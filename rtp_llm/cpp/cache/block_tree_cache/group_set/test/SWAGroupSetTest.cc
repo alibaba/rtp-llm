@@ -157,8 +157,8 @@ TEST_F(SWAGroupSetTest, ComputeReuseBlockCountCapsAtWindowSize) {
     EXPECT_EQ(group_->computeReuseBlockCount(4), 2u);
 }
 
-TEST_F(SWAGroupSetTest, WindowValidatorBusyResourceResetsLikeHole) {
-    for (GroupSetTransferState state : {GroupSetTransferState::DEMOTING, GroupSetTransferState::LOAD_PENDING}) {
+TEST_F(SWAGroupSetTest, WindowValidatorDetachedResourceResetsLikeHole) {
+    for (GroupSetTransferState state : {GroupSetTransferState::LOAD_PENDING}) {
         std::unique_ptr<MatchValidator> validator     = group_->createMatchValidator();
         SWAMatchValidator*              swa_validator = dynamic_cast<SWAMatchValidator*>(validator.get());
 
@@ -171,10 +171,11 @@ TEST_F(SWAGroupSetTest, WindowValidatorBusyResourceResetsLikeHole) {
         setDeviceBlock(c, 0);
         setDeviceBlock(d, 0);
         b->group_set_resources[0].transfer_state = state;
+        b->group_set_resources[0].transfer_detached = true;
 
         EXPECT_TRUE(validator->validate(a->group_set_resources[0]));
 
-        // Busy resource has data but is owned by an in-flight transfer: it must
+        // Detached resource has data but has been invalidated: it must
         // behave exactly like a hole and reset the window accumulation.
         EXPECT_FALSE(validator->validate(b->group_set_resources[0]));
         EXPECT_FALSE(swa_validator->connectedToRoot());
@@ -226,4 +227,16 @@ TEST_F(SWAGroupSetTest, SlidingWindowConfig) {
 }
 
 }  // namespace
+
+TEST_F(SWAGroupSetTest, EvictingSourcesRemainMatchable) {
+    for (Tier tier : {Tier::DEVICE, Tier::HOST}) {
+        GroupSetResource resource;
+        resource.setBlocks(tier, {15});
+        resource.transfer_state = GroupSetTransferState::EVICTING;
+        EXPECT_TRUE(group_->createMatchValidator()->validate(resource));
+        resource.transfer_detached = true;
+        EXPECT_FALSE(group_->createMatchValidator()->validate(resource));
+    }
+}
+
 }  // namespace rtp_llm

@@ -3,6 +3,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <sstream>
 
 #include <sys/mman.h>
@@ -100,6 +101,9 @@ bool HostBlockPool::init() {
                             cfg.alignment);
 
     // block 0's slot is allocated as backing but is never handed out by malloc().
+    RTP_LLM_CHECK_WITH_INFO(cfg.physical_block_count <= std::numeric_limits<size_t>::max() / cfg.stride_bytes,
+                            "host block pool [%s] backing size overflow",
+                            cfg.pool_name.c_str());
     const size_t total_bytes = cfg.physical_block_count * cfg.stride_bytes;
     backing_.emplace(total_bytes, cfg.alignment, cfg.pool_name);
     markHostBlockPoolDontDump(cfg.pool_name.c_str(), backing_->data(), total_bytes);

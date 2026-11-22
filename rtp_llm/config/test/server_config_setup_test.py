@@ -109,6 +109,40 @@ class KVCacheEventHostIdentityTest(TestCase):
 
         self.assertEqual(py_env_configs.kv_cache_config.kv_cache_event_host_ip_port, "")
 
+    def test_remote_control_derives_identity_when_hbm_events_are_disabled(self):
+        configs = self._dp_publisher_configs()
+        configs.kv_cache_config.kv_cache_event_publisher_type = "none"
+        configs.kv_cache_config.enable_remote_cache = True
+        configure_kv_cache_event_host_ip_port(configs)
+        self.assertEqual(
+            configs.kv_cache_config.kv_cache_event_host_ip_port, "10.0.0.8:20027"
+        )
+
+    def test_remote_control_preserves_explicit_identity(self):
+        configs = self._dp_publisher_configs()
+        configs.kv_cache_config.kv_cache_event_publisher_type = "none"
+        configs.kv_cache_config.enable_remote_cache = True
+        configs.kv_cache_config.kv_cache_event_host_ip_port = "replica-1:19000"
+        configure_kv_cache_event_host_ip_port(configs)
+        self.assertEqual(
+            configs.kv_cache_config.kv_cache_event_host_ip_port, "replica-1:19000"
+        )
+
+    def test_disabled_remote_and_hbm_events_do_not_derive_identity(self):
+        configs = self._dp_publisher_configs()
+        configs.kv_cache_config.kv_cache_event_publisher_type = "none"
+        configs.kv_cache_config.enable_remote_cache = False
+        configure_kv_cache_event_host_ip_port(configs)
+        self.assertEqual(configs.kv_cache_config.kv_cache_event_host_ip_port, "")
+
+    def test_remote_control_does_not_derive_identity_on_nonzero_tp_rank(self):
+        configs = self._dp_publisher_configs()
+        configs.kv_cache_config.kv_cache_event_publisher_type = "none"
+        configs.kv_cache_config.enable_remote_cache = True
+        configs.parallelism_config.tp_rank = 1
+        configure_kv_cache_event_host_ip_port(configs)
+        self.assertEqual(configs.kv_cache_config.kv_cache_event_host_ip_port, "")
+
 
 class SingleGpuBackendRankTest(TestCase):
     def _start_rank(self, tp_size: int, dp_size: int, world_rank: int):
@@ -207,14 +241,17 @@ class GenerateConfigTest(TestCase):
             "DISK_CACHE_SIZE_MB": "4096",
             "DISK_CACHE_BUFFERED_IO": "0",
             "DISK_CACHE_SYNC_TIMEOUT_MS": "12345",
+            "DISK_CACHE_EVICT_TIMEOUT_MS": "45000",
             "DISK_CACHE_STAGING_BLOCK_COUNT": "8",
             "ENABLE_MEMORY_CACHE": "1",
             "MEMORY_CACHE_SIZE_MB": "2048",
             "MEMORY_CACHE_SYNC_TIMEOUT_MS": "6789",
-            "BLOCK_TREE_FULL_PREFIX_SCAN_INTERVAL_MS": "30000",
+            "BLOCK_TREE_FULL_PREFIX_SCAN_INTERVAL_MS": "5000",
+            "BLOCK_TREE_TASK_POOL_SIZE": "6",
             "BLOCK_TREE_TRANSFER_WORKER_COUNT": "7",
             "BLOCK_TREE_BUSINESS_QUEUE_MAX_SIZE": "211",
             "BLOCK_TREE_TRANSFER_QUEUE_MAX_SIZE": "307",
+            "DISK_CACHE_EVICT_MAX_PENDING_BYTES": "83886080",
             "BLOCK_TREE_DEVICE_EVICT_LOW_WATERMARK_RATIO": "0.71",
             "BLOCK_TREE_DEVICE_EVICT_HIGH_WATERMARK_RATIO": "0.81",
             "BLOCK_TREE_MEMORY_EVICT_LOW_WATERMARK_RATIO": "0.72",
@@ -233,14 +270,17 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.disk_cache_size_mb, 4096)
         self.assertFalse(config.disk_cache_buffered_io)
         self.assertEqual(config.disk_cache_sync_timeout_ms, 12345)
+        self.assertEqual(config.disk_cache_evict_timeout_ms, 45000)
         self.assertEqual(config.disk_cache_staging_block_count, 8)
         self.assertTrue(config.enable_memory_cache)
         self.assertEqual(config.memory_cache_size_mb, 2048)
         self.assertEqual(config.memory_cache_sync_timeout_ms, 6789)
-        self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 30000)
+        self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 5000)
+        self.assertEqual(config.block_tree_task_pool_size, 6)
         self.assertEqual(config.block_tree_transfer_worker_count, 7)
         self.assertEqual(config.block_tree_business_queue_max_size, 211)
         self.assertEqual(config.block_tree_transfer_queue_max_size, 307)
+        self.assertEqual(config.disk_cache_evict_max_pending_bytes, 80 * 1024 * 1024)
         self.assertEqual(config.block_tree_device_evict_low_watermark_ratio, 0.71)
         self.assertEqual(config.block_tree_device_evict_high_watermark_ratio, 0.81)
         self.assertEqual(config.block_tree_memory_evict_low_watermark_ratio, 0.72)
@@ -252,14 +292,61 @@ class GenerateConfigTest(TestCase):
         config = PyEnvConfigs().kv_cache_config
 
         self.assertTrue(config.enable_crc)
+        self.assertEqual(config.block_tree_task_pool_size, 4)
+        self.assertEqual(config.block_tree_transfer_worker_count, 2)
         self.assertFalse(config.enable_memory_cache)
         self.assertEqual(config.disk_cache_staging_block_count, 128)
         self.assertEqual(config.device_eviction_policy, "lru")
         self.assertEqual(config.memory_eviction_policy, "lru")
-        self.assertEqual(config.disk_eviction_policy, "fifo")
+        self.assertEqual(config.disk_eviction_policy, "lru")
         self.assertEqual(config.reserve_block_ratio, 5)
-        self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 0)
+        self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 30000)
         self.assertFalse(hasattr(config, "write_cache_sync"))
+
+    def test_full_prefix_scan_interval_default_and_disable(self):
+        with patch.dict("os.environ", _jit_env(), clear=True):
+            self.assertEqual(
+                setup_args([]).kv_cache_config.block_tree_full_prefix_scan_interval_ms,
+                30000,
+            )
+            config = setup_args(
+                ["--block_tree_full_prefix_scan_interval_ms", "0"]
+            ).kv_cache_config
+            self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 0)
+        with patch.dict(
+            "os.environ",
+            _jit_env(BLOCK_TREE_FULL_PREFIX_SCAN_INTERVAL_MS="0"),
+            clear=True,
+        ):
+            self.assertEqual(
+                setup_args([]).kv_cache_config.block_tree_full_prefix_scan_interval_ms,
+                0,
+            )
+
+    def test_transfer_pool_defaults_and_worker_cli_overrides(self):
+        with patch.dict("os.environ", _jit_env(), clear=True):
+            config = setup_args([]).kv_cache_config
+            self.assertEqual(config.block_tree_task_pool_size, 4)
+            self.assertEqual(config.block_tree_transfer_worker_count, 2)
+            self.assertEqual(
+                config.disk_cache_evict_max_pending_bytes, 100 * 1024 * 1024
+            )
+        with patch.dict(
+            "os.environ",
+            _jit_env(
+                BLOCK_TREE_TASK_POOL_SIZE="6",
+                BLOCK_TREE_TRANSFER_WORKER_COUNT="7",
+            ),
+            clear=True,
+        ):
+            config = setup_args(
+                [
+                    "--block_tree_task_pool_size=8",
+                    "--block_tree_transfer_worker_count=2",
+                ]
+            ).kv_cache_config
+            self.assertEqual(config.block_tree_task_pool_size, 8)
+            self.assertEqual(config.block_tree_transfer_worker_count, 2)
 
     def test_disabled_crc_survives_worker_pickle_and_engine_config(self):
         import pickle
@@ -424,9 +511,9 @@ class GenerateConfigTest(TestCase):
         config.reserve_block_ratio = 7
         config.dsv4_fixed_pool_blocks = 512
         config.dsv4_hca_state_pool_blocks = 256
-        config.dsv4_fixed_pool_use_memory = True
         config.memory_cache_max_descriptors_per_transfer_batch = 17
         config.block_tree_full_prefix_scan_interval_ms = 5000
+        config.block_tree_task_pool_size = 6
         config.block_tree_transfer_worker_count = 7
         config.block_tree_business_queue_max_size = 211
         config.block_tree_transfer_queue_max_size = 307
@@ -438,8 +525,8 @@ class GenerateConfigTest(TestCase):
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 72)
-        self.assertEqual(state[:2], ("KVCacheConfig", 9))
+        self.assertEqual(len(state), 79)
+        self.assertEqual(state[:2], ("KVCacheConfig", 23))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)
@@ -450,9 +537,9 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(restored.reserve_block_ratio, 7)
         self.assertEqual(restored.dsv4_fixed_pool_blocks, 512)
         self.assertEqual(restored.dsv4_hca_state_pool_blocks, 256)
-        self.assertTrue(restored.dsv4_fixed_pool_use_memory)
         self.assertEqual(restored.memory_cache_max_descriptors_per_transfer_batch, 17)
         self.assertEqual(restored.block_tree_full_prefix_scan_interval_ms, 5000)
+        self.assertEqual(restored.block_tree_task_pool_size, 6)
         self.assertEqual(restored.block_tree_transfer_worker_count, 7)
         self.assertEqual(restored.block_tree_business_queue_max_size, 211)
         self.assertEqual(restored.block_tree_transfer_queue_max_size, 307)
@@ -473,8 +560,12 @@ class GenerateConfigTest(TestCase):
             value.__setstate__(pickle_state)
             return value
 
-        event_state = state
-        state = (state[0], 6, *state[2:64])
+        # Legacy payloads share the load deadline for eviction and omit later fields.
+        legacy_defaults = KVCacheConfig()
+        legacy_defaults.disk_cache_evict_timeout_ms = -1
+        event_state = (*state[:63], *legacy_defaults.__getstate__()[63:])
+        # Version 6 carried the retired host-placement flag at index 53.
+        state = (state[0], 6, *state[2:53], True, *state[53:63])
         self.assertEqual(restore(state).__getstate__(), event_state)
         version_five_state = (state[0], 5, *state[2:], True)
         self.assertEqual(restore(version_five_state).__getstate__(), event_state)
@@ -525,6 +616,10 @@ class GenerateConfigTest(TestCase):
             restored_write_sync,
         ):
             self.assertTrue(legacy_config.enable_crc)
+            self.assertEqual(
+                legacy_config.disk_cache_evict_max_pending_bytes,
+                default_config.disk_cache_evict_max_pending_bytes,
+            )
 
     def test_kv_cache_config_pickle_rejects_incompatible_states(self):
         from rtp_llm.ops import KVCacheConfig
@@ -549,9 +644,11 @@ class GenerateConfigTest(TestCase):
 
         expected_fields = {
             "enable_crc": "bool",
+            "block_tree_task_pool_size": "int",
             "block_tree_transfer_worker_count": "int",
             "block_tree_business_queue_max_size": "int",
             "block_tree_transfer_queue_max_size": "int",
+            "block_tree_frozen_force_release_timeout_ms": "int",
             "block_tree_device_evict_low_watermark_ratio": "float",
             "block_tree_device_evict_high_watermark_ratio": "float",
             "block_tree_memory_evict_low_watermark_ratio": "float",

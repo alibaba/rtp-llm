@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <cstdlib>
 #include <string>
 
@@ -128,6 +129,7 @@ void GenerateStateMachine::handleLoading() {
 void GenerateStateMachine::transitionToRunning() {
     auto stream = stream_cache_resource_->stream();
     if (stream != nullptr) {
+        stream->recordKvReadyTime(currentTimeUs());
         stream->recordRunningTime();
     }
     status.store(StreamState::RUNNING, std::memory_order_release);

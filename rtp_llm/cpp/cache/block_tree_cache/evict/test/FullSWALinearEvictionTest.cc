@@ -68,9 +68,9 @@ TEST_F(FullSWALinearEvictionTest, PromotingExistingPrefixRemovesAllGroupCandidat
         EXPECT_TRUE(node->is_resident);
     }
     for (size_t group_set_id = 0; group_set_id < 3; ++group_set_id) {
-        EXPECT_FALSE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(
+        EXPECT_FALSE(BlockTreeCacheTestPeer::evictOneForGroupSetForTest(
             *cache_, group_set_id, Tier::DEVICE, /*force_drop=*/true));
-        EXPECT_FALSE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(
+        EXPECT_FALSE(BlockTreeCacheTestPeer::evictOneForGroupSetForTest(
             *cache_, group_set_id, Tier::DEVICE, /*force_drop=*/false));
     }
 

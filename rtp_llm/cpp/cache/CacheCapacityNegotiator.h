@@ -20,6 +20,8 @@ struct BlockTreeCacheSizing {
     std::vector<BlockTreeGroupSetSizing> group_sets;
     size_t                               host_budget_bytes = 0;
     size_t                               disk_budget_bytes = 0;
+    // 1.0 retains device-proportional HOST sizing; non-default values split usable FULL/SWA slots.
+    double host_swa_block_ratio = 1.0;
 };
 
 using TierBlockNumOverrides = std::unordered_map<CacheGroupType, size_t>;
@@ -32,6 +34,13 @@ struct BlockTreeCacheBlockNums {
 std::vector<size_t> computeTierBlockCounts(size_t                     capacity_bytes,
                                            const std::vector<size_t>& device_block_counts,
                                            const std::vector<size_t>& pool_strides);
+
+// Ratios apply to usable blocks, while the byte budget also includes each
+// pool's reserved block zero. Without both FULL and SWA, preserve equal counts.
+std::vector<size_t> computeHostUsableBlockCounts(size_t                             capacity_bytes,
+                                                 const std::vector<size_t>&         strides,
+                                                 const std::vector<CacheGroupType>& types,
+                                                 double                             swa_full_ratio);
 
 /**
  * Final physical block counts: DEVICE per tag, HOST/DISK per GroupSet type.

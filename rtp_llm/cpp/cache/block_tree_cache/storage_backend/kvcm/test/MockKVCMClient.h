@@ -27,7 +27,8 @@ public:
                  const std::vector<int64_t>&,
                  const std::vector<int64_t>&,
                  const std::vector<std::string>&,
-                 int64_t),
+                 int64_t,
+                 int32_t),
                 (override));
     MOCK_METHOD(ClientErrorCode,
                 FinishWrite,
@@ -42,6 +43,27 @@ public:
                 MatchLocationLen,
                 (const std::string&, QueryType, const std::vector<int64_t>&, const std::vector<int64_t>&, int32_t),
                 (override));
+    MOCK_METHOD((std::pair<ClientErrorCode, std::vector<std::vector<BackendLocation>>>),
+                GetCacheLocationsByBackend,
+                (const std::string&,
+                 const std::vector<int64_t>&,
+                 const std::vector<int64_t>&,
+                 const BlockMask&,
+                 const std::vector<std::string>&,
+                 StorageType,
+                 BackendSelectStrategy),
+                (override));
+    MOCK_METHOD((std::pair<ClientErrorCode, std::vector<HostCacheMatch>>),
+                GetHostCacheState,
+                (const std::string&, QueryType, const std::vector<int64_t>&, const std::vector<std::string>&, int32_t),
+                ());
+    // The selected SDK exposes either the legacy five-argument API or the new
+    // backend-aware API. Its matching overload implements the pure virtual.
+    MOCK_METHOD((std::pair<ClientErrorCode, std::vector<HostCacheMatch>>),
+                GetHostCacheState,
+                (const std::string&, QueryType, const std::vector<int64_t>&, const std::vector<std::string>&, int32_t,
+                 const std::vector<StorageType>&),
+                ());
     MOCK_METHOD(ClientErrorCode,
                 RemoveCache,
                 (const std::string&, const std::vector<int64_t>&, const std::vector<int64_t>&, const BlockMask&),
@@ -88,6 +110,7 @@ public:
 
 class MockClientFactory: public ClientFactory {
 public:
+    MOCK_METHOD(std::string, getLeaderAddress, (const std::string&, const std::string&, uint32_t), (const, override));
     MOCK_METHOD(std::unique_ptr<kv_cache_manager::MetaClient>,
                 createMetaClient,
                 (const std::string&, const kv_cache_manager::InitParams&),
@@ -95,6 +118,12 @@ public:
     MOCK_METHOD(std::unique_ptr<kv_cache_manager::TransferClient>,
                 createTransferClient,
                 (const std::string&, const kv_cache_manager::InitParams&),
+                (const, override));
+    MOCK_METHOD(std::unique_ptr<kv_cache_manager::TransferClient>,
+                createTransferClientWithMemory,
+                (const std::string&,
+                 const kv_cache_manager::InitParams&,
+                 const kv_cache_manager::ClientMemoryRegistrations&),
                 (const, override));
     MOCK_METHOD(std::unique_ptr<Subscriber>, createSubscriber, (bool), (const, override));
 };

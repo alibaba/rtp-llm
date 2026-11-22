@@ -32,13 +32,27 @@ pipeline.stop()
 
 ## Cache Tiers (L1 / L2 / L3)
 
-Reused KV cache can live in three local tiers, each controlled by its own independent switch:
+Local KV cache tiers form a chain. L2 requires L1, and L3 requires L2 and L1.
 
 | Tier | Location | Switch | Required companion settings |
 |------|----------|--------|-----------------------------|
 | L1 | GPU device memory | `ENABLE_DEVICE_CACHE` (default on) | — |
-| L2 | Pinned host memory | `ENABLE_MEMORY_CACHE` (default off) | `MEMORY_CACHE_SIZE_MB` |
-| L3 | Local disk | `ENABLE_DISK_CACHE` (default off) | `DISK_CACHE_SIZE_MB`, `DISK_CACHE_PATHS` |
+| L2 | Pinned host memory | `ENABLE_MEMORY_CACHE` (default off) | `ENABLE_DEVICE_CACHE=1`, positive `MEMORY_CACHE_SIZE_MB` |
+| L3 | Local disk | `ENABLE_DISK_CACHE` (default off) | `ENABLE_DEVICE_CACHE=1`, `ENABLE_MEMORY_CACHE=1`, positive `MEMORY_CACHE_SIZE_MB` and `DISK_CACHE_SIZE_MB`, and `DISK_CACHE_PATHS` |
+
+For host reuse, set `REUSE_CACHE=1`, `ENABLE_DEVICE_CACHE=1`, `ENABLE_MEMORY_CACHE=1`, and
+`MEMORY_CACHE_SIZE_MB`. For local disk reuse, also set `ENABLE_DISK_CACHE=1`,
+`DISK_CACHE_SIZE_MB`, and `DISK_CACHE_PATHS`. Disk caching requires a model without reusable
+LINEAR groups.
+
+`ENABLE_CRC` defaults to `1` and enables CRC32C for local cache transfers on builds with
+the CUDA13 CRC backend. Builds without that backend log a warning and use plain copies.
+Set `ENABLE_CRC=0` to use plain copies explicitly.
+
+With automatic KV sizing, CRC workspaces target at most one eighth of the GPU memory
+available after the runtime reserve. Startup reduces concurrent slots first, then the
+transfer batch size. The smallest workspace can exceed that target if it still leaves
+room for the KV cache. An explicit `KV_CACHE_MEM_MB` reserves that KV capacity first.
 
 Device free-block headroom is managed by `BLOCK_TREE_DEVICE_EVICT_HIGH_WATERMARK_RATIO` (default 0.90)
 and `BLOCK_TREE_DEVICE_EVICT_LOW_WATERMARK_RATIO` (default 0.82). Reaching the high occupancy watermark
@@ -47,13 +61,10 @@ blocks on demand; blocks still referenced by requests or transfers may delay phy
 Scheduler admission separately uses `RESERVE_BLOCK_RATIO` (default 5%) to preserve headroom for
 running requests to grow. This admission reserve is independent of the cache eviction watermarks.
 
-All eight combinations are valid, including L2-only and L3-only deployments. Enabling a tier
-without its capacity or path settings is a startup error rather than a silent downgrade, so a
-misconfiguration never degrades quietly into a smaller cache than intended.
+Startup rejects configurations with a missing tier, capacity, or disk path.
 
-When MULTI_TASK_PROMPT is configured, the server automatically enables `REUSE_CACHE` and L1 to
-preserve the existing static system-prompt behavior. Disable MULTI_TASK_PROMPT when testing a pure
-L2-only or L3-only configuration.
+When `MULTI_TASK_PROMPT` is configured, the server automatically enables `REUSE_CACHE` and L1
+for static system prompts.
 
 `REUSE_CACHE` remains the deployment master switch: with it off, no tier is consulted or written.
 By default, a request must also set `reuse_cache=true` (the default) to use prefix-cache lookup
@@ -66,8 +77,8 @@ The deployment switches select the local tiers used for lookup and storage. The 
 protocol compatibility, but do not change this local-tier policy.
 
 - **Lookup** may use any enabled local tier, plus the configured remote backend.
-- **Storage after successful completion** selects one local target: L1 (DEVICE), then L2
-  (HOST), then L3 (DISK). Lower-tier demotion is a separate operation.
+- **Storage after successful completion** inserts into L1 (DEVICE) when enabled. Eviction
+  can demote cached blocks from L1 to L2 (HOST) and from L2 to L3 (DISK).
 
 With cache reuse enabled, the local-tier rules are:
 
@@ -75,16 +86,12 @@ With cache reuse enabled, the local-tier rules are:
 |---------------------------------|----------------|---------------------------------|
 | None | None locally | None |
 | L1 | L1 | L1 |
-| L2 | L2 | L2 |
-| L3 | L3 | L3 |
 | L1, L2 | L1, L2 | L1 |
-| L1, L3 | L1, L3 | L1 |
-| L2, L3 | L2, L3 | L2 |
 | L1, L2, L3 | L1, L2, L3 | L1 |
 
 Remote caching requires a backend enabled and initialized by the deployment configuration.
 Every DEVICE insert also prepares a remote upload when that backend exists, including
-resident inserts and duplicate keys. HOST/DISK inserts do not upload. Remote writes are
+resident inserts and duplicate keys. Local cache demotion does not initiate uploads. Remote writes are
 asynchronous, submitted outside the tree lock, and do not delay insert until I/O completes;
 a failed upload does not roll back the DEVICE cache entry.
 

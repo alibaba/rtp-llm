@@ -1,6 +1,8 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/CacheLockGuard.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/FullPrefixInvariantScanner.h"
 
 #include <algorithm>
+#include <chrono>
 #include <exception>
 #include <limits>
 #include <sstream>
@@ -8,29 +10,19 @@
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 namespace {
 
 // Bounds on cache mutex hold time and log volume, not user-facing knobs.
-constexpr size_t  kNodesPerBatch      = 1024;
+constexpr size_t  kNodesPerBatch      = 128;
+constexpr size_t  kScanPercent        = 5;
 constexpr size_t  kMaxDetailsPerCycle = 10;
 constexpr int64_t kMaxIntervalMs      = std::numeric_limits<int64_t>::max() / 1000;
-
-const char* transferStateName(GroupSetTransferState state) {
-    switch (state) {
-        case GroupSetTransferState::IDLE:
-            return "IDLE";
-        case GroupSetTransferState::DEMOTING:
-            return "DEMOTING";
-        case GroupSetTransferState::LOAD_PENDING:
-            return "LOAD_PENDING";
-        case GroupSetTransferState::LOADING:
-            return "LOADING";
-    }
-    return "UNKNOWN";
-}
+constexpr auto    kCacheLockTimeout   = std::chrono::milliseconds(10);
+constexpr auto    kCacheLockRetry     = std::chrono::milliseconds(1);
 
 bool isIdleAttached(const GroupSetResource& resource) {
     return resource.transfer_state == GroupSetTransferState::IDLE && !resource.transfer_detached;
@@ -194,10 +186,11 @@ std::string formatViolationDetail(const FullViolationDetail& detail) {
     return oss.str();
 }
 
-FullPrefixInvariantScanner::FullPrefixInvariantScanner(const BlockTree& tree,
-                                                       std::mutex&      cache_mutex,
-                                                       int64_t          interval_ms):
-    tree_(tree), cache_mutex_(cache_mutex), interval_ms_(interval_ms) {}
+FullPrefixInvariantScanner::FullPrefixInvariantScanner(const BlockTree&                     tree,
+                                                       std::mutex&                          cache_mutex,
+                                                       int64_t                              interval_ms,
+                                                       const BlockTreeCacheMetricsReporter* metrics_reporter):
+    metrics_reporter_(metrics_reporter), tree_(tree), cache_mutex_(cache_mutex), interval_ms_(interval_ms) {}
 
 FullPrefixInvariantScanner::~FullPrefixInvariantScanner() {
     stop();
@@ -211,8 +204,9 @@ bool FullPrefixInvariantScanner::start() {
         RTP_LLM_LOG_ERROR("FULL prefix invariant scan interval_ms=%ld overflows the loop period", interval_ms_);
         return false;
     }
+    // runScan() already spaces its batches; measure the window from callback start.
     loop_thread_ = autil::LoopThread::createLoopThread(
-        [this] { runBatchGuarded(); }, interval_ms_ * 1000, "BlockTreeScan", /*strictMode=*/true);
+        [this] { runScanGuarded(); }, interval_ms_ * 1000, "BlockTreeScan", /*strictMode=*/false);
     if (!loop_thread_) {
         RTP_LLM_LOG_ERROR("failed to create FULL prefix invariant scanner loop thread");
         return false;
@@ -221,18 +215,68 @@ bool FullPrefixInvariantScanner::start() {
 }
 
 void FullPrefixInvariantScanner::stop() {
-    stopping_.store(true, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(wait_mutex_);
+        stopping_.store(true, std::memory_order_release);
+    }
+    stop_condition_.notify_all();
     if (loop_thread_) {
         loop_thread_->stop();
         loop_thread_.reset();
     }
 }
 
-void FullPrefixInvariantScanner::runBatchGuarded() {
+void FullPrefixInvariantScanner::runScanGuarded() {
     try {
-        runBatch();
+        runScan();
     } catch (const std::exception& e) {
         RTP_LLM_LOG_WARNING("FULL prefix invariant scan round failed, dropping details: %s", e.what());
+    }
+}
+
+CacheLockGuard FullPrefixInvariantScanner::tryLockCacheUntil(std::chrono::steady_clock::time_point deadline) {
+    return CacheLockGuard(cache_mutex_,
+                          metrics_reporter_,
+                          "invariant_scan",
+                          deadline,
+                          kCacheLockRetry,
+                          wait_mutex_,
+                          stop_condition_,
+                          [this] { return stopping_.load(std::memory_order_acquire); });
+}
+
+void FullPrefixInvariantScanner::runScan() {
+    const auto window_start = std::chrono::steady_clock::now();
+    size_t     batches      = 1;
+    {
+        // Quota reads use the same bounded lock wait as scan batches.
+        auto lock = tryLockCacheUntil(std::chrono::steady_clock::now() + kCacheLockTimeout);
+        if (!lock.owns_lock() || stopping_.load(std::memory_order_acquire)) {
+            return;
+        }
+        const size_t tree_size = tree_.size();
+        // Round the percentage up without overflowing on a large tree, then round
+        // the quota up to whole batches. runBatch() stops at the current cycle's
+        // end. Empty trees still finish a stale cycle.
+        const size_t quota = std::min(
+            tree_size,
+            std::max(kNodesPerBatch, tree_size / 100 * kScanPercent + (tree_size % 100 * kScanPercent + 99) / 100));
+        batches = std::max(size_t{1}, quota / kNodesPerBatch + (quota % kNodesPerBatch != 0));
+    }
+
+    for (size_t batch = 0; batch < batches; ++batch) {
+        // Absolute start times include scan/lock time in the spacing; an overdue
+        // batch runs immediately. Never hold the cache mutex while waiting.
+        const auto offset = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::duration<double, std::milli>(interval_ms_) * (static_cast<double>(batch) / batches));
+        {
+            std::unique_lock<std::mutex> lock(wait_mutex_);
+            if (stop_condition_.wait_until(
+                    lock, window_start + offset, [this] { return stopping_.load(std::memory_order_acquire); })) {
+                return;
+            }
+        }
+        runBatch();
     }
 }
 
@@ -243,8 +287,9 @@ void FullPrefixInvariantScanner::runBatch() {
     bool                             cycle_complete = false;
 
     {
-        std::lock_guard<std::mutex> lock(cache_mutex_);
-        if (stopping_.load(std::memory_order_acquire)) {
+        // Skip a timed-out slot without advancing the cursor or rescheduling it.
+        auto lock = tryLockCacheUntil(std::chrono::steady_clock::now() + kCacheLockTimeout);
+        if (!lock.owns_lock() || stopping_.load(std::memory_order_acquire)) {
             return;
         }
         if (!cycle_active_) {
@@ -273,6 +318,13 @@ void FullPrefixInvariantScanner::publishBatch(const std::vector<FullViolationDet
     cycle_nodes_scanned_ += nodes_scanned;
 
     for (const FullViolationDetail& detail : details) {
+        // Report every observation, including details suppressed by the log cap.
+        if (metrics_reporter_ != nullptr) {
+            metrics_reporter_->reportInvariantViolation(detail.group_set_id,
+                                                        fullViolationTypeName(detail.type),
+                                                        invalidResourceReasonName(detail.reason),
+                                                        detail.stable);
+        }
         if (detail.stable) {
             ++cycle_stable_;
         } else {

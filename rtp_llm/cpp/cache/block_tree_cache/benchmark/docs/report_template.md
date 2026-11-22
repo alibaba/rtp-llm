@@ -19,8 +19,8 @@
 | 实验 | 可选展示方式 | 理解结果所需的背景 |
 | --- | --- | --- |
 | Tree 在线生命周期 | 请求完成数/req/s、关键时延表，或 task-pool 对照图 | C32 是逻辑 context；单 foreground scheduler；固定模拟 forward sleep；block/token 与 scaled payload；BASE/CONTINUATION 请求构造 |
-| Mixed Transfer | 按介质、group set、strategy 展示吞吐和 batch 信息 | 混合总吞吐是同一窗口各方向成功字节之和除以墙钟时间，不是单方向峰值相加 |
-| Batch API matrix | 按方向和 group set 比较 C/D 提交粒度及 copy strategy | transfer-engine descriptor batch 与 CUDA batch copy strategy 是两层概念；以实际参数为准 |
+| Mixed Transfer | 按介质和 group set 展示吞吐和 batch 信息 | 混合总吞吐是同一窗口各方向成功字节之和除以墙钟时间 |
+| Batch API matrix | 按方向和 group set 比较 C/D 提交粒度 | 记录 WorkLoop 的 descriptor batch 参数 |
 | E2E business matrix | 上层业务并发 × 下层 worker 数的表格或热力图 | 标明单方向、group set、每业务 descriptor 数和 batch；不等同于模型推理 e2e |
 | 专项子集或新增 case | 围绕问题自选表格、图形和分析 | 说明选择范围、负载语义、变量与指标口径即可 |
 

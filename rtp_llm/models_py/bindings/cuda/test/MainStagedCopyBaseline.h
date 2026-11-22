@@ -1,6 +1,5 @@
 #pragma once
 
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyStrategy.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 
 namespace rtp_llm::crc_copy_benchmark::main_baseline {
@@ -22,15 +21,13 @@ struct StagedMemoryCopyScratch {
 
 void releaseStagedMemoryCopyScratch(StagedMemoryCopyScratch& scratch);
 
-class StagedSmDeviceHostCopyStrategy: public DeviceHostCopyStrategy {
+class StagedCopy {
 public:
-    ~StagedSmDeviceHostCopyStrategy() override;
-
-    StrategyResult tryExecute(const DeviceHostCopyPlan& plan, const DeviceHostCopyOptions& options) override;
+    ~StagedCopy();
+    bool copy(const StagedMemoryCopyParams& params);
 
 private:
-    std::mutex                                              scratch_mutex_;
-    std::map<int, std::unique_ptr<StagedMemoryCopyScratch>> scratch_by_device_;
+    StagedMemoryCopyScratch scratch_;
 };
 
 }  // namespace rtp_llm::crc_copy_benchmark::main_baseline

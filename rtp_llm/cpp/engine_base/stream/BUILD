@@ -50,6 +50,7 @@ cc_library(
     ], exclude = ["CompleteTokenIds.cc"]),
     deps = [
         "//rtp_llm/cpp/observability:execution_recorder",
+        "//rtp_llm/cpp/telemetry:telemetry",
         ":generate_types",
         ":generate_config",
         ":complete_token_ids",
@@ -62,6 +63,7 @@ cc_library(
         "@havenask//aios/autil:env_util",
         "@havenask//aios/autil:synchronized_queue",
         "//:rtp_compute_ops",
+        "//rtp_llm/cpp/utils:async_profiling_scope",
         "//rtp_llm/cpp/utils:linear_blocks_util",
     ],
     visibility = ["//visibility:public"],

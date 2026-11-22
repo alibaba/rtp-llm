@@ -6,7 +6,7 @@ SWAGroupSet::SWAGroupSet(size_t                          sliding_window_size,
                          size_t                          seq_size_per_block,
                          std::vector<DeviceBlockPoolPtr> device_pools,
                          std::shared_ptr<HostBlockPool>  host_pool,
-                         BlockTreeDiskBlockPoolPtr       disk_pool):
+                         DiskBlockPoolPtr                disk_pool):
     GroupSet(std::move(device_pools), std::move(host_pool), std::move(disk_pool)),
     sliding_window_size_(sliding_window_size),
     seq_size_per_block_(seq_size_per_block) {}
@@ -24,11 +24,7 @@ SWAMatchValidator::SWAMatchValidator(size_t sliding_window_size, size_t seq_size
     sliding_window_size_(sliding_window_size), seq_size_per_block_(seq_size_per_block) {}
 
 bool SWAMatchValidator::validate(const GroupSetResource& resource) {
-    // A busy resource (DEMOTING/LOAD_PENDING) counts as a hole: it cannot serve
-    // this match, so the window accumulation restarts behind it.
-    const bool has_swa_data = resource.isMatchUsable() && !resource.is_empty();
-
-    if (!has_swa_data) {
+    if (!resource.isMatchUsable()) {
         connected_to_root_  = false;
         accumulated_length_ = 0;
         return false;

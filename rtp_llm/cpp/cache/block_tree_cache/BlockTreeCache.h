@@ -1,25 +1,30 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/BlockTreeLoader.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/store/BlockTreeStorer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTaskRegistry.h"
 
 namespace rtp_llm {
 
 class BlockTreeTaskPool;
 class BlockTransferDispatcher;
+class FrozenTask;
+class TransferCompletionCleanup;
 class FullPrefixInvariantScanner;
 struct CacheStats {
     size_t tree_node_count{0};
@@ -48,29 +53,33 @@ struct BlockTreeCacheConfig {
     // ---- Per-tier eviction policy ----
     EvictionPolicy device_eviction_policy{EvictionPolicy::LRU};
     EvictionPolicy host_eviction_policy{EvictionPolicy::LRU};
-    EvictionPolicy disk_eviction_policy{EvictionPolicy::FIFO};
+    EvictionPolicy disk_eviction_policy{EvictionPolicy::LRU};
 
-    // ---- Shared Store/Load/Evict task pool ----
+    // ---- Shared load/eviction task pool ----
     int    task_pool_size{4};
     size_t business_queue_max_size{10000};
 
-    // ---- Per-rank TransferEngine task pools, one per direction ----
-    size_t transfer_worker_count{4};
+    // ---- Per-rank WorkLoop owners or legacy workers per direction ----
+    size_t transfer_worker_count{2};
     size_t transfer_queue_max_size{10000};
 
-    // ---- Cross-rank transfer timeout ----
+    // ---- Transfer deadlines, including queue wait and cross-rank work ----
     int host_cache_sync_timeout_ms{10000};
-    int disk_cache_sync_timeout_ms{30000};
+    // Preserve the existing name for disk loads.
+    int disk_cache_sync_timeout_ms{3000};
+    // Outbound disk transfers for eviction.
+    int disk_cache_evict_timeout_ms{3000};
 
-    // Total max-stride staging blocks per rank, split evenly across Full/SWA pools.
-    // Default guarantees at least 64 Full blocks; actual capacities depend on payload sizes.
+    // Async: blocks per load/evict pair, split by direction and shared by groups.
+    // Legacy: rank-wide byte budget measured in maximum-stride blocks.
     size_t device_disk_staging_block_count{128};
     // Shared descriptor batching limit for watermark planning and all transfer directions.
-    size_t max_descriptors_per_transfer_batch{8};
+    size_t max_descriptors_per_transfer_batch{32};
+    size_t disk_cache_evict_max_pending_bytes{0};
 
     // ---- FULL prefix invariant scanner (diagnostic only) ----
     // The factory zeroes this on ranks that do not own a mutable BlockTree.
-    int64_t full_prefix_scan_interval_ms{0};  // 0 = disabled, no thread
+    int64_t full_prefix_scan_interval_ms{30000};  // 30 seconds; 0 = disabled, no thread
 
     // ---- Query helpers ----
     bool isTierEnabled(Tier tier) const {
@@ -103,9 +112,9 @@ struct BlockTreeCacheConfig {
 };
 
 // BlockTreeCache: eviction workflow coordinator.
-// Owns BlockTree, GroupSets, HostBlockPool (L2), BlockTreeDiskBlockPool (L3),
+// Owns BlockTree, GroupSets, HostBlockPool (L2), DiskBlockPool (L3),
 // StorageBackend, and the cache workflow collaborators injected by the factory.
-// Each storage tier (Device/Host/Disk/Remote) can be independently enabled/disabled.
+// Local tiers require DISK -> HOST -> DEVICE; remote storage is independent.
 class BlockTreeCache {
 public:
     using TierWatermark = BlockTreeCacheConfig::TierWatermark;
@@ -119,10 +128,15 @@ public:
 
     ~BlockTreeCache();
     bool init();
+    // Retry deferred watermarks after external pins release. Safe inside a pool callback.
+    void onCapacityChanged();
     // Reject pending loads and wait for allocator callbacks before its members are destroyed.
     void shutdownLoads();
 
-    BlockTreeMatchResult match(const CacheKeysType& cache_keys, const std::function<bool(size_t)>& valid_prefix = {});
+    BlockTreeMatchResult match(const CacheKeysType&               cache_keys,
+                               const std::function<bool(size_t)>& valid_prefix           = {},
+                               bool                               enable_storage_backend = true,
+                               std::optional<int64_t>             request_id             = {});
     void                 insert(const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& resources,
                                 Tier                                              target_tier);
@@ -130,15 +144,21 @@ public:
     size_t insert(const CacheKeysType&                              cache_keys,
                   const std::vector<std::vector<GroupSetResource>>& resources,
                   Tier                                              target_tier,
-                  bool                                              is_resident);
+                  bool                                              is_resident,
+                  std::optional<int64_t>                            request_id         = {},
+                  size_t                                            remote_reuse_begin = 0,
+                  size_t                                            remote_reuse_end   = 0);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
+    // Skips plans containing device blocks that would remain referenced after dropping.
     int evictForGroup(std::string_view group_tag, size_t num_blocks);
 
-    CacheStats                                getStats() const;
-    std::vector<BlockTreePoolMetricsSnapshot> poolMetricsSnapshots() const;
-    void                                      reportMetrics() const;
-    BlockTreeKeySnapshot                      getKeySnapshot(int64_t latest_version = -1) const;
+    CacheStats                    getStats() const;
+    std::vector<CachePoolMetrics> poolMetrics() const;
+    void                          reportMetrics() const;
+    void                          reportUnfreezeMetrics(const FrozenTask::ExecutionInfo& execution, bool forced) const;
+    void                          reportUnfreezeZeroMetrics(const std::vector<CachePoolMetrics>& pools) const;
+    BlockTreeKeySnapshot          getKeySnapshot(int64_t latest_version = -1) const;
     void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);
     KVCacheSnapshot logicalCacheSnapshot() const;
     bool            abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
@@ -146,7 +166,13 @@ public:
     BlockIndicesType matchedBlocksForGroup(std::string_view                      group_tag,
                                            const std::vector<MultiNodeResource>& matched_resources) const;
 
-    TransferResult executeTransfer(TransferTask task);
+    TransferResult                     executeTransfer(TransferTask task);
+    TransferTaskRegistry::State        localTransferCompletion(uint64_t trace_id) const;
+    TransferTaskRegistry::ForgetResult forgetLocalTransferCompletion(uint64_t trace_id) const;
+    void cleanupExpiredMissing() const;
+    // Configure before accepting coordinator work.
+    void                                     setCompletionCleanup(std::shared_ptr<TransferCompletionCleanup> cleanup);
+    std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const;
 
     // Accessors
     BlockTree* tree() const {
@@ -194,9 +220,11 @@ private:
     mutable std::mutex                             mutex_;
     BlockTreeEvictor                               evictor_;
     bool                                           initialized_{false};
-    BlockTreeLoader                             loader_;
-    BlockTreeStorer                             storer_;
-    std::unique_ptr<FullPrefixInvariantScanner> full_prefix_scanner_;
+    std::atomic<bool>                              stopping_{false};
+    std::atomic<bool>                              watermark_check_pending_{false};
+    BlockTreeLoader                                loader_;
+    BlockTreeStorer                                storer_;
+    std::unique_ptr<FullPrefixInvariantScanner>    full_prefix_scanner_;
 };
 
 using BlockTreeCachePtr = std::shared_ptr<BlockTreeCache>;

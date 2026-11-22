@@ -1,18 +1,16 @@
 # BlockTreeCache Benchmark
 
-## Device/Host copy API priority
+Tree 与 Transfer 均使用 WorkLoop。Device↔Host 和 Disk→Device 的 Device 拷贝使用 CRC32C；
+Host↔Disk 由磁盘 I/O 原样搬运记录。涉及 Device 的 Host/Disk fixture 通过 CRC store 预填记录。
 
-默认顺序为 `cuda_3d_batch > cuda_batch > sm > generic`；不支持 3D 的平台从旧路径继续。
+`--transfer-worker-count` 控制每方向 owner 数，`--btc-crc-slot-count` 控制每 owner 每 GPU 的 CRC
+slot 数，`--transfer-queue-max-size` 控制每方向驻留 batch 总预算。结果的 `resolved_config`
+记录这些容量、批次上限、`transfer_implementation=workloop` 和 Device 路径的 `actual_copy_strategy=crc`。
 
-`BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY` 可设置为 `cuda_3d_batch`、`cuda_batch`、`sm` 或 `generic`。
-只把指定接口移到首位，其他接口保持相对顺序。例如：
-
-```bash
-export BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY=sm  # sm > cuda_3d_batch > cuda_batch > generic
-```
-
-仅在 executor 构造时读取；未设置/空值使用默认顺序，非法值告警后使用默认顺序。
-优先级不会覆盖接口禁用选项或 SM 阈值。不适用时尝试下一个接口，执行失败则返回错误。
+Disk→Device staging 只在 load owner 上分配。每 rank 的 staging 预算按 worker 拆分，每个 owner 的
+FULL/SWA 池独立，两个类别按参考字节预算分配。每个池须容纳完整配置批次。
+结果分别报告 `staging_full_blocks`、`staging_swa_blocks` 和 `staging_data_bytes`。
+PerRank 统一推导磁盘读队列 `Q * min(M, read_threads)` 和写队列 `Q`，结果记录实际容量。
 
 本目录提供 BlockTreeCache 的 Tree 在线生命周期 microbenchmark 与 Device/Host/Disk transfer benchmark。当前实现以 workload 可核对、失败可传播、repetition 相互独立为前提；整改前的 buffered 大工作集与 round-trip 数值不能作为基线。
 
@@ -26,7 +24,7 @@ export BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY=sm  # sm > cuda_3d_batch > cuda_batc
 - `tree_online_high_variation_c32` 是**唯一** active/representative Tree perf case。该 case 使用混合 BASE/CONTINUATION 请求：BASE 使用 shared-base + unique suffix（原 high-variation 形状），CONTINUATION 完整继承同一 family 的 parent path 并追加唯一 tail（append-only）。family 状态跨 warmup/measured 持久化，scheduler 正确处理 dependency skip 与 token-budget FIFO。
 - Transfer 的 device 侧按 profile member/layer 构造真实 copy tile；device/host lane blocks 只按 wave width 分配，host/disk working set 独立寻址，不按 working set 大小扩张 GPU staging 内存。每个 wave 按方向将独立 endpoint 组成 transfer-engine descriptor batch，再等待该方向完成后推进配对方向。device↔disk staging lease 数至少取 wave width，避免 lane 超订导致 `staging pool exhausted`。
 - mixed case 在同一 measured window 内交替执行两个方向。展示的“混合总吞吐”是该窗口内两个方向成功字节数之和除以墙钟时间，不是两个单方向峰值的相加。
-- tier round-trip 已删除。demote/load 生命周期正确性继续由现有功能测试看护。
+- tier round-trip 已删除。evict/load 生命周期正确性继续由现有功能测试看护。
 - 计时边界：阶段为 `bootstrap → profile load → allocation → setup → warmup → measured → finalize`，只有 `measured`（含 deadline 后的已 admission request drain）计入指标；perf 运行是独立进程，其 wall time 不进入统计。
 - 内存模型：常驻显存由“同时存活的 blocks × 单 block payload”决定，而非 Tree 节点总数。Tree 使用固定 `scaled` payload，device/host pool 各 32,768 blocks；资源预检（preflight）不足时直接终止，不自动缩小命名 case。
 
@@ -34,7 +32,7 @@ export BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY=sm  # sm > cuda_3d_batch > cuda_batc
 
 - smoke：2 个，只运行最小在线 Tree lifecycle 与 D2H Transfer 端到端路径。
 - profile：包含 Tree、mixed Transfer（含 Device↔Host 并发变体）、单方向 batch API matrix 和 e2e business matrix。`--suite profile` 默认选择全部已注册家族；只跑专项时用 `--case` 指定完整名称列表，详见 case 文档。
-- 整套 suite 的 perf 采集由 registry 的 `is_representative_perf` 标记选择代表 case（Tree、host 三种 copy strategy 及并发变体、device-disk direct、host-disk direct）；显式 `--case` 选择时 driver 对所选 case 采集。
+- 整套 suite 的 perf 采集由 registry 的 `is_representative_perf` 标记选择代表 case（Tree、Device↔Host CRC 路径及并发变体、device-disk direct、host-disk direct）；显式 `--case` 选择时 driver 对所选 case 采集。
 - buffered profile working set：`full_context=32768` blocks，`swa=4096` blocks。每次 measured window 至少完整访问一轮 addressable working set。
 - task-pool 对照（tp4/tp8）不是常驻 case：driver 对同一 case 重复传 `--task-pool-size 4 --task-pool-size 8` 展开专项矩阵。每个 repetition 的两组除 pool size 外 profile、seed、repetition identity、workload definition/trace hash、capacity 与固定 100ms forward sleep 必须一致。tp32 不在正式对照矩阵内，但 runner/driver 保留任意正整数参数能力。
 
@@ -108,7 +106,7 @@ BLOCK_TREE_CACHE_BENCHMARK_TEST_CONFIG=1 \
   --suite smoke --perf off --output-dir /tmp/btc_smoke
 ```
 
-`gpu_lock` 选择并锁定 GPU；`env -u` 让后续 driver 从自身 runfiles 加载 binary 和模型配置，避免继承 GPU 锁的 runfiles。手动 smoke 必须设置上述 test-only 环境变量，否则 Tree 会采用正式的大型 workload。结果位于 `/tmp/btc_smoke/smoke/suite_manifest.json` 和各 case 的 `rep_0000/result.json`；两个 case 均应 completed，repetition 均应 valid。smoke 不覆盖磁盘、全部 copy strategy 或 matrix/e2e 性能。
+`gpu_lock` 选择并锁定 GPU；`env -u` 让后续 driver 从自身 runfiles 加载 binary 和模型配置，避免继承 GPU 锁的 runfiles。手动 smoke 必须设置上述 test-only 环境变量，否则 Tree 会采用正式的大型 workload。结果位于 `/tmp/btc_smoke/smoke/suite_manifest.json` 和各 case 的 `rep_0000/result.json`；两个 case 均应 completed，repetition 均应 valid。磁盘传输及完整性能矩阵由 profile suite 覆盖。
 
 ### 用 driver 跑 suite（推荐）
 
@@ -148,12 +146,6 @@ export LD_LIBRARY_PATH=/opt/conda310/lib:$LD_LIBRARY_PATH
 `--perf` 默认是 `record`；仅测指标或跑 smoke 时显式传 `--perf off`。CPU perf 的宿主/容器执行边界，以及 off-CPU 的 fallback/skip 规则见后文能力矩阵。
 
 默认是严格 suite：任一 failed、partial、skipped 或 required perf 失败都会返回非零。仅调试时可显式传 `--allow-incomplete`。缺少 `--disk-root` 时 disk case 仍保留在 manifest，并记为 `skipped_no_disk`。
-
-显式 `--copy-strategy=cuda-3d-batch` 要求非 PPU 的 CUDA 13 编译及 13.x runtime、driver ≥ 13。
-driver 通过原生二进制的 `capabilities --cuda-device N` 查询与生产策略共享的能力判断，不依据显卡名称推断。
-不支持时，28 个显式 3D case 仍保留在 suite manifest 中，状态为 `skipped_unsupported_platform`，
-并记录 `skip_reason` 和 `copy_capabilities`，不启动测量或 perf；严格 suite 仍返回非零。
-能力查询进程失败、超时或响应格式无效会报错，不计为平台跳过。直接调用 native transfer 强制 3D 时，不支持的平台会明确报错。
 
 ### 正式 profile 的 profiling 完整性（必做）
 
@@ -195,7 +187,7 @@ logical_coordinate = operation_index / direction_count
 working_set_index = permutation(logical_coordinate) % working_set_blocks
 ```
 
-`--transfer-descriptor-batch-size` 控制一次 transfer-engine `submit()` 最多携带多少 descriptor，`0` 表示跟随 concurrency；正式 case 显式设为 8。它与 `--copy-strategy` 不同：前者控制 transfer-engine API 的 descriptor 组批，后者指定 Device↔Host 的底层 copy 路径（`batch` 为 CUDA 1D batch，`cuda-3d-batch` 为 CUDA 3D batch）。当前 Device→Disk 引擎合约仅接受 singleton，runner 在 wave 内并发提交 singleton 以保留 lane concurrency；其余五个方向走真实 descriptor batch。
+`--transfer-descriptor-batch-size` 控制单次引擎提交的 descriptor 数，0 表示跟随 concurrency。各方向使用同一个配置的批次上限；初始化时会验证 Disk→Device staging 容量。
 
 正式结果必须满足：
 
@@ -205,13 +197,13 @@ failed = 0
 requested working set = addressable working set = visited working set
 ```
 
-result 还记录每个 tier 的 capacity/allocated/addressable blocks、每方向 attempted/succeeded/failed、首个错误、descriptor batch 的 requested/resolved/actual avg/max、requested/actual copy strategy 和是否 wrap-around。显式 `batch`/`staged-sm` 会在 benchmark 配置中关闭另一个 Device↔Host copy 优化路径，并由 benchmark-only recorder 记录 measured window 实际命中的策略；任何 fallback 或 mixed 命中都会使 case 无效。
+result 记录各 tier 容量、首个错误、各方向 attempted/succeeded/failed、实际 descriptor batch 和是否 wrap-around。
 
 所有 host/device block 在运行前清零。mixed disk case 的 read 跟随同 coordinate 的 write；如果方向顺序无法提供该前置条件，setup 会预填完整 disk working set。warmup、pilot、measured 使用连续 coordinate cursor，不从 offset 0 重放。
 
 ## Tree 语义（在线生命周期）
 
-- 固定 workload：setup 构造约 20k 节点（3,711-block shared base + 16,289-block background tree），device/host pool 各 32,768 blocks，watermark 0.8/0.9。shared base 不 pin，持续唯一 suffix insert 会驱动 demote/load/evict churn。
+- 固定 workload：setup 构造约 20k 节点（3,711-block shared base + 16,289-block background tree），device/host pool 各 32,768 blocks，watermark 0.8/0.9。shared base 不 pin，持续唯一 suffix insert 会驱动 evict/load/drop churn。
 - 请求 path = shared base 前缀（按 13 档 hit-rate 采样的 planned reuse）+ 请求独立 key space 的 unique suffix；不同请求 suffix 不相交，也不与 shared/background keys 冲突，因此 actual reuse 不可能因 key 碰撞高于 planned reuse。
 - **C32 是 32 个逻辑 request context**（单一 deque 容器），只有一个 foreground scheduler 线程串行调用 match/insert/release；`--task-pool-size` 只控制后台 load/evict/store task pool，不创建请求线程。
 - admission 顺序为 `match → 分配 load targets → 预分配 suffix blocks → commit load`；任一分配/commit 失败整体回滚，无残留 ref/resource。suffix blocks 在 admission 阶段准备好，insert 阶段不再发生 KV allocation。
@@ -566,3 +558,7 @@ curl -sI "http://search-ad.oss-cn-hangzhou-zmf.aliyuncs.com/$PREFIX/index.html" 
 | tree 结果 `pressure_ready=false` | warmup 后未达到预期压力形态 | 查看 `warmup.*` / `pool.*` 快照解释容量或时长；它是观察项，不会单独使 repetition 无效 |
 | 某张 perf 火焰图样本很少 | 短 case 或大量 off-CPU 等待导致 on-CPU samples 不足 | 在报告标明样本数并避免强热点归因；必要时延长独立 profiling process，不伪装成 suite repetition |
 | suite 全部 case 秒挂、stderr 报 libpython | 见第一行 | 设置 `LD_LIBRARY_PATH` 后重跑 |
+
+manual CRC/profile binary 的 `measurement_layer=copy_primitive`，staged 对照仅使用测试代码；
+它不测量 WorkLoop 调度。driver 在设置 `CRC_BENCH_SOURCE_COMMIT`、`CRC_BENCH_BASE_COMMIT` 后，
+可用 `CRC_BENCH_WORKTREE_PATCH_SHA256` 为未提交工作区补丁记录 SHA256；该值写入 run manifest。

@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/events/KVCacheEventPublisher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 
 namespace rtp_llm {
@@ -26,15 +27,25 @@ struct ReusableGroupLocation {
 
 using ReusableGroupLocations = std::unordered_map<std::string, ReusableGroupLocation>;
 
+struct BlockTreeReplacedCandidate {
+    TreeNode* node;
+    size_t    group_set_id;
+    Tier      source_tier;
+};
+
 struct BlockTreeInsertResult {
     std::vector<TreeNode*>                                 path;
     std::vector<TreeNode*>                                 inserted_nodes;
     std::vector<std::pair<TreeNode*, std::vector<size_t>>> adopted_nodes;
+    // Replaced FULL resources; old-tier heap erasure tolerates absent entries. Consumed under the cache mutex.
+    std::vector<BlockTreeReplacedCandidate> replaced_candidates;
+    std::vector<TransferDescriptor> revoked_evictions;
     // Borrowed from the tree; consumed under the BlockTreeCache mutex.
     std::vector<TreeNode*> newly_resident_nodes;
     // Number of logical GroupSetResources the tree took BLOCK_CACHE ownership of.
     size_t accepted_resource_count{0};
     size_t resident_prefix_length{0};
+    bool hard_stop{false};
 };
 
 struct BlockTreeNodeRangeResult {
@@ -58,8 +69,9 @@ public:
                                      bool                                              collect_path,
                                      bool                                              is_resident);
 
+    void      referenceNodeForNonOwnerTransfer(TreeNode* node);
     bool      isRemovable(TreeNode* node) const;
-    void      removePendingNodes(const std::unordered_set<TreeNode*>& nodes);
+    void      removePendingNodes(const std::unordered_map<TreeNode*, size_t>& nodes);
     TreeNode* removeNodeAndEmptyAncestors(TreeNode* node);
 
     TreeNode* root() const {
@@ -88,7 +100,7 @@ public:
                                                   const std::function<void(const TreeNode&)>& visitor) const;
 
     // All publication operations require the owning BlockTreeCache mutex.
-    // Only complete, matchable DEVICE values in every required group are advertised.
+    // Complete, matchable DEVICE components are advertised independently.
     void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);
     KVCacheSnapshot logicalCacheSnapshot() const;
     void            refreshPublishedState(const TreeNode* node);
@@ -97,7 +109,7 @@ private:
     void                               removePublishedKey(CacheKeyType key);
     KVCacheEventPublisherPtr           event_publisher_;
     std::vector<ReusableGroupLocation> publication_groups_;
-    std::unordered_set<CacheKeyType>   published_keys_;
+    std::unordered_map<CacheKeyType, std::vector<size_t>> published_groups_;
     int64_t                            publication_version_{-1};
 
     friend class BlockTreeEvictor;
@@ -107,6 +119,7 @@ private:
                                          bool                                              collect_path,
                                          bool                                              is_resident);
 
+    bool      canReleaseNode(TreeNode* node) const;
     void      removeNode(TreeNode* node);
     TreeNode* createNode(CacheKeyType key, TreeNode* parent);
     void      releaseNode(TreeNode* node);

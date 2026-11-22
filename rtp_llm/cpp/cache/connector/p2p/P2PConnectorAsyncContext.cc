@@ -423,7 +423,8 @@ void P2PConnectorAsyncReadContext::cancel(const std::shared_ptr<P2PBroadcastClie
             std::shared_ptr<P2PBroadcastClient::Result> cancel_result;
             try {
                 cancel_result = tp_broadcast_client->cancel(
-                    unique_key, P2PConnectorBroadcastType::CANCEL_READ, request_deadline_ms_, 0, 0);
+                    unique_key, P2PConnectorBroadcastType::CANCEL_READ, request_deadline_ms_,
+                    read_call ? read_call->requestId().value_or(0) : 0, 0);
             } catch (...) {
                 // This invocation owns the CAS; allow a retry without releasing
                 // the target lease if RPC creation throws.

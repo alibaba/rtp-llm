@@ -131,6 +131,7 @@ BlockTreeTaskPool::QueuedTask BlockTreeTaskPool::popNextNormalTaskLocked() {
 void BlockTreeTaskPool::workerLoop() {
     while (true) {
         std::function<void()> task;
+        QueuedTask queued_task;
         {
             std::unique_lock<std::mutex> lock(lifecycle_mutex_);
             queue_cv_.wait(lock,
@@ -139,7 +140,7 @@ void BlockTreeTaskPool::workerLoop() {
                 task = std::move(completion_queue_.front());
                 completion_queue_.pop_front();
             } else if (normalQueueSizeLocked() != 0) {
-                QueuedTask queued_task = popNextNormalTaskLocked();
+                queued_task = popNextNormalTaskLocked();
                 if (queued_task.deadline && std::chrono::steady_clock::now() >= *queued_task.deadline) {
                     task = std::move(queued_task.on_timeout);
                 } else {
@@ -156,6 +157,11 @@ void BlockTreeTaskPool::workerLoop() {
             // Keep the persistent worker alive. Business tasks publish their
             // own terminal error through the associated async context.
         }
+        // Captured staging leases can dispatch another task on destruction.
+        // Release both selected and discarded callbacks outside lifecycle_mutex_,
+        // before publishing idle so their follow-up submissions are accounted for.
+        task = {};
+        queued_task = {};
         taskFinished();
     }
 }
@@ -178,6 +184,9 @@ void BlockTreeTaskPool::waitForIdle() {
 
 void BlockTreeTaskPool::shutdown() {
     std::shared_ptr<autil::LockFreeThreadPool> thread_pool;
+    std::deque<QueuedTask>                    dropped_load;
+    std::deque<QueuedTask>                    dropped_background;
+    std::deque<std::function<void()>>         dropped_completions;
     bool                                       was_started   = false;
     size_t                                     dropped_tasks = 0;
     {
@@ -188,13 +197,18 @@ void BlockTreeTaskPool::shutdown() {
         admission_stopped_ = true;
         shutdown_          = true;
         dropped_tasks      = normalQueueSizeLocked() + completion_queue_.size();
-        load_queue_.clear();
-        background_queue_.clear();
-        completion_queue_.clear();
+        dropped_load.swap(load_queue_);
+        dropped_background.swap(background_queue_);
+        dropped_completions.swap(completion_queue_);
         thread_pool = thread_pool_;
         was_started = started_;
         queue_cv_.notify_all();
     }
+
+    // Lease destruction may try to submit follow-up work, which shutdown rejects.
+    dropped_load.clear();
+    dropped_background.clear();
+    dropped_completions.clear();
 
     if (dropped_tasks > 0) {
         const int dropped   = static_cast<int>(dropped_tasks);

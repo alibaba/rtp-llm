@@ -23,15 +23,15 @@ CUDA_VISIBLE_DEVICES=0 bazelisk test \
 
 | 路径 | 实现与计时边界 |
 |---|---|
-| `integrated_crc` | 直接链接当前仓库的 `CrcBlockCopyBatch`，每个 backing 的完整 payload 对应一条 CRC 消息。包含 metadata、GPU CRC、数据传输、同步和 verdict。 |
-| `copy1d_batch` | 调用真实 `CudaBatchDeviceHostCopyStrategy`，包含每次 descriptor 构造和 binding 内同步；禁止自动 fallback。 |
+| `integrated_crc` | 直接链接当前仓库的 `CrcCopyWorkspace`，每个 backing 的完整 payload 对应一条 CRC 消息。包含 metadata、GPU CRC、数据传输、同步和 verdict。 |
+| `copy1d_batch` | 直接调用 `execBatchedMemoryCopy`，包含每次 descriptor 构造和 binding 内同步。 |
 | `copy3d_batch` | 从实际 tiles 推导连续的 affine span；只有宽度相同、host 连续、device pitch 恒定的 tiles 才合并。当前 shape 预期每 backing 三个操作，代码不写死这个数量。构造和检查 descriptor、提交、等待完成都计时；使用独立 Torch 非默认 stream 和测试局部提交锁。 |
-| `staged_no_crc` | 调用真实的 `StagedSmDeviceHostCopyStrategy`，保留与 CRC 统一的 `CopyTileKernel`。GPU staging 与最终 HOST segment 直接 DMA，不再通过额外 pinned host scratch 做 CPU payload pack/unpack。 |
-| `main_staged` | main `e73826e27a6005640bb75ce2a73f235bfa51c55b` 的 staged strategy、scratch 和 executor 原样放入测试 namespace；沿用该版本的 SM gather/scatter kernel，包含三组 metadata 上传、pinned scratch、CPU pack/unpack 和同步。 |
+| `staged_no_crc` | 直接调用 `execStagedMemoryCopy`，与 CRC 共享 `CopyTileKernel`。GPU staging 与最终 HOST segment 直接 DMA。 |
+| `main_staged` | main `e73826e27a6005640bb75ce2a73f235bfa51c55b` 的 staged executor、scratch 和 SM gather/scatter kernel 的测试快照，包含三组 metadata 上传、pinned scratch、CPU pack/unpack 和同步。 |
 
 CRC、1D 和优化 staged 直接链接当前生产实现。main staged 单独保留固定提交的测试快照，用于避免与优化后的实现混用；3D 是测试内从实际 tiles 推导的对照。各路径与 CRC 的耗时差都不代表单个 CRC kernel 的时间。
 
-框架在 CUDA13 x86/ARM 构建中默认对 DEVICE-resident group 的本地 HOST/DISK cache 传输启用 CRC。启动时可用 `--enable_crc=false` 或 `ENABLE_CRC=0` 关闭；命令行优先于环境变量。统一参数入口将该值写入 `KVCacheConfig.enable_crc`，随后随 worker/engine 配置传到缓存工厂，底层传输代码只使用传入的配置。关闭后使用普通 payload 布局和 copy 路径，不创建 CRC workspace；不支持 CRC 的构建也沿用普通 copy 路径。本测试显式调用各条实现做对照，不受该开关控制。
+BlockTreeCache 的本地 HOST/DISK 层要求使用 CUDA13 CRC 后端并保持 `ENABLE_CRC=1`。涉及 DEVICE 的传输由 WorkLoop 执行 CRC copy，HOST 与 DISK 之间搬运已编码的记录。本测试直接调用各个 copy primitive 比较性能。
 
 | backing | 按 pool/layer 的 tile 字节数 | payload/backing | tiles/backing |
 |---|---|---:|---:|

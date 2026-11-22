@@ -26,7 +26,7 @@ class CacheTagsTest(unittest.TestCase):
             "swa_kv": SimpleNamespace(
                 kv_cache_kernel_block_id_device=swa, is_prefill=True
             ),
-            "global_kv_2": SimpleNamespace(
+            "csa_kv": SimpleNamespace(
                 kv_cache_kernel_block_id_device=global_kv, is_prefill=True
             ),
         }
@@ -34,19 +34,19 @@ class CacheTagsTest(unittest.TestCase):
         self.assertTrue(view.is_prefill)
         tables = CACHE.build_block_tables(None, view, batch_offset=1)
         self.assertEqual(tables["swa_kv"].tolist(), [[2, 4]])
-        self.assertEqual(tables["global_kv_2"].tolist(), [[9]])
+        self.assertEqual(tables["csa_kv"].tolist(), [[9]])
         self.assertEqual(
-            set(CACHE.build_block_tables_for_tags(None, view, ["global_kv_2"])),
-            {"global_kv_2"},
+            set(CACHE.build_block_tables_for_tags(None, view, ["csa_kv"])),
+            {"csa_kv"},
         )
 
     def test_host_mirrors_keep_group_order_and_invalid_padding(self):
-        cache = SimpleNamespace(group_tags=["global_kv_2", "decoder_swa_kv"])
+        cache = SimpleNamespace(group_tags=["csa_kv", "decoder_swa_kv"])
         inputs = {
             "decoder_swa_kv": SimpleNamespace(
                 kv_cache_block_id=torch.tensor([[6, 8]], dtype=torch.int32)
             ),
-            "global_kv_2": SimpleNamespace(
+            "csa_kv": SimpleNamespace(
                 kv_cache_block_id=torch.tensor([[9]], dtype=torch.int32)
             ),
         }

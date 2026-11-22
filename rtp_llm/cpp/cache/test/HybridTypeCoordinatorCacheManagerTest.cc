@@ -35,12 +35,12 @@ public:
     explicit PausableHybridPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups):
         PerRankBlockTransferEngine(groups) {}
 
-    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
+    std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ++submit_count_;
             if (released_) {
-                return PerRankBlockTransferEngine::execute(std::move(task));
+                return PerRankBlockTransferEngine::executeBatch(std::move(task));
             }
             auto context = std::make_shared<TransferBatchAsyncContext>();
             entered_     = true;
@@ -68,7 +68,7 @@ public:
                 submit.context->complete(error);
                 continue;
             }
-            auto context = PerRankBlockTransferEngine::execute(std::move(submit.task));
+            auto context = PerRankBlockTransferEngine::executeBatch(std::move(submit.task));
             context->waitDone();
             submit.context->complete(context->result());
         }
@@ -637,12 +637,12 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, InitAndAddressLookupSmoke) {
 
     const std::vector<SingleTypeCacheManagerPtr> groups = allocator->cacheGroups();
     ASSERT_GT(groups.size(), 1u);
-    const std::vector<KVCachePoolMetricsSnapshot> snapshots = allocator->poolMetricsSnapshots();
-    ASSERT_EQ(snapshots.size(), 2u);
+    const std::vector<CachePoolMetrics> metrics_list = allocator->poolMetrics();
+    ASSERT_EQ(metrics_list.size(), 2u);
     EXPECT_NE(poolForTag(*allocator, "linear"), poolForTag(*allocator, "full1"));
-    for (const auto& snapshot : snapshots) {
-        EXPECT_EQ(snapshot.used_blocks, snapshot.total_blocks - snapshot.free_blocks);
-        EXPECT_EQ(snapshot.free_blocks, config.group(snapshot.pool_name).block_num - 1);
+    for (const auto& metrics_data : metrics_list) {
+        EXPECT_EQ(metrics_data.used_blocks, metrics_data.total_blocks - metrics_data.free_blocks);
+        EXPECT_EQ(metrics_data.free_blocks, config.group(metrics_data.pool_name).block_num - 1);
     }
 
     // Should be able to fetch address for any global layer and non-zero block id.
@@ -1570,13 +1570,10 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, PreparedLoadReclaimsIndependentPoo
     auto config = makeTinyHybridConfig();
     setGroupBlockCounts(config, 5, 5);
     auto          allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
-    KVCacheConfig tree_config;
-    // Exercise on-demand reclamation, without background watermark eviction
-    // removing the seeded path before the capacity check begins.
-    tree_config.block_tree_device_evict_low_watermark_ratio  = 0;
-    tree_config.block_tree_device_evict_high_watermark_ratio = 0;
-    allocator->setBlockTreeCacheConfigForTest(tree_config);
     ASSERT_TRUE(allocator->init());
+    // Keep the seeded path until the on-demand capacity check.
+    block_tree_cache_test::BlockTreeCacheTestPeer::setTierWatermarkForTest(
+        *allocator->blockTreeCacheOwner(), Tier::DEVICE, 1.0, 1.0);
     allocator->setReserveBlocksNum(0);
 
     const auto seeded = seedCompleteBlockTreePath(allocator, CacheKeysType{100, 101, 102, 103});
@@ -1715,6 +1712,43 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, UpdateKVBlockCopyLastBlockAcrossGr
 
     allocator->free(FreeInfo{batch_res, nullptr});
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
+}
+
+TEST_F(HybridTypeCoordinatorCacheManagerTest, UpdateKVBlockDoesNotReuseConnectorHeldDroppedBlocks) {
+    for (const auto owner : {DeviceBlockRefType::REMOTE_CONNECTOR, DeviceBlockRefType::PD_CONNECTOR}) {
+        auto config    = makeTinyHybridConfig();
+        auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::HOST);
+        ASSERT_TRUE(allocator->init());
+        auto         linear_pool   = poolForTag(*allocator, "linear");
+        auto         full_pool     = poolForTag(*allocator, "full1");
+        const size_t free_before   = allocator->freeBlocksNum();
+        const auto   linear_blocks = allocateReferencedBlocks(linear_pool, 2);
+        const auto   full_blocks   = allocateReferencedBlocks(full_pool, 2);
+        linear_pool->incRef(linear_blocks[1], owner);
+        full_pool->incRef(full_blocks[1], owner);
+
+        auto resource = makeBatchResource(2, config, CacheKeysType{100}, /*reorder_resource=*/true);
+        resource->mutableBlockIds(0, "linear").assign({linear_blocks[0]});
+        resource->mutableBlockIds(0, "full1").assign({full_blocks[0]});
+        resource->mutableBlockIds(1, "linear").assign({linear_blocks[1]});
+        resource->mutableBlockIds(1, "full1").assign({full_blocks[1]});
+        std::vector<TaggedBlockIdPair> mapping;
+        ASSERT_TRUE(allocator->updateKVBlock(resource, {0, 0}, /*copy_last_block=*/true, mapping));
+        ASSERT_EQ(mapping.size(), 2u);
+        for (const auto& copy : mapping) {
+            EXPECT_NE(copy.dst, copy.tag == "linear" ? linear_blocks[1] : full_blocks[1]);
+        }
+        EXPECT_EQ(linear_pool->refCount(linear_blocks[1]), 1u);
+        EXPECT_EQ(full_pool->refCount(full_blocks[1]), 1u);
+        EXPECT_EQ(linear_pool->referencedBlocksNum(owner), 1u);
+        EXPECT_EQ(full_pool->referencedBlocksNum(owner), 1u);
+
+        allocator->free(FreeInfo{resource, nullptr});
+        EXPECT_EQ(allocator->freeBlocksNum(), free_before - 2);
+        linear_pool->decRef(linear_blocks[1], owner);
+        full_pool->decRef(full_blocks[1], owner);
+        EXPECT_EQ(allocator->freeBlocksNum(), free_before);
+    }
 }
 
 TEST_F(HybridTypeCoordinatorCacheManagerTest, UpdateKVBlockReservationFailureLeavesResourceUnchanged) {
@@ -1863,16 +1897,16 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, DenseManagersFollowBoundTopologyOr
         ASSERT_TRUE(allocator->init());
         const auto  managers  = allocator->cacheGroups();
         const auto& pools     = allocator->groupBlockPools();
-        const auto  snapshots = allocator->poolMetricsSnapshots();
+        const auto  metrics_list = allocator->poolMetrics();
         ASSERT_EQ(managers.size(), bound_topology->groupTags().size());
         ASSERT_EQ(pools.size(), managers.size());
-        ASSERT_EQ(snapshots.size(), managers.size());
+        ASSERT_EQ(metrics_list.size(), managers.size());
         for (size_t row = 0; row < managers.size(); ++row) {
             const auto& tag = bound_topology->groupTags()[row];
             EXPECT_EQ(managers[row]->tag(), tag);
             EXPECT_EQ(managers[row]->blockPool(), pools[row]);
-            EXPECT_EQ(snapshots[row].pool_index, row);
-            EXPECT_EQ(snapshots[row].pool_name, pools[row]->poolName());
+            EXPECT_EQ(metrics_list[row].pool_index, row);
+            EXPECT_EQ(metrics_list[row].pool_name, pools[row]->poolName());
             for (const int layer_id : bound_topology->layerIdsForGroup(tag)) {
                 const auto expected = managers[row]->convertIndexToAddr(layer_id, 1);
                 const auto actual   = allocator->convertIndexToAddr(layer_id, tag, 1);
@@ -1943,7 +1977,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, ReferenceIdentityMismatchDoesNotMu
     resource.mutableBlockIds("unexpected").assign(full_blocks);
 
     EXPECT_ANY_THROW(allocator->incrKVCacheRef(resource, {100}));
-    EXPECT_ANY_THROW(allocator->decrKVCacheRef(resource));
+    EXPECT_ANY_THROW(allocator->decrKVCacheRef(resource, DeviceBlockRefType::REQUEST));
     EXPECT_EQ(linear_pool->refCount(linear_blocks.front()), linear_ref);
     EXPECT_EQ(full_pool->refCount(full_blocks.front()), full_ref);
 
@@ -2024,13 +2058,17 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, ConnectorRefPreservesDummyTailAcro
 
     linear_pool->decRef(linear_blocks);
     full_pool->decRef(full_blocks);
-    EXPECT_EQ(linear_pool->referencedBlocksNum(), 1u);
-    EXPECT_EQ(full_pool->referencedBlocksNum(), 1u);
+    EXPECT_EQ(linear_pool->referencedBlocksNum(), 0u);
+    EXPECT_EQ(full_pool->referencedBlocksNum(), 0u);
+    EXPECT_EQ(linear_pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), 1u);
+    EXPECT_EQ(full_pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), 1u);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before - 2);
 
     ref.reset();
     EXPECT_EQ(linear_pool->referencedBlocksNum(), 0u);
     EXPECT_EQ(full_pool->referencedBlocksNum(), 0u);
+    EXPECT_EQ(linear_pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), 0u);
+    EXPECT_EQ(full_pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), 0u);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 

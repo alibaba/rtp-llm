@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -13,6 +14,8 @@
 
 namespace rtp_llm {
 
+class DiskIOExecutor;
+
 enum class BlockIOStatus {
     OK,
     INVALID_BLOCK,
@@ -22,7 +25,7 @@ enum class BlockIOStatus {
     PARTIAL_FAILURE,
 };
 
-struct BlockTreeDiskBlockPoolConfig: public BlockPoolConfigBase {
+struct DiskBlockPoolConfig: public BlockPoolConfigBase {
     std::string                              work_dir;
     int64_t                                  local_rank{0};
     int64_t                                  world_rank{0};
@@ -33,18 +36,20 @@ struct BlockTreeDiskBlockPoolConfig: public BlockPoolConfigBase {
     std::shared_ptr<BlockTreeDiskMountGuard> mount_guard;
 };
 
-// BlockTreeDiskBlockPool backs every block with a fixed-stride slice of a single preallocated
+// DiskBlockPool backs every block with a fixed-stride slice of a single preallocated
 // disk file, driving reads/writes through a DiskBlockIO (a BlockTreePosixDiskBlockIO by
 // default, or an injected implementation for tests). All lifecycle behavior
 // (malloc/free/incRef/decRef/metrics) is inherited unchanged from IBlockPool; this
 // class only owns the disk backing file and maps block indices to file offsets via
 // blockOffset(). Unlike the incRef/decRef refcount, read()/write() only check that
 // the physical block index is valid, so the same rank-0 index can be used on workers.
-class BlockTreeDiskBlockPool: public IBlockPool {
+class DiskBlockPool: public IBlockPool {
 public:
-    explicit BlockTreeDiskBlockPool(std::shared_ptr<const BlockTreeDiskBlockPoolConfig> config,
-                                    std::unique_ptr<DiskBlockIO>                        io = nullptr);
-    ~BlockTreeDiskBlockPool() override;
+    using Callback = std::function<void(BlockIOStatus)>;
+
+    explicit DiskBlockPool(std::shared_ptr<const DiskBlockPoolConfig> config,
+                           std::unique_ptr<DiskBlockIO>               io = nullptr);
+    ~DiskBlockPool() override;
 
     // Validates the config's payload/stride/work_dir invariants, builds the backing
     // file path from work_dir/world_rank/local_rank, preallocates it to
@@ -52,18 +57,31 @@ public:
     // and marks the pool initialized. Always returns true; invariant violations are
     // enforced via RTP_LLM_CHECK.
     bool init();
-
     // Single-block read/write. Only validBlock(block) is checked (not allocation/refCount);
     // block 0 and any out-of-range block return INVALID_BLOCK. bytes greater
     // than strideBytes() returns INVALID_SIZE.
     BlockIOStatus read(BlockIdxType block, void* dst, size_t bytes);
     BlockIOStatus write(BlockIdxType block, const void* src, size_t bytes);
 
-    // Batch read/write. Every block is validated with validBlock() and bytes_per_block is
-    // validated against strideBytes() before any I/O is issued; on success the
-    // underlying DiskBlockIO batch call is driven in blocks[] order.
+    // Validates the batch, then issues I/O in input order until the first error.
     BlockIOStatus read(const BlockIdList& blocks, const std::vector<void*>& dsts, size_t bytes_per_block);
     BlockIOStatus write(const BlockIdList& blocks, const std::vector<const void*>& srcs, size_t bytes_per_block);
+
+    // The owner keeps the pool and buffers alive until the shared executor has
+    // drained all accepted operations and callbacks. Counters advance only after
+    // full-batch success.
+    BlockIOStatus asyncRead(DiskIOExecutor&           executor,
+                            const BlockIdList&        blocks,
+                            const std::vector<void*>& dsts,
+                            size_t                    bytes_per_block,
+                            Callback                  callback);
+    // Buffers must cover bytes_per_block and stay leased until completion.
+    // The entire buffer is written unchanged, including any alignment padding.
+    BlockIOStatus asyncWrite(DiskIOExecutor&                 executor,
+                             const BlockIdList&              blocks,
+                             const std::vector<const void*>& srcs,
+                             size_t                          bytes_per_block,
+                             Callback                        callback);
 
     size_t             payloadBytes() const;
     size_t             strideBytes() const;
@@ -80,12 +98,18 @@ private:
     // BEFORE the IBlockPool base constructor runs (it requires physical_block_count
     // > 1 and seeds free blocks immediately from it). Returns a copy of config with
     // physical_block_count normalized to the computed value.
-    static std::shared_ptr<const BlockTreeDiskBlockPoolConfig>
-    normalizeConfig(const std::shared_ptr<const BlockTreeDiskBlockPoolConfig>& config);
+    static std::shared_ptr<const DiskBlockPoolConfig>
+    normalizeConfig(const std::shared_ptr<const DiskBlockPoolConfig>& config);
 
-    const BlockTreeDiskBlockPoolConfig& config() const;
+    const DiskBlockPoolConfig& config() const;
 
     static BlockIOStatus mapStatus(DiskBlockIOStatus status);
+
+    template<typename Request, typename Buffer>
+    BlockIOStatus prepareBatch(const BlockIdList&         blocks,
+                               const std::vector<Buffer>& buffers,
+                               size_t                     bytes_per_block,
+                               std::vector<Request>&      requests) const;
 
     std::unique_ptr<DiskBlockIO> io_;
     std::string                  file_path_;
@@ -93,6 +117,6 @@ private:
     std::atomic<size_t>          write_bytes_{0};
 };
 
-using BlockTreeDiskBlockPoolPtr = std::shared_ptr<BlockTreeDiskBlockPool>;
+using DiskBlockPoolPtr = std::shared_ptr<DiskBlockPool>;
 
 }  // namespace rtp_llm

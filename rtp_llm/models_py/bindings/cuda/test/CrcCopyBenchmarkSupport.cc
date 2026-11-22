@@ -2,7 +2,6 @@
 
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "rtp_llm/models_py/bindings/cuda/test/MainStagedCopyBaseline.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyStrategy.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -13,18 +12,11 @@
 #include <string>
 #include <algorithm>
 #include <numeric>
+#include <limits>
 #include <sstream>
 
 namespace rtp_llm::crc_copy_benchmark {
 namespace {
-void requireDone(const StrategyResult& result, const char* name) {
-    if (result.status != StrategyStatus::DONE) {
-        throw std::runtime_error(std::string(name) + " did not complete; fallback is forbidden; strategy_status="
-                                 + std::to_string(static_cast<int>(result.status))
-                                 + " copy_status=" + std::to_string(static_cast<int>(result.copy_status)));
-    }
-}
-
 CacheConfig flashCacheConfig() {
     // Flash-0731: this benchmark disables speculative decoding and measures only the 43 target layers.
     ModelConfig model;
@@ -144,35 +136,66 @@ size_t maximumLayoutPayload() {
     return std::max(deepSeekV4FlashLayout(true).payload(), deepSeekV4FlashLayout(false).payload());
 }
 
+namespace {
+struct CopyTile {
+    void*  host;
+    void*  device;
+    size_t bytes;
+    size_t member;
+    size_t local_layer;
+};
+
+StagedMemoryCopyParams stagedParams(const std::vector<CopyTile>& tiles, void* host_base, int device, bool evict) {
+    StagedMemoryCopyParams params;
+    params.host_base    = host_base;
+    params.device_index = device;
+    params.direction    = evict ? StagedMemoryCopyDirection::D2H : StagedMemoryCopyDirection::H2D;
+    params.tiles.reserve(tiles.size());
+    params.host_segments.reserve(tiles.size());
+    for (const auto& tile : tiles) {
+        if (params.host_bytes > std::numeric_limits<size_t>::max() - 15)
+            throw std::overflow_error("staged copy alignment overflow");
+        const size_t offset = (params.host_bytes + 15) & ~size_t{15};
+        if (tile.bytes > std::numeric_limits<size_t>::max() - offset)
+            throw std::overflow_error("staged copy size overflow");
+        params.tiles.push_back({tile.device, offset, tile.bytes});
+        params.host_bytes = offset + tile.bytes;
+        if (!params.host_segments.empty()) {
+            auto& prev = params.host_segments.back();
+            if (static_cast<uint8_t*>(prev.host) + prev.bytes == tile.host && prev.host_offset + prev.bytes == offset) {
+                prev.bytes += tile.bytes;
+                continue;
+            }
+        }
+        params.host_segments.push_back({tile.host, offset, tile.bytes});
+    }
+    return params;
+}
+}  // namespace
+
 struct FrameworkCopyPlan::Impl {
-    DeviceHostCopyPlan store;
-    DeviceHostCopyPlan load;
+    void*                 host_base{nullptr};
+    size_t                payload_bytes{0};
+    size_t                capacity_bytes{0};
+    std::vector<CopyTile> tiles;
 
     Impl(const std::vector<CrcCopyItem>& items, const Layout& layout) {
-        store.device_to_host = true;
-        load.device_to_host  = false;
         if (!items.empty()) {
-            store.host = load.host = {items.front().host, items.front().payload_bytes, items.front().capacity_bytes};
+            host_base      = items.front().host;
+            payload_bytes  = items.front().payload_bytes;
+            capacity_bytes = items.front().capacity_bytes;
         }
-        size_t count = 0;
-        for (const auto& item : items)
-            count += item.tiles.size();
-        store.copy_tiles.reserve(count);
-        load.copy_tiles.reserve(count);
+        tiles.reserve(items.size() * layout.geometry.size());
         for (const auto& item : items) {
             if (item.tiles.size() != layout.geometry.size())
                 throw std::runtime_error("framework plan does not match derived physical geometry");
             for (size_t i = 0; i < item.tiles.size(); ++i) {
-                const auto&        tile = item.tiles[i];
-                DeviceHostCopyTile copy;
-                copy.host_addr         = static_cast<unsigned char*>(item.host) + tile.offset;
-                copy.device_addr       = tile.device;
-                copy.bytes             = tile.bytes;
-                copy.device_index      = 0;
-                copy.member_group_id   = layout.geometry[i].member;
-                copy.local_layer_index = layout.geometry[i].local_layer;
-                store.copy_tiles.push_back(copy);
-                load.copy_tiles.push_back(copy);
+                const auto& tile = item.tiles[i];
+                tiles.push_back({static_cast<uint8_t*>(item.host) + tile.offset,
+                                 tile.device,
+                                 tile.bytes,
+                                 layout.geometry[i].member,
+                                 layout.geometry[i].local_layer});
             }
         }
     }
@@ -183,24 +206,28 @@ FrameworkCopyPlan::FrameworkCopyPlan(const std::vector<CrcCopyItem>& items, cons
 FrameworkCopyPlan::~FrameworkCopyPlan() = default;
 
 uintptr_t FrameworkCopyPlan::touchMetadata() const {
-    uintptr_t sum = 0;
-    for (const auto* plan : {&impl_->store, &impl_->load}) {
-        sum += plan->device_to_host ^ plan->group_set_id ^ reinterpret_cast<uintptr_t>(plan->host.base)
-               ^ plan->host.payload_bytes ^ plan->host.capacity_bytes;
-        for (const auto& tile : plan->copy_tiles)
-            sum += reinterpret_cast<uintptr_t>(tile.host_addr) ^ reinterpret_cast<uintptr_t>(tile.device_addr)
-                   ^ tile.bytes ^ uintptr_t(tile.device_index) ^ tile.member_group_id ^ tile.local_layer_index;
-    }
+    uintptr_t sum = reinterpret_cast<uintptr_t>(impl_->host_base) ^ impl_->payload_bytes ^ impl_->capacity_bytes;
+    for (const auto& tile : impl_->tiles)
+        sum += reinterpret_cast<uintptr_t>(tile.host) ^ reinterpret_cast<uintptr_t>(tile.device) ^ tile.bytes
+               ^ tile.member ^ tile.local_layer;
     return sum;
 }
 
 struct FrameworkCopies::Impl {
-    CudaBatchDeviceHostCopyStrategy              batch;
-    StagedSmDeviceHostCopyStrategy               staged;
-    main_baseline::StagedSmDeviceHostCopyStrategy main_staged;
-    at::cuda::CUDAStream                         stream;
+    const int                              device;
+    std::shared_ptr<DeviceHostCopyStreams> copy_streams;
+    StagedMemoryCopyScratch                staged;
+    main_baseline::StagedCopy              main_staged;
+    at::cuda::CUDAStream                   stream;
 
-    explicit Impl(int device): stream(at::cuda::getStreamFromPool(false, device)) {}
+    explicit Impl(int device):
+        device(device),
+        copy_streams(acquireDeviceHostCopyStreams(device)),
+        stream(at::cuda::getStreamFromPool(false, device)) {}
+
+    ~Impl() {
+        releaseStagedMemoryCopyScratch(staged);
+    }
 };
 
 FrameworkCopies::FrameworkCopies(int device) {
@@ -210,19 +237,29 @@ FrameworkCopies::FrameworkCopies(int device) {
 
 FrameworkCopies::~FrameworkCopies() = default;
 
-void FrameworkCopies::copyBatch(const FrameworkCopyPlan& plan, bool store) {
-    requireDone(impl_->batch.tryExecute(store ? plan.impl_->store : plan.impl_->load, DeviceHostCopyOptions{}),
-                "CUDA 1D batch");
+void FrameworkCopies::copyBatch(const FrameworkCopyPlan& plan, bool evict) {
+    BatchedMemoryCopyParams params;
+    params.device_index = impl_->device;
+    params.direction    = evict ? DeviceHostCopyDirection::D2H : DeviceHostCopyDirection::H2D;
+    params.tiles.reserve(plan.impl_->tiles.size());
+    for (const auto& tile : plan.impl_->tiles) {
+        params.tiles.push_back({evict ? tile.host : tile.device, evict ? tile.device : tile.host, tile.bytes});
+    }
+    const DeviceHostCopyExecutionContext context{impl_->copy_streams, params.direction};
+    if (execBatchedMemoryCopy(params, context) != BatchedMemoryCopyStatus::SUCCESS)
+        throw std::runtime_error("CUDA 1D batch copy failed");
 }
 
-void FrameworkCopies::copyStaged(const FrameworkCopyPlan& plan, bool store) {
-    requireDone(impl_->staged.tryExecute(store ? plan.impl_->store : plan.impl_->load, DeviceHostCopyOptions{}),
-                "rebased production staged without CRC");
+void FrameworkCopies::copyStaged(const FrameworkCopyPlan& plan, bool evict) {
+    const auto params = stagedParams(plan.impl_->tiles, plan.impl_->host_base, impl_->device, evict);
+    if (!execStagedMemoryCopy(params, &impl_->staged))
+        throw std::runtime_error("staged copy failed");
 }
 
-void FrameworkCopies::copyMainStaged(const FrameworkCopyPlan& plan, bool store) {
-    requireDone(impl_->main_staged.tryExecute(store ? plan.impl_->store : plan.impl_->load, DeviceHostCopyOptions{}),
-                "main staged without CRC");
+void FrameworkCopies::copyMainStaged(const FrameworkCopyPlan& plan, bool evict) {
+    const auto params = stagedParams(plan.impl_->tiles, plan.impl_->host_base, impl_->device, evict);
+    if (!impl_->main_staged.copy(params))
+        throw std::runtime_error("main staged copy failed");
 }
 
 const char* mainStagedSourceCommit() {

@@ -26,6 +26,7 @@
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/SingleTypeCacheManager.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
@@ -168,10 +169,18 @@ class PausableRecordingTransferEngine: public PerRankBlockTransferEngine {
 public:
     explicit PausableRecordingTransferEngine(const std::vector<GroupSetPtr>& groups,
                                              bool                            enable_disk_cache,
-                                             size_t                          device_disk_staging_block_count = 4):
-        PerRankBlockTransferEngine(groups, enable_disk_cache, {}, device_disk_staging_block_count) {}
+                                             size_t                          device_disk_staging_block_count = 8):
+        PerRankBlockTransferEngine(groups,
+                                   enable_disk_cache,
+                                   device_disk_staging_block_count,
+                                   enable_disk_cache ? 2 : 8,
+                                   4,
+                                   10000,
+                                   nullptr,
+                                   0,
+                                   4) {}
 
-    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
+    std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override {
         const auto& descriptors      = task.descriptors();
         bool        scripted_success = true;
         {
@@ -194,7 +203,7 @@ public:
             return std::make_shared<CompletedTransferAsyncContext>(
                 ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure"));
         }
-        return PerRankBlockTransferEngine::execute(std::move(task));
+        return PerRankBlockTransferEngine::executeBatch(std::move(task));
     }
 
     void enqueueResult(bool success) {
@@ -247,7 +256,7 @@ public:
                 submit.context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure"));
                 continue;
             }
-            auto context = PerRankBlockTransferEngine::execute(std::move(submit.task));
+            auto context = PerRankBlockTransferEngine::executeBatch(std::move(submit.task));
             context->waitDone();
             submit.context->complete(context->result());
         }
@@ -363,7 +372,7 @@ inline CacheConfig makeCompactDsv4CacheConfig(uint32_t block_num, int cp_size = 
     parallelism.role_type                          = RoleType::PREFILL;
     parallelism.tp_size                            = cp_size;
     parallelism.prefill_cp_config.kv_cache_sharded = cp_size > 1;
-    auto              config = CacheConfigCreator::createWarmupConfig(makeCompactDsv4ModelConfig(), parallelism, 0);
+    auto config = CacheConfigCreator::createWarmupConfig(makeCompactDsv4ModelConfig(), parallelism, 0);
     config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
     config.finalizeBlockNums(block_num, RuntimeConfig{});
     return config;
@@ -382,8 +391,12 @@ inline KVCacheConfig makeTierConfig(TierLayout layout, const std::string& disk_p
     config.disk_cache_size_mb             = layout == TierLayout::HOST_DISK ? lower_cache_size_mb : 0;
     config.disk_cache_buffered_io         = true;
     config.disk_cache_sync_timeout_ms     = 5000;
-    config.disk_cache_staging_block_count = 2;
+    config.disk_cache_staging_block_count = 8;
+    config.enable_crc                     = true;
     config.reuse_cache_tail_blocks        = std::numeric_limits<int>::max();
+    if (config.enable_disk_cache) {
+        config.memory_cache_max_descriptors_per_transfer_batch = 4;
+    }
     return config;
 }
 
@@ -453,7 +466,7 @@ inline PoolSnapshot snapshotPool(const std::shared_ptr<IBlockPool>& pool) {
         pool->usedBlocksNum(),
         0,
         pool->referencedBlocksNum(BlockTreeRefType::CACHE),
-        pool->referencedBlocksNum(BlockTreeRefType::EVICTION),
+        pool->referencedBlocksNum(BlockTreeRefType::EVICT),
     };
 }
 
@@ -798,7 +811,7 @@ inline void expectFullTierPathUnchanged(const BlockTreeCache&                   
         EXPECT_EQ(pool->freeBlocksNum(), 0u) << pool->poolName();
         EXPECT_EQ(pool->usedBlocksNum(), capacity) << pool->poolName();
         EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), capacity) << pool->poolName();
-        EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u) << pool->poolName();
+        EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::EVICT), 0u) << pool->poolName();
     }
 }
 
@@ -1390,6 +1403,7 @@ protected:
         ASSERT_TRUE(manager_->init());
         ASSERT_NE(manager_->blockTreeCache(), nullptr);
         auto cache = manager_->blockTreeCache();
+
         ASSERT_TRUE(cache->isHostCacheEnabled());
         ASSERT_EQ(cache->isDiskCacheEnabled(), GetParam() == TierLayout::HOST_DISK);
         ASSERT_NO_FATAL_FAILURE(expectDsv4TierTopology(manager_, cache_config_, GetParam()));
@@ -1399,6 +1413,7 @@ protected:
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DISK, 0.0);
         transfer_engine_ =
             std::make_shared<ScriptedPerRankBlockTransferEngine>(cache->groupSets(), true, cache->isDiskCacheEnabled());
+
         BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, transfer_engine_);
     }
 
@@ -1479,11 +1494,11 @@ protected:
                 size_t target_used = 0;
                 for (const std::shared_ptr<IBlockPool>& pool : current_source_pools) {
                     source_used += pool->usedBlocksNum();
-                    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u) << "round=" << round;
+                    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::EVICT), 0u) << "round=" << round;
                 }
                 for (const std::shared_ptr<IBlockPool>& pool : current_target_pools) {
                     target_used += pool->usedBlocksNum();
-                    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u) << "round=" << round;
+                    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::EVICT), 0u) << "round=" << round;
                 }
                 EXPECT_LE(source_used, source_used_before[group_set_id]) << "round=" << round;
                 EXPECT_GE(target_used, target_used_before[group_set_id]) << "round=" << round;
@@ -1703,9 +1718,9 @@ protected:
             ASSERT_TRUE(engine->armPause());
         }
         ScopedTransferRelease pending_release(engine);
-        const int    block_size     = static_cast<int>(cache_config_.seq_size_per_block);
+        const int             block_size      = static_cast<int>(cache_config_.seq_size_per_block);
         auto                  failed_resource = makeResource(cache_config_);
-        auto         tokens         = makeTokenIds(0, 2 * block_size, 2 * block_size, block_size);
+        auto                  tokens          = makeTokenIds(0, 2 * block_size, 2 * block_size, block_size);
         MallocInfo            failed_info{failed_resource, tokens};
         const auto            failed = manager_->malloc(failed_info);
         ASSERT_TRUE(failed.success);
@@ -1743,8 +1758,8 @@ protected:
         }
         if (waiting_child) {
             EXPECT_FALSE(waiting_child->done());
-            const size_t submits_before = engine->submittedDescriptorCount();
-            size_t                                                   expected_submits = 0;
+            const size_t submits_before   = engine->submittedDescriptorCount();
+            size_t       expected_submits = 0;
             std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> child_targets;
             if (corrupt_type == CacheGroupType::SWA) {
                 for (size_t i = 0; i < waiting_child->loadDescs().size(); ++i) {

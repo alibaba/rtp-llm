@@ -11,13 +11,16 @@
 
 namespace rtp_llm {
 
-P2PBroadcastClient::P2PBroadcastClient(const std::vector<std::string>& worker_addrs,
-                                       int64_t                         cancel_broadcast_timeout_ms):
-    worker_addrs_(worker_addrs), cancel_broadcast_timeout_ms_(cancel_broadcast_timeout_ms) {}
+P2PBroadcastClient::P2PBroadcastClient(const std::vector<std::string>&         worker_addrs,
+                                       int64_t                                 cancel_broadcast_timeout_ms,
+                                       std::function<void(const std::string&)> connect_failure_reporter):
+    worker_addrs_(worker_addrs),
+    cancel_broadcast_timeout_ms_(cancel_broadcast_timeout_ms),
+    connect_failure_reporter_(std::move(connect_failure_reporter)) {}
 
 bool P2PBroadcastClient::init() {
     rpc_pool_             = std::make_shared<RPCPool>();
-    tp_broadcast_manager_ = std::make_shared<BroadcastManager>(worker_addrs_);
+    tp_broadcast_manager_ = std::make_shared<BroadcastManager>(worker_addrs_, connect_failure_reporter_);
     if (!tp_broadcast_manager_->init()) {
         RTP_LLM_LOG_ERROR("P2PBroadcastClient init failed: tp_broadcast_manager_ init failed");
         return false;
@@ -86,6 +89,11 @@ P2PBroadcastClient::broadcastRequests(std::vector<FunctionRequestPB> requests,
         }
     }
 
+    const auto request_id = requests.empty() ? std::optional<int64_t>{} :
+                                                std::optional<int64_t>{requests.front().p2p_request().request_id()};
+    const std::string direction = requests.empty() ? "unknown" :
+        (requests.front().p2p_request().type() == P2PConnectorBroadcastType::READ ? "PEER2D" : "D2PEER");
+
     // Define the RPC call lambda for ExecuteFunction
     auto rpc_call = [deadline_ms](std::shared_ptr<RpcService::Stub>&    stub,
                        std::shared_ptr<grpc::ClientContext>& client_context,
@@ -97,13 +105,14 @@ P2PBroadcastClient::broadcastRequests(std::vector<FunctionRequestPB> requests,
     };
 
     auto result = tp_broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
-        std::move(requests), static_cast<int>(std::min<int64_t>(timeout_ms, std::numeric_limits<int>::max())), rpc_call);
+        std::move(requests), static_cast<int>(std::min<int64_t>(timeout_ms, std::numeric_limits<int>::max())),
+        rpc_call, request_id, direction);
     if (!result) {
         RTP_LLM_LOG_WARNING("broadcast failed, cannot create broadcast result");
         return nullptr;
     }
 
-    return std::make_shared<Result>(unique_key, result);
+    return std::make_shared<Result>(unique_key, result, request_id);
 }
 
 void P2PBroadcastClient::genBroadcastRequest(FunctionRequestPB&                  request,
@@ -190,7 +199,9 @@ std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::cancel(const std
     };
 
     auto result = tp_broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
-        std::move(requests), static_cast<int>(std::min<int64_t>(timeout_ms, std::numeric_limits<int>::max())), rpc_call);
+        std::move(requests), static_cast<int>(std::min<int64_t>(timeout_ms, std::numeric_limits<int>::max())),
+        rpc_call, request_id,
+        type == P2PConnectorBroadcastType::CANCEL_READ ? "CANCEL_PEER2D" : "CANCEL_D2PEER");
     if (!result) {
         RTP_LLM_LOG_WARNING("P2PBroadcastClient cancel: broadcast failed, unique_key: %s", unique_key.c_str());
         return nullptr;
@@ -198,7 +209,7 @@ std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::cancel(const std
 
     // 不等待结果，异步发送取消请求即可
     RTP_LLM_LOG_DEBUG("P2PBroadcastClient cancel: broadcast sent, unique_key: %s", unique_key.c_str());
-    return std::make_shared<Result>(unique_key, result);
+    return std::make_shared<Result>(unique_key, result, request_id);
 }
 
 ErrorCode P2PBroadcastClient::Result::errorCode() const {
@@ -206,7 +217,9 @@ ErrorCode P2PBroadcastClient::Result::errorCode() const {
 }
 
 std::string P2PBroadcastClient::Result::errorMessage() const {
-    return firstError().error.ToString();
+    const auto error = firstError().error.ToString();
+    const auto failure = tp_broadcast_result_ ? tp_broadcast_result_->failureSummary() : std::string{};
+    return failure.empty() ? error : error + "; " + failure;
 }
 
 P2PBroadcastClient::LeaseStatusResult P2PBroadcastClient::queryLeaseStatus(const std::string& unique_key,

@@ -1,9 +1,14 @@
 #pragma once
 
 #include <memory>
+#include <optional>
+#include <string>
+#include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTaskRegistry.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
 class RemoteOperationRequestPB;
@@ -16,6 +21,7 @@ class MetricsReporter;
 namespace rtp_llm {
 
 class BroadcastManager;
+class TransferCompletionCleanup;
 namespace kvcm {
 class ClientWrapper;
 }
@@ -31,20 +37,61 @@ public:
                        const ParallelismConfig&                   parallelism_config,
                        const SpeculativeExecutionConfig&          sp_config,
                        std::shared_ptr<BroadcastManager>          broadcast_manager,
+                       bool                                       gdr_enabled,
+                       std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter = nullptr,
+                       std::shared_ptr<kvcm::ClientWrapper>       client_wrapper   = nullptr);
+    KVCMStorageBackend(const CacheConfig&                         cache_config,
+                       const KVCacheConfig&                       kv_cache_config,
+                       const RuntimeConfig&                       runtime_config,
+                       const ParallelismConfig&                   parallelism_config,
+                       const SpeculativeExecutionConfig&          sp_config,
+                       std::shared_ptr<BroadcastManager>          broadcast_manager,
                        std::shared_ptr<kvcm::ClientWrapper>       client_wrapper   = nullptr,
                        std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter = nullptr);
     ~KVCMStorageBackend() override;
+    BlockTreeQueueSizes queueSizes() const override;
 
+    struct ControlConfig {
+        std::string              instance_group;
+        std::string              instance_id;
+        std::string              register_instance_request;
+        bool                     enable_vipserver = false;
+        std::string              vipserver_domain;
+        std::vector<std::string> addresses;
+        bool                     merge_full_specs = false;
+    };
+    // Immutable snapshot of the effective SDK registration, available after init.
+    std::optional<ControlConfig> controlConfig() const;
+
+    // Returns whether the request was handled and response is valid. Transfer
+    // success, failure, and timeout are carried by response.transfer_status().
     bool execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response);
+    // Local READ completion evidence; this accessor does not issue a query RPC.
+    const TransferTaskRegistry& taskRegistry() const;
+    void cleanupExpiredMissing();
+
+    // Recovery query atomically prevents a previously unseen READ from starting.
+    TransferTaskRegistry::State queryReadCompletion(const std::string& trace_id) const;
+    // Removes only completed READ evidence. Running executions remain queryable.
+    TransferTaskRegistry::ForgetResult forgetReadCompletion(const std::string& trace_id);
+    // Configure before serving READ requests; cleanup does not own their buffers.
+    void setCompletionCleanup(std::shared_ptr<TransferCompletionCleanup> cleanup);
+    // Retained non-protected READ targets; enumeration removes only RELEASED
+    // records. It never queries completion or releases frozen references.
+    std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const;
 
 protected:
     bool               initImpl() override;
     StorageMatchResult matchImpl(const StorageRequest& request) override;
     void readImpl(const StorageRequest& request, const std::shared_ptr<StorageBackendMatchMeta>& match_meta) override;
+    bool usesAsyncPayload(const StorageRequest& request, bool is_write) const noexcept override;
+    bool readAsyncImpl(const StorageRequest&                           request,
+                       const std::shared_ptr<StorageBackendMatchMeta>& match_meta,
+                       ReadCompletion                                  done) override;
     void writeImpl(const StorageRequest& request) override;
+    bool startWriteImpl(const StorageRequest& request, WriteCompletion done, WritePinFilter retain_pins) override;
     void shutdownImpl() noexcept override;
-    void onQuarantined(bool is_write, StorageQuarantineReason reason, size_t block_count) noexcept override;
-    void onQuarantineChanged(uint64_t generation, size_t task_count, size_t block_count) noexcept override;
+    void onRemoteCacheSkipped(const char* stage) noexcept override;
 
 private:
     class Impl;

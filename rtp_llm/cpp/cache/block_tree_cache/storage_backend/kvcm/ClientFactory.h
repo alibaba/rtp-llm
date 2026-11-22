@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <cstdint>
 #include <string>
 
 #include "kvcm_client/meta_client.h"
@@ -19,7 +20,18 @@ public:
     createMetaClient(const std::string& config, const kv_cache_manager::InitParams& init_params) const;
     virtual std::unique_ptr<kv_cache_manager::TransferClient>
     createTransferClient(const std::string& config, const kv_cache_manager::InitParams& init_params) const;
+    // The SDK exposes external-memory initialization as a distinct API. A
+    // custom factory that supports GDR must override this method so the
+    // registrations cannot be silently discarded by a legacy override.
+    virtual std::unique_ptr<kv_cache_manager::TransferClient>
+    createTransferClientWithMemory(const std::string&                                config,
+                                   const kv_cache_manager::InitParams&                init_params,
+                                   const kv_cache_manager::ClientMemoryRegistrations& memory_registrations) const;
     virtual std::unique_ptr<Subscriber> createSubscriber(bool enable_vipserver) const;
+    // Read-only control-plane discovery; a failed probe never requests registration.
+    virtual std::string getLeaderAddress(const std::string& address,
+                                         const std::string& instance_id,
+                                         uint32_t timeout_ms) const;
 };
 
 }  // namespace kvcm
