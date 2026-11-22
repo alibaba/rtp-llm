@@ -179,7 +179,6 @@ cc_library(
             "//rtp_llm/models_py/bindings/cuda/kernels:topk_v3",
             "//rtp_llm/models_py/bindings/cuda/kernels:topk_v3_tie_break",
             "//rtp_llm/models_py/bindings/cuda/kernels:contiguous_silu_fp8",
-            "//rtp_llm/models_py/bindings/cuda/kernels:head_ipc_gather",
         ],
     }) + select({
         "@//:using_cuda12_9": [
@@ -235,7 +234,13 @@ cc_library(
         "//rtp_llm/models_py/bindings/common:common",
         ":cuda_bindings_base",
         ":cuda_attn_bindings_base",
-    ],
+    ] + select({
+        "@//:using_ppu": [],
+        "//conditions:default": [
+            "//rtp_llm/models_py/bindings/cuda/kernels:head_ipc_gather",
+            "//rtp_llm/models_py/bindings/cuda/kernels:tp2_ar_hc_fused",
+        ],
+    }),
     visibility = ["//visibility:public"],
     alwayslink = 1,
 )

@@ -388,6 +388,13 @@ class Qwen4MoeLayer(GenericMoeLayer):
                 packed[:rows].copy_(experts)
             if shared.data_ptr() != packed[rows:].data_ptr():
                 packed[rows:].copy_(shared)
+            from rtp_llm.models_py.modules.qwen4_exp.tp2_ar_hc_fused import (
+                try_defer_moe_packed_tp2,
+            )
+
+            deferred = try_defer_moe_packed_tp2(packed)
+            if deferred is not None:
+                return deferred
             comm = self._tp_shared_packed_comm
             if (
                 comm is not None

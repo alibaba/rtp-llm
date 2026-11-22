@@ -1,8 +1,8 @@
-"""Opt-in TP2 Head gather using the measured vLLM IPC synchronization protocol.
+"""Opt-in TP2 Head gather and draft argmax using P2P CUDA IPC.
 
-The native kernel preserves BF16 bits while expanding to FP32. One dedicated
-staging allocation is serialized across eager stream handoffs. CUDA graph
-capture retains NCCL; captured local Head projection is unaffected.
+The native gather kernel preserves BF16 bits while expanding to FP32. The native
+argmax kernel reduces each rank's BF16 shard locally and exchanges only 8 bytes
+per row across NVLink in a 2-slot ping-pong buffer (eager and CUDA-graph safe).
 """
 
 import ctypes
@@ -13,7 +13,9 @@ import torch.distributed as dist
 
 
 class Qwen4HeadIpcGather:
-    def __init__(self, group, device):
+    max_rows = 32
+
+    def __init__(self, group, device, *, max_rows: int = 32):
         from flashinfer.comm import cuda_ipc
 
         from rtp_llm.ops.compute_ops import rtp_llm_ops
@@ -22,7 +24,9 @@ class Qwen4HeadIpcGather:
         self.device = torch.device(device)
         self.rank = dist.get_rank(group)
         self.ops = rtp_llm_ops
+        self.max_rows = int(max_rows)
         self._last_stream = None
+        self._argmax_last_stream = None
         self._lock = threading.Lock()
         self.closed = False
         assert dist.get_world_size(group) == 2
@@ -30,11 +34,24 @@ class Qwen4HeadIpcGather:
             self.signals = cuda_ipc.create_shared_buffer(
                 self.ops.head_ipc_meta_size(), group
             )
-            self.buffers = cuda_ipc.create_shared_buffer(32 * 124160 * 2, group)
+            self.buffers = cuda_ipc.create_shared_buffer(
+                self.max_rows * 124160 * 2, group
+            )
+            self.argmax_signals = cuda_ipc.create_shared_buffer(
+                self.ops.head_ipc_argmax_meta_size(), group
+            )
+            self.argmax_buffers = cuda_ipc.create_shared_buffer(
+                self.ops.head_ipc_argmax_buffer_size(), group
+            )
             cuda_ipc.cudart.cudaMemset(
                 ctypes.c_void_p(self.signals[self.rank]),
                 0,
                 self.ops.head_ipc_meta_size(),
+            )
+            cuda_ipc.cudart.cudaMemset(
+                ctypes.c_void_p(self.argmax_signals[self.rank]),
+                0,
+                self.ops.head_ipc_argmax_meta_size(),
             )
             torch.cuda.synchronize(self.device)
             dist.barrier(group=group)
@@ -47,7 +64,7 @@ class Qwen4HeadIpcGather:
             and local.device == self.device
             and local.dtype == torch.bfloat16
             and local.ndim == 2
-            and 1 <= local.shape[0] <= 32
+            and 1 <= local.shape[0] <= self.max_rows
             and local.shape[1] == 124160
             and local.is_contiguous()
             and local.data_ptr() % 16 == 0
@@ -64,6 +81,42 @@ class Qwen4HeadIpcGather:
             self._last_stream = stream
         return output
 
+    def try_argmax(self, local, valid_vocab_size: int = 0):
+        argmax_buffers = getattr(self, "argmax_buffers", None)
+        argmax_signals = getattr(self, "argmax_signals", None)
+        if not (
+            not self.closed
+            and argmax_buffers
+            and argmax_signals
+            and isinstance(local, torch.Tensor)
+            and local.is_cuda
+            and local.device == self.device
+            and local.dtype == torch.bfloat16
+            and local.ndim == 2
+            and 1 <= local.shape[0] <= self.max_rows
+            and local.shape[1] == 124160
+            and local.is_contiguous()
+            and local.data_ptr() % 16 == 0
+        ):
+            return None
+        capturing = torch.cuda.is_current_stream_capturing()
+        stream = torch.cuda.current_stream(self.device)
+        with self._lock:
+            if not capturing:
+                last = getattr(self, "_argmax_last_stream", None)
+                if last is not None and last != stream:
+                    stream.wait_stream(last)
+            output = self.ops.head_ipc_argmax(
+                local,
+                argmax_buffers,
+                argmax_signals,
+                self.rank,
+                int(valid_vocab_size),
+            )
+            if not capturing:
+                self._argmax_last_stream = stream
+        return output
+
     def close(self):
         if self.closed:
             return
@@ -72,9 +125,16 @@ class Qwen4HeadIpcGather:
             if dist.is_initialized():
                 dist.barrier(group=self.group)
             # Close imported mappings as well as each locally owned allocation.
-            self.ops.head_ipc_close(self.buffers, self.rank)
-            self.ops.head_ipc_close(self.signals, self.rank)
+            if getattr(self, "buffers", None):
+                self.ops.head_ipc_close(self.buffers, self.rank)
+            if getattr(self, "signals", None):
+                self.ops.head_ipc_close(self.signals, self.rank)
+            if getattr(self, "argmax_buffers", None):
+                self.ops.head_ipc_close(self.argmax_buffers, self.rank)
+            if getattr(self, "argmax_signals", None):
+                self.ops.head_ipc_close(self.argmax_signals, self.rank)
         self.buffers = self.signals = []
+        self.argmax_buffers = self.argmax_signals = []
         self.closed = True
 
 
@@ -104,4 +164,4 @@ def prepare_head_ipc_gather(config, parallelism, head):
 
     # Unsupported layouts return before any collective. An allocation/IPC error
     # is a startup failure; do not let one rank silently switch implementations.
-    return Qwen4HeadIpcGather(_get_group(Group.TP), head.weight.device)
+    return Qwen4HeadIpcGather(_get_group(Group.TP), head.weight.device, max_rows=256)

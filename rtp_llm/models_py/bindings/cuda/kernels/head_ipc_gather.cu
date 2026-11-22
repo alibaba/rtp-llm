@@ -4,6 +4,8 @@
 // Preserve its per-CTA alternating counter protocol and both barriers. Inputs
 // are copied to dedicated IPC staging; peer reads never alias the output.
 #include "rtp_llm/models_py/bindings/cuda/kernels/head_ipc_gather.h"
+#include <algorithm>
+#include <cfloat>
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -13,7 +15,9 @@
 
 namespace rtp_llm {
 namespace qwen_head_ipc {
-constexpr int                 kMaxBlocks         = 36;
+constexpr int                 kMaxBlocks         = 64;
+constexpr int                 kMaxRows           = 256;
+constexpr int                 kMaxArgmaxIters    = kMaxRows / kMaxBlocks;  // 4
 constexpr CUpointer_attribute rangeStartAddrAttr = CU_POINTER_ATTRIBUTE_RANGE_START_ADDR;
 
 // Counter may overflow, but it's fine since unsigned int overflow is
@@ -29,6 +33,16 @@ struct Signal {
     alignas(128) FlagType peer_counter[2][kMaxBlocks][8];
 };
 
+struct ArgmaxSignal {
+    alignas(128) FlagType cta_gen[kMaxBlocks][32];
+    alignas(128) FlagType peer_ready[2][kMaxBlocks][32];
+};
+
+struct __align__(8) ArgmaxPair {
+    float   val;
+    int32_t idx;
+};
+
 struct __align__(16) RankData {
     void* ptrs[8];
 };
@@ -37,33 +51,72 @@ struct __align__(16) RankSignals {
     Signal* signals[8];
 };
 
+struct __align__(16) ArgmaxRankBuffers {
+    uint64_t* ptrs[2];
+};
+
+struct __align__(16) ArgmaxRankSignals {
+    ArgmaxSignal* sigs[2];
+};
+
 #define DINLINE __device__ __forceinline__
 static DINLINE void st_flag_release(FlagType* flag_addr, FlagType flag) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
-    asm volatile("st.release.sys.global.u32 [%1], %0;" ::"r"(flag), "l"(flag_addr));
+    asm volatile("st.release.sys.global.u32 [%1], %0;" ::"r"(flag), "l"(flag_addr) : "memory");
 #else
-    asm volatile("membar.sys; st.volatile.global.u32 [%1], %0;" ::"r"(flag), "l"(flag_addr));
+    asm volatile("membar.sys; st.volatile.global.u32 [%1], %0;" ::"r"(flag), "l"(flag_addr) : "memory");
 #endif
 }
 
 static DINLINE FlagType ld_flag_acquire(FlagType* flag_addr) {
     FlagType flag;
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
-    asm volatile("ld.acquire.sys.global.u32 %0, [%1];" : "=r"(flag) : "l"(flag_addr));
+    asm volatile("ld.acquire.sys.global.u32 %0, [%1];" : "=r"(flag) : "l"(flag_addr) : "memory");
 #else
-    asm volatile("ld.volatile.global.u32 %0, [%1]; membar.gl;" : "=r"(flag) : "l"(flag_addr));
+    asm volatile("ld.volatile.global.u32 %0, [%1]; membar.gl;" : "=r"(flag) : "l"(flag_addr) : "memory");
 #endif
     return flag;
 }
 
 static DINLINE void st_flag_volatile(FlagType* flag_addr, FlagType flag) {
-    asm volatile("st.volatile.global.u32 [%1], %0;" ::"r"(flag), "l"(flag_addr));
+    asm volatile("st.volatile.global.u32 [%1], %0;" ::"r"(flag), "l"(flag_addr) : "memory");
 }
 
 static DINLINE FlagType ld_flag_volatile(FlagType* flag_addr) {
     FlagType flag;
-    asm volatile("ld.volatile.global.u32 %0, [%1];" : "=r"(flag) : "l"(flag_addr));
+    asm volatile("ld.volatile.global.u32 %0, [%1];" : "=r"(flag) : "l"(flag_addr) : "memory");
     return flag;
+}
+
+static DINLINE void st_u64_volatile(uint64_t* addr, uint64_t val) {
+    asm volatile("st.volatile.global.u64 [%1], %0;" ::"l"(val), "l"(addr) : "memory");
+}
+
+static DINLINE uint64_t ld_u64_volatile(const uint64_t* addr) {
+    uint64_t val;
+    asm volatile("ld.volatile.global.u64 %0, [%1];" : "=l"(val) : "l"(addr) : "memory");
+    return val;
+}
+
+static DINLINE uint64_t pack_pair(float val, int32_t idx) {
+    return static_cast<uint64_t>(__float_as_uint(val)) | (static_cast<uint64_t>(static_cast<uint32_t>(idx)) << 32);
+}
+
+static DINLINE void unpack_pair(uint64_t raw, float& val, int32_t& idx) {
+    val = __uint_as_float(static_cast<uint32_t>(raw & 0xffffffffULL));
+    idx = static_cast<int32_t>(static_cast<uint32_t>(raw >> 32));
+}
+
+static DINLINE bool argmax_better(float va, int32_t ia, float vb, int32_t ib) {
+    const bool na = isnan(va);
+    const bool nb = isnan(vb);
+    if (na != nb) {
+        return na;
+    }
+    if (na || va == vb) {
+        return ia < ib;
+    }
+    return va > vb;
 }
 
 // is_start: whether this is the very first synchronization barrier.
@@ -76,11 +129,7 @@ DINLINE void multi_gpu_barrier(const RankSignals& sg, Signal* self_sg, int rank)
         __syncthreads();
     static_assert(!(is_start && need_fence));  // Start barrier shouldn't need fence.
     if (threadIdx.x < ngpus) {
-        // Increment the counter. Technically we only need one counter, but we use
-        // multiple per block to eliminate the need to share the counter via smem.
-        auto val = self_sg->self_counter[blockIdx.x][threadIdx.x] += 1;
-        // Write the expected counter value to peer and wait for correct value from
-        // peer.
+        auto val              = self_sg->self_counter[blockIdx.x][threadIdx.x] += 1;
         auto peer_counter_ptr = &sg.signals[threadIdx.x]->peer_counter[val % 2][blockIdx.x][rank];
         auto self_counter_ptr = &self_sg->peer_counter[val % 2][blockIdx.x][threadIdx.x];
         if constexpr (need_fence) {
@@ -99,7 +148,8 @@ DINLINE void multi_gpu_barrier(const RankSignals& sg, Signal* self_sg, int rank)
 
 #undef DINLINE
 }  // namespace qwen_head_ipc
-__global__ void __launch_bounds__(512, 1) headIpcGatherFp32(qwen_head_ipc::RankData    data,
+
+__global__ void __launch_bounds__(512, 2) headIpcGatherFp32(qwen_head_ipc::RankData    data,
                                                             qwen_head_ipc::RankSignals signals,
                                                             qwen_head_ipc::Signal*     self,
                                                             uint4*                     output,
@@ -121,8 +171,135 @@ __global__ void __launch_bounds__(512, 1) headIpcGatherFp32(qwen_head_ipc::RankD
     qwen_head_ipc::multi_gpu_barrier<2, false>(signals, self, rank);
 }
 
+__global__ void __launch_bounds__(512, 2)
+headIpcArgmaxKernel(const uint4* __restrict__        local_u4,
+                    qwen_head_ipc::ArgmaxRankBuffers buffers,
+                    qwen_head_ipc::ArgmaxRankSignals signals,
+                    int64_t* __restrict__            out_tokens,
+                    int                              rank,
+                    int                              rows,
+                    int                              cols_u4,
+                    int                              valid_vocab_size) {
+    __shared__ uint32_t sh_gen;
+    __shared__ float    sh_val[16];
+    __shared__ int32_t  sh_idx[16];
+
+    const int bid  = blockIdx.x;
+    const int tid  = threadIdx.x;
+    const int lane = tid & 31;
+    const int warp = tid >> 5;
+
+    auto* self_sig = signals.sigs[rank];
+    auto* peer_sig = signals.sigs[1 - rank];
+    if (tid == 0) {
+        sh_gen = (self_sig->cta_gen[bid][0] += 1U);
+    }
+    __syncthreads();
+    const uint32_t gen  = sh_gen;
+    const int      slot = static_cast<int>(gen & 1U);
+
+    uint64_t*       self_buf = buffers.ptrs[rank];
+    const uint64_t* peer_buf = buffers.ptrs[1 - rank];
+
+    const int base_global_col = rank * (cols_u4 * 8);
+    uint64_t  local_pairs[qwen_head_ipc::kMaxArgmaxIters];
+
+    int iter = 0;
+    for (int r = bid; r < rows; r += gridDim.x, ++iter) {
+        const uint4* row_ptr  = local_u4 + static_cast<size_t>(r) * cols_u4;
+        float        best_val = -INFINITY;
+        int32_t      best_idx = 2147483647;
+
+        for (int c = tid; c < cols_u4; c += 512) {
+            const uint4 v    = row_ptr[c];
+            const int   gcol = base_global_col + c * 8;
+            float       vals[8];
+            vals[0] = __uint_as_float(v.x << 16);
+            vals[1] = __uint_as_float(v.x & 0xffff0000U);
+            vals[2] = __uint_as_float(v.y << 16);
+            vals[3] = __uint_as_float(v.y & 0xffff0000U);
+            vals[4] = __uint_as_float(v.z << 16);
+            vals[5] = __uint_as_float(v.z & 0xffff0000U);
+            vals[6] = __uint_as_float(v.w << 16);
+            vals[7] = __uint_as_float(v.w & 0xffff0000U);
+#pragma unroll
+            for (int k = 0; k < 8; ++k) {
+                const int idx = gcol + k;
+                if (idx < valid_vocab_size && qwen_head_ipc::argmax_better(vals[k], idx, best_val, best_idx)) {
+                    best_val = vals[k];
+                    best_idx = idx;
+                }
+            }
+        }
+
+#pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            const float   ov = __shfl_xor_sync(0xffffffffU, best_val, offset);
+            const int32_t oi = __shfl_xor_sync(0xffffffffU, best_idx, offset);
+            if (qwen_head_ipc::argmax_better(ov, oi, best_val, best_idx)) {
+                best_val = ov;
+                best_idx = oi;
+            }
+        }
+        if (lane == 0) {
+            sh_val[warp] = best_val;
+            sh_idx[warp] = best_idx;
+        }
+        __syncthreads();
+        if (warp == 0) {
+            float   wv = (lane < 16) ? sh_val[lane] : -INFINITY;
+            int32_t wi = (lane < 16) ? sh_idx[lane] : 2147483647;
+#pragma unroll
+            for (int offset = 8; offset > 0; offset >>= 1) {
+                const float   ov = __shfl_xor_sync(0xffffffffU, wv, offset);
+                const int32_t oi = __shfl_xor_sync(0xffffffffU, wi, offset);
+                if (qwen_head_ipc::argmax_better(ov, oi, wv, wi)) {
+                    wv = ov;
+                    wi = oi;
+                }
+            }
+            if (lane == 0) {
+                const uint64_t packed = qwen_head_ipc::pack_pair(wv, wi);
+                local_pairs[iter]     = packed;
+                const size_t off =
+                    (static_cast<size_t>(slot) * qwen_head_ipc::kMaxBlocks + bid) * qwen_head_ipc::kMaxArgmaxIters
+                    + iter;
+                qwen_head_ipc::st_u64_volatile(self_buf + off, packed);
+            }
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        qwen_head_ipc::st_flag_release(&peer_sig->peer_ready[slot][bid][0], gen);
+        while (qwen_head_ipc::ld_flag_acquire(&self_sig->peer_ready[slot][bid][0]) != gen) {}
+
+        int out_iter = 0;
+        for (int r = bid; r < rows; r += gridDim.x, ++out_iter) {
+            const size_t off =
+                (static_cast<size_t>(slot) * qwen_head_ipc::kMaxBlocks + bid) * qwen_head_ipc::kMaxArgmaxIters
+                + out_iter;
+            const uint64_t self_raw = local_pairs[out_iter];
+            const uint64_t peer_raw = qwen_head_ipc::ld_u64_volatile(peer_buf + off);
+            float          sv, pv;
+            int32_t        si, pi;
+            qwen_head_ipc::unpack_pair(self_raw, sv, si);
+            qwen_head_ipc::unpack_pair(peer_raw, pv, pi);
+            out_tokens[r] = static_cast<int64_t>(qwen_head_ipc::argmax_better(sv, si, pv, pi) ? si : pi);
+        }
+    }
+}
+
 int64_t headIpcMetaSize() {
     return sizeof(qwen_head_ipc::Signal);
+}
+
+int64_t headIpcArgmaxMetaSize() {
+    return sizeof(qwen_head_ipc::ArgmaxSignal);
+}
+
+int64_t headIpcArgmaxBufferSize() {
+    return static_cast<int64_t>(2) * qwen_head_ipc::kMaxBlocks * qwen_head_ipc::kMaxArgmaxIters * sizeof(uint64_t);
 }
 
 torch::Tensor headIpcGather(const torch::Tensor&        input,
@@ -131,7 +308,7 @@ torch::Tensor headIpcGather(const torch::Tensor&        input,
                             int64_t                     rank) {
     TORCH_CHECK(input.is_cuda() && input.scalar_type() == torch::kBFloat16 && input.dim() == 2 && input.is_contiguous(),
                 "Head IPC input must be contiguous CUDA BF16 matrix");
-    TORCH_CHECK(input.size(0) >= 1 && input.size(0) <= 32 && input.size(1) == 124160,
+    TORCH_CHECK(input.size(0) >= 1 && input.size(0) <= qwen_head_ipc::kMaxRows && input.size(1) == 124160,
                 "Head IPC input is outside the measured vocabulary/row domain");
     TORCH_CHECK(rank >= 0 && rank < 2 && buffers.size() == 2 && signals.size() == 2,
                 "Head IPC requires exactly two rank pointers");
@@ -149,13 +326,57 @@ torch::Tensor headIpcGather(const torch::Tensor&        input,
     }
     C10_CUDA_CHECK(cudaMemcpyAsync(
         data.ptrs[rank], input.data_ptr(), input.numel() * sizeof(uint16_t), cudaMemcpyDeviceToDevice, stream));
-    headIpcGatherFp32<<<16, 512, 0, stream>>>(data,
-                                              peer_signals,
-                                              peer_signals.signals[rank],
-                                              reinterpret_cast<uint4*>(output.data_ptr<float>()),
-                                              rank,
-                                              input.numel() / 8,
-                                              input.size(1) / 8);
+    const int blocks = std::min<int>(qwen_head_ipc::kMaxBlocks, std::max<int>(16, static_cast<int>(input.size(0) * 2)));
+    headIpcGatherFp32<<<blocks, 512, 0, stream>>>(data,
+                                                  peer_signals,
+                                                  peer_signals.signals[rank],
+                                                  reinterpret_cast<uint4*>(output.data_ptr<float>()),
+                                                  rank,
+                                                  input.numel() / 8,
+                                                  input.size(1) / 8);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return output;
+}
+
+torch::Tensor headIpcArgmax(const torch::Tensor&        input,
+                            const std::vector<int64_t>& buffers,
+                            const std::vector<int64_t>& signals,
+                            int64_t                     rank,
+                            int64_t                     valid_vocab_size) {
+    TORCH_CHECK(input.is_cuda() && input.scalar_type() == torch::kBFloat16 && input.dim() == 2 && input.is_contiguous(),
+                "Head IPC argmax input must be contiguous CUDA BF16 matrix");
+    TORCH_CHECK(input.size(0) >= 1 && input.size(0) <= qwen_head_ipc::kMaxRows && input.size(1) == 124160,
+                "Head IPC argmax input is outside [1..256, 124160]");
+    TORCH_CHECK(rank >= 0 && rank < 2 && buffers.size() == 2 && signals.size() == 2,
+                "Head IPC argmax requires two rank pointers");
+    for (int i = 0; i < 2; ++i)
+        TORCH_CHECK(buffers[i] > 0 && buffers[i] % 16 == 0 && signals[i] > 0 && signals[i] % 128 == 0,
+                    "Head IPC argmax pointers must be non-null and aligned");
+
+    const int64_t full_vocab = 2 * input.size(1);
+    const int64_t eff_vocab  = (valid_vocab_size > 0 && valid_vocab_size <= full_vocab) ? valid_vocab_size : full_vocab;
+
+    c10::cuda::CUDAGuard guard(input.device());
+    auto output = torch::empty({input.size(0), 1}, input.options().dtype(torch::kInt64));
+    auto stream = c10::cuda::getCurrentCUDAStream(input.get_device()).stream();
+
+    qwen_head_ipc::ArgmaxRankBuffers rank_bufs{};
+    qwen_head_ipc::ArgmaxRankSignals rank_sigs{};
+    for (int i = 0; i < 2; ++i) {
+        rank_bufs.ptrs[i] = reinterpret_cast<uint64_t*>(buffers[i]);
+        rank_sigs.sigs[i] = reinterpret_cast<qwen_head_ipc::ArgmaxSignal*>(signals[i]);
+    }
+
+    const int rows   = static_cast<int>(input.size(0));
+    const int blocks = std::min<int>(rows, qwen_head_ipc::kMaxBlocks);
+    headIpcArgmaxKernel<<<blocks, 512, 0, stream>>>(reinterpret_cast<const uint4*>(input.data_ptr()),
+                                                    rank_bufs,
+                                                    rank_sigs,
+                                                    output.data_ptr<int64_t>(),
+                                                    static_cast<int>(rank),
+                                                    rows,
+                                                    static_cast<int>(input.size(1) / 8),
+                                                    static_cast<int>(eff_vocab));
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return output;
 }

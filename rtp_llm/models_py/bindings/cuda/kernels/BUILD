@@ -427,6 +427,18 @@ cc_library(
 )
 
 cc_library(
+    name = "tp2_ar_hc_fused",
+    srcs = ["tp2_ar_hc_fused.cu"],
+    hdrs = ["tp2_ar_hc_fused.h"],
+    copts = cuda_copts() + ["-nvcc_options=ftz=false"],
+    deps = torch_deps() + [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "contiguous_silu_fp8",
     srcs = ["contiguous_silu_fp8.cu"],
     hdrs = ["contiguous_silu_fp8.h"],

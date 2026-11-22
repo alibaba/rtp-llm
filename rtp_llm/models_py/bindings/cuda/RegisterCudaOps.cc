@@ -5,6 +5,7 @@
 #include "rtp_llm/models_py/bindings/common/CpuTpStatus.h"
 #if !defined(USE_PPU)
 #include "rtp_llm/models_py/bindings/cuda/kernels/head_ipc_gather.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/tp2_ar_hc_fused.h"
 #endif
 
 #if defined(ENABLE_FP4)
@@ -36,9 +37,44 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
         py::call_guard<py::gil_scoped_release>());
 #if !defined(USE_PPU)
     rtp_ops_m.def("head_ipc_meta_size", &headIpcMetaSize);
+    rtp_ops_m.def("head_ipc_argmax_meta_size", &headIpcArgmaxMetaSize);
+    rtp_ops_m.def("head_ipc_argmax_buffer_size", &headIpcArgmaxBufferSize);
     rtp_ops_m.def(
         "head_ipc_gather", &headIpcGather, py::arg("input"), py::arg("buffers"), py::arg("signals"), py::arg("rank"));
+    rtp_ops_m.def("head_ipc_argmax",
+                  &headIpcArgmax,
+                  py::arg("input"),
+                  py::arg("buffers"),
+                  py::arg("signals"),
+                  py::arg("rank"),
+                  py::arg("valid_vocab_size") = 0);
     rtp_ops_m.def("head_ipc_close", &headIpcClose, py::arg("pointers"), py::arg("rank"));
+
+    rtp_ops_m.def("tp2_ar_hc_meta_size", &tp2ArHcMetaSize);
+    rtp_ops_m.def("tp2_ar_hc_buffer_size", &tp2ArHcBufferSize);
+    rtp_ops_m.def("tp2_ar_hc_inject_norm",
+                  &tp2ArHcInjectNorm,
+                  py::arg("hyper_x"),
+                  py::arg("local_sub"),
+                  py::arg("gates"),
+                  py::arg("gamma"),
+                  py::arg("buffers"),
+                  py::arg("signals"),
+                  py::arg("rank"),
+                  py::arg("eps"),
+                  py::arg("packed_dual"),
+                  py::arg("collect_amax"),
+                  py::arg("enable_pdl"));
+    rtp_ops_m.def("tp2_ar_hc_inject_only",
+                  &tp2ArHcInjectOnly,
+                  py::arg("hyper_x"),
+                  py::arg("local_sub"),
+                  py::arg("gates"),
+                  py::arg("buffers"),
+                  py::arg("signals"),
+                  py::arg("rank"),
+                  py::arg("packed_dual"),
+                  py::arg("enable_pdl"));
 #endif
 
     rtp_ops_m.def("cublas_gemm_bf16_bf16_fp32",

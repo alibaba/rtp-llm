@@ -46,6 +46,18 @@ def inject_into_residual(
     ``hyper_input`` is ``[..., hc_mult * hidden]``, ``sublayer_out`` is
     ``[..., hidden]`` and ``inject_weights`` is ``[..., hc_mult]``.
     """
+    if not isinstance(sublayer_out, torch.Tensor):
+        from rtp_llm.models_py.modules.qwen4_exp.tp2_ar_hc_fused import (
+            DeferredTp2Sublayer,
+        )
+
+        if isinstance(sublayer_out, DeferredTp2Sublayer):
+            fused = sublayer_out.workspace.try_inject_only(
+                hyper_input, sublayer_out, inject_weights
+            )
+            if fused is not None:
+                return fused
+            sublayer_out = sublayer_out.materialize()
     if hyper_input.is_cuda and torch.version.hip is None:
         from rtp_llm.models_py.triton_kernels.gated_residual.inject import (
             try_fused_inject,
@@ -263,6 +275,41 @@ class GatedResidual(nn.Module):
             and tuple(self.down_projection.weight.shape) == (320, 10240)
         )
         rows = hyper_input.numel() // self.hc_hidden_size
+        if not isinstance(sublayer_out, torch.Tensor):
+            from rtp_llm.models_py.modules.qwen4_exp.tp2_ar_hc_fused import (
+                DeferredTp2Sublayer,
+            )
+
+            if isinstance(sublayer_out, DeferredTp2Sublayer):
+                bf16_only = (
+                    self.down_projection is None
+                    and self.merged_down_inject is not None
+                )
+                if (fp8_down or bf16_only) and not (
+                    self._forward_pre_hooks
+                    or self._forward_hooks
+                    or module_hooks._global_forward_pre_hooks
+                    or module_hooks._global_forward_hooks
+                ):
+                    collect_scale = (
+                        fp8_down
+                        and rows <= 32768
+                        and not self._use_bf16_down_inject(hyper_input)
+                    )
+                    fused = sublayer_out.workspace.try_inject_grouped_norm(
+                        hyper_input,
+                        sublayer_out,
+                        inject_weights,
+                        self.norm_gamma,
+                        self.norm_eps,
+                        collect_scale=collect_scale,
+                    )
+                    if fused is not None:
+                        residual, normed, scale = fused
+                        return self._forward_normed(
+                            residual, normed, down_input_scale=scale
+                        )
+                sublayer_out = sublayer_out.materialize()
         bf16_candidate = (
             (
                 (self.hc_hidden_size == 10240 and 4096 <= rows <= 32768)
