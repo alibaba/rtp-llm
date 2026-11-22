@@ -9,6 +9,7 @@ import triton.language as tl
 from rtp_llm.models_py.utils.device_capability import sm90_pdl_enabled
 
 _SMALL_QUANT_MAX_ELEMENTS = 65536
+_CHUNKED_SMALL_QUANT_MAX_ELEMENTS = 98304
 
 
 @tr.jit
@@ -56,6 +57,28 @@ def _small_fp8_quant(
     offsets = tl.arange(0, BLOCK)
     values = tl.load(x + offsets, offsets < N, other=0).to(tl.float32)
     _quantize_projection_tile(x, q, scale, _fp8_absmax(values), N, OUT)
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()
+
+
+@tr.jit
+def _chunked_small_fp8_quant(
+    x,
+    q,
+    scale,
+    N: tl.constexpr,
+    OUT: tl.constexpr,
+    CHUNKS: tl.constexpr,
+    PDL: tl.constexpr = False,
+):
+    if PDL:
+        tl.extra.cuda.gdc_wait()
+    maximum = tl.full((), 0.0, tl.float32)
+    for chunk in tl.static_range(CHUNKS):
+        offsets = chunk * 65536 + tl.arange(0, 65536)
+        values = tl.load(x + offsets, offsets < N, other=0).to(tl.float32)
+        maximum = tl.maximum(maximum, _fp8_absmax(values))
+    _quantize_projection_tile(x, q, scale, maximum, N, OUT)
     if PDL:
         tl.extra.cuda.gdc_launch_dependents()
 
@@ -372,7 +395,7 @@ def try_small_fp8_quant(x, *, output=None):
     numel = x.numel()
     output_numel = output.numel()
     grid = (tr.cdiv(output_numel, 4096),)
-    if numel > _SMALL_QUANT_MAX_ELEMENTS:
+    if numel > _CHUNKED_SMALL_QUANT_MAX_ELEMENTS:
         parts = tr.cdiv(numel, 4096)
         partial = torch.empty((parts,), device=x.device, dtype=torch.float32)
         _fp8_partial_amax[(parts,)](
@@ -395,6 +418,20 @@ def try_small_fp8_quant(x, *, output=None):
             tr.next_power_of_2(parts),
             PDL=pdl,
             num_warps=4,
+            enable_fp_fusion=False,
+            launch_pdl=pdl,
+        )
+        return output, scale
+    if numel > _SMALL_QUANT_MAX_ELEMENTS:
+        _chunked_small_fp8_quant[grid](
+            x,
+            output,
+            scale,
+            numel,
+            output_numel,
+            tr.cdiv(numel, 65536),
+            PDL=pdl,
+            num_warps=16,
             enable_fp_fusion=False,
             launch_pdl=pdl,
         )

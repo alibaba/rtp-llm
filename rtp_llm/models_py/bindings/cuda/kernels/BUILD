@@ -440,3 +440,14 @@ cc_library(
         "-nvcc_options=fmad=false",
     ],
 )
+
+cc_library(
+    name = "head_ipc_gather",
+    srcs = ["head_ipc_gather.cu"],
+    hdrs = ["head_ipc_gather.h"],
+    copts = cuda_copts(),
+    deps = torch_deps() + [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+)

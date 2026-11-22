@@ -3,6 +3,9 @@
 #include "rtp_llm/models_py/bindings/cuda/RegisterAttnOpBindings.hpp"
 #include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
 #include "rtp_llm/models_py/bindings/common/CpuTpStatus.h"
+#if !defined(USE_PPU)
+#include "rtp_llm/models_py/bindings/cuda/kernels/head_ipc_gather.h"
+#endif
 
 #if defined(ENABLE_FP4)
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp4_quant.h"
@@ -31,6 +34,12 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
             return cpu_status_reduce(reinterpret_cast<void*>(pointer), rank, generation, local_ok, timeout_ms);
         },
         py::call_guard<py::gil_scoped_release>());
+#if !defined(USE_PPU)
+    rtp_ops_m.def("head_ipc_meta_size", &headIpcMetaSize);
+    rtp_ops_m.def(
+        "head_ipc_gather", &headIpcGather, py::arg("input"), py::arg("buffers"), py::arg("signals"), py::arg("rank"));
+    rtp_ops_m.def("head_ipc_close", &headIpcClose, py::arg("pointers"), py::arg("rank"));
+#endif
 
     rtp_ops_m.def("cublas_gemm_bf16_bf16_fp32",
                   &torch_ext::cublas_gemm_bf16_bf16_fp32,

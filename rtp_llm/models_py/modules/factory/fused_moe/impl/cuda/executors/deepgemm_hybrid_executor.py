@@ -37,6 +37,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
 from rtp_llm.models_py.modules.qwen4_exp.moe.compact_fp8_decode import (
+    _H20_COMPACT_EAGER_MAX_ROWS,
     _STABLE_ALIGNMENT_MAX_ROUTES,
     compact_fp8_decode,
     h20_compact_moe_phase,
@@ -691,7 +692,9 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                     not self.enable_cuda_graph or phase == "eager"
                 )
             # Verify can pack several rows per request. Routed offsets are int32.
-            max_rows = 2048
+            max_rows = (
+                _H20_COMPACT_EAGER_MAX_ROWS if phase == "eager" else 2048
+            )
             if phase == "target_verify":
                 max_rows = (2**31 - 1) // (self.top_k * max(self.K, self.N))
             if use_compact and hidden_states_fp8.ndim == 2:
@@ -1021,6 +1024,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             and payload.expert_tokens_meta.expert_num_tokens_cpu is None
             and token_num <= 2048
         )
+        actual_tokens = all_tokens
         if not graph_layout and not async_device_counts:
             num_recv_tokens_per_expert_cpu = (
                 payload.expert_tokens_meta.expert_num_tokens_cpu
@@ -1035,8 +1039,8 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 align_up_math(int(x), expert_alignment)
                 for x in num_recv_tokens_per_expert_cpu
             ]
-            all_tokens = sum(padded_num_tokens_per_expert)
-            if all_tokens == 0:
+            actual_tokens = sum(padded_num_tokens_per_expert)
+            if actual_tokens == 0:
                 return CombineForwardPayload(
                     fused_expert_output=torch.zeros(
                         hidden_states_fp8.shape,
@@ -1044,6 +1048,20 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                         dtype=torch.bfloat16,
                     )
                 )
+            if (
+                h20_compact_moe_phase.get() == "eager"
+                and use_cuda_silu
+                and not self.is_sm120
+                and actual_tokens > 4096
+            ):
+                all_tokens = align_up_math(actual_tokens, 4096)
+            else:
+                all_tokens = actual_tokens
+        extra_bucket_padding = (
+            not graph_layout
+            and not async_device_counts
+            and all_tokens > actual_tokens
+        )
         _, K = hidden_states_fp8.size()
         N = self.w13_weight.size(1)
         hidden_states_fp8_shape = hidden_states_fp8.shape
@@ -1088,7 +1106,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             torch.zeros(
                 (all_tokens,), device=hidden_states_fp8.device, dtype=torch.int32
             )
-            if async_device_counts
+            if (async_device_counts or extra_bucket_padding)
             else torch.full(
                 (all_tokens,), -1, device=hidden_states_fp8.device, dtype=torch.int32
             )
@@ -1114,7 +1132,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             torch.full(
                 (all_tokens,), -1, device=hidden_states_fp8.device, dtype=torch.int32
             )
-            if async_device_counts
+            if (async_device_counts or extra_bucket_padding)
             else (torch.empty_like(m_indices) if use_cuda_silu else m_indices)
         )
         expert_start_loc = torch.empty_like(scatter_num_tokens_per_expert)
@@ -1172,18 +1190,24 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 else:
                     counts = num_recv_tokens_per_expert_cpu
                     padded = padded_num_tokens_per_expert
-                    start, end = 0, all_tokens
+                    start, end = 0, actual_tokens
                     first = 0
                     while first < len(padded) and counts[first] == padded[first]:
                         start += padded[first]
                         first += 1
                     if first == len(padded):
-                        start = end = 0
+                        if extra_bucket_padding:
+                            start, end = actual_tokens, all_tokens
+                        else:
+                            start = end = 0
                     else:
-                        last = len(padded) - 1
-                        while counts[last] == padded[last]:
-                            end -= padded[last]
-                            last -= 1
+                        if extra_bucket_padding:
+                            end = all_tokens
+                        else:
+                            last = len(padded) - 1
+                            while counts[last] == padded[last]:
+                                end -= padded[last]
+                                last -= 1
                         start += counts[first]
                 down_input_fp8, down_input_scale = _native_contiguous_silu_fp8(
                     gateup_output,

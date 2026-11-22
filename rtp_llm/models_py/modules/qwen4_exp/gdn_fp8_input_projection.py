@@ -17,7 +17,10 @@ from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
     CudaFp8GEMMLinear,
 )
-from rtp_llm.models_py.utils.device_capability import cached_device_capability
+from rtp_llm.models_py.utils.device_capability import (
+    cached_device_capability,
+    sm90_pdl_enabled,
+)
 
 
 @gluon.jit(do_not_specialize=["M", "SS"], do_not_specialize_on_alignment=["M", "SS"])
@@ -63,9 +66,22 @@ def _group_and_partial(
 
 @triton.jit
 def _quant_from_partial(
-    x, output, scale, partial, N, OUT, PARTS, REDUCE: tl.constexpr, BLOCK: tl.constexpr
+    x,
+    output,
+    scale,
+    partial,
+    N,
+    OUT,
+    PARTS,
+    REDUCE: tl.constexpr,
+    BLOCK: tl.constexpr,
+    PDL: tl.constexpr = False,
 ):
     tile = tl.program_id(0)
+    index = tile * BLOCK + tl.arange(0, BLOCK)
+    raw = tl.load(x + index, index < N, other=0).to(tl.float32)
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     blocks = tl.arange(0, REDUCE)
     maximum = tl.max(tl.load(partial + blocks, blocks < PARTS, other=0), 0)
     s = tl.div_rn(maximum, 448.0)
@@ -74,10 +90,11 @@ def _quant_from_partial(
     if tile == 0:
         tl.store(scale, s)
     inverse = tl.div_rn(1.0, tl.maximum(s, 1.0e-9))
-    index = tile * BLOCK + tl.arange(0, BLOCK)
-    value = tl.load(x + index, index < N, other=0).to(tl.float32) * inverse
+    value = raw * inverse
     value = tl.where(value == value, value, 448.0)
     value = tl.maximum(-448.0, tl.minimum(448.0, value))
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()
     tl.store(
         output + index, tl.where(index < N, value, 0).to(tl.float8e4nv), index < OUT
     )
@@ -123,6 +140,7 @@ def _quantize_ba(x, partial):
         _ba_scale[(1,)](partial, bs, tiles, triton.next_power_of_2(tiles), num_warps=8)
         return scaled_fp8_per_tensor_quant(x, scale=bs, output=bq)
 
+    pdl = sm90_pdl_enabled(x.device)
     _quant_from_partial[(triton.cdiv(bq.numel(), 1024),)](
         x,
         bq,
@@ -133,7 +151,9 @@ def _quantize_ba(x, partial):
         tiles,
         triton.next_power_of_2(tiles),
         1024,
+        PDL=pdl,
         enable_fp_fusion=False,
+        launch_pdl=pdl,
     )
     return bq, bs
 

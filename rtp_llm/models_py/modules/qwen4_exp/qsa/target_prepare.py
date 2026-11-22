@@ -43,7 +43,13 @@ def try_prepare_target_window(
         and torch.cuda.get_device_capability(q.device) in ((9, 0), (12, 0))
         and q.ndim == 3
         and q.shape[1:] == (4, 128)
-        and 1 <= q.shape[0] <= (64 if position_state is not None else 32)
+        and (
+            1 <= q.shape[0] <= (64 if position_state is not None else 32)
+            or (
+                torch.cuda.get_device_capability(q.device) == (9, 0)
+                and 1 <= q.shape[0] <= 512
+            )
+        )
         and q.dtype == torch.bfloat16
         and q.stride(-1) == 1
         and q.stride(-2) == 128

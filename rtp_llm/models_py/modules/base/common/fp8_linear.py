@@ -1,5 +1,7 @@
 """Graph-compatible consumers for per-tensor FP8 parameters."""
 
+from contextvars import ContextVar
+
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -8,6 +10,8 @@ from rtp_llm.models_py.kernels.cuda.fp8_input_quant import (
     _quantize_projection_input as _quantize_cuda_projection_input,
 )
 from rtp_llm.utils.fp8_constants import FP8_STORAGE_SCALE_SUFFIX
+
+_prequantized_fp8_input: ContextVar = ContextVar("_prequantized_fp8_input", default=None)
 
 
 def dequantize_parameter(weights, name):
@@ -163,6 +167,19 @@ class Fp8Linear(nn.Module):
             if out is not None:
                 out = out.reshape(*x.shape[:-1], self.weight.shape[0])
                 return out if self.bias is None else (out + self.bias).to(x.dtype)
+        if input_scale is None:
+            cached = _prequantized_fp8_input.get()
+            if (
+                cached is not None
+                and x.data_ptr() == cached[0]
+                and tuple(x.shape) == cached[1]
+                and x.stride() == cached[2]
+                and cached[3].device == x.device
+                and cached[3].dtype == self.weight.dtype
+            ):
+                return self._run_quantized(
+                    cached[3], cached[4], x.shape[:-1], rows.shape[0]
+                ).to(x.dtype)
         padding = (-rows.shape[0]) % 16
         padded_output = None
         if padding:
@@ -177,6 +194,37 @@ class Fp8Linear(nn.Module):
         return self._run_quantized(quantized, scale, x.shape[:-1], rows.shape[0]).to(
             x.dtype
         )
+
+
+def prequantize_fp8_linear_input(linear, x):
+    """Quantize once on the caller stream for multiple identical-input consumers."""
+    if not (
+        type(linear) is Fp8Linear
+        and linear.use_scaled_mm
+        and linear.compute_weight is None
+        and x.is_cuda
+        and x.dtype == torch.bfloat16
+        and x.ndim == 2
+        and x.shape[0] > 0
+        and x.shape[1] == linear.weight.shape[1]
+        and x.is_contiguous()
+    ):
+        return None
+    rows = x.shape[0]
+    padding = (-rows) % 16
+    padded_output = (
+        torch.empty(
+            (rows + padding, x.shape[1]),
+            device=x.device,
+            dtype=linear.weight.dtype,
+        )
+        if padding
+        else None
+    )
+    quantized, scale = _quantize_projection_input(
+        x, role=linear.role, scale=None, output=padded_output
+    )
+    return (x.data_ptr(), tuple(x.shape), x.stride(), quantized, scale)
 
 
 def dense_projection(x, weight, projection):

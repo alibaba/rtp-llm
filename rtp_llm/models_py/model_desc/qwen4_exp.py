@@ -1,6 +1,5 @@
 import json
 import logging
-import os
 import weakref
 from collections.abc import Mapping
 from typing import Any, Dict, Optional
@@ -217,7 +216,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             and (self.qsa_indexer.n_heads, self.qsa_indexer.head_dim) == (4, 128)
             and hidden_states.ndim == 2
             and hidden_states.shape[1] == 2560
-            and hidden_states.shape[0] in range(4, 33, 4)
+            and hidden_states.shape[0] in range(4, 129, 4)
             and not hidden_states.requires_grad
             and not any(
                 name in self.qsa_indexer.__dict__
@@ -1199,7 +1198,8 @@ class Qwen4ExpModel(Qwen35Model):
             return None
         if (
             torch.version.hip is not None
-            or torch.cuda.get_device_capability(embedding.device) != (12, 0)
+            or torch.cuda.get_device_capability(embedding.device)
+            not in ((9, 0), (12, 0))
             or "forward" in embedding.__dict__
             or "word_embedding" in self.__dict__
             or embedding._forward_pre_hooks

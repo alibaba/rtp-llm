@@ -67,7 +67,7 @@ class Fp8VocabEmbedding(nn.Module):
             return
         # Device capability can differ across TP ranks. Agree before any rank
         # enters the optional scale gather, retaining BF16 transport otherwise.
-        eligible = torch.cuda.get_device_capability(self.device) == (12, 0)
+        eligible = torch.cuda.get_device_capability(self.device) in ((9, 0), (12, 0))
         if not all(
             exchange_group_state(
                 _get_group(Group.TP), eligible, "vocabulary_byte_gather"
