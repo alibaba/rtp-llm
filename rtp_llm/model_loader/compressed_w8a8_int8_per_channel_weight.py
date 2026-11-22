@@ -36,15 +36,17 @@ class CompressedW8A8Int8PerChannelWeight(PerChannelFp8Weight):
             or src_weight_info.name not in cls.w8a8_weight_list
         ):
             return False
-        for ckpt_w in src_weight_info.weights:
-            base_name = ckpt_w.name.rsplit(".", 1)[0]
+        concrete_names = [
+            ckpt_w.name.rsplit(".", 1)[0] for ckpt_w in src_weight_info.weights
+        ]
+        for base_name in concrete_names:
             if (
                 base_name not in quant_config.exclude_modules
                 and _ckpt_base_matches_quant_exclude(
-                    base_name, quant_config.exclude_modules
+                    base_name, quant_config.exclude_modules, concrete_names
                 )
                 and not _ckpt_base_matches_regex_exclude(
-                    base_name, quant_config.exclude_modules
+                    base_name, quant_config.exclude_modules, concrete_names
                 )
             ):
                 raise ValueError(
