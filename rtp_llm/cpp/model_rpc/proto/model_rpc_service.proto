@@ -911,6 +911,7 @@ message TransferCompletionKeyPB {
         uint64 transfer_trace_id = 1;
         string kvcm_trace_id = 2;
     }
+    string trace_id = 3;
 }
 
 enum TransferCompletionStatePB {

@@ -43,7 +43,7 @@ BlockIdxType heldBlock(const std::shared_ptr<FrozenTestPool>& pool) {
 FrozenTask::ExecutionInfo execution(uint64_t                           trace,
                                     std::vector<FrozenTask::TargetBlock> targets) {
     FrozenTask::ExecutionInfo info;
-    info.trace_id = std::to_string(trace);
+    info.key = trace;
     info.uses_rpc = true;
     info.rank_count = 2;
     info.target_blocks = std::move(targets);

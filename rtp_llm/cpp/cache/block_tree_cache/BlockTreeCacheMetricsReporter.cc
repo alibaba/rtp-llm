@@ -95,13 +95,12 @@ void BlockTreeCacheMetricsReporter::reportUnfreezeMetrics(const FrozenTask::Exec
         }
         pool_targets.blocks.insert(target.block);
     }
-    const char* backend = execution.registry_type == RegistryType::KVCM_READ ? "kvcm" : "local";
     for (const auto& [pool, pool_targets] : targets) {
         RtpLLMCacheUnfreezeMetricsCollector collector;
         collector.blocks = static_cast<int64_t>(pool_targets.blocks.size());
         kmonitor::MetricsTags tags("pool_name", pool->poolName());
         tags.AddTag("tier", tierName(pool_targets.tier));
-        tags.AddTag("backend", backend);
+        tags.AddTag("backend", execution.backend);
         tags.AddTag("forced", forced ? "true" : "false");
         metrics_reporter_->report<RtpLLMCachePoolMetrics, RtpLLMCacheUnfreezeMetricsCollector>(&tags, &collector);
     }

@@ -2257,7 +2257,7 @@ TEST_F(KVCacheManagerTest, FrozenForceReleaseTimeoutReachesRecoveryWorker) {
         engine->completion_error = ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "local I/O outcome unknown");
         auto& dispatcher = manager->block_tree_cache_->transfer_dispatcher_;
         dispatcher = std::make_unique<BlockTransferDispatcher>(engine);
-        reclaimer.bindReclaimers(dispatcher.get());
+        reclaimer.bindReclaimers(*dispatcher);
         auto pool = groups.front()->hostPool();
         ASSERT_NE(pool, nullptr);
         const auto block = pool->malloc();
@@ -2311,7 +2311,7 @@ TEST_F(KVCacheManagerTest, ForgetProgressesWithRecoveryDisabledAndWhileItsWorker
     auto& reclaimer = manager.block_tree_cache_->reclaimer();
     ASSERT_EQ(reclaimer.frozen_task_recovery_, nullptr);
     auto check_cleanup = [&](uint64_t trace) {
-        auto& registry = *reclaimer.transfer_worker_;
+        auto& registry = *reclaimer.worker_registry_;
         ASSERT_TRUE(registry.begin(trace));
         ASSERT_TRUE(registry.finish(trace, true));
         reclaimer.completion_cleanup_->enqueue(reclaimer.completion_cleanup_->prepare({false, 1}, trace));

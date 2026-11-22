@@ -18,7 +18,7 @@ int64_t wallTimeUs() noexcept {
 }  // namespace
 
 FrozenTask::PreparedExecution FrozenTask::prepare(ExecutionInfo execution) {
-    RTP_LLM_CHECK_WITH_INFO(validTransferCompletionKey(execution.registry_type, execution.trace_id),
+    RTP_LLM_CHECK_WITH_INFO(!execution.key.trace_id.empty(),
                             "frozen execution requires a valid trace");
     std::vector<TargetPool>                        targets;
     std::unordered_map<IBlockPool*, size_t>        pool_indices;

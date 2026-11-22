@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTaskRecovery.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionQuery.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionWire.h"
 
 #include <atomic>
 
@@ -28,7 +29,27 @@ void answer(size_t rank, const FunctionRequestPB& request, FunctionResponsePB& r
     }
 }
 
-enum class Reply { RUNNING, UNKNOWN, WRONG_RANK, WRONG_KEY, WRONG_REGISTRY, INVALID_STATE, TRANSPORT_ERROR, DUPLICATE_RANK, SAFE, FENCED };
+enum class Reply { RUNNING, UNKNOWN, WRONG_RANK, WRONG_KEY, INVALID_STATE, TRANSPORT_ERROR, DUPLICATE_RANK, SAFE, FENCED };
+
+TEST(TransferCompletionQueryTest, ReadsLegacyAndUnifiedTraceFields) {
+    TransferCompletionKeyPB wire;
+    encodeCompletionKey(uint64_t{73}, wire);
+    EXPECT_EQ(wire.trace_id(), "73");
+    EXPECT_EQ(wire.transfer_trace_id(), 73u);
+    wire.clear_trace_id();
+    EXPECT_EQ(decodeCompletionTraceId(wire), "73");
+
+    encodeCompletionKey({std::string("read-74"), TransferCompletionKey::LegacyWireField::KVCM_TRACE_ID}, wire);
+    EXPECT_EQ(wire.kvcm_trace_id(), "read-74");
+    wire.clear_trace_id();
+    EXPECT_EQ(decodeCompletionTraceId(wire), "read-74");
+    wire.set_trace_id("other");
+    EXPECT_TRUE(decodeCompletionTraceId(wire).empty());
+
+    encodeCompletionKey(std::string("new-75"), wire);
+    EXPECT_EQ(wire.trace_case(), TransferCompletionKeyPB::TRACE_NOT_SET);
+    EXPECT_EQ(decodeCompletionTraceId(wire), "new-75");
+}
 
 TEST(TransferCompletionQueryTest, RecoveryRequiresEvidenceForTheOriginalTraceAndEveryParticipant) {
     std::atomic<Reply> reply{Reply::RUNNING};
@@ -41,14 +62,7 @@ TEST(TransferCompletionQueryTest, RecoveryRequiresEvidenceForTheOriginalTraceAnd
             case Reply::RUNNING: row->set_state(TRANSFER_COMPLETION_RUNNING); break;
             case Reply::UNKNOWN: row->set_state(TRANSFER_COMPLETION_UNKNOWN); break;
             case Reply::WRONG_RANK: response.mutable_completion_query()->set_rank(0); break;
-            case Reply::WRONG_KEY:
-                if (row->key().has_transfer_trace_id()) row->mutable_key()->set_transfer_trace_id(92);
-                else row->mutable_key()->set_kvcm_trace_id("92");
-                break;
-            case Reply::WRONG_REGISTRY:
-                if (row->key().has_transfer_trace_id()) row->mutable_key()->set_kvcm_trace_id("91");
-                else row->mutable_key()->set_transfer_trace_id(91);
-                break;
+            case Reply::WRONG_KEY: row->mutable_key()->set_trace_id("wrong-trace"); break;
             case Reply::INVALID_STATE: row->set_state(static_cast<TransferCompletionStatePB>(99)); break;
             case Reply::TRANSPORT_ERROR: return grpc::Status(grpc::StatusCode::UNAVAILABLE, "query reply lost");
             case Reply::DUPLICATE_RANK:
@@ -68,15 +82,14 @@ TEST(TransferCompletionQueryTest, RecoveryRequiresEvidenceForTheOriginalTraceAnd
     ASSERT_TRUE(manager->init());
     TransferCompletionQuery query(manager);
     FrozenTaskReclaimer coordinator(std::make_shared<TransferCompletionCleanup>());
-    for (const TransferCompletionKey& key : {TransferCompletionKey{uint64_t{91}}, TransferCompletionKey{std::string("91")}}) {
+    for (const TransferCompletionKey& key : {TransferCompletionKey{uint64_t{91}}, TransferCompletionKey{std::string("read-92")}}) {
         TransferResult failure(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "lost read reply"), CacheCopyError::RPC_FAILED);
         coordinator.freezeTargetBlocksWithTraceIDAndStillIOWorkerID({key, {true, addresses.size()}, failure}, {}, {0, 1});
         auto task = coordinator.frozenTasks().front();
         FrozenTaskRecovery recovery(coordinator,
             [&](const auto& original, const auto& pending_workers, int timeout) {
                 TransferCompletionIdentity identity;
-                identity.trace_id = original.trace_id;
-                identity.registry_type = original.registry_type;
+                identity.key = original.key;
                 identity.remote = original.uses_rpc;
                 identity.expected_rank_count = original.rank_count;
                 auto evidence = query.query(identity, pending_workers, timeout);
@@ -93,14 +106,14 @@ TEST(TransferCompletionQueryTest, RecoveryRequiresEvidenceForTheOriginalTraceAnd
         ASSERT_NE(running, nullptr);
         ASSERT_EQ(running->ranks.size(), 2u);
         EXPECT_EQ(running->ranks[1].state, State::RUNNING);
-        for (const auto pending : {Reply::UNKNOWN, Reply::WRONG_RANK, Reply::WRONG_KEY, Reply::WRONG_REGISTRY,
+        for (const auto pending : {Reply::UNKNOWN, Reply::WRONG_RANK, Reply::WRONG_KEY,
                                    Reply::INVALID_STATE, Reply::TRANSPORT_ERROR, Reply::DUPLICATE_RANK}) {
             SCOPED_TRACE(static_cast<int>(pending));
             reply = pending;
             EXPECT_EQ(recovery.runOnce(2000).released, 0u);
             EXPECT_EQ(task->snapshot().state, FrozenTask::State::FROZEN);
         }
-        reply = key.registry_type == RegistryType::KVCM_READ ? Reply::FENCED : Reply::SAFE;
+        reply = key.trace_id == "read-92" ? Reply::FENCED : Reply::SAFE;
         EXPECT_EQ(recovery.runOnce(2000).released, 1u);
         EXPECT_EQ(task->snapshot().state, FrozenTask::State::RELEASED);
         EXPECT_EQ(running->ranks[1].state, State::RUNNING);

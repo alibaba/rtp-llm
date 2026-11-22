@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 
 namespace rtp_llm {
 namespace {
@@ -133,7 +134,7 @@ struct NativeWorker {
         manager->block_tree_cache_->reclaimer().configure(parallel.tp_rank,
             config.block_tree_frozen_recovery_interval_ms, config.block_tree_frozen_recovery_query_timeout_ms,
             config.block_tree_frozen_force_release_timeout_ms, std::move(broadcast));
-        manager->block_tree_cache_->reclaimer().bindReclaimers(manager->block_tree_cache_->transfer_dispatcher_.get());
+        manager->block_tree_cache_->reclaimer().bindReclaimers(*backend);
         return true;
     }
 
@@ -157,6 +158,23 @@ protected:
     autil::EnvGuard publication_{"RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0"};
     autil::EnvGuard async_{"RTP_LLM_STREAM_ASYNC", "0"};
 };
+
+TEST_F(KVCMTimeoutRecoverySmokeTest, ReadRejectsTraceAlreadyRegisteredByBlockTransfer) {
+    FilePayload file;
+    NativeWorker worker;
+    ASSERT_TRUE(worker.init(file, 0, 1));
+    auto& registry = *worker.manager->block_tree_cache_->transfer_dispatcher_->task_registry_;
+    ASSERT_TRUE(registry.begin(uint64_t{71}));
+
+    RemoteOperationRequestPB read;
+    read.set_op(REMOTE_OPERATION_READ);
+    read.set_trace_id("71");
+    RemoteOperationResponsePB response;
+    EXPECT_FALSE(worker.backend->execute(read, response));
+    EXPECT_EQ(response.transfer_status(), REMOTE_TRANSFER_STATUS_FAILED);
+    EXPECT_EQ(&worker.backend->taskRegistry(), &registry);
+    EXPECT_EQ(registry.queryLocal(std::vector<uint64_t>{71}).front(), TransferTaskRegistry::State::RUNNING);
+}
 
 TEST_F(KVCMTimeoutRecoverySmokeTest, LostNativeReadReplyRecoversThroughWorkerQueryAndForget) {
     FilePayload file;

@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionQuery.h"
 
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionWire.h"
+
 #include <algorithm>
 #include <chrono>
 #include <exception>
@@ -13,22 +15,6 @@ namespace {
 
 using State = TransferTaskRegistry::State;
 using Clock = std::chrono::steady_clock;
-
-void encodeKey(const TransferCompletionKey& trace, TransferCompletionKeyPB& key) {
-    if (trace.registry_type == RegistryType::BLOCK_TRANSFER) {
-        key.set_transfer_trace_id(trace.numericId());
-    } else {
-        key.set_kvcm_trace_id(trace.trace_id);
-    }
-}
-
-bool sameKey(const TransferCompletionKeyPB& key, const TransferCompletionKey& trace) {
-    if (trace.registry_type == RegistryType::BLOCK_TRANSFER) {
-        return key.trace_case() == TransferCompletionKeyPB::kTransferTraceId && key.transfer_trace_id() == trace.numericId();
-    }
-    return key.trace_case() == TransferCompletionKeyPB::kKvcmTraceId
-           && key.kvcm_trace_id() == trace.trace_id;
-}
 
 bool validState(State state) {
     return state == State::UNKNOWN || state == State::RUNNING || state == State::BUFFER_SAFE
@@ -47,7 +33,7 @@ void decodeResponse(const FunctionResponsePB& response,
         row.error = "completion query worker rank mismatch";
         return;
     }
-    if (query.entries_size() != 1 || !sameKey(query.entries(0).key(), trace)) {
+    if (query.entries_size() != 1 || decodeCompletionTraceId(query.entries(0).key()) != trace.trace_id) {
         row.error = "completion query key count or identity mismatch";
         return;
     }
@@ -94,13 +80,12 @@ TransferCompletionQuery::TransferCompletionQuery(std::shared_ptr<BroadcastManage
 TransferCompletionQueryResult
 TransferCompletionQuery::query(const TransferCompletionIdentity& execution, const std::vector<size_t>& worker_ids, int timeout_ms) const {
     TransferCompletionQueryResult result;
-    result.registry_type = execution.registry_type;
-    result.trace_id = execution.trace_id;
-    const TransferCompletionKey key{execution.registry_type, execution.trace_id};
+    const auto& key = execution.key;
+    result.trace_id = key.trace_id;
     result.ranks.resize(worker_ids.size());
     for (size_t rank = 0; rank < result.ranks.size(); ++rank)
         result.ranks[rank].rank = worker_ids[rank];
-    if (timeout_ms <= 0 || !validTransferCompletionKey(key)) {
+    if (timeout_ms <= 0 || key.trace_id.empty()) {
         fail(result, "completion query requires a valid trace and positive timeout");
         return result;
     }
@@ -142,7 +127,7 @@ TransferCompletionQuery::query(const TransferCompletionIdentity& execution, cons
     }
     try {
         FunctionRequestPB request;
-        encodeKey(key, *request.mutable_completion_query()->add_keys());
+        encodeCompletionKey(key, *request.mutable_completion_query()->add_keys());
         const int submit_timeout = remainingTimeout(deadline);
         if (submit_timeout == 0) {
             fail(result, "completion query deadline exceeded before submission");

@@ -10,14 +10,16 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTaskReclaimer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionForget.h"
 namespace rtp_llm {
-class BlockTransferDispatcher;
 class BlockTreeCache;
 class BlockTreeReclaimer {
 public:
     explicit BlockTreeReclaimer(BlockTreeCache& tree);
     ~BlockTreeReclaimer();
     void configure(int rank, int64_t interval_ms, int64_t timeout_ms, int64_t force_release_timeout_ms, std::shared_ptr<BroadcastManager> broadcast);
-    void bindReclaimers(BlockTransferDispatcher* transfer_dispatcher);
+    template<typename Participant>
+    void bindReclaimers(Participant& participant) const {
+        participant.setReclaimers(coordinator_, worker_registry_);
+    }
     bool start();
     void stop() noexcept;
     bool startFrozenTaskRecovery();
@@ -39,8 +41,7 @@ private:
     std::shared_ptr<BroadcastManager> transfer_broadcast_manager_;
     std::shared_ptr<TransferCompletionCleanup> completion_cleanup_;
     std::shared_ptr<FrozenTaskReclaimer> coordinator_;
-    std::shared_ptr<TransferTaskRegistry> transfer_worker_{std::make_shared<TransferTaskRegistry>()};
-    std::shared_ptr<TransferTaskRegistry> kvcm_worker_{std::make_shared<TransferTaskRegistry>()};
+    std::shared_ptr<TransferTaskRegistry> worker_registry_{std::make_shared<TransferTaskRegistry>()};
     std::unique_ptr<FrozenTaskRecovery> frozen_task_recovery_;
     std::mutex mutex_;
     std::condition_variable cv_;

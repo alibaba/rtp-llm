@@ -54,8 +54,8 @@ TEST(KVCMFrozenTaskTest, TargetsExcludeLocalPrefixFilteredLinearStateAndUnsentTa
         const auto task = onlyFrozenTask(*backend.backend);
         EXPECT_NE(task, nullptr);
         if (task) {
-            EXPECT_EQ(task->execution().trace_id, trace.front());
-            EXPECT_EQ(task->execution().registry_type, RegistryType::KVCM_READ);
+            EXPECT_EQ(task->execution().key.trace_id, trace.front());
+            EXPECT_EQ(task->execution().backend, "kvcm");
             EXPECT_EQ(task->snapshot().state, FrozenTask::State::FROZEN);
         }
         done.set_value(std::move(error));

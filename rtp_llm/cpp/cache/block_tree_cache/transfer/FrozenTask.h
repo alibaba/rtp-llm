@@ -25,8 +25,8 @@ public:
     };
 
     struct ExecutionInfo {
-        RegistryType registry_type{RegistryType::BLOCK_TRANSFER};
-        std::string trace_id;
+        TransferCompletionKey key;
+        std::string backend{"local"};
         bool uses_rpc{false};
         size_t rank_count{0};
         std::vector<TargetBlock> target_blocks;

@@ -22,8 +22,7 @@ bool validRank(const TransferCompletionRankResult& row, bool uses_rpc) {
 
 bool matchesQuery(const FrozenTask::ExecutionInfo& execution, const std::vector<size_t>& pending,
                   const TransferCompletionQueryResult& query) {
-    if (!validTransferCompletionKey(execution.registry_type, execution.trace_id)
-        || query.registry_type != execution.registry_type || query.trace_id != execution.trace_id
+    if (execution.key.trace_id.empty() || query.trace_id != execution.key.trace_id
         || !query.error.empty() || pending.empty() || query.ranks.size() != pending.size()
         || (!execution.uses_rpc && execution.rank_count != 1))
         return false;
@@ -49,8 +48,7 @@ void recordQuery(const std::shared_ptr<FrozenTask>& task, TransferCompletionQuer
 void recordException(const std::shared_ptr<FrozenTask>& task, const char* error) noexcept {
     try {
         TransferCompletionQueryResult failure;
-        failure.registry_type = task->execution().registry_type;
-        failure.trace_id = task->execution().trace_id;
+        failure.trace_id = task->execution().key.trace_id;
         failure.error = error;
         for (size_t rank = 0; rank < task->execution().rank_count; ++rank) {
             TransferCompletionRankResult row;
@@ -242,7 +240,7 @@ FrozenTaskRecovery::runOnce(int query_timeout_ms, const std::function<bool()>& s
                 if (stop())
                     break;
                 released = coordinator_.unfreezeTargetBlocksInOneWorkerWithTraceID(
-                    {task->execution().registry_type, task->execution().trace_id}, rank);
+                    task->execution().key, rank);
             }
         } catch (...) {
             ++summary.query_failed;

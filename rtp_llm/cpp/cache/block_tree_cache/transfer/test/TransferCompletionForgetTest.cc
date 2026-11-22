@@ -42,26 +42,21 @@ void answer(size_t rank, const FunctionRequestPB& request, FunctionResponsePB& r
 }
 
 TEST(TransferCompletionForgetTest, RemoteBatchRequiresAllOriginalRanksButRunningDoesNotBlockOtherKeys) {
-    struct Worker {
-        TransferTaskRegistry ordinary;
-        TransferTaskRegistry kvcm;
-    };
-    auto workers = std::make_shared<std::array<Worker, 2>>();
-    for (size_t rank = 0; rank < 2; ++rank) {
-        ASSERT_TRUE((*workers)[rank].ordinary.begin(uint64_t{71}));
-        ASSERT_TRUE((*workers)[rank].ordinary.finish(uint64_t{71}, true));
-        ASSERT_TRUE((*workers)[rank].kvcm.begin("71"));
+    auto workers = std::make_shared<std::array<TransferTaskRegistry, 2>>();
+    const Trace finished{uint64_t{71}}, pending{std::string("72")};
+    for (auto& worker : *workers) {
+        ASSERT_TRUE(worker.begin(finished.trace_id));
+        ASSERT_TRUE(worker.finish(finished.trace_id, true));
+        ASSERT_TRUE(worker.begin(pending.trace_id));
     }
-    ASSERT_TRUE((*workers)[0].kvcm.finish("71", true));
+    ASSERT_TRUE((*workers)[0].finish(pending.trace_id, true));
     std::atomic<bool> wrong_key{false};
     auto handler = [&wrong_key, workers](size_t rank, const auto& request, auto& response) {
         answer(rank, request, response, [&](const TransferCompletionKeyPB& key) {
-            return key.trace_case() == TransferCompletionKeyPB::kTransferTraceId ?
-                       (*workers)[rank].ordinary.forget(key.transfer_trace_id()) :
-                       (*workers)[rank].kvcm.forget(key.kvcm_trace_id());
+            return (*workers)[rank].forget(key.trace_id());
         });
         if (rank == 1 && wrong_key.load())
-            response.mutable_completion_forget()->mutable_entries(0)->mutable_key()->set_transfer_trace_id(71);
+            response.mutable_completion_forget()->mutable_entries(0)->mutable_key()->set_trace_id("71");
         return grpc::Status::OK;
     };
     CompletionRpcTestServer first(0, handler), second(1, handler);
@@ -73,9 +68,8 @@ TEST(TransferCompletionForgetTest, RemoteBatchRequiresAllOriginalRanksButRunning
     TransferCompletionForget forget(manager);
     const TransferCompletionTarget routing{true, addresses.size()};
     TransferCompletionCleanup cleanup;
-    const Trace ordinary{uint64_t{71}}, kvcm{std::string("71")};
-    cleanup.enqueue(cleanup.prepare(routing, ordinary));
-    cleanup.enqueue(cleanup.prepare(routing, kvcm));
+    cleanup.enqueue(cleanup.prepare(routing, finished));
+    cleanup.enqueue(cleanup.prepare(routing, pending));
     auto drain = [&](const std::vector<Trace>& expected, bool lose_reply = false) {
         return cleanup.drain([&](const auto& peers, const auto& batch, int timeout) {
             EXPECT_EQ(batch, expected);
@@ -85,18 +79,17 @@ TEST(TransferCompletionForgetTest, RemoteBatchRequiresAllOriginalRanksButRunning
             return result;
         }, 2000);
     };
-    EXPECT_EQ(drain({ordinary, kvcm}).forgotten, 1u);
+    EXPECT_EQ(drain({finished, pending}).forgotten, 1u);
     EXPECT_EQ(cleanup.size(), 1u);
-    EXPECT_EQ((*workers)[0].ordinary.size(), 0u);
-    EXPECT_EQ((*workers)[1].ordinary.size(), 0u);
-    EXPECT_EQ((*workers)[1].kvcm.size(), 1u);
-    ASSERT_TRUE((*workers)[1].kvcm.finish("71", true));
+    EXPECT_EQ((*workers)[0].size(), 0u);
+    EXPECT_EQ((*workers)[1].size(), 1u);
+    ASSERT_TRUE((*workers)[1].finish(pending.trace_id, true));
     wrong_key = true;
-    EXPECT_EQ(drain({kvcm}).pending, 1u);
-    EXPECT_EQ((*workers)[1].kvcm.size(), 0u);
+    EXPECT_EQ(drain({pending}).pending, 1u);
+    EXPECT_EQ((*workers)[1].size(), 0u);
     wrong_key = false;
-    EXPECT_EQ(drain({kvcm}, true).pending, 1u);
-    EXPECT_EQ(drain({kvcm}).forgotten, 1u);
+    EXPECT_EQ(drain({pending}, true).pending, 1u);
+    EXPECT_EQ(drain({pending}).forgotten, 1u);
     EXPECT_EQ(cleanup.size(), 0u);
 }
 

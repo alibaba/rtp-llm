@@ -166,7 +166,7 @@ public:
                         std::iota(pending_workers->begin(), pending_workers->end(), size_t{0});
                     }
                     owner->coordinator_->freezeTargetBlocksWithTraceIDAndStillIOWorkerID(
-                        {trace_id, participants, result}, owner->readTargets(requests), std::move(*pending_workers));
+                        {trace_id, participants, result, "kvcm"}, owner->readTargets(requests), std::move(*pending_workers));
                 }
                 marked_failure = std::move(protected_failure);
                 return marked_failure;
@@ -188,7 +188,8 @@ public:
     using ReadCompletionContextPtr = std::shared_ptr<ReadCompletionContext>;
 
     ReadCompletionContextPtr prepareReadCompletionContext(const std::vector<FunctionRequestPB>& requests) {
-        TransferCompletionKey trace_id{requests.front().remote_request().trace_id()};
+        TransferCompletionKey trace_id{requests.front().remote_request().trace_id(),
+                                       TransferCompletionKey::LegacyWireField::KVCM_TRACE_ID};
         TransferCompletionTarget participants{broadcast_manager_ != nullptr, broadcast_manager_ ? broadcast_manager_->workerNum() : 1};
         TransferCompletionCleanup::Prepared cleanup;
         if (completion_cleanup_)

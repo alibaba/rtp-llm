@@ -18,7 +18,7 @@ bool sameTarget(const TransferCompletionTarget& first, const TransferCompletionT
 
 TransferCompletionCleanup::Prepared
 TransferCompletionCleanup::prepare(TransferCompletionTarget target, TransferCompletionKey key) {
-    if (!validTransferCompletionKey(key))
+    if (key.trace_id.empty())
         throw std::invalid_argument("completion cleanup requires a nonempty execution trace");
     if (target.rank_count == 0 || (!target.remote && target.rank_count != 1))
         throw std::invalid_argument("completion cleanup requires the original participants");
@@ -172,8 +172,7 @@ TransferCompletionCleanup::drain(const Forget& forget, int timeout_ms,
                 size_t forgotten = 0;
                 for (auto it = batch.begin(); it != batch.end(); ++index) {
                     const auto& response = result.entries[index];
-                    const bool same_key = response.registry_type == it->key.registry_type
-                                          && response.trace_id == it->key.trace_id;
+                    const bool same_key = response.trace_id == it->key.trace_id;
                     if (same_key && response.all_done) {
                         it = batch.erase(it);
                         ++forgotten;

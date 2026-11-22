@@ -14,8 +14,7 @@ namespace rtp_llm {
 inline constexpr size_t kTransferCompletionForgetBatchSize = 1024;
 
 struct TransferCompletionIdentity {
-    RegistryType registry_type{RegistryType::BLOCK_TRANSFER};
-    std::string trace_id;
+    TransferCompletionKey key;
     std::optional<int64_t>              request_id;
     bool                                remote{false};
     size_t                              expected_rank_count{0};
@@ -40,7 +39,6 @@ struct TransferCompletionRankResult {
 };
 
 struct TransferCompletionQueryResult {
-    RegistryType registry_type{RegistryType::BLOCK_TRANSFER};
     std::string trace_id;
     std::vector<TransferCompletionRankResult> ranks;
     bool                                      all_safe{false};
@@ -55,7 +53,6 @@ struct TransferCompletionForgetRankResult {
 };
 
 struct TransferCompletionForgetEntryResult {
-    RegistryType registry_type{RegistryType::BLOCK_TRANSFER};
     std::string trace_id;
     std::vector<TransferCompletionForgetRankResult> ranks;
     bool                                           all_done{false};

@@ -1353,12 +1353,12 @@ TEST_F(MultiRankBlockTransferEngineTest, HostLoadRpcFailureFreezesOnlyTargetBefo
         const auto records = cache->reclaimer().frozenTasks();
         ASSERT_EQ(records.size(), 1u);
         const auto& execution = records.front()->execution();
-        EXPECT_EQ(execution.registry_type, RegistryType::BLOCK_TRANSFER);
+        EXPECT_EQ(execution.backend, "local");
         EXPECT_EQ(execution.rank_count, servers.size());
         std::lock_guard<std::mutex> lock(state->mutex);
         ASSERT_EQ(state->requests.size(), 2u);
         for (const auto& request : state->requests)
-            EXPECT_EQ(execution.trace_id, std::to_string(request.transfer_trace_id()));
+            EXPECT_EQ(execution.key.trace_id, std::to_string(request.transfer_trace_id()));
     });
     ASSERT_TRUE(context->commit());
     context->waitDone();

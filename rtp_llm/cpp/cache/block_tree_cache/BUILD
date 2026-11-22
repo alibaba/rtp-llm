@@ -268,6 +268,7 @@ cc_library(
         "store/BlockTreeStorer.h",
         "transfer/BlockTransferDispatcher.h",
         "transfer/TransferCompletionQuery.h",
+        "transfer/TransferCompletionWire.h",
         "transfer/TransferCompletionForget.h",
         "transfer/FrozenTaskRecovery.h",
         "transfer/MultiRankBlockTransferEngine.h",

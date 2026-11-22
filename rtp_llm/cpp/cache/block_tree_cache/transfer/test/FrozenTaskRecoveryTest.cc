@@ -68,8 +68,7 @@ TEST(FrozenTaskRecoveryTest, StopDuringQueryWaitsForExitAndDiscardsSafeReleasePe
             if (released.wait_for(5s) != std::future_status::ready)
                 throw std::runtime_error("test query gate timed out");
             TransferCompletionQueryResult safe;
-            safe.trace_id = execution.trace_id;
-            safe.registry_type = execution.registry_type;
+            safe.trace_id = execution.key.trace_id;
             safe.ranks.push_back({0, State::BUFFER_SAFE});
             safe.all_safe = true;
             return safe;

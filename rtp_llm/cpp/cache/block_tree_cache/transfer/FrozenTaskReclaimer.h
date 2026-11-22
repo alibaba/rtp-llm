@@ -11,6 +11,7 @@ public:
         TransferCompletionKey key;
         TransferCompletionTarget participants;
         const TransferResult& result;
+        std::string backend{"local"};
     };
 
     explicit FrozenTaskReclaimer(std::shared_ptr<TransferCompletionCleanup> cleanup):
@@ -27,7 +28,7 @@ public:
 private:
     std::shared_ptr<TransferCompletionCleanup> cleanup_;
     mutable std::mutex mutex_;
-    mutable std::map<std::pair<RegistryType, std::string>, std::shared_ptr<FrozenTask>> tasks_;
+    mutable std::map<std::string, std::shared_ptr<FrozenTask>> tasks_;
 };
 
 }
