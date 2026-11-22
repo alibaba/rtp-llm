@@ -64,7 +64,13 @@ def _mhc_fn_normw_merge_bwd(
     return _mhc_fn_normw_merge_bwd_
 
 
-@tilelang.jit(pass_configs=_PASS_CONFIGS)
+@tilelang.jit(
+    pass_configs={
+        **_PASS_CONFIGS,
+        # Avoid idle producer warps waiting on reused barrier phases (TileLang #3470).
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+    }
+)
 def _mhc_pre_norm_fn_fwd_mul(
     mhc_mult3: int,
     n_rms_group: int,
