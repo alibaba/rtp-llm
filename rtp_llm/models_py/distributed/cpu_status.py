@@ -33,6 +33,8 @@ class CpuTpStatus:
         self.rank = rank
         self.timeout_ms = timeout_ms
         self.generation = 0
+        self.broadcast_generation = 0
+        self.broadcast_capacity = len(mapping) - ops.cpu_status_size(world_size)
         self.closed = False
         self.lock = threading.Lock()
 
@@ -40,19 +42,45 @@ class CpuTpStatus:
         with self.lock:
             if self.closed:
                 raise RuntimeError("Status mapping is closed")
-            self.generation += 1
-            rc = self.ops.cpu_status_reduce(
-                self.pointer,
-                self.rank,
-                self.generation,
-                int(bool(local_ok)),
-                self.timeout_ms,
+            return self._reduce(local_ok)
+
+    def _reduce(self, local_ok):
+        self.generation += 1
+        rc = self.ops.cpu_status_reduce(
+            self.pointer,
+            self.rank,
+            self.generation,
+            int(bool(local_ok)),
+            self.timeout_ms,
+        )
+        if rc < 0:
+            raise RuntimeError(
+                f"TP CPU status failed: errno={-rc}, generation={self.generation}"
             )
-            if rc < 0:
-                raise RuntimeError(
-                    f"TP CPU status failed: errno={-rc}, generation={self.generation}"
+        return bool(rc)
+
+    def broadcast(self, lengths):
+        if lengths.device.type != "cpu" or not lengths.is_contiguous():
+            raise ValueError("TP acceptance broadcast requires a contiguous CPU tensor")
+        with self.lock:
+            if self.closed:
+                raise RuntimeError("Status mapping is closed")
+            for offset in range(0, lengths.nbytes, self.broadcast_capacity):
+                if offset:
+                    self._reduce(True)
+                self.broadcast_generation += 1
+                rc = self.ops.cpu_status_broadcast(
+                    self.pointer,
+                    self.rank,
+                    self.broadcast_generation,
+                    lengths.data_ptr() + offset,
+                    min(self.broadcast_capacity, lengths.nbytes - offset),
+                    self.timeout_ms,
                 )
-            return bool(rc)
+                if rc < 0:
+                    raise RuntimeError(f"TP CPU acceptance broadcast failed: errno={-rc}")
+            # The PLE prepare status reduction protects the final chunk from
+            # overwrite. All ranks copy the lengths before entering that phase.
 
     def close(self, cancel=False):
         with self.lock:
@@ -94,7 +122,9 @@ def _unlink_owned(path, identity):
     os.unlink(path)
 
 
-def create_cpu_tp_status(group, ops, timeout_ms=60000):
+def create_cpu_tp_status(
+    group, ops, timeout_ms=60000, *, broadcast_accept_lengths=False
+):
     """Collective startup; all ranks either map the same file or raise."""
     world_size = dist.get_world_size(group)
     required_bytes = ops.cpu_status_size(world_size)
@@ -109,6 +139,8 @@ def create_cpu_tp_status(group, ops, timeout_ms=60000):
             fd, path = tempfile.mkstemp(prefix="rtp-tp-status-", dir="/dev/shm")
             try:
                 size = max(mmap.PAGESIZE, required_bytes)
+                if broadcast_accept_lengths:
+                    size += mmap.PAGESIZE
                 os.ftruncate(fd, size)
                 identity = _identity(os.fstat(fd))
                 with mmap.mmap(fd, size) as mapped:

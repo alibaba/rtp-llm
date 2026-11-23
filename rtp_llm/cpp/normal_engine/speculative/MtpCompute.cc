@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <cstring>
+#include <exception>
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDACachingAllocator.h>
@@ -14,6 +15,17 @@
 namespace rtp_llm {
 namespace mtp {
 namespace {
+template<typename Hook>
+std::string invokeSpeculativeTargetHook(const char* name, Hook&& hook) {
+    try {
+        return hook();
+    } catch (const std::exception& error) {
+        return std::string(name) + " threw: " + error.what();
+    } catch (...) {
+        return std::string(name) + " threw an unknown exception";
+    }
+}
+
 torch::Tensor
 shiftedMtpTokenField(const torch::Tensor& field, const torch::Tensor& input_lengths_cpu, int32_t append_value) {
     if (!field.defined() || field.numel() == 0) {
@@ -341,6 +353,47 @@ AcceptedTokens getHostAcceptedTokens(const speculative::SpeculativeSamplerOutput
     }
     return {output.accept_tokens_cpu.defined() ? output.accept_tokens_cpu : output.accept_tokens.cpu(),
             output.accept_len_cpu.defined() ? output.accept_len_cpu : output.accept_len.cpu()};
+}
+
+void rollbackSpeculativeTargetState(SpeculativeTargetCommit&         target,
+                                    const std::function<bool(bool)>& all_ranks_ok,
+                                    const char*                      phase) {
+    const auto error = invokeSpeculativeTargetHook(
+        "rollback", [&] { return target.finishSpeculativeTargetCommit(false); });
+    if (!all_ranks_ok(error.empty())) {
+        RTP_LLM_LOG_ERROR("speculative target rollback after %s failed on at least one TP rank; local error: %s",
+                          phase,
+                          error.c_str());
+        std::terminate();
+    }
+}
+
+absl::Status commitSpeculativeTargetState(SpeculativeTargetCommit&         target,
+                                          const torch::Tensor&             accept_len,
+                                          const std::function<bool(bool)>& all_ranks_ok) {
+    auto error = invokeSpeculativeTargetHook(
+        "prepare", [&] { return target.prepareSpeculativeTargetCommit(accept_len); });
+    if (!all_ranks_ok(error.empty())) {
+        rollbackSpeculativeTargetState(target, all_ranks_ok, "prepare");
+        std::string message = "speculative target side-state commit prepare failed on at least one TP rank";
+        return absl::InternalError(error.empty() ? message : message + "; local error: " + error);
+    }
+
+    // Retain undo state until every TP rank has tentatively committed.
+    error = invokeSpeculativeTargetHook("commit", [&] { return target.finishSpeculativeTargetCommit(true); });
+    if (!all_ranks_ok(error.empty())) {
+        rollbackSpeculativeTargetState(target, all_ranks_ok, "commit");
+        std::string message = "speculative target side-state commit failed on at least one TP rank";
+        return absl::InternalError(error.empty() ? message : message + "; local error: " + error);
+    }
+
+    error = invokeSpeculativeTargetHook("finalize", [&] { return target.finalizeSpeculativeTargetCommit(); });
+    if (!all_ranks_ok(error.empty())) {
+        RTP_LLM_LOG_ERROR("speculative target finalize failed on at least one TP rank; local error: %s", error.c_str());
+        // Finalize releases undo; a partially finalized transaction cannot be rolled back.
+        std::terminate();
+    }
+    return absl::OkStatus();
 }
 
 DraftInputLayout selectDraftInputLayout(bool device_state_enabled) {

@@ -31,6 +31,13 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
             return cpu_status_reduce(reinterpret_cast<void*>(pointer), rank, generation, local_ok, timeout_ms);
         },
         py::call_guard<py::gil_scoped_release>());
+    rtp_ops_m.def(
+        "cpu_status_broadcast",
+        [](uintptr_t pointer, int rank, uint64_t generation, uintptr_t payload, size_t bytes, int timeout_ms) {
+            return cpu_status_broadcast(
+                reinterpret_cast<void*>(pointer), rank, generation, reinterpret_cast<void*>(payload), bytes, timeout_ms);
+        },
+        py::call_guard<py::gil_scoped_release>());
 
     rtp_ops_m.def("cublas_gemm_bf16_bf16_fp32",
                   &torch_ext::cublas_gemm_bf16_bf16_fp32,

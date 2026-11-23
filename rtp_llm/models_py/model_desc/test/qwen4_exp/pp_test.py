@@ -6,6 +6,9 @@ import torch
 from torch import nn
 
 from rtp_llm.models_py.model_desc import qwen4_exp
+from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
+    MultimodalEmbeddingInjector,
+)
 from rtp_llm.ops import HybridAttentionType
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
 from rtp_llm.utils.model_weight import W
@@ -124,6 +127,30 @@ class Qwen4ExpPPBoundaryTest(unittest.TestCase):
 
         torch.testing.assert_close(output.hidden_states, expected.hidden_states)
 
+    def test_multimodal_embedding_is_injected_before_the_pp_boundary(self):
+        tokens = torch.tensor([1, 3, 5], dtype=torch.int32)
+        features = torch.tensor([[42.0, 43.0]])
+        first = _bare_stage([1, 1], 0)
+        first.embed_tokens = lambda ids, *_: ids.float().unsqueeze(1).repeat(1, 2)
+        first.multimodal_embedding_injector = MultimodalEmbeddingInjector()
+        inputs = _inputs(tokens)
+        mm_inputs = inputs.multimodal_inputs
+        mm_inputs.multimodal_features = [features]
+        mm_inputs.mm_features_locs = torch.tensor([1], dtype=torch.int32)
+        inputs.multimodal_inputs = mm_inputs
+
+        first_output = first._forward_with_ple_prefetch(inputs)
+        expected = torch.tensor([[1.0, 1.0], [42.0, 43.0], [5.0, 5.0]])
+        torch.testing.assert_close(
+            first_output.pp_intermediates["hidden_states"], expected.repeat(1, 2) + 1
+        )
+
+        last = _bare_stage([1, 1], 1)
+        result = last._forward_with_ple_prefetch(
+            _inputs(tokens, first_output.pp_intermediates)
+        )
+        torch.testing.assert_close(result.hidden_states, expected + 3)
+
 
 class Qwen4ExpPPConstructionTest(unittest.TestCase):
     def _output_model(self, counts, rank):
@@ -153,11 +180,41 @@ class Qwen4ExpPPConstructionTest(unittest.TestCase):
             self.assertIsInstance(last.hyper_connection_mixer, _Mixer)
             self.assertEqual(weights.get_global_weight.call_count, 3)
 
-    def test_speculative_pp_with_ple_fails_closed(self):
-        model = self._output_model([2, 2], 0)
+    def test_speculative_pp_rejects_ple_on_a_later_stage(self):
+        model = self._output_model([2, 2], 1)
         model.ple_layers = nn.ModuleDict({"0": nn.Identity()})
-        with self.assertRaisesRegex(RuntimeError, "does not commit PLE"):
+        with self.assertRaisesRegex(
+            RuntimeError, "requires all PLE layers on the first stage"
+        ):
             model.initialize(SimpleNamespace(is_speculative=True))
+
+    def test_pd_pp_bootstraps_ple_writeback_only_on_decode(self):
+        init_resource = SimpleNamespace(is_speculative=True)
+        for role, rank in (("PREFILL", 1), ("DECODE", 0)):
+            with self.subTest(role=role):
+                model = self._output_model([2, 2], rank)
+                model.ple_layers = nn.ModuleDict({"0": nn.Identity()})
+                model.parallelism_config.role_type = role
+                model.parallelism_config.tp_size = 2
+                model._cpu_target_status = None
+                with (
+                    patch.object(qwen4_exp.Qwen35Model, "initialize", return_value=True),
+                    patch(
+                        "rtp_llm.models_py.modules.qwen4_exp.cpu_target_status."
+                        "prepare_cpu_target_status"
+                    ) as prepare,
+                ):
+                    self.assertTrue(model.initialize(init_resource))
+                    if role == "DECODE":
+                        prepare.assert_called_once_with(
+                            model.config,
+                            model.parallelism_config,
+                            broadcast_accept_lengths=True,
+                        )
+                        self.assertIs(model._cpu_target_status, prepare.return_value)
+                    else:
+                        prepare.assert_not_called()
+                        self.assertIsNone(model._cpu_target_status)
 
 
 class Qwen4ExpPPPLEMappingTest(unittest.TestCase):

@@ -31,6 +31,26 @@ class PLETransactionCoordinator:
         self.active_transaction: Optional[_PLETargetTransaction] = None
         self.captured_transactions: dict[int, _PLETargetTransaction] = {}
 
+    def take_pending_commit(self) -> "PLETransactionCoordinator":
+        """Detach this forward's candidates for a later PP commit."""
+        pending = PLETransactionCoordinator(self.ple_layers, self.fault_hook)
+        transaction = self.active_transaction
+        if transaction is not None:
+            # Commit needs only the block tables from each forward's tagged inputs.
+            for stage in transaction.stages.values():
+                stage.state_inputs = self._block_tables(stage.state_inputs)
+                stage.ctx_inputs = self._block_tables(stage.ctx_inputs)
+        pending.active_transaction = transaction
+        self.active_transaction = None
+        return pending
+
+    @staticmethod
+    def _block_tables(inputs):
+        return SimpleNamespace(
+            kv_cache_block_id_device=inputs.kv_cache_block_id_device,
+            kv_cache_block_id=inputs.kv_cache_block_id,
+        )
+
     def close(self) -> None:
         if self.active_transaction is not None:
             self._synchronize_ple_transaction(self.active_transaction)

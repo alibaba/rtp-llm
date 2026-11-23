@@ -1577,20 +1577,22 @@ runPyWrappedModelSpeculativeCommitBridge(py::object py_model, const std::string&
         const auto result = model.reduceSpeculativeTargetPrepareStatus(action == "reduce_true");
         return result.has_value() ? py::object(py::bool_(*result)) : py::object(py::none());
     }
+    auto* commit = model.speculativeTargetCommit();
     if (action == "has_hooks") {
-        return py::bool_(model.hasSpeculativeTargetCommitHooks());
+        return py::bool_(commit != nullptr);
     }
+    RTP_LLM_CHECK_WITH_INFO(commit, "speculative commit bridge action requires a writeback object");
     if (action == "prepare") {
         auto accept_len =
             torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false));
-        return py::str(model.prepareSpeculativeTargetCommit(accept_len));
+        return py::str(commit->prepareSpeculativeTargetCommit(accept_len));
     }
     if (action == "abort") {
-        (void)model.finishSpeculativeTargetCommit(false);
+        (void)commit->finishSpeculativeTargetCommit(false);
         return py::none();
     }
     if (action == "commit") {
-        return py::str(model.finishSpeculativeTargetCommit(true));
+        return py::str(commit->finishSpeculativeTargetCommit(true));
     }
     throw std::invalid_argument("unknown PyWrappedModel speculative commit bridge action: " + action);
 }

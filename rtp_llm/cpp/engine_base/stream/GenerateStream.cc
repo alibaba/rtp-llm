@@ -257,9 +257,9 @@ absl::Status GenerateStream::initKVBlock() {
     return ret;
 }
 
-void GenerateStream::fakeInitKVBlock(size_t reserved_blocks) {
+void GenerateStream::fakeInitKVBlock(size_t reserved_blocks, BlockIdxType block_id) {
     std::lock_guard<std::mutex> lock(*mutex_);
-    stream_cache_resource_->fakeInitKVBlock(reserved_blocks);
+    stream_cache_resource_->fakeInitKVBlock(reserved_blocks, block_id);
 }
 
 absl::Status GenerateStream::incrKVBlock() {

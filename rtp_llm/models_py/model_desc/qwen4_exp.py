@@ -818,7 +818,11 @@ class Qwen4ExpModel(Qwen35Model):
             prepare_cpu_target_status,
         )
 
-        self._cpu_target_status = prepare_cpu_target_status(config, parallelism_config)
+        self._cpu_target_status = (
+            prepare_cpu_target_status(config, parallelism_config)
+            if int(getattr(parallelism_config, "pp_size", 1)) == 1
+            else None
+        )
         from rtp_llm.models_py.modules.qwen4_exp.tp_reduce import (
             install_target_graph_all_reduce,
             prepare_target_reduce,
@@ -920,13 +924,23 @@ class Qwen4ExpModel(Qwen35Model):
         if (
             int(getattr(self.parallelism_config, "pp_size", 1)) > 1
             and bool(init_resource.is_speculative)
-            and bool(self.ple_layers)
-            and not bool(getattr(self.config, "is_mtp", False))
+            and self.requires_speculative_target_commit()
         ):
-            raise RuntimeError(
-                "qwen4_exp PP with speculative decoding is not supported yet: "
-                "the PP executor does not commit PLE target state across stages"
-            )
+            if not self.owns_model_input:
+                raise RuntimeError(
+                    "qwen4_exp PP + MTP requires all PLE layers on the first stage"
+                )
+            if (
+                self.parallelism_config.tp_size > 1
+                and self._cpu_target_status is None
+            ):
+                from rtp_llm.models_py.modules.qwen4_exp.cpu_target_status import (
+                    prepare_cpu_target_status,
+                )
+
+                self._cpu_target_status = prepare_cpu_target_status(
+                    self.config, self.parallelism_config, broadcast_accept_lengths=True
+                )
         initialized = super().initialize(init_resource)
         # The target and the draft both export their wide post-block residual:
         # target -> first draft step, draft -> subsequent draft steps.  Draft
@@ -1161,6 +1175,12 @@ class Qwen4ExpModel(Qwen35Model):
         if status is None:
             raise RuntimeError("CPU target status was not initialized collectively")
         return status.reduce(local_ok)
+
+    def take_speculative_target_commit(self) -> PLETransactionCoordinator:
+        return self._ple_coordinator().take_pending_commit()
+
+    def broadcast_pp_target_accept_lengths(self, accept_lengths: torch.Tensor) -> None:
+        self._cpu_target_status.broadcast(accept_lengths)
 
     def prepare_speculative_target_commit(self, accept_len: torch.Tensor) -> None:
         return self._ple_coordinator().prepare_speculative_target_commit(accept_len)

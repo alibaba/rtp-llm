@@ -376,56 +376,52 @@ public:
         return host_status_reducer ? host_status_reducer(local_ok) : std::nullopt;
     }
 
-    bool hasSpeculativeTargetCommitHooks() const override {
-        return speculative_target_commit_enabled_;
+    SpeculativeTargetCommit* speculativeTargetCommit() const override {
+        return target_commit_.get();
     }
 
-    std::string prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) override {
-        if (!speculative_target_commit_enabled_) {
-            return {};
-        }
-        recordEvent("prepare_target_commit");
-        prepared_accept_len_ = accept_len.cpu().contiguous();
-        if (speculative_target_prepare_throws_) {
-            throw std::runtime_error("injected prepare exception");
-        }
-        return speculative_target_prepare_error_;
-    }
+    struct TargetCommit final: SpeculativeTargetCommit {
+        explicit TargetCommit(FakeModel& model): model(model) {}
 
-    std::string finishSpeculativeTargetCommit(bool commit) override {
-        if (!speculative_target_commit_enabled_) {
-            return {};
+        std::string prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) override {
+            model.recordEvent("prepare_target_commit");
+            model.prepared_accept_len_ = accept_len.cpu().contiguous();
+            if (model.speculative_target_prepare_throws_) {
+                throw std::runtime_error("injected prepare exception");
+            }
+            return model.speculative_target_prepare_error_;
         }
-        recordEvent(commit ? "commit_target" : "abort_target");
-        if (commit) {
-            ++speculative_target_commit_count_;
-            speculative_target_state_committed_ = true;
-            speculative_target_undo_retained_   = true;
-            if (speculative_target_commit_throws_) {
-                throw std::runtime_error("injected commit exception");
+
+        std::string finishSpeculativeTargetCommit(bool commit) override {
+            model.recordEvent(commit ? "commit_target" : "abort_target");
+            if (commit) {
+                ++model.speculative_target_commit_count_;
+                model.speculative_target_state_committed_ = true;
+                model.speculative_target_undo_retained_   = true;
+                if (model.speculative_target_commit_throws_) {
+                    throw std::runtime_error("injected commit exception");
+                }
+            } else {
+                ++model.speculative_target_abort_count_;
+                model.speculative_target_state_committed_ = false;
+                model.speculative_target_undo_retained_   = false;
             }
             return {};
-        } else {
-            ++speculative_target_abort_count_;
-            speculative_target_state_committed_ = false;
-            speculative_target_undo_retained_   = false;
-            return {};
         }
-    }
 
-    std::string finalizeSpeculativeTargetCommit() override {
-        if (!speculative_target_commit_enabled_) {
+        std::string finalizeSpeculativeTargetCommit() override {
+            model.recordEvent("finalize_target");
+            ++model.speculative_target_finalize_count_;
+            model.speculative_target_undo_retained_ = false;
             return {};
         }
-        recordEvent("finalize_target");
-        ++speculative_target_finalize_count_;
-        speculative_target_undo_retained_ = false;
-        return {};
-    }
+
+        FakeModel& model;
+    };
 
     void enableSpeculativeTargetCommit(std::string prepare_error = {}) {
-        speculative_target_commit_enabled_ = true;
-        speculative_target_prepare_error_  = std::move(prepare_error);
+        target_commit_                    = std::make_unique<TargetCommit>(*this);
+        speculative_target_prepare_error_ = std::move(prepare_error);
     }
 
     void setSpeculativeTargetPrepareThrows(bool enabled) {
@@ -656,7 +652,7 @@ private:
     std::shared_ptr<std::vector<std::string>>  event_log_;
     std::string                                event_name_;
     size_t                                     prepare_attention_count_            = 0;
-    bool                                       speculative_target_commit_enabled_  = false;
+    std::unique_ptr<TargetCommit>              target_commit_;
     bool                                       speculative_target_prepare_throws_  = false;
     bool                                       speculative_target_commit_throws_   = false;
     bool                                       speculative_target_state_committed_ = false;

@@ -348,6 +348,46 @@ class Qwen4ExpPLECacheTest(PLERuntimeFixture, TestCase):
         )
         self.model.finalize_speculative_target_commit()
 
+    def test_pp_results_commit_their_own_forward_candidates(self):
+        query_len = 3
+        initial_state, initial_ctx = self._seed_target_history((2, 2))
+        ids = torch.tensor([[4, 5, 6], [8, 9, 10]])
+        hyper = torch.randn(2, query_len, _HC * _HIDDEN, dtype=torch.bfloat16)
+        _, states, contexts = self._target_baseline(
+            hyper, ids, initial_state, initial_ctx
+        )
+
+        pending = []
+        for row in range(2):
+            inputs = self._target_inputs((2,), query_len)
+            for side in inputs.values():
+                side.kv_cache_block_id = side.kv_cache_block_id[row : row + 1]
+                side.kv_cache_block_id_device = side.kv_cache_block_id
+            self.model._apply_ple(1, hyper[row], ids[row], inputs)
+            pending.append(self.model.take_speculative_target_commit())
+
+        # Both forwards finished before A's result arrived. Only A may change.
+        for row, length in enumerate((1, 3)):
+            commit = pending[row]
+            commit.prepare_speculative_target_commit(
+                torch.tensor([length], dtype=torch.int32)
+            )
+            commit.finish_speculative_target_commit(True)
+            commit.finalize_speculative_target_commit()
+            torch.testing.assert_close(
+                self.state_base[self.state_blocks[row, 0]].view_as(states[length - 1][row]),
+                states[length - 1][row],
+            )
+            torch.testing.assert_close(
+                self.ctx_base[self.ctx_blocks[row, 0]], contexts[length - 1][row]
+            )
+            if row == 0:
+                torch.testing.assert_close(
+                    self.state_base[self.state_blocks[1, 0]].view_as(initial_state[1]),
+                    initial_state[1],
+                )
+                torch.testing.assert_close(self.ctx_base[self.ctx_blocks[1, 0]], initial_ctx[1])
+
     def test_target_verify_tentative_commit_can_be_rolled_back_idempotently(self):
         prefixes = (self._PAGE - 1, self._PAGE)
         query_len = 3

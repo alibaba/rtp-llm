@@ -104,18 +104,18 @@ public:
     std::string                waitCacheStorePublication() override;
     HiddenStateCaptureStats    hiddenStateCaptureStats() const;
     std::optional<std::string> takeDeferredHiddenStateCaptureError() override;
-    bool                       hasSpeculativeTargetCommitHooks() const override;
-    std::string                prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) override;
-    std::string                finishSpeculativeTargetCommit(bool commit) override;
-    std::string                finalizeSpeculativeTargetCommit() override;
+    SpeculativeTargetCommit*   speculativeTargetCommit() const override;
+    std::unique_ptr<SpeculativeTargetCommit> takeSpeculativeTargetCommit() override;
     std::optional<bool>        reduceSpeculativeTargetPrepareStatus(bool local_ok) override;
     void                       loadMtpIndexerTopk(const torch::Tensor& topk) override;
     torch::Tensor              snapshotMtpIndexerTopk(int64_t batch_size) override;
+    void                       broadcastPPTargetAcceptLengths(const torch::Tensor& accept_lengths) override;
 
 private:
     friend struct test::PyWrappedModelTestPeer;
 
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
+    void                             initializeSpeculativeTargetCommit();
 
 private:
     // Helper functions to reduce code duplication
@@ -193,7 +193,7 @@ private:
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
     bool use_spec_decoding_{false};
     bool has_mtp_hidden_buffer_{false};
-    bool has_speculative_target_commit_hooks_{false};
+    std::unique_ptr<SpeculativeTargetCommit> speculative_target_commit_;
     bool has_speculative_target_status_reducer_{false};
     bool supports_micro_batch_{false};
     bool synchronize_moe_forward_{false};
@@ -391,27 +391,25 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                 "Python speculative target model must implement prepare_speculative_target_commit and "
                                 "finish_speculative_target_commit as a pair, together with "
                                 "finalize_speculative_target_commit");
-        has_speculative_target_commit_hooks_ =
-            has_prepare_speculative_target_commit
+        if (has_prepare_speculative_target_commit
             && (!py::hasattr(py_model_, "requires_speculative_target_commit")
-                || py_model_.attr("requires_speculative_target_commit")().cast<bool>());
-        if (has_speculative_target_commit_hooks_ && py::hasattr(py_model_, "has_speculative_target_status_reducer")) {
-            has_speculative_target_status_reducer_ =
-                py_model_.attr("has_speculative_target_status_reducer")().cast<bool>();
-            RTP_LLM_CHECK_WITH_INFO(!has_speculative_target_status_reducer_
-                                        || py::hasattr(py_model_, "reduce_speculative_target_prepare_status"),
-                                    "Python target status reducer capability requires its reduce hook");
+                || py_model_.attr("requires_speculative_target_commit")().cast<bool>())) {
+            initializeSpeculativeTargetCommit();
         }
-        if (has_speculative_target_commit_hooks_ && enable_cuda_graph_) {
+        if (speculative_target_commit_ && pp_size_ > 1 && params.parallelism_config.pp_rank == 0) {
+            RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "take_speculative_target_commit"),
+                                    "PP target model must expose its pending commit");
+            RTP_LLM_CHECK_WITH_INFO(params.parallelism_config.tp_size <= 1
+                                        || py::hasattr(py_model_, "broadcast_pp_target_accept_lengths"),
+                                    "PP target model must expose TP acceptance broadcast");
+        }
+        if (speculative_target_commit_ && enable_cuda_graph_) {
             RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "on_cuda_graph_warmup")
                                         && py::hasattr(py_model_, "on_cuda_graph_capture")
                                         && py::hasattr(py_model_, "on_cuda_graph_replay"),
                                     "speculative target CUDA Graph requires capture, save and replay transaction "
                                     "hooks to preserve side-state across graph instances");
         }
-        RTP_LLM_CHECK_WITH_INFO(!has_speculative_target_commit_hooks_ || params.parallelism_config.tp_size <= 1
-                                    || has_speculative_target_status_reducer_,
-                                "speculative target transactions require a CPU TP status reducer");
     }
 
     supports_micro_batch_ = py::hasattr(py_model_, "forward_micro_batch");
@@ -431,6 +429,16 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
         throw;
     }
+    if (speculative_target_commit_ && py::hasattr(py_model_, "has_speculative_target_status_reducer")) {
+        has_speculative_target_status_reducer_ =
+            py_model_.attr("has_speculative_target_status_reducer")().cast<bool>();
+        RTP_LLM_CHECK_WITH_INFO(!has_speculative_target_status_reducer_
+                                    || py::hasattr(py_model_, "reduce_speculative_target_prepare_status"),
+                                "Python target status reducer capability requires its reduce hook");
+    }
+    RTP_LLM_CHECK_WITH_INFO(!speculative_target_commit_ || params.parallelism_config.tp_size <= 1
+                                || has_speculative_target_status_reducer_,
+                            "speculative target transactions require a CPU TP status reducer");
     // Registration enables the handler; only batches with selected prefill rows invoke it.
     if (py::hasattr(py_model_, "custom_output_handler")) {
         initializeCustomOutput();
@@ -713,7 +721,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     // CP output contains only the selected last-token rows, so reject the
     // configuration while initializing the target model if that hand-off is
     // unavailable.
-    if (device_props_.enable_prefill_cp && use_spec_decoding_ && !hasMtpTargetHiddenBuffer()) {
+    if (device_props_.enable_prefill_cp && use_spec_decoding_ && params.parallelism_config.pp_rank == pp_size_ - 1
+        && !hasMtpTargetHiddenBuffer()) {
         RTP_LLM_LOG_ERROR("speculative prefill CP target is missing rank-local MTP hidden handoff");
         throw std::runtime_error(
             "speculative prefill CP requires the target model to provide a rank-local MTP hidden buffer");

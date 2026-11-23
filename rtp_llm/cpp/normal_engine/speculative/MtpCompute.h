@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 
+#include "absl/status/status.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsVerifyRunner.h"
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
@@ -40,6 +41,15 @@ struct AcceptedTokens {
 /** Wait when required by the consumer's transfer contract; materialize missing mirrors only for host consumers. */
 AcceptedTokens getHostAcceptedTokens(const speculative::SpeculativeSamplerOutput& output,
                                      bool                                         wait_for_transfer = true);
+
+/** All target ranks enter with the same device-local acceptance. A failed prepare or commit rolls back. */
+absl::Status commitSpeculativeTargetState(SpeculativeTargetCommit&         target,
+                                          const torch::Tensor&             accept_len,
+                                          const std::function<bool(bool)>& all_ranks_ok);
+
+void rollbackSpeculativeTargetState(SpeculativeTargetCommit&         target,
+                                    const std::function<bool(bool)>& all_ranks_ok,
+                                    const char*                      phase);
 
 enum class DraftInputLayout {
     COMPACT,     /** Pack valid rows; input_lengths holds their counts. */

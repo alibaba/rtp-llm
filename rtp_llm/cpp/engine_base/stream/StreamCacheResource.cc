@@ -1007,7 +1007,7 @@ const CacheKeysType& StreamCacheResource::cacheKeys(int32_t batch_id) const {
     return batch_kv_cache_resource_->cacheKeys(batch_id);
 }
 
-void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
+void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks, BlockIdxType block_id) {
     fake_inited_ = true;
     batch_kv_cache_resource_->resetBatchSize(stream_->maxBatchSize());
     const auto topology = resource_context_.cache_manager ?
@@ -1016,7 +1016,7 @@ void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
     batch_kv_cache_resource_->initGroups(topology);
 
     reserved_blocks = std::max(1ul, reserved_blocks);
-    batch_kv_cache_resource_->resizeBlocks(reserved_blocks, 0);
+    batch_kv_cache_resource_->resizeBlocks(reserved_blocks, block_id);
 }
 
 int StreamCacheResource::mallocFailedTimes() const {

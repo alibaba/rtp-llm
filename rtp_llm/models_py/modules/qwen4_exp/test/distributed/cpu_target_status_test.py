@@ -7,10 +7,12 @@ import tempfile
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
@@ -106,6 +108,71 @@ def _gloo_policy_worker(rank, store):
             assert "closed" in str(error)
         else:
             raise AssertionError("closed CPU transport accepted a phase")
+    dist.destroy_process_group()
+
+
+def _pp_accept_worker(rank, store):
+    dist.init_process_group(
+        "gloo",
+        init_method="file://" + store,
+        rank=rank,
+        world_size=4,
+        timeout=datetime.timedelta(seconds=30),
+    )
+    tp_group = dist.new_group([0, 1])
+    # The PP result group is registered on TP0 only, as in PP2 x TP2.
+    dist.new_group([0, 2])
+    if rank < 2:
+        for remote in (False, True):
+            hostname = f"worker-{rank}" if remote else "one-host"
+            gloo_factory = (
+                contextlib.nullcontext()
+                if remote
+                else patch.object(
+                    policy,
+                    "_new_cpu_tp_control_group",
+                    side_effect=AssertionError("same-host TP must not create Gloo"),
+                )
+            )
+            with (
+                gloo_factory,
+                patch(
+                    "rtp_llm.models_py.distributed.collective_torch._get_group",
+                    return_value=tp_group,
+                ),
+                patch.object(policy.socket, "gethostname", return_value=hostname),
+            ):
+                owner = policy.prepare_cpu_target_status(
+                    SimpleNamespace(is_mtp=False, enable_qwen4_ple=True),
+                    SimpleNamespace(role_type="PDFUSION", tp_size=2),
+                    broadcast_accept_lengths=True,
+                )
+            assert isinstance(
+                owner, policy._GlooTargetStatus if remote else status.CpuTpStatus
+            )
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                for size in (2, 2 * mmap.PAGESIZE, 1):
+                    expected = torch.arange(size, dtype=torch.int32)
+                    lengths = expected.clone() if rank == 0 else torch.empty_like(expected)
+                    model_input = torch.tensor([12, 23] if rank == 0 else [0, 0])
+                    # Enter acceptance and input synchronization in opposite order.
+                    if rank == 0:
+                        broadcast = pool.submit(owner.broadcast, lengths)
+                        dist.broadcast(model_input, src=0, group=tp_group)
+                        broadcast.result(timeout=10)
+                    else:
+                        work = dist.broadcast(
+                            model_input, src=0, group=tp_group, async_op=True
+                        )
+                        owner.broadcast(lengths)
+                        work.wait()
+                    assert torch.equal(lengths, expected)
+                    assert model_input.tolist() == [12, 23]
+                    assert owner.reduce(True)
+                    assert not owner.reduce(rank == 0)
+                    assert owner.reduce(True)
+            owner.close()
+    dist.barrier()
     dist.destroy_process_group()
 
 
@@ -263,6 +330,12 @@ class CpuTargetStatusTest(unittest.TestCase):
                 args=(str(Path(root) / "store"),),
                 nprocs=2,
                 join=True,
+            )
+
+    def test_pp_acceptance_is_independent_of_tp_input_order(self):
+        with tempfile.TemporaryDirectory() as root:
+            mp.spawn(
+                _pp_accept_worker, args=(str(Path(root) / "store"),), nprocs=4, join=True
             )
 
     def test_collective_startup_generations_restart_and_peer_failure(self):

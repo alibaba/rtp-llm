@@ -260,15 +260,14 @@ speculative::SpeculativeSamplingParams gatherSpeculativeSamplingParams(const std
 
 class SpeculativeTargetCommitGuard {
 public:
-    explicit SpeculativeTargetCommitGuard(ModelBase* model):
-        model_(model), armed_(model_ != nullptr && model_->hasSpeculativeTargetCommitHooks()) {}
+    explicit SpeculativeTargetCommitGuard(SpeculativeTargetCommit* commit): commit_(commit) {}
 
     ~SpeculativeTargetCommitGuard() {
-        if (!armed_) {
+        if (!commit_) {
             return;
         }
         try {
-            const std::string error = model_->finishSpeculativeTargetCommit(false);
+            const std::string error = commit_->finishSpeculativeTargetCommit(false);
             if (!error.empty()) {
                 RTP_LLM_LOG_ERROR("failed to abort speculative target side-state transaction: %s", error.c_str());
                 std::terminate();
@@ -283,12 +282,11 @@ public:
     }
 
     void dismiss() {
-        armed_ = false;
+        commit_ = nullptr;
     }
 
 private:
-    ModelBase* model_ = nullptr;
-    bool       armed_ = false;
+    SpeculativeTargetCommit* commit_;
 };
 
 }  // namespace
@@ -1753,7 +1751,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     // preparation can overlap target verification just like ordinary MTP.
     launchDraftPrefillPrepareAsync(model_input);
 
-    SpeculativeTargetCommitGuard target_commit_guard(model_.get());
+    SpeculativeTargetCommitGuard target_commit_guard(model_ ? model_->speculativeTargetCommit() : nullptr);
 
     {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -1922,7 +1920,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     };
 
     absl::Status local_sampling_status;
-    if (model_ != nullptr && model_->hasSpeculativeTargetCommitHooks()) {
+    if (speculativeTargetTransactionsEnabled()) {
         try {
             local_sampling_status = run_sampling_and_cap();
         } catch (const std::exception& e) {
@@ -2355,7 +2353,7 @@ absl::Status MtpExecutor::validateSpeculativeTargetExecutionPolicy(bool target_c
 }
 
 bool MtpExecutor::speculativeTargetTransactionsEnabled() const {
-    return model_ != nullptr && model_->hasSpeculativeTargetCommitHooks();
+    return model_ && model_->speculativeTargetCommit();
 }
 
 bool MtpExecutor::reduceSpeculativeTargetPrepareStatus(bool local_ok) {
@@ -2377,28 +2375,13 @@ bool MtpExecutor::reduceSpeculativeTargetPrepareStatus(bool local_ok) {
 }
 
 void MtpExecutor::rollbackSpeculativeTargetStateOrFailStop(const char* phase) {
-    std::string local_rollback_error;
-    try {
-        local_rollback_error = model_->finishSpeculativeTargetCommit(false);
-    } catch (const std::exception& e) {
-        local_rollback_error = std::string("rollback threw: ") + e.what();
-    } catch (...) {
-        local_rollback_error = "rollback threw an unknown exception";
-    }
-    const bool global_rollback_ok = reduceSpeculativeTargetPrepareStatus(local_rollback_error.empty());
-    if (!global_rollback_ok) {
-        RTP_LLM_LOG_ERROR("speculative target rollback after %s failed on at least one TP rank; local error: %s",
-                          phase,
-                          local_rollback_error.c_str());
-        // Persistent side state may now differ across ranks. Continuing would
-        // expose a partial commit to later decode cycles.
-        std::terminate();
-    }
+    mtp::rollbackSpeculativeTargetState(
+        *model_->speculativeTargetCommit(), [this](bool ok) { return reduceSpeculativeTargetPrepareStatus(ok); }, phase);
 }
 
 void MtpExecutor::rollbackSpeculativeTargetStateBestEffort(const char* phase) noexcept {
     try {
-        const auto error = model_->finishSpeculativeTargetCommit(false);
+        const auto error = model_->speculativeTargetCommit()->finishSpeculativeTargetCommit(false);
         if (!error.empty()) {
             RTP_LLM_LOG_ERROR("speculative target best-effort rollback after %s failed: %s", phase, error.c_str());
         }
@@ -2433,7 +2416,8 @@ absl::Status MtpExecutor::rendezvousSpeculativeTargetSamplingStatus(const absl::
 
 absl::Status
 MtpExecutor::prepareAndCommitSpeculativeTargetState(torch::Tensor& accept_len, size_t batch_size, bool is_fake_stream) {
-    if (model_ == nullptr || !model_->hasSpeculativeTargetCommitHooks()) {
+    auto* commit = model_ ? model_->speculativeTargetCommit() : nullptr;
+    if (!commit) {
         return absl::OkStatus();
     }
     if (is_fake_stream) {
@@ -2491,66 +2475,8 @@ MtpExecutor::prepareAndCommitSpeculativeTargetState(torch::Tensor& accept_len, s
         execBroadcast({{accept_len}, 0});
     }
 
-    std::string local_error;
-    try {
-        local_error = model_->prepareSpeculativeTargetCommit(accept_len);
-    } catch (const std::exception& e) {
-        RTP_LLM_LOG_ERROR("speculative target commit prepare threw on TP rank %d: %s", tp_rank_, e.what());
-        local_error = std::string("prepare threw: ") + e.what();
-    } catch (...) {
-        RTP_LLM_LOG_ERROR("speculative target commit prepare threw on TP rank %d: unknown exception", tp_rank_);
-        local_error = "prepare threw an unknown exception";
-    }
-    // A local native-model exception must not skip the one status reduction
-    // that every TP rank enters for this verification step.
-    const bool global_ok = reduceSpeculativeTargetPrepareStatus(local_error.empty());
-    if (!global_ok) {
-        rollbackSpeculativeTargetStateOrFailStop("prepare");
-        std::string message = "speculative target side-state commit prepare failed on at least one TP rank";
-        if (!local_error.empty()) {
-            message += "; local error: " + local_error;
-        }
-        return absl::InternalError(message);
-    }
-
-    // Commit is tentative until every rank reports success. Implementations
-    // retain their originals so a peer failure can roll this rank back.
-    std::string local_commit_error;
-    try {
-        local_commit_error = model_->finishSpeculativeTargetCommit(true);
-    } catch (const std::exception& e) {
-        local_commit_error = std::string("commit threw: ") + e.what();
-    } catch (...) {
-        local_commit_error = "commit threw an unknown exception";
-    }
-    const bool global_commit_ok = reduceSpeculativeTargetPrepareStatus(local_commit_error.empty());
-    if (!global_commit_ok) {
-        rollbackSpeculativeTargetStateOrFailStop("commit");
-        std::string message = "speculative target side-state commit failed on at least one TP rank";
-        if (!local_commit_error.empty()) {
-            message += "; local error: " + local_commit_error;
-        }
-        return absl::InternalError(message);
-    }
-
-    std::string local_finalize_error;
-    try {
-        local_finalize_error = model_->finalizeSpeculativeTargetCommit();
-    } catch (const std::exception& e) {
-        local_finalize_error = std::string("finalize threw: ") + e.what();
-    } catch (...) {
-        local_finalize_error = "finalize threw an unknown exception";
-    }
-    const bool global_finalize_ok = reduceSpeculativeTargetPrepareStatus(local_finalize_error.empty());
-    if (!global_finalize_ok) {
-        RTP_LLM_LOG_ERROR("speculative target finalize failed on at least one TP rank; local error: %s",
-                          local_finalize_error.c_str());
-        // Commit was globally successful, so rollback is no longer legal;
-        // fail-stop all ranks after consensus instead of entering another
-        // transaction with an ambiguous retained undo log.
-        std::terminate();
-    }
-    return absl::OkStatus();
+    return mtp::commitSpeculativeTargetState(
+        *commit, accept_len, [this](bool ok) { return reduceSpeculativeTargetPrepareStatus(ok); });
 }
 
 SpecLogitsVerifyRunner::LaunchResult

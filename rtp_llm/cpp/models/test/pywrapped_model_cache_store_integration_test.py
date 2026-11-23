@@ -1527,26 +1527,25 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "status transport poisoned"):
             run_speculative_commit_bridge(model, "reduce_true")
 
-    def test_speculative_commit_prepare_exception_becomes_error(self) -> None:
+    def test_speculative_commit_prepare_exception_propagates(self) -> None:
         model = SpeculativeCommitBridgeModel(prepare_error=True)
 
         self.assertTrue(run_speculative_commit_bridge(model, "has_hooks"))
-        error = run_speculative_commit_bridge(model, "prepare")
+        with self.assertRaisesRegex(RuntimeError, "prepare bridge boom"):
+            run_speculative_commit_bridge(model, "prepare")
 
-        self.assertIn("prepare bridge boom", error)
-
-    def test_speculative_commit_abort_exception_does_not_escape(self) -> None:
+    def test_speculative_commit_abort_exception_propagates(self) -> None:
         model = SpeculativeCommitBridgeModel(abort_error=True)
 
-        self.assertIsNone(run_speculative_commit_bridge(model, "abort"))
+        with self.assertRaisesRegex(RuntimeError, "abort bridge boom"):
+            run_speculative_commit_bridge(model, "abort")
         self.assertEqual(model.finish_calls, [False])
 
-    def test_speculative_commit_exception_becomes_error(self) -> None:
+    def test_speculative_commit_exception_propagates(self) -> None:
         model = SpeculativeCommitBridgeModel(commit_error=True)
 
-        error = run_speculative_commit_bridge(model, "commit")
-
-        self.assertIn("commit bridge boom", error)
+        with self.assertRaisesRegex(RuntimeError, "commit bridge boom"):
+            run_speculative_commit_bridge(model, "commit")
         self.assertEqual(model.finish_calls, [True])
 
     def test_non_target_wrapper_ignores_speculative_commit_hooks(self) -> None:

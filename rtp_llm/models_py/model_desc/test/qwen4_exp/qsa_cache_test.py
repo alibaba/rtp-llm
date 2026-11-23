@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from unittest import TestCase, main, skipUnless
 from unittest.mock import patch
+from weakref import ref
 
 import torch
 
@@ -11,6 +12,9 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
 )
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_selection import (
     select_qsa_paged_tokens,
+)
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.step_metadata import (
+    cached_text_rope,
 )
 from rtp_llm.models_py.model_desc.test.qwen4_exp.qsa_fixtures import QSARuntimeFixture
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
@@ -136,6 +140,31 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
         values.add_(1)
         next_step = SimpleNamespace(metadata_cache={})
         self.assertEqual(host_values(next_step, values), [2, 3])
+
+    def test_text_rope_cache_keeps_position_storage_alive(self):
+        context = SimpleNamespace(metadata_cache={})
+        positions = torch.arange(1951, 1955)
+        options = dict(
+            token_count=positions.numel(), dtype=torch.bfloat16, device=positions.device
+        )
+        rope = cached_text_rope(
+            context, positions, self.rope_config, self.indexer, **options
+        )
+        self.assertIs(
+            cached_text_rope(
+                context,
+                positions.view_as(positions),
+                self.rope_config,
+                self.indexer,
+                **options,
+            ),
+            rope,
+        )
+        position_ref = ref(positions)
+        del positions
+        self.assertIsNotNone(position_ref())
+        context.metadata_cache.clear()
+        self.assertIsNone(position_ref())
 
     def test_batched_state_preflight_reads_fresh_values_before_any_write(self):
         context = self._draft_incremental_context(

@@ -13,6 +13,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -201,6 +202,18 @@ std::vector<int64_t> decodeKvBlockTableShape(int64_t rank, int64_t group_num, in
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);
 
+class SpeculativeTargetCommit {
+public:
+    virtual ~SpeculativeTargetCommit() = default;
+
+    // Select accepted candidates and retain undo state before writing.
+    virtual std::string prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) = 0;
+    // Apply the write, or discard/rollback it on failure.
+    virtual std::string finishSpeculativeTargetCommit(bool commit) = 0;
+    // Release undo state once every TP rank has committed.
+    virtual std::string finalizeSpeculativeTargetCommit() = 0;
+};
+
 class ModelBase {
 public:
     virtual ~ModelBase() = default;
@@ -226,17 +239,9 @@ public:
         return {};
     }
 
-    // Optional target-verify side-state transaction. Models that stage
-    // recurrent/side-cache candidates during speculative target verification
-    // opt in here. The prepare phase must validate and select the accepted
-    // candidates without mutating persistent cache pools. Once every TP rank
-    // has prepared successfully, finish(true) tentatively applies that
-    // prevalidated plan while retaining enough original state for rollback.
-    // finish(false) discards an uncommitted plan or rolls back a tentative
-    // commit and must be idempotent. Both finish paths report errors instead
-    // of throwing so every TP rank can reach the same status rendezvous.
-    virtual bool hasSpeculativeTargetCommitHooks() const {
-        return false;
+    // Model-owned writeback for the current target verification, if supported.
+    virtual SpeculativeTargetCommit* speculativeTargetCommit() const {
+        return nullptr;
     }
 
     // Optional host consensus, selected collectively at model startup. nullopt
@@ -244,21 +249,6 @@ public:
     // fail-stop and must propagate; asymmetric fallback is forbidden.
     virtual std::optional<bool> reduceSpeculativeTargetPrepareStatus(bool /*local_ok*/) {
         return std::nullopt;
-    }
-
-    virtual std::string prepareSpeculativeTargetCommit(const torch::Tensor& /*accept_len*/) {
-        return {};
-    }
-
-    virtual std::string finishSpeculativeTargetCommit(bool /*commit*/) {
-        return {};
-    }
-
-    // Called only after every TP rank has tentatively committed. This releases
-    // the retained originals/undo log without changing the committed state.
-    // A finalize error is fail-stop because rollback is no longer legal.
-    virtual std::string finalizeSpeculativeTargetCommit() {
-        return {};
     }
 
     // Optional spec-decode hand-off: target model exposes the pre-output-projection
@@ -295,6 +285,15 @@ public:
     // written row count.
     virtual torch::Tensor getMtpLastHiddenStates(int64_t /*num_tokens*/) {
         return torch::Tensor();
+    }
+
+    // Transfer this forward's candidates to its PP task if writeback is enabled.
+    virtual std::unique_ptr<SpeculativeTargetCommit> takeSpeculativeTargetCommit() {
+        return nullptr;
+    }
+
+    virtual void broadcastPPTargetAcceptLengths(const torch::Tensor& /*accept_lengths*/) {
+        throw std::logic_error("target model does not support PP acceptance broadcast");
     }
 
     rtp_llm::Weights            weights_;

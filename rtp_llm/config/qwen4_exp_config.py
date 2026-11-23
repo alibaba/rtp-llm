@@ -231,12 +231,13 @@ def resolve_qwen4_parallelism(config, parallelism):
     cp = resolved.prefill_cp_config
     if (
         resolved.dp_size != 1
-        or resolved.pp_size != 1
-        or resolved.world_size != resolved.tp_size
+        or resolved.world_size != resolved.pp_size * resolved.tp_size
         or cp.is_enabled()
         or cp.is_prefill_enabled()
     ):
-        raise ValueError("Qwen4 NVFP4 requires pure TP or pure EP without DP/PP/CP")
+        raise ValueError(
+            "Qwen4 NVFP4 requires pure TP or pure EP per PP stage without DP/CP"
+        )
     if resolved.ep_size == 1 and resolved.tp_size in (1, 2):
         resolved.ffn_tp_size = resolved.tp_size
         resolved.ffn_tp_rank = resolved.tp_rank
