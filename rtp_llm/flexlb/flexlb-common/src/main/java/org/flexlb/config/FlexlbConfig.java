@@ -125,8 +125,7 @@ public final class FlexlbConfig {
     }
 
     /**
-     * Sets serving executor capacities and the quiet-period duration in milliseconds used during
-     * shutdown.
+     * Sets serving executor capacities, shutdown timing, and HTTP/2 keepalive policy.
      */
     @Getter
     @Setter
@@ -137,5 +136,8 @@ public final class FlexlbConfig {
 
         /** 静默时间：下线后每次 Schedule 到达重新计时，期满后等待已接收 RPC 完成。 */
         private long shutdownQuietPeriodMs = 5_000L;
+
+        private long permitKeepAliveTimeMs = 30_000L;
+        private boolean permitKeepAliveWithoutCalls = true;
     }
 }
