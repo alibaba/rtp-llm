@@ -375,16 +375,14 @@ Engine received→waiting 和 waiting→running 使用 WorkerStatus 中 Engine �
 完成任务的时间戳完整时，无需在轮询中逐个观察到这些阶段。
 
 gRPC 服务端执行器与批次发送执行器初始化后立即通过 `FlexMonitor` 上报一次状态，之后每 2 秒上报忙碌线程数、总线程数和
-排队任务数；gRPC 服务端另报最大线程数、累计拒绝任务数。它们与其它线程池使用相同的
+排队任务数；gRPC 服务端另报最大线程数和在提交线程执行的累计回调数。它们与其它线程池使用相同的
 provider：KMonitor 部署上报 `whale-lb.grpc.server.executor.*` 和
 `whale-lb.dispatch.executor.*`，无需单独接入 Micrometer 采集。
 忙碌线程、排队数、总线程数、最大线程数使用 GAUGE，scrape 读取最近一次上报的快照，
 最多滞后 2 秒；不能用这些快照捕获短于采样间隔的峰值。瞬时指标保留原名。
-拒绝任务数使用 `grpc.server.executor.caller.runs` COUNTER。每次拒绝发生时直接上报 1，
-由监控 provider 累加，不维护本地累计值或上次上报位置。初始化及每 2 秒上报 0，
-使没有拒绝事件时指标仍可查询；零上报不增加计数。Master 重启后计数重新开始。拒绝数包含队列或线程饱和、
-线程池关闭后提交触发的拒绝。保留 `grpc.server.executor.caller.runs` 上报名，
-面板显示“任务拒绝数”，使用 `increase(...[1m])` 查看窗口拒绝数。
+线程池饱和或关闭时，gRPC 回调在提交线程继续执行，以便完成已有 RPC 的收尾。
+新 RPC 在队列满时返回 `RESOURCE_EXHAUSTED`。每次回退到提交线程时，服务端向
+`grpc.server.executor.caller.runs` 上报 1。初始化及每 2 秒上报 0，Master 重启后计数重新开始。
 已初始化的空闲线程池持续上报忙碌线程数和排队任务数为 0，总线程数仍包含空闲线程。
 
 `JvmGcMetricsReporter` 接收 JVM 的 GC 通知，每次记录一次回收和本次暂停毫秒数，
