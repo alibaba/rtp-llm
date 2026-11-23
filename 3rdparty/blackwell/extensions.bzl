@@ -71,7 +71,7 @@ def _extensions_impl(ctx):
     for name, src in BLACKWELL_SOURCES.items():
         pins[name] = {"repository": src.repository, "commit": src.commit, "sha256": src.sha256}
     pins["cuda_extension"] = {"repository": "foundation_models/cuda_extension", "commit": CUDA_EXTENSION.commit}
-    pins["elfutils"] = {"version": ELFUTILS.version, "sha256": ELFUTILS.sha256}
+    pins["elfutils"] = {"repository": ELFUTILS.repository, "commit": ELFUTILS.commit, "sha256": ELFUTILS.sha256}
     args.add("--pins", json.encode(pins))
     ctx.actions.run(
         executable = builder,

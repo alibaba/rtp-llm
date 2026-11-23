@@ -35,7 +35,7 @@ BLACKWELL_SOURCES = {
         repository = "deepseek-ai/FlashMLA",
         commit = "0f11e178da1f67becb087a324b400854931ec3e3",
         sha256 = "e94fe4a1844d8f6a551d78ce390de51c95e2b4e3e2d5d690c3e49dde9d6baa10",
-        srcs = ["csrc/api/common.h", "csrc/api/device_stream.h", "csrc/cuda_kernels/**", "csrc/3rdparty/kerutils/include/**", "csrc/*.h"],
+        srcs = ["csrc/api/common.h", "csrc/cuda_kernels/**", "csrc/3rdparty/kerutils/include/**", "csrc/*.h"],
     ),
     "fmt": struct(
         repository = "fmtlib/fmt",
@@ -45,9 +45,11 @@ BLACKWELL_SOURCES = {
     ),
 }
 
+# Git mirror of the Sourceware elfutils-0.191 tag, available to build workers.
 ELFUTILS = struct(
-    version = "0.191",
-    sha256 = "df76db71366d1d708365fc7a6c60ca48398f14367eb2b8954efc8897147ad871",
+    repository = "sailfishos-mirror/elfutils",
+    commit = "18a015c0b0787ba5acb39801ab7c17dac50f584d",
+    sha256 = "cf08bb76105161967f83225a20cee3e82c81839e07065ff10450cee8a2327aaf",
 )
 
 _ELFUTILS_BUILD = '''exports_files([
@@ -105,9 +107,13 @@ def blackwell_repositories():
     )
     http_archive(
         name = "rtp_blackwell_elfutils",
-        urls = ["https://sourceware.org/elfutils/ftp/{0}/elfutils-{0}.tar.bz2".format(ELFUTILS.version)],
+        urls = [
+            "https://codeload.github.com/{}/tar.gz/{}".format(ELFUTILS.repository, ELFUTILS.commit),
+            "https://github.com/{}/archive/{}.tar.gz".format(ELFUTILS.repository, ELFUTILS.commit),
+        ],
+        type = "tar.gz",
         sha256 = ELFUTILS.sha256,
-        strip_prefix = "elfutils-" + ELFUTILS.version,
+        strip_prefix = "elfutils-" + ELFUTILS.commit,
         build_file_content = _ELFUTILS_BUILD,
     )
     for name, source in BLACKWELL_SOURCES.items():
