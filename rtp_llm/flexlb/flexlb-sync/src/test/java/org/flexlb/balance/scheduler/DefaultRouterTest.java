@@ -537,7 +537,7 @@ class DefaultRouterTest {
         DefaultRouter router = router();
         BalanceContext context = context(111L);
         when(prefillSelector.select(context, RoleType.PREFILL, null))
-                .thenReturn(PlacementResult.blocked(RoleType.DECODE));
+                .thenReturn(PlacementResult.blocked(PlacementKey.anyGroup(RoleType.DECODE)));
 
         PlacementResult<RouteAdmission, PlacementKey> blocked = router.select(context);
         assertEquals(PlacementResult.Status.BLOCKED, blocked.status());
@@ -759,7 +759,16 @@ class DefaultRouterTest {
             PlacementResult<SelectedRole, RoleType> result) {
         switch (role) {
             case PREFILL, PDFUSION ->
-                    when(prefillSelector.select(context, role, group)).thenReturn(result);
+                    when(prefillSelector.select(context, role, group))
+                            .thenReturn(
+                                    new PlacementResult<>(
+                                            result.status(),
+                                            result.value(),
+                                            result.failure(),
+                                            result.blocker() == null
+                                                    ? null
+                                                    : new PlacementKey(result.blocker(), group),
+                                            result.diagnostics()));
             case DECODE ->
                     when(decodeSelector.select(context, DecodeBinding.capture(context), group))
                             .thenReturn(result);

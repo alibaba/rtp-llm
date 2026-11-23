@@ -416,7 +416,6 @@ public final class RouteProjection {
             WorkSnapshot work,
             long ownershipVersion,
             QueuePrefixCache prefixCache) {
-
         public Inputs(QueueSnapshot queue, WorkSnapshot work, long ownershipVersion) {
             this(queue, work, ownershipVersion, new QueuePrefixCache());
         }
@@ -435,6 +434,30 @@ public final class RouteProjection {
             if (ownershipVersion < 0L) {
                 throw new IllegalArgumentException("ownershipVersion must be non-negative");
             }
+        }
+
+        /**
+         * Estimate routing cost without treating temporary Prefill pressure as a slower engine.
+         * The actual worker still uses its live queue and admission limits at delivery.
+         */
+        public Inputs forBlockedRoutingRank() {
+            var limits = queue.constraints();
+            var rankingLimits =
+                    new GroupPlanner.Constraints(
+                            limits.maxRequests(),
+                            limits.batchTokenCapacity(),
+                            Long.MAX_VALUE,
+                            limits.predictedExecutionBudgetMs(),
+                            limits.collectionWindowMs());
+            var rankingQueue =
+                    new QueueSnapshot(
+                            queue.capturedAtMs(),
+                            queue.queueScheduling(),
+                            queue.ordering(),
+                            rankingLimits,
+                            queue.activeItems(),
+                            null);
+            return new Inputs(rankingQueue, work, ownershipVersion, null);
         }
     }
 
