@@ -543,6 +543,9 @@ py_library(
         "//rtp_llm/libs:librtp_compute_ops_so",
         "//rtp_llm/libs:libth_transformer_config_so",
     ],
+    # These are top-level Python extensions, not rtp_llm.libs submodules.
+    # A direct kernel import must work before rtp_llm.ops initializes sys.path.
+    imports = ["../libs"],
     deps = [
         ":models",
         ":new_loader_core",
@@ -962,6 +965,7 @@ py_test(
     srcs = [
         "new_models/qwen_service_vision.py",
         "new_models/qwen_service_vision_test.py",
+        "new_models/qwen_visual_namespace.py",
     ],
     main = "new_models/qwen_service_vision_test.py",
     env = {

@@ -36,6 +36,7 @@ py_test(
         "//rtp_llm/models_py:new_weight_loader",
         "//rtp_llm/models_py/distributed:collective_torch",
     ],
+    env = {"GPU_COUNT": "2"},
     tags = ["H20_CU13"],
     exec_properties = {"gpu": "H20_CU13", "gpu_count": "2"},
 )
