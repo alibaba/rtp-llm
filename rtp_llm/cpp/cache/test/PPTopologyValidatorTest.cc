@@ -507,13 +507,16 @@ TEST(PPTopologyValidatorTest, PrefillLinearQuotaIsNegotiatedAcrossStageBudgets) 
     first.block_tree.disk_budget_bytes = 30 * 4096;
     second.block_tree.host_budget_bytes = 12 * 4096;
     second.block_tree.disk_budget_bytes = 21 * 4096;
-    first.block_tree.linear_ratio = {4, 1};
-    second.block_tree.linear_ratio = {4, 1};
+    first.block_tree.linear_request = {64, 1, 8};
+    second.block_tree.linear_request = {64, 1, 0};
 
-    const auto decoded = StageCacheSnapshot::deserialize(second.serialize());
-    EXPECT_EQ(decoded.block_tree.linear_ratio.full_pages, 4u);
-    EXPECT_EQ(decoded.block_tree.linear_ratio.linear_states, 1u);
-    const auto result = validatePPTopology({first, decoded});
+    const auto decoded_first = StageCacheSnapshot::deserialize(first.serialize());
+    const auto decoded_second = StageCacheSnapshot::deserialize(second.serialize());
+    EXPECT_EQ(decoded_first.block_tree.linear_request.full_page_tokens, 8u);
+    EXPECT_EQ(decoded_second.block_tree.linear_request.prompt_tokens, 64);
+    EXPECT_EQ(decoded_second.block_tree.linear_request.reuse_tail_blocks, 1);
+    EXPECT_EQ(decoded_second.block_tree.linear_request.full_page_tokens, 0u);
+    const auto result = validatePPTopology({decoded_first, decoded_second});
     ASSERT_TRUE(result.ok) << result.error;
     EXPECT_EQ(result.agreed.block_tree.host.at(CacheGroupType::FULL), 9u);
     EXPECT_EQ(result.agreed.block_tree.host.at(CacheGroupType::LINEAR), 3u);
@@ -522,13 +525,77 @@ TEST(PPTopologyValidatorTest, PrefillLinearQuotaIsNegotiatedAcrossStageBudgets) 
 
     EXPECT_THROW(StageCacheSnapshot::deserialize(second.serialize() + "|extra"), std::exception);
     const auto legacy = StageCacheSnapshot::deserialize(makeHybridSnapshot(100, 25).serialize());
-    EXPECT_EQ(legacy.block_tree.linear_ratio.full_pages, 0u);
-    EXPECT_EQ(legacy.block_tree.linear_ratio.linear_states, 0u);
+    EXPECT_EQ(legacy.block_tree.linear_request.prompt_tokens, -1);
+    EXPECT_EQ(legacy.block_tree.linear_request.full_page_tokens, 0u);
 
-    second.block_tree.linear_ratio = {5, 1};
+    second.block_tree.linear_request.prompt_tokens = 80;
     const auto mismatch = validatePPTopology({first, second});
     EXPECT_FALSE(mismatch.ok);
     EXPECT_NE(mismatch.error.find("LINEAR pool ratio"), std::string::npos);
+}
+
+TEST(PPTopologyValidatorTest, FullOnlyStageLimitsTheSharedLinearQuota) {
+    auto first = makeHybridSnapshot(100, 25);
+    auto second = makeFullSnapshot(80, 4, 2);
+    first.block_tree.host_budget_bytes = 15 * 4096;
+    first.block_tree.disk_budget_bytes = 30 * 4096;
+    second.block_tree.host_budget_bytes = 6 * 4096;
+    second.block_tree.disk_budget_bytes = 14 * 4096;
+    first.block_tree.linear_request = {64, 1, 8};
+    second.block_tree.linear_request = {64, 1, 0};
+
+    const auto result = validatePPTopology({first, second});
+    ASSERT_TRUE(result.ok) << result.error;
+    EXPECT_EQ(result.agreed.block_tree.host.at(CacheGroupType::FULL), 6u);
+    EXPECT_EQ(result.agreed.block_tree.host.at(CacheGroupType::LINEAR), 3u);
+    EXPECT_EQ(result.agreed.block_tree.disk.at(CacheGroupType::FULL), 14u);
+    EXPECT_EQ(result.agreed.block_tree.disk.at(CacheGroupType::LINEAR), 5u);
+}
+
+TEST(PPTopologyValidatorTest, LinearOnlyStageLimitsTheSharedFullQuota) {
+    auto first = makeHybridSnapshot(100, 25);
+    auto second = first;
+    second.groups.erase(second.groups.begin());
+    second.block_tree.group_sets.erase(second.block_tree.group_sets.begin());
+    first.block_tree.host_budget_bytes = 15 * 4096;
+    second.block_tree.host_budget_bytes = 2 * 4096;
+    first.block_tree.linear_request = {64, 1, 8};
+    second.block_tree.linear_request = {64, 1, 0};
+
+    const auto result = validatePPTopology({first, second});
+    ASSERT_TRUE(result.ok) << result.error;
+    EXPECT_EQ(result.agreed.block_tree.host.at(CacheGroupType::FULL), 5u);
+    EXPECT_EQ(result.agreed.block_tree.host.at(CacheGroupType::LINEAR), 2u);
+}
+
+TEST(PPTopologyValidatorTest, UnsupportedLeadingStageRejectsQuotaAfterExchange) {
+    auto first = makeFullSnapshot(100);
+    auto second = makeFullSnapshot(80);
+    first.block_tree.host_budget_bytes = 10 * 4096;
+    second.block_tree.host_budget_bytes = 10 * 4096;
+    first.block_tree.linear_request = {64, 1, 0};
+    second.block_tree.linear_request = {64, 1, 0};
+
+    const auto local_first = StageCacheSnapshot::deserialize(first.serialize());
+    const auto local_second = StageCacheSnapshot::deserialize(second.serialize());
+    const auto rejected = validatePPTopology({local_first, local_second});
+    ASSERT_FALSE(rejected.ok);
+    EXPECT_NE(rejected.error.find("stage 0 lower-tier LINEAR pool ratio"), std::string::npos);
+    EXPECT_NE(rejected.error.find("requires reusable FULL and LINEAR"), std::string::npos);
+    EXPECT_TRUE(rejected.agreed.block_tree.host.empty());
+}
+
+TEST(PPTopologyValidatorTest, InvalidLinearQuotaSettingSurvivesExchange) {
+    auto first = makeHybridSnapshot(100, 25);
+    auto second = makeHybridSnapshot(80, 20);
+    first.block_tree.host_budget_bytes = 10 * 4096;
+    second.block_tree.host_budget_bytes = 10 * 4096;
+    first.block_tree.linear_request = {-2, 1, 8};
+    second.block_tree.linear_request = {-2, 1, 0};
+    const auto result = validatePPTopology(
+        {StageCacheSnapshot::deserialize(first.serialize()), StageCacheSnapshot::deserialize(second.serialize())});
+    EXPECT_FALSE(result.ok);
+    EXPECT_NE(result.error.find("must be -1 or positive"), std::string::npos);
 }
 
 }  // namespace rtp_llm

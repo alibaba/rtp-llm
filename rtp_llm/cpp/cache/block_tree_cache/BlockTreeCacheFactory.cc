@@ -303,21 +303,21 @@ std::vector<BlockInfo> resolveStorageBuffers(const CacheConfig&                c
 
 namespace {
 
-LowerTierLinearPoolRatio planLowerTierLinearPoolRatio(const CacheConfig&                         config,
-                                                      const KVCacheConfig&                       options,
-                                                      const ParallelismConfig&                   parallelism,
-                                                      const std::vector<std::vector<std::string>>& group_members) {
-    constexpr const char* name = "LOWER_TIER_LINEAR_POOL_AVG_PROMPT_TOKENS";
+LowerTierLinearPoolRequest planLowerTierLinearPoolRequest(const CacheConfig&                          config,
+                                                         const KVCacheConfig&                        options,
+                                                         const ParallelismConfig&                   parallelism,
+                                                         const std::vector<std::vector<std::string>>& group_members) {
     const int tokens = options.lower_tier_linear_pool_avg_prompt_tokens;
     if ((!options.enable_memory_cache && !options.enable_disk_cache) || parallelism.role_type != RoleType::PREFILL
         || tokens == -1) {
         return {};
     }
-    RTP_LLM_CHECK_WITH_INFO(tokens > 0, "%s must be -1 or positive", name);
-    const auto tail_blocks = config.reuse_cache_tail_blocks;
-    RTP_LLM_CHECK_WITH_INFO(options.reuse_cache && tail_blocks > 0 && tail_blocks < std::numeric_limits<int>::max(),
-                            "%s requires REUSE_CACHE and a finite REUSE_CACHE_TAIL_BLOCKS",
-                            name);
+    LowerTierLinearPoolRequest request{tokens, options.reuse_cache ? config.reuse_cache_tail_blocks : 0};
+    // The leading stage owns every reusable group's block IDs. Only that
+    // stage supplies geometry; every stage sends its settings to the gather.
+    if (parallelism.pp_size > 1 && parallelism.pp_rank > 0) {
+        return request;
+    }
     const auto find_members = [&](CacheGroupType type) {
         return std::find_if(group_members.begin(), group_members.end(), [&](const auto& members) {
             return config.group(members.front()).policy.group_type == type;
@@ -325,23 +325,23 @@ LowerTierLinearPoolRatio planLowerTierLinearPoolRatio(const CacheConfig&        
     };
     const auto full = find_members(CacheGroupType::FULL);
     const auto linear = find_members(CacheGroupType::LINEAR);
-    RTP_LLM_CHECK_WITH_INFO(full != group_members.end() && linear != group_members.end(),
-                            "%s requires reusable FULL and LINEAR pools",
-                            name);
-    RTP_LLM_CHECK_WITH_INFO(std::all_of(linear->begin(), linear->end(), [&](const std::string& tag) {
-                                const auto& group = config.group(tag);
-                                return group.seqSizePerBlock() == config.seq_size_per_block
-                                       && group.kernelBlocksPerKvBlock() == 1 && !group.policy.shared_chunk_state;
-                            }),
-                            "%s requires one LINEAR state checkpoint per base page",
-                            name);
+    if (full == group_members.end() || linear == group_members.end()) {
+        return request;
+    }
+    if (!std::all_of(linear->begin(), linear->end(), [&](const std::string& tag) {
+            const auto& group = config.group(tag);
+            return group.seqSizePerBlock() == config.seq_size_per_block
+                   && group.kernelSeqSizePerBlock() == group.seqSizePerBlock() && !group.policy.shared_chunk_state;
+        })) {
+        return request;
+    }
     std::optional<CPSlotMapper> mapper;
     if (config.local_kv_cache_sharded) {
         const auto max_int = std::numeric_limits<int>::max();
-        RTP_LLM_CHECK_WITH_INFO(parallelism.tp_size > 1 && parallelism.tp_size <= max_int
-                                    && config.seq_size_per_block <= static_cast<size_t>(max_int),
-                                "%s requires a valid CP page span",
-                                name);
+        if (parallelism.tp_size <= 1 || parallelism.tp_size > max_int || config.seq_size_per_block == 0
+            || config.seq_size_per_block > static_cast<size_t>(max_int / parallelism.tp_size)) {
+            return request;
+        }
         mapper.emplace(/*cp_rank=*/0,
                        static_cast<int>(parallelism.tp_size),
                        static_cast<int>(config.seq_size_per_block));
@@ -350,16 +350,10 @@ LowerTierLinearPoolRatio planLowerTierLinearPoolRatio(const CacheConfig&        
         return mapper ? mapper->logicalSeqSizePerBlock(config, tag) : config.group(tag).seqSizePerBlock();
     };
     const auto page_tokens = full_page_span(full->front());
-    RTP_LLM_CHECK_WITH_INFO(page_tokens > 0 && std::all_of(full->begin(), full->end(), [&](const auto& tag) {
-                                return full_page_span(tag) == page_tokens;
-                            }),
-                            "%s requires a common FULL page span",
-                            name);
-    const LowerTierLinearPoolRatio ratio{static_cast<uint32_t>(1 + (tokens - 1) / page_tokens),
-                                         static_cast<uint32_t>(tail_blocks) + 1};
-    RTP_LLM_LOG_INFO("%s=%d full_page_tokens=%zu full_reference_blocks=%u linear_reference_blocks=%u",
-                     name, tokens, page_tokens, ratio.full_pages, ratio.linear_states);
-    return ratio;
+    if (std::all_of(full->begin(), full->end(), [&](const auto& tag) { return full_page_span(tag) == page_tokens; })) {
+        request.full_page_tokens = page_tokens;
+    }
+    return request;
 }
 
 }  // namespace
@@ -401,8 +395,13 @@ BlockTreeCacheLayoutPtr planBlockTreeCacheLayout(const CacheConfig&       cache_
     layout->sizing.disk_budget_bytes =
         budget_bytes(kv_cache_config.enable_disk_cache, kv_cache_config.disk_cache_size_mb);
     layout->sizing.host_swa_block_ratio = kv_cache_config.memory_cache_swa_block_ratio;
-    layout->sizing.linear_ratio =
-        planLowerTierLinearPoolRatio(cache_config, kv_cache_config, parallelism_config, layout->group_members);
+    const auto linear_request =
+        planLowerTierLinearPoolRequest(cache_config, kv_cache_config, parallelism_config, layout->group_members);
+    if (parallelism_config.pp_size > 1) {
+        layout->sizing.linear_request = linear_request;
+    } else {
+        layout->sizing.linear_ratio = resolveLowerTierLinearPoolRatio(linear_request);
+    }
     return layout;
 }
 
@@ -515,6 +514,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         RTP_LLM_LOG_ERROR("failed to build a consistent BlockTreeCache layout");
         return nullptr;
     }
+    RTP_LLM_CHECK_WITH_INFO(layout->sizing.linear_request.prompt_tokens == -1 || layout->block_nums.has_value(),
+                            "PP lower-tier LINEAR quota requires negotiated capacities");
     const size_t max_blocks_per_batch        = layout->crc_workspaces.batch_size ? layout->crc_workspaces.batch_size :
                                                                                    static_cast<size_t>(max_batch_descriptors);
     const size_t crc_slots_per_loop          = layout->crc_workspaces.slots_per_loop;

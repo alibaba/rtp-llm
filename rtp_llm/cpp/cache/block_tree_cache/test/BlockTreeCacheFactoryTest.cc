@@ -744,6 +744,40 @@ TEST_F(BlockTreeCacheFactoryTest, PrefillLinearPromptReferenceSizesHostAndSsd) {
     EXPECT_THROW(planBlockTreeCacheLayout(config, options, prefill), std::exception);
 }
 
+TEST_F(BlockTreeCacheFactoryTest, PpLinearQuotaPlanningAllowsFullOnlyStagesBeforeNegotiation) {
+    KVCacheConfig options;
+    options.reuse_cache = true;
+    options.enable_memory_cache = true;
+    options.memory_cache_size_mb = 1;
+    options.lower_tier_linear_pool_avg_prompt_tokens = 32;
+    options.enable_crc = false;
+    ParallelismConfig prefill;
+    prefill.role_type = RoleType::PREFILL;
+    prefill.pp_size = 2;
+    auto full_only = makeSingleConfig();
+    full_only.reuse_cache_tail_blocks = 2;
+
+    const auto first = planBlockTreeCacheLayout(makeHybridConfig(), options, prefill);
+    ASSERT_NE(first, nullptr);
+    EXPECT_EQ(first->sizing.linear_request.full_page_tokens, 4u);
+    EXPECT_EQ(first->sizing.linear_request.prompt_tokens, 32);
+    EXPECT_EQ(first->sizing.linear_ratio.full_pages, 0u);
+
+    // Even a leading stage missing LINEAR must reach snapshot collection so
+    // all stages can reject the unsupported option together.
+    const auto unsupported = planBlockTreeCacheLayout(full_only, options, prefill);
+    ASSERT_NE(unsupported, nullptr);
+    EXPECT_EQ(unsupported->sizing.linear_request.full_page_tokens, 0u);
+    EXPECT_EQ(unsupported->sizing.linear_request.prompt_tokens, 32);
+
+    prefill.pp_rank = 1;
+    const auto second = planBlockTreeCacheLayout(full_only, options, prefill);
+    ASSERT_NE(second, nullptr);
+    EXPECT_EQ(second->sizing.linear_request.full_page_tokens, 0u);
+    EXPECT_EQ(second->sizing.linear_request.prompt_tokens, 32);
+    EXPECT_EQ(second->sizing.linear_request.reuse_tail_blocks, 2);
+}
+
 TEST_F(BlockTreeCacheFactoryTest, FactoryConsumesNegotiatedBlockCounts) {
     const auto    config = makeSingleConfig();
     block_transfer_engine_test::TempDirGuard disk_dir("negotiated_tier_counts");

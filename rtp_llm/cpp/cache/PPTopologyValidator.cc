@@ -135,12 +135,9 @@ std::string validateTierSizing(const StageCacheSnapshot& stage, const BlockTreeC
         || (sizing.disk_budget_bytes > 0) != (expected.disk_budget_bytes > 0)) {
         return "HOST/DISK cache enablement differs across PP stages";
     }
-    if (sizing.linear_ratio.full_pages != expected.linear_ratio.full_pages
-        || sizing.linear_ratio.linear_states != expected.linear_ratio.linear_states) {
-        return "lower-tier LINEAR pool ratio differs across PP stages";
-    }
-    if ((sizing.linear_ratio.full_pages == 0) != (sizing.linear_ratio.linear_states == 0)) {
-        return "invalid lower-tier LINEAR pool ratio";
+    if (sizing.linear_request.prompt_tokens != expected.linear_request.prompt_tokens
+        || sizing.linear_request.reuse_tail_blocks != expected.linear_request.reuse_tail_blocks) {
+        return "lower-tier LINEAR pool ratio settings differ across PP stages";
     }
     if (sizing.host_budget_bytes == 0 && sizing.disk_budget_bytes == 0) {
         return {};
@@ -172,8 +169,29 @@ void mergeMinBlockNums(TierBlockNumOverrides& counts, const TierBlockNumOverride
     }
 }
 
+bool constrainAgreedLinearQuota(TierBlockNumOverrides& counts, LowerTierLinearPoolRatio ratio) {
+    if (counts.empty() || ratio.full_pages == 0) {
+        return true;
+    }
+    auto& full_physical   = counts.at(CacheGroupType::FULL);
+    auto& linear_physical = counts.at(CacheGroupType::LINEAR);
+    // Owner-stage minima may constrain only one type if other stages have
+    // absent pools. Reduce both counts to the same usable FULL reference.
+    const uint64_t full_from_linear =
+        static_cast<uint64_t>(linear_physical - 1) * ratio.full_pages / ratio.linear_states;
+    const uint64_t full_usable = std::min<uint64_t>(full_physical - 1, full_from_linear);
+    if (full_usable == 0) {
+        return false;
+    }
+    full_physical   = full_usable + 1;
+    linear_physical = ratio.linearUsableBlocks(full_usable) + 1;
+    return true;
+}
+
 BlockTreeCacheBlockNums computeStageTierBlockNums(const StageCacheSnapshot&               stage,
-                                                  const std::vector<CanonicalGroupEntry>& groups) {
+                                                  const std::vector<CanonicalGroupEntry>& groups,
+                                                  LowerTierLinearPoolRatio                linear_ratio,
+                                                  size_t                                  reference_full_device_blocks) {
     const auto& sizing = stage.block_tree;
     if (sizing.host_budget_bytes == 0 && sizing.disk_budget_bytes == 0) {
         return {};
@@ -192,7 +210,8 @@ BlockTreeCacheBlockNums computeStageTierBlockNums(const StageCacheSnapshot&     
         if (budget == 0) {
             return std::vector<size_t>{};
         }
-        return computeLocalTierBlockCounts(budget, device_blocks, strides, types, sizing.linear_ratio, swa_ratio);
+        return computeLocalTierBlockCounts(
+            budget, device_blocks, strides, types, linear_ratio, swa_ratio, reference_full_device_blocks);
     };
     const auto host = tier_counts(sizing.host_budget_bytes, sizing.host_swa_block_ratio);
     const auto disk = tier_counts(sizing.disk_budget_bytes, 1.0);
@@ -323,18 +342,19 @@ std::string StageCacheSnapshot::serialize() const {
         << joinGroupNums(block_tree.group_sets, [](const auto& group_set) { return group_set.pool_stride; })
         << kFieldSep << block_tree.host_budget_bytes << kFieldSep << block_tree.disk_budget_bytes << kFieldSep
         << std::setprecision(std::numeric_limits<double>::max_digits10) << block_tree.host_swa_block_ratio;
-    const auto& ratio = block_tree.linear_ratio;
-    RTP_LLM_CHECK_WITH_INFO((ratio.full_pages == 0) == (ratio.linear_states == 0),
-                            "PP snapshot lower-tier LINEAR pool ratio must contain two positive counts");
-    if (ratio.full_pages > 0) {
-        oss << kFieldSep << ratio.full_pages << kFieldSep << ratio.linear_states;
+    const auto& request = block_tree.linear_request;
+    if (request.prompt_tokens != -1) {
+        // Include invalid requests too so every rank can participate in the
+        // collective and receive the same validation result.
+        oss << kFieldSep << request.prompt_tokens << kFieldSep << request.reuse_tail_blocks
+            << kFieldSep << request.full_page_tokens;
     }
     return oss.str();
 }
 
 StageCacheSnapshot StageCacheSnapshot::deserialize(const std::string& payload) {
     const auto fields = splitFields(payload, kFieldSep);
-    RTP_LLM_CHECK_WITH_INFO(fields.size() == 14 || fields.size() == 16, "PP snapshot payload is malformed (field count)");
+    RTP_LLM_CHECK_WITH_INFO(fields.size() == 14 || fields.size() == 17, "PP snapshot payload is malformed (field count)");
     auto group_tags = splitFields(fields[0], kTagSep);
     if (fields[0].empty()) {
         group_tags.clear();
@@ -386,16 +406,17 @@ StageCacheSnapshot StageCacheSnapshot::deserialize(const std::string& payload) {
     RTP_LLM_CHECK_WITH_INFO(ratio_chars == fields[13].size() && std::isfinite(snapshot.block_tree.host_swa_block_ratio)
                                 && snapshot.block_tree.host_swa_block_ratio > 0.0,
                             "PP snapshot HOST SWA block ratio must be finite and positive");
-    if (fields.size() == 16) {
-        const auto read_positive_count = [](const std::string& field) {
-            uint32_t value = 0;
+    if (fields.size() == 17) {
+        const auto read_setting = [](const std::string& field, auto& value) {
             const auto* end = field.data() + field.size();
             const auto result = std::from_chars(field.data(), end, value);
-            RTP_LLM_CHECK_WITH_INFO(result.ec == std::errc{} && result.ptr == end && value > 0,
-                                    "PP snapshot lower-tier LINEAR pool ratio must contain two positive counts");
-            return value;
+            RTP_LLM_CHECK_WITH_INFO(result.ec == std::errc{} && result.ptr == end,
+                                    "invalid PP snapshot lower-tier LINEAR pool ratio setting");
         };
-        snapshot.block_tree.linear_ratio = {read_positive_count(fields[14]), read_positive_count(fields[15])};
+        auto& request = snapshot.block_tree.linear_request;
+        read_setting(fields[14], request.prompt_tokens);
+        read_setting(fields[15], request.reuse_tail_blocks);
+        read_setting(fields[16], request.full_page_tokens);
     }
     return snapshot;
 }
@@ -464,14 +485,39 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
     }
 
     deriveConstructionInputs(result);
+    LowerTierLinearPoolRatio linear_ratio;
+    size_t                   reference_full_device_blocks = 0;
+    try {
+        linear_ratio = resolveLowerTierLinearPoolRatio(stages.front().block_tree.linear_request);
+    } catch (const std::exception& e) {
+        return fail("stage 0 lower-tier LINEAR pool ratio: " + std::string(e.what()));
+    }
+    if (linear_ratio.full_pages > 0) {
+        const auto& leading_groups = stages.front().groups;
+        const auto find_reusable_group = [&](CacheGroupType type) {
+            return std::find_if(leading_groups.begin(), leading_groups.end(), [&](const auto& group) {
+                return group.block_tree_group_member && group.type == type;
+            });
+        };
+        const auto full = find_reusable_group(CacheGroupType::FULL);
+        if (full == leading_groups.end() || find_reusable_group(CacheGroupType::LINEAR) == leading_groups.end()) {
+            return fail("stage 0 lower-tier LINEAR pool ratio requires reusable FULL and LINEAR pools");
+        }
+        reference_full_device_blocks = result.canonical_groups[canonical_index.at(full->tag)].logical_block_num;
+    }
     for (size_t s = 0; s < stages.size(); ++s) {
         try {
-            const auto counts = computeStageTierBlockNums(stages[s], result.canonical_groups);
+            const auto counts = computeStageTierBlockNums(
+                stages[s], result.canonical_groups, linear_ratio, reference_full_device_blocks);
             mergeMinBlockNums(result.agreed.block_tree.host, counts.host);
             mergeMinBlockNums(result.agreed.block_tree.disk, counts.disk);
         } catch (const std::exception& e) {
             return fail("BlockTreeCache capacity on stage " + std::to_string(s) + ": " + e.what());
         }
+    }
+    if (!constrainAgreedLinearQuota(result.agreed.block_tree.host, linear_ratio)
+        || !constrainAgreedLinearQuota(result.agreed.block_tree.disk, linear_ratio)) {
+        return fail("negotiated lower-tier LINEAR pool ratio cannot hold usable FULL and LINEAR blocks");
     }
     result.ok = true;
     return result;
