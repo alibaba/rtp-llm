@@ -143,7 +143,9 @@ class PrefillQMemoryTest(unittest.TestCase):
             supports_prefill=lambda *args: True,
             project_q=lambda linear, value, out: linear(value, out=out).view(-1, 2, 8),
             prefill=mega_prefill,
-            project_output=lambda pair, linear, out: output_project(*pair, out=out),
+            project_output=lambda pair, linear, out, prefill_wo_a: output_project(
+                *pair, out=out
+            ),
         )
 
         common = SimpleNamespace(

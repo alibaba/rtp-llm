@@ -438,6 +438,10 @@ def forward_layers(
             idx_w=v4._prefill_ws_idx_w,
             align_bytes=(64 << 20) if v41 else (1 << 30),
         )
+        if v41:
+            from rtp_llm.models_py.modules.dsv41.fp8 import _v41_wo_a_quant
+
+            ws.wo_a_prefill = _v41_wo_a_quant.prepare_prefill(input_ids.device)
 
     # Build + propagate CP context once per prefill step. Under CP the
     # caller hands us a per-rank chunk slice (T_local = chunk_length),

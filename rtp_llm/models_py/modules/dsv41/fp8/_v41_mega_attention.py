@@ -375,10 +375,8 @@ class MegaAttention(torch.nn.Module):
             hook.after_core()
         return output, scales
 
-    def project_output(self, pair, wo_b, out=None):
+    def project_output(self, pair, wo_b, out=None, *, prefill_wo_a=None):
         """Consume the kernel's interleaved FP8 result without inverse RoPE."""
-        import deep_gemm
-
         data, scales = pair
         if self.groups != self.padded_groups:
             pair = (data[:, : self.groups], scales[:, : self.groups])
@@ -388,10 +386,12 @@ class MegaAttention(torch.nn.Module):
 
         if type(wo_b) is V41MXFP8Linear:
             quantized = _v41_wo_a_quant.try_grouped_quant(
-                pair, (self.output_weight, self.output_scale)
+                pair, (self.output_weight, self.output_scale), prefill=prefill_wo_a
             )
             if quantized is not None:
                 return wo_b.forward_quantized(*quantized, out=out)
+        import deep_gemm
+
         rank = self.output_weight.shape[1]
         projected = torch.empty(
             (rows, self.groups, rank), dtype=torch.bfloat16, device=data.device

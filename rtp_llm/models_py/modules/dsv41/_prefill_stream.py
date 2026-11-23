@@ -29,3 +29,14 @@ def prefill_stream_is_capturing() -> bool:
     if stream is not None and _current_stream(-1) == stream:
         return False
     return torch.cuda.is_current_stream_capturing()
+
+
+def is_default_eager_prefill(device: torch.device) -> bool:
+    """Whether the scoped eager stream is still current on this device."""
+    stream = getattr(_state, "stream", None)
+    return (
+        stream is not None
+        and device.type == "cuda"
+        and device.index == stream[1]
+        and _current_stream(-1) == stream
+    )

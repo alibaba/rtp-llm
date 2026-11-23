@@ -763,6 +763,9 @@ class MegaAttentionCUDA(unittest.TestCase):
 
     @torch.inference_mode()
     def test_mega_fp8_pair_optional_wo_a_projection_and_graph(self):
+        from rtp_llm.models_py.modules.dsv41._prefill_stream import (
+            default_eager_prefill,
+        )
         from rtp_llm.models_py.modules.dsv41.fp8 import _v41_wo_a_quant
         from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
@@ -780,7 +783,7 @@ class MegaAttentionCUDA(unittest.TestCase):
 
         wo_a = dequant(state.output_weight, state.output_scale)
         wo_b = dequant(attn.wo_b.weight, attn.wo_b.weight_scales)
-        for rows in (1, 64, 512):
+        for rows in (1, 64, 67, 512):
             with self.subTest(rows=rows):
                 q = _q_fused(torch.randn(rows, 64, 512, device="cuda").bfloat16())
                 kv = torch.randn(257, 1, 512, device="cuda").bfloat16()
@@ -806,6 +809,13 @@ class MegaAttentionCUDA(unittest.TestCase):
                     projected.bfloat16().flatten(1).float(), wo_b
                 )
                 self._assert_projection_close(expected, reference)
+                with default_eager_prefill(True):
+                    prepared = _v41_wo_a_quant.prepare_prefill(q.device)
+                    self.assertEqual(prepared is not None, fused_ready)
+                    actual = state.project_output(
+                        pair, attn.wo_b, prefill_wo_a=prepared
+                    )
+                    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
                 for force_fallback in (True, False):
                     context = (
                         patch.object(
