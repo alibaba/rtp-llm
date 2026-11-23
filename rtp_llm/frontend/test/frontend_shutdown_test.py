@@ -176,6 +176,27 @@ class FrontendShutdownManagerTest(unittest.TestCase):
             endpoint.start_profile.assert_awaited_with(payload)
         self.assertEqual(owner.grpc_client.calls, [])
 
+    def test_health_check_routes_to_embedding_backend(self):
+        owner = FrontendApp.__new__(FrontendApp)
+        owner.frontend_server = FakeFrontendServer(is_embedding=True)
+        endpoint = SimpleNamespace(health_check=AsyncMock(return_value=True))
+        owner.frontend_server._embedding_endpoint = endpoint
+        owner.shutdown_manager = FrontendShutdownManager()
+        owner.separated_frontend = False
+        owner.server_config = SimpleNamespace(http_port=0)
+        owner.grpc_client = FakeGrpcClient()
+        client = TestClient(owner.create_app())
+
+        response = client.post("/health_check")
+        self.assertEqual(response.status_code, 200)
+        endpoint.health_check.assert_awaited()
+        # embedding 分支命中时不再走 grpc_client 的 health_check
+        self.assertEqual(owner.grpc_client.calls, [])
+
+        endpoint.health_check = AsyncMock(return_value=False)
+        response = client.post("/health_check")
+        self.assertEqual(response.status_code, 400)
+
     def test_draining_rejects_new_business_and_marks_health_unavailable(self):
         app_owner = FrontendApp.__new__(FrontendApp)
         app_owner.frontend_server = FakeFrontendServer()

@@ -56,7 +56,6 @@ def create_engine(
         return LanguageCppEngine(
             model=model,
             engine_config=engine_config,
-            world_info=world_info,
             propose_model=propose_model,
         )
     else:

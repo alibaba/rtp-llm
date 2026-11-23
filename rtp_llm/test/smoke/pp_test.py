@@ -263,7 +263,7 @@ class PPSmokeTest(unittest.TestCase):
             {
                 "role": "PDFUSION",
                 "ip": "127.0.0.1",
-                "http_port": backend.http_port,
+                "http_port": backend.server_port,
                 "grpc_port": backend.rpc_server_port,
             }
         ]

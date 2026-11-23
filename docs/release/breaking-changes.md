@@ -57,7 +57,7 @@ exactly as much as you would trust it to execute code inside your container.
 **Introduced in:** [PR #813](https://github.com/alibaba/rtp-llm/pull/813) (DashSc gRPC, `develop/dash_sc`).
 
 **Summary:** The CLI/env default for `--worker_info_port_num` / `WORKER_INFO_PORT_NUM` changed from **8** to **9** (`rtp_llm/server/server_args/server_group_args.py`, `rtp_llm/config/py_config_modules.py` `MIN_WORKER_INFO_PORT_NUM`). Worker listen ports are laid out as
-`base = start_port + rank_id * worker_info_port_num`, then fixed offsets (RPC, cache store, HTTP, embedding RPC, DashSc gRPC at **base + 8**, etc.).
+`base = start_port + rank_id * worker_info_port_num`, then fixed offsets (RPC, cache store, embedding RPC, DashSc gRPC at **base + 8**, etc.).
 
 **Impact:**
 

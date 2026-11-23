@@ -12,7 +12,6 @@
 #include "rtp_llm/cpp/embedding_engine/arpc/ArpcServerWrapper.h"
 #include "rtp_llm/cpp/multimodal_processor/LocalMultimodalProcessor.h"
 #include "rtp_llm/cpp/multimodal_processor/RemoteMultimodalProcessor.h"
-#include "rtp_llm/cpp/api_server/HttpApiServer.h"
 #include "rtp_llm/cpp/model_rpc/EmbeddingRpcServer.h"
 namespace th = torch;
 
@@ -46,11 +45,6 @@ private:
                         kmonitor::MetricsReporterPtr         reporter,
                         std::shared_ptr<MultimodalProcessor> mm_processor);
 
-    void startHttpServer(std::shared_ptr<EmbeddingEngine>     embedding_engine,
-                         std::shared_ptr<MultimodalProcessor> mm_processor,
-                         const EngineInitParams&              params,
-                         py::object                           py_render);
-
 private:
     void initGrpcServer(int64_t                              embedding_rpc_port,
                         const GrpcConfig&                    grpc_config,
@@ -63,7 +57,6 @@ private:
     std::shared_ptr<EmbeddingEngine>     embedding_engine_;
     std::shared_ptr<MultimodalProcessor> mm_processor_ = nullptr;
     std::unique_ptr<ArpcServerWrapper>   embedding_rpc_service_;
-    std::shared_ptr<HttpApiServer>       http_server_;
 
     std::atomic<bool>            is_server_shutdown_{false};
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
