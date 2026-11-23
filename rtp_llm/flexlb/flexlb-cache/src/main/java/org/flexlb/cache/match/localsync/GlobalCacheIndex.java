@@ -1,5 +1,6 @@
 package org.flexlb.cache.match.localsync;
 
+import com.google.common.collect.ImmutableSet;
 import it.unimi.dsi.fastutil.HashCommon;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongIterators;
@@ -11,7 +12,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.stream.IntStream;
 
@@ -187,14 +187,15 @@ public class GlobalCacheIndex {
     }
 
     /**
-     * Holds the shard tables and counts that are replaced together when the index is cleared.
+     * Holds shard tables and counts that are replaced together when the index is cleared.
+     * Owner sets are immutable so prefix matching can inspect them after releasing the shard lock.
      */
     private static final class BlockIndex {
         private static final int SHARD_BITS = 8;
 
-        private final List<Long2ObjectOpenHashMap<Set<String>>> shards =
+        private final List<Long2ObjectOpenHashMap<ImmutableSet<String>>> shards =
                 IntStream.range(0, 1 << SHARD_BITS)
-                        .mapToObj(index -> new Long2ObjectOpenHashMap<Set<String>>())
+                        .mapToObj(index -> new Long2ObjectOpenHashMap<ImmutableSet<String>>())
                         .toList();
         private final LongAdder totalBlocks = new LongAdder();
         private final LongAdder totalMappings = new LongAdder();
@@ -202,20 +203,24 @@ public class GlobalCacheIndex {
         private void add(long key, String worker) {
             var shard = shardFor(key);
             synchronized (shard) {
-                Set<String> owners = shard.get(key);
+                ImmutableSet<String> owners = shard.get(key);
                 if (owners == null) {
-                    owners = ConcurrentHashMap.newKeySet();
-                    owners.add(worker);
-                    shard.put(key, owners);
+                    shard.put(key, ImmutableSet.of(worker));
                     totalBlocks.increment();
                     totalMappings.increment();
-                } else if (owners.add(worker)) {
+                } else if (!owners.contains(worker)) {
+                    shard.put(
+                            key,
+                            ImmutableSet.<String>builderWithExpectedSize(owners.size() + 1)
+                                    .addAll(owners)
+                                    .add(worker)
+                                    .build());
                     totalMappings.increment();
                 }
             }
         }
 
-        private Long2ObjectOpenHashMap<Set<String>> shardFor(long key) {
+        private Long2ObjectOpenHashMap<ImmutableSet<String>> shardFor(long key) {
             // fastutil uses the low hash bits for the entry slot within a shard.
             return shards.get((int) (HashCommon.mix(key) >>> (Long.SIZE - SHARD_BITS)));
         }
@@ -223,14 +228,23 @@ public class GlobalCacheIndex {
         private void remove(long key, String worker) {
             var shard = shardFor(key);
             synchronized (shard) {
-                Set<String> owners = shard.get(key);
-                if (owners != null && owners.remove(worker)) {
-                    totalMappings.decrement();
-                    if (owners.isEmpty()) {
-                        shard.remove(key);
-                        totalBlocks.decrement();
-                    }
+                ImmutableSet<String> owners = shard.get(key);
+                if (owners == null || !owners.contains(worker)) {
+                    return;
                 }
+                if (owners.size() == 1) {
+                    shard.remove(key);
+                    totalBlocks.decrement();
+                } else {
+                    var remaining = ImmutableSet.<String>builderWithExpectedSize(owners.size() - 1);
+                    for (String owner : owners) {
+                        if (!worker.equals(owner)) {
+                            remaining.add(owner);
+                        }
+                    }
+                    shard.put(key, remaining.build());
+                }
+                totalMappings.decrement();
             }
         }
 
@@ -240,7 +254,7 @@ public class GlobalCacheIndex {
             }
             var shard = shardFor(key);
             synchronized (shard) {
-                Set<String> owners = shard.get(key.longValue());
+                ImmutableSet<String> owners = shard.get(key.longValue());
                 return owners == null ? Collections.emptySet() : owners;
             }
         }

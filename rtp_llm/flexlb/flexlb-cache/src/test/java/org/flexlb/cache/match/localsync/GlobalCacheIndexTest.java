@@ -98,6 +98,36 @@ class GlobalCacheIndexTest {
     }
 
     @Test
+    void stableOwnerRemainsVisibleWhileOtherOwnerChanges() throws Exception {
+        var keys = List.of(Long.MIN_VALUE, 0L, Long.MAX_VALUE);
+        keys.forEach(key -> globalCacheIndex.addCacheBlock(key, "stable"));
+        var start = new CountDownLatch(1);
+        try (var pool = Executors.newSingleThreadExecutor()) {
+            var writer =
+                    pool.submit(
+                            () -> {
+                                start.await();
+                                for (int i = 0; i < 1_000; i++) {
+                                    keys.forEach(
+                                            key -> globalCacheIndex.addCacheBlock(key, "other"));
+                                    globalCacheIndex.removeAllCacheBlockOfEngine(
+                                            "other", Set.copyOf(keys));
+                                }
+                                return null;
+                            });
+            start.countDown();
+            for (int i = 0; i < 1_000; i++) {
+                assertEquals(
+                        Map.of("stable", keys.size()),
+                        globalCacheIndex.batchCalculatePrefixMatchLength(List.of("stable"), keys));
+            }
+            writer.get(5, TimeUnit.SECONDS);
+        }
+        assertEquals(keys.size(), globalCacheIndex.totalBlocks());
+        assertEquals(keys.size(), globalCacheIndex.totalMappings());
+    }
+
+    @Test
     void testEmptyInput() {
         // Test empty input cases
         Map<String, Integer> result =
