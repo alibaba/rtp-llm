@@ -456,3 +456,11 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [":cache_types", "//rtp_llm/cpp/utils:core_utils"],
 )
+
+cc_library(
+    name = "numa_memory_policy",
+    srcs = ["NumaMemoryPolicy.cc"],
+    hdrs = ["NumaMemoryPolicy.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
