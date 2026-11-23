@@ -35,3 +35,7 @@ apply_atom_overlay main_0189b3506/hc_verify
 hc_source="$site/atom/model_ops/qwen4_exp/hc_verify"
 "${ROCM_PATH:-/opt/rocm}/bin/hipcc" --genco -O3 --offload-arch=gfx942 \
     "$hc_source.hip" -o "$hc_source.hsaco"
+apply_atom_overlay main_0189b3506/nonpd_verify_pack
+pack_source="$site/aiter/qwen4_pack"
+"${ROCM_PATH:-/opt/rocm}/bin/hipcc" --genco -O3 --offload-arch=gfx942 \
+    "$pack_source.hip" -o "$pack_source.hsaco"

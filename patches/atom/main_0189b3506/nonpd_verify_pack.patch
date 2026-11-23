@@ -1,0 +1,265 @@
+--- a/atom/plugin/rtpllm/utils/qwen4_exp_context.py
++++ b/atom/plugin/rtpllm/utils/qwen4_exp_context.py
+@@ -1024,7 +1024,8 @@
+             role = str(runtime.parallelism_config.role_type).rsplit(".", 1)[-1]
+             single_verify = (
+                 gdn_metadata is not None
+-                and gdn_metadata.num_spec_decodes in (1, 2)
++                and (gdn_metadata.num_spec_decodes in (1, 2)
++                     or (role == "PDFUSION" and gdn_metadata.num_spec_decodes in (4, 8, 16)))
+                 and gdn_metadata.num_spec_decode_tokens == 4 * gdn_metadata.num_spec_decodes
+                 and not runtime._rtp_model_config.is_mtp
+                 and (
+--- a/atom/model_ops/moe.py
++++ b/atom/model_ops/moe.py
+@@ -1219,7 +1219,7 @@
+     activation_ = ActivationType(activation)
+     quant_type_ = QuantType(quant_type)
+
+-    from atom.model_ops.qwen38_moe_dispatch import maybe_small_decode
++    from atom.model_ops.qwen38_moe_dispatch import maybe_small_decode, rtp_single_verify
+
+     candidate = maybe_small_decode(
+         hidden_states, w1, w2, topk_weight, topk_ids, expert_mask,
+@@ -1229,6 +1229,14 @@
+     if candidate is not None:
+         return candidate
+
++    sort_policy = 0
++    if hidden_states.shape[0] in (16, 32, 64) and rtp_single_verify.get():
++        from atom.plugin.rtpllm.utils.topk_compat import _mi308x_topk
++
++        if _mi308x_topk(hidden_states.device):
++            from aiter.fused_moe import QWEN4_VERIFY_PACK
++
++            sort_policy = QWEN4_VERIFY_PACK
+     return fused_moe(
+         hidden_states,
+         w1,
+@@ -1245,6 +1253,7 @@
+         a2_scale,
+         swiglu_limit=swiglu_limit,
+         gate_mode=gate_mode,
++        moe_sorting_dispatch_policy=sort_policy,
+         num_local_tokens=scheduled_tokens_gpu,
+     )
+
+--- a/aiter/fused_moe.py
++++ b/aiter/fused_moe.py
+@@ -812,6 +812,10 @@
+     return ret
+
+
++# Caller guarantees unique local expert IDs within each token, including the shared expert.
++QWEN4_VERIFY_PACK = -942
++
++
+ def moe_sorting(
+     topk_ids,
+     topk_weights,
+@@ -828,6 +832,23 @@
+     output_aux=False,
+     output=None,
+ ):
++    if dispatch_policy == QWEN4_VERIFY_PACK:
++        dispatch_policy = 0
++        if (
++            num_experts == 514 and model_dim == 2560 and block_size in (16, 32, 64)
++            and topk_ids.shape in ((16, 12), (32, 12), (64, 12))
++            and topk_weights.shape == topk_ids.shape and topk_ids.dtype == torch.int32
++            and topk_weights.dtype == torch.float32 and moebuf_dtype == torch.bfloat16
++            and expert_mask is not None and expert_mask.shape == (514,) and expert_mask.dtype == torch.int32
++            and not return_local_topk_ids and not output_aux and accumulate
++            and AsmMoeMode(flat).requires_host_sort and topk_weights.is_contiguous()
++            and topk_ids.is_contiguous() and expert_mask.is_contiguous()
++            and (output is None or (output.shape == (topk_ids.shape[0], 2560)
++                 and output.dtype == torch.bfloat16 and output.is_contiguous()))
++            and (num_local_tokens is None or (num_local_tokens.numel() == 1 and num_local_tokens.dtype == torch.int32))
++        ):
++            from aiter.qwen4_pack import pack
++            return pack(topk_ids, topk_weights, expert_mask, block_size, num_local_tokens, output)
+     asm_mode = AsmMoeMode(flat)
+     if (
+         not _USE_CK_MOE_SORTING
+--- /dev/null
++++ b/aiter/qwen4_pack.py
+@@ -0,0 +1,43 @@
++"""MI308X top-10 plus shared-expert route packing for TP2 Qwen4 verifiers."""
++import ctypes
++from functools import lru_cache
++from pathlib import Path
++
++import torch
++
++@lru_cache(None)
++def _load(device):
++    ptr = ctypes.c_void_p
++    hip = ctypes.CDLL("libamdhip64.so")
++    hip.hipModuleLoad.argtypes = [ctypes.POINTER(ptr), ctypes.c_char_p]
++    hip.hipModuleGetFunction.argtypes = [ctypes.POINTER(ptr), ptr, ctypes.c_char_p]
++    hip.hipModuleLaunchKernel.argtypes = [ptr, *([ctypes.c_uint] * 7), ptr, ctypes.POINTER(ptr), ctypes.POINTER(ptr)]
++    mod, fn = ptr(), ptr()
++    with torch.cuda.device(device):
++        status = hip.hipModuleLoad(ctypes.byref(mod), bytes(Path(__file__).with_name("qwen4_pack.hsaco")))
++        if not status:
++            status = hip.hipModuleGetFunction(ctypes.byref(fn), mod, b"qwen4_pack_verify_routes")
++    if status:
++        raise RuntimeError(f"MI308X verifier route kernel load failed: {status}")
++    return hip, mod, fn
++
++def pack(ids, weights, mask, block, live, output):
++    rows = ids.shape[0]
++    options = {"device": ids.device}
++    tiles = (rows * 12 + 514 * block - 12 + block - 1) // block
++    sorted_ids = torch.empty(tiles * block, dtype=torch.int32, **options)
++    sorted_weights = torch.empty_like(sorted_ids, dtype=torch.float32)
++    experts = torch.empty(tiles, dtype=torch.int32, **options)
++    sizes = torch.empty(2, dtype=torch.int32, **options)
++    if output is None:
++        output = torch.empty((rows, 2560), dtype=torch.bfloat16, **options)
++    hip, _, func = _load(ids.device)
++    ptr = ctypes.c_void_p
++    values = [ptr(v.data_ptr()) for v in (ids, weights, mask, sorted_ids, sorted_weights, experts, sizes, output)]
++    values.extend((ctypes.c_int(rows), ctypes.c_int(block), ptr(live.data_ptr() if live is not None else 0)))
++    args = (ptr * len(values))(*(ctypes.cast(ctypes.byref(v), ptr) for v in values))
++    stream = ptr(torch.cuda.current_stream(ids.device).cuda_stream)
++    status = hip.hipModuleLaunchKernel(func, 1 + 5 * rows, 1, 1, 256, 1, 1, 0, stream, args, None)
++    if status:
++        raise RuntimeError(f"MI308X verifier route kernel failed: {status}")
++    return sorted_ids, sorted_weights, experts, sizes, output
+--- /dev/null
++++ b/aiter/qwen4_pack.hip
+@@ -0,0 +1,90 @@
++#include <hip/hip_runtime.h>
++#include <stdint.h>
++// Each local expert has at most one route per token. A 64-bit mask encodes
++// stable token order for up to 64 verifier rows. The dummy expert is masked.
++extern "C" __global__ void qwen4_pack_verify_routes(
++    const int *ids, const float *weights, const int *mask, int *sorted_ids,
++    float *sorted_weights, int *sorted_experts, int *sizes, uint32_t *output,
++    int rows, int block_size, const int *num_local_tokens) {
++  const int thread = threadIdx.x, lane = thread % 64, wave = thread / 64;
++  int valid_rows = num_local_tokens ? *num_local_tokens : rows;
++  if (blockIdx.x) {
++    int i = (blockIdx.x - 1) * 256 + thread;
++    if (i < valid_rows * 1280)
++      output[i] = 0;
++    return;
++  }
++  __shared__ unsigned long long hits[514];
++  __shared__ int expert_offsets[514], wave_tiles[4], wave_experts[4],
++      tile_count, local_expert_count;
++  for (int i = thread; i < 514; i += 256)
++    hits[i] = 0;
++  if (!thread) {
++    tile_count = 0;
++    local_expert_count = 0;
++  }
++  __syncthreads();
++  for (int i = thread; i < valid_rows * 12; i += 256) {
++    int expert = ids[i];
++    if (expert >= 0 && mask[expert])
++      atomicOr(hits + expert, 1ull << (i / 12));
++  }
++  __syncthreads();
++  // Prefix sums map active global experts to padded tiles and local expert IDs.
++  for (int base = 0; base < 514; base += 256) {
++    int expert = base + thread;
++    int expert_tiles =
++        expert < 514 ? (__popcll(hits[expert]) + block_size - 1) / block_size
++                     : 0;
++    int prefix_tiles = expert_tiles;
++    for (int d = 1; d < 64; d *= 2) {
++      int other = __shfl_up(prefix_tiles, d);
++      if (lane >= d)
++        prefix_tiles += other;
++    }
++    auto locals = __ballot(expert < 514 && mask[expert]);
++    int local_id = __popcll(locals & ((1ull << lane) - 1));
++    if (lane == 63) {
++      wave_tiles[wave] = prefix_tiles;
++      wave_experts[wave] = __popcll(locals);
++    }
++    __syncthreads();
++    int first = tile_count + prefix_tiles - expert_tiles,
++        l = local_expert_count + local_id;
++    for (int i = 0; i < wave; i++) {
++      first += wave_tiles[i];
++      l += wave_experts[i];
++    }
++    if (expert < 514)
++      expert_offsets[expert] = first * block_size;
++    for (int tile = 0; tile < expert_tiles; tile++)
++      sorted_experts[first + tile] = l;
++    __syncthreads();
++    if (!thread) {
++      for (int i = 0; i < 4; i++) {
++        tile_count += wave_tiles[i];
++        local_expert_count += wave_experts[i];
++      }
++    }
++    __syncthreads();
++  }
++  // Match the Opus ABI, including the valid-row sentinel in padding.
++  if (!thread) {
++    sizes[0] = tile_count * block_size;
++    sizes[1] = valid_rows;
++  }
++  for (int i = thread; i < tile_count * block_size; i += 256) {
++    sorted_ids[i] = (12 << 24) | valid_rows;
++    sorted_weights[i] = 0;
++  }
++  __syncthreads();
++  for (int i = thread; i < valid_rows * 12; i += 256) {
++    int expert = ids[i], row = i / 12;
++    if (expert >= 0 && mask[expert]) {
++      int dest =
++          expert_offsets[expert] + __popcll(hits[expert] & ((1ull << row) - 1));
++      sorted_ids[dest] = ((i % 12) << 24) | row;
++      sorted_weights[dest] = weights[i];
++    }
++  }
++}
+--- a/atom/model_ops/qwen4_exp/hc_verify.py
++++ b/atom/model_ops/qwen4_exp/hc_verify.py
+@@ -35,7 +35,7 @@
+     rows = x.shape[0]
+     if not (
+         rtp_single_verify.get() and rank == 320 and hc_count == 4
+-        and rows in (4, 8) and x.shape == (rows, 10240) and weight.shape == (324, 10240)
++        and rows in (4, 8, 16, 32, 64) and x.shape == (rows, 10240) and weight.shape == (324, 10240)
+         and x.dtype == weight.dtype == torch.bfloat16 and x.device == weight.device
+         and x.is_contiguous() and weight.is_contiguous() and _mi308x_topk(x.device)
+     ):
+@@ -53,7 +53,8 @@
+         if status:
+             raise RuntimeError(f"HC verifier kernel launch failed with HIP status {status}")
+     else:
+-        partials = torch.empty((32, rows, 324), device=x.device, dtype=torch.float32)
+-        split_project[(11, 32)](x, weight, partials, rows, 32, 64, 32, num_warps=4)
+-        finalize[(rows, 6)](partials, gate, inject, rows, 32, 32, num_warps=2)
++        splits, bn, bk, bm = (32, 32, 64, 16) if rows == 8 else (16, 64, 128, 64 if rows == 64 else 16)
++        partials = torch.empty((splits, rows, 324), device=x.device, dtype=torch.float32)
++        split_project[((324 + bn - 1) // bn, splits, max(1, rows // bm))](x, weight, partials, rows, bn, bk, splits, bm, num_warps=4)
++        finalize[(rows, 6)](partials, gate, inject, rows, splits, splits, num_warps=2)
+     return gate, inject
+--- a/atom/model_ops/qwen4_exp/hc_verify_triton.py
++++ b/atom/model_ops/qwen4_exp/hc_verify_triton.py
+@@ -2,12 +2,14 @@
+ import triton.language as tl
+
+ @triton.jit
+-def split_project(X,W,P,M:tl.constexpr,BN:tl.constexpr,BK:tl.constexpr,S:tl.constexpr):
++def split_project(X,W,P,M:tl.constexpr,BN:tl.constexpr,BK:tl.constexpr,S:tl.constexpr,BM:tl.constexpr):
+     n=tl.program_id(0)*BN+tl.arange(0,BN)
+-    m=tl.arange(0,16)
++    m=tl.arange(0,BM)
++    if M > BM:
++        m+=tl.program_id(2)*BM
+     split=tl.program_id(1)
+     k=split*(10240//S)+tl.arange(0,BK)
+-    acc=tl.full((16,BN),0,tl.float32)
++    acc=tl.full((BM,BN),0,tl.float32)
+     for i in range((10240//S)//BK):
+         x=tl.load(X+m[:,None]*10240+k[None,:],m[:,None]<M,0)
+         w=tl.load(W+n[None,:]*10240+k[:,None],n[None,:]<324,0)
