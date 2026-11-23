@@ -315,11 +315,16 @@ public final class WorkerBatcher {
                 endpointEvents, "endpointEvents");
         this.deliveryStrategy = Objects.requireNonNull(
                 deliveryStrategy, "deliveryStrategy");
-        Comparator<ScheduledRequest> queueOrder = priorityOrdering
-                ? PRIORITY_QUEUE_ORDER : FIFO_QUEUE_ORDER;
-        this.projectionOrder =
-                priorityOrdering
-                        ? PRIORITY_PROJECTION_ORDER : FIFO_PROJECTION_ORDER;
+        Comparator<ScheduledRequest> queueOrder;
+        if (config.isPrefillCostOrder()) {
+            queueOrder = PrefillCostOrder.workerOrder(priorityOrdering ? ScheduledRequest::priority : item -> 0,
+                    ScheduledRequest::seqLen, ScheduledRequest::hitCache, FIFO_QUEUE_ORDER);
+            this.projectionOrder = PrefillCostOrder.workerOrder(priorityOrdering ? GroupPlanner.Item::priority : item -> 0,
+                    GroupPlanner.Item::seqLen, GroupPlanner.Item::hitCache, FIFO_PROJECTION_ORDER);
+        } else {
+            queueOrder = priorityOrdering ? PRIORITY_QUEUE_ORDER : FIFO_QUEUE_ORDER;
+            this.projectionOrder = priorityOrdering ? PRIORITY_PROJECTION_ORDER : FIFO_PROJECTION_ORDER;
+        }
         this.activeIndex = queueScheduling
                 ? PrefillActiveIndex.ordered(INITIAL_QUEUE_ALLOCATION, queueOrder,
                         this::signalQueuedDecodeCapacityAvailable)

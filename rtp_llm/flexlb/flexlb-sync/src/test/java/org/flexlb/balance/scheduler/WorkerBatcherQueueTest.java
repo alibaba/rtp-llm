@@ -8,8 +8,10 @@ import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
+import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.AfterEach;
@@ -20,7 +22,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -80,6 +83,27 @@ class WorkerBatcherQueueTest {
         assertEquals(List.of(2L, 1L, 3L, 4L), requestIds(snapshot.items()));
         assertEquals(4, snapshot.items().size());
         assertEquals("test-worker", snapshot.endpointId());
+    }
+
+    @Test
+    void costOrderRanksLocalRequestsAndRouteProbesByHitFractionWithinPriority() throws InterruptedException {
+        config.getScheduler().getOrdering().setPrefillCostOrder(true);
+        WorkerBatcher runtime = runningRuntime();
+        // The older request has more cached tokens, but the smaller hit fraction.
+        var older = item(1, 50, Long.MAX_VALUE, 1, 1000, 500);
+        var hot = item(2, 50, Long.MAX_VALUE, 2, 100, 90);
+        var tie = item(3, 50, Long.MAX_VALUE, 3, 100, 90);
+        var urgent = item(4, 80, Long.MAX_VALUE, 4, 100, 0);
+        assertTrue(runtime.offer(older));
+        assertSame(older, deliveryStrategy.attempts.poll(5, TimeUnit.SECONDS));
+        assertTrue(runtime.offer(hot));
+        assertSame(hot, deliveryStrategy.attempts.poll(5, TimeUnit.SECONDS));
+        assertTrue(runtime.offer(tie));
+        assertTrue(runtime.offer(urgent));
+        assertEquals(List.of(urgent, hot, tie, older), runtime.captureQueueSnapshot().items());
+        var projection = runtime.captureRouteProjectionInputs().queue();
+        assertEquals(List.of(4L, 2L, 3L, 1L), projection.activeItems().stream()
+                .sorted(projection.ordering()).map(item -> item.requestId()).toList());
     }
 
     @Test
@@ -177,6 +201,15 @@ class WorkerBatcherQueueTest {
 
     private ScheduledRequest item(long requestId, int priority, long expiresAtMs,
                            long enqueuedAtMs, long seqLen) {
+        return item(requestId, priority, expiresAtMs, enqueuedAtMs, seqLen, 0);
+    }
+
+    private ScheduledRequest item(long requestId, int priority, long expiresAtMs,
+                                  long enqueuedAtMs, long seqLen, long hitCache) {
+        DebugInfo debug = new DebugInfo();
+        debug.setHitCacheLen(hitCache);
+        ServerStatus prefill = new ServerStatus();
+        prefill.setDebugInfo(debug);
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(seqLen);
@@ -189,7 +222,7 @@ class WorkerBatcherQueueTest {
                 context,
                 new CompletableFuture<Response>(),
                 null,
-                null,
+                prefill,
                 null,
                 prefillEndpoint,
                 null,
@@ -223,7 +256,7 @@ class WorkerBatcherQueueTest {
     private static final class BlockingDeliveryStrategy
             implements DeliveryStrategy {
 
-        private final AtomicInteger attempts = new AtomicInteger();
+        private final LinkedBlockingQueue<ScheduledRequest> attempts = new LinkedBlockingQueue<>();
         private final CapacityBoundary.Availability availability =
                 new CapacityBoundary.Availability() {
                     @Override
@@ -245,7 +278,7 @@ class WorkerBatcherQueueTest {
                 List<ScheduledRequest> candidates,
                 PrefillTimePredictor.Evaluator evaluator,
                 OptionalLong plannedPrediction) {
-            attempts.incrementAndGet();
+            attempts.add(candidates.getFirst());
             return WorkerBatcherTestSupport.boundaryOnly(
                     candidates.getFirst(),
                     CapacityBoundary.unavailable(

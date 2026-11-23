@@ -602,7 +602,6 @@ public class CostBasedPrefillStrategy {
             enqueueSeq = Long.MAX_VALUE;
         }
         RouteProjection.Session projectionSession = RouteProjection.session();
-        GroupPlanner.Item admissionProbe = null;
 
         // Use one endpoint snapshot for both service prediction and decision-group planning.
         for (int i = 0; i < discovery.candidates().size(); i++) {
@@ -645,12 +644,9 @@ public class CostBasedPrefillStrategy {
 
             String admissionBlock = null;
             if (projectionInputs.queue().admissionBlock() != null) {
-                // Ordering is cache-independent. Reuse one probe across blocked endpoints.
-                if (admissionProbe == null) {
-                    admissionProbe = new GroupPlanner.Item(request.getRequestId(),
-                            balanceContext.getPriority(), enqueueSeq, enqueuedAtMs,
-                            Long.MAX_VALUE, request.getSeqLen(), 0L);
-                }
+                GroupPlanner.Item admissionProbe = new GroupPlanner.Item(request.getRequestId(),
+                        balanceContext.getPriority(), enqueueSeq, enqueuedAtMs,
+                        Long.MAX_VALUE, request.getSeqLen(), cacheHit);
                 admissionBlock = RouteProjection.admissionBlockReason(
                         projectionInputs.queue(), projection, admissionProbe, planningAtMs);
             }
