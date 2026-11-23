@@ -30,11 +30,20 @@ class Embedding(nn.Module):
         text_tokens_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # Qwen-family models have no absolute position/type embedding tables
-        # (positions are applied by RoPE in the attention layers), so the
-        # multimodal-overload arguments are accepted for signature parity with
-        # the common Embedding and ignored; multimodal feature insertion is
-        # handled by MultimodalEmbeddingInjector.
-        output = F.embedding(input, self.weight)
+        # (positions are applied by RoPE in the attention layers), so
+        # position_ids/token_types are accepted for signature parity and
+        # ignored. text_tokens_mask carries semantics: mask==0 positions hold
+        # feature hash ids (not real token ids, possibly out-of-vocab), so we
+        # clamp them to token 0 for a safe lookup and zero the result rows —
+        # mirroring embedding_kernels.cu's USE_MASK path. The real multimodal
+        # features are inserted by MultimodalEmbeddingInjector afterwards.
+        if text_tokens_mask is not None and text_tokens_mask.numel() == input.numel():
+            mask = text_tokens_mask.to(input.device, dtype=torch.bool)
+            safe_ids = torch.where(mask, input, torch.zeros_like(input))
+            output = F.embedding(safe_ids, self.weight)
+            output = output * mask.unsqueeze(-1).to(output.dtype)
+        else:
+            output = F.embedding(input, self.weight)
         if self.tp_size > 1:
             m, n = output.shape
             output = all_gather(output, group=Group.TP)
