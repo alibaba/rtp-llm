@@ -5,7 +5,7 @@ import it.unimi.dsi.fastutil.longs.LongSet;
 import it.unimi.dsi.fastutil.longs.LongSets;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.DiffResult;
-import org.springframework.beans.factory.annotation.Autowired;
+import org.flexlb.config.ConfigService;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
@@ -24,14 +24,25 @@ import java.util.concurrent.RejectedExecutionException;
 public class EngineLocalView {
     private final ConcurrentHashMap<String, LongSet> engineViews = new ConcurrentHashMap<>();
 
+    private final int diffParallelism;
+    private final DynamicCacheIntervalService dynamicIntervalManager;
+
     private volatile ForkJoinPool customPool;
 
     private volatile boolean closed;
 
-    /**
-     * Dynamic sync interval manager
-     */
-    @Autowired private DynamicCacheIntervalService dynamicIntervalManager;
+    public EngineLocalView(
+            ConfigService configService, DynamicCacheIntervalService dynamicIntervalManager) {
+        int configuredParallelism =
+                configService
+                        .loadBalanceConfig()
+                        .getWorkerRegistry()
+                        .getCacheStatus()
+                        .getDiffParallelism();
+        this.diffParallelism =
+                Math.min(Runtime.getRuntime().availableProcessors(), configuredParallelism);
+        this.dynamicIntervalManager = dynamicIntervalManager;
+    }
 
     @PreDestroy
     public synchronized void shutdown() {
@@ -201,8 +212,7 @@ public class EngineLocalView {
                 throw new IllegalStateException("Engine local view is closed");
             }
             if (customPool == null) {
-                customPool =
-                        new ForkJoinPool(Math.min(Runtime.getRuntime().availableProcessors(), 8));
+                customPool = new ForkJoinPool(diffParallelism);
             }
             return customPool;
         }
