@@ -9,8 +9,8 @@ import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
+import org.flexlb.service.grace.ApplicationLifecycle;
 import org.flexlb.sync.status.WorkerDirectory;
-import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
@@ -40,7 +40,7 @@ class HttpLoadBalanceServerTest {
                         scheduler,
                         mock(EndpointRegistry.class),
                         mock(WorkerDirectory.class),
-                        mock(MasterEngineSynchronizer.class),
+                        mock(ApplicationLifecycle.class),
                         new ServerScheduleLatencyRecorder());
         WebTestClient client =
                 WebTestClient.bindToRouterFunction(server.loadBalancePrefill()).build();
@@ -68,10 +68,10 @@ class HttpLoadBalanceServerTest {
         ConfigService configService = mock(ConfigService.class, RETURNS_DEEP_STUBS);
         RequestScheduler scheduler = mock(RequestScheduler.class);
         EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
-        MasterEngineSynchronizer synchronizer = mock(MasterEngineSynchronizer.class);
+        ApplicationLifecycle lifecycle = mock(ApplicationLifecycle.class);
         when(consistency.getMasterHostIpPort()).thenReturn("127.0.0.1:7001");
         when(scheduler.getQueuedRequestCount()).thenReturn(7);
-        when(synchronizer.isReady()).thenReturn(true);
+        when(lifecycle.isReadyForSchedule()).thenReturn(true);
 
         HttpLoadBalanceServer server =
                 new HttpLoadBalanceServer(
@@ -80,7 +80,7 @@ class HttpLoadBalanceServerTest {
                         scheduler,
                         endpointRegistry,
                         mock(WorkerDirectory.class),
-                        synchronizer,
+                        lifecycle,
                         new ServerScheduleLatencyRecorder());
         WebTestClient client =
                 WebTestClient.bindToRouterFunction(server.loadBalancePrefill()).build();
@@ -132,7 +132,7 @@ class HttpLoadBalanceServerTest {
                         scheduler,
                         endpointRegistry,
                         mock(WorkerDirectory.class),
-                        mock(MasterEngineSynchronizer.class),
+                        mock(ApplicationLifecycle.class),
                         new ServerScheduleLatencyRecorder());
         WebTestClient client =
                 WebTestClient.bindToRouterFunction(server.loadBalancePrefill()).build();
@@ -170,7 +170,7 @@ class HttpLoadBalanceServerTest {
                         mock(RequestScheduler.class),
                         mock(EndpointRegistry.class),
                         mock(WorkerDirectory.class),
-                        mock(MasterEngineSynchronizer.class),
+                        mock(ApplicationLifecycle.class),
                         new ServerScheduleLatencyRecorder());
         WebTestClient client =
                 WebTestClient.bindToRouterFunction(server.loadBalancePrefill()).build();

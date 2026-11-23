@@ -376,11 +376,6 @@ public class EndpointRegistry {
         return (Map<String, DecodeEndpoint>) (Map<?, ?>) Map.copyOf(endpoints(RoleType.DECODE));
     }
 
-    public int getEndpointCount(RoleType roleType) {
-        Map<String, WorkerEndpoint> endpoints = endpoints(roleType);
-        return endpoints == null ? 0 : endpoints.size();
-    }
-
     /**
      * Trigger TTL eviction on all prefill and decode endpoints.
      *

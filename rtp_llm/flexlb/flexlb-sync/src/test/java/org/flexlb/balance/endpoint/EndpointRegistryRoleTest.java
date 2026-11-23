@@ -90,7 +90,7 @@ class EndpointRegistryRoleTest {
                 new RoleType[] {
                     RoleType.PREFILL, RoleType.DECODE, RoleType.PDFUSION, RoleType.VIT
                 }) {
-            assertEquals(1, registry.getEndpointCount(roleType));
+            assertEquals(1, registry.endpointAddressSnapshot(roleType).size());
         }
     }
 

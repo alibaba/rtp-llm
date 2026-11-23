@@ -103,11 +103,6 @@ public final class WorkerDirectory implements WorkerStatusProvider {
         return total;
     }
 
-    /** Capacity means currently published routing capacity, not discovery. */
-    public int routingCapacity(RoleType role) {
-        return role == null ? 0 : endpointRegistry.getEndpointCount(role);
-    }
-
     /** Exact endpoint for a discovered generation, or {@code null}. */
     public WorkerEndpoint exactEndpoint(
             RoleType role, String address, WorkerStatus expectedStatus) {
