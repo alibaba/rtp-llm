@@ -1,0 +1,345 @@
+--- a/atom/model_ops/qwen38_moe_dispatch.py
++++ b/atom/model_ops/qwen38_moe_dispatch.py
+@@ -29,6 +29,8 @@
+     swiglu_limit: float | None,
+     gate_mode: str,
+     scheduled_tokens: torch.Tensor | None,
++    *,
++    router_logits: torch.Tensor | None = None,
+ ) -> torch.Tensor | None:
+     # Real EP routes favor native decode at these verification sizes. Larger
+     # batches, prefill, and unsupported contracts keep the existing CK/ASM
+@@ -87,6 +89,10 @@
+
+     from aiter.ops.flydsl.fused_moe_gfx942 import run_flydsl_moe_gfx942
+
++    presorted = None
++    if router_logits is not None:
++        from atom.plugin.rtpllm.utils.small_verify_route import prepare_flydsl_routes
++        presorted = prepare_flydsl_routes(router_logits, topk_ids, expert_mask)
+     # The sort maps global routes to local experts and drops remote routes.
+     # Keep the original ids/weights: no remap allocation, kernel, or host sync.
+     return run_flydsl_moe_gfx942(
+@@ -104,4 +110,5 @@
+         0,
+         "16_16_16_False:default:0",
+         swiglu_limit,
++        presorted=presorted,
+     )
+--- a/atom/models/qwen4_exp.py
++++ b/atom/models/qwen4_exp.py
+@@ -349,6 +349,14 @@
+             pad_align=moe_pad_align(config.moe_intermediate_size, self.tp_size),
+         )
+         install_stacked_expert_loaders(self.experts)
++        self._small_verify_route = None
++        if self.fuse_shared and torch.version.hip:
++            from atom.plugin.prepare import is_rtpllm
++
++            if is_rtpllm():
++                from atom.plugin.rtpllm.utils.small_verify_route import try_qwen4_verify
++
++                self._small_verify_route = try_qwen4_verify
+         self._single_token_ok: bool | None = None
+
+     def _single_token_supported(self) -> bool:
+@@ -386,7 +394,11 @@
+             if hidden_states.shape[0] == 1 and self._single_token_supported():
+                 out = self._single_token_experts(hidden_states, logits)
+             else:
+-                out = self.experts(hidden_states=hidden_states, router_logits=logits)
++                out = None
++                if hidden_states.shape[0] == 4 and self._small_verify_route is not None:
++                    out = self._small_verify_route(self, hidden_states, logits)
++                if out is None:
++                    out = self.experts(hidden_states=hidden_states, router_logits=logits)
+             if self.tp_size > 1 and reduce_results:
+                 out = tensor_model_parallel_all_reduce(out)
+             return out.view(orig_shape)
+--- a/aiter/ops/flydsl/fused_moe_gfx942.py
++++ b/aiter/ops/flydsl/fused_moe_gfx942.py
+@@ -544,18 +544,22 @@
+     problem: _Problem,
+     activation_str: str,
+     swiglu_limit: float | None,
++    presorted=None,
+ ):
+-    sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids, cur_out = moe_sorting(
+-        topk_ids,
+-        topk_weight,
+-        expert_mask.numel() if expert_mask is not None else problem.experts,
+-        problem.model_dim,
+-        hidden_states.dtype,
+-        config.BLOCK_M,
+-        expert_mask,
+-        num_local_tokens,
+-        moe_sorting_dispatch_policy,
+-    )
++    if presorted is None:
++        sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids, cur_out = moe_sorting(
++            topk_ids,
++            topk_weight,
++            expert_mask.numel() if expert_mask is not None else problem.experts,
++            problem.model_dim,
++            hidden_states.dtype,
++            config.BLOCK_M,
++            expert_mask,
++            num_local_tokens,
++            moe_sorting_dispatch_policy,
++        )
++    else:
++        sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids, cur_out = presorted
+     grid = int(sorted_expert_ids.shape[0])
+     if problem.batch * problem.topk <= problem.experts:
+         grid = problem.batch * problem.topk
+@@ -634,6 +638,8 @@
+     moe_sorting_dispatch_policy: int,
+     config_string: str,
+     swiglu_limit: float | None = None,
++    *,
++    presorted=None,
+ ) -> torch.Tensor:
+     if num_local_tokens is not None:
+         raise NotImplementedError(
+@@ -752,6 +758,7 @@
+             problem,
+             activation_str,
+             swiglu_limit,
++            presorted,
+         )
+     raise RuntimeError(f"Unsupported batch-size {problem.batch}")
+
+--- /dev/null
++++ b/atom/plugin/rtpllm/utils/small_verify_route.py
+@@ -0,0 +1,89 @@
++"""MI308X Qwen4 verifier route layout consumed by the sorted FlyDSL GEMMs."""
++import ctypes
++import logging
++import os
++from functools import lru_cache
++from pathlib import Path
++
++import torch
++from aiter import ActivationType, QuantType
++
++from atom.model_ops.qwen38_moe_dispatch import maybe_small_decode, rtp_single_verify
++from atom.model_ops.topK import topk_meta_rows
++from atom.plugin.prepare import is_rtpllm
++from atom.plugin.rtpllm.utils.topk_compat import _mi308x_topk
++from atom.utils.forward_context import pass_scheduled_tokens_gpu
++
++_ENABLED = (os.environ.get("ROLE_TYPE") == "DECODE" and os.environ.get("ATOM_RTP_TOPK512", "1") == "1")
++_ptr = ctypes.c_void_p
++
++
++def _check(status):
++    if status:
++        raise RuntimeError(f"Qwen4 verifier route HIP error {status}")
++
++
++@lru_cache(None)
++def _kernel(device):
++    hip = ctypes.CDLL("libamdhip64.so")
++    hip.hipModuleLoad.argtypes = [ctypes.POINTER(_ptr), ctypes.c_char_p]
++    hip.hipModuleGetFunction.argtypes = [ctypes.POINTER(_ptr), _ptr, ctypes.c_char_p]
++    hip.hipModuleLaunchKernel.argtypes = [_ptr, *([ctypes.c_uint] * 7), _ptr,
++                                          ctypes.POINTER(_ptr), ctypes.POINTER(_ptr)]
++    module, function = _ptr(), _ptr()
++    binary = Path(__file__).with_name("qwen4_verify_route.hsaco")
++    with torch.cuda.device(device):
++        _check(hip.hipModuleLoad(ctypes.byref(module), os.fsencode(binary)))
++        _check(hip.hipModuleGetFunction(ctypes.byref(function), module, b"qwen4_verify_route_m4"))
++    logging.getLogger(__name__).info("Loaded Qwen4 M=4 fused verify routing on %s", device)
++    return hip, module, function
++
++
++def prepare_flydsl_routes(logits, topk_ids, expert_mask):
++    # At most one 16-row tile per selected expert when there are four verifier rows.
++    rows, topk = topk_ids.shape
++    device = logits.device
++    tiles = rows * topk
++    tokens = torch.empty(tiles * 16, device=device, dtype=torch.int32)
++    weights = torch.empty_like(tokens, dtype=torch.float32)
++    experts = torch.empty(tiles, device=device, dtype=torch.int32)
++    sizes = torch.empty(2, device=device, dtype=torch.int32)
++    output = torch.empty((rows, 2560), device=device, dtype=torch.bfloat16)
++    valid = pass_scheduled_tokens_gpu(rows)
++    hip, _, function = _kernel(device)
++    tensors = (logits, topk_ids, expert_mask, tokens, weights, experts, sizes, output, valid)
++    values = [_ptr(t.data_ptr()) if t is not None else _ptr() for t in tensors]
++    args = (_ptr * len(values))(*(ctypes.cast(ctypes.byref(p), _ptr) for p in values))
++    # One routing CTA followed by 40 CTAs that clear the GEMM2 accumulation buffer.
++    stream = torch.cuda.current_stream(device)
++    _check(hip.hipModuleLaunchKernel(function, 41, 1, 1, 256, 1, 1, 0,
++                                     _ptr(stream.cuda_stream), args, None))
++    return tokens, weights, experts, sizes, output
++
++
++def try_qwen4_verify(model, hidden_states, logits):
++    if not (_ENABLED and is_rtpllm() and rtp_single_verify.get() and _mi308x_topk(logits.device)):
++        return None
++    ex = model.experts
++    quant = ex.quant_method
++    if not (
++        model.tp_size == 2 and model.n_routed_experts == 512 and ex.top_k == 10
++        and ex.renormalize and ex.scoring_func == "softmax" and not ex.use_grouped_topk
++        and ex.custom_routing_function is None and ex.e_score_correction_bias is None
++        and ex.balance_router_logits is None and ex.routed_scaling_factor == 1
++        and ex.shared_expert_scoring_func == "sigmoid" and ex.num_fused_shared_experts == 1
++        and ex.activation == ActivationType.Silu and not ex.apply_router_weight_on_input and not ex.reduce_results
++        and ex.moe_parallel_config.dp_size == 1 and ex.moe_parallel_config.dp_logical_ratio == 1
++        and quant.__class__.__name__ == "CompressedTensorsFp8MoEMethod"
++        and quant.fused_experts is None and quant.quant_type == QuantType.per_Token
++        and logits.shape == (4, 513) and logits.dtype == torch.bfloat16 and logits.is_contiguous()
++    ):
++        return None
++    # These buffers carry the preinitialized rank-specific shared and dummy expert IDs.
++    weights, ids = topk_meta_rows(4)
++    return maybe_small_decode(
++        hidden_states, ex.w13_weight, ex.w2_weight, weights, ids, ex.expert_mask,
++        ActivationType.Silu, quant.quant_type, False, ex.w13_weight_scale, ex.w2_weight_scale,
++        getattr(ex, "w13_input_scale", None), getattr(ex, "w2_input_scale", None),
++        getattr(ex, "swiglu_limit", 0.0), "separated", None, router_logits=logits,
++    )
+--- /dev/null
++++ b/atom/plugin/rtpllm/utils/qwen4_verify_route.hip
+@@ -0,0 +1,139 @@
++#include <hip/hip_bfloat16.h>
++#include <hip/hip_runtime.h>
++#include <math.h>
++#include <stdint.h>
++
++// One wave per verifier row. The kGlobalExperts-expert bitmap replaces Opus'
++// global workspace.
++constexpr int kGlobalExperts = 514; // 512 routed, one shared, one masked dummy.
++constexpr int M = 4;
++extern "C" __global__ void qwen4_verify_route_m4(const hip_bfloat16 *logits,
++                                                 const int *shared_ids,
++                                                 const int *mask, int *tokens,
++                                                 float *weights, int *experts,
++                                                 int *sizes, hip_bfloat16 *out,
++                                                 const int *valid_rows) {
++  constexpr int T = M * 64;
++  int t = threadIdx.x, row = t / 64, lane = t % 64;
++  if (blockIdx.x) {
++    int i = (blockIdx.x - 1) * T + t;
++    if (i < M * 2560)
++      out[i] = hip_bfloat16(0.f);
++    return;
++  }
++  __shared__ int hits[kGlobalExperts], group[kGlobalExperts],
++      wave_count[T / 64], wave_local[T / 64], total, total_local;
++  __shared__ int route_id[M][12];
++  __shared__ float route_w[M][12];
++  for (int i = t; i < kGlobalExperts; i += T)
++    hits[i] = 0;
++  if (t == 0) {
++    total = 0;
++    total_local = 0;
++  }
++  __syncthreads();
++  unsigned key[8];
++#pragma unroll
++  for (int j = 0; j < 8; ++j) {
++    int id = lane + 64 * j;
++    float x = float(logits[row * 513 + id]);
++    unsigned b = x == 0.f ? 0u : __float_as_uint(x) >> 16;
++    unsigned ordered = (b & 32768) ? (b ^ 65535) : (b ^ 32768);
++    key[j] = (ordered << 10) | (511 - id);
++  }
++  float first = 0.f;
++#pragma unroll
++  for (int k = 0; k < 10; ++k) {
++    unsigned best = 0;
++#pragma unroll
++    for (int j = 0; j < 8; ++j)
++      best = max(best, key[j]);
++#pragma unroll
++    for (int d = 32; d; d >>= 1)
++      best = max(best, __shfl_xor(best, d, 64));
++    int expert = 511 - (best & 511);
++#pragma unroll
++    for (int j = 0; j < 8; ++j)
++      if (key[j] == best)
++        key[j] = 0;
++    unsigned b = best >> 10;
++    b = (b & 32768) ? (b ^ 32768) : (b ^ 65535);
++    float x = __uint_as_float(b << 16);
++    if (k == 0)
++      first = x;
++    if (lane == k) {
++      route_id[row][k] = (!valid_rows || row < *valid_rows) ? expert : -1;
++      route_w[row][k] = __expf(x - first);
++    }
++  }
++  __syncthreads();
++  float w = lane < 10 ? route_w[row][lane] : 0.f;
++  for (int off = 8; off; off >>= 1)
++    w += __shfl_xor(w, off, 16);
++  if (lane < 10)
++    route_w[row][lane] /= w;
++  if (lane == 10 || lane == 11) {
++    route_id[row][lane] = shared_ids[row * 12 + lane];
++    route_w[row][lane] =
++        lane == 10 ? 1.f / (1.f + __expf(-float(logits[row * 513 + 512])))
++                   : 1.f;
++  }
++  __syncthreads();
++  if (lane < 12) {
++    int e = route_id[row][lane];
++    if (e >= 0 && mask[e])
++      atomicOr((unsigned *)&hits[e], 1u << row);
++  }
++  __syncthreads();
++  // Prefix sums over local and active experts map each routed group to a 16-row
++  // tile.
++  for (int base = 0; base < kGlobalExperts; base += T) {
++    int e = base + t;
++    bool local = e < kGlobalExperts && mask[e], active = local && hits[e];
++    unsigned long long av = __ballot(active), lv = __ballot(local);
++    unsigned long long prior = (1ull << lane) - 1;
++    if (lane == 0) {
++      wave_count[row] = __popcll(av);
++      wave_local[row] = __popcll(lv);
++    }
++    __syncthreads();
++    int g = total + __popcll(av & prior),
++        lid = total_local + __popcll(lv & prior);
++    for (int i = 0; i < row; i++) {
++      g += wave_count[i];
++      lid += wave_local[i];
++    }
++    if (active) {
++      group[e] = g;
++      experts[g] = lid;
++    }
++    __syncthreads();
++    if (t == 0) {
++      for (int i = 0; i < M; i++) {
++        total += wave_count[i];
++        total_local += wave_local[i];
++      }
++    }
++    __syncthreads();
++  }
++  if (t == 0) {
++    sizes[0] = total * 16;
++    sizes[1] = M;
++  }
++  // Within each expert, increasing row order matches Opus. High bits encode the
++  // TopK slot.
++  if (lane < 12) {
++    int e = route_id[row][lane];
++    if (e >= 0 && mask[e]) {
++      unsigned bits = hits[e];
++      int off = __popc(bits & ((1u << row) - 1)), start = group[e] * 16;
++      tokens[start + off] = (lane << 24) | row;
++      weights[start + off] = route_w[row][lane];
++      if (off == 0)
++        for (int j = __popc(bits); j < 16; j++) {
++          tokens[start + j] = (12 << 24) | M;
++          weights[start + j] = 0.f;
++        }
++    }
++  }
++}

@@ -23,3 +23,8 @@ for feature in ssm_state_compaction request_state_pool; do
 done
 apply_atom_overlay main_0189b3506/native_pd_cache
 apply_atom_overlay main_0189b3506/pd_single_verify_moe
+apply_atom_overlay topk512/verify_route
+# Build the MI308X verifier kernel before runtime graph capture.
+route_source="$site/atom/plugin/rtpllm/utils/qwen4_verify_route"
+"${ROCM_PATH:-/opt/rocm}/bin/hipcc" --genco -O3 --offload-arch=gfx942 \
+    "$route_source.hip" -o "$route_source.hsaco"
