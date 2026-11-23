@@ -122,7 +122,7 @@ private:
         CrcCopyExecutor::Timing crc_timing;
     };
     struct StagingResource {
-        std::array<std::shared_ptr<HostStagingBlockPool>, 2> pools;  // FULL/default, SWA.
+        std::array<std::shared_ptr<HostStagingBlockPool>, 2> pools;  // FULL, SWA/LINEAR.
         Queue                                                waiting;
     };
     void run();

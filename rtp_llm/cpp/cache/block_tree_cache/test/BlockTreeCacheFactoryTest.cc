@@ -26,6 +26,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyGeometry.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -2193,17 +2194,62 @@ TEST_F(BlockTreeCacheFactoryTest, DisabledDiskCacheKeepsHostTimeouts) {
     EXPECT_EQ(cache->config().disk_cache_evict_timeout_ms, 1234);
 }
 
-TEST_F(BlockTreeCacheFactoryTest, RejectsDiskCacheForReusableLinearGroupSet) {
-    const auto    config    = makeHybridConfig();
-    auto          allocator = initAllocator<CoordinatorCacheManager>(config);
-    KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_memory_cache  = true;
-    kv_cache_config.memory_cache_size_mb = 1;
-    kv_cache_config.enable_disk_cache  = true;
-    kv_cache_config.disk_cache_size_mb = 1;
-    kv_cache_config.disk_cache_paths   = "/unused/rejected-before-disk-init";
+TEST_F(BlockTreeCacheFactoryTest, ReusableLinearStateRoundTripsThroughSsd) {
+    for (const bool crc_enabled : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << "crc=" << crc_enabled);
+        if (crc_enabled && !CrcCopyWorkspace::available()) {
+            continue;
+        }
+        const auto                               config = makeHybridConfig();
+        auto                                     allocator = initAllocator<CoordinatorCacheManager>(config);
+        block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_reusable_linear_ssd");
+        KVCacheConfig                            options;
+        options.enable_memory_cache    = true;
+        options.memory_cache_size_mb   = 1;
+        options.enable_disk_cache      = true;
+        options.disk_cache_size_mb     = 1;
+        options.disk_cache_paths       = disk_dir.path;
+        options.disk_cache_buffered_io = true;
+        options.enable_crc             = crc_enabled;
 
-    expectFactoryRejects(config, allocator, kv_cache_config);
+        auto cache = createBlockTreeCache(config, options, allocator);
+        ASSERT_NE(cache, nullptr);
+        ASSERT_EQ(cache->groupSets().size(), 2u);
+        const auto linear = std::find_if(cache->groupSets().begin(), cache->groupSets().end(), [](const auto& group) {
+            return group->groupType() == CacheGroupType::LINEAR;
+        });
+        ASSERT_NE(linear, cache->groupSets().end());
+        const auto& group = *linear;
+        const auto id = group->groupSetId();
+        const auto device_blocks = block_tree_cache_test::allocateDeviceBlocksForTest(*group, 1);
+        ASSERT_EQ(device_blocks.size(), 1u);
+        const auto& blocks = device_blocks.front();
+        const auto host_block = group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::EVICT);
+        const auto disk_block = group->allocateSingleBlock(Tier::DISK, BlockTreeRefType::EVICT);
+        ASSERT_NE(host_block, NULL_BLOCK_IDX);
+        ASSERT_NE(disk_block, NULL_BLOCK_IDX);
+        const auto tiles = getDeviceHostCopyTiles(*group, blocks);
+        ASSERT_FALSE(tiles.empty());
+        for (size_t i = 0; i < tiles.size(); ++i) {
+            writeDevicePattern(tiles[i].buffer.addr, tiles[i].buffer.size_bytes, 0x35 + i % 113);
+        }
+        const auto execute = [&](const TransferDescriptor& descriptor) {
+            const auto result = cache->executeTransfer(block_transfer_engine_test::makeTransferTask({descriptor}));
+            ASSERT_TRUE(result.ok()) << result.status.ToString();
+        };
+        ASSERT_NO_FATAL_FAILURE(execute(TransferDescriptor::deviceToHost(id, blocks, host_block)));
+        ASSERT_NO_FATAL_FAILURE(execute(TransferDescriptor::hostToDisk(id, host_block, disk_block)));
+        group->releaseSingleBlock(Tier::HOST, host_block, BlockTreeRefType::EVICT);
+        for (const auto& tile : tiles) {
+            writeDevicePattern(tile.buffer.addr, tile.buffer.size_bytes, 0);
+        }
+        ASSERT_NO_FATAL_FAILURE(execute(TransferDescriptor::diskToDevice(id, disk_block, blocks)));
+        for (size_t i = 0; i < tiles.size(); ++i) {
+            expectDevicePattern(tiles[i].buffer.addr, tiles[i].buffer.size_bytes, 0x35 + i % 113);
+        }
+        group->releaseSingleBlock(Tier::DISK, disk_block, BlockTreeRefType::EVICT);
+        block_tree_cache_test::unreferenceDeviceBlocksForTest(*group, device_blocks);
+    }
 }
 
 TEST_F(BlockTreeCacheFactoryTest, DiskCacheAllowsDisabledLinearReuse) {
