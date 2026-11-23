@@ -176,20 +176,17 @@ public class EngineLocalView {
     }
 
     /**
-     * Remove all cache blocks of an engine
+     * Detach an engine's cached keys for removal from the global index.
      *
      * @param engineIPort Engine IP
      */
-    public void removeAllCacheBlockOfEngine(String engineIPort) {
+    public Set<Long> removeAllCacheBlockOfEngine(String engineIPort) {
         if (engineIPort == null) {
-            return;
+            return Set.of();
         }
 
         Set<Long> removed = engineViews.remove(engineIPort);
-        // Warn if removal fails
-        if (removed == null) {
-            log.warn("Remove failed, the engine: {} not exist.", engineIPort);
-        }
+        return removed == null ? Set.of() : removed;
     }
 
     /**

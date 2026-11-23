@@ -86,49 +86,28 @@ public class GlobalCacheIndex {
 
         lock.lock();
         try {
-            Set<String> engines = blockToEnginesMap.get(blockCacheKey);
-            if (engines == null) {
-                return;
-            }
-
-            boolean removed = engines.remove(engineIp);
-            if (removed) {
-                totalMappings.decrement();
-
-                // Remove entire entry if no engine owns this cache block
-                if (engines.isEmpty()) {
-                    blockToEnginesMap.remove(blockCacheKey);
-                }
-            }
+            removeOwner(engineIp, blockCacheKey);
         } finally {
             lock.unlock();
         }
     }
 
     /**
-     * Remove an engine
+     * Remove only the blocks from the retiring engine's detached local view.
      *
      * @param engineIp logical worker identity in {@code ip:port@engineIndex} format
+     * @param blockCacheKeys keys detached by the caller while holding the worker cache lock
      */
-    public void removeAllCacheBlockOfEngine(String engineIp) {
-        if (engineIp == null) {
+    public void removeAllCacheBlockOfEngine(String engineIp, Set<Long> blockCacheKeys) {
+        if (engineIp == null || blockCacheKeys.isEmpty()) {
             return;
         }
 
         lock.lock();
         try {
-            blockToEnginesMap.forEach(
-                    (blockCacheKey, engines) -> {
-                        boolean removed = engines.remove(engineIp);
-                        if (removed) {
-                            totalMappings.decrement();
-
-                            // Remove entire entry if no engine owns this cache block
-                            if (engines.isEmpty()) {
-                                blockToEnginesMap.remove(blockCacheKey);
-                            }
-                        }
-                    });
+            for (Long blockCacheKey : blockCacheKeys) {
+                removeOwner(engineIp, blockCacheKey);
+            }
         } finally {
             lock.unlock();
         }
@@ -171,6 +150,16 @@ public class GlobalCacheIndex {
 
     public long totalMappings() {
         return totalMappings.sum();
+    }
+
+    private void removeOwner(String engineIp, Long blockCacheKey) {
+        Set<String> engines = blockToEnginesMap.get(blockCacheKey);
+        if (engines != null && engines.remove(engineIp)) {
+            totalMappings.decrement();
+            if (engines.isEmpty()) {
+                blockToEnginesMap.remove(blockCacheKey);
+            }
+        }
     }
 
     /**
