@@ -2084,8 +2084,14 @@ class FlexlbServiceImplTest {
                                     io.opentelemetry.api.common.AttributeKey.longKey(
                                             "flexlb.schedule.code")));
             assertEquals(
-                    List.of("flexlb.response.ready"),
+                    List.of("flexlb.request.received", "flexlb.response.ready"),
                     span.getEvents().stream().map(event -> event.getName()).toList());
+            assertFalse(
+                    exporter.spans.stream()
+                            .anyMatch(
+                                    data ->
+                                            data.getName()
+                                                    .equals("rtp_llm.flexlb.request.received")));
         } finally {
             org.flexlb.telemetry.FlexlbTrace.configure(null, "");
             sdk.close();

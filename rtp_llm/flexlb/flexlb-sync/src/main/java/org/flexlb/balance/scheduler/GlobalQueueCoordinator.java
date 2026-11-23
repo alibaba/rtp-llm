@@ -210,6 +210,8 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             entry.context.setPlanCost(0L);
             entry.context.setVictimCount(0);
             orderedQueue.restore(entry);
+            FlexlbTrace.recordScheduleEvent(
+                    entry.context.getTraceContext(), "flexlb.queue.requeued");
             changed.signal();
             return true;
         } finally {
