@@ -128,6 +128,12 @@ E256/K2560/N640/topk10. These are correctness checks, not a model quality or
 service performance equivalence claim; deployments must rerun the gate with
 their dependency lock.
 
+The 2026-11-23 production-shape run additionally compared b12x and CUTLASS
+at local E256/K2560/N640/topk10 for every integer M1–16 on both EP ranks.
+All 32 synthetic and 32 captured-route cases passed. The largest relative
+L2 error on captured routes was 3.77%; each backend's eager and CUDA Graph
+results were bitwise identical.
+
 The Qwen4 FP8-to-NVFP4 recipe selects Hybrid automatically for compatible
 SM120 TP2/EP2 Decode workers. The static backend requires this recipe.
 `decode_b12x_max_rows` accepts 0 through 16 physical input rows.
@@ -207,6 +213,8 @@ of NCCL's private host communicator state.
 ARM keeps the standard collective: the SM120 native target and binding are
 currently enabled only for x86 CUDA 13. Required `nccl.h` and `nccl_device.h`
 are explicit build inputs, and the supporting header glob must be nonempty.
+Build the complete x86 SM120 Python compute extension, including the registered
+LSA ops, with `bazel build --config=cuda13 --config=sm120 //:rtp_compute_ops`.
 
 Aligned staging buffers are allocated during group-agreed initialization;
 each output is allocated before suppressing the routed collective, with
@@ -243,6 +251,14 @@ test process rather than attempting to recover its CUDA context.
 an unmatched launch in flight. The surviving worker must report a CUDA fault
 or remain pending until the test supervisor orders local cancellation. The
 test supervisor reaps both workers within the test budget.
+`reduce_gate_tp_recovery_test` runs the same unmatched native launch under
+RTP-LLM's backend `ProcessManager`. One rank exits with status 42 while the
+other waits and does not respond to graceful shutdown signals. The manager
+escalates to SIGKILL, reaps the surviving rank and exits with status 1 for
+the deployment supervisor. The test launches a fresh TP
+group with new processes and a new communicator, and checks the resulting
+eager output and two CUDA Graph replays on both ranks. The test controls the
+restart so it can run outside a deployment orchestrator.
 
 The 2026-11-21 CUDA 13.2/NCCL 2.30.4 run on two SM120 GPUs passed all 36
 shape cases, both one-rank startup failures, all eight shared-packing agreement

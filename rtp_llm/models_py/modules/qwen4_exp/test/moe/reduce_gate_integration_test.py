@@ -3,7 +3,10 @@
 import gc
 import json
 import os
+import signal
 import statistics
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -37,6 +40,12 @@ def check_reference(actual, expected):
 
 
 def main():
+    if sys.argv[1:2] == ["--manage-failing-tp-group"]:
+        manage_failing_tp_group(Path(sys.argv[2]))
+        return
+    if os.environ.get("RTP_TEST_LSA_TP_RECOVERY") == "1":
+        run_tp_recovery()
+        return
     if os.environ.get("RTP_TEST_LSA_PEER_EXIT") == "1":
         run_peer_exit()
         return
@@ -171,6 +180,164 @@ def peer_exit_worker(rank, rendezvous, submitted, peer_exited):
             stream.synchronize()
         print("LSA_PEER_EXIT_PENDING_THEN_CANCELLED", flush=True)
     os._exit(0)
+
+
+def run_tp_recovery():
+    if "LOCAL_RANK" in os.environ or torch.cuda.device_count() < 2:
+        raise RuntimeError("TP recovery needs two GPUs and its own process manager")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        command = [sys.executable, __file__, "--manage-failing-tp-group", tmp]
+        with subprocess.Popen(command, start_new_session=True) as supervisor:
+            try:
+                assert supervisor.wait(timeout=75) == 1
+            finally:
+                if supervisor.poll() is None:
+                    os.killpg(supervisor.pid, signal.SIGKILL)
+        old = json.loads((root / "failed-group.json").read_text())
+        assert old["peer_exit"] == 42, old
+        assert old["survivor_exit"] == -signal.SIGKILL, old
+        assert old["failure_detected"] and old["launch_pending"], old
+        assert old["pids"][0] != old["pids"][1], old
+        print("LSA_TP_GROUP_REAPED", json.dumps(old), flush=True)
+
+        # A deployment supervisor starts a new service after the manager's
+        # nonzero exit. Reproduce that handoff with a fresh rendezvous here.
+        rendezvous = f"file://{root}/restarted-rendezvous"
+        mp.spawn(restarted_tp_worker, args=(rendezvous, root), nprocs=2)
+        new = [
+            json.loads((root / f"ready-rank{rank}.json").read_text())
+            for rank in range(2)
+        ]
+        assert {entry["rank"] for entry in new} == {0, 1}, new
+        assert len({entry["pid"] for entry in new}) == 2, new
+        assert not {entry["pid"] for entry in new}.intersection(old["pids"]), new
+        print("LSA_TP_GROUP_RESTARTED", json.dumps(new), flush=True)
+
+
+def manage_failing_tp_group(root):
+    from rtp_llm.utils.process_manager import ProcessManager
+
+    ctx = mp.get_context("spawn")
+    submitted = ctx.Event()
+    rendezvous = f"file://{root}/failed-rendezvous"
+    workers = [
+        ctx.Process(
+            target=failing_tp_worker,
+            args=(rank, rendezvous, submitted),
+            name=f"lsa-tp-rank{rank}",
+        )
+        for rank in range(2)
+    ]
+
+    def record_exit():
+        (root / "failed-group.json").write_text(
+            json.dumps(
+                {
+                    "pids": [worker.pid for worker in workers],
+                    "survivor_exit": workers[0].exitcode,
+                    "peer_exit": workers[1].exitcode,
+                    "failure_detected": manager.failure_detected,
+                    "launch_pending": submitted.is_set(),
+                }
+            )
+        )
+
+    manager = ProcessManager(
+        monitor_interval=1, allow_defer_first_sigterm=True, pre_exit_cleanup=record_exit
+    )
+    try:
+        for worker in workers:
+            worker.start()
+        # Matches the production backend manager's registration and failure path.
+        manager.set_processes(workers, shutdown_group="backend")
+        manager.monitor_and_release_processes()
+        raise AssertionError("The failed TP group must make its manager exit nonzero")
+    finally:
+        for worker in workers:
+            if worker.pid is not None and worker.is_alive():
+                worker.kill()
+                worker.join()
+
+
+def failing_tp_worker(rank, rendezvous, submitted):
+    # Exercise the service manager's hard-kill path when a rank stuck in
+    # the CUDA call cannot complete its graceful shutdown.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    torch.cuda.set_device(rank)
+    rows = 32
+    ops, handle, value, output, gate, stream = prepare_fault_case(
+        rank, dict(init_method=rendezvous, rank=rank, world_size=2), 8192, rows, 0
+    )
+    if rank == 1:
+        assert submitted.wait(20), "The survivor never entered LSA"
+        os._exit(42)
+
+    ops.apply(
+        handle,
+        value.data_ptr(),
+        value.data_ptr(),
+        gate.data_ptr(),
+        output.data_ptr(),
+        rows,
+        stream.cuda_stream,
+    )
+    assert not stream.query(), "Unmatched LSA launch completed before peer exit"
+    submitted.set()
+    try:
+        stream.synchronize()
+    except RuntimeError as error:
+        if not any(
+            reason in str(error)
+            for reason in ("unspecified launch failure", "illegal memory access")
+        ):
+            raise
+        # A driver may report a device fault first. Keep the process alive so
+        # the test can still verify the manager owns group cleanup.
+        print("LSA_TP_SURVIVOR_DEVICE_FAULT", flush=True)
+        signal.pause()
+    raise AssertionError("Unmatched LSA completed or the survivor escaped cleanup")
+
+
+def restarted_tp_worker(rank, rendezvous, root):
+    torch.cuda.set_device(rank)
+    rows = 32
+    ops, handle, value, output, gate, stream = prepare_fault_case(
+        rank, dict(init_method=rendezvous, rank=rank, world_size=2), 8192, rows, 0
+    )
+    shared = torch.zeros_like(value)
+
+    def launch():
+        ops.apply(
+            handle,
+            value.data_ptr(),
+            shared.data_ptr(),
+            gate.data_ptr(),
+            output.data_ptr(),
+            rows,
+            torch.cuda.current_stream().cuda_stream,
+        )
+
+    value.fill_(rank + 1)
+    launch()
+    stream.synchronize()
+    assert torch.equal(output, torch.full_like(output, 3))
+
+    graph = torch.cuda.CUDAGraph()
+    dist.barrier()
+    with torch.cuda.graph(graph):
+        launch()
+    for multiplier in (2, 3):
+        value.fill_((rank + 1) * multiplier)
+        graph.replay()
+        torch.cuda.synchronize()
+        assert torch.equal(output, torch.full_like(output, 3 * multiplier))
+    dist.barrier()
+    dist.destroy_process_group()
+    (root / f"ready-rank{rank}.json").write_text(
+        json.dumps({"rank": rank, "pid": os.getpid(), "eager": 1, "graph_replays": 2})
+    )
 
 
 def run_missing_peer(rank, group_options):

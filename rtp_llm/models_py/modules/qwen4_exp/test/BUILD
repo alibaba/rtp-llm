@@ -598,6 +598,21 @@ py_test(
     target_compatible_with = _SM120_LSA_CUDA13_ONLY,
 )
 
+py_test(
+    name = "reduce_gate_tp_recovery_test",
+    srcs = ["moe/reduce_gate_integration_test.py"],
+    main = "moe/reduce_gate_integration_test.py",
+    deps = ["//rtp_llm:testlib"],
+    env = {
+        "GPU_COUNT": "2",
+        "NCCL_P2P_DISABLE": "0",
+        "RTP_TEST_LSA_TP_RECOVERY": "1",
+    },
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "2"},
+    target_compatible_with = _SM120_LSA_CUDA13_ONLY,
+)
+
 test_suite(
     name = "qwen4_moe",
     tests = [
@@ -616,6 +631,7 @@ test_suite(
         ":reduce_gate_integration_test",
         ":reduce_gate_default_abort_test",
         ":reduce_gate_peer_exit_test",
+        ":reduce_gate_tp_recovery_test",
         "//rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test:small_moe_gemv_test",
     ],
 )
