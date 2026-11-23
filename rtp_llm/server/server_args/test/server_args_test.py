@@ -1301,6 +1301,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["CONCURRENCY_LIMIT"] = "64"
         os.environ["MAX_CONTEXT_BATCH_SIZE"] = "32"
         os.environ["MAX_BATCH_TOKENS_WITHOUT_CACHE"] = "2048"
+        os.environ["MAX_BATCH_KV_LEN"] = "16384"
         os.environ["CP_FORCE_SINGLE_PREFILL"] = "0"
         os.environ["PREFILL_CHUNK_SIZE"] = "256"
         os.environ["WARM_UP"] = "1"
@@ -1378,6 +1379,11 @@ class ServerArgsSetTest(TestCase):
         )
         self.assertEqual(restored_fifo_config.max_batch_tokens_without_cache, 2048)
         self.assertEqual(restored_fifo_config.prefill_chunk_size, 256)
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.max_batch_kv_len,
+            16384,
+        )
+        self.assertEqual(restored_fifo_config.max_batch_kv_len, 16384)
         # Old pickles carry only the two original slots; every field added later
         # must fall back to its default instead of raising.
         fifo_config_type = type(py_env_configs.runtime_config.fifo_scheduler_config)
@@ -1391,6 +1397,35 @@ class ServerArgsSetTest(TestCase):
         seven_slot_fifo_config.__setstate__((32, 8192, "ratio", "2", False, 16, 2048))
         self.assertEqual(seven_slot_fifo_config.max_batch_tokens_without_cache, 2048)
         self.assertEqual(seven_slot_fifo_config.prefill_chunk_size, 0)
+        self.assertEqual(seven_slot_fifo_config.max_batch_kv_len, 0)
+        eight_slot_fifo_config = fifo_config_type.__new__(fifo_config_type)
+        eight_slot_fifo_config.__setstate__(
+            (32, 8192, "ratio", "2", False, 16, 2048, 256)
+        )
+        self.assertEqual(eight_slot_fifo_config.prefill_chunk_size, 256)
+        self.assertEqual(eight_slot_fifo_config.max_batch_kv_len, 0)
+
+        for single_prefill in (False, True):
+            current_fifo_config = fifo_config_type()
+            current_fifo_config.force_single_prefill = single_prefill
+            current_fifo_config.max_batch_kv_len = 16384
+            restored = pickle.loads(pickle.dumps(current_fifo_config))
+            self.assertEqual(restored.force_single_prefill, single_prefill)
+            self.assertEqual(restored.max_batch_kv_len, 16384)
+        for slot, single_prefill, kv_limit in (
+            (False, False, 0),
+            (True, True, 0),
+            (0, False, 0),
+            (1, False, 1),
+            (16384, False, 16384),
+        ):
+            with self.subTest(legacy_fifo_slot=slot):
+                restored = fifo_config_type.__new__(fifo_config_type)
+                restored.__setstate__(
+                    (32, 8192, "ratio", "2", False, 16, 2048, 256, slot)
+                )
+                self.assertEqual(restored.force_single_prefill, single_prefill)
+                self.assertEqual(restored.max_batch_kv_len, kv_limit)
 
         # Verify frontend and DashSc pre-stop windows are configured independently.
         self.assertEqual(
@@ -1470,6 +1505,8 @@ class ServerArgsSetTest(TestCase):
             "64",
             "--max_batch_tokens_without_cache",
             "4096",
+            "--max_batch_kv_len",
+            "32768",
             "--prefill_chunk_size",
             "512",
             "--cp_force_single_prefill",
@@ -1546,6 +1583,10 @@ class ServerArgsSetTest(TestCase):
             16,
         )
 
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.max_batch_kv_len,
+            32768,
+        )
         # Verify runtime_config (warm_up is now in RuntimeConfig)
         self.assertEqual(py_env_configs.runtime_config.warm_up, False)  # bool in C++
         self.assertEqual(py_env_configs.runtime_config.warm_up_with_loss, False)

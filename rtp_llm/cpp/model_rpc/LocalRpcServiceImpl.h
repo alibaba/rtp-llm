@@ -6,7 +6,6 @@
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
-#include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 
 namespace rtp_llm {
@@ -147,14 +146,6 @@ public:
     EngineScheduleInfo getEngineScheduleInfo(int64_t latest_finised_version) {
         return local_server_->getEngineScheduleInfo(latest_finised_version);
     }
-
-    std::shared_ptr<EngineBase> getEngine() const {
-        return local_server_->getEngine();
-    };
-
-    std::shared_ptr<MultimodalProcessor> getMultimodalProcessor() const {
-        return local_server_->getMultimodalProcessor();
-    };
 
     virtual size_t onflightRequestNum() {
         return local_server_->onflightRequestNum();

@@ -50,7 +50,7 @@ class EngineConfig:
     runtime_config: RuntimeConfig
     # C++ uses this for NCCL ip/ports
     nccl_comm_config: NcclCommConfig
-    # C++ reads rpc_server_port, embedding_rpc_server_port, http_port from this
+    # C++ reads rpc_server_port, embedding_rpc_server_port from this
     server_config: ServerConfig
 
     # Specialized configs from py_env_configs

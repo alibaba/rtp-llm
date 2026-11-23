@@ -22,6 +22,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
+#include "rtp_llm/cpp/model_rpc/RpcServerRuntimeMeta.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 
 using namespace ::testing;
@@ -216,14 +217,93 @@ public:
     }
 
     KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
-        return {};
+        return cache_status;
     }
 
     std::vector<GenerateStreamPtr> streams;
+    KVCacheInfo                    cache_status;
 
 private:
     EngineFailureMode mode_;
 };
+
+class WorkerStatusRpcTest: public ::testing::Test {
+protected:
+    void SetUp() override {
+        engine_                                  = std::make_shared<FailingEngine>(EngineFailureMode::REJECT_ALL);
+        engine_->cache_status.available_kv_cache = 80000;
+        engine_->cache_status.total_kv_cache     = 100000;
+        server_.setEngineForTest(engine_);
+        server_.meta_                                        = std::make_shared<RpcServerRuntimeMeta>();
+        server_.maga_init_params_.parallelism_config.pp_size = 1;
+        server_.maga_init_params_.pd_sep_config.role_type    = RoleType::PREFILL;
+    }
+
+    WorkerStatusPB workerStatus() {
+        grpc::ServerContext context;
+        StatusVersionPB     request;
+        WorkerStatusPB      response;
+        EXPECT_TRUE(server_.GetWorkerStatus(&context, &request, &response).ok());
+        return response;
+    }
+
+    TestLocalRpcServer             server_;
+    std::shared_ptr<FailingEngine> engine_;
+};
+
+TEST_F(WorkerStatusRpcTest, ReportsBothFifoBudgetsWithoutClampingPhysicalKv) {
+    struct Budgets {
+        int64_t query;
+        int64_t kv;
+        int64_t reported;
+    };
+    for (const auto& budgets : std::vector<Budgets>{{262144, 16384, 16384},
+                                                    {8192, 16384, 8192},
+                                                    {262144, 0, 262144},
+                                                    {262144, -1, 262144},
+                                                    {0, 16384, 1},
+                                                    {-1, 16384, 16384},
+                                                    {0, 0, 0},
+                                                    {1, 16384, 1},
+                                                    {262144, 1, 1}}) {
+        SCOPED_TRACE(::testing::Message() << "query=" << budgets.query << " kv=" << budgets.kv);
+        auto& config                 = server_.maga_init_params_.runtime_config.fifo_scheduler_config;
+        config.max_batch_tokens_size = budgets.query;
+        config.max_batch_kv_len      = budgets.kv;
+        const auto response          = workerStatus();
+        EXPECT_EQ(response.max_batch_tokens_size(), budgets.reported);
+        EXPECT_EQ(response.available_kv_cache(), 80000);
+        EXPECT_EQ(response.total_kv_cache(), 100000);
+    }
+}
+
+TEST_F(WorkerStatusRpcTest, AppliesKvBudgetOnlyToSelectedFifoScheduler) {
+    struct SchedulerConfig {
+        int         pp_size;
+        bool        batch_decode;
+        RoleType    role;
+        std::string mode;
+        int64_t     reported;
+    };
+    for (const auto& scheduler : std::vector<SchedulerConfig>{{1, false, RoleType::PREFILL, "", 16384},
+                                                              {2, false, RoleType::PREFILL, "", 262144},
+                                                              {1, true, RoleType::PREFILL, "", 262144},
+                                                              {1, false, RoleType::PDFUSION, "ratio", 262144},
+                                                              {1, false, RoleType::PREFILL, "ratio", 16384},
+                                                              {1, false, RoleType::PDFUSION, "unknown", 16384}}) {
+        SCOPED_TRACE(::testing::Message() << "pp=" << scheduler.pp_size << " batch=" << scheduler.batch_decode
+                                          << " role=" << scheduler.role << " mode=" << scheduler.mode);
+        auto& params                                     = server_.maga_init_params_;
+        params.parallelism_config.pp_size                = scheduler.pp_size;
+        params.pd_sep_config.role_type                   = scheduler.role;
+        params.runtime_config.use_batch_decode_scheduler = scheduler.batch_decode;
+        auto& config                                     = params.runtime_config.fifo_scheduler_config;
+        config.pdfusion_scheduler_mode                   = scheduler.mode;
+        config.max_batch_tokens_size                     = 262144;
+        config.max_batch_kv_len                          = 16384;
+        EXPECT_EQ(workerStatus().max_batch_tokens_size(), scheduler.reported);
+    }
+}
 
 class RecordingWriter: public LocalRpcServer::WriterInterface {
 public:

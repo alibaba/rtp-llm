@@ -76,6 +76,7 @@ private:
     bool   evaluateRunningBatch(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
     bool   fitsPrefillTokenLimits(size_t                   admitted_stream_count,
                                   size_t                   admitted_tokens,
+                                  size_t                   admitted_tokens_without_cache,
                                   size_t                   admitted_max_seq_len,
                                   size_t                   admitted_sequence_count,
                                   const GenerateStreamPtr& candidate) const;
@@ -119,6 +120,7 @@ private:
     StreamGroupQueue waiting_group_queue_;
     StreamGroupQueue loading_cache_group_queue_;
 
+    const size_t max_batch_kv_len_ = 0;
     // Soft per-round quota on the tokens that are actually recomputed (prefix-cache hits
     // excluded). 0 disables it.
     const size_t max_batch_tokens_without_cache_ = 0;

@@ -361,7 +361,7 @@ public:
         // first (new wire format); on parse failure, fall back to bool: true→DEFAULT,
         // false→NONE. Without this fallback an old bool payload raises
         // autil::legacy::ExceptionBase and the surrounding catch nulls the entire
-        // generate_config (see ApiDataType.cc).
+        // generate_config.
         int return_all_probs_int = static_cast<int>(return_all_probs);
         try {
             json.Jsonize("return_all_probs", return_all_probs_int, return_all_probs_int);
