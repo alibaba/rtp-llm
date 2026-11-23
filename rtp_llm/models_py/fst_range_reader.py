@@ -152,6 +152,19 @@ def native_cpu_range_api():
     return cpp, SafeTensorsMetadata, TorchOp, dtype_convert
 
 
+def native_host_reader(cpp):
+    """Construct the native CPU noGDS reader for either Ali wheel ABI."""
+    try:
+        # 0.3.x binds device_id in the native worker; the wheel uses 0 for CPU.
+        return cpp.nogds_file_reader(False, 1024, 1, False, 0)
+    except TypeError as error:
+        if "incompatible constructor arguments" not in str(error):
+            raise
+        # 0.1.x has the same host reader without device_id. Do not swallow
+        # allocation, I/O, or any other runtime error and switch backends.
+        return cpp.nogds_file_reader(False, 1024, 1, False)
+
+
 def iter_fst_range_tensors(
     files, *, name_filter=None, slice_expander=None, read_spec_resolver=None, catalog=None
 ):
@@ -159,7 +172,7 @@ def iter_fst_range_tensors(
     cpp, SafeTensorsMetadata, TorchOp, dtype_convert = native_cpu_range_api()
     # use_mmap=False permits arbitrary file offsets. CPU mode avoids pinned
     # CUDA allocation and current-device state in the reader's worker threads.
-    reader = cpp.nogds_file_reader(False, 1024, 1, False)
+    reader = native_host_reader(cpp)
     framework = TorchOp()
 
     def read(fd, metadata, frame, spec):

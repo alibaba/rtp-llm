@@ -244,6 +244,63 @@ class DefaultFstRouteTest(_CheckpointCase):
 
 
 class DefaultFstNativeReaderTest(_CheckpointCase):
+    def test_multifile_readspec_uses_native_batch_order_and_close(self):
+        from fastsafetensors import ParallelLoader, SingleGroup
+        from fastsafetensors.parallel_loader import TimingContext
+
+        from rtp_llm.models_py.fastsafetensors_read_spec import (
+            build_read_spec_parallel_loader,
+        )
+        from rtp_llm.models_py.read_spec import ReadSpec
+        from rtp_llm.models_py.v4_fst_nogds import checked_nogds_loader
+
+        files = []
+        for i in range(3):
+            path = str(self.root / f"shard-{i}.safetensors")
+            save_file({f"w{i}": self.expected + i}, path)
+            files.append(path)
+        base = checked_nogds_loader(ParallelLoader)
+        ordered = hasattr(base, "_take_ordered_batch")
+        if ordered:
+
+            class ReversedCompletion(base):
+                def _load_single_batch(self, producer_id, loader, batch_id, files):
+                    if batch_id == 0 and self.max_concurrent_producers > 1:
+                        with self._result_condition:
+                            if not self._result_condition.wait_for(
+                                lambda: 1 in self._completed_batches, timeout=10
+                            ):
+                                raise AssertionError(
+                                    "batch 1 did not finish before batch 0"
+                                )
+                    return super()._load_single_batch(
+                        producer_id, loader, batch_id, files
+                    )
+
+            base = ReversedCompletion
+        cls = build_read_spec_parallel_loader(base, TimingContext)
+        for q in (0, -1):
+            with self.subTest(queue_size=q):
+                loader = cls(
+                    pg=SingleGroup(),
+                    hf_weights_files=files,
+                    read_spec_resolver=ReadSpec.full,
+                    device="cpu",
+                    nogds=True,
+                    use_tqdm_on_load=False,
+                    queue_size=q,
+                    max_concurrent_producers=2 if ordered and q == 0 else 1,
+                )
+                try:
+                    observed = [(k, v.clone()) for k, v in loader.iterate_weights()]
+                    self.assertEqual([k for k, _ in observed], ["w0", "w1", "w2"])
+                    for i, (_, value) in enumerate(observed):
+                        torch.testing.assert_close(value, self.expected + i)
+                    if ordered:
+                        self.assertEqual(sorted(loader.batch_broadcast_stats), [0, 1, 2])
+                finally:
+                    loader.close()
+
     def test_explicit_native_cpu_read(self):
         loader = _loader(self.root, "cpu", load_method=Method.FASTSAFETENSORS)
         model = loader.load()

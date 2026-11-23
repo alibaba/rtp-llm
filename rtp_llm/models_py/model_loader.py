@@ -2320,8 +2320,11 @@ class NewModelLoader:
                 seen.add(name)
                 yield name, checkpoint_value
         finally:
-            backing_loader = getattr(loader, "loader", None)
-            close = getattr(backing_loader, "close", None)
+            # Ordered FST owns a native reader per producer. Closing only the
+            # legacy first-reader alias leaks the rest on this ABI.
+            close = getattr(loader, "close", None)
+            if not callable(close):
+                close = getattr(getattr(loader, "loader", None), "close", None)
             if callable(close):
                 close()
 

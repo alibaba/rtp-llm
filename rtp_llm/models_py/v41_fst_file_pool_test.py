@@ -81,13 +81,23 @@ class V41FilePoolTest(unittest.TestCase):
             # The producer waiting for close of its previous file must wake on
             # GeneratorExit as well; no background reader can be left waiting.
             existing = set(threading.enumerate())
+
+            def new_producers():
+                # The FIFO wheel uses Thread-N (_producer_worker); ordered
+                # FST names producer threads explicitly.
+                return {
+                    t
+                    for t in threading.enumerate()
+                    if t not in existing
+                    and (
+                        "_producer_worker" in t.name
+                        or t.name.startswith("fastsafetensors-producer-")
+                    )
+                }
+
             reader = stream()
             next(reader)
-            workers = {
-                t
-                for t in threading.enumerate()
-                if t not in existing and "_producer_worker" in t.name
-            }
+            workers = new_producers()
             self.assertTrue(workers)
             reader.close()
             self.assertFalse(any(t.is_alive() for t in workers))
@@ -99,11 +109,7 @@ class V41FilePoolTest(unittest.TestCase):
 
             reader = stream(fail_second)
             next(reader)
-            workers = {
-                t
-                for t in threading.enumerate()
-                if t not in existing and "_producer_worker" in t.name
-            }
+            workers = new_producers()
             self.assertTrue(workers)
             with self.assertRaisesRegex(ValueError, "rejected second weight"):
                 next(reader)

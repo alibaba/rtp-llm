@@ -182,6 +182,12 @@ class _TensorTransport:
     def __init__(self, tensor: torch.Tensor):
         self.real_tensor = tensor
 
+    @property
+    def dtype(self):
+        # Newer TorchProcessGroup adapters inspect the transport dtype before
+        # send/recv. _transport_tensor has already normalized FP8 to raw bytes.
+        return self.real_tensor.dtype
+
 
 def _stacked_expert_read_specs(
     slice_expander: Any,
@@ -507,18 +513,22 @@ def build_read_spec_parallel_loader(
             self.segmented_tensor_reader = segmented_tensor_reader
             self.name_filter = name_filter
 
-        def _consume_single_batch(self):
+        def _consume_single_batch(self, batch_id=None):
+            ordered = batch_id is not None
             with timing_context("wait_queue", self._log_message) as timer:
-                batch_item = self.batch_queue.get()
-                if self.queue_size == 0 and self.consumer_processed is not None:
-                    self.consumer_processed.set()
-                if batch_item is None:
-                    self._log_error("get batch_item is None, will break")
-                    return
-                if isinstance(batch_item, Exception):
-                    self._log_error("get batch_item is Exception, will raise")
-                    raise batch_item
-                batch = batch_item
+                if ordered:
+                    # 0.3.x may finish I/O out of order. This also propagates
+                    # producer errors and releases the credit on dequeue (q>=0).
+                    batch = self._take_ordered_batch(batch_id)
+                else:
+                    batch = self.batch_queue.get()
+                    if self.queue_size == 0 and self.consumer_processed is not None:
+                        self.consumer_processed.set()
+                    if batch is None:
+                        self._log_error("get batch_item is None, will break")
+                        return
+                    if isinstance(batch, Exception):
+                        raise batch
                 timer.batch_id = batch.batch_id
             queue_wait_time = timer.elapsed_ms
 
@@ -545,12 +555,33 @@ def build_read_spec_parallel_loader(
                         self.name_filter,
                     )
                 get_tensor_time = timer.elapsed_ms
+            except BaseException:
+                # Do not start another serial read when an owner rejects a
+                # tensor or closes the generator while it owns this batch.
+                self.stop_event.set()
+                raise
             finally:
-                with timing_context(
-                    "fb.close", self._log_message, batch.batch_id
-                ) as timer:
-                    batch.fb.close()
-                close_time = timer.elapsed_ms
+                try:
+                    try:
+                        if ordered and hasattr(self, "batch_broadcast_stats"):
+                            stats_type = type(self.broadcast_stats)
+                            get_stats = getattr(batch.fb, "get_broadcast_stats", None)
+                            stats = get_stats() if get_stats else stats_type().to_dict()
+                            self.batch_broadcast_stats[batch.batch_id] = stats
+                            self.broadcast_stats.merge(stats_type(**stats))
+                    finally:
+                        with timing_context(
+                            "fb.close", self._log_message, batch.batch_id
+                        ) as timer:
+                            batch.fb.close()
+                        close_time = timer.elapsed_ms
+                finally:
+                    if self.queue_size < 0:
+                        # Both ABIs serialize q=-1 until the buffer closes.
+                        if ordered:
+                            self._inflight_slots.release()
+                        elif self.consumer_processed is not None:
+                            self.consumer_processed.set()
 
             self._log_message(
                 f"Batch {batch.batch_id} summary: "
@@ -559,8 +590,6 @@ def build_read_spec_parallel_loader(
                 f"get_tensor={get_tensor_time:.3f}ms, "
                 f"close={close_time:.3f}ms"
             )
-            if self.queue_size < 0 and self.consumer_processed is not None:
-                self.consumer_processed.set()
 
     ReadSpecParallelLoader.__name__ = "ReadSpecParallelLoader"
     return ReadSpecParallelLoader

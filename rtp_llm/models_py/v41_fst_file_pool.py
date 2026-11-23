@@ -47,11 +47,13 @@ def v41_file_staging_loader(base, model_type, device, *, cuda_backend, use_shm):
             self._rtp_file_pool = None
 
         def _load_single_batch(self, *args, **kwargs):
-            # Do not replace the pool before the previous batch's last tensor
-            # has been consumed. Only the producer clears this wheel-owned event.
-            self.consumer_processed.wait()
-            if self.stop_event.is_set() or self.error_event.is_set():
-                return
+            # The FIFO producer waits here before allocating the next pool.
+            # Ordered producers already acquired the sole q=-1 inflight slot.
+            processed = getattr(self, "consumer_processed", None)
+            if processed is not None:
+                processed.wait()
+                if self.stop_event.is_set() or self.error_event.is_set():
+                    return
             with torch.cuda.device(device):
                 # An entire checkpoint's worth of differently-sized raw files
                 # must not share a cache: a larger one cannot reuse a smaller
@@ -68,6 +70,8 @@ def v41_file_staging_loader(base, model_type, device, *, cuda_backend, use_shm):
                 # post-close notification. Stop before waking the producer so
                 # it cannot load another shard while the consumer unwinds.
                 self.stop_event.set()
-                self.consumer_processed.set()
+                processed = getattr(self, "consumer_processed", None)
+                if processed is not None:
+                    processed.set()
 
     return StagedFileLoader

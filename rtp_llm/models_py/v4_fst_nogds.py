@@ -27,6 +27,8 @@ def _transfer(fd, gbuf, offset, length, dest_offset, device):
     from fastsafetensors.dlpack import from_cuda_buffer
     from fastsafetensors.st_types import DType
 
+    from rtp_llm.models_py.fst_range_reader import native_host_reader
+
     if not (0 <= dest_offset < dest_offset + length <= gbuf.get_length()):
         raise OSError("Invalid noGDS retry extent")
     # Like the FST CUDA file copier, the DLPack tensor borrows the allocation.
@@ -40,7 +42,7 @@ def _transfer(fd, gbuf, offset, length, dest_offset, device):
         )
         hptr = buf.data_ptr()
         host = cpp.gds_device_buffer(hptr, buf.numel(), False)
-        reader = cpp.nogds_file_reader(False, 1024, 1, False)
+        reader = native_host_reader(cpp)
         for start in range(0, length, buf.numel()):
             size = min(buf.numel(), length - start)
             token = reader.submit_read(fd, host, offset + start, size, 0)
@@ -94,6 +96,9 @@ class _CheckedCopier:
         self.copier, self.device, self.framework = copier, device, framework
         copier.reader = _CheckedReader(copier.reader, device, _transfer)
 
+    def __getattr__(self, name):
+        return getattr(self.copier, name)
+
     def submit_io(self, *args, **kwargs):
         return self.copier.submit_io(*args, **kwargs)
 
@@ -115,10 +120,12 @@ def protect_v4_nogds(loader):
     # Install per parallel-loader instance, never on the process-global copier
     # registry. FST still assigns files to the same ranks and runs the same
     # ReadSpecs/collectives. Other devices/readers are untouched.
-    make = loader.loader.copier_constructor
+    def wrap(make):
+        def create(meta, device, framework, *args, **kwargs):
+            copier = make(meta, device, framework, *args, **kwargs)
+            return _CheckedCopier(copier, device, framework)
 
-    def create(meta, device, framework, debug):
-        copier = make(meta, device, framework, debug)
-        return _CheckedCopier(copier, device, framework)
+        return create
 
-    loader.loader.copier_constructor = create
+    for producer in getattr(loader, "loaders", (loader.loader,)):
+        producer.copier_constructor = wrap(producer.copier_constructor)

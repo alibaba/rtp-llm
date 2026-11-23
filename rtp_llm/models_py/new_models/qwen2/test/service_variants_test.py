@@ -112,6 +112,34 @@ def load(root, name, method):
 
 
 class Qwen2ServiceVariantsTest(unittest.TestCase):
+    def test_smoke_model_owners_accept_parallel_fst_worker_batches(self):
+        # A normal CPU FST load uses the range reader, not the installed
+        # ParallelLoader worker used by accelerator smoke. Run that actual
+        # worker on host tensors so its batch protocol is covered on CPU CI.
+        for variant in ("qwen_2", "qwen_2_embedding"):
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                fixture(root, head=variant == "qwen_2")
+                baseline = load(root, variant, "scratch")
+                loader = baseline.model_weights_loader
+                owner = loader._create_model()
+                keep = owner.checkpoint_weight_name_filter()
+                paths = sorted(str(path) for path in root.glob("*.safetensors"))
+                self.assertEqual(len(paths), 2)
+                resolver = loader._checkpoint_read_spec_resolver(owner, keep, None)
+                weights = loader._fastsafetensors_weights_iterator(
+                    paths, "cpu", keep, None, resolver
+                )
+                try:
+                    owner.load_weights(weights)
+                finally:
+                    weights.close()
+                loader._validate_loaded_weights(owner)
+                loader._run_post_load_hooks(owner)
+                torch.testing.assert_close(
+                    owner.state_dict(), baseline.py_model.state_dict(), rtol=0, atol=0
+                )
+
     def test_qwen2_vl_awq_packed_checkpoint(self):
         from rtp_llm.config.quant_config import AWQConfig
         from rtp_llm.models.qwen2_vl import QWen2_VL

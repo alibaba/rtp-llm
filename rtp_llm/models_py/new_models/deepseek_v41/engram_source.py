@@ -107,9 +107,11 @@ class EngramSource:
     def _read_native(self, name, fd, address):
         from fastsafetensors import cpp
 
+        from rtp_llm.models_py.fst_range_reader import native_host_reader
+
         start, size = self.frames[name]
         if size:
-            reader = cpp.nogds_file_reader(False, 1024, 1, False)
+            reader = native_host_reader(cpp)
             dest = cpp.gds_device_buffer(address, size, False)
             chunk = 64 * 1024 * 1024
             for off in range(0, size, chunk):
