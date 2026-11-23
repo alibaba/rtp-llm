@@ -3,9 +3,7 @@ import contextvars
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from unittest import IsolatedAsyncioTestCase, main
-from unittest.mock import call, patch
 
-from rtp_llm.metrics import GaugeMetrics, kmonitor
 from rtp_llm.multimodal.source_download_executor import SourceDownloadExecutor
 
 
@@ -25,36 +23,6 @@ class SourceDownloadExecutorTest(IsolatedAsyncioTestCase):
         finally:
             pool.shutdown()
         self.assertEqual(await asyncio.to_thread(lambda: 7), 7)
-
-    async def test_queue_wait_measures_only_started_tasks(self):
-        pool = SourceDownloadExecutor(1)
-        entered, release = threading.Event(), threading.Event()
-
-        def occupy_worker():
-            entered.set()
-            return release.wait(5)
-
-        try:
-            with patch(
-                "rtp_llm.multimodal.source_download_executor.time"
-            ) as clock, patch.object(kmonitor, "report") as report:
-                clock.monotonic_ns.return_value = 1_000_000
-                active = pool.submit(occupy_worker)
-                self.assertTrue(entered.wait(3))
-                queued = pool.submit(lambda: 42)
-                self.assertTrue(pool.submit(lambda: None).cancel())
-                clock.monotonic_ns.return_value = 8_000_000
-                release.set()
-                self.assertTrue(active.result(3))
-                self.assertEqual(queued.result(3), 42)
-                metric = GaugeMetrics.VIT_DOWNLOAD_QUEUE_WAIT_MS_METRIC
-                self.assertEqual(
-                    report.call_args_list,
-                    [call(metric, 0.0, {}), call(metric, 7.0, {})],
-                )
-        finally:
-            release.set()
-            pool.shutdown()
 
     async def test_download_limit_does_not_block_default_executor(self):
         pool = SourceDownloadExecutor(2)

@@ -74,7 +74,6 @@ def load_image_source(
     *,
     deadline=None,
     cancellation_event=None,
-    destination=None,
 ):
     """Load original bytes in the backend, retaining the V4.1 HTTP contract.
 
@@ -106,12 +105,7 @@ def load_image_source(
         url,
         download_headers,
         lambda: _download_image_source(
-            url,
-            download_headers,
-            max_bytes,
-            deadline,
-            cancellation_event,
-            destination=destination,
+            url, download_headers, max_bytes, deadline, cancellation_event
         ),
         deadline,
     )
@@ -128,11 +122,6 @@ def load_image_source(
                 ExceptionType.INVALID_PARAMS, "Multimodal file size is too large"
             )
         vit_media.download_cache_hit()
-        if destination is not None:
-            with content.getbuffer() as data:
-                destination.write(data)
-            destination.seek(0)
-            content = destination
     if VIT_PHASE_METRICS:
         record_vit_preprocess_value(
             AccMetrics.VIT_URL_SOURCE_QPS_METRIC,
@@ -143,7 +132,7 @@ def load_image_source(
 
 
 def _download_image_source(
-    url, download_headers, max_bytes, deadline, cancellation_event, *, destination=None
+    url, download_headers, max_bytes, deadline, cancellation_event
 ):
     from rtp_llm.multimodal.multimodal_util import (
         _check_download,
@@ -172,10 +161,7 @@ def _download_image_source(
                     raise requests.ConnectionError("temporary image download failure")
                 if status != 200:
                     raise ValueError("image download failed")
-                content = destination if destination is not None else BytesIO()
-                if destination is not None:
-                    content.seek(0)
-                    content.truncate()
+                content = BytesIO()
                 with vit_http_phase_timer("body"):
                     for chunk in _image_download_chunks(
                         response, deadline, cancellation_event

@@ -1,10 +1,7 @@
 import asyncio
 import contextvars
-import time
+import functools
 from concurrent.futures import ThreadPoolExecutor
-
-from rtp_llm.metrics import GaugeMetrics
-from rtp_llm.multimodal.vit_metrics import report_vit_preprocess_metric
 
 
 class SourceDownloadExecutor:
@@ -22,26 +19,15 @@ class SourceDownloadExecutor:
         )
         self._closed = False
 
-    def submit(self, func, /, *args, **kwargs):
-        if self._closed or self._executor is None:
-            raise RuntimeError("A dedicated source download pool is required")
-        submitted_ns = time.monotonic_ns()
-
-        def run():
-            wait_ms = (time.monotonic_ns() - submitted_ns) / 1_000_000
-            report_vit_preprocess_metric(
-                GaugeMetrics.VIT_DOWNLOAD_QUEUE_WAIT_MS_METRIC, wait_ms
-            )
-            return func(*args, **kwargs)
-
-        return self._executor.submit(contextvars.copy_context().run, run)
-
     async def run(self, func, /, *args, **kwargs):
         if self._closed:
             raise RuntimeError("Source download executor is closed")
         if self._executor is None:
             return await asyncio.to_thread(func, *args, **kwargs)
-        return await asyncio.wrap_future(self.submit(func, *args, **kwargs))
+        # Preserve request-scoped context just as asyncio.to_thread does.
+        context = contextvars.copy_context()
+        call = functools.partial(context.run, func, *args, **kwargs)
+        return await asyncio.get_running_loop().run_in_executor(self._executor, call)
 
     def shutdown(self):
         self._closed = True

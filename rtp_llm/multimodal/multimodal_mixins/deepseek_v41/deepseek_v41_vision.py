@@ -5,7 +5,6 @@ import logging
 import os
 import sys
 import threading
-from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
@@ -57,7 +56,6 @@ from rtp_llm.multimodal.preprocess_ipc import (
     pack_preprocess_tensors,
     packed_preprocess_enabled,
 )
-from rtp_llm.multimodal.preprocess_sources import FileSource
 from rtp_llm.multimodal.vit_metrics import (
     VIT_PHASE_METRICS,
     record_vit_preprocess_value,
@@ -611,20 +609,6 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         return outputs
 
     @staticmethod
-    def fetch_preprocess_source(url, config, deadline, cancellation_event, destination):
-        with vit_preprocess_timer(
-            GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC, _METRIC_TAGS
-        ):
-            return load_image_source(
-                url,
-                config.download_headers,
-                max_file_size_kb=config.mm_image_max_file_size_kb,
-                deadline=deadline,
-                cancellation_event=cancellation_event,
-                destination=destination,
-            )
-
-    @staticmethod
     def preprocess_input(
         mm_inputs,
         vit_config,
@@ -633,7 +617,6 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         gpu_preprocess=True,
         capture_inspection_sources=False,
         deadline=None,
-        prepared_sources=None,
     ):
         """Decode one bounded work item in MMProcessEngine's CPU executor.
 
@@ -655,29 +638,20 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         ) == "1" and is_single_image_input(mm_inputs)
         deadline = image_download_deadline(deadline)
         for media_index, media in enumerate(mm_inputs):
-            with vit_media.input_scope(media_index), ExitStack() as resources:
-                source = (
-                    prepared_sources[media_index]
-                    if prepared_sources is not None
-                    else None
-                )
-                if source is None:
-                    payload = DeepSeekV41VisionEmbedding.fetch_preprocess_source(
-                        media.url, vit_config, deadline, None, None
+            with vit_media.input_scope(media_index):
+                with vit_preprocess_timer(
+                    GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC, _METRIC_TAGS
+                ):
+                    payload = load_image_source(
+                        media.url,
+                        vit_config.download_headers,
+                        max_file_size_kb=vit_config.mm_image_max_file_size_kb,
+                        deadline=deadline,
                     )
-                elif isinstance(source, FileSource):
-                    payload = resources.enter_context(source.open())
-                else:
-                    payload = source
                 if capture_inspection_sources or capture_identity:
                     # Hash the same owned buffer passed to Image.open below. Never
                     # re-download a URL to derive identity or approve cached pixels.
-                    source = (
-                        payload.getvalue()
-                        if hasattr(payload, "getvalue")
-                        else payload.read()
-                    )
-                    payload.seek(0)
+                    source = payload.getvalue()
                     if capture_inspection_sources:
                         inspection_sources.append(source)
                     if capture_identity:

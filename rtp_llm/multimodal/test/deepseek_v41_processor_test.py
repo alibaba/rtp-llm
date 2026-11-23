@@ -20,7 +20,7 @@ from PIL import Image, ImageOps
 from urllib3.exceptions import ReadTimeoutError
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
+from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
 from rtp_llm.multimodal.mm_error_messages import MMErr
 from rtp_llm.multimodal.mm_preprocess import LocalPreprocessExecutor
 from rtp_llm.multimodal.mm_work_item import MMWorkItem
@@ -255,6 +255,7 @@ class V41ImageDownloadTimingTest(unittest.TestCase):
         self.assertEqual(elapsed_ms, 250.0)
 
     def test_http_phase_metrics_cover_v41_retry_and_cache_hit(self):
+        from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
         from rtp_llm.multimodal import vit_metrics
         from rtp_llm.multimodal.multimodal_mixins.deepseek_v41 import (
             deepseek_v41_processor as processor,
@@ -276,10 +277,7 @@ class V41ImageDownloadTimingTest(unittest.TestCase):
         values = [
             (sample.metric, sample.value, sample.tags)
             for sample in metrics.samples
-            if sample.metric not in (
-                GaugeMetrics.VIT_HTTP_PHASE_RT_US_METRIC,
-                AccMetrics.VIT_URL_CACHE_LOOKUP_QPS_METRIC,
-            )
+            if sample.metric != GaugeMetrics.VIT_HTTP_PHASE_RT_US_METRIC
         ]
         self.assertEqual(
             values,
@@ -304,42 +302,7 @@ class V41ImageDownloadTimingTest(unittest.TestCase):
 
         self.assertEqual(result, [b"image"] * 2)
         self.assertEqual((elapsed_ms, requests), (250.0, 2))
-        self.assertEqual(
-            [(s.metric, s.tags) for s in metrics.samples],
-            [
-                (AccMetrics.VIT_URL_CACHE_LOOKUP_QPS_METRIC, {"result": "miss"}),
-                (AccMetrics.VIT_URL_CACHE_LOOKUP_QPS_METRIC, {"result": "hit"}),
-            ],
-        )
-
-    def test_url_cache_qps_counts_logical_lookups_even_when_download_fails(self):
-        from rtp_llm.multimodal.vit_metrics import collect_vit_preprocess_metrics
-
-        with collect_vit_preprocess_metrics() as metrics:
-            _, _, attempts = self.run_loader([503, 200], repeats=2)
-            self.assertEqual(attempts, 2)
-            self.cache.resize_cache(0)
-            failed, _, _ = self.run_loader([404])
-            self.assertIsInstance(failed, FtRuntimeException)
-            self.cache.resize_cache(2)
-            with patch.object(
-                self.cache, "check_cache", side_effect=OSError("owner unavailable")
-            ):
-                self.run_loader([200])
-            with patch.object(self.cache, "check_cache", return_value=None):
-                failed, _, _ = self.run_loader([404])
-                self.assertIsInstance(failed, FtRuntimeException)
-        self.assertEqual(
-            [
-                (s.value, s.tags)
-                for s in metrics.samples
-                if s.metric == AccMetrics.VIT_URL_CACHE_LOOKUP_QPS_METRIC
-            ],
-            [
-                (1, {"result": outcome})
-                for outcome in ("miss", "hit", "bypass", "bypass", "miss")
-            ],
-        )
+        self.assertFalse(metrics.samples)
 
     def test_disabled_url_cache_downloads_each_time(self):
         self.cache.resize_cache(0)

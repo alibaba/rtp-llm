@@ -20,7 +20,6 @@ from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
 from rtp_llm.multimodal.mm_embedding_cache import MMEmbeddingCacheEntry
 from rtp_llm.multimodal.mm_inspection_tickets import InspectionTickets
-from rtp_llm.multimodal.mm_preprocess import download_region
 from rtp_llm.multimodal.mm_work_item import _input_has_url
 from rtp_llm.multimodal.source_download_executor import SourceDownloadExecutor
 from rtp_llm.ops import MultimodalInput
@@ -138,37 +137,8 @@ class MMInspectionCoordinator:
         self.tickets = InspectionTickets(ttl=max(300, self._greennet_timeout_s * 2))
         self._cached_inspection_lock = threading.Lock()
         self._native_cached_inspections = WeakValueDictionary()
-        self.fetch_source = (
-            mm_part.fetch_preprocess_source
-            if callable(getattr(type(mm_part), "fetch_preprocess_source", None))
-            else None
-        )
-        threads = vit_config.vit_source_download_concurrency
-        if threads == 0 and self.fetch_source is not None:
-            threads = max(1, vit_config.mm_preprocess_max_workers)
-        self.source_download_executor = SourceDownloadExecutor(threads)
-
-    async def _reinspect_cached(self, request, inputs, deadline):
-        if self.fetch_source is None:
-            return await self._greennet_provider.reinspect_cached(request, inputs)
-
-        async def load_source(url, inspection_deadline, cancelled):
-            def fetch():
-                with download_region(
-                    getattr(request, "region", None)
-                ), self.fetch_source(
-                    url,
-                    self.vit_config,
-                    min(deadline, inspection_deadline),
-                    cancelled,
-                    None,
-                ) as source:
-                    return source.getvalue()
-
-            return await self.source_download_executor.run(fetch)
-
-        return await self._greennet_provider.reinspect_cached(
-            request, inputs, load_source=load_source
+        self._source_download_executor = SourceDownloadExecutor(
+            vit_config.vit_source_download_concurrency
         )
 
     def _greennet_enabled(self) -> bool:
@@ -271,7 +241,6 @@ class MMInspectionCoordinator:
         worker_sources: bool = False,
         external_request_id: str = "",
         cached_embedding: bool = False,
-        region: Optional[str] = None,
     ) -> Tuple[
         List[MultimodalInput], Optional["concurrent.futures.Future"], Optional[Any]
     ]:
@@ -298,7 +267,6 @@ class MMInspectionCoordinator:
             # Never replace the numeric ID used by scheduling/cancellation.
             id=external_request_id or str(request_id),
             model_name="",
-            region=region,
             user_id=user_id,
             service_name=service_name,
             greennet_passed=(
@@ -334,7 +302,7 @@ class MMInspectionCoordinator:
             source_inputs = None
             prepare_sources = getattr(self.mm_part, "prepare_inspection_inputs", None)
             if callable(prepare_sources):
-                source_inputs = await self.source_download_executor.run(
+                source_inputs = await self._source_download_executor.run(
                     prepare_sources,
                     mm_inputs,
                     self.vit_config,
@@ -349,7 +317,9 @@ class MMInspectionCoordinator:
                 raise asyncio.CancelledError()
             with vit_media.stage("greennet.prepare"):
                 if reuse_cached and source_inputs is None:
-                    handle = await self._reinspect_cached(req, mm_inputs, deadline)
+                    handle = await self._greennet_provider.reinspect_cached(
+                        req, mm_inputs
+                    )
                 else:
                     handle = await self._greennet_provider.preprocess_and_submit(
                         req, source_inputs if source_inputs is not None else mm_inputs
@@ -465,8 +435,8 @@ class MMInspectionCoordinator:
                             request_attrs = vars(request_for_cache).copy()
                             request_attrs["greennet_passed"] = False
                             request_for_cache = SimpleNamespace(**request_attrs)
-                        cached_handle = await self._reinspect_cached(
-                            request_for_cache, cached_inputs, deadline
+                        cached_handle = await self._greennet_provider.reinspect_cached(
+                            request_for_cache, cached_inputs
                         )
                         try:
                             with vit_media.stage("greennet"):
@@ -552,4 +522,4 @@ class MMInspectionCoordinator:
 
     def close(self):
         self._shutdown_greennet_loop()
-        self.source_download_executor.shutdown()
+        self._source_download_executor.shutdown()

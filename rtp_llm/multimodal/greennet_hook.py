@@ -93,10 +93,8 @@ class GreenNetProvider:
     ) -> GreenNetHandle:
         raise NotImplementedError
 
-    async def reinspect_cached(
-        self, request, mm_inputs, *, load_source=None
-    ) -> GreenNetHandle:
-        """Reuse a verdict first. load_source fetches bytes on the engine download pool."""
+    async def reinspect_cached(self, request, mm_inputs) -> GreenNetHandle:
+        """Only the verdict is consumed; providers may reuse a cached decision."""
         return await self.preprocess_and_submit(request, mm_inputs)
 
     async def submit_sources(self, request, mm_inputs, sources: List[bytes]):

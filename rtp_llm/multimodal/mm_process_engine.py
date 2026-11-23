@@ -67,11 +67,11 @@ from rtp_llm.multimodal.multimodal_util import (
     url_data_cache_,
     vit_emb_cache_,
 )
-from rtp_llm.multimodal.preprocess_sources import ImageSourcePrefetch
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput, VitSeparation
 from rtp_llm.telemetry import vit_media
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
+
 
 _gen2_started = None
 
@@ -404,21 +404,18 @@ class MMProcessEngine:
             async_publication=self.vit_config.mm_cache_async_publish,
         )
         hash_cache_class = MMHashKeyCache
-        if self._embedding_cache.uses_native_index and emb_host_feature_enabled(
-            "MM_EMB_NATIVE_HASH_INDEX"
+        if (
+            self._embedding_cache.uses_native_index
+            and emb_host_feature_enabled("MM_EMB_NATIVE_HASH_INDEX")
         ):
-            from rtp_llm.multimodal.mm_embedding_native_cache import (
-                NativeMMHashKeyCache,
-            )
+            from rtp_llm.multimodal.mm_embedding_native_cache import NativeMMHashKeyCache
 
             hash_cache_class = NativeMMHashKeyCache
         self._hash_key_cache = hash_cache_class(
             max_bytes=self.vit_config.mm_hash_key_cache_max_bytes
         )
         if os.environ.get("MM_EMB_NATIVE_HASH_INDEX") == "1":
-            logging.info(
-                "MM_EMB_HASH_CACHE_IMPLEMENTATION %s", hash_cache_class.__name__
-            )
+            logging.info("MM_EMB_HASH_CACHE_IMPLEMENTATION %s", hash_cache_class.__name__)
         # Keep the old private name as an alias for callers/tests that inspect
         # async submission state. Both paths now use the same cache instance.
         self._async_cache = self._embedding_cache
@@ -438,13 +435,6 @@ class MMProcessEngine:
             inspection_provider,
             self.report_vit_error,
         )
-        self._image_prefetch = None
-        if self._inspection.fetch_source is not None:
-            self._image_prefetch = ImageSourcePrefetch(
-                self._inspection.source_download_executor,
-                self._inspection.fetch_source,
-                vit_config,
-            )
 
     @property
     def _greennet_timeout_s(self):
@@ -597,7 +587,6 @@ class MMProcessEngine:
         cancellation_event=None,
         external_request_id: str = "",
         cache_entries=None,
-        region=None,
     ) -> GreenNetVerdict:
         """Gate shared embeddings with this caller's request-scoped inspection."""
         if not mm_inputs:
@@ -611,7 +600,6 @@ class MMProcessEngine:
             external_request_id=external_request_id,
             deadline=deadline,
             cached_embedding=True,
-            region=region,
         )
         try:
             while future is not None:
@@ -991,7 +979,6 @@ class MMProcessEngine:
                 external_request_id=external_request_id,
                 cancellation_event=cancellation_event,
                 cache_entries=cached_inspection_entries,
-                region=region,
             )
             if not verdict.passed:
                 self.report_vit_error(verdict)
@@ -1223,8 +1210,6 @@ class MMProcessEngine:
             )
             raise
         finally:
-            for item in work_items:
-                item.release_preprocess_sources()
             if query_started:
                 self.dec_query_num()
 
@@ -1346,19 +1331,13 @@ class MMProcessEngine:
                             if work_item.cache_entry.greennet_passed:
                                 work_item.capture_inspection_sources = False
                 work_item.remaining_timeout_s()
-                prefetch = getattr(self, "_image_prefetch", None)
-                if prefetch is not None and prefetch.start(work_item):
-                    if isinstance(inspection_handle, SourceInspection):
-                        work_item.pending_inspection_handle = inspection_handle
-                else:
-                    self.preprocess_executor.submit(work_item)
-                    if isinstance(inspection_handle, SourceInspection):
-                        inspection_handle.track_work_item(work_item)
+                self.preprocess_executor.submit(work_item)
+                if isinstance(inspection_handle, SourceInspection):
+                    inspection_handle.track_work_item(work_item)
 
         except Exception as error:
             # The caller has not received this list yet and cannot roll it back.
             for work_item in work_items:
-                work_item.release_preprocess_sources()
                 work_item.fail_cache(error)
                 if work_item.inspection_future is not None:
                     work_item.inspection_future.cancel()
@@ -1375,7 +1354,6 @@ class MMProcessEngine:
                 continue
             work_item.remaining_timeout_s()
             self.preprocess_executor.get_result(work_item)
-            work_item.release_preprocess_sources()
             work_item.remaining_timeout_s()
             if work_item.embedding_result is None and not work_item.waiting_for_cache:
                 estimate = self.mm_part.estimate_work(
@@ -1635,7 +1613,6 @@ class MMProcessEngine:
                     user_id=user_id,
                     service_name=service_name,
                     model_name="",
-                    region=region,
                 )
                 for media, (key, entry) in zip(mm_inputs, claims):
                     decision = self._inspection.cached_decision(
@@ -1653,7 +1630,6 @@ class MMProcessEngine:
                 external_request_id=external_request_id,
                 cancellation_event=cancellation_event,
                 cache_entries=cached_inspection_entries,
-                region=region,
             )
             if not verdict.passed:
                 raise FtRuntimeException(
@@ -1874,8 +1850,11 @@ class MMProcessEngine:
                         deferred_reads.append(
                             task.computed if task is not None else None
                         )
-                    if state == "complete" and is_current_cache_entry(
-                        self._embedding_cache, cache_key, entry
+                    if (
+                        state == "complete"
+                        and is_current_cache_entry(
+                            self._embedding_cache, cache_key, entry
+                        )
                     ):
                         self._hash_key_cache.get(cache_key, entry.generation)
                     if state in ("miss", "in_progress"):
@@ -2315,7 +2294,6 @@ class MMProcessEngine:
                     user_id=user_id,
                     service_name=service_name,
                     external_request_id=external_request_id,
-                    region=region,
                     deadline=deadline,
                 )
             )

@@ -9,7 +9,6 @@ import os
 import signal
 import threading
 import time
-from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Set, Tuple
 
@@ -19,7 +18,6 @@ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
-from rtp_llm.multimodal.mm_error_messages import MMErr
 from rtp_llm.multimodal.mm_preprocess_result import MMPreprocessResult
 from rtp_llm.multimodal.mm_worker_inspection import (
     WorkerInspectionChannel,
@@ -70,15 +68,6 @@ def _reset_download_region(token) -> None:
     from internal_source.rtp_llm.utils.download_proxy import current_download_region
 
     current_download_region.reset(token)
-
-
-@contextmanager
-def download_region(region):
-    token = _set_download_region(region)
-    try:
-        yield
-    finally:
-        _reset_download_region(token)
 
 
 class _PreprocessTaskError(Exception):
@@ -236,7 +225,6 @@ def _worker_process_task(
     inspection_task=None,
     region: Optional[str] = None,
     trace_spec=None,
-    prepared_sources=None,
 ) -> PreprocessTaskResult:
     """
     只接收变化的 `mm_inputs` 参数。
@@ -244,8 +232,6 @@ def _worker_process_task(
     if _worker_preprocess_func is None:
         raise RuntimeError("Worker process has not been initialized correctly.")
     params = dict(_worker_preprocess_params)
-    if prepared_sources is not None:
-        params["prepared_sources"] = prepared_sources
     if capture_inspection_sources:
         params.update(capture_inspection_sources=True, deadline=deadline)
     try:
@@ -292,12 +278,8 @@ def _worker_process_task(
         raise
 
 
-def _unpack_preprocess_result(payload: Any, work_item=None) -> Tuple[Any, float, float]:
+def _unpack_preprocess_result(payload: Any) -> Tuple[Any, float, float]:
     """Read the four-field result returned by both preprocess executors."""
-    download = getattr(work_item, "source_download", None)
-    if download is not None:
-        payload.total_ms += download.elapsed_ms
-        payload.download_ms += download.network_ms
     result, total_ms, download_ms, samples = payload
     total_ms, download_ms = float(total_ms), float(download_ms)
     _report_vit_preprocess_samples(samples)
@@ -359,45 +341,22 @@ class PreprocessExecutor:
         event = pending[0].preprocess_ready_event
         while pending:
             event.clear()
-            ready = []
-            for item in pending:
-                download = getattr(item, "source_download", None)
-                if download is not None and item.prepared_sources is None:
-                    if not download.ready():
-                        continue
-                    item.prepared_sources = download.result()
-                    item.remaining_timeout_s()
-                    self.submit(item)
-                    handle = item.pending_inspection_handle
-                    if handle is not None:
-                        handle.track_work_item(item)
-                        item.pending_inspection_handle = None
-                if item.future is None or item.preprocess_ready:
-                    ready.append(item)
+            ready = [
+                item for item in pending if item.future is None or item.preprocess_ready
+            ]
             for item in ready:
                 pending.remove(item)
                 yield item
             if pending and not ready:
-                waiting_cpu = [item for item in pending if item.future is not None]
                 try:
                     if not event.wait(
                         timeout=min(item.remaining_timeout_s() for item in pending)
                     ):
-                        if waiting_cpu:
-                            self._on_wait_timeout(waiting_cpu)
+                        self._on_wait_timeout(pending)
                         raise TimeoutError("CPU preprocessing result wait timed out")
                 except Exception as error:
-                    if not waiting_cpu:
-                        timeout = FtRuntimeException(
-                            ExceptionType.MM_DOWNLOAD_FAILED,
-                            f"{MMErr.DL_TIMEOUT}: image download deadline exceeded",
-                        )
-                        vit_media.failure(
-                            "download", timeout, vit_media.item_media(pending)
-                        )
-                        raise timeout from error
                     vit_media.failure(
-                        "preprocess.worker", error, vit_media.item_media(waiting_cpu)
+                        "preprocess.worker", error, vit_media.item_media(pending)
                     )
                     raise
 
@@ -446,8 +405,6 @@ class LocalPreprocessExecutor(PreprocessExecutor):
 
         try:
             params = dict(self.preprocess_params)
-            if getattr(work_item, "prepared_sources", None) is not None:
-                params["prepared_sources"] = work_item.prepared_sources
             if work_item.capture_inspection_sources:
                 params.update(
                     capture_inspection_sources=True, deadline=work_item.deadline
@@ -492,9 +449,7 @@ class LocalPreprocessExecutor(PreprocessExecutor):
                 getattr(work_item, "media_traces", ()),
                 getattr(payload, "trace_timings", None),
             )
-            _, preprocess_time, download_time = _unpack_preprocess_result(
-                payload, work_item
-            )
+            _, preprocess_time, download_time = _unpack_preprocess_result(payload)
             _report_result_path(work_item, payload)
             _report_preprocess_timing(preprocess_time, download_time)
             work_item.future = None
@@ -691,7 +646,6 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
                     inspection_task,
                     work_item.region,
                     vit_media.worker_spec(getattr(work_item, "media_traces", ())),
-                    getattr(work_item, "prepared_sources", None),
                 ),
                 callback=completed,
                 error_callback=completed,
@@ -783,7 +737,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
                 result,
                 preprocess_time,
                 download_time,
-            ) = _unpack_preprocess_result(payload, work_item)
+            ) = _unpack_preprocess_result(payload)
             self._set_result(work_item, result)
             _report_result_path(work_item, payload)
             work_item.future = None

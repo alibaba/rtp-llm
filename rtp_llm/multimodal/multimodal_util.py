@@ -49,11 +49,10 @@ logger = logging.getLogger(__name__)
 class _DownloadTiming:
     """Mutable timing carrier used while one preprocess call is running."""
 
-    __slots__ = ("elapsed_ms", "intervals")
+    __slots__ = ("elapsed_ms",)
 
-    def __init__(self, intervals=None):
+    def __init__(self):
         self.elapsed_ms = 0.0
-        self.intervals = intervals
 
 
 _download_timing: contextvars.ContextVar[Optional[_DownloadTiming]] = (
@@ -62,14 +61,14 @@ _download_timing: contextvars.ContextVar[Optional[_DownloadTiming]] = (
 
 
 @contextmanager
-def collect_download_timing(intervals=None):
+def collect_download_timing():
     """Collect media-loading time for the enclosing preprocess call.
 
     The timer is context-local so concurrent preprocess calls cannot add their
     download durations to one another. A cache hit does not enter the timed
     load section and therefore contributes zero download time.
     """
-    timing = _DownloadTiming(intervals)
+    timing = _DownloadTiming()
     token = _download_timing.set(timing)
     try:
         yield timing
@@ -80,10 +79,7 @@ def collect_download_timing(intervals=None):
 def _record_download_time(start_time: float) -> None:
     timing = _download_timing.get()
     if timing is not None:
-        end = time.monotonic()
-        timing.elapsed_ms += max(0.0, end - start_time) * 1000.0
-        if timing.intervals is not None:
-            timing.intervals.append((start_time, end))
+        timing.elapsed_ms += max(0.0, time.monotonic() - start_time) * 1000.0
 
 
 REQUEST_GET = None
