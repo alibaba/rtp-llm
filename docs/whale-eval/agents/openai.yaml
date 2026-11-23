@@ -1,0 +1,4 @@
+interface:
+  display_name: "Whale 一键评测"
+  short_description: "Launch and track Whale model evaluations"
+  default_prompt: "用 $whale-eval 基于我给的 Whale 部署，为指定模型自动选机房并启动功能、精度和稳定性评测。"
