@@ -79,6 +79,21 @@ def config_for(
 
 
 class Nvfp4HybridExecutorTest(unittest.TestCase):
+    def test_b12x_source_without_distribution_metadata(self):
+        from importlib.metadata import PackageNotFoundError
+
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.b12x_nvfp4 import (
+            B12xNvfp4MoE,
+        )
+
+        B12xNvfp4MoE.is_available.cache_clear()
+        self.addCleanup(B12xNvfp4MoE.is_available.cache_clear)
+        with (
+            patch.object(B12xNvfp4MoE, "_runtime"),
+            patch("importlib.metadata.version", side_effect=PackageNotFoundError),
+        ):
+            self.assertTrue(B12xNvfp4MoE.is_available())
+
     def test_registry_selects_by_stage_and_conditions_without_model_name(self):
         registry = StrategyRegistry()
         baseline, hybrid = CudaNvfp4CutlassStrategy(), CudaNvfp4HybridStrategy()
@@ -715,6 +730,130 @@ class B12xNvfp4GpuTest(unittest.TestCase):
             torch.testing.assert_close(output, expected, atol=0, rtol=0)
             second_graph.replay()
             torch.testing.assert_close(second_output, second_expected, atol=0, rtol=0)
+
+    def test_production_shape_matches_cutlass(self):
+        from pathlib import Path
+
+        from flashinfer import ActivationType
+        from flashinfer.fused_moe import cutlass_fused_moe
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.b12x_nvfp4 import (
+            B12xNvfp4MoE,
+        )
+        from rtp_llm.models_py.triton_kernels.moe.qwen4_topk import _moe_topk
+
+        self.assertTrue(B12xNvfp4MoE.is_available())
+        device = torch.device("cuda", torch.cuda.current_device())
+        experts, hidden, intermediate, top_k = 256, 2560, 640, 10
+        torch.manual_seed(647)
+        capture_root = os.getenv("RTP_TEST_B12X_CAPTURE_DIR")
+        fixture = None
+        if capture_root:
+            fixture = torch.load(
+                Path(capture_root) / "I8192-B16-R0-L0-S0.pt",
+                map_location=device,
+                weights_only=True,
+            )
+        model = object()
+        for ep_rank in (0, 1):
+            if fixture is not None:
+                pack = torch.load(
+                    Path(capture_root) / f"weights-R{ep_rank}-L0.pt",
+                    map_location=device,
+                    weights_only=True,
+                )
+                w1, w2, scales = (
+                    pack["fc1_expert_weights"],
+                    pack["fc2_expert_weights"],
+                    pack["quant_scales"],
+                )
+            else:
+                w1, w2, scales = self.packed_weights(
+                    experts, hidden, intermediate, device
+                )
+                w1.random_()
+                w2.random_()
+                for index, rows, cols in (
+                    (1, 2 * intermediate, hidden),
+                    (4, hidden, intermediate),
+                ):
+                    _, scales[index] = self.swizzled_scales(
+                        experts, rows, cols, index + ep_rank, device
+                    )
+            self.assertEqual(w1.shape, (experts, 2 * intermediate, hidden // 16))
+            self.assertEqual(w2.shape, (experts, hidden, intermediate // 16))
+            adapter = B12xNvfp4MoE(w1, w2, scales, ep_rank, model, top_k)
+            for rows in range(1, 17):
+                with self.subTest(ep_rank=ep_rank, rows=rows):
+                    if fixture is not None:
+                        x = fixture["input"][:rows].contiguous()
+                        ids = (
+                            fixture["token_selected_experts"][:rows]
+                            .to(torch.int32)
+                            .contiguous()
+                        )
+                        weights = (
+                            fixture["token_final_scales"][:rows].float().contiguous()
+                        )
+                    else:
+                        x = (
+                            torch.randn(
+                                rows, hidden, device=device, dtype=torch.bfloat16
+                            )
+                            * 0.125
+                        )
+                        logits = torch.randn(rows, 2 * experts, device=device)
+                        ids = torch.empty(
+                            (rows, top_k), dtype=torch.int32, device=device
+                        )
+                        weights = torch.empty(
+                            (rows, top_k), dtype=torch.float32, device=device
+                        )
+                        _moe_topk[(rows,)](
+                            logits,
+                            ids,
+                            weights,
+                            STRIDE=2 * experts,
+                            num_warps=1,
+                            enable_fp_fusion=False,
+                        )
+                    self.assertEqual(x.shape, (rows, hidden))
+                    self.assertEqual(ids.shape, (rows, top_k))
+                    actual = adapter(x, ids, weights)
+                    result = cutlass_fused_moe(
+                        input=x,
+                        input_sf=None,
+                        token_selected_experts=ids,
+                        token_final_scales=weights,
+                        fc1_expert_weights=w1,
+                        fc2_expert_weights=w2,
+                        output_dtype=torch.bfloat16,
+                        quant_scales=scales,
+                        tp_size=1,
+                        tp_rank=0,
+                        ep_size=2,
+                        ep_rank=ep_rank,
+                        activation_type=ActivationType.Swiglu,
+                        enable_pdl=False,
+                    )
+                    expected = result[0] if isinstance(result, list) else result
+                    local = (ids // experts == ep_rank).any(dim=1)
+                    self.assertGreater(expected.float().norm().item(), 0)
+                    self.assertTrue(torch.isfinite(actual).all().item())
+                    self.assertEqual(torch.count_nonzero(actual[~local]).item(), 0)
+                    delta = actual.float() - expected.float()
+                    relative_l2 = (delta.norm() / expected.float().norm()).item()
+                    self.assertLessEqual(relative_l2, 0.05)
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        replayed = adapter(x, ids, weights)
+                    graph.replay()
+                    torch.testing.assert_close(replayed, actual, atol=0, rtol=0)
+                    print(
+                        f"B12X_PRODUCTION_CASE ep_rank={ep_rank} rows={rows} "
+                        f"capture={fixture is not None} rel_l2={relative_l2:.8f} "
+                        f"max_abs={delta.abs().max().item():.8f}",
+                        flush=True,
+                    )
 
     def test_explicit_cutlass_tactics_above_b12x_limit(self):
         self.assertEqual(torch.cuda.get_device_capability(), (12, 0))

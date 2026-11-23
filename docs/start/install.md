@@ -144,7 +144,9 @@ before entering communicator initialization. After initialization, both
 ranks agree on NCCL's device LSA capabilities before registering the
 symmetric window. A failed preflight, local window allocation or capability
 query selects the standard routed collective on both ranks. Both ranks
-confirm activation before installing the epilogue. Failures inside NCCL
+confirm activation before installing the epilogue. After both NCCL activation
+calls return, an unsuccessful local capability check also sends both ranks
+back to the standard collective. Failures inside NCCL
 communicator initialization, symmetric-window registration or device
 communicator creation can leave a peer in a native collective and require
 the TP group to restart.
@@ -167,6 +169,20 @@ cancellation copies the pinned constant through the independent stream,
 which requires an asynchronous copy engine. The owner retains these resources
 for the lifetime of captured Graphs. This is an ordinary CUDA launch, as in NCCL's
 [local LSA AllReduce example](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/deviceapi.html#local-allreduce-using-lsa).
+
+Both FP8-to-NVFP4 and prequantized NVFP4 checkpoints accept the Decode LSA
+options in the ModelOpt FP4 configuration. For a prequantized checkpoint,
+use `--quantization` with the existing packed format and the desired options:
+
+```json
+{"method":"modelopt_fp4","bits":4,"group_size":16,"is_quanted":true,"decode_lsa_enabled":false}
+```
+
+`decode_lsa_enabled` defaults to true. A rank that opts out reports that
+decision in the layout exchange, so both ranks retain the standard collective.
+`decode_lsa_startup_timeout_s` sets the first layout exchange deadline
+(default 120 seconds). Set the same value on both ranks. MTP draft models
+skip the LSA setup and its layout exchange.
 
 `decode_lsa_timeout_ms` in the ModelOpt FP4 config defaults to 0: wait on the
 owner's cancellation flag without a device deadline. Both ranks agree
@@ -223,6 +239,10 @@ while all 64 barrier CTAs wait;
 the queued fusion must fault rather than complete with stale peer data.
 Both tests run in disposable processes; a hung cancellation fails the bounded
 test process rather than attempting to recover its CUDA context.
+`reduce_gate_peer_exit_test` additionally exits one worker while the peer has
+an unmatched launch in flight. The surviving worker must report a CUDA fault
+or remain pending until the test supervisor orders local cancellation. The
+test supervisor reaps both workers within the test budget.
 
 The 2026-11-21 CUDA 13.2/NCCL 2.30.4 run on two SM120 GPUs passed all 36
 shape cases, both one-rank startup failures, all eight shared-packing agreement

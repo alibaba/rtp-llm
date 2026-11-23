@@ -108,7 +108,12 @@ class LsaMoeReduce:
 def prepare_model_reduce(model, config, parallelism):
     """Select LSA only after both TP ranks agree on capability and layout."""
     role = str(parallelism.role_type).rsplit(".", 1)[-1]
-    if role != "DECODE" or parallelism.tp_size != 2 or not dist.is_initialized():
+    if (
+        role != "DECODE"
+        or parallelism.tp_size != 2
+        or getattr(config, "is_mtp", False)
+        or not dist.is_initialized()
+    ):
         return None
     from rtp_llm.models_py.distributed import collective_torch
 
@@ -120,11 +125,12 @@ def prepare_model_reduce(model, config, parallelism):
         PureTpRouterNvfp4Cutlass,
     )
 
-    timeout_ms = getattr(
-        getattr(config, "quant_config", None), "decode_lsa_timeout_ms", 0
-    )
+    quant_config = getattr(config, "quant_config", None)
+    timeout_ms = getattr(quant_config, "decode_lsa_timeout_ms", 0)
+    startup_timeout_s = getattr(quant_config, "decode_lsa_startup_timeout_s", 120)
     state = {
         "timeout_ms": timeout_ms,
+        "startup_timeout_s": startup_timeout_s,
         "shared_gemm_nk": getattr(
             getattr(config, "quant_config", None), "decode_shared_gemm_nk", False
         ),
@@ -136,6 +142,8 @@ def prepare_model_reduce(model, config, parallelism):
     ops = None
     device = None
     try:
+        if not getattr(quant_config, "decode_lsa_enabled", True):
+            raise ValueError("LSA disabled by the Decode configuration")
         if type(timeout_ms) is not int or not 0 <= timeout_ms <= 2**31 - 1:
             raise ValueError(
                 "decode_lsa_timeout_ms must be an integer from 0 through 2147483647"
@@ -146,8 +154,7 @@ def prepare_model_reduce(model, config, parallelism):
         ):
             raise ValueError("NCCL P2P access or CUDA memory management is disabled")
         if not (
-            not getattr(config, "is_mtp", False)
-            and parallelism.ep_size == 2
+            parallelism.ep_size == 2
             and parallelism.dp_size == parallelism.pp_size == 1
             and parallelism.local_world_size == 2
             and parallelism.get_ffn_tp_size() == 1
@@ -190,13 +197,16 @@ def prepare_model_reduce(model, config, parallelism):
         state["bus_id"] = ops.device(device.index)
     except Exception as error:
         state["error"] = str(error)
-    peers = exchange_group_state(group, state, "qwen38-lsa-layout")
+    peers = exchange_group_state(
+        group, state, "qwen38-lsa-layout", timeout_s=startup_timeout_s
+    )
     if (
         any(peer["error"] is not None for peer in peers)
         or len({peer["host"] for peer in peers}) != 1
         or len({peer["layers"] for peer in peers}) != 1
         or len({peer["hidden"] for peer in peers}) != 1
         or len({peer["timeout_ms"] for peer in peers}) != 1
+        or len({peer["startup_timeout_s"] for peer in peers}) != 1
         or len({peer["shared_gemm_nk"] for peer in peers}) != 1
         or len({peer["bus_id"] for peer in peers}) != 2
     ):
@@ -247,14 +257,22 @@ def prepare_model_reduce(model, config, parallelism):
         # Window registration and device communicator creation are
         # collective. Let errors propagate instead of switching protocols.
         ops.activate(handle)
-        exchange_group_state(group, {"ready": True}, "qwen38-lsa-ready")
+        state = {"error": None}
+        try:
+            ops.check_activation(handle)
+        except Exception as error:
+            state["error"] = str(error)
+        peers = exchange_group_state(group, state, "qwen38-lsa-ready")
+        if any(peer["error"] is not None for peer in peers):
+            logger.info("MoE LSA activation unavailable: %s", peers)
+            return None
         owner = LsaMoeReduce(ops, device, config.hidden_size, handle, buffers)
         handle = None
     finally:
         if handle is not None:
             ops.destroy(handle)
     logger.info(
-        "MoE LSA ready on %s; timeout_ms=%d (0 uses NCCL abort-driven waiting)",
+        "MoE LSA ready on %s; timeout_ms=%d (0 waits for peer or local cancellation)",
         device,
         timeout_ms,
     )

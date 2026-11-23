@@ -11,6 +11,7 @@ int qwen38_lsa_set_timeout(void* handle, int timeout_ms);
 int qwen38_lsa_connect(void* handle, int rank, const void* unique_id);
 int qwen38_lsa_check_capability(void* handle);
 int qwen38_lsa_activate(void* handle);
+int qwen38_lsa_check_activation(void* handle);
 int qwen38_lsa_abort(void* handle);
 int qwen38_lsa_apply(
     void* handle, const void* input, const void* shared, const void* gate, void* output, int rows, void* stream);

@@ -294,6 +294,14 @@ extern "C" int qwen38_lsa_activate(void* handle) {
         check(ncclDevCommCreate(context->comm, &requirements, &context->dev));
         context->dev_created = true;
         context->dev.abortFlag = context->abort_device;
+    });
+}
+
+extern "C" int qwen38_lsa_check_activation(void* handle) {
+    return protect([&] {
+        auto* context = static_cast<Context*>(handle);
+        if (!context || !context->comm || !context->dev_created)
+            throw std::runtime_error("LSA requires an activated device communicator");
         if (context->dev.lsaSize != 2 || context->dev.lsaBarrier.nBarriers < kMaxBlocks || !context->dev.abortFlag)
             throw std::runtime_error("LSA requires two peers, 64 granted barrier slots and an abort flag");
     });

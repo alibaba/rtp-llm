@@ -872,6 +872,19 @@ class ModelOptFp4Config(QuantizationConfig):
             "decode_b12x_max_rows", 16 if qwen4_recipe else 0
         )
         self.decode_cutlass_profile_ids = kwargs.get("decode_cutlass_profile_ids", None)
+        self.decode_lsa_enabled = kwargs.get("decode_lsa_enabled", True)
+        if type(self.decode_lsa_enabled) is not bool:
+            raise ValueError("decode_lsa_enabled must be a boolean")
+        self.decode_lsa_startup_timeout_s = kwargs.get(
+            "decode_lsa_startup_timeout_s", 120
+        )
+        if (
+            type(self.decode_lsa_startup_timeout_s) is not int
+            or not 1 <= self.decode_lsa_startup_timeout_s <= 2**31 - 1
+        ):
+            raise ValueError(
+                "decode_lsa_startup_timeout_s must be an integer from 1 through 2147483647"
+            )
         self.decode_lsa_timeout_ms = kwargs.get("decode_lsa_timeout_ms", 0)
         if (
             type(self.decode_lsa_timeout_ms) is not int

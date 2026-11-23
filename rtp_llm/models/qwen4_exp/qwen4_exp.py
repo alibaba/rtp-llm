@@ -120,10 +120,40 @@ class Qwen4Exp(Qwen35Moe):
         if getattr(config, "_qwen4_nvfp4_source", False):
             from rtp_llm.config.quant_config import ModelOptFp4Config
 
+            decode_options = {}
             if config.quantization:
-                raise ValueError(
-                    "Qwen4 NVFP4 checkpoints do not support requantization"
-                )
+                try:
+                    requested = json.loads(config.quantization)
+                except ValueError:
+                    requested = None
+                packed_format = {
+                    "method": "modelopt_fp4",
+                    "bits": 4,
+                    "group_size": 16,
+                    "is_quanted": True,
+                }
+                allowed_options = {
+                    "decode_lsa_enabled",
+                    "decode_lsa_startup_timeout_s",
+                    "decode_lsa_timeout_ms",
+                    "decode_shared_gemm_nk",
+                }
+                if (
+                    not isinstance(requested, dict)
+                    or any(
+                        type(requested.get(key)) is not type(value)
+                        or requested[key] != value
+                        for key, value in packed_format.items()
+                    )
+                    or requested.keys() - packed_format.keys() - allowed_options
+                ):
+                    raise ValueError(
+                        "Qwen4 NVFP4 checkpoints do not support requantization. "
+                        "Use the packed ModelOpt FP4 format with Decode options only."
+                    )
+                decode_options = {
+                    key: requested[key] for key in allowed_options if key in requested
+                }
             # Routed experts are already packed. Dense weights and PLE tables
             # retain their original BF16 storage without online quantization.
             config._qwen4_full_fp8_nvfp4 = False
@@ -135,6 +165,7 @@ class Qwen4Exp(Qwen35Moe):
                 mixed_attention=True,
                 dense_storage="source_bf16",
                 require_contiguous_experts=True,
+                **decode_options,
             )
             config.quant_algo.setQuantAlgo("modelopt_fp4", 4, 16)
             config.dense_weight_dtype = "bf16"

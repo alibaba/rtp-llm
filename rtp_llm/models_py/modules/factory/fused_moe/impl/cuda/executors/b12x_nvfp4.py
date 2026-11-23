@@ -193,11 +193,18 @@ class B12xNvfp4MoE:
         except (ImportError, RuntimeError, OSError, AttributeError, TypeError) as error:
             logger.info("SM120 b12x unavailable: %s", error)
             return False
-        from importlib.metadata import version
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            runtime_version = version("flashinfer-python")
+        except PackageNotFoundError:
+            # The source digest is the admission check. Some source installs
+            # do not expose wheel metadata.
+            runtime_version = "unknown"
 
         logger.info(
             "SM120 b12x verified: FlashInfer=%s static_sources=%s",
-            version("flashinfer-python"),
+            runtime_version,
             _STATIC_SOURCES_SHA256,
         )
         return True

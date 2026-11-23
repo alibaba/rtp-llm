@@ -37,6 +37,9 @@ def check_reference(actual, expected):
 
 
 def main():
+    if os.environ.get("RTP_TEST_LSA_PEER_EXIT") == "1":
+        run_peer_exit()
+        return
     if "LOCAL_RANK" in os.environ:
         run_worker(int(os.environ["LOCAL_RANK"]))
     else:
@@ -69,25 +72,113 @@ def run_worker(rank, rendezvous=None):
         print("LSA_MODEL_ENTRY_DONE", flush=True)
 
 
-def run_missing_peer(rank, group_options):
+def prepare_fault_case(rank, group_options, hidden, rows, timeout_ms):
     from rtp_llm.ops import rtp_llm_ops
 
     dist.init_process_group("gloo", **group_options)
     ops = rtp_llm_ops._qwen38_lsa
     ids = [ops.unique_id() if rank == 0 else None]
     dist.broadcast_object_list(ids, src=0)
-    abort_default = os.environ.get("RTP_TEST_LSA_DEFAULT_ABORT") == "1"
-    hidden, rows = (8192, 32) if abort_default else (2560, 1)
     handle = ops.allocate(rank, hidden)
-    ops.set_timeout(handle, 0 if abort_default else 1000)
+    ops.set_timeout(handle, timeout_ms)
     ops.connect(handle, rank, ids[0])
     ops.check_capability(handle)
     ops.activate(handle)
+    ops.check_activation(handle)
     value = torch.zeros(rows, hidden, device="cuda", dtype=torch.bfloat16)
     output = torch.full_like(value, float("nan"))
     gate = torch.zeros(rows, 1, device="cuda", dtype=torch.bfloat16)
     stream = torch.cuda.current_stream()
+    stream.synchronize()
     dist.barrier()
+    return ops, handle, value, output, gate, stream
+
+
+def run_peer_exit():
+    if "LOCAL_RANK" in os.environ or torch.cuda.device_count() < 2:
+        raise RuntimeError(
+            "The peer-exit regression needs two GPUs and its own parent process"
+        )
+    ctx = mp.get_context("spawn")
+    submitted = ctx.Event()
+    peer_exited = ctx.Event()
+    with tempfile.TemporaryDirectory() as tmp:
+        rendezvous = f"file://{tmp}/rendezvous"
+        survivor = ctx.Process(
+            target=peer_exit_worker, args=(0, rendezvous, submitted, peer_exited)
+        )
+        peer = ctx.Process(
+            target=peer_exit_worker, args=(1, rendezvous, submitted, peer_exited)
+        )
+        workers = (survivor, peer)
+        try:
+            for worker in workers:
+                worker.start()
+            peer.join(45)
+            assert peer.exitcode == 42 and submitted.is_set(), peer.exitcode
+            peer_exited.set()
+            survivor.join(20)
+            assert survivor.exitcode == 0, survivor.exitcode
+            print("LSA_PEER_EXIT_TEST_PASSED peer_exit=42 survivor_exit=0", flush=True)
+        finally:
+            for worker in workers:
+                if worker.pid is not None:
+                    if worker.is_alive():
+                        worker.kill()
+                    worker.join()
+
+
+def peer_exit_worker(rank, rendezvous, submitted, peer_exited):
+    torch.cuda.set_device(rank)
+    rows, hidden = 32, 8192
+    ops, handle, value, output, gate, stream = prepare_fault_case(
+        rank, dict(init_method=rendezvous, rank=rank, world_size=2), hidden, rows, 0
+    )
+    if rank == 1:
+        assert submitted.wait(20)
+        # A real process exit with live NCCL windows and no matching launch.
+        os._exit(42)
+
+    ops.apply(
+        handle,
+        value.data_ptr(),
+        value.data_ptr(),
+        gate.data_ptr(),
+        output.data_ptr(),
+        rows,
+        stream.cuda_stream,
+    )
+    submitted.set()
+    assert peer_exited.wait(25)
+    try:
+        deadline = time.monotonic() + 0.2
+        while time.monotonic() < deadline:
+            assert not stream.query(), "LSA completed without the peer contributing"
+            time.sleep(0.01)
+    except RuntimeError as error:
+        # Some drivers may invalidate the dead peer's mapping immediately.
+        if not any(
+            message in str(error)
+            for message in ("unspecified launch failure", "illegal memory access")
+        ):
+            raise
+        print("LSA_PEER_EXIT_DEVICE_FAULT", flush=True)
+    else:
+        ops.abort(handle)
+        with unittest.TestCase().assertRaisesRegex(
+            RuntimeError, "unspecified launch failure|illegal memory access"
+        ):
+            stream.synchronize()
+        print("LSA_PEER_EXIT_PENDING_THEN_CANCELLED", flush=True)
+    os._exit(0)
+
+
+def run_missing_peer(rank, group_options):
+    abort_default = os.environ.get("RTP_TEST_LSA_DEFAULT_ABORT") == "1"
+    hidden, rows = (8192, 32) if abort_default else (2560, 1)
+    ops, handle, value, output, gate, stream = prepare_fault_case(
+        rank, group_options, hidden, rows, 0 if abort_default else 1000
+    )
     if rank == 0:
         start = time.monotonic()
         ops.apply(
@@ -127,16 +218,23 @@ def check_startup_fallback(model, config, parallelism, rank, device):
     from rtp_llm.ops import rtp_llm_ops
 
     ops = rtp_llm_ops._qwen38_lsa
-    for stage in ("allocate", "check_capability"):
+    for stage in ("allocate", "check_capability", "check_activation"):
         with (
             patch.object(ops, "allocate", wraps=ops.allocate) as allocate,
             patch.object(ops, "connect", wraps=ops.connect) as connect,
             patch.object(ops, "check_capability", wraps=ops.check_capability) as check,
             patch.object(ops, "activate", wraps=ops.activate) as activate,
+            patch.object(
+                ops, "check_activation", wraps=ops.check_activation
+            ) as check_activation,
             patch.object(ops, "destroy", wraps=ops.destroy) as destroy,
         ):
             if rank == 1:
-                failing = allocate if stage == "allocate" else check
+                failing = {
+                    "allocate": allocate,
+                    "check_capability": check,
+                    "check_activation": check_activation,
+                }[stage]
                 failing.side_effect = RuntimeError(
                     f"injected local LSA {stage} failure"
                 )
@@ -151,7 +249,12 @@ def check_startup_fallback(model, config, parallelism, rank, device):
             else:
                 connect.assert_called_once()
                 check.assert_called_once()
-            activate.assert_not_called()
+            if stage == "check_activation":
+                activate.assert_called_once()
+                check_activation.assert_called_once()
+            else:
+                activate.assert_not_called()
+                check_activation.assert_not_called()
             if stage == "allocate" and rank == 1:
                 destroy.assert_not_called()
             else:
@@ -314,6 +417,19 @@ def run_hidden_size(device, rank, hidden_size):
     )
     with patch.object(collective_torch, "_get_group", return_value=dist.group.WORLD):
         if hidden_size == 2560:
+            with patch(
+                "rtp_llm.models_py.modules.qwen4_exp.moe.reduce_gate.exchange_group_state"
+            ) as exchange:
+                config.is_mtp = True
+                assert prepare_model_reduce(model, config, parallelism) is None
+                config.is_mtp = False
+                exchange.assert_not_called()
+            config.quant_config = SimpleNamespace(decode_lsa_enabled=rank == 0)
+            assert prepare_model_reduce(model, config, parallelism) is None
+            config.quant_config = SimpleNamespace(
+                decode_lsa_startup_timeout_s=120 + rank
+            )
+            assert prepare_model_reduce(model, config, parallelism) is None
             with patch.dict(os.environ, {"NCCL_P2P_DISABLE": str(rank)}):
                 assert prepare_model_reduce(model, config, parallelism) is None
             # Decline before native communicator creation on either rank.
