@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.modules.dsv4.moe.moe_layer import resolve_moe_max_tokens_per_rank
+from rtp_llm.utils.model_weight import W
 
 from .mega_moe import GLM5MegaMoE
 
@@ -67,7 +68,6 @@ class MegaMoeWrapper(nn.Module):
         max_generate_batch_size: int = 0,
     ):
         super().__init__()
-        from rtp_llm.utils.model_weight import W
 
         ep_size = parallelism_config.ep_size
         ep_rank = parallelism_config.ep_rank
