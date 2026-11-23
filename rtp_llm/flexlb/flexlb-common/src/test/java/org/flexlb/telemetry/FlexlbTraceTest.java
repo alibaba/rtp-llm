@@ -35,6 +35,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -69,6 +71,36 @@ class FlexlbTraceTest {
         FlexlbTrace.configure(null, "");
         sdk.close();
         GlobalOpenTelemetry.resetForTest();
+    }
+
+    @Test
+    void schedulingStagesKeepParentAndPropagateTheOriginalFailure() {
+        Span parent = FlexlbTrace.startServer("Schedule", Context.root());
+        Context context = Context.root().with(parent);
+        FlexlbTrace.schedulingEvent(context, "flexlb.queue.enqueued");
+        var failure = new IllegalStateException("decision failed");
+        assertSame(
+                failure,
+                assertThrows(
+                        IllegalStateException.class,
+                        () ->
+                                FlexlbTrace.scheduleDecision(
+                                        context,
+                                        () -> {
+                                            throw failure;
+                                        })));
+        FlexlbTrace.finish(parent);
+
+        var point = exporter.spans.get(0);
+        assertEquals("rtp_llm.flexlb.queue.enqueued", point.getName());
+        assertEquals(parent.getSpanContext().getSpanId(), point.getParentSpanId());
+        assertEquals(point.getStartEpochNanos(), point.getEndEpochNanos());
+        var decision = exporter.spans.get(1);
+        assertEquals("rtp_llm.flexlb.pd_decision", decision.getName());
+        assertEquals(point.getParentSpanId(), decision.getParentSpanId());
+        assertEquals(StatusCode.ERROR, decision.getStatus().getStatusCode());
+        assertEquals(
+                "flexlb.queue.enqueued", exporter.spans.get(2).getEvents().getFirst().getName());
     }
 
     @Test

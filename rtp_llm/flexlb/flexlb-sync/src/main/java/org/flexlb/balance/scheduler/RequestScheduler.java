@@ -13,6 +13,7 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.telemetry.FlexlbTrace;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -260,7 +261,9 @@ public final class RequestScheduler {
     private void submitDirect(BalanceContext context) {
         Response failure = Response.error(StrategyErrorType.DISPATCH_FAILED);
         try {
-            PlacementResult<RouteAdmission, PlacementKey> selection = router.select(context);
+            PlacementResult<RouteAdmission, PlacementKey> selection =
+                    FlexlbTrace.scheduleDecision(
+                            context.getTraceContext(), () -> router.select(context));
             context.setSchedulingDiagnostics(selection.diagnostics());
             switch (selection.status()) {
                 case SUCCESS -> {
