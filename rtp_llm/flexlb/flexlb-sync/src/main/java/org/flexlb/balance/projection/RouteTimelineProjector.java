@@ -63,8 +63,7 @@ final class RouteTimelineProjector {
             WorkSnapshot committed,
             PrefillTimePredictor.Evaluator evaluator,
             RouteProjection.DeliveryProjection deliveryProjection,
-            long planningAtMs,
-            QueuePrefixCache prefixCache) {
+            long planningAtMs) {
         long projectionAtMs = Math.max(queue.capturedAtMs(), planningAtMs);
         if (evaluator == null) {
             return unavailable("PREDICTOR_MISSING");
@@ -76,7 +75,7 @@ final class RouteTimelineProjector {
         predictions.reset(evaluator);
         try {
             return projectWithPredictions(
-                    queue, committed, deliveryProjection, projectionAtMs, predictions, prefixCache);
+                    queue, committed, deliveryProjection, projectionAtMs, predictions);
         } catch (PredictionFailure predictionFailure) {
             return unavailable(predictionFailure.detail("PREDICTION_FAILED"));
         } finally {
@@ -89,8 +88,7 @@ final class RouteTimelineProjector {
             WorkSnapshot committed,
             RouteProjection.DeliveryProjection deliveryProjection,
             long projectionAtMs,
-            PredictionBoundary predictions,
-            QueuePrefixCache prefixCache) {
+            PredictionBoundary predictions) {
         if (containsCommittedRequest(committed, requestId)) {
             return unavailable("INCOMING_ALREADY_COMMITTED");
         }
@@ -162,9 +160,7 @@ final class RouteTimelineProjector {
                         ? RouteProjection.Candidate.InitialHeadDisposition.NONE
                         : null;
         List<GroupPlanner.Item> eligibleActive = new ArrayList<>(queue.activeItems().size());
-        long earliestExpiryMs = Long.MAX_VALUE;
         for (GroupPlanner.Item item : queue.activeItems()) {
-            earliestExpiryMs = Math.min(earliestExpiryMs, item.expiresAtMs());
             // Expired work is a terminal queue mutation, not work ahead of a
             // new request in this snapshot projection.
             if (expiredAt(item, projectionAtMs)) {
@@ -187,12 +183,6 @@ final class RouteTimelineProjector {
         }
         long cursorMs = committedMs;
         long decisionNowMs = projectionAtMs;
-        Object model = predictions.evaluator.snapshotIdentity();
-        boolean cacheable =
-                prefixCache != null && model != null && projectionAtMs < earliestExpiryMs;
-        var cached = cacheable ? prefixCache.read(model, deliveryProjection, projectionAtMs) : null;
-        int reusedGroups = 0;
-        List<QueuePrefixCache.Group> stableGroups = null;
 
         while (!ordered.isEmpty()) {
             ExpirationPrune expiration = ordered.pruneExpired(decisionNowMs);
@@ -213,17 +203,6 @@ final class RouteTimelineProjector {
             }
 
             int probePosition = ordered.probePosition();
-            if (cacheable && cached != null && reusedGroups < cached.groups().size()) {
-                var group = cached.groups().get(reusedGroups);
-                // The first excluded member can decide the group boundary.
-                if (group.size() < probePosition) {
-                    cursorMs = saturatedAdd(cursorMs, group.durationMs());
-                    ordered.removePlannedPrefix(group.size());
-                    reusedGroups++;
-                    continue;
-                }
-                cacheable = false;
-            }
             final GroupPlanner.Plan<GroupPlanner.Item> plan;
             final RouteProjection.GroupPlanning planning;
             try {
@@ -252,7 +231,6 @@ final class RouteTimelineProjector {
             }
 
             if (!plan.ready()) {
-                cacheable = false;
                 // The production worker wakes for the collection deadline or
                 // the current head's absolute expiry, then validates every
                 // candidate again. Advancing this explicit scheduling clock
@@ -269,14 +247,6 @@ final class RouteTimelineProjector {
                 RouteProjection.GroupService service =
                         deliveryProjection.service(plan, predictions, planning);
                 if (probePosition < plan.items().size()) {
-                    if (stableGroups != null) {
-                        prefixCache.publish(
-                                model,
-                                deliveryProjection,
-                                projectionAtMs,
-                                earliestExpiryMs,
-                                stableGroups);
-                    }
                     return candidate(
                             RouteProjection.Candidate.State.MODELED,
                             saturatedAdd(startMs, service.completionOffsetMs(probePosition)),
@@ -284,19 +254,7 @@ final class RouteTimelineProjector {
                             initialHeadDisposition,
                             "SERIAL_FROZEN_QUEUE");
                 }
-                long durationMs = service.totalDurationMs();
-                cursorMs = saturatedAdd(startMs, durationMs);
-                if (cacheable && plan.items().size() < probePosition) {
-                    if (stableGroups == null) {
-                        stableGroups = new ArrayList<>();
-                        if (reusedGroups > 0) {
-                            stableGroups.addAll(cached.groups().subList(0, reusedGroups));
-                        }
-                    }
-                    stableGroups.add(new QueuePrefixCache.Group(plan.items().size(), durationMs));
-                } else {
-                    cacheable = false;
-                }
+                cursorMs = saturatedAdd(startMs, service.totalDurationMs());
             } catch (PredictionFailure predictionFailure) {
                 return unavailable(predictionFailure.detail("SERVICE_PREDICTION_FAILED"));
             }
