@@ -542,6 +542,10 @@ def parse_ds_header_attributes(
     if not isinstance(attrs, dict):
         return {}
     normalized = {str(k).lower(): v for k, v in attrs.items()}
+    # Case folding can overwrite an explicitly lowercase estimated-usage key.
+    for name in _ESTIMATED_USAGE_HEADERS:
+        if name in attrs:
+            normalized[name] = attrs[name]
     # Empty aliases from upstream must not erase a real request identity.
     normalized.update(extract_request_headers(attrs))
     return normalized
@@ -551,6 +555,8 @@ def _dict_get_case_insensitive(value: Any, key: str) -> Any:
     if not isinstance(value, dict):
         return None
     lower_key = key.lower()
+    if lower_key in _ESTIMATED_USAGE_HEADERS and lower_key in value:
+        return value[lower_key]
     for k, v in value.items():
         if str(k).lower() == lower_key:
             return v
@@ -1246,6 +1252,10 @@ _ESTIMATED_USAGE_HEADER = "x-dashscope-inner-enableestimatedusage"
 _SUPPORT_FRONTEND_ESTIMATED_USAGE_HEADER = (
     "x-dashscope-inner-support-frontend-estimatedusage"
 )
+_ESTIMATED_USAGE_HEADERS = (
+    _ESTIMATED_USAGE_HEADER,
+    _SUPPORT_FRONTEND_ESTIMATED_USAGE_HEADER,
+)
 
 
 def _default_tpm_recheck_interval_ms() -> int | None:
@@ -1268,6 +1278,11 @@ def _request_header_value(
     if value is not None:
         return value
     lower = name.lower()
+    if lower in _ESTIMATED_USAGE_HEADERS:
+        invocation_metadata = tuple(invocation_metadata)
+        for key, value in invocation_metadata:
+            if key == lower:
+                return value
     for key, value in invocation_metadata:
         if str(key).lower() == lower:
             return value

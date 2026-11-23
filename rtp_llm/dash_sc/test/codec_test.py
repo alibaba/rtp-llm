@@ -1379,6 +1379,55 @@ class DashScGrpcRequestTest(TestCase):
                 op = parse_request_controls(self._tpm_request(attrs))
                 self.assertEqual(op.support_frontend_estimated_usage, expected)
 
+    def test_estimated_usage_prefers_exact_lowercase_in_each_source(self) -> None:
+        for header, field in (
+            ("x-dashscope-inner-enableestimatedusage", "enable_estimated_usage"),
+            (
+                "x-dashscope-inner-support-frontend-estimatedusage",
+                "support_frontend_estimated_usage",
+            ),
+        ):
+            mixed = header.title()
+            for canonical, alias in (("false", "true"), ("true", "false")):
+                for pairs in (
+                    [(header, canonical), (mixed, alias)],
+                    [(mixed, alias), (header, canonical)],
+                ):
+                    for attrs, metadata in (
+                        (dict(pairs), ()),
+                        ({"body": {"parameters": dict(pairs)}}, ()),
+                        ({}, pairs),
+                    ):
+                        with self.subTest(
+                            header=header, attrs=attrs, metadata=metadata
+                        ):
+                            controls = parse_request_controls(
+                                self._tpm_request(attrs), invocation_metadata=metadata
+                            )
+                            self.assertEqual(
+                                getattr(controls, field), canonical == "true"
+                            )
+
+    def test_estimated_usage_keeps_source_priority_and_metadata_order(self) -> None:
+        header = "x-dashscope-inner-enableestimatedusage"
+        for attrs, metadata, expected in (
+            ({header.title(): "false", header.upper(): "true"}, (), True),
+            ({"body": {header.title(): "false", header.upper(): "true"}}, (), False),
+            ({header.title(): "true"}, [(header, "false")], True),
+            ({"body": {header: "true"}}, [(header.title(), "false")], False),
+            ({}, [(header.title(), "true"), (header.upper(), "false")], True),
+            (
+                {},
+                [(header.title(), "true"), (header, "false"), (header, "true")],
+                False,
+            ),
+        ):
+            with self.subTest(attrs=attrs, metadata=metadata):
+                controls = parse_request_controls(
+                    self._tpm_request(attrs), invocation_metadata=metadata
+                )
+                self.assertEqual(controls.enable_estimated_usage, expected)
+
     def _tpm_request(self, attrs):
         req = predict_v2_pb2.ModelInferRequest()
         req.parameters["ds_header_attributes"].string_param = json.dumps(attrs)
