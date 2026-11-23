@@ -1,35 +1,6 @@
 {
   "aiter_patch_sha256": "1f294c677feaae3a25363e946be3429764ef7aa4bb3f6468cd5ae5863e5f70d4",
   "aiter_version": "0.1.29+rocm7.2.0.git97d2389",
-  "atom_patch_sha256": "3c776914106bfb1539f632465a06ab7d53815c5293a4237a21f3c125465ed39b",
-  "atom_patched_files_sha256": {
-    "atom/model_ops/attentions/qwen4_exp_attn.py": "907ef333584669a21c010432da09c1fb68f4f5e5d0ca8fec521415138d0249c0",
-    "atom/model_ops/fla_ops/replayssm.py": "84f6570a425d69179e3225d295b0b9ec978e93c899abe0d926cfa8b8a06c7a6b",
-    "atom/model_ops/qwen4_exp/qsa_attention.py": "a9fcd02272264a65f375e647bb8f9aea3b9e0bdbc89807552d04d7218247c6ee",
-    "atom/model_ops/topK.py": "ec4459a695f0fc778be527021ec2fe8a80fd63f17ce2de1834212f6a57157885",
-    "atom/plugin/rtpllm/models/qwen4_exp.py": "e38f63c2921d185282e32bd2d315227c00651a2dc5cb0c1c6c9ef6c3f3e2c799",
-    "atom/plugin/rtpllm/utils/qwen4_exp_context.py": "e3491986c275a06d4dbf355f970b17e4153b713d8e27a9f8e485f1ed82693d8d",
-    "atom/plugin/rtpllm/utils/replayssm_rtp.py": "4606420c7dc9614380f5eb15fdc5c61c6f2a956b3c1d0d141e39c5a45577a87a",
-    "atom/plugin/rtpllm/utils/replayssm_rtp_fused_copy.py": "4f6a0f940d2ed15684fd16483f46e896636d567c30893d6a8b93e2e93c0883f9",
-    "atom/model_ops/attention_gdn.py": "8db24f4c126fd67b63ffaea1e9334f5de1373fb80767f9988fe7fb396708ea21",
-    "atom/model_ops/fla_ops/gdn_flydsl.py": "fe98278780d0e85342c21180e6dfc2ae8032f66d5744ba1660488ef33d30c6a1",
-    "atom/plugin/rtpllm/utils/replay_hybrid.py": "8864542e137735d8b8a13f694bc00b2aa2d7cb9dc63a4cde0f689cd20d42a19c",
-    "atom/plugin/rtpllm/utils/replay_policy.py": "fb498cf76628a4cb2b6743cd4c6288b0835d526e2967fc842e52ccd99fcdfa2a"
-  },
-  "atom_source_files_sha256": {
-    "atom/model_ops/attentions/qwen4_exp_attn.py": "871dda629901a152bbcbad8284ef897eb269a82d4958b4fdaefc6526f3b9c197",
-    "atom/model_ops/fla_ops/replayssm.py": "8fe6868912f5152bd15908042419609c77557bffc1bdb84611a063de2ca851a6",
-    "atom/model_ops/qwen4_exp/qsa_attention.py": "48868718f44dd884ae15b836c0a9172035c07ecf4d5945cd1f50761866557e13",
-    "atom/model_ops/topK.py": "969ccdf514f5cd25282da5f743ac422dcf65e20febacfe5ec2b92f686bd2b9d9",
-    "atom/plugin/rtpllm/models/qwen4_exp.py": "1c07b955a57cbdec11ebd7b036ce7442427c7a9dd613676082e1454cf8afe8bf",
-    "atom/plugin/rtpllm/utils/qwen4_exp_context.py": "0ba7eb3581a141c1aba9b1e850b765dcf5a33be2e2ed0b04b6370b978635dd58",
-    "atom/plugin/rtpllm/utils/replayssm_rtp.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "atom/plugin/rtpllm/utils/replayssm_rtp_fused_copy.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "atom/model_ops/attention_gdn.py": "353a23fc8064f10ba75a7f98bfb7da2a5cc2b55d1cbab525efdb47cbcf32ee8d",
-    "atom/model_ops/fla_ops/gdn_flydsl.py": "bdd7df6992d1b7541ccc769dca8ab0c156844276df6383566c85bd6b9eab7b1b",
-    "atom/plugin/rtpllm/utils/replay_hybrid.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "atom/plugin/rtpllm/utils/replay_policy.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-  },
   "flydsl_version": "0.4.2",
   "flydsl_wheel_sha256": "7cc611464424c6949ef7c5b4839e85c0e567669016e653eae888ebe4a457a071",
   "hipblaslt_library": "libhipblaslt.so.1.2.70200",
@@ -111,23 +82,6 @@
     "8192,640,2560": 204409
   },
   "source_sha256": "6d6647ff16af4289547faf65f7663b59de0957ec39f90cef377b0c689a627897",
-  "atom_previous_added_files_sha256": {
-    "atom/plugin/rtpllm/utils/replayssm_rtp.py": [
-      "f26a06c896b09a1ce5862be9d87383aea4fbbb882e67cb18c77a128be2634330",
-      "8ee981c65a678feb3cb1b5be5cd7713dc2bb63392ccf9bacbbbd901914f7dc36"
-    ],
-    "atom/plugin/rtpllm/utils/replayssm_rtp_fused_copy.py": [
-      "4f6a0f940d2ed15684fd16483f46e896636d567c30893d6a8b93e2e93c0883f9",
-      "0db5be297a2a61600cbe7decf1725394fdeaa0d844aa1177c7a988b3431a279b"
-    ],
-    "atom/plugin/rtpllm/utils/replay_hybrid.py": [
-      "aec10379d0a853fdb555875ac38527b8c422c175efcd1753ca326eb5413bec7d",
-      "459fb274e91016219c5a9c2b762827b2c50c93c7774a944ff9ea70e81cb38914"
-    ],
-    "atom/plugin/rtpllm/utils/replay_policy.py": [
-      "43ce3907a5563ac07e2ba44df38a8b32b86fbc5ef108ee7b1c339724cc017426"
-    ]
-  },
   "aiter_gdn_patch_sha256": "d2699d41bf52e22e394a3f71b8e333aa4ac2f381ed0b2a060503a038e1eee9b8",
   "aiter_gdn_source_files_sha256": {
     "aiter/ops/flydsl/kernels/gdr_decode.py": "22971591a79700c9faca17b08241a39f38a433119d6bfd2adee0d05e1e1f7461",

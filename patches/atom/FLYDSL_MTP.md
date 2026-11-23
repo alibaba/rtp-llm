@@ -1,30 +1,18 @@
 # ROCm ATOM installation and checks
 
-The ROCm image installs the locked ATOM and AITER wheels and applies their
-overlays from this checkout. To reproduce the installation on fresh wheels
-using the service interpreter, run:
+The ROCm image applies the overlays from the external checkout to the pinned
+ATOM and AITER wheels. To reproduce this on fresh wheels, run:
 
 ```sh
 bash patches/apply_qwen38_rocm.sh /opt/conda310/bin/python /path/to/flydsl-0.4.2-cp310-cp310-manylinux_2_27_x86_64.whl
 ```
 
-RTP uses FlyDSL GDN with hybrid replay on supported ROCm targets.
-`ATOM_ENABLE_REPLAYSSM=0` selects plain FlyDSL. The small-row MoE TopK
-specialization applies to eligible BF16 shapes with 512 routed experts,
-top-k 10 and up to 1024 rows on MI308X (up to 4 rows on other ROCm devices).
-Larger batches use the normal selector.
-`ATOM_RTP_TOPK512=0` disables the specialization.
-The MTP drafter uses fused hyper-connection operations on its ROCm RTP path.
+On MI308X, Qwen4 uses fused routing and HC projection for eligible four- and
+eight-row target verifier batches in both decode-only and combined workers.
+Combined workers select this path for pure verification batches. The regular
+small-row TopK specialization supports other eligible shapes as well.
+`ATOM_RTP_TOPK512=0` disables the TopK specialization and fused routing.
 
-Eligible ROCm ATOM MTP decode workers capture draft forwards, LM heads, TP
-gathers and greedy sampling together by default. Set
-`RTP_LLM_MTP_DRAFT_LOOP_GRAPH=0` to disable draft-loop capture.
-Restart workers after changing these settings.
-
-Run these checks with the same Python interpreter and installed packages:
-
-```sh
-python patches/atom/tests/test_flydsl_gdn_mtp.py
-python patches/atom/tests/test_hybrid_gdn_graph.py
-python patches/atom/topk512/test_topk512.py
-```
+`ATOM_ENABLE_REPLAYSSM=0` selects plain FlyDSL GDN and
+`RTP_LLM_MTP_DRAFT_LOOP_GRAPH=0` disables draft-loop capture. Restart the
+workers after changing either setting.

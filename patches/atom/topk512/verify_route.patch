@@ -128,7 +128,7 @@
 +from atom.plugin.rtpllm.utils.topk_compat import _mi308x_topk
 +from atom.utils.forward_context import pass_scheduled_tokens_gpu
 +
-+_ENABLED = (os.environ.get("ROLE_TYPE") == "DECODE" and os.environ.get("ATOM_RTP_TOPK512", "1") == "1")
++_ENABLED = os.environ.get("ATOM_RTP_TOPK512", "1") == "1"
 +_ptr = ctypes.c_void_p
 +
 +

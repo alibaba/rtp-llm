@@ -1,20 +1,11 @@
 --- a/atom/model_ops/qwen4_exp/hyperconnection.py
 +++ b/atom/model_ops/qwen4_exp/hyperconnection.py
-@@ -18,6 +18,8 @@
-
- Parameters are replicated, not TP-sharded: ~13 MB per module.
- """
-+
-+import os
-
- import torch
- from aiter.tuned_gemm import tgemm
 @@ -79,6 +81,14 @@
          prefix: str = "",
      ) -> None:
          super().__init__()
 +        self._verify_project = None
-+        if torch.version.hip and os.environ.get("ROLE_TYPE") == "DECODE":
++        if torch.version.hip:
 +            from atom.plugin.prepare import is_rtpllm
 +
 +            if is_rtpllm():
