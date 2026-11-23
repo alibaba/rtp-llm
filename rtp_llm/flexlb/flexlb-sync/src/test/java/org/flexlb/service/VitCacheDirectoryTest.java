@@ -62,6 +62,7 @@ class VitCacheDirectoryTest {
     private WorkerStatus b;
     private EngineGrpcClient grpc;
     private LBStatusConsistencyService consistency;
+    private WorkerDirectory workers;
 
     @BeforeEach
     void setUp() {
@@ -69,10 +70,8 @@ class VitCacheDirectoryTest {
         b = worker("10.0.0.2", "two");
         live.put(a.routingAddress(), a);
         live.put(b.routingAddress(), b);
-        var workers = mock(WorkerDirectory.class);
-        when(workers.statusSnapshot(RoleType.VIT)).thenAnswer(call -> Map.copyOf(live));
-        when(workers.endpointAddressSnapshot(RoleType.VIT))
-                .thenAnswer(call -> new java.util.ArrayList<>(live.keySet()));
+        workers = mock(WorkerDirectory.class);
+        when(workers.vitRoutingSnapshot()).thenAnswer(call -> Map.copyOf(live));
         when(workers.captureEndpoint(eq(RoleType.VIT), any()))
                 .thenAnswer(
                         call -> {
@@ -120,6 +119,18 @@ class VitCacheDirectoryTest {
     }
 
     @Test
+    void selectedVitRejectsAnEngineIndexOutsideTheRegisteredEndpoint() {
+        var ctx = context("image");
+        var selected = selector.select(ctx, "one");
+        assertEquals(a.getPhysicalIpPort(), selected.getPhysicalIpPort());
+        ctx.getRequest().setSelectedVit(selected);
+        assertTrue(selector.validate(ctx, "one").isSuccess());
+
+        selected.setEngineIndex(1);
+        assertFalse(selector.validate(ctx, "one").isSuccess());
+    }
+
+    @Test
     void vitOnlyWithoutAffinityKeysSelectsByLoadAndRevalidatesTheWorker() {
         a.recordVitLoad(OptionalLong.of(8), a.vitRoutedInputs(), System.nanoTime());
         b.recordVitLoad(OptionalLong.of(1), b.vitRoutedInputs(), System.nanoTime());
@@ -154,6 +165,23 @@ class VitCacheDirectoryTest {
         assertEquals(b.getIp(), selector.select(context("independent"), null).getServerIp());
         a.recordVitLoad(OptionalLong.of(0), a.vitRoutedInputs(), System.nanoTime());
         assertEquals(a.getIp(), selector.select(context("another"), null).getServerIp());
+    }
+
+    @Test
+    void capturesOnlyTheWinningGenerationAndRejectsAReplacementBeforeAccounting() {
+        snapshot(a, "a1", "image");
+        snapshot(b, "b1");
+        var route = context("image");
+        route.getRequest().setVitRouteOnly(true);
+        var replacement = worker(a.getIp(), "one");
+        when(workers.captureEndpoint(RoleType.VIT, a.routingAddress()))
+                .thenReturn(new WorkerEndpoint(replacement).tryPinGeneration());
+        assertFalse(selector.select(route, null).isSuccess());
+        assertEquals(0L, a.vitRoutedInputs());
+        assertEquals(0L, replacement.vitRoutedInputs());
+        verify(workers).captureEndpoint(RoleType.VIT, a.routingAddress());
+        verify(workers, org.mockito.Mockito.never())
+                .captureEndpoint(RoleType.VIT, b.routingAddress());
     }
 
     @Test
@@ -409,18 +437,6 @@ class VitCacheDirectoryTest {
         } finally {
             executor.shutdownNow();
         }
-    }
-
-    @Test
-    void selectedVitRejectsAnEngineIndexOutsideTheRegisteredEndpoint() {
-        var ctx = context("image");
-        var selected = selector.select(ctx, "one");
-        assertEquals(a.getPhysicalIpPort(), selected.getPhysicalIpPort());
-        ctx.getRequest().setSelectedVit(selected);
-        assertTrue(selector.validate(ctx, "one").isSuccess());
-
-        selected.setEngineIndex(1);
-        assertFalse(selector.validate(ctx, "one").isSuccess());
     }
 
     @Test
