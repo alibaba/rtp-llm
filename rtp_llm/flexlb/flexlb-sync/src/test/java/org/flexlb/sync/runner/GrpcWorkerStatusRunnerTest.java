@@ -20,10 +20,12 @@ import org.mockito.ArgumentCaptor;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -398,6 +400,75 @@ class GrpcWorkerStatusRunnerTest {
         assertEquals(Long.MAX_VALUE, status.vitLoadEstimate(afterReceive + 1, 0));
     }
 
+    @Test
+    void heartbeatsAdvanceDuringBlockedStatusApplication() throws Exception {
+        WorkerStatus status =
+                RunnerTestSupport.discovered(
+                        RoleType.VIT, null, "127.0.0.1", 8080, 8081, "test-site");
+        status.configureStatusFreshness(10_000_000L);
+        ConfigService config = mock(ConfigService.class);
+        when(config.loadBalanceConfig())
+                .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
+        EndpointRegistry registry = RunnerTestSupport.endpointRegistry(config);
+        try {
+            WorkerDirectory directory = directory(registry, status);
+            WorkerEndpoint endpoint =
+                    RunnerTestSupport.publishEndpoint(
+                            registry, RoleType.VIT, status.getLogicalIpPort(), status);
+            var response =
+                    EngineRpcService.WorkerStatusPB.newBuilder()
+                            .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_VIT)
+                            .setStatusVersion(status.appliedStatusCursor().statusVersion())
+                            .setAlive(true)
+                            .build();
+            var pendingApplication = new AtomicReference<Runnable>();
+            var busyApplicationQueued = new AtomicBoolean();
+
+            status.lock.lock();
+            try {
+                status.recordStatusApplied(System.nanoTime() / 1000 - 11_000_000L);
+                CompletableFuture.runAsync(
+                                () ->
+                                        runVitPoll(
+                                                status,
+                                                directory,
+                                                CompletableFuture.completedFuture(response),
+                                                pendingApplication::set))
+                        .get(5, TimeUnit.SECONDS);
+                long firstReceipt = status.pollHealth().lastSuccessfulPollUs();
+                CompletableFuture.runAsync(
+                                () ->
+                                        runVitPoll(
+                                                status,
+                                                directory,
+                                                CompletableFuture.completedFuture(response),
+                                                ignored -> busyApplicationQueued.set(true)))
+                        .get(5, TimeUnit.SECONDS);
+                assertTrue(status.pollHealth().lastSuccessfulPollUs() > firstReceipt);
+                assertFalse(status.tryClaimHealthRetirement(System.nanoTime() / 1000, 10_000_000L));
+                assertFalse(busyApplicationQueued.get());
+                try (var captured =
+                        directory.captureEndpoint(RoleType.VIT, status.getLogicalIpPort())) {
+                    assertNull(captured);
+                }
+                try (var existingWork = endpoint.tryPinGeneration()) {
+                    assertNotNull(existingWork);
+                }
+            } finally {
+                status.lock.unlock();
+            }
+
+            assertNotNull(pendingApplication.get());
+            pendingApplication.get().run();
+            try (var captured =
+                    directory.captureEndpoint(RoleType.VIT, status.getLogicalIpPort())) {
+                assertNotNull(captured);
+            }
+        } finally {
+            registry.close();
+        }
+    }
+
     @ParameterizedTest
     @CsvSource({"ROLE_TYPE_VIT,1,true", "ROLE_TYPE_DECODE,2,true", "ROLE_TYPE_VIT,2,false"})
     void rejectedVitStatusKeepsThePreviousLoad(
@@ -454,7 +525,7 @@ class GrpcWorkerStatusRunnerTest {
     }
 
     private static WorkerDirectory directory(EndpointRegistry registry, WorkerStatus status) {
-        WorkerDirectory directory = new WorkerDirectory(registry);
+        WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
         directory.currentOrDiscover(status.getRole(), status.getLogicalIpPort(), () -> status);
         return directory;
     }
