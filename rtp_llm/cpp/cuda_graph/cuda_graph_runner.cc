@@ -1210,6 +1210,23 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(wait_host_mirror_d2h)");
             host_mirror_copy_event.synchronize();
         }
+        if (!isGenerationPrefillCudaGraph() && inputs.attention_inputs.is_prefill
+            && inputs.attention_inputs.input_lengths.defined() && inputs.attention_inputs.input_lengths.is_cuda()
+            && py_model_inputs_.attention_inputs.prefix_lengths.defined()
+            && !py_model_inputs_.attention_inputs.prefix_lengths.is_cuda()
+            && py_model_inputs_.attention_inputs.prefix_lengths.numel() >= state.current_batch_size) {
+            const auto* prefix_ptr = py_model_inputs_.attention_inputs.prefix_lengths.data_ptr<int32_t>();
+            int64_t     prefix_sum = 0;
+            for (int i = 0; i < state.current_batch_size; ++i) {
+                prefix_sum += prefix_ptr[i];
+            }
+            const int total_kv = inputs.attention_inputs.total_tokens + static_cast<int>(prefix_sum);
+            py_model_inputs_.attention_inputs.context_total_kv_length = total_kv;
+            for (auto& [tag, tagged_inputs] : py_model_inputs_.attention_inputs_by_tag) {
+                (void)tag;
+                tagged_inputs.context_total_kv_length = total_kv;
+            }
+        }
         py::gil_scoped_acquire gil;
         callPrepareCudaGraph(attn_pyobj, py_model_inputs_);
     }

@@ -351,7 +351,8 @@ std::optional<std::string> PyWrappedModel::takeDeferredHiddenStateCaptureError()
 }
 
 // Helper function to build PyAttentionInputs from GptModelInputs
-torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptModelInputs& inputs) {
+torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptModelInputs& inputs,
+                                                                    bool                  defer_device_context_kv_sum) {
     RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs");
     torch_ext::PyAttentionInputs py_attn_inputs;
 
@@ -452,7 +453,8 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         // prefix_lengths here is a source tensor (never a deferred H2D copy),
         // so summing it is safe; item() adds one stream sync on this path.
         int64_t prefix_sum = 0;
-        if (py_attn_inputs.prefix_lengths.defined() && py_attn_inputs.prefix_lengths.numel() > 0) {
+        if (!defer_device_context_kv_sum && py_attn_inputs.prefix_lengths.defined()
+            && py_attn_inputs.prefix_lengths.numel() > 0) {
             prefix_sum = py_attn_inputs.prefix_lengths.sum().item<int64_t>();
         }
         py_attn_inputs.context_total_kv_length = py_attn_inputs.total_tokens + static_cast<int>(prefix_sum);
@@ -899,10 +901,15 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
             py_model_.attr("prepare_moe_forward")(inputs.combo_tokens.numel(), has_context).cast<bool>();
     }
 
+#if USING_CUDA
+    const bool defer_device_context_kv_sum = enable_cuda_graph_;
+#else
+    const bool defer_device_context_kv_sum = false;
+#endif
     torch_ext::PyAttentionInputs attention_inputs;
     {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(build)");
-        attention_inputs = buildPyAttentionInputs(inputs);
+        attention_inputs = buildPyAttentionInputs(inputs, defer_device_context_kv_sum);
         // Fake/warmup streams alias reserved block zero and have no live cache rows.
         attention_inputs.is_s_padded = inputs.warmup || inputs.is_fake_stream;
     }
@@ -957,6 +964,17 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
         && runner->canRun(py_model_inputs, state, CudaGraphCheckMode::PREPARE)) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
         runner->prepareAttentionInputs(py_model_inputs, state, skip_forward_event_sync);
+    } else if (defer_device_context_kv_sum && attention_inputs_.is_prefill && attention_inputs_.input_lengths.defined()
+               && attention_inputs_.input_lengths.is_cuda() && attention_inputs_.prefix_lengths.defined()
+               && attention_inputs_.prefix_lengths.numel() > 0 && attention_inputs_.cu_kv_seqlens_device.defined()
+               && attention_inputs_.cu_kv_seqlens_device.numel() > attention_inputs_.input_lengths.size(0)) {
+        const int total_kv =
+            attention_inputs_.cu_kv_seqlens_device[attention_inputs_.input_lengths.size(0)].item<int>();
+        attention_inputs_.context_total_kv_length = total_kv;
+        for (auto& [tag, tagged_inputs] : attention_inputs_by_tag_) {
+            (void)tag;
+            tagged_inputs.context_total_kv_length = total_kv;
+        }
     }
     prepared_guard.commit();
 }

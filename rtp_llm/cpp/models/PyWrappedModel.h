@@ -125,7 +125,8 @@ private:
 
 private:
     // Helper functions to reduce code duplication
-    torch_ext::PyAttentionInputs  buildPyAttentionInputs(const GptModelInputs& inputs);
+    torch_ext::PyAttentionInputs  buildPyAttentionInputs(const GptModelInputs& inputs,
+                                                         bool                  defer_device_context_kv_sum = false);
     torch_ext::PyEmbeddingInputs  buildPyEmbeddingInputs(const GptModelInputs& inputs);
     torch_ext::PyMultimodalInputs buildPyMultimodalInputs(const GptModelInputs& inputs);
     torch_ext::BertEmbeddingInputs

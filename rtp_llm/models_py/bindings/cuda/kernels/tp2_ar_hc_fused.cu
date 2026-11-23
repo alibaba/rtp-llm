@@ -14,14 +14,20 @@ namespace rtp_llm {
 namespace tp2_hc_ipc {
 
 constexpr int    kMaxBlocks     = 128;
-constexpr int    kMaxRows       = 2048;
-constexpr int    kMaxIters      = kMaxRows / kMaxBlocks;  // 16
+constexpr int    kMaxSingleRows = 12288;
+constexpr int    kMaxPackedRows = kMaxSingleRows / 2;     // 6144
+constexpr int    kMaxSingleIters = kMaxSingleRows / kMaxBlocks;  // 96
 constexpr int    kHidden        = 2560;
 constexpr int    kBranches      = 4;
 constexpr int    kThreads       = 320;  // 320 * 8 BF16 = 2560 columns
 constexpr int    kWarps         = kThreads / 32;  // 10
 constexpr size_t kRowU4         = kHidden / 8;    // 320 uint4s
-constexpr size_t kSlotStrideU4  = 2 * kRowU4;     // 640 uint4s (routed + shared)
+constexpr size_t kCtaCapU4      = static_cast<size_t>(kMaxSingleIters) * kRowU4;  // 30720 uint4s
+
+constexpr int    kGatherThreads          = 256;
+constexpr size_t kMaxGatherBytesPerSlot  = 30ULL * 1024ULL * 1024ULL;  // 30 MiB/shard (12288 x 1280 BF16)
+constexpr size_t kMaxGatherU4PerSlot     = kMaxGatherBytesPerSlot / sizeof(uint4);
+constexpr size_t kGatherCtaCapU4         = kMaxGatherU4PerSlot / kMaxBlocks;
 
 struct Tp2HcSignal {
     alignas(128) uint32_t cta_gen[kMaxBlocks][32];
@@ -119,8 +125,11 @@ static DINLINE uint4 pack_u4_bf16(const float in[8]) {
         pack_bf16x2(in[6], in[7]));
 }
 
-static DINLINE size_t ipc_slot_offset(int slot, int bid, int iter) {
-    return ((static_cast<size_t>(slot) * kMaxBlocks + bid) * kMaxIters + iter) * kSlotStrideU4;
+template<bool kPackedDual>
+static DINLINE size_t ipc_slot_offset(int slot, int bid, int iter, size_t cta_cap_u4) {
+    constexpr size_t kIterStrideU4 = kPackedDual ? (2 * kRowU4) : kRowU4;
+    return (static_cast<size_t>(slot) * kMaxBlocks + bid) * cta_cap_u4
+           + static_cast<size_t>(iter) * kIterStrideU4;
 }
 
 template<bool kPackedDual>
@@ -177,7 +186,8 @@ tp2ArHcInjectNormKernel(const uint4* __restrict__    hyper_x,
                         RankSignals                  signals,
                         int                          rank,
                         int                          rows,
-                        float                        eps) {
+                        float                        eps,
+                        size_t                       cta_cap_u4) {
     __shared__ uint32_t sh_gen;
     __shared__ float    sh_warp[kBranches][kWarps];
     __shared__ float    sh_scalar[kBranches];
@@ -223,7 +233,7 @@ tp2ArHcInjectNormKernel(const uint4* __restrict__    hyper_x,
     uint4 lr_reg{}, ls_reg{};
     int   iter = 0;
     for (int r = bid; r < rows; r += gridDim.x, ++iter) {
-        const size_t base_off = ipc_slot_offset(slot, bid, iter);
+        const size_t base_off = ipc_slot_offset<kPackedDual>(slot, bid, iter, cta_cap_u4);
         const uint4  lr       = local_sub[static_cast<size_t>(r) * kRowU4 + tid];
         st_u4_volatile(self_buf + base_off + tid, lr);
         if (iter == 0) {
@@ -266,7 +276,7 @@ tp2ArHcInjectNormKernel(const uint4* __restrict__    hyper_x,
     iter = 0;
     for (int r = bid; r < rows; r += gridDim.x, ++iter) {
         const bool   last_iter = (r + gridDim.x >= rows);
-        const size_t base_off  = ipc_slot_offset(slot, bid, iter);
+        const size_t base_off  = ipc_slot_offset<kPackedDual>(slot, bid, iter, cta_cap_u4);
         const uint4  lr        = (iter == 0) ? lr_reg : ld_u4_volatile(self_buf + base_off + tid);
         const uint4  pr        = ld_u4_volatile(peer_buf + base_off + tid);
         uint4        ls{}, ps{};
@@ -400,7 +410,8 @@ tp2ArHcInjectOnlyKernel(const uint4* __restrict__    hyper_x,
                         RankBuffers                  buffers,
                         RankSignals                  signals,
                         int                          rank,
-                        int                          rows) {
+                        int                          rows,
+                        size_t                       cta_cap_u4) {
     __shared__ uint32_t sh_gen;
 
     const int bid = blockIdx.x;
@@ -435,7 +446,7 @@ tp2ArHcInjectOnlyKernel(const uint4* __restrict__    hyper_x,
     uint4 lr_reg{}, ls_reg{};
     int   iter = 0;
     for (int r = bid; r < rows; r += gridDim.x, ++iter) {
-        const size_t base_off = ipc_slot_offset(slot, bid, iter);
+        const size_t base_off = ipc_slot_offset<kPackedDual>(slot, bid, iter, cta_cap_u4);
         const uint4  lr       = local_sub[static_cast<size_t>(r) * kRowU4 + tid];
         st_u4_volatile(self_buf + base_off + tid, lr);
         if (iter == 0) {
@@ -471,7 +482,7 @@ tp2ArHcInjectOnlyKernel(const uint4* __restrict__    hyper_x,
     iter = 0;
     for (int r = bid; r < rows; r += gridDim.x, ++iter) {
         const bool   last_iter = (r + gridDim.x >= rows);
-        const size_t base_off  = ipc_slot_offset(slot, bid, iter);
+        const size_t base_off  = ipc_slot_offset<kPackedDual>(slot, bid, iter, cta_cap_u4);
         const uint4  lr        = (iter == 0) ? lr_reg : ld_u4_volatile(self_buf + base_off + tid);
         const uint4  pr        = ld_u4_volatile(peer_buf + base_off + tid);
         uint4        ls{}, ps{};
@@ -543,6 +554,72 @@ static void launch_maybe_pdl(KernelFunc kernel, dim3 grid, dim3 block, cudaStrea
     }
 }
 
+template<bool kEnablePdl>
+__global__ void __launch_bounds__(kGatherThreads, 4)
+tp2P2pAllGatherKernel(const uint4* __restrict__ shard,
+                      uint4* __restrict__       out,
+                      RankBuffers               buffers,
+                      RankSignals               signals,
+                      int                       rank,
+                      size_t                    num_u4,
+                      size_t                    cta_cap_u4) {
+    __shared__ uint32_t sh_gen;
+
+    const int    bid = blockIdx.x;
+    const int    tid = threadIdx.x;
+    Tp2HcSignal* self_sig = signals.sigs[rank];
+    Tp2HcSignal* peer_sig = signals.sigs[1 - rank];
+    if (tid == 0) {
+        sh_gen = (self_sig->cta_gen[bid][0] += 1U);
+    }
+    __syncthreads();
+
+    const uint32_t gen      = sh_gen;
+    const int      slot     = static_cast<int>(gen & 1U);
+    const size_t   cta_base = (static_cast<size_t>(slot) * kMaxBlocks + bid) * cta_cap_u4;
+
+    uint4*       self_buf      = buffers.ptrs[rank];
+    const uint4* peer_buf      = buffers.ptrs[1 - rank];
+    const size_t self_out_base = (rank == 0) ? 0 : num_u4;
+    const size_t peer_out_base = (rank == 0) ? num_u4 : 0;
+    const size_t stride        = static_cast<size_t>(gridDim.x) * kGatherThreads;
+
+    pdl_wait<kEnablePdl>();
+
+    size_t iter = 0;
+    for (size_t idx = static_cast<size_t>(bid) * kGatherThreads + tid; idx < num_u4; idx += stride, ++iter) {
+        const uint4 v = shard[idx];
+        st_u4_volatile(self_buf + cta_base + iter * kGatherThreads + tid, v);
+        out[self_out_base + idx] = v;
+    }
+
+    __syncthreads();
+    if (tid == 0) {
+        st_flag_release(&peer_sig->peer_ready[slot][bid][0], gen);
+        while (ld_flag_acquire(&self_sig->peer_ready[slot][bid][0]) != gen) {}
+    }
+    __syncthreads();
+
+    iter = 0;
+    for (size_t idx = static_cast<size_t>(bid) * kGatherThreads + tid; idx < num_u4; idx += stride, ++iter) {
+        out[peer_out_base + idx] = ld_u4_volatile(peer_buf + cta_base + iter * kGatherThreads + tid);
+    }
+
+    pdl_trigger<kEnablePdl>();
+}
+
+static size_t resolve_cta_cap_u4(int64_t buffer_bytes, size_t* out_slot_bytes) {
+    const int64_t total_bytes = (buffer_bytes > 0) ? buffer_bytes : tp2ArHcBufferSize(kMaxSingleRows);
+    constexpr int64_t kUnitBytes = static_cast<int64_t>(2) * kMaxBlocks * sizeof(uint4);
+    TORCH_CHECK(total_bytes >= kUnitBytes && total_bytes % kUnitBytes == 0,
+                "TP2 IPC buffer_bytes must be a positive multiple of 2 * 128 * 16");
+    const size_t slot_bytes = static_cast<size_t>(total_bytes / 2);
+    if (out_slot_bytes) {
+        *out_slot_bytes = slot_bytes;
+    }
+    return (slot_bytes / sizeof(uint4)) / kMaxBlocks;
+}
+
 #undef DINLINE
 }  // namespace tp2_hc_ipc
 
@@ -550,9 +627,70 @@ int64_t tp2ArHcMetaSize() {
     return sizeof(tp2_hc_ipc::Tp2HcSignal);
 }
 
-int64_t tp2ArHcBufferSize() {
-    return static_cast<int64_t>(2) * tp2_hc_ipc::kMaxBlocks * tp2_hc_ipc::kMaxIters
-           * tp2_hc_ipc::kSlotStrideU4 * sizeof(uint4);
+int64_t tp2ArHcBufferSize(int64_t max_single_rows) {
+    TORCH_CHECK(max_single_rows >= tp2_hc_ipc::kMaxBlocks
+                    && max_single_rows <= tp2_hc_ipc::kMaxSingleRows
+                    && max_single_rows % tp2_hc_ipc::kMaxBlocks == 0,
+                "max_single_rows must be a multiple of 128 in [128..12288]");
+    return static_cast<int64_t>(2) * max_single_rows * tp2_hc_ipc::kRowU4 * sizeof(uint4);
+}
+
+int64_t tp2P2pGatherBufferSize(int64_t max_single_rows) {
+    return tp2ArHcBufferSize(max_single_rows);
+}
+
+torch::Tensor tp2P2pAllGather(const torch::Tensor&        shard,
+                              const std::vector<int64_t>& buffers,
+                              const std::vector<int64_t>& signals,
+                              int64_t                     rank,
+                              bool                        enable_pdl,
+                              int64_t                     buffer_bytes) {
+    TORCH_CHECK(shard.is_cuda() && shard.is_contiguous() && shard.dim() >= 1,
+                "tp2P2pAllGather requires a contiguous >=1D CUDA tensor");
+    size_t       slot_bytes = 0;
+    const size_t cta_cap_u4 = tp2_hc_ipc::resolve_cta_cap_u4(buffer_bytes, &slot_bytes);
+    const size_t shard_bytes = static_cast<size_t>(shard.numel()) * static_cast<size_t>(shard.element_size());
+    TORCH_CHECK(shard_bytes > 0 && shard_bytes % sizeof(uint4) == 0 && shard_bytes <= slot_bytes,
+                "tp2P2pAllGather shard bytes must be a non-zero multiple of 16 within IPC slot capacity");
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(shard.data_ptr()) % alignof(uint4) == 0,
+                "tp2P2pAllGather shard pointer must be 16-byte aligned");
+    TORCH_CHECK(rank >= 0 && rank < 2 && buffers.size() == 2 && signals.size() == 2,
+                "tp2P2pAllGather requires 2 rank pointers");
+
+    c10::cuda::CUDAGuard guard(shard.device());
+    std::vector<int64_t> out_shape(shard.sizes().begin(), shard.sizes().end());
+    out_shape[0] *= 2;
+    auto out = torch::empty(out_shape, shard.options());
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(out.data_ptr()) % alignof(uint4) == 0,
+                "tp2P2pAllGather output pointer must be 16-byte aligned");
+
+    tp2_hc_ipc::RankBuffers rank_bufs{};
+    tp2_hc_ipc::RankSignals rank_sigs{};
+    for (int i = 0; i < 2; ++i) {
+        rank_bufs.ptrs[i] = reinterpret_cast<uint4*>(buffers[i]);
+        rank_sigs.sigs[i] = reinterpret_cast<tp2_hc_ipc::Tp2HcSignal*>(signals[i]);
+    }
+
+    const size_t num_u4 = shard_bytes / sizeof(uint4);
+    const size_t needed = (num_u4 + tp2_hc_ipc::kGatherThreads - 1) / tp2_hc_ipc::kGatherThreads;
+    const dim3   grid(static_cast<unsigned>(std::min<size_t>(tp2_hc_ipc::kMaxBlocks, std::max<size_t>(1, needed))));
+    const dim3   block(tp2_hc_ipc::kGatherThreads);
+    auto         stream = c10::cuda::getCurrentCUDAStream(shard.get_device()).stream();
+
+    const auto* s_ptr = reinterpret_cast<const uint4*>(shard.data_ptr());
+    auto*       o_ptr = reinterpret_cast<uint4*>(out.data_ptr());
+    const int   r_i32 = static_cast<int>(rank);
+
+    if (enable_pdl) {
+        tp2_hc_ipc::launch_maybe_pdl(tp2_hc_ipc::tp2P2pAllGatherKernel<true>,
+                                     grid, block, stream, true,
+                                     s_ptr, o_ptr, rank_bufs, rank_sigs, r_i32, num_u4, cta_cap_u4);
+    } else {
+        tp2_hc_ipc::launch_maybe_pdl(tp2_hc_ipc::tp2P2pAllGatherKernel<false>,
+                                     grid, block, stream, false,
+                                     s_ptr, o_ptr, rank_bufs, rank_sigs, r_i32, num_u4, cta_cap_u4);
+    }
+    return out;
 }
 
 std::tuple<torch::Tensor, torch::Tensor, c10::optional<torch::Tensor>>
@@ -566,7 +704,8 @@ tp2ArHcInjectNorm(const torch::Tensor&        hyper_x,
                   double                      eps,
                   bool                        packed_dual,
                   bool                        collect_amax,
-                  bool                        enable_pdl) {
+                  bool                        enable_pdl,
+                  int64_t                     buffer_bytes) {
     TORCH_CHECK(hyper_x.is_cuda() && local_sub.is_cuda() && gates.is_cuda() && gamma.is_cuda(),
                 "tp2ArHcInjectNorm inputs must be CUDA tensors");
     TORCH_CHECK(hyper_x.scalar_type() == torch::kBFloat16 && local_sub.scalar_type() == torch::kBFloat16
@@ -574,11 +713,14 @@ tp2ArHcInjectNorm(const torch::Tensor&        hyper_x,
                 "tp2ArHcInjectNorm inputs must be BF16");
     TORCH_CHECK(hyper_x.is_contiguous() && local_sub.is_contiguous() && gates.is_contiguous() && gamma.is_contiguous(),
                 "tp2ArHcInjectNorm inputs must be contiguous");
-    const int64_t rows = hyper_x.numel() / (tp2_hc_ipc::kBranches * tp2_hc_ipc::kHidden);
-    TORCH_CHECK(rows >= 1 && rows <= tp2_hc_ipc::kMaxRows
-                    && hyper_x.size(-1) == tp2_hc_ipc::kBranches * tp2_hc_ipc::kHidden,
-                "tp2ArHcInjectNorm hyper_x shape is outside [1..2048, 10240]");
+    size_t       slot_bytes = 0;
+    const size_t cta_cap_u4 = tp2_hc_ipc::resolve_cta_cap_u4(buffer_bytes, &slot_bytes);
+    const int64_t max_sub_rows      = static_cast<int64_t>(slot_bytes / (tp2_hc_ipc::kRowU4 * sizeof(uint4)));
+    const int64_t rows              = hyper_x.numel() / (tp2_hc_ipc::kBranches * tp2_hc_ipc::kHidden);
     const int64_t expected_sub_rows = packed_dual ? (2 * rows) : rows;
+    TORCH_CHECK(rows >= 1 && expected_sub_rows <= max_sub_rows
+                    && hyper_x.size(-1) == tp2_hc_ipc::kBranches * tp2_hc_ipc::kHidden,
+                "tp2ArHcInjectNorm sub-rows exceed IPC slot capacity");
     TORCH_CHECK(local_sub.dim() == 2 && local_sub.size(0) == expected_sub_rows
                     && local_sub.size(1) == tp2_hc_ipc::kHidden,
                 "tp2ArHcInjectNorm local_sub shape mismatch");
@@ -638,7 +780,8 @@ tp2ArHcInjectNorm(const torch::Tensor&        hyper_x,
                                  rank_sigs,                                                                            \
                                  r_i32,                                                                                \
                                  n_i32,                                                                                \
-                                 eps_f)
+                                 eps_f,                                                                                \
+                                 cta_cap_u4)
 
     if (packed_dual) {
         if (collect_amax) {
@@ -669,7 +812,8 @@ torch::Tensor tp2ArHcInjectOnly(const torch::Tensor&        hyper_x,
                                 const std::vector<int64_t>& signals,
                                 int64_t                     rank,
                                 bool                        packed_dual,
-                                bool                        enable_pdl) {
+                                bool                        enable_pdl,
+                                int64_t                     buffer_bytes) {
     TORCH_CHECK(hyper_x.is_cuda() && local_sub.is_cuda() && gates.is_cuda(),
                 "tp2ArHcInjectOnly inputs must be CUDA tensors");
     TORCH_CHECK(hyper_x.scalar_type() == torch::kBFloat16 && local_sub.scalar_type() == torch::kBFloat16
@@ -677,11 +821,14 @@ torch::Tensor tp2ArHcInjectOnly(const torch::Tensor&        hyper_x,
                 "tp2ArHcInjectOnly inputs must be BF16");
     TORCH_CHECK(hyper_x.is_contiguous() && local_sub.is_contiguous() && gates.is_contiguous(),
                 "tp2ArHcInjectOnly inputs must be contiguous");
-    const int64_t rows = hyper_x.numel() / (tp2_hc_ipc::kBranches * tp2_hc_ipc::kHidden);
-    TORCH_CHECK(rows >= 1 && rows <= tp2_hc_ipc::kMaxRows
-                    && hyper_x.size(-1) == tp2_hc_ipc::kBranches * tp2_hc_ipc::kHidden,
-                "tp2ArHcInjectOnly hyper_x shape is outside [1..2048, 10240]");
+    size_t       slot_bytes = 0;
+    const size_t cta_cap_u4 = tp2_hc_ipc::resolve_cta_cap_u4(buffer_bytes, &slot_bytes);
+    const int64_t max_sub_rows      = static_cast<int64_t>(slot_bytes / (tp2_hc_ipc::kRowU4 * sizeof(uint4)));
+    const int64_t rows              = hyper_x.numel() / (tp2_hc_ipc::kBranches * tp2_hc_ipc::kHidden);
     const int64_t expected_sub_rows = packed_dual ? (2 * rows) : rows;
+    TORCH_CHECK(rows >= 1 && expected_sub_rows <= max_sub_rows
+                    && hyper_x.size(-1) == tp2_hc_ipc::kBranches * tp2_hc_ipc::kHidden,
+                "tp2ArHcInjectOnly sub-rows exceed IPC slot capacity");
     TORCH_CHECK(local_sub.dim() == 2 && local_sub.size(0) == expected_sub_rows
                     && local_sub.size(1) == tp2_hc_ipc::kHidden,
                 "tp2ArHcInjectOnly local_sub shape mismatch");
@@ -715,21 +862,21 @@ torch::Tensor tp2ArHcInjectOnly(const torch::Tensor&        hyper_x,
         if (enable_pdl) {
             tp2_hc_ipc::launch_maybe_pdl(tp2_hc_ipc::tp2ArHcInjectOnlyKernel<true, true>,
                                          grid, block, stream, true,
-                                         x_ptr, s_ptr, g_ptr, r_ptr, rank_bufs, rank_sigs, r_i32, n_i32);
+                                         x_ptr, s_ptr, g_ptr, r_ptr, rank_bufs, rank_sigs, r_i32, n_i32, cta_cap_u4);
         } else {
             tp2_hc_ipc::launch_maybe_pdl(tp2_hc_ipc::tp2ArHcInjectOnlyKernel<true, false>,
                                          grid, block, stream, false,
-                                         x_ptr, s_ptr, g_ptr, r_ptr, rank_bufs, rank_sigs, r_i32, n_i32);
+                                         x_ptr, s_ptr, g_ptr, r_ptr, rank_bufs, rank_sigs, r_i32, n_i32, cta_cap_u4);
         }
     } else {
         if (enable_pdl) {
             tp2_hc_ipc::launch_maybe_pdl(tp2_hc_ipc::tp2ArHcInjectOnlyKernel<false, true>,
                                          grid, block, stream, true,
-                                         x_ptr, s_ptr, g_ptr, r_ptr, rank_bufs, rank_sigs, r_i32, n_i32);
+                                         x_ptr, s_ptr, g_ptr, r_ptr, rank_bufs, rank_sigs, r_i32, n_i32, cta_cap_u4);
         } else {
             tp2_hc_ipc::launch_maybe_pdl(tp2_hc_ipc::tp2ArHcInjectOnlyKernel<false, false>,
                                          grid, block, stream, false,
-                                         x_ptr, s_ptr, g_ptr, r_ptr, rank_bufs, rank_sigs, r_i32, n_i32);
+                                         x_ptr, s_ptr, g_ptr, r_ptr, rank_bufs, rank_sigs, r_i32, n_i32, cta_cap_u4);
         }
     }
 

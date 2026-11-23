@@ -39,6 +39,7 @@ def _tp2_worker(rank: int, port: int) -> None:
     ensure_engine_ops_loaded()
     os.environ["MASTER_ADDR"] = "127.0.0.1"
     os.environ["MASTER_PORT"] = str(port)
+    os.environ["RTP_LLM_TP2_IPC_MAX_ROWS"] = "12288"
     torch.cuda.set_device(rank)
     device = torch.device("cuda", rank)
     dist.init_process_group("nccl", rank=rank, world_size=2)
@@ -51,7 +52,7 @@ def _tp2_worker(rank: int, port: int) -> None:
             g_gen.manual_seed(20261122)
             gamma = (torch.randn(10240, generator=g_gen, device=device) * 0.1).bfloat16()
 
-            for rows in (1, 4, 17, 48, 64, 128, 192, 256, 512, 1024, 2048):
+            for rows in (1, 4, 17, 48, 64, 128, 192, 256, 512, 1024, 2048, 5200, 8192):
                 x_gen = torch.Generator(device=device)
                 x_gen.manual_seed(1000 + rows)
                 hyper_x = torch.randn(
@@ -81,6 +82,16 @@ def _tp2_worker(rank: int, port: int) -> None:
                     (True, local_packed, ref_dual),
                 ):
                     deferred = DeferredTp2Sublayer(local_t, packed_dual, ws)
+                    if packed_dual and rows > ws.max_packed_rows:
+                        assert not ws.can_stage_packed(local_t)
+                        assert ws.try_inject_only(hyper_x, deferred, gates) is None
+                        assert (
+                            ws.try_inject_grouped_norm(
+                                hyper_x, deferred, gates, gamma, 1e-6, collect_scale=True
+                            )
+                            is None
+                        )
+                        continue
                     actual_inj = ws.try_inject_only(hyper_x, deferred, gates)
                     expected_inj = inject_into_residual(hyper_x, ref_sub, gates)
                     assert torch.equal(actual_inj, expected_inj), (rows, packed_dual)
@@ -139,6 +150,52 @@ def _tp2_worker(rank: int, port: int) -> None:
                     torch.testing.assert_close(c_norm, ref_norm, atol=1e-2, rtol=1e-2)
                 graph.reset()
 
+            # Multicast-free TP2 P2P IPC AllGather (decode + 10K prefill BF16 & FP8 + CUDA Graph)
+            from rtp_llm.models_py.distributed.tp2_p2p_all_gather import Tp2P2pAllGather
+
+            ag_ws = Tp2P2pAllGather(group, device)
+            assert ag_ws.buffers == ws.buffers, "Expected shared TP2 IPC buffer pool"
+            try:
+                for rows in (1, 2, 8, 64, 4800, 5200):
+                    ag_gen = torch.Generator(device=device)
+                    ag_gen.manual_seed(80000 + rows * 10 + rank)
+                    shard_bf16 = torch.randn(
+                        (rows, 1280), generator=ag_gen, device=device, dtype=torch.bfloat16
+                    )
+                    assert ag_ws.should_use(shard_bf16)
+                    actual_ag = ag_ws.all_gather(shard_bf16)
+                    ref_ag = torch.empty((2 * rows, 1280), device=device, dtype=torch.bfloat16)
+                    dist.all_gather_into_tensor(ref_ag, shard_bf16, group=group)
+                    assert torch.equal(actual_ag, ref_ag), ("bf16_ag", rows)
+
+                    shard_u8 = torch.randint(
+                        0, 255, (rows, 1280), generator=ag_gen, device=device, dtype=torch.uint8
+                    )
+                    assert ag_ws.should_use(shard_u8)
+                    actual_u8 = ag_ws.all_gather(shard_u8)
+                    ref_u8 = torch.empty((2 * rows, 1280), device=device, dtype=torch.uint8)
+                    dist.all_gather_into_tensor(ref_u8, shard_u8, group=group)
+                    assert torch.equal(actual_u8, ref_u8), ("u8_ag", rows)
+
+                g_shard = torch.randn((16, 1280), device=device, dtype=torch.bfloat16)
+                ag_ws.all_gather(g_shard)
+                torch.cuda.synchronize(device)
+                dist.barrier(group=group)
+                ag_graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(ag_graph):
+                    g_out = ag_ws.all_gather(g_shard)
+                for step in range(3):
+                    gg = torch.Generator(device=device)
+                    gg.manual_seed(95000 + step * 10 + rank)
+                    g_shard.copy_(torch.randn(g_shard.shape, generator=gg, device=device, dtype=torch.bfloat16))
+                    ag_graph.replay()
+                    ref_g = torch.empty((32, 1280), device=device, dtype=torch.bfloat16)
+                    dist.all_gather_into_tensor(ref_g, g_shard, group=group)
+                    assert torch.equal(g_out, ref_g), ("graph_ag", step)
+                ag_graph.reset()
+            finally:
+                ag_ws.close()
+
             # Head IPC Gather (up to 256 rows) & Split-K Head IPC Argmax (mixed shapes + 2-step CUDA graphs)
             for rows in (4, 1, 3, 8, 16, 32, 48, 64, 192, 256, 4):
                 h_gen = torch.Generator(device=device)
@@ -196,6 +253,7 @@ def _tp2_worker(rank: int, port: int) -> None:
             os._exit(1)
         finally:
             head_ws.close()
+            ws.close()
     finally:
         dist.destroy_process_group()
 
@@ -239,6 +297,31 @@ class Tp2ArHcFusedTest(unittest.TestCase):
             self.assertIsNone(try_defer_sublayer_tp2(x, collective_torch.Group.TP))
         finally:
             _moe_tp2_defer_slot.reset(mtok2)
+
+        mtok_ep = _moe_tp2_defer_slot.set(_DeferSlot(ws, allow_single=False))
+        try:
+            self.assertIsNone(try_defer_sublayer_tp2(x, collective_torch.Group.TP))
+            d4 = try_defer_moe_packed_tp2(packed)
+            self.assertIsInstance(d4, DeferredTp2Sublayer)
+            self.assertTrue(d4.packed_dual)
+        finally:
+            _moe_tp2_defer_slot.reset(mtok_ep)
+
+        from rtp_llm.models_py.distributed.tp2_p2p_all_gather import (
+            default_tp2_ipc_max_single_rows,
+        )
+
+        old_env = os.environ.pop("RTP_LLM_TP2_IPC_MAX_ROWS", None)
+        try:
+            self.assertEqual(
+                default_tp2_ipc_max_single_rows(ws.device, 95 * (1024 ** 3)), 4096
+            )
+            self.assertEqual(
+                default_tp2_ipc_max_single_rows(ws.device, 140 * (1024 ** 3)), 12288
+            )
+        finally:
+            if old_env is not None:
+                os.environ["RTP_LLM_TP2_IPC_MAX_ROWS"] = old_env
 
     def test_two_gpu_p2p_fusion_and_argmax_parity(self):
         if (

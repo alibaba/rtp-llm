@@ -17,6 +17,7 @@ py_library(
         "all_reduce.py",
         "rocm_rccl.py",
         "symm_mem.py",
+        "tp2_p2p_all_gather.py",
     ],
     deps = [
         ":rank_layout",

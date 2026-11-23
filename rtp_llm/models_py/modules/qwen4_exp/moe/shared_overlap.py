@@ -30,7 +30,10 @@ from .compact_fp8_decode import (
     compact_moe_output_buffer,
     h20_compact_moe_phase,
 )
-from .shared_gate_triton import try_shared_sigmoid_mul
+from .shared_gate_triton import (
+    try_linear_shared_sigmoid_mul,
+    try_shared_sigmoid_mul,
+)
 
 
 @lru_cache(maxsize=None)
@@ -307,7 +310,7 @@ class Qwen4MoeLayer(GenericMoeLayer):
         )
         main = torch.cuda.current_stream(hidden_states.device)
         capturing = torch.cuda.is_current_stream_capturing()
-        use_aux_stream = True
+        use_aux_stream = capturing or rows <= 512
         prequant_entry = None
         prequant_scope = None
         gate_proj = getattr(self, "gate", None)
@@ -421,7 +424,27 @@ class Qwen4MoeLayer(GenericMoeLayer):
                 out.copy_(gated)
                 return out
             return gated
-        gate = self.shared_expert_gate(hidden_states)
+        gate_proj = self.shared_expert_gate
+        if (
+            getattr(gate_proj, "bias", None) is None
+            and getattr(gate_proj, "compute_weight", None) is not None
+            and not (
+                "forward" in gate_proj.__dict__
+                or gate_proj._forward_pre_hooks
+                or gate_proj._forward_hooks
+                or torch.nn.modules.module._global_forward_pre_hooks
+                or torch.nn.modules.module._global_forward_hooks
+            )
+        ):
+            fused_linear = try_linear_shared_sigmoid_mul(
+                hidden_states,
+                gate_proj.compute_weight,
+                shared_expert_output,
+                out=out,
+            )
+            if fused_linear is not None:
+                return fused_linear
+        gate = gate_proj(hidden_states)
         fused = try_shared_sigmoid_mul(gate, shared_expert_output, out=out)
         if fused is not None:
             return fused
@@ -468,7 +491,7 @@ class Qwen4MoeLayer(GenericMoeLayer):
         ):
             rows = hidden_states.shape[0]
             use_ep_overlap = 1 <= rows <= self._ep_shared_max_tokens
-            if not use_ep_overlap and 1 <= rows <= 5120:
+            if not use_ep_overlap and 1 <= rows <= _H20_COMPACT_EAGER_MAX_ROWS:
                 use_ep_overlap = (
                     rows <= _H20_COMPACT_EAGER_MAX_ROWS
                     and h20_compact_moe_phase.get() == "eager"
