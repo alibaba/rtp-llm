@@ -225,8 +225,6 @@ class VLLMEngineTransport:
     async def add_request_async(self, request: Any) -> None:
         if getattr(self, "_hybrid_cache", False):
             await self._ensure_client()
-        if request.prompt_token_ids is None:
-            raise ValueError("NaviSched requires prompt token ids")
         external_request_id = str(request.request_id)
         if external_request_id in self._request_ids:
             raise ValueError(f"duplicate NaviSched VLLM request: {external_request_id}")
@@ -236,6 +234,8 @@ class VLLMEngineTransport:
                 request, "Master biz absent from discovery"
             )
             return
+        if request.prompt_token_ids is None:
+            raise ValueError("NaviSched requires prompt token ids")
         request_id = self._allocate_graph_request_id()
         self._ensure_remote_output_task()
         frames = [
@@ -246,7 +246,9 @@ class VLLMEngineTransport:
         self._request_ids[external_request_id] = request_id
         self._external_request_ids[request_id] = external_request_id
         self._remote_cache_stats[external_request_id] = (
-            len(request.prompt_token_ids or ()), 0, 0
+            len(request.prompt_token_ids or ()),
+            0,
+            0,
         )
         routing_token_ids = self._routing_prompt_token_ids(request)
         checkpoint = self._routing_explicit_cache_checkpoint_position(
@@ -279,6 +281,8 @@ class VLLMEngineTransport:
                 self._abort_request(external_request_id)
             raise
         except Exception as error:
+            # The RPC may have reached Master before its response timed out.
+            # Running locally now could execute the same request twice.
             self._forget_request(external_request_id, request_id)
             logger.exception(
                 "NaviSched VLLM client route failed: request_id=%s "

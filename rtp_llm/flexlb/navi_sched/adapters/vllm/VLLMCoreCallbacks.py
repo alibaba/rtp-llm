@@ -10,6 +10,24 @@ logger = logging.getLogger("vllm.v1.engine.core")
 
 
 class VLLMCoreCallbacks:
+    def get_hash_block_size(self, core):
+        block_size = self._cache_policy.block_size
+        if type(block_size) is not int or block_size <= 0:
+            raise ValueError("invalid NaviSched runtime hash block size")
+        return block_size
+
+    def get_routing_metadata(self, core):
+        from .VLLMCachePolicy import get_vllm_prefill_routing_policy
+
+        policy = get_vllm_prefill_routing_policy(core.scheduler.get_kv_connector())
+        return {
+            "block_size": self.get_hash_block_size(core),
+            "trim_last_prompt_token": policy["trim_last_prompt_token"],
+            "prefix_cache_lookup_enabled": bool(
+                core.vllm_config.cache_config.enable_prefix_caching
+            ),
+        }
+
     def log_core_stage(
         self, core, stage: str, started_ns: int, finished_ns: int, **details: Any
     ) -> None:

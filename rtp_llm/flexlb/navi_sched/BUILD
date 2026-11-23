@@ -1823,8 +1823,8 @@ cc_test(
 
 py_test(
     name = "navi_sched_vllm_adapter_callbacks_test",
-    srcs = ["test/vllm/VLLMAdapterCallbacksTest.py"],
-    data = glob(["adapters/vllm/*.py"]),
+    srcs = ["test/vllm/VLLMAdapterCallbacksTest.py", "test/vllm/VLLMReviewRoutingTest.py", "test/vllm/VLLMLoggingTest.py"],
+    data = glob(["adapters/vllm/*.py"]) + ["navi_sched_vllm_plugin.py"],
     main = "test/vllm/VLLMAdapterCallbacksTest.py",
     python_version = "PY3",
 )

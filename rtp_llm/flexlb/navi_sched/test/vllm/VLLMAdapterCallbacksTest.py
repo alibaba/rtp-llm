@@ -41,7 +41,35 @@ FileLoggingTests = module(
 ).VLLMLoggingTest
 
 
+RoutingTests = module(
+    "review_routing_contracts", Path(__file__).with_name("VLLMReviewRoutingTest.py")
+).RoutingTest
+PluginOptInTests = sys.modules["review_routing_contracts"].PluginOptInTest
+
+
 class ReviewTests(unittest.TestCase):
+
+    def test_runtime_routing_metadata_uses_effective_cache_policy(self):
+        callbacks = core_callbacks.VLLMCoreCallbacks()
+        callbacks._cache_policy = types.SimpleNamespace(block_size=32)
+        core = types.SimpleNamespace(
+            scheduler=types.SimpleNamespace(get_kv_connector=lambda: None),
+            vllm_config=types.SimpleNamespace(
+                cache_config=types.SimpleNamespace(enable_prefix_caching=True)
+            ),
+        )
+        self.assertEqual(callbacks.get_hash_block_size(core), 32)
+        self.assertEqual(
+            callbacks.get_routing_metadata(core),
+            {
+                "block_size": 32,
+                "trim_last_prompt_token": False,
+                "prefix_cache_lookup_enabled": True,
+            },
+        )
+        callbacks._cache_policy.block_size = 0
+        with self.assertRaises(ValueError):
+            callbacks.get_hash_block_size(core)
 
     def test_registry_factories_and_duplicate_rejection(self):
         reg = module("review_registry_test", ADAPTER / "VLLMPluginRegistry.py")
