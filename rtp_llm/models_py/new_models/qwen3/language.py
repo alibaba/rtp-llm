@@ -463,21 +463,24 @@ class Qwen3ForCausalLM(GptModelBase, RtpModule):
         prefix_mapping={"model.": ""},
     )
 
-    def owns_lora_checkpoint_target(self, mapped_name):
-        if self._pipeline_partitioned:
-            parts = mapped_name.split(".", 2)
-            if (
-                len(parts) == 3
-                and parts[0] == "layers"
-                and parts[1].isascii()
-                and parts[1].isdigit()
-            ):
-                index = int(parts[1])
-                if str(index) == parts[1] and index < self.layer_num:
-                    return index in self._owned_layer_ids
-        # Never silently discard an invalid layer id or an unknown namespace:
-        # let strict per-owner factor mapping diagnose it.
+    def _owns_mapped_layer(self, mapped_name):
+        parts = mapped_name.split(".", 2)
+        if len(parts) == 3 and parts[0] == "layers" and parts[2]:
+            index = parts[1]
+            if index.isascii() and index.isdigit():
+                layer = int(index)
+                limit = getattr(
+                    self.config, "_checkpoint_num_layers_before_override", self.layer_num
+                )
+                if str(layer) == index and layer < limit:
+                    return layer in self._owned_layer_ids
+        # Leave malformed or genuinely out-of-range layers for strict dispatch.
         return True
+
+    def owns_lora_checkpoint_target(self, mapped_name):
+        # A full-depth adapter and its base checkpoint have the same layer
+        # domain, even when the service builds only a prefix or one PP stage.
+        return self._owns_mapped_layer(mapped_name)
 
     def checkpoint_weight_name_filter(self):
         checkpoint_layers = getattr(
@@ -495,19 +498,7 @@ class Qwen3ForCausalLM(GptModelBase, RtpModule):
             if mapped in self.handler_heads.sources:
                 return True
             if mapped.startswith("layers."):
-                parts = mapped.split(".", 2)
-                index = parts[1]
-                if (
-                    len(parts) != 3
-                    or not parts[2]
-                    or not index.isascii()
-                    or not index.isdigit()
-                ):
-                    return True
-                layer_id = int(index)
-                if str(layer_id) != index or layer_id >= checkpoint_layers:
-                    return True  # Strict dispatch handles malformed/out-of-range keys.
-                return layer_id in self._owned_layer_ids
+                return self._owns_mapped_layer(mapped)
             if mapped == "embed_tokens.weight":
                 return self.embed_tokens is not None or (
                     self.lm_head is not None and self.tie_word_embeddings

@@ -74,6 +74,104 @@ def write_meta_source(root):
 
 
 class LlamaCheckpointFormatsTest(unittest.TestCase):
+    def test_full_depth_static_lora_with_reduced_llama_layer_count(self):
+        from safetensors.torch import save_file
+
+        from rtp_llm.config.model_config import apply_layer_num_override
+        from rtp_llm.models.llama import Llama
+        from rtp_llm.ops import ParallelismConfig
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hf = dict(
+                model_type="mistral",
+                architectures=["MistralForCausalLM"],
+                num_hidden_layers=2,
+                num_attention_heads=2,
+                num_key_value_heads=1,
+                hidden_size=4,
+                intermediate_size=8,
+                vocab_size=10,
+                rms_norm_eps=1e-5,
+                max_position_embeddings=32,
+                sliding_window=32,
+                tie_word_embeddings=False,
+            )
+            (root / "config.json").write_text(json.dumps(hf))
+            config = Llama._create_config(tmp)
+            config.model_type = "llama"
+            config.max_seq_len = 16
+            apply_layer_num_override(config, 1)
+            base = {
+                "model.embed_tokens.weight": values(10, 4),
+                "lm_head.weight": values(10, 4),
+                "model.norm.weight": torch.ones(4),
+            }
+            factors = {}
+            for layer in range(2):
+                prefix = f"model.layers.{layer}."
+                for norm in ("input_layernorm", "post_attention_layernorm"):
+                    base[prefix + norm + ".weight"] = torch.ones(4)
+                for target, shape in (
+                    ("self_attn.q_proj", (4, 4)),
+                    ("self_attn.k_proj", (2, 4)),
+                    ("self_attn.v_proj", (2, 4)),
+                    ("self_attn.o_proj", (4, 4)),
+                    ("mlp.gate_proj", (8, 4)),
+                    ("mlp.up_proj", (8, 4)),
+                    ("mlp.down_proj", (4, 8)),
+                ):
+                    base[prefix + target + ".weight"] = values(*shape)
+                for target in ("q_proj", "o_proj"):
+                    peft = "base_model.model." + prefix + "self_attn." + target
+                    factors[peft + ".lora_A.weight"] = values(1, 4) + 1
+                    factors[peft + ".lora_B.weight"] = values(4, 1) + layer + 1
+            save_file(base, str(root / "model.safetensors"))
+            adapter = root / "adapter"
+            adapter.mkdir()
+            (adapter / "adapter_config.json").write_text(
+                json.dumps({"r": 1, "lora_alpha": 2})
+            )
+            adapter_file = adapter / "adapter_model.bin"
+            torch.save(factors, adapter_file)
+
+            def load_adapter(method):
+                options = NewLoaderConfig(
+                    device="cpu",
+                    compute_dtype=torch.float32,
+                    load_method=method,
+                    parallelism_config=ParallelismConfig(),
+                )
+                loader = NewModelLoader(config, options, model_path=tmp)
+                model = loader.load(startup_lora=("test", str(adapter)))
+                self.assertEqual(loader.loaded_method.value, method)
+                return model
+
+            delta = 2 * ((values(4, 1) + 1) @ (values(1, 4) + 1))
+            attn = "model.layers.0.self_attn."
+            for method in ("scratch", "fastsafetensors"):
+                with self.subTest(method=method):
+                    model = load_adapter(method)
+                    self.assertEqual(len(model.layers), 1)
+                    qkv = torch.cat([
+                        base[attn + "q_proj.weight"] + delta,
+                        base[attn + "k_proj.weight"],
+                        base[attn + "v_proj.weight"],
+                    ])
+                    layer = model.layers[0].self_attn
+                    torch.testing.assert_close(layer.qkv_proj.weight, qkv)
+                    torch.testing.assert_close(
+                        layer.o_proj.weight, base[attn + "o_proj.weight"] + delta
+                    )
+
+            # An adapter referring beyond the original checkpoint is still invalid.
+            torch.save(
+                {name.replace("layers.1.", "layers.2."): v for name, v in factors.items()},
+                adapter_file,
+            )
+            with self.assertRaisesRegex(NotImplementedError, r"layers\.2\.self_attn"):
+                load_adapter("scratch")
+
     def test_explicitly_disabled_window_does_not_limit_full_attention(self):
         from rtp_llm.models_py.new_models.qwen2.llama import _check_window
 

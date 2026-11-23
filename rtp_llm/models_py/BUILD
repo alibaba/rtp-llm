@@ -343,6 +343,7 @@ py_test(
     env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
     deps = [
         ":new_weight_loader",
+        "//rtp_llm:fastsafetensors",
         "//rtp_llm:models",
         "//rtp_llm/tools/convert:convert",
         "//rtp_llm:safetensors",
