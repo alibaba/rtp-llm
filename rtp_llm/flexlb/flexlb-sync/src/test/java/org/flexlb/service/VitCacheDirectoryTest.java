@@ -104,11 +104,17 @@ class VitCacheDirectoryTest {
         assertFalse(selector.select(route, null).isSuccess());
 
         route.getRequest().setVitRouteOnly(true);
-        var selected = selector.select(route, null);
+        var cacheDirectory = mock(VitCacheDirectory.class);
+        var loadSelector = new VitCacheSelector(cacheDirectory, workers);
+        var selected = loadSelector.select(route, null);
         assertTrue(selected.isSuccess());
         assertEquals(b.getLogicalIpPort(), selected.getLogicalIpPort());
+        assertEquals(a.getLogicalIpPort(), loadSelector.select(route, "one").getLogicalIpPort());
+        assertEquals(0L, b.vitRoutedInputs());
+        verifyNoInteractions(cacheDirectory);
+
         route.getRequest().setSelectedVit(selected);
-        assertTrue(selector.validate(route, "two").isSuccess());
+        assertTrue(loadSelector.validate(route, "two").isSuccess());
     }
 
     @Test
