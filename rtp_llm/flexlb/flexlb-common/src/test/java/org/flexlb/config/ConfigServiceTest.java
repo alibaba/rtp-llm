@@ -216,6 +216,8 @@ class ConfigServiceTest {
         var cache = config.getWorkerRegistry().getCacheStatus();
         assertEquals(30, cache.getTargetDiffSize());
         assertEquals(8, cache.getDiffParallelism());
+        assertEquals(32, cache.getPollExecutorThreads());
+        assertEquals(15_000, cache.getPollExecutorQueueCapacity());
         assertEquals(50L, cache.getMinRefreshIntervalMs());
         assertEquals(3000L, cache.getMaxRefreshIntervalMs());
         assertFalse(cache.isFullSnapshotDebugMode());
@@ -318,7 +320,8 @@ class ConfigServiceTest {
                       "cacheAffinity":{"maxExtraTtftMs":25,"minPrefixHitPercent":10}},
                       "decode":{"availability":{"maxKvUsagePercent":85,"maxEngineRequests":128}}}},
                   "workerRegistry":{"health":{"statusPollIntervalMs":25},
-                    "cacheStatus":{"minRefreshIntervalMs":100,"maxRefreshIntervalMs":2000,"diffParallelism":2}},
+                    "cacheStatus":{"minRefreshIntervalMs":100,"maxRefreshIntervalMs":2000,"diffParallelism":2,
+                      "pollExecutorThreads":4,"pollExecutorQueueCapacity":128}},
                   "observability":{"cacheHit":{"recentKeyWindow":{"durationMs":60000,"maxKeyOccurrences":100000},
                     "requestTraceLogEnabled":true,"theoryLog":{}}}
                 }
@@ -328,7 +331,10 @@ class ConfigServiceTest {
         assertTrue(
                 config.priorityOrdering().getPreemption().allows(VictimStage.DECODE_ENGINE_OWNED));
         assertEquals(12, config.fixedWindowDecision().getMaxRequests());
-        assertEquals(2, config.getWorkerRegistry().getCacheStatus().getDiffParallelism());
+        var cacheStatus = config.getWorkerRegistry().getCacheStatus();
+        assertEquals(2, cacheStatus.getDiffParallelism());
+        assertEquals(4, cacheStatus.getPollExecutorThreads());
+        assertEquals(128, cacheStatus.getPollExecutorQueueCapacity());
         assertEquals(90L, config.fixedWindowDecision().getMaxPredictedExecutionMs());
         assertEquals(4, config.getDispatcher().getMaxInflightPerPrefillWorker());
         assertEquals(
@@ -760,6 +766,12 @@ class ConfigServiceTest {
             assertThrows(
                     ConfigValidationException.class, () -> ConfigTestFixtures.parse(patch), patch);
         }
+        assertInvalid(
+                "{\"workerRegistry\":{\"cacheStatus\":{\"pollExecutorThreads\":0}}}",
+                "workerRegistry.cacheStatus.pollExecutorThreads");
+        assertInvalid(
+                "{\"workerRegistry\":{\"cacheStatus\":{\"pollExecutorQueueCapacity\":-1}}}",
+                "workerRegistry.cacheStatus.pollExecutorQueueCapacity");
         assertInvalid(
                 "{\"workerRegistry\":{\"cacheStatus\":{\"diffParallelism\":0}}}",
                 "workerRegistry.cacheStatus.diffParallelism");
