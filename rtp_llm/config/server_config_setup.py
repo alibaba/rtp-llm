@@ -9,6 +9,7 @@ from typing import Optional
 import torch
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.quant_config import QuantizationConfig, uses_glm53_native_nvfp4_moe
 from rtp_llm.model_factory_register import ModelDict
 from rtp_llm.ops import (
     FfnDisAggregateConfig,
@@ -985,6 +986,22 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
     setup_default_args(py_env_configs)
     setup_jit_cache_envs(py_env_configs)
     fetch_model_files_to_local(py_env_configs)
+    model_args = py_env_configs.model_args
+    moe_config = py_env_configs.moe_config
+    if (
+        model_args.model_type == "glm5_3_flash"
+        and model_args.ckpt_path
+        and moe_config.moe_strategy == "mega_moe_fp8_se"
+    ):
+        # A rolling checkpoint update can retain the previous deployment's
+        # strategy until its role configuration is updated.
+        quant_config = QuantizationConfig.load_from_ckpt(model_args.ckpt_path)
+        if uses_glm53_native_nvfp4_moe(
+            model_args.model_type, quant_config, "mega_moe_se"
+        ):
+            moe_config.moe_strategy = "mega_moe_se"
+            logging.info("Using native MegaMoE for the GLM-5.3-Flash NVFP4 checkpoint")
+
     ll_num_max_token = py_env_configs.concurrency_config.concurrency_limit
     sp_type = py_env_configs.sp_config.type  # Get SpeculativeType enum value
     if py_env_configs.sp_config.type != SpeculativeType.NONE:

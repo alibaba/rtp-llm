@@ -1,4 +1,7 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -12,6 +15,45 @@ from rtp_llm.server.server_args.server_args import setup_args
 
 
 class GenerateConfigTest(TestCase):
+
+    @patch.dict(
+        "os.environ",
+        {
+            "MODEL_TYPE": "glm5_3_flash",
+            "MOE_STRATEGY": "mega_moe_fp8_se",
+            "USE_ALL_GATHER": "0",
+        },
+        clear=True,
+    )
+    def test_glm53_preserves_fp8_strategy_and_selects_native_nvfp4(self):
+        nvfp4 = {
+            "quant_method": "modelopt",
+            "quant_algo": "NVFP4",
+            "config_groups": {
+                "group_0": {
+                    "input_activations": {"num_bits": 4},
+                    "weights": {"type": "float", "num_bits": 4, "group_size": 16},
+                }
+            },
+        }
+        fp8 = {
+            "quant_method": "fp8",
+            "weight_block_size": [128, 128],
+        }
+        for quantization, expected in (
+            (nvfp4, "mega_moe_se"),
+            (fp8, "mega_moe_fp8_se"),
+        ):
+            with self.subTest(quantization=quantization["quant_method"]):
+                with tempfile.TemporaryDirectory() as checkpoint:
+                    config_file = Path(checkpoint) / "config.json"
+                    config_file.write_text(
+                        json.dumps({"quantization_config": quantization})
+                    )
+                    py_env_configs = setup_args()
+                    py_env_configs.model_args.ckpt_path = checkpoint
+                    setup_and_configure_server(py_env_configs)
+                self.assertEqual(py_env_configs.moe_config.moe_strategy, expected)
 
     @patch.dict(
         "os.environ",
