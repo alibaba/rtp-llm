@@ -39,13 +39,14 @@ public class ChannelConfiguration {
 
     @Bean
     public ThreadPoolExecutor managedChannelThreadPoolExecutor() {
+        var engineGrpc = config.getEngineGrpc();
+        int executorThreads = engineGrpc.getExecutorThreads();
         return new ThreadPoolExecutor(
-                config.getInternalRuntime().getGrpcClientExecutorThreads(),
-                config.getInternalRuntime().getGrpcClientExecutorThreads(),
+                executorThreads,
+                executorThreads,
                 5,
                 TimeUnit.MINUTES,
-                new LinkedBlockingQueue<>(
-                        config.getInternalRuntime().getGrpcClientExecutorQueueCapacity()),
+                new LinkedBlockingQueue<>(engineGrpc.getExecutorQueueCapacity()),
                 new NamedThreadFactory("engine-grpc-client-executor"),
                 RUN_GRPC_CALLBACK_INLINE);
     }
@@ -81,7 +82,7 @@ public class ChannelConfiguration {
         // than the default unbounded MPSC queue. Load is bounded instead at
         // admission: the dispatch executor's admission permit bounds in-flight
         // EnqueueBatch payloads (see DefaultBatchDispatcher).
-        int threads = config.getInternalRuntime().getGrpcClientEventLoopThreads();
+        int threads = config.getEngineGrpc().getEventLoopThreads();
         if (Epoll.isAvailable()) {
             return new EpollEventLoopGroup(
                     threads,
