@@ -4,6 +4,7 @@ import logging
 import os
 import tempfile
 import unittest
+from concurrent.futures import Future
 from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
@@ -211,6 +212,51 @@ class AccessLoggerTest(unittest.TestCase):
                 logger.log_exception_access([mm_input], RuntimeError("failure"))
                 self.assertIsNone(logger.logger)
                 self.assertIsNone(logger.query_logger)
+
+    def test_mm_result_includes_upload_urls_in_query_order(self):
+        logger = MMAccessLogger("unused", 1, disable_access_log=True)
+        logger.logger = MagicMock()
+        items = [MagicMock(), MagicMock(), MagicMock()]
+        for index, item in enumerate(items):
+            item.to_string.return_value = f"image-{index}"
+
+        verdict, urls = Future(), {}
+        logger.log_success_access(items, "embedding", upload_log=(verdict, urls))
+        logger.logger.info.assert_not_called()
+        urls[2] = "https://oss.example/third?signature=c"
+        urls[0] = "https://oss.example/first?signature=a"
+        verdict.set_result(None)
+        logger.logger.info.assert_called_once()
+        record = json.loads(logger.logger.info.call_args.args[0])
+        self.assertEqual(record["query"], ["image-0", "image-1", "image-2"])
+        self.assertEqual(record["response"], "embedding")
+        self.assertEqual(
+            record["greennet_oss_urls"],
+            [
+                "https://oss.example/first?signature=a",
+                None,
+                "https://oss.example/third?signature=c",
+            ],
+        )
+
+        logger.logger.reset_mock()
+        urls = {0: "https://oss.example/image?signature=one"}
+        logger.log_exception_access(
+            items[:1], RuntimeError("failed"), upload_log=(verdict, urls)
+        )
+        logger.logger.info.assert_called_once()
+        record = json.loads(logger.logger.info.call_args.args[0])
+        self.assertEqual(record["exception"], "failed")
+        self.assertEqual(
+            record["greennet_oss_url"], "https://oss.example/image?signature=one"
+        )
+
+        logger.logger.reset_mock()
+        logger.log_success_access(items[:1], "cached", upload_log=(verdict, {}))
+        logger.logger.info.assert_called_once()
+        self.assertNotIn(
+            "greennet_oss_url", json.loads(logger.logger.info.call_args.args[0])
+        )
 
     def test_mm_external_request_id_matches_greennet_fallback(self):
         for request_id, external_id in [(42, "dash-abc"), (42, ""), (0, "")]:

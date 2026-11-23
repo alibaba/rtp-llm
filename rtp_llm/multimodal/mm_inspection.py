@@ -58,6 +58,10 @@ class SourceInspection:
             item.inspection_request = SimpleNamespace(
                 **vars(self.request), input_index_offset=index
             )
+            indices = getattr(self.request, "upload_indices", ())
+            item.inspection_request.upload_indices = indices[
+                index : index + len(item.mm_inputs)
+            ]
 
     def track_work_item(self, item):
         if item.inspection_future is not None:
@@ -241,6 +245,7 @@ class MMInspectionCoordinator:
         worker_sources: bool = False,
         external_request_id: str = "",
         cached_embedding: bool = False,
+        upload_urls=None,
     ) -> Tuple[
         List[MultimodalInput], Optional["concurrent.futures.Future"], Optional[Any]
     ]:
@@ -266,6 +271,10 @@ class MMInspectionCoordinator:
         req = SimpleNamespace(
             # Never replace the numeric ID used by scheduling/cancellation.
             id=external_request_id or str(request_id),
+            upload_indices=tuple(
+                vit_media.input_index(item, getattr(entry, "upload_input_index", index))
+                for index, item in enumerate(mm_inputs)
+            ),
             model_name="",
             user_id=user_id,
             service_name=service_name,
@@ -276,6 +285,14 @@ class MMInspectionCoordinator:
                 and self._hash_key_cache.greennet_passed(mm_inputs[0].cache_key())
             ),
         )
+        if upload_urls is not None:
+            # RPC indices can be sparse when a hash lookup submits only misses.
+            positions = {idx: pos for pos, idx in enumerate(req.upload_indices)}
+
+            def on_image_upload(index, url):
+                upload_urls[positions[index]] = url
+
+            req.on_image_upload = on_image_upload
         if deadline is None:
             deadline = time.monotonic() + self._greennet_timeout_s
         if (
@@ -456,8 +473,19 @@ class MMInspectionCoordinator:
                     if not source_inputs:
                         return GreenNetVerdict(passed=True)
                     with vit_media.stage("greennet"):
+                        source_request = request
+                        indices = getattr(request, "upload_indices", ())
+                        if indices and len(source_inputs) != len(mm_inputs):
+                            index_by_id = {
+                                id(media): index
+                                for media, index in zip(mm_inputs, indices)
+                            }
+                            source_request = SimpleNamespace(**vars(request))
+                            source_request.upload_indices = tuple(
+                                index_by_id[id(media)] for media in source_inputs
+                            )
                         handle = await self._greennet_provider.submit_sources(
-                            request, source_inputs, sources
+                            source_request, source_inputs, sources
                         )
                         # The provider owns the source bytes until its task finishes.
                         del sources

@@ -7,6 +7,7 @@ import sys
 import threading
 from dataclasses import dataclass, replace
 from functools import partial
+from io import BytesIO
 from pathlib import Path
 
 import torch
@@ -20,6 +21,7 @@ from rtp_llm.models_py.modules.dsv41.vision_preprocess_tables import (
     is_supported_shape,
     prepare_resize_tables,
 )
+from rtp_llm.multimodal.media_network import accepts_source_bytes
 from rtp_llm.multimodal.mm_error_messages import MMErr, media_error_detail
 from rtp_llm.multimodal.mm_preprocess_result import (
     ImageSourceIdentity,
@@ -92,7 +94,9 @@ def _pack_decoded_images(images):
     for image in images:
         tables = image.resize_tables
         rgb = next(packed)
-        horizontal = (next(packed), next(packed)) if tables.horizontal is not None else None
+        horizontal = (
+            (next(packed), next(packed)) if tables.horizontal is not None else None
+        )
         vertical = (next(packed), next(packed)) if tables.vertical is not None else None
         results.append(
             _DecodedImage(
@@ -603,12 +607,15 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
                     ("patch", work.input_patches),
                 ):
                     report_vit_phase(
-                        AccMetrics.VIT_PACKED_FORWARD_WORK_QPS_METRIC, value, {"unit": unit}
+                        AccMetrics.VIT_PACKED_FORWARD_WORK_QPS_METRIC,
+                        value,
+                        {"unit": unit},
                     )
             offset = end
         return outputs
 
     @staticmethod
+    @accepts_source_bytes
     def preprocess_input(
         mm_inputs,
         vit_config,
@@ -617,6 +624,7 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         gpu_preprocess=True,
         capture_inspection_sources=False,
         deadline=None,
+        prepared_sources=None,
     ):
         """Decode one bounded work item in MMProcessEngine's CPU executor.
 
@@ -642,18 +650,31 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
                 with vit_preprocess_timer(
                     GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC, _METRIC_TAGS
                 ):
-                    payload = load_image_source(
-                        media.url,
-                        vit_config.download_headers,
-                        max_file_size_kb=vit_config.mm_image_max_file_size_kb,
-                        deadline=deadline,
-                    )
+                    if (
+                        prepared_sources is not None
+                        and prepared_sources[media_index] is not None
+                    ):
+                        payload = BytesIO(prepared_sources[media_index])
+                    else:
+                        payload = load_image_source(
+                            media.url,
+                            vit_config.download_headers,
+                            max_file_size_kb=vit_config.mm_image_max_file_size_kb,
+                            deadline=deadline,
+                        )
                 if capture_inspection_sources or capture_identity:
                     # Hash the same owned buffer passed to Image.open below. Never
                     # re-download a URL to derive identity or approve cached pixels.
                     source = payload.getvalue()
                     if capture_inspection_sources:
-                        inspection_sources.append(source)
+                        # Supplied bytes are already owned by the parent. Only
+                        # locally loaded sources need to cross the return pipe.
+                        inspection_sources.append(
+                            None
+                            if prepared_sources is not None
+                            and prepared_sources[media_index] is not None
+                            else source
+                        )
                     if capture_identity:
                         source_identity = ImageSourceIdentity.from_bytes(source)
                 try:

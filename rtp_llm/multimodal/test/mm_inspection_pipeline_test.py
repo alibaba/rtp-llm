@@ -101,6 +101,12 @@ class WorkerSourceProvider(GreenNetProvider):
         self.release, self.records, self.cancelled = release, records, cancelled
 
     async def submit_sources(self, request, mm_inputs, sources):
+        if getattr(request, "on_image_upload", None) is not None:
+            for offset, media in enumerate(mm_inputs):
+                request.on_image_upload(
+                    request.input_index_offset + offset,
+                    f"https://oss.example/{media.url.rsplit('/', 1)[-1]}?sig=test",
+                )
         self.records.put(
             (
                 os.getpid(),
@@ -165,6 +171,19 @@ class WorkerInspectionTest(TestCase):
         item.capture_inspection_sources = True
         item.inspection_request = SimpleNamespace(id=name, input_index_offset=index)
         return item
+
+    def test_upload_reaches_only_its_own_parent_request(self):
+        self.release.set()
+        urls = [{}, {}]
+        items = [self.item("same-id", 3), self.item("same-id", 7)]
+        for index, item in enumerate(items):
+            item.inspection_request.on_image_upload = urls[index].__setitem__
+            self.executor.submit(item)
+        for item in items:
+            self.executor.get_result(item)
+            self.assertTrue(item.inspection_future.result(10).passed)
+        url = "https://oss.example/same-id?sig=test"
+        self.assertEqual(urls, [{3: url}, {7: url}])
 
     def test_rgb_and_next_task_ready_before_verdict_without_jpeg_ipc(self):
         first, second = self.item("first", 3), self.item("second", 7)
@@ -247,6 +266,9 @@ class WorkerInspectionTest(TestCase):
         model = SourceModel()
         engine = self._make_engine(model)
         engine._inspection._greennet_provider = SourceProvider()
+        engine.vit_config.disable_access_log = False
+        engine._access_logger.logger = MagicMock()
+        engine._access_logger.query_logger = MagicMock()
         engine.preprocess_executor.shutdown()
         engine.preprocess_executor = self.executor
         engine.mm_preprocess_batch_size = 1
@@ -273,6 +295,16 @@ class WorkerInspectionTest(TestCase):
                 finally:
                     self.release.set()
                 result.result(10)
+                engine._access_logger.logger.info.assert_called_once()
+                record = json.loads(engine._access_logger.logger.info.call_args.args[0])
+                self.assertEqual(record["id"], 91)
+                self.assertEqual(
+                    record["greennet_oss_urls"],
+                    [
+                        "https://oss.example/image-one?sig=test",
+                        "https://oss.example/image-two?sig=test",
+                    ],
+                )
         finally:
             self.release.set()
             engine.stop()
@@ -746,7 +778,11 @@ class InspectionPipelineTest(TestCase):
                 waiting.set()
                 return super().wait(timeout)
 
-        for result in (None, RuntimeError("failed"), concurrent.futures.CancelledError()):
+        for result in (
+            None,
+            RuntimeError("failed"),
+            concurrent.futures.CancelledError(),
+        ):
             with self.subTest(result=result):
                 waiting = threading.Event()
                 ready = ObservedEvent()
@@ -756,7 +792,9 @@ class InspectionPipelineTest(TestCase):
                 )
                 second = MMWorkItem([media], preprocess_ready_event=ready)
                 independent = MMWorkItem([media])
-                self.assertIs(first.preprocess_ready_event, second.preprocess_ready_event)
+                self.assertIs(
+                    first.preprocess_ready_event, second.preprocess_ready_event
+                )
                 self.assertIsNot(independent.preprocess_ready_event, ready)
 
                 executor = object.__new__(MultiprocessPreprocessExecutor)

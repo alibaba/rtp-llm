@@ -172,6 +172,9 @@ class MMWorkItem:
         self.inspection_sources: Optional[List[bytes]] = None
         self.inspection_request = None
         self.inspection_future = None
+        self.source_download = None
+        self.prepared_sources = None
+        self.pending_inspection_handle = None
         self.preprocess_ready = False
         self.preprocess_submitted_at = 0.0
         self.preprocess_received_at = 0.0
@@ -234,6 +237,13 @@ class MMWorkItem:
 
         # future 可以是 ApplyResult (multiprocess) 或 _LocalResult (local)
         self.future: Optional[Any] = None
+
+    def release_preprocess_sources(self):
+        if self.source_download is not None:
+            self.source_download.close()
+            self.source_download = None
+            self.prepared_sources = None
+            self.pending_inspection_handle = None
 
     def remaining_timeout_s(self) -> float:
         timeout_s = self.mm_timeout_ms / 1000.0

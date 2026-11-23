@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import logging
 import multiprocessing.util
 import os
 import queue
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from types import SimpleNamespace
 from typing import Any
 
 from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
@@ -111,6 +113,14 @@ class WorkerInspectionChannel:
                         self.tokens[slot] = -task.task_id
 
         future.add_done_callback(cancelled)
+        if getattr(request, "on_image_upload", None) is not None:
+            # Keep the request-local collector in the parent. Only its task ID
+            # and a capture flag need to cross the process boundary.
+            args = vars(request).copy()
+            del args["on_image_upload"]
+            task = replace(
+                task, request=SimpleNamespace(**args, capture_upload_url=True)
+            )
         return task, future
 
     def finish(self, task_id, verdict=None, error=None, trace_timings=None):
@@ -143,7 +153,15 @@ class WorkerInspectionChannel:
                     return
             try:
                 kind, task_id, value = self.results.get(timeout=0.1)
-                if kind == "done":
+                if kind == "oss_upload":
+                    try:
+                        with self._condition:
+                            pending = self._pending.get(task_id)
+                        if pending is not None:
+                            pending[0].request.on_image_upload(*value)
+                    except Exception:
+                        logging.exception("Failed to record GreenNet OSS upload")
+                elif kind == "done":
                     trace_timings = None
                     if isinstance(value, WorkerInspectionResult):
                         trace_timings = value.trace_timings
@@ -287,6 +305,10 @@ class WorkerInspectionRunner:
             with vit_media.stage("greennet"):
                 if self.provider is None:
                     self.provider = self.factory()
+                if getattr(task.request, "capture_upload_url", False):
+                    task.request.on_image_upload = lambda index, url: self.results.put(
+                        ("oss_upload", task.task_id, (index, url))
+                    )
                 handle = await self.provider.submit_sources(
                     task.request, mm_inputs, sources
                 )

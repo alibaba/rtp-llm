@@ -155,6 +155,15 @@ class MediaTrace:
             ),
         )
 
+    def finish_download(self, error=None, *, cached=False):
+        if cached:
+            with self._lock:
+                span = self._stages.get("download")
+                if span is not None:
+                    span.update_name(PREFIX + "download.cache")
+                    span.set_attribute(PREFIX + "download.cache_hit", True)
+        self.end("download", error)
+
     @staticmethod
     def _stage_failure(name, error):
         if error is None:
@@ -237,6 +246,10 @@ def bind(media):
         _current.reset(token)
 
 
+def input_index(item, fallback):
+    return (_input_indices.get() or {}).get(id(item), fallback)
+
+
 def _new_media(inputs, request_id):
     if request_id in (None, "", 0) or not tracing.is_telemetry_active():
         return ()
@@ -250,7 +263,7 @@ def _new_media(inputs, request_id):
     result = []
     try:
         for index, item in enumerate(inputs):
-            index = (_input_indices.get() or {}).get(id(item), index)
+            index = input_index(item, index)
             span = tracing.get_tracer().start_span(
                 PREFIX + "media",
                 context=parent,

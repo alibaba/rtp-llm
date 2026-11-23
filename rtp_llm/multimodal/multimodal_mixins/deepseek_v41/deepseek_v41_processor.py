@@ -101,6 +101,20 @@ def load_image_source(
         )
     check_download_urls((url,))
 
+    from rtp_llm.multimodal.media_network import current_network, read_native_source
+
+    network = current_network.get()
+    if network is not None:
+        return read_native_source(
+            network,
+            url,
+            download_headers,
+            max_bytes,
+            deadline,
+            cancellation_event,
+            v41=True,
+        )
+
     content, hit = url_data_cache_.get_or_load(
         url,
         download_headers,
@@ -230,7 +244,9 @@ def _download_image_source(
                 ) from error
             delay = min(0.2 * 2**attempt, remaining)
             if VIT_PHASE_METRICS:
-                record_vit_preprocess_value(AccMetrics.VIT_HTTP_SOURCE_RETRY_QPS_METRIC, 1)
+                record_vit_preprocess_value(
+                    AccMetrics.VIT_HTTP_SOURCE_RETRY_QPS_METRIC, 1
+                )
             with vit_http_phase_timer("backoff"):
                 if cancellation_event is not None:
                     cancellation_event.wait(delay)

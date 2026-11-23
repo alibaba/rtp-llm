@@ -427,7 +427,6 @@ def _download_http_content(
             response.close()
 
 
-@vit_media.download
 def get_bytes_io_from_url(
     url: str,
     download_headers: str = "",
@@ -445,8 +444,39 @@ def get_bytes_io_from_url(
             available, and the limit is also enforced while streaming the body.
     """
 
+    from rtp_llm.multimodal.media_network import prepared_url_bytes
+
+    supplied = prepared_url_bytes.get()
+    if supplied is not None and url in supplied:
+        _check_download(deadline, cancellation_event)
+        check_download_urls((url,))
+        data = supplied[url]
+        _validate_file_size(len(data), max_file_size_kb)
+        return BytesIO(data)
+    return _load_url_source(
+        url, download_headers, max_file_size_kb, deadline, cancellation_event
+    )
+
+
+@vit_media.download
+def _load_url_source(
+    url, download_headers, max_file_size_kb, deadline, cancellation_event
+):
+    from rtp_llm.multimodal.media_network import current_network, read_native_source
+
     _check_download(deadline, cancellation_event)
     check_download_urls((url,))
+    network = current_network.get()
+    if network is not None and url.startswith(("http://", "https://")):
+        return read_native_source(
+            network,
+            url,
+            download_headers,
+            max(0, max_file_size_kb or 0) * 1024,
+            deadline,
+            cancellation_event,
+            v41=False,
+        )
 
     def load():
         headers = _get_http_heads(download_headers)

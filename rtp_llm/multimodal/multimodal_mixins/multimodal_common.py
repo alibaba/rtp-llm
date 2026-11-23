@@ -22,6 +22,7 @@ from functools import wraps
 from torchvision import transforms
 
 from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.multimodal.media_network import uses_url_loader
 from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url, vit_emb_cache_
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
@@ -236,6 +237,7 @@ class MultiModalEmbeddingInterface:
 
 class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
     @staticmethod
+    @uses_url_loader
     def preprocess_input(
         mm_inputs: List[MultimodalInput],
         vit_config: VitConfig,
@@ -252,6 +254,7 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
 
 class AudioEmbeddingInterface(MultiModalEmbeddingInterface):
     @staticmethod
+    @uses_url_loader
     def preprocess_input(
         mm_inputs: List[MultimodalInput],
         vit_config: VitConfig,
@@ -273,6 +276,7 @@ class AudioEmbeddingInterface(MultiModalEmbeddingInterface):
 
 class VideoEmbeddingInterface(MultiModalEmbeddingInterface):
     @staticmethod
+    @uses_url_loader
     def preprocess_input(
         mm_inputs: List[MultimodalInput],
         vit_config: VitConfig,

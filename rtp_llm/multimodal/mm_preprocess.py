@@ -9,6 +9,7 @@ import os
 import signal
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Set, Tuple
 
@@ -18,6 +19,7 @@ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
+from rtp_llm.multimodal.mm_error_messages import MMErr
 from rtp_llm.multimodal.mm_preprocess_result import MMPreprocessResult
 from rtp_llm.multimodal.mm_worker_inspection import (
     WorkerInspectionChannel,
@@ -70,6 +72,15 @@ def _reset_download_region(token) -> None:
     current_download_region.reset(token)
 
 
+@contextmanager
+def download_region(region):
+    token = _set_download_region(region)
+    try:
+        yield
+    finally:
+        _reset_download_region(token)
+
+
 class _PreprocessTaskError(Exception):
     """Keep task I/O failures distinct from broken pool communication."""
 
@@ -119,7 +130,21 @@ def _run_preprocess_task(
                 # for this task only; concurrent tasks keep their own value.
                 region_token = _set_download_region(region)
                 try:
-                    result = preprocess_func(mm_inputs, vit_config, **preprocess_params)
+                    if (
+                        getattr(preprocess_func, "uses_url_loader", False)
+                        and "prepared_sources" in preprocess_params
+                    ):
+                        from rtp_llm.multimodal.media_network import bind_url_sources
+
+                        params = dict(preprocess_params)
+                        with bind_url_sources(
+                            mm_inputs, params.pop("prepared_sources")
+                        ):
+                            result = preprocess_func(mm_inputs, vit_config, **params)
+                    else:
+                        result = preprocess_func(
+                            mm_inputs, vit_config, **preprocess_params
+                        )
                 except Exception as error:
                     task_error = error
                     if isinstance(error, Image.DecompressionBombError):
@@ -225,6 +250,7 @@ def _worker_process_task(
     inspection_task=None,
     region: Optional[str] = None,
     trace_spec=None,
+    prepared_sources=None,
 ) -> PreprocessTaskResult:
     """
     只接收变化的 `mm_inputs` 参数。
@@ -232,6 +258,8 @@ def _worker_process_task(
     if _worker_preprocess_func is None:
         raise RuntimeError("Worker process has not been initialized correctly.")
     params = dict(_worker_preprocess_params)
+    if prepared_sources is not None:
+        params["prepared_sources"] = prepared_sources
     if capture_inspection_sources:
         params.update(capture_inspection_sources=True, deadline=deadline)
     try:
@@ -278,11 +306,15 @@ def _worker_process_task(
         raise
 
 
-def _unpack_preprocess_result(payload: Any) -> Tuple[Any, float, float]:
+def _unpack_preprocess_result(payload: Any, work_item=None) -> Tuple[Any, float, float]:
     """Read the four-field result returned by both preprocess executors."""
+    download = getattr(work_item, "source_download", None)
+    if download is not None:
+        payload.total_ms += download.elapsed_ms
+        payload.download_ms += download.network_ms
     result, total_ms, download_ms, samples = payload
     total_ms, download_ms = float(total_ms), float(download_ms)
-    _report_vit_preprocess_samples(samples)
+    _report_vit_preprocess_samples(samples, work_item)
     # Clock/context overhead must never make the derived remainder negative.
     download_ms = max(0.0, min(download_ms, total_ms))
     return result, total_ms, download_ms
@@ -312,10 +344,17 @@ def _report_preprocess_queue_size(queue_size: int) -> None:
         logging.exception("Failed to report ViT preprocess queue size")
 
 
-def _report_vit_preprocess_samples(samples: List[VitMetricSample]) -> None:
+def _report_vit_preprocess_samples(
+    samples: List[VitMetricSample], work_item=None
+) -> None:
+    download = getattr(work_item, "source_download", None)
+    fetch_times = iter(getattr(download, "fetch_times_us", ()))
     for sample in samples:
         try:
-            kmonitor.report(sample.metric, sample.value, sample.tags)
+            value = sample.value
+            if sample.metric == GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC:
+                value += next(fetch_times, 0)
+            kmonitor.report(sample.metric, value, sample.tags)
         except Exception:
             # Parent-side telemetry must not discard a successful worker result.
             logging.exception("Failed to report ViT preprocessing sample")
@@ -341,22 +380,45 @@ class PreprocessExecutor:
         event = pending[0].preprocess_ready_event
         while pending:
             event.clear()
-            ready = [
-                item for item in pending if item.future is None or item.preprocess_ready
-            ]
+            ready = []
+            for item in pending:
+                download = getattr(item, "source_download", None)
+                if download is not None and item.prepared_sources is None:
+                    if not download.ready():
+                        continue
+                    item.prepared_sources = download.result()
+                    item.remaining_timeout_s()
+                    self.submit(item)
+                    handle = item.pending_inspection_handle
+                    if handle is not None:
+                        handle.track_work_item(item)
+                        item.pending_inspection_handle = None
+                if item.future is None or item.preprocess_ready:
+                    ready.append(item)
             for item in ready:
                 pending.remove(item)
                 yield item
             if pending and not ready:
+                waiting_cpu = [item for item in pending if item.future is not None]
                 try:
                     if not event.wait(
                         timeout=min(item.remaining_timeout_s() for item in pending)
                     ):
-                        self._on_wait_timeout(pending)
+                        if waiting_cpu:
+                            self._on_wait_timeout(waiting_cpu)
                         raise TimeoutError("CPU preprocessing result wait timed out")
                 except Exception as error:
+                    if not waiting_cpu:
+                        timeout = FtRuntimeException(
+                            ExceptionType.MM_DOWNLOAD_FAILED,
+                            f"{MMErr.DL_TIMEOUT}: image download deadline exceeded",
+                        )
+                        vit_media.failure(
+                            "download", timeout, vit_media.item_media(pending)
+                        )
+                        raise timeout from error
                     vit_media.failure(
-                        "preprocess.worker", error, vit_media.item_media(pending)
+                        "preprocess.worker", error, vit_media.item_media(waiting_cpu)
                     )
                     raise
 
@@ -376,7 +438,14 @@ class PreprocessExecutor:
             ):
                 if len(result.inspection_sources) != len(work_item.mm_inputs):
                     raise ValueError("CPU inspection sources changed input count")
-                work_item.inspection_sources = result.inspection_sources
+                prepared = getattr(work_item, "prepared_sources", None)
+                if prepared is not None:
+                    work_item.inspection_sources = [
+                        source if source is not None else prepared[index]
+                        for index, source in enumerate(result.inspection_sources)
+                    ]
+                else:
+                    work_item.inspection_sources = result.inspection_sources
             work_item.source_identity = result.source_identity
             work_item.preprocess_result = result.data
         elif work_item.capture_inspection_sources:
@@ -405,6 +474,8 @@ class LocalPreprocessExecutor(PreprocessExecutor):
 
         try:
             params = dict(self.preprocess_params)
+            if getattr(work_item, "prepared_sources", None) is not None:
+                params["prepared_sources"] = work_item.prepared_sources
             if work_item.capture_inspection_sources:
                 params.update(
                     capture_inspection_sources=True, deadline=work_item.deadline
@@ -431,7 +502,7 @@ class LocalPreprocessExecutor(PreprocessExecutor):
             vit_media.consume(
                 getattr(work_item, "media_traces", ()), error.trace_timings
             )
-            _report_vit_preprocess_samples(error.samples)
+            _report_vit_preprocess_samples(error.samples, work_item)
             raise error.error from error
         except Exception as e:
             logging.error(f"Error in local preprocessing: {e}", exc_info=True)
@@ -449,7 +520,9 @@ class LocalPreprocessExecutor(PreprocessExecutor):
                 getattr(work_item, "media_traces", ()),
                 getattr(payload, "trace_timings", None),
             )
-            _, preprocess_time, download_time = _unpack_preprocess_result(payload)
+            _, preprocess_time, download_time = _unpack_preprocess_result(
+                payload, work_item
+            )
             _report_result_path(work_item, payload)
             _report_preprocess_timing(preprocess_time, download_time)
             work_item.future = None
@@ -646,6 +719,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
                     inspection_task,
                     work_item.region,
                     vit_media.worker_spec(getattr(work_item, "media_traces", ())),
+                    getattr(work_item, "prepared_sources", None),
                 ),
                 callback=completed,
                 error_callback=completed,
@@ -737,7 +811,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
                 result,
                 preprocess_time,
                 download_time,
-            ) = _unpack_preprocess_result(payload)
+            ) = _unpack_preprocess_result(payload, work_item)
             self._set_result(work_item, result)
             _report_result_path(work_item, payload)
             work_item.future = None
@@ -746,7 +820,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             _report_preprocess_timing(preprocess_time, download_time)
         except _PreprocessTaskError as e:
             vit_media.consume(getattr(work_item, "media_traces", ()), e.trace_timings)
-            _report_vit_preprocess_samples(e.samples)
+            _report_vit_preprocess_samples(e.samples, work_item)
             logging.error("Preprocessing task failed: %s", e.error, exc_info=True)
             raise e.error from e
         except multiprocessing.pool.TimeoutError as e:

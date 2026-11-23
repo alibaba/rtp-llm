@@ -25,6 +25,7 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal import mm_work_item as work_item_ops
 from rtp_llm.multimodal.greennet_hook import GreenNetVerdict, get_greennet_provider
+from rtp_llm.multimodal.media_network import MediaNetwork, SourceBatch, current_network
 from rtp_llm.multimodal.mm_async_result import continue_after
 from rtp_llm.multimodal.mm_embedding_cache import (
     MMEmbeddingAsyncCache,
@@ -71,7 +72,6 @@ from rtp_llm.ops import MMPreprocessConfig, MultimodalInput, VitSeparation
 from rtp_llm.telemetry import vit_media
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
-
 
 _gen2_started = None
 
@@ -284,6 +284,8 @@ class MMProcessEngine:
         preprocess_params = self.mm_part.get_preprocess_params()
         preprocess_func = self.mm_part.preprocess_input
 
+        use_native_network = os.getenv("MM_NATIVE_MEDIA_NETWORK") == "1"
+        self._media_network = None
         if vit_config.use_local_preprocess:
             self.preprocess_executor: PreprocessExecutor = LocalPreprocessExecutor(
                 preprocess_func, vit_config, preprocess_params
@@ -301,6 +303,7 @@ class MMProcessEngine:
                 inspection_factory=(
                     inspection_provider.worker_factory()
                     if self.mm_part.supports_inspection_sources
+                    and not use_native_network
                     and not getattr(
                         self.mm_part, "inspection_verdict_is_request_scoped", False
                     )
@@ -404,18 +407,21 @@ class MMProcessEngine:
             async_publication=self.vit_config.mm_cache_async_publish,
         )
         hash_cache_class = MMHashKeyCache
-        if (
-            self._embedding_cache.uses_native_index
-            and emb_host_feature_enabled("MM_EMB_NATIVE_HASH_INDEX")
+        if self._embedding_cache.uses_native_index and emb_host_feature_enabled(
+            "MM_EMB_NATIVE_HASH_INDEX"
         ):
-            from rtp_llm.multimodal.mm_embedding_native_cache import NativeMMHashKeyCache
+            from rtp_llm.multimodal.mm_embedding_native_cache import (
+                NativeMMHashKeyCache,
+            )
 
             hash_cache_class = NativeMMHashKeyCache
         self._hash_key_cache = hash_cache_class(
             max_bytes=self.vit_config.mm_hash_key_cache_max_bytes
         )
         if os.environ.get("MM_EMB_NATIVE_HASH_INDEX") == "1":
-            logging.info("MM_EMB_HASH_CACHE_IMPLEMENTATION %s", hash_cache_class.__name__)
+            logging.info(
+                "MM_EMB_HASH_CACHE_IMPLEMENTATION %s", hash_cache_class.__name__
+            )
         # Keep the old private name as an alias for callers/tests that inspect
         # async submission state. Both paths now use the same cache instance.
         self._async_cache = self._embedding_cache
@@ -428,6 +434,8 @@ class MMProcessEngine:
             self.vit_config.mm_hash_key_cache_max_bytes,
         )
 
+        if use_native_network:
+            self._media_network = MediaNetwork(vit_config)
         self._inspection = MMInspectionCoordinator(
             self.mm_part,
             self.vit_config,
@@ -534,7 +542,11 @@ class MMProcessEngine:
         return self._inspection._request_scoped_inspection()
 
     def _begin_greennet(self, *args, **kwargs):
-        return self._inspection._begin_greennet(*args, **kwargs)
+        token = current_network.set(getattr(self, "_media_network", None))
+        try:
+            return self._inspection._begin_greennet(*args, **kwargs)
+        finally:
+            current_network.reset(token)
 
     def _probe_remote(
         self, inputs, local_key, entry, timeout_ms, trace_id, *, restore_approval=True
@@ -679,6 +691,7 @@ class MMProcessEngine:
         with inspect, then the verdict gates the result. Raises
         FtRuntimeException(UNSAFE_INPUT_CONTENT) on a non-passing verdict."""
         deadline = time.monotonic() + self._greennet_timeout_s
+        upload_urls = None if self.vit_config.disable_access_log else {}
         if len(mm_inputs) != 1 or not _input_has_url(mm_inputs[0]):
             rewritten, verdict_future, handle = self._begin_greennet(
                 mm_inputs,
@@ -686,6 +699,7 @@ class MMProcessEngine:
                 user_id=user_id,
                 service_name=service_name,
                 external_request_id=external_request_id,
+                upload_urls=upload_urls,
                 deadline=deadline,
                 worker_sources=True,
             )
@@ -693,6 +707,7 @@ class MMProcessEngine:
             try:
                 result, work_items = self._mm_embedding_impl(
                     rewritten,
+                    upload_log=(verdict_future, upload_urls),
                     cache_inputs=mm_inputs,
                     inspection_handle=handle,
                     deadline=deadline,
@@ -764,6 +779,7 @@ class MMProcessEngine:
                         user_id=user_id,
                         service_name=service_name,
                         external_request_id=external_request_id,
+                        upload_urls=upload_urls,
                         deadline=deadline,
                     )
                 )
@@ -775,6 +791,7 @@ class MMProcessEngine:
                     user_id=user_id,
                     service_name=service_name,
                     external_request_id=external_request_id,
+                    upload_urls=upload_urls,
                     deadline=deadline,
                     worker_sources=True,
                 )
@@ -790,6 +807,7 @@ class MMProcessEngine:
                     user_id=user_id,
                     service_name=service_name,
                     external_request_id=external_request_id,
+                    upload_urls=upload_urls,
                     deadline=deadline,
                     worker_sources=True,
                 )
@@ -798,6 +816,7 @@ class MMProcessEngine:
 
             result, work_items = self._mm_embedding_impl(
                 rewritten,
+                upload_log=(verdict_future, upload_urls),
                 inspection_handle=handle,
                 deadline=deadline,
                 cache_claim=(cache_key, entry, state),
@@ -1102,6 +1121,7 @@ class MMProcessEngine:
         report_request_metrics: bool = True,
         defer_feature_hashes: bool = False,
         deadline: Optional[float] = None,
+        upload_log=None,
         inspection_handle: Optional[SourceInspection] = None,
         external_request_id: str = "",
         region: Optional[str] = None,
@@ -1182,6 +1202,7 @@ class MMProcessEngine:
                         mm_inputs,
                         str(result),
                         request_id,
+                        upload_log=upload_log,
                         external_request_id=external_request_id,
                     )
 
@@ -1206,10 +1227,13 @@ class MMProcessEngine:
                 mm_inputs,
                 e,
                 request_id,
+                upload_log=upload_log,
                 external_request_id=external_request_id,
             )
             raise
         finally:
+            for work_item in work_items:
+                work_item.release_preprocess_sources()
             if query_started:
                 self.dec_query_num()
 
@@ -1331,13 +1355,41 @@ class MMProcessEngine:
                             if work_item.cache_entry.greennet_passed:
                                 work_item.capture_inspection_sources = False
                 work_item.remaining_timeout_s()
-                self.preprocess_executor.submit(work_item)
-                if isinstance(inspection_handle, SourceInspection):
-                    inspection_handle.track_work_item(work_item)
+                network = getattr(self, "_media_network", None)
+                if (
+                    network is not None
+                    and work_item.should_preprocess
+                    and (
+                        getattr(
+                            self.mm_part.preprocess_input, "accepts_source_bytes", False
+                        )
+                        or getattr(
+                            self.mm_part.preprocess_input, "uses_url_loader", False
+                        )
+                    )
+                    and any(
+                        media.url.startswith(("https://", "http://"))
+                        for media in work_item.mm_inputs
+                    )
+                ):
+                    work_item.source_download = SourceBatch(
+                        network,
+                        work_item,
+                        v41=getattr(
+                            self.mm_part.preprocess_input, "accepts_source_bytes", False
+                        ),
+                    )
+                    if isinstance(inspection_handle, SourceInspection):
+                        work_item.pending_inspection_handle = inspection_handle
+                else:
+                    self.preprocess_executor.submit(work_item)
+                    if isinstance(inspection_handle, SourceInspection):
+                        inspection_handle.track_work_item(work_item)
 
         except Exception as error:
             # The caller has not received this list yet and cannot roll it back.
             for work_item in work_items:
+                work_item.release_preprocess_sources()
                 work_item.fail_cache(error)
                 if work_item.inspection_future is not None:
                     work_item.inspection_future.cancel()
@@ -1354,6 +1406,7 @@ class MMProcessEngine:
                 continue
             work_item.remaining_timeout_s()
             self.preprocess_executor.get_result(work_item)
+            work_item.release_preprocess_sources()
             work_item.remaining_timeout_s()
             if work_item.embedding_result is None and not work_item.waiting_for_cache:
                 estimate = self.mm_part.estimate_work(
@@ -1614,10 +1667,18 @@ class MMProcessEngine:
                     service_name=service_name,
                     model_name="",
                 )
-                for media, (key, entry) in zip(mm_inputs, claims):
-                    decision = self._inspection.cached_decision(
-                        key, entry, media, deadline, request
+                for index, (media, (key, entry)) in enumerate(zip(mm_inputs, claims)):
+                    media_request = SimpleNamespace(
+                        **vars(request),
+                        upload_indices=(vit_media.input_index(media, index),),
                     )
+                    token = current_network.set(getattr(self, "_media_network", None))
+                    try:
+                        decision = self._inspection.cached_decision(
+                            key, entry, media, deadline, media_request
+                        )
+                    finally:
+                        current_network.reset(token)
                     self._inspection.tickets.bind(
                         inspection_ticket, key, entry.generation, decision, request_id
                     )
@@ -1833,6 +1894,10 @@ class MMProcessEngine:
                             if cached_inspection_entries is not None:
                                 cached_inspection_entries.append((cache_key, entry))
                     if state == "miss":
+                        if producer_inspects:
+                            entry.upload_input_index = vit_media.input_index(
+                                mm_input, input_index
+                            )
                         entry.expects_greennet = producer_inspects
                         task = _AsyncComputeTask(cache_key, entry)
                         self._async_tasks[entry] = task
@@ -1850,11 +1915,8 @@ class MMProcessEngine:
                         deferred_reads.append(
                             task.computed if task is not None else None
                         )
-                    if (
-                        state == "complete"
-                        and is_current_cache_entry(
-                            self._embedding_cache, cache_key, entry
-                        )
+                    if state == "complete" and is_current_cache_entry(
+                        self._embedding_cache, cache_key, entry
                     ):
                         self._hash_key_cache.get(cache_key, entry.generation)
                     if state in ("miss", "in_progress"):
@@ -2278,6 +2340,7 @@ class MMProcessEngine:
         external_request_id: str = "",
         region: Optional[str] = None,
     ) -> Optional[concurrent.futures.Future]:
+        upload_urls = None if self.vit_config.disable_access_log else {}
         handle = None
         if not self.is_proxy_mode:
             _report_vit_metric(AccMetrics.VIT_QPS_METRIC, 1, {"source": "mm_embedding"})
@@ -2294,12 +2357,14 @@ class MMProcessEngine:
                     user_id=user_id,
                     service_name=service_name,
                     external_request_id=external_request_id,
+                    upload_urls=upload_urls,
                     deadline=deadline,
                 )
             )
             # ViT embedding runs concurrently with inspection.
             _, work_items = self._mm_embedding_impl(
                 rewritten,
+                upload_log=(verdict_future, upload_urls),
                 inspection_handle=handle,
                 cache_claim=(cache_key, entry, "miss"),
                 remote_probe=remote_probe,
@@ -2392,6 +2457,9 @@ class MMProcessEngine:
         self.preprocess_executor.shutdown()
         self._scheduler.close()
         self._shutdown_greennet_loop()
+        if getattr(self, "_media_network", None) is not None:
+            self._media_network.close()
+            self._media_network = None
         self._embedding_cache.close()
         self._embedding_cache.clear(RuntimeError("MMProcessEngine stopped"))
         self._hash_key_cache.clear()

@@ -27,6 +27,7 @@ from rtp_llm.multimodal.greennet_hook import (
     GreenNetProvider,
     GreenNetVerdict,
 )
+from rtp_llm.multimodal.media_network import uses_url_loader
 from rtp_llm.multimodal.mm_batch_pipeline import PrefetchedMMBatch
 from rtp_llm.multimodal.mm_preprocess import (
     MultiprocessPreprocessExecutor,
@@ -55,6 +56,7 @@ class CPUModel(MultiModalEmbeddingInterface):
         self.forward_count = 0
 
     @staticmethod
+    @uses_url_loader
     def preprocess_input(mm_inputs, vit_config, **kwargs):
         data = []
         for index, item in enumerate(mm_inputs):
@@ -174,6 +176,36 @@ class MediaPipelineTraceTest(unittest.TestCase):
             len([s for s in later if s.name.endswith(".media") and s.links]), 2
         )
 
+    def test_native_download_span_belongs_to_original_media(self):
+        import os
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class Origin(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"media")
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Origin)
+        self.addCleanup(server.server_close)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        with patch.dict(os.environ, {"MM_NATIVE_MEDIA_NETWORK": "1"}):
+            engine = self.engine()
+        inp = self.make_input()
+        inp.url = f"http://127.0.0.1:{server.server_port}/image"
+        engine.get_embedding_result([inp], request_id=84)
+        engine._async_compute_executor.shutdown(wait=True)
+        spans = self.spans()
+        (media,) = [s for s in spans if s.name == vit_media.PREFIX + "media"]
+        (download,) = [s for s in spans if s.name == vit_media.PREFIX + "download"]
+        self.assertEqual(download.parent.span_id, media.context.span_id)
+        self.assertEqual(download.context.trace_id, media.context.trace_id)
+        self.assertEqual(download.attributes["request_id"], "84")
+
     def test_async_submit_rpc_finishes_before_media(self):
         engine = self.engine()
         engine.mm_part.release.clear()
@@ -197,10 +229,12 @@ class MediaPipelineTraceTest(unittest.TestCase):
                 engine = self.engine(mm_cache_async_publish=async_publish)
                 inp = self.make_input(b"retained-cache")
                 sdk_span_refs = []
+                handles = []
                 new_media = vit_media._new_media
 
                 def capture(*args, **kwargs):
                     media = new_media(*args, **kwargs)
+                    handles.extend(media)
                     sdk_span_refs.extend(weakref.ref(member.span) for member in media)
                     return media
 
@@ -212,7 +246,8 @@ class MediaPipelineTraceTest(unittest.TestCase):
                 entry = engine._embedding_cache.peek(inp.cache_key())
                 self.assertIsNotNone(entry)
                 producer_context = entry._vit_media_context
-                retained_handle = entry._pending_before_publish.__self__.media_traces[0]
+                self.assertIsNone(entry._pending_before_publish)
+                (retained_handle,) = handles
                 self.assertEqual(
                     retained_handle.span.get_span_context(), producer_context
                 )
@@ -250,7 +285,7 @@ class MediaPipelineTraceTest(unittest.TestCase):
         inp = self.make_input()
         inp.url = "/definitely-missing-vit-trace-test/input.png"
         with self.assertRaises(Exception):
-            engine.get_embedding_result([inp])
+            engine.get_embedding_result([inp], request_id=83)
         engine._async_compute_executor.shutdown(wait=True)
         spans = self.spans()
         media = next(s for s in spans if s.name.endswith(".media"))
