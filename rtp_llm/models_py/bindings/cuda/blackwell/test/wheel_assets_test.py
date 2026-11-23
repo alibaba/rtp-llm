@@ -27,7 +27,7 @@ def check_wheel(wheel):
         files = manifest["files"]
         required = {
             "glm53_extension_check.py",
-            "flash_mla_glm53_22.abi3.so",
+            "rtp_fp8_sparse_decode.abi3.so",
             "mega_mhc_isolated/csrc/jit_kernels/impls/sm100_mega_mhc.hpp",
             "mega_mhc_isolated/include/deep_jit/utils/parser.hpp",
             "mega_mhc_isolated/include/cute/tensor.hpp",
@@ -37,7 +37,16 @@ def check_wheel(wheel):
             "fp8_mqa_isolated/LICENSE",
         }
         required.update(
-            f"mega_mhc_isolated/licenses/{name}.txt" for name in manifest["sources"]
+            f"mega_mhc_isolated/licenses/{name}.txt"
+            for name in (
+                "cutlass_mhc",
+                "cutlass_mla",
+                "deep_gemm",
+                "deep_gemm_mqa",
+                "deep_jit",
+                "flash_mla",
+                "fmt",
+            )
         )
         missing = required.difference(files)
         if missing:

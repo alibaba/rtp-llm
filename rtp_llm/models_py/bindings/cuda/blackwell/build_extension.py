@@ -12,11 +12,8 @@ import tempfile
 from pathlib import Path
 
 SPARSE_SOURCES = (
-    "csrc/api/sparse_decode.cpp",
     "csrc/cuda_kernels/smxx/decode/get_decoding_sched_meta/get_decoding_sched_meta.cu",
     "csrc/cuda_kernels/smxx/decode/combine/combine.cu",
-    "csrc/cuda_kernels/sm100/decode/sparse/head64/instantiations/v41_h64.cu",
-    "csrc/cuda_kernels/sm100/decode/sparse/head64/instantiations/v41_h64_no_split.cu",
 )
 
 
@@ -44,7 +41,17 @@ def configure_compiler():
     return compiler
 
 
-def build_deep_gemm(part, sources, root, binding, format_header, licenses, cuda):
+def build_deep_gemm(
+    part,
+    sources,
+    root,
+    binding,
+    kernel_dir,
+    format_header,
+    elfutils_headers,
+    licenses,
+    cuda,
+):
     import torch
     from torch.utils.cpp_extension import include_paths, library_paths
 
@@ -58,7 +65,7 @@ def build_deep_gemm(part, sources, root, binding, format_header, licenses, cuda)
         sources["cutlass_mhc"] / "include/cutlass",
         sources["fmt"] / "include/fmt",
     ]
-    include_dirs = [root, root / "include"]
+    include_dirs = [kernel_dir, root, root / "include"]
     if mhc:
         headers.append(sources["deep_jit"] / "include/deep_jit")
         (root / "compat").mkdir()
@@ -109,10 +116,20 @@ def build_deep_gemm(part, sources, root, binding, format_header, licenses, cuda)
     ]
     if not mhc:
         command.append("-lnvrtc")
-    subprocess.run(command, check=True)
+    # DeepJIT resolves libdw at runtime with dlopen. Only the build needs its
+    # declarations; wheel users do not need elfutils development headers.
+    with tempfile.TemporaryDirectory() as temp:
+        if mhc:
+            elfutils = Path(temp) / "elfutils"
+            elfutils.mkdir()
+            for header in elfutils_headers:
+                include = elfutils if header.name.startswith("libdw") else Path(temp)
+                shutil.copyfile(header, include / header.name)
+            command.insert(1, "-I" + temp)
+        subprocess.run(command, check=True)
 
 
-def build_sparse(sources, output, binding, cuda):
+def build_sparse(sources, output, binding, kernel_dir, cuda):
     from setuptools import Distribution
     from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
@@ -128,8 +145,8 @@ def build_sparse(sources, output, binding, cuda):
         "-DKERUTILS_IS_BUILD_ON_CUDA",
         "-DTORCH_TARGET_VERSION=0x020a000000000000",
         "-Wno-deprecated-declarations",
-        "-Dsm100=glm53_sm100_opt22",
-        "-Dsmxx=glm53_smxx_opt22",
+        "-Dsm100=rtp_fp8_sparse_sm100",
+        "-Dsmxx=rtp_fp8_sparse_smxx",
     ]
     nvcc = common + [
         "--threads",
@@ -146,9 +163,15 @@ def build_sparse(sources, output, binding, cuda):
         "-Xcompiler=-fvisibility=hidden",
     ]
     extension = CUDAExtension(
-        "flash_mla_glm53_22",
-        sources=[str(binding)] + [str(repo / name) for name in SPARSE_SOURCES],
+        "rtp_fp8_sparse_decode",
+        sources=[
+            str(binding),
+            str(kernel_dir / "sparse_fp8_decode.cpp"),
+            str(kernel_dir / "sparse_fp8_kernel.cu"),
+            *[str(repo / name) for name in SPARSE_SOURCES],
+        ],
         include_dirs=[
+            str(kernel_dir),
             str(repo / "csrc"),
             str(cutlass / "include"),
             str(cutlass / "tools/util/include"),
@@ -179,7 +202,7 @@ def sha256(path):
     return digest.hexdigest()
 
 
-def write_manifest(output, assets, patches, sources):
+def write_manifest(output, assets, sources):
     import torch
 
     files = {}
@@ -198,7 +221,6 @@ def write_manifest(output, assets, patches, sources):
         "torch_cuda": torch.version.cuda,
         "python_soabi": sysconfig.get_config_var("SOABI"),
         "sources": sources,
-        "patches": {patch.name: sha256(patch) for patch in patches},
         "files": files,
     }
     output.write_text(json.dumps(metadata, sort_keys=True, indent=2) + "\n")
@@ -218,18 +240,21 @@ def main():
         build = commands.add_parser(part)
         build.add_argument("--source", action="append", required=True)
         build.add_argument("--binding", type=Path, required=True)
+        build.add_argument("--kernel-dir", type=Path, required=True)
         build.add_argument("--output", type=Path, required=True)
         if part == "mhc":
             build.add_argument("--license", action="append", required=True)
             build.add_argument("--format-header", type=Path, required=True)
+            build.add_argument(
+                "--elfutils-header", type=Path, action="append", required=True
+            )
     manifest = commands.add_parser("manifest")
     manifest.add_argument("--output", type=Path, required=True)
     manifest.add_argument("--asset", type=Path, action="append", required=True)
-    manifest.add_argument("--patch", type=Path, action="append", default=[])
     manifest.add_argument("--pins", type=json.loads, required=True)
     args = parser.parse_args()
     if args.part == "manifest":
-        write_manifest(args.output, args.asset, args.patch, args.pins)
+        write_manifest(args.output, args.asset, args.pins)
         return
 
     import torch
@@ -243,14 +268,22 @@ def main():
         raise RuntimeError("CUDA toolkit is required")
     sources = named_paths(args.source)
     if args.part == "sparse":
-        build_sparse(sources, args.output, args.binding.absolute(), Path(CUDA_HOME))
+        build_sparse(
+            sources,
+            args.output,
+            args.binding.absolute(),
+            args.kernel_dir.absolute(),
+            Path(CUDA_HOME),
+        )
     else:
         build_deep_gemm(
             args.part,
             sources,
             args.output.absolute(),
             args.binding.absolute(),
+            args.kernel_dir.absolute(),
             getattr(args, "format_header", None),
+            getattr(args, "elfutils_header", []),
             named_paths(getattr(args, "license", [])),
             Path(CUDA_HOME),
         )

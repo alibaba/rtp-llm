@@ -1,6 +1,7 @@
 """Public CUDA 13 x86 pins for the GLM-5.3 build."""
 
-# Use the official MegaMHC sources and patch declared by blackwell_repositories.
+# Open builds use the shared HC, selected-KV MLA and indexer paths.
+CUDA_EXTENSION = None
 MHC_SOURCE = None
 
 DEEP_GEMM_WHEEL = struct(

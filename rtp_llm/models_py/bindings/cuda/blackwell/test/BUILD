@@ -1,3 +1,4 @@
+load("@rtp_blackwell_config//:pins.bzl", "CUDA_EXTENSION")
 load("@rules_python//python:defs.bzl", "py_test")
 
 py_test(
@@ -9,5 +10,5 @@ py_test(
     target_compatible_with = select({
         "//:using_glm53_cuda13_x86": [],
         "//conditions:default": ["@platforms//:incompatible"],
-    }),
+    }) if CUDA_EXTENSION != None else ["@platforms//:incompatible"],
 )

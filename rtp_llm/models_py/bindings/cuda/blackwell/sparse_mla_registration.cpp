@@ -1,5 +1,12 @@
 #include <torch/csrc/stable/library.h>
-STABLE_TORCH_LIBRARY(flash_mla_glm53_22, m) {
+
+#include "sparse_fp8_decode.h"
+
+STABLE_TORCH_LIBRARY(rtp_fp8_sparse_decode, m) {
     m.def(
-        "sparse_decode_fwd(Tensor q, Tensor kv, Tensor indices, Tensor? topk_length, Tensor? attn_sink, Tensor(a!)? tile_scheduler_metadata, Tensor(b!)? num_splits, Tensor? extra_kv, Tensor? extra_indices, Tensor? extra_topk_length, int d_v, float sm_scale, bool enable_batch_invariant=False) -> (Tensor, Tensor, Tensor(a)?, Tensor(b)?)");
+        "forward(Tensor q, Tensor kv, Tensor indices, Tensor(a!)? scheduler, Tensor(b!)? splits, float scale, bool enable_batch_invariant=False) -> (Tensor, Tensor, Tensor(a)?, Tensor(b)?)");
+}
+
+STABLE_TORCH_LIBRARY_IMPL(rtp_fp8_sparse_decode, CUDA, m) {
+    m.impl("forward", TORCH_BOX(&rtp_kernel::blackwell::sparse_fp8_decode));
 }

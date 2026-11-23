@@ -9,13 +9,13 @@ import torch
 
 @functools.lru_cache(maxsize=1)
 def _load_native():
-    library = Path(__file__).parents[5] / "libs/flash_mla_glm53_22.abi3.so"
+    library = Path(__file__).parents[5] / "libs/rtp_fp8_sparse_decode.abi3.so"
     if not library.is_file():
         logging.info("GLM53 native sparse MLA unavailable; using selected-KV fallback")
         return None
     try:
         torch.ops.load_library(str(library))
-        op = torch.ops.flash_mla_glm53_22.sparse_decode_fwd
+        op = torch.ops.rtp_fp8_sparse_decode.forward
     except (OSError, RuntimeError, AttributeError) as error:
         logging.warning(
             "GLM53 native sparse MLA unavailable; using fallback: %s", error
@@ -88,14 +88,8 @@ class Glm53NativeSparse:
             query,
             src.unsqueeze(2),
             indices,
-            None,
-            None,
             metadata,
             splits,
-            None,
-            None,
-            None,
-            512,
             scale,
         )
         if key not in self.schedulers:

@@ -48,8 +48,8 @@ def check(root, allow_cuda_stub=False):
     ):
         if not callable(getattr(module, name, None)):
             raise ValueError(f"Missing MegaMHC binding: {name}")
-    torch.ops.load_library(str(root / "flash_mla_glm53_22.abi3.so"))
-    if not callable(torch.ops.flash_mla_glm53_22.sparse_decode_fwd):
+    torch.ops.load_library(str(root / "rtp_fp8_sparse_decode.abi3.so"))
+    if not callable(torch.ops.rtp_fp8_sparse_decode.forward):
         raise ValueError("Missing native sparse MLA operator")
     binaries = list((root / "fp8_mqa_isolated").glob("_rtp_llm_fp8_mqa*.so"))
     if len(binaries) != 1:

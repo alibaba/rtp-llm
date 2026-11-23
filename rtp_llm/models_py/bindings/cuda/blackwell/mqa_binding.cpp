@@ -2,10 +2,13 @@
 #include <pybind11/pybind11.h>
 #include <torch/python.h>
 #include "csrc/apis/attention.hpp"
-#include "csrc/apis/runtime.hpp"
+#include "mqa_runtime.h"
 
 PYBIND11_MODULE(_rtp_llm_fp8_mqa, m) {
-    deep_gemm::runtime::register_apis(m);
+    m.def("init", &rtp_kernel::blackwell::init_mqa_runtime);
+    m.def("set_num_sms", [](int num_sms) { deep_gemm::device_runtime->set_num_sms(num_sms); });
+    m.def("get_num_sms", []() { return deep_gemm::device_runtime->get_num_sms(); });
+    m.def("set_pdl", [](bool enable) { deep_gemm::device_runtime->set_pdl(enable); });
     m.def("fp8_mqa_logits",
           &deep_gemm::attention::fp8_mqa_logits,
           py::arg("q"),
