@@ -470,6 +470,114 @@ class QueryQuantCudaTest(unittest.TestCase):
         self.assertEqual(actual.data_ptr(), output.data_ptr())
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
+    def test_emit_norm_false_matches_reference_and_graph_replay(self):
+        w = torch.randn(1280, device="cuda", dtype=torch.bfloat16)
+        for rows in (0, 1, 7, 1025):
+            with self.subTest(rows=rows):
+                packed = torch.randn(1, rows, 1792, device="cuda", dtype=torch.bfloat16)
+                x = packed[..., :1280]
+                ref_norm, (ref_q8, ref_sf) = reference(x, w)
+                dual_norm, (dual_q8, dual_sf) = query_norm_quant(
+                    x, w, 1e-6, emit_norm=True
+                )
+                fp8_norm, (fp8_q8, fp8_sf) = query_norm_quant(
+                    x, w, 1e-6, emit_norm=False
+                )
+                self.assertIsNone(fp8_norm)
+                torch.testing.assert_close(dual_norm, ref_norm, rtol=0, atol=0)
+                torch.testing.assert_close(
+                    fp8_q8.view(torch.uint8), ref_q8.view(torch.uint8), rtol=0, atol=0
+                )
+                torch.testing.assert_close(
+                    fp8_q8.view(torch.uint8), dual_q8.view(torch.uint8), rtol=0, atol=0
+                )
+                self.assertEqual(fp8_sf.shape, ref_sf.shape)
+                self.assertEqual(fp8_sf.stride(), ref_sf.stride())
+                if rows:
+                    self.assertEqual(fp8_sf.data_ptr() % 16, 0)
+                    for col in range(fp8_sf.shape[1]):
+                        left = fp8_sf[:, col].contiguous().view(torch.uint8)
+                        right = ref_sf[:, col].contiguous().view(torch.uint8)
+                        torch.testing.assert_close(
+                            left[: rows * 4], right[: rows * 4], rtol=0, atol=0
+                        )
+        # CUDA graph capture/replay with emit_norm=False exercises _FastCuteLauncher on SM100.
+        x = torch.randn(1, 24, 1792, device="cuda", dtype=torch.bfloat16)[..., :1280]
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                query_norm_quant(x, w, 1e-6, emit_norm=False)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            g_norm, (g_q8, g_sf) = query_norm_quant(x, w, 1e-6, emit_norm=False)
+        self.assertIsNone(g_norm)
+        for scale in (0.0, 1.0, 50.0):
+            x.copy_(torch.randn_like(x) * scale)
+            graph.replay()
+            _, (ref_q8, ref_sf) = reference(x, w)
+            torch.testing.assert_close(
+                g_q8.view(torch.uint8), ref_q8.view(torch.uint8), rtol=0, atol=0
+            )
+            torch.testing.assert_close(g_sf, ref_sf, rtol=0, atol=0)
+
+    def test_try_project_prefill_quantized_qkv_gates_and_accuracy(self):
+        if torch.cuda.get_device_capability()[0] != 10:
+            self.skipTest("MXFP8 prefill QKV requires SM10x")
+        from rtp_llm.models_py.modules.dsv41._v41_fused_qkv import try_project_qr_kv
+        from rtp_llm.models_py.modules.dsv41._v41_query_quant import (
+            try_project_prefill_quantized_qkv,
+        )
+
+        torch.manual_seed(17)
+        wq_a_wkv = V41MXFP8Linear(
+            (torch.randn(1792, 5120, device="cuda") * 0.02).to(torch.float8_e4m3fn),
+            torch.ones(1792 // 32, 5120 // 32, device="cuda").to(torch.float8_e8m0fnu),
+        )
+        wq_b = V41MXFP8Linear(
+            (torch.randn(256, 1280, device="cuda") * 0.02).to(torch.float8_e4m3fn),
+            torch.ones(256 // 32, 1280 // 32, device="cuda").to(torch.float8_e8m0fnu),
+        )
+        index_wq = V41MXFP8Linear(
+            (torch.randn(128, 1280, device="cuda") * 0.02).to(torch.float8_e4m3fn),
+            torch.ones(128 // 32, 1280 // 32, device="cuda").to(torch.float8_e8m0fnu),
+        )
+        q_norm = torch.randn(1280, device="cuda", dtype=torch.bfloat16)
+        attn = SimpleNamespace(
+            wq_a_wkv=wq_a_wkv,
+            wq_b=wq_b,
+            index_wq=index_wq,
+            is_index_source=True,
+            q_norm=q_norm,
+            q_lora_rank=1280,
+            eps=1e-6,
+        )
+        x = torch.randn(1, 33, 5120, device="cuda", dtype=torch.bfloat16)
+        ref_qr, ref_kv = try_project_qr_kv(wq_a_wkv, x, q_norm, 1280, 1e-6)
+        qr_fp8, kv_fp8, qr_q = try_project_prefill_quantized_qkv(attn, x)
+        self.assertIsNone(qr_fp8)
+        torch.testing.assert_close(kv_fp8, ref_kv, rtol=0, atol=0)
+        q8_2d, sf = qr_q[0].squeeze(0), qr_q[1]
+        torch.testing.assert_close(
+            wq_b.forward_quantized(q8_2d, sf), wq_b(ref_qr.squeeze(0)), rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            index_wq.forward_quantized(q8_2d, sf),
+            index_wq(ref_qr.squeeze(0)),
+            rtol=0,
+            atol=0,
+        )
+        qr_dual, _, _ = try_project_prefill_quantized_qkv(attn, x, emit_norm=True)
+        torch.testing.assert_close(qr_dual, ref_qr, rtol=0, atol=0)
+        self.assertIsNone(
+            try_project_prefill_quantized_qkv(attn, x, quant_kernel="triton")
+        )
+        attn_no_mxfp8_idx = SimpleNamespace(**{**attn.__dict__, "index_wq": object()})
+        self.assertIsNone(try_project_prefill_quantized_qkv(attn_no_mxfp8_idx, x))
+        attn_no_mxfp8_qb = SimpleNamespace(**{**attn.__dict__, "wq_b": object()})
+        self.assertIsNone(try_project_prefill_quantized_qkv(attn_no_mxfp8_qb, x))
+
     @unittest.skipUnless(os.environ.get("V41_QUERY_QUANT_BENCH"), "opt-in benchmark")
     def test_benchmark(self):
         def elapsed(fn):

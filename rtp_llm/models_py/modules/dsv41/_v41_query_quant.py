@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import threading
+from functools import lru_cache
 
 import torch
 import triton
@@ -21,6 +22,31 @@ class _NativePrepared(threading.local):
 
 
 _NATIVE_PREPARED = _NativePrepared()
+_DEEP_GEMM = None
+_CUTE_MODULE = None
+
+
+@lru_cache(maxsize=16)
+def _device_capability(device_index: int):
+    return torch.cuda.get_device_capability(device_index)
+
+
+def _get_deep_gemm():
+    global _DEEP_GEMM
+    if _DEEP_GEMM is None:
+        import deep_gemm
+
+        _DEEP_GEMM = deep_gemm
+    return _DEEP_GEMM
+
+
+def _get_cute_module():
+    global _CUTE_MODULE
+    if _CUTE_MODULE is None:
+        from rtp_llm.models_py.modules.dsv41 import _v41_query_quant_cute
+
+        _CUTE_MODULE = _v41_query_quant_cute
+    return _CUTE_MODULE
 
 
 def _native_signature(api, operation, x, rows):
@@ -167,6 +193,7 @@ def _query_norm_quant_kernel(
     EPS: tl.constexpr,
     BLOCK: tl.constexpr,
     PDL: tl.constexpr = False,
+    EMIT_NORM: tl.constexpr = True,
 ):
     row = tl.program_id(0).to(tl.int64)
     cols = tl.arange(0, BLOCK)
@@ -178,7 +205,8 @@ def _query_norm_quant_kernel(
     inv = tl.rsqrt(tl.sum(x * x, 0) / D + EPS)
     # Match the existing strided norm's materialized BF16 boundary.
     y = (x * inv * w).to(tl.bfloat16)
-    tl.store(Y + row * D + cols, y, cols < D)
+    if EMIT_NORM:
+        tl.store(Y + row * D + cols, y, cols < D)
     groups = tl.reshape(y.to(tl.float32), (BLOCK // 32, 32))
     amax = tl.max(tl.abs(groups), 1)
     # The legacy CUDA producer clamps the scale itself to 1e-10.
@@ -203,41 +231,46 @@ def _query_norm_quant_kernel(
 
 
 def query_norm_quant(
-    x: torch.Tensor, weight: torch.Tensor, eps: float, *, pdl: bool = False
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    *,
+    pdl: bool = False,
+    emit_norm: bool = True,
 ):
-    """Return BF16 Q plus FP8 Q and packed MN-major UE8M0 scales."""
-    import deep_gemm
-
-    pdl = pdl or (
-        torch.cuda.get_device_capability(x.device)[0] >= 9 and deep_gemm.get_pdl()
-    )
+    """Return BF16 Q (or None when emit_norm=False) plus FP8 Q and packed UE8M0 scales."""
+    cap = _device_capability(x.device.index) if x.is_cuda else (0, 0)
+    pdl = pdl or (cap[0] >= 9 and _get_deep_gemm().get_pdl())
     flat = x.view(-1, x.shape[-1])
     rows, width = flat.shape
-    if (
-        width == 1280
-        and x.is_cuda
-        and x.dtype == torch.bfloat16
-        and torch.cuda.get_device_capability(x.device) == (10, 0)
-    ):
-        from rtp_llm.models_py.modules.dsv41._v41_query_quant_cute import (
-            try_query_norm_quant,
+    if width == 1280 and x.is_cuda and x.dtype == torch.bfloat16 and cap == (10, 0):
+        cute_mod = _get_cute_module()
+        result = (
+            cute_mod.try_query_norm_quant(x, weight, eps, pdl=pdl)
+            if emit_norm
+            else cute_mod.try_query_norm_quant(x, weight, eps, pdl=pdl, emit_norm=False)
         )
-
-        result = try_query_norm_quant(x, weight, eps, pdl=pdl)
         if result is not None:
             return result
-    normalized = torch.empty(x.shape, device=x.device, dtype=x.dtype)
+    normalized = (
+        torch.empty(x.shape, device=x.device, dtype=x.dtype) if emit_norm else None
+    )
     quantized = torch.empty(x.shape, device=x.device, dtype=torch.float8_e4m3fn)
-    scales = torch.empty(
-        (triton.cdiv(width // 32, 4), triton.cdiv(rows, 4) * 4),
+    padded_rows = (rows + 3) // 4 * 4
+    scale_packs = triton.cdiv(width // 32, 4)
+    scales = torch.empty_strided(
+        (padded_rows, scale_packs),
+        (1, padded_rows or 1),
         device=x.device,
         dtype=torch.int32,
-    ).T[:rows]
+    )
+    if padded_rows != rows:
+        scales = scales[:rows]
     if rows:
         _query_norm_quant_kernel[(rows,)](
             flat,
             weight,
-            normalized,
+            normalized if emit_norm else quantized,
             quantized,
             scales,
             flat.stride(0),
@@ -247,6 +280,7 @@ def query_norm_quant(
             triton.next_power_of_2(width),
             PDL=pdl,
             launch_pdl=pdl,
+            EMIT_NORM=emit_norm,
             num_warps=8 if width > 1024 else 4,
             enable_fp_fusion=False,
         )
@@ -280,5 +314,49 @@ def try_project_quantized_qkv(attn, x, quantized_input=None, *, pdl: bool = Fals
     )
     qr, quantized = query_norm_quant(
         projected[..., : attn.q_lora_rank], attn.q_norm, attn.eps, pdl=pdl
+    )
+    return qr, projected[..., attn.q_lora_rank :], quantized
+
+
+def try_project_prefill_quantized_qkv(
+    attn,
+    x,
+    quantized_input=None,
+    *,
+    quant_kernel: str = "auto",
+    emit_norm: bool = False,
+    pdl: bool = False,
+):
+    """Prefill Q/KV projection with fused strided Q RMSNorm + group32 MXFP8 quant.
+
+    V4.1 dense group32 quantization uses legacy scale semantics at all prefill
+    row counts when ``quant_kernel`` is ``auto`` or ``legacy``.
+    """
+    linear = getattr(attn, "wq_a_wkv", None)
+    if not isinstance(getattr(attn, "wq_b", None), V41MXFP8Linear):
+        return None
+    if getattr(attn, "is_index_source", False) and not isinstance(
+        getattr(attn, "index_wq", None), V41MXFP8Linear
+    ):
+        return None
+    if not is_supported(linear, x, attn.q_norm, attn.q_lora_rank):
+        return None
+    if _device_capability(x.device.index)[0] != 10:
+        return None
+    if attn.q_lora_rank % 128 != 0:
+        return None
+    if quant_kernel.strip().lower() not in ("auto", "legacy"):
+        return None
+    projected = (
+        linear(x)
+        if quantized_input is None
+        else linear.forward_quantized(*quantized_input).view(*x.shape[:-1], linear.N)
+    )
+    qr, quantized = query_norm_quant(
+        projected[..., : attn.q_lora_rank],
+        attn.q_norm,
+        attn.eps,
+        pdl=pdl,
+        emit_norm=emit_norm,
     )
     return qr, projected[..., attn.q_lora_rank :], quantized

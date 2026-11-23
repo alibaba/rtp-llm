@@ -737,6 +737,30 @@ class AttentionV41FP8(AttentionFP8):
             linear, x, self.q_norm, self.q_lora_rank
         )
 
+    def _try_fused_qr_kv(self, x, shared_input_quant=None, *, common=None):
+        if common is not None and _FLASH_MLA_SPARSE_Q_CHUNK % 4 == 0:
+            from rtp_llm.models_py.modules.dsv41._v41_query_quant import (
+                try_project_prefill_quantized_qkv,
+            )
+            from rtp_llm.utils.hot_hook_runtime import runtime as hot_hook_runtime
+
+            ws = getattr(common, "workspace", None)
+            quant_kernel = (
+                ws.fp8_quant_kernel
+                if ws is not None and hasattr(ws, "fp8_quant_kernel")
+                else os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto")
+            )
+            result = try_project_prefill_quantized_qkv(
+                self,
+                x,
+                shared_input_quant,
+                quant_kernel=quant_kernel,
+                emit_norm=hot_hook_runtime().enabled,
+            )
+            if result is not None:
+                return result
+        return super()._try_fused_qr_kv(x, shared_input_quant)
+
     def prefill_fused_attn_norm_input_quant(self, x, norm_weight, norm_eps):
         from rtp_llm.models_py.modules.dsv41.fp8._v41_norm_quant import (
             rmsnorm_group32_quant,
@@ -972,15 +996,23 @@ class AttentionV41FP8(AttentionFP8):
         cache[key] = common
         return common
 
-    def _project_prefill_q(self, qr, freqs_cis, workspace):
-        rows = qr.shape[0]
+    def _project_prefill_q(self, qr, freqs_cis, workspace, qr_quantized=None):
+        rows = qr.shape[0] if qr is not None else qr_quantized[0].shape[0]
         q_out, q, q_rope = workspace.prefill_q_head_views(
             rows, self.n_heads, self.head_dim, self.rope_head_dim
         )
         if rows == 0:
             return q
         with record_function_range("dsv41.prefill.q_lora_b_rope"):
-            projected = self._lin(self.wq_b, qr, out=q_out)
+            use_quant_qb = False
+            if qr_quantized is not None:
+                from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+
+                use_quant_qb = isinstance(self.wq_b, V41MXFP8Linear)
+            if use_quant_qb:
+                projected = self.wq_b.forward_quantized(*qr_quantized, out=q_out)
+            else:
+                projected = self._lin(self.wq_b, qr, out=q_out)
             if projected is not q_out:
                 q = projected.view(rows, self.n_heads, self.head_dim)
                 q_rope = None
@@ -1004,14 +1036,16 @@ class AttentionV41FP8(AttentionFP8):
         after sparse-index construction it is dead, so reusing it avoids a
         second ``[rows, dim]`` allocation for the final attention output.
         """
-        rows = qkv.qr.shape[0]
+        qr_q = getattr(qkv, "qr_quantized", None)
+        q_ref = qkv.qr if qkv.qr is not None else qr_q[0]
+        rows = q_ref.shape[0]
         if out is not None:
             expected = (rows, self.dim)
             if (
                 not isinstance(out, torch.Tensor)
                 or tuple(out.shape) != expected
                 or out.dtype != torch.bfloat16
-                or out.device != qkv.qr.device
+                or out.device != q_ref.device
                 or not out.is_contiguous()
             ):
                 raise ValueError(
@@ -1019,37 +1053,75 @@ class AttentionV41FP8(AttentionFP8):
                 )
         if rows == 0:
             if out is None:
-                out = qkv.qr.new_empty((0, self.dim))
+                out = torch.empty(
+                    (0, self.dim), dtype=torch.bfloat16, device=q_ref.device
+                )
             self._prefill_output_all_reduce(out)
             return out
         if out is None:
             out = torch.empty(
-                (rows, self.dim), dtype=torch.bfloat16, device=qkv.qr.device
+                (rows, self.dim), dtype=torch.bfloat16, device=q_ref.device
             )
         chunk = _FLASH_MLA_SPARSE_Q_CHUNK
         freqs_chunks, index_chunks, length_chunks = common.workspace.attention_metadata(
             common.freqs_cis, indices, topk_length, rows, chunk
         )
-        qr_chunks = (qkv.qr,) if rows <= chunk else qkv.qr.split(chunk)
+        if qkv.qr is not None:
+            qr_chunks = (qkv.qr,) if rows <= chunk else qkv.qr.split(chunk)
+        else:
+            n_chunks = (rows + chunk - 1) // chunk
+            qr_chunks = (None,) * n_chunks
+        if qr_q is not None and (rows <= chunk or chunk % 4 == 0):
+            q8, sf = qr_q
+            if rows <= chunk:
+                qr_q_chunks = (qr_q,)
+            else:
+                q8_chunks = q8.split(chunk)
+                qr_q_chunks = tuple(
+                    (q8_c, sf[s : s + q8_c.shape[0]])
+                    for s, q8_c in zip(range(0, rows, chunk), q8_chunks)
+                )
+        else:
+            qr_q_chunks = (None,) * len(qr_chunks)
         out_chunks = (out,) if rows <= chunk else out.split(chunk)
         mega = getattr(self, "_mega_attention", None)
+        use_quant_query = (
+            mega is not None
+            and qr_q is not None
+            and (rows <= chunk or chunk % 4 == 0)
+            and hasattr(mega, "supports_quantized_query")
+            and mega.supports_quantized_query(qr_q)
+        )
         if (
             mega is not None
-            and mega.supports_query(qkv.qr)
+            and (
+                use_quant_query or (qkv.qr is not None and mega.supports_query(qkv.qr))
+            )
             and mega.supports_prefill(kv, indices, topk_length)
         ):
             positions = (
                 common.cp_ctx.global_positions if common.cp_on else common.position_ids
             )
             position_chunks = self._mega_position_chunks(positions, rows, chunk)
-            for qr, target, indices_chunk, lengths, pos in zip(
-                qr_chunks, out_chunks, index_chunks, length_chunks, position_chunks
+            for qr, qr_q_chunk, target, indices_chunk, lengths, pos in zip(
+                qr_chunks,
+                qr_q_chunks,
+                out_chunks,
+                index_chunks,
+                length_chunks,
+                position_chunks,
             ):
+                chunk_rows = qr.shape[0] if qr is not None else qr_q_chunk[0].shape[0]
                 q_out, _, _ = common.workspace.prefill_q_head_views(
-                    qr.shape[0], self.n_heads, self.head_dim, self.rope_head_dim
+                    chunk_rows, self.n_heads, self.head_dim, self.rope_head_dim
                 )
                 with record_function_range("dsv41.prefill.q_lora_b_mega"):
-                    q = mega.project_q(self.wq_b, qr, out=q_out)
+                    if use_quant_query:
+                        q = mega.project_q(
+                            self.wq_b, qr, qr_quantized=qr_q_chunk, out=q_out
+                        )
+                    else:
+                        q = mega.project_q(self.wq_b, qr, out=q_out)
                 with record_function_range("dsv41.prefill.mega_attention"):
                     pair = mega.prefill(q, kv, indices_chunk, pos, lengths)
                 with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
@@ -1063,10 +1135,21 @@ class AttentionV41FP8(AttentionFP8):
             return out
         from rtp_llm.models_py.modules.dsv41.flash_mla import flash_mla_sparse_fwd
 
-        for qr, target, freqs, indices_chunk, lengths in zip(
-            qr_chunks, out_chunks, freqs_chunks, index_chunks, length_chunks
+        for qr, qr_q_chunk, target, freqs, indices_chunk, lengths in zip(
+            qr_chunks,
+            qr_q_chunks,
+            out_chunks,
+            freqs_chunks,
+            index_chunks,
+            length_chunks,
         ):
-            q = self._project_prefill_q(qr, freqs, common.workspace)
+            q = (
+                self._project_prefill_q(qr, freqs, common.workspace)
+                if qr_q_chunk is None
+                else self._project_prefill_q(
+                    qr, freqs, common.workspace, qr_quantized=qr_q_chunk
+                )
+            )
             with record_function_range(profile_name):
                 o, _, _ = flash_mla_sparse_fwd(
                     q=q,
@@ -1906,6 +1989,7 @@ class AttentionV41FP8(AttentionFP8):
         *,
         request_row_slices=None,
         indexer_weights=None,
+        qr_quantized=None,
     ):
         shared = self._shared_attention
         if not self.is_index_source:
@@ -1987,9 +2071,19 @@ class AttentionV41FP8(AttentionFP8):
                 dtype=torch.int32,
                 device=rows_input.device,
             )
-            q = self._lin(self.index_wq, qr).view(
-                -1, self.index_n_heads, self.index_head_dim
-            )
+            use_quant_idx = False
+            if qr_quantized is not None:
+                from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+
+                use_quant_idx = isinstance(self.index_wq, V41MXFP8Linear)
+            if use_quant_idx:
+                q = self.index_wq.forward_quantized(*qr_quantized).view(
+                    -1, self.index_n_heads, self.index_head_dim
+                )
+            else:
+                q = self._lin(self.index_wq, qr).view(
+                    -1, self.index_n_heads, self.index_head_dim
+                )
             raw_weights = indexer_weights
             if raw_weights is None:
                 ced_projection = shared.get("ced_indexer_projection")
@@ -2704,6 +2798,8 @@ class AttentionV41FP8(AttentionFP8):
         indexer_weights=None,
     ):
         """Consume query rows without regenerating or writing source KV."""
+        qkv_qr_q = getattr(qkv, "qr_quantized", None)
+        qkv_rows = qkv.qr.shape[0] if qkv.qr is not None else qkv_qr_q[0].shape[0]
         if not self.compress_ratio:
             if swa_only_workspace is not None:
                 dispose_tensor(qkv.kv_full)
@@ -2715,7 +2811,7 @@ class AttentionV41FP8(AttentionFP8):
                     indices=meta.combined_indices,
                     topk_length=meta.combined_lens,
                     profile_name="dsv41.prefill.swa_concat.flash_mla",
-                    out=self._prefill_output_buffer(x, qkv.qr.shape[0]),
+                    out=self._prefill_output_buffer(x, qkv_rows),
                 )
             out = self._prefill_sparse_attention(
                 qkv,
@@ -2724,7 +2820,7 @@ class AttentionV41FP8(AttentionFP8):
                 indices=common.topk_idxs,
                 topk_length=common.swa_meta.topk_length_kv_full,
                 profile_name="dsv41.prefill.swa.flash_mla_kv_full",
-                out=self._prefill_output_buffer(x, qkv.qr.shape[0]),
+                out=self._prefill_output_buffer(x, qkv_rows),
             )
             dispose_tensor(qkv.kv_full)
             return out
@@ -2738,17 +2834,18 @@ class AttentionV41FP8(AttentionFP8):
             vectors = (positions, req_ids, positions.long(), req_ids.long())
             cache["query_vectors"] = vectors
         positions, req_ids = vectors[2:]
+        select_kwargs = {}
+        if indexer_weights is not None:
+            select_kwargs["indexer_weights"] = indexer_weights
+        if qkv_qr_q is not None:
+            select_kwargs["qr_quantized"] = qkv_qr_q
         selected = self._select_indices(
             x,
             qkv.qr,
             positions,
             req_ids,
             request_row_slices=getattr(common, "request_row_slices", None),
-            **(
-                {"indexer_weights": indexer_weights}
-                if indexer_weights is not None
-                else {}
-            ),
+            **select_kwargs,
         )
         pending = self._shared_attention.pop("prefill_pool_ready", None)
         if pending is not None:
@@ -2808,7 +2905,7 @@ class AttentionV41FP8(AttentionFP8):
             indices=indices,
             topk_length=lens,
             profile_name="dsv41.prefill.shared_global",
-            out=self._prefill_output_buffer(x, qkv.qr.shape[0]),
+            out=self._prefill_output_buffer(x, qkv_rows),
         )
 
     def _produce_global_decode(self, x, positions, req_ids, starts, *, projected=None):

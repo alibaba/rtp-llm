@@ -1523,6 +1523,14 @@ def _warm_q_norm_rope(attn, device):
         (1, rows, rank + attn.head_dim), dtype=torch.bfloat16, device=device
     )
     strided_q_rmsnorm(combined[..., :rank], attn.q_norm, attn.eps)
+    if (
+        device.type == "cuda"
+        and torch.cuda.get_device_capability(device)[0] == 10
+        and rank % 128 == 0
+    ):
+        from rtp_llm.models_py.modules.dsv41._v41_query_quant import query_norm_quant
+
+        query_norm_quant(combined[..., :rank], attn.q_norm, attn.eps, emit_norm=False)
     swa_kv_norm_rope(
         combined[..., rank:],
         attn.kv_norm,

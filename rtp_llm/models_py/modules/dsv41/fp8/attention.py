@@ -704,9 +704,10 @@ class PrefillQKV(NamedTuple):
     buffers, which are dead by then. Consumers enter only after materialization.
     """
 
-    qr: torch.Tensor
+    qr: Optional[torch.Tensor]
     q: Optional[torch.Tensor]
     kv_full: torch.Tensor
+    qr_quantized: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
 
 
 class AttentionFP8(nn.Module):
@@ -1708,6 +1709,8 @@ class AttentionFP8(nn.Module):
         self,
         x: torch.Tensor,
         shared_input_quant: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        *,
+        common: Optional[PrefillMeta] = None,
     ):
         linear = getattr(self, "wq_a_wkv", None)
         if linear is None:
@@ -4390,7 +4393,7 @@ class AttentionFP8(nn.Module):
         """Q/KV path: RMSNorm + LoRA Q + KV linears + fused RMSNorm-RoPE."""
         x_3d = x.unsqueeze(0)
         rd = common.rd
-        fused_qkv = self._try_fused_qr_kv(x_3d, shared_input_quant)
+        fused_qkv = self._try_fused_qr_kv(x_3d, shared_input_quant, common=common)
         if fused_qkv is not None:
             if (
                 shared_input_quant is not None
@@ -4416,9 +4419,12 @@ class AttentionFP8(nn.Module):
         else:
             shared_input_quant = None
 
+        qr_quantized = None
         with record_function_range("dsv4.fp8.attn.qkv.q_lora_a_norm"):
             if fused_qkv is not None:
                 qr = fused_qkv[0]
+                if len(fused_qkv) == 3:
+                    qr_quantized = fused_qkv[2]
             else:
                 if shared_input_quant is not None:
                     q_proj = self._lin_from_shared_quant(
@@ -4451,7 +4457,18 @@ class AttentionFP8(nn.Module):
                 )
         else:
             kv_full = kv
-        return PrefillQKV(qr=qr.squeeze(0), q=None, kv_full=kv_full)
+        qr_out = None if qr is None else qr.squeeze(0)
+        qr_quantized_out = (
+            None
+            if qr_quantized is None
+            else (qr_quantized[0].squeeze(0), qr_quantized[1])
+        )
+        return PrefillQKV(
+            qr=qr_out,
+            q=None,
+            kv_full=kv_full,
+            qr_quantized=qr_quantized_out,
+        )
 
     def _materialize_prefill_q(
         self, qkv: PrefillQKV, common: PrefillMeta
@@ -4466,13 +4483,23 @@ class AttentionFP8(nn.Module):
         """
         if qkv.q is not None:
             return qkv
-        qr_3d = qkv.qr.unsqueeze(0)
+        qr_q = getattr(qkv, "qr_quantized", None)
         with record_function_range("dsv4.fp8.attn.qkv.q_lora_b_rope"):
-            seqlen = int(qr_3d.shape[1])
-            q_out = common.workspace.prefill_q(seqlen)
-            q_local_flat = self._lin(
-                self.wq_b, qr_3d, out=q_out.view(seqlen, self.n_heads * self.head_dim)
-            )
+            if qr_q is not None and isinstance(self.wq_b, V41MXFP8Linear):
+                seqlen = int(qr_q[0].shape[0])
+                q_out = common.workspace.prefill_q(seqlen)
+                q_local_flat = self.wq_b.forward_quantized(
+                    *qr_q, out=q_out.view(seqlen, self.n_heads * self.head_dim)
+                )
+            else:
+                qr_3d = qkv.qr.unsqueeze(0)
+                seqlen = int(qr_3d.shape[1])
+                q_out = common.workspace.prefill_q(seqlen)
+                q_local_flat = self._lin(
+                    self.wq_b,
+                    qr_3d,
+                    out=q_out.view(seqlen, self.n_heads * self.head_dim),
+                )
             q_local = q_local_flat.view(1, seqlen, self.n_heads, self.head_dim)
             q_local = fused_rmsnorm_rope(
                 q_local, None, common.freqs_cis, common.rd, eps=self.eps, out=q_local
