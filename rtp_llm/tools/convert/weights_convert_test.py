@@ -2,6 +2,8 @@ import os
 import unittest
 from unittest.mock import Mock, patch
 
+import torch
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.cpp.cache.test.libcache_config_creator_py_test import validate_basic_config
 from rtp_llm.models.kimi_linear.kimi_linear import KimiLinear
@@ -241,6 +243,38 @@ class WeightsConvertLayerOverrideTest(unittest.TestCase):
         )
         self.assertEqual(model_config.num_layers, 2)
         self.assertEqual(len(model_config.kv_cache_spec_descs), 2)
+
+
+class FtStylePreshuffleSidecarTest(unittest.TestCase):
+    def test_index_generation_merges_preshuffle_sidecars(self):
+        import json
+        import tempfile
+
+        from safetensors.torch import save_file
+
+        converter = WeightConverter.__new__(WeightConverter)
+        converter.env_params = {"TP_SIZE": "1", "DP_SIZE": "1"}
+        with tempfile.TemporaryDirectory() as tmp:
+            save_file({"model.layers.0.moe.w1": torch.zeros(2, 2)}, os.path.join(tmp, "model-00-00-part-00000.safetensors"))
+            save_file({"model.layers.1.moe.w1": torch.zeros(2, 2)}, os.path.join(tmp, "model-00-01-part-00000.safetensors"))
+            # dump_weight_as_ft_style writes one sidecar per conversion rank.
+            with open(os.path.join(tmp, "model-00-00-preshuffled.json"), "w") as f:
+                json.dump({"moe_weights_preshuffled": ["model.layers.0.moe.w1"]}, f)
+            with open(os.path.join(tmp, "model-00-01-preshuffled.json"), "w") as f:
+                json.dump({"moe_weights_preshuffled": ["model.layers.1.moe.w1"]}, f)
+
+            self.assertNotEqual(converter._generate_safetensor_meta_info(tmp), -1)
+
+            with open(
+                os.path.join(tmp, "model.safetensors.index.json"), encoding="utf-8"
+            ) as f:
+                index = json.load(f)
+            self.assertTrue(index["is_ft_style_weight"])
+            self.assertEqual(
+                sorted(index["moe_weights_preshuffled"]),
+                ["model.layers.0.moe.w1", "model.layers.1.moe.w1"],
+            )
+            self.assertEqual(index["weight_map"]["model.layers.0.moe.w1"], "model-00-00-part-00000.safetensors")
 
 
 if __name__ == "__main__":

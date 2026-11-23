@@ -754,6 +754,9 @@ class KVCacheConfig:
     reuse_cache_tail_blocks: int
     linear_pool_blocks: int
     swa_pool_blocks: int
+    enable_linear_cache_reclaim: bool
+    kv_cache_pool_block_weights: str
+    max_block_size_per_item: int
     memory_cache_size_mb: int
     memory_cache_swa_block_ratio: float
     dsv41_decoder_swa_pool_blocks: int
@@ -918,8 +921,9 @@ class LinearAttentionConfig:
     linear_value_head_dim: int
     ssm_state_dtype: DataType
     conv_state_dtype: DataType
+    supports_history_state_reclaim: bool
 
-    def __init__(self, linear_conv_kernel_dim: int = 0, linear_key_head_dim: int = 0, linear_num_key_heads: int = 0, linear_num_value_heads: int = 0, linear_value_head_dim: int = 0, ssm_state_dtype: DataType = DataType.TYPE_BF16, conv_state_dtype: DataType = DataType.TYPE_BF16) -> None:
+    def __init__(self, linear_conv_kernel_dim: int = 0, linear_key_head_dim: int = 0, linear_num_key_heads: int = 0, linear_num_value_heads: int = 0, linear_value_head_dim: int = 0, ssm_state_dtype: DataType = DataType.TYPE_BF16, conv_state_dtype: DataType = DataType.TYPE_BF16, supports_history_state_reclaim: bool = False) -> None:
         ...
     def to_string(self) -> str:
         ...
@@ -1267,6 +1271,7 @@ class PDSepConfig:
     cache_store_rdma_listen_port: int
     cache_store_rdma_mode: bool
     decode_entrance: bool
+    decode_linear_tail_only: bool
     decode_polling_kv_cache_step_ms: int
     decode_retry_interval_ms: int
     load_cache_timeout_ms: int

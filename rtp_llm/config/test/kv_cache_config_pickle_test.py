@@ -2,7 +2,7 @@ import pickle
 from unittest import TestCase, main
 
 from rtp_llm.config.test.kv_cache_event_test_values import KV_CACHE_EVENT_FIELD_VALUES
-from rtp_llm.ops import KVCacheConfig
+from rtp_llm.ops import DataType, KVCacheConfig, LinearAttentionConfig
 
 BASE_EVENT_FIELD_VALUES = {
     name: value
@@ -15,7 +15,8 @@ EVENT_PICKLE_FIELDS = tuple(BASE_EVENT_FIELD_VALUES)
 def _version_twenty_two_state(config):
     state = config.__getstate__()
     # The former host-placement option was between pool counts and scan interval.
-    return (state[0], 22, *state[2:53], True, *state[53:])
+    # Drop the v24 tail reclaim flag so older states keep their mainline shapes.
+    return (state[0], 22, *state[2:53], True, *state[53:79])
 
 
 def _version_twenty_state(config):
@@ -53,7 +54,85 @@ def _version_twenty_state(config):
     )
 
 
+class LinearAttentionConfigBindingsTest(TestCase):
+    def test_reclaim_capability_defaults_off_with_previous_constructor(self):
+        config = LinearAttentionConfig(
+            4, 128, 16, 48, 128, DataType.TYPE_FP32, DataType.TYPE_BF16
+        )
+        self.assertFalse(config.supports_history_state_reclaim)
+        self.assertEqual(config.ssm_state_dtype, DataType.TYPE_FP32)
+
+    def test_model_can_declare_reclaim_capability(self):
+        config = LinearAttentionConfig(supports_history_state_reclaim=True)
+        self.assertTrue(config.supports_history_state_reclaim)
+        config.supports_history_state_reclaim = False
+        self.assertFalse(config.supports_history_state_reclaim)
+
+
 class KVCacheConfigPickleTest(TestCase):
+    def test_pool_block_weights_binding_defaults_empty_and_preserves_raw_json(self):
+        config = KVCacheConfig()
+        self.assertEqual(config.kv_cache_pool_block_weights, "")
+        raw = '{"full": 8, "linear": 1, "draft-linear": 2}'
+        config.kv_cache_pool_block_weights = raw
+        self.assertEqual(config.kv_cache_pool_block_weights, raw)
+        self.assertIn(f"kv_cache_pool_block_weights: {raw}\n", config.to_string())
+
+    def test_pool_block_weights_round_trip_preserves_other_cache_policies(self):
+        config = KVCacheConfig()
+        config.kv_cache_pool_block_weights = '{"full":7,"linear":2}'
+        config.enable_linear_cache_reclaim = True
+        config.reserve_block_ratio = 9
+        config.kv_cache_event_instance_group = "weighted-pools"
+        state = config.__getstate__()
+        self.assertEqual(state[:2], ("KVCacheConfig", 25))
+        self.assertEqual(len(state), 81)
+        self.assertEqual(state[80], config.kv_cache_pool_block_weights)
+        self.assertTrue(state[79])
+
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertEqual(restored.__getstate__(), state)
+        self.assertEqual(
+            restored.kv_cache_pool_block_weights, config.kv_cache_pool_block_weights
+        )
+        self.assertTrue(restored.enable_linear_cache_reclaim)
+        self.assertEqual(restored.reserve_block_ratio, 9)
+        self.assertEqual(restored.kv_cache_event_instance_group, "weighted-pools")
+
+    def test_version_nine_state_keeps_reclaim_and_defaults_pool_weights_empty(self):
+        config = KVCacheConfig()
+        config.enable_linear_cache_reclaim = True
+        config.kv_cache_pool_block_weights = '{"full":8,"linear":1}'
+        state = config.__getstate__()
+        # Historical v9 branch state: mainline v8 layout (rebuilt through
+        # the v22 helper) plus the reclaim flag at index 70.
+        v22_state = _version_twenty_two_state(config)
+        previous = (v22_state[0], 9, *v22_state[2:70], state[79])
+        original = tuple(list(previous))
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        restored.__setstate__(previous)
+        self.assertEqual(previous, original)
+        self.assertTrue(restored.enable_linear_cache_reclaim)
+        self.assertEqual(restored.kv_cache_pool_block_weights, "")
+
+    def test_linear_cache_reclaim_defaults_off_and_round_trips(self):
+        config = KVCacheConfig()
+        self.assertFalse(config.enable_linear_cache_reclaim)
+        config.enable_linear_cache_reclaim = True
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertTrue(restored.enable_linear_cache_reclaim)
+
+    def test_previous_event_state_defaults_linear_reclaim_off(self):
+        config = KVCacheConfig()
+        config.enable_linear_cache_reclaim = True
+        # Older layouts carry a retired host-placement flag at index 53, so
+        # build the legacy shape through the v22 helper before truncating.
+        v22_state = _version_twenty_two_state(config)
+        previous = (v22_state[0], 7, *v22_state[2:69])
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        restored.__setstate__(previous)
+        self.assertFalse(restored.enable_linear_cache_reclaim)
+
     def test_event_fields_round_trip_with_block_tree_configuration(self):
         config = KVCacheConfig()
         config.block_tree_task_pool_size = 6
@@ -66,12 +145,19 @@ class KVCacheConfigPickleTest(TestCase):
         for enable_crc in (False, True):
             with self.subTest(enable_crc=enable_crc):
                 config.enable_crc = enable_crc
+                config.enable_linear_cache_reclaim = True
+                config.kv_cache_pool_block_weights = '{"full":7,"linear":2}'
                 state = config.__getstate__()
-                self.assertEqual(len(state), 79)
-                self.assertEqual(state[:2], ("KVCacheConfig", 23))
+                v22_state = _version_twenty_two_state(config)
+                self.assertEqual(len(state), 81)
+                self.assertEqual(state[:2], ("KVCacheConfig", 25))
                 self.assertEqual(state[63:68], tuple(BASE_EVENT_FIELD_VALUES.values()))
                 self.assertIs(state[68], enable_crc)
                 self.assertEqual(state[77], 6)
+                # v24 appends the reclaim flag and v25 the pool weights after
+                # main's v23 fields.
+                self.assertTrue(state[79])
+                self.assertEqual(state[80], '{"full":7,"linear":2}')
                 # Restoring fields must not mutate the supplied tuple.
                 original_state = tuple(list(state))
                 direct = KVCacheConfig.__new__(KVCacheConfig)
@@ -81,6 +167,8 @@ class KVCacheConfigPickleTest(TestCase):
                 restored = pickle.loads(pickle.dumps(config))
                 self.assertIs(restored.enable_crc, enable_crc)
                 self.assertEqual(restored.block_tree_task_pool_size, 6)
+                self.assertTrue(restored.enable_linear_cache_reclaim)
+                self.assertEqual(restored.kv_cache_pool_block_weights, '{"full":7,"linear":2}')
                 self.assertEqual(restored.block_tree_transfer_worker_count, 7)
                 self.assertEqual(
                     restored.disk_cache_evict_max_pending_bytes, 80 * 1024 * 1024
@@ -91,6 +179,15 @@ class KVCacheConfigPickleTest(TestCase):
                     self.assertEqual(getattr(restored, name), value, name)
                 self.assertIn(f"enable_crc: {int(enable_crc)}\n", restored.to_string())
                 self.assertIn("block_tree_task_pool_size: 6\n", restored.to_string())
+                # A mainline version-8 state (crc tail, no reclaim / pool weights)
+                # must still decode with crc preserved and reclaim defaulted off;
+                # build it through the v22 helper to restore the retired flag at 53.
+                crc_only = (v22_state[0], 8, *v22_state[2:70])
+                restored_crc_only = KVCacheConfig.__new__(KVCacheConfig)
+                restored_crc_only.__setstate__(crc_only)
+                self.assertIs(restored_crc_only.enable_crc, enable_crc)
+                self.assertFalse(restored_crc_only.enable_linear_cache_reclaim)
+                self.assertEqual(restored_crc_only.kv_cache_pool_block_weights, "")
 
     def test_previous_versions_use_default_pending_budget(self):
         source = KVCacheConfig()
@@ -118,6 +215,7 @@ class KVCacheConfigPickleTest(TestCase):
                 self.assertEqual(
                     restored.disk_cache_evict_max_pending_bytes, 100 * 1024 * 1024
                 )
+                self.assertFalse(restored.enable_linear_cache_reclaim)
 
     def test_version_seven_preserves_events_and_enables_crc_by_default(self):
         source = KVCacheConfig()
@@ -147,6 +245,7 @@ class KVCacheConfigPickleTest(TestCase):
         self.assertEqual(restored.block_tree_transfer_worker_count, 7)
         self.assertTrue(restored.enable_crc)
         defaults = KVCacheConfig()
+        self.assertEqual(restored.kv_cache_pool_block_weights, "")
         for name in EVENT_PICKLE_FIELDS:
             self.assertEqual(getattr(restored, name), getattr(defaults, name), name)
 
@@ -312,7 +411,9 @@ class KVCacheConfigPickleTest(TestCase):
                 for _ in range(2):
                     config = pickle.loads(pickle.dumps(config))
                     self.assertEqual(getattr(config, name), timeout)
-                    self.assertEqual(config.__getstate__()[-1], timeout)
+                    # v25 keeps frozen timeout at index 78; the v24/v25 tail
+                    # flags follow it.
+                    self.assertEqual(config.__getstate__()[78], timeout)
                     self.assertIn(f"{name}: {timeout}\n", config.to_string())
         for timeout in (-1, 2**31):
             with self.subTest(timeout=timeout), self.assertRaisesRegex(
@@ -320,7 +421,7 @@ class KVCacheConfigPickleTest(TestCase):
             ):
                 state = KVCacheConfig().__getstate__()
                 restored = KVCacheConfig.__new__(KVCacheConfig)
-                restored.__setstate__((*state[:-1], timeout))
+                restored.__setstate__((*state[:78], timeout, state[79], state[80]))
 
     def test_previous_versions_use_default_frozen_force_release_timeout(self):
         source = KVCacheConfig()

@@ -15,7 +15,8 @@ public:
                        DeviceBlockPoolPtr block_pool,
                        int                group_id,
                        int                tail_blocks = std::numeric_limits<int>::max()):
-        SingleTypeCacheManager(std::move(cache_group), std::move(block_pool), group_id), tail_blocks_(tail_blocks) {
+        SingleTypeCacheManager(std::move(cache_group), std::move(block_pool), group_id),
+        tail_blocks_(tail_blocks) {
         RTP_LLM_CHECK_WITH_INFO(tail_blocks > 0, "linear cache tail blocks must be positive");
     }
 
@@ -44,27 +45,43 @@ public:
                          std::vector<size_t>* backfilled_positions = nullptr) override;
 
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
+    void releaseRequestStateToDecodeTail(BlockIds& block_ids, int reserve_step) override;
+    size_t         historyReclaimEnd(int committed_tokens) const override;
     int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const override;
-    int  estimatePeakNeedBlocks(int                     seq_len,
-                                const BlockIndicesType& current_block_indices,
-                                int                     remaining_tokens,
-                                int                     reserve_step,
-                                bool                    enable_reuse_cache) const override;
-    int  estimateInitialBatchPeakNeedBlocks(int  seq_len,
-                                            int  common_seq_len,
-                                            int  remaining_tokens,
-                                            int  reserve_step,
-                                            bool enable_reuse_cache,
-                                            int  target_batch_size) const override;
+    int            estimatePeakNeedBlocks(int                     seq_len,
+                                          const BlockIndicesType& current_block_indices,
+                                          int                     remaining_tokens,
+                                          int                     reserve_step,
+                                          bool                    enable_reuse_cache,
+                                          bool                    reclaim_history = false) const override;
+    int            estimateInitialBatchPeakNeedBlocks(int  seq_len,
+                                                      int  common_seq_len,
+                                                      int  remaining_tokens,
+                                                      int  reserve_step,
+                                                      bool enable_reuse_cache,
+                                                      int  target_batch_size,
+                                                      bool reclaim_history = false) const override;
     NeedBlocksInfo getNeedBlocks(int                      common_seq_len,
                                  int                      seq_len,
                                  int                      reserve_step,
                                  int                      reuse_blocks_len,
-                                 bool                     reuse_enabled      = false,
-                                 const RequiredPositions& required_positions = {}) const override;
+                                 bool                     reuse_enabled           = false,
+                                 const RequiredPositions& required_positions      = {},
+                                 size_t                   reclaimed_prefix_blocks = 0) const override;
     bool           shouldMaterializeBlock(int pos, int seq_len, int reserve_step, bool enable_reuse_cache) const;
 
 private:
+    // History-reclaim estimation (request-level RECLAIM_COMMITTED policy):
+    // simulates committed-slot retirement to bound the physical-block peak.
+    int  estimateHistoryReclaimPeak(std::vector<int> block_costs,
+                                    int              seq_len,
+                                    int              remaining_tokens,
+                                    int              reserve_step,
+                                    bool             enable_reuse_cache,
+                                    bool             initialized) const;
+    void filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const;
+    int  materializedTailBlockCount() const;
+    int  retainedTailBlockCount() const;
     int  retainedDecodeBlocks(int reserve_step) const;
     bool mallocImpl(BlockIds&                block_ids,
                     int                      seq_len,
@@ -75,7 +92,7 @@ private:
                     const RequiredPositions& required_positions);
 
 private:
-    int tail_blocks_;
+    int  tail_blocks_;
 };
 
 using LinearCacheManagerPtr = std::shared_ptr<LinearCacheManager>;

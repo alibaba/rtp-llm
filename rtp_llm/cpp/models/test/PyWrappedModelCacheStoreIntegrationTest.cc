@@ -1099,7 +1099,7 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
                               scenario.parallelism,
                               HWKernelConfig{},
                               ProfilingDebugLoggingConfig{},
-                              RuntimeConfig{},
+                              RuntimeConfig{/*max_generate_batch_size=*/32},
                               ConcurrencyConfig{},
                               SpeculativeExecutionConfig{},
                               /*max_seq_len=*/scenario_name.find("cuda_lengths_host_prefix") == 0 ? 1024 : 64,
@@ -1247,7 +1247,7 @@ py::dict runDirtyGenerationPrefillCaptureScenario(py::object py_model) {
                                   ParallelismConfig{},
                                   hw_kernel_config,
                                   ProfilingDebugLoggingConfig{},
-                                  RuntimeConfig{},
+                                  RuntimeConfig{/*max_generate_batch_size=*/32},
                                   ConcurrencyConfig{},
                                   SpeculativeExecutionConfig{},
                                   /*max_seq_len=*/4,
@@ -1318,7 +1318,7 @@ py::dict runGenerationPrefillCaptureScenario(py::object                         
                               ParallelismConfig{},
                               hw_kernel_config,
                               ProfilingDebugLoggingConfig{},
-                              RuntimeConfig{},
+                              RuntimeConfig{/*max_generate_batch_size=*/32},
                               ConcurrencyConfig{},
                               SpeculativeExecutionConfig{},
                               /*max_seq_len=*/4,
@@ -1425,6 +1425,9 @@ runCustomOutput(py::object py_model, py::object handler, torch::Tensor indexes, 
     description.attention_conf.size_per_head = width;
     auto               layout = std::make_optional(makeLayout(makeCacheConfig({{"full", 4, 64}})).layout);
     GptModelInitParams params{weights, description, layout};
+    // Keep the decode graph capture bound in sync with the default
+    // concurrency limit; the aggregate default of 1 would cap capture buckets.
+    params.runtime_config.max_generate_batch_size = 32;
     if (enable_graph) {
         params.cache_manager = std::make_shared<KVCacheManager>(makeCacheConfig({{"full", 4, 64}}),
                                                                 /*warmup=*/true,
@@ -1518,6 +1521,7 @@ py::object makeNativeLmHead(py::object                   py_model,
     description.output_vocab_size            = vocab_size;
     description.output_vocab_padded_size     = kernel.size(0) * tp_size;
     GptModelInitParams params{*weights, description, std::nullopt};
+    params.runtime_config.max_generate_batch_size = 32;
     params.parallelism_config.tp_size    = tp_size;
     params.parallelism_config.tp_rank    = tp_rank;
     params.parallelism_config.local_rank = kernel.get_device();
@@ -1557,7 +1561,7 @@ runPyWrappedModelSpeculativeCommitBridge(py::object py_model, const std::string&
                               ParallelismConfig{},
                               HWKernelConfig{},
                               ProfilingDebugLoggingConfig{},
-                              RuntimeConfig{},
+                              RuntimeConfig{/*max_generate_batch_size=*/32},
                               ConcurrencyConfig{},
                               SpeculativeExecutionConfig{},
                               /*max_seq_len=*/64,

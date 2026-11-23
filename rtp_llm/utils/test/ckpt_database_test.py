@@ -27,6 +27,39 @@ class CkptDataBaseTest(unittest.TestCase):
             os.getcwd(), "rtp_llm/utils/test/testdata/ckpt_database_testdata/"
         )
 
+    def test_parse_preshuffled_keys_reads_ft_style_index(self):
+        # dump_weight_as_ft_style records the AITER preshuffle markers in the
+        # shared index because safetensors cannot persist tensor attributes;
+        # _load_from_ft_style restores them from this entry.
+        with tempfile.TemporaryDirectory() as tmp:
+            index_path = os.path.join(tmp, "model.safetensors.index.json")
+            with open(index_path, "w", encoding="utf-8") as index:
+                json.dump(
+                    {
+                        "is_ft_style_weight": True,
+                        "moe_weights_preshuffled": [
+                            "model.layers.0.moe.w1",
+                            "model.layers.0.moe.w2",
+                        ],
+                    },
+                    index,
+                )
+            keys = CkptDatabase._parse_preshuffled_keys(None, tmp)
+            self.assertEqual(
+                keys, frozenset({"model.layers.0.moe.w1", "model.layers.0.moe.w2"})
+            )
+
+            with open(index_path, "w", encoding="utf-8") as index:
+                json.dump({"is_ft_style_weight": True}, index)
+            self.assertEqual(CkptDatabase._parse_preshuffled_keys(None, tmp), frozenset())
+
+            with open(index_path, "w", encoding="utf-8") as index:
+                json.dump(
+                    {"is_ft_style_weight": True, "moe_weights_preshuffled": "bad"},
+                    index,
+                )
+            self.assertEqual(CkptDatabase._parse_preshuffled_keys(None, tmp), frozenset())
+
     def test_collect_ckpt_file(self):
         path = os.path.join(self._testdata_path(), "bin_testdata")
         database = CkptDatabase(path)

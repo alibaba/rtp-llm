@@ -148,6 +148,26 @@ class MtpGraphCapacityTest(unittest.TestCase):
                 torch.cuda.synchronize()
                 torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
+    def test_undeclared_layout_rejects_batches_beyond_captured_rows(self):
+        # max_generate_batch_size can admit decode batches wider than the
+        # captured max_bs_ rows; per-row acceptance packs few enough tokens
+        # to still fit a captured bucket, so the row guard is what keeps the
+        # replay out of graph preparation and its block-table row check.
+        torch.cuda.set_device(0)
+        model = PackedDraftCapacityModel(hc_mult=4)
+        runner = CudaGraphRunner()
+        runner.init_mtp_draft_prefill(model, 8, 4, 3, 4)
+        overflow = fixtures._build_prefill_inputs(["full"], {"full": 1}, [1] * 9)
+        overflow.attention_inputs = get_primary_attention_inputs(overflow)
+        # 9 rows with 9 packed tokens fit the 9-token capture bucket; only
+        # the row count exceeds the captured 8 rows.
+        overflow.combo_position_ids = torch.zeros(9, dtype=torch.int32, device="cuda")
+        self.assertFalse(runner.canRun(overflow))
+        fitting = fixtures._build_prefill_inputs(["full"], {"full": 1}, [1] * 8)
+        fitting.attention_inputs = get_primary_attention_inputs(fitting)
+        fitting.combo_position_ids = torch.zeros(8, dtype=torch.int32, device="cuda")
+        self.assertTrue(runner.canRun(fitting))
+
     def test_nonpositive_request_lanes_rejected_before_capture(self):
         for lanes in (0, -1):
             with self.subTest(lanes=lanes):

@@ -459,6 +459,46 @@ void CacheConfig::fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&   specs,
     setTopology(std::move(new_groups), std::move(new_layers));
 }
 
+uint32_t CacheConfig::blockWeight(const std::string& tag) const {
+    const auto it = pool_block_weights.find(tag);
+    return it == pool_block_weights.end() ? 1u : it->second;
+}
+
+uint32_t CacheConfig::blockNumForGroup(const GroupBase& group, uint32_t baseline) const {
+    const auto weight = blockWeight(group.tag);
+    RTP_LLM_CHECK_WITH_INFO(weight > 0, "cache pool '%s' block weight must be positive", group.tag.c_str());
+    // Main's #1574 rule: a group either pins its own explicit block count or
+    // follows the global baseline; pool weights scale the baseline share.
+    const uint64_t blocks =
+        group.policy.explicit_block_num > 0 ?
+            group.policy.explicit_block_num :
+            static_cast<uint64_t>(baseline) * weight;
+    RTP_LLM_CHECK_WITH_INFO(
+        blocks <= static_cast<uint64_t>(std::numeric_limits<int32_t>::max()),
+        "cache pool '%s' block count exceeds int32 block ID range: baseline=%u weight=%u blocks=%lu",
+        group.tag.c_str(),
+        baseline,
+        weight,
+        blocks);
+    return static_cast<uint32_t>(blocks);
+}
+
+uint32_t CacheConfig::maxBaselineBlockNum() const {
+    uint64_t maximum = std::numeric_limits<uint32_t>::max();
+    for (const auto& group : groups()) {
+        if (group.policy.explicit_block_num > 0) {
+            (void)blockNumForGroup(group, 1);
+            continue;
+        }
+        const auto weight = blockWeight(group.tag);
+        RTP_LLM_CHECK_WITH_INFO(weight > 0, "cache pool '%s' block weight must be positive", group.tag.c_str());
+        // Baseline * weight must stay inside the int32 block-ID range.
+        const uint64_t limit = static_cast<uint64_t>(std::numeric_limits<int32_t>::max()) / weight;
+        maximum = std::min(maximum, limit);
+    }
+    return static_cast<uint32_t>(maximum);
+}
+
 void CacheConfig::finalizeBlockNums(uint32_t                   global_block_num,
                                     const RuntimeConfig&       runtime_config,
                                     const PPBlockNumOverrides* pp_overrides) {
@@ -467,6 +507,7 @@ void CacheConfig::finalizeBlockNums(uint32_t                   global_block_num,
     (void)runtime_config;
     for (auto& sub_cfg : mtp_sub_configs) {
         if (sub_cfg != nullptr) {
+            sub_cfg->pool_block_weights = pool_block_weights;
             sub_cfg->finalizeBlockNums(global_block_num, runtime_config, pp_overrides);
         }
     }
@@ -475,21 +516,22 @@ void CacheConfig::finalizeBlockNums(uint32_t                   global_block_num,
         return;
     }
 
+    // Main's #1574 sizing rule (explicit block count or global baseline)
+    // folded into blockNumForGroup, which additionally applies the pool
+    // block-weight multiplier.
     auto groups = topology().groups();
     for (auto& group : groups) {
-        const auto explicit_independent_blocks = group.policy.explicit_block_num;
-        uint32_t   rule_blocks                 = global_block_num;
-        if (explicit_independent_blocks > 0) {
-            rule_blocks = explicit_independent_blocks;
-        }
+        // PP rank-scoped overrides (when present) are absolute per-group block
+        // counts and take precedence over the weighted baseline share.
         if (pp_overrides != nullptr) {
             const auto it = pp_overrides->find(group.tag);
             RTP_LLM_CHECK_WITH_INFO(
                 it != pp_overrides->end(), "cache group [%s] is missing from PP block overrides", group.tag.c_str());
-            rule_blocks = it->second;
+            RTP_LLM_CHECK_WITH_INFO(it->second > 0, "cache group [%s] requires positive block count", group.tag.c_str());
+            group.block_num = it->second;
+        } else {
+            group.block_num = blockNumForGroup(group, global_block_num);
         }
-        RTP_LLM_CHECK_WITH_INFO(rule_blocks > 0, "cache group [%s] requires positive block count", group.tag.c_str());
-        group.block_num = rule_blocks;
     }
     // The published topology already owns frozen Specs; changing capacity does
     // not require cloning their immutable byte layouts again.
@@ -542,6 +584,11 @@ std::string CacheConfig::debugString(size_t indent) const {
                           return group.policy.group_type == CacheGroupType::LINEAR;
                       }));
     os << indent1 << "group_block_nums=" << rtp_llm::vectorToString(group_block_nums) << "\n";
+    os << indent1 << "pool_block_weights={";
+    for (const auto& group : topology_groups) {
+        os << group.tag << ":" << blockWeight(group.tag) << ",";
+    }
+    os << "}\n";
     os << "\n";
 
     os << indent1 << "# Cache Specifications:\n";

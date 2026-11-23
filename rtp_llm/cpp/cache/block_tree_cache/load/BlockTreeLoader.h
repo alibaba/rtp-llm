@@ -52,7 +52,8 @@ public:
     BlockTreeMatchResult matchLocked(const CacheKeysType&               cache_keys,
                                      const std::function<bool(size_t)>& valid_prefix           = {},
                                      bool                               enable_storage_backend = true,
-                                     std::optional<int64_t>             request_id             = {});
+                                     std::optional<int64_t>             request_id             = {},
+                                     bool                               skip_linear            = false);
     BlockIndicesType     matchedBlocksForGroup(std::string_view                      group_tag,
                                                const std::vector<MultiNodeResource>& matched_resources) const;
     bool                 abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
@@ -61,7 +62,8 @@ public:
 private:
     bool                 validMatch(std::vector<TreeNode*>&            path,
                                     std::vector<bool>&                 candidate_valid,
-                                    const std::function<bool(size_t)>& valid_prefix) const;
+                                    const std::function<bool(size_t)>& valid_prefix,
+                                    bool                               skip_linear) const;
     void                 collectReuseTimeMetrics(TreeNode*                                    node,
                                                  size_t                                       group_set_id,
                                                  uint64_t                                     access_seq,
@@ -71,8 +73,11 @@ private:
                                            const CacheKeysType&               cache_keys,
                                            const std::function<bool(size_t)>& valid_prefix,
                                            bool                               enable_storage_backend,
-                                           std::optional<int64_t>             request_id);
-    StorageRequest       makeStorageRequest(const CacheKeysType& cache_keys, size_t local_matched_blocks_num) const;
+                                           std::optional<int64_t>             request_id,
+                                           bool                               skip_linear);
+    StorageRequest       makeStorageRequest(const CacheKeysType& cache_keys,
+                                           size_t               local_matched_blocks_num,
+                                           bool                 skip_linear) const;
     bool                 commitLoad(const std::shared_ptr<LoadAsyncContext>& context);
     void                 abortLoadLocked(const std::vector<TransferDescriptor>& load_descs,
                                          const std::vector<bool>&               joined_loads,
