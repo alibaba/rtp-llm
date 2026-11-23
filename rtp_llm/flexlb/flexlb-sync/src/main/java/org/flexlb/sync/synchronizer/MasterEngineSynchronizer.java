@@ -19,6 +19,7 @@ import org.springframework.stereotype.Component;
 import javax.annotation.PreDestroy;
 import java.util.List;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -56,6 +57,7 @@ public final class MasterEngineSynchronizer {
 
     private final ScheduledThreadPoolExecutor scheduler;
     private final ThreadPoolExecutor statusCheckExecutor;
+    private final ThreadPoolExecutor cachePollExecutor;
     private final ThreadPoolExecutor statusApplicationExecutor;
     private final ThreadPoolExecutor engineSyncExecutor;
 
@@ -91,6 +93,13 @@ public final class MasterEngineSynchronizer {
         statusCheckExecutor = executor(statusThreads, "status-checker-executor");
         statusApplicationExecutor = executor(statusThreads, "status-application-executor");
         statusApplicationExecutor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
+        var cacheStatus = flexlbConfig.getWorkerRegistry().getCacheStatus();
+        cachePollExecutor =
+                executor(
+                        cacheStatus.getPollExecutorThreads(),
+                        cacheStatus.getPollExecutorQueueCapacity(),
+                        "cache-poll-executor",
+                        new ThreadPoolExecutor.AbortPolicy());
         this.scheduler =
                 new ScheduledThreadPoolExecutor(
                         5,
@@ -112,6 +121,7 @@ public final class MasterEngineSynchronizer {
                                 workerDirectory,
                                 workerAddressService,
                                 statusCheckExecutor,
+                                cachePollExecutor,
                                 statusApplicationExecutor,
                                 engineHealthReporter,
                                 engineGrpcService,
@@ -138,18 +148,27 @@ public final class MasterEngineSynchronizer {
         scheduler.shutdown();
         engineSyncExecutor.shutdown();
         statusCheckExecutor.shutdown();
+        cachePollExecutor.shutdown();
         statusApplicationExecutor.shutdown();
     }
 
     private static ThreadPoolExecutor executor(int threads, String name) {
+        return executor(threads, 15_000, name, new ThreadPoolExecutor.CallerRunsPolicy());
+    }
+
+    private static ThreadPoolExecutor executor(
+            int threads,
+            int queueCapacity,
+            String name,
+            RejectedExecutionHandler rejectionHandler) {
         return new ThreadPoolExecutor(
                 threads,
                 threads,
                 60L,
                 TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(15_000),
+                new LinkedBlockingQueue<>(queueCapacity),
                 new NamedThreadFactory(name),
-                new ThreadPoolExecutor.CallerRunsPolicy());
+                rejectionHandler);
     }
 
     private void reportExecutorMetrics() {
@@ -158,6 +177,8 @@ public final class MasterEngineSynchronizer {
                     ENGINE_BALANCING_THREAD_POOL_INFO, "engineSyncExecutor", engineSyncExecutor);
             engineHealthReporter.reportThreadPoolInfo(
                     ENGINE_BALANCING_THREAD_POOL_INFO, "statusCheckExecutor", statusCheckExecutor);
+            engineHealthReporter.reportThreadPoolInfo(
+                    ENGINE_BALANCING_THREAD_POOL_INFO, "cachePollExecutor", cachePollExecutor);
             engineHealthReporter.reportThreadPoolInfo(
                     ENGINE_BALANCING_THREAD_POOL_INFO,
                     "statusApplicationExecutor",

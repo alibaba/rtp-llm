@@ -428,6 +428,12 @@ public final class FlexlbConfigValidator {
                 workers.getCacheStatus().getDiffParallelism(),
                 "workerRegistry.cacheStatus.diffParallelism");
         positive(
+                workers.getCacheStatus().getPollExecutorThreads(),
+                "workerRegistry.cacheStatus.pollExecutorThreads");
+        positive(
+                workers.getCacheStatus().getPollExecutorQueueCapacity(),
+                "workerRegistry.cacheStatus.pollExecutorQueueCapacity");
+        positive(
                 workers.getCacheStatus().getTargetDiffSize(),
                 "workerRegistry.cacheStatus.targetDiffSize");
         positive(
