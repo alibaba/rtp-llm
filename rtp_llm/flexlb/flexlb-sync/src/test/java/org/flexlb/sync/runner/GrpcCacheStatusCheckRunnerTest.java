@@ -13,10 +13,12 @@ import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.LongAdder;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -156,6 +158,53 @@ class GrpcCacheStatusCheckRunnerTest {
                         eq(20L),
                         eq(RoleType.PREFILL));
         assertEquals(1L, workerStatus.getCacheIndexedVersion());
+    }
+
+    @Test
+    void acknowledgedVersionReusesKeysAndRefreshesCapacityUntilVersionChanges() {
+        WorkerStatus worker = workerStatus();
+        WorkerDirectory directory = directory(worker);
+        var first =
+                EngineRpcService.CacheStatusPB.newBuilder()
+                        .setVersion(1)
+                        .setAvailableKvCache(100)
+                        .putCacheKeys(42, true)
+                        .build();
+        var unchanged =
+                EngineRpcService.CacheStatusPB.newBuilder()
+                        .setVersion(1)
+                        .setAvailableKvCache(80)
+                        .setTotalKvCache(200)
+                        .build();
+        var cleared = unchanged.toBuilder().setVersion(2).build();
+        when(engineGrpcService.getCacheStatusAsync(
+                        anyString(),
+                        anyInt(),
+                        any(WorkerStatus.class),
+                        anyLong(),
+                        anyLong(),
+                        eq(RoleType.PREFILL)))
+                .thenReturn(
+                        CompletableFuture.completedFuture(first),
+                        CompletableFuture.completedFuture(unchanged),
+                        CompletableFuture.completedFuture(cleared));
+        when(localKvCacheAwareManager.updateFromWorkerStatus(worker))
+                .thenReturn(WorkerCacheUpdateResult.builder().success(true).build());
+
+        runCachePoll(worker.getLogicalIpPort(), worker, directory, false);
+        var keys = worker.getCacheStatus().getCachedKeys();
+        assertEquals(Set.of(42L), keys);
+
+        runCachePoll(worker.getLogicalIpPort(), worker, directory, false);
+        assertSame(keys, worker.getCacheStatus().getCachedKeys());
+        assertEquals(80, worker.getCacheStatus().getAvailableKvCache());
+        assertEquals(200, worker.getCacheStatus().getTotalKvCache());
+        verify(localKvCacheAwareManager).updateFromWorkerStatus(worker);
+
+        runCachePoll(worker.getLogicalIpPort(), worker, directory, false);
+        assertEquals(Set.of(), worker.getCacheStatus().getCachedKeys());
+        assertEquals(2, worker.getCacheIndexedVersion());
+        verify(localKvCacheAwareManager, times(2)).updateFromWorkerStatus(worker);
     }
 
     @Test
