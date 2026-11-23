@@ -1,9 +1,17 @@
 load("//bazel:defs.bzl", "rpm_library")
 
+# The default release is x86_64. Distributions providing a native 3FS
+# package can select it for the corresponding target toolchain.
+label_flag(
+    name = "client_rpm",
+    build_setting_default = "@hf3fs_rpm//file:file",
+    visibility = ["//visibility:public"],
+)
+
 rpm_library(
     name = "hf3fs",
     rpms = [
-        "@hf3fs_rpm//file:file",
+        ":client_rpm",
     ],
     lib_path = "usr/lib64",
     include_path = "usr/include",
