@@ -1,12 +1,14 @@
 package org.flexlb.cache.match.localsync;
 
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
+import it.unimi.dsi.fastutil.longs.LongSet;
+import it.unimi.dsi.fastutil.longs.LongSets;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.DiffResult;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
-import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ForkJoinPool;
@@ -14,23 +16,14 @@ import java.util.concurrent.ForkJoinTask;
 import java.util.concurrent.RejectedExecutionException;
 
 /**
- * Engine local view (small hash table)
- * Manages local cache state and metadata for each engine
- * Storage structure: EngineIpPort -> HashMap<Long>
- *
- * @author FlexLB
+ * Holds primitive cache keys per logical worker. The cache manager serializes each worker's
+ * updates and retirement, so a diff can read both key sets concurrently without copying them.
  */
 @Slf4j
 @Component
 public class EngineLocalView {
-    /**
-     * Core storage structure: EngineIpPort -> Set<Long>
-     */
-    private final ConcurrentHashMap<String, Set<Long>> engineViews = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, LongSet> engineViews = new ConcurrentHashMap<>();
 
-    /**
-     * Custom ForkJoin thread pool for parallel computation
-     */
     private volatile ForkJoinPool customPool;
 
     private volatile boolean closed;
@@ -60,46 +53,23 @@ public class EngineLocalView {
             return DiffResult.empty(engineIPort);
         }
 
-        Set<Long> oldCacheBlocks = getEngineCacheBlocks(engineIPort);
-
-        // Efficiently calculate differences
-        Set<Long> addedBlocks = ConcurrentHashMap.newKeySet(128);
-        Set<Long> removedBlocks = ConcurrentHashMap.newKeySet(128);
-
-        // Use custom ForkJoin thread pool to parallel compute added and removed cache blocks
+        LongSet oldKeys = engineViews.getOrDefault(engineIPort, LongSets.EMPTY_SET);
+        LongSet newKeys =
+                newCacheBlocks instanceof LongSet primitive
+                        ? primitive
+                        : new LongOpenHashSet(newCacheBlocks);
+        LongSet addedBlocks;
+        LongSet removedBlocks;
         ForkJoinPool pool = diffPool();
-        ForkJoinTask<?> addedTask = null;
+        ForkJoinTask<LongSet> addedTask = null;
         try {
-            addedTask =
-                    pool.submit(
-                            () ->
-                                    newCacheBlocks.parallelStream()
-                                            .filter(
-                                                    blockCacheKey ->
-                                                            !oldCacheBlocks.contains(blockCacheKey))
-                                            .forEach(addedBlocks::add));
-
-            ForkJoinTask<?> removedTask =
-                    pool.submit(
-                            () ->
-                                    oldCacheBlocks.parallelStream()
-                                            .filter(
-                                                    blockCacheKey ->
-                                                            !newCacheBlocks.contains(blockCacheKey))
-                                            .forEach(removedBlocks::add));
-
-            addedTask.join();
-            removedTask.join();
+            addedTask = pool.submit(() -> difference(newKeys, oldKeys));
+            ForkJoinTask<LongSet> removedTask = pool.submit(() -> difference(oldKeys, newKeys));
+            addedBlocks = addedTask.join();
+            removedBlocks = removedTask.join();
         } catch (RejectedExecutionException error) {
-            if (addedTask != null) {
-                addedTask.join();
-            }
-            newCacheBlocks.stream()
-                    .filter(blockCacheKey -> !oldCacheBlocks.contains(blockCacheKey))
-                    .forEach(addedBlocks::add);
-            oldCacheBlocks.stream()
-                    .filter(blockCacheKey -> !newCacheBlocks.contains(blockCacheKey))
-                    .forEach(removedBlocks::add);
+            addedBlocks = addedTask == null ? difference(newKeys, oldKeys) : addedTask.join();
+            removedBlocks = difference(oldKeys, newKeys);
         }
 
         // Update statistics in dynamic sync interval manager
@@ -115,35 +85,21 @@ public class EngineLocalView {
     }
 
     /**
-     * Get all cache block IDs of an engine
-     *
-     * @param engineIPort Engine IP
-     * @return Cache block ID set
-     */
-    public Set<Long> getEngineCacheBlocks(String engineIPort) {
-        if (engineIPort == null) {
-            return Collections.emptySet();
-        }
-        Set<Long> engineCache = engineViews.get(engineIPort);
-        return engineCache == null ? Collections.emptySet() : engineCache;
-    }
-
-    /**
      * Add or update engine cache block
      *
      * @param engineIPort     Engine IP
      * @param blockCacheKey   Cache block hash value
      */
-    public void addOrUpdateCacheBlock(String engineIPort, Long blockCacheKey) {
-        if (engineIPort == null || blockCacheKey == null) {
+    public void addOrUpdateCacheBlock(String engineIPort, long blockCacheKey) {
+        if (engineIPort == null) {
             log.warn(
                     "Invalid parameters: engineIPort={}, blockCacheKey={}",
                     engineIPort,
                     blockCacheKey);
             return;
         }
-        Set<Long> engineCache =
-                engineViews.computeIfAbsent(engineIPort, k -> ConcurrentHashMap.newKeySet());
+        LongSet engineCache =
+                engineViews.computeIfAbsent(engineIPort, key -> new LongOpenHashSet());
 
         engineCache.add(blockCacheKey);
     }
@@ -154,12 +110,12 @@ public class EngineLocalView {
      * @param engineIPort   Engine IP
      * @param blockCacheKey Cache block hash value
      */
-    public void removeCacheBlock(String engineIPort, Long blockCacheKey) {
-        if (engineIPort == null || blockCacheKey == null) {
+    public void removeCacheBlock(String engineIPort, long blockCacheKey) {
+        if (engineIPort == null) {
             return;
         }
 
-        Set<Long> engineCache = engineViews.get(engineIPort);
+        LongSet engineCache = engineViews.get(engineIPort);
         if (engineCache == null) {
             return;
         }
@@ -185,7 +141,7 @@ public class EngineLocalView {
             return Set.of();
         }
 
-        Set<Long> removed = engineViews.remove(engineIPort);
+        LongSet removed = engineViews.remove(engineIPort);
         return removed == null ? Set.of() : removed;
     }
 
@@ -199,7 +155,7 @@ public class EngineLocalView {
     }
 
     public int size(String engineIpPort) {
-        Set<Long> engineCache = engineViews.get(engineIpPort);
+        LongSet engineCache = engineViews.get(engineIpPort);
         return engineCache == null ? 0 : engineCache.size();
     }
 
@@ -219,6 +175,17 @@ public class EngineLocalView {
      */
     public Set<String> getAllEngineIpPorts() {
         return engineViews.keySet();
+    }
+
+    private static LongSet difference(LongSet keys, LongSet other) {
+        LongSet result = new LongOpenHashSet();
+        for (var iterator = keys.iterator(); iterator.hasNext(); ) {
+            long key = iterator.nextLong();
+            if (!other.contains(key)) {
+                result.add(key);
+            }
+        }
+        return result;
     }
 
     private ForkJoinPool diffPool() {
