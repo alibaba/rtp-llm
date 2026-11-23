@@ -8,8 +8,30 @@
 
 #include <atomic>
 #include <future>
+#include <stdexcept>
+#include "rtp_llm/cpp/disaggregate/cache_store/NoRdmaMemoryUtilImpl.h"
 
 namespace rtp_llm {
+
+TEST(NormalCacheStoreFailureTest, StagingExceptionCompletesRequestWithoutPublishingBlocks) {
+    struct ThrowingMemoryUtil : public NoRdmaMemoryUtilImpl {
+        bool isRdmaMode() override { throw std::runtime_error("injected staging failure"); }
+    };
+    NormalCacheStore store;
+    store.request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(std::make_shared<ThrowingMemoryUtil>());
+    auto request = std::make_shared<RequestBlockBuffer>("store-failure");
+    request->addBlock("a", std::make_shared<char>('!'), 1, false, true);
+    int callbacks = 0;
+    auto callback = [&](bool ok, CacheStoreErrorCode ec) {
+        ++callbacks;
+        EXPECT_FALSE(ok);
+        EXPECT_EQ(CacheStoreErrorCode::StoreFailed, ec);
+    };
+    auto collector = std::make_shared<CacheStoreStoreMetricsCollector>(nullptr, 1, 1);
+    EXPECT_NO_THROW(store.runStoreTask(request, callback, collector));
+    EXPECT_EQ(1, callbacks);
+    EXPECT_EQ(nullptr, store.getRequestBlockBufferStore()->getBlockBuffer("store-failure", "a"));
+}
 
 class NormalCacheStoreTest: public CacheStoreTestBase {
 protected:

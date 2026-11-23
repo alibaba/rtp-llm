@@ -21,6 +21,17 @@ TcpCacheStoreLoadServiceClosure::~TcpCacheStoreLoadServiceClosure() {
 }
 
 void TcpCacheStoreLoadServiceClosure::Run() {
+    runWithCopy([](const BlockBuffer& dst, const BlockBufferInfo& block) {
+        const auto options = torch::TensorOptions().dtype(torch::kUInt8);
+        auto dst_tensor = torch::from_blob(
+            dst.addr.get(), {int64_t(dst.len)}, options.device(dst.gpu_mem ? torch::kCUDA : torch::kCPU));
+        auto src_tensor = torch::from_blob(
+            const_cast<char*>(block.content().data()), {int64_t(block.len())}, options.device(torch::kCPU));
+        execNoBlockCopy({dst_tensor, src_tensor});
+    });
+}
+
+void TcpCacheStoreLoadServiceClosure::runWithCopy(CopyBlock copy) {
     collector_->markRequestCallEnd(currentTimeUs() - response_->response_send_start_time_us());
     if (!tryPinThreadDevice(device_id_, "cache load request")) {
         end(false, CacheStoreErrorCode::LoadErrorUnknown);
@@ -39,33 +50,41 @@ void TcpCacheStoreLoadServiceClosure::Run() {
         return;
     }
 
-    // TCP Mode 下需要Copy数据
-    if (response_->blocks_size() != request_block_buffer_->getBlocksCount()) {
+    auto targets = request_block_buffer_->getBlocks();
+    if (response_->blocks_size() != targets.size()) {
         RTP_LLM_LOG_WARNING("cache load response block count not equal to request block buffer");
         end(false, CacheStoreErrorCode::LoadBufferTimeout);
         return;
     }
 
-    for (int i = 0; i < response_->blocks_size(); i++) {
-        const auto& block        = response_->blocks(i);
-        auto        unload_block = request_block_buffer_->getBlock(block.key());
-
-        if (unload_block == nullptr || block.len() != unload_block->len) {
-            RTP_LLM_LOG_WARNING("can not find match block %s from response, request is %s",
+    // Validate the entire reply before writing any destination. The declared
+    // byte count is not proof that the protobuf actually contains those bytes.
+    std::vector<std::shared_ptr<BlockBuffer>> destinations;
+    destinations.reserve(targets.size());
+    for (const auto& block : response_->blocks()) {
+        auto it = targets.find(block.key());
+        if (it == targets.end() || !it->second || block.len() != it->second->len
+            || block.content().size() != block.len()) {
+            RTP_LLM_LOG_WARNING("invalid TCP cache block %s from response, request is %s",
                                 block.key().c_str(),
                                 request_block_buffer_->getRequestId().c_str());
             end(false, CacheStoreErrorCode::LoadBufferTimeout);
             return;
         }
-
-        auto dst_tensor = torch::from_blob(
-            unload_block->addr.get(),
-            {(int64_t)unload_block->len},
-            torch::TensorOptions().dtype(torch::kUInt8).device(unload_block->gpu_mem ? torch::kCUDA : torch::kCPU));
-        auto src_tensor = torch::from_blob(const_cast<char*>(block.content().data()),
-                                           {(int64_t)block.len()},
-                                           torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
-        execNoBlockCopy({dst_tensor, src_tensor});
+        destinations.push_back(std::move(it->second));
+        targets.erase(it);
+    }
+    try {
+        for (int i = 0; i < response_->blocks_size(); ++i) {
+            copy(*destinations[i], response_->blocks(i));
+        }
+    } catch (const std::exception& e) {
+        // Do not let a failed transfer escape the ANet IO worker or report
+        // a partially copied cache as usable.
+        RTP_LLM_LOG_WARNING(
+            "TCP cache load copy failed, request %s: %s", request_block_buffer_->getRequestId().c_str(), e.what());
+        end(false, CacheStoreErrorCode::LoadErrorUnknown);
+        return;
     }
     end(true, CacheStoreErrorCode::None);
 }

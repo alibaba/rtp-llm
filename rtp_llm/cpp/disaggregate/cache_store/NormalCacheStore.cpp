@@ -198,7 +198,14 @@ void NormalCacheStore::runStoreTask(const std::shared_ptr<RequestBlockBuffer>&  
     // store to local
     collector->markTaskRun();
 
-    auto ret = request_block_buffer_store_->setRequestBlockBuffer(request_block_buffer);
+    bool ret = false;
+    try {
+        ret = request_block_buffer_store_->setRequestBlockBuffer(request_block_buffer);
+    } catch (const std::exception& e) {
+        // The thread pool can log an exception but cannot complete this request.
+        RTP_LLM_LOG_WARNING(
+            "cache store staging failed, request %s: %s", request_block_buffer->getRequestId().c_str(), e.what());
+    }
     collector->markEnd(ret);
 
     if (!ret) {

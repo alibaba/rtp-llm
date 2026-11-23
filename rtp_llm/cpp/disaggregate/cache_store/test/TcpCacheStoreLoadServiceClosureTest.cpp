@@ -7,6 +7,7 @@
 #include "autil/EnvUtil.h"
 
 #include <limits>
+#include <stdexcept>
 
 namespace rtp_llm {
 
@@ -67,6 +68,54 @@ TEST_F(TcpCacheStoreLoadServiceClosureNoDeviceTest, testRun_DevicePinFailed) {
 #else
     GTEST_SKIP() << "device pinning is a no-op in CPU-only builds";
 #endif
+}
+
+TEST_F(TcpCacheStoreLoadServiceClosureNoDeviceTest, RejectsInvalidReplyBeforeCopyingAnyBlock) {
+    for (const bool duplicate : {false, true}) {
+        int callbacks = 0;
+        auto closure = makeClosure(arpc::ARPC_ERROR_NONE, KvCacheStoreServiceErrorCode::EC_SUCCESS,
+                                   [&](bool ok, CacheStoreErrorCode ec) {
+                                       ++callbacks;
+                                       EXPECT_FALSE(ok);
+                                       EXPECT_EQ(CacheStoreErrorCode::LoadBufferTimeout, ec);
+                                   });
+        for (const char* key : {"a", "b"}) {
+            closure->request_block_buffer_->addBlock(key, std::make_shared<char>('!'), 1, false, true);
+            auto* block = closure->response_->add_blocks();
+            block->set_key(duplicate ? "a" : key);
+            block->set_len(1);
+            block->set_content("x", duplicate || key[0] == 'a' ? 1 : 0);
+        }
+        closure->runWithCopy([](const BlockBuffer&, const BlockBufferInfo&) { ADD_FAILURE() << "unexpected copy"; });
+        EXPECT_EQ(1, callbacks);
+    }
+}
+
+TEST_F(TcpCacheStoreLoadServiceClosureNoDeviceTest, CopyExceptionFailsOnlyTheCurrentRequest) {
+    for (const bool fail : {true, false}) {
+        int callbacks = 0;
+        auto closure = makeClosure(arpc::ARPC_ERROR_NONE, KvCacheStoreServiceErrorCode::EC_SUCCESS,
+                                   [&](bool ok, CacheStoreErrorCode ec) {
+                                       ++callbacks;
+                                       EXPECT_EQ(!fail, ok);
+                                       EXPECT_EQ(fail ? CacheStoreErrorCode::LoadErrorUnknown : CacheStoreErrorCode::None, ec);
+                                   });
+        closure->request_block_buffer_->addBlock("a", std::make_shared<char>('!'), 1, false, true);
+        auto* block = closure->response_->add_blocks();
+        block->set_key("a");
+        block->set_len(1);
+        block->set_content("x", 1);
+        if (fail) {
+            EXPECT_NO_THROW(closure->runWithCopy([](const BlockBuffer&, const BlockBufferInfo&) {
+                throw std::runtime_error("injected native copy failure");
+            }));
+        } else {
+            closure->runWithCopy([](const BlockBuffer&, const BlockBufferInfo& block) {
+                EXPECT_EQ('x', block.content().data()[0]);
+            });
+        }
+        EXPECT_EQ(1, callbacks);
+    }
 }
 
 TEST_F(TcpCacheStoreLoadServiceClosureNoDeviceTest, testRun_SwitchesToRequestedDevice) {

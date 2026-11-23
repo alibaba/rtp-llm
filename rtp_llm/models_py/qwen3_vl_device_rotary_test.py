@@ -54,16 +54,28 @@ class VisionDeviceRotaryTest(unittest.TestCase):
                 "model.visual." + name: value.to(dtype=dtype, device="cpu")
                 for name, value in reference.state_dict().items()
             }
+            # The service reads visual weights as FP16 before casting to BF16.
+            # This BF16 value is halfway from zero to the smallest FP16
+            # subnormal: it rounds to zero even when random weights would hide it.
+            state["model.visual.blocks.0.attn.qkv.weight"][0, 0] = 2.0**-25
             save_file(state, str(Path(directory) / "model.safetensors"))
             reference.load_state_dict(
                 {
-                    name.removeprefix("model.visual."): value
+                    name.removeprefix("model.visual."): value.half().to(dtype)
                     for name, value in state.items()
                 }
             )
             loaded = impl.Qwen3_5MoeMixin.from_new_loader(
                 dtype, str(target), params, "fastsafetensors", None, directory
             ).mm_part
+            expected_state = reference.state_dict()
+            actual_state = loaded.visual.state_dict()
+            self.assertEqual(actual_state.keys(), expected_state.keys())
+            for name in expected_state:
+                with self.subTest(parameter=name):
+                    torch.testing.assert_close(
+                        actual_state[name], expected_state[name], rtol=0, atol=0
+                    )
             rotary = loaded.visual.rotary_pos_emb.inv_freq
             self.assertEqual(rotary.dtype, torch.float32)
             self.assertNotIn("rotary_pos_emb.inv_freq", loaded.visual.state_dict())

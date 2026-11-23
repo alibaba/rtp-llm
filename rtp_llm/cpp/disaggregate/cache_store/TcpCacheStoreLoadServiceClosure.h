@@ -35,6 +35,8 @@ public:
     void Run() override;
 
 private:
+    using CopyBlock = void (*)(const BlockBuffer&, const BlockBufferInfo&);
+    void runWithCopy(CopyBlock copy);
     void end(bool success, CacheStoreErrorCode ec);
 
 private:
