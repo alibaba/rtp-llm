@@ -3,18 +3,23 @@ package org.flexlb.service;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import org.flexlb.balance.strategy.SelectedRole;
+import org.flexlb.constant.MetricConstant;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerIdentity;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.FlexMetricType;
+import org.flexlb.metric.FlexMetricTags;
+import org.flexlb.metric.FlexMonitor;
 import org.flexlb.service.VitCacheDirectory.Candidate;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.telemetry.FlexlbTrace;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import javax.annotation.PostConstruct;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -33,17 +38,31 @@ public class VitCacheSelector {
     private static final int MAX_PENDING = 100_000;
     private static final long MAX_LOAD_AGE_NANOS = TimeUnit.SECONDS.toNanos(1);
 
+    private static final FlexMetricTags TOTAL_IMAGES = FlexMetricTags.of("kind", "total");
+    private static final FlexMetricTags HIT_IMAGES = FlexMetricTags.of("kind", "hit");
+
     private final VitCacheDirectory directory;
     private final WorkerDirectory workers;
+    private final FlexMonitor monitor;
     private final Cache<String, Placement> pending =
             Caffeine.newBuilder()
                     .maximumSize(MAX_PENDING)
                     .expireAfterWrite(MAX_PENDING_TTL_MS, TimeUnit.MILLISECONDS)
                     .build();
 
-    public VitCacheSelector(VitCacheDirectory directory, WorkerDirectory workers) {
+    public VitCacheSelector(
+            VitCacheDirectory directory, WorkerDirectory workers, FlexMonitor monitor) {
         this.directory = directory;
         this.workers = workers;
+        this.monitor = monitor;
+    }
+
+    /** Count the original image inputs at the ViT-only route entry, including duplicate keys. */
+    public void recordVitOnlyInputs(List<String> keys) {
+        if (keys != null && !keys.isEmpty()) {
+            monitor.report(MetricConstant.VIT_CACHE_AFFINITY_IMAGES, TOTAL_IMAGES, keys.size());
+            monitor.prepare(MetricConstant.VIT_CACHE_AFFINITY_IMAGES, HIT_IMAGES);
+        }
     }
 
     /** Holds the selected endpoint generation through the admission handoff. */
@@ -76,6 +95,11 @@ public class VitCacheSelector {
                     ? errorStatus(StrategyErrorType.NO_VIT_WORKER)
                     : selected.serverStatus();
         }
+    }
+
+    @PostConstruct
+    void registerMetrics() {
+        monitor.register(MetricConstant.VIT_CACHE_AFFINITY_IMAGES, FlexMetricType.COUNTER);
     }
 
     @Scheduled(fixedDelay = 5000)
@@ -207,8 +231,7 @@ public class VitCacheSelector {
             }
             int pendingHits = 0;
             for (String key : keys) {
-                Placement placement = pending.getIfPresent(key);
-                if (placement != null && placement.matches(candidate, now)) {
+                if (hasPendingPlacement(key, candidate, now)) {
                     pendingHits++;
                 }
             }
@@ -241,6 +264,9 @@ public class VitCacheSelector {
             return null;
         }
         try {
+            if (mediaCount > 0) {
+                reportTheoreticalHits(ctx.getRequest().getCacheAffinityKeys(), selected, now);
+            }
             long timeout = ctx.getRequest().getGenerateTimeout();
             long ttl =
                     timeout <= 0
@@ -258,6 +284,24 @@ public class VitCacheSelector {
         } catch (RuntimeException | Error failure) {
             result.close();
             throw failure;
+        }
+    }
+
+    private boolean hasPendingPlacement(String key, Candidate candidate, long now) {
+        Placement placement = pending.getIfPresent(key);
+        return placement != null && placement.matches(candidate, now);
+    }
+
+    private void reportTheoreticalHits(List<String> keys, Candidate selected, long now) {
+        // Use the original input list and count before publishing this route's placements.
+        int hits = 0;
+        for (String key : keys) {
+            if (selected.hasCachedImage(key) || hasPendingPlacement(key, selected, now)) {
+                hits++;
+            }
+        }
+        if (hits > 0) {
+            monitor.report(MetricConstant.VIT_CACHE_AFFINITY_IMAGES, HIT_IMAGES, hits);
         }
     }
 
