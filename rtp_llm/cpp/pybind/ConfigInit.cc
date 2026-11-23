@@ -1,11 +1,14 @@
 #define PYBIND11_DETAILED_ERROR_MESSAGES
 #include <cerrno>
 #include <cmath>
+#include <cstring>
 #include <fcntl.h>
 #include <limits>
 #include <system_error>
 #include <unistd.h>
 #include <ATen/MapAllocator.h>
+#include <ATen/StorageUtils.h>
+#include <ATen/ops/empty.h>
 #include <c10/util/ScopeExit.h>
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputClass.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTokenUtils.h"
@@ -44,8 +47,44 @@ static at::Storage mapPreprocessStorage(int borrowed_fd, size_t nbytes) {
     return at::Storage(at::Storage::use_byte_size_t(), nbytes, std::move(data));
 }
 
+// The ordinary Torch reducers preserve each view's dtype and offset and send
+// the single shared storage once per pickled result.
+static std::vector<at::Tensor> packPreprocessCpuTensors(const std::vector<at::Tensor>& tensors) {
+    constexpr size_t alignment = 64;
+    constexpr auto   max_bytes = static_cast<size_t>(std::numeric_limits<int64_t>::max());
+    TORCH_CHECK(!tensors.empty(), "preprocess tensor group is empty");
+    std::vector<size_t> offsets;
+    offsets.reserve(tensors.size());
+    size_t total_bytes = 0;
+    for (const auto& tensor : tensors) {
+        TORCH_CHECK(tensor.defined() && tensor.device().is_cpu() && tensor.layout() == at::kStrided
+                        && tensor.is_contiguous() && !tensor.requires_grad() && !tensor.is_conj() && !tensor.is_neg()
+                        && !tensor.is_quantized() && tensor.numel() > 0,
+                    "preprocess tensor group requires nonempty contiguous CPU tensors");
+        TORCH_CHECK(total_bytes <= max_bytes - (alignment - 1), "preprocess tensor group is too large");
+        total_bytes = (total_bytes + alignment - 1) & ~(alignment - 1);
+        TORCH_CHECK(tensor.nbytes() <= max_bytes - total_bytes, "preprocess tensor group is too large");
+        offsets.push_back(total_bytes);
+        total_bytes += tensor.nbytes();
+    }
+
+    at::Storage             storage(at::new_shm_fd_storage(total_bytes));
+    auto*                   destination = static_cast<char*>(storage.mutable_data());
+    std::vector<at::Tensor> views;
+    views.reserve(tensors.size());
+    for (size_t index = 0; index < tensors.size(); ++index) {
+        const auto& tensor = tensors[index];
+        const auto  offset = offsets[index];
+        std::memcpy(destination + offset, tensor.const_data_ptr(), tensor.nbytes());
+        views.push_back(at::empty({0}, tensor.options())
+                            .set_(storage, offset / tensor.element_size(), tensor.sizes(), tensor.strides()));
+    }
+    return views;
+}
+
 void registerMultimodal(py::module& m) {
     m.def("map_preprocess_storage", &mapPreprocessStorage, py::call_guard<py::gil_scoped_release>());
+    m.def("pack_preprocess_cpu_tensors", &packPreprocessCpuTensors, py::call_guard<py::gil_scoped_release>());
     m.def("get_multimodal_token_spans",
           &getMultimodalTokenSpans,
           py::arg("token_ids"),

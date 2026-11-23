@@ -24,6 +24,7 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.mm_batch_pipeline import PrefetchedMMBatch
 from rtp_llm.multimodal.mm_work_item import prepare_batch_feature_hashes
+from rtp_llm.multimodal.vit_metrics import VIT_PHASE_METRICS, report_vit_phase
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MMWorkEstimate,
     MultiModalEmbeddingInterface,
@@ -1148,6 +1149,8 @@ class MMScheduler:
             queued_chunks_at_seal=self._queue_depth(),
             **{"seal_" + reason: 1},
         )
+        if VIT_PHASE_METRICS:
+            report_vit_phase(AccMetrics.VIT_BATCH_SEAL_QPS_METRIC, 1, {"reason": reason})
         return batch
 
     def _claim_batch(

@@ -26,8 +26,14 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalInputsPB,
     MultimodalOutputPB,
 )
+from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.mm_error_messages import MMErr, media_error_detail, raise_mm
 from rtp_llm.multimodal.url_cache import URLDataCache
+from rtp_llm.multimodal.vit_metrics import (
+    VIT_PHASE_METRICS,
+    record_vit_preprocess_value,
+    vit_http_phase_timer,
+)
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.telemetry import vit_media
 from rtp_llm.utils.base_model_datatypes import MMUrlType
@@ -123,6 +129,10 @@ def request_get(url, headers, timeout=None, *, deadline=None, cancellation_event
         except requests.exceptions.ConnectTimeout:
             if retry_count == CONNECT_TIMEOUT_RETRIES:
                 raise
+            if VIT_PHASE_METRICS:
+                record_vit_preprocess_value(
+                    AccMetrics.VIT_HTTP_CONNECT_RETRY_QPS_METRIC, 1
+                )
             logger.warning(
                 "multimodal download connect timeout; retrying request (%d/%d)",
                 retry_count + 1,
@@ -333,12 +343,16 @@ def _download_http_content(
 
     response = None
     try:
-        if deadline is None and cancellation_event is None:
-            response = request_get(url, headers)
-        else:
-            response = request_get(
-                url, headers, deadline=deadline, cancellation_event=cancellation_event
-            )
+        with vit_http_phase_timer("headers"):
+            if deadline is None and cancellation_event is None:
+                response = request_get(url, headers)
+            else:
+                response = request_get(
+                    url,
+                    headers,
+                    deadline=deadline,
+                    cancellation_event=cancellation_event,
+                )
         if response.status_code != 200:
             raise_mm(
                 f"{MMErr.DL_FAILED}: HTTP {response.status_code}",
@@ -357,14 +371,19 @@ def _download_http_content(
 
         content = BytesIO()
         downloaded_bytes = 0
-        for chunk in response.iter_content(chunk_size=1024 * 1024):
+        with vit_http_phase_timer("body"):
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                _check_download(deadline, cancellation_event)
+                if not chunk:
+                    continue
+                downloaded_bytes += len(chunk)
+                _validate_file_size(downloaded_bytes, max_file_size_kb)
+                content.write(chunk)
             _check_download(deadline, cancellation_event)
-            if not chunk:
-                continue
-            downloaded_bytes += len(chunk)
-            _validate_file_size(downloaded_bytes, max_file_size_kb)
-            content.write(chunk)
-        _check_download(deadline, cancellation_event)
+        if VIT_PHASE_METRICS:
+            record_vit_preprocess_value(
+                GaugeMetrics.VIT_HTTP_BODY_BYTES_METRIC, downloaded_bytes
+            )
         content.seek(0)
         return content
     except FtRuntimeException:
@@ -479,6 +498,12 @@ def get_bytes_io_from_url(
         _check_download(deadline, cancellation_event)
         _validate_file_size(source.getbuffer().nbytes, max_file_size_kb)
         vit_media.download_cache_hit()
+    if VIT_PHASE_METRICS:
+        record_vit_preprocess_value(
+            AccMetrics.VIT_URL_SOURCE_QPS_METRIC,
+            1,
+            {"source": "cache" if hit else "load"},
+        )
     return source
 
 

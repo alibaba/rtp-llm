@@ -20,10 +20,12 @@ from urllib3.exceptions import ProtocolError, ReadTimeoutError
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.mm_download_domains import check_download_urls
-from rtp_llm.metrics import GaugeMetrics
+from rtp_llm.metrics import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.mm_error_messages import MMErr, media_error_detail
 from rtp_llm.multimodal.vit_metrics import (
+    VIT_PHASE_METRICS,
     record_vit_preprocess_value,
+    vit_http_phase_timer,
     vit_preprocess_timer,
 )
 from rtp_llm.telemetry import vit_media
@@ -119,6 +121,12 @@ def load_image_source(
                 ExceptionType.INVALID_PARAMS, "Multimodal file size is too large"
             )
         vit_media.download_cache_hit()
+    if VIT_PHASE_METRICS:
+        record_vit_preprocess_value(
+            AccMetrics.VIT_URL_SOURCE_QPS_METRIC,
+            1,
+            {"source": "cache" if hit else "load"},
+        )
     return content
 
 
@@ -138,27 +146,34 @@ def _download_image_source(
         download_recorded = False
         try:
             _check_download(deadline, cancellation_event)
-            with request_get(
-                url,
-                _get_http_heads(download_headers),
-                timeout=(_IMAGE_CONNECT_TIMEOUT_S, _IMAGE_READ_TIMEOUT_S),
-                deadline=deadline,
-                cancellation_event=cancellation_event,
-            ) as response:
+            with vit_http_phase_timer("headers"):
+                reply = request_get(
+                    url,
+                    _get_http_heads(download_headers),
+                    timeout=(_IMAGE_CONNECT_TIMEOUT_S, _IMAGE_READ_TIMEOUT_S),
+                    deadline=deadline,
+                    cancellation_event=cancellation_event,
+                )
+            with reply as response:
                 status = response.status_code
                 if status in (408, 429, 500, 502, 503, 504):
                     raise requests.ConnectionError("temporary image download failure")
                 if status != 200:
                     raise ValueError("image download failed")
                 content = BytesIO()
-                for chunk in _image_download_chunks(
-                    response, deadline, cancellation_event
-                ):
+                with vit_http_phase_timer("body"):
+                    for chunk in _image_download_chunks(
+                        response, deadline, cancellation_event
+                    ):
+                        _check_download(deadline, cancellation_event)
+                        if content.tell() + len(chunk) > max_bytes:
+                            raise ValueError("Multimodal file size is too large")
+                        content.write(chunk)
                     _check_download(deadline, cancellation_event)
-                    if content.tell() + len(chunk) > max_bytes:
-                        raise ValueError("Multimodal file size is too large")
-                    content.write(chunk)
-                _check_download(deadline, cancellation_event)
+                if VIT_PHASE_METRICS:
+                    record_vit_preprocess_value(
+                        GaugeMetrics.VIT_HTTP_BODY_BYTES_METRIC, content.tell()
+                    )
                 content.seek(0)
             return content
         except (
@@ -213,10 +228,13 @@ def _download_image_source(
                     f"Temporary multimodal download failure: {detail}",
                 ) from error
             delay = min(0.2 * 2**attempt, remaining)
-            if cancellation_event is not None:
-                cancellation_event.wait(delay)
-            else:
-                time.sleep(delay)
+            if VIT_PHASE_METRICS:
+                record_vit_preprocess_value(AccMetrics.VIT_HTTP_SOURCE_RETRY_QPS_METRIC, 1)
+            with vit_http_phase_timer("backoff"):
+                if cancellation_event is not None:
+                    cancellation_event.wait(delay)
+                else:
+                    time.sleep(delay)
             # The next attempt checks cancellation/deadline inside the try, so
             # backoff deadline expiry keeps the same download error contract.
         finally:
