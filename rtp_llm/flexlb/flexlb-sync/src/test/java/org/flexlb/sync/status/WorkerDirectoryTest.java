@@ -146,7 +146,7 @@ class WorkerDirectoryTest {
         assertEquals(
                 List.of(matching.getLogicalIpPort()),
                 workerDirectory.endpointAddresses(RoleType.DECODE, "group1"));
-        assertEquals(2, workerDirectory.routingCapacity(RoleType.DECODE));
+        assertEquals(2, registry.endpointAddressSnapshot(RoleType.DECODE).size());
     }
 
     @Test
