@@ -10,9 +10,9 @@ import org.flexlb.cache.domain.CacheMatchQuery;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
-import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
@@ -625,15 +625,17 @@ public class CostBasedPrefillStrategy {
                 workerDirectory.prefillRoutingSnapshot(roleType);
         List<EndpointRegistry.PrefillRoutingEntry> matching = new ArrayList<>();
         int registered = 0;
-        boolean preemptQueued = context.getConfig().allowsPreemption(VictimStage.PREFILL_QUEUED);
+        var config = context.getConfig();
+        boolean queuedRoutes =
+                config.isQueue()
+                        && config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH;
         for (EndpointRegistry.PrefillRoutingEntry entry : directory) {
             PrefillEndpoint endpoint = entry.endpoint();
             if (group != null && !group.equals(endpoint.getStatus().topologySnapshot().group())) {
                 continue;
             }
             registered++;
-            if (endpoint.canAcceptRequest()
-                    || preemptQueued && endpoint.canPreemptQueuedRequest(context.getPriority())) {
+            if (queuedRoutes || endpoint.canAcceptRequest()) {
                 matching.add(entry);
             }
         }

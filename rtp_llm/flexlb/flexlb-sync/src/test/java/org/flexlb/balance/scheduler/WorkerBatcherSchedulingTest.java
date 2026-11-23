@@ -362,16 +362,6 @@ class WorkerBatcherSchedulingTest {
             decision.setMaxCollectionWaitMs(windowMs);
         }
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
-        when(endpoint.reserveRouteOwnership(
-                        org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyLong()))
-                .thenAnswer(
-                        ignored ->
-                                new org.flexlb.balance.endpoint.PrefillState.ReservationResult<>(
-                                        org.flexlb.balance.endpoint.PrefillState.CapacityStatus
-                                                .ACQUIRED,
-                                        mock(
-                                                org.flexlb.balance.endpoint.PrefillState
-                                                        .RouteReservation.class)));
         DeliveryStrategy delivery = mock(DeliveryStrategy.class);
         List<org.flexlb.dao.pv.DecisionGroup> published = new CopyOnWriteArrayList<>();
         when(delivery.prepare(
