@@ -41,8 +41,12 @@ void deepselect_bf16_dense_sorted(const torch::Tensor& logits, const torch::Tens
 void deepselect_bf16_candidates(const torch::Tensor& scores, const torch::Tensor& ends, torch::Tensor& output);
 
 // Draft selection support: FP32 [B,V] logits with unit inner stride, B <= 65535,
-// native K in {512,1024,4096}, V >= K, padded V < 2^23, CUDA SM100/SM103.
+// native K in {512,1024,4096}, V >= K, padded V < 2^23, CUDA SM100/SM103
+// or SM90 when its native image is compiled into this build.
 bool draft_markov_topk_bf16_supported(const torch::Tensor& logits, int64_t k);
+
+// Apply the sampler threshold as well: SM90 B >= 1, SM100/SM103 B >= 16.
+bool draft_markov_topk_bf16_sampling_supported(const torch::Tensor& logits, int64_t k);
 
 // Form BF16 corrected scores, select K, then divide selected values by temperature.
 // Bias is contiguous BF16 [B,V]; temperature is contiguous FP32 [B], finite and

@@ -15,11 +15,13 @@
 #include <iostream>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 #include <torch/all.h>
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #if USING_CUDA
+#include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_bf16_dispatch.h"
 #include <ATen/autocast_mode.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/util/ScopeExit.h>
@@ -38,6 +40,29 @@
 namespace rtp_llm {
 namespace speculative {
 namespace {
+
+#if USING_CUDA
+TEST(DSparkBf16DispatchTest, ArchitectureAndCompiledImageSelectTheThreshold) {
+    for (bool has_sm90_image : {false, true}) {
+        const auto hopper = torch_ext::draftBf16Dispatch(9, 0, has_sm90_image);
+        EXPECT_EQ(hopper.supported, has_sm90_image);
+        EXPECT_EQ(hopper.min_batch, 1);
+        EXPECT_FALSE(hopper.supportsBatch(0));
+        EXPECT_EQ(hopper.supportsBatch(1), has_sm90_image);
+        for (int minor : {0, 3}) {
+            const auto blackwell = torch_ext::draftBf16Dispatch(10, minor, has_sm90_image);
+            EXPECT_TRUE(blackwell.supported);
+            EXPECT_EQ(blackwell.min_batch, 16);
+            EXPECT_FALSE(blackwell.supportsBatch(1));
+            EXPECT_FALSE(blackwell.supportsBatch(15));
+            EXPECT_TRUE(blackwell.supportsBatch(16));
+        }
+        for (const auto& arch : {std::pair<int, int>{8, 9}, {9, 1}, {10, 1}, {12, 0}}) {
+            EXPECT_FALSE(torch_ext::draftBf16Dispatch(arch.first, arch.second, has_sm90_image).supported);
+        }
+    }
+}
+#endif
 
 TEST(FastTopKSamplerTest, TopKOneReturnsArgmaxIndex) {
     FastTopKSampler sampler;
@@ -1575,8 +1600,10 @@ TEST(DSparkBf16DraftTest, ConditionalDistributionAndRngAcrossDispatchBoundary) {
     constexpr int64_t          vocab = 2051, rank = 32, gamma = 3, k = 1024;
     auto                       probe = torch::empty({16, vocab}, opts);
     if (!torch_ext::draft_markov_topk_bf16_supported(probe, k)) {
-        GTEST_SKIP() << "BF16 draft selection requires SM100/SM103";
+        GTEST_SKIP() << "BF16 draft selection is unavailable on this architecture/build";
     }
+    const auto* properties = at::cuda::getDeviceProperties(0);
+    const bool  sm90       = properties->major == 9 && properties->minor == 0;
     for (int64_t batch : {1, 15, 16, 48}) {
         for (bool mapped : {false, true}) {
             SCOPED_TRACE(::testing::Message() << "batch=" << batch << " mapped=" << mapped);
@@ -1598,7 +1625,7 @@ TEST(DSparkBf16DraftTest, ConditionalDistributionAndRngAcrossDispatchBoundary) {
                 auto          bias      = torch_ext::cublas_gemm_bf16_bf16_fp32(embedding, w2);
                 torch::Tensor expected_q;
                 torch::Tensor expected_ids;
-                if (batch >= 16) {
+                if (sm90 || batch >= 16) {
                     auto rounded = (logits.view({batch, gamma, vocab}).select(1, step)
                                     + bias.to(torch::kBFloat16).to(torch::kFloat32))
                                        .to(torch::kBFloat16)
@@ -3019,6 +3046,257 @@ TEST(DSparkFusedDraftSampleTest, MatchesTargetCompactPathAcrossBoundaries) {
     // per-row logit scale, success tensor populated.
     runTargetProbe({/*rows=*/256, /*with_success=*/true, /*with_scale=*/true, {0.5f, 0.95f, 0.99f}});
 }
+
+#if USING_CUDA
+bool sm90LowBatchDraftAvailable() {
+    const auto* properties = at::cuda::getDeviceProperties(0);
+    const auto  probe      = torch::empty({1, 512}, torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32));
+    return properties->major == 9 && properties->minor == 0 && torch_ext::draft_markov_topk_bf16_supported(probe, 512);
+}
+
+void checkSm90LowBatchDraftReference(int64_t batch, int64_t k, bool mapped, int64_t minimum) {
+    const auto        opts  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    constexpr int64_t vocab = 8201, rank = 32, gamma = 3;
+    torch::manual_seed(20261122);
+    auto logits = torch::randn({batch * gamma, vocab}, opts) * 0.5;
+    // Dyadic weights make the FP32 dot products exact. The reference can
+    // independently use ATen matmul rather than the native GEMM under test.
+    auto               w1           = (torch::randint(-4, 5, {vocab, rank}, opts) * 0.125).to(torch::kBFloat16);
+    auto               w2           = (torch::randint(-4, 5, {vocab, rank}, opts) * 0.125).to(torch::kBFloat16);
+    auto               w2_fp32      = w2.to(torch::kFloat32);
+    auto               anchors      = torch::arange(batch, opts.dtype(torch::kInt32));
+    auto               temperatures = torch::linspace(0.5, 0.9, batch, opts);
+    auto               map = mapped ? torch::arange(vocab, opts.dtype(torch::kLong)).flip({0}) : torch::Tensor();
+    SpeculativeSampler sampler(map, gamma);
+    torch::manual_seed(7731);
+    auto actual     = sampler.sampleDSparkDraft(logits, anchors, temperatures, {}, {}, w1, w2, vocab, false, k);
+    auto actual_rng = torch::rand({16}, opts);
+    auto previous   = anchors.to(torch::kLong);
+    torch::manual_seed(7731);
+    for (int64_t step = 0; step < gamma; ++step) {
+        auto       bias        = torch::mm(w1.index_select(0, previous).to(torch::kFloat32), w2_fp32.transpose(0, 1));
+        auto       step_logits = logits.view({batch, gamma, vocab}).select(1, step);
+        const bool bf16        = batch >= minimum;
+        auto       scores =
+            bf16 ?
+                      (step_logits + bias.to(torch::kBFloat16).to(torch::kFloat32)).to(torch::kBFloat16).to(torch::kFloat32) :
+                      torch_ext::markov_scaled_logits(step_logits, bias, temperatures);
+        if (!bf16) {
+            EXPECT_TRUE(torch::allclose(scores, (step_logits + bias) / temperatures.unsqueeze(1), 1e-6, 1e-6));
+        }
+        auto ids       = mapped ? std::get<1>(actual.all_probs.select(1, step).topk(k, -1, true, false)) :
+                                  actual.all_probs_indices.select(1, step).to(torch::kLong);
+        auto selected  = scores.gather(1, ids);
+        auto remaining = scores.scatter(1, ids, -std::numeric_limits<float>::infinity());
+        EXPECT_TRUE(remaining.amax(1).le(selected.amin(1)).all().item<bool>());
+        auto expected_q = torch::softmax(bf16 ? selected / temperatures.unsqueeze(1) : selected, -1);
+        auto expected   = torch::zeros({batch, vocab}, opts).scatter_(1, ids, expected_q);
+        auto actual_q   = mapped ? actual.all_probs.select(1, step) :
+                                   torch::zeros_like(expected).scatter_(1, ids, actual.all_probs.select(1, step));
+        EXPECT_TRUE(torch::allclose(actual_q, expected, 1e-4, 1e-6));
+        auto tokens       = actual.token_ids.select(1, step).to(torch::kLong);
+        auto draft_tokens = mapped ? map.index_select(0, tokens) : tokens;
+        EXPECT_TRUE(actual_q.gather(1, draft_tokens.unsqueeze(1)).gt(0).all().item<bool>());
+        auto slots = execSampleFromProbs(mapped ? expected_q : actual.all_probs.select(1, step).contiguous())
+                         .to(torch::kLong)
+                         .unsqueeze(1);
+        if (!mapped) {
+            EXPECT_TRUE(torch::equal(ids.gather(1, slots).squeeze(1), tokens));
+        }
+        previous = tokens;
+    }
+    EXPECT_TRUE(torch::equal(actual_rng, torch::rand({16}, opts)));
+}
+
+TEST(DSparkLowBatchBf16Test, Sm90MatchesReferenceAndRngAtEveryLowBatch) {
+    const c10::cuda::CUDAGuard guard(0);
+    if (!sm90LowBatchDraftAvailable()) {
+        GTEST_SKIP() << "Requires the compiled SM90 draft BF16 image";
+    }
+    for (int64_t batch = 1; batch < 16; ++batch) {
+        for (int64_t k : {512, 1024, 4096}) {
+            for (bool mapped : {false, true}) {
+                SCOPED_TRACE(::testing::Message() << "batch=" << batch << " k=" << k << " mapped=" << mapped);
+                checkSm90LowBatchDraftReference(batch, k, mapped, 1);
+            }
+        }
+    }
+}
+
+TEST(DSparkLowBatchBf16Test, ArchitectureThresholdPreservesBothDispatches) {
+    const c10::cuda::CUDAGuard guard(0);
+    const auto                 opts  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    auto                       probe = torch::empty({16, 512}, opts);
+    if (!torch_ext::draft_markov_topk_bf16_supported(probe, 512)) {
+        GTEST_SKIP() << "BF16 draft selection is unavailable on this architecture/build";
+    }
+    const auto*   properties = at::cuda::getDeviceProperties(0);
+    const int64_t expected   = properties->major == 9 && properties->minor == 0 ? 1 : 16;
+    for (int64_t batch : {0, 1, 3, 4, 7, 8, 15, 16}) {
+        EXPECT_EQ(torch_ext::draft_markov_topk_bf16_sampling_supported(probe.narrow(0, 0, batch), 512),
+                  batch >= expected);
+        if (batch == 0) {
+            continue;
+        }
+        for (bool mapped : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "minimum=" << expected << " batch=" << batch << " mapped=" << mapped);
+            checkSm90LowBatchDraftReference(batch, 512, mapped, expected);
+        }
+    }
+}
+
+TEST(DSparkLowBatchBf16Test, GreedyPointMassTokensAndRngRemainUnchanged) {
+    const c10::cuda::CUDAGuard guard(0);
+    if (!sm90LowBatchDraftAvailable()) {
+        GTEST_SKIP() << "Requires the compiled SM90 draft BF16 image";
+    }
+    const auto        opts  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    constexpr int64_t vocab = 2051, rank = 32, gamma = 3;
+    for (int64_t batch : {1, 3, 8, 15, 16}) {
+        torch::manual_seed(7731);
+        auto               logits       = torch::randn({batch * gamma, vocab}, opts);
+        auto               w1           = torch::randn({vocab, rank}, opts).to(torch::kBFloat16);
+        auto               w2           = torch::randn({vocab, rank}, opts).to(torch::kBFloat16);
+        auto               anchors      = torch::arange(batch, opts.dtype(torch::kInt32));
+        auto               temperatures = torch::ones({batch}, opts);
+        SpeculativeSampler sampler({}, gamma);
+        torch::Tensor      tokens, rng;
+        for (int width : {0, 512}) {
+            torch::manual_seed(101);
+            auto actual = sampler.sampleDSparkDraft(logits, anchors, temperatures, {}, {}, w1, w2, vocab, true, width);
+            ASSERT_TRUE(actual.token_ids_are_point_mass);
+            EXPECT_FALSE(actual.all_probs.defined());
+            auto after = torch::rand({16}, opts);
+            if (!tokens.defined()) {
+                tokens = actual.token_ids.clone();
+                rng    = after;
+            } else {
+                EXPECT_TRUE(torch::equal(tokens, actual.token_ids));
+                EXPECT_TRUE(torch::equal(rng, after));
+            }
+        }
+    }
+}
+
+TEST(DSparkLowBatchBf16Test, UnsupportedInputsKeepTheFallback) {
+    const c10::cuda::CUDAGuard guard(0);
+    const auto                 opts   = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    auto                       logits = torch::empty({16, 2051}, opts);
+    for (int width : {0, 1, 511, 513, 2048, 4096}) {
+        EXPECT_FALSE(torch_ext::draft_markov_topk_bf16_sampling_supported(logits, width));
+    }
+    EXPECT_FALSE(torch_ext::draft_markov_topk_bf16_sampling_supported({}, 512));
+    EXPECT_FALSE(torch_ext::draft_markov_topk_bf16_sampling_supported(logits.to(torch::kBFloat16), 512));
+    EXPECT_FALSE(torch_ext::draft_markov_topk_bf16_sampling_supported(logits.transpose(0, 1), 512));
+    EXPECT_FALSE(torch_ext::draft_markov_topk_bf16_sampling_supported(logits.to(torch::kCPU), 512));
+}
+
+// Explicit opt-in keeps timing/profiling out of ordinary correctness runs.
+TEST(DSparkLowBatchBf16Test, DISABLED_ProductionShapeBenchmark) {
+    const c10::cuda::CUDAGuard guard(0);
+    if (!sm90LowBatchDraftAvailable()) {
+        GTEST_SKIP() << "Requires a compiled SM90 BF16 draft image";
+    }
+    const char* output_dir = std::getenv("TEST_UNDECLARED_OUTPUTS_DIR");
+    ASSERT_NE(output_dir, nullptr);
+    ASSERT_NE(*output_dir, '\0');
+    namespace tap = torch::autograd::profiler;
+    namespace tpi = torch::profiler::impl;
+    const torch::NoGradGuard no_grad;
+    const auto               opts   = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    const auto               stream = at::cuda::getCurrentCUDAStream();
+    constexpr int64_t        vocab = 129280, rank = 256, gamma = 5;
+    constexpr int            warmup = 30, repetitions = 100, chunks = 3, profile_calls = 5;
+    torch::manual_seed(20261123);
+    auto        weight = (torch::randn({vocab, rank}, opts) * 0.1).to(torch::kBFloat16);
+    cudaEvent_t begin, end;
+    ASSERT_EQ(cudaEventCreate(&begin), cudaSuccess);
+    ASSERT_EQ(cudaEventCreate(&end), cudaSuccess);
+    auto cleanup = c10::make_scope_exit([&]() {
+        cudaEventDestroy(begin);
+        cudaEventDestroy(end);
+    });
+    for (int64_t batch = 1; batch <= 16; ++batch) {
+        // Match the proposal's real Gamma*V row stride. Input allocation is
+        // outside timing; output/workspace allocation inside native calls stays.
+        auto logits = torch::empty({batch, gamma, vocab}, opts).select(1, 0);
+        logits.normal_(0, 0.5);
+        auto embedding   = (torch::randn({batch, rank}, opts) * 0.1).to(torch::kBFloat16);
+        auto temperature = torch::full({batch}, 0.6f, opts);
+        auto bias_fp32   = torch::empty({batch, vocab}, opts);
+        auto bias_bf16   = torch::empty({batch, vocab}, opts.dtype(torch::kBFloat16));
+        for (int64_t k : {512, 1024, 4096}) {
+            SCOPED_TRACE(::testing::Message() << "batch=" << batch << " K=" << k);
+            ASSERT_TRUE(torch_ext::draft_markov_topk_bf16_sampling_supported(logits, k));
+            auto run = [&](bool bf16) {
+                auto bias = torch_ext::cublas_gemm_bf16_bf16_out(
+                    embedding, weight, bf16 ? bias_bf16 : bias_fp32, bf16 ? torch::kBFloat16 : torch::kFloat32);
+                return bf16 ? torch_ext::draft_markov_topk_bf16(logits, bias, temperature, k) :
+                              torch_ext::draft_markov_topk(logits, bias, temperature, k);
+            };
+            // Verify both paths' score/support contracts at production shapes.
+            for (bool bf16 : {false, true}) {
+                auto [values, ids] = run(bf16);
+                ASSERT_TRUE(ids.ge(0).logical_and(ids.lt(vocab)).all().item<bool>());
+                auto sorted = std::get<0>(ids.sort(1));
+                ASSERT_TRUE(sorted.narrow(1, 1, k - 1).ne(sorted.narrow(1, 0, k - 1)).all().item<bool>());
+                auto scores   = bf16 ? (logits + bias_bf16.to(torch::kFloat32)).to(torch::kBFloat16).to(torch::kFloat32)
+                                         / temperature.unsqueeze(1) :
+                                       torch_ext::markov_scaled_logits(logits, bias_fp32, temperature);
+                auto selected = scores.gather(1, ids.to(torch::kLong));
+                ASSERT_TRUE(torch::allclose(values, selected, 1e-5, 1e-6));
+                auto remaining = scores.scatter(1, ids.to(torch::kLong), -std::numeric_limits<float>::infinity());
+                ASSERT_TRUE(remaining.amax(1).le(selected.amin(1)).all().item<bool>());
+                for (int i = 0; i < warmup; ++i) {
+                    run(bf16);
+                }
+            }
+            for (int chunk = 0; chunk < chunks; ++chunk) {
+                for (int kind = 0; kind < 2; ++kind) {
+                    const bool bf16 = (chunk + batch + kind) % 2 != 0;
+                    stream.synchronize();
+                    ASSERT_EQ(cudaEventRecord(begin, stream.stream()), cudaSuccess);
+                    for (int i = 0; i < repetitions; ++i) {
+                        run(bf16);
+                    }
+                    ASSERT_EQ(cudaEventRecord(end, stream.stream()), cudaSuccess);
+                    ASSERT_EQ(cudaEventSynchronize(end), cudaSuccess);
+                    float milliseconds = 0.0f;
+                    ASSERT_EQ(cudaEventElapsedTime(&milliseconds, begin, end), cudaSuccess);
+                    // Stream latency includes eager submission gaps, not just
+                    // kernel time. The separate trace supplies kernel sums.
+                    std::cout << "DSPARK_BF16_BENCH {\"batch\":" << batch << ",\"k\":" << k
+                              << ",\"bf16\":" << (bf16 ? "true" : "false") << ",\"chunk\":" << chunk
+                              << ",\"event_us\":" << milliseconds * 1000.0 / repetitions << ",\"warmup\":" << warmup
+                              << ",\"repetitions\":" << repetitions << "}" << std::endl;
+                }
+            }
+            stream.synchronize();
+            tpi::ProfilerConfig               config(tpi::ProfilerState::KINETO, /*report_input_shapes=*/false);
+            const std::set<tpi::ActivityType> activities{tpi::ActivityType::CPU, tpi::ActivityType::CUDA};
+            tap::prepareProfiler(config, activities);
+            tap::enableProfiler(config, activities);
+            try {
+                for (int kind = 0; kind < 2; ++kind) {
+                    for (int call = 0; call < profile_calls; ++call) {
+                        RTP_LLM_PROFILE_SCOPE_DYNAMIC(
+                            "bf16_dispatch_bench(batch=%ld,k=%ld,bf16=%d,call=%d)", batch, k, kind, call);
+                        run(kind != 0);
+                    }
+                    stream.synchronize();
+                }
+            } catch (...) {
+                tap::disableProfiler();
+                throw;
+            }
+            auto trace = tap::disableProfiler();
+            ASSERT_NE(trace, nullptr);
+            trace->save(std::string(output_dir) + "/bf16_dispatch_b" + std::to_string(batch) + "_k" + std::to_string(k)
+                        + ".json");
+        }
+    }
+}
+#endif
 
 }  // namespace
 }  // namespace speculative

@@ -476,12 +476,20 @@ cc_library(
 cc_library(
     name = "deepselect_bf16",
     srcs = ["deepselect_bf16.cu"],
-    hdrs = ["deepselect_bf16.h"] + glob([
+    hdrs = [
+        "deepselect_bf16.h",
+        "deepselect_bf16_dispatch.h",
+    ] + glob([
         "deepselect/**/*.h",
         "deepselect/**/*.cuh",
     ]),
     copts = copts() + cuda_default_copts_without_arch() + select({
-        "@//:using_cuda13_x86": deepselect_cuda_copts,
+        # The Hopper draft path needs its own native image. Keep the
+        # existing Blackwell cubins and leave target/attention eligibility strict.
+        "@//:using_cuda13_x86": deepselect_cuda_copts + [
+            "-DRTP_DEEPSELECT_BF16_SM90_IMAGE=1",
+            "--cuda-include-ptx=sm_90a", "--cuda-gpu-arch=sm_90a",
+        ],
         "@//:using_cuda13_arm": deepselect_cuda_copts,
         "@//:using_cuda12_9": deepselect_cuda_copts,
         "//conditions:default": [],

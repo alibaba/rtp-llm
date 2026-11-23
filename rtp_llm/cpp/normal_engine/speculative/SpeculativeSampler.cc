@@ -808,9 +808,8 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
     torch::Tensor markov_embedding;
 #if USING_CUDA
     const bool bf16_draft_topk =
-        batch_size >= 16 && compact_width > 0 && markov_w1.scalar_type() == torch::kBFloat16
-        && markov_w2.scalar_type() == torch::kBFloat16
-        && torch_ext::draft_markov_topk_bf16_supported(proposal_logits.select(1, 0), compact_width);
+        compact_width > 0 && markov_w1.scalar_type() == torch::kBFloat16 && markov_w2.scalar_type() == torch::kBFloat16
+        && torch_ext::draft_markov_topk_bf16_sampling_supported(proposal_logits.select(1, 0), compact_width);
     // Reuse the bias buffer after selection on the same stream.
     torch::Tensor markov_bias_buffer;
 #endif

@@ -1,4 +1,5 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_bf16.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_bf16_dispatch.h"
 
 #include <cuda_runtime.h>
 #include <cstdint>
@@ -246,7 +247,9 @@ void deepselect_bf16_dense_sorted(const torch::Tensor& logits, const torch::Tens
     deepselect_bf16_impl<true, false, true>(logits, ends, output, false);
 }
 
-bool draft_markov_topk_bf16_supported(const torch::Tensor& logits, int64_t k) {
+namespace {
+
+bool draftMarkovTopkBf16Supported(const torch::Tensor& logits, int64_t k, bool for_sampling) {
 #if !defined(USE_ROCM) && CUDART_VERSION >= 12090
     if (!logits.defined() || !logits.is_cuda() || logits.scalar_type() != torch::kFloat32 || logits.dim() != 2
         || logits.stride(1) != 1 || logits.size(0) > 65535) {
@@ -260,12 +263,29 @@ bool draft_markov_topk_bf16_supported(const torch::Tensor& logits, int64_t k) {
         return false;
     }
     const auto* properties = at::cuda::getDeviceProperties(logits.get_device());
-    return properties->major == 10 && (properties->minor == 0 || properties->minor == 3);
+#if defined(RTP_DEEPSELECT_BF16_SM90_IMAGE)
+    constexpr bool has_sm90_image = true;
+#else
+    constexpr bool has_sm90_image = false;
+#endif
+    const auto dispatch = draftBf16Dispatch(properties->major, properties->minor, has_sm90_image);
+    return for_sampling ? dispatch.supportsBatch(logits.size(0)) : dispatch.supported;
 #else
     (void)logits;
     (void)k;
+    (void)for_sampling;
     return false;
 #endif
+}
+
+}  // namespace
+
+bool draft_markov_topk_bf16_supported(const torch::Tensor& logits, int64_t k) {
+    return draftMarkovTopkBf16Supported(logits, k, false);
+}
+
+bool draft_markov_topk_bf16_sampling_supported(const torch::Tensor& logits, int64_t k) {
+    return draftMarkovTopkBf16Supported(logits, k, true);
 }
 
 std::tuple<torch::Tensor, torch::Tensor> draft_markov_topk_bf16(const torch::Tensor& logits,
@@ -273,9 +293,10 @@ std::tuple<torch::Tensor, torch::Tensor> draft_markov_topk_bf16(const torch::Ten
                                                                 const torch::Tensor& temperature,
                                                                 int64_t              k) {
 #if !defined(USE_ROCM) && CUDART_VERSION >= 12090
-    TORCH_CHECK(draft_markov_topk_bf16_supported(logits, k),
-                "draft BF16 topk requires SM100/SM103, FP32 [B,V] logits with unit inner stride, B <= 65535, "
-                "K in {512,1024,4096}, K <= V and padded V < 2^23");
+    TORCH_CHECK(
+        draft_markov_topk_bf16_supported(logits, k),
+        "draft BF16 topk requires SM100/SM103 or a compiled SM90 image, FP32 [B,V] logits with unit inner stride, B <= 65535, "
+        "K in {512,1024,4096}, K <= V and padded V < 2^23");
     const int64_t rows  = logits.size(0);
     const int64_t vocab = logits.size(1);
     TORCH_CHECK(markov_bias.is_cuda() && markov_bias.scalar_type() == torch::kBFloat16 && markov_bias.is_contiguous()
