@@ -216,13 +216,18 @@ class BackendManager(object):
             self.engine.task_type,
         )
 
-    def serve_forever(self):
+    def serve_forever(self, service_draining=None):
         """Enter service loop to keep the process alive until shutdown is requested"""
         # freeze all current tracked objects to reduce gc cost
         gc.collect()
         gc.freeze()
         logging.info("BackendManager entering serve_forever loop")
         while not self._shutdown_requested.is_set():
+            if service_draining is not None and service_draining.value:
+                from rtp_llm.ops import RtpLLMOp
+
+                RtpLLMOp.mark_metrics_draining()
+                service_draining = None  # The notification is terminal for this rank.
             time.sleep(0.1)  # Check shutdown flag more frequently
         logging.info("Shutdown requested, stopping BackendManager...")
         self.stop()

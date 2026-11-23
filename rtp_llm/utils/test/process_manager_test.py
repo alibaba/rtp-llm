@@ -69,6 +69,16 @@ def signal_handler_worker(queue):
 
 
 class TestProcessManager(unittest.TestCase):
+    def test_deferred_sigterm_marks_engine_metrics_draining(self):
+        draining = multiprocessing.get_context("spawn").RawValue("b", False)
+        with patch.object(ProcessManager, "_setup_signal_handlers"), patch.object(
+            ProcessManager, "_defer_first_sigterm_if_needed", return_value=True
+        ):
+            manager = ProcessManager(service_draining=draining)
+            manager._signal_handler(signal.SIGTERM, None)
+            self.assertTrue(draining.value)
+            self.assertFalse(manager.shutdown_requested)
+
 
     def setUp(self):
         """Set up test fixtures"""

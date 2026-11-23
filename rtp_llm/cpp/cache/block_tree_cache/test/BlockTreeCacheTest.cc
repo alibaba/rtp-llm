@@ -29,6 +29,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include "rtp_llm/cpp/metrics/RpcFailureMetrics.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
@@ -858,10 +859,11 @@ TEST(BlockTreeCacheMetricsTest, PoolIOMetricsOnlyReportPopulatedValues) {
     EXPECT_EQ(metricSeriesCount(metrics->write_bandwidth_bytes_per_sec_metric), 1u);
     kmonitor::MetricsTags tags("pool_name", "DISK");
     tags.AddTag("tier", "DISK");
-    EXPECT_DOUBLE_EQ(snapshotQps(metrics->read_bytes_metric, tags), 24576);
-    EXPECT_DOUBLE_EQ(snapshotQps(metrics->write_bytes_metric, tags), 8192);
-    EXPECT_DOUBLE_EQ(snapshotQps(metrics->read_bandwidth_bytes_per_sec_metric, tags), 8192);
-    EXPECT_DOUBLE_EQ(snapshotQps(metrics->write_bandwidth_bytes_per_sec_metric, tags), 4096);
+    const auto serving_disk_tags = kmonTagsWithServiceStatus(&tags);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->read_bytes_metric, serving_disk_tags), 24576);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->write_bytes_metric, serving_disk_tags), 8192);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->read_bandwidth_bytes_per_sec_metric, serving_disk_tags), 8192);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->write_bandwidth_bytes_per_sec_metric, serving_disk_tags), 4096);
 
     RtpLLMCachePoolMetricsCollector idle_collector;
     idle_collector.read_bytes                    = 24576;
@@ -870,10 +872,10 @@ TEST(BlockTreeCacheMetricsTest, PoolIOMetricsOnlyReportPopulatedValues) {
     idle_collector.write_bandwidth_bytes_per_sec = 0;
     ASSERT_TRUE(
         (metrics_reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&tags, &idle_collector)));
-    EXPECT_DOUBLE_EQ(snapshotQps(metrics->read_bytes_metric, tags), 24576);
-    EXPECT_DOUBLE_EQ(snapshotQps(metrics->write_bytes_metric, tags), 8192);
-    EXPECT_DOUBLE_EQ(snapshotQps(metrics->read_bandwidth_bytes_per_sec_metric, tags), 0);
-    EXPECT_DOUBLE_EQ(snapshotQps(metrics->write_bandwidth_bytes_per_sec_metric, tags), 0);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->read_bytes_metric, serving_disk_tags), 24576);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->write_bytes_metric, serving_disk_tags), 8192);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->read_bandwidth_bytes_per_sec_metric, serving_disk_tags), 0);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->write_bandwidth_bytes_per_sec_metric, serving_disk_tags), 0);
 }
 
 TEST(BlockTreeCacheMetricsTest, PendingNodeHardStopPreservesCommonTags) {
@@ -1875,9 +1877,9 @@ TEST_F(BlockTreeCacheTest, EvictionLifetimeStopsAtSelectionForEachSourceTier) {
         kmonitor::MetricsTags tags("tier", tierName(direction.first));
         tags.AddTag("trigger_type", "watermark");
         tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
-        expectCountSamples(metrics->evicted_block_lifetime_ms_metric, tags, 1);
+        expectCountSamples(metrics->evicted_block_lifetime_ms_metric, kmonTagsWithServiceStatus(&tags), 1);
         expectCountSamples(metrics->evicted_block_idletime_ms_metric, tags, 1);
-        EXPECT_DOUBLE_EQ(snapshotQps(metrics->evicted_block_lifetime_ms_metric, tags), 50);
+        EXPECT_DOUBLE_EQ(snapshotQps(metrics->evicted_block_lifetime_ms_metric, kmonTagsWithServiceStatus(&tags)), 50);
         EXPECT_DOUBLE_EQ(snapshotQps(metrics->evicted_block_idletime_ms_metric, tags), 30);
         EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_qps_metric, evictionBlockTags(tags, "total")), 1);
         EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_qps_metric, evictionBlockTags(tags, "fail")), 0);
@@ -1886,7 +1888,7 @@ TEST_F(BlockTreeCacheTest, EvictionLifetimeStopsAtSelectionForEachSourceTier) {
         reporter.reportEvictionFinished(failed_task, cache_->groupSets(), false, {}, 0);
         EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_qps_metric, evictionBlockTags(tags, "total")), 2);
         EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_qps_metric, evictionBlockTags(tags, "fail")), 2);
-        expectCountSamples(metrics->evicted_block_lifetime_ms_metric, tags, 0);
+        expectCountSamples(metrics->evicted_block_lifetime_ms_metric, kmonTagsWithServiceStatus(&tags), 0);
         expectCountSamples(metrics->evicted_block_idletime_ms_metric, tags, 0);
     }
 }
@@ -1927,9 +1929,9 @@ TEST_F(BlockTreeCacheTest, EvictionBatchMetricsIncludeCancelledBlocksAndExcludeD
     EXPECT_DOUBLE_EQ(cancelled_blocks, 5);
     EXPECT_DOUBLE_EQ(success_blocks, 4);
     EXPECT_DOUBLE_EQ(total_blocks, success_blocks + failed_blocks + cancelled_blocks);
-    expectCountSamples(metrics->evicted_block_lifetime_ms_metric, tags, 4);
+    expectCountSamples(metrics->evicted_block_lifetime_ms_metric, kmonTagsWithServiceStatus(&tags), 4);
     expectCountSamples(metrics->evicted_block_idletime_ms_metric, tags, 4);
-    EXPECT_DOUBLE_EQ(snapshotQps(metrics->evicted_block_lifetime_ms_metric, tags), 45);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->evicted_block_lifetime_ms_metric, kmonTagsWithServiceStatus(&tags)), 45);
     EXPECT_DOUBLE_EQ(snapshotQps(metrics->evicted_block_idletime_ms_metric, tags), 22.5);
 }
 
@@ -1969,9 +1971,9 @@ TEST_F(BlockTreeCacheTest, DropLifetimeAndIdletimeCoverDiskAndPrunedResources) {
             kmonitor::MetricsTags tags("tier", tierName(tier));
             tags.AddTag("trigger_type", trigger_type);
             tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
-            expectCountSamples(metrics->evicted_block_lifetime_ms_metric, tags, 1);
+            expectCountSamples(metrics->evicted_block_lifetime_ms_metric, kmonTagsWithServiceStatus(&tags), 1);
             expectCountSamples(metrics->evicted_block_idletime_ms_metric, tags, 1);
-            EXPECT_DOUBLE_EQ(snapshotQps(metrics->evicted_block_lifetime_ms_metric, tags), lifetime_ms);
+            EXPECT_DOUBLE_EQ(snapshotQps(metrics->evicted_block_lifetime_ms_metric, kmonTagsWithServiceStatus(&tags)), lifetime_ms);
             EXPECT_DOUBLE_EQ(snapshotQps(metrics->evicted_block_idletime_ms_metric, tags), idletime_ms);
         }
     }
@@ -2174,7 +2176,7 @@ TEST_F(BlockTreeCacheTest, ForceDropTriggerQpsCountsOneSuccessfulRequest) {
     lifetime_tags.AddTag("trigger_type", "force_drop");
     lifetime_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
     EXPECT_EQ(metricSeriesCount(eviction_metrics->evicted_block_lifetime_ms_metric), 1u);
-    expectCountSamples(eviction_metrics->evicted_block_lifetime_ms_metric, lifetime_tags, 2);
+    expectCountSamples(eviction_metrics->evicted_block_lifetime_ms_metric, kmonTagsWithServiceStatus(&lifetime_tags), 2);
 }
 
 TEST_F(BlockTreeCacheTest, WatermarkTriggerQpsCountsOneSuccessfulSchedulingRound) {
@@ -2204,7 +2206,7 @@ TEST_F(BlockTreeCacheTest, WatermarkTriggerQpsCountsOneSuccessfulSchedulingRound
     lifetime_tags.AddTag("trigger_type", "watermark");
     lifetime_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
     EXPECT_EQ(metricSeriesCount(eviction_metrics->evicted_block_lifetime_ms_metric), 1u);
-    expectCountSamples(eviction_metrics->evicted_block_lifetime_ms_metric, lifetime_tags, 2);
+    expectCountSamples(eviction_metrics->evicted_block_lifetime_ms_metric, kmonTagsWithServiceStatus(&lifetime_tags), 2);
     EXPECT_EQ(metricSeriesCount(eviction_metrics->choose_victim_qps_metric), 0u);
     cache_->reportMetrics();
     auto selection_tags = watermark_tags;

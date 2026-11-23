@@ -546,8 +546,10 @@ TEST(GrammarLogitsProcessorTest, TimeoutReportsOnlyTheTransitionToDisabled) {
         monitor->SetServiceName("");
         auto  reporter        = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
         auto* metrics         = reporter->getMetricsGroup<RtpLLMGrammarMetrics>();
+        auto serving_tags = reporter->getTags();
+        serving_tags.AddTag("is_serving", "true");
         auto* compile_latency = dynamic_cast<kmonitor::GaugeMetric*>(
-            metrics->compile_latency_us_metric->DeclareMetric(&reporter->getTags()));
+            metrics->compile_latency_us_metric->DeclareMetric(&serving_tags));
         auto* timeout =
             dynamic_cast<kmonitor::QpsMetric*>(metrics->update_timeout_qps_metric->DeclareMetric(&reporter->getTags()));
         ASSERT_NE(compile_latency, nullptr);

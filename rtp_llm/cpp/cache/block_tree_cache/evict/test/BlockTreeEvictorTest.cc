@@ -39,6 +39,7 @@
 #include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
@@ -1695,7 +1696,8 @@ void verifyMixedDetachedBatchSettlement(bool transfer_success) {
         for (const auto& [metric, start_time_us] :
              {std::make_pair(metrics->evicted_block_lifetime_ms_metric, child_timing.tier_enter_time_us),
               std::make_pair(metrics->evicted_block_idletime_ms_metric, child_timing.last_access_time_us)}) {
-            auto* series = metric->DeclareMetric(&detached_tags);
+            const auto lifetime_tags = kmonTagsWithServiceStatus(&detached_tags);
+            auto* series = metric->DeclareMetric(metric == metrics->evicted_block_lifetime_ms_metric ? &lifetime_tags : &detached_tags);
             auto* gauge  = dynamic_cast<kmonitor::GaugeMetric*>(series);
             EXPECT_NE(gauge, nullptr);
             if (gauge != nullptr) {

@@ -116,12 +116,15 @@ def start_backend_server_impl(
     global_controller,
     py_env_configs: PyEnvConfigs,
     process_manager: ProcessManager = None,
+    service_draining=None,
 ):
     from rtp_llm.start_backend_server import start_backend_server
 
     # only for debug
     if py_env_configs.profiling_debug_logging_config.debug_load_server:
-        start_backend_server(global_controller, py_env_configs, None)
+        start_backend_server(
+            global_controller, py_env_configs, None, service_draining=service_draining
+        )
         os._exit(-1)
 
     # Create pipe for subprocess startup status communication
@@ -139,6 +142,7 @@ def start_backend_server_impl(
         backend_process = torch.multiprocessing.Process(
             target=start_backend_server,
             args=(global_controller, py_env_configs, pipe_writer, os.getpid()),
+            kwargs={"service_draining": service_draining},
             name="backend_manager",
         )
         backend_process.start()
@@ -728,8 +732,11 @@ def start_server(py_env_configs: PyEnvConfigs):
     )
     _sync_server_shutdown_timeout(py_env_configs)
 
+    # Backend ranks observe this one-way flag even while frontend RPCs drain.
+    service_draining = multiprocessing.get_context("spawn").RawValue("b", False)
     # Create process manager with config values
     process_manager = ProcessManager(
+        service_draining=service_draining,
         shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
         monitor_interval=py_env_configs.server_config.monitor_interval,
         frontend_pre_stop_drain_seconds=(
@@ -785,7 +792,10 @@ def start_server(py_env_configs: PyEnvConfigs):
             # For backend server, vit_process_engine is None when vit is separated
             logging.info("start backend server")
             backend_process = start_backend_server_impl(
-                global_controller, py_env_configs, process_manager
+                global_controller,
+                py_env_configs,
+                process_manager,
+                service_draining=service_draining,
             )
             process_manager.add_process(backend_process, shutdown_group="backend")
 

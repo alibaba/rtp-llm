@@ -1615,6 +1615,7 @@ import torch)");
                         for (size_t model_id : {0, 1}) {
                             kmonitor::MetricsTags tags("model_id", std::to_string(model_id));
                             tags.AddTag("model_type", model_id == 0 ? "target" : "draft");
+                            tags.AddTag("is_serving", "true");
                             auto*                   metric = metrics->step_latency_us_metric->DeclareMetric(&tags);
                             kmonitor::MetricsRecord record(nullptr, nullptr, 0);
                             metric->Snapshot(&record, 1000);

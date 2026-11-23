@@ -1,4 +1,5 @@
 #include <optional>
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include <pybind11/pytypes.h>
 
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpEmbeddingOp.h"
@@ -172,6 +173,7 @@ void RtpEmbeddingOp::initGrpcServer(int64_t                              embeddi
 }
 
 void RtpEmbeddingOp::stop() {
+    markKmonServiceDraining();
     if (embedding_rpc_service_) {
         embedding_rpc_service_->stop();
         embedding_rpc_service_.reset();

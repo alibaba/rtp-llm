@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include <exception>
 
 #include "autil/legacy/jsonizable.h"
@@ -96,7 +97,8 @@ public:
             tag_map["error_code"] = std::to_string(error_code);
             tag_map["priority"]   = "0";
             auto tags             = kmonitor::MetricsTags(tag_map);
-            metric_reporter->report(1, "py_rtp_framework_error_qps", kmonitor::MetricType::QPS, &tags, true);
+            auto service_tags = kmonTagsWithServiceStatus(&tags);
+            metric_reporter->report(1, "py_rtp_framework_error_qps", kmonitor::MetricType::QPS, &service_tags, true);
         }
         RTP_LLM_LOG_WARNING("found exception: [%s]", e.what());
         AccessLogWrapper::logExceptionAccess(body, request_id, e.what());

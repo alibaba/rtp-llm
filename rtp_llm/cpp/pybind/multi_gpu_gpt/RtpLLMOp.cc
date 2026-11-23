@@ -1,4 +1,5 @@
 #include <cstddef>
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include <memory>
 #include <tuple>
 #include <vector>
@@ -463,6 +464,7 @@ void RtpLLMOp::startHttpServer(py::object model_weights_loader,
 }
 
 void RtpLLMOp::stop() {
+    markKmonServiceDraining();
     // Python forwards (including CUDA graph replay) still need the GIL while
     // requests drain. Release it before waiting, including on another stop().
     pybind11::gil_scoped_release release;
@@ -519,6 +521,7 @@ void RtpLLMOp::restart() {
 
 void registerRtpLLMOp(const py::module& m) {
     pybind11::class_<RtpLLMOp>(m, "RtpLLMOp")
+        .def_static("mark_metrics_draining", &markKmonServiceDraining)
         .def(pybind11::init<>())
         .def("init",
              &RtpLLMOp::init,

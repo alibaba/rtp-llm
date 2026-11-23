@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/api_server/ApiServerMetrics.h"
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include "kmonitor/client/KMonitorFactory.h"
 
 namespace rtp_llm {
@@ -79,7 +80,7 @@ bool ApiServerMetricReporter::init() {
             priority_tags.AddTag("source", source);                                                                    \
         }                                                                                                              \
         priority_tags.AddTag("priority", std::to_string(priority));                                                    \
-        metric->Report(&priority_tags, 1);                                                                             \
+        reportKmonMetric(metric.get(), &priority_tags, 1);                                                             \
     } while (0)
 
 void ApiServerMetricReporter::reportQpsMetric(const std::string& source, int priority) {
@@ -111,7 +112,7 @@ void ApiServerMetricReporter::reportErrorQpsMetric(const std::string& source, in
     }
     priority_tags.AddTag("priority", std::to_string(priority));
 
-    framework_error_qps_metric_->Report(&priority_tags, 1);
+    reportKmonMetric(framework_error_qps_metric_.get(), &priority_tags, 1);
 }
 
 #define REPORT_METRIC_IF_INITED(metric, value, errorMessage)                                                           \
@@ -120,7 +121,7 @@ void ApiServerMetricReporter::reportErrorQpsMetric(const std::string& source, in
             AUTIL_LOG(ERROR, errorMessage);                                                                            \
             return;                                                                                                    \
         }                                                                                                              \
-        metric->Report(value);                                                                                         \
+        reportKmonMetric(metric.get(), nullptr, value);                                                                \
     } while (0)
 
 void ApiServerMetricReporter::reportConflictQpsMetric() {

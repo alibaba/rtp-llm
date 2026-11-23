@@ -55,6 +55,7 @@ cc_library(
     ]),
     deps = [
         ":openai",
+        "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/engine_base:engine_base",
         "//rtp_llm/cpp/engine_base:weights_converter",
         "//rtp_llm/cpp/engine_base/stream:generate_config",

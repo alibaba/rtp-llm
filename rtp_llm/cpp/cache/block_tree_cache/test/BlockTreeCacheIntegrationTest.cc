@@ -19,6 +19,7 @@
 #include "kmonitor/client/core/MetricsData.h"
 #include "kmonitor/client/metric/GaugeMetric.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
@@ -48,7 +49,8 @@ void expectEvictionTimeSamples(const std::shared_ptr<kmonitor::MetricsReporter>&
     tags.AddTag("trigger_type", trigger_type);
     tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
     for (auto* metric : {metrics->evicted_block_lifetime_ms_metric, metrics->evicted_block_idletime_ms_metric}) {
-        auto* series = metric->DeclareMetric(&tags);
+        const auto lifetime_tags = kmonTagsWithServiceStatus(&tags);
+        auto* series = metric->DeclareMetric(metric == metrics->evicted_block_lifetime_ms_metric ? &lifetime_tags : &tags);
         auto* gauge  = dynamic_cast<kmonitor::GaugeMetric*>(series);
         EXPECT_NE(gauge, nullptr);
         if (gauge != nullptr) {

@@ -63,6 +63,7 @@ def local_rank_start(
     world_rank: int = 0,
     pipe_writer=None,
     expected_parent_pid: Optional[int] = None,
+    service_draining=None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     if expected_parent_pid is not None:
@@ -72,6 +73,8 @@ def local_rank_start(
     logging.info(f"[PROCESS_START]Start local rank process")
 
     def signal_handler(signum, frame):
+        if service_draining is not None:
+            service_draining.value = True
         logging.info(
             f"Local rank received signal {signum}, shutting down gracefully..."
         )
@@ -115,7 +118,7 @@ def local_rank_start(
         pipe_writer = None  # success closed it
 
         logging.info("Entering service loop to keep backend_manager alive")
-        backend_manager.serve_forever()
+        backend_manager.serve_forever(service_draining)
 
     except BaseException as e:
         error_msg = f"start server error: {e}"
@@ -168,6 +171,7 @@ def _create_rank_processes(
     ctx,
     processes: List[BaseProcess],
     rank_pipe_readers: List[Connection],
+    service_draining=None,
 ):
     """Create and start rank processes. Each proc is appended before start() so a
     mid-loop abort still leaves every spawned object in the caller's list; teardown
@@ -186,6 +190,7 @@ def _create_rank_processes(
         proc = ctx.Process(
             target=local_rank_start,
             args=(global_controller, py_env_configs, world_rank, writer, parent_pid),
+            kwargs={"service_draining": service_draining},
             name=f"rank-{world_rank}",
         )
         processes.append(proc)
@@ -291,13 +296,19 @@ def multi_rank_start(
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
     cleanup=None,
+    service_draining=None,
 ):
     """Start multi-rank backend server with proper process management"""
     ctx = multiprocessing.get_context("spawn")
     processes, rank_pipe_readers = [], []
     try:
         _create_rank_processes(
-            global_controller, py_env_configs, ctx, processes, rank_pipe_readers
+            global_controller,
+            py_env_configs,
+            ctx,
+            processes,
+            rank_pipe_readers,
+            service_draining=service_draining,
         )
         local_world_size = len(processes)
 
@@ -314,6 +325,7 @@ def multi_rank_start(
             shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
             monitor_interval=py_env_configs.server_config.monitor_interval,
             allow_defer_first_sigterm=True,
+            service_draining=service_draining,
             pre_exit_cleanup=cleanup,
         )
         manager.set_processes(processes, shutdown_group="backend")
@@ -373,7 +385,10 @@ def start_backend_server(
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
     expected_parent_pid: Optional[int] = None,
+    service_draining=None,
 ):
+    if service_draining is None:
+        service_draining = multiprocessing.get_context("spawn").RawValue("b", False)
     # The debug-load path runs inline; only a spawned manager has a parent guard.
     if expected_parent_pid is not None:
         arm_parent_death_sigkill(expected_parent_pid)
@@ -398,7 +413,11 @@ def start_backend_server(
     pc = py_env_configs.parallelism_config
     if not torch.cuda.is_available():
         return local_rank_start(
-            global_controller, py_env_configs, pc.world_rank, pipe_writer
+            global_controller,
+            py_env_configs,
+            pc.world_rank,
+            pipe_writer,
+            service_draining=service_draining,
         )
 
     if (
@@ -424,9 +443,14 @@ def start_backend_server(
                 py_env_configs,
                 pipe_writer,
                 cleanup=manager.stop if manager else None,
+                service_draining=service_draining,
             )
         return local_rank_start(
-            global_controller, py_env_configs, pc.world_rank, pipe_writer
+            global_controller,
+            py_env_configs,
+            pc.world_rank,
+            pipe_writer,
+            service_draining=service_draining,
         )
     finally:
         if manager:
