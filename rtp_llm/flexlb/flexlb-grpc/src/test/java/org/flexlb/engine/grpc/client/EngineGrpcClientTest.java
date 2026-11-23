@@ -1,9 +1,16 @@
 package org.flexlb.engine.grpc.client;
 
+import io.grpc.CallOptions;
+import io.grpc.Channel;
+import io.grpc.ClientCall;
+import io.grpc.ClientInterceptor;
+import io.grpc.Deadline;
 import io.grpc.ManagedChannel;
+import io.grpc.MethodDescriptor;
 import io.grpc.Server;
 import io.grpc.inprocess.InProcessChannelBuilder;
 import io.grpc.inprocess.InProcessServerBuilder;
+import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.dao.master.WorkerHost;
@@ -18,6 +25,8 @@ import org.mockito.ArgumentCaptor;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -191,11 +200,81 @@ class EngineGrpcClientTest {
     }
 
     @Test
+    void cancellingTheFutureCancelsTheInFlightWorkerStatusRpc() throws Exception {
+        String serverName = InProcessServerBuilder.generateName();
+        var started = new CountDownLatch(1);
+        var cancelled = new CountDownLatch(1);
+        Server server =
+                InProcessServerBuilder.forName(serverName)
+                        .directExecutor()
+                        .addService(
+                                new RpcServiceGrpc.RpcServiceImplBase() {
+                                    @Override
+                                    public void getWorkerStatus(
+                                            EngineRpcService.StatusVersionPB request,
+                                            StreamObserver<EngineRpcService.WorkerStatusPB>
+                                                    observer) {
+                                        ((ServerCallStreamObserver<?>) observer)
+                                                .setOnCancelHandler(cancelled::countDown);
+                                        started.countDown();
+                                    }
+                                })
+                        .build()
+                        .start();
+        GrpcChannelFactory channelFactory = mock(GrpcChannelFactory.class);
+        when(channelFactory.create(any()))
+                .thenAnswer(
+                        invocation ->
+                                InProcessChannelBuilder.forName(serverName)
+                                        .directExecutor()
+                                        .build());
+        EngineGrpcClient client =
+                new EngineGrpcClient(
+                        mock(EngineAddressResolver.class),
+                        channelFactory,
+                        mock(GrpcReporter.class),
+                        mock(CacheMatchConfiguration.class));
+        try {
+            var response =
+                    client.getWorkerStatusAsync(
+                            "10.0.0.1",
+                            18002,
+                            EngineRpcService.StatusVersionPB.getDefaultInstance(),
+                            30_000);
+            assertTrue(started.await(2, TimeUnit.SECONDS));
+
+            assertTrue(response.cancel(false));
+            assertTrue(cancelled.await(2, TimeUnit.SECONDS));
+            verify(channelFactory).create(new GrpcTarget("10.0.0.1", 18002));
+        } finally {
+            client.shutdown();
+            server.shutdownNow().awaitTermination(2, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
     void retriesStatusButDoesNotRetryBatchAfterBrokenConnection() throws Exception {
         String serverName = InProcessServerBuilder.generateName();
         AtomicInteger workerStatusCalls = new AtomicInteger();
         AtomicInteger batchCalls = new AtomicInteger();
         AtomicInteger cancelCalls = new AtomicInteger();
+        var workerStatusDeadlines = new ConcurrentLinkedQueue<Deadline>();
+        ClientInterceptor deadlineRecorder =
+                new ClientInterceptor() {
+                    @Override
+                    public <ReqT, RespT> ClientCall<ReqT, RespT> interceptCall(
+                            MethodDescriptor<ReqT, RespT> method,
+                            CallOptions options,
+                            Channel next) {
+                        if (method.getFullMethodName()
+                                .equals(
+                                        RpcServiceGrpc.getGetWorkerStatusMethod()
+                                                .getFullMethodName())) {
+                            workerStatusDeadlines.add(options.getDeadline());
+                        }
+                        return next.newCall(method, options);
+                    }
+                };
         Server server =
                 InProcessServerBuilder.forName(serverName)
                         .directExecutor()
@@ -254,6 +333,7 @@ class EngineGrpcClientTest {
                         invocation ->
                                 InProcessChannelBuilder.forName(serverName)
                                         .directExecutor()
+                                        .intercept(deadlineRecorder)
                                         .build());
         EngineGrpcClient client =
                 new EngineGrpcClient(
@@ -301,6 +381,8 @@ class EngineGrpcClientTest {
                                     .get(2, TimeUnit.SECONDS));
 
             assertEquals(2, workerStatusCalls.get());
+            assertEquals(2, workerStatusDeadlines.size());
+            assertEquals(workerStatusDeadlines.remove(), workerStatusDeadlines.remove());
             assertEquals(1, batchCalls.get());
             assertEquals(1, cancelCalls.get());
             verify(grpcReporter).reportConnectionDuration(eq("GetWorkerStatus"), anyLong());
