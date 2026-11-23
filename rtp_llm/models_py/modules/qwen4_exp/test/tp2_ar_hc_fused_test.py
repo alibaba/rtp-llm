@@ -19,6 +19,7 @@ from rtp_llm.models_py.modules.qwen4_exp.tp2_ar_hc_fused import (
     prepare_tp2_ar_hc_workspace,
     try_defer_attn_tp2,
     try_defer_moe_packed_tp2,
+    try_defer_sublayer_tp2,
 )
 from rtp_llm.models_py.triton_kernels.common.gated_residual_prefill_inject_norm_triton import (
     try_inject_grouped_norm,
@@ -50,7 +51,7 @@ def _tp2_worker(rank: int, port: int) -> None:
             g_gen.manual_seed(20261122)
             gamma = (torch.randn(10240, generator=g_gen, device=device) * 0.1).bfloat16()
 
-            for rows in (1, 4, 17, 48, 64, 128, 192, 256, 512):
+            for rows in (1, 4, 17, 48, 64, 128, 192, 256, 512, 1024, 2048):
                 x_gen = torch.Generator(device=device)
                 x_gen.manual_seed(1000 + rows)
                 hyper_x = torch.randn(
@@ -138,8 +139,8 @@ def _tp2_worker(rank: int, port: int) -> None:
                     torch.testing.assert_close(c_norm, ref_norm, atol=1e-2, rtol=1e-2)
                 graph.reset()
 
-            # Head IPC Gather (up to 256 rows) & Head IPC Argmax (eager + 2-step CUDA graph)
-            for rows in (1, 4, 48, 64, 192, 256):
+            # Head IPC Gather (up to 256 rows) & Split-K Head IPC Argmax (mixed shapes + 2-step CUDA graphs)
+            for rows in (4, 1, 3, 8, 16, 32, 48, 64, 192, 256, 4):
                 h_gen = torch.Generator(device=device)
                 h_gen.manual_seed(30000 + rows * 10 + rank)
                 local_logits = torch.randn(
@@ -158,7 +159,6 @@ def _tp2_worker(rank: int, port: int) -> None:
                     if valid_v > 0:
                         local_logits[:, -10:] = 64.0
                     actual_idx = head_ws.try_argmax(local_logits, valid_v)
-                    expected_idx = torch.argmax(expected_full[:, :eff], dim=-1, keepdim=True)
                     shards_v = [torch.empty_like(local_logits) for _ in range(2)]
                     dist.all_gather(shards_v, local_logits, group=group)
                     expected_idx = torch.argmax(
@@ -166,28 +166,34 @@ def _tp2_worker(rank: int, port: int) -> None:
                     )
                     assert torch.equal(actual_idx, expected_idx), (rows, valid_v)
 
-            # 2-step draft loop CUDA Graph capture of try_argmax
-            l0 = torch.randn((48, 124160), device=device, dtype=torch.bfloat16)
-            l1 = torch.randn((48, 124160), device=device, dtype=torch.bfloat16)
-            head_ws.try_argmax(l0, 0)
-            torch.cuda.synchronize(device)
-            dist.barrier(group=group)
-            d_graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(d_graph):
-                t0 = head_ws.try_argmax(l0, 0)
-                t1 = head_ws.try_argmax(l1, 0)
-            for step in range(3):
-                lg = torch.Generator(device=device)
-                lg.manual_seed(70000 + step * 10 + rank)
-                l0.copy_(torch.randn(l0.shape, generator=lg, device=device, dtype=torch.bfloat16))
-                l1.copy_(torch.randn(l1.shape, generator=lg, device=device, dtype=torch.bfloat16))
-                d_graph.replay()
-                for lt, actual_t in ((l0, t0), (l1, t1)):
-                    sh = [torch.empty_like(lt) for _ in range(2)]
-                    dist.all_gather(sh, lt, group=group)
-                    ref_t = torch.argmax(torch.cat(sh, dim=1).float(), dim=-1, keepdim=True)
-                    assert torch.equal(actual_t, ref_t)
-            d_graph.reset()
+            # 2-step draft loop CUDA Graph capture of try_argmax (both Split-K=16 at rows=4 and Split-K=1 at rows=48)
+            for graph_rows in (4, 48):
+                l0 = torch.randn((graph_rows, 124160), device=device, dtype=torch.bfloat16)
+                l1 = torch.randn((graph_rows, 124160), device=device, dtype=torch.bfloat16)
+                head_ws.try_argmax(l0, 0)
+                torch.cuda.synchronize(device)
+                dist.barrier(group=group)
+                d_graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(d_graph):
+                    t0 = head_ws.try_argmax(l0, 0)
+                    t1 = head_ws.try_argmax(l1, 0)
+                for step in range(3):
+                    lg = torch.Generator(device=device)
+                    lg.manual_seed(70000 + graph_rows * 100 + step * 10 + rank)
+                    l0.copy_(torch.randn(l0.shape, generator=lg, device=device, dtype=torch.bfloat16))
+                    l1.copy_(torch.randn(l1.shape, generator=lg, device=device, dtype=torch.bfloat16))
+                    d_graph.replay()
+                    for lt, actual_t in ((l0, t0), (l1, t1)):
+                        sh = [torch.empty_like(lt) for _ in range(2)]
+                        dist.all_gather(sh, lt, group=group)
+                        ref_t = torch.argmax(torch.cat(sh, dim=1).float(), dim=-1, keepdim=True)
+                        assert torch.equal(actual_t, ref_t)
+                d_graph.reset()
+        except BaseException:
+            import traceback
+
+            traceback.print_exc()
+            os._exit(1)
         finally:
             head_ws.close()
     finally:
@@ -224,6 +230,15 @@ class Tp2ArHcFusedTest(unittest.TestCase):
             self.assertIsNone(try_defer_moe_packed_tp2(packed))
         finally:
             _moe_tp2_defer_slot.reset(mtok)
+
+        mtok2 = _moe_tp2_defer_slot.set(_DeferSlot(ws))
+        try:
+            d3 = try_defer_sublayer_tp2(x, collective_torch.Group.TP)
+            self.assertIsInstance(d3, DeferredTp2Sublayer)
+            self.assertFalse(d3.packed_dual)
+            self.assertIsNone(try_defer_sublayer_tp2(x, collective_torch.Group.TP))
+        finally:
+            _moe_tp2_defer_slot.reset(mtok2)
 
     def test_two_gpu_p2p_fusion_and_argmax_parity(self):
         if (

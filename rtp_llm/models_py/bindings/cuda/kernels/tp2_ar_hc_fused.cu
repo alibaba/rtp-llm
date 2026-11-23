@@ -13,9 +13,9 @@
 namespace rtp_llm {
 namespace tp2_hc_ipc {
 
-constexpr int    kMaxBlocks     = 64;
-constexpr int    kMaxRows       = 512;
-constexpr int    kMaxIters      = kMaxRows / kMaxBlocks;  // 8
+constexpr int    kMaxBlocks     = 128;
+constexpr int    kMaxRows       = 2048;
+constexpr int    kMaxIters      = kMaxRows / kMaxBlocks;  // 16
 constexpr int    kHidden        = 2560;
 constexpr int    kBranches      = 4;
 constexpr int    kThreads       = 320;  // 320 * 8 BF16 = 2560 columns
@@ -179,8 +179,8 @@ tp2ArHcInjectNormKernel(const uint4* __restrict__    hyper_x,
                         int                          rows,
                         float                        eps) {
     __shared__ uint32_t sh_gen;
-    __shared__ float    sh_warp[kWarps];
-    __shared__ float    sh_scalar;
+    __shared__ float    sh_warp[kBranches][kWarps];
+    __shared__ float    sh_scalar[kBranches];
 
     const int bid  = blockIdx.x;
     const int tid  = threadIdx.x;
@@ -294,6 +294,7 @@ tp2ArHcInjectNormKernel(const uint4* __restrict__    hyper_x,
         float sub[8];
         reduce_tp2_u4<kPackedDual>(lr, pr, ls, ps, sub);
 
+        float res_all[kBranches][8];
 #pragma unroll
         for (int g = 0; g < kBranches; ++g) {
             const uint16_t gate_bf16 = static_cast<uint16_t>((gate_cur >> (g * 16)) & 0xffffU);
@@ -302,46 +303,49 @@ tp2ArHcInjectNormKernel(const uint4* __restrict__    hyper_x,
             float xf[8];
             unpack_u4_bf16(x_cur[g], xf);
 
-            float res[8];
             float local_sq = 0.0f;
 #pragma unroll
             for (int k = 0; k < 8; ++k) {
-                float inj      = bf16_bits_to_f32(f32_to_bf16_bits(__fmul_rn(sub[k], gate_f)));
+                float    inj   = bf16_bits_to_f32(f32_to_bf16_bits(__fmul_rn(sub[k], gate_f)));
                 uint16_t rbits = f32_to_bf16_bits(__fadd_rn(xf[k], inj));
-                float rf       = bf16_bits_to_f32(rbits);
-                res[k]         = rf;
+                float    rf    = bf16_bits_to_f32(rbits);
+                res_all[g][k]  = rf;
                 local_sq       = __fmaf_rn(rf, rf, local_sq);
             }
 
             const size_t out_idx  = (static_cast<size_t>(r) * kBranches + g) * kRowU4 + tid;
-            residual_out[out_idx] = pack_u4_bf16(res);
+            residual_out[out_idx] = pack_u4_bf16(res_all[g]);
 
 #pragma unroll
             for (int offset = 16; offset > 0; offset >>= 1) {
                 local_sq += __shfl_xor_sync(0xffffffffU, local_sq, offset);
             }
             if (lane == 0) {
-                sh_warp[warp] = local_sq;
+                sh_warp[g][warp] = local_sq;
             }
-            __syncthreads();
-            if (warp == 0) {
-                float v = (lane < kWarps) ? sh_warp[lane] : 0.0f;
-#pragma unroll
-                for (int offset = 16; offset > 0; offset >>= 1) {
-                    v += __shfl_xor_sync(0xffffffffU, v, offset);
-                }
-                if (lane == 0) {
-                    sh_scalar = rsqrtf(v * (1.0f / 2560.0f) + eps);
-                }
-            }
-            __syncthreads();
-            const float inv_rms = sh_scalar;
+        }
 
-            float norm_f[8];
-            float local_amax = 0.0f;
+        __syncthreads();
+        if (warp < kBranches) {
+            float v = (lane < kWarps) ? sh_warp[warp][lane] : 0.0f;
+#pragma unroll
+            for (int offset = 16; offset > 0; offset >>= 1) {
+                v += __shfl_xor_sync(0xffffffffU, v, offset);
+            }
+            if (lane == 0) {
+                sh_scalar[warp] = rsqrtf(v * (1.0f / 2560.0f) + eps);
+            }
+        }
+        __syncthreads();
+
+#pragma unroll
+        for (int g = 0; g < kBranches; ++g) {
+            const float inv_rms    = sh_scalar[g];
+            float       norm_f[8];
+            float       local_amax = 0.0f;
 #pragma unroll
             for (int k = 0; k < 8; ++k) {
-                float nf  = (res[k] * inv_rms) * (1.0f + gamma_f[g][k]);
+                float nf  = (res_all[g][k] * inv_rms) * (1.0f + gamma_f[g][k]);
                 norm_f[k] = nf;
                 if constexpr (kCollectAmax) {
                     float av   = fabsf(bf16_bits_to_f32(f32_to_bf16_bits(nf)));
@@ -353,7 +357,8 @@ tp2ArHcInjectNormKernel(const uint4* __restrict__    hyper_x,
             if (last_iter && g == kBranches - 1 && !kCollectAmax) {
                 pdl_trigger<kEnablePdl>();
             }
-            norm_out[out_idx] = pack_u4_bf16(norm_f);
+            const size_t out_idx = (static_cast<size_t>(r) * kBranches + g) * kRowU4 + tid;
+            norm_out[out_idx]    = pack_u4_bf16(norm_f);
 
             if constexpr (kCollectAmax) {
 #pragma unroll
@@ -361,23 +366,26 @@ tp2ArHcInjectNormKernel(const uint4* __restrict__    hyper_x,
                     local_amax = fmaxf(local_amax, __shfl_xor_sync(0xffffffffU, local_amax, offset));
                 }
                 if (lane == 0) {
-                    sh_warp[warp] = local_amax;
+                    sh_warp[g][warp] = local_amax;
                 }
-                __syncthreads();
-                if (warp == 0) {
-                    float v = (lane < kWarps) ? sh_warp[lane] : 0.0f;
+            }
+        }
+
+        if constexpr (kCollectAmax) {
+            __syncthreads();
+            if (warp < kBranches) {
+                float v = (lane < kWarps) ? sh_warp[warp][lane] : 0.0f;
 #pragma unroll
-                    for (int offset = 16; offset > 0; offset >>= 1) {
-                        v = fmaxf(v, __shfl_xor_sync(0xffffffffU, v, offset));
-                    }
-                    if (lane == 0) {
-                        if (last_iter && g == kBranches - 1) {
-                            pdl_trigger<kEnablePdl>();
-                        }
-                        amax_out[r * kBranches + g] = v;
-                    }
+                for (int offset = 16; offset > 0; offset >>= 1) {
+                    v = fmaxf(v, __shfl_xor_sync(0xffffffffU, v, offset));
                 }
-                __syncthreads();
+                if (lane == 0) {
+                    amax_out[r * kBranches + warp] = v;
+                }
+            }
+            __syncthreads();
+            if (last_iter && tid == 0) {
+                pdl_trigger<kEnablePdl>();
             }
         }
     }
@@ -569,7 +577,7 @@ tp2ArHcInjectNorm(const torch::Tensor&        hyper_x,
     const int64_t rows = hyper_x.numel() / (tp2_hc_ipc::kBranches * tp2_hc_ipc::kHidden);
     TORCH_CHECK(rows >= 1 && rows <= tp2_hc_ipc::kMaxRows
                     && hyper_x.size(-1) == tp2_hc_ipc::kBranches * tp2_hc_ipc::kHidden,
-                "tp2ArHcInjectNorm hyper_x shape is outside [1..512, 10240]");
+                "tp2ArHcInjectNorm hyper_x shape is outside [1..2048, 10240]");
     const int64_t expected_sub_rows = packed_dual ? (2 * rows) : rows;
     TORCH_CHECK(local_sub.dim() == 2 && local_sub.size(0) == expected_sub_rows
                     && local_sub.size(1) == tp2_hc_ipc::kHidden,
@@ -672,7 +680,7 @@ torch::Tensor tp2ArHcInjectOnly(const torch::Tensor&        hyper_x,
     const int64_t rows = hyper_x.numel() / (tp2_hc_ipc::kBranches * tp2_hc_ipc::kHidden);
     TORCH_CHECK(rows >= 1 && rows <= tp2_hc_ipc::kMaxRows
                     && hyper_x.size(-1) == tp2_hc_ipc::kBranches * tp2_hc_ipc::kHidden,
-                "tp2ArHcInjectOnly hyper_x shape is outside [1..512, 10240]");
+                "tp2ArHcInjectOnly hyper_x shape is outside [1..2048, 10240]");
     const int64_t expected_sub_rows = packed_dual ? (2 * rows) : rows;
     TORCH_CHECK(local_sub.dim() == 2 && local_sub.size(0) == expected_sub_rows
                     && local_sub.size(1) == tp2_hc_ipc::kHidden,

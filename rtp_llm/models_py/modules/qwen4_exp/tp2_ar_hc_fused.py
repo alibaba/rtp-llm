@@ -108,7 +108,7 @@ def try_defer_sublayer_tp2(tensor: torch.Tensor, group) -> Optional[DeferredTp2S
 
 
 class Qwen4Tp2ArHcWorkspace:
-    max_rows = 512
+    max_rows = 2048
 
     def __init__(self, group, device: torch.device) -> None:
         from flashinfer.comm import cuda_ipc

@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import weakref
 from collections.abc import Mapping
 from typing import Any, Dict, Optional
@@ -46,6 +47,9 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_state import (
 )
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_transaction import (
     PLETransactionCoordinator,
+)
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
+    qsa_strict_validation_enabled,
 )
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context import (
     Qwen4ExpQSARuntimeContext,
@@ -107,9 +111,11 @@ from rtp_llm.models_py.utils.device_capability import cached_device_capability
 try:
     from rtp_llm.models_py.modules.qwen4_exp.qsa import (
         prefill_packed_indexer as _qsa_packed_prefill_mod,
+        qsa_fp8_input_projection as _qsa_triple_proj_mod,
     )
 except ImportError:
     _qsa_packed_prefill_mod = None
+    _qsa_triple_proj_mod = None
 from rtp_llm.ops import (
     AttentionConfigs,
     HWKernelConfig,
@@ -564,16 +570,16 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                 )
 
                 aux_stream = None
+                run_qkv = None
+                fused_gate_forward = getattr(
+                    fmha_impl, "forward_with_output_gate", None
+                )
                 with record_function_range("qwen4.qsa.indexer"):
                     prepared = None
-                    # Every packed window up to the context bound -- decode and
-                    # draft graphs, target verification and the prefill plan
-                    # window (previously the 33..4092 hole, which quantized the
-                    # same hidden states twice per layer, once for the gate and
-                    # once for the indexer q/k projection) -- shares the pair's
-                    # single input quantization. Both projections keep their
-                    # own weight scale and GEMM; the shared quant is bit-exact
-                    # for the input bytes and both outputs.
+                    projected_qk = None
+                    # Share a single input quantization across qkv_proj, gate,
+                    # and qsa_indexer.qk_projection when all three FP8 consumers
+                    # are active; otherwise fall back to the pair quantizer.
                     if (
                         type(self.qsa_indexer) is Qwen4ExpQSAIndexer
                         and hidden_states.ndim == 2
@@ -583,11 +589,28 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                             for name in ("project", "project_raw", "split_projected")
                         )
                     ):
-                        prepared = _fp8_linear_mod.project_fp8_pair(
-                            hidden_states,
-                            self.gate,
-                            self.qsa_indexer.qk_projection,
-                        )
+                        triple = None
+                        qkv_proj = getattr(self, "qkv_proj", None)
+                        if (
+                            _qsa_triple_proj_mod is not None
+                            and callable(fused_gate_forward)
+                            and qkv_proj is not None
+                        ):
+                            triple = _qsa_triple_proj_mod.try_prepare_qsa_triple(
+                                hidden_states,
+                                qkv_proj,
+                                self.gate,
+                                self.qsa_indexer.qk_projection,
+                            )
+                        if triple is not None:
+                            gate, projected_qk, run_qkv = triple
+                            prepared = (gate, projected_qk)
+                        else:
+                            prepared = _fp8_linear_mod.project_fp8_pair(
+                                hidden_states,
+                                self.gate,
+                                self.qsa_indexer.qk_projection,
+                            )
                     if prepared is None:
                         gate = self.gate(hidden_states)
                     else:
@@ -595,12 +618,10 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                         selection_kwargs["projected"] = (
                             self.qsa_indexer.split_projected(projected_qk)
                         )
-                    fused_gate_forward = getattr(
-                        fmha_impl, "forward_with_output_gate", None
-                    )
+                    capturing = hidden_states.is_cuda and torch.cuda.is_current_stream_capturing()
+                    max_overlap_rows = 512 if capturing else 2048
                     overlap_indexer = (
                         prepared is not None
-                        and torch.cuda.is_current_stream_capturing()
                         and type(self) is Qwen4ExpAttention
                         and type(self.qsa_indexer) is Qwen4ExpQSAIndexer
                         and type(fmha_impl) is SparseGqaFmhaImpl
@@ -608,18 +629,32 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                         and hidden_states.is_cuda
                         and torch.version.hip is None
                         and hidden_states.ndim == 2
-                        and 1 <= hidden_states.shape[0] <= 512
+                        and 1 <= hidden_states.shape[0] <= max_overlap_rows
                         and cached_device_capability(hidden_states.device) == (9, 0)
+                        and (
+                            capturing
+                            or (
+                                not qsa_strict_validation_enabled()
+                                and os.getenv("RTP_QWEN4_DISABLE_QSA_EAGER_OVERLAP", "0")
+                                != "1"
+                            )
+                        )
                     )
                     if overlap_indexer:
                         main_stream = torch.cuda.current_stream(hidden_states.device)
                         aux_stream = _qsa_aux_stream_for_device(hidden_states.device)
                         aux_stream.wait_stream(main_stream)
                         fmha_impl._qsa_selection_ready_stream = aux_stream
+                        if not capturing:
+                            hidden_states.record_stream(aux_stream)
+                            if projected_qk is not None:
+                                projected_qk.record_stream(aux_stream)
                         with torch.cuda.stream(aux_stream):
                             selected = self._qsa_selected_indices(
                                 hidden_states, qsa_runtime, **selection_kwargs
                             )
+                        if not capturing and isinstance(selected, torch.Tensor):
+                            selected.record_stream(main_stream)
                     else:
                         selected = self._qsa_selected_indices(
                             hidden_states, qsa_runtime, **selection_kwargs
@@ -632,7 +667,11 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                     set_selected(selected)
                 with record_function_range("qwen4.qsa.fmha"):
                     if callable(fused_gate_forward):
-                        qkv = self.qkv_proj(hidden_states)
+                        qkv = (
+                            run_qkv()
+                            if run_qkv is not None
+                            else self.qkv_proj(hidden_states)
+                        )
                         norm_gate_forward = getattr(
                             fmha_impl, "forward_with_qk_norm_and_output_gate", None
                         )

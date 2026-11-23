@@ -413,8 +413,17 @@ class GatedResidual(nn.Module):
             and mix.dtype == torch.bfloat16
             and mix.device == bf16_up.device
         )
+        if use_bf16_up and mix.is_cuda and torch.version.hip is None:
+            from rtp_llm.models_py.triton_kernels.common.gated_residual_sm90_up_mix_triton import (
+                try_sm90_bf16_up_mix,
+            )
+
+            mixed = try_sm90_bf16_up_mix(
+                mix, bf16_up, normed, self.hc_mult
+            )
         if (
-            not use_bf16_up
+            mixed is None
+            and not use_bf16_up
             and up is not None
             and up.bias is None
             and up.role in ("DECODE", "PDFUSION")

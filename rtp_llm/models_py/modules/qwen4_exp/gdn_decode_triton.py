@@ -241,10 +241,19 @@ def try_packed_decode(
     ):
         return None
     # vLLM f1a7d496 uses four value rows for FP32-state SM90 Decode.
-    # On H20 with paged state, the smaller tile benefits from head-first CTAs.
-    heads_first = sequence_length == 1 and (
-        (tune_h20 and 16 <= batch <= 64) or (tune_h20_bf16 and 64 <= batch <= 128)
+    # On SM90 with paged state, head-first CTAs improve cache locality for both
+    # single-token decode and MTP target-verify windows.
+    heads_first = (tune_h20 and 16 <= batch <= 64) or (
+        sequence_length == 1 and tune_h20_bf16 and 64 <= batch <= 128
     )
+    if sequence_length == 1 and heads_first and batch >= 32:
+        value_tile = 8
+    elif sequence_length > 1 and heads_first and batch >= 64:
+        value_tile = 16
+    elif heads_first or batch >= 16:
+        value_tile = 4
+    else:
+        value_tile = 8
     return _run_packed_decode(
         qkv,
         a,
@@ -255,7 +264,7 @@ def try_packed_decode(
         block_map,
         lengths,
         page_size,
-        value_tile=4 if heads_first or batch >= 16 else 8,
+        value_tile=value_tile,
         sequence_length=sequence_length,
         heads_first=heads_first,
     )
