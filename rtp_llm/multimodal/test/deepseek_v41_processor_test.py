@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import requests
 import torch
-from PIL import Image
+from PIL import Image, ImageOps
 from urllib3.exceptions import ReadTimeoutError
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -610,32 +610,56 @@ class V41BackendPreprocessContractTest(unittest.TestCase):
             torch.testing.assert_close(item.patches, original.patches, rtol=0, atol=0)
         self.assertFalse(hasattr(original, "inspection_sources"))
 
-    def test_low_detail_matches_resized_source_in_both_preprocess_paths(self):
+    def test_low_detail_uses_the_model_resize_grid_for_each_image(self):
+        self.config = V41ImageProcessorConfig()
         source = image_data(900, 630)
-        with Image.open(io.BytesIO(source)) as image:
-            resized = io.BytesIO()
-            image.resize((512, 512), Image.Resampling.BICUBIC).save(resized, "PNG")
         media = [self.media(source), self.media(source)]
         media[1].mm_preprocess_config.width = media[1].mm_preprocess_config.height = 512
-        for gpu_preprocess in (False, True):
-            with self.subTest(gpu_preprocess=gpu_preprocess):
-                result = vision_module.DeepSeekV41VisionEmbedding.preprocess_input(
-                    media,
-                    self.vit_config,
-                    processor_config=self.config,
-                    gpu_preprocess=gpu_preprocess,
-                    capture_inspection_sources=True,
+        adapter = object.__new__(vision_module.DeepSeekV41VisionEmbedding)
+        adapter.processor_config = self.config
+        for gpu in (False, True):
+            result = adapter.preprocess_input(
+                media,
+                self.vit_config,
+                processor_config=self.config,
+                gpu_preprocess=gpu,
+                capture_inspection_sources=True,
+            )
+            self.assertEqual(result.inspection_sources, [source, source])
+            for item, grid_size in zip(result.data, [(900, 630), (512, 512)]):
+                _, _, height, width = plan_image_grid(*grid_size, self.config)
+                with Image.open(io.BytesIO(source)) as image:
+                    if gpu:
+                        self.assertTrue(
+                            torch.equal(item.rgb, torch.from_numpy(np.array(image)))
+                        )
+                        self.assertEqual(item.resize_tables.target_hw, (height, width))
+                    else:
+                        expected = ImageOps.pad(
+                            image, (width, height), color=(127, 127, 127)
+                        )
+                        reference = preprocess_image(expected, self.config)[0]
+                        self.assertTrue(torch.equal(item.patches, reference))
+                self.assertEqual(adapter._vit_grid(item), (height // 14, width // 14))
+
+    def test_low_detail_keeps_a_one_pixel_strip_and_handles_gpu_size_limit(self):
+        for width in (8192, 65537):
+            with self.subTest(width=width):
+                payload = io.BytesIO()
+                Image.new("RGB", (width, 1), "white").save(payload, "PNG")
+                media = self.media(payload.getvalue())
+                media.mm_preprocess_config.width = media.mm_preprocess_config.height = (
+                    512
                 )
-                self.assertEqual(result.inspection_sources, [source, source])
-                field = "rgb" if gpu_preprocess else "patches"
-                for actual, raw in zip(result.data, [source, resized.getvalue()]):
-                    reference = self.prepare(raw, gpu_preprocess=gpu_preprocess)
-                    torch.testing.assert_close(
-                        getattr(actual, field),
-                        getattr(reference, field),
-                        rtol=0,
-                        atol=0,
-                    )
+                options = dict(processor_config=V41ImageProcessorConfig())
+                prepare = vision_module.DeepSeekV41VisionEmbedding.preprocess_input
+                cpu = prepare([media], self.vit_config, gpu_preprocess=False, **options)
+                self.assertEqual((cpu.patches[:, 0] == 1).sum().item(), 546)
+                item = prepare([media], self.vit_config, gpu_preprocess=True, **options)
+                if width == 8192:
+                    self.assertEqual(item.resize_tables.target_hw, (546, 546))
+                else:
+                    self.assertTrue(torch.equal(item.patches, cpu.patches))
 
     def test_media_hints_leave_model_preprocessing_unchanged(self):
         data = [image_data(3, 5), image_data(5, 3)]

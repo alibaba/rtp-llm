@@ -14,13 +14,14 @@ from urllib.parse import urlsplit
 import numpy as np
 import requests
 import torch
-from PIL import Image, ImageOps
+from PIL import Image
 from pillow_heif import register_heif_opener
 from urllib3.exceptions import ProtocolError, ReadTimeoutError
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.mm_download_domains import check_download_urls
 from rtp_llm.metrics import AccMetrics, GaugeMetrics
+from rtp_llm.models_py.modules.dsv41.vision_preprocess_tables import resize_geometry
 from rtp_llm.multimodal.mm_error_messages import MMErr, media_error_detail
 from rtp_llm.multimodal.vit_metrics import (
     VIT_PHASE_METRICS,
@@ -315,21 +316,29 @@ def plan_image_grid(width: int, height: int, config: V41ImageProcessorConfig):
     return llm_h, llm_w, best_height, best_width
 
 
-def preprocess_image(image: Image.Image, config: V41ImageProcessorConfig):
+def preprocess_image(
+    image: Image.Image,
+    config: V41ImageProcessorConfig,
+    *,
+    grid: tuple[int, int, int, int] | None = None,
+):
     # Pillow decodes lazily; conversion must be inside the decode timer.
     with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_DECODE_RT_US_METRIC, _METRIC_TAGS):
         image = image.convert("RGB")
-    return _preprocess_rgb_image(image, config)
-
-
-def _preprocess_rgb_image(image: Image.Image, config: V41ImageProcessorConfig):
     with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_RESIZE_RT_US_METRIC, _METRIC_TAGS):
-        llm_h, llm_w, best_height, best_width = plan_image_grid(
-            image.width, image.height, config
+        llm_h, llm_w, best_height, best_width = grid or plan_image_grid(
+            *image.size, config
         )
         patch = config.vision_patch_size
         vit_h, vit_w = best_height // patch, best_width // patch
-        image = ImageOps.pad(image, (best_width, best_height), color=(127, 127, 127))
+        resize_h, resize_w, top, left = resize_geometry(
+            image.height, image.width, best_height, best_width
+        )
+        image = image.resize((resize_w, resize_h), Image.Resampling.BICUBIC)
+        if image.size != (best_width, best_height):
+            canvas = Image.new("RGB", (best_width, best_height), (127, 127, 127))
+            canvas.paste(image, (left, top))
+            image = canvas
     record_vit_preprocess_value(
         GaugeMetrics.VIT_RESIZED_PIXEL_COUNT_METRIC,
         best_height * best_width,

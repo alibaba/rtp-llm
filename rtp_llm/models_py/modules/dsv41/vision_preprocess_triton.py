@@ -73,9 +73,9 @@ from rtp_llm.models_py.modules.dsv41.vision_preprocess_tables import (
     _PRECISION_BITS,
     ResizeTables,
     _coefficients,
-    _geometry,
     _normalization_lut,
     is_supported_shape,
+    resize_geometry,
 )
 
 
@@ -278,7 +278,7 @@ def preprocess_rgb_u8(
         raise ValueError("resize tables do not match the input geometry")
     in_h, in_w = rgb.shape[:2]
     out_h, out_w = target_hw
-    resize_h, resize_w, top, left = _geometry(in_h, in_w, out_h, out_w)
+    resize_h, resize_w, top, left = resize_geometry(in_h, in_w, out_h, out_w)
     block = 128
     with torch.cuda.device(rgb.device):
         source = rgb

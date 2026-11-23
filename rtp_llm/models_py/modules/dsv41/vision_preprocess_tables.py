@@ -54,14 +54,14 @@ _MAX_COEFFICIENTS = 1 << 20
 _MAX_ELEMENTS = (1 << 31) - 1
 
 
-def _geometry(in_h: int, in_w: int, out_h: int, out_w: int):
-    """Pillow contain dimensions and centered pad, including ties-to-even."""
+def resize_geometry(in_h: int, in_w: int, out_h: int, out_w: int):
+    """Pillow contain dimensions and centered pad; keep thin images one pixel wide."""
     resize_h, resize_w = out_h, out_w
     source_ratio, target_ratio = in_w / in_h, out_w / out_h
     if source_ratio > target_ratio:
-        resize_h = round(in_h / in_w * out_w)
+        resize_h = max(1, round(in_h / in_w * out_w))
     elif source_ratio < target_ratio:
-        resize_w = round(in_w / in_h * out_h)
+        resize_w = max(1, round(in_w / in_h * out_h))
     return (
         resize_h,
         resize_w,
@@ -101,7 +101,7 @@ def is_supported_shape(
         or max(in_h * in_w, out_h * out_w) * 3 > _MAX_ELEMENTS
     ):
         return False
-    resize_h, resize_w, _, _ = _geometry(in_h, in_w, out_h, out_w)
+    resize_h, resize_w, _, _ = resize_geometry(in_h, in_w, out_h, out_w)
     if min(resize_h, resize_w) < 1 or in_h * resize_w * 3 > _MAX_ELEMENTS:
         return False
     for old, new in ((in_w, resize_w), (in_h, resize_h)):
@@ -185,7 +185,7 @@ def prepare_resize_tables(source_hw, target_hw, *, patch_size=14):
     if not is_supported_shape(source_hw, target_hw, patch_size=patch_size):
         raise ValueError("unsupported shape for V4.1 GPU preprocessing")
     in_h, in_w = source_hw
-    resize_h, resize_w, _, _ = _geometry(in_h, in_w, *target_hw)
+    resize_h, resize_w, _, _ = resize_geometry(in_h, in_w, *target_hw)
     return ResizeTables(
         source_hw,
         target_hw,

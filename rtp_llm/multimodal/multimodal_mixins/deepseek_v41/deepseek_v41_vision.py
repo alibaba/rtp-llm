@@ -13,11 +13,11 @@ import torch
 from PIL import Image
 from torch import nn
 
-from rtp_llm.config.dsv41_config import V41_LOW_DETAIL_SIZE
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.metrics import AccMetrics, GaugeMetrics
 from rtp_llm.models_py.modules.dsv41.vision_preprocess_tables import (
     ResizeTables,
+    is_supported_shape,
     prepare_resize_tables,
 )
 from rtp_llm.multimodal.mm_error_messages import MMErr, media_error_detail
@@ -659,30 +659,33 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
                 try:
                     with Image.open(payload) as image:
                         config = media.mm_preprocess_config
-                        if (
-                            (config.width, config.height) == V41_LOW_DETAIL_SIZE
-                            and image.size != V41_LOW_DETAIL_SIZE
+                        grid_size = (
+                            (config.width, config.height)
+                            if config.width > 0 and config.height > 0
+                            else image.size
+                        )
+                        grid = plan_image_grid(*grid_size, processor_config)
+                        target_hw = grid[2:]
+                        patch_size = processor_config.vision_patch_size
+                        # An explicit small grid can exceed the GPU filter's downsampling limit.
+                        if gpu_preprocess and (
+                            grid_size == image.size
+                            or is_supported_shape(
+                                (image.height, image.width),
+                                target_hw,
+                                patch_size=patch_size,
+                            )
                         ):
-                            # Detail is applied before the checkpoint's normal grid/resize.
-                            image = image.convert("RGB").resize(
-                                V41_LOW_DETAIL_SIZE, Image.Resampling.BICUBIC
-                            )
-                        if gpu_preprocess:
                             rgb = _rgb_tensor(image)
-                            _, _, target_h, target_w = plan_image_grid(
-                                rgb.shape[1], rgb.shape[0], processor_config
-                            )
                             tables = prepare_resize_tables(
-                                tuple(rgb.shape[:2]),
-                                (target_h, target_w),
-                                patch_size=processor_config.vision_patch_size,
+                                tuple(rgb.shape[:2]), target_hw, patch_size=patch_size
                             )
                             results.append(_DecodedImage(rgb, tables))
                             if VIT_PHASE_METRICS:
                                 result_bytes += rgb.numel() * rgb.element_size()
                         else:
                             patches, vit_h, vit_w, _, _ = preprocess_image(
-                                image, processor_config
+                                image, processor_config, grid=grid
                             )
                             results.append(_RuntimeImage(patches, vit_h, vit_w))
                             if VIT_PHASE_METRICS:
@@ -730,8 +733,13 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
     def _vit_grid(self, image):
         if not isinstance(image, (_DecodedImage, UploadedImage)):
             return image.n_vit_h, image.n_vit_w
-        height, width = image.rgb.shape[:2]
-        _, _, target_h, target_w = plan_image_grid(width, height, self.processor_config)
+        if image.resize_tables is not None:
+            target_h, target_w = image.resize_tables.target_hw
+        else:
+            height, width = image.rgb.shape[:2]
+            _, _, target_h, target_w = plan_image_grid(
+                width, height, self.processor_config
+            )
         patch = self.processor_config.vision_patch_size
         return target_h // patch, target_w // patch
 
