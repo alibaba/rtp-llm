@@ -22,6 +22,7 @@ public class TheoryCacheKeyHistory {
     private final long historyDurationMs;
     private final long configuredMaxKeyOccurrences;
     private RecentCacheKeyWindow historyWindow;
+    private long leadershipEpoch;
 
     public TheoryCacheKeyHistory(
             ConfigService configService, WorkerStatusProvider workerStatusProvider) {
@@ -42,6 +43,11 @@ public class TheoryCacheKeyHistory {
      * History capacity and duration stay fixed until the Master restarts.
      */
     public RecentCacheKeyWindow.Snapshot record(List<Long> cacheKeys) {
+        return record(cacheKeys, 0L);
+    }
+
+    /** Records a request and invalidates pre-election history on entry to a new leadership term. */
+    public RecentCacheKeyWindow.Snapshot record(List<Long> cacheKeys, long epoch) {
         if (historyWindow == null) {
             OptionalLong estimatedHistoryCapacity = estimateHistoryCapacity();
             if (estimatedHistoryCapacity.isEmpty()) {
@@ -53,7 +59,18 @@ public class TheoryCacheKeyHistory {
                             estimatedHistoryCapacity.getAsLong(),
                             System::currentTimeMillis);
         }
+        if (leadershipEpoch != epoch) {
+            reset();
+            leadershipEpoch = epoch;
+        }
         return historyWindow.record(cacheKeys);
+    }
+
+    /** Invalidates the current history when recording is interrupted. */
+    public void reset() {
+        if (historyWindow != null) {
+            historyWindow.reset();
+        }
     }
 
     private OptionalLong estimateHistoryCapacity() {

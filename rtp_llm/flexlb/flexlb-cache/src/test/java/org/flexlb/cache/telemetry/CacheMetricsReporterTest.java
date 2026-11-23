@@ -1,6 +1,7 @@
 package org.flexlb.cache.telemetry;
 
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import org.flexlb.cache.match.theory.RecentCacheKeyWindow;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
@@ -16,6 +17,10 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.lang.reflect.Field;
 
 import static org.flexlb.constant.MetricConstant.CACHE_AFFINITY_DECISION;
+import static org.flexlb.constant.MetricConstant.CACHE_CLUSTER_RECENT_HISTORY_COVERAGE_MS;
+import static org.flexlb.constant.MetricConstant.CACHE_CLUSTER_RECENT_HISTORY_READY;
+import static org.flexlb.constant.MetricConstant.CACHE_CLUSTER_RECENT_HIT_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_CLUSTER_RECENT_INPUT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_BYTES;
 import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
@@ -34,9 +39,11 @@ import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_TOTAL_COUNT;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 /**
  * Checks cache metric registration and emitted samples.
@@ -58,6 +65,27 @@ class CacheMetricsReporterTest {
         } catch (Exception e) {
             fail("Failed to inject monitor: " + e.getMessage());
         }
+    }
+
+    @Test
+    void emitsLeaderTokenCountsOnlyWhenHistoryIsComplete() {
+        var snapshot = mock(RecentCacheKeyWindow.Snapshot.class);
+        when(snapshot.getTimeWindowMs()).thenReturn(100L);
+        when(snapshot.getHistoryCoverageMs()).thenReturn(40L, 100L);
+        when(snapshot.isHistoryComplete()).thenReturn(false, true);
+        var tags = FlexMetricTags.of("timeWindowMs", "100", "isMaster", "true");
+
+        reporter.reportClusterRecentCacheKeyHitMetrics(snapshot, 30L, 100L);
+        verify(monitor).report(CACHE_CLUSTER_RECENT_HISTORY_COVERAGE_MS, tags, 40L);
+        verify(monitor).report(CACHE_CLUSTER_RECENT_HISTORY_READY, tags, 0L);
+        verify(monitor, never()).report(CACHE_CLUSTER_RECENT_HIT_TOKENS, tags, 30L);
+        verify(monitor, never()).report(CACHE_CLUSTER_RECENT_INPUT_TOKENS, tags, 100L);
+
+        reporter.reportClusterRecentCacheKeyHitMetrics(snapshot, 30L, 100L);
+        verify(monitor).report(CACHE_CLUSTER_RECENT_HISTORY_COVERAGE_MS, tags, 100L);
+        verify(monitor).report(CACHE_CLUSTER_RECENT_HISTORY_READY, tags, 1L);
+        verify(monitor).report(CACHE_CLUSTER_RECENT_HIT_TOKENS, tags, 30L);
+        verify(monitor).report(CACHE_CLUSTER_RECENT_INPUT_TOKENS, tags, 100L);
     }
 
     @Test

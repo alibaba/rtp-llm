@@ -3,6 +3,7 @@ package org.flexlb.cache.match.theory;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.LongSupplier;
@@ -32,6 +33,7 @@ public class RecentCacheKeyWindow {
     private final int tableMask;
 
     private int uniqueSize;
+    private long historyStartMs = Long.MIN_VALUE;
 
     RecentCacheKeyWindow(long timeWindowMs, long maxCacheKeys, LongSupplier nowSupplier) {
         if (timeWindowMs <= 0L) {
@@ -62,7 +64,11 @@ public class RecentCacheKeyWindow {
 
     public Snapshot record(List<Long> cacheKeys) {
         long nowMs = nowSupplier.getAsLong();
+        if (historyStartMs == Long.MIN_VALUE) {
+            historyStartMs = nowMs;
+        }
         evictExpired(nowMs);
+        long coverageMs = Math.min(timeWindowMs, Math.max(0L, nowMs - historyStartMs));
 
         long requestOccurrences = 0L;
         long requestHitOccurrences = 0L;
@@ -89,7 +95,16 @@ public class RecentCacheKeyWindow {
         if (log.isDebugEnabled()) {
             logRequest(nowMs, requestOccurrences, requestHitOccurrences);
         }
-        return new Snapshot(timeWindowMs, requestOccurrences, requestHitOccurrences);
+        return new Snapshot(timeWindowMs, requestOccurrences, requestHitOccurrences, coverageMs);
+    }
+
+    /** Clears the window while retaining its allocated storage. */
+    void reset() {
+        if (uniqueSize > 0) {
+            Arrays.fill(tableStates, EMPTY);
+            uniqueSize = 0;
+        }
+        historyStartMs = Long.MIN_VALUE;
     }
 
     private void retainCacheKey(long cacheKey, long nowMs) {
@@ -100,6 +115,7 @@ public class RecentCacheKeyWindow {
             return;
         }
         if (uniqueSize == maxCacheKeys) {
+            historyStartMs = Math.max(historyStartMs, oldestTimestampMs());
             evictOldestCacheKey();
         }
         int newSlot = findEmptySlot(cacheKey);
@@ -164,6 +180,10 @@ public class RecentCacheKeyWindow {
         expirationHeapSlots[secondHeapIndex] = firstTableSlot;
         tableHeapIndexes[firstTableSlot] = secondHeapIndex;
         tableHeapIndexes[secondTableSlot] = firstHeapIndex;
+    }
+
+    private long oldestTimestampMs() {
+        return tableLastSeenTimestampMs[expirationHeapSlots[0]];
     }
 
     private void evictOldestCacheKey() {
@@ -239,10 +259,6 @@ public class RecentCacheKeyWindow {
         }
     }
 
-    private long oldestTimestampMs() {
-        return tableLastSeenTimestampMs[expirationHeapSlots[0]];
-    }
-
     private void logRequest(long nowMs, long requestOccurrences, long requestHitOccurrences) {
         double hitRatio =
                 requestOccurrences > 0L
@@ -278,11 +294,21 @@ public class RecentCacheKeyWindow {
         private final long timeWindowMs;
         private final long requestOccurrences;
         private final long requestHitOccurrences;
+        private final long historyCoverageMs;
 
-        Snapshot(long timeWindowMs, long requestOccurrences, long requestHitOccurrences) {
+        Snapshot(
+                long timeWindowMs,
+                long requestOccurrences,
+                long requestHitOccurrences,
+                long historyCoverageMs) {
             this.timeWindowMs = timeWindowMs;
             this.requestOccurrences = requestOccurrences;
             this.requestHitOccurrences = requestHitOccurrences;
+            this.historyCoverageMs = historyCoverageMs;
+        }
+
+        public boolean isHistoryComplete() {
+            return historyCoverageMs >= timeWindowMs;
         }
     }
 }
