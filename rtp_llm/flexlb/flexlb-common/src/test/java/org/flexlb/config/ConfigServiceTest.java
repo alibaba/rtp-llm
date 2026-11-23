@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -133,6 +134,36 @@ class ConfigServiceTest {
                 () ->
                         ConfigTestFixtures.parse(
                                 "{\"engineGrpc\":{\"kvCacheMaxInboundMessageBytes\":0}}"));
+    }
+
+    @Test
+    void engineGrpcExecutorConfigurationUsesDefaultsAndRejectsNonPositiveOverrides() {
+        var defaults = ConfigTestFixtures.parse("{}").getEngineGrpc();
+        assertEquals(32, defaults.getExecutorThreads());
+        assertEquals(10_000, defaults.getExecutorQueueCapacity());
+        assertEquals(8, defaults.getEventLoopThreads());
+
+        var configured =
+                ConfigTestFixtures.parse(
+                                """
+                {"engineGrpc":{"executorThreads":3,"executorQueueCapacity":17,"eventLoopThreads":2}}
+                """)
+                        .getEngineGrpc();
+        assertEquals(3, configured.getExecutorThreads());
+        assertEquals(17, configured.getExecutorQueueCapacity());
+        assertEquals(2, configured.getEventLoopThreads());
+
+        for (String field :
+                List.of("executorThreads", "executorQueueCapacity", "eventLoopThreads")) {
+            for (int value : new int[] {0, -1}) {
+                assertInvalid(
+                        """
+                        {"engineGrpc":{"%s":%d}}
+                        """
+                                .formatted(field, value),
+                        "engineGrpc." + field);
+            }
+        }
     }
 
     @Test

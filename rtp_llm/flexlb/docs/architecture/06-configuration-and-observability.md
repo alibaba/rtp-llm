@@ -200,6 +200,9 @@ UniConfig / Nacos 的 v3 部分更新示例：
   `receiveTimeoutMs=30000` 限制读完请求体的时间。`receiveBudgetBytes=0` 使用 JVM
   Direct 上限的四分之一作为总接收预算，其中八分之一分给 Cancel，最多 128 MiB。
   接收预算按请求体的 wire bytes 计费，调度和推理耗时在接收计时之外。
+- `engineGrpc.executorThreads`（默认 32）和 `executorQueueCapacity`（默认 10000）控制
+  Master 到 Engine 的 gRPC 回调执行器。`eventLoopThreads`（默认 8）控制共享的 Netty I/O 线程，
+  Engine 通道和 Master 间转发通道共用。三个值均需为正整数，Master 启动时读取。
 - `engineGrpc.kvCacheMaxInboundMessageBytes`：Master 启动时读取 KV Cache 状态响应的
   接收上限，默认 `134217728`（128 MiB）。其他出站通道仍沿用原有上限。
 - `observability.cacheHit`：recent-key window、指标和理论命中日志。理论命中查询、历史池更新、
