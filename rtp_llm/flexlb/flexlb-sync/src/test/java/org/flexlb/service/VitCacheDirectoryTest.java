@@ -188,6 +188,49 @@ class VitCacheDirectoryTest {
     }
 
     @Test
+    void cacheAffinityKeepsTheDefaultGapBoundaryAndFallsBackAt33() {
+        snapshot(a, "a1", "x", "y");
+        var route = context("x", "y");
+        recordLoad(b, 10);
+        recordLoad(a, 42);
+        assertEquals(a.getIp(), selector.select(route, null).getServerIp());
+
+        recordLoad(a, 43);
+        assertEquals(b.getIp(), selector.select(route, null).getServerIp());
+    }
+
+    @Test
+    void cacheAffinityPrefersKnownLoadAndUsesCacheWhenAllSamplesAreUnknown() {
+        snapshot(a, "a1", "x");
+        var route = context("x");
+        long staleNanos = System.nanoTime() - TimeUnit.SECONDS.toNanos(2);
+        a.recordVitLoad(OptionalLong.of(0), a.vitRoutedInputs(), staleNanos);
+        assertEquals(a.getIp(), selector.select(route, null).getServerIp());
+
+        recordLoad(b, 100);
+        assertEquals(b.getIp(), selector.select(route, null).getServerIp());
+    }
+
+    @Test
+    void zeroGapUsesRoutedInputsAndReportsHitsOnTheFinalWorker() {
+        snapshot(a, "a1", "x", "y");
+        snapshot(b, "b1", "x");
+        var route = context("x", "y");
+        route.getRequest().setVitRouteOnly(true);
+        route.getConfig().getRouter().getRoles().getVit().setMaxExtraInflightInputs(0);
+        recordLoad(a, 0);
+        recordLoad(b, 0);
+
+        assertEquals(a.getIp(), selector.select(route, null).getServerIp());
+        assertEquals(b.getIp(), selector.select(route, null).getServerIp());
+        assertEquals(2L, a.vitRoutedInputs());
+        assertEquals(2L, b.vitRoutedInputs());
+        var hits = FlexMetricTags.of("kind", "hit");
+        verify(monitor).report(MetricConstant.VIT_CACHE_AFFINITY_IMAGES, hits, 2);
+        verify(monitor).report(MetricConstant.VIT_CACHE_AFFINITY_IMAGES, hits, 1);
+    }
+
+    @Test
     void theoreticalCacheHitsCountOriginalImagesOnceBeforePublishingPlacements() {
         tierSnapshot(a, List.of("both"), List.of("both", "gpu"), List.of("cpu"));
         var route = context("both", "both", "gpu", "cpu", "cold", "cold");
@@ -670,6 +713,11 @@ class VitCacheDirectoryTest {
         BalanceContext context = new BalanceContext(config);
         context.setRequest(request);
         return context;
+    }
+
+    private static void recordLoad(WorkerStatus worker, long inflight) {
+        worker.recordVitLoad(
+                OptionalLong.of(inflight), worker.vitRoutedInputs(), System.nanoTime());
     }
 
     private void snapshot(WorkerStatus worker, String epoch, String... keys) {
