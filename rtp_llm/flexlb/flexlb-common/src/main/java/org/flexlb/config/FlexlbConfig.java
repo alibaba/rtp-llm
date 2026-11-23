@@ -143,11 +143,14 @@ public final class FlexlbConfig {
     }
 
     /**
-     * Sets the receive limit for KV cache snapshots on Engine gRPC channels.
+     * Configures Engine gRPC callbacks, shared client I/O and the KV cache snapshot receive limit.
      */
     @Getter
     @Setter
     public static final class EngineGrpcConfig {
+        private int executorThreads = 32;
+        private int executorQueueCapacity = 10_000;
+        private int eventLoopThreads = 8;
         private int kvCacheMaxInboundMessageBytes = 128 * 1024 * 1024;
     }
 }
