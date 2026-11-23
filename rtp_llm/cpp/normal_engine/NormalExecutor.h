@@ -109,6 +109,8 @@ private:
     bool    enable_detail_log_ = false;
     int64_t dp_forward_step_   = 0;
 
+    bool qwen4_decode_lookahead_ = false;
+
     bool                  is_propose_          = false;
     int                   propose_model_index_ = 0;
     int                   tp_rank_             = 0;

@@ -55,6 +55,32 @@ void holdSamplerInputHostBuffers(TensorHolder& holder, const SamplerInputs& inpu
     holder.hold_host(inputs.cum_log_probs);
 }
 
+// Keep cache blocks live across the handoff from the preceding dispatch to
+// the dispatch that owns the newly submitted step.
+struct NormalDecodeLookaheadLease {
+    std::vector<GenerateStreamPtr> streams;
+    bool                           forward_started = false;
+
+    ~NormalDecodeLookaheadLease() {
+        if (forward_started) {
+            // An error prevented handing ownership to dispatchOutputAsync.
+            try {
+                cuda_graph::graphGetCurrentStream().synchronize();
+            } catch (const std::exception& error) {
+                RTP_LLM_LOG_ERROR("failed to drain decode lookahead: %s", error.what());
+            }
+        }
+        release();
+    }
+
+    void release() {
+        for (const auto& stream : streams) {
+            stream->decPendingAsyncBookkeepingAndMaybeRelease();
+        }
+        streams.clear();
+    }
+};
+
 }  // namespace
 
 NormalExecutor::ModelFactory NormalExecutor::test_model_factory = nullptr;
@@ -94,6 +120,13 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     tp_rank_                   = params.parallelism_config.tp_rank;
     parallelism_config_        = params.parallelism_config;
     role_type_                 = params.pd_sep_config.role_type;
+#if USING_CUDA
+    qwen4_decode_lookahead_ =
+        params.model_config_.model_type == "qwen4_exp" && params.hw_kernel_config.enable_cuda_graph
+        && !params.hw_kernel_config.enable_cuda_graph_debug_mode && parallelism_config_.tp_size == 1
+        && parallelism_config_.pp_size == 1 && role_type_ == RoleType::PDFUSION && !warm_up_ && !is_propose_
+        && useStreamAsync() && useDeviceInput() && useDropBroadSync();
+#endif
     // First instance() call may carry the arg+env resolved engine config; a
     // null/disabled config leaves the recorder Disabled.
     auto& recorder = ExecutionRecorder::instance(&params.profiling_debug_logging_config);
@@ -267,17 +300,30 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
     // Cap outstanding stream-async bookkeeping to one step unless DROP_BROAD_SYNC is on.
     // Still sync when gatherModelInput lacks NormalAsyncDeviceState; host
     // token/seq_len fallbacks race the previous worker.
-    bool worker_synced = false;
-    if (useStreamAsync() && !useDropBroadSync()) {
+    NormalDecodeLookaheadLease lookahead_lease;
+    if (qwen4_decode_lookahead_ && !streams.empty()) {
+        lookahead_lease.streams.reserve(streams.size());
+        for (const auto& stream : streams) {
+            if (!stream->tryAcquireNormalDecodeLookahead()) {
+                lookahead_lease.release();
+                break;
+            }
+            lookahead_lease.streams.push_back(stream);
+        }
+    }
+    const bool lookahead     = !lookahead_lease.streams.empty();
+    bool       worker_synced = false;
+    if (useStreamAsync() && (!useDropBroadSync() || (qwen4_decode_lookahead_ && !lookahead))) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.wait_prev_dispatch(stream_count=%zu)", streams.size());
         dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
         worker_synced = true;
     }
 
-    StreamGroups stream_groups(streams);
+    StreamGroups stream_groups(streams, lookahead);
     prepareGrpcNormalDeviceState(stream_groups);
 
-    if (useStreamAsync() && useDropBroadSync() && !gatherCanUseDeviceState(stream_groups)) {
+    if (useStreamAsync() && useDropBroadSync() && !worker_synced && !lookahead
+        && !gatherCanUseDeviceState(stream_groups)) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.wait_prev_dispatch(stream_count=%zu)", streams.size());
         dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
         worker_synced = true;
@@ -328,7 +374,9 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
 
         // Move metadata to CUDA before tpSyncModelInputs so broadcasts use the
         // GPU packed-buffer path instead of CPU execBroadcastCpu/unpack loops.
-        ensureModelInputsOnCuda(model_input, "process.before_tp_sync");
+        if (!lookahead) {
+            ensureModelInputsOnCuda(model_input, "process.before_tp_sync");
+        }
 
         tpSyncModelInputs(model_input, parallelism_config_);
         if (model_input.skip_run) {
@@ -337,7 +385,9 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
 
         // Post-sync guard for fields not covered by the root device bitmap
         // (notably sequence_lengths_plus_1) before model_->forward.
-        ensureModelInputsOnCuda(model_input, "process.after_tp_sync");
+        if (!lookahead) {
+            ensureModelInputsOnCuda(model_input, "process.after_tp_sync");
+        }
 
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
@@ -390,6 +440,7 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
             const auto role = is_propose_ ? ModelInputsModelRole::DRAFT : ModelInputsModelRole::NORMAL;
             model_inputs_logger_->log(model_input, role, model_->model_id_);
         }
+        lookahead_lease.forward_started = lookahead;
         // These eager DP/EP ranks enter the same sequence of MoE collectives.
         // Count every forward, including fake-only and unsampled batches, so
         // the recorder's per-rank filtering cannot shift the ordinal.
@@ -452,6 +503,11 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
             // instead of appending one column behind.
             stream_groups = StreamGroups(streams);
         }
+        if (lookahead) {
+            for (const auto& stream : lookahead_lease.streams) {
+                stream->step();
+            }
+        }
 
         CHECK_AND_RETURN_REF(sampler_input,
                              batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
@@ -496,12 +552,14 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
         }
         reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us, token_counts_by_priority);
 
-        return dispatchOutputAsync(stream_groups,
-                                   std::move(model_output),
-                                   std::move(sampler_output),
-                                   std::move(sampler_event),
-                                   profile_step_finish_,
-                                   std::move(recorded_batch));
+        auto status                     = dispatchOutputAsync(stream_groups,
+                                          std::move(model_output),
+                                          std::move(sampler_output),
+                                          std::move(sampler_event),
+                                          profile_step_finish_,
+                                          std::move(recorded_batch));
+        lookahead_lease.forward_started = false;
+        return status;
     }
 
     {
@@ -850,6 +908,9 @@ void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups,
         }
         state.last_real_seq_len = cur_real_seq_len;
         state.next_real_seq_len = cur_real_seq_len + 1;
+        if (qwen4_decode_lookahead_ && stream_groups.totalContextBatchSize() == 0) {
+            state.decode_lookahead = stream->canLookAheadNormalDecode(state.next_real_seq_len);
+        }
         stream->setNormalAsyncDeviceState(std::move(state));
         batch_idx_out += 1;
     }
@@ -875,8 +936,12 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&            
     // Claim each stream's KV resource before handing work to the runner so
     // releaseResource defers while the worker reads/updates those blocks.
     auto streams_for_inc = stream_groups_copy.allStreams();
+    std::vector<std::shared_ptr<void>> previous_decode_pages;
     for (auto& s : streams_for_inc) {
         s->incPendingAsyncBookkeeping();
+        if (qwen4_decode_lookahead_ && sampler_event) {
+            s->reserveNormalDecodeBlocks(previous_decode_pages);
+        }
     }
 
     dispatch_runner_.launch([processor,
@@ -884,7 +949,8 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&            
                              model_output_copy   = std::move(model_output_copy),
                              sampler_output_copy = std::move(sampler_output_copy),
                              sampler_event,
-                             recorded_batch = std::move(recorded_batch)]() mutable {
+                             previous_decode_pages = std::move(previous_decode_pages),
+                             recorded_batch        = std::move(recorded_batch)]() mutable {
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output_worker");
 
         // Local ownership submits on normal return and on worker exceptions,
@@ -899,6 +965,13 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&            
                 s->decPendingAsyncBookkeepingAndMaybeRelease();
             }
         });
+
+        if (!previous_decode_pages.empty()) {
+            // The next page table can retire pages that this replay still
+            // owns. Release those references once this replay has finished.
+            sampler_event->synchronize();
+            previous_decode_pages.clear();
+        }
 
         // Queue a stream wait, then do pinned D2H on the worker stream while
         // the main thread continues to the next gather.

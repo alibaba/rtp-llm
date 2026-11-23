@@ -9,6 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
+from typing import Optional
 
 WORLD_SIZE = 8
 PAGE_SIZE = 128
@@ -22,6 +23,7 @@ def _wait_for_traces(
     steps: int,
     prefix_length: int,
     alignment_steps: int = 0,
+    decode_lookahead: bool = False,
 ) -> None:
     deadline = time.monotonic() + 180
     paths = []
@@ -41,6 +43,7 @@ def _wait_for_traces(
                         steps,
                         prefix_length,
                         alignment_steps,
+                        decode_lookahead,
                     )
             except json.JSONDecodeError:
                 pass  # Kineto exports asynchronously after the request returns.
@@ -57,13 +60,46 @@ def _check_trace(
     steps: int,
     prefix_length: int = 0,
     alignment_steps: int = 0,
+    decode_lookahead: bool = False,
 ) -> None:
-    graphs = sum(
-        event.get("cat") == "cuda_runtime"
+    launches = [
+        event
+        for event in events
+        if event.get("cat") == "cuda_runtime"
         and event.get("ph") == "X"
         and event.get("name") == "cudaGraphLaunch"
-        for event in events
-    )
+    ]
+    graphs = len(launches)
+    if decode_lookahead:
+        # Kineto may stop while the last asynchronously submitted graph is
+        # still running. Validate the complete predecessors and their launches.
+        launches.sort(key=lambda event: event["ts"])
+        groups = {event["args"]["correlation"]: [] for event in launches}
+        for event in events:
+            cid = event.get("args", {}).get("correlation")
+            if cid in groups and event.get("cat") in {
+                "kernel",
+                "gpu_kernel",
+                "gpu_memcpy",
+                "gpu_memset",
+            }:
+                groups[cid].append(event)
+        ahead = 0
+        for pair, (current, following) in enumerate(zip(launches, launches[1:])):
+            kernels = groups[current["args"]["correlation"]]
+            _check_qtoken(kernels, path, phase, 1)
+            previous_gpu_end = max(event["ts"] + event["dur"] for event in kernels)
+            launch_delay = following["ts"] + following["dur"] - previous_gpu_end
+            if pair == 0 and launch_delay >= 0:
+                raise RuntimeError(
+                    f"First page crossing in {path} submitted {launch_delay:.1f} us after graph 1 ended"
+                )
+            ahead += launch_delay < 0
+        if graphs != steps or ahead < 2:
+            raise RuntimeError(
+                f"Expected at least two ahead-of-time replays in {path}, got {ahead} of {graphs} launches"
+            )
+        return
     kernel_names = [
         event.get("name", "")
         for event in events
@@ -140,6 +176,8 @@ def _capture(
     prefix_length: int = 0,
     short_prefix: bool = False,
     alignment_steps: int = 0,
+    decode_lookahead: bool = False,
+    decode_new_tokens: Optional[int] = None,
 ) -> None:
     import grpc
     import requests
@@ -155,6 +193,10 @@ def _capture(
         "prefill": (16384, 8, 1, 1),
         "mtp": (4608, 1, 20, 4),
     }[phase]
+    if decode_lookahead:
+        steps = 5
+        if decode_new_tokens is not None:
+            new_tokens = decode_new_tokens
     if short_prefix:
         length = prefix_length + 8
         batch = 8 * WORLD_SIZE
@@ -302,6 +344,7 @@ def _capture(
         steps,
         prefix_length,
         alignment_steps,
+        decode_lookahead,
     )
     (output / f"{metric_name}_metrics.json").write_text(
         json.dumps({**asdict(metrics), "reuse_len": prefix_length}, indent=2) + "\n"
@@ -325,12 +368,28 @@ def main() -> None:
     mode.add_argument(
         "--mtp", action="store_true", help="Profile DP8/EP8 MTP with CUDA Graph."
     )
+    mode.add_argument(
+        "--decode_lookahead",
+        action="store_true",
+        help="Validate DP8/EP8 decode submitting the next graph during the previous replay.",
+    )
+    parser.add_argument(
+        "--decode_new_tokens",
+        type=int,
+        help="Override the fixed output length for --decode_lookahead.",
+    )
     parser.add_argument(
         "--output_dir", type=Path, default=os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")
     )
     args = parser.parse_args()
     if args.output_dir is None:
         parser.error("--output_dir is required when invoking this script directly")
+    if args.decode_new_tokens is not None and (
+        not args.decode_lookahead or args.decode_new_tokens < 5
+    ):
+        parser.error(
+            "--decode_new_tokens requires --decode_lookahead and at least 5 tokens"
+        )
     checkpoint = args.checkpoint_path.resolve(strict=True)
     output = args.output_dir.resolve()
     (output / "timelines").mkdir(parents=True, exist_ok=False)
@@ -368,8 +427,9 @@ def main() -> None:
             --decode_capture_config 4 --use_batch_decode_scheduler 1
         """
     else:
-        server_args += """
-            --max_seq_len 32784 --max_batch_tokens_size 16384 --kv_cache_mem_mb 16384 --linear_pool_blocks 16
+        server_args += f"""
+            --max_seq_len {32768 + (args.decode_new_tokens or 16)} --max_batch_tokens_size 16384
+            --kv_cache_mem_mb 16384 --linear_pool_blocks 16
             --decode_capture_config 4 --use_batch_decode_scheduler 1
         """
     # Limit recurrent checkpoints to the tail. Each seed ends one page after
@@ -382,7 +442,9 @@ def main() -> None:
         server_env = {
             "BATCH_DECODE_SCHEDULER_WARMUP_TYPE": "0",
             "FT_SERVER_TEST": "1",
-            "GEN_TIMELINE_SYNC": "0" if args.short_prefix else "1",
+            "GEN_TIMELINE_SYNC": (
+                "0" if args.short_prefix or args.decode_lookahead else "1"
+            ),
             "OMP_NUM_THREADS": "4",
             "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
             "QWEN4_GDN_BACKEND": "flashinfer",
@@ -392,6 +454,12 @@ def main() -> None:
             "QWEN4_QSA_INDEXER_CHUNK_SIZE": "4096",
             "TORCH_CUDA_PROFILER_DIR": str(output / "timelines"),
         }
+        if args.decode_lookahead:
+            server_env.update(
+                RTP_LLM_STREAM_ASYNC="1",
+                RTP_LLM_DEVICE_INPUT="1",
+                RTP_LLM_DROP_BROAD_SYNC="1",
+            )
         (output / "launch.json").write_text(
             json.dumps(
                 {"server_args": shlex.split(server_args), "server_env": server_env},
@@ -408,7 +476,9 @@ def main() -> None:
                 timeout=3000,
             ):
                 raise RuntimeError(f"Qwen4 did not start. See {server.log_file_path}")
-            phases = ("mtp",) if args.mtp else ("decode", "prefill")
+            phases = ("mtp",) if args.mtp else ("decode",)
+            if not args.mtp and not args.decode_lookahead:
+                phases += ("prefill",)
             # The DP engine can run short decode forwards to keep ranks aligned.
             # Retain those steps in the raw trace and check the one real prefill.
             alignment_steps = 3 if args.short_prefix else 0
@@ -419,6 +489,8 @@ def main() -> None:
                     checkpoint,
                     output,
                     alignment_steps=alignment_steps if phase == "prefill" else 0,
+                    decode_lookahead=args.decode_lookahead,
+                    decode_new_tokens=args.decode_new_tokens,
                 )
             if args.prefix_cache or args.short_prefix:
                 _capture(

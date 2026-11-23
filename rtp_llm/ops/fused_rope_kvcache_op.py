@@ -295,6 +295,7 @@ class FusedRopeKVCacheDecodeOp:
         device: Optional[torch.device] = None,
         *,
         forbid_reallocation: bool = False,
+        snapshot_host_lengths: bool = False,
     ) -> torch.Tensor:
         """Refresh the stable CUDA buffer consumed by decode RoPE.
 
@@ -380,6 +381,13 @@ class FusedRopeKVCacheDecodeOp:
                 device=device,
             )
 
+        if snapshot_host_lengths and not sequence_lengths.is_cuda:
+            # The next prepare can rewrite the graph's host mirror before
+            # this H2D reaches the front of the replay stream. Give the copy
+            # a pinned source whose lifetime is tracked by PyTorch.
+            snapshot = torch.empty_like(sequence_lengths, pin_memory=True)
+            snapshot.copy_(sequence_lengths)
+            sequence_lengths = snapshot
         self._sequence_lengths_device.copy_(
             sequence_lengths,
             non_blocking=source_supports_async_copy,
@@ -451,6 +459,7 @@ class FusedRopeKVCacheDecodeOp:
         attn_inputs: PyAttentionInputs,
         *,
         forbid_reallocation: bool = False,
+        snapshot_host_lengths: bool = False,
     ) -> FusedRopeAttnParams:
         assert (
             attn_inputs.kv_cache_kernel_block_id_device is not None
@@ -465,6 +474,7 @@ class FusedRopeKVCacheDecodeOp:
                 attn_inputs,
                 kv_cache_offset.device,
                 forbid_reallocation=forbid_reallocation,
+                snapshot_host_lengths=snapshot_host_lengths,
             )
         else:
             # The params object is retained by attention implementations even

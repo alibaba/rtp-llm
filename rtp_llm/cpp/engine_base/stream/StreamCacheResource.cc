@@ -421,7 +421,8 @@ absl::Status StreamCacheResource::waitForAllocatorLoad() {
     return finalizeAllocatorLoad();
 }
 
-absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
+absl::Status StreamCacheResource::incrKVBlock(int                                 seq_len_override,
+                                              std::vector<std::shared_ptr<void>>* previous_decode_pages) {
     RTP_LLM_PROFILE_FUNCTION();
     // TODO(xinfei.sxf) add reserver_blocks
     if (fake_inited_) {
@@ -437,6 +438,7 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     malloc_info.enable_cache_lookup          = enableCacheLookup();
     malloc_info.enable_remove_skipped_blocks = !stream_->isContextStream();
     malloc_info.incr_seq_len_override        = seq_len_override;
+    malloc_info.previous_decode_pages        = previous_decode_pages;
 
     auto result = resource_context_.cache_manager->malloc(malloc_info);
     if (!result.success) {

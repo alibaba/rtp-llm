@@ -39,7 +39,8 @@ public:
     absl::Status         waitForAllocatorLoad();
     // Empty while pending; a terminal status preserves retryable materialization failures.
     std::optional<absl::Status> pollAllocatorLoad();
-    absl::Status                incrKVBlock(int seq_len_override = -1);
+    absl::Status                incrKVBlock(int                                 seq_len_override      = -1,
+                                            std::vector<std::shared_ptr<void>>* previous_decode_pages = nullptr);
     void                        fakeInitKVBlock(size_t reserved_blocks = 0);
     int                         tryReleaseKVBlock(size_t nums);
     void                        freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);

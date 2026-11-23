@@ -29,6 +29,19 @@
 namespace rtp_llm {
 namespace {
 
+struct DecodePageLease {
+    DecodePageLease(DeviceBlockPoolPtr pool, BlockIndicesType pages): pool(std::move(pool)), pages(std::move(pages)) {
+        this->pool->incRef(this->pages);
+    }
+
+    ~DecodePageLease() {
+        pool->decRef(pages);
+    }
+
+    DeviceBlockPoolPtr pool;
+    BlockIndicesType   pages;
+};
+
 // CP shard helpers: when mapper is null/passthrough, all helpers no-op.
 inline CacheKeysType cpCanonicalCacheKeys(const std::shared_ptr<CPSlotMapper>& mapper, const CacheKeysType& full) {
     return (mapper && mapper->isSharded()) ? mapper->canonicalCacheKeys(full) : full;
@@ -839,9 +852,24 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
         }
         for (int b = 0; b < batch_size; ++b) {
             for (int group_id = 0; group_id < config_.groupNums(); ++group_id) {
-                const auto& tag = config_.groupTags()[static_cast<size_t>(group_id)];
-                kv_cache_groups_[static_cast<size_t>(group_id)]->removeSkippedBlocks(
-                    kv_resource->mutableBlockIds(b, tag), malloc_info.reuse_cache, reserve_step);
+                const auto  group_index = static_cast<size_t>(group_id);
+                const auto& tag         = config_.groupTags()[group_index];
+                const auto& group       = kv_cache_groups_[group_index];
+                auto&       block_ids   = kv_resource->mutableBlockIds(b, tag);
+                if (malloc_info.previous_decode_pages && group->hasSparseSlots()) {
+                    BlockIndicesType pages;
+                    const auto&      blocks = block_ids.blocks();
+                    for (size_t pos = 0; pos < original_sizes[static_cast<size_t>(b)][group_index]; ++pos) {
+                        if (blocks[pos] > 0 && !isNullBlockIdx(blocks[pos])) {
+                            pages.push_back(blocks[pos]);
+                        }
+                    }
+                    if (!pages.empty()) {
+                        malloc_info.previous_decode_pages->push_back(
+                            std::make_shared<DecodePageLease>(group_block_pools_[group_index], std::move(pages)));
+                    }
+                }
+                group->removeSkippedBlocks(block_ids, malloc_info.reuse_cache, reserve_step);
             }
         }
         return {true, 0};

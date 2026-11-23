@@ -23,6 +23,7 @@ target verification and bounded draft prefill support CUDA Graph. Layout and
 publication preflights complete before either side or main-cache writes.
 """
 
+import os
 from typing import TYPE_CHECKING, Optional, Union
 
 import torch
@@ -463,7 +464,9 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         else:
             # Decode also refreshes its stable sequence-length buffer.
             offset = self.rope_kvcache_impl.prepare(
-                attn_inputs, forbid_reallocation=True
+                attn_inputs,
+                forbid_reallocation=True,
+                snapshot_host_lengths=os.getenv("RTP_LLM_DROP_BROAD_SYNC") == "1",
             ).kv_cache_offset
         captured_offset = self.rope_params.kv_cache_offset
         if (

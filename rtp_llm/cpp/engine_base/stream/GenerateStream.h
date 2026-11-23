@@ -813,7 +813,14 @@ public:
         // scheduler can drive incrKVBlock without racing the async worker.
         // -1 = unset (first iter / cleared).
         int next_real_seq_len = -1;
+        // False means the scheduler must join the pending commit before proceeding.
+        // Unset preserves the ordinary device-input scheduler path.
+        std::optional<bool> decode_lookahead = std::nullopt;
     };
+
+    bool canLookAheadNormalDecode(int next_length) const;
+    bool tryAcquireNormalDecodeLookahead();
+    void reserveNormalDecodeBlocks(std::vector<std::shared_ptr<void>>& previous_decode_pages);
 
     uint64_t setNormalAsyncDeviceState(NormalAsyncDeviceState state) {
         state.epoch         = ++normal_async_epoch_counter_;

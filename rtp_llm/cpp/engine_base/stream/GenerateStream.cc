@@ -506,7 +506,7 @@ int GenerateStream::batchSize(int output_len) const {
 }
 
 int GenerateStream::currentBatchSize() const {
-    return batchSize(outputTokenLen());
+    return batchSize(hasNumBeams() ? outputTokenLen() : 0);
 }
 
 int GenerateStream::nextBatchSize() const {
@@ -585,7 +585,11 @@ bool GenerateStream::returnCumLogProbs() const {
 }
 
 bool GenerateStream::genTimeline() const {
-    return genTimelineAtSeqLength(seqLength());
+    if (!gen_timeline_) {
+        return false;
+    }
+    const auto& state = getNormalAsyncDeviceState();
+    return genTimelineAtSeqLength(state.decode_lookahead.value_or(false) ? state.next_real_seq_len : seqLength());
 }
 
 bool GenerateStream::genTimelineAtSeqLength(int seq_length) const {
@@ -1132,7 +1136,12 @@ bool GenerateStream::needsAsyncBookkeepingJoinForKvReservation() const {
     // MTP publishes its state before claiming the worker, so a nonzero epoch
     // distinguishes its page-table snapshot from normal decode.
     if (state.epoch == 0) {
-        return getNormalAsyncDeviceState().next_real_seq_len <= 0;
+        const auto& normal = getNormalAsyncDeviceState();
+        if (normal.decode_lookahead.has_value()) {
+            return !*normal.decode_lookahead
+                   || stream_cache_resource_->singleBatchNeedBlocks(normal.next_real_seq_len, reserve_step_) > 0;
+        }
+        return normal.next_real_seq_len <= 0;
     }
     if (!hasMtpCacheSnapshot(state) || state.next_seq_len_upper_bound <= 0 || stream_cache_resource_ == nullptr) {
         return true;
@@ -1144,6 +1153,41 @@ bool GenerateStream::needsAsyncBookkeepingJoinForKvReservation() const {
     return stream_cache_resource_->singleBatchNeedBlocks(state.next_seq_len_upper_bound,
                                                          static_cast<int>(reserve_step_))
            > 0;
+}
+
+bool GenerateStream::canLookAheadNormalDecode(int next_length) const {
+    const auto& config = *generateConfig();
+    // EOS and stop words can finish the request once it reaches min_new_tokens.
+    return !isFakeStream() && maxBatchSize() == 1 && next_length > inputLength()
+           && next_length - inputLength() < config.min_new_tokens
+           && static_cast<size_t>(next_length) < nextStepSeqLengthLimit() && !config.calculate_loss
+           && !config.return_hidden_states && !config.return_all_hidden_states && !config.hasStructuredOutputRequest();
+}
+
+bool GenerateStream::tryAcquireNormalDecodeLookahead() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (!normal_async_state_.decode_lookahead.value_or(false) || isContextStream() || isFakeStream()
+        || getStatus() != StreamState::RUNNING || hasErrorWithoutLock()
+        || stream_cache_resource_->isResourceReleased()) {
+        return false;
+    }
+    incPendingAsyncBookkeeping();
+    return true;
+}
+
+void GenerateStream::reserveNormalDecodeBlocks(std::vector<std::shared_ptr<void>>& previous_decode_pages) {
+    const auto& state = getNormalAsyncDeviceState();
+    if (!state.decode_lookahead.value_or(false)
+        || stream_cache_resource_->singleBatchNeedBlocks(state.next_real_seq_len, reserve_step_) == 0) {
+        return;
+    }
+    RTP_LLM_PROFILE_SCOPE("stream.reserve_normal_decode_kv");
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (getStatus() == StreamState::RUNNING && !hasErrorWithoutLock()) {
+        // On capacity failure incrMalloc rolls back. The scheduler can join
+        // the commit and retry using the ordinary allocation path.
+        (void)stream_cache_resource_->incrKVBlock(state.next_real_seq_len, &previous_decode_pages);
+    }
 }
 
 void GenerateStream::setPPInflight() {
