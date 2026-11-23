@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -87,6 +88,8 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     private final Set<GlobalQueueEntry> costOrderPending = Collections.newSetFromMap(new IdentityHashMap<>());
     // Protected by lock. A completed estimate is visible to the next dequeue.
     private final Map<GlobalQueueEntry, WorkEstimate> costOrderEstimates = new IdentityHashMap<>();
+    /** Includes the in-progress lookup until its result is published under the lock. */
+    private final LinkedHashSet<GlobalQueueEntry> costRefreshQueue = new LinkedHashSet<>();
     /** At most one read-only refresh runs independently of placement planners. */
     private boolean refreshingCosts;
     /** Published by the decision thread; timeout readers never acquire the queue lock. */
@@ -297,7 +300,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             if (inFlight.size() < plannerCount && (orderedQueue.hasUnscannedRequests()
                     || waitingRequests.hasReadyRequests() || !costOrderPending.isEmpty())) { return; }
             if (prefillCostOrder && costOrderPending.size() < calculateScanBudget(plannerCount)
-                    && (orderedQueue.hasUnscannedRequests() || waitingRequests.hasReadyRequests())) { return; }
+                    && orderedQueue.hasUnscannedRequests()) { return; }
             changed.await();
         } catch (InterruptedException interruption) {
             if (closed.get()) { Thread.currentThread().interrupt(); }
@@ -380,11 +383,12 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         int budget = calculateScanBudget(slots);
         // Cost ordering needs the whole visible page to rank before committing slots.
         int lookahead = prefillCostOrder ? budget : slots;
-        waitingRequests.resumeReady(lookahead, entry -> {
-            if (shedding != null) { shedding.remove(entry); }
-            orderedQueue.markRequestReadyForRetry(entry);
-        });
-        if (prefillCostOrder) {
+        if (!prefillCostOrder) {
+            waitingRequests.resumeReady(lookahead, entry -> {
+                if (shedding != null) { shedding.remove(entry); }
+                orderedQueue.markRequestReadyForRetry(entry);
+            });
+        } else {
             int remaining = calculateScanBudget(plannerCount) - costOrderPending.size();
             if (remaining <= 0) {
                 // A higher-priority arrival may enter even when the lookahead window is full.
@@ -412,65 +416,62 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     private List<GlobalQueueEntry> rankCostCandidates(List<GlobalQueueEntry> page, int slots) {
         costOrderPending.addAll(page);
         long now = System.nanoTime();
-        var candidates = new ArrayList<PrefillCostOrder.Candidate<GlobalQueueEntry>>(costOrderPending.size());
-        var stale = new ArrayList<GlobalQueueEntry>();
-        for (var entry : costOrderPending) {
+        var contenders = new ArrayList<>(costOrderPending);
+        // Keep wakeups in their ranked domain index until a planner actually selects them.
+        waitingRequests.collectReadyHeads(calculateScanBudget(slots), contenders);
+        var candidates = new ArrayList<PrefillCostOrder.Candidate<GlobalQueueEntry>>(contenders.size());
+        for (var entry : contenders) {
             var estimate = costOrderEstimates.get(entry);
             if (estimate == null || now - estimate.atNanos() >= TimeUnit.SECONDS.toNanos(1)) {
                 // Stale-while-revalidate: this round keeps ranking on the last
                 // completed estimate; the background renewal swaps in the new value
                 // when it lands, so an expired estimate never falls back to
                 // arrival order while its refresh is still in flight.
-                if (!refreshingCosts) { stale.add(entry); }
+                costRefreshQueue.add(entry);
             }
             candidates.add(benefitCandidate(entry, estimate));
         }
-        if (!stale.isEmpty()) {
+        if (!refreshingCosts && !costRefreshQueue.isEmpty()) {
             refreshingCosts = true;
-            costEstimator.execute(() -> refreshCosts(stale));
+            costEstimator.execute(this::refreshCosts);
         }
         var selected = PrefillCostOrder.first(candidates, priorityOrdering, slots);
-        costOrderPending.removeAll(selected);
+        for (var entry : selected) {
+            costOrderPending.remove(entry);
+            if (waitingRequests.resumeIfWaiting(entry) && shedding != null) { shedding.remove(entry); }
+        }
         return selected;
     }
 
-    private void refreshCosts(List<GlobalQueueEntry> entries) {
+    private void refreshCosts() {
+        lock.lock();
         try {
-            for (var entry : entries) {
-                if (closed.get()) { return; }
-                if (entry.removed || entry.future.isDone()) { continue; }
+            while (!closed.get() && !costRefreshQueue.isEmpty()) {
+                var entry = costRefreshQueue.getFirst();
                 CostBasedPrefillStrategy.TokenEstimate tokens = null;
+                lock.unlock();
                 try {
-                    tokens = router.estimateQueuedTokens(entry.context, entry.routingGroup);
+                    if (!entry.removed && !entry.future.isDone()) {
+                        tokens = router.estimateQueuedTokens(entry.context, entry.routingGroup);
+                    }
                 } catch (RuntimeException unavailable) {
                     Logger.debug("Prefill token estimate renewal failed; keeping the last value", unavailable);
-                }
-                lock.lock();
-                try {
-                    if (!entry.removed && registered.get(entry.future) == entry) {
-                        // A failed renewal keeps the last completed benefit instead of
-                        // demoting the entry to unknown; the refreshed timestamp paces
-                        // the next retry by the estimate TTL.
-                        WorkEstimate previous = costOrderEstimates.get(entry);
-                        var updated = new WorkEstimate(System.nanoTime(), tokens != null ? tokens
-                                : previous == null ? null : previous.tokens());
-                        costOrderEstimates.put(entry, updated);
-                        if (tokens != null && waitingRequests.isWaiting(entry)) {
-                            waitingRequests.updatePrefillCost(benefitCandidate(entry, updated));
-                        }
-                    }
                 } finally {
-                    lock.unlock();
+                    lock.lock();
+                }
+                if (!costRefreshQueue.remove(entry) || entry.future.isDone()) { continue; }
+                WorkEstimate previous = costOrderEstimates.get(entry);
+                var updated = new WorkEstimate(System.nanoTime(), tokens != null ? tokens
+                        : previous == null ? null : previous.tokens());
+                costOrderEstimates.put(entry, updated);
+                if (tokens != null && waitingRequests.isWaiting(entry)) {
+                    waitingRequests.updatePrefillCost(benefitCandidate(entry, updated));
                 }
             }
         } finally {
-            lock.lock();
-            try {
-                refreshingCosts = false;
-                changed.signal();
-            } finally {
-                lock.unlock();
-            }
+            refreshingCosts = false;
+            changed.signal();
+            lock.unlock();
         }
     }
 
@@ -667,6 +668,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         if (shedding != null) { shedding.remove(entry); }
         costOrderPending.remove(entry);
         costOrderEstimates.remove(entry);
+        costRefreshQueue.remove(entry);
         if (orderedQueue.remove(entry)) {
             waitingRequests.remove(entry);
             changed.signal();
@@ -777,6 +779,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             registered.clear();
             costOrderPending.clear();
             costOrderEstimates.clear();
+            costRefreshQueue.clear();
             completed = List.copyOf(completedPlans);
             completedPlans.clear();
             inFlight.clear();

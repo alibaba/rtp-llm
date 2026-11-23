@@ -646,8 +646,7 @@ class RequestSchedulerTest {
             assertTrue(fixture.requests.get(0).future.cancel(false));
             fixture.allowHeadRetry.countDown();
             fixture.requests.get(1).future.get(5, TimeUnit.SECONDS);
-            assertTrue(fixture.requests.get(2).blockedAttempt.await(5, TimeUnit.SECONDS));
-            fixture.awaitIndependentCommit();
+            RequestLifecycleTestSupport.awaitCondition(() -> fixture.requests.get(2).attempts.get() >= 2);
 
             assertEquals(List.of(821L), fixture.admitted);
             assertEquals(0, fixture.availableSlots.get());

@@ -5,6 +5,7 @@ import org.flexlb.balance.scheduler.PrefillCostOrder.Candidate;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.NavigableSet;
 import java.util.Objects;
@@ -32,13 +33,8 @@ final class PlacementWaitQueue {
 
     PlacementWaitQueue(boolean priorityOrdering, PlacementAvailability availability) {
         this.availability = Objects.requireNonNull(availability, "availability");
-        Comparator<GlobalQueueEntry> fifo = Comparator.comparingLong(entry -> entry.sequence);
-        Comparator<GlobalQueueEntry> order = priorityOrdering
-                ? Comparator.<GlobalQueueEntry>comparingInt(entry -> entry.priority).reversed().thenComparing(fifo)
-                : fifo;
         waiterOrder = Comparator.comparing(Waiter::rank, PrefillCostOrder.comparator(priorityOrdering));
-        ready = new TreeSet<>((left, right) ->
-                order.compare(left.entries.first().rank.value(), right.entries.first().rank.value()));
+        ready = new TreeSet<>(Comparator.comparing(domain -> domain.entries.first(), waiterOrder));
     }
 
     boolean isWaiting(GlobalQueueEntry entry) {
@@ -99,17 +95,38 @@ final class PlacementWaitQueue {
         return !ready.isEmpty();
     }
 
+    /** Only the head of each available domain can claim its retry opportunity. */
+    void collectReadyHeads(int limit, List<GlobalQueueEntry> candidates) {
+        var domains = ready.iterator();
+        for (int i = 0; i < limit && domains.hasNext(); i++) {
+            candidates.add(domains.next().entries.first().rank.value());
+        }
+    }
+
     void resumeReady(int limit, Consumer<GlobalQueueEntry> resume) {
         for (int count = 0; count < limit && !ready.isEmpty(); count++) {
-            Domain domain = ready.pollFirst();
-            GlobalQueueEntry entry = domain.entries.pollFirst().rank.value();
-            domain.active = true;
-            domain.available = false;
-            waiting.remove(entry);
-            retrying.put(entry, domain);
-            // Even completed entries need an owner-side cleanup opportunity.
-            resume.accept(entry);
+            resume.accept(resumeHead(ready.first()));
         }
+    }
+
+    boolean resumeIfWaiting(GlobalQueueEntry entry) {
+        Waiter waiter = waiting.get(entry);
+        if (waiter == null) { return false; }
+        if (waiter.domain.entries.first() != waiter || !ready.contains(waiter.domain)) {
+            throw new IllegalStateException("selected retry is not a ready domain head");
+        }
+        resumeHead(waiter.domain);
+        return true;
+    }
+
+    private GlobalQueueEntry resumeHead(Domain domain) {
+        ready.remove(domain);
+        GlobalQueueEntry entry = domain.entries.pollFirst().rank.value();
+        domain.active = true;
+        domain.available = false;
+        waiting.remove(entry);
+        retrying.put(entry, domain);
+        return entry;
     }
 
     /** A departing request did not consume the remaining retry opportunity. */

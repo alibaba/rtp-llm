@@ -624,6 +624,68 @@ class GlobalQueueProgressTest {
     }
 
     @Test
+    void parkedRequestGetsItsFirstEstimateAfterABusyLookup() throws Exception {
+        long cold = 1802L;
+        long hot = 1801L;
+        var coldLookupStarted = new CountDownLatch(1);
+        var finishColdLookup = new CountDownLatch(1);
+        var hotLookups = new AtomicInteger();
+        try (Fixture f = new Fixture(RoleType.PREFILL, true, true, null, 1)) {
+            when(f.router.estimateQueuedTokens(any(), nullable(String.class))).thenAnswer(call -> {
+                BalanceContext context = call.getArgument(0);
+                if (context.getRequestId() == cold) {
+                    coldLookupStarted.countDown();
+                    await(finishColdLookup);
+                    return new CostBasedPrefillStrategy.TokenEstimate(1000, 0);
+                }
+                hotLookups.incrementAndGet();
+                return new CostBasedPrefillStrategy.TokenEstimate(1000, 900);
+            });
+            f.admissionBlocked.addAll(List.of(cold, hot));
+            try {
+                f.submit(cold, "a");
+                await(coldLookupStarted);
+                f.submit(hot, "a");
+                RequestLifecycleTestSupport.awaitGlobalCapacityWaiters(f.scheduler, 2);
+                assertEquals(0, hotLookups.get());
+            } finally {
+                finishColdLookup.countDown();
+            }
+            awaitCondition(() -> estimateRecorded(f, hot));
+            f.admissionBlocked.clear();
+            f.release("a");
+            awaitCondition(() -> f.admissionOrder.size() == 2);
+            assertEquals(List.of(hot, cold), f.admissionOrder);
+        }
+    }
+
+    @Test
+    void hottestReadyWorkerGetsTheOnlyPlannerWhenThreeWorkersWakeTogether() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL, true, true, null, 1)) {
+            configureWorkCosts(f, true);
+            var ids = List.of(1802L, 1803L, 1801L); // two cold requests, then the hot one
+            f.admissionBlocked.addAll(ids);
+            for (int i = 0; i < ids.size(); i++) {
+                long id = ids.get(i);
+                f.submit(id, "g" + id);
+                RequestLifecycleTestSupport.awaitGlobalCapacityWaiters(f.scheduler, i + 1);
+                awaitCondition(() -> estimateRecorded(f, id));
+            }
+            Object queue = ReflectionTestUtils.getField(f.scheduler, "globalQueue");
+            var lock = (ReentrantLock) ReflectionTestUtils.getField(queue, "lock");
+            lock.lock();
+            try {
+                f.admissionBlocked.clear();
+                ids.forEach(id -> f.release("g" + id));
+            } finally {
+                lock.unlock();
+            }
+            awaitCondition(() -> f.admissionOrder.size() == 3);
+            assertEquals(List.of(1801L, 1802L, 1803L), f.admissionOrder);
+        }
+    }
+
+    @Test
     void staleEstimateKeepsRankingWhileRefreshIsInFlight() throws Exception {
         var started = new CountDownLatch(2);
         var releaseOne = new CountDownLatch(1);
@@ -903,7 +965,7 @@ class GlobalQueueProgressTest {
                 when(route.tryEnqueue(any(), any(), any())).thenAnswer(commit -> {
                     onAdmission.accept(id);
                     if (admissionBlocked.contains(id)) {
-                        return PlacementResult.blocked(PlacementKey.exact(role, "a", "a:8000"));
+                        return PlacementResult.blocked(PlacementKey.exact(role, groups.get(id), groups.get(id) + ":8000"));
                     }
                     admissionOrder.add(id);
                     admitted.add(id);
