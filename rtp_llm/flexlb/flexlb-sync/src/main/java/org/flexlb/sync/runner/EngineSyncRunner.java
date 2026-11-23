@@ -43,6 +43,7 @@ public class EngineSyncRunner implements Runnable {
     private final WorkerAddressService workerAddressService;
 
     private final ExecutorService statusCheckExecutor;
+    private final ExecutorService statusApplicationExecutor;
 
     private final EngineHealthReporter engineHealthReporter;
 
@@ -86,6 +87,7 @@ public class EngineSyncRunner implements Runnable {
                 workerDirectory,
                 workerAddressService,
                 statusCheckExecutor,
+                statusCheckExecutor,
                 engineHealthReporter,
                 engineGrpcService,
                 roleType,
@@ -104,6 +106,7 @@ public class EngineSyncRunner implements Runnable {
             WorkerDirectory workerDirectory,
             WorkerAddressService workerAddressService,
             ExecutorService statusCheckExecutor,
+            ExecutorService statusApplicationExecutor,
             EngineHealthReporter engineHealthReporter,
             EngineGrpcService engineGrpcService,
             RoleType roleType,
@@ -120,6 +123,7 @@ public class EngineSyncRunner implements Runnable {
         this.workerAddressService = workerAddressService;
         this.workerDirectory = Objects.requireNonNull(workerDirectory, "workerDirectory");
         this.statusCheckExecutor = statusCheckExecutor;
+        this.statusApplicationExecutor = statusApplicationExecutor;
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
         this.roleType = roleType;
@@ -212,6 +216,9 @@ public class EngineSyncRunner implements Runnable {
                                 host.getEngineIndex(),
                                 host.getMultiEngineNum());
 
+                if (workerStatus == null) {
+                    continue;
+                }
                 if (!workerStatus.isActiveGeneration()) {
                     logger.debug(
                             "Skip retiring WorkerStatus generation {} for {}",
@@ -243,7 +250,7 @@ public class EngineSyncRunner implements Runnable {
                                         engineGrpcService,
                                         syncRequestTimeoutMs,
                                         cacheAwareService,
-                                        statusCheckExecutor);
+                                        statusApplicationExecutor);
                         statusCheckExecutor.submit(grpcWorkerStatusRunner);
                         handedOff = true;
                     } catch (RejectedExecutionException e) {
@@ -288,7 +295,7 @@ public class EngineSyncRunner implements Runnable {
                                         syncCount,
                                         syncEngineStatusInterval,
                                         cacheFullSnapshotDebugMode,
-                                        statusCheckExecutor);
+                                        statusApplicationExecutor);
                         statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
                         handedOff = true;
                     } catch (RejectedExecutionException e) {
@@ -416,10 +423,20 @@ public class EngineSyncRunner implements Runnable {
                                             engineIndex,
                                             multiEngineNum));
 
+            WorkerStatus.TopologySnapshot topology = workerStatus.topologySnapshot();
+            boolean sameOwnership =
+                    workerStatus.getRole() == roleType && Objects.equals(topology.group(), group);
+            if (sameOwnership
+                    && Objects.equals(topology.site(), site)
+                    && Objects.equals(topology.deploymentName(), deploymentName)) {
+                return workerStatus;
+            }
             EndpointRegistry.DetachedGeneration endpointToRetire = null;
             RoleType generationRole = null;
             boolean retirementStarted = false;
-            workerStatus.lock.lock();
+            if (!workerStatus.lock.tryLock()) {
+                return sameOwnership ? workerStatus : null;
+            }
             try {
                 if (!workerDirectory.isCurrentStatus(roleType, workerIpPort, workerStatus)) {
                     continue;
@@ -454,7 +471,7 @@ public class EngineSyncRunner implements Runnable {
             if (!retirementStarted) {
                 return workerStatus;
             }
-            workerDirectory.completeRetirement(
+            workerDirectory.completeRetirementAsync(
                     generationRole,
                     workerIpPort,
                     workerStatus,
@@ -499,6 +516,7 @@ public class EngineSyncRunner implements Runnable {
                 "Created WorkerStatus generation {} for worker: {}",
                 discovered.getGenerationId(),
                 workerIpPort);
+        discovered.configureStatusFreshness(statusStaleAfterUs);
         return discovered;
     }
 
@@ -506,7 +524,9 @@ public class EngineSyncRunner implements Runnable {
         EndpointRegistry.DetachedGeneration endpointToRetire = null;
         RoleType generationRole = null;
         boolean retirementStarted = false;
-        workerStatus.lock.lock();
+        if (!workerStatus.lock.tryLock()) {
+            return;
+        }
         try {
             if (!workerDirectory.isCurrentStatus(roleType, workerIpPort, workerStatus)) {
                 return;
@@ -514,8 +534,8 @@ public class EngineSyncRunner implements Runnable {
             if (!workerStatus.isActiveGeneration()) {
                 return;
             }
-            WorkerStatus.PollHealth health = workerStatus.pollHealth();
-            if (System.nanoTime() / 1000 - health.lastSuccessfulPollUs() <= statusStaleAfterUs) {
+            if (!workerStatus.tryClaimHealthRetirement(
+                    System.nanoTime() / 1000, statusStaleAfterUs)) {
                 return;
             }
 
@@ -528,7 +548,7 @@ public class EngineSyncRunner implements Runnable {
         }
 
         if (retirementStarted) {
-            workerDirectory.completeRetirement(
+            workerDirectory.completeRetirementAsync(
                     generationRole,
                     workerIpPort,
                     workerStatus,

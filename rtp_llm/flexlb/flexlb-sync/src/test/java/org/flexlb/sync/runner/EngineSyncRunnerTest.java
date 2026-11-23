@@ -25,6 +25,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
 import java.util.Map;
@@ -33,6 +34,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -207,18 +209,14 @@ class EngineSyncRunnerTest {
         Mockito.when(configService.loadBalanceConfig())
                 .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
-        WorkerDirectory directory = new WorkerDirectory(registry);
+        WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
         String ipPort = "127.0.0.1:8080@0";
         WorkerStatus status =
-                Mockito.spy(
-                        RunnerTestSupport.discovered(
-                                RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, "test-site"));
-        when(status.pollHealth())
-                .thenReturn(
-                        new WorkerStatus.PollHealth(
-                                System.nanoTime() / 1_000 - 2_000_000L, 20_000L, 0L, true));
+                RunnerTestSupport.discovered(
+                        RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, "test-site");
         discover(directory, status);
         RunnerTestSupport.publishEndpoint(registry, RoleType.PREFILL, ipPort, status);
+        markStatusExpired(status);
         Mockito.when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
                 .thenReturn(List.of());
 
@@ -276,25 +274,20 @@ class EngineSyncRunnerTest {
                                 }
                                 return List.of();
                             });
-            WorkerDirectory directory = new WorkerDirectory(registry);
+            WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
             String ipPort = host.getLogicalIpPort();
             WorkerStatus status =
-                    Mockito.spy(
-                            RunnerTestSupport.discovered(
-                                    RoleType.PREFILL,
-                                    "",
-                                    host.getIp(),
-                                    host.getHttpPort(),
-                                    host.getGrpcPort(),
-                                    ""));
-            // Make removal eligible if discovery mistakenly drops this worker.
-            Mockito.lenient()
-                    .when(status.pollHealth())
-                    .thenReturn(
-                            new WorkerStatus.PollHealth(
-                                    System.nanoTime() / 1_000 - 2_000_000L, 20_000L, 0L, true));
+                    RunnerTestSupport.discovered(
+                            RoleType.PREFILL,
+                            "",
+                            host.getIp(),
+                            host.getHttpPort(),
+                            host.getGrpcPort(),
+                            "");
             discover(directory, status);
             RunnerTestSupport.publishEndpoint(registry, RoleType.PREFILL, ipPort, status);
+            // Make removal eligible if discovery mistakenly drops this worker.
+            markStatusExpired(status);
             WorkerEndpoint originalEndpoint = registry.get(RoleType.PREFILL, ipPort);
             assertNotNull(originalEndpoint);
             EngineSyncRunner runner =
@@ -340,7 +333,7 @@ class EngineSyncRunnerTest {
                 .when(configService.loadBalanceConfig())
                 .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
-        WorkerDirectory directory = new WorkerDirectory(registry);
+        WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
         EngineSyncRunner runner =
                 new EngineSyncRunner(
                         modelName,
@@ -395,7 +388,7 @@ class EngineSyncRunnerTest {
         WorkerEndpoint secondEndpoint = Mockito.mock(WorkerEndpoint.class);
         WorkerStatus first = varianceStatus("127.0.0.1", 61001, 10.0);
         WorkerStatus second = varianceStatus("127.0.0.2", 61002, 20.0);
-        WorkerDirectory directory = new WorkerDirectory(registry);
+        WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
         discover(directory, first);
         discover(directory, second);
         when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
@@ -425,7 +418,7 @@ class EngineSyncRunnerTest {
         WorkerEndpoint secondEndpoint = Mockito.mock(WorkerEndpoint.class);
         WorkerStatus first = varianceStatus("127.0.0.1", 61001, 10.0);
         WorkerStatus second = varianceStatus("127.0.0.2", 61002, 20.0);
-        WorkerDirectory directory = new WorkerDirectory(registry);
+        WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
         discover(directory, first);
         discover(directory, second);
         when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
@@ -459,6 +452,7 @@ class EngineSyncRunnerTest {
                         modelName,
                         workerDirectory,
                         workerAddressService,
+                        statusCheckExecutor,
                         statusCheckExecutor,
                         engineHealthReporter,
                         engineGrpcService,
@@ -544,6 +538,7 @@ class EngineSyncRunnerTest {
                         workerDirectory,
                         workerAddressService,
                         statusCheckExecutor,
+                        statusCheckExecutor,
                         engineHealthReporter,
                         engineGrpcService,
                         RoleType.PREFILL,
@@ -585,7 +580,8 @@ class EngineSyncRunnerTest {
         Mockito.when(configService.loadBalanceConfig())
                 .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
-        WorkerDirectory directory = new WorkerDirectory(registry);
+        var queuedRetirement = new AtomicReference<Runnable>();
+        WorkerDirectory directory = new WorkerDirectory(registry, queuedRetirement::set);
         String ipPort = "127.0.0.1:61000@0";
         WorkerStatus oldStatus =
                 RunnerTestSupport.discovered(
@@ -615,19 +611,18 @@ class EngineSyncRunnerTest {
                         false,
                         STATUS_STALE_AFTER_US);
         try {
-            // First discovery pass retires the old topology generation: it
-            // detaches the endpoint, marks the status RETIRING, and removes the
-            // business identity from the map. The replacement generation is
-            // deliberately deferred until real endpoint retirement has removed
-            // the RETIRING holder, so no routable identity exists yet.
             runner.run();
+            assertFalse(oldStatus.isActiveGeneration());
+            assertEquals(oldStatus, directory.statusSnapshot(RoleType.PREFILL).get(ipPort));
+            assertNull(registry.get(RoleType.PREFILL, ipPort));
 
+            runner.run();
+            assertEquals(oldStatus, directory.statusSnapshot(RoleType.PREFILL).get(ipPort));
+            assertNotNull(queuedRetirement.get());
+            queuedRetirement.getAndSet(null).run();
             assertFalse(
                     directory.statusSnapshot(RoleType.PREFILL).containsKey(ipPort),
                     "old generation is retired and removed; replacement is deferred");
-            assertNull(
-                    registry.get(RoleType.PREFILL, ipPort),
-                    "old endpoint is detached immediately and replacement is unpublished");
             // A subsequent discovery pass publishes the replacement generation
             // for the same address under the new topology group.
             runner.run();
@@ -643,12 +638,25 @@ class EngineSyncRunnerTest {
                     registry.get(RoleType.PREFILL, ipPort),
                     "replacement endpoint is unpublished before its first status commit");
         } finally {
+            Runnable cleanup = queuedRetirement.getAndSet(null);
+            if (cleanup != null) {
+                cleanup.run();
+            }
             registry.close();
         }
     }
 
     private static void discover(WorkerDirectory directory, WorkerStatus status) {
         directory.currentOrDiscover(status.getRole(), status.getLogicalIpPort(), () -> status);
+    }
+
+    private static void markStatusExpired(WorkerStatus status) {
+        ReflectionTestUtils.setField(
+                status,
+                "pollHealth",
+                new AtomicReference<>(
+                        new WorkerStatus.PollHealth(
+                                System.nanoTime() / 1_000 - 2_000_000L, 20_000L, 0L, true)));
     }
 
     private static WorkerStatus varianceStatus(String ip, int port, double stepLatencyMs) {

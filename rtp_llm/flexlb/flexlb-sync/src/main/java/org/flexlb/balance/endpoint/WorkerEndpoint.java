@@ -114,6 +114,11 @@ public class WorkerEndpoint {
         return NO_STATUS_PROJECTION;
     }
 
+    /** Capture an endpoint for new routing without restricting owned-work cleanup. */
+    public final GenerationPin tryPinSchedulingGeneration() {
+        return hasFreshSchedulingStatus() ? tryPinGeneration() : null;
+    }
+
     /**
      * Pin this exact endpoint generation for one admission handoff.
      *
@@ -126,6 +131,9 @@ public class WorkerEndpoint {
         EndpointGenerationLifecycle.HandoffPermit permit = generationLifecycle.tryAcquireHandoff();
         return permit == null ? null : new GenerationPin(this, status.getGenerationId(), permit);
     }
+
+    /** Wake placement attempts parked while this generation's applied state was stale. */
+    public void signalPlacementCapacityChanged() {}
 
     /** Validate an exact, still-open pin before consuming its admission right. */
     public final void requirePinnedGeneration(GenerationPin pin) {
@@ -168,6 +176,10 @@ public class WorkerEndpoint {
         WorkerStatus.EngineObservation engine = status.committedEngineObservation();
         return OptionalLong.of(
                 engine.runningTaskList() == null ? 0L : engine.runningTaskList().size());
+    }
+
+    protected final boolean hasFreshSchedulingStatus() {
+        return status.hasFreshSchedulingStatus(System.nanoTime() / 1000);
     }
 
     protected final void requireStatusGeneration(WorkerStatus ws) {

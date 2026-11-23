@@ -8,14 +8,20 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.RoleType;
 import org.slf4j.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import javax.annotation.PreDestroy;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.function.Supplier;
 
 /**
@@ -28,11 +34,33 @@ public final class WorkerDirectory implements WorkerStatusProvider {
     private final Map<RoleType, ConcurrentHashMap<String, WorkerStatus>> statusesByRole =
             new EnumMap<>(RoleType.class);
     private final EndpointRegistry endpointRegistry;
+    private final Executor retirementExecutor;
 
+    @Autowired
     public WorkerDirectory(EndpointRegistry endpointRegistry) {
+        this(
+                endpointRegistry,
+                Executors.newFixedThreadPool(
+                        4,
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "worker-retirement");
+                            thread.setDaemon(true);
+                            return thread;
+                        }));
+    }
+
+    public WorkerDirectory(EndpointRegistry endpointRegistry, Executor retirementExecutor) {
         this.endpointRegistry = Objects.requireNonNull(endpointRegistry, "endpointRegistry");
+        this.retirementExecutor = Objects.requireNonNull(retirementExecutor, "retirementExecutor");
         for (RoleType role : RoleType.values()) {
             statusesByRole.put(role, new ConcurrentHashMap<>());
+        }
+    }
+
+    @PreDestroy
+    public void shutdownRetirementExecutor() {
+        if (retirementExecutor instanceof ExecutorService executorService) {
+            executorService.shutdown();
         }
     }
 
@@ -146,6 +174,29 @@ public final class WorkerDirectory implements WorkerStatusProvider {
                             + status.getGenerationId());
         }
         return detached;
+    }
+
+    /**
+     * Hand off drain and cache cleanup after closing the routing gate on the caller.
+     * Only the generation owner which began retirement submits cleanup.
+     */
+    public void completeRetirementAsync(
+            RoleType role,
+            String address,
+            WorkerStatus status,
+            EndpointRegistry.DetachedGeneration detached,
+            CacheAwareService cacheAwareService,
+            Logger logger) {
+        Runnable cleanup =
+                () ->
+                        completeRetirement(
+                                role, address, status, detached, cacheAwareService, logger);
+        try {
+            retirementExecutor.execute(cleanup);
+        } catch (RejectedExecutionException duringShutdown) {
+            // The registry still waits on the detached token during shutdown.
+            cleanup.run();
+        }
     }
 
     /**

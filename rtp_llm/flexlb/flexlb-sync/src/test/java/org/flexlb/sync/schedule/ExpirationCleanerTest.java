@@ -68,7 +68,7 @@ class ExpirationCleanerTest {
         CacheAwareService cache = mock(CacheAwareService.class);
         WorkerStatus first = status("127.0.0.1", 8080);
         WorkerStatus second = status("127.0.0.2", 8080);
-        WorkerDirectory directory = new WorkerDirectory(registry);
+        WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
         directory.currentOrDiscover(RoleType.PREFILL, first.getLogicalIpPort(), () -> first);
         directory.currentOrDiscover(RoleType.PREFILL, second.getLogicalIpPort(), () -> second);
 
