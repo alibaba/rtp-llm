@@ -50,7 +50,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             if (generationHandoff == null) {
                 throw new IllegalStateException("route admission is already closed or committed");
             }
-            return prefillState.reserveRoute(item, predictedMs, inflightRequestLimit);
+            return prefillState.reserveRoute(item, predictedMs, queuedRouteLimit(item));
         }
 
         public PrefillState.CommittedHandoff commit(
@@ -83,6 +83,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             new RoutingConfig.ExecutionTimeEstimatorConfig().getExpression());
     private final PrefillTimePredictor predictor;
     private final long inflightRequestLimit;
+    private final boolean prefillCostOrder;
     /** Engine waiting-queue admission gate; null when tokenBalance disables the gate. */
     private final EngineQueueAdmission engineQueueAdmission;
     /** Integral hotspot release line; null when hotspot release is disabled. */
@@ -116,6 +117,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         this.placementAvailability = java.util.Objects.requireNonNull(
                 placementAvailability, "placementAvailability");
         this.predictor = createPredictor(config);
+        this.prefillCostOrder = config.isPrefillCostOrder();
         this.inflightRequestLimit = config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH
                 ? config.getDispatcher().getMaxInflightPerPrefillWorker() : 0L;
         this.runtime = new WorkerBatcher(
@@ -361,6 +363,15 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     public CapacityBoundary.Availability routeAdmissionAvailability() {
         return prefillState.routeAvailability(inflightRequestLimit, getStatus());
+    }
+
+    public CapacityBoundary.Availability routeAdmissionAvailability(ScheduledRequest item) {
+        return prefillState.routeAvailability(queuedRouteLimit(item), getStatus());
+    }
+
+    // A zero-hit route can use an idle worker. Keep it reorderable while the worker has outstanding work.
+    private long queuedRouteLimit(ScheduledRequest item) {
+        return prefillCostOrder && item.seqLen() > 0 && item.hitCache() == 0 ? 1L : inflightRequestLimit;
     }
 
     /** Advisory endpoint ownership revision captured by queue placement. */

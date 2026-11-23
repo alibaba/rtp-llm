@@ -281,7 +281,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 var result = routeAdmission.reserve(exact, predictedMs);
                 if (result.status() != PrefillState.CapacityStatus.ACQUIRED) {
                     return rejectedPrefill(exact, result.status(), CapacityBoundary.deliveryUnavailable(
-                            prefill.routeAdmissionAvailability()));
+                            prefill.routeAdmissionAvailability(exact)));
                 }
                 reservation = result.reservation();
             } catch (Throwable failure) {

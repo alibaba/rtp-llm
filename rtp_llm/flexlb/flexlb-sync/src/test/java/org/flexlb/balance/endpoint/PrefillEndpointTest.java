@@ -107,6 +107,46 @@ class PrefillEndpointTest {
         }
     }
 
+    @Test
+    void lateCacheHitUsesFreeSlotWhileColdRequestWaits() throws Exception {
+        FlexlbConfig config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
+        org.flexlb.balance.scheduler.SchedulingTestConfig.usePrefillCostOrder(config);
+        config.setDispatcher(DispatcherConfig.nonBatch());
+        config.getDispatcher().setMaxInflightPerPrefillWorker(2);
+        config.getWorkerRegistry().getHealth().setStatusPollIntervalMs(50L);
+        var deliveries = new java.util.concurrent.LinkedBlockingQueue<DeliveryResult>();
+        var runtime = new EndpointTestSupport.TestRequestRuntime() {
+            @Override
+            void onCompleted(DeliveryClaim claim, DeliveryResult result) {
+                deliveries.add(result);
+            }
+        };
+        var worker = new PrefillEndpoint(EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.4", 8080, 8090),
+                config, EndpointTestSupport.liveRouteStrategy(runtime), runtime.events(), endpointReporter);
+        worker.startGeneration();
+        try {
+            var first = createScheduledRequest(worker, config, 1L, 1024L, 0L);
+            var cold = createScheduledRequest(worker, config, 2L, 1024L, 0L);
+            var hot = createScheduledRequest(worker, config, 3L, 1024L, 960L);
+            assertTrue(EndpointTestSupport.offer(worker, first));
+            assertEquals(DeliveryResult.delivered(), deliveries.poll(2, TimeUnit.SECONDS));
+            assertTrue(EndpointTestSupport.offer(worker, cold));
+            assertFalse(worker.routeAdmissionAvailability(cold).isAvailable());
+            assertTrue(EndpointTestSupport.offer(worker, hot));
+            assertEquals(DeliveryResult.delivered(), deliveries.poll(2, TimeUnit.SECONDS));
+            assertEquals(List.of(cold), worker.captureQueueSnapshot().items());
+            assertFalse(worker.canAcceptRequest());
+
+            assertTrue(worker.releaseCommittedItem(first.execution()));
+            assertFalse(worker.routeAdmissionAvailability(cold).isAvailable());
+            assertTrue(worker.releaseCommittedItem(hot.execution()));
+            assertEquals(DeliveryResult.delivered(), deliveries.poll(2, TimeUnit.SECONDS));
+            assertTrue(worker.releaseCommittedItem(cold.execution()));
+        } finally {
+            worker.close();
+        }
+    }
+
     private PrefillEndpoint routeEndpoint(FlexlbConfig routeConfig, String ip) {
         PrefillEndpoint routeEndpoint = new PrefillEndpoint(
                 EndpointTestSupport.workerStatus(
