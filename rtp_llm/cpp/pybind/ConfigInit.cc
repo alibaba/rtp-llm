@@ -484,6 +484,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("multi_task_prompt_tokens", &KVCacheConfig::multi_task_prompt_tokens)
         .def_readwrite("reserve_block_ratio", &KVCacheConfig::reserve_block_ratio)
         .def_readwrite("memory_cache_size_mb", &KVCacheConfig::memory_cache_size_mb)
+        .def_readwrite("dsa_prefill_layout", &KVCacheConfig::dsa_prefill_layout)
+        .def_readwrite("dsa_prefill_staging_layers", &KVCacheConfig::dsa_prefill_staging_layers)
+        .def_readwrite("dsa_mla_host_cache_mb", &KVCacheConfig::dsa_mla_host_cache_mb)
+        .def_readwrite("dsa_mla_resident_tokens", &KVCacheConfig::dsa_mla_resident_tokens)
+        .def_readwrite("dsa_mla_hbm_share_denominator", &KVCacheConfig::dsa_mla_hbm_share_denominator)
         .def_readwrite("memory_cache_swa_block_ratio", &KVCacheConfig::memory_cache_swa_block_ratio)
         .def_readwrite("dsv41_decoder_swa_pool_blocks", &KVCacheConfig::dsv41_decoder_swa_pool_blocks)
         .def_readwrite("memory_cache_sync_timeout_ms", &KVCacheConfig::memory_cache_sync_timeout_ms)
@@ -589,7 +594,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      25,
+                                      26,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -671,7 +676,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       // the per-pool block weights at the tail so indices 0-78
                                       // stay identical to main's v23.
                                       self.enable_linear_cache_reclaim,
-                                      self.kv_cache_pool_block_weights);
+                                      self.kv_cache_pool_block_weights,
+                                      self.dsa_prefill_layout,
+                                      self.dsa_prefill_staging_layers,
+                                      self.dsa_mla_host_cache_mb,
+                                      self.dsa_mla_resident_tokens,
+                                      self.dsa_mla_hbm_share_denominator);
             },
             [](py::tuple t) {
                 // Pickle version ladder after merging main #1643 (dsv41 btc):
@@ -685,6 +695,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 //       (size 81).
                 // Each step strips its tail fields and steps the version down so
                 // both families' older states keep decoding through main's ladder.
+                const py::tuple mla_host_cache_state = t;
+                const bool      has_mla_host_cache_fields =
+                    t.size() == 86 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 26;
+                if (has_mla_host_cache_fields) {
+                    t    = t[py::slice(0, 81, 1)].cast<py::tuple>();
+                    t[1] = py::int_(25);
+                }
                 const py::tuple pool_weights_v25_state = t;
                 const bool      has_v25_pool_weights_field =
                     t.size() == 81 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 25;
@@ -892,6 +909,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 if (has_v24_reclaim_field) {
                     // v24 appended the reclaim flag at index 79 after main's v23 fields.
                     c.enable_linear_cache_reclaim = reclaim_v24_state[79].cast<bool>();
+                }
+                if (has_mla_host_cache_fields) {
+                    c.dsa_prefill_layout            = mla_host_cache_state[81].cast<int32_t>();
+                    c.dsa_prefill_staging_layers    = mla_host_cache_state[82].cast<uint32_t>();
+                    c.dsa_mla_host_cache_mb         = mla_host_cache_state[83].cast<int64_t>();
+                    c.dsa_mla_resident_tokens       = mla_host_cache_state[84].cast<uint32_t>();
+                    c.dsa_mla_hbm_share_denominator = mla_host_cache_state[85].cast<uint32_t>();
                 }
                 if (has_v25_pool_weights_field) {
                     // v25 appended the per-pool weights at index 80 after v24.

@@ -100,6 +100,8 @@ def get_mla_impl(
     max_seq_len: int = 0,
     parallelism_config: Optional[ParallelismConfig] = None,
     cuda_graph_selection_mode: Optional[Union[str, CudaGraphSelectionMode]] = None,
+    *,
+    force_sparse_prefill: bool = False,
 ) -> MlaImplBase:
 
     selection_mode = _normalize_cuda_graph_selection_mode(
@@ -159,6 +161,7 @@ def get_mla_impl(
             use_fast_path = bool(
                 attn_inputs.is_prefill
                 and not use_decode_mla
+                and not force_sparse_prefill
                 and not (
                     parallelism_config
                     and parallelism_config.prefill_cp_config.is_enabled()
@@ -412,6 +415,7 @@ class AttnImplFactory(object):
         cuda_graph_selection_mode: Optional[Union[str, CudaGraphSelectionMode]] = None,
         decode_cascade_max_requests: int = 0,
         hw_kernel_config=None,
+        force_sparse_prefill: bool = False,
     ) -> AttentionImpl:
         # Extract AttentionConfigs from ModelConfig
         attn_configs = model_config.getAttentionConfigs(
@@ -469,6 +473,7 @@ class AttnImplFactory(object):
                     )
         key_str = _select_attention_impl_key(attn_configs)
         fmha_impl_method = cls.get_fmha_impl_method(key_str)
+        mla_options = {"force_sparse_prefill": True} if force_sparse_prefill else {}
         instance = fmha_impl_method(
             attn_configs,
             weight,
@@ -479,6 +484,7 @@ class AttnImplFactory(object):
             model_config.max_seq_len,
             parallelism_config,
             cuda_graph_selection_mode,
+            **mla_options,
         )
         configure_fusion = getattr(instance, "configure_fusion", None)
         if configure_fusion is not None:

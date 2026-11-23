@@ -63,6 +63,8 @@ for _fp8_name in (
 
 
 _OPT_ENABLED = False
+_KV_OVERLAP_COMMS = {}
+_KV_OVERLAP_STREAMS = {}
 
 
 def configure(enabled: bool) -> None:
@@ -92,6 +94,8 @@ class _NCCLLib:
         ]
         self._lib.ncclCommDestroy.restype = _ncclResult_t
         self._lib.ncclCommDestroy.argtypes = [_ncclComm_t]
+        self._lib.ncclCommAbort.restype = _ncclResult_t
+        self._lib.ncclCommAbort.argtypes = [_ncclComm_t]
         self._lib.ncclAllGather.restype = _ncclResult_t
         self._lib.ncclAllGather.argtypes = [
             _buffer_t,
@@ -154,6 +158,9 @@ class _NCCLLib:
 
     def destroy_comm(self, comm: _ncclComm_t) -> None:
         self._check(self._lib.ncclCommDestroy(comm))
+
+    def abort_comm(self, comm: _ncclComm_t) -> None:
+        self._check(self._lib.ncclCommAbort(comm))
 
     def window_register(
         self, comm: _ncclComm_t, ptr: int, nbytes: int
@@ -260,12 +267,13 @@ def _torch_all_gather(input: torch.Tensor, group: Any) -> torch.Tensor:
     return all_gather(input, group=group)
 
 
-def _get_comm(process_group, device: torch.device):
+def _get_comm(process_group, device: torch.device, *, kv_overlap=False):
     """Collectively create and cache the direct NCCL communicator at startup."""
     global _LIB
 
     key = _comm_key(process_group, device)
-    cached = _COMMS.get(key)
+    cache = _KV_OVERLAP_COMMS if kv_overlap else _COMMS
+    cached = cache.get(key)
     if cached is not None:
         return cached
 
@@ -280,8 +288,38 @@ def _get_comm(process_group, device: torch.device):
         comm = _LIB.make_comm(process_group, resolved_device)
     _WORLD_SIZES[process_group] = dist.get_world_size(process_group)
     cached = (_LIB, comm)
-    _COMMS[key] = cached
+    cache[key] = cached
     return cached
+
+
+def warmup_kv_overlap(group, device):
+    """Return one persistent side stream with an independent NCCL communicator."""
+    process_group = _resolve_process_group(group)
+    key = _comm_key(process_group, device)
+    _get_comm(process_group, device, kv_overlap=True)
+    if key not in _KV_OVERLAP_STREAMS:
+        _KV_OVERLAP_STREAMS[key] = torch.cuda.Stream(device=device, priority=-1)
+    return _KV_OVERLAP_STREAMS[key]
+
+
+def all_gather_kv_overlap(input, group):
+    """Enqueue a byte-preserving gather on the current CP overlap stream."""
+    process_group = _resolve_process_group(group)
+    lib, comm = _KV_OVERLAP_COMMS[_comm_key(process_group, input.device)]
+    output = torch.empty(
+        (_world_size(process_group) * input.shape[0], *input.shape[1:]),
+        dtype=input.dtype,
+        device=input.device,
+    )
+    lib.all_gather(
+        input.data_ptr(),
+        output.data_ptr(),
+        input.numel(),
+        input.dtype,
+        comm,
+        torch.cuda.current_stream(input.device).cuda_stream,
+    )
+    return output
 
 
 def _require_comm(process_group, device: torch.device):
@@ -310,7 +348,18 @@ def destroy() -> None:
                 "Failed to deregister GLM5 pynccl symmetric window: %s", error
             )
 
-    for lib, comm in list(_COMMS.values()):
+    # These auxiliary communicators own no registered windows. Abort them
+    # uniformly on all ranks so a remote failure cannot strand teardown in a
+    # local CUDA stream synchronization or a mismatched communicator destroy.
+    for lib, comm in _KV_OVERLAP_COMMS.values():
+        try:
+            lib.abort_comm(comm)
+        except RuntimeError as error:
+            logging.warning(
+                "Failed to abort GLM5 pynccl overlap communicator: %s", error
+            )
+
+    for lib, comm in _COMMS.values():
         try:
             lib.destroy_comm(comm)
         except RuntimeError as error:
@@ -327,6 +376,8 @@ def destroy() -> None:
     _SYMM_POOLS.clear()
     _SYMM_POOL_FAILED.clear()
     _COMMS.clear()
+    _KV_OVERLAP_COMMS.clear()
+    _KV_OVERLAP_STREAMS.clear()
     _WORLD_SIZES.clear()
     _LIB = None
 

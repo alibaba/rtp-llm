@@ -272,7 +272,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         default="",
         help=(
             "按 cache group tag 设置 pool block 数量权重的 JSON 对象，权重为正整数；"
-            "例如 {\"full\":8,\"linear\":1}。权重表示 block 数量比例而非显存比例，"
+            '例如 {"full":8,"linear":1}。权重表示 block 数量比例而非显存比例，'
             "PP>1 时各 stage 只需包含本 stage 拥有的 tag，其余 tag 自动忽略；"
             "空字符串保持默认分配策略。"
         ),
@@ -320,6 +320,48 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=int,
         default=0,
         help="单个 rank 的 Memory KVCache 容量，单位 MB",
+    )
+    kv_cache_group.add_argument(
+        "--dsa_prefill_layout",
+        env_name="RTP_LLM_DSA_PREFILL_LAYOUT",
+        bind_to=(kv_cache_config, "dsa_prefill_layout"),
+        type=int,
+        choices=[-1, 0, 1],
+        default=-1,
+        help="GLM5 分层 prefill KV cache。-1 按兼容性自动启用，0 禁用，1 要求启用。",
+    )
+    kv_cache_group.add_argument(
+        "--dsa_prefill_staging_layers",
+        env_name="RTP_LLM_DSA_PREFILL_STAGING_LAYERS",
+        bind_to=(kv_cache_config, "dsa_prefill_staging_layers"),
+        type=int,
+        choices=range(65),
+        default=4,
+        help="GLM5 prefill GPU staging 的最大并行层数。",
+    )
+    kv_cache_group.add_argument(
+        "--dsa_mla_host_cache_mb",
+        env_name="RTP_LLM_DSA_MLA_HOST_CACHE_MB",
+        bind_to=(kv_cache_config, "dsa_mla_host_cache_mb"),
+        type=int,
+        default=0,
+        help="GLM5 decode 每个 rank 的 pinned host MLA backing 容量，单位 MiB。",
+    )
+    kv_cache_group.add_argument(
+        "--dsa_mla_resident_tokens",
+        env_name="RTP_LLM_DSA_MLA_RESIDENT_TOKENS",
+        bind_to=(kv_cache_config, "dsa_mla_resident_tokens"),
+        type=int,
+        default=0,
+        help="GLM5 decode GPU MLA 工作集 token 数，0 按 TopK batch 容量计算。",
+    )
+    kv_cache_group.add_argument(
+        "--dsa_mla_hbm_share_denominator",
+        env_name="RTP_LLM_DSA_MLA_HBM_SHARE_DENOMINATOR",
+        bind_to=(kv_cache_config, "dsa_mla_hbm_share_denominator"),
+        type=int,
+        default=3,
+        help="GLM5 decode 单个请求可优先使用的空闲 HBM 块份额的分母，0 禁用份额限制。",
     )
     kv_cache_group.add_argument(
         "--memory_cache_swa_block_ratio",

@@ -204,7 +204,8 @@ GroupedCacheLayerLayout projectLayout(const GroupedCacheLayerLayout&       sourc
                 layers[local] = source_group.at(global);
             }
         }
-        groups.emplace(target_group.tag, CacheLayerLayout(std::move(layers)));
+        groups.emplace(target_group.tag,
+                       CacheLayerLayout(std::move(layers), source_group.stagingBlocks(), source_group.stagingLayers()));
     }
     return GroupedCacheLayerLayout(std::move(target_topology), std::move(groups));
 }

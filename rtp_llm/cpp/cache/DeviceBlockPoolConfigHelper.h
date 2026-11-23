@@ -35,11 +35,16 @@ public:
 
         size_t     total_layout_layers = 0;
         size_t     current_offset      = 0;
-        const auto append_layout       = [&](const GroupBase& source_group, uint32_t layer_num) {
+        const auto& mla_plan            = cache_config.mla_host_cache;
+        const bool  mla_group           = group.tag == "default";
+        const auto  append_layout = [&](const GroupBase& source_group, uint32_t layer_num, bool prefill_host = false) {
             RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "group tag=%s layout has no layers", group.tag.c_str());
             RTP_LLM_CHECK_WITH_INFO(
                 source_group.spec != nullptr, "cache spec for group tag=%s is null", source_group.tag.c_str());
             auto layout                  = createMemoryLayoutConfig(source_group, layer_num, group.block_num);
+            if (prefill_host) {
+                layout.host_block_count = group.block_num;
+            }
             layout.kv_cache_offset_bytes = current_offset;
             current_offset += layout.kv_block_pool_size_bytes;
             layout.kv_scale_offset_bytes = current_offset;
@@ -54,7 +59,12 @@ public:
             std::count_if(group_layer_ids.begin(), group_layer_ids.end(), [&cache_config](int layer_id) {
                 return layer_id >= 0 && static_cast<uint32_t>(layer_id) < cache_config.layer_num;
             }));
-        if (main_layer_num > 0) {
+        if (mla_group && mla_plan.layeredPrefill()) {
+            RTP_LLM_CHECK_WITH_INFO(mla_plan.prefill_hbm_layers > 0 && mla_plan.prefill_hbm_layers < main_layer_num,
+                                    "layered GLM5 prefill requires resident and host MLA layers");
+            append_layout(group, mla_plan.prefill_hbm_layers);
+            append_layout(group, main_layer_num - mla_plan.prefill_hbm_layers, true);
+        } else if (main_layer_num > 0) {
             append_layout(group, main_layer_num);
         }
 

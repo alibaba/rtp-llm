@@ -5,6 +5,7 @@ Mirrors flashmla_sparse_impl.py but with all-gather + restore + zig-zag q split.
 
 import copy
 import logging
+from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Dict, List, Optional
 
@@ -764,31 +765,28 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         kv_cache=None,
         layer_id: int = 0,
         scatter_out: Optional[torch.Tensor] = None,
+        prepared_kv=None,
     ) -> torch.Tensor:
         """CP prefill: all-gather → restore → write to kv_cache → attend on q tokens
         owned by this rank (q[total_local_ids]). Returns [total_q_len, H, kv_lora_rank]
         with non-owned positions zero (scattered later by total_local_ids)."""
-        gathered_ckv = all_gather(
-            compressed_kv.contiguous(), group=Group.TP, role="mla_ckv"
-        )
-        gathered_ckv = gathered_ckv.reshape(-1, compressed_kv.size(-1))
-        gathered_k_pe = all_gather(k_pe.contiguous(), group=Group.TP, role="mla_kpe")
-        gathered_k_pe = gathered_k_pe.reshape(-1, k_pe.size(-1))
-
-        restored_ckv = gathered_ckv[self.kv_restore_unpad_indices]
-        restored_k_pe = gathered_k_pe[self.kv_restore_unpad_indices]
-        self.kv_cache_write_op.forward(
-            restored_ckv,
-            restored_k_pe,
-            kv_cache,
-            self.mla_params,
-            slot_mapping_override=(
-                self.sharded_slot_mapping if self.kv_cache_sharded else None
-            ),
-        )
-        common.apply_write_cache_store(
-            self.write_cache_store_impl, self.attn_inputs, kv_cache
-        )
+        if prepared_kv is None:
+            gathered_ckv = all_gather(
+                compressed_kv.contiguous(), group=Group.TP, role="mla_ckv"
+            ).reshape(-1, compressed_kv.size(-1))
+            gathered_k_pe = all_gather(
+                k_pe.contiguous(), group=Group.TP, role="mla_kpe"
+            ).reshape(-1, k_pe.size(-1))
+            self.write_gathered_kv(gathered_ckv, gathered_k_pe, kv_cache)
+        else:
+            fused_kv, ready, publish = prepared_kv
+            compute = torch.cuda.current_stream(fused_kv.device)
+            compute.wait_event(ready)
+            fused_kv.record_stream(compute)
+            if publish:
+                common.apply_write_cache_store(
+                    self.write_cache_store_impl, self.attn_inputs, kv_cache
+                )
 
         no_q_work = (
             topk is None
@@ -797,7 +795,11 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             or self.total_local_ids.numel() == 0
         )
         if no_q_work:
-            if self.kv_cache_sharded and self._gather is not None:
+            if (
+                prepared_kv is None
+                and self.kv_cache_sharded
+                and self._gather is not None
+            ):
                 self._gather_sharded_kv_cache(kv_cache, None)
             if self.total_local_ids is not None and self.total_local_ids.numel() == 0:
                 return q.new_zeros((q.size(0), q.size(1), self.kv_lora_rank))
@@ -815,7 +817,9 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         else:
             q0 = q[self.total_local_ids].contiguous()
         if self._gather is not None:
-            out0 = self._attend_gather(q0, kv_cache, topk)
+            out0 = self._attend_gather(
+                q0, kv_cache, topk, fused_kv if prepared_kv is not None else None
+            )
         else:
             out0 = self._attend_with_kvcache(q0, kv_cache, topk, layer_id)
 
@@ -824,8 +828,23 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         out = triton_kv_scatter(out0, self.total_local_ids, q.size(0), out=scatter_out)
         return out
 
+    def write_gathered_kv(self, gathered_ckv, gathered_k_pe, kv_cache, *, publish=True):
+        self.kv_cache_write_op.forward(
+            gathered_ckv[self.kv_restore_unpad_indices],
+            gathered_k_pe[self.kv_restore_unpad_indices],
+            kv_cache,
+            self.mla_params,
+            slot_mapping_override=(
+                self.sharded_slot_mapping if self.kv_cache_sharded else None
+            ),
+        )
+        if publish:
+            common.apply_write_cache_store(
+                self.write_cache_store_impl, self.attn_inputs, kv_cache
+            )
+
     def _allocate_fused_kv(self) -> torch.Tensor:
-        """Allocate the layer-local BF16 gather destination after Indexer."""
+        """Allocate the layer-local BF16 gather destination."""
         ws = self._gather
         assert ws is not None and self.block_table is not None
         return _allocate_prefill_fused_kv(
@@ -835,7 +854,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         )
 
     def _gather_sharded_kv_cache(
-        self, kv_cache, fused_kv: Optional[torch.Tensor]
+        self, kv_cache, fused_kv: Optional[torch.Tensor], *, gather=None
     ) -> None:
         """Mirror indexer's sharded gather flow (indexer_op.py:1017-1078):
 
@@ -908,9 +927,11 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 per_req_padded_local_kv_lens=self.sharded_local_kv_lens,
             )
 
-        gathered = all_gather(
-            local_fused.contiguous(), group=Group.TP, role="mla_history"
-        ).reshape(-1, local_fused.size(-1))
+        if gather is None:
+            gathered = all_gather(local_fused, group=Group.TP, role="mla_history")
+        else:
+            gathered = gather(local_fused, Group.TP)
+        gathered = gathered.reshape(-1, local_fused.size(-1))
         if fused_kv is not None:
             fused_kv.copy_(gathered[self.sharded_kv_restore_indices])
 
@@ -950,16 +971,18 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         q0: torch.Tensor,
         kv_cache,
         topk: torch.Tensor,
+        fused_kv: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """gather + flash_mla_sparse_fwd. After CP all-gather/restore/write, the paged
         cache has the full per-request KV; the only CP-specific bit is using
         precomputed_req_ids (req id per global q token) for the offset lookup."""
         ws = self._gather
         assert ws is not None and self.precomputed_req_ids is not None
-        fused_kv = self._allocate_fused_kv()
-        if self.kv_cache_sharded:
+        if fused_kv is None and self.kv_cache_sharded:
+            fused_kv = self._allocate_fused_kv()
             self._gather_sharded_kv_cache(kv_cache, fused_kv)
-        else:
+        elif fused_kv is None:
+            fused_kv = self._allocate_fused_kv()
             src = _as_uint8(kv_cache.kv_cache_base)
             if src.ndim == 4:
                 src = src.squeeze(2)
@@ -1062,6 +1085,155 @@ class SparseMlaCpImpl(SparseMlaImpl):
         # code that swaps fmha_impl still sees the owner granularity.
         self.fmha_impl.kv_owner_tokens_per_block = self._kv_owner_tokens_per_block
         self._glm53_prefill_workspace: Optional[Glm53PrefillWorkspace] = None
+
+    @property
+    def overlap_kv_projections(self):
+        return (
+            self._glm53_prefill_workspace is not None
+            and cp_opt_enabled()
+            and self._kv_cache_sharded
+            and self._cp_size > 1
+            and self.attn_configs.q_lora_rank > 0
+            and self.fmha_impl._gather is not None
+            and not self.fmha_impl.use_cuda_graph
+        )
+
+    @property
+    def overlap_cache_before_q(self):
+        return (
+            self.overlap_kv_projections
+            and getattr(self, "_cross_layer_kv", None) is None
+        )
+
+    def kv_overlap_stream(self):
+        from rtp_llm.models_py.distributed.pynccl_cp import warmup_kv_overlap
+
+        return warmup_kv_overlap(Group.TP, self.fmha_impl.block_table.device)
+
+    def begin_cross_layer_prefetch(self, staged):
+        if (
+            self.overlap_kv_projections
+            and len(staged.staging) >= 2
+            and any(self.fmha_impl.attn_inputs.prefix_lengths.reshape(-1).tolist())
+        ):
+            from .cp_kv_prefetch import CrossLayerKvPrefetch
+
+            self._cross_layer_kv = CrossLayerKvPrefetch(
+                self.fmha_impl, staged, self.kv_overlap_stream(), Group.TP
+            )
+
+    def close_cross_layer_prefetch(self):
+        pipeline = getattr(self, "_cross_layer_kv", None)
+        if pipeline is not None:
+            torch.cuda.current_stream(pipeline.device).wait_stream(pipeline.stream)
+            self._cross_layer_kv = None
+
+    def wait_kv_overlap_before_moe(self):
+        latest = getattr(self, "_latest_kv_wait", None)
+        if latest is not None:
+            torch.cuda.current_stream(self.fmha_impl.block_table.device).wait_event(
+                latest
+            )
+            self._latest_kv_wait = None
+
+    @contextmanager
+    def prefetch_kv_projections(self, compressed_kv, k_pe):
+        if not self.overlap_kv_projections:
+            yield
+            return
+        from rtp_llm.models_py.distributed.pynccl_cp import all_gather_kv_overlap
+
+        stream = self.kv_overlap_stream()
+        compute = torch.cuda.current_stream(compressed_kv.device)
+        # Rotate a private key projection so the standard Q/K rotary call can
+        # still run on compute without racing the independent collective.
+        key = k_pe.clone()
+        if self.fmha_impl.full_rope_pos_ids is not None:
+            self.rope_impl.forward(
+                key.unsqueeze(1)[:, :0, :],
+                key,
+                self.rope_params,
+                precomputed_pos_ids=self.fmha_impl.full_rope_pos_ids,
+            )
+        packed = torch.cat((compressed_kv, key), dim=-1)
+        stream.wait_stream(compute)
+        succeeded = False
+        try:
+            with torch.cuda.stream(stream):
+                gathered = all_gather_kv_overlap(packed, Group.TP)
+                event = torch.cuda.Event()
+                event.record(stream)
+            packed.record_stream(stream)
+            self._overlapped_projection = gathered, event
+            del gathered, packed, key
+            yield
+            succeeded = True
+        finally:
+            self._overlapped_projection = None
+            self._prepared_kv = None
+            if not succeeded:
+                compute.wait_stream(stream)
+
+    def prepare_cache_before_q(self, layer_id, kv_cache, rope_width):
+        self._prepared_kv = self._prepare_overlapped_cache(
+            layer_id, kv_cache, rope_width, before_q=True
+        )
+
+    def _prepare_overlapped_cache(
+        self, layer_id, kv_cache, rope_width, *, before_q=False
+    ):
+        projected = getattr(self, "_overlapped_projection", None)
+        if projected is None:
+            return None
+        from rtp_llm.models_py.distributed.pynccl_cp import all_gather_kv_overlap
+
+        self._overlapped_projection = None
+        op = self.fmha_impl
+        gathered, event = projected
+        del projected
+        compute = torch.cuda.current_stream(gathered.device)
+        stream = self.kv_overlap_stream()
+        if not before_q:
+            compute.wait_event(event)
+            gathered.record_stream(compute)
+            op.write_gathered_kv(
+                gathered[:, :-rope_width], gathered[:, -rope_width:], kv_cache
+            )
+        stream.wait_stream(compute)
+        pipeline = getattr(self, "_cross_layer_kv", None)
+        with torch.cuda.stream(stream):
+            if before_q:
+                # The projection and any required H2D are on this side
+                # stream already. Q/Indexer need not wait until consuming KV.
+                # Publication stays on the post-Indexer consumer path.
+                op.write_gathered_kv(
+                    gathered[:, :-rope_width],
+                    gathered[:, -rope_width:],
+                    kv_cache,
+                    publish=False,
+                )
+            del gathered
+            if pipeline is None or layer_id == 0:
+                fused = op._allocate_fused_kv()
+                op._gather_sharded_kv_cache(
+                    kv_cache, fused, gather=all_gather_kv_overlap
+                )
+            else:
+                fused = pipeline.finish_layer(
+                    layer_id, kv_cache, op.sharded_slot_mapping
+                )
+            ready = torch.cuda.Event()
+            ready.record(stream)
+            # Launch future history before the consumer begins attention. The
+            # consumer joins only its own readiness, not the next layer.
+            if pipeline is not None:
+                pipeline.prefetch(layer_id + 1)
+        self._latest_kv_wait = (
+            pipeline.pending[2]
+            if pipeline is not None and pipeline.pending is not None
+            else ready
+        )
+        return fused, ready, before_q
 
     def enable_glm53_prefill_workspace(self) -> None:
         """Enable GLM5.3's per-forward attention workspace manager."""
@@ -1256,6 +1428,11 @@ class SparseMlaCpImpl(SparseMlaImpl):
                 q.size(0), self.num_heads, self.kv_lora_rank
             )
 
+        prepared_kv = getattr(self, "_prepared_kv", None)
+        if prepared_kv is None:
+            prepared_kv = self._prepare_overlapped_cache(
+                layer_id, kv_cache, k_pe.size(-1)
+            )
         q_transformed = self._apply_input_bmm(q, layer_id, out=q_transform_out)
         attn_output = self.fmha_impl.forward(
             q_transformed,
@@ -1266,6 +1443,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
             kv_cache,
             layer_id=layer_id,
             scatter_out=scatter_out,
+            **({"prepared_kv": prepared_kv} if prepared_kv is not None else {}),
         )
         if attn_output is None:
             return None

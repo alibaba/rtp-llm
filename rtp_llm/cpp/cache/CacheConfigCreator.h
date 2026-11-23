@@ -55,6 +55,14 @@ public:
                                       const RuntimeConfig&                              runtime_config,
                                       const std::optional<SpeculativeExecutionConfig>& sp_config,
                                       bool                                              is_mtp);
+    static MlaHostCachePlan planMlaHostCache(const CacheConfig&                               config,
+                                             const ModelConfig&                               model_config,
+                                             const RuntimeConfig&                             runtime_config,
+                                             const KVCacheConfig&                             kv_cache_config,
+                                             const ParallelismConfig&                         parallelism_config,
+                                             const std::optional<WarmUpResult>&               warm_up_result,
+                                             const std::optional<SpeculativeExecutionConfig>& sp_config,
+                                             bool prefill_cuda_graph_requested);
 
     static uint32_t computeLocalBlockNum(const CacheConfig&                               config,
                                          const ModelConfig&                               model_config,
@@ -63,11 +71,13 @@ public:
                                          const ParallelismConfig&                         parallelism_config,
                                          const std::optional<WarmUpResult>&               warm_up_result = std::nullopt,
                                          const std::optional<SpeculativeExecutionConfig>& sp_config      = std::nullopt,
-                                         BlockTreeCrcWorkspacePlan*                       crc_plan       = nullptr);
+                                         BlockTreeCrcWorkspacePlan*                       crc_plan       = nullptr,
+                                         bool                                             allow_unavailable = false);
     static uint32_t synchronizeBlockNum(uint32_t local_block_num, const ParallelismConfig& parallelism_config);
     static uint32_t synchronizeBlockNum(uint32_t                 local_block_num,
                                         const ParallelismConfig& parallelism_config,
-                                        const CacheConfig&       config);
+                                        CacheConfig&             config,
+                                        const MlaHostCachePlan&  automatic_prefill = {});
     // is_ffn_service defaults to the attention cohort: main retired the
     // FFN-disaggregation role that used the third argument.
     static uint32_t selectConfirmedBlockNum(const int* candidates, size_t count, bool is_ffn_service = false);

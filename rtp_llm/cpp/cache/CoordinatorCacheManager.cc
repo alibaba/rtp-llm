@@ -2040,7 +2040,6 @@ bool CoordinatorCacheManager::doInit() {
             swa_group_ids_.push_back(group_id);
         } else {
             group = std::make_shared<FullCacheManager>(cache_group, group_pool, group_id);
-            full_group_ids_.push_back(group_id);
         }
 
         RTP_LLM_CHECK_WITH_INFO(group->init(config_.layerIdsForGroup(cache_group.tag)),
@@ -2056,7 +2055,7 @@ bool CoordinatorCacheManager::doInit() {
     }
 
 #if USING_CUDA || USING_ROCM
-    if (allocation_type_ == AllocationType::DEVICE && group_nums == 1
+    if (allocation_type_ == AllocationType::DEVICE && group_nums == 1 && !group_block_pools_.front()->hasSplitBacking()
         && topology_groups.front().policy.group_type == CacheGroupType::FULL) {
         const auto&                    group         = topology_groups.front();
         const auto                     kv_tensors    = kv_cache_groups_.front()->allLayerCacheBase();
@@ -2173,7 +2172,17 @@ GroupedCacheLayerLayout CoordinatorCacheManager::allLayerCacheBase() const {
                                     layers.size());
             layers[static_cast<size_t>(layer_id)].kv_scale_addr = tensor;
         }
-        groups.emplace(topology->groups()[group_id].tag, CacheLayerLayout(std::move(layers)));
+        const auto& group = topology->groups()[group_id];
+        const auto& pool  = group_block_pools_[group_id];
+        if (group.tag == "default" && pool->hasSplitBacking()) {
+            const auto& plan = config_.mla_host_cache;
+            groups.emplace(group.tag,
+                           CacheLayerLayout(std::move(layers),
+                                            std::min(plan.prefill_staging_blocks, group.block_num),
+                                            plan.prefill_staging_layers));
+        } else {
+            groups.emplace(group.tag, CacheLayerLayout(std::move(layers)));
+        }
     }
     return GroupedCacheLayerLayout(topology, std::move(groups));
 }
@@ -2279,9 +2288,11 @@ void CoordinatorCacheManager::blockBatchCopyByGroup(const std::vector<TaggedBloc
         const auto group_id = static_cast<int>(groupIdForTag(mapping.tag));
         RTP_LLM_CHECK_WITH_INFO(
             static_cast<size_t>(group_id) < group_block_pools_.size(), "missing block pool for group %d", group_id);
-        const auto copy_type =
-            BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(group_id)]->where(),
-                                           group_block_pools_[static_cast<size_t>(group_id)]->where());
+        const auto& pool = group_block_pools_[static_cast<size_t>(group_id)];
+        if (pool->hasSplitBacking()) {
+            continue;
+        }
+        const auto copy_type = BatchCopyParams::get_copy_type(pool->where(), pool->where());
         for (int layer_id : layer_ids) {
             const auto& physical_group = config_.physicalGroupForLayer(layer_id, mapping.tag);
             copy_nums[copy_type] += physical_group.kvScaleStrideBytes() > 0 ? 2 : 1;
@@ -2301,11 +2312,33 @@ void CoordinatorCacheManager::blockBatchCopyByGroup(const std::vector<TaggedBloc
         const auto group_id = static_cast<int>(groupIdForTag(mapping.tag));
         RTP_LLM_CHECK_WITH_INFO(
             static_cast<size_t>(group_id) < group_block_pools_.size(), "missing block pool for group %d", group_id);
-        const auto copy_type =
-            BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(group_id)]->where(),
-                                           group_block_pools_[static_cast<size_t>(group_id)]->where());
+        const auto& pool      = group_block_pools_[static_cast<size_t>(group_id)];
+        const auto& group     = kv_cache_groups_[static_cast<size_t>(group_id)];
+        const auto  copy_type = BatchCopyParams::get_copy_type(pool->where(), pool->where());
 
         for (int layer_id : layer_ids) {
+            if (pool->hasSplitBacking()) {
+                const auto src = group->convertIndexToBuffer(layer_id, mapping.src);
+                const auto dst = group->convertIndexToBuffer(layer_id, mapping.dst);
+                RTP_LLM_CHECK_WITH_INFO(src.size() == dst.size() && !src.empty(),
+                                        "mismatched physical cache copy for layer=%d tag=%s",
+                                        layer_id,
+                                        mapping.tag.c_str());
+                for (size_t part = 0; part < src.size(); ++part) {
+                    RTP_LLM_CHECK_WITH_INFO(src[part].addr && dst[part].addr
+                                                && src[part].size_bytes == dst[part].size_bytes,
+                                            "invalid physical cache copy for layer=%d tag=%s",
+                                            layer_id,
+                                            mapping.tag.c_str());
+                    const auto src_type = src[part].is_cuda ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU_PINNED;
+                    const auto dst_type = dst[part].is_cuda ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU_PINNED;
+                    copy_params.add(dst[part].addr,
+                                    src[part].addr,
+                                    src[part].size_bytes,
+                                    BatchCopyParams::get_copy_type(dst_type, src_type));
+                }
+                continue;
+            }
             const auto&  physical_group      = config_.physicalGroupForLayer(layer_id, mapping.tag);
             const size_t kv_block_size_bytes = physical_group.kvBlockStrideBytes();
             const size_t scale_block_bytes   = physical_group.kvScaleStrideBytes();

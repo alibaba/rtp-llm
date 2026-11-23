@@ -169,6 +169,12 @@ struct KVCacheConfig {
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
     int64_t                                 reserve_block_ratio           = 5;
     int64_t                                 memory_cache_size_mb          = 0;
+    // Auto (-1) selects the layered placement only for a compatible GLM5 prefill.
+    int32_t                                 dsa_prefill_layout            = -1;
+    uint32_t                                dsa_prefill_staging_layers    = 4;
+    int64_t                                 dsa_mla_host_cache_mb         = 0;
+    uint32_t                                dsa_mla_resident_tokens       = 0;
+    uint32_t                                dsa_mla_hbm_share_denominator = 3;
     int64_t                                 memory_cache_sync_timeout_ms  = 10000;
     std::string                             disk_cache_paths              = "";
     int64_t                                 disk_cache_size_mb            = 0;

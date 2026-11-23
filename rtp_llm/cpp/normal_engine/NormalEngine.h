@@ -78,7 +78,7 @@ private:
     absl::Status                    trySaveStepError() const;
     void                            loop();
     void                            normalizeSystemPromptCacheConfig();
-    void                            initCacheManager(std::optional<WarmUpResult> warm_up_result);
+    void initCacheManager(std::optional<WarmUpResult> warm_up_result, bool prefill_cuda_graph_requested);
     static void                     initializeAndPublishCacheManager(ResourceContext&                            resource_context,
                                                                      int&                                        kv_cache_group_num,
                                                                      RoleType                                    role_type,

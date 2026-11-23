@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -95,6 +96,32 @@ public:
     // Stable CUDA device index of the backing buffer. Returns -1 for non-CUDA builds.
     int deviceIndex() const;
 
+    struct LayerBackingView {
+        torch::Tensor device_kv;
+        torch::Tensor device_scale;
+        torch::Tensor host_kv;
+        torch::Tensor host_scale;
+        uint32_t      device_block_count  = 0;
+        uint32_t      device_spare_blocks = 0;
+    };
+    // Both views are at physical block granularity; host row zero corresponds
+    // to logical block device_block_count, never a staging slot.
+    LayerBackingView layerBackingView(int layer_id) const;
+    bool             hasSplitBacking() const {
+        return !physical_layouts_.empty();
+    }
+
+    struct RegistrationRegion {
+        void*  addr         = nullptr;
+        size_t size_bytes   = 0;
+        size_t stride_bytes = 0;
+        bool   is_cuda      = false;
+        int    device_index = -1;
+    };
+    // Only logical rows are exported. Scratch may make a device region
+    // noncontiguous across layers, in which case each layer is exported alone.
+    std::vector<RegistrationRegion> registrationRegions() const;
+
     MemoryType                 where() const;
     std::vector<torch::Tensor> allLayerCacheBase() const;
     std::vector<torch::Tensor> allLayerScaleCacheBase() const;
@@ -112,13 +139,13 @@ public:
     const DeviceBlockPoolConfig& config() const;
 
     void* getBaseAddress() const {
-        return cache_base_ptr_;
+        return hasSplitBacking() ? nullptr : cache_base_ptr_;
     }
     bool usesDedicatedDeviceAllocation() const {
-        return uses_dedicated_device_allocation_;
+        return !hasSplitBacking() && uses_dedicated_device_allocation_;
     }
     size_t getAllocationSizeBytes() const {
-        return allocation_size_bytes_;
+        return hasSplitBacking() ? 0 : allocation_size_bytes_;
     }
     size_t getTotalSizeBytes() const;
     size_t blockSizeBytes() const override;
@@ -141,10 +168,20 @@ private:
     static std::shared_ptr<const DeviceBlockPoolConfig>
          normalizeConfig(const std::shared_ptr<const DeviceBlockPoolConfig>& config);
     void initializeCacheBuffer();
+    void initializeSplitCacheBuffer();
     void initializePinnedCpuBuffer();
-    void initializeDeviceMallocBuffer();
+    void initializeDeviceMallocBuffer(size_t size_bytes);
     void initializeLayerMappings();
     void initializeLayoutStrategies();
+
+    struct PhysicalLayout {
+        MemoryLayoutConfig device;
+        MemoryLayoutConfig host;
+        uint32_t           device_block_count  = 0;
+        uint32_t           device_spare_blocks = 0;
+    };
+    using BlockLocation = std::tuple<const MemoryLayoutStrategy&, int, BlockIdxType>;
+    BlockLocation locateLogicalBlock(int layer_id, BlockIdxType block) const;
 
     // Helper functions for initializeLayoutStrategies()
     void          processMemoryLayout(size_t layout_idx, const torch::Tensor& full_tensor, size_t& global_layer_begin);
@@ -159,30 +196,38 @@ private:
                                            torch::Tensor&            kv_scale_tensor);
     void processLayerTensors(size_t layout_idx, const MemoryLayoutConfig& layout_cfg, size_t& global_layer_begin);
 
+    std::unique_ptr<MemoryLayoutStrategy>
+         makeSplitLayoutStrategy(const MemoryLayoutConfig& layout, const torch::Tensor& arena, size_t layout_idx);
+    void processSplitLayout(size_t layout_idx, size_t global_layer_begin);
+
     // Helper functions for regUserMr/deregUserMr
     void registerUserMrForBuffer(std::shared_ptr<MemoryUtil> memory_util,
                                  size_t                      layout_idx,
-                                 size_t                      offset_bytes,
+                                 void*                       base_ptr,
                                  size_t                      bytes,
                                  size_t                      stride_bytes,
                                  bool                        gpu,
                                  const std::string&          buffer_type);
     void deregisterUserMrForBuffer(std::shared_ptr<MemoryUtil> memory_util,
                                    size_t                      layout_idx,
-                                   size_t                      offset_bytes,
+                                   void*                       base_ptr,
                                    bool                        gpu,
                                    const std::string&          buffer_type);
 
 private:
     static constexpr size_t                          kRefTypeCount = static_cast<size_t>(DeviceBlockRefType::COUNT);
-    std::vector<uint32_t> refcounts_;
+    std::vector<uint32_t>                            refcounts_;
     std::array<std::vector<uint32_t>, kRefTypeCount> refcounts_by_type_;
     std::array<size_t, kRefTypeCount>                referenced_block_counts_{};
 
-    torch::Tensor cache_aligned_buffer_;
-    void*         cache_base_ptr_{nullptr};
-    size_t        allocation_size_bytes_{0};
-    bool          uses_dedicated_device_allocation_{false};
+    torch::Tensor                                      cache_aligned_buffer_;
+    torch::Tensor                                      host_aligned_buffer_;
+    std::vector<PhysicalLayout>                        physical_layouts_;
+    std::vector<std::unique_ptr<MemoryLayoutStrategy>> host_layout_strategies_;
+    std::vector<LayerBackingView>                      layer_backing_views_;
+    void*                                              cache_base_ptr_{nullptr};
+    size_t                                             allocation_size_bytes_{0};
+    bool                                               uses_dedicated_device_allocation_{false};
 
     bool                        kvcache_reg_mr_  = false;
     int64_t                     mr_cost_time_ms_ = 0;

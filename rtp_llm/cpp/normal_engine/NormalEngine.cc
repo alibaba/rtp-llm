@@ -312,7 +312,10 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         }
         dynamic_decode_gate_enabled_ = gate_result.value();
     }
-    initCacheManager(warm_up_result);
+    initCacheManager(
+        warm_up_result,
+        params.hw_kernel_config.enable_cuda_graph
+            || isGenerationPrefillCudaGraphRequested(params.hw_kernel_config, parallelism_config.role_type));
     RTP_LLM_LOG_INFO("create cache manager done");
 
     initExecutor(params);
@@ -1039,7 +1042,7 @@ absl::StatusOr<bool> NormalEngine::runAttentionAccuracyCheck(const EngineInitPar
 #endif
 }
 
-void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
+void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result, bool prefill_cuda_graph_requested) {
     normalizeSystemPromptCacheConfig();
     const bool use_device_malloc_block_pool =
         shouldUseDeviceMallocKVCacheBacking(pd_sep_config, cache_store_config, kv_cache_config);
@@ -1050,17 +1053,58 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         model_config_, parallelism_config, kv_cache_config, sp_config, draft_model_config, isMTPEagle(), isEagle());
     CacheConfigCreator::configureLinearReplay(
         config, model_config_, parallelism_config, runtime_config, sp_config, isMTPEagle());
-    auto block_tree_layout = planBlockTreeCacheLayout(config, kv_cache_config);
+    auto planned_host_cache = CacheConfigCreator::planMlaHostCache(config,
+                                                                   model_config_,
+                                                                   runtime_config,
+                                                                   kv_cache_config,
+                                                                   parallelism_config,
+                                                                   warm_up_result,
+                                                                   sp_config,
+                                                                   prefill_cuda_graph_requested);
+    // Every rank contributes an ordinary candidate, even if only one placement
+    // or neither placement fits its local GPU budget.
+    const bool compare_prefill_placements =
+        parallelism_config.role_type == RoleType::PREFILL && model_config_.model_type == "glm_5"
+        && kv_cache_config.dsa_prefill_layout < 0 && kv_cache_config.memory_cache_size_mb > 0
+        && !prefill_cuda_graph_requested;
+    MlaHostCachePlan automatic_prefill;
+    if (compare_prefill_placements) {
+        automatic_prefill = planned_host_cache;
+    } else {
+        config.mla_host_cache = planned_host_cache;
+    }
+    auto effective_cache_config = kv_cache_config;
+    if (config.mla_host_cache.layeredPrefill()) {
+        // The host budget funds canonical model storage in the same logical
+        // pool. Do not independently allocate a second memory-cache tier.
+        effective_cache_config.enable_memory_cache = false;
+    }
+    auto block_tree_layout = planBlockTreeCacheLayout(config, effective_cache_config);
     RTP_LLM_CHECK_WITH_INFO(block_tree_layout != nullptr, "failed to plan BlockTreeCache layout");
-    const auto local_block_num     = CacheConfigCreator::computeLocalBlockNum(config,
-                                                                          model_config_,
-                                                                          runtime_config,
-                                                                          kv_cache_config,
-                                                                          parallelism_config,
-                                                                          warm_up_result,
-                                                                          sp_config,
-                                                                          &block_tree_layout->crc_workspaces);
-    const auto confirmed_block_num = CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config, config);
+    const auto local_block_num = config.mla_host_cache.logical_blocks != 0 ?
+                                     config.mla_host_cache.logical_blocks :
+                                     CacheConfigCreator::computeLocalBlockNum(config,
+                                                                              model_config_,
+                                                                              runtime_config,
+                                                                              effective_cache_config,
+                                                                              parallelism_config,
+                                                                              warm_up_result,
+                                                                              sp_config,
+                                                                              &block_tree_layout->crc_workspaces,
+                                                                              compare_prefill_placements);
+    const auto confirmed_block_num =
+        CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config, config, automatic_prefill);
+    if (automatic_prefill.layeredPrefill()) {
+        if (config.mla_host_cache.layeredPrefill()) {
+            RTP_LLM_LOG_INFO("automatic layered MLA selected with %u blocks", confirmed_block_num);
+            effective_cache_config.enable_memory_cache = false;
+            block_tree_layout                          = planBlockTreeCacheLayout(config, effective_cache_config);
+            RTP_LLM_CHECK_WITH_INFO(block_tree_layout != nullptr, "failed to plan layered BlockTreeCache layout");
+        } else {
+            RTP_LLM_LOG_INFO("retaining ordinary prefill cache with %u blocks; layered MLA does not increase capacity",
+                             confirmed_block_num);
+        }
+    }
     if (parallelism_config.pp_size > 1) {
         PPCacheCapacityNegotiator negotiator(parallelism_config.pp_size);
         const auto                capacity =
@@ -1074,7 +1118,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
     auto cache_manager = make_shared<KVCacheManager>(config,
                                                      false,
                                                      metrics_reporter_,
-                                                     kv_cache_config,
+                                                     effective_cache_config,
                                                      parallelism_config,
                                                      runtime_config,
                                                      draft_model_config ? sp_config : SpeculativeExecutionConfig{},
@@ -1090,7 +1134,11 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
 }
 
 absl::Status NormalEngine::initSystemPrompt() {
-    resource_context_.initCacheConfig(kv_cache_config);
+    auto effective_cache_config = kv_cache_config;
+    if (resource_context_.cache_manager->cacheConfig().mla_host_cache.layeredPrefill()) {
+        effective_cache_config.enable_memory_cache = false;
+    }
+    resource_context_.initCacheConfig(effective_cache_config);
 
     if (parallelism_config.pp_rank == 0 && !kv_cache_config.multi_task_prompt_tokens.empty()) {
         RTP_LLM_LOG_INFO("start system prompt build");

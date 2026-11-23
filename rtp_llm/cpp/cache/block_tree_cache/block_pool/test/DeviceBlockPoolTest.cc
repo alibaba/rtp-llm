@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 
+#include <cerrno>
 #include <memory>
 #include <optional>
 #include <type_traits>
@@ -8,6 +9,12 @@
 #include <vector>
 
 #include "gtest/gtest.h"
+
+#if USING_CUDA
+#include <ATen/Context.h>
+#include <ATen/core/CachingHostAllocator.h>
+#include <sys/mman.h>
+#endif
 
 // Build the device pool config from the lightweight cache-config test helpers
 // (cache_config_test_utils + DeviceBlockPoolConfigHelper) rather than BlockPoolTestHelper,
@@ -101,6 +108,94 @@ TEST(DeviceBlockPoolTest, InitKeepsBlockZeroInvalid) {
     ASSERT_TRUE(block.has_value());
     EXPECT_NE(*block, 0);
 }
+
+TEST(DeviceBlockPoolTest, LayeredPrefillKeepsLogicalIdsAcrossGpuAndPinnedLayers) {
+    auto config                                  = makeMixedScaleConfig();
+    config->memory_layouts[0].device_block_count = config->memory_layouts[0].block_num;
+    config->memory_layouts[1].host_block_count   = config->memory_layouts[1].block_num;
+    DeviceBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+    ASSERT_TRUE(pool.hasSplitBacking());
+    EXPECT_EQ(pool.getBaseAddress(), nullptr);
+    EXPECT_FALSE(pool.usesDedicatedDeviceAllocation());
+    EXPECT_GE(pool.getTotalSizeBytes(), config->total_size_bytes);
+
+    const auto block = pool.malloc();
+    ASSERT_TRUE(block.has_value());
+    const auto gpu = pool.layerBackingView(0);
+    const auto cpu = pool.layerBackingView(2);
+    ASSERT_TRUE(gpu.device_kv.is_cuda());
+    ASSERT_TRUE(gpu.device_scale.is_cuda());
+    EXPECT_FALSE(gpu.host_kv.defined());
+    EXPECT_EQ(gpu.device_block_count, config->physical_block_count);
+    ASSERT_TRUE(cpu.host_kv.is_pinned());
+    EXPECT_FALSE(cpu.device_kv.defined());
+    EXPECT_EQ(cpu.device_block_count, 0u);
+    EXPECT_EQ(cpu.host_kv.size(0), config->physical_block_count);
+    EXPECT_EQ(pool.allLayerCacheBase()[2].data_ptr(), cpu.host_kv.data_ptr());
+
+    const auto [gpu_addr, gpu_scale_addr]   = pool.convertIndexToAddr(0, *block);
+    const auto [host_addr, host_scale_addr] = pool.convertIndexToAddr(2, *block);
+    EXPECT_EQ(gpu_addr, gpu.device_kv[*block].data_ptr());
+    EXPECT_EQ(gpu_scale_addr, gpu.device_scale[*block].data_ptr());
+    EXPECT_EQ(host_addr, cpu.host_kv[*block].data_ptr());
+    EXPECT_EQ(host_scale_addr, nullptr);
+    const auto buffers = pool.convertIndexToBuffer(2, *block, 1, 0);
+    ASSERT_EQ(buffers.size(), 2u);
+    EXPECT_FALSE(buffers[0].is_cuda);
+    EXPECT_FALSE(buffers[1].is_cuda);
+    EXPECT_EQ(buffers[0].addr, host_addr);
+
+    const auto regions = pool.registrationRegions();
+    ASSERT_EQ(regions.size(), 3u);
+    EXPECT_TRUE(regions[0].is_cuda);
+    EXPECT_TRUE(regions[1].is_cuda);
+    EXPECT_FALSE(regions[2].is_cuda);
+    EXPECT_EQ(regions[2].addr, cpu.host_kv.data_ptr());
+}
+
+#if USING_CUDA
+TEST(DeviceBlockPoolTest, SplitHostArenaAvoidsAllocatorRoundingAndOutlivesPool) {
+    auto  config                      = makeConfig();
+    auto& layout                      = config->memory_layouts.front();
+    layout.host_block_count           = layout.block_num;
+    config->use_device_malloc_backing = false;
+    const auto host_bytes             = layout.kv_block_pool_size_bytes;
+    ASSERT_NE(host_bytes & (host_bytes - 1), 0u);
+
+    at::globalContext().lazyInitDevice(at::kCUDA);
+    auto*         allocator = at::getHostAllocator(at::kCUDA);
+    const auto    before    = allocator->get_stats().active_bytes.current;
+    torch::Tensor retained;
+    void*         arena_base = nullptr;
+    {
+        DeviceBlockPool pool(config);
+        ASSERT_TRUE(pool.init());
+        ASSERT_EQ(pool.getTotalSizeBytes(), host_bytes);
+        const auto host = pool.layerBackingView(0).host_kv;
+        ASSERT_TRUE(host.is_pinned());
+        arena_base = host.data_ptr();
+        retained   = host.select(0, 1);
+        // Pool construction must not reserve this arena from Torch's rounding cache.
+        EXPECT_EQ(allocator->get_stats().active_bytes.current, before);
+    }
+
+    ASSERT_TRUE(retained.is_pinned());
+    retained.fill_(17);
+    EXPECT_TRUE(retained.to(torch::kCUDA).eq(17).all().item<bool>());
+
+    const long page_size = sysconf(_SC_PAGESIZE);
+    ASSERT_GT(page_size, 0);
+    EXPECT_EQ(reinterpret_cast<uintptr_t>(arena_base) % static_cast<size_t>(page_size), 0u);
+    unsigned char residency = 0;
+    ASSERT_EQ(mincore(arena_base, static_cast<size_t>(page_size), &residency), 0);
+    retained        = torch::Tensor();
+    const int state = mincore(arena_base, static_cast<size_t>(page_size), &residency);
+    const int error = errno;
+    EXPECT_EQ(state, -1);
+    EXPECT_EQ(error, ENOMEM);
+}
+#endif
 
 TEST(DeviceBlockPoolTest, ConstructorRejectsInvalidConfigMatrix) {
     std::shared_ptr<const DeviceBlockPoolConfig> null_config;
