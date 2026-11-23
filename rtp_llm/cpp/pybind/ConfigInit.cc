@@ -477,6 +477,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("reuse_cache", &KVCacheConfig::reuse_cache)
         .def_readwrite("enable_prefill_partial_tail_reuse", &KVCacheConfig::enable_prefill_partial_tail_reuse)
         .def_readwrite("enable_prefill_common_prefix_recovery", &KVCacheConfig::enable_prefill_common_prefix_recovery)
+        .def_readwrite("prefill_segment_rules_file", &KVCacheConfig::prefill_segment_rules_file)
+        .def_readwrite("prefill_segment_before", &KVCacheConfig::prefill_segment_before)
+        .def_readwrite("prefill_segment_after", &KVCacheConfig::prefill_segment_after)
+        .def("enablePrefillPreciseReuse", &KVCacheConfig::enablePrefillPreciseReuse)
         .def_readwrite("enable_remote_cache", &KVCacheConfig::enable_remote_cache)
         .def_readwrite("enable_device_cache", &KVCacheConfig::enable_device_cache)
         .def_readwrite("enable_crc", &KVCacheConfig::enable_crc)
@@ -578,7 +582,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      11,
+                                      12,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -650,9 +654,19 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_prefill_partial_tail_reuse,
                                       self.enable_prefill_common_prefix_recovery,
                                       self.linear_pool_blocks,
-                                      self.swa_pool_blocks);
+                                      self.swa_pool_blocks,
+                                      self.prefill_segment_rules_file,
+                                      self.prefill_segment_before,
+                                      self.prefill_segment_after);
             },
             [](py::tuple t) {
+                const py::tuple segment_state = t;
+                const bool      has_segment_fields =
+                    t.size() == 77 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 12;
+                if (has_segment_fields) {
+                    t    = t[py::slice(0, 74, 1)].cast<py::tuple>();
+                    t[1] = py::int_(11);
+                }
                 const py::tuple tail_state = t;
                 // v11 appends enable_prefill_common_prefix_recovery after the
                 // partial-tail flag (size 72 in this branch's pushed layout,
@@ -822,6 +836,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
                 c.enable_prefill_partial_tail_reuse     = enable_prefill_partial_tail_reuse;
                 c.enable_prefill_common_prefix_recovery = enable_prefill_common_prefix_recovery;
+                if (has_segment_fields) {
+                    c.prefill_segment_rules_file = segment_state[74].cast<std::string>();
+                    c.prefill_segment_before     = segment_state[75].cast<std::vector<std::vector<int>>>();
+                    c.prefill_segment_after      = segment_state[76].cast<std::vector<std::vector<int>>>();
+                }
                 return c;
             }));
 

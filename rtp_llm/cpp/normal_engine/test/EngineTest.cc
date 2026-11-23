@@ -52,6 +52,7 @@ namespace rtp_llm {
 
 class NormalEngineTest: public DeviceTestBase {
 public:
+    void checkSegmentExecution(int failure);
     void checkInternalForkHistoryCopy(bool        invalid_row,
                                       const char* remote_address   = nullptr,
                                       const char* failed_block_dir = nullptr,
@@ -692,6 +693,180 @@ TEST_F(NormalEngineTest, testInternalForkWriterOrCaptureErrorAndConcurrentCancel
         retry->releaseResource();
         EXPECT_EQ(pool->freeBlocksNum(), free_before);
     }
+}
+
+void NormalEngineTest::checkSegmentExecution(int failure) {
+    class SegmentWriter: public MockModel {
+    public:
+        SegmentWriter(ForwardHook hook, bool fail_save): MockModel(32, std::move(hook)), fail_save_(fail_save) {}
+        bool supportsSparseCacheSave() const override {
+            return true;
+        }
+        std::optional<std::string> takeDeferredHiddenStateCaptureError() override {
+            return fail_save_ ? std::optional<std::string>("segment writer failed") : std::nullopt;
+        }
+
+    private:
+        bool fail_save_;
+    };
+
+    ModelConfig model;
+    model.num_layers  = 1;
+    model.max_seq_len = 32;
+    model.vocab_size = model.input_vocab_size = 32;
+    model.hidden_size                         = 4;
+    model.special_tokens.eos_token_id         = -1;
+    model.attn_config.head_num = model.attn_config.kv_head_num = 1;
+    model.attn_config.size_per_head                            = 4;
+    model.attn_config.tokens_per_block = model.attn_config.kernel_tokens_per_block = 8;
+    auto          cache = test::makeSimpleLinearCacheConfig(1, 64, 8, DataType::TYPE_FP16);
+    KVCacheConfig config;
+    config.reuse_cache = config.enable_device_cache = true;
+    config.enable_prefill_partial_tail_reuse        = false;
+    config.enable_prefill_common_prefix_recovery    = false;
+    config.prefill_segment_after                    = {{3}, {5}, {7}};
+    PDSepConfig pd;
+    pd.role_type = RoleType::PREFILL;
+    auto manager = std::make_shared<KVCacheManager>(
+        cache, false, nullptr, config, ParallelismConfig{}, RuntimeConfig{}, SpeculativeExecutionConfig{}, pd);
+    ASSERT_TRUE(manager->init());
+    ResourceContext context;
+    context.initCacheConfig(config);
+    context.ignore_request_cache_switches = false;
+    context.cache_manager                 = manager;
+    context.role_type                     = pd.role_type;
+    const auto make_stream                = [&](const std::vector<int>& ids) {
+        auto query                             = std::make_shared<GenerateInput>();
+        query->input_ids                       = torch::tensor(ids, torch::kInt32);
+        query->generate_config                 = std::make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = failure == 0 ? 1 : 2;
+        query->generate_config->reuse_cache    = true;
+        auto stream = std::make_shared<NormalGenerateStream>(query, model, RuntimeConfig{}, context, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        stream->streamCacheResource().init(1);
+        return stream;
+    };
+    const std::vector<int> prompt{1, 2, 3, 4, 5, 6, 7, 8, 9};
+    auto                   stream      = make_stream(prompt);
+    auto&                  resource    = stream->streamCacheResource();
+    auto                   pool        = manager->blockTreeCache()->groupSets().front()->devicePools().front();
+    const auto             free_before = pool->freeBlocksNum();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.prepareRequiredContinuation().ok());
+    resource.prepareRegisteredSave();
+    ASSERT_TRUE(resource.prefixCacheRegistration().has_value());
+    const auto&               registration = *resource.prefixCacheRegistration();
+    const std::vector<size_t> segment_ends{3, 5, 7};
+    std::vector<BlockIdxType> destinations;
+    std::vector<CacheKeyType> keys;
+    for (size_t end : segment_ends) {
+        auto point = std::find_if(registration.points.begin(), registration.points.end(), [end](const auto& p) {
+            return p.endpoint.pos == end;
+        });
+        ASSERT_NE(point, registration.points.end());
+        ASSERT_TRUE(point->internal_only);
+        const auto& binding = point->group_bindings.front();
+        ASSERT_EQ(binding.state, PrefixCacheSaveState::REGISTERED);
+        ASSERT_TRUE(binding.resource.hasCompleteDeviceValue());
+        destinations.push_back(binding.resource.device_blocks.front());
+        keys.push_back(point->endpoint.key);
+    }
+    const auto bytes = [&](BlockIdxType block) {
+        const auto address = manager->convertIndexToAddr(0, "linear", block);
+        return torch::from_blob(address.kv_addr,
+                                {static_cast<int64_t>(cache.group("linear").kvBlockStrideBytes())},
+                                torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    };
+    const auto source = resource.kvCache().blocks(0, "linear").back();
+    ASSERT_NE(source, destinations.front());
+    bytes(source).fill_(0x5a);
+    bytes(destinations.front()).zero_();
+    resource.block_update_mapping_.push_back({"linear", source, destinations.front()});
+    bool             writer_called = false;
+    EngineInitParams params;
+    params.model_config_   = model;
+    params.py_model        = py::none();
+    params.kv_cache_config = config;
+    params.pd_sep_config   = pd;
+    NormalExecutor executor(params, manager);
+    ASSERT_TRUE(executor.partial_tail_reuse_);
+    executor.setModel(std::make_unique<SegmentWriter>(
+        [&](const GptModelInputs& input) {
+            writer_called = true;
+            EXPECT_TRUE(bytes(destinations.front()).eq(0x5a).all().item<bool>());
+            EXPECT_FALSE(registration.content_completed);
+            ASSERT_TRUE(input.cache_save_positions.defined());
+            ASSERT_TRUE(input.cache_save_block_ids.defined());
+            const auto positions = input.cache_save_positions.cpu().contiguous().view({-1});
+            const auto blocks    = input.cache_save_block_ids.cpu().contiguous().view({-1});
+            for (size_t i = 0; i < destinations.size(); ++i) {
+                const auto* begin = positions.data_ptr<int64_t>();
+                const auto* found = std::find(begin, begin + positions.numel(), segment_ends[i]);
+                ASSERT_NE(found, begin + positions.numel());
+                EXPECT_EQ(blocks.data_ptr<int32_t>()[found - begin], destinations[i]);
+            }
+            if (failure == 1) {
+                throw std::runtime_error("segment forward failed");
+            }
+            for (size_t i = 0; i < destinations.size(); ++i) {
+                bytes(destinations[i]).fill_(segment_ends[i]);
+            }
+        },
+        failure == 2));
+    if (failure == 1) {
+        EXPECT_THROW((void)executor.process(ScheduleOutput{{stream}}), std::runtime_error);
+    } else {
+        ASSERT_TRUE(executor.process(ScheduleOutput{{stream}}).ok());
+    }
+    EXPECT_TRUE(writer_called);
+    const bool content_completed = registration.content_completed;
+    EXPECT_EQ(content_completed, failure == 0);
+    for (const auto& point : registration.points) {
+        if (point.internal_only) {
+            EXPECT_EQ(point.group_bindings.front().state,
+                      failure == 0 ? PrefixCacheSaveState::CONTENT_COMPLETE : PrefixCacheSaveState::REGISTERED);
+        }
+    }
+    if (failure == 0) {
+        EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+    }
+    EXPECT_EQ(stream->isFinished(), failure == 0);
+    stream->releaseResource();
+    EXPECT_TRUE(registration.source_pins.empty());
+    EXPECT_TRUE(registration.cached_source_pins.empty());
+    EXPECT_TRUE(registration.runtime_source_pins.empty());
+    for (size_t i = 0; i < keys.size(); ++i) {
+        const auto nodes = manager->blockTreeCache()->tree()->findNode({keys[i]});
+        if (failure != 0) {
+            EXPECT_TRUE(nodes.empty());
+            EXPECT_FALSE(pool->isAllocated(destinations[i]));
+            continue;
+        }
+        ASSERT_EQ(nodes.size(), 1u);
+        EXPECT_EQ(nodes.back()->token_end, segment_ends[i]);
+        EXPECT_TRUE(bytes(destinations[i]).eq(segment_ends[i]).all().item<bool>());
+        std::vector<int> branch(prompt.begin(), prompt.begin() + segment_ends[i]);
+        branch.insert(branch.end(), {20, 21});
+        auto next = make_stream(branch);
+        ASSERT_TRUE(next->streamCacheResource().initKVBlock().ok());
+        EXPECT_EQ(next->initialReuseLength(), segment_ends[i]);
+        next->releaseResource();
+    }
+    if (failure != 0) {
+        EXPECT_EQ(pool->freeBlocksNum(), free_before);
+    }
+}
+
+TEST_F(NormalEngineTest, testSegmentOnlyCopiesBeforeSelectedWriterAndPublishesThreeEndpoints) {
+    checkSegmentExecution(0);
+}
+
+TEST_F(NormalEngineTest, testSegmentOnlyForwardFailureDoesNotPublishAndReleasesResources) {
+    checkSegmentExecution(1);
+}
+
+TEST_F(NormalEngineTest, testSegmentOnlySaveFailureDoesNotPublishAndReleasesResources) {
+    checkSegmentExecution(2);
 }
 
 void NormalEngineTest::checkInternalForkHistoryCopy(bool        invalid_row,

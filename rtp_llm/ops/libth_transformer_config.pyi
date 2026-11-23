@@ -730,6 +730,10 @@ class KVCacheConfig:
     enable_crc: bool
     enable_prefill_partial_tail_reuse: bool
     enable_prefill_common_prefix_recovery: bool
+    prefill_segment_rules_file: str
+    prefill_segment_before: list[list[int]]
+    prefill_segment_after: list[list[int]]
+    def enablePrefillPreciseReuse(self) -> bool: ...
     enable_device_cache: bool
     enable_memory_cache: bool
     enable_disk_cache: bool

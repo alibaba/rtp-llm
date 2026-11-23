@@ -15,6 +15,9 @@
 #include <iomanip>
 #include <limits>
 #include <sstream>
+#include <set>
+#include <map>
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include <thread>
 
 using namespace std;
@@ -535,6 +538,7 @@ absl::Status StreamCacheResource::initKVBlock() {
             }
             registration.points.push_back(std::move(point));
         };
+    bool registration_created = false;
     if (is_first_malloc && !prefix_cache_registration_ && partialTailReuseEnabled()) {
         PrefixCacheRegistration registration;
         registration.token_ids             = malloc_info.complete_token_ids->completeTokenIdsVec(0);
@@ -564,6 +568,7 @@ absl::Status StreamCacheResource::initKVBlock() {
             register_point(registration, {index, registration.base_keys[index], registration.original_input_tokens});
         }
         prefix_cache_registration_ = std::move(registration);
+        registration_created       = true;
     }
 
     if (is_first_malloc && prefix_cache_registration_ && resource_context_.enable_prefill_common_prefix_recovery
@@ -580,6 +585,59 @@ absl::Status StreamCacheResource::initKVBlock() {
                    return point.endpoint.pos == fork.pos;
                })) {
             register_point(registration, fork, true);
+        }
+    }
+
+    if (registration_created && (resource_context_.prefill_segment_before || resource_context_.prefill_segment_after)) {
+        auto&                    registration = *prefix_cache_registration_;
+        std::map<size_t, size_t> candidates;
+        const auto               collect = [&](const auto& rules, bool after) {
+            if (!rules) {
+                return;
+            }
+            for (const auto& rule : *rules) {
+                if (rule.empty() || rule.size() > registration.token_ids.size()) {
+                    continue;
+                }
+                for (size_t start = 0; start <= registration.token_ids.size() - rule.size(); ++start) {
+                    if (std::equal(rule.begin(), rule.end(), registration.token_ids.begin() + start)) {
+                        ++candidates[start + (after ? rule.size() : 0)];
+                    }
+                }
+            }
+        };
+        collect(resource_context_.prefill_segment_before, false);
+        collect(resource_context_.prefill_segment_after, true);
+        std::set<size_t> registered;
+        for (const auto& point : registration.points) {
+            registered.insert(point.endpoint.pos);
+        }
+        // Candidate selection seam: retain every legal G today; future priority policy belongs here.
+        for (const auto& [pos, matches] : candidates) {
+            const bool legal = pos > 0 && pos <= registration.original_input_tokens
+                               && pos <= static_cast<size_t>(std::numeric_limits<int>::max())
+                               && malloc_info.complete_token_ids->isValidReuseLength(static_cast<int>(pos), 0);
+            const bool duplicate = registered.count(pos) != 0;
+            if (legal && !duplicate) {
+                const auto key = cacheKeyAtTokenEnd(*malloc_info.complete_token_ids,
+                                                    0,
+                                                    seqSizePerBlock(),
+                                                    static_cast<int>(pos),
+                                                    registration.base_keys,
+                                                    resource_context_.cache_manager->cacheConfig().cache_key_hash_seed);
+                register_point(registration, {(pos - 1) / static_cast<size_t>(seqSizePerBlock()), key, pos}, true);
+                registered.insert(pos);
+            }
+            if (prefixObservationEnabled()) {
+                RTP_LLM_LOG_INFO("event=prefix_segment_candidate request_id=%ld pos=%zu matches=%zu legal=%d "
+                                 "duplicate=%d registered=%d",
+                                 stream_->streamId(),
+                                 pos,
+                                 matches,
+                                 legal,
+                                 duplicate,
+                                 legal && !duplicate);
+            }
         }
     }
 
@@ -1154,8 +1212,8 @@ bool StreamCacheResource::reuseCache() const {
 }
 
 bool StreamCacheResource::partialTailReuseEnabled() const {
-    if (!(resource_context_.enable_prefill_partial_tail_reuse
-          || resource_context_.enable_prefill_common_prefix_recovery)
+    if (!(resource_context_.enable_prefill_partial_tail_reuse || resource_context_.enable_prefill_common_prefix_recovery
+          || resource_context_.prefill_segment_before || resource_context_.prefill_segment_after)
         || resource_context_.role_type != RoleType::PREFILL
         || !(resource_context_.enable_device_cache || resource_context_.enable_memory_cache
              || resource_context_.enable_disk_cache)

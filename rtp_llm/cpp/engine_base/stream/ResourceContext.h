@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <vector>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
@@ -23,6 +24,8 @@ struct ResourceContext {
     bool reuse_cache{false};
     bool enable_prefill_partial_tail_reuse{false};
     bool enable_prefill_common_prefix_recovery{false};
+    std::shared_ptr<const std::vector<std::vector<int>>> prefill_segment_before;
+    std::shared_ptr<const std::vector<std::vector<int>>> prefill_segment_after;
     bool enable_device_cache{true};
     bool enable_memory_cache{false};
     bool enable_disk_cache{false};

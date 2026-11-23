@@ -400,6 +400,22 @@ class CacheConfigArgumentsTest(TestCase):
             ).enable_prefill_partial_tail_reuse
         )
 
+    def test_prefill_segment_rules_file_binds_cli_without_enabling_reuse(self):
+        config = self.parse_cache_config(
+            ["--prefill_segment_rules_file", "/deployment/segments.json"], {}
+        )
+        self.assertEqual(config.prefill_segment_rules_file, "/deployment/segments.json")
+        self.assertFalse(config.reuse_cache)
+        self.assertFalse(config.enable_prefill_partial_tail_reuse)
+        self.assertFalse(config.enable_prefill_common_prefix_recovery)
+
+    def test_prefill_segment_rules_file_has_no_environment_alias(self):
+        config = self.parse_cache_config(
+            [], {"PREFILL_SEGMENT_RULES_FILE": "/ignored/segments.json"}
+        )
+        self.assertEqual(config.prefill_segment_rules_file, "")
+        self.assertFalse(config.reuse_cache)
+
     def test_common_prefix_recovery_switch_is_independent(self):
         for tail in (False, True):
             for recovery in (False, True):

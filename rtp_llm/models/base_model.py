@@ -130,6 +130,9 @@ class BaseModel(object):
         self.default_generate_config: GenerateConfig = GenerateConfig()
         self.load_tokenizer()
         self._finalize_output_vocab_config()
+        self.kv_cache_config.load_prefill_segment_rules(
+            self.model_config.input_vocab_size or self.model_config.vocab_size
+        )
 
         if (
             self.kv_cache_config.multi_task_prompt

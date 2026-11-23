@@ -584,9 +584,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     data_type_             = params.model_config_.data_type;
     mtp_input_hidden_size_ = static_cast<size_t>(params.model_config_.getMtpInputHiddenSize());
     propose_step_          = propose_params->gen_num_per_circle;
-    partial_tail_reuse_ = (params.kv_cache_config.enable_prefill_partial_tail_reuse
-                           || params.kv_cache_config.enable_prefill_common_prefix_recovery)
-                          && role_type_ == RoleType::PREFILL && !warm_up_;
+    partial_tail_reuse_ =
+        params.kv_cache_config.enablePrefillPreciseReuse() && role_type_ == RoleType::PREFILL && !warm_up_;
     RTP_LLM_CHECK_WITH_INFO(
         propose_step_ > 0, "speculative proposal width/gen_num_per_cycle must be positive, got %zu", propose_step_);
     vocab_size_                = params.model_config_.vocab_size;

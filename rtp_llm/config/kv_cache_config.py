@@ -9,6 +9,57 @@ from rtp_llm.ops import KVCacheConfig as CppKVCacheConfig
 class KVCacheConfig(CppKVCacheConfig):
     """Python wrapper for C++ KVCacheConfig with additional convenience methods."""
 
+    def load_prefill_segment_rules(self, input_vocab_size: int) -> None:
+        """Resolve deployment rules once, preserving parsed worker snapshots."""
+        if self.prefill_segment_before or self.prefill_segment_after:
+            return
+        path = self.prefill_segment_rules_file
+        if not path:
+            return
+        if input_vocab_size <= 0:
+            raise ValueError(f"{path}: input vocabulary size must be positive")
+        try:
+            with open(path, encoding="utf-8") as reader:
+                rules = json.load(reader)
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise ValueError(
+                f"{path}: cannot load prefill segment rules: {error}"
+            ) from error
+        if not isinstance(rules, dict):
+            raise ValueError(f"{path}: expected a JSON object")
+        unknown = rules.keys() - {"before", "after"}
+        if unknown:
+            raise ValueError(f"{path}: unknown rule keys: {sorted(unknown)}")
+        parsed: list[list[list[int]]] = []
+        for side in ("before", "after"):
+            entries = rules.get(side, [])
+            if not isinstance(entries, list):
+                raise ValueError(f"{path}: {side} must be an array")
+            sequences: list[list[int]] = []
+            seen: set[tuple[int, ...]] = set()
+            for index, entry in enumerate(entries):
+                location = f"{path}: {side}[{index}]"
+                if not isinstance(entry, list) or not entry:
+                    raise ValueError(f"{location} must be a non-empty token ID array")
+                for token_index, token in enumerate(entry):
+                    if type(token) is not int:
+                        raise ValueError(
+                            f"{location}[{token_index}] must be an integer token ID"
+                        )
+                    if not 0 <= token < input_vocab_size or token > 2147483647:
+                        raise ValueError(
+                            f"{location}[{token_index}] token ID {token} is outside "
+                            f"[0, min({input_vocab_size}, 2147483648))"
+                        )
+                sequence = tuple(entry)
+                if sequence not in seen:
+                    seen.add(sequence)
+                    sequences.append(entry)
+            parsed.append(sequences)
+        if not any(parsed):
+            raise ValueError(f"{path}: at least one before/after rule is required")
+        self.prefill_segment_before, self.prefill_segment_after = parsed
+
     def load_and_update_task_prompt_config(
         self, tokenizer: Optional[Any] = None
     ) -> None:

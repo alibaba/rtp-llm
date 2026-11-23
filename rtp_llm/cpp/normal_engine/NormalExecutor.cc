@@ -120,9 +120,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
             RTP_LLM_LOG_WARNING("batch recorder initialization failed; configuration was not published");
         }
     }
-    partial_tail_reuse_ = (params.kv_cache_config.enable_prefill_partial_tail_reuse
-                           || params.kv_cache_config.enable_prefill_common_prefix_recovery)
-                          && role_type_ == RoleType::PREFILL && !warm_up_ && !is_propose_;
+    partial_tail_reuse_ = params.kv_cache_config.enablePrefillPreciseReuse() && role_type_ == RoleType::PREFILL
+                          && !warm_up_ && !is_propose_;
     RTP_LLM_LOG_INFO("enable_detail_log_ = %d, tp_rank_ = %d", enable_detail_log_, tp_rank_);
     if (params.profiling_debug_logging_config.enable_model_inputs_log) {
         model_inputs_logger_ =

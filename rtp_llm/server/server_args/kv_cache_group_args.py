@@ -68,6 +68,14 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         "默认关闭，可与尾复用独立组合。",
     )
     kv_cache_group.add_argument(
+        "--prefill_segment_rules_file",
+        env_name="",
+        bind_to=(kv_cache_config, "prefill_segment_rules_file"),
+        type=str,
+        default="",
+        help="UTF-8 JSON token segment rules with optional before/after arrays; empty disables segment registration.",
+    )
+    kv_cache_group.add_argument(
         "--enable_device_cache",
         env_name="ENABLE_DEVICE_CACHE",
         bind_to=(kv_cache_config, "enable_device_cache"),

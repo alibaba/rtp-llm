@@ -183,6 +183,7 @@ struct MtpExecutorTestConfig {
     int64_t         dspark_mask_token_id      = -1;
     RoleType        role_type                 = RoleType::PDFUSION;
     bool            enable_batch_record       = false;
+    bool            segment_only              = false;
     double          record_decode_sample_rate = 1.0;
 };
 
@@ -946,6 +947,9 @@ public:
         ModelConfig                model_config;
         RuntimeConfig              runtime_config;
         KVCacheConfig              kv_cache_config;
+        if (test_config.segment_only) {
+            kv_cache_config.prefill_segment_after = {{3}};
+        }
         ResourceContext            resource_context;
         SpeculativeExecutionConfig sp_config;
 
@@ -1105,18 +1109,20 @@ public:
         executor->setSampler(std::move(fake_sampler));
     }
 
-    void runTargetOnlyPrefillScenario(RoleType     role_type,
-                                      bool         simulate_multi_dp,
-                                      bool         expect_draft_forward,
-                                      bool                       simulate_cp_mutation   = false,
-                                      std::optional<std::string> deferred_capture_error = std::nullopt,
-                                      SpeculativeType            sp_type                = SP_TYPE_MTP,
-                                      bool                       existing_stream_error  = false,
-                                      bool                       enable_frontend_metrics = false,
-                                      bool                       enable_tail_reuse      = false,
-                                      bool                       dspark_publication_failure = false) {
+    void runTargetOnlyPrefillScenario(RoleType                   role_type,
+                                      bool                       simulate_multi_dp,
+                                      bool                       expect_draft_forward,
+                                      bool                       simulate_cp_mutation       = false,
+                                      std::optional<std::string> deferred_capture_error     = std::nullopt,
+                                      SpeculativeType            sp_type                    = SP_TYPE_MTP,
+                                      bool                       existing_stream_error      = false,
+                                      bool                       enable_frontend_metrics    = false,
+                                      bool                       enable_tail_reuse          = false,
+                                      bool                       dspark_publication_failure = false,
+                                      bool                       segment_only               = false) {
         MtpExecutorTestConfig test_config;
         test_config.role_type = role_type;
+        test_config.segment_only = segment_only;
         test_config.sp_type   = sp_type;
         if (sp_type == SP_TYPE_DSPARK) {
             test_config.dspark_mask_token_id = 0;
@@ -1142,7 +1148,11 @@ public:
         torch::Tensor source_bytes;
         torch::Tensor destination_bytes;
         if (enable_tail_reuse) {
-            components.executor->partial_tail_reuse_ = true;
+            if (segment_only) {
+                ASSERT_TRUE(components.executor->partial_tail_reuse_);
+            } else {
+                components.executor->partial_tail_reuse_ = true;
+            }
             target_only_stream->streamCacheResource().setNeedReleaseResource(false);
             const auto& cache = components.executor->cache_manager_;
             const auto& tag = cache->cacheConfig().groupTags().front();
@@ -2008,6 +2018,13 @@ TEST_F(MtpExecutorTest, testTargetOnlyFrontendMetricsAreSuppressedDuringWarmup) 
 
 TEST_F(MtpExecutorTest, testTargetOnlyRunsTargetPrefillWithoutDraftOrSampling) {
     runTargetOnlyPrefillScenario(RoleType::PREFILL, false, false, false);
+}
+
+TEST_F(MtpExecutorTest, testSegmentOnlyTargetAndDraftCompleteRuntimeSave) {
+    runTargetOnlyPrefillScenario(
+        RoleType::PREFILL, false, false, false, std::nullopt, SP_TYPE_MTP, false, false, true, false, true);
+    runTargetOnlyPrefillScenario(
+        RoleType::PREFILL, true, true, true, std::nullopt, SP_TYPE_MTP, false, false, true, false, true);
 }
 
 TEST_F(MtpExecutorTest, testTailReuseTargetOnlyCopiesBeforeForwardAndCompletesRuntimeSave) {

@@ -1,8 +1,11 @@
 import contextlib
 import io
+import json
 import os
+import pickle
 import re
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import TestCase
@@ -438,8 +441,8 @@ class GenerateConfigTest(TestCase):
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 74)
-        self.assertEqual(state[:2], ("KVCacheConfig", 11))
+        self.assertEqual(len(state), 77)
+        self.assertEqual(state[:2], ("KVCacheConfig", 12))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)
@@ -955,6 +958,195 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(pc.ep_size, 8)
         self.assertEqual(pc.ep_rank, 5)
         self.assertEqual(pc.ffn_tp_rank, 1)
+
+
+class PrefillSegmentRulesStartupTest(TestCase):
+    def test_segment_snapshot_survives_repeated_worker_round_trips(self):
+        from rtp_llm.config.kv_cache_config import KVCacheConfig as PythonKVCacheConfig
+
+        config = PythonKVCacheConfig()
+        config.prefill_segment_rules_file = "/unavailable/segments.json"
+        config.prefill_segment_before = [[2, 3], [8]]
+        config.prefill_segment_after = [[1], [2, 3]]
+        config.reuse_cache_tail_blocks = 13
+        config.linear_pool_blocks = 31
+        config.swa_pool_blocks = 17
+        for _ in range(2):
+            config = pickle.loads(pickle.dumps(config))
+            config.load_prefill_segment_rules(10)
+            self.assertEqual(
+                config.prefill_segment_rules_file, "/unavailable/segments.json"
+            )
+            self.assertEqual(config.prefill_segment_before, [[2, 3], [8]])
+            self.assertEqual(config.prefill_segment_after, [[1], [2, 3]])
+            self.assertEqual(config.reuse_cache_tail_blocks, 13)
+            self.assertEqual(config.linear_pool_blocks, 31)
+            self.assertEqual(config.swa_pool_blocks, 17)
+            self.assertTrue(config.enablePrefillPreciseReuse())
+            self.assertFalse(config.reuse_cache)
+
+    def test_rules_preserve_sides_and_deduplicate_sequences(self):
+        from rtp_llm.config.kv_cache_config import KVCacheConfig
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "segments.json"
+            path.write_text(
+                json.dumps({"before": [[2, 3], [2, 3], [9]], "after": [[2, 3], [0]]}),
+                encoding="utf-8",
+            )
+            config = KVCacheConfig()
+            config.prefill_segment_rules_file = str(path)
+            config.load_prefill_segment_rules(10)
+            self.assertEqual(config.prefill_segment_before, [[2, 3], [9]])
+            self.assertEqual(config.prefill_segment_after, [[2, 3], [0]])
+            self.assertFalse(config.reuse_cache)
+
+    def test_optional_sides_and_disabled_path(self):
+        from rtp_llm.config.kv_cache_config import KVCacheConfig
+
+        config = KVCacheConfig()
+        config.load_prefill_segment_rules(0)
+        self.assertEqual(config.prefill_segment_before, [])
+        self.assertEqual(config.prefill_segment_after, [])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "segments.json"
+            for side in ("before", "after"):
+                with self.subTest(side=side):
+                    path.write_text(json.dumps({side: [[1]]}), encoding="utf-8")
+                    config = KVCacheConfig()
+                    config.prefill_segment_rules_file = str(path)
+                    config.load_prefill_segment_rules(2)
+                    self.assertEqual(
+                        config.prefill_segment_before, [[1]] if side == "before" else []
+                    )
+                    self.assertEqual(
+                        config.prefill_segment_after, [[1]] if side == "after" else []
+                    )
+
+    def test_invalid_rules_fail_with_file_and_entry(self):
+        from rtp_llm.config.kv_cache_config import KVCacheConfig
+
+        cases = (
+            ("[]", "expected a JSON object"),
+            ('{"offset": []}', "unknown rule keys"),
+            ("{}", "at least one"),
+            ('{"before": [], "after": []}', "at least one"),
+            ('{"before": null}', "before must be an array"),
+            ('{"after": [1]}', r"after\[0\] must be a non-empty"),
+            ('{"before": [[]]}', r"before\[0\] must be a non-empty"),
+            ('{"before": [[true]]}', r"before\[0\]\[0\] must be an integer"),
+            ('{"after": [[1.0]]}', r"after\[0\]\[0\] must be an integer"),
+            ('{"after": [["1"]]}', r"after\[0\]\[0\] must be an integer"),
+            ('{"before": [[-1]]}', r"before\[0\]\[0\] token ID -1 is outside"),
+            ('{"after": [[10]]}', r"after\[0\]\[0\] token ID 10 is outside"),
+            (
+                '{"before": [[2147483648]]}',
+                r"before\[0\]\[0\] token ID 2147483648 is outside",
+            ),
+            ("{invalid", "cannot load"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "segments.json"
+            for raw, message in cases:
+                with self.subTest(raw=raw):
+                    path.write_text(raw, encoding="utf-8")
+                    config = KVCacheConfig()
+                    config.prefill_segment_rules_file = str(path)
+                    with self.assertRaisesRegex(
+                        ValueError, re.escape(str(path)) + ": " + message
+                    ):
+                        config.load_prefill_segment_rules(10)
+                    self.assertEqual(config.prefill_segment_before, [])
+                    self.assertEqual(config.prefill_segment_after, [])
+
+    def test_missing_file_and_invalid_utf8_fail_at_startup(self):
+        from rtp_llm.config.kv_cache_config import KVCacheConfig
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "segments.json"
+            config = KVCacheConfig()
+            config.prefill_segment_rules_file = str(path)
+            with self.assertRaisesRegex(
+                ValueError, re.escape(str(path)) + ": cannot load"
+            ):
+                config.load_prefill_segment_rules(10)
+            path.write_bytes(b"\xff")
+            with self.assertRaisesRegex(
+                ValueError, re.escape(str(path)) + ": cannot load"
+            ):
+                config.load_prefill_segment_rules(10)
+
+    def test_model_startup_uses_initialized_input_vocab_and_fallback(self):
+        from rtp_llm.config.model_config import ModelConfig
+        from rtp_llm.model_loader.load_config import LoadMethod
+        from rtp_llm.models.base_model import BaseModel
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "segments.json"
+            path.write_text('{"after": [[7]]}', encoding="utf-8")
+            for input_vocab, vocab, valid in (
+                (8, 4, True),
+                (4, 8, False),
+                (0, 8, True),
+            ):
+                with self.subTest(input_vocab=input_vocab, vocab=vocab):
+                    config = PyEnvConfigs()
+                    config.kv_cache_config.prefill_segment_rules_file = str(path)
+                    model_config = ModelConfig()
+                    model_config.vocab_size = vocab
+
+                    def initialize_vocab(model):
+                        model.model_config.input_vocab_size = input_vocab
+
+                    expectation = (
+                        contextlib.nullcontext()
+                        if valid
+                        else self.assertRaisesRegex(ValueError, "token ID 7 is outside")
+                    )
+                    with patch.object(
+                        BaseModel,
+                        "load_tokenizer",
+                        autospec=True,
+                        side_effect=initialize_vocab,
+                    ), expectation:
+                        BaseModel(
+                            model_config=model_config,
+                            parallelism_config=config.parallelism_config,
+                            hw_kernel_config=config.py_hw_kernel_config,
+                            kv_cache_config=config.kv_cache_config,
+                            fmha_config=config.fmha_config,
+                            moe_config=config.moe_config,
+                            max_generate_batch_size=1,
+                            load_method=LoadMethod.AUTO,
+                            vit_config=None,
+                            merge_lora=False,
+                        )
+                    self.assertEqual(
+                        config.kv_cache_config.prefill_segment_after,
+                        [[7]] if valid else [],
+                    )
+
+    def test_input_vocabulary_bound_and_missing_vocabulary_fail(self):
+        from rtp_llm.config.kv_cache_config import KVCacheConfig
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "segments.json"
+            path.write_text('{"after": [[7]]}', encoding="utf-8")
+            config = KVCacheConfig()
+            config.prefill_segment_rules_file = str(path)
+            with self.assertRaisesRegex(
+                ValueError, "input vocabulary size must be positive"
+            ):
+                config.load_prefill_segment_rules(0)
+            with self.assertRaisesRegex(ValueError, "token ID 7 is outside"):
+                config.load_prefill_segment_rules(7)
+            config.load_prefill_segment_rules(8)
+            self.assertEqual(config.prefill_segment_after, [[7]])
+            path.write_text('{"after": [[2147483648]]}', encoding="utf-8")
+            wide_config = KVCacheConfig()
+            wide_config.prefill_segment_rules_file = str(path)
+            with self.assertRaisesRegex(ValueError, "token ID 2147483648 is outside"):
+                wide_config.load_prefill_segment_rules(2147483649)
 
 
 if __name__ == "__main__":

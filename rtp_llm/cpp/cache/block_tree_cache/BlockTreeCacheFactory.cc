@@ -370,10 +370,7 @@ std::vector<BlockInfo> resolveStorageBuffers(const CacheConfig&                c
 BlockTreeCacheLayoutPtr planBlockTreeCacheLayout(const CacheConfig&   cache_config,
                                                  const KVCacheConfig& kv_cache_config) {
     auto layout = std::make_shared<BlockTreeCacheLayout>();
-    if (!buildGroupMembers(cache_config,
-                           kv_cache_config.enable_prefill_partial_tail_reuse
-                               || kv_cache_config.enable_prefill_common_prefix_recovery,
-                           layout->group_members)) {
+    if (!buildGroupMembers(cache_config, kv_cache_config.enablePrefillPreciseReuse(), layout->group_members)) {
         return nullptr;
     }
     const bool enable_crc = kv_cache_config.enable_crc && CrcBlockCopyBatch::available()

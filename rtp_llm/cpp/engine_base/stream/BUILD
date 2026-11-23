@@ -50,6 +50,7 @@ cc_library(
     ], exclude = ["CompleteTokenIds.cc"]),
     deps = [
         "//rtp_llm/cpp/cache:prefix_cache_registration",
+        "//rtp_llm/cpp/cache:kv_cache_hash_util",
         "//rtp_llm/cpp/observability:execution_recorder",
         ":generate_types",
         ":generate_config",

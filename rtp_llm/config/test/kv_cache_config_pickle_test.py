@@ -25,8 +25,8 @@ class KVCacheConfigPickleTest(TestCase):
                         config.enable_prefill_partial_tail_reuse = tail_reuse
                         config.enable_prefill_common_prefix_recovery = recovery
                         state = config.__getstate__()
-                        self.assertEqual(len(state), 74)
-                        self.assertEqual(state[:2], ("KVCacheConfig", 11))
+                        self.assertEqual(len(state), 77)
+                        self.assertEqual(state[:2], ("KVCacheConfig", 12))
                         self.assertEqual(
                             state[64:69], tuple(KV_CACHE_EVENT_FIELD_VALUES.values())
                         )
@@ -163,6 +163,63 @@ class KVCacheConfigPickleTest(TestCase):
         self.assertEqual(restored.linear_pool_blocks, 0)
         self.assertEqual(restored.swa_pool_blocks, 0)
         self.assertFalse(restored.enable_crc)
+
+    def test_v9_v10_v11_layouts_restore_without_segment_rules(self):
+        source = KVCacheConfig()
+        source.enable_crc = False
+        source.enable_prefill_partial_tail_reuse = True
+        source.enable_prefill_common_prefix_recovery = True
+        source.reuse_cache_tail_blocks = 13
+        state = source.__getstate__()
+        cases = (
+            (
+                (state[0], 9, *state[2:69], True, True),
+                True,
+                True,
+                True,
+                2147483647,
+                0,
+                0,
+            ),
+            ((state[0], 9, *state[2:70], 31, 17), False, False, False, 13, 31, 17),
+            ((state[0], 10, *state[2:71]), True, False, False, 13, 0, 0),
+            ((state[0], 10, *state[2:71], 31, 17), True, False, False, 13, 31, 17),
+            ((state[0], 11, *state[2:72]), True, True, False, 13, 0, 0),
+            ((state[0], 11, *state[2:72], 31, 17), True, True, False, 13, 31, 17),
+        )
+        for previous, tail, recovery, crc, retention, linear, swa in cases:
+            with self.subTest(version=previous[1], size=len(previous)):
+                restored = KVCacheConfig.__new__(KVCacheConfig)
+                restored.__setstate__(previous)
+                self.assertEqual(restored.enable_prefill_partial_tail_reuse, tail)
+                self.assertEqual(
+                    restored.enable_prefill_common_prefix_recovery, recovery
+                )
+                self.assertEqual(restored.enable_crc, crc)
+                self.assertEqual(restored.reuse_cache_tail_blocks, retention)
+                self.assertEqual(restored.linear_pool_blocks, linear)
+                self.assertEqual(restored.swa_pool_blocks, swa)
+                self.assertEqual(restored.prefill_segment_rules_file, "")
+                self.assertEqual(restored.prefill_segment_before, [])
+                self.assertEqual(restored.prefill_segment_after, [])
+
+    def test_precise_reuse_depends_on_rules_and_independent_old_switches(self):
+        for tail in (False, True):
+            for recovery in (False, True):
+                for before, after in (([], []), ([[3]], []), ([], [[4]])):
+                    with self.subTest(
+                        tail=tail, recovery=recovery, before=before, after=after
+                    ):
+                        config = KVCacheConfig()
+                        config.prefill_segment_rules_file = "/not-yet-parsed.json"
+                        config.enable_prefill_partial_tail_reuse = tail
+                        config.enable_prefill_common_prefix_recovery = recovery
+                        config.prefill_segment_before = before
+                        config.prefill_segment_after = after
+                        self.assertEqual(
+                            config.enablePrefillPreciseReuse(),
+                            tail or recovery or bool(before or after),
+                        )
 
     def test_malformed_event_states_are_rejected(self):
         state = KVCacheConfig().__getstate__()

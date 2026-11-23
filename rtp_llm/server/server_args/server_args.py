@@ -226,6 +226,8 @@ class EnvArgumentParser(argparse.ArgumentParser):
         args: Sequence[Any],
         env_name: Optional[str] = None,
     ) -> None:
+        if env_name == "":
+            return
         effective_env_name = env_name
         if effective_env_name is None:
             for arg_name_or_flag in args:

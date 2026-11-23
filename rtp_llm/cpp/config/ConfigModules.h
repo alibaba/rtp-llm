@@ -166,6 +166,9 @@ struct KVCacheConfig {
     // Prefill DEVICE interior common-prefix recovery point registration.
     // Independent of and combinable with partial tail reuse; default off.
     bool                                    enable_prefill_common_prefix_recovery = false;
+    std::string                             prefill_segment_rules_file;
+    std::vector<std::vector<int>>           prefill_segment_before;
+    std::vector<std::vector<int>>           prefill_segment_after;
     std::string                             multi_task_prompt     = "";
     std::string                             multi_task_prompt_str = "";
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
@@ -256,6 +259,11 @@ struct KVCacheConfig {
     int         kvcm_get_broadcast_timeout           = 15000;
     int         kvcm_put_broadcast_timeout           = 15000;
     std::string kvcm_client_config                   = "";
+    bool        enablePrefillPreciseReuse() const {
+        return enable_prefill_partial_tail_reuse || enable_prefill_common_prefix_recovery
+               || !prefill_segment_before.empty() || !prefill_segment_after.empty();
+    }
+
     void        insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
     std::string to_string() const;
 };

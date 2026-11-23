@@ -342,6 +342,10 @@ bool KVCacheManager::init() {
         kv_cache_config_.enable_prefill_partial_tail_reuse && pd_sep_config_.role_type == RoleType::PREFILL;
     tree_kv_cache_config.enable_prefill_common_prefix_recovery =
         kv_cache_config_.enable_prefill_common_prefix_recovery && pd_sep_config_.role_type == RoleType::PREFILL;
+    if (pd_sep_config_.role_type != RoleType::PREFILL) {
+        tree_kv_cache_config.prefill_segment_before.clear();
+        tree_kv_cache_config.prefill_segment_after.clear();
+    }
     tree_kv_cache_config.enable_prefix_cache_observability =
         autil::EnvUtil::getEnv("RTP_LLM_PREFIX_CACHE_OBSERVABILITY", false)
         && pd_sep_config_.role_type == RoleType::PREFILL && parallelism_config_.tp_rank == 0;
