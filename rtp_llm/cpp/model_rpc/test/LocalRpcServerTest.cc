@@ -60,6 +60,12 @@ public:
         maga_init_params_.model_config_.model_type = model_type;
     }
 
+    ErrorInfo validateEmbeddings(const GenerateInput& input, SpeculativeType type) {
+        maga_init_params_.parallelism_config.tp_size = 1;
+        maga_init_params_.sp_config.type = type;
+        return validateInputRuntimeSupport(input);
+    }
+
     ErrorInfo prepare(const GenerateInputPB& input, std::shared_ptr<GenerateInput>& output) {
         return prepareInput(input, output);
     }
@@ -884,6 +890,26 @@ TEST(LocalRpcServerTest, AllocatorDumpAggregationRejectsMismatchedIds) {
 
     EXPECT_EQ(status.error_code(), grpc::StatusCode::DATA_LOSS);
     EXPECT_EQ(response.results_size(), 0);
+}
+
+TEST(LocalRpcServerTest, ExternalEmbeddingsRejectSpeculativeLayoutsEvenWithRequestBypass) {
+    TestLocalRpcServer server;
+    GenerateInput input;
+    input.input_embeddings = std::vector<torch::Tensor>{torch::ones({2, 4})};
+    input.input_embeddings_locs = std::vector<int32_t>{2};
+    input.generate_config = std::make_shared<GenerateConfig>();
+    EXPECT_TRUE(server.validateEmbeddings(input, SP_TYPE_NONE).ok());
+    for (auto type : {SP_TYPE_VANILLA, SP_TYPE_MTP, SP_TYPE_EAGLE, SP_TYPE_EAGLE3,
+                      SP_TYPE_DETERMINISTIC, SP_TYPE_DSPARK, SP_TYPE_DFLASH}) {
+        for (bool bypass : {false, true}) {
+            input.generate_config->force_disable_sp_run = bypass;
+            const auto result = server.validateEmbeddings(input, type);
+            EXPECT_EQ(result.code(), ErrorCode::INVALID_PARAMS);
+            EXPECT_THAT(result.ToString(), HasSubstr("speculative decoding"));
+        }
+    }
+    input.input_embeddings.reset();
+    EXPECT_TRUE(server.validateEmbeddings(input, SP_TYPE_MTP).ok());
 }
 
 TEST(LocalRpcServerTest, AllowsQwen4MediaPastAdmission) {

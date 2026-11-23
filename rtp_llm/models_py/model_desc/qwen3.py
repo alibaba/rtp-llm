@@ -80,6 +80,7 @@ class Qwen3DecoderLayer(nn.Module):
 
 
 class Qwen3Model(GptModelBase):
+
     def __init__(
         self,
         config: ModelConfig,
@@ -151,7 +152,7 @@ class Qwen3Model(GptModelBase):
         the upstream stage; stage-local warmup supplies the same boundary with zeros.
         """
         if self.embed_tokens is not None:
-            hidden_states = self.embed_tokens(inputs.input_ids)
+            hidden_states = self.get_inputs_embeds(inputs.input_ids, inputs)
         else:
             hidden_states = inputs.pp_intermediates["hidden_states"]
         if fmha_impl is None:

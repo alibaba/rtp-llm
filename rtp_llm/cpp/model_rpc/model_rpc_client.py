@@ -696,6 +696,7 @@ def trans_input(input_py: GenerateInput):
                 input_pb.request_info.trace_context.tracestate = tracestate
 
     trans_multimodal_input(input_py, input_pb, input_py.generate_config)
+    trans_embedding_inputs(input_py, input_pb)
     # Preserve main's regular GenerateConfig validation at the RPC boundary,
     # then assert (without mutating) that the request entrypoint prepared grammar.
     input_py.generate_config.validate()
@@ -1017,6 +1018,27 @@ def _trans_frontend_metric_envelope(outputs_pb: GenerateOutputsPB) -> GenerateOu
     )
 
 
+def trans_embedding_inputs(input_py: GenerateInput, input_pb: GenerateInputPB):
+    if input_py.input_embeddings is None:
+        return
+
+    embedding_inputs = input_py.input_embeddings
+    if len(embedding_inputs.embeddings) != len(embedding_inputs.embedding_locs):
+        raise ValueError(
+            f"input_embeddings count ({len(embedding_inputs.embeddings)}) "
+            f"!= embedding_locs count ({len(embedding_inputs.embedding_locs)})"
+        )
+
+    input_embeddings_pb = input_pb.input_embeddings
+
+    # 转换 embeddings
+    for emb in embedding_inputs.embeddings:
+        trans_from_tensor(emb, input_embeddings_pb.embeddings.add())
+
+    # 转换 embedding_locs
+    input_embeddings_pb.embedding_locs.extend(embedding_inputs.embedding_locs)
+
+
 def trans_output(
     input_py: GenerateInput, outputs_pb: GenerateOutputsPB, stream_state: StreamState
 ) -> GenerateOutputs:
@@ -1205,7 +1227,11 @@ def trans_output(
             output_py.hidden_states = all_hidden_states[i]
 
         if all_all_hidden_states is not None:
-            output_py.all_hidden_states = all_all_hidden_states[i]
+            output_py.all_hidden_states = (
+                all_all_hidden_states
+                if len(all_all_hidden_states.shape) == 2
+                else all_all_hidden_states[i]
+            )
 
         if all_loss is not None:
             loss_slice = all_loss[i]

@@ -240,13 +240,13 @@ public:
         reset_runner();
     }
 
-private:
-    void prepareDeviceMirrors(torch_ext::PyModelInputs& inputs) {
+    static void prepareDeviceMirrors(torch_ext::PyModelInputs& inputs) {
         inputs.attention_inputs.input_lengths_device  = inputs.attention_inputs.input_lengths.cuda();
         inputs.attention_inputs.prefix_lengths_device = inputs.attention_inputs.prefix_lengths.cuda();
         refreshTaggedAttentionInputs(inputs);
     }
 
+private:
     void reset_runner() {
         if (runner_ != nullptr) {
             delete runner_;
@@ -268,6 +268,7 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
     py::class_<CudaGraphTestRunner>(m, "CudaGraphRunner")
         .def(py::init<>())
         .def_static("topologyWidths", &CudaGraphTestRunner::topologyWidths)
+        .def_static("prepare_device_mirrors", &CudaGraphTestRunner::prepareDeviceMirrors)
         .def("init_prefill",
              &CudaGraphTestRunner::init_prefill,
              py::arg("py_instance"),

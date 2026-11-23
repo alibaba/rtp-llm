@@ -311,10 +311,12 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
     generate_results.request_id                = request_id_;
     generate_results.frontend_metrics_terminal = consumerFinishedWithoutLock();
     fillFrontendMetricCounters(generate_results);
+    torch::Tensor all_hidden_states_cpu;
 
     // CompleteTokenIds has already applied this step, so currentBatchSize is the output row count.
     for (int i = 0; i < currentBatchSize(); i++) {
         GenerateOutput generate_output;
+        generate_output.finished = isSubGenerateDoneWithoutLock(i);
         generate_output.output_ids = torch::empty({1, (int64_t)output_len}, torch::kInt32);
 
         // TODO(xinfei.sxf) optimize this copy : only copy last token
@@ -357,9 +359,19 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
                 generate_output.hidden_states = update_info.hidden_states.narrow(0, i, 1).cpu();
             }
         }
-        if (generate_input_->generate_config->return_all_hidden_states && update_info.all_hidden_states.defined()
-            && iter_count_ == 1) {
-            generate_output.all_hidden_states = update_info.all_hidden_states.cpu();
+        if (generate_input_->generate_config->return_all_hidden_states) {
+            const torch::Tensor* all_hidden_states = nullptr;
+            if (update_info.all_hidden_states.defined() && iter_count_ == 1) {
+                all_hidden_states = &update_info.all_hidden_states;
+            } else if (!isStreaming() && generate_output.finished && all_hidden_states_.defined()) {
+                all_hidden_states = &all_hidden_states_;
+            }
+            if (all_hidden_states != nullptr) {
+                if (!all_hidden_states_cpu.defined()) {
+                    all_hidden_states_cpu = all_hidden_states->cpu();
+                }
+                generate_output.all_hidden_states = all_hidden_states_cpu;
+            }
         }
         if (loss_.defined()) {
             RTP_LLM_CHECK_WITH_INFO(loss_index_ == inputLength() - 1,
@@ -381,7 +393,6 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             generate_output.prompt_logits = update_info.prompt_logits;
         }
 
-        generate_output.finished = isSubGenerateDoneWithoutLock(i);
         generate_output.aux_info = prepareAuxInfo(output_len);
         if (generate_input_->generate_config->aux_info) {
             if (calculateSoftmaxProbs() && softmax_probs_.defined()) {
@@ -513,6 +524,10 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     // TODO(wangyin.yx): check behaviour of update_info.hidden_states under mtp/eagle model
     if (needReturnHiddenStates() && update_info.all_hidden_states.defined()) {
         last_hidden_states_ = update_info.all_hidden_states;
+    }
+    if (generate_input_->generate_config->return_all_hidden_states && update_info.all_hidden_states.defined()
+        && !all_hidden_states_.defined()) {
+        all_hidden_states_ = update_info.all_hidden_states;
     }
 
     if (calculateSoftmaxProbs() && update_info.softmax_probs.defined()) {

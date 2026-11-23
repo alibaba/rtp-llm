@@ -17,6 +17,7 @@ cc_library(
         "MMProcessorConfig.h",
     ],
     deps = [
+        "//rtp_llm/cpp/engine_base/stream:input_embeddings_utils",
         "//rtp_llm/cpp/config:role_types",
         "//rtp_llm/cpp/utils:core_utils",
     ],

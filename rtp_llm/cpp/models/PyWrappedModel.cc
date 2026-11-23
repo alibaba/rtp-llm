@@ -901,6 +901,8 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
                                            attention_inputs_,
                                            attention_inputs_by_tag_,
                                            torch_ext::BertEmbeddingInputs()});
+    py_model_inputs.input_embeddings = inputs.input_embeddings;
+    py_model_inputs.input_embeddings_locs = inputs.input_embeddings_locs;
     auto* runner          = selectGraphRunner(attention_inputs_);
     auto& state           = selectGraphState(attention_inputs_);
     if (moe_forward_allows_graph_ && enable_cuda_graph_ && runner != nullptr
@@ -931,11 +933,22 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
                                                attention_inputs_,
                                                attention_inputs_by_tag_,
                                                torch_ext::BertEmbeddingInputs()});
-        auto* runner          = selectGraphRunner(attention_inputs_);
+        py_model_inputs.input_embeddings = inputs.input_embeddings;
+    py_model_inputs.input_embeddings_locs = inputs.input_embeddings_locs;
+    auto* runner          = selectGraphRunner(attention_inputs_);
         auto& state           = selectGraphState(attention_inputs_);
         if (runner != nullptr && runner->canRun(py_model_inputs, state, CudaGraphCheckMode::PREPARE)) {
             runner->updateKVCacheKernelBlockId(py_model_inputs, state);
         }
+    }
+}
+
+void PyWrappedModel::rejectContextParallelInputEmbeddings(const ExecProperties& device_props,
+                                                          const GptModelInputs& inputs) {
+    if (device_props.enable_prefill_cp) {
+        RTP_LLM_CHECK_WITH_INFO(!inputs.input_embeddings.has_value() || inputs.input_embeddings->empty(),
+                                "input_embeddings is not supported with context parallel (enable_prefill_cp). "
+                                "CP rewrites combo_tokens layout, making input_embeddings_locs invalid.");
     }
 }
 
@@ -975,6 +988,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     try {
         RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
 
+        rejectContextParallelInputEmbeddings(device_props_, inputs);
         PyContextParallelParams cp_params;
         if (device_props_.enable_prefill_cp && has_context_request) {
             /** Build rank-local inputs and CP metadata, including configured MTP hidden-state layout. */
@@ -1033,6 +1047,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                               attention_inputs_by_tag_,
                                               bert_embedding_inputs});
 
+        py_model_inputs.input_embeddings = inputs.input_embeddings;
+        py_model_inputs.input_embeddings_locs = inputs.input_embeddings_locs;
         py_model_inputs.capture_hidden_states  = capture_hidden_states;
         py_model_inputs.need_all_logits        = inputs.need_all_logits;
         py_model_inputs.need_all_hidden_states = inputs.need_all_hidden_states;

@@ -300,6 +300,11 @@ message V41RequestInputsPB {
     repeated V41ImageInputPB images = 4;
 }
 
+message InputEmbeddingsPB {
+    repeated TensorPB embeddings = 1;   // 和embedding_locs一一对应
+    repeated int32 embedding_locs = 2;  // embedding的在token ids中的起始位置
+}
+
 message GenerateInputPB {
     int64 request_id = 1;
     repeated int32 token_ids = 2;
@@ -317,6 +322,7 @@ message GenerateInputPB {
     // token_ids are already expanded when this field is present.
     MultimodalTokenLayoutPB multimodal_token_layout = 11;
     V41RequestInputsPB v41_inputs = 12;
+    InputEmbeddingsPB input_embeddings = 13;
 }
 
 message AuxInfoPB {

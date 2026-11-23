@@ -54,7 +54,7 @@ py_test(
     main = "cuda_graph_copy_kernel_test.py",
     srcs = ["cuda_graph_copy_kernel_test.py"],
     data = ["//:th_transformer"],
-    deps = ["//rtp_llm/test/model_test/test_util"],
+    deps = ["//rtp_llm/test/model_test/test_util:test_util"],
     env = {
         "NOT_USE_DEFAULT_STREAM": "1",
         "TEST_USING_DEVICE": "ROCM",
@@ -131,7 +131,7 @@ py_library(
     srcs = ["cuda_graph_test_utils.py"],
     deps = [
         "//rtp_llm/models_py:utils",
-        "//rtp_llm/test/model_test/test_util",
+        "//rtp_llm/test/model_test/test_util:test_util",
     ],
     visibility = ["//visibility:public"],
 )
@@ -147,7 +147,7 @@ py_test(
     ],
     deps = [
         ":cuda_graph_test_utils",
-        "//rtp_llm/test/model_test/test_util",
+        "//rtp_llm/test/model_test/test_util:test_util",
     ],
     env = {
         "LOAD_METHOD": "scratch",
@@ -171,7 +171,7 @@ py_test(
     ],
     deps = [
         ":cuda_graph_test_utils",
-        "//rtp_llm/test/model_test/test_util",
+        "//rtp_llm/test/model_test/test_util:test_util",
     ],
     env = {
         "LOAD_METHOD": "scratch",
@@ -202,7 +202,7 @@ py_test(
     deps = [
         ":cuda_graph_test_utils",
         "//rtp_llm/models_py:modules",
-        "//rtp_llm/test/model_test/test_util",
+        "//rtp_llm/test/model_test/test_util:test_util",
     ],
     env = {
         "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
@@ -224,7 +224,7 @@ py_test(
     deps = [
         ":cuda_graph_test_utils",
         "//rtp_llm/models_py:modules",
-        "//rtp_llm/test/model_test/test_util",
+        "//rtp_llm/test/model_test/test_util:test_util",
     ],
     env = {
         "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
@@ -247,7 +247,7 @@ py_test(
     deps = [
         ":cuda_graph_test_utils",
         "//rtp_llm/models_py:modules",
-        "//rtp_llm/test/model_test/test_util",
+        "//rtp_llm/test/model_test/test_util:test_util",
     ],
     env = {
         "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
@@ -271,7 +271,7 @@ py_test(
     deps = [
         ":cuda_graph_test_utils",
         "//rtp_llm/models_py:modules",
-        "//rtp_llm/test/model_test/test_util",
+        "//rtp_llm/test/model_test/test_util:test_util",
     ],
     env = {
         "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
@@ -292,7 +292,7 @@ py_test(
         "//:th_transformer",
     ],
     deps = [
-        "//rtp_llm/test/model_test/test_util",
+        "//rtp_llm/test/model_test/test_util:test_util",
     ],
     env = {
         "NOT_USE_DEFAULT_STREAM": "1",
@@ -313,7 +313,7 @@ py_test(
         "//:th_transformer",
     ],
     deps = [
-        "//rtp_llm/test/model_test/test_util",
+        "//rtp_llm/test/model_test/test_util:test_util",
     ],
     env = {
         "TEST_USING_DEVICE": "CUDA",
@@ -330,4 +330,19 @@ py_test(
     env = {"TEST_USING_DEVICE": "CUDA", "LOAD_METHOD": "scratch"},
     tags = ["RTX_5000_PRO_CU13"],
     exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
+)
+
+py_test(
+    name = "input_embedding_graph_integration_test",
+    srcs = ["input_embedding_graph_integration_test.py"],
+    data = [":test_cuda_graph_runner", "//:th_transformer"],
+    deps = [":cuda_graph_test_utils", "//rtp_llm/test/model_test/test_util:test_util"],
+    env = {
+        "LOAD_METHOD": "scratch",
+        "NOT_USE_DEFAULT_STREAM": "1",
+        "TEST_USING_DEVICE": "CUDA",
+        "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
+    },
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+    tags = ["RTX_5000_PRO_CU13"],
 )

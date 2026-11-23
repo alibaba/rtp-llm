@@ -1733,7 +1733,8 @@ class Qwen3NextModel(GptModelBase):
 
     def word_embedding(self, inputs: PyModelInputs) -> torch.Tensor:
         input_ids: torch.Tensor = inputs.input_ids
-        return self.embed_tokens(input_ids)
+        inputs_embeds = self.get_inputs_embeds(input_ids, inputs)
+        return inputs_embeds
 
     def _build_attn_meta(
         self,
@@ -1973,6 +1974,7 @@ class Qwen35Model(Qwen3NextModel):
         inputs_embeds = self.embed_tokens(
             input_ids, position_ids, token_type_ids, text_tokens_mask
         )
+        inputs_embeds = self.apply_input_embeddings(inputs_embeds, inputs)
         hidden_states = self.multimodal_embedding_injector(
             inputs_embeds, mm_features, mm_feature_locs
         )
