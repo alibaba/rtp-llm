@@ -108,6 +108,24 @@ class KvCacheManagerTest {
     }
 
     @Test
+    void retiresOnlyTheSelectedLogicalWorkersCacheKeys() {
+        KvCacheManager manager = kvCacheManagerWithRealIndexes();
+        var retiring = workerStatus(0, 2);
+        var remaining = workerStatus(1, 2);
+        List<String> candidates =
+                List.of(retiring.getLogicalIpPort(), remaining.getLogicalIpPort());
+        manager.updateEngineCache(retiring, "PREFILL", Set.of(11L, -22L));
+        manager.updateEngineCache(remaining, "PREFILL", Set.of(11L, 33L));
+
+        manager.removeEngineCache(retiring.getLogicalIpPort());
+
+        assertEquals(
+                Map.of(remaining.getLogicalIpPort(), 2),
+                manager.findMatchingEngines(List.of(11L, 33L), candidates));
+        assertTrue(manager.findMatchingEngines(List.of(-22L), candidates).isEmpty());
+    }
+
+    @Test
     void reportsRtpSingleEngineCacheMetricsWithPhysicalAddress() {
         WorkerStatus status = workerStatus(0, 1);
         when(engineLocalView.calculateDiff("10.0.0.1:8080@0", Set.of()))
@@ -121,11 +139,13 @@ class KvCacheManagerTest {
     @Test
     void removesStaleCacheWhenActiveWorkerIsReplacedAtTheSameCount() {
         when(engineLocalView.getAllEngineIpPorts()).thenReturn(Set.of("10.0.0.1:8080"));
+        when(engineLocalView.removeAllCacheBlockOfEngine("10.0.0.1:8080"))
+                .thenReturn(Set.of(11L, -22L));
 
         kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.2:8080"));
 
         verify(engineLocalView).removeAllCacheBlockOfEngine("10.0.0.1:8080");
-        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080");
+        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080", Set.of(11L, -22L));
         verify(engineLocalView, never()).removeAllCacheBlockOfEngine("10.0.0.2:8080");
     }
 
@@ -139,7 +159,7 @@ class KvCacheManagerTest {
         kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.1:8080"));
 
         verify(engineLocalView, never()).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
-        verify(globalCacheIndex, never()).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
+        verifyNoInteractions(globalCacheIndex);
     }
 
     @Test
@@ -152,7 +172,7 @@ class KvCacheManagerTest {
         kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.2:8080"));
 
         verify(engineLocalView).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
-        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
+        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080@0", Set.of());
     }
 
     @Test
@@ -167,7 +187,7 @@ class KvCacheManagerTest {
         kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.1:8080"));
 
         verify(engineLocalView, times(2)).removeAllCacheBlockOfEngine(logicalIpPort);
-        verify(globalCacheIndex, times(2)).removeAllCacheBlockOfEngine(logicalIpPort);
+        verify(globalCacheIndex, times(2)).removeAllCacheBlockOfEngine(logicalIpPort, Set.of());
     }
 
     @Test
@@ -185,8 +205,7 @@ class KvCacheManagerTest {
 
         verify(engineLocalView, never()).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
         verify(engineLocalView, never()).removeAllCacheBlockOfEngine("10.0.0.1:8080@1");
-        verify(globalCacheIndex, never()).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
-        verify(globalCacheIndex, never()).removeAllCacheBlockOfEngine("10.0.0.1:8080@1");
+        verifyNoInteractions(globalCacheIndex);
     }
 
     @Test
@@ -204,8 +223,8 @@ class KvCacheManagerTest {
 
         verify(engineLocalView).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
         verify(engineLocalView).removeAllCacheBlockOfEngine("10.0.0.1:8080@1");
-        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
-        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080@1");
+        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080@0", Set.of());
+        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080@1", Set.of());
     }
 
     @Test
@@ -215,7 +234,7 @@ class KvCacheManagerTest {
         kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.1:8080"));
 
         verify(engineLocalView).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
-        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
+        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080@0", Set.of());
     }
 
     @Test
