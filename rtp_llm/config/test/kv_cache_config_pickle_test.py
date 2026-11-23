@@ -430,17 +430,20 @@ class KVCacheConfigPickleTest(TestCase):
                 for _ in range(2):
                     config = pickle.loads(pickle.dumps(config))
                     self.assertEqual(getattr(config, name), timeout)
-                    # v25 keeps frozen timeout at index 78; the v24/v25 tail
-                    # flags follow it.
+                    # Appended pickle fields must keep the existing indices.
                     self.assertEqual(config.__getstate__()[78], timeout)
                     self.assertIn(f"{name}: {timeout}\n", config.to_string())
-        for timeout in (-1, 2**31):
-            with self.subTest(timeout=timeout), self.assertRaisesRegex(
-                RuntimeError, "invalid KVCacheConfig frozen recovery timing"
-            ):
-                state = KVCacheConfig().__getstate__()
-                restored = KVCacheConfig.__new__(KVCacheConfig)
-                restored.__setstate__((*state[:78], timeout, state[79], state[80]))
+        current_state = KVCacheConfig().__getstate__()
+        legacy_state = (current_state[0], 25, *current_state[2:81])
+        for state in (legacy_state, current_state):
+            for timeout in (-1, 2**31):
+                with self.subTest(
+                    version=state[1], timeout=timeout
+                ), self.assertRaisesRegex(
+                    RuntimeError, "invalid KVCacheConfig frozen recovery timing"
+                ):
+                    restored = KVCacheConfig.__new__(KVCacheConfig)
+                    restored.__setstate__((*state[:78], timeout, *state[79:]))
 
     def test_previous_versions_use_default_frozen_force_release_timeout(self):
         source = KVCacheConfig()
