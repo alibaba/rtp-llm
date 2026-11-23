@@ -4,12 +4,15 @@ import lombok.Getter;
 import lombok.Setter;
 
 /**
- * Scheduler mode and QUEUE-owned settings.
+ * Scheduler mode, diagnostics and QUEUE-owned settings.
  */
 @Getter
 @Setter
 public final class SchedulerConfig {
     private Type type = Type.QUEUE;
+
+    /** Allocator sampling configuration for both scheduler modes. */
+    private NettyMemoryReporterConfig nettyMemoryReporter = new NettyMemoryReporterConfig();
 
     /** Maximum time a request may remain owned by the QUEUE scheduler. */
     private long queueTimeoutMs = 3_600_000L;
