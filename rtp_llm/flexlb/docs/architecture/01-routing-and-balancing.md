@@ -164,6 +164,11 @@ prefixLength`），不影响选谁。
 `blockCacheKeys`、Local Standby keys 等）；输出 `response`；per-role 记录
 `cacheMatchSelectionByRole`（角色→选中 ip + 命中 token 数，`recordCacheMatch()` 同时累计
 查询耗时/次数与 `cacheMatchSource`）和 `shortestTtftDecisionByRole`（debug 决策快照）。
+NON_BATCH 先按现有 TTFT 和缓存亲和性规则选 Prefill。暂时缺少 Prefill KV 时，请求可进入
+选中 worker 的队列，在实际交付前重新检查 KV 和执行额度。若观测到现有队首阻塞导致
+本次无法入队，等待键绑定到选中的 Prefill；DIRECT 在选中 worker 执行额度耗尽时报告
+容量不足。
+
 队列字段见 [02-queue-scheduling](02-queue-scheduling.md)。
 
 ## 并发要点

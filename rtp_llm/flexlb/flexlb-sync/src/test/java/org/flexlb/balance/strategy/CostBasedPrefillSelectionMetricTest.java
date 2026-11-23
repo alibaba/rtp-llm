@@ -4,6 +4,7 @@ import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
@@ -41,6 +42,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
@@ -210,7 +212,7 @@ class CostBasedPrefillSelectionMetricTest {
                 SchedulingMetadata.explicit(
                         incomingPriority, System.currentTimeMillis() + 120_000L));
 
-        PlacementResult<SelectedRole, RoleType> result =
+        PlacementResult<SelectedRole, PlacementKey> result =
                 strategy.select(context, RoleType.PREFILL, null);
 
         try (SelectedRole selected = result.value()) {
@@ -305,6 +307,53 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @Test
+    void directAdmissionReportsTheSelectedCacheWorkerWhenFull() {
+        registry.close();
+        config.setScheduler(org.flexlb.config.SchedulerConfig.direct());
+        config.getDispatcher().setMaxInflightPerPrefillWorker(1);
+        ConfigService service = mock(ConfigService.class);
+        when(service.loadBalanceConfig()).thenReturn(config);
+        registry = StrategyTestSupport.endpointRegistry(service);
+        strategy = new CostBasedPrefillStrategy(new WorkerDirectory(registry), cache, reporter);
+        publish("10.0.0.1", 8080);
+        configureAffinity(1_000L, 30.0);
+        String hotAddress = "10.0.0.2:8080@0";
+        PrefillEndpoint hot = (PrefillEndpoint) registry.get(RoleType.PREFILL, hotAddress);
+
+        BalanceContext occupiedContext = new BalanceContext(config);
+        Request occupied = new Request();
+        occupied.setRequestId("10002");
+        occupied.setSeqLen(100);
+        occupiedContext.setRequest(occupied);
+        occupiedContext.setSchedulingMetadata(
+                SchedulingMetadata.explicit(50, System.currentTimeMillis() + 60_000L));
+        ScheduledRequest incumbent =
+                new ScheduledRequest(
+                        occupiedContext,
+                        new CompletableFuture<>(),
+                        null,
+                        null,
+                        null,
+                        hot,
+                        null,
+                        null,
+                        System.currentTimeMillis());
+        try (var pin = hot.tryPinGeneration();
+                var reservation = hot.reserveUnqueuedRoute(pin, incumbent, 1L).reservation()) {
+            assertNotNull(reservation);
+            var result = strategy.select(context, RoleType.PREFILL, null);
+            try (var unexpectedSelection = result.value()) {
+                assertEquals(PlacementResult.Status.BLOCKED, result.status());
+                assertEquals(
+                        PlacementKey.exact(RoleType.PREFILL, null, hotAddress), result.blocker());
+            }
+        }
+        try (var selected = select()) {
+            assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
+        }
+    }
+
+    @Test
     void exactCostTiesRotateWithoutShrinkingTheCandidateFleet() {
         publish("10.0.0.2", 8080);
         publish("10.0.0.3", 8080);
@@ -329,6 +378,19 @@ class CostBasedPrefillSelectionMetricTest {
         try (SelectedRole selected = select()) {
             assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
             verify(reporter).reportCacheAffinityDecision(RoleType.PREFILL, "10.0.0.1:8080", reason);
+        }
+    }
+
+    @Test
+    void nonBatchEqualTtftFavorsHigherCacheHit() {
+        configureFocusedAffinity();
+        PrefillCandidateSet candidates = candidates(new long[] {100L, 100L}, new long[] {0L, 500L});
+
+        for (int attempt = 0; attempt < 3; attempt++) {
+            assertEquals(
+                    1,
+                    strategy.selectBestCandidate(
+                            candidates, 100L, RoleType.PREFILL, null, 1_000L, config));
         }
     }
 
@@ -418,7 +480,7 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     private SelectedRole select() {
-        PlacementResult<SelectedRole, RoleType> result =
+        PlacementResult<SelectedRole, PlacementKey> result =
                 strategy.select(context, RoleType.PREFILL, null);
         assertEquals(PlacementResult.Status.SUCCESS, result.status());
         return result.value();
