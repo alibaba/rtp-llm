@@ -101,6 +101,25 @@ class ConfigServiceTest {
     }
 
     @Test
+    void grpcServerKeepaliveDefaultsAndOverridesAreValidated() {
+        var defaults = ConfigTestFixtures.parse("{}").getGrpcServer();
+        assertEquals(10_000L, defaults.getPermitKeepAliveTimeMs());
+        assertTrue(defaults.isPermitKeepAliveWithoutCalls());
+
+        var configured =
+                ConfigTestFixtures.parse(
+                                """
+                {"grpcServer":{"permitKeepAliveTimeMs":30000,"permitKeepAliveWithoutCalls":false}}
+                """)
+                        .getGrpcServer();
+        assertEquals(30_000L, configured.getPermitKeepAliveTimeMs());
+        assertFalse(configured.isPermitKeepAliveWithoutCalls());
+        assertThrows(
+                ConfigValidationException.class,
+                () -> ConfigTestFixtures.parse("{\"grpcServer\":{\"permitKeepAliveTimeMs\":-1}}"));
+    }
+
+    @Test
     void requires_explicit_request_timeout_and_defaults_decision_lifetime() {
         assertThrows(ConfigValidationException.class, () -> new ConfigService((String) null));
         assertThrows(ConfigValidationException.class, () -> new ConfigService("   "));
