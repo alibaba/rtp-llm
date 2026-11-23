@@ -45,7 +45,12 @@ public class VitCacheDirectory {
     record Snapshot(WorkerStatus worker, String instance, Set<String> keys,
                     Set<String> gpuEmbeddingKeys, Set<String> cpuEmbeddingKeys, long time) {}
     public record Candidate(WorkerStatus worker, String instance, Set<String> hashKeys,
-                            int hashHits, int embeddingHits, int gpuHits) {}
+                            Set<String> gpuEmbeddingKeys, Set<String> cpuEmbeddingKeys,
+                            int hashHits, int embeddingHits, int gpuHits) {
+        boolean hasCachedImage(String key) {
+            return hashKeys.contains(key) || gpuEmbeddingKeys.contains(key) || cpuEmbeddingKeys.contains(key);
+        }
+    }
 
     public VitCacheDirectory(WorkerDirectory workers, EngineGrpcClient grpc,
                              LBStatusConsistencyService consistency) {
@@ -200,7 +205,9 @@ public class VitCacheDirectory {
             }
             matches.put(worker.getIpPort(), new Candidate(worker,
                     snapshot == null ? null : snapshot.instance(),
-                    snapshot == null ? Set.of() : snapshot.keys(), hashHits, gpuHits + cpuHits, gpuHits));
+                    snapshot == null ? Set.of() : snapshot.keys(),
+                    snapshot == null ? Set.of() : snapshot.gpuEmbeddingKeys(),
+                    snapshot == null ? Set.of() : snapshot.cpuEmbeddingKeys(), hashHits, gpuHits + cpuHits, gpuHits));
         }
         return Map.copyOf(matches);
     }

@@ -480,11 +480,14 @@ class DefaultRouterTest {
         var selector = mock(org.flexlb.service.VitCacheSelector.class);
         org.springframework.test.util.ReflectionTestUtils.setField(router, "vitCacheSelector", selector);
         BalanceContext context = context(302L);
+        context.getRequest().setVitRouteOnly(true);
+        context.getRequest().setCacheAffinityKeys(List.of("a", "a", "b"));
         SelectionFixture vit = selection(RoleType.VIT, 302L, "v", 8002, "g");
         when(selector.select(context, null)).thenReturn(vit.status);
         var response = router.routeVit(context);
         assertTrue(response.isSuccess());
         assertEquals(List.of(vit.status), response.getServerStatus());
+        verify(selector).recordVitOnlyInputs(List.of("a", "a", "b"));
         verify(selector).select(context, null);
         verifyNoInteractions(vitSelector);
     }

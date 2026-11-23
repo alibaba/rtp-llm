@@ -430,6 +430,12 @@ Above the limit, the least-loaded worker wins, with cache affinity breaking
 load ties. The default limit is 32 inflight inputs. Zero permits affinity on
 load ties only.
 
+On ViT-only routes, `flexlb_app_vit_cache_affinity_images_total{kind="total"}`
+counts every input key occurrence, including when cache affinity is disabled or no worker
+is available. With affinity enabled, `kind="hit"` counts each image whose key appears
+in the selected worker's hash or embedding directory, or has a live pending placement
+on that worker from an earlier route. Each input counts at most once toward hits.
+
 Decode freezes each route attempt's request identity, priority, complete prompt-plus-output
 demand, capacity limits and admission mode before selecting workers. DIRECT requires
 immediately available dispatch capacity. QUEUE without reclamation can retain a physically

@@ -19,6 +19,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.telemetry.FlexlbTrace;
 import org.junit.jupiter.api.AfterEach;
@@ -85,7 +86,7 @@ class VitCacheSelectorTraceTest {
         when(workers.vitRoutingSnapshot()).thenReturn(routing);
         when(workers.captureEndpoint(eq(RoleType.VIT), any())).thenAnswer(call -> new WorkerEndpoint(worker).tryPinGeneration());
         directory = mock(VitCacheDirectory.class);
-        selector = new VitCacheSelector(directory, workers);
+        selector = new VitCacheSelector(directory, workers, NoOpFlexMonitor.getInstance());
     }
 
     @AfterEach
@@ -226,8 +227,8 @@ class VitCacheSelectorTraceTest {
         doReturn(new WorkerStatus.VitLoad(41, now)).when(worker).vitLoad();
         WorkerStatus idle = spy(WorkerStatus.createDiscovered(RoleType.VIT, "group", "10.0.0.2", 8000, 8001, ""));
         doReturn(new WorkerStatus.VitLoad(0, now)).when(idle).vitLoad();
-        var warm = new VitCacheDirectory.Candidate(worker, "instance-a", Set.of("private-key"), 1, 0, 0);
-        var cold = new VitCacheDirectory.Candidate(idle, "instance-b", Set.of(), 0, 0, 0);
+        var warm = new VitCacheDirectory.Candidate(worker, "instance-a", Set.of("private-key"), Set.of(), Set.of(), 1, 0, 0);
+        var cold = new VitCacheDirectory.Candidate(idle, "instance-b", Set.of(), Set.of(), Set.of(), 0, 0, 0);
         var candidates = Map.of(worker.getIpPort(), warm, idle.getIpPort(), cold);
         when(directory.candidates(isNull(), anyList())).thenReturn(candidates);
         when(workers.captureEndpoint(eq(RoleType.VIT), any())).thenAnswer(call -> {

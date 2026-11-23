@@ -6,11 +6,15 @@ import io.opentelemetry.api.trace.Span;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.RoutingConfig;
+import org.flexlb.constant.MetricConstant;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.FlexMetricType;
+import org.flexlb.metric.FlexMetricTags;
+import org.flexlb.metric.FlexMonitor;
 import org.flexlb.service.VitCacheDirectory.Candidate;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.telemetry.FlexlbTrace;
@@ -41,6 +45,9 @@ public class VitCacheSelector {
     private static final long MIN_PENDING_TTL_MS = 120_000;
     private static final long MAX_PENDING_TTL_MS = 600_000;
     private static final int MAX_PENDING = 100_000;
+    private static final FlexMetricTags TOTAL_IMAGES = FlexMetricTags.of("kind", "total");
+    private static final FlexMetricTags HIT_IMAGES = FlexMetricTags.of("kind", "hit");
+    private final FlexMonitor monitor;
     private final VitCacheDirectory directory;
     private final WorkerDirectory workers;
     private final Cache<String, Placement> pending = Caffeine.newBuilder()
@@ -87,13 +94,15 @@ public class VitCacheSelector {
         }
     }
 
-    public VitCacheSelector(VitCacheDirectory directory, WorkerDirectory workers) {
+    public VitCacheSelector(VitCacheDirectory directory, WorkerDirectory workers, FlexMonitor monitor) {
+        this.monitor = monitor;
         this.directory = directory;
         this.workers = workers;
     }
 
     @PostConstruct
     public void start() {
+        monitor.register(MetricConstant.VIT_CACHE_AFFINITY_IMAGES, FlexMetricType.COUNTER);
         maintenance.scheduleWithFixedDelay(() -> {
             try {
                 prunePending();
@@ -117,6 +126,13 @@ public class VitCacheSelector {
         pending.asMap().entrySet().removeIf(entry ->
                 !entry.getValue().matches(candidates.get(entry.getValue().worker().getIpPort()), now));
         pending.cleanUp();
+    }
+
+    public void recordVitOnlyInputs(List<String> keys) {
+        if (keys != null && !keys.isEmpty()) {
+            monitor.report(MetricConstant.VIT_CACHE_AFFINITY_IMAGES, TOTAL_IMAGES, keys.size());
+            monitor.prepare(MetricConstant.VIT_CACHE_AFFINITY_IMAGES, HIT_IMAGES);
+        }
     }
 
     public ServerStatus select(BalanceContext ctx, String group) {
@@ -215,8 +231,7 @@ public class VitCacheSelector {
             }
             int pendingHits = 0;
             for (String key : keys) {
-                Placement placement = pending.getIfPresent(key);
-                if (placement != null && placement.matches(candidate, now)) {
+                if (hasPendingPlacement(key, candidate, now)) {
                     pendingHits++;
                 }
             }
@@ -247,10 +262,27 @@ public class VitCacheSelector {
         if (result == null || !result.isSuccess()) {
             return result;
         }
+        if (mediaCount > 0) {
+            // Count each original input against the winner before publishing this placement.
+            int hits = 0;
+            for (String key : ctx.getRequest().getCacheAffinityKeys()) {
+                if (selected.hasCachedImage(key) || hasPendingPlacement(key, selected, now)) {
+                    hits++;
+                }
+            }
+            if (hits > 0) {
+                monitor.report(MetricConstant.VIT_CACHE_AFFINITY_IMAGES, HIT_IMAGES, hits);
+            }
+        }
         rememberPlacement(selected.worker(), selected.instance(), selected.hashKeys(), keys,
                 ctx.getRequest().getGenerateTimeout());
         recordLoad(span, selectedLoad.sample(), nowNanos, config);
         return result;
+    }
+
+    private boolean hasPendingPlacement(String key, Candidate candidate, long now) {
+        Placement placement = pending.getIfPresent(key);
+        return placement != null && placement.matches(candidate, now);
     }
 
     private void rememberPlacement(WorkerStatus worker, String instance, Set<String> confirmedHashKeys,

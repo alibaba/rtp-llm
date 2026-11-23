@@ -79,6 +79,9 @@ public class DefaultRouter {
     public Response routeVit(BalanceContext context) {
         Response invalid = validateRequest(context);
         if (invalid != null) { return invalid; }
+        if (vitCacheSelector != null) {
+            vitCacheSelector.recordVitOnlyInputs(context.getRequest().getCacheAffinityKeys());
+        }
         if (!requiredRoles.contains(RoleType.VIT) || vitCacheSelector == null) {
             return Response.error(StrategyErrorType.NO_VIT_WORKER);
         }

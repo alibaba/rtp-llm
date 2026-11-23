@@ -10,6 +10,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry.VitRoutingEntry;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.constant.MetricConstant;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
@@ -22,6 +23,8 @@ import org.flexlb.engine.grpc.MultimodalRpcServiceGrpc;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
+import org.flexlb.metric.FlexMetricTags;
+import org.flexlb.metric.FlexMonitor;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -60,6 +63,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
 class VitCacheDirectoryTest {
+    private final FlexMonitor monitor = mock(FlexMonitor.class);
     private VitCacheDirectory directory;
     private VitCacheSelector selector;
     private final Map<String, WorkerStatus> live = new HashMap<>();
@@ -88,7 +92,7 @@ class VitCacheDirectoryTest {
         grpc = mock(EngineGrpcClient.class);
         consistency = mock(LBStatusConsistencyService.class);
         directory = new VitCacheDirectory(workers, grpc, consistency);
-        selector = new VitCacheSelector(directory, workers);
+        selector = new VitCacheSelector(directory, workers, monitor);
     }
 
     @AfterEach
@@ -132,7 +136,7 @@ class VitCacheDirectoryTest {
     @Test
     void leastLoadInspectsCacheAndPinsOnlyTheWinner() {
         var cacheDirectory = mock(VitCacheDirectory.class);
-        var fastSelector = new VitCacheSelector(cacheDirectory, workers);
+        var fastSelector = new VitCacheSelector(cacheDirectory, workers, monitor);
         try {
             var ctx = firstVitRoute(false, "image");
             load(a, 100L);
@@ -299,6 +303,36 @@ class VitCacheDirectoryTest {
         ctx.getConfig().getRouter().getRoles().getVit().setCacheAffinityEnabled(affinity);
         ctx.getRequest().setVitRouteOnly(true);
         return ctx;
+    }
+
+    @Test
+    void theoreticalHitsCountEachInputAtMostOnceBeforeRecordingPending() {
+        tierSnapshot(a, List.of("both"), List.of("both", "gpu"), List.of("cpu"));
+        var request = firstVitRoute(true, "both", "both", "gpu", "cpu", "cold", "cold");
+        selector.recordVitOnlyInputs(request.getRequest().getCacheAffinityKeys());
+        assertEquals(a.getIp(), selector.select(request, "one").getServerIp());
+        var hits = FlexMetricTags.of("kind", "hit");
+        verify(monitor).report(MetricConstant.VIT_CACHE_AFFINITY_IMAGES, FlexMetricTags.of("kind", "total"), 6);
+        verify(monitor).prepare(MetricConstant.VIT_CACHE_AFFINITY_IMAGES, hits);
+        verify(monitor).report(MetricConstant.VIT_CACHE_AFFINITY_IMAGES, hits, 4);
+        assertEquals(a.getIp(), selector.select(request, "one").getServerIp());
+        verify(monitor).report(MetricConstant.VIT_CACHE_AFFINITY_IMAGES, hits, 6);
+        verifyNoMoreInteractions(monitor);
+    }
+
+    @Test
+    void onlyTheFinalAffinityEnabledVitOnlySelectionContributesHits() {
+        snapshot(a, "a1", "hot");
+        load(a, 100L);
+        load(b, 0L);
+        var routed = selector.select(firstVitRoute(true, "hot"), null);
+        assertEquals(b.getIp(), routed.getServerIp());
+        assertEquals(a.getIp(), selector.select(firstVitRoute(false, "hot"), "one").getServerIp());
+        var fullRoute = context("hot");
+        assertEquals(a.getIp(), selector.select(fullRoute, "one").getServerIp());
+        fullRoute.getRequest().setSelectedVit(routed);
+        assertTrue(selector.validate(fullRoute, "two").isSuccess());
+        verifyNoInteractions(monitor);
     }
 
     @Test
