@@ -6,7 +6,10 @@ import triton.language as tl
 from torch import nn
 from triton.language.extra.cuda import libdevice
 
-from rtp_llm.models_py.utils.device_capability import sm90_pdl_enabled
+from rtp_llm.models_py.utils.device_capability import (
+    cached_device_capability,
+    sm90_pdl_enabled,
+)
 
 
 @triton.jit
@@ -89,7 +92,7 @@ def is_supported(logits, ids, weights):
         and weights.is_contiguous()
     ):
         return False
-    capability = torch.cuda.get_device_capability(logits.device)
+    capability = cached_device_capability(logits.device)
     if logits.shape[0] <= 8192:
         return capability[0] >= 8
     return capability == (9, 0)

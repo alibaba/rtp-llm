@@ -53,9 +53,19 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import (
     has_nonzero_prefill_prefix,
     host_input_mirror,
 )
+from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
+    all_reduce,
+)
+from rtp_llm.models_py.distributed.flashinfer_all_reduce import (
+    get_flashinfer_allreduce,
+)
 from rtp_llm.models_py.modules import FMHAImplBase
+from rtp_llm.models_py.modules.base.common import fp8_linear as _fp8_linear_mod
+from rtp_llm.models_py.modules.base.common.fp8_embedding import Fp8VocabEmbedding
 from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
     ZeroCenteredFusedQKRMSNorm,
+    exact_head_rms_norm,
 )
 from rtp_llm.models_py.modules.hybrid.causal_attention import CausalAttention
 from rtp_llm.models_py.modules.hybrid.gated_residual import (
@@ -75,6 +85,12 @@ from rtp_llm.models_py.modules.qwen4_exp.ple.ple import (
     Qwen4ExpPLELayer,
 )
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import Qwen4ExpQSAIndexer
+from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import SparseGqaFmhaImpl
+from rtp_llm.models_py.modules.qwen4_exp.tp2_ar_hc_fused import (
+    _DeferSlot,
+    _attn_tp2_defer_slot,
+    _moe_tp2_defer_slot,
+)
 from rtp_llm.models_py.modules.qwen4_exp.weight_views import (
     PreparedWeightDict,
     Qwen4LinearFactory,
@@ -84,6 +100,14 @@ from rtp_llm.models_py.modules.qwen4_exp.weight_views import (
     record_projection_consumer,
     summarize_compute_inventory,
 )
+from rtp_llm.models_py.utils.device_capability import cached_device_capability
+
+try:
+    from rtp_llm.models_py.modules.qwen4_exp.qsa import (
+        prefill_packed_indexer as _qsa_packed_prefill_mod,
+    )
+except ImportError:
+    _qsa_packed_prefill_mod = None
 from rtp_llm.ops import (
     AttentionConfigs,
     HWKernelConfig,
@@ -207,8 +231,9 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             and type(self.qsa_indexer) is Qwen4ExpQSAIndexer
             and (self.qsa_indexer.n_heads, self.qsa_indexer.head_dim) == (4, 128)
             and hidden_states.ndim == 2
-            and hidden_states.shape[1] == 2560
-            and hidden_states.shape[0] in range(4, 513, 4)
+            and hidden_states.shape[1] == getattr(self, "hidden_size", 2560)
+            and 4 <= hidden_states.shape[0] <= 512
+            and hidden_states.shape[0] % 4 == 0
             and not hidden_states.requires_grad
             and not any(
                 name in self.qsa_indexer.__dict__
@@ -221,8 +246,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             and hidden_states.is_cuda
             and torch.version.hip is None
             and hidden_states.dtype == torch.bfloat16
-            and torch.cuda.get_device_capability(hidden_states.device)
-            in ((9, 0), (12, 0))
+            and cached_device_capability(hidden_states.device) in ((9, 0), (12, 0))
         )
 
         def _prefix_present(inputs) -> bool:
@@ -283,7 +307,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             and hidden_states.is_cuda
             and hidden_states.dtype == torch.bfloat16
             and torch.version.hip is None
-            and torch.cuda.get_device_capability(hidden_states.device) == (9, 0)
+            and cached_device_capability(hidden_states.device) == (9, 0)
             and not any(
                 name in self.qsa_indexer.__dict__
                 for name in ("project", "project_raw", "split_projected")
@@ -296,11 +320,11 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             and type(self.qsa_indexer) is Qwen4ExpQSAIndexer
             and (self.qsa_indexer.n_heads, self.qsa_indexer.head_dim) == (4, 128)
             and hidden_states.ndim == 2
-            and 1 <= hidden_states.shape[0] <= 64
+            and 1 <= hidden_states.shape[0] <= 128
             and hidden_states.is_cuda
             and hidden_states.dtype == torch.bfloat16
             and torch.version.hip is None
-            and torch.cuda.get_device_capability(hidden_states.device) == (9, 0)
+            and cached_device_capability(hidden_states.device) == (9, 0)
             and not any(
                 name in self.qsa_indexer.__dict__
                 for name in ("project", "project_raw", "split_projected")
@@ -315,10 +339,6 @@ class Qwen4ExpAttention(Qwen3NextAttention):
         else:
             q, raw_keys = projected
             if not (raw_query or raw_decode or prefix_reuse_raw or packed_prefill_raw):
-                from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
-                    exact_head_rms_norm,
-                )
-
                 q = exact_head_rms_norm(
                     q, self.qsa_indexer.q_norm_gamma, self.qsa_indexer.norm_eps
                 )
@@ -395,12 +415,8 @@ class Qwen4ExpAttention(Qwen3NextAttention):
         prepared_keys = (
             indexer_write.get("block_keys") if isinstance(indexer_write, dict) else None
         )
-        if packed_prefill_raw:
-            from rtp_llm.models_py.modules.qwen4_exp.qsa.prefill_packed_indexer import (
-                try_packed_prefill,
-            )
-
-            selected = try_packed_prefill(
+        if packed_prefill_raw and _qsa_packed_prefill_mod is not None:
+            selected = _qsa_packed_prefill_mod.try_packed_prefill(
                 q,
                 prepared_keys,
                 rope_cos,
@@ -414,10 +430,6 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             if selected is not None:
                 return selected
             # The existing path consumes normalized Q when the packed gate declines.
-            from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
-                exact_head_rms_norm,
-            )
-
             q = exact_head_rms_norm(
                 q, self.qsa_indexer.q_norm_gamma, self.qsa_indexer.norm_eps
             )
@@ -523,13 +535,6 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                     device=hidden_states.device,
                 )
             try:
-                from rtp_llm.models_py.modules.base.common.fp8_linear import (
-                    project_fp8_pair,
-                )
-                from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import (
-                    SparseGqaFmhaImpl,
-                )
-
                 trusted_selection = (
                     type(self) is Qwen4ExpAttention
                     and type(self.qsa_indexer) is Qwen4ExpQSAIndexer
@@ -568,7 +573,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                             for name in ("project", "project_raw", "split_projected")
                         )
                     ):
-                        prepared = project_fp8_pair(
+                        prepared = _fp8_linear_mod.project_fp8_pair(
                             hidden_states,
                             self.gate,
                             self.qsa_indexer.qk_projection,
@@ -594,8 +599,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                         and torch.version.hip is None
                         and hidden_states.ndim == 2
                         and 1 <= hidden_states.shape[0] <= 512
-                        and torch.cuda.get_device_capability(hidden_states.device)
-                        == (9, 0)
+                        and cached_device_capability(hidden_states.device) == (9, 0)
                     )
                     if overlap_indexer:
                         main_stream = torch.cuda.current_stream(hidden_states.device)
@@ -616,11 +620,6 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                     set_selected(selected)
                 with record_function_range("qwen4.qsa.fmha"):
                     if callable(fused_gate_forward):
-                        from rtp_llm.models_py.distributed.collective_torch import (
-                            Group,
-                            all_reduce,
-                        )
-
                         qkv = self.qkv_proj(hidden_states)
                         norm_gate_forward = getattr(
                             fmha_impl, "forward_with_qk_norm_and_output_gate", None
@@ -940,11 +939,6 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             and not self.mlp_hyper_connection._forward_hooks
             and tp2_ws.supports_hyper(hyper_states)
         ):
-            from rtp_llm.models_py.modules.qwen4_exp.tp2_ar_hc_fused import (
-                _DeferSlot,
-                _attn_tp2_defer_slot,
-            )
-
             attn_defer_token = _attn_tp2_defer_slot.set(_DeferSlot(tp2_ws))
         try:
             with record_function_range(self._attn_profile_range):
@@ -975,11 +969,6 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             and not getattr(self.mlp, "_forward_hooks", None)
             and tp2_ws.supports_hyper(hyper_states)
         ):
-            from rtp_llm.models_py.modules.qwen4_exp.tp2_ar_hc_fused import (
-                _DeferSlot,
-                _moe_tp2_defer_slot,
-            )
-
             mlp_defer_token = _moe_tp2_defer_slot.set(_DeferSlot(tp2_ws))
         try:
             with record_function_range("qwen4.moe"):
@@ -1264,17 +1253,12 @@ class Qwen4ExpModel(Qwen35Model):
         # H-wide embedding through their separate input projection.
         if type(self) is not Qwen4ExpModel:
             return None
-        from rtp_llm.models_py.modules.base.common.fp8_embedding import (
-            Fp8VocabEmbedding,
-        )
-
         embedding = getattr(self, "embed_tokens", None)
         if not isinstance(embedding, Fp8VocabEmbedding) or embedding.tp_size != 2:
             return None
         if (
             torch.version.hip is not None
-            or torch.cuda.get_device_capability(embedding.device)
-            not in ((9, 0), (12, 0))
+            or cached_device_capability(embedding.device) not in ((9, 0), (12, 0))
             or "forward" in embedding.__dict__
             or "word_embedding" in self.__dict__
             or embedding._forward_pre_hooks
@@ -1484,10 +1468,6 @@ class Qwen4ExpModel(Qwen35Model):
         return self._ple_coordinator().clear_speculative_target_graph_capture()
 
     def save_speculative_target_graph_capture(self, graph_key: int) -> None:
-        from rtp_llm.models_py.distributed.flashinfer_all_reduce import (
-            get_flashinfer_allreduce,
-        )
-
         communicator = get_flashinfer_allreduce()
         if communicator is not None:
             communicator.finish_graph_capture()
@@ -1668,10 +1648,6 @@ class Qwen4ExpModel(Qwen35Model):
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         if self.__dict__.get("_closed", False):
             raise RuntimeError("Qwen4 model is closed")
-        from rtp_llm.models_py.distributed.flashinfer_all_reduce import (
-            get_flashinfer_allreduce,
-        )
-
         communicator = get_flashinfer_allreduce()
         prior_capture = None
         if communicator is not None:
@@ -1832,7 +1808,7 @@ class Qwen4ExpModel(Qwen35Model):
             shape=hyper_states.shape,
             bf16=hyper_states.dtype == torch.bfloat16,
             sm=(
-                torch.cuda.get_device_capability(hyper_states.device)
+                cached_device_capability(hyper_states.device)
                 if hc_defer_shape and hyper_states.is_cuda and torch.version.hip is None
                 else None
             ),

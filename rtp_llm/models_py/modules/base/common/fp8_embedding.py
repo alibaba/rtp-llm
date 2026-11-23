@@ -4,6 +4,7 @@ import torch
 from torch import nn
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+from rtp_llm.models_py.utils.device_capability import cached_device_capability
 
 
 class Fp8VocabEmbedding(nn.Module):
@@ -41,24 +42,9 @@ class Fp8VocabEmbedding(nn.Module):
         self.tp_size = tp_size
         self.hidden_size = weight.shape[1]
         self.vocab_size = weight.shape[0]
-        self.device = device
-        self.tile_width = next(
-            width
-            for width in (256, 128, 64, 32, 16, 8, 4, 2, 1)
-            if self.hidden_size % width == 0
-        )
-        self.column_tiles = self.hidden_size // self.tile_width
-        flat = weight.view(-1, self.tile_width)
-        self.shards = [flat]
-        self.pointer_table = torch.tensor(
-            [flat.data_ptr()], dtype=torch.int64, device=weight.device
-        )
         self.device = weight.device
-        self.weight = self.shards[0].view_as(weight)
+        self.weight = weight
         self.weight._rtp_requires_restart_for_update = True
-        self.columns = torch.arange(
-            self.column_tiles, dtype=torch.int64, device=self.device
-        )
 
     def prepare_byte_gather(self, *, role="PDFUSION"):
         """Collect immutable column scales once, before serving or capture.
@@ -79,7 +65,7 @@ class Fp8VocabEmbedding(nn.Module):
             self.tp_size == 2
             and self.hidden_size == 1280
             and torch.version.hip is None
-            and torch.cuda.get_device_capability(self.device) in ((9, 0), (12, 0))
+            and cached_device_capability(self.device) in ((9, 0), (12, 0))
         ):
             return
         scales = all_gather(self.weight_scale, group=Group.TP)

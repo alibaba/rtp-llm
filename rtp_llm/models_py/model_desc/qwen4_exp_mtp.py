@@ -18,6 +18,9 @@ from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
     exact_head_rms_norm,
 )
 from rtp_llm.models_py.modules.hybrid.gated_residual import grouped_rms_norm
+from rtp_llm.models_py.modules.qwen4_exp.mtp_norm_triton import (
+    try_mtp_embedding_rms_norm,
+)
 from rtp_llm.models_py.modules.qwen4_exp.weight_views import (
     Qwen4LinearFactory as LinearFactory,
     annotate_compute_inventory,
@@ -135,10 +138,6 @@ class Qwen4ExpMTPInputProjection(nn.Module):
 
         embedding = None
         if inputs_embeds.is_cuda and torch.version.hip is None:
-            from rtp_llm.models_py.modules.qwen4_exp.mtp_norm_triton import (
-                try_mtp_embedding_rms_norm,
-            )
-
             embedding = try_mtp_embedding_rms_norm(
                 inputs_embeds, self.embedding_gamma, self.norm_eps
             )

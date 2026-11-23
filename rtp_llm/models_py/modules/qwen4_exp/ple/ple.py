@@ -7,12 +7,13 @@ import torch.nn.functional as F
 from torch import nn
 
 from rtp_llm.models_py.modules.hybrid.gated_residual import grouped_rms_norm
+from rtp_llm.models_py.utils.device_capability import cached_device_capability
 
 
 def _sm_supported(device: torch.device) -> bool:
     """SM90 (compute capability major 9) or the original SM120 (12, 0)."""
-    major, minor = torch.cuda.get_device_capability(device)
-    return major == 9 or (major, minor) == (12, 0)
+    cap = cached_device_capability(device)
+    return cap is not None and (cap[0] == 9 or cap == (12, 0))
 
 
 class Qwen4ExpNGramEmbedding(nn.Module):
@@ -638,7 +639,7 @@ class Qwen4ExpPLELayer(nn.Module):
             and value.shape == (2560, 2560)
             and key.is_cuda
             and torch.version.hip is None
-            and torch.cuda.get_device_capability(key.device) == (9, 0)
+            and cached_device_capability(key.device) == (9, 0)
             and all(
                 w.device == key.device
                 and w.dtype == torch.bfloat16
@@ -697,7 +698,7 @@ class Qwen4ExpPLELayer(nn.Module):
                     self.norm_conv,
                 )
             )
-            and torch.cuda.get_device_capability(hyper_states.device) == (9, 0)
+            and cached_device_capability(hyper_states.device) == (9, 0)
         )
 
     def _short_conv(self, hidden_states: torch.Tensor) -> torch.Tensor:

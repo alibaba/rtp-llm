@@ -11,6 +11,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.utils.device_capability import cached_device_capability
+
 
 @triton.jit
 def _small_moe_up(
@@ -89,7 +91,7 @@ def is_supported(x, w1, w2, ids, weights):
         and all(t.dtype == torch.bfloat16 for t in (x, w1, w2))
         and ids.dtype == torch.int32
         and weights.dtype == torch.float32
-        and torch.cuda.get_device_capability(x.device) == (12, 0)
+        and cached_device_capability(x.device) == (12, 0)
     )
 
 

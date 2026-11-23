@@ -6,7 +6,10 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.utils.device_capability import sm90_pdl_enabled
+from rtp_llm.models_py.utils.device_capability import (
+    cached_device_capability,
+    sm90_pdl_enabled,
+)
 
 _TORCH_GIT = "70d99e998b4955e0049d13a98d77ae1b14db1f45"
 
@@ -74,7 +77,7 @@ def try_mtp_embedding_rms_norm(x, gamma, eps):
         and isinstance(eps, (float, int))
         and math.isfinite(eps)
         and eps >= 0
-        and torch.cuda.get_device_capability(x.device) in ((9, 0), (12, 0))
+        and cached_device_capability(x.device) in ((9, 0), (12, 0))
     ):
         return None
     rows = x.shape[0]

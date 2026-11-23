@@ -10,6 +10,7 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import IndexerCacheUndo
+from rtp_llm.models_py.utils.device_capability import cached_device_capability
 
 
 @triton.jit
@@ -123,9 +124,9 @@ def supports_raw_key_layout(raw_keys: torch.Tensor) -> bool:
     return raw_keys.is_contiguous() or (
         raw_keys.is_cuda
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(raw_keys.device) == (9, 0)
+        and cached_device_capability(raw_keys.device) == (9, 0)
         and raw_keys.ndim == 2
-        and 1 <= raw_keys.shape[0] <= 256
+        and 1 <= raw_keys.shape[0] <= 512
         and raw_keys.shape[1] == 128
         and raw_keys.dtype == torch.bfloat16
         and raw_keys.stride(1) == 1

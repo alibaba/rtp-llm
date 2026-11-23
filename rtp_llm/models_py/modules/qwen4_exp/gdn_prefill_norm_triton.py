@@ -12,6 +12,15 @@ try:
     from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
         FP8_GROUP_QUANT_V2_MIN_ELEMENTS,
     )
+    from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
+        CudaFp8DeepGEMMLinear,
+    )
+    from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_flashinfer_linear import (
+        CudaFp8FlashinferLinear,
+    )
+    from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
+        CudaFp8GEMMLinear,
+    )
 
     from .gdn_prefill_norm_gluon import flat_head_norm
     from .gdn_prefill_norm_quant_gluon import _launch_norm_quant as norm_quant
@@ -19,6 +28,15 @@ except ImportError:
     # Older platform Triton versions retain the existing implementation.
     flat_head_norm = None
     norm_quant = None
+    CudaFp8DeepGEMMLinear = CudaFp8FlashinferLinear = CudaFp8GEMMLinear = None
+
+
+def _unmodified(module, methods):
+    return (
+        not module._forward_hooks
+        and not module._forward_pre_hooks
+        and all(name not in module.__dict__ for name in methods)
+    )
 
 
 @triton.jit
@@ -172,29 +190,12 @@ class Qwen4PrefillGatedNorm(torch.nn.Module):
         ):
             return projection(self(x, gate))
 
-        from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
-            CudaFp8DeepGEMMLinear,
-        )
-        from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_flashinfer_linear import (
-            CudaFp8FlashinferLinear,
-        )
-        from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
-            CudaFp8GEMMLinear,
-        )
-
-        def unmodified(module, methods):
-            return (
-                not module._forward_hooks
-                and not module._forward_pre_hooks
-                and all(name not in module.__dict__ for name in methods)
-            )
-
         consumer = projection
         if type(projection) is CudaFp8GEMMLinear:
             # The model's LinearFactory returns this dispatcher, not its inner
             # backend. Follow the same BF16-input dispatch as its forward; do
             # not force DeepGEMM where the wrapper selects FlashInfer.
-            if not unmodified(projection, ("forward", "_should_use_flashinfer")):
+            if not _unmodified(projection, ("forward", "_should_use_flashinfer")):
                 return projection(self(x, gate))
             if projection._should_use_flashinfer(x):
                 if not sm90:
@@ -209,9 +210,9 @@ class Qwen4PrefillGatedNorm(torch.nn.Module):
             and consumer.K == x.shape[1]
             and consumer.N == 2560
             and consumer.weight.device == x.device
-            and unmodified(self, ("forward",))
-            and unmodified(self.native, ("forward",))
-            and unmodified(consumer, ("forward", "quantize_input", "forward_quantized"))
+            and _unmodified(self, ("forward",))
+            and _unmodified(self.native, ("forward",))
+            and _unmodified(consumer, ("forward", "quantize_input", "forward_quantized"))
             and not torch.nn.modules.module._global_forward_pre_hooks
             and not torch.nn.modules.module._global_forward_hooks
         ):

@@ -6,10 +6,34 @@ per row across NVLink in a 2-slot ping-pong buffer (eager and CUDA-graph safe).
 """
 
 import ctypes
+import os
+import socket
 import threading
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
+
+from rtp_llm.models_py.utils.device_capability import cached_device_capability
+
+
+def _tp2_peers_can_access(group, device: torch.device) -> bool:
+    if dist.get_world_size(group) != 2:
+        return False
+    boot_path = Path("/proc/sys/kernel/random/boot_id")
+    boot_id = boot_path.read_text().strip() if boot_path.is_file() else ""
+    info = (socket.gethostname(), boot_id, os.getuid(), int(device.index))
+    peers = [None, None]
+    dist.all_gather_object(peers, info, group=group)
+    (h0, b0, u0, d0), (h1, b1, u1, d1) = peers
+    return (
+        (h0, b0, u0) == (h1, b1, u1)
+        and d0 != d1
+        and 0 <= d0 < torch.cuda.device_count()
+        and 0 <= d1 < torch.cuda.device_count()
+        and torch.cuda.can_device_access_peer(d0, d1)
+        and torch.cuda.can_device_access_peer(d1, d0)
+    )
 
 
 class Qwen4HeadIpcGather:
@@ -154,14 +178,15 @@ def prepare_head_ipc_gather(config, parallelism, head):
         and head.weight.dtype == torch.float8_e4m3fn
         and head.weight.is_cuda
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(head.weight.device) in ((9, 0), (12, 0))
-        and torch.cuda.device_count() == 2
-        and torch.cuda.can_device_access_peer(0, 1)
-        and torch.cuda.can_device_access_peer(1, 0)
+        and cached_device_capability(head.weight.device) in ((9, 0), (12, 0))
+        and torch.cuda.device_count() >= 2
     ):
         return None
     from rtp_llm.models_py.distributed.collective_torch import Group, _get_group
 
+    group = _get_group(Group.TP)
+    if not _tp2_peers_can_access(group, head.weight.device):
+        return None
     # Unsupported layouts return before any collective. An allocation/IPC error
     # is a startup failure; do not let one rank silently switch implementations.
-    return Qwen4HeadIpcGather(_get_group(Group.TP), head.weight.device, max_rows=256)
+    return Qwen4HeadIpcGather(group, head.weight.device, max_rows=256)

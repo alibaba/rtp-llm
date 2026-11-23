@@ -4,6 +4,7 @@ import torch
 import triton
 import triton.language as tl
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import IndexerCacheUndo
+from rtp_llm.models_py.utils.device_capability import cached_device_capability
 
 
 @triton.jit
@@ -174,7 +175,7 @@ def try_write_draft_window(
     if not (
         raw.is_cuda
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(raw.device) in ((9, 0), (12, 0))
+        and cached_device_capability(raw.device) in ((9, 0), (12, 0))
         and kv.shape[1] in (16, 32)
         and kv.shape[2] == 128
         and 1 <= raw.shape[0] <= 512

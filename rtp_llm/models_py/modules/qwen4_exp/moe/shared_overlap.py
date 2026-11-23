@@ -1,4 +1,4 @@
-"""Overlap the local shared branch with routing and experts on SM120.
+"""Overlap the local shared expert branch with routed MoE on SM90 and SM120.
 
 The two-event scheduling follows vLLM's SharedExperts runner (Apache-2.0).
 The routed TP reduction stays on the original stream. The unsharded shared
@@ -10,8 +10,26 @@ from functools import lru_cache
 
 import torch
 
+from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
+from rtp_llm.models_py.modules.base.common.fp8_linear import (
+    Fp8Linear,
+    _prequantized_fp8_input,
+    prequantize_fp8_linear_input,
+)
+from rtp_llm.models_py.modules.qwen4_exp._profiler import record_function_range
+from rtp_llm.models_py.modules.qwen4_exp.tp2_ar_hc_fused import (
+    try_defer_moe_packed_tp2,
+)
+from rtp_llm.models_py.utils.device_capability import cached_device_capability
 from rtp_llm.utils.model_weight import W
+
+from .compact_fp8_decode import (
+    _H20_COMPACT_EAGER_MAX_ROWS,
+    compact_moe_output_buffer,
+    h20_compact_moe_phase,
+)
+from .shared_gate_triton import try_shared_sigmoid_mul
 
 
 @lru_cache(maxsize=None)
@@ -62,7 +80,7 @@ class Qwen4MoeLayer(GenericMoeLayer):
             and shared_weight.dtype == torch.bfloat16
             and shared_weight.is_cuda
             and torch.version.hip is None
-            and torch.cuda.get_device_capability(shared_weight.device) == (9, 0)
+            and cached_device_capability(shared_weight.device) == (9, 0)
         ):
             from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
                 PureTpRouterNoQuant,
@@ -137,8 +155,7 @@ class Qwen4MoeLayer(GenericMoeLayer):
             and tuple(self.shared_expert_gate.weight.shape) == (1, 2560)
             and shared.up_proj.weight.is_cuda
             and torch.version.hip is None
-            and torch.cuda.get_device_capability(shared.up_proj.weight.device)
-            == (12, 0)
+            and cached_device_capability(shared.up_proj.weight.device) == (12, 0)
         ):
             return
         self._shared_stream = torch.cuda.Stream(device=shared.up_proj.weight.device)
@@ -200,7 +217,7 @@ class Qwen4MoeLayer(GenericMoeLayer):
             and tuple(self.shared_expert_gate.weight.shape) == (1, 2560)
             and shared.up_proj.weight.is_cuda
             and torch.version.hip is None
-            and torch.cuda.get_device_capability(shared.up_proj.weight.device) == (9, 0)
+            and cached_device_capability(shared.up_proj.weight.device) == (9, 0)
         ):
             return False
         device = shared.up_proj.weight.device
@@ -255,7 +272,7 @@ class Qwen4MoeLayer(GenericMoeLayer):
             and tuple(self.shared_expert_gate.weight.shape) == (1, 2560)
             and shared.up_proj.weight.is_cuda
             and torch.version.hip is None
-            and torch.cuda.get_device_capability(shared.up_proj.weight.device) == (9, 0)
+            and cached_device_capability(shared.up_proj.weight.device) == (9, 0)
         ):
             return
         self._ep_shared_stream = _shared_stream_for_device(
@@ -273,14 +290,6 @@ class Qwen4MoeLayer(GenericMoeLayer):
             self._ep_two_batch = QwenEpTwoBatch(self)
 
     def _forward_ep_shared_overlap(self, hidden_states):
-        from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
-        from rtp_llm.models_py.modules.base.common.fp8_linear import (
-            Fp8Linear,
-            _prequantized_fp8_input,
-            prequantize_fp8_linear_input,
-        )
-        from rtp_llm.models_py.modules.qwen4_exp._profiler import record_function_range
-
         rows = hidden_states.shape[0]
         use_pack = (
             self._tp_shared_pack_reduce
@@ -294,9 +303,7 @@ class Qwen4MoeLayer(GenericMoeLayer):
         )
         main = torch.cuda.current_stream(hidden_states.device)
         capturing = torch.cuda.is_current_stream_capturing()
-        use_aux_stream = (
-            capturing or rows <= self._ep_shared_max_tokens or rows >= 1536
-        )
+        use_aux_stream = True
         prequant_entry = None
         prequant_scope = None
         gate_proj = getattr(self, "gate", None)
@@ -357,8 +364,6 @@ class Qwen4MoeLayer(GenericMoeLayer):
             ):
                 experts = self._ep_two_batch.forward(self, hidden_states)
             elif use_pack:
-                from .compact_fp8_decode import compact_moe_output_buffer
-
                 out_scope = compact_moe_output_buffer.set(packed[:rows])
                 try:
                     experts = super()._forward_routed(
@@ -384,10 +389,6 @@ class Qwen4MoeLayer(GenericMoeLayer):
                 packed[:rows].copy_(experts)
             if shared.data_ptr() != packed[rows:].data_ptr():
                 packed[rows:].copy_(shared)
-            from rtp_llm.models_py.modules.qwen4_exp.tp2_ar_hc_fused import (
-                try_defer_moe_packed_tp2,
-            )
-
             deferred = try_defer_moe_packed_tp2(packed)
             if deferred is not None:
                 return deferred
@@ -416,8 +417,6 @@ class Qwen4MoeLayer(GenericMoeLayer):
                 out.copy_(gated)
                 return out
             return gated
-        from .shared_gate_triton import try_shared_sigmoid_mul
-
         gate = self.shared_expert_gate(hidden_states)
         fused = try_shared_sigmoid_mul(gate, shared_expert_output, out=out)
         if fused is not None:
@@ -429,16 +428,18 @@ class Qwen4MoeLayer(GenericMoeLayer):
         return gated
 
     def _forward_ep_with_packed_reduce(self, hidden_states):
-        from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
-
+        rows = hidden_states.shape[0]
         routed = super()._forward_routed(hidden_states, skip_tp_allreduce=True)
         shared = self.shared_expert(hidden_states, skip_allreduce=True)
         shared = self._gate_shared_expert_output(hidden_states, shared)
         # Reduce both partial tensors in one collective, retaining each BF16
         # reduction's rounding before the local addition.
-        packed = torch.stack((routed, shared))
+        packed = torch.cat((routed, shared), dim=0)
+        deferred = try_defer_moe_packed_tp2(packed)
+        if deferred is not None:
+            return deferred
         reduced = getattr(self, "tp_all_reduce", all_reduce)(packed, group=Group.TP)
-        return reduced[0] + reduced[1]
+        return reduced[:rows] + reduced[rows:]
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         graph = self._mega_prefill_graph
@@ -464,11 +465,6 @@ class Qwen4MoeLayer(GenericMoeLayer):
             rows = hidden_states.shape[0]
             use_ep_overlap = 1 <= rows <= self._ep_shared_max_tokens
             if not use_ep_overlap and 1 <= rows <= 5120:
-                from .compact_fp8_decode import (
-                    _H20_COMPACT_EAGER_MAX_ROWS,
-                    h20_compact_moe_phase,
-                )
-
                 use_ep_overlap = (
                     rows <= _H20_COMPACT_EAGER_MAX_ROWS
                     and h20_compact_moe_phase.get() == "eager"

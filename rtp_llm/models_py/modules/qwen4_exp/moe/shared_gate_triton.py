@@ -5,7 +5,10 @@ import triton
 import triton.language as tl
 from triton.language.extra.cuda import libdevice
 
-from rtp_llm.models_py.utils.device_capability import sm90_pdl_enabled
+from rtp_llm.models_py.utils.device_capability import (
+    cached_device_capability,
+    sm90_pdl_enabled,
+)
 
 
 @triton.jit
@@ -13,7 +16,6 @@ def _shared_sigmoid_mul(
     gate,
     shared,
     output,
-    N: tl.constexpr,
     H: tl.constexpr,
     BLOCK: tl.constexpr,
     PDL: tl.constexpr = False,
@@ -59,7 +61,7 @@ def is_supported(gate, shared, out=None):
                 and out.is_contiguous()
             )
         )
-        and torch.cuda.get_device_capability(shared.device) == (9, 0)
+        and cached_device_capability(shared.device) == (9, 0)
     )
 
 
@@ -72,7 +74,6 @@ def try_shared_sigmoid_mul(gate, shared, *, out=None):
         gate,
         shared,
         output,
-        N=shared.shape[0],
         H=shared.shape[1],
         BLOCK=512,
         PDL=pdl,

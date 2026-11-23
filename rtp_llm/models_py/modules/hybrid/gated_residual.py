@@ -9,6 +9,35 @@ from rtp_llm.models_py.modules.base.common.fp8_linear import (
     dense_projection,
     make_projection,
 )
+from rtp_llm.models_py.utils.device_capability import cached_device_capability
+
+try:
+    from rtp_llm.models_py.modules.qwen4_exp.tp2_ar_hc_fused import (
+        DeferredTp2Sublayer,
+    )
+except ImportError:
+    DeferredTp2Sublayer = ()
+
+try:
+    from rtp_llm.models_py.triton_kernels.common import (
+        gated_residual_down_triton as _hc_down,
+        gated_residual_inject_triton as _hc_inject,
+        gated_residual_mix_triton as _hc_mix,
+        gated_residual_norm_triton as _hc_norm,
+        gated_residual_prefill_inject_norm_triton as _hc_prefill_inject_norm,
+        gated_residual_prefill_up_mix_triton as _hc_prefill_up_mix,
+        gated_residual_splitk_inject as _hc_splitk_inject,
+        gated_residual_up_mix_triton as _hc_up_mix,
+    )
+except ImportError:
+    _hc_down = None
+    _hc_inject = None
+    _hc_mix = None
+    _hc_norm = None
+    _hc_prefill_inject_norm = None
+    _hc_prefill_up_mix = None
+    _hc_splitk_inject = None
+    _hc_up_mix = None
 
 
 def grouped_rms_norm(
@@ -23,14 +52,9 @@ def grouped_rms_norm(
     and cost bit-exactness. So these norms deliberately do NOT take the loader's
     ``plus_one``, unlike the rest of the repo's RMSNorms.
     """
-    if x.is_cuda and torch.version.hip is None:
-        from rtp_llm.models_py.triton_kernels.common.gated_residual_norm_triton import (
-            grouped_rms_norm_triton,
-            is_supported,
-        )
-
-        if is_supported(x, gamma, group_size):
-            return grouped_rms_norm_triton(x, gamma, group_size, eps)
+    if _hc_norm is not None and x.is_cuda and torch.version.hip is None:
+        if _hc_norm.is_supported(x, gamma, group_size):
+            return _hc_norm.grouped_rms_norm_triton(x, gamma, group_size, eps)
     out = x.float().unflatten(-1, (x.shape[-1] // group_size, group_size))
     out = out * torch.rsqrt(out.pow(2).mean(-1, keepdim=True) + eps)
     return (out.flatten(-2) * (1.0 + gamma.float())).type_as(x)
@@ -47,10 +71,6 @@ def inject_into_residual(
     ``[..., hidden]`` and ``inject_weights`` is ``[..., hc_mult]``.
     """
     if not isinstance(sublayer_out, torch.Tensor):
-        from rtp_llm.models_py.modules.qwen4_exp.tp2_ar_hc_fused import (
-            DeferredTp2Sublayer,
-        )
-
         if isinstance(sublayer_out, DeferredTp2Sublayer):
             fused = sublayer_out.workspace.try_inject_only(
                 hyper_input, sublayer_out, inject_weights
@@ -58,14 +78,9 @@ def inject_into_residual(
             if fused is not None:
                 return fused
             sublayer_out = sublayer_out.materialize()
-    if hyper_input.is_cuda and torch.version.hip is None:
-        from rtp_llm.models_py.triton_kernels.common.gated_residual_inject_triton import (
-            fused_inject,
-            is_supported,
-        )
-
-        if is_supported(hyper_input, sublayer_out, inject_weights):
-            return fused_inject(hyper_input, sublayer_out, inject_weights)
+    if _hc_inject is not None and hyper_input.is_cuda and torch.version.hip is None:
+        if _hc_inject.is_supported(hyper_input, sublayer_out, inject_weights):
+            return _hc_inject.fused_inject(hyper_input, sublayer_out, inject_weights)
     injection = sublayer_out.unsqueeze(-2) * inject_weights.unsqueeze(-1)
     return hyper_input + injection.flatten(-2)
 
@@ -139,7 +154,7 @@ class GatedResidual(nn.Module):
             and mix_up.dtype == torch.float8_e4m3fn
             and mix_up.is_cuda
             and torch.version.hip is None
-            and torch.cuda.get_device_capability(mix_up.device) == (9, 0)
+            and cached_device_capability(mix_up.device) == (9, 0)
         ):
             # Prepare before graph capture; preserve the original FP8 weight.
             self.bf16_fp8_up = (
@@ -182,7 +197,7 @@ class GatedResidual(nn.Module):
             and tuple(mix_down.shape) == (320, 10240)
             and mix_down.is_cuda
             and torch.version.hip is None
-            and torch.cuda.get_device_capability(mix_down.device) == (9, 0)
+            and cached_device_capability(mix_down.device) == (9, 0)
         ):
             inject_bf16 = (
                 self.inject_projection.compute_weight
@@ -232,7 +247,8 @@ class GatedResidual(nn.Module):
                 f"{hyper_input.shape[-1]}"
             )
         if (
-            self.down_projection is not None
+            _hc_norm is not None
+            and self.down_projection is not None
             and self.down_projection.use_scaled_mm
             and tuple(self.down_projection.weight.shape) == (320, 10240)
             and not self._use_bf16_down_inject(hyper_input)
@@ -240,11 +256,7 @@ class GatedResidual(nn.Module):
             and hyper_input.is_cuda
             and torch.version.hip is None
         ):
-            from rtp_llm.models_py.triton_kernels.common.gated_residual_norm_triton import (
-                try_grouped_rms_norm_with_fp8_scale,
-            )
-
-            fused = try_grouped_rms_norm_with_fp8_scale(
+            fused = _hc_norm.try_grouped_rms_norm_with_fp8_scale(
                 hyper_input, self.norm_gamma, self.hidden_size, self.norm_eps
             )
             if fused is not None:
@@ -267,10 +279,6 @@ class GatedResidual(nn.Module):
         )
         rows = hyper_input.numel() // self.hc_hidden_size
         if not isinstance(sublayer_out, torch.Tensor):
-            from rtp_llm.models_py.modules.qwen4_exp.tp2_ar_hc_fused import (
-                DeferredTp2Sublayer,
-            )
-
             if isinstance(sublayer_out, DeferredTp2Sublayer):
                 bf16_only = (
                     self.down_projection is None
@@ -311,22 +319,22 @@ class GatedResidual(nn.Module):
             )
             and hyper_input.is_cuda
             and torch.version.hip is None
-            and torch.cuda.get_device_capability(hyper_input.device) == (9, 0)
+            and cached_device_capability(hyper_input.device) == (9, 0)
         )
-        if (fp8_down or bf16_candidate) and not (
-            self._forward_pre_hooks
-            or self._forward_hooks
-            or module_hooks._global_forward_pre_hooks
-            or module_hooks._global_forward_hooks
-        ):
-            from rtp_llm.models_py.triton_kernels.common.gated_residual_prefill_inject_norm_triton import (
-                try_inject_grouped_norm,
+        if (
+            _hc_prefill_inject_norm is not None
+            and (fp8_down or bf16_candidate)
+            and not (
+                self._forward_pre_hooks
+                or self._forward_hooks
+                or module_hooks._global_forward_pre_hooks
+                or module_hooks._global_forward_hooks
             )
-
+        ):
             collect_scale = (
                 fp8_down and rows <= 32768 and not self._use_bf16_down_inject(hyper_input)
             )
-            fused = try_inject_grouped_norm(
+            fused = _hc_prefill_inject_norm.try_inject_grouped_norm(
                 hyper_input,
                 sublayer_out,
                 inject_weights,
@@ -350,17 +358,14 @@ class GatedResidual(nn.Module):
         # Wide BF16 inputs use separate projections to preserve the model's
         # down/inject rounding.
         if (
-            merged is not None
+            _hc_down is not None
+            and merged is not None
             and normed.is_contiguous()
             and normed.dtype == merged.dtype
             and normed.device == merged.device
             and (1 <= rows <= 32 or bf16_fp8_candidate)
         ):
-            from rtp_llm.models_py.triton_kernels.common.gated_residual_down_triton import (
-                down_inject_epilogue,
-            )
-
-            mix, inject_weights = down_inject_epilogue(
+            mix, inject_weights = _hc_down.down_inject_epilogue(
                 F.linear(normed, merged), self.mix_down.shape[0], self.hc_mult
             )
         else:
@@ -371,32 +376,26 @@ class GatedResidual(nn.Module):
             )
             fused = None
             if (
-                self.inject_projection is not None
+                _hc_splitk_inject is not None
+                and self.inject_projection is not None
                 and self.inject_projection.compute_weight is not None
             ):
-                from rtp_llm.models_py.triton_kernels.common.gated_residual_splitk_inject import (
-                    try_splitk_down_inject,
-                )
-
-                fused = try_splitk_down_inject(
+                fused = _hc_splitk_inject.try_splitk_down_inject(
                     normed, self.inject_projection.compute_weight, down
                 )
             if (
                 fused is None
+                and _hc_down is not None
                 and self.hc_mult == 4
                 and down.is_cuda
                 and torch.version.hip is None
             ):
-                from rtp_llm.models_py.triton_kernels.common.gated_residual_down_triton import (
-                    separate_down_inject_epilogue,
-                )
-
                 injection = (
                     dense_projection(normed, self.inject, self.inject_projection)
                     if self.inject is not None
                     else None
                 )
-                fused = separate_down_inject_epilogue(down, injection)
+                fused = _hc_down.separate_down_inject_epilogue(down, injection)
             if fused is None:
                 mix = F.silu(down / self.hc_mult)
             else:
@@ -410,28 +409,24 @@ class GatedResidual(nn.Module):
             and mix.device == bf16_up.device
         )
         if (
-            not use_bf16_up
+            _hc_up_mix is not None
+            and not use_bf16_up
             and up is not None
             and up.bias is None
             and up.role in ("DECODE", "PDFUSION")
         ):
-            from rtp_llm.models_py.triton_kernels.common.gated_residual_up_mix_triton import (
-                try_fp8_up_mix,
+            mixed = _hc_up_mix.try_fp8_up_mix(
+                mix, up.weight, up.scale, normed, self.hc_mult
             )
-
-            mixed = try_fp8_up_mix(mix, up.weight, up.scale, normed, self.hc_mult)
         if (
             mixed is None
+            and _hc_prefill_up_mix is not None
             and not use_bf16_up
             and up is not None
             and up.bias is None
             and up.role in ("PREFILL", "DECODE", "PDFUSION")
         ):
-            from rtp_llm.models_py.triton_kernels.common.gated_residual_prefill_up_mix_triton import (
-                try_fp8_prefill_up_mix,
-            )
-
-            mixed = try_fp8_prefill_up_mix(
+            mixed = _hc_prefill_up_mix.try_fp8_prefill_up_mix(
                 mix, up.weight, up.scale, normed, self.hc_mult
             )
         if mixed is None:
@@ -441,16 +436,14 @@ class GatedResidual(nn.Module):
                 else dense_projection(mix, self.mix_up, self.up_projection)
             )
             branches = (self.hc_mult, self.hidden_size)
-            fused_mix = False
-            if normed.is_cuda and torch.version.hip is None:
-                from rtp_llm.models_py.triton_kernels.common.gated_residual_mix_triton import (
-                    fused_mix_reduce,
-                    is_supported,
-                )
-
-                fused_mix = is_supported(mix_logits, normed, self.hc_mult)
+            fused_mix = (
+                _hc_mix is not None
+                and normed.is_cuda
+                and torch.version.hip is None
+                and _hc_mix.is_supported(mix_logits, normed, self.hc_mult)
+            )
             if fused_mix:
-                mixed = fused_mix_reduce(mix_logits, normed, self.hc_mult)
+                mixed = _hc_mix.fused_mix_reduce(mix_logits, normed, self.hc_mult)
             else:
                 mix = torch.sigmoid(mix_logits)
                 mixed = (

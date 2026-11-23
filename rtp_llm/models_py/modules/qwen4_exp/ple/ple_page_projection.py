@@ -4,11 +4,13 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.utils.device_capability import cached_device_capability
+
 
 def _sm_supported(device: torch.device) -> bool:
     """SM90 (compute capability major 9) or the original SM120 (12, 0)."""
-    major, minor = torch.cuda.get_device_capability(device)
-    return major == 9 or (major, minor) == (12, 0)
+    cap = cached_device_capability(device)
+    return cap is not None and (cap[0] == 9 or cap == (12, 0))
 
 
 def _valid_page_size(page_size) -> bool:
@@ -149,7 +151,7 @@ def quantize_pages(x, key_scale, value_scale, page_size=128, *, row_scales=False
         REDUCE=triton.next_power_of_2(tiles),
         BLOCK=4096,
         ROW_SCALES=row_scales,
-        SM90_NATIVE_SCALE=torch.cuda.get_device_capability(x.device)[0] == 9,
+        SM90_NATIVE_SCALE=cached_device_capability(x.device)[0] == 9,
     )
     return quantized, (scales[0], *row_sf) if row_scales else scales
 

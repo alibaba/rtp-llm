@@ -12,6 +12,8 @@ import triton
 import triton.language as tl
 from triton.language.extra.cuda import libdevice
 
+from rtp_llm.models_py.utils.device_capability import cached_device_capability
+
 
 @triton.jit
 def _prepare_draft_qsa(
@@ -125,7 +127,7 @@ def try_prepare(q, positions, sources, visible, frequency, *, rope_config):
     if not (
         q.is_cuda
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(q.device) in ((9, 0), (12, 0))
+        and cached_device_capability(q.device) in ((9, 0), (12, 0))
         and q.dtype == torch.bfloat16
         and q.ndim == 3
         and q.shape[1:] == (4, 128)
@@ -196,7 +198,7 @@ def try_prepare_metadata(
     if not (
         q.is_cuda
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(q.device) in ((9, 0), (12, 0))
+        and cached_device_capability(q.device) in ((9, 0), (12, 0))
         and q.dtype == torch.bfloat16
         and q.ndim == 3
         and q.shape[1:] == (4, 128)

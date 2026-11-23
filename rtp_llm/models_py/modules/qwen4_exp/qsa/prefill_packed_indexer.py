@@ -14,6 +14,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.utils.device_capability import cached_device_capability
+
 from .indexer_norm_rope import _norm_rope_row
 
 
@@ -117,11 +119,11 @@ def _packed_causal_score(
 def _is_supported(q, keys, cos, sin, cu, lengths, gamma):
     # Short rows retain their fallback outside the validated packed geometry.
     return (
-        1 <= len(lengths) <= 64
+        1 <= len(lengths) <= 128
         and min(lengths) >= 256
         and q.is_cuda
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(q.device) == (9, 0)
+        and cached_device_capability(q.device) == (9, 0)
         and q.ndim == 3
         and q.shape[1:] == (4, 128)
         and q.stride(-1) == 1

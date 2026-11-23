@@ -16,7 +16,14 @@ from functools import lru_cache
 import torch
 
 
+_ORIG_GET_DEVICE_CAPABILITY = torch.cuda.get_device_capability
+
+
 @lru_cache(maxsize=None)
+def _cached_device_capability_impl(device_index: int) -> tuple:
+    return _ORIG_GET_DEVICE_CAPABILITY(torch.device("cuda", device_index))
+
+
 def cached_device_capability(device) -> tuple | None:
     """(major, minor) for a CUDA device, cached once per process."""
     resolved = torch.device(device) if isinstance(device, str) else device
@@ -24,9 +31,10 @@ def cached_device_capability(device) -> tuple | None:
         resolved = torch.device(resolved if resolved is not None else "cuda")
     if resolved.type != "cuda":
         return None
-    if resolved.index is None:
-        resolved = torch.device("cuda", torch.cuda.current_device())
-    return torch.cuda.get_device_capability(resolved)
+    if torch.cuda.get_device_capability is not _ORIG_GET_DEVICE_CAPABILITY:
+        return torch.cuda.get_device_capability(resolved)
+    idx = resolved.index if resolved.index is not None else torch.cuda.current_device()
+    return _cached_device_capability_impl(int(idx))
 
 
 def sm90_pdl_enabled(device) -> bool:

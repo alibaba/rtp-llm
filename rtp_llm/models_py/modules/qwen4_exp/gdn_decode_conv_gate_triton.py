@@ -4,6 +4,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.utils.device_capability import cached_device_capability
+
 
 @triton.jit
 def _qwen4_gdn_decode_conv1d_gate_kernel(
@@ -69,11 +71,10 @@ def _qwen4_gdn_decode_conv1d_gate_kernel(
     acc += h2 * w2
     acc += x * w3
     tl.store(OUT + row * DIM + channel, acc / (1.0 + tl.exp(-acc)))
-    if dst_page != -1:
-        dst = STATE + dst_page * STRIDE_STATE + channel
-        tl.store(dst, h1)
-        tl.store(dst + DIM, h2)
-        tl.store(dst + 2 * DIM, x)
+    dst = STATE + dst_page * STRIDE_STATE + channel
+    tl.store(dst, h1)
+    tl.store(dst + DIM, h2)
+    tl.store(dst + 2 * DIM, x)
 
 
 def try_decode_conv_gate(
@@ -140,7 +141,7 @@ def try_decode_conv_gate(
             tensor.device == x.device
             for tensor in (weight, state, block_map, lengths, a, b, a_log, dt_bias)
         )
-        and torch.cuda.get_device_capability(x.device) == (9, 0)
+        and cached_device_capability(x.device) == (9, 0)
     ):
         return None
     output = x.new_empty((batch, dim))
