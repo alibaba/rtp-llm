@@ -93,6 +93,21 @@ class VitCacheDirectoryTest {
     }
 
     @Test
+    void vitOnlyWithoutAffinityKeysSelectsByLoadAndRevalidatesTheWorker() {
+        a.recordVitLoad(OptionalLong.of(8), a.vitRoutedInputs(), System.nanoTime());
+        b.recordVitLoad(OptionalLong.of(1), b.vitRoutedInputs(), System.nanoTime());
+        var route = context();
+        assertFalse(selector.select(route, null).isSuccess());
+
+        route.getRequest().setVitRouteOnly(true);
+        var selected = selector.select(route, null);
+        assertTrue(selected.isSuccess());
+        assertEquals(b.getLogicalIpPort(), selected.getLogicalIpPort());
+        route.getRequest().setSelectedVit(selected);
+        assertTrue(selector.validate(route, "two").isSuccess());
+    }
+
+    @Test
     void vitOnlyRoutesAccountForMediaAssignedSinceThePollStarted() {
         snapshot(a, "a1");
         snapshot(b, "b1");
