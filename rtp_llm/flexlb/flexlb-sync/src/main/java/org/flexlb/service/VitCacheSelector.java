@@ -104,16 +104,70 @@ public class VitCacheSelector {
 
     private SelectedRole selectNewWorker(
             BalanceContext ctx, String group, List<String> requestKeys) {
+        if (requestKeys.isEmpty()) {
+            return selectByLoad(ctx, group);
+        }
         int mediaCount = ctx.getRequest().isVitRouteOnly() ? requestKeys.size() : 0;
         var keys = List.copyOf(new LinkedHashSet<>(requestKeys));
         var candidates = directory.candidates(group, keys);
-        if (keys.isEmpty()) {
-            return rankAndPin(ctx, group, keys, candidates, mediaCount);
-        }
         // Rank and record cold-key placements together so concurrent requests share a placement.
         synchronized (pending) {
             return rankAndPin(ctx, group, keys, candidates, mediaCount);
         }
+    }
+
+    private SelectedRole selectByLoad(BalanceContext ctx, String group) {
+        long nowNanos = System.nanoTime();
+        long nowUs = TimeUnit.NANOSECONDS.toMicros(nowNanos);
+        WorkerStatus selected = null;
+        long bestLoad = Long.MAX_VALUE;
+        int ties = 0;
+        for (WorkerStatus worker : workers.vitRoutingSnapshot().values()) {
+            if (!VitCacheDirectory.isRoutableForGroup(worker, group, nowUs)) {
+                continue;
+            }
+            long load = worker.vitLoadEstimate(nowNanos, MAX_LOAD_AGE_NANOS);
+            if (load < bestLoad) {
+                bestLoad = load;
+                ties = 0;
+            }
+            if (load == bestLoad && ThreadLocalRandom.current().nextInt(++ties) == 0) {
+                selected = worker;
+            }
+        }
+        return selected == null ? null : pinRouteWorker(ctx, group, selected);
+    }
+
+    private SelectedRole pinRouteWorker(BalanceContext ctx, String group, WorkerStatus worker) {
+        var pin = workers.captureEndpoint(RoleType.VIT, worker.routingAddress());
+        if (pin == null) {
+            return null;
+        }
+        try {
+            if (pin.endpoint().getStatus() == worker
+                    && (group == null || Objects.equals(group, worker.getGroup()))) {
+                return SelectedRole.stateless(pin, status(worker, ctx.getRequestId()));
+            }
+        } catch (RuntimeException | Error failure) {
+            pin.close();
+            throw failure;
+        }
+        pin.close();
+        return null;
+    }
+
+    private static ServerStatus status(WorkerStatus worker, String requestId) {
+        ServerStatus status = new ServerStatus();
+        status.setRole(RoleType.VIT);
+        status.setWorkerGeneration(worker.getGenerationId());
+        status.setServerIp(worker.getIp());
+        status.setHttpPort(worker.getPort());
+        status.setGrpcPort(worker.getGrpcPort());
+        status.setSelectedEngineIndex(worker.getEngineIndex(), worker.getMultiEngineNum());
+        status.setGroup(worker.getGroup());
+        status.setRequestId(requestId);
+        status.setSuccess(true);
+        return status;
     }
 
     private SelectedRole rankAndPin(
@@ -163,17 +217,11 @@ public class VitCacheSelector {
             return null;
         }
         var worker = selected.worker();
-        var pin = workers.captureEndpoint(RoleType.VIT, worker.routingAddress());
-        if (pin == null) {
-            return null;
-        }
-        if (pin.endpoint().getStatus() != worker
-                || (group != null && !Objects.equals(group, worker.getGroup()))) {
-            pin.close();
+        var result = pinRouteWorker(ctx, group, worker);
+        if (result == null) {
             return null;
         }
         try {
-            var result = SelectedRole.stateless(pin, status(worker, ctx.getRequestId()));
             long timeout = ctx.getRequest().getGenerateTimeout();
             long ttl =
                     timeout <= 0
@@ -189,23 +237,9 @@ public class VitCacheSelector {
             }
             return result;
         } catch (RuntimeException | Error failure) {
-            pin.close();
+            result.close();
             throw failure;
         }
-    }
-
-    private static ServerStatus status(WorkerStatus worker, String requestId) {
-        ServerStatus status = new ServerStatus();
-        status.setRole(RoleType.VIT);
-        status.setWorkerGeneration(worker.getGenerationId());
-        status.setServerIp(worker.getIp());
-        status.setHttpPort(worker.getPort());
-        status.setGrpcPort(worker.getGrpcPort());
-        status.setSelectedEngineIndex(worker.getEngineIndex(), worker.getMultiEngineNum());
-        status.setGroup(worker.getGroup());
-        status.setRequestId(requestId);
-        status.setSuccess(true);
-        return status;
     }
 
     private SelectedRole pinSelectedWorker(BalanceContext ctx, String group) {

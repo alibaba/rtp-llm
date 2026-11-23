@@ -47,6 +47,7 @@ public class VitCacheDirectory {
                     });
 
     private volatile Map<String, Snapshot> snapshots = Map.of();
+
     private boolean wasMaster;
 
     public VitCacheDirectory(
@@ -76,8 +77,7 @@ public class VitCacheDirectory {
         long nowUs = System.nanoTime() / 1000;
         Map<String, Candidate> matches = new HashMap<>();
         for (WorkerStatus worker : live.values()) {
-            if (!isRoutable(worker, nowUs)
-                    || (group != null && !Objects.equals(group, worker.getGroup()))) {
+            if (!isRoutableForGroup(worker, group, nowUs)) {
                 continue;
             }
             String address = worker.routingAddress();
@@ -207,6 +207,11 @@ public class VitCacheDirectory {
                         System.currentTimeMillis()));
         snapshots = Map.copyOf(updated);
         return true;
+    }
+
+    static boolean isRoutableForGroup(WorkerStatus worker, String group, long nowUs) {
+        return isRoutable(worker, nowUs)
+                && (group == null || Objects.equals(group, worker.getGroup()));
     }
 
     private boolean validKeys(List<String> keys) {
