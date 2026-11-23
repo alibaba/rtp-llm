@@ -22,3 +22,6 @@ arm=$($script arm --print-command)
 [[ "$arm" == *"requirements_cuda13_overrides.txt"* ]]
 [[ "$arm" == *"aarch64-manylinux_2_28"* ]]
 [[ "$arm" == *"requirements_cuda13_arm.update"* ]]
+
+with_indexes=$(UV_ADDITIONAL_INDEXES="https://example.com/wheels/ https://example.com/vendor/" "$script" x86 --print-command)
+[[ "$with_indexes" == *"--index https://example.com/wheels/ --index https://example.com/vendor/"* ]]

@@ -22,8 +22,9 @@ import sys
 from pathlib import Path
 
 HASH_RE = re.compile(r"--hash=sha256:([0-9a-f]{64})")
-PIN_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==")
-URL_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s+@\s+(\S+)")
+PACKAGE_RE = r"([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]+\])?"
+PIN_RE = re.compile(rf"^{PACKAGE_RE}==")
+URL_RE = re.compile(rf"^{PACKAGE_RE}\s+@\s+(\S+)")
 URL_SHA_RE = re.compile(r"#sha256=([0-9a-f]{64})")
 
 

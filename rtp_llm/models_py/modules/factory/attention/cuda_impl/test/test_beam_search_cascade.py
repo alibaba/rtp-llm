@@ -389,7 +389,9 @@ class BeamSearchCascadeTest(unittest.TestCase):
 
     def test_large_request_capacity_grows_workspace_before_capture(self):
         torch.manual_seed(20261104)
-        batch, heads, kv_heads, dim, page, max_pages = 4096, 16, 8, 128, 16, 256
+        # Equal query and KV head counts keep the split-K workspace above
+        # 128 MiB when FlashInfer divides scratch by the GQA group size.
+        batch, heads, kv_heads, dim, page, max_pages = 4096, 16, 16, 128, 16, 256
         configs = SimpleNamespace(
             head_num=heads,
             kv_head_num=kv_heads,

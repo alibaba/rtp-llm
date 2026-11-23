@@ -8,6 +8,7 @@ This is particularly useful in testing environments where you want to use
 a specific version of flashinfer different from the system-installed one.
 """
 
+import hashlib
 import importlib.metadata
 import logging
 import os
@@ -25,7 +26,7 @@ from rtp_llm.utils import jit_cache_env as cache_env
 
 
 def get_package_info(package_name):
-    """Get package version and installation path"""
+    """Get the version, installation path, and RECORD fingerprint."""
     try:
         import importlib
 
@@ -57,14 +58,18 @@ def get_package_info(package_name):
             dist = importlib.metadata.distribution(meta_package_name)
             version = dist.version
             package_path = dist.locate_file(package_name)
+            record = dist.read_text("RECORD")
         finally:
             sys.path[:] = saved_path
         if Path(str(package_path)).exists():
-            return version, str(package_path)
-        return None, None
+            record_hash = (
+                hashlib.sha256(record.encode("utf-8")).hexdigest() if record else None
+            )
+            return version, str(package_path), record_hash
+        return None, None, None
     except Exception as e:
         logging.info(f"[Package Copy] Failed to get info for {package_name}: {e}")
-        return None, None
+        return None, None, None
 
 
 def _build_variant(source_path):
@@ -87,7 +92,7 @@ def _build_variant(source_path):
     return None
 
 
-def _cache_key(package_name, version, source_path):
+def _cache_key(package_name, version, source_path, record_hash):
     # The interpreter ABI is part of the build identity too: a host can serve
     # jobs running different Python versions from the same pip variant (the
     # 2026-10-23 ppu312 pool swap ran cp312 jobs alongside the cp310 bazel
@@ -96,9 +101,13 @@ def _cache_key(package_name, version, source_path):
     # on 3.10). Key on it so each interpreter stages its own copy.
     py_tag = "cp%d%d" % sys.version_info[:2]
     variant = _build_variant(source_path)
-    if variant is None:
-        return "%s_python-%s-%s" % (package_name, version, py_tag)
-    return "%s_python-%s-%s__%s" % (package_name, version, py_tag, variant)
+    key = f"{package_name}_python-{version}-{py_tag}"
+    if variant is not None:
+        key += f"__{variant}"
+    # Wheel patches change RECORD while keeping the version and repo name.
+    if record_hash is not None:
+        key += f"__{record_hash}"
+    return key
 
 
 def copy_package_with_lock(package_name, cache_dir):
@@ -110,15 +119,14 @@ def copy_package_with_lock(package_name, cache_dir):
     logging.info(f"[Package Copy] Processing {package_name}...")
 
     # Get package version and source path
-    version, source_path = get_package_info(package_name)
+    version, source_path, record_hash = get_package_info(package_name)
     if not version or not source_path:
         logging.info(f"[Package Copy] Package {package_name} not found, skipping")
         return None
 
     logging.info(f"[Package Copy] Found {package_name} v{version} at {source_path}")
 
-    # Keyed on version AND build variant; see _build_variant.
-    cache_key = _cache_key(package_name, version, source_path)
+    cache_key = _cache_key(package_name, version, source_path, record_hash)
     target_base = Path(cache_dir) / cache_key
     target_site_packages = target_base / "site-packages"
     target_package_path = target_site_packages / Path(source_path).name

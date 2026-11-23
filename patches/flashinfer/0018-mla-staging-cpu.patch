@@ -1,0 +1,12 @@
+diff --git a/flashinfer/jit/attention/modules.py b/flashinfer/jit/attention/modules.py
+--- a/flashinfer/jit/attention/modules.py
++++ b/flashinfer/jit/attention/modules.py
+@@ -92,7 +92,7 @@ class _GeneratedBatchMlaModule:
+                 f"scratch={scratch_bytes.numel()} and device={device_bytes.numel()}."
+             )
+         staging = torch.empty(
+-            staged_int_workspace_bytes, dtype=torch.uint8, pin_memory=True
++            staged_int_workspace_bytes, dtype=torch.uint8, device="cpu", pin_memory=True
+         )
+         staging.copy_(scratch_bytes[:staged_int_workspace_bytes])
+         with torch.cuda.device(int_workspace.device):

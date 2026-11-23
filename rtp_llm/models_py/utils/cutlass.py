@@ -1,14 +1,66 @@
 import base64
 import hashlib
 import sys
+from functools import lru_cache
 from importlib import metadata
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import torch
 
 
+@lru_cache(maxsize=None)
+def _cutlass_dsl_package_paths(cuda_major: str):
+    # CuTe 4.8 splits Python, MLIR and runtime files between wheels. Its
+    # compiler loader locates the CUDA library next to the Python package.
+    package = "nvidia_cutlass_dsl"
+    try:
+        roots = [
+            Path(
+                metadata.distribution(f"nvidia-cutlass-dsl-libs-{part}").locate_file(
+                    package
+                )
+            )
+            for part in (f"cu{cuda_major}", "base", "core")
+        ]
+    except metadata.PackageNotFoundError:
+        return (), None
+    if not all((root / "dsl_packages").is_dir() for root in roots):
+        return (), None
+
+    root = roots[0]
+    if any(other != root for other in roots[1:]):
+        # pip overlays these wheel paths on install. Recreate that layout for
+        # Bazel's separate site-packages, with core's package initializer last.
+        overlay = TemporaryDirectory(prefix="rtp-cutlass-dsl-")
+        root = Path(overlay.name) / package
+        for source in roots:
+            for entry in source.rglob("*"):
+                if "__pycache__" in entry.parts:
+                    continue
+                target = root / entry.relative_to(source)
+                if entry.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.unlink(missing_ok=True)
+                    target.symlink_to(entry.absolute())
+        # Keep the namespace and its compiler files available for later JITs.
+        return (str(root / "dsl_packages"), str(root.parent)), overlay
+    return (str(root / "dsl_packages"),), None
+
+
 def setup_cutlass_import_path() -> None:
     """Expose the ``cutlass`` package bundled by ``nvidia-cutlass-dsl``."""
+    cuda_major = (torch.version.cuda or "").split(".", 1)[0]
+    if cuda_major == "13":
+        paths, _overlay = _cutlass_dsl_package_paths(cuda_major)
+        if paths:
+            for path in paths:
+                if path not in sys.path:
+                    sys.path.insert(0, path)
+            return
+
     # Bazel keeps the base and CUDA 13 compiler wheels in separate runfiles.
     # Their identical namespace paths must not make import order select CUDA 12.
     try:
@@ -52,15 +104,22 @@ def cuda13_cutlass_is_intact() -> bool:
         distribution = metadata.distribution("nvidia-cutlass-dsl-libs-cu13")
     except metadata.PackageNotFoundError:
         return False
-    if distribution.version != "4.4.2" or not distribution.files:
+    if not distribution.files:
+        return False
+    if distribution.version == "4.8.1":
+        paths, _overlay = _cutlass_dsl_package_paths("13")
+        if not paths:
+            return False
+        expected_package = Path(paths[0]) / "cutlass"
+    elif distribution.version == "4.4.2":
+        expected_package = Path(
+            distribution.locate_file("nvidia_cutlass_dsl/python_packages/cutlass")
+        )
+    else:
         return False
     loaded = sys.modules.get("cutlass")
     if loaded is not None and getattr(loaded, "__file__", None):
-        expected = Path(
-            distribution.locate_file(
-                "nvidia_cutlass_dsl/python_packages/cutlass/__init__.py"
-            )
-        ).resolve()
+        expected = (expected_package / "__init__.py").resolve()
         if Path(loaded.__file__).resolve() != expected:
             return False
     for entry in distribution.files:
