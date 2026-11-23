@@ -141,10 +141,14 @@ public:
         record_["forward_end_us"]   = end_us;
     }
     void setDecodeCudaGraph(const char* status, int bucket, int real_requests, const std::vector<int32_t>& dp_requests) {
-        record_["decode_cuda_graph"] = {{"status", status},
-                                        {"bucket", bucket},
-                                        {"real_requests", real_requests},
-                                        {"dp_real_requests", dp_requests}};
+        ExecutionRecorder::JsonArray requests_by_rank;
+        for (const auto requests : dp_requests) {
+            requests_by_rank.emplace_back(requests);
+        }
+        record_["decode_cuda_graph"] = ExecutionRecorder::Json{{"status", std::string(status)},
+                                                               {"bucket", bucket},
+                                                               {"real_requests", real_requests},
+                                                               {"dp_real_requests", std::move(requests_by_rank)}};
     }
     std::vector<RecordedTokenTiming> timings;
 
