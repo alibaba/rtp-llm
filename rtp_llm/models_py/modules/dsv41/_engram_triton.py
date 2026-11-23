@@ -115,6 +115,8 @@ def hash_token_windows(
 def _lookup_host_kernel(
     weight,
     scales,
+    scale_ptrs,
+    shard_rows,
     indices,
     output,
     rows,
@@ -126,6 +128,7 @@ def _lookup_host_kernel(
     QUANT_BLOCK: tl.constexpr,
     BLOCK_R: tl.constexpr,
     GRID: tl.constexpr,
+    SHARDED: tl.constexpr,
 ):
     columns = tl.arange(0, DIM)
     for base in tl.range(tl.program_id(0) * BLOCK_R, rows, GRID * BLOCK_R):
@@ -145,10 +148,16 @@ def _lookup_host_kernel(
             other=0,
         )
         value = raw.to(tl.float8e4nv, bitcast=True).to(tl.float32)
+        if SHARDED:
+            owner = index // shard_rows
+            local_row = index - owner * shard_rows
+            address = tl.load(scale_ptrs + owner, valid, other=0).to(tl.uint64)
+            source = address.to(tl.pointer_type(tl.uint8))
+            scale_offsets = source[:, None] + local_row[:, None] * (DIM // QUANT_BLOCK)
+        else:
+            scale_offsets = scales + index[:, None] * (DIM // QUANT_BLOCK)
         exponent = tl.load(
-            scales
-            + index[:, None] * (DIM // QUANT_BLOCK)
-            + columns[None, :] // QUANT_BLOCK,
+            scale_offsets + columns[None, :] // QUANT_BLOCK,
             valid[:, None],
             other=0,
         )
@@ -226,6 +235,20 @@ def _lookup_host_rows(
 ):
     tokens, heads = indices.shape
     dim = weight_uva.shape[1]
+    sharded = not isinstance(scales_uva, torch.Tensor)
+    if sharded:
+        from ._engram_scale_shards import ShardedScaleDescriptor
+
+        if not isinstance(scales_uva, ShardedScaleDescriptor) or dim != 256:
+            raise ValueError("Sharded Engram BF16 lookup requires 256-column rows")
+        if scales_uva.validate_metadata(indices.device, weight_uva.shape[0]) is False:
+            raise ValueError("Invalid sharded Engram scale metadata")
+        scales = scales_uva.local_scales
+        scale_ptrs = scales_uva.peer_ptrs
+        shard_rows = scales_uva.rows_per_shard
+    else:
+        scales = scale_ptrs = scales_uva
+        shard_rows = 1
     output = out
     if output is None:
         output = torch.empty(
@@ -246,7 +269,9 @@ def _lookup_host_rows(
     grid = min(triton.cdiv(rows, block_rows), num_sms)
     kernel = _lookup_host_kernel[(grid,)](
         weight_uva,
-        scales_uva,
+        scales,
+        scale_ptrs,
+        shard_rows,
         indices,
         output,
         rows,
@@ -258,8 +283,11 @@ def _lookup_host_rows(
         QUANT_BLOCK=32,
         BLOCK_R=block_rows,
         GRID=grid,
+        SHARDED=sharded,
         num_warps=num_warps,
     )
+    if sharded:
+        scales_uva.record_stream(torch.cuda.current_stream(indices.device))
     if prepare and _prepare_prefetch_kernel(kernel):
         # Exercise the configured function before readiness is published.
         return _lookup_host_rows(

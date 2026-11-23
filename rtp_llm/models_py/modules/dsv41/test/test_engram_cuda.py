@@ -856,6 +856,8 @@ class EngramCudaTest(unittest.TestCase):
         grid = min((rows + 15) // 16, self.embedding._num_sms)
         sync_kernel = _engram_triton._lookup_host_kernel[(grid,)](
             *self.embedding._uva,
+            self.embedding._uva[1],
+            1,
             ids,
             output,
             rows,
@@ -867,6 +869,7 @@ class EngramCudaTest(unittest.TestCase):
             QUANT_BLOCK=32,
             BLOCK_R=16,
             GRID=grid,
+            SHARDED=False,
             num_warps=4,
         )
         attribute = (

@@ -496,7 +496,10 @@ class EngramPrefetchTest(unittest.TestCase):
             100,
         )
         namespace.update(
-            torch=SimpleNamespace(empty=lambda *a, **kw: output, bfloat16=object()),
+            # This fixture's object() scales represent the original flat tensor.
+            torch=SimpleNamespace(
+                Tensor=object, empty=lambda *a, **kw: output, bfloat16=object()
+            ),
             triton=SimpleNamespace(cdiv=lambda a, b: (a + b - 1) // b),
             _lookup_host_kernel=Launcher(),
         )
@@ -577,6 +580,8 @@ class EngramPrefetchTest(unittest.TestCase):
         model.kv_cache = object()
         model._engram_forward_active = False
         model._engram_prefetch = None
+        model._engram_prefetch_has_device_scales = False
+        model._engram_verify_prefetch_enabled = False
         model._is_decode_role = False
         model._engram_attachment = model_module.EngramModelAttachment(
             phase="READY", layer_indices=((1, 0),)
@@ -617,6 +622,153 @@ class EngramPrefetchTest(unittest.TestCase):
         bind.assert_called_once_with(model, model._engram_runtime, scale_group=None)
         create_prefetch.assert_not_called()
         self.assertIn("Engram initialized on layers [1]", logged.output[-1])
+
+    def test_verify_prefetch_policy_is_static_local_hopper(self):
+        for capability, lease, expected in (
+            ((9, 0), None, True),
+            ((9, 0), object(), True),
+            ((10, 0), None, False),
+            ((10, 3), None, False),
+        ):
+            with self.subTest(capability=capability, gpu_scales=lease is not None):
+                model, _ = self._model()
+                model._v4_args = SimpleNamespace(
+                    v41_config={"checkpoint_path": "/test"}
+                )
+                model._engram_runtime = object()
+                self.module.embed_tokens._device_scale_lease = lease
+                attachment = model._engram_attachment
+                attachment.layers = ((1, 0, self.module),)
+                prefetch = Mock()
+                with (
+                    patch.dict(os.environ, {"DSV41_ENGRAM_SHARD_SCALES": "0"}),
+                    patch.object(
+                        engram,
+                        "EngramLayout",
+                        return_value=SimpleNamespace(layer_ids=(1,)),
+                    ),
+                    patch.object(type(attachment), "bind", return_value=attachment),
+                    patch("torch.cuda.get_device_capability", return_value=capability),
+                    patch.object(
+                        engram, "create_engram_prefetch", return_value=(prefetch, 256)
+                    ) as create,
+                ):
+                    model._load_extra_weights(None)
+                self.assertEqual(model._engram_verify_prefetch_enabled, expected)
+                self.assertEqual(create.call_count, int(capability == (9, 0)))
+
+    def test_prepare_verify_prefetch_preserves_decode_and_bounded_fallbacks(self):
+        model, inputs = self._model()
+        model._v4_args = SimpleNamespace(v41_config={})
+        hash_state = SimpleNamespace(
+            prepare_device=Mock(return_value=object()), layout=object(), pad_id=2
+        )
+        model._engram_attachment.hash_state = hash_state
+        hashes = MagicMock()
+        masks = object()
+        prefetch = Mock()
+        prefetch.begin.side_effect = lambda lookups: tuple(lookups)
+        model._engram_prefetch = prefetch
+        model._engram_prefetch_max_rows = 256
+        windows = SimpleNamespace(is_cuda=True, device=torch.device("cuda:0"))
+        windows.to = Mock(return_value=windows)
+        inputs.engram_token_windows = windows
+        kernel = Mock(return_value=(hashes, masks))
+        for rows, prefill, verify, eligible, expected in (
+            (6, True, True, True, True),
+            (256, True, True, True, True),
+            (6, True, True, False, False),
+            (6, True, False, True, False),
+            (6, False, False, False, True),
+            (0, True, True, True, False),
+            (257, True, True, True, False),
+        ):
+            with self.subTest(
+                rows=rows, prefill=prefill, verify=verify, eligible=eligible
+            ):
+                windows.shape = (rows, 4)
+                inputs.attention_inputs.is_prefill = prefill
+                inputs.attention_inputs.is_target_verify = verify
+                model._engram_verify_prefetch_enabled = eligible
+                self.layer.engram_prefetch = None
+                prefetch.reset_mock()
+                with (
+                    patch.dict(
+                        sys.modules,
+                        {
+                            "rtp_llm.models_py.modules.dsv41._engram_triton": SimpleNamespace(
+                                hash_token_windows=kernel
+                            )
+                        },
+                    ),
+                    patch("torch.cuda.get_device_capability") as query,
+                ):
+                    type(model)._prepare_engram(model, inputs)
+                self.assertEqual(prefetch.begin.call_count, int(expected))
+                self.assertIs(
+                    self.layer.engram_prefetch, prefetch if expected else None
+                )
+                self.assertIs(self.layer.engram_token_mask, masks)
+                query.assert_not_called()
+
+    def test_gpu_scale_owner_policy_tracks_the_bound_legacy_plan(self):
+        for capability, leases, has_plan, external in (
+            ((9, 0), (None, None), True, False),
+            ((9, 0), (None, object()), True, False),
+            ((9, 0), (object(), object()), True, False),
+            ((9, 0), (object(), object()), False, False),
+            ((9, 0), (None, object()), True, True),
+            ((10, 0), (object(), object()), True, False),
+            ((10, 3), (None, None), True, False),
+        ):
+            with self.subTest(
+                capability=capability, has_plan=has_plan, external=external
+            ):
+                model, _ = self._model()
+                model._v4_args = SimpleNamespace(
+                    v41_config={"checkpoint_path": "/test"}
+                )
+                model._engram_runtime = object()
+                attachment = model._engram_attachment
+                attachment.external = external
+                attachment.layers = tuple(
+                    (
+                        target,
+                        index,
+                        SimpleNamespace(
+                            embed_tokens=SimpleNamespace(_device_scale_lease=lease)
+                        ),
+                    )
+                    for index, (target, lease) in enumerate(zip((1, 14), leases))
+                )
+                plan = Mock() if has_plan else None
+                with (
+                    patch.dict(os.environ, {"DSV41_ENGRAM_SHARD_SCALES": "0"}),
+                    patch.object(
+                        engram,
+                        "EngramLayout",
+                        return_value=SimpleNamespace(layer_ids=(1, 14)),
+                    ),
+                    patch.object(type(attachment), "bind", return_value=attachment),
+                    patch("torch.cuda.get_device_capability", return_value=capability),
+                    patch.object(
+                        engram,
+                        "create_engram_prefetch",
+                        return_value=(plan, 256 if has_plan else 0),
+                    ) as create,
+                ):
+                    model._load_extra_weights(None)
+                local_hopper = capability == (9, 0) and not external
+                active = local_hopper and has_plan
+                self.assertEqual(create.call_count, int(local_hopper))
+                self.assertEqual(
+                    model._engram_prefetch_has_device_scales,
+                    active and any(lease is not None for lease in leases),
+                )
+                self.assertEqual(
+                    model._engram_verify_prefetch_enabled,
+                    active,
+                )
 
     def test_model_real_attachment_guard_rejects_before_prefetch(self):
         model, inputs = self._model()
@@ -766,6 +918,302 @@ class EngramPrefetchTest(unittest.TestCase):
         model._prepare_engram.assert_not_called()
         self.assertIs(self.layer.engram_hashes, outer_hashes)
         self.assertTrue(model._engram_forward_active)
+
+    def _run_real_decode_layer_loop(self, model, metadata):
+        # Exercise the real owner-reuse/finally code without importing attention
+        # kernels or running a CUDA operation. Only layer math is replaced.
+        path = Path(__file__).resolve().parents[1] / "decode" / "forward.py"
+        tree = ast.parse(path.read_text())
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "forward_layers"
+        )
+        namespace = {
+            "_rt": SimpleNamespace(ENABLED=False),
+            "_profiler": SimpleNamespace(
+                make_layer_forward_range=lambda: lambda index: nullcontext()
+            ),
+            "prepare_model_gate_routing_metadata": lambda *args: None,
+            "forward_decode_layer": lambda layer, hidden, *args, **kwargs: hidden,
+            "expert_load_for_layer": lambda *args: None,
+        }
+        future = ast.parse("from __future__ import annotations").body[0]
+        exec(compile(ast.Module([future, function], []), str(path), "exec"), namespace)
+        model.v4.capture_aux_hidden_layer_ids = ()
+        model.v4._mtp_hidden_buffer = None
+        model.v4._hc_head_reduce = lambda hidden: hidden.squeeze(2)
+        model.v4.norm = lambda hidden: hidden
+        return namespace["forward_layers"](
+            model.v4,
+            None,
+            torch.zeros(1, dtype=torch.int32),
+            metadata,
+            None,
+            prepare_hidden_fn=lambda **kwargs: torch.zeros(1, 1, 1, 2),
+        )
+
+    def test_gpu_scale_owner_precedes_prepare_and_is_reused_by_decode(self):
+        for verify in (False, True):
+            for capturing in (False, True):
+                with self.subTest(verify=verify, capturing=capturing):
+                    model, inputs = self._model()
+                    model._is_decode_role = True
+                    model._engram_prefetch_has_device_scales = True
+                    model._engram_verify_prefetch_enabled = True
+                    legacy = model._engram_prefetch = Mock()
+                    model._engram_prefetch_max_rows = 256
+                    model._v4_args = SimpleNamespace(v41_config={})
+                    model._engram_attachment.hash_state = SimpleNamespace(
+                        prepare_device=Mock(return_value=object()),
+                        layout=object(),
+                        pad_id=2,
+                    )
+                    self.layer.engram.embed_tokens._device_scale_lease = object()
+                    windows = SimpleNamespace(
+                        is_cuda=True, device=torch.device("cuda:0"), shape=(6, 4)
+                    )
+                    windows.to = Mock(return_value=windows)
+                    inputs.engram_token_windows = windows
+                    hashes = MagicMock()
+                    masks = object()
+                    kernel = Mock(return_value=(hashes, masks))
+                    previous = model.v4._engram_lookup_prefetch = object()
+                    inputs.attention_inputs.is_prefill = verify
+                    inputs.attention_inputs.is_target_verify = verify
+                    metadata = SimpleNamespace(batch_size=1, q_len_per_req=1)
+                    fmha = SimpleNamespace(metadata=metadata)
+                    calls = []
+                    plan = Mock(active=False)
+
+                    def create_owner(*args):
+                        calls.append("owner")
+                        plan.active = True
+                        return plan
+
+                    def prepare(actual_inputs):
+                        self.assertTrue(plan.active)
+                        self.assertTrue(model._engram_verify_prefetch_enabled)
+                        calls.append("prepare")
+                        type(model)._prepare_engram(model, actual_inputs)
+
+                    def begin(lookups):
+                        create.assert_called_once_with(model.v4, metadata)
+                        self.assertTrue(plan.active)
+                        plan.close.assert_not_called()
+                        self.assertIs(self.layer.engram_token_mask, masks)
+                        self.assertEqual(
+                            tuple(lookups),
+                            (
+                                (
+                                    1,
+                                    self.layer.engram.embed_tokens,
+                                    self.layer.engram_hashes,
+                                ),
+                            ),
+                        )
+                        calls.append("begin")
+
+                    def close():
+                        self.assertTrue(plan.active)
+                        calls.append("close")
+                        plan.active = False
+
+                    def inner(_):
+                        calls.append("inner")
+                        self.assertIs(model.v4._engram_lookup_prefetch, plan)
+                        self.assertIs(self.layer.engram_prefetch, legacy)
+                        legacy.begin.assert_called_once()
+                        self.assertEqual(
+                            self._run_real_decode_layer_loop(model, metadata).shape,
+                            (1, 1, 2),
+                        )
+                        plan.close.assert_not_called()
+                        self.assertTrue(plan.active)
+                        return "output"
+
+                    if verify:
+                        fmha._cuda_graph_engram_forked = Mock()
+                        plan.start_verify_lookup.side_effect = (
+                            lambda forked: calls.append("verify-start")
+                        )
+                    plan.before_layer.side_effect = lambda index: calls.append(
+                        f"layer-{index}"
+                    )
+                    plan.close.side_effect = close
+                    legacy.begin.side_effect = begin
+                    legacy.finish.side_effect = lambda: calls.append("finish")
+                    model._prepare_engram.side_effect = prepare
+                    model._prepare_image_features.side_effect = lambda _: calls.append(
+                        "images"
+                    )
+                    model.parent_forward.side_effect = inner
+                    create = Mock(side_effect=create_owner)
+                    with (
+                        patch.dict(
+                            sys.modules,
+                            {
+                                "rtp_llm.models_py.modules.dsv41._engram_decode_prefetch": SimpleNamespace(
+                                    DecodeEngramPrefetch=create
+                                ),
+                                "rtp_llm.models_py.modules.dsv41._engram_triton": SimpleNamespace(
+                                    hash_token_windows=kernel
+                                ),
+                            },
+                        ),
+                        patch.object(
+                            torch.cuda,
+                            "is_current_stream_capturing",
+                            return_value=capturing,
+                        ),
+                        patch("torch.cuda.get_device_capability") as capability,
+                    ):
+                        self.assertEqual(model(inputs, fmha), "output")
+                    expected = ["owner", "prepare", "begin"]
+                    if verify:
+                        expected.append("verify-start")
+                        plan.start_verify_lookup.assert_called_once_with(
+                            fmha._cuda_graph_engram_forked
+                        )
+                    else:
+                        plan.start_verify_lookup.assert_not_called()
+                    self.assertEqual(
+                        calls,
+                        expected
+                        + ["images", "inner", "layer-0", "layer-1", "close", "finish"],
+                    )
+                    create.assert_called_once_with(model.v4, metadata)
+                    legacy.begin.assert_called_once()
+                    plan.close.assert_called_once()
+                    legacy.finish.assert_called_once()
+                    capability.assert_not_called()
+                    self.assertIs(model.v4._engram_lookup_prefetch, previous)
+                    self.assertIsNone(self.layer.engram_hashes)
+                    self.assertIsNone(self.layer.engram_token_mask)
+                    self.assertIsNone(self.layer.engram_prefetch)
+                    self.assertFalse(model._engram_forward_active)
+                    self.assertFalse(plan.active)
+
+    def test_gpu_scale_owner_closes_when_prepare_raises(self):
+        model, inputs = self._model()
+        model._engram_prefetch_has_device_scales = True
+        legacy = model._engram_prefetch = Mock()
+        previous = model.v4._engram_lookup_prefetch = object()
+        inputs.attention_inputs.is_prefill = False
+        metadata = object()
+        calls = []
+        plan = Mock()
+        create = Mock(side_effect=lambda *args: calls.append("owner") or plan)
+
+        def fail_prepare(_):
+            create.assert_called_once_with(model.v4, metadata)
+            plan.close.assert_not_called()
+            calls.append("prepare")
+            raise RuntimeError("hash prepare failed")
+
+        model._prepare_engram.side_effect = fail_prepare
+        plan.close.side_effect = lambda: calls.append("close")
+        legacy.finish.side_effect = lambda: calls.append("finish")
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "rtp_llm.models_py.modules.dsv41._engram_decode_prefetch": SimpleNamespace(
+                        DecodeEngramPrefetch=create
+                    )
+                },
+            ),
+            patch.object(torch.cuda, "is_current_stream_capturing", return_value=True),
+            self.assertRaisesRegex(RuntimeError, "hash prepare failed"),
+        ):
+            model(inputs, SimpleNamespace(metadata=metadata))
+        self.assertEqual(calls, ["owner", "prepare", "close", "finish"])
+        plan.close.assert_called_once()
+        legacy.finish.assert_called_once()
+        model.parent_forward.assert_not_called()
+        self.assertIs(model.v4._engram_lookup_prefetch, previous)
+        self.assertIsNone(self.layer.engram_hashes)
+        self.assertIsNone(self.layer.engram_token_mask)
+        self.assertFalse(model._engram_forward_active)
+
+    def test_sm100_without_legacy_plan_keeps_inner_owner_order(self):
+        model, inputs = self._model()
+        model._is_decode_role = True
+        inputs.attention_inputs.is_prefill = False
+        metadata = SimpleNamespace(batch_size=1, q_len_per_req=1)
+        calls = []
+        plan = Mock()
+        create = Mock(side_effect=lambda *args: calls.append("owner") or plan)
+        plan.before_layer.side_effect = lambda index: calls.append(f"layer-{index}")
+        plan.close.side_effect = lambda: calls.append("close")
+
+        def prepare(_):
+            create.assert_not_called()
+            calls.append("prepare")
+
+        def inner(_):
+            calls.append("inner")
+            self.assertIsNone(model.v4._engram_lookup_prefetch)
+            self._run_real_decode_layer_loop(model, metadata)
+            plan.close.assert_called_once()
+            return "output"
+
+        model._prepare_engram.side_effect = prepare
+        model._prepare_image_features.side_effect = lambda _: calls.append("images")
+        model.parent_forward.side_effect = inner
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "rtp_llm.models_py.modules.dsv41._engram_decode_prefetch": SimpleNamespace(
+                        DecodeEngramPrefetch=create
+                    )
+                },
+            ),
+            patch(
+                "torch.cuda.get_device_capability", return_value=(10, 0)
+            ) as capability,
+        ):
+            self.assertEqual(
+                model(inputs, SimpleNamespace(metadata=metadata)), "output"
+            )
+        self.assertEqual(
+            calls,
+            ["prepare", "images", "inner", "owner", "layer-0", "layer-1", "close"],
+        )
+        create.assert_called_once_with(model.v4, metadata)
+        capability.assert_not_called()
+        self.assertIsNone(model._engram_prefetch)
+        self.assertIsNone(model.v4._engram_lookup_prefetch)
+
+    def test_gpu_scale_owner_keeps_prefill_and_missing_fmha_fallback(self):
+        for ordinary_prefill, fmha in (
+            (True, SimpleNamespace(metadata=object())),
+            (False, None),
+            (False, object()),
+        ):
+            with self.subTest(ordinary_prefill=ordinary_prefill, fmha=fmha):
+                model, inputs = self._model()
+                model._is_decode_role = True
+                model._engram_prefetch_has_device_scales = True
+                legacy = model._engram_prefetch = Mock()
+                inputs.attention_inputs.is_prefill = ordinary_prefill
+                create = Mock()
+                with patch.dict(
+                    sys.modules,
+                    {
+                        "rtp_llm.models_py.modules.dsv41._engram_decode_prefetch": SimpleNamespace(
+                            DecodeEngramPrefetch=create
+                        )
+                    },
+                ):
+                    self.assertEqual(model(inputs, fmha), "output")
+                create.assert_not_called()
+                model._prepare_engram.assert_called_once_with(inputs)
+                model.parent_forward.assert_called_once_with(inputs)
+                legacy.finish.assert_called_once()
+                self.assertIsNone(model.v4._engram_lookup_prefetch)
+                self.assertFalse(model._engram_forward_active)
 
     def test_verify_graph_forks_before_model_work_and_drains_on_failure(self):
         model, inputs = self._model()

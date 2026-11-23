@@ -64,6 +64,8 @@ class DeepSeekV41Model(DeepSeekV4Model):
         self._engram_forward_active = False
         self._engram_cpu_runtime = None
         self._engram_prefetch = None
+        self._engram_verify_prefetch_enabled = False
+        self._engram_prefetch_has_device_scales = False
         self._engram_prefetch_max_rows = 0
 
     def initialize_prefill_cp_collectives(self, device: torch.device) -> None:
@@ -153,6 +155,16 @@ class DeepSeekV41Model(DeepSeekV4Model):
                     ),
                 )
             )
+            # The graph table owner is installed before preparation, so local
+            # Hopper verification can prefetch both host and device scales.
+            self._engram_verify_prefetch_enabled = self._engram_prefetch is not None
+            self._engram_prefetch_has_device_scales = (
+                self._engram_prefetch is not None
+                and any(
+                    module.embed_tokens._device_scale_lease is not None
+                    for _, _, module in attachment.layers
+                )
+            )
         logging.info(
             "DeepSeek V4.1 Engram initialized on layers %s (external=%s)",
             [layer_id for layer_id, _ in attachment.layer_indices],
@@ -203,7 +215,13 @@ class DeepSeekV41Model(DeepSeekV4Model):
         attn = as_tagged_attention_inputs(inputs.attention_inputs)
         if (
             self._engram_prefetch is not None
-            and not attn.is_prefill
+            and (
+                not attn.is_prefill
+                or (
+                    self._engram_verify_prefetch_enabled
+                    and bool(getattr(attn, "is_target_verify", False))
+                )
+            )
             and 0 < windows.shape[0] <= self._engram_prefetch_max_rows
         ):
             self._engram_prefetch.begin(
@@ -343,8 +361,22 @@ class DeepSeekV41Model(DeepSeekV4Model):
         verify_prefetch = None
         try:
             if self.kv_cache is not None:
-                self._prepare_engram(inputs)
                 attn = as_tagged_attention_inputs(inputs.attention_inputs)
+                if (
+                    getattr(self, "_engram_prefetch_has_device_scales", False)
+                    and hasattr(fmha_impl, "metadata")
+                    and (
+                        not attn.is_prefill or getattr(attn, "is_target_verify", False)
+                    )
+                ):
+                    from rtp_llm.models_py.modules.dsv41._engram_decode_prefetch import (
+                        DecodeEngramPrefetch,
+                    )
+
+                    # Legacy Hopper prefetch starts inside preparation. Install
+                    # the same graph table owner used by decode before it forks.
+                    verify_prefetch = DecodeEngramPrefetch(self.v4, fmha_impl.metadata)
+                self._prepare_engram(inputs)
                 forked = getattr(fmha_impl, "_cuda_graph_engram_forked", None)
                 if forked is not None and getattr(attn, "is_target_verify", False):
                     from rtp_llm.models_py.modules.dsv41._engram_decode_prefetch import (
@@ -353,7 +385,10 @@ class DeepSeekV41Model(DeepSeekV4Model):
 
                     # Hashing used only the captured history window. Fork its
                     # L1 gather before any main-stream work reads other inputs.
-                    verify_prefetch = DecodeEngramPrefetch(self.v4, fmha_impl.metadata)
+                    if verify_prefetch is None:
+                        verify_prefetch = DecodeEngramPrefetch(
+                            self.v4, fmha_impl.metadata
+                        )
                     verify_prefetch.start_verify_lookup(forked)
                 if (
                     not self._is_decode_role

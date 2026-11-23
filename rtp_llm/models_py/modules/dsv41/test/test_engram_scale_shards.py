@@ -15,7 +15,7 @@ from contextlib import ExitStack, contextmanager
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 import torch
 
@@ -299,11 +299,18 @@ class ScaleShardCPUTest(unittest.TestCase):
             groups = (tuple(range(count)),)
             self._exercise_selector(self.peers([0] * count), groups, groups)
 
-    def test_metadata_admits_both_blackwell_capabilities(self):
+    def test_metadata_admits_exact_hopper_and_both_blackwell_capabilities(self):
         import torch.distributed._symmetric_memory as symm
 
         provider = _provider()
-        for capability, expected in (((10, 0), True), ((10, 3), True), ((9, 0), False)):
+        for capability, expected in (
+            ((9, 0), True),
+            ((10, 0), True),
+            ((10, 3), True),
+            ((8, 9), False),
+            ((9, 1), False),
+            ((10, 1), False),
+        ):
             with self.subTest(capability=capability):
                 properties = SimpleNamespace(
                     major=capability[0],
@@ -311,19 +318,134 @@ class ScaleShardCPUTest(unittest.TestCase):
                     uuid="test-gpu",
                     multi_processor_count=148,
                 )
-                with patch.object(
-                    torch.cuda, "is_current_stream_capturing", return_value=False
-                ), patch.object(
-                    torch.cuda, "get_device_properties", return_value=properties
-                ), patch.object(
-                    symm, "get_backend", return_value="CUDA"
-                ), patch.object(
-                    provider.Path, "read_text", return_value="test-boot"
+                with (
+                    patch.object(
+                        torch.cuda, "is_current_stream_capturing", return_value=False
+                    ),
+                    patch.object(
+                        torch.cuda, "get_device_properties", return_value=properties
+                    ),
+                    patch.object(symm, "get_backend", return_value="CUDA"),
+                    patch.object(provider.Path, "read_text", return_value="test-boot"),
                 ):
                     metadata = provider._local_metadata(torch.device("cuda:0"), True)
                 self.assertEqual(metadata["eligible"], expected)
                 self.assertEqual(metadata["capability"], list(capability))
                 self.assertIsNone(metadata["error"])
+
+    def test_local_constructor_routes_hopper_shards_to_original_bf16_lookup(self):
+        """CPU metadata routing, not symmetric-memory or CUDA qualification."""
+        engram = importlib.import_module("rtp_llm.models_py.modules.dsv41.engram")
+        provider = _provider()
+        weight = torch.zeros((3, 256), dtype=torch.uint8).view(torch.float8_e4m3fn)
+        scales = torch.zeros((3, 8), dtype=torch.uint8)
+        for capability in ((9, 0), (10, 0), (10, 3)):
+            for shards in (1, 2, 8):
+                with self.subTest(capability=capability, shards=shards):
+                    weight_uva, scale_uva, lease, group = (
+                        object(),
+                        object(),
+                        object(),
+                        object(),
+                    )
+                    descriptor = SimpleNamespace(group_size=shards)
+                    view = Mock(
+                        side_effect=lambda tensor: (
+                            weight_uva if tensor is weight else scale_uva
+                        )
+                    )
+                    pinned = SimpleNamespace(
+                        device=torch.device("cuda:0"), cuda_view=view
+                    )
+                    properties = SimpleNamespace(
+                        major=capability[0],
+                        minor=capability[1],
+                        multi_processor_count=132,
+                    )
+                    with (
+                        patch.dict("os.environ", {"DSV41_ENGRAM_DEVICE_SCALES": "1"}),
+                        patch.object(
+                            torch.cuda,
+                            "is_current_stream_capturing",
+                            return_value=False,
+                        ),
+                        patch.object(
+                            torch.cuda, "get_device_properties", return_value=properties
+                        ) as query,
+                        patch.object(
+                            provider, "create_sharded_scales", return_value=descriptor
+                        ) as create,
+                        patch.object(
+                            engram, "_DeviceScaleLease", return_value=lease
+                        ) as make_lease,
+                    ):
+                        embedding = engram.HostEngramEmbedding(
+                            weight,
+                            scales,
+                            pinned=pinned,
+                            scale_group=group,
+                            scale_identity="test-generation",
+                        )
+                    self.assertIs(embedding._uva[0], weight_uva)
+                    self.assertIs(embedding._uva[1], descriptor)
+                    self.assertIs(embedding._device_scale_lease, lease)
+                    self.assertEqual(embedding._scale_shard_count, shards)
+                    self.assertEqual(
+                        embedding._quantized_lookup_supported, capability != (9, 0)
+                    )
+                    legacy = shards > 1 and capability != (9, 0)
+                    self.assertIs(
+                        embedding._legacy_scale_uva, scale_uva if legacy else None
+                    )
+                    self.assertEqual(
+                        view.call_args_list,
+                        (
+                            [call(embedding.scales), call(weight)]
+                            if legacy
+                            else [call(weight)]
+                        ),
+                    )
+                    create.assert_called_once_with(
+                        embedding.scales, group, pinned.device, "test-generation"
+                    )
+                    make_lease.assert_called_once_with(embedding._uva, pinned)
+                    query.assert_called_once_with(pinned.device)
+
+    def test_local_constructor_keeps_device_scale_rollback_and_capture_gate(self):
+        engram = importlib.import_module("rtp_llm.models_py.modules.dsv41.engram")
+        provider = _provider()
+        weight = torch.zeros((3, 256), dtype=torch.uint8).view(torch.float8_e4m3fn)
+        scales = torch.zeros((3, 8), dtype=torch.uint8)
+        weight_uva, scale_uva = object(), object()
+        pinned = SimpleNamespace(
+            device=torch.device("cuda:0"),
+            cuda_view=Mock(side_effect=(weight_uva, scale_uva)),
+        )
+        properties = SimpleNamespace(major=9, minor=0, multi_processor_count=132)
+        with (
+            patch.dict("os.environ", {"DSV41_ENGRAM_DEVICE_SCALES": "0"}),
+            patch.object(torch.cuda, "is_current_stream_capturing") as capture,
+            patch.object(torch.cuda, "get_device_properties", return_value=properties),
+            patch.object(provider, "create_sharded_scales") as create,
+            patch.object(engram, "_DeviceScaleLease") as make_lease,
+        ):
+            embedding = engram.HostEngramEmbedding(
+                weight, scales, pinned=pinned, scale_group=object()
+            )
+        self.assertEqual(embedding._uva, (weight_uva, scale_uva))
+        self.assertIsNone(embedding._device_scale_lease)
+        self.assertFalse(embedding._quantized_lookup_supported)
+        capture.assert_not_called()
+        create.assert_not_called()
+        make_lease.assert_not_called()
+        with (
+            patch.dict("os.environ", {"DSV41_ENGRAM_DEVICE_SCALES": "1"}),
+            patch.object(torch.cuda, "is_current_stream_capturing", return_value=True),
+            patch.object(torch.cuda, "get_device_properties") as query,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "startup allocation"):
+                engram.HostEngramEmbedding(weight, scales, pinned=pinned)
+        query.assert_not_called()
 
     def test_selector_partial_peer_failure_and_global_mismatch(self):
         peers = self.peers([0] * 8 + [1] * 8)
@@ -341,14 +463,18 @@ class ScaleShardCPUTest(unittest.TestCase):
         for local_cached in (False, True):
             with self.subTest(local_cached=local_cached):
                 cache = {(world, groups): None} if local_cached else {}
-                with patch.dict(provider._NODE_GROUPS, cache, clear=True), patch.object(
-                    provider,
-                    "_exchange",
-                    return_value=[
-                        {"cached": local_cached},
-                        {"cached": not local_cached},
-                    ],
-                ), patch.object(provider.dist, "new_group") as create:
+                with (
+                    patch.dict(provider._NODE_GROUPS, cache, clear=True),
+                    patch.object(
+                        provider,
+                        "_exchange",
+                        return_value=[
+                            {"cached": local_cached},
+                            {"cached": not local_cached},
+                        ],
+                    ),
+                    patch.object(provider.dist, "new_group") as create,
+                ):
                     with self.assertRaisesRegex(RuntimeError, "caches differ"):
                         provider._new_node_scale_group(world, groups)
                     create.assert_not_called()
@@ -357,13 +483,18 @@ class ScaleShardCPUTest(unittest.TestCase):
         provider = _provider()
         world_a, world_b = object(), object()
         plan_a, plan_b = ((0, 1), (2, 3)), ((0, 2), (1, 3))
-        with patch.dict(provider._NODE_GROUPS, clear=True), patch.object(
-            provider,
-            "_exchange",
-            side_effect=lambda group, payload, phase: [dict(payload)] * 4,
-        ), patch.object(provider.dist, "get_rank", return_value=0), patch.object(
-            provider.dist, "new_group", side_effect=lambda **kwargs: object()
-        ) as create:
+        with (
+            patch.dict(provider._NODE_GROUPS, clear=True),
+            patch.object(
+                provider,
+                "_exchange",
+                side_effect=lambda group, payload, phase: [dict(payload)] * 4,
+            ),
+            patch.object(provider.dist, "get_rank", return_value=0),
+            patch.object(
+                provider.dist, "new_group", side_effect=lambda **kwargs: object()
+            ) as create,
+        ):
             a = provider._new_node_scale_group(world_a, plan_a)
             self.assertIs(provider._new_node_scale_group(world_a, plan_a), a)
             b = provider._new_node_scale_group(world_b, plan_a)
@@ -398,10 +529,13 @@ class ScaleShardCPUTest(unittest.TestCase):
         self.assertFalse(values.reshape(1, 24, 256)[0, 1:4].any())
 
     def test_disabled_selection_does_not_enter_collectives(self):
-        with forbid_forward_collectives(), patch.object(
-            torch.cuda,
-            "get_device_capability",
-            side_effect=AssertionError("Disabled sharding must not probe CUDA"),
+        with (
+            forbid_forward_collectives(),
+            patch.object(
+                torch.cuda,
+                "get_device_capability",
+                side_effect=AssertionError("Disabled sharding must not probe CUDA"),
+            ),
         ):
             selected = _provider().select_scale_group(
                 "cuda:0", "cpu-disabled-test", enabled=False
@@ -567,8 +701,9 @@ def _run_group(group, device, label):
                 torch.cuda.synchronize(device)
                 for asynchronous in (False, True):
                     graph = torch.cuda.CUDAGraph()
-                    with forbid_forward_collectives(), torch.cuda.graph(
-                        graph, stream=capture_stream
+                    with (
+                        forbid_forward_collectives(),
+                        torch.cuda.graph(graph, stream=capture_stream),
                     ):
                         if asynchronous:
                             aux.wait_stream(capture_stream)

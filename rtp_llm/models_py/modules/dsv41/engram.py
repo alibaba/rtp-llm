@@ -787,11 +787,11 @@ class HostEngramEmbedding:
         self.block_size = block_size
         self._initialize_lookup_state(pinned=pinned)
         if pinned is not None:
-            if os.getenv("DSV41_ENGRAM_DEVICE_SCALES", "1") == "1":
-                if torch.cuda.is_current_stream_capturing():
-                    raise RuntimeError(
-                        "Engram device scales require startup allocation"
-                    )
+            device_scales = os.getenv("DSV41_ENGRAM_DEVICE_SCALES", "1") == "1"
+            if device_scales and torch.cuda.is_current_stream_capturing():
+                raise RuntimeError("Engram device scales require startup allocation")
+            properties = torch.cuda.get_device_properties(pinned.device)
+            if device_scales:
                 # Keep the CPU source and all FP8/E8M0 bytes unchanged.
                 if scale_group is not None:
                     from rtp_llm.models_py.modules.dsv41._engram_scale_shards import (
@@ -802,9 +802,14 @@ class HostEngramEmbedding:
                         self.scales, scale_group, pinned.device, scale_identity
                     )
                     self._scale_shard_count = getattr(gpu_scales, "group_size", 1)
-                    if self._scale_shard_count > 1:
+                    if self._scale_shard_count > 1 and (
+                        properties.major,
+                        properties.minor,
+                    ) != (9, 0):
                         # Preserve the BF16 embedding API for diagnostic callers
-                        # without recreating a full GPU scales replica.
+                        # on Blackwell without recreating a full GPU replica.
+                        # Hopper's BF16 lookup reads the descriptor directly,
+                        # retaining its original FP32 dequantization/BF16 round.
                         self._legacy_scale_uva = pinned.cuda_view(self.scales)
                 else:
                     gpu_scales = self.scales.to(pinned.device)
@@ -818,7 +823,6 @@ class HostEngramEmbedding:
                     pinned.cuda_view(self.weight),
                     pinned.cuda_view(self.scales),
                 )
-            properties = torch.cuda.get_device_properties(pinned.device)
             self._num_sms = properties.multi_processor_count
             self._quantized_lookup_supported = (
                 self._device_scale_lease is not None

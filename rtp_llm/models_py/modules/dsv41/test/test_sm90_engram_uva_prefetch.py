@@ -5,9 +5,12 @@ No checkpoint/shared production table is created, duplicated, or registered.
 """
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.modules.dsv41._engram_decode_prefetch import DecodeEngramPrefetch
 from rtp_llm.models_py.modules.dsv41.engram import HostEngramEmbedding, NgramHashState
 from rtp_llm.models_py.modules.dsv41.engram_prefetch import UvaEngramPrefetch
 from rtp_llm.models_py.modules.dsv41.test import test_sm90_engram as fixture_module
@@ -42,6 +45,14 @@ class Sm90EngramUvaPrefetchTest(unittest.TestCase):
             fixture.layout, token_map=[*range(12), 31], device=self.device
         )
         self.prefetch = UvaEngramPrefetch(self.device, (0, 1))
+        # GPU scale captures retain their tables through decode metadata, just
+        # as the model forward does before starting the auxiliary lookup stream.
+        self.graph_model = torch.nn.Module()
+        self.graph_model.layers = [
+            SimpleNamespace(engram=self.model, engram_hashes=None) for _ in (0, 1)
+        ]
+        self.graph_metadata = {}
+        self.addCleanup(self.graph_metadata.clear)
         self.addCleanup(self.prefetch.finish)
 
     def _lookups(self, hashes):
@@ -53,7 +64,17 @@ class Sm90EngramUvaPrefetchTest(unittest.TestCase):
         hashes = self.hasher.hash_token_windows(windows, dead_mask=windows == 12)
         ids = hashes[:, 0].contiguous()
         mask = (windows[:, 0] >= 0) & (windows[:, 0] != 12)
+        metadata = self.graph_metadata.setdefault(
+            windows.shape[0],
+            SimpleNamespace(batch_size=windows.shape[0], q_len_per_req=1),
+        )
+        owner = DecodeEngramPrefetch(self.graph_model, metadata)
         try:
+            if (
+                self.embedding._device_scale_lease is not None
+                and torch.cuda.is_current_stream_capturing()
+            ):
+                self.assertIsNotNone(owner._capture_permit)
             self.prefetch.begin(self._lookups(ids))
             output = hidden
             for layer_id in (0, 1):
@@ -62,7 +83,10 @@ class Sm90EngramUvaPrefetchTest(unittest.TestCase):
                 )
             return output
         finally:
-            self.prefetch.finish()
+            try:
+                self.prefetch.finish()
+            finally:
+                owner.close()
 
     def _run_eager(self, hidden, windows):
         hashes = self.hasher.hash_token_windows(windows, dead_mask=windows == 12)
@@ -72,6 +96,100 @@ class Sm90EngramUvaPrefetchTest(unittest.TestCase):
         for _ in (0, 1):
             output = self.model(output, ids, mask)
         return output
+
+    @torch.inference_mode()
+    def test_verify_prepare_and_real_block_consumer_follow_changed_graph_inputs(self):
+        from rtp_llm.models_py.model_desc.deepseek_v41_model import DeepSeekV41Model
+        from rtp_llm.models_py.modules.dsv41.block import Block
+        from rtp_llm.models_py.modules.dsv41.engram import EngramLayout
+
+        with patch.dict("os.environ", {"DSV41_ENGRAM_DEVICE_SCALES": "0"}):
+            embedding = HostEngramEmbedding(
+                self.fixture.pinned.weight,
+                self.fixture.pinned.scales,
+                pinned=self.fixture.pinned,
+            )
+        self.model.embed_tokens = embedding
+        self.assertIsNone(embedding._device_scale_lease)
+        layout = EngramLayout(
+            dict(
+                engram_layer_ids=[1, 14],
+                engram_num_embeddings=[4000, 4000],
+                engram_max_ngram_size=4,
+                engram_n_heads=4,
+                engram_head_dim=32,
+                engram_compressed_vocab_size=32,
+                engram_pad_token_id=2,
+                engram_vocab_size=13,
+            )
+        )
+        state = NgramHashState(layout, token_map=[*range(12), 31], device=self.device)
+        prefetch = UvaEngramPrefetch(self.device, (1, 14))
+        self.addCleanup(prefetch.finish)
+        indices = ((1, 0), (14, 1))
+        layers = [SimpleNamespace(engram=None) for _ in range(15)]
+        for target, _ in indices:
+            layers[target] = SimpleNamespace(
+                layer_id=target, engram=self.model, engram_prefetch=None
+            )
+        owner = SimpleNamespace(
+            _engram_attachment=SimpleNamespace(layer_indices=indices, hash_state=state),
+            _v4_args=SimpleNamespace(v41_config={"image_token_id": 12}),
+            v4=SimpleNamespace(
+                embed=SimpleNamespace(weight=self.model.q_weight), layers=layers
+            ),
+            _engram_prefetch=prefetch,
+            _engram_prefetch_max_rows=256,
+            _engram_layers=indices,
+            _engram_verify_prefetch_enabled=True,
+        )
+        attn = SimpleNamespace(is_prefill=True, is_target_verify=True)
+
+        def run(hidden, windows, enabled):
+            owner._engram_verify_prefetch_enabled = enabled
+            try:
+                DeepSeekV41Model._prepare_engram(
+                    owner,
+                    SimpleNamespace(
+                        engram_token_windows=windows, attention_inputs=attn
+                    ),
+                )
+                output = hidden
+                for target, _ in indices:
+                    self.assertIs(
+                        layers[target].engram_prefetch, prefetch if enabled else None
+                    )
+                    output = Block._inject_engram(layers[target], output)
+                return output
+            finally:
+                prefetch.finish()
+                for target, _ in indices:
+                    layers[target].engram_prefetch = None
+
+        for tokens in (6, 48, 128):
+            windows = torch.zeros(tokens, 4, dtype=torch.int32, device=self.device)
+            initial = torch.randn(tokens, 4, 5120, device=self.device).bfloat16()
+            hidden = initial.clone()
+            for _ in range(3):
+                hidden.copy_(initial)
+                run(hidden, windows, True)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                output = run(hidden, windows, True)
+            for turn in range(3):
+                values = (torch.arange(tokens * 4).reshape(tokens, 4) + turn) % 12
+                values[tokens // 2 :] = -1
+                values[0, 2] = -1
+                if turn == 2:
+                    values[0, 0] = 12
+                windows.copy_(values)
+                initial.normal_()
+                hidden.copy_(initial)
+                graph.replay()
+                torch.cuda.synchronize(self.device)
+                expected = run(initial.clone(), windows, False)
+                torch.testing.assert_close(output, expected, rtol=0, atol=0)
+            graph = output = None
 
     @torch.inference_mode()
     def test_eager_and_graph_changed_history_mask_and_bucket_are_bitwise_equal(self):

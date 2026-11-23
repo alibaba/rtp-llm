@@ -109,7 +109,7 @@ def _local_metadata(device, enabled):
         result["eligible"] = (
             bool(result["boot_id"])
             and bool(result["uuid"])
-            and result["capability"] in ([10, 0], [10, 3])
+            and result["capability"] in ([9, 0], [10, 0], [10, 3])
             and result["backend"] in (None, "CUDA")
         )
     except Exception as error:
