@@ -13,6 +13,12 @@ namespace py = pybind11;
 namespace rtp_llm {
 
 void registerBasicRocmOps(py::module& rtp_ops_m) {
+    rtp_ops_m.def("try_fused_multimodal_copy_",
+                  &tryFusedMultimodalCopy,
+                  "Copy one batch of ordered, disjoint GPU features, returning false before writing on a miss.",
+                  py::arg("dst"),
+                  py::arg("srcs"),
+                  py::arg("row_offsets"));
     rtp_ops_m.def("fused_multimodal_copy_",
                   &fusedMultimodalCopy,
                   "Fuse multimodal embedding D2D copies",

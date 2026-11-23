@@ -310,13 +310,13 @@ bool RtpEmbeddingStageMetrics::init(kmonitor::MetricsGroupManager* manager) {
 
 void RtpEmbeddingStageMetrics::report(const kmonitor::MetricsTags* tags, RtpEmbeddingStageMetricsCollector* collector) {
     if (collector->tokenizer_latency_us >= 0) {
-        REPORT_MUTABLE_METRIC(tokenizer_latency_us_metric, collector->tokenizer_latency_us);
+        RTP_REPORT_MUTABLE_METRIC(tokenizer_latency_us_metric, collector->tokenizer_latency_us);
     }
     if (collector->vision_latency_us >= 0) {
-        REPORT_MUTABLE_METRIC(vision_latency_us_metric, collector->vision_latency_us);
+        RTP_REPORT_MUTABLE_METRIC(vision_latency_us_metric, collector->vision_latency_us);
     }
     if (collector->result_process_latency_us >= 0) {
-        REPORT_MUTABLE_METRIC(result_process_latency_us_metric, collector->result_process_latency_us);
+        RTP_REPORT_MUTABLE_METRIC(result_process_latency_us_metric, collector->result_process_latency_us);
     }
 }
 

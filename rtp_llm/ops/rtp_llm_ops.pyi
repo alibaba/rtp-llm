@@ -13,6 +13,7 @@ __all__ = [
     "SelectTopkOp",
     "embedding",
     "fused_multimodal_copy_",
+    "try_fused_multimodal_copy_",
     "fused_add_layernorm",
     "fused_add_layernorm_quant_fp8",
     "fused_bias_add",
@@ -90,6 +91,11 @@ def fused_multimodal_copy_(
     row_offsets: list[int],
 ) -> None:
     """Copy multiple contiguous feature tensors into a token embedding tensor."""
+
+def try_fused_multimodal_copy_(
+    dst: torch.Tensor, srcs: list[torch.Tensor], row_offsets: list[int]
+) -> bool:
+    """Copy a disjoint GPU batch, returning false without writing if unsupported."""
 
 def fused_bias_gelu_quant_fp8(
     input: torch.Tensor,

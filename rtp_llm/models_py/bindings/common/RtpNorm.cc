@@ -56,7 +56,8 @@ void fused_bias_gelu_quant_fp8(at::Tensor& input, at::Tensor& bias, at::Tensor& 
     CHECK_INPUT(output);
     CHECK_CUDA(scales);
     CHECK_DIM(2, input);
-    TORCH_CHECK(bias.dim() == 1, "bias must be a 1D tensor");
+    TORCH_CHECK(bias.dim() == 1 || (bias.dim() == 2 && bias.size(0) == 1),
+                "bias must have shape [hidden_size] or [1, hidden_size]");
     CHECK_DIM(2, output);
     CHECK_DIM(2, scales);
     CHECK_EQ(input.device(), bias.device());
@@ -222,7 +223,9 @@ void fused_add_layernorm_quant_fp8(at::Tensor& input,
         CHECK_INPUT(bias);
         CHECK_EQ(input.device(), bias.device());
         CHECK_EQ(input.scalar_type(), bias.scalar_type());
-        TORCH_CHECK(bias.dim() == 1 && bias.numel() == input.size(1), "bias must have shape [hidden_size]");
+        TORCH_CHECK(bias.dim() == 1 || (bias.dim() == 2 && bias.size(0) == 1),
+                    "bias must have shape [hidden_size] or [1, hidden_size]");
+        CHECK_EQ(input.size(1), bias.numel());
     }
     if (input.numel() == 0) {
         return;

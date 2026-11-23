@@ -17,7 +17,14 @@ def _normalize_multimodal_locs(
 
     if isinstance(multimodal_locs, torch.Tensor):
         actual_count = multimodal_locs.numel()
-        locs = multimodal_locs.to(device="cpu", dtype=torch.long).view(-1).tolist()
+        if (
+            multimodal_locs.device.type == "cpu"
+            and multimodal_locs.ndim == 1
+            and multimodal_locs.dtype in (torch.int32, torch.int64)
+        ):
+            locs = multimodal_locs.tolist()
+        else:
+            locs = multimodal_locs.to(device="cpu", dtype=torch.long).view(-1).tolist()
     else:
         actual_count = len(multimodal_locs)
         locs = list(multimodal_locs)
@@ -77,6 +84,21 @@ class MultimodalEmbeddingInjector(nn.Module):
                 "embeddings must be a 2D tensor of shape [tokens, hidden_size]"
             )
 
+        if (
+            embeddings.is_cuda
+            and embeddings.is_contiguous()
+            and isinstance(multimodal_locs, torch.Tensor)
+            and all(
+                isinstance(feature, torch.Tensor) for feature in multimodal_features
+            )
+        ):
+            from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+            if rtp_llm_ops.try_fused_multimodal_copy_(
+                embeddings, multimodal_features, locs
+            ):
+                return embeddings
+
         hidden_size = embeddings.size(-1)
         copy_features: List[torch.Tensor] = []
         copy_locs: List[int] = []
@@ -99,14 +121,8 @@ class MultimodalEmbeddingInjector(nn.Module):
             if feature.device != embeddings.device:
                 feature = feature.to(embeddings.device)
 
-            # A negative location means that part (or all) of this feature lives in
-            # a reused prefix. Only inject the suffix that belongs to this request.
             if loc < 0:
-                reused_rows = min(-loc, feature.size(0))
-                feature = feature.narrow(0, reused_rows, feature.size(0) - reused_rows)
-                loc = 0
-                if feature.numel() == 0:
-                    continue
+                raise ValueError(f"feature[{idx}] loc must be non-negative, got {loc}")
 
             length = feature.size(0)
             if loc + length > embeddings.size(0):
@@ -127,7 +143,12 @@ class MultimodalEmbeddingInjector(nn.Module):
             for (_, previous_end), (current_start, _) in zip(intervals, intervals[1:])
         )
 
-        if embeddings.is_cuda and copy_features and not has_overlap:
+        if (
+            embeddings.is_cuda
+            and embeddings.is_contiguous()
+            and copy_features
+            and not has_overlap
+        ):
             # Batch the small feature copies into one launch. Vision-BERT commonly
             # has one feature per request item, so the scalar fallback otherwise
             # creates O(batch_size) D2D launches on the model stream.
@@ -135,9 +156,15 @@ class MultimodalEmbeddingInjector(nn.Module):
 
             rtp_llm_ops.fused_multimodal_copy_(embeddings, copy_features, copy_locs)
         else:
-            # Sequential copies define last-writer-wins semantics for overlapping
-            # ranges; a parallel fused kernel cannot preserve that ordering.
+            # Sequential copies preserve strided destination views and define
+            # last-writer-wins semantics for overlapping ranges.
+            storage = embeddings.untyped_storage()
+            dst_begin = storage.data_ptr()
+            dst_end = dst_begin + storage.nbytes()
             for feature, loc in zip(copy_features, copy_locs):
+                src_begin = feature.data_ptr()
+                if src_begin < dst_end and dst_begin < src_begin + feature.nbytes:
+                    feature = feature.clone()
                 embeddings.narrow(0, loc, feature.size(0)).copy_(feature)
 
         return embeddings

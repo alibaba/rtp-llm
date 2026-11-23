@@ -138,6 +138,7 @@ class _FakeWorkItem:
     ):
         # mm_inputs is the raw media list; its length is what the scheduler
         # bounds batches by (sum(len(wi.mm_inputs)) across a request).
+        self.preprocess_events = ()
         self.mm_inputs = [None] * images
         if preprocess_result is None:
             preprocess_result = torch.zeros(1)

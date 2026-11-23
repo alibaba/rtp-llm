@@ -1,5 +1,5 @@
 import itertools
-from unittest import SkipTest, TestCase, main
+from unittest import SkipTest, TestCase, main, mock
 
 import torch
 from torch import dtype as _dtype
@@ -8,6 +8,7 @@ from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
     MultimodalDeepstackInjector,
     MultimodalEmbeddingInjector,
 )
+from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
 class MultimodalEmbeddingTest(TestCase):
@@ -154,6 +155,116 @@ class MultimodalEmbeddingTest(TestCase):
             output[2:],
             torch.zeros(2, 2, dtype=torch.half),
         )
+
+    def test_injector_preserves_noncontiguous_destination_storage(self):
+        for dtype in self.DTYPES:
+            with self.subTest(dtype=dtype):
+                backing = torch.arange(48, dtype=dtype, device="cuda").reshape(6, 8)
+                expected = backing.clone()
+                embeddings = backing[1:5, ::2]
+                feature = torch.full((2, 4), -7.0, dtype=dtype, device="cuda")
+                expected[2:4, ::2] = feature
+                self.assertFalse(embeddings.is_contiguous())
+
+                with mock.patch.object(rtp_llm_ops, "fused_multimodal_copy_") as fused:
+                    output = MultimodalEmbeddingInjector()(
+                        embeddings, [feature], torch.tensor([1], dtype=torch.int32)
+                    )
+
+                fused.assert_not_called()
+                self.assertIs(output, embeddings)
+                torch.testing.assert_close(backing, expected, rtol=0, atol=0)
+
+    def test_injector_fuses_noncontiguous_sources_for_disjoint_ranges(self):
+        for dtype in self.DTYPES:
+            with self.subTest(dtype=dtype):
+                embeddings = torch.zeros((5, 4), dtype=dtype, device="cuda")
+                feature = torch.arange(8, dtype=dtype, device="cuda").reshape(4, 2).t()
+                self.assertFalse(feature.is_contiguous())
+                features = [feature, feature + 10]
+                expected = embeddings.clone()
+                expected[0:2] = features[0]
+                expected[3:5] = features[1]
+
+                with mock.patch.object(
+                    rtp_llm_ops,
+                    "fused_multimodal_copy_",
+                    wraps=rtp_llm_ops.fused_multimodal_copy_,
+                ) as fused:
+                    output = MultimodalEmbeddingInjector()(
+                        embeddings, features, torch.tensor([0, 3], dtype=torch.int32)
+                    )
+
+                fused.assert_called_once()
+                self.assertTrue(
+                    all(src.is_contiguous() for src in fused.call_args.args[1])
+                )
+                self.assertIs(output, embeddings)
+                torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+    def test_fast_copy_validates_entire_ordered_batch_before_writing(self):
+        dst = torch.zeros((8, 4), dtype=torch.bfloat16, device="cuda")
+        sources = torch.arange(16, dtype=dst.dtype, device=dst.device).reshape(2, 2, 4)
+        first, last = sources.unbind()
+        for rejected_source, offsets in (
+            (last, [0, 1]),
+            (last, [3, 0]),
+            (last, [0, 7]),
+            (last.float(), [0, 4]),
+            (dst[:2], [0, 4]),
+        ):
+            self.assertFalse(
+                rtp_llm_ops.try_fused_multimodal_copy_(
+                    dst, [first, rejected_source], offsets
+                )
+            )
+            self.assertEqual(dst.count_nonzero().item(), 0)
+        self.assertTrue(
+            rtp_llm_ops.try_fused_multimodal_copy_(dst, [first, last], [0, 4])
+        )
+        torch.testing.assert_close(dst[:2], first)
+        torch.testing.assert_close(dst[4:6], last)
+
+    def test_aliased_features_read_in_input_order(self):
+        for step in (1, 2):
+            with self.subTest(destination_stride=step):
+                backing = torch.arange(32, device="cuda", dtype=torch.float16).view(
+                    8, 4
+                )
+                dst = backing[::step]
+                # The second source observes the first write. The first copy may
+                # also partially overlap its own destination.
+                expected = backing.clone()
+                reference = expected[::step]
+                sources = [backing[1:3], backing[:1]]
+                reference[:2].copy_(expected[1:3].clone())
+                reference[3:4].copy_(expected[:1].clone())
+                result = MultimodalEmbeddingInjector()(
+                    dst, sources, torch.tensor([0, 3], dtype=torch.int32, device="cpu")
+                )
+                self.assertIs(result, dst)
+                torch.testing.assert_close(backing, expected, rtol=0, atol=0)
+
+    def test_injector_preserves_last_writer_for_overlapping_ranges(self):
+        for dtype in self.DTYPES:
+            with self.subTest(dtype=dtype):
+                embeddings = torch.zeros((5, 4), dtype=dtype, device="cuda")
+                first = torch.full((3, 4), 2.0, dtype=dtype, device="cuda")
+                last = torch.full((2, 4), 9.0, dtype=dtype, device="cuda")
+                expected = embeddings.clone()
+                expected[1:4] = first
+                expected[2:4] = last
+
+                with mock.patch.object(rtp_llm_ops, "fused_multimodal_copy_") as fused:
+                    output = MultimodalEmbeddingInjector()(
+                        embeddings,
+                        [first, last],
+                        torch.tensor([1, 2], dtype=torch.int32),
+                    )
+
+                fused.assert_not_called()
+                self.assertIs(output, embeddings)
+                torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
     def test_injector_rejects_feature_location_count_mismatch(self):
         injector = MultimodalEmbeddingInjector().cuda()

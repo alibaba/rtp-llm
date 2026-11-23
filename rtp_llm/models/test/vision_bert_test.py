@@ -123,6 +123,52 @@ class VisionBertTest(unittest.TestCase):
             config.mm_related_params.config["ckpt_path"], str(self.checkpoint_path)
         )
 
+    def test_scheduler_packs_only_uniform_nonempty_image_groups(self):
+        from rtp_llm.multimodal.multimodal_mixins.vision_bert_mixin import (
+            VisionBertEmbedding,
+        )
+
+        params = self.config().mm_related_params
+        part = VisionBertEmbedding(params)
+        images = list(torch.arange(30, dtype=torch.float32).reshape(2, 3, 5).unbind())
+        first, second = images
+        groups = [
+            images,
+            [first],
+            [first[:1], second],
+            [first[:0], second],
+            [first[:0], second[:0]],
+        ]
+        batched = part.batched_embedding(groups, [0] * len(groups))
+        self.assertEqual(len(batched), len(groups))
+        for i, (group, (result, extra)) in enumerate(zip(groups, batched)):
+            with self.subTest(rows=[image.size(0) for image in group]):
+                direct, direct_extra = part.embedding(group)
+                self.assertIsNone(extra)
+                self.assertIsNone(direct_extra)
+                self.assertIsInstance(direct, list)
+                if i == 0:
+                    self.assertIsInstance(result, torch.Tensor)
+                    self.assertEqual(tuple(result.shape), (2, 3, 6))
+                    torch.testing.assert_close(
+                        result, torch.stack(direct), rtol=0, atol=0
+                    )
+                else:
+                    self.assertIsInstance(result, list)
+                    self.assertEqual(len(result), len(direct))
+                    for actual, expected in zip(result, direct):
+                        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+        class CustomEmbedding(VisionBertEmbedding):
+            def embedding(self, data, *, mm_type, marker):
+                return data, (mm_type, marker)
+
+        result, extra = CustomEmbedding(params).batched_embedding(
+            [images], [7], marker=11
+        )[0]
+        self.assertIs(result, images)
+        self.assertEqual(extra, (7, 11))
+
     def test_real_visual_checkpoint_load_and_projection(self):
         # Non-square marker weights catch prefix, transpose and random-init
         # regressions while the public factory drives the production loader.
@@ -187,6 +233,14 @@ class VisionBertTest(unittest.TestCase):
             + beta.to(dtype).float()
         ).to(dtype)
         torch.testing.assert_close(torch.cat(output), expected, rtol=2e-3, atol=2e-3)
+        for group in ([features[0]], [features[0][:0], features[0][:1], features[1]]):
+            with self.subTest(rows=[value.shape[0] for value in group]):
+                reference = part.LayerNorm(
+                    part.vision_embedding(torch.cat(group).to(dtype))
+                )
+                split, _ = part.embedding(group)
+                self.assertEqual([v.size(0) for v in split], [v.size(0) for v in group])
+                torch.testing.assert_close(torch.cat(split), reference, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

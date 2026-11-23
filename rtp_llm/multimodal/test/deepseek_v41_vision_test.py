@@ -2,14 +2,16 @@ import hashlib
 import importlib.util
 import json
 import os
-from pathlib import Path
-from types import SimpleNamespace
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest import TestCase, main
 from unittest.mock import patch
 
 import torch
 from safetensors import safe_open
+from safetensors.torch import save_file
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from rtp_llm.config.dsv41_config import V41Config
@@ -117,8 +119,9 @@ class V41PreparedValidationTest(TestCase):
             allocate_types.assert_not_called()
             encode.assert_not_called()
 
-    def test_valid_record_runs_real_cpu_vision(self):
-        config = V41Config.from_dict(
+    @staticmethod
+    def _tiny_config():
+        return V41Config.from_dict(
             {
                 "text_config": {
                     "hidden_size": 8,
@@ -144,7 +147,9 @@ class V41PreparedValidationTest(TestCase):
                 "image_token_id": 129264,
             }
         )
-        adapter = DeepSeekV41VisionEmbedding(config, device="cpu").eval()
+
+    def test_valid_record_runs_real_cpu_vision(self):
+        adapter = DeepSeekV41VisionEmbedding(self._tiny_config(), device="cpu").eval()
         with torch.no_grad():
             for parameter in adapter.parameters():
                 parameter.fill_(0.125)
@@ -155,6 +160,50 @@ class V41PreparedValidationTest(TestCase):
         self.assertEqual(tuple(output.shape), (5, 8))
         self.assertTrue(torch.isfinite(output).all())
         torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+    def test_bf16_mixin_load_preserves_checkpoint_fp32_norm_weights(self):
+        from rtp_llm.config.py_config_modules import VitConfig
+        from rtp_llm.model_loader.load_config import LoadMethod
+        from rtp_llm.model_loader.multimodal_mixin_loader import MultimodalMixinLoader
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_mixin import (
+            DeepSeekV41Mixin,
+        )
+        from rtp_llm.utils.base_model_datatypes import VitParameters
+
+        config = self._tiny_config()
+        state = DeepSeekV41VisionEmbedding(config, device="cpu").state_dict()
+        norm_names = (
+            "vision.blocks.0.norm1.weight",
+            "vision.blocks.0.norm2.weight",
+            "vision.norm.weight",
+        )
+        for index, name in enumerate(norm_names):
+            offsets = torch.arange(1, 1 + state[name].numel(), dtype=torch.float32)
+            state[name] = 1 + index + offsets / 4096
+            self.assertFalse(torch.equal(state[name], state[name].bfloat16().float()))
+
+        params = VitParameters()
+        params.config["v41_config"] = config
+        with TemporaryDirectory() as checkpoint:
+            save_file(state, str(Path(checkpoint) / "model.safetensors"))
+            with patch.object(MultimodalMixinLoader, "force_clean_cuda_memory"):
+                mixin = DeepSeekV41Mixin(
+                    compute_dtype=torch.bfloat16,
+                    device="cpu",
+                    mm_related_params=params,
+                    load_method=LoadMethod.AUTO,
+                    vit_config=VitConfig(),
+                    ckpt_path=checkpoint,
+                )
+        loaded = mixin.mm_part.state_dict()
+        for name in norm_names:
+            with self.subTest(weight=name):
+                self.assertEqual(loaded[name].dtype, torch.float32)
+                self.assertTrue(
+                    torch.equal(
+                        loaded[name].view(torch.int32), state[name].view(torch.int32)
+                    )
+                )
 
     def test_empty_hash_bypasses_cache_without_aliasing(self):
         # An empty content_sha256 is accepted by the RPC/prepared-input checks;

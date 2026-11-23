@@ -38,6 +38,28 @@ class LinearRegistrationTest(unittest.TestCase):
         plain_fp4 = ModelOptFp4Config(bits=4, group_size=16, is_quanted=True)
         self.assertFalse(CudaFp8GEMMLinear.can_handle(plain_fp4, weight, scales))
 
+    def test_bias_gelu_falls_back_for_supported_linear_inputs(self):
+        devices = ("cpu", "cuda") if torch.cuda.is_available() else ("cpu",)
+        for device in devices:
+            for dtype, shape, bias_stride in (
+                (torch.float32, (5, 4), 1),
+                (torch.float16, (2, 5, 4), 1),
+                (torch.float16, (5, 4), 2),
+            ):
+                with self.subTest(
+                    device=device, dtype=dtype, shape=shape, stride=bias_stride
+                ):
+                    value = torch.randn(shape, dtype=dtype, device=device)
+                    weight = torch.randn(4, 8, dtype=dtype, device=device)
+                    bias = torch.randn(8 * bias_stride, dtype=dtype, device=device)[
+                        ::bias_stride
+                    ]
+                    layer = CudaF16Linear(weight, bias=bias)
+                    expected = torch.nn.functional.gelu(layer(value))
+                    torch.testing.assert_close(
+                        layer.forward_with_bias_gelu(value), expected, rtol=0, atol=0
+                    )
+
     def test_unscaled_fp32_projection_keeps_nonquantized_backend(self):
         self.assertIn(CudaF16Linear, LinearFactory._strategies)
         weight = torch.arange(12, dtype=torch.float32).view(4, 3)

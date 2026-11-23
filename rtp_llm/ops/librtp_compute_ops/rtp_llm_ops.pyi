@@ -214,6 +214,7 @@ def cp_gather_indexer_k_quant_cache(kv_cache: torch.Tensor, dst_k: torch.Tensor,
     Gather indexer K quantized cache kernel
     """
 def fused_multimodal_copy_(dst: torch.Tensor, srcs: list[torch.Tensor], row_offsets: list[int]) -> None: ...
+def try_fused_multimodal_copy_(dst: torch.Tensor, srcs: list[torch.Tensor], row_offsets: list[int]) -> bool: ...
 
 def cuda_graph_copy_large2small(input_tensor: torch.Tensor, output_tensor: torch.Tensor, batch_size: torch.Tensor, max_batch_size: int, max_seq_len: int, input_lengths: torch.Tensor, hidden_size: int, cu_seq_len: torch.Tensor) -> None:
     """

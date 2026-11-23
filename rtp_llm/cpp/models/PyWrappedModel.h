@@ -99,6 +99,9 @@ public:
         if (forward.is_none()) {
             return false;
         }
+        // A pooled encoder may build its own ragged attention plan from CPU lengths.
+        pooled_host_attention_lengths_ =
+            py::getattr(forward, "uses_host_attention_lengths", py::bool_(false)).cast<bool>();
         py_forward_method_ = std::move(forward);
         return true;
     }
@@ -197,8 +200,9 @@ private:
     std::unique_ptr<GraphBase> generation_prefill_graph_runner_;
     py::object                 py_model_;
     py::object                 py_forward_method_;
-    bool                       prepare_attention_in_forward_ = false;
-    bool                       use_host_multimodal_locs_     = false;
+    bool                       pooled_host_attention_lengths_ = false;
+    bool                       prepare_attention_in_forward_  = false;
+    bool                       use_host_multimodal_locs_      = false;
     py::object                 held_attn_pyobj_;
     // Per-wrapper ownership, not the process-wide configuration request. Only
     // the normal main-generation wrapper can own this secondary runner.

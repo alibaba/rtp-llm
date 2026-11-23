@@ -43,7 +43,7 @@ compute_layernorm(Tf val, float s_mean, float s_variance, const T* gamma, const 
 #if USING_CUDA
 // Vision-BERT/DeepGEMM fast path.  This deliberately mirrors the existing
 // USE_DIFF_OF_SQUARES AddBiasResidualLayerNorm reduction and BF16 rounding,
-// then quantizes the rounded values from shared memory into DeepGEMM's
+// then quantizes the rounded register values into DeepGEMM's
 // per-128 UE8M0 TMA layout.  Keeping both outputs preserves the residual path
 // while avoiding a second global-memory read and a separate quant kernel.
 template<typename T>
@@ -59,91 +59,71 @@ __global__ void generalAddBiasResidualLayerNormQuantFp8(T*             output,
                                                         __nv_fp8_e4m3* output_quant,
                                                         uint32_t*      scales,
                                                         int            scale_stride) {
-    constexpr int packed_elements = num_elems<T>::value;
-    using float_packed_t          = typename packed_as<float, packed_elements>::type;
-    using scalar_t                = typename packed_as<T, 1>::type;
-
-    extern __shared__ __align__(sizeof(float)) char shared_storage[];
-    T*                                              values = reinterpret_cast<T*>(shared_storage);
-    __shared__ float                                shared_mean;
-    __shared__ float                                shared_inv_std;
-
-    const int row        = blockIdx.x;
-    const int packed_dim = hidden_dim / packed_elements;
-    float     local_sum  = 0.0f;
-    float     local_sq   = 0.0f;
-
-    for (int i = threadIdx.x; i < packed_dim; i += blockDim.x) {
-        const int index = row * packed_dim + i;
-        T         value = input[index];
-        if (bias != nullptr) {
-            value = add(value, ldg(&bias[i]));
-        }
-        value                        = add(value, ldg(&residual[index]));
-        output[index]                = value;
-        values[i]                    = value;
-        const float_packed_t value_f = cuda_cast<float_packed_t>(value);
-        local_sum += cuda_sum<float>(value_f);
-        local_sq += cuda_sum<float>(value_f * value_f);
-    }
-
-    float moments[2] = {local_sum, local_sq};
-    blockReduceSumV2<float, 2>(moments);
-    if (threadIdx.x == 0) {
-        shared_mean          = moments[0] / hidden_dim;
-        const float variance = moments[1] / hidden_dim - shared_mean * shared_mean;
-        shared_inv_std       = rsqrtf(variance + eps);
-    }
-    __syncthreads();
-
-    for (int i = threadIdx.x; i < packed_dim; i += blockDim.x) {
-        const int            index      = row * packed_dim + i;
-        const float_packed_t value_f    = cuda_cast<float_packed_t>(values[i]);
-        const T              normalized = cuda_cast<T>(
-            compute_layernorm<float_packed_t, T, true>(value_f, shared_mean, shared_inv_std, gamma, beta, i));
-        normed_output[index] = normalized;
-        values[i]            = normalized;
-    }
-    __syncthreads();
-
-    constexpr int group_size        = 128;
-    constexpr int threads_per_group = 32;
-    const int     groups_per_row    = hidden_dim / group_size;
-    const int     group             = threadIdx.x / threads_per_group;
-    const int     lane              = threadIdx.x % threads_per_group;
-    if (group >= groups_per_row) {
-        return;
-    }
-
-    const scalar_t* scalar_values = reinterpret_cast<const scalar_t*>(values) + group * group_size;
-    float           local_absmax  = 1e-4f;
+    using float_packed_t     = typename packed_as<float, num_elems<T>::value>::type;
+    const int      row       = blockIdx.x;
+    const int      lane      = threadIdx.x % 32;
+    const int      group     = threadIdx.x / 32;
+    const int      pair_col  = group * 64 + lane;
+    const int      pair_base = row * (hidden_dim / 2) + pair_col;
+    float_packed_t value[2];
+    float          moments[4];
 #pragma unroll
-    for (int i = lane; i < group_size; i += threads_per_group) {
-        local_absmax = fmaxf(local_absmax, fabsf(static_cast<float>(scalar_values[i])));
+    for (int part = 0; part < 2; ++part) {
+        const int offset = part * 32;
+        T         v      = input[pair_base + offset];
+        if (bias != nullptr) {
+            v = add(v, ldg(&bias[pair_col + offset]));
+        }
+        v                          = add(v, ldg(&residual[pair_base + offset]));
+        output[pair_base + offset] = v;
+        value[part]                = cuda_cast<float_packed_t>(v);
+        moments[2 * part]          = cuda_sum<float>(value[part]);
+        moments[2 * part + 1]      = cuda_sum<float>(value[part] * value[part]);
+    }
+
+    // Each half of the scaling group retains its original 32-pair XOR sum.
+    warpReduceSumV2<float, 4>(moments);
+    __shared__ float2 partial[16];
+    if (lane == 0) {
+        partial[2 * group]     = make_float2(moments[0], moments[1]);
+        partial[2 * group + 1] = make_float2(moments[2], moments[3]);
+    }
+    __syncthreads();
+    const float2 p        = lane < (hidden_dim / 64) ? partial[lane] : make_float2(0.f, 0.f);
+    float        whole[2] = {p.x, p.y};
+    warpReduceSumV2<float, 2>(whole);
+    const float mean    = __shfl_sync(0xffffffffu, whole[0], 0) / hidden_dim;
+    const float squares = __shfl_sync(0xffffffffu, whole[1], 0) / hidden_dim;
+    const float inv_std = rsqrtf(squares - mean * mean + eps);
+
+    float_packed_t rounded[2];
+    float          amax = 1e-4f;
+#pragma unroll
+    for (int part = 0; part < 2; ++part) {
+        const int offset     = part * 32;
+        const T   normalized = cuda_cast<T>(
+            compute_layernorm<float_packed_t, T, true>(value[part], mean, inv_std, gamma, beta, pair_col + offset));
+        normed_output[pair_base + offset] = normalized;
+        rounded[part]                     = cuda_cast<float_packed_t>(normalized);
+        amax                              = fmaxf(amax, fmaxf(fabsf(rounded[part].x), fabsf(rounded[part].y)));
     }
 #pragma unroll
     for (int delta = 16; delta > 0; delta >>= 1) {
-        local_absmax = fmaxf(local_absmax, __shfl_xor_sync(0xffffffffu, local_absmax, delta));
+        amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, delta));
     }
-
-    const float    raw_scale       = fmaxf(local_absmax / 448.0f, 1e-10f);
-    const uint32_t scale_bits      = __float_as_uint(raw_scale);
-    const int      floor_exponent  = static_cast<int>((scale_bits >> 23) & 0xff) - 127;
-    const int      scale_exponent  = floor_exponent + ((scale_bits & 0x7fffffU) != 0U);
-    const int      biased_exponent = scale_exponent + 127;
-    const float    group_scale     = __int_as_float(biased_exponent << 23);
+    const float    raw_scale = fmaxf(amax / 448.0f, 1e-10f);
+    const uint32_t bits      = __float_as_uint(raw_scale);
+    const uint32_t exponent  = (bits >> 23) + ((bits & 0x7fffffU) != 0);
+    const float    scale     = __uint_as_float(exponent << 23);
     if (lane == 0) {
-        const int packed_col = group / 4;
-        const int pack_idx   = group % 4;
-        reinterpret_cast<uint8_t*>(scales)[packed_col * scale_stride * 4 + row * 4 + pack_idx] =
-            static_cast<uint8_t>(biased_exponent);
+        reinterpret_cast<uint8_t*>(scales)[(group / 4) * scale_stride * 4 + row * 4 + group % 4] =
+            static_cast<uint8_t>(exponent);
     }
-
-    __nv_fp8_e4m3* row_quant = output_quant + row * hidden_dim + group * group_size;
 #pragma unroll
-    for (int i = lane; i < group_size; i += threads_per_group) {
-        const float value = static_cast<float>(scalar_values[i]);
-        row_quant[i]      = __nv_fp8_e4m3(fminf(fmaxf(value / group_scale, -448.0f), 448.0f));
+    for (int part = 0; part < 2; ++part) {
+        const float2 q = make_float2(fminf(fmaxf(rounded[part].x / scale, -448.0f), 448.0f),
+                                     fminf(fmaxf(rounded[part].y / scale, -448.0f), 448.0f));
+        reinterpret_cast<__nv_fp8x2_e4m3*>(output_quant)[pair_base + 32 * part] = __nv_fp8x2_e4m3(q);
     }
 }
 
@@ -162,25 +142,21 @@ void invokeGeneralAddBiasResidualLayerNormQuantFp8(T*           out,
                                                    uint32_t*    scales,
                                                    int          scale_stride,
                                                    cudaStream_t stream) {
-    using packed_t                = typename packed_as<T, 2>::type;
-    constexpr int packed_elements = 2;
-    const int     packed_dim      = hidden_dim / packed_elements;
-    dim3          block(32 * ((packed_dim + 31) / 32));
-    dim3          grid(tokens);
-    const size_t  shared_bytes = hidden_dim * sizeof(T);
-    generalAddBiasResidualLayerNormQuantFp8<<<grid, block, shared_bytes, stream>>>(
-        reinterpret_cast<packed_t*>(out),
-        reinterpret_cast<packed_t*>(norm_output),
-        reinterpret_cast<const packed_t*>(input),
-        reinterpret_cast<const packed_t*>(bias),
-        reinterpret_cast<const packed_t*>(residual),
-        reinterpret_cast<const packed_t*>(gamma),
-        reinterpret_cast<const packed_t*>(beta),
-        eps,
-        hidden_dim,
-        static_cast<__nv_fp8_e4m3*>(out_quant),
-        scales,
-        scale_stride);
+    using packed_t = typename packed_as<T, 2>::type;
+    dim3 block(hidden_dim / 4);
+    dim3 grid(tokens);
+    generalAddBiasResidualLayerNormQuantFp8<<<grid, block, 0, stream>>>(reinterpret_cast<packed_t*>(out),
+                                                                        reinterpret_cast<packed_t*>(norm_output),
+                                                                        reinterpret_cast<const packed_t*>(input),
+                                                                        reinterpret_cast<const packed_t*>(bias),
+                                                                        reinterpret_cast<const packed_t*>(residual),
+                                                                        reinterpret_cast<const packed_t*>(gamma),
+                                                                        reinterpret_cast<const packed_t*>(beta),
+                                                                        eps,
+                                                                        hidden_dim,
+                                                                        static_cast<__nv_fp8_e4m3*>(out_quant),
+                                                                        scales,
+                                                                        scale_stride);
 }
 
 template void invokeGeneralAddBiasResidualLayerNormQuantFp8<half>(half*,

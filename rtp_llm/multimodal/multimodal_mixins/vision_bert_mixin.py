@@ -61,18 +61,50 @@ class VisionBertEmbedding(ImageEmbeddingInterface):
 
     @torch.inference_mode()
     def embedding(self, data, **kwargs):
-        tensors = data
-        input_length = [len(t) for t in tensors]
-        vision_input = torch.concat(tensors, dim=0).to(
-            dtype=self._data_type, device=self._device, non_blocking=True
-        )
+        return self._project_images(data, pack_equal_rows=False)
 
+    @torch.inference_mode()
+    def batched_embedding(self, data_list, mm_types, **kwargs):
+        if (
+            getattr(self.embedding, "__func__", None)
+            is not VisionBertEmbedding.embedding
+        ):
+            return super().batched_embedding(data_list, mm_types, **kwargs)
+        return [
+            self._project_images(data, pack_equal_rows=True)
+            for data, _ in zip(data_list, mm_types)
+        ]
+
+    def _project_images(self, data, *, pack_equal_rows: bool):
+        single = len(data) == 1 and data[0].ndim == 2 and data[0].is_contiguous()
+        vision_input = data[0] if single else torch.cat(data, dim=0)
+        weight = self.vision_embedding.weight
+        vision_input = vision_input.to(
+            dtype=weight.dtype, device=weight.device, non_blocking=True
+        )
         vision_embedding = self.vision_embedding(vision_input)
         vision_embedding = self.LayerNorm(vision_embedding)
-        return list(torch.split(vision_embedding, input_length, dim=0)), None
+        if single:
+            return [vision_embedding], None
+        lengths = [tensor.size(0) for tensor in data]
+        # The scheduler can retain one tensor for a uniform multi-image request.
+        if (
+            pack_equal_rows
+            and len(lengths) > 1
+            and lengths[0] > 0
+            and lengths.count(lengths[0]) == len(lengths)
+            and vision_embedding.ndim == 2
+        ):
+            return vision_embedding.unflatten(0, (len(lengths), lengths[0])), None
+        return list(vision_embedding.split(lengths)), None
 
 
 class VisionBertMixin(BaseMultiModalMixin):
+    def _read_mm_weights(self, device: str):
+        return self.mm_mixin_loader.load_weights(
+            device=device, data_type=self.compute_dtype
+        )
+
     def _init_multimodal(
         self,
     ) -> None:

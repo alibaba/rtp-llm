@@ -18,8 +18,48 @@
 #include "pybind11/stl.h"
 #include <limits>
 
+#include <algorithm>
+
 namespace py = pybind11;
 using namespace rtp_llm;
+
+// Inspect each already-bound input by reference. Extracting individual configs
+// and tensors in Python creates a new pybind wrapper for every property read.
+static py::object
+getPrecomputedFeatures(const py::list& inputs, int default_timeout_ms, int default_type, int tensor_type) {
+    py::list tensors;
+    int      timeout_ms = 0;
+    bool     has_cuda   = false;
+    for (const auto& item : inputs) {
+        if (!py::isinstance<MultimodalInput>(item)) {
+            return py::none();
+        }
+        const auto& input = item.cast<const MultimodalInput&>();
+        if (!input.url.empty() || (input.mm_type != default_type && input.mm_type != tensor_type)
+            || !input.tensor.defined()) {
+            return py::none();
+        }
+        const int timeout = input.mm_preprocess_config.mm_timeout_ms;
+        timeout_ms        = std::max(timeout_ms, timeout > 0 ? timeout : default_timeout_ms);
+        has_cuda          = has_cuda || input.tensor.is_cuda();
+        tensors.append(input.tensor);
+    }
+    return py::make_tuple(std::move(tensors), timeout_ms, has_cuda);
+}
+
+static py::list getMultimodalLogStrings(const py::list& inputs) {
+    py::list   strings;
+    const auto input_type = py::type::of<MultimodalInput>();
+    for (const auto& item : inputs) {
+        if (py::type::of(item).is(input_type)) {
+            strings.append(item.cast<const MultimodalInput&>().to_string());
+        } else {
+            // Keep ordinary test doubles and subclasses' custom formatting.
+            strings.append(item.attr("to_string")());
+        }
+    }
+    return strings;
+}
 
 void registerMultimodal(py::module& m) {
     m.def("get_multimodal_token_spans",
@@ -33,11 +73,13 @@ void registerMultimodal(py::module& m) {
              py::arg("mm_type"),
              py::arg("tensor"),
              py::arg("mm_preprocess_config"))
+        .def_static("get_precomputed_features", &getPrecomputedFeatures)
         .def_readwrite("url", &MultimodalInput::url)
         .def_readwrite("mm_type", &MultimodalInput::mm_type)
         .def_readwrite("tensor", &MultimodalInput::tensor)
         .def_readwrite("mm_preprocess_config", &MultimodalInput::mm_preprocess_config)
         .def("to_string", &MultimodalInput::to_string)
+        .def_static("get_log_strings", &getMultimodalLogStrings)
         .def("cache_key", &MultimodalInput::cache_key)
         .def(pybind11::pickle(
             [](const MultimodalInput& m) {  // __getstate__

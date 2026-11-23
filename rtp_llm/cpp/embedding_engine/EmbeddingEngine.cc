@@ -92,7 +92,8 @@ std::shared_ptr<EmbeddingOutput> EmbeddingEngine::decode(th::Tensor             
 #if USING_CUDA
     if (inputs_on_current_stream && executor_->canOverlapTensorOutput()) {
         input->allow_stream_overlap = true;
-        if (multimodal_features && !multimodal_features->features.empty()) {
+        if ((multimodal_features && !multimodal_features->features.empty())
+            || (input_embeddings && input_embeddings->is_cuda())) {
             input->producer_ready = runtimeCreateEvent();
         }
     }

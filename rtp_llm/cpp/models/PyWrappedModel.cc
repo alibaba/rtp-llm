@@ -893,6 +893,22 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
             py_model_.attr("prepare_moe_forward")(inputs.combo_tokens.numel(), has_context).cast<bool>();
     }
 
+    // The selected pooled forward owns the encoder's ragged plan. No decoder,
+    // paged KV or CUDA graph consumes device mirrors on this eager path.
+    if (pooled_host_attention_lengths_ && !device_props_.enable_prefill_cp && !inputs.pd_separation
+        && !inputs.kv_cache_kernel_block_id.defined() && !inputs.is_target_verify && !inputs.is_draft_extend
+        && inputs.input_lengths.device().is_cpu() && inputs.sequence_lengths.numel() == 0
+        && inputs.prefix_lengths.numel() == inputs.input_lengths.numel()) {
+        attention_inputs_               = torch_ext::PyAttentionInputs();
+        attention_inputs_.is_prefill    = true;
+        attention_inputs_.is_s_padded   = inputs.warmup || inputs.is_fake_stream;
+        attention_inputs_.input_lengths = inputs.input_lengths;
+        attention_inputs_.dtype         = dataTypeToTorchType(description_.data_type);
+        attention_inputs_by_tag_.clear();
+        prepared_guard.commit();
+        return;
+    }
+
     torch_ext::PyAttentionInputs attention_inputs;
     {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(build)");
@@ -983,6 +999,27 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
     }
 }
 
+// Accept adjacent fields only after proving they are views of the same
+// allocation. Other callers can continue to supply each tensor independently.
+static torch::Tensor copyPackedEmbeddingIds(const GptModelInputs& inputs) {
+    const auto& ids = inputs.combo_tokens;
+    if (!ids.device().is_cpu() || ids.dim() != 1 || ids.numel() == 0 || !ids.is_contiguous()
+        || ids.scalar_type() != torch::kInt32) {
+        return {};
+    }
+    const auto follows = [&](const torch::Tensor& field, int row) {
+        return field.defined() && field.sizes() == ids.sizes() && field.is_contiguous()
+               && field.scalar_type() == ids.scalar_type() && field.is_alias_of(ids)
+               && field.storage_offset() == ids.storage_offset() + row * ids.numel();
+    };
+    if (!follows(inputs.combo_position_ids, 1) || !follows(inputs.combo_tokens_type_ids, 2)
+        || (inputs.text_tokens_mask.defined() && !follows(inputs.text_tokens_mask, 3))) {
+        return {};
+    }
+    const int rows = inputs.text_tokens_mask.defined() ? 4 : 3;
+    return ids.as_strided({rows, ids.numel()}, {ids.numel(), 1}).to(torch::kCUDA, /*non_blocking=*/true);
+}
+
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.forward");
 
@@ -1023,30 +1060,41 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         if (device_props_.enable_prefill_cp && has_context_request) {
             /** Build rank-local inputs and CP metadata, including configured MTP hidden-state layout. */
             context_parallel_processor_->handleInputs(const_cast<GptModelInputs&>(inputs), cp_params);
-        }
-
-        torch::Tensor token_ids;
-        if (inputs.combo_tokens.device().is_cuda()) {
-            token_ids = inputs.combo_tokens;
-        } else {
+            // CP replaces the per-token tensors after holdInputsHostBuffers().
             buffer_holder_.hold_host(inputs.combo_tokens);
-            token_ids = inputs.combo_tokens.to(torch::kCUDA, /*non_blocking=*/true);
+            buffer_holder_.hold_host(inputs.combo_position_ids);
+            buffer_holder_.hold_host(inputs.combo_tokens_type_ids);
+            buffer_holder_.hold_host(inputs.text_tokens_mask);
         }
 
+        const auto                   packed_ids = pooled_host_attention_lengths_ && !device_props_.enable_prefill_cp ?
+                                                      copyPackedEmbeddingIds(inputs) :
+                                                      torch::Tensor{};
+        torch::Tensor                token_ids;
+        torch::Tensor                combo_position_ids;
+        torch_ext::PyEmbeddingInputs embedding_inputs;
+        if (packed_ids.defined()) {
+            token_ids                              = packed_ids[0];
+            combo_position_ids                     = packed_ids[1];
+            embedding_inputs.combo_tokens_type_ids = packed_ids[2];
+            if (inputs.text_tokens_mask.defined()) {
+                embedding_inputs.text_tokens_mask = packed_ids[3];
+            }
+        } else {
+            token_ids = inputs.combo_tokens.is_cuda() ? inputs.combo_tokens :
+                                                        inputs.combo_tokens.to(torch::kCUDA, /*non_blocking=*/true);
+            if (inputs.combo_position_ids.defined()) {
+                combo_position_ids = inputs.combo_position_ids.is_cuda() ?
+                                         inputs.combo_position_ids :
+                                         inputs.combo_position_ids.to(torch::kCUDA, /*non_blocking=*/true);
+            } else {
+                combo_position_ids = torch::empty({0});
+            }
+            embedding_inputs = buildPyEmbeddingInputs(inputs);
+        }
         torch::Tensor input_hiddens =
             inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
 
-        torch::Tensor combo_position_ids = torch::empty({0});
-        if (inputs.combo_position_ids.defined()) {
-            if (inputs.combo_position_ids.device().is_cuda()) {
-                combo_position_ids = inputs.combo_position_ids;
-            } else {
-                buffer_holder_.hold_host(inputs.combo_position_ids);
-                combo_position_ids = inputs.combo_position_ids.to(torch::kCUDA, /*non_blocking=*/true);
-            }
-        }
-
-        auto embedding_inputs  = buildPyEmbeddingInputs(inputs);
         auto multimodal_inputs = buildPyMultimodalInputs(inputs);
         auto bert_embedding_inputs =
             buildBertEmbeddingInputs(inputs, combo_position_ids, embedding_inputs.combo_tokens_type_ids);

@@ -13,15 +13,16 @@ from contextlib import AbstractContextManager, nullcontext
 from typing import TYPE_CHECKING, Callable, List, Optional
 
 import torch
-import torch.profiler
 
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
+from rtp_llm.multimodal.mm_profiler import record_function
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MMWorkEstimate,
     MultiModalEmbeddingInterface,
 )
+from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 from rtp_llm.utils.time_util import Timer, current_time_ms
 
 if TYPE_CHECKING:
@@ -88,11 +89,18 @@ def _run_embedding(
     Does the batched forward, guards the output count, writes embedding_result
     onto each work item, and caches cacheable results. Errors propagate.
     """
+    for wi in items:
+        if wi.preprocess_events:
+            for event in wi.preprocess_events:
+                event.wait(torch.cuda.current_stream(event.device))
+            for feature in wi.preprocess_result:
+                if feature.is_cuda:
+                    feature.record_stream(torch.cuda.current_stream(feature.device))
     data_list = [wi.preprocess_result for wi in items]
     type_list = [wi.mm_type for wi in items]
 
     with Timer() as route_timer:
-        with torch.profiler.record_function("batched_embedding"):
+        with record_function("batched_embedding"):
             batch_outputs = mm_part.batched_embedding(data_list, type_list)
     # Forward-only latency, sampled per merged batch -> its own metric. The
     # historical per-request (wait + forward) latency stays on
@@ -234,6 +242,9 @@ class MMScheduler:
             raise ValueError(f"max_queue_size must be > 0, got {max_queue_size}")
 
         self._mm_part = mm_part
+        self._guard_inline_forward = bool(
+            getattr(mm_part, "supports_inline_embedding", False)
+        )
         self._batch_wait_ms = batch_wait_ms
         self._max_batch_size = max_batch_size
         self._max_batch_images = max_batch_images
@@ -260,7 +271,7 @@ class MMScheduler:
         # must not block this sole consumer when newcomers fill the waiting queue.
         # At most max_batch_size continuations can be added by one forward, so
         # retained queued chunks remain bounded by max_queue_size + max_batch_size.
-        self._waiting: queue.Queue[_EmbeddingChunk] = queue.Queue()
+        self._waiting: queue.SimpleQueue[_EmbeddingChunk] = queue.SimpleQueue()
         # A request that would have overflowed the batch's image budget, carried
         # to the next round so it is neither lost nor re-ordered behind newer
         # arrivals.
@@ -296,7 +307,7 @@ class MMScheduler:
     def _queue_depth(self) -> int:
         """Return queued chunks, including a budget-overflow pending chunk.
 
-        ``Queue.qsize()`` is intentionally used as a point-in-time gauge; it is
+        ``qsize()`` is intentionally used as a point-in-time gauge; it is
         approximate under concurrent producers, which is appropriate for
         monitoring and avoids adding a lock to the submission hot path.
         """
@@ -594,7 +605,7 @@ class MMScheduler:
 
     @staticmethod
     def _drain(
-        q: "queue.Queue[_EmbeddingChunk]",
+        q: "queue.SimpleQueue[_EmbeddingChunk]",
     ) -> List[_EmbeddingChunk]:
         """Pop and return every request currently queued."""
         drained: List[_EmbeddingChunk] = []
@@ -868,9 +879,14 @@ class MMScheduler:
         try:
             # Annotate the trace with the batch size so a merged forward is
             # attributable (the profiler unit is per-forward/batch, not per-request).
-            with profiler_cm:
-                with torch.profiler.record_function(
-                    f"mm_forward(batch_size={batch_size})"
+            with profiler_cm, record_function(f"mm_forward(batch_size={batch_size})"):
+                # Inline tensor models previously ran inside the capture gate on
+                # the RPC thread. Hold it on the executing worker, never while
+                # the submitting thread waits for its future.
+                with (
+                    cuda_graph_gate.operation()
+                    if self._guard_inline_forward
+                    else nullcontext()
                 ):
                     _run_embedding(self._mm_part, items)
         except Exception as e:

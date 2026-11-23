@@ -45,9 +45,11 @@ from rtp_llm.multimodal.mm_error_messages import MMErr
 from rtp_llm.multimodal.mm_process_engine import (
     MMEmbeddingAsyncCache,
     MMEmbeddingCacheEntry,
+    MMEmbeddingRes,
     MMHashKeyCache,
     MMProcessEngine,
     MMWorkItem,
+    _embedding_token_length,
     _feature_hashes_from_result,
 )
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
@@ -194,6 +196,84 @@ class MMProcessEngineTest(TestCase):
 
     def tearDown(self):
         vit_emb_cache_.resize_cache(0)
+
+    def test_precomputed_inputs_keep_request_policy(self):
+        engine = self.mm_process_engine
+        engine.supports_precomputed_embedding = True
+        engine.hash_embedding_features = False
+        engine._access_logger = MagicMock(spec=MMAccessLogger)
+        engine.vit_config.disable_access_log = False
+        provider = _StubGreenNetProvider(GreenNetVerdict(passed=True, code=1))
+        engine._greennet_provider = provider
+        feature = torch.ones(2, 4)
+        config = MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
+        item = MultimodalInput("", MMUrlType.TENSOR, feature, config)
+
+        with patch.object(
+            engine.preprocess_executor, "submit"
+        ) as preprocess, patch.object(
+            engine._scheduler,
+            "submit_and_wait",
+            wraps=engine._scheduler.submit_and_wait,
+        ) as submit:
+            res = engine.mm_embedding_inputs_cpp([item], 42, user_id="test-user")
+        preprocess.assert_not_called()
+        work_item = submit.call_args.args[0][0]
+        self.assertEqual(work_item.mm_timeout_ms, 30000)
+        torch.testing.assert_close(work_item.preprocess_result[0], feature)
+        self.assertIsNone(res.feature_hashes)
+        self.assertEqual(provider.request_ids, ["42"])
+        self.assertEqual(provider.user_ids, ["test-user"])
+        self.assertEqual(engine._access_logger.log_success_access.call_args.args[2], 42)
+
+    def test_precomputed_batch_inherits_timeouts_and_falls_back_as_a_unit(self):
+        tensor = torch.ones(2, 4)
+        default = MultimodalInput("", MMUrlType.DEFAULT, tensor, MMPreprocessConfig())
+        config = MMPreprocessConfig()
+        config.mm_timeout_ms = 200
+        explicit = MultimodalInput("", MMUrlType.TENSOR, tensor, config)
+        inputs = [default, explicit]
+        for inherited, expected in ((100, 200), (500, 500)):
+            features, timeout, on_cuda = MultimodalInput.get_precomputed_features(
+                inputs, inherited, MMUrlType.DEFAULT, MMUrlType.TENSOR
+            )
+            self.assertEqual(timeout, expected)
+            self.assertFalse(on_cuda)
+            self.assertEqual([f.data_ptr() for f in features], [tensor.data_ptr()] * 2)
+        for url, kind in (("image.jpg", MMUrlType.DEFAULT), ("", MMUrlType.IMAGE)):
+            other = MultimodalInput(url, kind, tensor, config)
+            self.assertIsNone(
+                MultimodalInput.get_precomputed_features(
+                    [default, other], 100, MMUrlType.DEFAULT, MMUrlType.TENSOR
+                )
+            )
+
+    def test_stacked_result_preserves_public_list_and_log(self):
+        packed = torch.arange(24).view(3, 2, 4)
+        result = MMEmbeddingRes(packed)
+        reference = MMEmbeddingRes(list(packed.unbind()))
+        self.assertEqual(str(result), str(reference))
+        self.assertIs(result.stacked_embeddings, packed)
+        self.assertEqual(_embedding_token_length(packed), 6)
+        public = result.embeddings
+        self.assertIsInstance(public, list)
+        self.assertIs(result.embeddings, public)
+        self.assertIsNone(result.stacked_embeddings)
+        for actual, expected in zip(public, reference.embeddings):
+            self.assertEqual(actual.data_ptr(), expected.data_ptr())
+        public.pop()
+        reference.embeddings.pop()
+        self.assertEqual(str(result), str(reference))
+
+    def test_precomputed_inputs_respect_scheduler_media_limit(self):
+        engine = self.mm_process_engine
+        engine.supports_precomputed_embedding = True
+        engine._scheduler._max_batch_images = 1
+        item = MultimodalInput(
+            "", MMUrlType.DEFAULT, torch.ones(2, 4), MMPreprocessConfig()
+        )
+        with self.assertRaisesRegex(ValueError, "per-request limit"):
+            engine.mm_embedding_inputs_cpp([item, item])
 
     def test_embedding(self):
         res = self.mm_process_engine.mm_embedding_cpp(
