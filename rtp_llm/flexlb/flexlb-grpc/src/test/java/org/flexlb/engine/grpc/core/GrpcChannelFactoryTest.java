@@ -24,6 +24,7 @@ import org.springframework.core.env.MapPropertySource;
 
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -113,6 +114,22 @@ class GrpcChannelFactoryTest {
             }
         } finally {
             server.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void channelExecutorsStillRunLateCallbacksAfterShutdown() {
+        try (var context = createChannelContext(Map.of())) {
+            for (String beanName :
+                    new String[] {"managedChannelThreadPoolExecutor", "forwarderChannelExecutor"}) {
+                var executor = context.getBean(beanName, ThreadPoolExecutor.class);
+                var ran = new CountDownLatch(1);
+                executor.shutdown();
+
+                executor.execute(ran::countDown);
+
+                assertEquals(0, ran.getCount(), beanName);
+            }
         }
     }
 

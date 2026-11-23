@@ -82,7 +82,7 @@ public class FlexlbGrpcServer {
                                 .getShutdownQuietPeriodMs());
         this.grpcServerEventLoopGroup = grpcServerEventLoopGroup;
         this.monitor = Objects.requireNonNull(monitor, "monitor");
-        this.rejectionHandler = new ReportingAbortHandler(this.monitor);
+        this.rejectionHandler = new ReportingCallerRunsHandler(this.monitor);
         this.grpcServerTimingInterceptor = grpcServerTimingInterceptor;
         this.grpcQosHeaderInterceptor = grpcQosHeaderInterceptor;
     }
@@ -134,6 +134,8 @@ public class FlexlbGrpcServer {
                         .addService(
                                 ServerInterceptors.intercept(
                                         flexlbServiceImpl,
+                                        // Count rejected Schedule calls in drain timing.
+                                        new GrpcOverloadInterceptor(grpcExecutor),
                                         new GrpcTraceInterceptor(),
                                         grpcServerTimingInterceptor,
                                         grpcQosHeaderInterceptor))
@@ -258,25 +260,23 @@ public class FlexlbGrpcServer {
     }
 
     /**
-     * Reports each task rejected because the pool is saturated or shutting down.
-     * AbortPolicy throws instead of running tasks on the calling Netty event loop.
+     * Preserves gRPC callbacks on the submitting thread when the pool cannot accept them.
      */
-    private static class ReportingAbortHandler implements RejectedExecutionHandler {
+    private static class ReportingCallerRunsHandler implements RejectedExecutionHandler {
         private final FlexMonitor monitor;
-        private final ThreadPoolExecutor.AbortPolicy delegate =
-                new ThreadPoolExecutor.AbortPolicy();
 
-        ReportingAbortHandler(FlexMonitor monitor) {
+        ReportingCallerRunsHandler(FlexMonitor monitor) {
             this.monitor = monitor;
         }
 
         @Override
-        public void rejectedExecution(Runnable r, ThreadPoolExecutor executor) {
+        public void rejectedExecution(Runnable callback, ThreadPoolExecutor executor) {
             try {
                 monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 1.0);
-            } finally {
-                delegate.rejectedExecution(r, executor);
+            } catch (RuntimeException error) {
+                Logger.warn("Failed to report gRPC executor saturation: {}", error.toString());
             }
+            callback.run();
         }
     }
 }
