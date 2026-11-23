@@ -9,6 +9,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.telemetry.FlexlbTrace;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
 
@@ -171,6 +172,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             }
             orderedQueue.add(entry);
             registered.put(future, entry);
+            FlexlbTrace.schedulingEvent(context.getTraceContext(), "flexlb.queue.enqueued");
             // Completion removes this exact request from the ordering and wait
             // indexes without scanning the backlog.
             future.whenComplete((ignored, failure) -> completeRequest(entry));
@@ -382,6 +384,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     }
 
     private void reportRouteSubmitted(BalanceContext context, ScheduledRequest item) {
+        FlexlbTrace.schedulingEvent(context.getTraceContext(), "flexlb.prefill_queue.enqueued");
         try {
             reporter.reportRouteSubmitTimeMs(
                     item.prefill().getRole().name(),
@@ -586,7 +589,9 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             // A wakeup grants a fresh fleet-wide decision, not an obligation
             // to return to the endpoint which published the capacity event.
             PlacementResult<RouteAdmission, PlacementKey> result =
-                    router.select(entry.context, entry.routingGroup);
+                    FlexlbTrace.scheduleDecision(
+                            entry.context.getTraceContext(),
+                            () -> router.select(entry.context, entry.routingGroup));
             handle.recordDiagnostics(result.diagnostics());
             if (result.status() == PlacementResult.Status.SUCCESS) {
                 return Plan.success(entry, handle, result, availabilitySequence);

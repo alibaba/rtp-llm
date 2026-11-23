@@ -850,6 +850,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             // response is the result actually delivered to this caller.
             io.opentelemetry.context.Context traceContext =
                     ctx == null ? entryTraceContext() : ctx.getTraceContext();
+            FlexlbTrace.schedulingEvent(traceContext, "flexlb.response.ready");
             FlexlbTrace.setScheduleAttribute(
                     traceContext, FlexlbTrace.SCHEDULE_CODE, (long) response.getCode());
             FlexlbTrace.setScheduleAttribute(
