@@ -83,7 +83,7 @@ def select_target_verify_tokens(
     rotated_q = None
     prepared = None
     position_state = self.positions(ratio)
-    if raw_query and target_writer and position_state is None:
+    if raw_query and target_writer:
         from rtp_llm.models_py.modules.qwen4_exp.qsa.target_prepare import (
             try_prepare_target_window,
         )
@@ -105,6 +105,7 @@ def select_target_verify_tokens(
             plan.state_table,
             rope_config=rope_config,
             norm_eps=float(indexer.norm_eps),
+            position_state=position_state,
         )
     if prepared is not None:
         rotated_q, undo = prepared

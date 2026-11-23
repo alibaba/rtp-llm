@@ -1,23 +1,17 @@
-"""Read-only QSA target snapshot and norm/RoPE preparation, then original writer.
+"""QSA target preparation and cache writes in two ordered launches.
 
-Every snapshot finishes in the first launch. The independent second launch
-retains the writer's launch options and BF16/state/undo boundaries.
+All snapshots finish in the first launch, before the second touches any cache.
 """
 
 import math
 
 import torch
 import triton
-import triton.language as tl
-from triton.language.extra.cuda import libdevice
 
 from rtp_llm.models_py.kernels.cuda.qsa.target_prepare import _prepare_target_window
+from rtp_llm.models_py.kernels.cuda.qsa.target_writer import _write_target_window
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import is_qsa_rope_style
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import IndexerCacheUndo
-from rtp_llm.models_py.modules.qwen4_exp.qsa.target_writer import (
-    _snapshot_target_window,
-    _write_target_window,
-)
 
 
 def try_prepare_target_window(
@@ -36,6 +30,7 @@ def try_prepare_target_window(
     *,
     rope_config,
     norm_eps,
+    position_state=None,
 ):
     """Return None before writes unless all bounded target layouts qualify.
 
@@ -48,7 +43,7 @@ def try_prepare_target_window(
         and torch.cuda.get_device_capability(q.device) == (12, 0)
         and q.ndim == 3
         and q.shape[1:] == (4, 128)
-        and 1 <= q.shape[0] <= 32
+        and 1 <= q.shape[0] <= (64 if position_state is not None else 32)
         and q.dtype == torch.bfloat16
         and q.stride(-1) == 1
         and q.stride(-2) == 128
@@ -130,6 +125,41 @@ def try_prepare_target_window(
         return None
     batch = prefixes.numel()
     query = q.shape[0] // batch
+    mrope = position_state is not None
+    position_pool = group_slots = group_mask = group_current = None
+    query_cos = query_sin = None
+    position_slots = write_slots = positions = old_positions = None
+    h_pairs = w_pairs = 0
+    if mrope:
+        positions = position_state.geometry.positions
+        if (
+            position_state.staged
+            or positions.shape != (q.shape[0], 3)
+            or positions.dtype != torch.int32
+            or positions.device != q.device
+            or positions.stride(1) != 1
+        ):
+            return None
+        group_inputs = position_state.group_rope_inputs(
+            rope_config, frequency=frequency
+        )
+        if group_inputs is None:
+            return None
+        (
+            position_pool,
+            group_slots,
+            group_mask,
+            group_current,
+            frequency,
+            h_pairs,
+            w_pairs,
+        ) = group_inputs
+        query_cos, query_sin = position_state.target_query_rope(rope_config, frequency)
+        position_slots = position_state.geometry.slots
+        write_slots = position_state.staging_slots()
+        old_positions = torch.empty(
+            positions.shape, dtype=positions.dtype, device=positions.device
+        )
     rotated = torch.empty(q.shape, device=q.device, dtype=q.dtype)
     cosine = torch.empty((q.shape[0], 64), device=q.device, dtype=q.dtype)
     sine = torch.empty_like(cosine)
@@ -163,16 +193,26 @@ def try_prepare_target_window(
         old_state,
         kv_slots,
         old_kv,
+        position_pool,
+        group_slots,
+        group_mask,
+        group_current,
+        query_cos,
+        query_sin,
+        position_slots,
+        old_positions,
         H=4,
         XS=q.stride(0),
         PS=1,
         INV_SCALE=1.0 / scale,
         EPS=norm_eps,
+        MROPE=mrope,
+        H_PAIRS=h_pairs,
+        W_PAIRS=w_pairs,
         num_warps=1,
         enable_fp_fusion=False,
         **parameters,
     )
-    # Keep precisely the original writer configuration, including fusion.
     _write_target_window[(batch,)](
         raw,
         prefixes,
@@ -183,11 +223,18 @@ def try_prepare_target_window(
         kt,
         state,
         st,
+        POSITION_POOL=position_pool,
+        POSITIONS=positions,
+        POSITION_SLOTS=write_slots,
+        POSITION_STRIDE=positions.stride(0) if mrope else 3,
+        WRITE_POSITIONS=mrope,
         RAW_STRIDE=raw.stride(0),
         EPS=norm_eps,
         num_warps=4,
         **parameters,
     )
+    if mrope:
+        position_state.record_stage(write_slots, old_positions)
     return rotated, IndexerCacheUndo(
         state_pool=state,
         state_slots=state_slots,
