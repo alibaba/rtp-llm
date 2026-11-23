@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import random
 import subprocess
 import sys
 import tempfile
@@ -224,12 +225,16 @@ class WoAQuantCPUContractTest(unittest.TestCase):
             self.assertEqual(scales.shape, (m, 64))
             self.assertEqual(scales.stride(), (1, padded if padded else 1))
             self.assertEqual(scales.storage_offset(), 0)
-            base = scales._base
-            self.assertEqual(scales.untyped_storage().data_ptr(), base.data_ptr())
+            self.assertEqual(scales.untyped_storage().nbytes(), padded * 64 * 4)
+            base = scales.as_strided((padded, 64), scales.stride())
             base.fill_(-1)
             scales.fill_(17)
-            self.assertTrue(bool((base[:, :m] == 17).all()))
-            self.assertTrue(bool((base[:, m:] == -1).all()))
+            self.assertTrue(bool((base[:m] == 17).all()))
+            self.assertTrue(bool((base[m:] == -1).all()))
+            transposes = sum(
+                e.count for e in profile.key_averages() if e.key == "aten::permute"
+            )
+            self.assertEqual(transposes, 0)
             slices = sum(
                 e.count for e in profile.key_averages() if e.key == "aten::slice"
             )
@@ -490,6 +495,71 @@ class WoAQuantCPUContractTest(unittest.TestCase):
             weight[0].data_ptr = lambda: 257
             self.assertIsNone(op.try_grouped_quant(a, weight, out=out))
             self.assertEqual(launch.call_count, 8)
+
+    def test_prepared_prefill_keeps_live_signature_and_records_only_weights(self):
+        a, weight = _metadata()
+        out = (mock.Mock(), mock.Mock())
+        for tensor in (*a, *weight):
+            tensor.record_stream = mock.Mock()
+        device = a[0].device
+        stream = object()
+        api = mock.Mock()
+        api.get_jit_config_fingerprint.return_value = (1,)
+        entry = dict(context=7, api=api, prepared=set())
+        with mock.patch.dict(op._READY, {0: entry}, clear=True), mock.patch.object(
+            op, "is_default_eager_prefill", return_value=True
+        ) as eager, mock.patch.object(
+            op, "_context", return_value=7
+        ) as context, mock.patch.object(
+            torch.cuda, "current_stream", return_value=stream
+        ) as current, mock.patch.object(
+            torch.cuda, "device", return_value=nullcontext()
+        ) as guard, mock.patch.object(
+            torch.cuda, "is_current_stream_capturing", return_value=True
+        ) as capture, mock.patch.object(
+            op, "_output", return_value=out
+        ), mock.patch.object(
+            op, "_check_output"
+        ) as check:
+            prefill = op.prepare_prefill(device)
+            self.assertIsNotNone(prefill)
+            for config in ((1,), (2,)):
+                api.get_jit_config_fingerprint.return_value = config
+                self.assertIs(op.try_grouped_quant(a, weight, prefill=prefill), out)
+            self.assertEqual(
+                entry["prepared"],
+                {(33, a[0].stride(), config) for config in ((1,), (2,))},
+            )
+            guard.assert_not_called()
+            capture.assert_not_called()
+            check.assert_not_called()
+            context.assert_called_once_with()
+            current.assert_called_once_with(device)
+            for tensor in (*a, *out):
+                tensor.record_stream.assert_not_called()
+            for tensor in weight:
+                self.assertEqual(
+                    tensor.record_stream.call_args_list, [mock.call(stream)] * 2
+                )
+
+            _, changed = _metadata()
+            changed[1].stride = lambda: (32768, 32, 1)
+            self.assertIsNone(op.try_grouped_quant(a, changed, prefill=prefill))
+            api.get_jit_config_fingerprint.return_value = (3,)
+            eager.return_value = False
+            self.assertIsNone(op.try_grouped_quant(a, weight, prefill=prefill))
+            guard.assert_called_once_with(device)
+            capture.assert_called_once_with()
+            self.assertIsNone(op.prepare_prefill(device))
+
+            api.get_jit_config_fingerprint.return_value = (1,)
+            eager.return_value = True
+            self.assertIs(
+                op.try_grouped_quant(a, weight, out=out, prefill=prefill), out
+            )
+            check.assert_called_once_with(out, 33, device, (*a, *weight))
+            for tensor in (*a, *out):
+                tensor.record_stream.assert_called_once_with(stream)
 
     def test_sm103_148_sms_is_supported_but_cold_calls_cannot_compile(self):
         a, w = _metadata()
@@ -1144,6 +1214,58 @@ print("Warmed GPU1 called from current GPU0: PASS")
                         op.try_grouped_quant(a, (self.w, self.sw)),
                         self.baseline(a),
                     )
+
+    @torch.inference_mode()
+    def test_prepared_prefill_handles_variable_chunks_and_mixed_streams(self):
+        from rtp_llm.models_py.modules.dsv41._prefill_stream import (
+            default_eager_prefill,
+        )
+
+        rng = random.Random(20261123)
+        chunk = 12288
+        even = rng.sample(range(514, chunk - 2, 2), 4)
+        odd = rng.sample(range(513, chunk - 2, 2), 4)
+        random_rows = [rows for pair in zip(even, odd) for rows in pair]
+        tail = rng.randrange(513, 1024, 2)
+        # Crossing the chunk limit submits a full chunk and then the tail.
+        row_counts = (1, *random_rows, chunk - 1, chunk, tail)
+        weight = (self.w, self.sw)
+        compute = torch.cuda.current_stream(self.w.device)
+        side = torch.cuda.Stream(device=self.w.device)
+        with default_eager_prefill(True):
+            prepared = op.prepare_prefill(self.w.device)
+            self.assertIsNotNone(prepared)
+            for i, rows in enumerate(row_counts):
+                token_major = bool(i % 2)
+                with self.subTest(rows=rows, token_major=token_major):
+                    a = self.pair(rows, token_major)
+                    with mock.patch.object(
+                        op, "_context", wraps=op._context
+                    ) as context:
+                        actual = op.try_grouped_quant(a, weight, prefill=prepared)
+                    context.assert_not_called()
+                    expected = op.try_grouped_quant(a, weight)
+                    self.equal(actual, expected)
+                    for got, reference in zip(actual, expected):
+                        self.assertEqual(got.stride(), reference.stride())
+                    del a, actual, expected
+
+            a = self.pair(rng.randrange(1025, 1536), token=True)
+            expected = op.try_grouped_quant(a, weight)
+            side.wait_stream(compute)
+            with torch.cuda.stream(side), mock.patch.object(
+                op, "_context", wraps=op._context
+            ) as context:
+                actual = op.try_grouped_quant(a, weight, prefill=prepared)
+            context.assert_called_once_with()
+            compute.wait_stream(side)
+            self.equal(actual, expected)
+            for got, reference in zip(actual, expected):
+                self.assertEqual(got.stride(), reference.stride())
+            with mock.patch.object(op, "_context", wraps=op._context) as context:
+                restored = op.try_grouped_quant(a, weight, prefill=prepared)
+            context.assert_not_called()
+            self.equal(restored, expected)
 
     def test_reused_output_changed_graph_inputs_and_side_stream(self):
         for token in (False, True):

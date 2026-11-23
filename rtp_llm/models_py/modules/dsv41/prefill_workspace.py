@@ -137,6 +137,7 @@ class PrefillWorkspace:
         )
         self._q_head_views = {}
         self._output_quant_buffers = {}
+        self.wo_a_prefill = None
         # Forward-local policy: honor changes between requests without reading
         # the environment once per chunk and layer. No device data is retained
         # beyond this workspace's existing lifetime.

@@ -1053,7 +1053,12 @@ class AttentionV41FP8(AttentionFP8):
                 with record_function_range("dsv41.prefill.mega_attention"):
                     pair = mega.prefill(q, kv, indices_chunk, pos, lengths)
                 with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
-                    mega.project_output(pair, self.wo_b, out=target)
+                    mega.project_output(
+                        pair,
+                        self.wo_b,
+                        out=target,
+                        prefill_wo_a=common.workspace.wo_a_prefill,
+                    )
             self._prefill_output_all_reduce(out)
             return out
         from rtp_llm.models_py.modules.dsv41.flash_mla import flash_mla_sparse_fwd

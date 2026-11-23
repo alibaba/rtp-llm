@@ -44,6 +44,7 @@ def _workspace():
 
     return SimpleNamespace(
         attention_metadata=metadata,
+        wo_a_prefill=object(),
         prefill_q_head_views=lambda rows, heads, dim, rope: (
             torch.empty(rows, heads * dim, dtype=torch.bfloat16),
             None,
@@ -135,7 +136,9 @@ class MegaAttentionWiringTest(unittest.TestCase):
                         .to(torch.bfloat16)
                     ),
                     project_output=Mock(
-                        side_effect=lambda pair, linear, out: out.copy_(pair)
+                        side_effect=lambda pair, linear, out, prefill_wo_a: out.copy_(
+                            pair
+                        )
                     ),
                 )
                 owner._mega_attention = mega
@@ -165,6 +168,10 @@ class MegaAttentionWiringTest(unittest.TestCase):
                         profile_name="legacy",
                     )
                 self.assertEqual(mega.prefill.call_count, 3)
+                for call in mega.project_output.call_args_list:
+                    self.assertIs(
+                        call.kwargs["prefill_wo_a"], common.workspace.wo_a_prefill
+                    )
                 self.assertEqual(
                     [c.args[0].shape[0] for c in mega.prefill.call_args_list], [3, 3, 2]
                 )

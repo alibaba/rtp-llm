@@ -20,19 +20,26 @@ class PrefillStreamTest(unittest.TestCase):
     def test_only_the_proven_thread_device_and_stream_borrow_eager(self):
         check = _prefill_stream.prefill_stream_is_capturing
         main = (0, 0, 1)
+        device = torch.device("cuda:0")
+        eager = _prefill_stream.is_default_eager_prefill
         with patch.object(
             _prefill_stream, "_current_stream", return_value=main
         ) as current, patch.object(
             torch.cuda, "is_current_stream_capturing", return_value=True
         ) as capture:
             self.assertTrue(check())
+            self.assertFalse(eager(device))
             with _prefill_stream.default_eager_prefill(True):
                 self.assertFalse(check())
+                self.assertTrue(eager(device))
+                self.assertFalse(eager(torch.device("cuda:1")))
                 with ThreadPoolExecutor(1) as worker:
                     self.assertTrue(worker.submit(check).result())
+                    self.assertFalse(worker.submit(eager, device).result())
                 for other in ((0, 1, 1), (17, 0, 1)):
                     current.return_value = other
                     self.assertTrue(check())
+                    self.assertFalse(eager(device))
                 current.return_value = main
                 with self.assertRaisesRegex(ValueError, "nested"):
                     with _prefill_stream.default_eager_prefill(False):

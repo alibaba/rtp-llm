@@ -10,11 +10,20 @@ import ctypes
 import logging
 import threading
 from functools import lru_cache
+from typing import NamedTuple
 
 import torch
 
+from rtp_llm.models_py.modules.dsv41._prefill_stream import is_default_eager_prefill
+
 _READY = {}
 _LOCK = threading.Lock()
+
+
+class _PreparedPrefill(NamedTuple):
+    device: torch.device
+    entry: dict
+    stream: torch.cuda.Stream
 
 
 @lru_cache(maxsize=16)
@@ -119,7 +128,9 @@ def _context():
 def _output(m, device):
     q = torch.empty((m, 8192), dtype=torch.float8_e4m3fn, device=device)
     padded_m = (m + 3) // 4 * 4
-    s = torch.empty((64, padded_m), dtype=torch.int32, device=device).T
+    s = torch.empty_strided(
+        (padded_m, 64), (1, padded_m or 1), dtype=torch.int32, device=device
+    )
     return q, s if padded_m == m else s[:m]
 
 
@@ -153,12 +164,26 @@ def is_ready(weight, scale):
         return entry["context"] == _context()
 
 
+def prepare_prefill(device):
+    """Prepare one eager prefill on the calling thread's default CUDA stream.
+
+    The caller may reuse this state only on the verified device, context and
+    stream during this forward, while capture remains inactive.
+    """
+    entry = _READY.get(device.index)
+    if device.type != "cuda" or entry is None:
+        return None
+    if not is_default_eager_prefill(device) or entry["context"] != _context():
+        return None
+    return _PreparedPrefill(device, entry, torch.cuda.current_stream(device))
+
+
 def _signature(a, api):
     # DeepGEMM owns the list of public configuration knobs affecting its JIT.
     return (a[0].shape[0], a[0].stride(), api.get_jit_config_fingerprint())
 
 
-def _launch(entry, a, weight, out):
+def _launch(entry, a, weight, out, *, prefill_stream=None):
     api = entry["api"]
     api.fp8_einsum(
         "bhr,hdr->bhd",
@@ -168,21 +193,56 @@ def _launch(entry, a, weight, out):
         recipe=(1, 1, 32),
         epilogue=api.epilogue.FP8Group32(out[1]),
     )
-    stream = torch.cuda.current_stream(a[0].device)
-    for tensor in (*a, *weight, *out):
+    if prefill_stream is None:
+        stream = torch.cuda.current_stream(a[0].device)
+        tensors = (*a, *weight, *out)
+    else:
+        # The prefill operands and fresh outputs stay on their allocation
+        # stream. The weights may have been allocated on another stream.
+        stream = prefill_stream
+        tensors = weight
+    for tensor in tensors:
         tensor.record_stream(stream)
 
 
-def try_grouped_quant(a, weight, *, out=None):
+def _try_launch(entry, a, weight, out, *, prefill_stream=None):
+    aq = a[0]
+    signature = _signature(a, entry["api"])
+    missing = signature not in entry["prepared"]
+    if missing and prefill_stream is None and torch.cuda.is_current_stream_capturing():
+        return None
+    if out is None:
+        out = _output(aq.shape[0], aq.device)
+    else:
+        _check_output(out, aq.shape[0], aq.device, (*a, *weight))
+    _launch(entry, a, weight, out, prefill_stream=prefill_stream)
+    if missing:
+        entry["prepared"].add(signature)
+    return out
+
+
+def try_grouped_quant(a, weight, *, out=None, prefill=None):
     """Return FP8 + packed group32 scales, or None for the BF16 fallback.
 
     Eager calls after startup may JIT additional shapes. CUDA capture only
     launches signatures already prepared eagerly; it never compiles here.
     Output quantization always uses legacy, independent of global quant knobs.
     Inputs must be finite. Outputs are caller-owned and may be reused.
+    Pass prefill state only for an input pair produced, used and released on
+    its verified allocation stream. Caller-supplied outputs use the generic
+    path and retain its validation and allocator tracking.
     """
     aq, _ = a
     device = aq.device
+    if (
+        prefill is not None
+        and out is None
+        and prefill.device == device
+        and is_default_eager_prefill(device)
+    ):
+        if not _layout_supported(a, weight):
+            return None
+        return _try_launch(prefill.entry, a, weight, out, prefill_stream=prefill.stream)
     entry = _READY.get(device.index)
     # Warmup publishes an entry only for a supported device. Operand layouts
     # and storage can still change across calls and weight reloads.
@@ -191,17 +251,7 @@ def try_grouped_quant(a, weight, *, out=None):
     with torch.cuda.device(device):
         if entry["context"] != _context():
             return None
-        signature = _signature(a, entry["api"])
-        missing = signature not in entry["prepared"]
-        if missing and torch.cuda.is_current_stream_capturing():
-            return None
-        if out is None:
-            out = _output(aq.shape[0], device)
-        _check_output(out, aq.shape[0], device, (*a, *weight))
-        _launch(entry, a, weight, out)
-        if missing:
-            entry["prepared"].add(signature)
-    return out
+        return _try_launch(entry, a, weight, out)
 
 
 @torch.inference_mode()
