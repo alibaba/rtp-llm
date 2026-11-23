@@ -8,7 +8,7 @@ import logging
 import re
 import threading
 import time
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import IntEnum
 from io import BytesIO
@@ -32,7 +32,7 @@ from rtp_llm.multimodal.url_cache import URLDataCache
 from rtp_llm.multimodal.vit_metrics import (
     VIT_PHASE_METRICS,
     record_vit_preprocess_value,
-    vit_preprocess_timer,
+    vit_http_phase_timer,
 )
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.telemetry import vit_media
@@ -331,12 +331,6 @@ def _validate_file_size(size_bytes: int, max_file_size_kb: Optional[int]) -> Non
         raise_mm(MMErr.FILE_TOO_LARGE)
 
 
-def _http_phase_timer(phase):
-    if not VIT_PHASE_METRICS:
-        return nullcontext()
-    return vit_preprocess_timer(GaugeMetrics.VIT_HTTP_PHASE_RT_US_METRIC, {"phase": phase})
-
-
 def _download_http_content(
     url: str,
     headers: dict,
@@ -349,7 +343,7 @@ def _download_http_content(
 
     response = None
     try:
-        with _http_phase_timer("headers"):
+        with vit_http_phase_timer("headers"):
             if deadline is None and cancellation_event is None:
                 response = request_get(url, headers)
             else:
@@ -377,7 +371,7 @@ def _download_http_content(
 
         content = BytesIO()
         downloaded_bytes = 0
-        with _http_phase_timer("body"):
+        with vit_http_phase_timer("body"):
             for chunk in response.iter_content(chunk_size=1024 * 1024):
                 _check_download(deadline, cancellation_event)
                 if not chunk:

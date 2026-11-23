@@ -69,6 +69,12 @@ def vit_preprocess_timer(
             metrics.report(metric, (time.monotonic_ns() - start_ns) / 1000.0, tags)
 
 
+def vit_http_phase_timer(phase):
+    if not VIT_PHASE_METRICS:
+        return contextlib.nullcontext()
+    return vit_preprocess_timer(GaugeMetrics.VIT_HTTP_PHASE_RT_US_METRIC, {"phase": phase})
+
+
 def record_vit_preprocess_value(
     metric: Union[AccMetrics, GaugeMetrics],
     value: Union[int, float],

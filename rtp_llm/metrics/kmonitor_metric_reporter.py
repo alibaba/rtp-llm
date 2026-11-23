@@ -73,6 +73,7 @@ class AccMetrics(Enum):
     VIT_BATCH_SEAL_QPS_METRIC = "py_rtp_vit_batch_seal_qps"
     VIT_URL_SOURCE_QPS_METRIC = "py_rtp_vit_url_source_qps"
     VIT_HTTP_CONNECT_RETRY_QPS_METRIC = "py_rtp_vit_http_connect_retry_qps"
+    VIT_HTTP_SOURCE_RETRY_QPS_METRIC = "py_rtp_vit_http_source_retry_qps"
     # Incremented when a submission is rejected because the scheduler's waiting
     # queue is full (overload / stalled forward backpressure).
     VIT_EMBEDDING_OVERLOAD_QPS_METRIC = "py_rtp_vit_embedding_overload_qps"

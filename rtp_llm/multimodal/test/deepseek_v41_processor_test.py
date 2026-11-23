@@ -254,6 +254,56 @@ class V41ImageDownloadTimingTest(unittest.TestCase):
         self.assertEqual(requests, 2)
         self.assertEqual(elapsed_ms, 250.0)
 
+    def test_http_phase_metrics_cover_v41_retry_and_cache_hit(self):
+        from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
+        from rtp_llm.multimodal import vit_metrics
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41 import (
+            deepseek_v41_processor as processor,
+        )
+
+        with patch.object(processor, "VIT_PHASE_METRICS", True), patch.object(
+            vit_metrics, "VIT_PHASE_METRICS", True
+        ), vit_metrics.collect_vit_preprocess_metrics() as metrics:
+            result, elapsed_ms, requests = self.run_loader([503, 200], repeats=2)
+
+        self.assertEqual(result, [b"image"] * 2)
+        self.assertEqual((elapsed_ms, requests), (250.0, 2))
+        phases = [
+            sample.tags["phase"]
+            for sample in metrics.samples
+            if sample.metric == GaugeMetrics.VIT_HTTP_PHASE_RT_US_METRIC
+        ]
+        self.assertEqual(phases, ["headers", "backoff", "headers", "body"])
+        values = [
+            (sample.metric, sample.value, sample.tags)
+            for sample in metrics.samples
+            if sample.metric != GaugeMetrics.VIT_HTTP_PHASE_RT_US_METRIC
+        ]
+        self.assertEqual(
+            values,
+            [
+                (AccMetrics.VIT_HTTP_SOURCE_RETRY_QPS_METRIC, 1, {}),
+                (GaugeMetrics.VIT_HTTP_BODY_BYTES_METRIC, 5, {}),
+                (AccMetrics.VIT_URL_SOURCE_QPS_METRIC, 1, {"source": "load"}),
+                (AccMetrics.VIT_URL_SOURCE_QPS_METRIC, 1, {"source": "cache"}),
+            ],
+        )
+
+    def test_http_phase_metrics_off_preserves_download(self):
+        from rtp_llm.multimodal import vit_metrics
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41 import (
+            deepseek_v41_processor as processor,
+        )
+
+        with patch.object(processor, "VIT_PHASE_METRICS", False), patch.object(
+            vit_metrics, "VIT_PHASE_METRICS", False
+        ), vit_metrics.collect_vit_preprocess_metrics() as metrics:
+            result, elapsed_ms, requests = self.run_loader([503, 200], repeats=2)
+
+        self.assertEqual(result, [b"image"] * 2)
+        self.assertEqual((elapsed_ms, requests), (250.0, 2))
+        self.assertFalse(metrics.samples)
+
     def test_disabled_url_cache_downloads_each_time(self):
         self.cache.resize_cache(0)
         result, elapsed_ms, requests = self.run_loader([200, 200], repeats=2)
