@@ -47,6 +47,7 @@ public class FlexlbGrpcServer {
     static final int FLEXLB_GRPC_PORT_OFFSET = 2;
 
     private static final int DEFAULT_HTTP_PORT = 7001;
+
     private static final String[] RECEIVING_METRICS = {
         "app.grpc.server.receiving.active",
         "app.grpc.server.receiving.control.active",
@@ -67,7 +68,7 @@ public class FlexlbGrpcServer {
     private final GrpcServerTimingInterceptor grpcServerTimingInterceptor;
     private final GrpcQosHeaderInterceptor grpcQosHeaderInterceptor;
 
-    private Server server;
+    private volatile Server server;
     private NioEventLoopGroup bossGroup;
     private volatile ThreadPoolExecutor grpcExecutor;
     private ThreadPoolExecutor grpcControlExecutor;
@@ -268,6 +269,11 @@ public class FlexlbGrpcServer {
                 Thread.currentThread().interrupt();
             }
         }
+    }
+
+    public boolean isServing() {
+        Server current = server;
+        return current != null && !current.isShutdown() && !current.isTerminated();
     }
 
     protected NettyServerBuilder createServerBuilder(int port) {

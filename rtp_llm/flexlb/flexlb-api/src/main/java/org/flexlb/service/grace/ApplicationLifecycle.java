@@ -6,6 +6,7 @@ import org.flexlb.httpserver.FlexlbGrpcServer;
 import org.flexlb.listener.ApplicationWarmupState;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.ApplicationContextAware;
 import org.springframework.context.event.ContextClosedEvent;
@@ -42,6 +43,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
 
     private volatile boolean shutdownReceived;
     private volatile boolean shutdownCompletedSuccessfully;
+    private volatile boolean processReady;
 
     @Autowired
     public ApplicationLifecycle(
@@ -141,6 +143,21 @@ public class ApplicationLifecycle implements ApplicationContextAware {
 
     public boolean isHealthy() {
         return warmupState.isWarmupFinished() && !shutdownReceived;
+    }
+
+    @EventListener(ApplicationReadyEvent.class)
+    public void onApplicationReady(ApplicationReadyEvent event) {
+        if (event.getApplicationContext() == owningContext) {
+            processReady = true;
+        }
+    }
+
+    public boolean isProcessReady() {
+        return processReady;
+    }
+
+    public boolean isReadyForSchedule() {
+        return processReady && !shutdownReceived && grpcServer.isServing();
     }
 
     public boolean shutdownCompletedSuccessfully() {

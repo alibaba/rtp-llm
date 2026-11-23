@@ -190,10 +190,16 @@ class TransientCapacityQueueContractTest {
                     INCIDENT_DECODE_MAX_CONCURRENCY);
             assertEquals(
                     INCIDENT_PREFILL_ENGINES,
-                    fixture.runtime.endpointRegistry().getEndpointCount(RoleType.PREFILL));
+                    fixture.runtime
+                            .endpointRegistry()
+                            .endpointAddressSnapshot(RoleType.PREFILL)
+                            .size());
             assertEquals(
                     INCIDENT_DECODE_ENGINES,
-                    fixture.runtime.endpointRegistry().getEndpointCount(RoleType.DECODE));
+                    fixture.runtime
+                            .endpointRegistry()
+                            .endpointAddressSnapshot(RoleType.DECODE)
+                            .size());
             fixture.metrics.resetPlacementWakeups();
             fixture.submission.holdCompletions();
             long firstRequestId = 100_000L;

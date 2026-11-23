@@ -591,11 +591,17 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 "engine-scale perf must exercise the configured decision mode");
         boolean fixedWindowDecision = decisionMode == DecisionPolicyConfig.Type.FIXED_WINDOW;
         provisionPrefillEndpoints(prefillEngineCount);
-        while (endpointRegistry.getEndpointCount(RoleType.DECODE) < decodeEngineCount) {
-            addLogicalDecodeEndpoint(endpointRegistry.getEndpointCount(RoleType.DECODE));
+        while (endpointRegistry.endpointAddressSnapshot(RoleType.DECODE).size()
+                < decodeEngineCount) {
+            addLogicalDecodeEndpoint(
+                    endpointRegistry.endpointAddressSnapshot(RoleType.DECODE).size());
         }
-        assertEquals(prefillEngineCount, endpointRegistry.getEndpointCount(RoleType.PREFILL));
-        assertEquals(decodeEngineCount, endpointRegistry.getEndpointCount(RoleType.DECODE));
+        assertEquals(
+                prefillEngineCount,
+                endpointRegistry.endpointAddressSnapshot(RoleType.PREFILL).size());
+        assertEquals(
+                decodeEngineCount,
+                endpointRegistry.endpointAddressSnapshot(RoleType.DECODE).size());
 
         int warmupRequests =
                 Math.max(
@@ -1281,8 +1287,9 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     }
 
     private void provisionPrefillEndpoints(int required) throws IOException {
-        while (endpointRegistry.getEndpointCount(RoleType.PREFILL) < required) {
-            int additionalIndex = endpointRegistry.getEndpointCount(RoleType.PREFILL) - 1;
+        while (endpointRegistry.endpointAddressSnapshot(RoleType.PREFILL).size() < required) {
+            int additionalIndex =
+                    endpointRegistry.endpointAddressSnapshot(RoleType.PREFILL).size() - 1;
             if (DELIVERY_MODE == DeliveryMode.BATCH) {
                 int grpcPort =
                         ENGINE_MATRIX_FIRST_PREFILL_GRPC_PORT == 0

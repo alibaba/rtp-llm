@@ -44,6 +44,7 @@ class AppStateHookServerTest {
     @Test
     @DisplayName("Should return 200 for localhost request when process is ready")
     void handleProcessOk_ShouldReturn200_WhenLocalhostRequestAndProcessReady() {
+        when(applicationLifecycle.isProcessReady()).thenReturn(true);
         when(serverRequest.remoteAddress())
                 .thenReturn(Optional.of(new InetSocketAddress("127.0.0.1", 12345)));
 
@@ -59,6 +60,7 @@ class AppStateHookServerTest {
     @Test
     @DisplayName("Should return 200 for loopback request when process is ready")
     void handleProcessOk_ShouldReturn200_WhenLoopbackRequestAndProcessReady() {
+        when(applicationLifecycle.isProcessReady()).thenReturn(true);
         when(serverRequest.remoteAddress())
                 .thenReturn(
                         Optional.of(
@@ -119,6 +121,7 @@ class AppStateHookServerTest {
     @DisplayName("Should return 200 for local host address request when process is ready")
     void handleProcessOk_ShouldReturn200_WhenLocalHostAddressRequestAndProcessReady()
             throws UnknownHostException {
+        when(applicationLifecycle.isProcessReady()).thenReturn(true);
         when(serverRequest.remoteAddress())
                 .thenReturn(Optional.of(new InetSocketAddress(InetAddress.getLocalHost(), 12345)));
 

@@ -179,7 +179,7 @@ class PdfusionSchedulingTest {
             assertEquals(
                     List.of(RoleType.PDFUSION),
                     response.getServerStatus().stream().map(ServerStatus::getRole).toList());
-            assertEquals(0, endpoints.getEndpointCount(RoleType.DECODE));
+            assertEquals(0, endpoints.endpointAddressSnapshot(RoleType.DECODE).size());
             assertEquals(1, lifecycle.trackedRequestCount());
             PrefillEndpoint endpoint =
                     (PrefillEndpoint) endpoints.get(RoleType.PDFUSION, worker.getLogicalIpPort());
