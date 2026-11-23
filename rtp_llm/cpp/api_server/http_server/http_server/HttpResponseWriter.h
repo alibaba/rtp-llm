@@ -1,6 +1,7 @@
 #pragma once
 
 #include <mutex>
+#include <functional>
 #include <string>
 #include <optional>
 
@@ -13,7 +14,9 @@ class HttpResponse;
 
 class HttpResponseWriter {
 public:
-    explicit HttpResponseWriter(const std::shared_ptr<anet::Connection>& conn): _connection(conn) {}
+    using ResponseSender = std::function<bool(const std::shared_ptr<HttpResponse>&)>;
+    explicit HttpResponseWriter(const std::shared_ptr<anet::Connection>& conn, ResponseSender sender = {}):
+        _connection(conn), _sender(std::move(sender)) {}
     virtual ~HttpResponseWriter();
 
 public:
@@ -46,6 +49,7 @@ private:
 
 private:
     std::shared_ptr<anet::Connection> _connection;
+    ResponseSender                    _sender;
     WriteType                         _type{WriteType::Undefined};
 
     int                        _statusCode{200};
