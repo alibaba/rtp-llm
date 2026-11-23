@@ -92,7 +92,13 @@ bool FullCacheManager::malloc(BlockIds&            block_ids,
         }
     }
 
-    auto result = block_pool_->malloc(static_cast<size_t>(need_blocks_num));
+    const auto last = std::find_if(
+        existing_blocks.rbegin(), existing_blocks.rend(), [](BlockIdxType block) { return !isNullBlockIdx(block); });
+    const BlockIdxType last_block = last == existing_blocks.rend() ? 0 : *last;
+    auto               result     = block_pool_->mallocForSequence(static_cast<size_t>(need_blocks_num),
+                                                 static_cast<size_t>(std::max(seq_len, 0)),
+                                                 last_block,
+                                                 hbm_share_denominator_);
     if (!result.has_value() || result->size() != static_cast<size_t>(need_blocks_num)) {
         return false;
     }

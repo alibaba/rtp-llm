@@ -128,6 +128,7 @@ public:
         int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const;
 
     GroupedCacheLayerLayout allLayerCacheBase() const;
+    void                    notifyCacheBlocksWritten(const BlockIdList& blocks) const;
 
     // for main model; grouped layout preserves layers that own multiple cache groups
     GroupedCacheLayerLayout getMainModelGroupedCacheLayerLayout() const;

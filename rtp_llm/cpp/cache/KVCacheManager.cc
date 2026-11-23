@@ -205,7 +205,10 @@ GroupedCacheLayerLayout projectLayout(const GroupedCacheLayerLayout&       sourc
             }
         }
         groups.emplace(target_group.tag,
-                       CacheLayerLayout(std::move(layers), source_group.stagingBlocks(), source_group.stagingLayers()));
+                       CacheLayerLayout(std::move(layers),
+                                        source_group.stagingBlocks(),
+                                        source_group.stagingLayers(),
+                                        source_group.blockGenerations()));
     }
     return GroupedCacheLayerLayout(std::move(target_topology), std::move(groups));
 }
@@ -750,6 +753,10 @@ KVCacheManager::convertIndexToBuffer(int layer_id, const std::string& group_tag,
 std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(
     int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const {
     return coordinator_manager_->convertIndexToBuffer(layer_id, group_tag, block_id, partition_count, partition_id);
+}
+
+void KVCacheManager::notifyCacheBlocksWritten(const BlockIdList& blocks) const {
+    coordinator_manager_->notifyCacheBlocksWritten(blocks);
 }
 
 GroupedCacheLayerLayout KVCacheManager::allLayerCacheBase() const {

@@ -2039,7 +2039,10 @@ bool CoordinatorCacheManager::doInit() {
                 std::make_shared<SWACacheManager>(cache_group, group_pool, group_id, config_.reuse_cache_tail_blocks);
             swa_group_ids_.push_back(group_id);
         } else {
-            group = std::make_shared<FullCacheManager>(cache_group, group_pool, group_id);
+            const size_t hbm_share_denominator =
+                cache_group.tag == "default" ? config_.mla_host_cache.decode_hbm_share_denominator : 0;
+            group = std::make_shared<FullCacheManager>(cache_group, group_pool, group_id, hbm_share_denominator);
+            full_group_ids_.push_back(group_id);
         }
 
         RTP_LLM_CHECK_WITH_INFO(group->init(config_.layerIdsForGroup(cache_group.tag)),
@@ -2175,11 +2178,21 @@ GroupedCacheLayerLayout CoordinatorCacheManager::allLayerCacheBase() const {
         const auto& group = topology->groups()[group_id];
         const auto& pool  = group_block_pools_[group_id];
         if (group.tag == "default" && pool->hasSplitBacking()) {
+            const auto layer_ids = topology->layerIdsForGroup(group.tag);
+            for (size_t pool_layer = 0; pool_layer < layer_ids.size(); ++pool_layer) {
+                auto&      layer   = layers[static_cast<size_t>(layer_ids[pool_layer])];
+                const auto backing = pool->layerBackingView(static_cast<int>(pool_layer));
+                if (backing.device_kv.defined() && backing.host_kv.defined()) {
+                    layer.kv_host_addr          = backing.host_kv;
+                    layer.logical_device_blocks = backing.device_block_count;
+                }
+            }
             const auto& plan = config_.mla_host_cache;
             groups.emplace(group.tag,
                            CacheLayerLayout(std::move(layers),
                                             std::min(plan.prefill_staging_blocks, group.block_num),
-                                            plan.prefill_staging_layers));
+                                            plan.prefill_staging_layers,
+                                            pool->blockGenerations()));
         } else {
             groups.emplace(group.tag, CacheLayerLayout(std::move(layers)));
         }
@@ -2367,6 +2380,21 @@ void CoordinatorCacheManager::blockBatchCopyByGroup(const std::vector<TaggedBloc
     }
 
     execBatchCopy(copy_params);
+    if (config_.mla_host_cache.pinnedDecode()) {
+        BlockIdList overwritten;
+        for (const auto& mapping : copy_mapping) {
+            if (mapping.tag == "default" && mapping.src != mapping.dst && !isNullBlockIdx(mapping.dst)) {
+                overwritten.push_back(mapping.dst);
+            }
+        }
+        notifyCacheBlocksWritten(overwritten);
+    }
+}
+
+void CoordinatorCacheManager::notifyCacheBlocksWritten(const BlockIdList& blocks) const {
+    if (!blocks.empty() && tracksWriteGenerations()) {
+        group_block_pools_[groupIdForTag("default")]->invalidateBlockGenerations(blocks);
+    }
 }
 
 size_t CoordinatorCacheManager::freeBlocksNum() const {

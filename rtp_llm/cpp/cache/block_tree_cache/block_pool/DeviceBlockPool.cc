@@ -281,6 +281,9 @@ bool DeviceBlockPool::tryReplaceRequestReferences(const std::vector<RequestRefer
         for (size_t i = 0; i < transfer_count; ++i) {
             auto& change     = changes[reclaimable[i]];
             change.new_count = 1;
+            // A reclaimed request-only donor starts a new logical lifetime
+            // even though it never re-enters the free list.
+            onBlockAllocatedNoLock(change.block);
             replacements.push_back(change.block);
         }
         replacements.insert(replacements.end(), fresh_blocks->begin(), fresh_blocks->end());
@@ -355,6 +358,61 @@ DeviceBlockPool::ReferenceStats DeviceBlockPool::referenceStats() const {
             referenced_block_counts_[static_cast<size_t>(DeviceBlockRefType::PD_CONNECTOR)]};
 }
 
+torch::Tensor DeviceBlockPool::blockGenerations() const {
+    return block_generations_;
+}
+
+std::vector<int64_t> DeviceBlockPool::blockGenerationsSnapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!block_generations_ptr_) {
+        return {};
+    }
+    return {block_generations_ptr_, block_generations_ptr_ + config().physical_block_count};
+}
+
+void DeviceBlockPool::invalidateBlockGenerations(const BlockIdList& blocks) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    if (!block_generations_ptr_) {
+        return;
+    }
+    for (const auto block : blocks) {
+        // Worker ranks consume IDs allocated on the coordinator. A local
+        // allocation is not a precondition for invalidating their copies.
+        RTP_LLM_CHECK_WITH_INFO(block > 0 && static_cast<size_t>(block) < config().physical_block_count,
+                                "invalid generation block id %d in %s",
+                                block,
+                                config().pool_name.c_str());
+    }
+    for (const auto block : blocks) {
+        onBlockAllocatedNoLock(block);
+    }
+}
+
+void DeviceBlockPool::onBlockAllocatedNoLock(BlockIdxType block) noexcept {
+    if (block_generations_ptr_) {
+        auto& epoch = block_generations_ptr_[block];
+        epoch       = epoch == std::numeric_limits<int64_t>::max() ? 1 : epoch + 1;
+    }
+}
+
+std::optional<BlockIdList> DeviceBlockPool::mallocForSequence(size_t       n,
+                                                              size_t       sequence_tokens,
+                                                              BlockIdxType last_block,
+                                                              size_t       hbm_share_denominator) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    RTP_LLM_CHECK(hbm_share_denominator != 1);
+    if (!device_block_boundary_ || !hbm_share_denominator || !sequence_tokens) {
+        return mallocNoLock(n);
+    }
+    const size_t request_blocks =
+        sequence_tokens / row_split_tokens_per_block_ + (sequence_tokens % row_split_tokens_per_block_ != 0);
+    const bool prefer_host = last_block > 0 ? last_block >= device_block_boundary_ :
+                                              request_blocks > lowerRangeFreeBlocksNoLock() / hbm_share_denominator;
+    return mallocNoLock(n, prefer_host);
+}
+
 void DeviceBlockPool::onFirstTreeRefNoLock(BlockIdxType block) {
     ++refcounts_[block];
 }
@@ -391,6 +449,8 @@ DeviceBlockPool::normalizeConfig(const std::shared_ptr<const DeviceBlockPoolConf
     // Every memory layout shares the same block id space, so physical_block_count is
     // reconciled against memory_layouts[*].block_num before IBlockPool construction.
     // The first layout's block_num is authoritative and every other layout must agree with it.
+    uint32_t     row_split_boundary            = 0;
+    size_t       row_split_tokens_per_block    = 0;
     const size_t computed_physical_block_count = static_cast<size_t>(config->memory_layouts.front().block_num);
     for (size_t layout_idx = 0; layout_idx < config->memory_layouts.size(); ++layout_idx) {
         const auto& layout_cfg = config->memory_layouts[layout_idx];
@@ -424,6 +484,16 @@ DeviceBlockPool::normalizeConfig(const std::shared_ptr<const DeviceBlockPoolConf
                                         || (layout_cfg.device_block_count && layout_cfg.host_block_count),
                                     "layout[%zu] GPU scratch requires a GPU and host split",
                                     layout_idx);
+            if (layout_cfg.device_block_count && layout_cfg.host_block_count) {
+                RTP_LLM_CHECK_WITH_INFO(layout_cfg.seq_size_per_block > 0
+                                            && (row_split_boundary == 0
+                                                || (row_split_boundary == layout_cfg.device_block_count
+                                                    && row_split_tokens_per_block == layout_cfg.seq_size_per_block)),
+                                        "layout[%zu] has inconsistent split decode block geometry",
+                                        layout_idx);
+                row_split_boundary         = layout_cfg.device_block_count;
+                row_split_tokens_per_block = layout_cfg.seq_size_per_block;
+            }
         }
     }
 
@@ -894,6 +964,20 @@ bool DeviceBlockPool::init() {
         initializeCacheBuffer();
         initializeLayerMappings();
         initializeLayoutStrategies();
+        for (const auto& layout : cfg.memory_layouts) {
+            if (layout.device_block_count && layout.host_block_count) {
+                device_block_boundary_      = static_cast<BlockIdxType>(layout.device_block_count);
+                row_split_tokens_per_block_ = layout.seq_size_per_block;
+                break;
+            }
+        }
+        if (device_block_boundary_) {
+            splitFreeRanges(device_block_boundary_);
+            block_generations_ =
+                torch::zeros({static_cast<int64_t>(cfg.physical_block_count)},
+                             torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU).pinned_memory(true));
+            block_generations_ptr_ = block_generations_.data_ptr<int64_t>();
+        }
     }
 
     markInitialized();

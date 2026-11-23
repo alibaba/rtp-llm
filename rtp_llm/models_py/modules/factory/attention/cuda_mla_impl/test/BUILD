@@ -55,6 +55,14 @@ py_test(
 )
 
 py_test(
+    name = "pinned_mla_cache_test",
+    srcs = ["pinned_mla_cache_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["SM103_CU13", "manual"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "glm5_cp_kv_prefetch_test",
     srcs = ["cp_kv_prefetch_test.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],

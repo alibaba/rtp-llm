@@ -568,16 +568,21 @@ MlaHostCachePlan CacheConfigCreator::planMlaHostCache(const CacheConfig&        
                                                       const ParallelismConfig&           parallelism_config,
                                                       const std::optional<WarmUpResult>& warm_up_result,
                                                       const std::optional<SpeculativeExecutionConfig>& sp_config,
-                                                      bool prefill_cuda_graph_requested) {
+                                                      bool               prefill_cuda_graph_requested,
+                                                      const ModelConfig* draft_model_config) {
     const bool prefill           = parallelism_config.role_type == RoleType::PREFILL;
     const bool explicit_prefill  = prefill && kv_cache_config.dsa_prefill_layout == 1;
     const bool requested_prefill = prefill && kv_cache_config.dsa_prefill_layout != 0
                                    && (explicit_prefill || kv_cache_config.memory_cache_size_mb > 0);
-    if (!requested_prefill) {
+    const bool requested_decode = kv_cache_config.dsa_mla_host_cache_mb > 0;
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_config.dsa_mla_host_cache_mb >= 0,
+                            "GLM5 decode host KV capacity must be nonnegative");
+    if (!requested_prefill && !requested_decode) {
         return {};
     }
 
-    const auto& groups = config.groups();
+    const bool  explicit_request = explicit_prefill || requested_decode;
+    const auto& groups           = config.groups();
     const auto  mla =
         std::find_if(groups.begin(), groups.end(), [](const GroupBase& group) { return group.tag == "default"; });
     const bool has_indexer =
@@ -593,10 +598,13 @@ MlaHostCachePlan CacheConfigCreator::planMlaHostCache(const CacheConfig&        
         && config.blockWeight("default") == 1 && parallelism_config.pp_size == 1 && !kv_cache_config.enable_disk_cache
         && !kv_cache_config.enable_remote_cache
         && (!requested_prefill
-            || (!prefill_cuda_graph_requested && kv_cache_config.memory_cache_size_mb > 0 && config.layer_num > 1));
+            || (!prefill_cuda_graph_requested && kv_cache_config.memory_cache_size_mb > 0 && config.layer_num > 1))
+        && (!requested_decode
+            || (parallelism_config.role_type == RoleType::DECODE && !kv_cache_config.enable_memory_cache));
     if (!compatible) {
-        RTP_LLM_CHECK_WITH_INFO(!explicit_prefill,
-                                "layered GLM5 MLA requires eager CUDA prefill, PP1 and no disk or remote cache");
+        RTP_LLM_CHECK_WITH_INFO(!explicit_request,
+                                "GLM5 host MLA requires tagged CUDA MLA, PP1 and no disk or remote cache; "
+                                "use eager prefill or decode without a secondary memory cache");
         return {};
     }
 
@@ -633,8 +641,74 @@ MlaHostCachePlan CacheConfigCreator::planMlaHostCache(const CacheConfig&        
                                         logical_limit,
                                         logical_limit,
                                         staging_layers});
+    } else {
+        const auto hbm_share_denominator = kv_cache_config.dsa_mla_hbm_share_denominator;
+        RTP_LLM_CHECK_WITH_INFO(hbm_share_denominator != 1, "GLM5 HBM share denominator must be zero or at least two");
+        PinnedMlaDecodeBudget input;
+        input.device_bytes = device_bytes;
+        addBudgetBytes(input.host_bytes, 1024 * 1024, kv_cache_config.dsa_mla_host_cache_mb);
+        input.mla_bytes_per_block = config.blockSizeBytesForGroup("default");
+        RTP_LLM_CHECK_WITH_INFO(input.mla_bytes_per_block <= budget.paged_block_bytes,
+                                "GLM5 MLA bytes exceed the device block budget");
+        input.device_metadata_bytes_per_block = budget.paged_block_bytes - input.mla_bytes_per_block;
+        const size_t indexer_states           = config.layerIdsForGroup("indexer_kv").size();
+        size_t       mapping_bytes            = 0;
+        addBudgetBytes(mapping_bytes, 2 * sizeof(int32_t), page_tokens);
+        addBudgetBytes(mapping_bytes, sizeof(int64_t));
+        addBudgetBytes(input.device_metadata_bytes_per_block, mapping_bytes, indexer_states);
+
+        const bool allows_split_draft =
+            !draft_model_config
+            || (draft_model_config->model_type == "glm_5_mtp" && draft_model_config->attn_config.is_sparse
+                && draft_model_config->attn_config.indexer_topk > 0);
+        RTP_LLM_CHECK_WITH_INFO(allows_split_draft,
+                                "GLM5 pinned decode requires a sparse glm_5_mtp draft with positive Indexer TopK");
+        RTP_LLM_CHECK_WITH_INFO(model_config.attn_config.indexer_topk > 0 && runtime_config.max_generate_batch_size > 0,
+                                "GLM5 pinned decode requires positive Indexer TopK and batch size");
+        const size_t query_tokens =
+            sp_config && sp_config->gen_num_per_cycle > 0 ? static_cast<size_t>(sp_config->gen_num_per_cycle) + 1 : 1;
+        const auto draft_topk      = draft_model_config ? draft_model_config->attn_config.indexer_topk : 0;
+        const auto selected_tokens = pinnedMlaRequiredTokenSlots(
+            model_config.attn_config.indexer_topk, draft_topk, query_tokens, runtime_config.max_generate_batch_size);
+        RTP_LLM_CHECK_WITH_INFO(selected_tokens > 0, "GLM5 pinned decode working-set size exceeds size_t range");
+        const size_t configured = kv_cache_config.dsa_mla_resident_tokens;
+        RTP_LLM_CHECK_WITH_INFO(!configured || (configured >= selected_tokens && configured % page_tokens == 0),
+                                "GLM5 resident token override must cover %zu selected tokens and align to %zu",
+                                selected_tokens,
+                                page_tokens);
+        const size_t resident_blocks = configured ?
+                                           configured / page_tokens :
+                                           selected_tokens / page_tokens + (selected_tokens % page_tokens != 0);
+        RTP_LLM_CHECK_WITH_INFO(resident_blocks <= max_blocks, "GLM5 MLA working-set token count exceeds int32");
+        input.resident_blocks = static_cast<uint32_t>(resident_blocks);
+        addBudgetBytes(input.resident_workspace_bytes, input.mla_bytes_per_block, resident_blocks);
+        size_t working_set_bytes = 4096;
+        addBudgetBytes(working_set_bytes, 20, resident_blocks * page_tokens);
+        addBudgetBytes(input.resident_workspace_bytes, working_set_bytes, indexer_states);
+        // A Decode-role system prompt runs ordinary eager attention before
+        // serving traffic. Its compact staging holds only one live MLA layer.
+        size_t context_tokens = 0;
+        for (const auto& prompt : kv_cache_config.multi_task_prompt_tokens) {
+            context_tokens = std::max(context_tokens, prompt.second.size());
+        }
+        const size_t context_blocks = context_tokens / page_tokens + (context_tokens % page_tokens != 0);
+        if (context_blocks > 0) {
+            const auto reserve_context_layer = [&](size_t layer_block_bytes) {
+                // Remapped page table and dirty host-slot tensor.
+                addBudgetBytes(layer_block_bytes, 2 * sizeof(int32_t), page_tokens);
+                addBudgetBytes(input.context_workspace_bytes, layer_block_bytes, context_blocks);
+            };
+            reserve_context_layer(mla->kvBlockStrideBytes());
+            for (const auto& draft : config.mtp_sub_configs) {
+                reserve_context_layer(draft->group("default").kvBlockStrideBytes());
+            }
+        }
+        input.max_logical_blocks    = logical_limit;
+        input.max_device_blocks     = max_blocks - input.resident_blocks;
+        input.hbm_share_denominator = hbm_share_denominator;
+        result                      = planPinnedMlaDecode(input);
     }
-    RTP_LLM_CHECK_WITH_INFO(result.logical_blocks != 0 || !explicit_prefill,
+    RTP_LLM_CHECK_WITH_INFO(result.logical_blocks != 0 || !explicit_request,
                             "insufficient HBM or host backing for requested GLM5 MLA placement");
     return result;
 }

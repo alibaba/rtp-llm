@@ -35,15 +35,22 @@ public:
 
         size_t     total_layout_layers = 0;
         size_t     current_offset      = 0;
-        const auto& mla_plan            = cache_config.mla_host_cache;
-        const bool  mla_group           = group.tag == "default";
-        const auto  append_layout = [&](const GroupBase& source_group, uint32_t layer_num, bool prefill_host = false) {
+        const auto&    mla_plan            = cache_config.mla_host_cache;
+        const bool     mla_group           = group.tag == "default";
+        const uint32_t device_blocks       = mla_group ? mla_plan.decodeDeviceBlocks(group.block_num) : group.block_num;
+        const auto append_layout = [&](const GroupBase& source_group, uint32_t layer_num, bool prefill_host = false) {
             RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "group tag=%s layout has no layers", group.tag.c_str());
             RTP_LLM_CHECK_WITH_INFO(
                 source_group.spec != nullptr, "cache spec for group tag=%s is null", source_group.tag.c_str());
             auto layout                  = createMemoryLayoutConfig(source_group, layer_num, group.block_num);
             if (prefill_host) {
                 layout.host_block_count = group.block_num;
+            } else if (device_blocks < group.block_num) {
+                RTP_LLM_CHECK_WITH_INFO(source_group.kvScaleStrideBytes() == 0,
+                                        "GLM5 split MLA blocks must use a packed layout");
+                layout.device_block_count  = device_blocks;
+                layout.device_spare_blocks = mla_plan.decode_resident_blocks;
+                layout.host_block_count    = group.block_num - device_blocks;
             }
             layout.kv_cache_offset_bytes = current_offset;
             current_offset += layout.kv_block_pool_size_bytes;

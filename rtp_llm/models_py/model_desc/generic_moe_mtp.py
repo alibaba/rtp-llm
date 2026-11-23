@@ -103,8 +103,9 @@ class GenericMoeMTPModel(Glm5ModelBase):
             fmha_config=self.fmha_config,
             py_hw_kernel_config=self.py_hw_kernel_config,
         )
-        # Clones using the same KV arena must share its token-to-slot mapping.
-        # initialize() rebuilds the working sets if the arena changes.
+        # Reuse the device working-set map when this clone uses the same arena.
+        # initialize() replaces it when the engine attaches different storage.
+        clone._pinned_mla_state = getattr(self, "_pinned_mla_state", None)
         clone.device_type = self.device_type
         clone.moe_config = self.moe_config
         clone.max_generate_batch_size = self.max_generate_batch_size

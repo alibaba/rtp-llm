@@ -8,8 +8,12 @@ namespace rtp_llm {
 
 class FullCacheManager: public SingleTypeCacheManager {
 public:
-    FullCacheManager(GroupBase cache_group, DeviceBlockPoolPtr block_pool, int group_id):
-        SingleTypeCacheManager(std::move(cache_group), std::move(block_pool), group_id) {}
+    FullCacheManager(GroupBase          cache_group,
+                     DeviceBlockPoolPtr block_pool,
+                     int                group_id,
+                     size_t             hbm_share_denominator = 0):
+        SingleTypeCacheManager(std::move(cache_group), std::move(block_pool), group_id),
+        hbm_share_denominator_(hbm_share_denominator) {}
 
     // Transition-only overload.
     FullCacheManager(const LayerIdsType&          layer_ids,
@@ -49,6 +53,7 @@ public:
                                  size_t                   reclaimed_prefix_blocks = 0) const override;
 
 private:
+    size_t hbm_share_denominator_ = 0;
 };
 
 }  // namespace rtp_llm

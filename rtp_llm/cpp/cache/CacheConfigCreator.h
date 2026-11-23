@@ -62,7 +62,8 @@ public:
                                              const ParallelismConfig&                         parallelism_config,
                                              const std::optional<WarmUpResult>&               warm_up_result,
                                              const std::optional<SpeculativeExecutionConfig>& sp_config,
-                                             bool prefill_cuda_graph_requested);
+                                             bool               prefill_cuda_graph_requested,
+                                             const ModelConfig* draft_model_config = nullptr);
 
     static uint32_t computeLocalBlockNum(const CacheConfig&                               config,
                                          const ModelConfig&                               model_config,

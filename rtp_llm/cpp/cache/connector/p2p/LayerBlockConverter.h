@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 #include <string>
 #include <cstddef>
+#include <cstdint>
 #include <utility>
 #include <vector>
 
@@ -19,6 +20,11 @@ public:
                                                         int                partition_id    = 0) const = 0;
 
     virtual std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const = 0;
+
+    virtual bool tracksWriteGenerations() const {
+        return false;
+    }
+    virtual void notifyCacheBlocksWritten(const std::vector<int32_t>&) const {}
 };
 
 }  // namespace rtp_llm

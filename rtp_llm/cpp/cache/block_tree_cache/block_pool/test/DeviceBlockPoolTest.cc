@@ -197,6 +197,103 @@ TEST(DeviceBlockPoolTest, SplitHostArenaAvoidsAllocatorRoundingAndOutlivesPool) 
 }
 #endif
 
+TEST(DeviceBlockPoolTest, DecodeSplitUsesHostLogicalSuffixAndExcludesGpuScratch) {
+    auto  config               = makeConfig();
+    auto& layout               = config->memory_layouts.front();
+    layout.device_block_count  = 3;
+    layout.device_spare_blocks = 2;
+    layout.host_block_count    = layout.block_num - layout.device_block_count;
+    DeviceBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+    EXPECT_EQ(pool.totalBlocksNum(), layout.block_num - 1);
+    EXPECT_EQ(pool.blockSizeBytes(), config->total_size_bytes / layout.block_num);
+    EXPECT_GE(pool.getTotalSizeBytes(),
+              config->total_size_bytes + layout.device_spare_blocks * layout.layer_num * layout.kv_block_stride_bytes);
+    const auto view = pool.layerBackingView(1);
+    ASSERT_TRUE(view.device_kv.is_cuda());
+    ASSERT_TRUE(view.host_kv.is_pinned());
+    EXPECT_EQ(view.device_block_count, 3u);
+    EXPECT_EQ(view.device_spare_blocks, 2u);
+    EXPECT_EQ(view.device_kv.size(0), 5);
+    EXPECT_EQ(view.host_kv.size(0), layout.host_block_count);
+
+    const auto gpu  = pool.convertIndexToBuffer(1, 2);
+    const auto host = pool.convertIndexToBuffer(1, 3, 1, 0);
+    ASSERT_EQ(gpu.size(), 1u);
+    ASSERT_EQ(host.size(), 2u);
+    EXPECT_TRUE(gpu.front().is_cuda);
+    EXPECT_FALSE(host.front().is_cuda);
+    EXPECT_EQ(gpu.front().addr, view.device_kv[2].data_ptr());
+    EXPECT_EQ(host.front().addr, view.host_kv[0].data_ptr());
+    EXPECT_EQ(pool.convertIndexToAddr(1, 4).kv_addr, view.host_kv[1].data_ptr());
+    EXPECT_ANY_THROW(pool.convertIndexToBuffer(1, layout.block_num));
+
+    const auto regions = pool.registrationRegions();
+    ASSERT_EQ(regions.size(), static_cast<size_t>(layout.layer_num + 1));
+    const auto scratch = reinterpret_cast<uintptr_t>(view.device_kv[3].data_ptr());
+    for (const auto& region : regions) {
+        const auto start = reinterpret_cast<uintptr_t>(region.addr);
+        EXPECT_FALSE(region.is_cuda && start <= scratch && scratch < start + region.size_bytes);
+    }
+}
+
+TEST(DeviceBlockPoolTest, DecodeSplitAllocationFollowsInitialAndTrailingTier) {
+    auto  config               = makeConfig();
+    auto& layout               = config->memory_layouts.front();
+    layout.device_block_count  = 5;
+    layout.device_spare_blocks = 2;
+    layout.host_block_count    = layout.block_num - layout.device_block_count;
+    DeviceBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+
+    auto long_req = pool.mallocForSequence(2, 8, /*last_block=*/0, /*hbm_share_denominator=*/3);
+    ASSERT_TRUE(long_req.has_value());
+    EXPECT_EQ(*long_req, (BlockIdList{5, 6}));
+    auto growth = pool.mallocForSequence(4, 1, long_req->back(), /*hbm_share_denominator=*/3);
+    ASSERT_TRUE(growth.has_value());
+    EXPECT_EQ(*growth, (BlockIdList{7, 8, 9, 1}));
+    auto short_req = pool.mallocForSequence(1, 1, /*last_block=*/0, /*hbm_share_denominator=*/3);
+    ASSERT_TRUE(short_req.has_value());
+    EXPECT_EQ(*short_req, (BlockIdList{2}));
+    const auto before = pool.freeBlocksNum();
+    EXPECT_FALSE(pool.mallocForSequence(before + 1, 1, 0, 3).has_value());
+    EXPECT_EQ(pool.freeBlocksNum(), before);
+}
+
+TEST(DeviceBlockPoolTest, DecodeSplitEpochsTrackLeasesAndInPlaceReuse) {
+    auto  config              = makeConfig();
+    auto& layout              = config->memory_layouts.front();
+    layout.device_block_count = 3;
+    layout.host_block_count   = layout.block_num - layout.device_block_count;
+    DeviceBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+
+    const auto epochs = pool.blockGenerations();
+    ASSERT_TRUE(epochs.is_pinned());
+    ASSERT_EQ(epochs.numel(), layout.block_num);
+    auto block = pool.mallocForSequence(1, 100, 0, 3);
+    ASSERT_TRUE(block.has_value());
+    const auto id = block->front();
+    ASSERT_EQ(epochs[id].item<int64_t>(), 1);
+    pool.incRef(id);
+    auto release = pool.pinForStorageIo(id);
+    ASSERT_EQ(epochs[id].item<int64_t>(), 1);
+    release();
+    pool.invalidateBlockGenerations({id, id + 1});
+    EXPECT_EQ(epochs[id].item<int64_t>(), 2);
+    EXPECT_EQ(epochs[id + 1].item<int64_t>(), 1);
+
+    BlockIndicesType replacements;
+    int              required_free_blocks = -1;
+    ASSERT_TRUE(pool.tryReplaceRequestReferences({{id, 1, 0}}, 1, replacements, required_free_blocks));
+    EXPECT_EQ(replacements, (BlockIndicesType{id}));
+    EXPECT_EQ(required_free_blocks, 0);
+    EXPECT_EQ(epochs[id].item<int64_t>(), 3);
+    EXPECT_EQ(pool.blockGenerationsSnapshot()[id], 3);
+    EXPECT_EQ(pool.blockGenerations().data_ptr(), epochs.data_ptr());
+    EXPECT_EQ(epochs[0].item<int64_t>(), 0);
+}
+
 TEST(DeviceBlockPoolTest, ConstructorRejectsInvalidConfigMatrix) {
     std::shared_ptr<const DeviceBlockPoolConfig> null_config;
     EXPECT_ANY_THROW(static_cast<void>(DeviceBlockPool(null_config)));

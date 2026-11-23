@@ -1060,7 +1060,8 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result, 
                                                                    parallelism_config,
                                                                    warm_up_result,
                                                                    sp_config,
-                                                                   prefill_cuda_graph_requested);
+                                                                   prefill_cuda_graph_requested,
+                                                                   draft_model_config);
     // Every rank contributes an ordinary candidate, even if only one placement
     // or neither placement fits its local GPU budget.
     const bool compare_prefill_placements =

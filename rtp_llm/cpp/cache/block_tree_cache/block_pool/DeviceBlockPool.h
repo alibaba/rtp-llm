@@ -107,7 +107,16 @@ public:
     // Both views are at physical block granularity; host row zero corresponds
     // to logical block device_block_count, never a staging slot.
     LayerBackingView layerBackingView(int layer_id) const;
-    bool             hasSplitBacking() const {
+
+    // Decode split pools expose a stable device-readable int64 tensor in
+    // pinned host memory. Callers own a lease on every ID read by a kernel;
+    // writers invalidate before handing overwritten data to another forward.
+    torch::Tensor        blockGenerations() const;
+    std::vector<int64_t> blockGenerationsSnapshot() const;
+    void                 invalidateBlockGenerations(const BlockIdList& blocks);
+    std::optional<BlockIdList>
+         mallocForSequence(size_t n, size_t sequence_tokens, BlockIdxType last_block, size_t hbm_share_denominator);
+    bool hasSplitBacking() const {
         return !physical_layouts_.empty();
     }
 
@@ -153,6 +162,7 @@ public:
     std::string debugString() const override;
 
 protected:
+    void onBlockAllocatedNoLock(BlockIdxType block) noexcept override;
     void onFirstTreeRefNoLock(BlockIdxType block) override;
     bool onLastTreeRefNoLock(BlockIdxType block) override;
     bool hasExternalRefNoLock(BlockIdxType block) const override;
@@ -225,6 +235,10 @@ private:
     std::vector<PhysicalLayout>                        physical_layouts_;
     std::vector<std::unique_ptr<MemoryLayoutStrategy>> host_layout_strategies_;
     std::vector<LayerBackingView>                      layer_backing_views_;
+    torch::Tensor                                      block_generations_;
+    int64_t*                                           block_generations_ptr_      = nullptr;
+    BlockIdxType                                       device_block_boundary_      = 0;
+    size_t                                             row_split_tokens_per_block_ = 0;
     void*                                              cache_base_ptr_{nullptr};
     size_t                                             allocation_size_bytes_{0};
     bool                                               uses_dedicated_device_allocation_{false};

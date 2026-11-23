@@ -278,8 +278,13 @@ class MlaAttention(nn.Module):
         fmha_impl = default_fmha_impl
         kv_cache = default_kv_cache
         input_shape = hidden_states.shape[:-1]
-        defer_q_projection = kv_cache is not None and getattr(
-            fmha_impl, "overlap_kv_projections", False
+        early_prefetch = self.q_lora_rank > 0 and self.layer_idx in getattr(
+            fmha_impl, "pinned_mla_groups", {}
+        )
+        defer_q_projection = (
+            kv_cache is not None
+            and not early_prefetch
+            and getattr(fmha_impl, "overlap_kv_projections", False)
         )
         topk_indices = None
         q_c = None
@@ -320,6 +325,23 @@ class MlaAttention(nn.Module):
                 )
             else:
                 q_c = self.q_a_layernorm(q.contiguous())
+            if early_prefetch:
+                topk_indices = self._run_sparse_indexer(
+                    hidden_states,
+                    q_c,
+                    None,
+                    indexer_kv_cache,
+                    indexer_fmha_impl,
+                    x_fp8,
+                    x_scale,
+                    q_c_fp8,
+                    q_c_scale,
+                    prev_topk_indices,
+                    force_reuse_topk_indices,
+                )
+                if topk_indices is None:
+                    raise RuntimeError("decode working set requires Indexer TopK")
+                fmha_impl.prefetch_kv(self.layer_idx, topk_indices)
             if not defer_q_projection:
                 q = self._expand_query(q_c, q_c_fp8, q_c_scale)
         else:
@@ -374,7 +396,7 @@ class MlaAttention(nn.Module):
                     )
                 q = self._expand_query(q_c, q_c_fp8, q_c_scale)
             q_view = q.reshape(-1, self.num_heads, self.q_head_dim)
-            if self.attn_config.is_sparse:
+            if self.attn_config.is_sparse and not early_prefetch:
                 topk_indices = self._run_sparse_indexer(
                     hidden_states,
                     q_c,
@@ -401,6 +423,7 @@ class MlaAttention(nn.Module):
                 attention_cache,
                 self.layer_idx,
                 topk_indices,
+                **({"kv_prefetched": True} if early_prefetch else {}),
             )
 
         # The sparse-attention launch has consumed these projections. PyTorch's
