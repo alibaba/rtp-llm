@@ -117,8 +117,12 @@ class Roberta(Bert):
             return RobertaRerankerModule(self.model_config, self.tokenizer)
         return super()._init_custom_module()
 
+    # Roberta shares the BertModel python forward with Bert (identical graph
+    # body); its position/pad offsets are gathered on the host before the
+    # graph-captured region. The embedding prefill CUDA graph runner already
+    # refreshes bert combo_position_ids/combo_tokens_type_ids at replay.
     def support_cuda_graph(self) -> bool:
-        return False
+        return True
 
     @classmethod
     def from_huggingface(cls, config: ModelConfig, config_json: Dict[str, Any]):
