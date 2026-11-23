@@ -83,6 +83,31 @@ def load_fixture(
 
 
 class WeightOnlyInt8CheckpointTest(unittest.TestCase):
+    @torch.inference_mode()
+    def test_update_requantizes_complete_shard_without_replacing_storage(self):
+        from rtp_llm.models_py.runtime_weight_update import RuntimeWeightTransaction
+
+        layer, _, _, _ = load_fixture("cpu", tp=2, rank=1, rows=160, width=192)
+        ptrs = [p.data_ptr() for p in (layer.weight, layer.weight_scale, layer.bias)]
+        new = torch.arange(160 * 192).reshape(160, 192).remainder(93).half() - 32
+        txn = RuntimeWeightTransaction(layer.prepare_weight_updates({"weight": new}))
+        txn.install()
+        txn.commit()
+        local = new[:, 96:].T
+        scale = local.abs().amax(0) / 128
+        q = (local / scale).round().clamp(-128, 127).to(torch.int8)
+        torch.testing.assert_close(
+            layer.weight, cuda_groupwise_layout(torch.nn.functional.pad(q, (0, 32, 0, 32)), 8, 80)
+        )
+        torch.testing.assert_close(layer.weight_scale[:160], scale)
+        updates = layer.prepare_weight_updates({"bias": torch.arange(160).half()})
+        self.assertEqual([u.name for u in updates], ["bias"])
+        txn = RuntimeWeightTransaction(updates)
+        txn.install()
+        txn.commit()
+        torch.testing.assert_close(layer.bias, torch.arange(160).half())
+        self.assertEqual(ptrs, [p.data_ptr() for p in (layer.weight, layer.weight_scale, layer.bias)])
+
     def test_local_rank_before_quantization_and_native_fst_parity(self):
         for method in ("scratch", "fastsafetensors"):
             for rank in (0, 1):

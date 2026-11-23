@@ -143,6 +143,11 @@ def publish_input_vocab(config, tokenizer, rows):
     valid; the host embedding request boundary rejects actually used invalid IDs.
     Never drop added/special token IDs when computing the diagnostic range.
     """
+    explicit = int(getattr(config, "input_vocab_size", 0) or 0)
+    if explicit and explicit != rows:
+        raise ValueError(
+            f"Explicit BERT input_vocab_size {explicit} disagrees with checkpoint rows {rows}"
+        )
     real = tokenizer.get_real_tokenizer() if tokenizer is not None else None
     ids = []
     if real is not None:

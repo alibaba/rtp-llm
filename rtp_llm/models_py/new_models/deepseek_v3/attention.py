@@ -297,6 +297,18 @@ def _prepare_fused_fp8_runtime_weight(
     return weight, scale
 
 
+def _quantize_online_mla_weight(source):
+    """Quantize the floating MLA source once, directly into the chosen format."""
+    from rtp_llm.models_py.kernels.cuda.fp8_quant import (
+        per_block_cast_to_fp8,
+        quant_weight_ue8m0_packed,
+    )
+
+    if is_deep_gemm_e8m0_used(source.device):
+        return quant_weight_ue8m0_packed(source.contiguous())
+    return per_block_cast_to_fp8(source, use_ue8m0=False)
+
+
 class DeepSeekV32MlaAttention(RtpModule):
     """MLA attention for DeepSeek V3.2, new-loader style.
 
@@ -363,6 +375,13 @@ class DeepSeekV32MlaAttention(RtpModule):
             if quant_config is not None
             and not self._online_int8
             and not quant_config.quant_type.endswith("_online")
+            # The online FT writer quantizes compressed A, but its direct-Q
+            # (no LoRA) fused record stays in the original compute dtype.
+            and not (
+                not q_lora_rank
+                and getattr(quant_config, "ft_encoded_online_source", None)
+                == "fp8_block_online"
+            )
             else QuantizationConfig(quant_type="none")
         )
 
@@ -571,17 +590,7 @@ class DeepSeekV32MlaAttention(RtpModule):
             elif quantize_q:
                 self._fused_qkv_a_runtime = _MlaInt8Projection(fused_a_bf16)
             elif self.q_lora_rank > 0 and not is_hip and self._online_fp8:
-                from rtp_llm.models_py.kernels.cuda.fp8_quant import (
-                    per_block_cast_to_fp8,
-                )
-
-                fused_a_weight, fused_a_scale = per_block_cast_to_fp8(
-                    fused_a_bf16,
-                    use_ue8m0=False,
-                )
-                fused_a_weight, fused_a_scale = _prepare_fused_fp8_runtime_weight(
-                    fused_a_weight, fused_a_scale
-                )
+                fused_a_weight, fused_a_scale = _quantize_online_mla_weight(fused_a_bf16)
                 self._fused_qkv_a_runtime = _CudaRuntimeFusedFp8Linear(
                     fused_a_weight,
                     fused_a_scale,
@@ -612,16 +621,10 @@ class DeepSeekV32MlaAttention(RtpModule):
             # KC/VC were derived from the checkpoint before this quantization.
             self._kv_b_int8 = _MlaInt8Projection(kv_b_w)
         elif self._online_fp8 and not is_hip:
-            from rtp_llm.models_py.kernels.cuda.fp8_quant import per_block_cast_to_fp8
-
-            runtime_weight, runtime_scale = per_block_cast_to_fp8(
-                kv_b_w,
-                use_ue8m0=False,
-            )
             (
                 self._kv_b_runtime_w,
                 self._kv_b_runtime_s,
-            ) = _prepare_fused_fp8_runtime_weight(runtime_weight, runtime_scale)
+            ) = _quantize_online_mla_weight(kv_b_w)
             self._kv_b_w = None
         else:
             self._kv_b_w = (

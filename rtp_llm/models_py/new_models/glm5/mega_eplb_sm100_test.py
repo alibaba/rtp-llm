@@ -17,7 +17,10 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe im
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.fp8_fp4_router import (
     MegaMoeRouter,
 )
-from rtp_llm.models_py.new_models.glm5.language import _PackedGlm5Experts, _PackedGlm5MoE
+from rtp_llm.models_py.new_models.glm5.language import (
+    _PackedGlm5Experts,
+    _PackedGlm5MoE,
+)
 from rtp_llm.ops import RoleType
 
 
@@ -27,8 +30,11 @@ class PackedMegaEplbSM100Test(unittest.TestCase):
         self.assertEqual(torch.cuda.get_device_capability()[0], 10)
         with tempfile.TemporaryDirectory() as folder:
             dist.init_process_group(
-                "nccl", init_method="file://" + os.path.join(folder, "rendezvous"),
-                rank=0, world_size=1, device_id=torch.device("cuda", 0),
+                "nccl",
+                init_method="file://" + os.path.join(folder, "rendezvous"),
+                rank=0,
+                world_size=1,
+                device_id=torch.device("cuda", 0),
             )
             try:
                 self.run_swap()
@@ -38,18 +44,35 @@ class PackedMegaEplbSM100Test(unittest.TestCase):
     def run_swap(self):
         e, k, dim, inter = 16, 4, 4096, 2048
         pc = SimpleNamespace(
-            tp_size=1, ep_size=1, world_size=1, local_world_size=1, role_type=RoleType.DECODE
+            tp_size=1,
+            ep_size=1,
+            world_size=1,
+            local_world_size=1,
+            role_type=RoleType.DECODE,
         )
         mc = SimpleNamespace(
-            activation_type="SiGLU", model_type="glm_5", num_layers=1,
-            max_seq_len=32, gen_num_per_cycle=0,
+            activation_type="SiGLU",
+            model_type="glm_5",
+            num_layers=1,
+            max_seq_len=32,
+            gen_num_per_cycle=0,
             eplb_config=SimpleNamespace(enable_eplb=True, redundant_expert=0),
         )
         strategy = SimpleNamespace(moe_strategy="mega_moe")
         leaf = _PackedGlm5Experts(
-            num_experts=e, top_k=k, hidden_size=dim, moe_intermediate_size=inter,
-            tp_size=1, tp_rank=0, ep_size=1, ep_rank=0, params_dtype=torch.bfloat16,
-            model_config=mc, parallelism_config=pc, moe_config=strategy, quant_config=None,
+            num_experts=e,
+            top_k=k,
+            hidden_size=dim,
+            moe_intermediate_size=inter,
+            tp_size=1,
+            tp_rank=0,
+            ep_size=1,
+            ep_rank=0,
+            params_dtype=torch.bfloat16,
+            model_config=mc,
+            parallelism_config=pc,
+            moe_config=strategy,
+            quant_config=None,
             layer_idx=0,
         )
         swap = tuple(range(e // 2, e)) + tuple(range(e // 2))
@@ -59,27 +82,46 @@ class PackedMegaEplbSM100Test(unittest.TestCase):
             # Experts in the two halves have different FP4 nibbles AND scales.
             for expert in range(e):
                 hot = int(expert >= e // 2)
-                for j, (proj, rows, cols) in enumerate((
-                    ("gate_proj", inter, dim), ("up_proj", inter, dim), ("down_proj", dim, inter),
-                )):
+                for j, (proj, rows, cols) in enumerate(
+                    (
+                        ("gate_proj", inter, dim),
+                        ("up_proj", inter, dim),
+                        ("down_proj", dim, inter),
+                    )
+                ):
                     key = f"{expert}.{proj}"
-                    owner.load_weights({
-                        key + ".weight": torch.full(
-                            (rows, cols // 2), 0x11 * (hot + 1), dtype=torch.int8
-                        ),
-                        key + ".scale": torch.full(
-                            (rows, cols // 32), 117 + hot - j, dtype=torch.uint8
-                        ).view(torch.float8_e8m0fnu),
-                    })
+                    owner.load_weights(
+                        {
+                            key
+                            + ".weight": torch.full(
+                                (rows, cols // 2), 0x11 * (hot + 1), dtype=torch.int8
+                            ),
+                            key
+                            + ".scale": torch.full(
+                                (rows, cols // 32), 117 + hot - j, dtype=torch.uint8
+                            ).view(torch.float8_e8m0fnu),
+                        }
+                    )
             owner.to("cuda")
             return owner.prepare_eplb_reload_weights()
 
         raw = prepare(leaf)
         cfg = SimpleNamespace(
-            mega_moe_policy=MegaMoeExecutionPolicy(), moe_strategy="mega_moe",
-            model_config=mc, parallelism_config=pc, moe_config=strategy,
-            ep_size=1, ep_rank=0, tp_size=1, n_routed_experts=e, n_local_experts=e, local_expert_start=0,
-            n_activated_experts=k, max_generate_batch_size=8, dim=dim, moe_inter_dim=inter,
+            mega_moe_policy=MegaMoeExecutionPolicy(),
+            moe_strategy="mega_moe",
+            model_config=mc,
+            parallelism_config=pc,
+            moe_config=strategy,
+            ep_size=1,
+            ep_rank=0,
+            tp_size=1,
+            n_routed_experts=e,
+            n_local_experts=e,
+            local_expert_start=0,
+            n_activated_experts=k,
+            max_generate_batch_size=8,
+            dim=dim,
+            moe_inter_dim=inter,
             layer_id=0,
         )
         kernel = MegaMoeExecutor(cfg, None, dict(raw))
@@ -110,7 +152,9 @@ class PackedMegaEplbSM100Test(unittest.TestCase):
             # Raw dispatch reads physical slots. The captured dispatch reads
             # logical ids; it must still return the original logical output.
             physical = kernel(x, weights, ids).clone()
-            torch.testing.assert_close(physical, baseline.flip(0) if swapped else baseline)
+            torch.testing.assert_close(
+                physical, baseline.flip(0) if swapped else baseline
+            )
             torch.testing.assert_close(leaf(x, weights, ids), baseline)
             graph.replay()
             torch.testing.assert_close(y, baseline)

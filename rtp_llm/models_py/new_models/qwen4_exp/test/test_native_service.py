@@ -99,6 +99,19 @@ class NativeQwen4ServiceTest(unittest.TestCase):
                 self.assertEqual(model.model_weights_loader.loaded_method.value, method)
                 self.assertEqual(model.py_model.layers[0].mlp.experts.w13.dtype, torch.bfloat16)
                 self.assertIs(model.weight.get_global_weight("embedding"), model.py_model.embed_tokens.weight)
+                embedding = model.py_model.embed_tokens.weight
+                head = model.weight.get_global_weight("lm_head")
+                old_embedding = embedding.clone()
+                update = old_embedding + 1
+                with self.assertRaises((ValueError, NotImplementedError, PermissionError)):
+                    model.weight_manager.update_tensors({
+                        "embedding": update,
+                        "model.language_model.layers.0.linear_attn.in_proj_qkvz.weight": update,
+                    })
+                torch.testing.assert_close(embedding, old_embedding)
+                model.weight_manager.update_tensors({"embedding": update, "lm_head": head.clone() + 2})
+                torch.testing.assert_close(model.py_model._runtime.embed_tokens.weight, update)
+                torch.testing.assert_close(head, values["lm_head.weight"] + 2)
                 qsa = model.py_model.layers[1].self_attn.qsa_indexer
                 self.assertIs(qsa.rope_config, config.attn_config.rope_config)
                 torch.testing.assert_close(

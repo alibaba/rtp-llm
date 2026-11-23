@@ -338,7 +338,7 @@ class NewLoaderExpertBalancer:
             self._staged = None
 
 
-def _bind_stats(experts, logical, gpu_loads, *, stats_only=False):
+def _bind_stats(experts, logical, gpu_loads, live_rows=None, *, stats_only=False):
     for layer_id, module in experts.items():
         if (
             stats_only
@@ -350,4 +350,4 @@ def _bind_stats(experts, logical, gpu_loads, *, stats_only=False):
             # Replicated attention-TP inputs must contribute once per DP group;
             # CP origins have attention TP rank zero and contribute separately.
             continue
-        module.bind_eplb_stats(logical[layer_id], gpu_loads[layer_id])
+        module.bind_eplb_stats(logical[layer_id], gpu_loads[layer_id], live_rows)

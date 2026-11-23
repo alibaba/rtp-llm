@@ -9,6 +9,11 @@ from rtp_llm.models_py.new_models.megatron_bert.backbone import MegatronParamete
 class MegatronBertForEmbedding(MegatronParameters, GptModelBase, RtpModule):
     supports_ft_handler_heads = True
 
+    def finalize_runtime_input_vocab(self, config, tokenizer):
+        from rtp_llm.models_py.new_models.bert.checkpoint_metadata import publish_input_vocab
+
+        publish_input_vocab(config, tokenizer, self.embeddings.word_embeddings.weight.shape[0])
+
     def load_ft_checkpoint(self, checkpoint):
         from .ft_checkpoint import load_megatron_ft_checkpoint
 

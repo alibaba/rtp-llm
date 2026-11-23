@@ -18,23 +18,36 @@ def _vocab(checkpoint, model, name):
     vocab, dim = model._v4_args.vocab_size, model._v4_args.dim
     shapes = [checkpoint.read_rank_slice(name, rank) for rank in range(tp)]
     if name == "global.embedding":
+        if shapes == [(vocab, dim)]:
+            return checkpoint.read(name)
         if dim % tp or any(shape != (vocab, dim // tp) for shape in shapes):
             raise ValueError("Invalid V4 FT hidden-column embedding partition")
         # A V4.1/PPU embedding can consume its own hidden-column shard.
         leaf = model.v4.embed
         spec = leaf.checkpoint_read_spec("weight", (vocab, dim))
-        if spec and spec.shard_dim == 1 and spec.shard_count == tp:
+        needs_tied_head = (
+            getattr(model, "tied_target_vocabulary", False)
+            and "global.lm_head" not in checkpoint.entries
+        )
+        if (
+            spec
+            and spec.shard_dim == 1
+            and spec.shard_count == tp
+            and not needs_tied_head
+        ):
             part = checkpoint.read_rank_slice(
                 name, spec.shard_rank, (slice(None), slice(None))
             )
             return spec.wrap_sharded_tensor(part)
-        return torch.cat(
-            [
-                checkpoint.read_rank_slice(name, rank, (slice(None), slice(None)))
-                for rank in range(tp)
-            ],
-            dim=1,
-        )
+        result = None
+        for rank in range(tp):
+            part = checkpoint.read_rank_slice(name, rank, (slice(None), slice(None)))
+            if result is None:
+                result = part.new_empty((vocab, dim))
+            if part.dtype != result.dtype:
+                raise ValueError("V4 FT embedding peer dtype mismatch")
+            result.narrow(1, rank * part.shape[1], part.shape[1]).copy_(part)
+        return result
 
     head = model.v4.head
     if head.output_vocab_ids:

@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 import torch
 import torch.nn as nn
 
+from rtp_llm.models_py.downstream_heads import DecoderHandlerOwner, needs_generation_projection
 from rtp_llm.models_py.layers.embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -633,7 +634,7 @@ def extract_config_values(
 # ------------------------------------------------------------------ #
 
 
-class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GenericMoeModel, RtpModule):
+class DeepSeekV32ForCausalLM(DecoderHandlerOwner, MlaRuntimeLayoutMixin, GenericMoeModel, RtpModule):
     """Config-driven DeepSeek MLA/MoE implementation for newloader.
 
     WEIGHTS_MAPPER only strips "model." prefix.  All submodule names match
@@ -646,7 +647,6 @@ class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GenericMoeModel, RtpModule):
 
     @classmethod
     def from_ft_checkpoint_header(cls, model_config, load_config, checkpoint):
-        from rtp_llm.models_py.downstream_heads import ReplicatedHandlerHeads
         from rtp_llm.ops import TaskType
 
         owner = cls(model_config, load_config)
@@ -665,15 +665,6 @@ class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GenericMoeModel, RtpModule):
         # FTExportWeights omits the generation projection for downstream
         # tasks. A handler can independently request a *full* vocabulary
         # tensor under its replicated __custom__ role.
-        owner.lm_head = None
-        owner.handler_heads = ReplicatedHandlerHeads(
-            load_config.custom_weight_mappings, owner.WEIGHTS_MAPPER,
-            model_config.hidden_size, load_config.compute_dtype,
-            projection_layers=load_config.custom_projection_layers,
-            protected_roots={"embed_tokens", "lm_head", "layers", "norm", "handler_heads"},
-        )
-        owner.supports_custom_weight_mappings = True
-        owner.supports_handler_projection_layers = True
         owner.supports_ft_handler_heads = True
         return owner
 
@@ -693,7 +684,14 @@ class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GenericMoeModel, RtpModule):
         return int(layer_text)
 
     def checkpoint_weight_name_filter(self) -> Callable[[str], bool]:
-        return self._score_name_filter
+        def owns(name):
+            if name in self._handler_checkpoint_names:
+                return True
+            if self.WEIGHTS_MAPPER.map_name(name) == "lm_head.weight" and self.lm_head is None:
+                return False
+            return self._score_name_filter(name)
+
+        return owns
 
     @staticmethod
     def _read_config_json(ckpt_path: str) -> Dict[str, Any]:
@@ -720,10 +718,10 @@ class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GenericMoeModel, RtpModule):
                     has_lm_head = True
                 yield name, tensor
 
-        mapped_iter = self.WEIGHTS_MAPPER.apply(_track(weights_iter))
+        mapped_iter = self.WEIGHTS_MAPPER.apply(_track(self._capture_handler_inputs(weights_iter)))
         super().load_weights(mapped_iter)
 
-        if not has_lm_head and self.tie_word_embeddings:
+        if not has_lm_head and self.tie_word_embeddings and self.lm_head is not None:
             logger.info(
                 "[DeepSeekV32] lm_head.weight not found in ckpt; "
                 "tying lm_head to embed_tokens"
@@ -854,6 +852,7 @@ class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GenericMoeModel, RtpModule):
         )
 
         # --- LM head ---
+        self._init_decoder_handlers(load_config, cfg["hidden_size"])
         self.lm_head = ParallelLMHead(
             vocab_size=cfg["vocab_size"],
             hidden_size=cfg["hidden_size"],
@@ -861,8 +860,8 @@ class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GenericMoeModel, RtpModule):
             tp_rank=cfg["lm_head_tp_rank"],
             params_dtype=cfg["lm_head_params_dtype"],
             **output_vocab_head_kwargs(model_config),
-        )
-        if self.tie_word_embeddings:
+        ) if needs_generation_projection(model_config) else None
+        if self.tie_word_embeddings and self.lm_head is not None:
             self.embed_tokens.tie_output_head(self.lm_head)
 
     def embedding(self, inputs: PyModelInputs) -> torch.Tensor:

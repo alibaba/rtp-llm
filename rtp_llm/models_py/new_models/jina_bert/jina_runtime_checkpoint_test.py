@@ -87,6 +87,7 @@ class _JinaServiceFixture(unittest.TestCase):
                 service.load()
                 model = service.py_model
                 self.assertIsInstance(model, JinaBertForEmbedding)
+                self.assertEqual(config.input_vocab_size, model.embeddings.word_embeddings.num_embeddings)
                 self.assertIs(service.checkpoint_owner, model)
                 self.assertIs(service.weight, model.weight)
                 self.assertIs(

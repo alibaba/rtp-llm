@@ -199,11 +199,11 @@ class RtpModule(nn.Module):
         return None
 
     def _resolve_checkpoint_load_plan(
-        self, module: nn.Module, name: str, shape: tuple[int, ...]
+        self, module: nn.Module, name: str, shape: tuple[int, ...], *, skip_local_spec=False
     ) -> Tuple[Optional[CheckpointLoadTarget], Optional[ReadSpec]]:
         """Resolve dispatch destination and ReadSpec in one tree traversal."""
         local_spec = None
-        if isinstance(module, RtpModule):
+        if not skip_local_spec and isinstance(module, RtpModule):
             local_spec = module.checkpoint_read_spec(name, shape)
         if "." not in name:
             return self._direct_checkpoint_target(module, name), local_spec
@@ -265,6 +265,11 @@ class RtpModule(nn.Module):
             )
         target_plan, child_spec = self._resolve_checkpoint_load_plan(child, rest, shape)
         return target_plan, local_spec if local_spec is not None else child_spec
+
+    def mapped_child_read_spec(self, name, shape):
+        """For a composite loader that maps its input then dispatches to children."""
+        mapped = self.WEIGHTS_MAPPER.map_name(name)
+        return self._resolve_checkpoint_load_plan(self, mapped, shape, skip_local_spec=True)[1]
 
     def resolve_checkpoint_load_plan(
         self, name: str, shape: tuple[int, ...]

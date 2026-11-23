@@ -221,7 +221,7 @@ class OwnedV41Attention(RtpModule):
             return make_sharded_read_spec(
                 name, tuple(shape), 0, self.tp_size, self.tp_rank
             )
-        return None
+        return self.mapped_child_read_spec(name, shape)
 
     def load_weights(self, weights):
         items = weights.items() if isinstance(weights, dict) else weights
@@ -337,6 +337,9 @@ class OwnedV41CommitAttention(RtpModule):
         ) = None
         OwnedV41Attention._initialize_runtime_metadata(self, args)
         self.WEIGHTS_MAPPER = WeightsMapper(exact_mapping={"kv_norm.weight": "kv_norm"})
+
+    def checkpoint_read_spec(self, name, shape):
+        return self.mapped_child_read_spec(name, shape)
 
     def load_weights(self, weights):
         items = weights.items() if isinstance(weights, dict) else weights

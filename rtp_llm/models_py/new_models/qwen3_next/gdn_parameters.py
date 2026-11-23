@@ -12,6 +12,7 @@ import torch.nn as nn
 from rtp_llm.models_py.layers.linear import ColumnParallelLinear
 from rtp_llm.models_py.module_base import RtpModule, copy_weight_
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
+from rtp_llm.models_py.runtime_weight_update import TensorUpdate
 
 if TYPE_CHECKING:
     from rtp_llm.ops import LinearAttentionConfig
@@ -124,6 +125,42 @@ def _finite_positive_real(value: Any, name: str) -> float:
 
 class Qwen3NextGdnParameters(RtpModule):
     """Own checkpoint parameters independent of runtime graph and device views."""
+
+    supports_independent_weight_updates = True
+    _state_parameters = {
+        "in_proj_ba.weight": "in_proj_ba_w",
+        "conv1d.weight": "conv1d_w",
+        "dt_bias": "dt_bias",
+        "A_log": "a_log",
+        "norm.weight": "norm_w",
+    }
+
+    def owns_online_checkpoint_name(self, name):
+        return name in self._state_parameters
+
+    def _local_state_tensor(self, name, tensor):
+        if name == "in_proj_ba.weight":
+            return self._split_ba(tensor)
+        if name == "conv1d.weight":
+            return self._split_conv1d(tensor)
+        if name in ("dt_bias", "A_log"):
+            return self._split_head_tensor(tensor, name)
+        if name == "norm.weight":
+            if tensor.shape != self.norm_w.shape:
+                raise ValueError(f"linear_attn.norm.weight must have shape {tuple(self.norm_w.shape)}")
+            return tensor.contiguous()
+        raise NotImplementedError(f"No GDN state update for {name!r}")
+
+    def prepare_weight_updates(self, weights):
+        updates = []
+        for name, tensor in weights.items():
+            local = self._local_state_tensor(name, tensor)
+            parameter = self._state_parameters[name]
+            target = self._parameters[parameter]
+            if tensor.dtype != target.dtype:
+                raise TypeError(f"{name} requires {target.dtype}, got {tensor.dtype}")
+            updates.append(TensorUpdate(parameter, target, local))
+        return updates
 
     def __init__(
         self,
@@ -618,42 +655,20 @@ class Qwen3NextGdnParameters(RtpModule):
                 self._load_split_qkvz("qkv", name.removeprefix("in_proj_qkv."), tensor)
             elif name.startswith("in_proj_z."):
                 self._load_split_qkvz("z", name.removeprefix("in_proj_z."), tensor)
-            elif name == "in_proj_ba.weight":
-                if self._ba_layout is not None and self._ba_layout != "fused":
-                    raise RuntimeError(
-                        "Cannot mix split and fused checkpoint layouts for B/A"
-                    )
-                self._ba_layout = "fused"
+            elif name in self._state_parameters:
+                if name == "in_proj_ba.weight":
+                    if self._ba_layout is not None and self._ba_layout != "fused":
+                        raise RuntimeError(
+                            "Cannot mix split and fused checkpoint layouts for B/A"
+                        )
+                    self._ba_layout = "fused"
                 if not self._assign_weight(
-                    self, "in_proj_ba_w", self._split_ba(tensor)
+                    self, self._state_parameters[name], self._local_state_tensor(name, tensor)
                 ):
-                    raise RuntimeError("Failed to load in_proj_ba.weight")
+                    raise RuntimeError(f"Failed to load {name}")
             elif name == "in_proj_b.weight":
                 self._load_split_ba("b", tensor)
             elif name == "in_proj_a.weight":
                 self._load_split_ba("a", tensor)
-            elif name == "conv1d.weight":
-                if not self._assign_weight(
-                    self, "conv1d_w", self._split_conv1d(tensor)
-                ):
-                    raise RuntimeError("Failed to load conv1d.weight")
-            elif name == "dt_bias":
-                if not self._assign_weight(
-                    self, "dt_bias", self._split_head_tensor(tensor, name)
-                ):
-                    raise RuntimeError("Failed to load dt_bias")
-            elif name == "A_log":
-                if not self._assign_weight(
-                    self, "a_log", self._split_head_tensor(tensor, name)
-                ):
-                    raise RuntimeError("Failed to load A_log")
-            elif name == "norm.weight":
-                if tuple(tensor.shape) != tuple(self.norm_w.shape):
-                    raise ValueError(
-                        f"linear_attn.norm.weight must have shape "
-                        f"{tuple(self.norm_w.shape)}, got {tuple(tensor.shape)}"
-                    )
-                if not self._assign_weight(self, "norm_w", tensor.contiguous()):
-                    raise RuntimeError("Failed to load linear attention norm")
             else:
                 raise RuntimeError(f"Unsupported Qwen3-Next linear tensor {name!r}")

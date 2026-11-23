@@ -162,6 +162,23 @@ models_py_test(
 )
 
 models_py_test(
+    name = "qwen4_nvfp4_tp2_marlin_hopper_test",
+    src = "new_models/qwen4_exp/expert_factory_test.py",
+    gpu = "H20_CU13",
+    args = ["Q4SourceExpertTest.test_prequantized_tp2_marlin_slices_weights_and_scales_together"],
+    env = {"RUN_Q4_NEWLOADER_MARLIN": "1"},
+    deps = [":new_weight_loader"],
+)
+
+models_py_test(
+    name = "eplb_graph_bucket_stats_hopper_test",
+    src = "eplb_direct_test.py",
+    gpu = "H20_CU13",
+    args = ["GraphBucketStatsTest.test_changing_real_rows_in_one_captured_graph"],
+    deps = [":new_weight_loader"],
+)
+
+models_py_test(
     name = "qwen4_nvfp4_newloader_hopper_output_test",
     src = "new_models/qwen4_exp/nvfp4_experts_test.py",
     gpu = "H20_CU13",
@@ -216,11 +233,13 @@ py_library(
         "read_spec.py",
         "registry.py",
         "runtime_weight_update.py",
+        "scratch_moe_tp.py",
         "v41_fst_file_pool.py",
         "v4_fst_nogds.py",
         "weight_mapper.py",
     ],
     deps = [
+        "//rtp_llm:checkpoint_file_utils",
         "//rtp_llm:device_detection",
         "//rtp_llm:safetensors_torch",
         "//rtp_llm/models_py/distributed:rank_layout",
@@ -328,6 +347,20 @@ py_test(
         "//rtp_llm/tools/convert:convert",
         "//rtp_llm:safetensors",
         "//rtp_llm:utils",
+        "//rtp_llm/tools/convert:ft_export_metadata",
+        "//rtp_llm/tools/convert:ft_export_writer",
+    ],
+)
+
+py_test(
+    name = "llama_meta_online_fp8_test",
+    srcs = ["llama_checkpoint_formats_test.py", "llama_meta_online_fp8_test.py"],
+    main = "llama_meta_online_fp8_test.py",
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    deps = [
+        ":new_weight_loader",
+        "//rtp_llm:models",
         "//rtp_llm/tools/convert:ft_export_metadata",
         "//rtp_llm/tools/convert:ft_export_writer",
     ],
@@ -468,6 +501,26 @@ py_test(
     tags = ["manual"],
     env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
     deps = [":new_weight_loader", "//rtp_llm:models"],
+)
+
+py_library(
+    name = "frontend_model_helpers",
+    srcs = [
+        "kernels/cuda/quant_layouts.py",
+        "modules/__init__.py",
+        "modules/dsv41/__init__.py",
+        "modules/dsv41/bounded_replay.py",
+        "new_models/__init__.py",
+        "new_models/kimi_k25/__init__.py",
+        "new_models/kimi_k25/vision_runtime.py",
+        "speculative/__init__.py",
+        "speculative/qwen3_dspark_checkpoint.py",
+    ],
+    deps = [
+        ":new_loader_core",
+        "//rtp_llm/models_py/new_models/qwen3_moe_eagle3:draft_body",
+    ],
+    visibility = ["//rtp_llm:__pkg__"],
 )
 
 py_library(

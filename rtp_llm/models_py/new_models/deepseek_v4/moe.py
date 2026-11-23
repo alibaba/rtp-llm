@@ -330,12 +330,12 @@ class OwnedFp8Fp4MoE(RtpModule):
     def layer_idx(self):
         return self.layer_id
 
-    def bind_eplb_stats(self, log_stats, gpu_loads):
+    def bind_eplb_stats(self, log_stats, gpu_loads, live_rows=None):
         from rtp_llm.models_py.layers.eplb_stats import ExpertRouteStats
 
         self._eplb_stats = ExpertRouteStats(
             log_stats, gpu_loads, num_experts=self.num_experts,
-            ep_size=self.ep_size, device=self.router_weight.device,
+            ep_size=self.ep_size, device=self.router_weight.device, live_rows=live_rows,
         )
         if self._runtime is not None:
             self._runtime.set_route_stats(self._eplb_stats)

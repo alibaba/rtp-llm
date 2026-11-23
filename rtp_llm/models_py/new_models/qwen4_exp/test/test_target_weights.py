@@ -77,6 +77,33 @@ def _checkpoint(root):
 
 
 class TargetWeightsTest(unittest.TestCase):
+    def test_rank_local_owner_keeps_full_classifier_and_no_generation_head(self):
+        from rtp_llm.models_py.downstream_heads import handler_weight_mappings
+        from rtp_llm.models_py.new_models.qwen4_exp.language import Qwen4ForCausalLM
+        from rtp_llm.ops import TaskType
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = _checkpoint(root)
+            data["classifier.weight"] = torch.arange(256).reshape(2, 128).bfloat16()
+            save_file(data, str(root / "model.safetensors"))
+            (root / "model.safetensors.index.json").write_text(json.dumps({
+                "weight_map": {name: "model.safetensors" for name in data}
+            }))
+            cfg = dict(model_type="_qwen4_whole_target_checkpoint", ckpt_path=directory,
+                       num_experts=2, moe_k=1, task_type=TaskType.SEQ_CLASSIFICATION)
+            load = NewLoaderConfig(device="cpu", compute_dtype=torch.bfloat16, load_method="scratch",
+                                   tp_size=2, tp_rank=1, ep_size=2, ep_rank=1,
+                                   custom_weight_mappings=handler_weight_mappings(("classifier.weight",)))
+            model = NewModelLoader(cfg, load, model_path=directory).load()
+            try:
+                self.assertIsNone(model.lm_head)
+                view = Qwen4ForCausalLM.runtime_weight_view(model)
+                self.assertNotIn("lm_head", view)
+                torch.testing.assert_close(view["__custom__.classifier.weight"], data["classifier.weight"])
+            finally:
+                model.close()
+
     def test_pruned_head_preserves_input_tokens_and_checkpoint_token_order(self):
         emb = "model.language_model.embed_tokens.weight"
         ids = list(range(0, 32, 2)) + [31]

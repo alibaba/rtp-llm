@@ -410,6 +410,7 @@ class NewLoaderConfig:
     # Opaque owner-validated coupled tensor references (e.g. scaled vocabulary).
     prepared_runtime_loan: Any = field(default=None, repr=False, compare=False)
     reserve_runtime_mem_mb: int = 0
+    moe_pure_tp_preshard: bool = False
 
     @classmethod
     def from_runtime(cls, parallelism_config, **options) -> "NewLoaderConfig":
@@ -2360,6 +2361,17 @@ class NewModelLoader:
             module.to(target_device)
             module.process_weights_after_loading()
 
+    def _finalize_host_staged_modules(self, model):
+        if self.load_config.force_cpu_load_weights:
+            # Honor a requested host quantizer, not merely host checkpoint I/O.
+            for module in self._staged_device_modules(model):
+                prepare = getattr(
+                    getattr(module, "quant_method", None), "prepare_weights_on_cpu", None
+                )
+                if callable(prepare):
+                    prepare(module)
+        self._migrate_staged_modules(model, self.load_config.device)
+
     @torch.inference_mode()
     def load(self, *, startup_lora: Optional[Tuple[str, str]] = None) -> nn.Module:
         # Backend selection alone does not publish a model. On retry, do not
@@ -2454,6 +2466,11 @@ class NewModelLoader:
                 ),
             )
             importer(ft_checkpoint)
+            finish_meta_lora = None
+            if meta_checkpoint is not None and startup_lora is not None:
+                from rtp_llm.models_py.lora_checkpoint import prepare_startup_lora_merge
+
+                finish_meta_lora = prepare_startup_lora_merge(model, self, *startup_lora)
             ft_rebalance = False
             if isinstance(ft_checkpoint, FTCheckpoint):
                 cfg = getattr(self.model_config, "eplb_config", None)
@@ -2471,11 +2488,17 @@ class NewModelLoader:
                             )
                         ft_rebalance = True
             self._validate_loaded_weights(model)
+            if meta_checkpoint is not None:
+                # Raw Meta tensors, unlike FT snapshots, still need the same
+                # bounded layer-at-a-time conversion as a floating HF checkpoint.
+                self._finalize_host_staged_modules(model)
             model.to(self.load_config.device)
             self._validate_loaded_weights(model)
             self._run_post_load_hooks(model)
             validate_borrowed_parameters(model, self.load_config.device)
-            if startup_lora is not None:
+            if finish_meta_lora is not None:
+                finish_meta_lora()
+            elif startup_lora is not None:
                 # Format adapters may import already packed runtime parameters.
                 from rtp_llm.models_py.lora_checkpoint import (
                     merge_startup_lora_checkpoint,
@@ -2636,9 +2659,25 @@ class NewModelLoader:
                 read_spec_resolver=base_resolver,
             )
         else:
+            scratch_expert_reader = None
+            if (
+                self.load_config.moe_pure_tp_preshard
+                and self.load_config.tp_size > 1
+                and self.load_config.ep_size == 1
+                and getattr(self.load_config.parallelism_config, "dp_size", 1) == 1
+                and startup_lora is None
+                and self._model_type() in {"qwen3_next", "qwen3_next_mtp", "qwen35_moe", "qwen35_moe_mtp"}
+            ):
+                from rtp_llm.models_py.scratch_moe_tp import make_reader
+
+                scratch_expert_reader = make_reader(
+                    lambda key: checkpoint_load_plan.get(self._mapped_checkpoint_name(model, key))
+                )
             weights = weight_mapper.get_all_weights(
                 selected_files,
                 catalog=self._checkpoint_catalog(),
+                advise_scratch_cache=True,
+                scratch_expert_reader=scratch_expert_reader,
                 device="cpu",
                 name_filter=base_filter,
                 safetensor_slice_expander=base_expander,
@@ -2679,19 +2718,7 @@ class NewModelLoader:
         )
 
         if not accelerator_fst:
-            if self.load_config.force_cpu_load_weights:
-                # A forced host load includes method-owned host conversion,
-                # not merely CPU I/O followed by a different GPU quantizer.
-                # Other quantization families retain their existing lifecycle.
-                for module in self._staged_device_modules(model):
-                    prepare = getattr(
-                        getattr(module, "quant_method", None),
-                        "prepare_weights_on_cpu",
-                        None,
-                    )
-                    if callable(prepare):
-                        prepare(module)
-            self._migrate_staged_modules(model, self.load_config.device)
+            self._finalize_host_staged_modules(model)
         validate_borrowed_parameters(model, self.load_config.device)
         model.to(self.load_config.device)
         self._validate_loaded_weights(model)

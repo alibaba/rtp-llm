@@ -4,6 +4,7 @@ from typing import Any, Dict
 
 import torch
 
+from rtp_llm.config.quant_config import resolve_nvfp4_backend
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -29,6 +30,7 @@ class CudaFp4NoDPStrategy(MoeStrategy):
         checker.check(
             config.moe_strategy == "fp4_no_dp" or config.moe_strategy == "auto"
         )
+        checker.check(resolve_nvfp4_backend(config.moe_config) == "trtllm")
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.trtllm_fp4_executor import (
@@ -62,6 +64,7 @@ class CudaFp4EpLowLatencyStrategy(MoeStrategy):
         checker.check(
             config.moe_strategy == "fp4_ep_low_latency" or config.moe_strategy == "auto"
         )
+        checker.check(resolve_nvfp4_backend(config.moe_config) == "cutedsl")
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutedsl_fp4_executor import (
@@ -92,6 +95,7 @@ class CudaFp4EpNormalStrategy(MoeStrategy):
         checker.check(
             config.moe_strategy == "fp4_ep_normal" or config.moe_strategy == "auto"
         )
+        checker.check(resolve_nvfp4_backend(config.moe_config) == "trtllm")
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.trtllm_fp4_executor import (

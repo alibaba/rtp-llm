@@ -1086,6 +1086,14 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
         const bool can_run_graph = moe_forward_allows_graph_ && !capture_hidden_states && enable_cuda_graph_
                                    && graph_runner != nullptr && graph_runner->canRun(py_model_inputs, graph_state);
+        if (eplb_live_rows_.defined()) {
+            // Match the runner's packed token count (including real verify
+            // tokens), not the number of requests or the selected bucket width.
+            const auto live_rows = is_prefill_cuda_graph_mode_ || is_generation_prefill_runner ?
+                                       graph_state.current_seq_len :
+                                       graph_state.seq_len_sum;
+            eplb_live_rows_.fill_(can_run_graph ? live_rows : std::numeric_limits<int>::max());
+        }
         // The eager Python instance retains this wrapper's SEED/REUSE role and
         // shares its request-local TopK buffer with the graph clones. Batches
         // outside the captured buckets must use that same role eagerly.

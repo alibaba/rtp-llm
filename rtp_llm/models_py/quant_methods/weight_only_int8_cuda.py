@@ -7,8 +7,18 @@ import triton.language as tl
 
 @triton.jit
 def _mixed_w8a16(
-    X, W, S, B, Y, M, K: tl.constexpr, N: tl.constexpr, BIAS: tl.constexpr,
-    BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,
+    X,
+    W,
+    S,
+    B,
+    Y,
+    M,
+    K: tl.constexpr,
+    N: tl.constexpr,
+    BIAS: tl.constexpr,
+    BM: tl.constexpr,
+    BN: tl.constexpr,
+    BK: tl.constexpr,
 ):
     tile = tl.program_id(0)
     m = (tile // (N // BN)) * BM + tl.arange(0, BM)
@@ -17,8 +27,9 @@ def _mixed_w8a16(
     acc = tl.full((BM, BN), 0, tl.float32)
     for block in range(K // BK):
         k = block * BK + tl.arange(0, BK)
-        x = tl.load(X + m[:, None].to(tl.int64) * K + k[None, :],
-                    mask=m[:, None] < M, other=0)
+        x = tl.load(
+            X + m[:, None].to(tl.int64) * K + k[None, :], mask=m[:, None] < M, other=0
+        )
         # Invert cuda_groupwise_layout(bits=8, arch>=75): row permutation
         # in each MMA group of 16, paired columns interleaved per 64 rows,
         # then the middle two bytes of each four-byte word exchanged.
@@ -32,8 +43,7 @@ def _mixed_w8a16(
         acc = tl.dot(x, w, acc)
     if BIAS:
         acc += tl.load(B + n)[None, :]
-    tl.store(Y + m[:, None].to(tl.int64) * N + n[None, :], acc,
-             mask=m[:, None] < M)
+    tl.store(Y + m[:, None].to(tl.int64) * N + n[None, :], acc, mask=m[:, None] < M)
 
 
 def mixed_w8a16(x, weight, scale, *, bias=None):
@@ -44,7 +54,17 @@ def mixed_w8a16(x, weight, scale, *, bias=None):
     if m:
         with torch.cuda.device(x.device):
             _mixed_w8a16[(triton.cdiv(m, 16) * (n // 32),)](
-                x, weight, scale, bias if bias is not None else scale, out,
-                m, k, n, bias is not None, 16, 32, 32,
+                x,
+                weight,
+                scale,
+                bias if bias is not None else scale,
+                out,
+                m,
+                k,
+                n,
+                bias is not None,
+                16,
+                32,
+                32,
             )
     return out

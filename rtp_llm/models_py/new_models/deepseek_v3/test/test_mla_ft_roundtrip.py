@@ -13,10 +13,13 @@ from safetensors.torch import save_file
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
-from rtp_llm.models.glm5 import Glm5
 from rtp_llm.models.downstream_modules.classifier.classifier import ClassifierHandler
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
+from rtp_llm.models.glm4_moe_lite import Glm4MoeLite
+from rtp_llm.models.glm5 import Glm5
+from rtp_llm.models_py.ft_checkpoint import CheckpointTopology, FTCheckpoint
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
+from rtp_llm.models_py.new_models.deepseek_v3.language import DeepSeekV32ForCausalLM
 from rtp_llm.models_py.new_models.deepseek_v3.test.test_glm5_mtp_route import (
     _Draft as GlmDraft,
 )
@@ -27,12 +30,17 @@ from rtp_llm.models_py.new_models.deepseek_v3.test.test_nextn_route import (
     fixture,
     load_service,
 )
+from rtp_llm.models_py.quant_methods.base import QuantizationConfig
+from rtp_llm.ops import HWKernelConfig, ParallelismConfig, TaskType
 from rtp_llm.tools.convert.ft_export_job import create_ft_export_job
 from rtp_llm.tools.convert.ft_export_metadata import generate_ft_index
-from rtp_llm.ops import ParallelismConfig, TaskType
 
 
 class GlmScore(_CpuCheckpoint, Glm5):
+    pass
+
+
+class GlmLiteScore(_CpuCheckpoint, Glm4MoeLite):
     pass
 
 
@@ -44,6 +52,11 @@ class BlockScore(_Score):
             bits=8, group_size=128, is_quanted=True
         )
         return cfg
+
+
+class GpuBlockScore(BlockScore):
+    def _get_device_str(self):
+        return "cuda:0"
 
 
 def _two_rank_round_trip(rank, root):
@@ -165,11 +178,12 @@ class MlaFtRoundTrip(unittest.TestCase):
             "deepseek_v32",
             "kimi_k2",
             "glm_5",
+            "glm4_moe_lite",
         ):
             with self.subTest(tag=tag):
                 self.round_trip(
                     tag,
-                    GlmScore if tag == "glm_5" else _Score,
+                    {"glm_5": GlmScore, "glm4_moe_lite": GlmLiteScore}.get(tag, _Score),
                     sparse=tag in ("deepseek_v32", "glm_5"),
                     direct=tag == "deepseek2",
                 )
@@ -195,7 +209,10 @@ class MlaFtRoundTrip(unittest.TestCase):
             save_file(data, str(hf / "model.safetensors"))
             torch.multiprocessing.spawn(_two_rank_round_trip, args=(path,), nprocs=2)
 
-    def test_offline_block_fp8_writer_and_absorb(self):
+    def test_offline_block_fp8_writer_and_staging(self):
+        self.check_block_writer("cpu")
+
+    def check_block_writer(self, device):
         cfg, _, _ = fixture(True)
         cfg.update(
             num_hidden_layers=1,
@@ -261,16 +278,91 @@ class MlaFtRoundTrip(unittest.TestCase):
                 dest.mkdir()
                 (dest / "config.json").write_text(json.dumps(cfg))
             save_file(data, str(hf / "model.safetensors"))
-            source = load_service(
-                str(hf), "scratch", cls=BlockScore, tag="deepseek_v32"
+            cfg_owner = BlockScore._create_config(str(hf))
+            cfg_owner.ckpt_path, cfg_owner.model_type, cfg_owner.max_seq_len = (
+                str(hf),
+                "deepseek_v32",
+                128,
             )
-            source.kv_cache_config = KVCacheConfig()
-            create_ft_export_job(source).dump_weight_as_ft_style("cpu", str(ft))
+            cfg_owner.attn_config.tokens_per_block = (
+                cfg_owner.attn_config.kernel_tokens_per_block
+            ) = 64
+            cfg_owner.data_type, cfg_owner.enable_fp32_lm_head, cfg_owner.lora_infos = (
+                "bf16",
+                False,
+                {},
+            )
+            cfg_owner.init_precision_config(KVCacheConfig(), "bf16")
+            self.assertTrue(cfg_owner.quant_algo.isQuant())
+            BlockScore._post_build_model_config(cfg_owner)
+            pc = ParallelismConfig()
+            service = BlockScore(
+                cfg_owner,
+                pc,
+                HWKernelConfig(),
+                KVCacheConfig(),
+                None,
+                None,
+                1,
+                "scratch",
+                None,
+                False,
+            )
+            create_ft_export_job(service).dump_weight_as_ft_style(device, str(ft))
             generate_ft_index(str(ft), {"TP_SIZE": "1", "EP_SIZE": "1", "DP_SIZE": "1"})
-            actual = load_service(
-                str(ft), "scratch", cls=BlockScore, tag="deepseek_v32"
+            if device == "cpu":
+                # Staging only: FP8 kernel setup requires an accelerator.
+                # Exercise the production importer directly and check the
+                # original FP8 bytes, scales and independent BF16 absorb copies.
+                cfg_owner.ckpt_path = str(ft)
+                options = NewLoaderConfig(
+                    device="cpu",
+                    parallelism_config=pc,
+                    compute_dtype=torch.bfloat16,
+                    quant_config=QuantizationConfig(
+                        "fp8_block", cfg_owner.quant_config
+                    ),
+                )
+                actual = DeepSeekV32ForCausalLM(cfg_owner, options)
+                checkpoint = FTCheckpoint.open(
+                    str(ft), CheckpointTopology(), num_layers=1
+                )
+                actual.load_ft_checkpoint(checkpoint)
+                for key in data:
+                    if not key.startswith(p + "self_attn."):
+                        continue
+                    expected = data[key]
+                    got = actual.get_parameter(key.removeprefix("model."))
+                    if expected.dtype == torch.float8_e4m3fn:
+                        expected, got = (
+                            expected.view(torch.uint8),
+                            got.view(torch.uint8),
+                        )
+                    torch.testing.assert_close(got, expected, atol=0, rtol=0)
+                kv = data[p + "self_attn.kv_b_proj.weight"].float() * data[
+                    p + "self_attn.kv_b_proj.weight_scale_inv"
+                ].repeat_interleave(128, 0).repeat_interleave(128, 1)
+                expanded = kv.bfloat16().reshape(2, 256, 128)
+                torch.testing.assert_close(
+                    actual.layers[0].self_attn._kc_w,
+                    expanded[:, :128, :],
+                    atol=0,
+                    rtol=0,
+                )
+                torch.testing.assert_close(
+                    actual.layers[0].self_attn._vc_w,
+                    expanded[:, 128:, :].transpose(1, 2),
+                    atol=0,
+                    rtol=0,
+                )
+                return
+            source = load_service(
+                str(hf), "scratch", cls=GpuBlockScore, tag="deepseek_v32"
             ).py_model
-            for key, expected in source.py_model.named_parameters():
+            actual = load_service(
+                str(ft), "scratch", cls=GpuBlockScore, tag="deepseek_v32"
+            ).py_model
+            for key, expected in source.named_parameters():
                 got = actual.get_parameter(key)
                 if expected.dtype == torch.float8_e4m3fn:
                     expected, got = expected.view(torch.uint8), got.view(torch.uint8)
@@ -278,7 +370,7 @@ class MlaFtRoundTrip(unittest.TestCase):
             for key in ("_kc_w", "_vc_w"):
                 torch.testing.assert_close(
                     getattr(actual.layers[0].self_attn, key),
-                    getattr(source.py_model.layers[0].self_attn, key),
+                    getattr(source.layers[0].self_attn, key),
                     atol=0,
                     rtol=0,
                 )

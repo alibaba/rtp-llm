@@ -6,6 +6,20 @@ from rtp_llm.models_py.layers.linear import ColumnParallelLinear
 from rtp_llm.models_py.module_base import RtpModule
 
 
+class _IndexerGateLinear(ColumnParallelLinear):
+    """FP32 gate: the fused CUDA small-token kernel streams complete [N,K] rows."""
+
+    fused_gate = False
+
+    def process_weights_after_loading(self):
+        if not self.fused_gate or torch.version.hip is not None:
+            return super().process_weights_after_loading()
+        # This ordinary FP32 projection falls back to F.linear on CUDA. Keep
+        # one canonical Parameter for both paths, including weight updates.
+        self.weight.data = self.weight.detach().contiguous()
+        self._post_load_done = True
+
+
 class SparseIndexerParameters(RtpModule):
     def __init__(
         self, index_n_heads, index_head_dim, hidden_size, q_lora_rank,
@@ -47,7 +61,7 @@ class SparseIndexerParameters(RtpModule):
             dtype=params_dtype,
         ).requires_grad_(False)
         # weights_proj: hidden_size → index_n_heads
-        self.weights_proj = ColumnParallelLinear(
+        self.weights_proj = _IndexerGateLinear(
             input_size=hidden_size,
             output_size=index_n_heads,
             tp_size=1,

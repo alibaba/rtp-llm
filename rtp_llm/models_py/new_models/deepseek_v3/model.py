@@ -100,6 +100,7 @@ class DeepSeekV32Indexer(Indexer, SparseIndexerParameters):
         self._configure_indexer_runtime(
             hw_kernel_config, owner_tokens_per_block or blocksize
         )
+        self.weights_proj.fused_gate = self._fuse_logits_head_gate
         self._fuse_kernels_enabled = self._can_fuse_rope(cos_sin_cache)
 
         self.indexer_op = IndexerOp(

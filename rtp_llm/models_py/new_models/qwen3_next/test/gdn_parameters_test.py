@@ -135,6 +135,11 @@ class GdnOwnershipTest(unittest.TestCase):
         inputs = {
             "in_proj_qkvz.weight": torch.arange(24 * 8).float().reshape(24, 8),
             "out_proj.weight": torch.arange(8 * 8).float().reshape(8, 8),
+            "in_proj_ba.weight": torch.arange(64).float().reshape(8, 8),
+            "conv1d.weight": torch.arange(48).float().reshape(16, 1, 3),
+            "dt_bias": torch.arange(4).float() + 3,
+            "A_log": torch.arange(4).float() + 5,
+            "norm.weight": torch.arange(2).float() + 7,
         }
         request = {"linear_attn." + name: value for name, value in inputs.items()}
         for tp, rank in ((1, 0), (2, 0), (2, 1)):
@@ -148,19 +153,20 @@ class GdnOwnershipTest(unittest.TestCase):
                 expected.load_weights(inputs)
                 manager = NewLoaderWeightManager(model, loader)
                 parameters = dict(model.linear_attn.named_parameters())
-                pointers = {k: parameters[k].data_ptr() for k in inputs}
+                names = [expected._state_parameters.get(k, k) for k in inputs]
+                pointers = {k: parameters[k].data_ptr() for k in names}
                 with self.assertRaises(ValueError):
                     manager.update_tensors(
                         {**request, "linear_attn.out_proj.weight": torch.ones(8, 1)}
                     )
                 self.assertEqual(manager.version, 0)
-                for name in inputs:
+                for name in names:
                     torch.testing.assert_close(
                         parameters[name], torch.zeros_like(parameters[name])
                     )
                 manager.update_tensors(request)
                 self.assertEqual(manager.version, 1)
-                for name in inputs:
+                for name in names:
                     self.assertEqual(parameters[name].data_ptr(), pointers[name])
                     torch.testing.assert_close(
                         parameters[name], expected.get_parameter(name)

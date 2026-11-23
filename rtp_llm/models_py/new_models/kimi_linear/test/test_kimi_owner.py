@@ -188,6 +188,25 @@ class KimiModelCheckpointTest(unittest.TestCase):
                     self.assertEqual(model._mla_kernel_layout.weights[0], {})
                     self.assertTrue(model._mla_kernel_layout.weights[1])
 
+            from rtp_llm.models.downstream_modules.classifier.classifier import ClassifierHandler
+            from rtp_llm.models.downstream_modules.custom_module import CustomModule
+            from rtp_llm.ops import TaskType
+
+            raw["num_labels"] = 3
+            (Path(root) / "config.json").write_text(json.dumps(raw))
+            data["classifier.weight"] = torch.arange(24).float().reshape(3, 8)
+            data["classifier.bias"] = torch.arange(3).float()
+            save_file(data, str(Path(root) / "model.safetensors"))
+            config.task_type = TaskType.SEQ_CLASSIFICATION
+            service.custom_module = CustomModule(config, None)
+            service.custom_module.handler = ClassifierHandler(config)
+            service.custom_module.handler.device = torch.device("cpu")
+            load_owned_model(service)
+            self.assertIsNone(service.py_model.lm_head)
+            linear = service.custom_module.handler.linear
+            torch.testing.assert_close(linear.weight, data["classifier.weight"])
+            torch.testing.assert_close(linear.bias, data["classifier.bias"])
+
 
 if __name__ == "__main__":
     unittest.main()

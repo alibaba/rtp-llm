@@ -478,6 +478,8 @@ class FTCheckpoint:
         model: torch.nn.Module,
         bindings: tuple[RuntimeTensorBinding, ...],
         source_validators: Mapping[str, Callable[[torch.Tensor], None]] | None = None,
+        *,
+        generated_parameters: Mapping[str, torch.Tensor] | None = None,
     ) -> None:
         """Validate the entire declared layout, then copy into existing storage.
 
@@ -496,6 +498,16 @@ class FTCheckpoint:
                     targets[f"{path}.{name}" if path else name] = value
         if any(id(value) in loan_ids for value in targets.values()):
             raise PermissionError("FT adapter cannot write an alias of a borrowed parameter")
+        # Raw format adapters may build an online quantizer whose scale is
+        # generated after import. Require the exact declared parameter; do not
+        # silently exempt any other missing binding. Runtime FT snapshots
+        # cannot use this exception to omit a serialized scale.
+        if generated_parameters and isinstance(self, FTCheckpoint):
+            raise ValueError("FT runtime snapshots cannot omit generated parameters")
+        for name, parameter in (generated_parameters or {}).items():
+            if name not in targets or targets[name] is not parameter:
+                raise ValueError(f"Unknown generated parameter {name}")
+            del targets[name]
         used_sources, used_targets = self.entries.keys() & preserved.values(), set()
         for name, validate in (source_validators or {}).items():
             if name in preserved.values():

@@ -1,4 +1,4 @@
-"""Checkpoint-owned FP8 updates staged before any live parameter is written.
+"""Checkpoint-owned quantized updates staged before any live parameter is written.
 
 The existing linear checkpoint loader owns TP/fusion and the quantization
 method owns runtime layout conversion. A complete quantization unit is needed:
@@ -12,6 +12,8 @@ import copy
 import torch
 
 from rtp_llm.models_py.quant_methods.unquantized import UnquantizedLinearMethod
+from rtp_llm.models_py.quant_methods.w8a8_int8 import W8A8Int8LinearMethod
+from rtp_llm.models_py.quant_methods.weight_only_int8 import WeightOnlyInt8LinearMethod
 from rtp_llm.models_py.runtime_weight_update import (
     TensorUpdate,
     prepare_leaf_weight_updates,
@@ -51,6 +53,8 @@ def validate_quantized_weight_update(module, weights=None) -> None:
 
     supported = (
         UnquantizedLinearMethod,
+        WeightOnlyInt8LinearMethod,
+        W8A8Int8LinearMethod,
         Fp8LinearMethod,
         Fp8OnlineLinearMethod,
         Fp8PerChannelLinearMethod,
@@ -70,14 +74,26 @@ def validate_quantized_weight_update(module, weights=None) -> None:
         raise NotImplementedError(
             f"{type(module.quant_method).__name__} has no atomic weight/scale update contract"
         )
+    if type(module.quant_method) is W8A8Int8LinearMethod:
+        # The PPU implementation uses reshape(...).contiguous(). If a future
+        # backend copies or repacks those inputs, an in-place install would
+        # silently leave its executable state stale. Check actual live views.
+        method = module.quant_method
+        exe = method._executor
+        if exe is not None and (
+            method._storage != method._storage_signature(module)
+            or exe.weight.data_ptr() != module.weight.data_ptr()
+            or exe.weight_scale.data_ptr() != module.weight_scale.data_ptr()
+        ):
+            raise RuntimeError("PPU W8A8 executor does not alias the live weight/scale")
     if list(module.children()):
         raise NotImplementedError("Quantized updates require leaf-owned conversion")
 
 
-def _prepare_fp4_bias_updates(module, weights) -> list[TensorUpdate]:
+def _prepare_quantized_bias_updates(module, weights) -> list[TensorUpdate]:
     if module.bias is None:
-        raise ValueError("Cannot update bias on a bias-free NVFP4 projection")
-    # Avoid copying the potentially huge FP4 weight/scale payload just to
+        raise ValueError("Cannot update bias on a bias-free quantized projection")
+    # Avoid copying the potentially huge quantized weight/scale payload just to
     # replace a bias. The owner's loader needs only bias and layout metadata.
     staged = copy.copy(module)
     staged._parameters = {
@@ -104,8 +120,11 @@ def prepare_quantized_weight_updates(module, weights) -> list[TensorUpdate]:
     validate_quantized_weight_update(module, weights)
     if not weights:
         raise ValueError("Quantized update requires checkpoint tensors")
-    if _is_modelopt_fp4(module):
-        return _prepare_fp4_bias_updates(module, weights)
+    if _is_modelopt_fp4(module) or (
+        type(module.quant_method) in (WeightOnlyInt8LinearMethod, W8A8Int8LinearMethod)
+        and all(name.rsplit(".", 1)[-1] == "bias" for name in weights)
+    ):
+        return _prepare_quantized_bias_updates(module, weights)
     if type(module.quant_method) is UnquantizedLinearMethod:
         prepare = getattr(module.quant_method, "prepare_weight_updates", None)
         if callable(prepare):
@@ -123,6 +142,11 @@ def prepare_quantized_weight_updates(module, weights) -> list[TensorUpdate]:
         for name, value in module._buffers.items()
     }
     staged.quant_method = copy.copy(module.quant_method)
+    compressed_int8 = type(module.quant_method) is W8A8Int8LinearMethod
+    if compressed_int8:
+        staged.quant_method._pieces = {}
+        staged.quant_method._executor = None
+        staged.quant_method._storage = None
     # Cached ROCm executors on the LIVE method retain references to the live
     # Parameters. Conversion creates a separate executor on this private copy.
     staged.quant_method.__dict__.pop("_rocm_executor", None)
@@ -157,7 +181,11 @@ def prepare_quantized_weight_updates(module, weights) -> list[TensorUpdate]:
             "Quantized update requires a complete weight/scale unit, including "
             "every fused QKV or gate/up shard"
         ) from error
-    staged.to(device=module.weight.device)
+    # Compressed W8A8 is already in the PPU executor's canonical [N,K]/[N,1]
+    # storage. Validate on CPU, then copy into the live views in the transaction.
+    # Never build a temporary executor or swap a cached PPU storage pointer.
+    if not compressed_int8:
+        staged.to(device=module.weight.device)
     staged.process_weights_after_loading()
     if getattr(staged.quant_method, "_runtime_backend", None) != getattr(
         module.quant_method, "_runtime_backend", None

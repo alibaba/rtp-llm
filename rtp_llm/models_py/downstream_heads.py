@@ -32,6 +32,62 @@ def unpack_handler_mapping(mapping):
     return role, source, dtype
 
 
+def needs_generation_projection(config):
+    from rtp_llm.ops import TaskType
+
+    default = TaskType.LANGUAGE_MODEL
+    task = config.get("task_type", default) if isinstance(config, dict) else getattr(config, "task_type", default)
+    return task == default
+
+
+class DecoderHandlerOwner:
+    """Attach exactly the declared handler inputs to a score-model owner."""
+
+    def _init_decoder_handlers(self, load_config, hidden_size):
+        self.supports_custom_weight_mappings = True
+        self.supports_handler_projection_layers = True
+        self._handler_checkpoint_names = frozenset(
+            item[1] for item in getattr(load_config, "custom_weight_mappings", ())
+        )
+        self.handler_heads = ReplicatedHandlerHeads(
+            getattr(load_config, "custom_weight_mappings", ()),
+            self.WEIGHTS_MAPPER, hidden_size, load_config.compute_dtype,
+            projection_layers=getattr(load_config, "custom_projection_layers", ()),
+            protected_roots={"embed_tokens", "lm_head", "norm", "layers", "handler_heads"},
+        )
+
+    def _capture_handler_inputs(self, items):
+        heads = getattr(self, "handler_heads", None)
+        if heads is None or not heads.sources:
+            yield from items
+            return
+        for name, value in items:
+            mapped = self.WEIGHTS_MAPPER.map_name(name)
+            if mapped in heads.sources:
+                value = heads.capture(mapped, value)
+                if mapped not in heads.vocabulary_sources:
+                    continue
+                if mapped == "lm_head.weight" and self.lm_head is None:
+                    continue
+                if mapped == "embed_tokens.weight" and self.embed_tokens is None and (
+                    self.lm_head is None or not self.tie_word_embeddings
+                ):
+                    continue
+            yield name, value
+
+    def resolve_checkpoint_load_plan(self, name, shape):
+        heads = getattr(self, "handler_heads", None)
+        if heads is not None and name in heads.sources:
+            return None, None  # The handler consumes the complete, unprocessed source.
+        return super().resolve_checkpoint_load_plan(name, shape)
+
+    def validate_weights_loaded(self, loaded_tensor_ids=None):
+        heads = getattr(self, "handler_heads", None)
+        if heads is not None:
+            heads.validate()
+        super().validate_weights_loaded(loaded_tensor_ids)
+
+
 class ReplicatedHandlerHeads(nn.Module):
     """Handler projections consume full, unprocessed weights on each serving rank."""
 

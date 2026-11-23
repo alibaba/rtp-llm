@@ -98,6 +98,13 @@ class _OptionalPooler(RtpModule):
 
 class BertEncoderOwner(GptModelBase, RtpModule):
     checkpoint_prefix = "bert"
+    _embedding_exports = {
+        "embedding": "embeddings.word_embeddings.weight",
+        "position_encoding.weight": "embeddings.position_embeddings.weight",
+        "token_type_embedding.weight": "embeddings.token_type_embeddings.weight",
+        "pre_decoder_layernorm.gamma": "embeddings.LayerNorm.weight",
+        "pre_decoder_layernorm.bias": "embeddings.LayerNorm.bias",
+    }
     supports_custom_weight_mappings = True
     supports_ft_handler_heads = True
 
@@ -254,16 +261,16 @@ class BertEncoderOwner(GptModelBase, RtpModule):
     def runtime_weight_view(self):
         exports = self.handler_heads.exports()
         if self.embeddings is not None:
-            exports.update(
-                {
-                    "embedding": self.embeddings.word_embeddings.weight,
-                    "position_encoding.weight": self.embeddings.position_embeddings.weight,
-                    "token_type_embedding.weight": self.embeddings.token_type_embeddings.weight,
-                    "pre_decoder_layernorm.gamma": self.embeddings.LayerNorm.weight,
-                    "pre_decoder_layernorm.bias": self.embeddings.LayerNorm.bias,
-                }
-            )
+            exports.update((alias, self.get_parameter(path)) for alias, path in self._embedding_exports.items())
         return exports
+
+    def online_checkpoint_name(self, name):
+        return self._embedding_exports.get(name, name)
+
+    def is_nonlocal_online_weight(self, name):
+        # Requests are broadcast to every pipeline stage. Skip only known
+        # embedding leaves on non-owners; unknown names must still fail.
+        return not self.first and self.WEIGHTS_MAPPER.map_name(name) in self._embedding_exports.values()
 
     def _input_embeddings(self, inputs):
         """First-stage embedding boundary for specialized encoder modalities."""

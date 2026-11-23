@@ -37,8 +37,8 @@ class KimiK25ForCausalLM(DeepSeekV32ForCausalLM):
 
     def checkpoint_weight_name_filter(self):
         text_filter = super().checkpoint_weight_name_filter()
-        return lambda name: name.startswith("language_model.") and text_filter(
-            name.removeprefix("language_model.")
+        return lambda name: name in self._handler_checkpoint_names or (
+            name.startswith("language_model.") and text_filter(name.removeprefix("language_model."))
         )
 
     def load_weights(self, weights):

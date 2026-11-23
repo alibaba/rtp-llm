@@ -24,6 +24,41 @@ class _GlobalsOnly(PpuOwnedV4Transformer):
 
 
 class PpuBackboneLayoutTest(unittest.TestCase):
+    def test_tied_target_uses_global_embedding_rows_for_the_output_head(self):
+        from rtp_llm.models_py.layers.embedding import ParallelLMHead
+        from rtp_llm.models_py.module_base import RtpModule
+        from rtp_llm.models_py.new_models.deepseek_v4.language import OwnedV4ModelMixin, _BackboneMapper
+        from rtp_llm.models_py.new_models.deepseek_v4.ppu_globals import PpuHiddenShardEmbedding
+        from rtp_llm.models_py.weight_mapper import WeightsMapper
+
+        class Target(OwnedV4ModelMixin, RtpModule):
+            def __init__(self, rank):
+                RtpModule.__init__(self)
+                self.config = SimpleNamespace(model_type="deepseek_v4", tie_word_embeddings=True)
+                self.v4 = RtpModule()
+                self.v4.embed = PpuHiddenShardEmbedding(8, 4, 2, rank)
+                self.v4.head = ParallelLMHead(8, 4, 2, rank, torch.float32)
+                self.v4.WEIGHTS_MAPPER = WeightsMapper()
+                self.WEIGHTS_MAPPER = _BackboneMapper(self.v4)
+
+        with tempfile.TemporaryDirectory() as root:
+            matrix = torch.arange(32).reshape(8, 4).bfloat16()
+            embed, head = [os.path.join(root, n + ".safetensors") for n in ("embed", "head")]
+            save_file({"embed.weight": matrix}, embed)
+            save_file({"head.weight": matrix + 50}, head)
+            for rank, paths in product(range(2), ([embed], [embed, head], [head, embed])):
+                with self.subTest(rank=rank, paths=paths):
+                    model = Target(rank)
+                    loader = NewModelLoader(model.config, NewLoaderConfig(device="cpu"), model_path=root)
+                    resolve = loader._checkpoint_read_spec_resolver(model, None, None)
+                    self.assertFalse(resolve("embed.weight", (8, 4)).is_local_shard)
+                    for path in paths:
+                        model.load_weights(get_all_weights([path], read_spec_resolver=resolve))
+                    NewModelLoader._validate_loaded_weights(model)
+                    torch.testing.assert_close(model.v4.embed.weight, matrix.chunk(2, dim=1)[rank])
+                    expected = matrix if len(paths) == 1 else matrix + 50
+                    torch.testing.assert_close(model.v4.head.weight, expected.chunk(2)[rank].float())
+
     def test_platform_selection_does_not_replace_pro_or_dspark(self):
         from rtp_llm.models_py.new_models.deepseek_v4.language import (
             DeepSeekV4ForCausalLM,

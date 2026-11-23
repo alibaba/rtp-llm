@@ -4,6 +4,7 @@ import torch
 
 from rtp_llm.models_py.ft_checkpoint import RuntimeTensorBinding
 from rtp_llm.models_py.quant_methods.unquantized import UnquantizedLinearMethod
+from rtp_llm.models_py.quant_methods.weight_only_int8 import WeightOnlyInt8LinearMethod
 from rtp_llm.models_py.read_spec import LoadedCheckpointTensor
 
 
@@ -23,17 +24,25 @@ def load_meta_checkpoint(model, checkpoint):
         raise ValueError("Meta params.json n_kv_heads does not match model")
     if params.get("norm_eps") != model.norm.eps:
         raise ValueError("Meta params.json norm_eps does not match model")
-    for layer in model.layers:
-        for linear in (
-            layer.self_attn.qkv_proj,
-            layer.self_attn.o_proj,
-            layer.mlp.gate_up_proj,
-            layer.mlp.down_proj,
+    generated = {}
+    for index, layer in enumerate(model.layers):
+        for path in (
+            "self_attn.qkv_proj", "self_attn.o_proj", "mlp.gate_up_proj", "mlp.down_proj"
         ):
-            if not isinstance(linear.quant_method, UnquantizedLinearMethod):
-                raise ValueError(
-                    "Meta consolidated import requires an unquantized model adapter"
-                )
+            linear = layer.get_submodule(path)
+            method = type(linear.quant_method)
+            if method in (UnquantizedLinearMethod, WeightOnlyInt8LinearMethod):
+                continue
+            if linear.quant_config.quant_type == "fp8_online":
+                from rtp_llm.models_py.quant_methods.fp8 import Fp8OnlineLinearMethod
+
+                if method is Fp8OnlineLinearMethod:
+                    generated[f"layers.{index}.{path}.weight_scale"] = linear.weight_scale
+                    continue
+            raise ValueError(
+                "Meta consolidated import supports unquantized, online W8A16 "
+                "and online per-tensor FP8 projections only"
+            )
 
     def local(name, dim, leaf, leaf_name="weight", wrapped=False):
         shape = checkpoint.shape(name, dim)
@@ -47,7 +56,7 @@ def load_meta_checkpoint(model, checkpoint):
         )
         if not tensor.is_floating_point():
             raise ValueError(
-                "Unquantized Meta checkpoint weights must be floating point"
+                "Raw Meta checkpoint weights must be floating point"
             )
         # Meta consolidated files are raw model weights, not FT runtime snapshots:
         # checkpoint dtype is converted to the requested parameter compute dtype.
@@ -155,4 +164,4 @@ def load_meta_checkpoint(model, checkpoint):
             )
 
         add(mlp_names, dst + "mlp.gate_up_proj.weight", mlp)
-    checkpoint.load_parameters(model, tuple(bindings))
+    checkpoint.load_parameters(model, tuple(bindings), generated_parameters=generated)

@@ -13,11 +13,17 @@ from rtp_llm.models_py.quant_methods.weight_only_int8 import (
 
 class WeightOnlyInt8NativeTest(unittest.TestCase):
     def test_mixed_gemm_layout_and_projection(self):
-        self.assertEqual(torch.cuda.get_device_capability(), (int(os.environ["W8A16_EXPECT_SM"]), 0))
+        self.assertEqual(
+            torch.cuda.get_device_capability(), (int(os.environ["W8A16_EXPECT_SM"]), 0)
+        )
         for dtype in (torch.float16, torch.bfloat16):
             with self.subTest(dtype=dtype):
                 layer, q, scale, bias = load_fixture(
-                    "cuda:0", dtype=dtype, rows=160, width=96, startup=True,
+                    "cuda:0",
+                    dtype=dtype,
+                    rows=160,
+                    width=96,
+                    startup=True,
                 )
                 dense = (q * scale).cuda()  # independently computed [K,N]
                 # Basis vectors inspect every output channel and every packed
@@ -30,7 +36,9 @@ class WeightOnlyInt8NativeTest(unittest.TestCase):
                 self.assertEqual(layer(eye[:0]).shape, (0, 160))
                 # Include a partial M tile, multidimensional input and fused
                 # bias as well as the normal row-parallel post-GEMM bias.
-                x = torch.linspace(-1, 1, 3 * 7 * 96, device="cuda", dtype=dtype).reshape(3, 7, 96)
+                x = torch.linspace(
+                    -1, 1, 3 * 7 * 96, device="cuda", dtype=dtype
+                ).reshape(3, 7, 96)
                 reference = torch.nn.functional.linear(x, dense.T, bias.cuda())
                 actual = apply_packed_weight_only_int8(
                     x, layer.weight, layer.weight_scale, 160, bias.cuda()

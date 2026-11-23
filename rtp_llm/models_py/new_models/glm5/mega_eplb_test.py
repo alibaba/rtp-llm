@@ -20,7 +20,10 @@ from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoe
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors import mega_moe
-from rtp_llm.models_py.new_models.glm5.language import _PackedGlm5Experts, _PackedGlm5MoE
+from rtp_llm.models_py.new_models.glm5.language import (
+    _PackedGlm5Experts,
+    _PackedGlm5MoE,
+)
 from rtp_llm.utils.model_weight import W
 
 
@@ -49,7 +52,9 @@ class PackedMegaEplbTest(unittest.TestCase):
     @torch.inference_mode()
     def test_physical_weights_cmp_dispatch_and_rollback(self):
         config = SimpleNamespace(
-            num_layers=1, model_type="glm_5", activation_type="SiGLU",
+            num_layers=1,
+            model_type="glm_5",
+            activation_type="SiGLU",
             eplb_config=SimpleNamespace(enable_eplb=True, redundant_expert=0),
         )
         parallel = SimpleNamespace(
@@ -57,10 +62,20 @@ class PackedMegaEplbTest(unittest.TestCase):
         )
         model = _Model()
         leaf = model.experts = _PackedGlm5Experts(
-            num_experts=2, top_k=1, hidden_size=32, moe_intermediate_size=32,
-            tp_size=1, tp_rank=0, ep_size=1, ep_rank=0, params_dtype=torch.bfloat16,
-            model_config=config, parallelism_config=parallel, quant_config=None,
-            moe_config=SimpleNamespace(moe_strategy="mega_moe"), layer_idx=0,
+            num_experts=2,
+            top_k=1,
+            hidden_size=32,
+            moe_intermediate_size=32,
+            tp_size=1,
+            tp_rank=0,
+            ep_size=1,
+            ep_rank=0,
+            params_dtype=torch.bfloat16,
+            model_config=config,
+            parallelism_config=parallel,
+            quant_config=None,
+            moe_config=SimpleNamespace(moe_strategy="mega_moe"),
+            layer_idx=0,
         )
         ckpt = {}
         for expert in range(2):
@@ -75,15 +90,22 @@ class PackedMegaEplbTest(unittest.TestCase):
         kernel = mega_moe.MegaMoeExecutor.__new__(mega_moe.MegaMoeExecutor)
         torch.nn.Module.__init__(kernel)
         kernel.cfg = SimpleNamespace(
-            mega_moe_policy=MegaMoeExecutionPolicy(), moe_strategy="mega_moe",
-            moe_w1_layout="up_gate", moe_inter_dim=32, dim=32, n_local_experts=2,
+            mega_moe_policy=MegaMoeExecutionPolicy(),
+            moe_strategy="mega_moe",
+            moe_w1_layout="up_gate",
+            moe_inter_dim=32,
+            dim=32,
+            n_local_experts=2,
             layer_id=0,
         )
         x = torch.ones(2, 32)
         ids = torch.tensor([[0], [1]])
         buf = kernel._mega_buf = SimpleNamespace(
-            x=x.clone(), x_sf=torch.ones_like(x), topk_idx=ids.clone(),
-            topk_weights=torch.ones(2, 1), num_max_tokens_per_rank=2,
+            x=x.clone(),
+            x_sf=torch.ones_like(x),
+            topk_idx=ids.clone(),
+            topk_weights=torch.ones(2, 1),
+            num_max_tokens_per_rank=2,
         )
         kernel._mega_y = torch.empty_like(x)
         kernel._mega_group = object()
@@ -91,7 +113,8 @@ class PackedMegaEplbTest(unittest.TestCase):
             transform_sf_into_required_layout=lambda s, *args: s,
             # The down weight is an exact alias; copying it twice is invalid.
             transform_weights_for_mega_moe=lambda l1, l2: (
-                (l1[0].clone(), l1[1].clone()), (l2[0], l2[1].clone())
+                (l1[0].clone(), l1[1].clone()),
+                (l2[0], l2[1].clone()),
             ),
             fp8_fp4_mega_moe=_reference_kernel,
         )
@@ -105,26 +128,42 @@ class PackedMegaEplbTest(unittest.TestCase):
             patch.object(kernel, "_setup_buffer_and_warmup") as warmup,
             patch.object(kernel, "_new_input_packer", return_value=None),
         ):
-            save_file({leaf.prefix + "." + k: v for k, v in ckpt.items()},
-                      os.path.join(folder, "model.safetensors"))
+            save_file(
+                {leaf.prefix + "." + k: v for k, v in ckpt.items()},
+                os.path.join(folder, "model.safetensors"),
+            )
             kernel.setup_weights_from_fp4(
-                raw[W.moe_w1], raw[W.moe_s1], raw[W.moe_w2], raw[W.moe_s2],
+                raw[W.moe_w1],
+                raw[W.moe_s1],
+                raw[W.moe_w2],
+                raw[W.moe_s2],
                 w1_layout="up_gate",
             )
             leaf.fused_moe = FusedMoe(None, kernel, 2, "mega_moe")
             graph_block = block.clone_for_cuda_graph(share_mega_buf=True)
             loader = NewModelLoader(
-                config, NewLoaderConfig(device="cpu", load_method="scratch",
-                                        parallelism_config=parallel), model_path=folder,
+                config,
+                NewLoaderConfig(
+                    device="cpu", load_method="scratch", parallelism_config=parallel
+                ),
+                model_path=folder,
             )
             staged = loader.load_moe_layer_weights(
-                model, layer_id=0, physical_to_logical=[1, 0], ep_rank=0, ep_size=1,
+                model,
+                layer_id=0,
+                physical_to_logical=[1, 0],
+                ep_rank=0,
+                ep_size=1,
             )
-            self.assertEqual({k for k in staged if k.startswith("mega.")},
-                             {"mega.l1_w", "mega.l1_sf", "mega.l2_sf"})
+            self.assertEqual(
+                {k for k in staged if k.startswith("mega.")},
+                {"mega.l1_w", "mega.l1_sf", "mega.l2_sf"},
+            )
             phy = torch.tensor([1, 0], dtype=torch.int32)
             routing = leaf._routing_tensors(ExpertPlacement(2, 1, 0, (1, 0)))
-            original = {k: v.data_ptr() for k, v in leaf.eplb_runtime_weight_view().items()}
+            original = {
+                k: v.data_ptr() for k, v in leaf.eplb_runtime_weight_view().items()
+            }
 
             # Independent oracle for a constant input and homogeneous matrices.
             expected = []
@@ -132,7 +171,9 @@ class PackedMegaEplbTest(unittest.TestCase):
                 gate, up, down = [
                     32 * (e + j + 1) * 0.5 * 2 ** (e - j - 3) for j in range(3)
                 ]
-                expected.append(torch.nn.functional.silu(torch.tensor(gate)) * up * down)
+                expected.append(
+                    torch.nn.functional.silu(torch.tensor(gate)) * up * down
+                )
             oracle = torch.stack(expected)[:, None].expand_as(x)
 
             def check(swapped):
@@ -144,15 +185,25 @@ class PackedMegaEplbTest(unittest.TestCase):
                     _, _, arena_ids, weights = owner.fused_moe.prepacked_input_views(2)
                     arena_ids.copy_(ids)
                     y = owner.forward_prepacked(x, arena_ids, weights)
-                    torch.testing.assert_close(arena_ids, ids.flip(0) if swapped else ids)
+                    torch.testing.assert_close(
+                        arena_ids, ids.flip(0) if swapped else ids
+                    )
                     torch.testing.assert_close(y, oracle)
-                self.assertEqual(original, {
-                    k: v.data_ptr() for k, v in leaf.eplb_runtime_weight_view().items()
-                })
+                self.assertEqual(
+                    original,
+                    {
+                        k: v.data_ptr()
+                        for k, v in leaf.eplb_runtime_weight_view().items()
+                    },
+                )
 
             check(False)
             with self.assertRaisesRegex(ValueError, "Missing EPLB runtime tensor"):
-                leaf.apply_eplb_plan(phy, *routing, {k: v for k, v in staged.items() if k != "mega.l1_sf"})
+                leaf.apply_eplb_plan(
+                    phy,
+                    *routing,
+                    {k: v for k, v in staged.items() if k != "mega.l1_sf"},
+                )
             check(False)
             leaf.apply_eplb_plan(phy, *routing, staged, defer_commit=True)
             check(True)

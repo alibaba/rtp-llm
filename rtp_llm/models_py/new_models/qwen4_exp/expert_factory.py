@@ -4,7 +4,11 @@ from types import SimpleNamespace
 
 import torch
 
-from rtp_llm.config.quant_config import QWEN4_FP8_NVFP4_RECIPE, ModelOptFp4Config
+from rtp_llm.config.quant_config import (
+    QWEN4_FP8_NVFP4_RECIPE,
+    ModelOptFp4Config,
+    resolve_nvfp4_backend,
+)
 from rtp_llm.models_py.layers.moe_experts import BaseMoEExperts
 from rtp_llm.models_py.new_models.qwen4_exp.nvfp4_experts import Qwen4Nvfp4Experts
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
@@ -28,16 +32,52 @@ class Qwen4RoutedExperts(BaseMoEExperts):
             super().validate_runtime_device(device)
 
 
+class Qwen4PackedRoutedExperts(Qwen4RoutedExperts):
+    def _dispatch_scale(self, local_id, proj, param_name, tensor):
+        # Both packed checkpoint halves share one outer scale in the fused
+        # kernel. Taking their maximum would silently change one projection.
+        other = {"up_proj": "gate_proj", "gate_proj": "up_proj"}.get(proj)
+        if (
+            param_name == "weight_scale_2"
+            and (local_id, other, param_name) in self._loaded_aux_keys
+            and tensor.numel() == 1
+        ):
+            previous = self.w13_scale_2[local_id]
+            if not torch.equal(previous, tensor.reshape(()).to(previous)):
+                raise ValueError("Qwen4 NVFP4 requires equal up/gate outer scales")
+        super()._dispatch_scale(local_id, proj, param_name, tensor)
+
+
 def make_qwen4_experts(plan, layer_idx, load, *, prefix=None):
     kind = plan.source_kind
     h = plan.hidden_size
     m = plan.positive("moe_intermediate_size")
     e = plan.positive("num_experts")
     if kind == "nvfp4":
-        if load.tp_size != load.ep_size:
-            raise ValueError("Qwen4 prequantized Marlin requires TP == EP")
-        return Qwen4Nvfp4Experts(h, m, e, load.ep_size, load.ep_rank)
-    if kind not in ("bf16", "fp8"):
+        # Explicit generic strategies use their own layout and FusedMoe router.
+        # Preserve the direct W4A16 default on the architectures it supports;
+        # Blackwell SM100 instead uses the registered FP4 execution path.
+        moe = load.moe_config
+        backend = resolve_nvfp4_backend(moe)
+        auto = (
+            getattr(moe, "moe_strategy", "auto") == "auto"
+            and getattr(moe, "fp4_moe_op", "auto") == "auto"
+            and not getattr(moe, "use_deepep_moe", False)
+        )
+        device = torch.device(load.device)
+        if backend == "marlin" or (
+            auto
+            and (
+                device.type == "cpu"
+                or (device.type == "cuda" and torch.cuda.get_device_capability(device) in ((9, 0), (12, 0)))
+            )
+        ):
+            return Qwen4Nvfp4Experts(
+                h, m, e, load.ep_size, load.ep_rank,
+                tp_size=load.ffn_tp_size if load.ep_size == 1 else 1,
+                tp_rank=load.ffn_tp_rank if load.ep_size == 1 else 0,
+            )
+    if kind not in ("bf16", "fp8", "nvfp4"):
         raise ValueError(f"Unrecognized Qwen4 expert source: {kind!r}")
 
     config = plan.model_config
@@ -56,6 +96,8 @@ def make_qwen4_experts(plan, layer_idx, load, *, prefix=None):
                 is_quanted=False,
                 model_recipe=QWEN4_FP8_NVFP4_RECIPE,
             )
+        if source is None and kind == "nvfp4":
+            source = ModelOptFp4Config(bits=4, group_size=16, is_quanted=True)
         config = SimpleNamespace(
             model_type=config.get("model_type", "qwen4_exp"),
             activation_type="SiGLU",
@@ -68,6 +110,10 @@ def make_qwen4_experts(plan, layer_idx, load, *, prefix=None):
         if source is not None:
             raise ValueError("Qwen4 BF16 expert source requires unquantized runtime")
         method = "none"
+    elif kind == "nvfp4":
+        if not isinstance(source, ModelOptFp4Config) or not source.is_quanted():
+            raise ValueError("Qwen4 packed NVFP4 experts require prequantized group-16 weights")
+        method = "modelopt_fp4"
     else:
         if (
             not isinstance(source, ModelOptFp4Config)
@@ -88,7 +134,8 @@ def make_qwen4_experts(plan, layer_idx, load, *, prefix=None):
     if prefix is None:
         # EPLB compares WEIGHTS_MAPPER output to the registered owner path.
         prefix = f"layers.{layer_idx}.mlp.experts"
-    owner = Qwen4RoutedExperts(
+    owner_cls = Qwen4PackedRoutedExperts if kind == "nvfp4" else Qwen4RoutedExperts
+    owner = owner_cls(
         num_experts=e,
         top_k=config.moe_k,
         hidden_size=h,

@@ -36,8 +36,18 @@ class Qwen4ForCausalLM(Qwen4TargetWeights):
                     hook()
         from rtp_llm.models_py.new_models.qwen4_exp.runtime_bindings import bind_target
         runtime = bind_target(self,self.config,self.load_config)
+        # Only these two ordinary tensors are read directly by execution.
+        # Scaled/packed vocab, tied mirrors, and prepared decoder copies do
+        # not have a complete online refresh contract.
+        direct = set()
+        if self._untied_vocab:
+            for leaf in (self.embed_tokens, self.lm_head):
+                if leaf is not None and not leaf.fp8_storage and leaf.storage_scale is None:
+                    leaf.supports_independent_weight_updates = True
+                    direct.add(id(leaf.weight))
         for parameter in self.parameters():
-            parameter._rtp_requires_restart_for_update = True
+            if id(parameter) not in direct:
+                parameter._rtp_requires_restart_for_update = True
         object.__setattr__(self,"_runtime",runtime)
 
     def __getattr__(self,name):
@@ -67,10 +77,12 @@ class Qwen4ForCausalLM(Qwen4TargetWeights):
         runtime.kv_cache = cache
 
     def runtime_weight_view(self):
-        weights = {"embedding":self.embed_tokens.weight,"lm_head":self.lm_head.weight}
+        weights = {"embedding":self.embed_tokens.weight, **self.handler_heads.exports()}
+        if self.lm_head is not None:
+            weights["lm_head"] = self.lm_head.weight
         if self.embed_tokens.storage_scale is not None:
             weights["embedding.qwen4_fp8_storage_scale"] = self.embed_tokens.storage_scale
-        if self.lm_head.storage_scale is not None:
+        if self.lm_head is not None and self.lm_head.storage_scale is not None:
             weights["lm_head.weight_only_quant_scale"] = self.lm_head.storage_scale
         return weights
 

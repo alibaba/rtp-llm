@@ -5,6 +5,7 @@ import math
 
 import torch
 
+from rtp_llm.config.quant_config import resolve_nvfp4_backend as _resolve_backend
 from rtp_llm.models_py.quant_methods.base import (
     FusedMoEMethodBase,
     register_moe_quant_method,
@@ -419,29 +420,6 @@ class ModelOptFp4MoEMethod(FusedMoEMethodBase):
             W.moe_w2_i_s,
             *self._derived_names(),
         )
-
-
-def _resolve_backend(config):
-    backend = getattr(config, "fp4_moe_op", "auto")
-    strategy = getattr(config, "moe_strategy", "auto")
-    for selected in ("marlin", "cutlass"):
-        if strategy == f"nvfp4_{selected}":
-            if backend not in ("auto", selected):
-                raise ValueError(
-                    f"nvfp4_{selected} requires FP4_MOE_OP=auto or {selected}"
-                )
-            return selected
-        if backend == selected:
-            raise ValueError(
-                f"FP4_MOE_OP={selected} requires MOE_STRATEGY=nvfp4_{selected}"
-            )
-    if backend == "auto":
-        if getattr(config, "use_deepep_moe", False) and getattr(
-            config, "use_deepep_low_latency", False
-        ):
-            return "cutedsl"
-        return "trtllm"
-    return backend
 
 
 def _prepare_trtllm(weight, scale, gate_up):

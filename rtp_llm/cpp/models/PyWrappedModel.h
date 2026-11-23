@@ -168,6 +168,7 @@ private:
     const bool                                      track_cache_store_completion_;
     const bool                                      owns_py_model_;
     bool                                            direct_eplb_stats_ = false;
+    torch::Tensor                                   eplb_live_rows_;
     const size_t                                    layer_num_;
     const int64_t                                   pp_size_;
     const int64_t                                   hidden_size_;
@@ -382,8 +383,14 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         overall_expert_stats_ = execCreateMoeExpertStates(
             {stats_layers, moe_conf.ep_size, moe_conf.expert_num, moe_conf.expert_num + moe_conf.extra_expert_num});
         if (direct_eplb_stats_) {
-            py_model_.attr("_newloader_eplb_bind_stats")(overall_expert_stats_.stats_buf.log_stats_buf,
-                                                         overall_expert_stats_.stats_buf.gpu_loads_buf);
+            auto& stats = overall_expert_stats_.stats_buf;
+            if (enable_cuda_graph_) {
+                // All captured bucket graphs read this same scalar at replay.
+                eplb_live_rows_ = torch::full({}, std::numeric_limits<int>::max(), stats.log_stats_buf.options());
+                py_model_.attr("_newloader_eplb_bind_stats")(stats.log_stats_buf, stats.gpu_loads_buf, eplb_live_rows_);
+            } else {
+                py_model_.attr("_newloader_eplb_bind_stats")(stats.log_stats_buf, stats.gpu_loads_buf);
+            }
         }
     }
     // MtpExecutor passes use_spec_decoding only to its target wrapper. The

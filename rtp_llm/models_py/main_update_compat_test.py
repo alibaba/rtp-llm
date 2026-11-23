@@ -53,6 +53,36 @@ class _Owner(RtpModule):
 
 
 class MainUpdateCompatTest(unittest.TestCase):
+    def test_retry_busy_rank_after_peer_already_accepted_update(self):
+        # The public call updates a single rank. A busy peer cannot undo an
+        # earlier successful response; keep inference paused until it catches up.
+        managers = [NewLoaderWeightManager(*self.load(rank)) for rank in (0, 1)]
+        entered, release = threading.Event(), threading.Event()
+
+        def still_in_forward():
+            with managers[1]._model._weight_update_lock:
+                entered.set()
+                release.wait(10)
+
+        worker = threading.Thread(target=still_in_forward)
+        worker.start()
+        name = "model.embed_tokens.weight"
+        values = torch.arange(32).reshape(8, 4).bfloat16()
+        try:
+            self.assertTrue(entered.wait(5))
+            managers[0].update_tensors({name: values})
+            with self.assertRaises(BlockingIOError):
+                managers[1].update_tensors({name: values})
+            self.assertEqual([m.version for m in managers], [1, 0])
+            torch.testing.assert_close(managers[0]._model.embed_tokens.weight, values[:4])
+            torch.testing.assert_close(managers[1]._model.embed_tokens.weight, torch.zeros_like(values[4:]))
+        finally:
+            release.set()
+            worker.join()
+        managers[1].update_tensors({name: values})
+        torch.testing.assert_close(managers[1]._model.embed_tokens.weight, values[4:])
+        self.assertEqual([m.version for m in managers], [1, 1])
+
     def test_busy_forward_rejects_update_without_writing_and_allows_retry(self):
         model, loader = self.load()
         manager = NewLoaderWeightManager(model, loader)

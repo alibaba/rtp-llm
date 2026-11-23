@@ -99,8 +99,9 @@ You can Provide PreQuantified Model Weight, The model config needs to contain qu
 
 
 ## Int8WeightOnly
-For dense projections, the loader quantizes FP16/BF16 checkpoint weights to INT8
-with one scale per output channel. SM8.x uses PyTorch's CUDA mixed-dtype linear
+For dense projections, the loader stages floating checkpoint weights in the
+configured compute dtype (FP16 or BF16, not FP32) and quantizes to INT8 with one
+scale per output channel. SM8.x uses PyTorch's CUDA mixed-dtype linear
 operator. On SM90 and SM100 the loader checks that the installed Triton compiler
 can run the packed-weight kernel before publishing the model. Other devices
 (including SM120) are not enabled for this dense path; CPU loading is for

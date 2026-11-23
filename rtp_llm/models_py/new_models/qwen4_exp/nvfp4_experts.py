@@ -6,7 +6,7 @@ import torch
 from torch import nn
 
 from rtp_llm.models_py.module_base import RtpModule
-from rtp_llm.models_py.read_spec import ReadSpec, unwrap_checkpoint_tensor
+from rtp_llm.models_py.read_spec import ReadSpec, make_sharded_read_spec, unwrap_checkpoint_tensor
 
 
 class Qwen4Nvfp4Experts(RtpModule):
@@ -23,13 +23,19 @@ class Qwen4Nvfp4Experts(RtpModule):
     _projection = ("up", "gate", "down")
     _suffix = ("weight", "weight_scale", "weight_scale_2", "input_scale")
 
-    def __init__(self, hidden_size, intermediate_size, num_experts, ep_size, ep_rank):
+    def __init__(
+        self, hidden_size, intermediate_size, num_experts, ep_size, ep_rank, tp_size=1, tp_rank=0
+    ):
         super().__init__()
         k, n = hidden_size, intermediate_size
         if (
             min(k, n, num_experts, ep_size) <= 0
             or k % 128
             or n % 128
+            or tp_size < 1
+            or not 0 <= tp_rank < tp_size
+            or n % (16 * tp_size)
+            or (tp_size > 1 and ep_size > 1)
             or num_experts % ep_size
             or not 0 <= ep_rank < ep_size
         ):
@@ -37,7 +43,12 @@ class Qwen4Nvfp4Experts(RtpModule):
         e = num_experts // ep_size
         self.ep_size, self.ep_rank = ep_size, ep_rank
         self.num_experts, self.first, self.local = num_experts, ep_rank * e, e
-        self.n = n
+        self.tp_size, self.tp_rank = tp_size, tp_rank
+        self.local_n = n // tp_size
+        # Down-projection K must be a multiple of 128 for Marlin repacking.
+        # E.g. the production width 640 shards to 320; zero channels contribute
+        # nothing to the SwiGLU and the rank-local output reduction.
+        self.n = n = (self.local_n + 127) // 128 * 128
         fp8 = torch.float8_e4m3fn
         for name, shape, dtype in (
             ("w13", (e, 2 * n, k // 2), torch.uint8),
@@ -47,9 +58,10 @@ class Qwen4Nvfp4Experts(RtpModule):
             ("outer_scales", (e, 3), torch.float32),
             ("input_scales", (e, 3), torch.float32),
         ):
-            self.register_parameter(
-                name, nn.Parameter(torch.empty(shape, dtype=dtype), requires_grad=False)
-            )
+            data = torch.empty(shape, dtype=dtype)
+            if self.n != self.local_n and name in ("w13", "s13", "w2", "s2"):
+                data.view(torch.uint8).zero_()
+            self.register_parameter(name, nn.Parameter(data, requires_grad=False))
         self._loaded = set()
         self._marlin = None
 
@@ -60,7 +72,11 @@ class Qwen4Nvfp4Experts(RtpModule):
         return int(match[1]), match[2], match[3]
 
     def checkpoint_read_spec(self, name, shape):
-        expert, _, _ = self._parse(name)
+        expert, proj, suffix = self._parse(name)
+        if self.tp_size > 1 and suffix in ("weight", "weight_scale"):
+            return make_sharded_read_spec(
+                name, shape, int(proj == "down"), self.tp_size, self.tp_rank
+            )
         return ReadSpec(
             name, name, shape, load=self.first <= expert < self.first + self.local
         )
@@ -74,7 +90,7 @@ class Qwen4Nvfp4Experts(RtpModule):
                 raise RuntimeError(f"Nonlocal expert was materialized: {name}")
             if self._marlin is not None or name in self._loaded:
                 raise ValueError(f"Repeated NVFP4 expert source: {name}")
-            value, _ = unwrap_checkpoint_tensor(value)
+            value, spec = unwrap_checkpoint_tensor(value)
             if suffix in ("weight_scale_2", "input_scale"):
                 storage = (
                     self.outer_scales
@@ -91,11 +107,16 @@ class Qwen4Nvfp4Experts(RtpModule):
                 value = value.reshape(())
             else:
                 is_weight = suffix == "weight"
+                if self.tp_size > 1 and (spec is None or not spec.is_local_shard):
+                    read_spec = self.checkpoint_read_spec(name, tuple(value.shape))
+                    value = value[read_spec.slices]
                 if p == 2:
-                    dest = (self.w2 if is_weight else self.s2)[i]
+                    dest = (self.w2 if is_weight else self.s2)[
+                        i, :, : self.local_n // (2 if is_weight else 16)
+                    ]
                 else:
                     dest = (self.w13 if is_weight else self.s13)[
-                        i, p * self.n : (p + 1) * self.n
+                        i, p * self.n : p * self.n + self.local_n
                     ]
                 if value.dtype != dest.dtype or value.shape != dest.shape:
                     raise ValueError(

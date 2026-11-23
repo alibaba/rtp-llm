@@ -12,6 +12,7 @@ import torch
 from torch import nn
 from safetensors import safe_open
 
+from rtp_llm.models_py.downstream_heads import DecoderHandlerOwner, needs_generation_projection
 from rtp_llm.models_py.layers.embedding import ParallelLMHead, output_vocab_head_kwargs
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.weight_mapper import WeightsMapper
@@ -144,6 +145,10 @@ class Qwen4VocabWeight(_Qwen4VocabStorage, Qwen4ProjectionWeight):
         shape[axis] //= tp_size
         super().__init__(tuple(shape), dtype=dtype, fp8_storage=fp8_storage)
 
+    def prepare_weight_updates(self, weights):
+        from rtp_llm.models_py.runtime_weight_update import prepare_leaf_weight_updates
+        return prepare_leaf_weight_updates(self, weights)
+
     def load_weights(self, weights):
         for name, tensor in weights.items():
             if name != "weight" or tuple(tensor.shape) != self.full_shape:
@@ -260,7 +265,7 @@ class Qwen4DecoderWeights(RtpModule):
                 prefetch_budget_mb=plan.ple_prefetch_mb)
 
 
-class Qwen4TargetWeights(RtpModule):
+class Qwen4TargetWeights(DecoderHandlerOwner, RtpModule):
     @classmethod
     def from_ft_checkpoint_header(cls, model_config, load_config, checkpoint):
         from rtp_llm.models_py.new_models.qwen4_exp.rank_local_ft import rank_local_plan
@@ -275,6 +280,7 @@ class Qwen4TargetWeights(RtpModule):
         directory = model_config.get("ckpt_path") if isinstance(model_config,dict) else model_config.ckpt_path
         self.checkpoint_plan = plan = checkpoint_plan or Qwen4CheckpointPlan(directory, model_config)
         self.WEIGHTS_MAPPER = WeightsMapper(prefix_mapping={plan.prefix:""})
+        self._init_decoder_handlers(load_config, plan.hidden_size)
         def option(name, default):
             return model_config.get(name, default) if isinstance(model_config, dict) else getattr(model_config, name, default)
         input_vocab = option("input_vocab_size", 0) or plan.text.get("input_vocab_size") or plan.vocab_size
@@ -283,7 +289,9 @@ class Qwen4TargetWeights(RtpModule):
         self.embed_tokens = Qwen4VocabWeight(input_vocab,plan.hidden_size,tp_size=load_config.attn_tp_size,
             tp_rank=load_config.attn_tp_rank,embedding=True,dtype=load_config.compute_dtype,fp8_storage=plan.vocab_fp8)
         head_options = output_vocab_head_kwargs(model_config)
-        if head_options:
+        if not needs_generation_projection(model_config):
+            self.lm_head = None
+        elif head_options:
             self.lm_head = Qwen4PrunedLMHead(
                 plan.vocab_size, plan.hidden_size,
                 tp_size=load_config.lm_head_tp_size, tp_rank=load_config.lm_head_tp_rank,
@@ -294,9 +302,10 @@ class Qwen4TargetWeights(RtpModule):
             self.lm_head = Qwen4VocabWeight(plan.vocab_size,plan.hidden_size,tp_size=load_config.lm_head_tp_size,
                 tp_rank=load_config.lm_head_tp_rank,embedding=False,dtype=load_config.compute_dtype,fp8_storage=plan.vocab_fp8)
         tied = option("tie_word_embeddings", plan.text.get("tie_word_embeddings", plan.source_config.get("tie_word_embeddings", False)))
+        self._untied_vocab = not tied
         # Unlike the output head, Qwen4's input embedding shards hidden
         # columns. Derive the mirror from its full HF source, never its shard.
-        self._head_from_embedding = tied and not (
+        self._head_from_embedding = self.lm_head is not None and tied and not (
             "lm_head.weight" in plan.shapes or plan.prefix + "lm_head.weight" in plan.shapes
         )
         self.layers = nn.ModuleList([Qwen4DecoderWeights(plan,i,load_config) for i in range(plan.num_layers)])
@@ -308,7 +317,7 @@ class Qwen4TargetWeights(RtpModule):
     def load_weights(self, weights):
         items = weights.items() if isinstance(weights,dict) else weights
         def mapped_weights():
-            for name, tensor in self.WEIGHTS_MAPPER.apply(items):
+            for name, tensor in self.WEIGHTS_MAPPER.apply(self._capture_handler_inputs(items)):
                 yield name, tensor
                 if self._head_from_embedding and name == "embed_tokens.weight":
                     if tensor.shape[0] < self.checkpoint_plan.vocab_size:
@@ -321,6 +330,10 @@ class Qwen4TargetWeights(RtpModule):
             for i,layer in enumerate(self.layers) if layer.ple is not None]
         prefix = self.checkpoint_plan.prefix
         def keep(name):
+            if name in self._handler_checkpoint_names:
+                return True
+            if self.lm_head is None and self.WEIGHTS_MAPPER.map_name(name) == "lm_head.weight":
+                return False
             if name.startswith(prefix):
                 name = name[len(prefix):]
             elif name != "lm_head.weight":

@@ -1,10 +1,12 @@
 """Tiny split and stacked Qwen4 checkpoint loads, including pure FFN TP."""
 
+import os
 import tempfile
 import unittest
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 from safetensors import safe_open
@@ -138,6 +140,92 @@ def _round_nvfp4(mat):
 
 
 class Q4SourceExpertTest(unittest.TestCase):
+    @staticmethod
+    def _nvfp4_owner(rank, strategy, op, device="cpu"):
+        from rtp_llm.config.quant_config import ModelOptFp4Config
+
+        config = SimpleNamespace(
+            model_type="qwen4_exp", num_layers=1, moe_k=1, activation_type="SiGLU",
+            quant_config=ModelOptFp4Config(bits=4, group_size=16, is_quanted=True),
+        )
+        plan = SimpleNamespace(
+            source_kind="nvfp4", model_config=config, hidden_size=128, prefix="", shapes={},
+            positive={"moe_intermediate_size": 640, "num_experts": 1}.__getitem__,
+        )
+        load = NewLoaderConfig(
+            device=device, tp_size=2, tp_rank=rank, ep_size=1, ep_rank=0,
+            compute_dtype=torch.bfloat16,
+            moe_config=SimpleNamespace(moe_strategy=strategy, fp4_moe_op=op),
+        )
+        return make_qwen4_experts(plan, 0, load)
+
+    def test_prequantized_tp2_marlin_slices_weights_and_scales_together(self):
+        owners = [self._nvfp4_owner(rank, "nvfp4_marlin", "auto") for rank in (0, 1)]
+        # Positive E2M1 nibbles; weights and per-group scales both vary across
+        # the TP boundary. Compare two local SwiGLUs to a full-checkpoint oracle.
+        lut = torch.tensor([0., .5, 1., 1.5, 2., 3., 4., 6.])
+
+        def decode(w, s):
+            codes = torch.stack((w & 15, w >> 4), -1).flatten(-2)
+            return lut[codes.long()] * s.float().repeat_interleave(16, -1)
+
+        x = torch.linspace(0.01, 0.02, 128)
+        dense = {}
+        rng = torch.Generator().manual_seed(1024)
+        for proj in ("up", "gate", "down"):
+            rows, cols = (128, 640) if proj == "down" else (640, 128)
+            w = torch.randint(0, 8, (rows, cols // 2), dtype=torch.uint8, generator=rng)
+            w |= torch.randint(0, 8, w.shape, dtype=torch.uint8, generator=rng) << 4
+            s = torch.randint(1, 5, (rows, cols // 16), generator=rng).to(torch.float8_e4m3fn)
+            dense[proj] = decode(w, s)
+            for suffix, value in (("weight", w), ("weight_scale", s),
+                                  ("input_scale", torch.tensor(1.)), ("weight_scale_2", torch.tensor(1.))):
+                key = f"0.{proj}_proj.{suffix}"
+                for rank, leaf in enumerate(owners):
+                    # Exercise direct full-source and range-reader dispatch.
+                    data = leaf.checkpoint_read_spec(key, tuple(value.shape)).materialize(value) if rank else value
+                    leaf.load_weights({key: data})
+        outputs = []
+        for leaf in owners:
+            leaf.validate_weights_loaded()
+            self.assertEqual((leaf.local_n, leaf.n), (320, 384))
+            up, gate = decode(leaf.w13[0], leaf.s13[0]).chunk(2, dim=0)
+            down = decode(leaf.w2[0], leaf.s2[0])
+            outputs.append(down @ (torch.nn.functional.silu(gate @ x) * (up @ x)))
+        reference = dense["down"] @ (torch.nn.functional.silu(dense["gate"] @ x) * (dense["up"] @ x))
+        torch.testing.assert_close(outputs[0] + outputs[1], reference)
+        if os.environ.get("RUN_Q4_NEWLOADER_MARLIN") == "1":
+            # Execute both real TP shards on the allocated SM90/120 device,
+            # then sum partials exactly as the direct TP router does.
+            h = x.bfloat16().cuda().reshape(1, -1)
+            ids = torch.zeros((1, 1), dtype=torch.int32, device=h.device)
+            weights = torch.ones((1, 1), device=h.device)
+            partials = []
+            for leaf in owners:
+                leaf.to(h.device)
+                leaf.process_weights_after_loading()
+                partials.append(leaf(h, ids, weights).clone())
+            result = (partials[0] + partials[1]).cpu().float()[0]
+            self.assertLess(((result - reference).norm() / reference.norm()).item(), 0.05)
+
+    def test_prequantized_qwen4_uses_requested_or_architecture_backend(self):
+        from rtp_llm.models_py.new_models.qwen4_exp.nvfp4_experts import Qwen4Nvfp4Experts
+
+        for sm, expected in (((9, 0), "marlin"), ((12, 0), "marlin"), ((10, 0), "trtllm")):
+            with patch("torch.cuda.get_device_capability", return_value=sm):
+                layer = self._nvfp4_owner(0, "auto", "auto", "cuda:0")
+                if expected == "marlin":
+                    self.assertIsInstance(layer, Qwen4Nvfp4Experts)
+                else:
+                    self.assertEqual(layer.quant_method._backend, expected)
+        layer = self._nvfp4_owner(0, "fp4_no_dp", "auto")
+        self.assertEqual(layer.quant_method._backend, "trtllm")
+        layer.load_weights({"0.gate_proj.weight_scale_2": torch.tensor(1.)})
+        with self.assertRaisesRegex(ValueError, "equal up/gate outer scales"):
+            layer.load_weights({"0.up_proj.weight_scale_2": torch.tensor(2.)})
+        with self.assertRaisesRegex(ValueError, "requires FP4_MOE_OP"):
+            self._nvfp4_owner(0, "fp4_no_dp", "cutedsl")
+
     def test_only_this_layers_shared_gate_reaches_factory_adapter(self):
         for present in (False, True):
             values, _ = _source(True)

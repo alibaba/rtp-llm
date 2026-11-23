@@ -58,6 +58,34 @@ class _DenseModel(RtpModule):
 
 
 class W8A8Int8Test(unittest.TestCase):
+    @torch.inference_mode()
+    def test_complete_weight_scale_update_and_partial_qkv_bias(self):
+        from rtp_llm.models_py.runtime_weight_update import RuntimeWeightTransaction
+
+        files = self.checkpoint("qkv")
+        leaf = self.load(files, "qkv").projection
+        old = leaf.weight.clone()
+        before = [p.data_ptr() for p in (leaf.weight, leaf.weight_scale, leaf.bias)]
+        with self.assertRaisesRegex(ValueError, "complete weight/scale unit"):
+            leaf.prepare_weight_updates({"q_proj.weight": files["projection.q_proj.weight"]})
+        torch.testing.assert_close(leaf.weight, old)
+        tensor = old.bitwise_not()
+        scale = leaf.weight_scale * 3
+        tx = RuntimeWeightTransaction(leaf.prepare_weight_updates({"weight": tensor, "weight_scale": scale}))
+        tx.install()
+        tx.commit()
+        torch.testing.assert_close(leaf.weight, tensor)
+        torch.testing.assert_close(leaf.weight_scale, scale)
+        bias = leaf.bias.clone()
+        updates = leaf.prepare_weight_updates({"q_proj.bias": bias[:16] + 2})
+        self.assertEqual([u.name for u in updates], ["bias"])
+        tx = RuntimeWeightTransaction(updates)
+        tx.install()
+        tx.commit()
+        torch.testing.assert_close(leaf.bias[:16], bias[:16] + 2)
+        torch.testing.assert_close(leaf.bias[16:], bias[16:])
+        self.assertEqual(before, [p.data_ptr() for p in (leaf.weight, leaf.weight_scale, leaf.bias)])
+
     def checkpoint(self, kind, fused=False, flat_scales=False):
         projections = {
             "column": [("", 16)],

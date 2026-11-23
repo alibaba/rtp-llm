@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 
+from rtp_llm.models_py.downstream_heads import DecoderHandlerOwner, needs_generation_projection
 from rtp_llm.models_py.layers.embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -576,7 +577,7 @@ class _KimiMlaKernelWeightLayout:
         return None
 
 
-class KimiLinearForCausalLM(KimiLinearModel, RtpModule):
+class KimiLinearForCausalLM(DecoderHandlerOwner, KimiLinearModel, RtpModule):
     """Clean prefix-streamed Kimi Linear NewLoader implementation."""
 
     # Kimi names routed-expert projections w1/w3/w2 while the shared
@@ -614,6 +615,10 @@ class KimiLinearForCausalLM(KimiLinearModel, RtpModule):
         checkpoint_layers = self._checkpoint_num_layers
 
         def should_load(name: str) -> bool:
+            if name in self._handler_checkpoint_names:
+                return True
+            if self.WEIGHTS_MAPPER.map_name(name) == "lm_head.weight" and self.lm_head is None:
+                return False
             if name.startswith("model.layers."):
                 index = self._checkpoint_layer_index(name)
                 if index is None or index < num_layers:
@@ -646,6 +651,7 @@ class KimiLinearForCausalLM(KimiLinearModel, RtpModule):
         self._init_capture_context(self._capture_canonical_layer, self._capture_canonical_final)
         self._cfg = cfg
         self._checkpoint_num_layers = cfg["checkpoint_layers"]
+        self._init_decoder_handlers(load_config, cfg["hidden_size"])
         self.tie_word_embeddings = cfg["tie_word_embeddings"]
         self._mla_kernel_layout: Optional[_KimiMlaKernelWeightLayout] = None
         self._keep_mla_checkpoint_weights = load_config.keep_mla_checkpoint_weights
@@ -675,8 +681,8 @@ class KimiLinearForCausalLM(KimiLinearModel, RtpModule):
             tp_rank=cfg["lm_head_tp_rank"],
             params_dtype=cfg["lm_head_params_dtype"],
             **output_vocab_head_kwargs(model_config),
-        )
-        if self.tie_word_embeddings:
+        ) if needs_generation_projection(model_config) else None
+        if self.tie_word_embeddings and self.lm_head is not None:
             self.embed_tokens.tie_output_head(self.lm_head)
 
     def _apply(self, fn, recurse: bool = True):
@@ -700,8 +706,8 @@ class KimiLinearForCausalLM(KimiLinearModel, RtpModule):
                     has_lm_head = True
                 yield name, tensor
 
-        super().load_weights(track(self.WEIGHTS_MAPPER.apply(iterator)))
-        if not has_lm_head and self.tie_word_embeddings:
+        super().load_weights(track(self.WEIGHTS_MAPPER.apply(self._capture_handler_inputs(iterator))))
+        if not has_lm_head and self.tie_word_embeddings and self.lm_head is not None:
             self.lm_head._copy_local_tied_weight(self.embed_tokens.weight.data)
 
     def load_ft_checkpoint(self, checkpoint):
@@ -710,11 +716,14 @@ class KimiLinearForCausalLM(KimiLinearModel, RtpModule):
         load_kimi_linear_ft(self, checkpoint)
 
     def runtime_weight_view(self) -> Dict[str, torch.Tensor]:
-        return {
+        result = {
             "embedding": self.embed_tokens.weight,
             "final_layernorm.gamma": self.norm.weight,
-            "lm_head": self.lm_head.weight,
+            **self.handler_heads.exports(),
         }
+        if self.lm_head is not None:
+            result["lm_head"] = self.lm_head.weight
+        return result
 
     def _ensure_mla_kernel_layout(self) -> None:
         if self._mla_kernel_layout is not None:

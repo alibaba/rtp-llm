@@ -15,11 +15,13 @@ from rtp_llm.models_py.new_models.deepseek_v3.indexer_parameters import SparseIn
 
 class IndexerLoader(NewModelLoader):
     def _create_model(self):
-        return SparseIndexerParameters(**self.model_config["indexer"])
+        owner = SparseIndexerParameters(**self.model_config["indexer"])
+        owner.weights_proj.fused_gate = self.model_config.get("fused_gate", False)
+        return owner
 
 
 class SparseIndexerCheckpointTest(unittest.TestCase):
-    def _check(self, data, cfg, method):
+    def _check(self, data, cfg, method, fused=False):
         args = dict(
             hidden_size=cfg["hidden_size"], q_lora_rank=cfg["q_lora_rank"],
             index_n_heads=cfg["index_n_heads"], index_head_dim=cfg["index_head_dim"],
@@ -28,12 +30,14 @@ class SparseIndexerCheckpointTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             save_file(data, str(Path(root) / "model.safetensors"))
             loader = IndexerLoader(
-                {"model_type": "glm_5", "indexer": args}, NewLoaderConfig(device="cpu", load_method=method),
+                {"model_type": "glm_5", "indexer": args, "fused_gate": fused}, NewLoaderConfig(device="cpu", load_method=method),
                 model_path=root,
             )
             owner = loader.load()
             self.assertEqual(loader.loaded_method, method)
         owner.to(dtype=torch.bfloat16)
+        if torch.version.hip is None:
+            self.assertEqual(owner.weights_proj.weight.is_contiguous(), fused)
         self.assertEqual(owner.weights_proj.weight.dtype, torch.float32)
         torch.testing.assert_close(owner.weights_proj.weight, data["weights_proj.weight"].float(), rtol=0, atol=0)
         x = torch.linspace(-1, 1, cfg["hidden_size"]).bfloat16().reshape(1, -1)
@@ -53,7 +57,8 @@ class SparseIndexerCheckpointTest(unittest.TestCase):
         gen = torch.Generator().manual_seed(2026)
         data = {key: torch.randn(shape, generator=gen) for key, shape in shapes.items()}
         for method in (NewLoaderLoadMethod.SCRATCH, NewLoaderLoadMethod.FASTSAFETENSORS):
-            self._check(data, cfg, method)
+            for fused in (False, True):
+                self._check(data, cfg, method, fused=fused)
 
     @unittest.skipUnless(os.environ.get("GLM5_BF16_CHECKPOINT"), "release checkpoint not provided")
     def test_real_glm5_sparse_indexer(self):

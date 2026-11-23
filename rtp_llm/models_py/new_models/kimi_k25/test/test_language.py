@@ -206,6 +206,26 @@ def reference_forward(weights, hidden):
 
 
 class KimiLanguageTest(unittest.TestCase):
+    def test_declared_classifier_outside_language_module(self):
+        from dataclasses import replace
+        from rtp_llm.models_py.downstream_heads import handler_weight_mappings
+        from rtp_llm.ops import TaskType
+
+        data = {"language_model." + name: value for name, value in language_weights().items()}
+        data["classifier.weight"] = torch.arange(24).float().reshape(3, 8)
+        data["vision_tower.unrelated"] = torch.ones(1)
+        with tempfile.TemporaryDirectory() as root:
+            checkpoint(root, config(), data)
+            cfg = KimiK25._create_config(root)
+            cfg.model_type, cfg.task_type = "kimi_k25", TaskType.SEQ_CLASSIFICATION
+            cfg.attn_config.kernel_tokens_per_block = 64
+            load = replace(load_config(), custom_weight_mappings=handler_weight_mappings(("classifier.weight",)))
+            model = NewModelLoader(cfg, load, model_path=root).load()
+            view = model.runtime_weight_view()
+            torch.testing.assert_close(view["__custom__.classifier.weight"], data["classifier.weight"])
+            self.assertNotIn("lm_head", view)
+            self.assertIsNone(model.lm_head)
+
     def test_registered_language_class(self):
         self.assertIs(get_model_class("kimi_k25"), KimiK25ForCausalLM)
 

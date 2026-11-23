@@ -151,6 +151,17 @@ class NewLoaderWeightManager:
                 ):
                     raise TypeError("Online updates require named checkpoint tensors")
                 canonical = _checkpoint_wire_name(name)
+                if (
+                    getattr(self._model, "_pipeline_partitioned", False)
+                    and getattr(self._model, "supports_pp_global_weight_aliases", False)
+                ):
+                    # Resolve published names before stage filtering: the
+                    # stage that does not export a view cannot reverse-map it.
+                    canonical = {
+                        "embedding": "embed_tokens.weight",
+                        "lm_head": "lm_head.weight",
+                        "final_layernorm.gamma": "norm.weight",
+                    }.get(canonical, canonical)
                 normalize = getattr(self._model, "online_checkpoint_name", None)
                 if normalize is not None:
                     canonical = normalize(canonical)
@@ -195,6 +206,10 @@ class NewLoaderWeightManager:
                 target, _ = self._model.resolve_checkpoint_load_plan(
                     mapped, tuple(tensor.shape)
                 )
+                if target is not None:
+                    owns_name = getattr(target.module, "owns_online_checkpoint_name", None)
+                    if owns_name is not None and not owns_name(target.name):
+                        target = None  # Child projections keep their own conversion.
                 if target is None or not callable(
                     getattr(target.module, "prepare_weight_updates", None)
                 ):
@@ -356,6 +371,9 @@ class NewLoaderWeightManager:
             self.version += 1
 
     def _local_request(self, name):
+        nonlocal_weight = getattr(self._model, "is_nonlocal_online_weight", None)
+        if nonlocal_weight is not None and nonlocal_weight(name):
+            return False
         scoped = name.removeprefix("model.language_model.")
         layer = re.match(r"^(?:model\.)?layers\.(\d+)\.", scoped)
         if layer and int(layer[1]) >= self._loader.model_config.num_layers:

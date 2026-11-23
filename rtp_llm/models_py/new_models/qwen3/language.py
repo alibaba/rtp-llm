@@ -437,6 +437,7 @@ class Qwen3ForCausalLM(GptModelBase, RtpModule):
     """
 
     supports_checkpoint_weight_updates = True
+    supports_pp_global_weight_aliases = True
     supports_custom_weight_mappings = True
     supports_handler_projection_layers = True
     supports_ft_handler_heads = True

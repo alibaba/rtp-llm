@@ -98,6 +98,55 @@ def _service(root, method, device, config):
 
 
 class V4MtpCheckpointTest(unittest.TestCase):
+
+    def test_ft_projection_bytes_and_legacy_exact_scale(self):
+        from rtp_llm.models_py.ft_checkpoint import CheckpointTopology, FTCheckpoint
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            cfg, values = _tiny(root)
+            load = NewLoaderConfig(
+                device="cpu",
+                compute_dtype=torch.bfloat16,
+                max_generate_batch_size=2,
+                parallelism_config=ParallelismConfig(),
+            )
+            model = get_model_class(cfg.model_type)(cfg, load)
+            # These draft-only globals were serialized after the backbone.
+            fields = {}
+            for stem in ("e", "h"):
+                for leaf in (
+                    stem + "norm.weight",
+                    stem + "_proj.weight",
+                    stem + "_proj.scale",
+                ):
+                    val = values["mtp.0." + leaf]
+                    fields["rank_00_00_00.global.v4.mtp." + leaf] = (
+                        val.bfloat16()
+                        if stem == "e" and leaf.endswith("scale")
+                        else val
+                    )
+            filename = "mtp-ft.safetensors"
+            save_file(fields, str(root / filename))
+            (root / "model.safetensors.index.json").write_text(
+                json.dumps(
+                    {
+                        "is_ft_style_weight": True,
+                        "weight_map": dict.fromkeys(fields, filename),
+                    }
+                )
+            )
+            model.load_ft_checkpoint(FTCheckpoint.open(folder, CheckpointTopology()))
+            for field in fields:
+                param = field.split(".mtp.", 1)[1]
+                self.assertTrue(
+                    torch.equal(
+                        model.get_parameter(param).view(torch.uint8),
+                        values["mtp.0." + param].view(torch.uint8),
+                    ),
+                    param,
+                )
+
     def test_real_single_layer_io_and_service_cpu_preflight(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

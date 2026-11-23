@@ -120,6 +120,7 @@ def load_owned_model(service, *, publish_runtime=True):
         max_generate_batch_size=service.max_generate_batch_size,
         force_cpu_load_weights=getattr(service, "force_cpu_load_weights", False),
         reserve_runtime_mem_mb=getattr(service, "reserve_runtime_mem_mb", 0),
+        moe_pure_tp_preshard=getattr(service, "moe_pure_tp_preshard", False),
         custom_weight_mappings=(
             service.custom_module.checkpoint_weight_mappings()
             if service.custom_module is not None

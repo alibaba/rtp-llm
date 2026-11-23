@@ -343,13 +343,28 @@ py_library(
     deps = [":utils"],
 )
 
+# The CPU frontend resolves model classes to build model/tokenizer/embedding
+# configs. Ship their Python definitions, not the inference implementation.
 py_library(
-    name = "models",
+    name = "model_descriptors",
     srcs = glob([
         "models/*.py",
         "models/**/*.py",
-    ], exclude=["models/test/*.py"]),
+    ], exclude=["models/test/*.py"]) + ["async_decoder_engine/embedding/interface.py"],
     deps = [
+        ":config",
+        ":frontend",
+        ":model_factory_register",
+        ":ops",
+        "//rtp_llm/model_loader:loader",
+        "//rtp_llm/models_py:frontend_model_helpers",
+    ],
+)
+
+py_library(
+    name = "models",
+    deps = [
+        ":model_descriptors",
         ":async_model",
         ":config",
         ":frontend",
@@ -562,14 +577,13 @@ py_library(
 )
 
 py_library(
-    name = "model_factory",
+    name = "frontend_model_factory",
     srcs = ["model_factory.py"],
     deps = [
-        ":async_model",
         ":config",
         ":device_detection",
+        ":model_descriptors",
         ":model_factory_register",
-        ":models",
         ":ops",
         ":utils",
         ":warmup",
@@ -577,7 +591,12 @@ py_library(
 )
 
 py_library(
-    name = "sdk",
+    name = "model_factory",
+    deps = [":frontend_model_factory", ":models", ":async_model"],
+)
+
+py_library(
+    name = "frontend_sdk",
     srcs = [
         '__init__.py',
         'start_server.py',
@@ -590,7 +609,7 @@ py_library(
         "//rtp_llm/server:server",
         "//rtp_llm/distribute:distribute",
         "//rtp_llm/models_py/distributed:rank_layout",
-        ":model_factory",
+        ":frontend_model_factory",
         ":uvicorn",
         ":model_factory_register",
         ":fastapi",
@@ -617,6 +636,11 @@ py_library(
     ],
     data = jit_deps(),
     imports = ["."],
+)
+
+py_library(
+    name = "sdk",
+    deps = [":frontend_sdk", ":model_factory"],
 )
 
 py_library(
@@ -677,7 +701,7 @@ py_library(
         "//rtp_llm/dash_sc:dash_sc_grpc_server",
         ":openai_api",
         ":lora",
-        ":sdk",
+        ":frontend_sdk",
         ":frontend",
         ":embedding",
         "//rtp_llm/tools:model_assistant",

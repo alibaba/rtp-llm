@@ -153,6 +153,22 @@ class MainPPCheckpointTest(unittest.TestCase):
                     self.assertEqual(
                         target.dtype, torch.float32 if stage else torch.bfloat16
                     )
+                    # Published names are broadcast too, including on a stage
+                    # with no local view to reverse-map to a Parameter.
+                    manager.update_tensors({"embedding": replacement + 1})
+                    expected = (replacement + 1).to(target.dtype) if mirrored else old
+                    torch.testing.assert_close(target, expected)
+                    norm = torch.full((4,), 3, dtype=torch.bfloat16)
+                    manager.update_tensors({"final_layernorm.gamma": norm})
+                    if stage:
+                        torch.testing.assert_close(model.norm.weight, norm)
+                    if explicit or stage == 0:
+                        manager.update_tensors({"lm_head": replacement.float() + 7})
+                        if stage:
+                            torch.testing.assert_close(target, replacement.float() + 7)
+                    else:
+                        with self.assertRaisesRegex(ValueError, "non-owning"):
+                            manager.update_tensors({"lm_head": replacement.float()})
 
     def test_non_generation_heads_are_handler_owned_and_norm_is_preserved(self):
         from rtp_llm.ops import TaskType

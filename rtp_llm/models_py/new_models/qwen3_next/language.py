@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.models_py.downstream_heads import DecoderHandlerOwner, needs_generation_projection
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.layers.embedding import (
     ParallelLMHead,
@@ -850,9 +851,10 @@ class _StageLayers(nn.ModuleDict):
         return iter(self.values())
 
 
-class Qwen3NextForCausalLM(Qwen3NextModel, RtpModule):
+class Qwen3NextForCausalLM(DecoderHandlerOwner, Qwen3NextModel, RtpModule):
     """Qwen3-Next Dense + Linear Attention (prefix model.)."""
 
+    supports_pp_global_weight_aliases = True
     _expects_mtp = False
 
     WEIGHTS_MAPPER = WeightsMapper(
@@ -876,13 +878,19 @@ class Qwen3NextForCausalLM(Qwen3NextModel, RtpModule):
         mapped = self.WEIGHTS_MAPPER.map_name(name)
         if mapped.startswith("layers."):
             return self._owns_mapped_layer(mapped)
+        if name in getattr(self, "_handler_checkpoint_names", ()):
+            return True
+        if mapped == "lm_head.weight" and self.lm_head is None:
+            return False
         if not self._pipeline_partitioned:
             return True
         if mapped == "embed_tokens.weight":
             return self.embed_tokens is not None or (
                 self.lm_head is not None and self.tie_word_embeddings
             )
-        if mapped.startswith(("lm_head.", "norm.")):
+        if mapped.startswith("norm."):
+            return self.norm is not None
+        if mapped.startswith("lm_head."):
             return self.lm_head is not None
         return True
 
@@ -904,6 +912,8 @@ class Qwen3NextForCausalLM(Qwen3NextModel, RtpModule):
         return self._owns_mapped_layer(mapped_name)
 
     def resolve_checkpoint_load_plan(self, name, shape):
+        if name in getattr(getattr(self, "handler_heads", None), "sources", ()):
+            return None, None
         if (
             name == "embed_tokens.weight"
             and self.embed_tokens is None
@@ -955,7 +965,7 @@ class Qwen3NextForCausalLM(Qwen3NextModel, RtpModule):
                     continue
                 yield name, tensor
 
-        mapped_iter = self.WEIGHTS_MAPPER.apply(_transform(weights_iter))
+        mapped_iter = self.WEIGHTS_MAPPER.apply(_transform(self._capture_handler_inputs(weights_iter)))
 
         def _track_mapped_weights(it):
             nonlocal has_lm_head
@@ -1079,6 +1089,8 @@ class Qwen3NextForCausalLM(Qwen3NextModel, RtpModule):
         )
         owns_embedding = 0 in self._owned_layer_ids
         owns_head = cfg["num_layers"] - 1 in self._owned_layer_ids
+        if not self._expects_mtp:
+            self._init_decoder_handlers(load_config, cfg["hidden_size"])
         self._cfg = cfg
         self.tie_word_embeddings = cfg["tie_word_embeddings"]
         self.normalize_lm_head_weight = _config_bool(
@@ -1132,7 +1144,7 @@ class Qwen3NextForCausalLM(Qwen3NextModel, RtpModule):
                 params_dtype=cfg["lm_head_params_dtype"],
                 **output_vocab_head_kwargs(model_config),
             )
-            if owns_head
+            if owns_head and (self._expects_mtp or needs_generation_projection(model_config))
             else None
         )
         if (
@@ -1152,11 +1164,13 @@ class Qwen3NextForCausalLM(Qwen3NextModel, RtpModule):
         load_qwen_next_ft(self, checkpoint)
 
     def runtime_weight_view(self) -> dict[str, torch.Tensor]:
-        result = {}
+        heads = getattr(self, "handler_heads", None)
+        result = heads.exports() if heads is not None else {}
         if self.embed_tokens is not None:
             result["embedding"] = self.embed_tokens.weight
-        if self.lm_head is not None:
+        if self.norm is not None:
             result["final_layernorm.gamma"] = self.norm.weight
+        if self.lm_head is not None:
             result["lm_head"] = self.lm_head.weight
         return result
 

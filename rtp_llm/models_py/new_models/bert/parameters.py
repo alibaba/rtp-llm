@@ -11,9 +11,15 @@ from rtp_llm.models_py.layers.linear import (
 )
 from rtp_llm.models_py.module_base import RtpModule, copy_weight_
 from rtp_llm.models_py.read_spec import make_sharded_read_spec, unwrap_checkpoint_tensor
+from rtp_llm.models_py.runtime_weight_update import prepare_leaf_weight_updates
 
 
 class HiddenShardedTable(RtpModule):
+    supports_independent_weight_updates = True
+
+    def prepare_weight_updates(self, weights):
+        return prepare_leaf_weight_updates(self, weights)
+
     def __init__(self, rows, width, tp, rank, dtype):
         super().__init__()
         if rows <= 0 or tp <= 0 or not 0 <= rank < tp or width % tp:
@@ -77,6 +83,13 @@ class BertNorm(RtpModule):
         )
 
 
+class _EmbeddingNorm(BertNorm):
+    supports_independent_weight_updates = True
+
+    def prepare_weight_updates(self, weights):
+        return prepare_leaf_weight_updates(self, weights)
+
+
 class BertEmbeddings(RtpModule):
     def __init__(self, vocab, positions, types, h, eps, tp, rank, dtype):
         super().__init__()
@@ -84,7 +97,7 @@ class BertEmbeddings(RtpModule):
         self.word_embeddings = HiddenShardedTable(vocab, h, tp, rank, dtype)
         self.position_embeddings = HiddenShardedTable(positions, h, tp, rank, dtype)
         self.token_type_embeddings = HiddenShardedTable(types, h, tp, rank, dtype)
-        self.LayerNorm = BertNorm(h, eps, dtype)
+        self.LayerNorm = _EmbeddingNorm(h, eps, dtype)
 
     @property
     def weight(self):

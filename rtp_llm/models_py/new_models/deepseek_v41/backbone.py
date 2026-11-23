@@ -237,6 +237,9 @@ class OwnedV41Transformer(RtpModule):
             )
         )
 
+    def checkpoint_read_spec(self, name, shape):
+        return self.mapped_child_read_spec(name, shape)
+
     def load_weights(self, weights):
         items = weights.items() if isinstance(weights, dict) else weights
         RtpModule.load_weights(self, self.WEIGHTS_MAPPER.apply(items))

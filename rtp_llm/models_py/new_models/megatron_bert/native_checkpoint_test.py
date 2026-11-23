@@ -98,6 +98,7 @@ class _MegatronServiceFixture(unittest.TestCase):
                     vit_config=None,
                 )
                 self.assertIsInstance(service.py_model, MegatronBertForEmbedding)
+                self.assertEqual(cfg.input_vocab_size, ref.bert.embeddings.word_embeddings.num_embeddings)
                 self.assertIs(service.checkpoint_owner, service.py_model)
                 self.assertEqual(
                     service.model_weights_loader.loaded_method.value, method

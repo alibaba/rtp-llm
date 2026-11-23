@@ -5,14 +5,12 @@ py_library(
     srcs = glob([
         "api/*.py",
     ]),
-    deps = ["//rtp_llm:model_factory"],
+    deps = ["//rtp_llm:frontend_model_factory"],
 )
 
 py_library(
     name = "model_assistant",
-    srcs = [
-           "model_assistant_server.py",
-           ":model_assistant_api"
-    ]
+    srcs = ["model_assistant_server.py"],
+    deps = [":model_assistant_api"],
 )
 

@@ -148,6 +148,26 @@ class V41ServiceOwnerTest(unittest.TestCase):
             with self.subTest(rank=rank), tempfile.TemporaryDirectory() as root:
                 model, config, loader, values = self.staged(root, rank)
                 self.assertIsInstance(model.v4, V4Transformer)
+                resolver = loader._checkpoint_read_spec_resolver(
+                    model, model.checkpoint_weight_name_filter(), None
+                )
+                head_shape = tuple(values["head.weight"].shape)
+                head_spec = resolver("head.weight", head_shape)
+                self.assertTrue(head_spec.is_local_shard)
+                self.assertEqual(head_spec.slices, model.v4.head.checkpoint_read_spec("weight", head_shape).slices)
+                for name, axis in (("embed.weight", 1),
+                                   ("layers.0.attn.attn_sink", 0),
+                                   ("layers.0.attn.wq_b.weight", 0), ("layers.0.attn.wq_b.scale", 0),
+                                   ("layers.0.attn.wo_b.weight", 1), ("layers.0.attn.wo_b.scale", 1)):
+                    spec = resolver(name, tuple(values[name].shape))
+                    self.assertEqual((spec.shard_dim, spec.shard_rank, spec.shard_count), (axis, rank, 2), name)
+                    if name.startswith("layers."):
+                        leaf = model.get_parameter(model.WEIGHTS_MAPPER.map_name(name))
+                        expected = values[name][spec.slices].contiguous()
+                        self.assertTrue(torch.equal(leaf.view(torch.uint8), expected.view(torch.uint8)), name)
+                # Replicated KV is shared by all local query heads: no TP cut.
+                kv = "layers.0.attn.wkv.weight"
+                self.assertFalse(resolver(kv, tuple(values[kv].shape)).is_local_shard)
                 self.assertIsInstance(model.v4.layers[1].attn, AttentionV41FP8)
                 self.assertIsInstance(model.v4.layers[1].attn_hc, DelayedHCUnit)
                 self.assertEqual(model.v4.layers[2].attn.kv_source_layer_id, 1)

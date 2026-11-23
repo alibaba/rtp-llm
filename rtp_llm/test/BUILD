@@ -463,6 +463,26 @@ py_test(
 )
 
 py_test(
+    name = "frontend_model_descriptor_test",
+    srcs = ["frontend_wheel_contract_test.py"],
+    main = "frontend_wheel_contract_test.py",
+    args = ["FrontendDescriptorTest"],
+    deps = ["//rtp_llm:rtp_llm_frontend_lib"],
+)
+
+# Packaging smoke: check the actual wheel, not the source tree or full testlib.
+py_test(
+    name = "frontend_wheel_contents_test",
+    srcs = ["frontend_wheel_contract_test.py"],
+    main = "frontend_wheel_contract_test.py",
+    args = ["FrontendWheelContentsTest"],
+    data = ["//rtp_llm:rtp_llm_frontend_whl"],
+    deps = ["//rtp_llm:rtp_llm_frontend_lib"],
+    env = {"FRONTEND_WHEEL": "$(rootpath //rtp_llm:rtp_llm_frontend_whl)"},
+    tags = ["manual"],
+)
+
+py_test(
     name = "deepseek_v41_image_renderer_test",
     srcs = ["deepseek_v41_image_renderer_test.py"],
     deps = ["//rtp_llm:testlib", "//rtp_llm:multimodal", "//rtp_llm/models_py:new_weight_loader"],

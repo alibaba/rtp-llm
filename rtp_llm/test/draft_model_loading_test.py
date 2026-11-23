@@ -98,6 +98,25 @@ class DraftModelLoadingTest(unittest.TestCase):
                     engine.parallelism_config.pp_stage_layer_counts, expected
                 )
 
+    def test_legacy_eagle3_draft_options_select_eagle3_execution(self):
+        for strategy in (SpeculativeType.MTP, SpeculativeType.EAGLE, SpeculativeType.EAGLE3):
+            with self.subTest(strategy=strategy):
+                engine = make_engine_config(strategy, 1, 0)
+                sp = engine.sp_config
+                sp.model_type, sp.checkpoint_path, sp.quantization = "qwen_3_moe_eagle3", "draft", None
+                engine.profiling_debug_logging_config = MagicMock()
+                model_cls = MagicMock()
+                target = SimpleNamespace(max_seq_len=128)
+                with patch.object(ModelFactory, "get_model_cls", return_value=model_cls), patch(
+                    "rtp_llm.model_factory.build_model_config"
+                ), patch.object(ModelFactory, "_setup_eagle3_configs") as configure:
+                    draft = ModelFactory.create_propose_model_config(engine, target, ModelArgs())
+                self.assertEqual(sp.type, SpeculativeType.EAGLE3)
+                configure.assert_called_once_with(target, draft, engine.parallelism_config)
+        sp.model_type = "other_draft"
+        with self.assertRaisesRegex(ValueError, "qwen_3_moe_eagle3 requires"):
+            ModelFactory.create_propose_model_config(engine, target, ModelArgs())
+
     def test_factory_sets_draft_role_before_building_config(self):
         for sp_type in (
             SpeculativeType.MTP,

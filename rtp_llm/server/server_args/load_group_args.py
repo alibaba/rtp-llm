@@ -47,7 +47,7 @@ def init_load_group_args(parser, load_config, model_args):
         bind_to=(load_config, "loader_recycle_handles"),
         type=str2bool,
         default=True,
-        help="ROCm + safetensors 主模型加载时回收已读 shard handle；置假关闭",
+        help="旧 ROCm safetensors 读者提前关闭已读 shard；新 scratch 读者始终逐 shard 关闭，FST 不受影响",
     )
     load_group.add_argument(
         "--moe_pure_tp_preshard",
@@ -55,7 +55,7 @@ def init_load_group_args(parser, load_config, model_args):
         bind_to=(load_config, "moe_pure_tp_preshard"),
         type=str2bool,
         default=False,
-        help="默认关闭；设为 true 后在 pure TP 下预切分已支持的 MoE 权重；不支持的来源或布局回退为全量读取",
+        help="默认关闭；pure TP 下 Qwen3-Next/Qwen3.5 MoE scratch 可只读本 rank 专家切片；其他布局沿用普通读取，FST 不受影响",
     )
     load_group.add_argument(
         "--loader_drop_page_cache",
@@ -63,8 +63,7 @@ def init_load_group_args(parser, load_config, model_args):
         bind_to=(load_config, "loader_drop_page_cache"),
         type=str2bool,
         default=True,
-        help="权重加载后按阈值释放 shard page cache（POSIX_FADV_DONTNEED）；生产默认开，"
-        "作为共享 worker 显存压力下的 OOM 逃生门可关",
+        help="scratch 映射 safetensors 时建议 Linux 回收已消费的文件缓存；不保证回收，也不释放显存，不控制 FST",
     )
     load_group.add_argument(
         "--loader_drop_page_cache_threshold_mb",

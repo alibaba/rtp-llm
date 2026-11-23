@@ -178,6 +178,7 @@ def _load_safetensors(
     slice_expander: Optional[SafetensorSliceExpander] = None,
     read_spec_resolver: Optional[ReadSpecResolver] = None,
     catalog: Optional[CheckpointCatalog] = None,
+    scratch_expert_reader=None,
 ) -> Iterator[Tuple[str, torch.Tensor]]:
     from safetensors import safe_open
 
@@ -213,6 +214,11 @@ def _load_safetensors(
                 if read_spec.is_local_shard:
                     yield read_spec.output_name, read_spec.materialize(source)
                     continue
+                if scratch_expert_reader is not None:
+                    parts = scratch_expert_reader(name, source)
+                    if parts is not None:
+                        yield from parts
+                        continue
             yield name, handle.get_tensor(name)
 
 
@@ -253,6 +259,8 @@ def get_all_weights(
     safetensor_slice_expander: Optional[SafetensorSliceExpander] = None,
     read_spec_resolver: Optional[ReadSpecResolver] = None,
     catalog: Optional[CheckpointCatalog] = None,
+    advise_scratch_cache: bool = False,
+    scratch_expert_reader=None,
 ) -> Iterator[Tuple[str, torch.Tensor]]:
     seen = set()
     for path in ckpt_paths:
@@ -264,7 +272,13 @@ def get_all_weights(
                 safetensor_slice_expander,
                 read_spec_resolver,
                 catalog,
+                scratch_expert_reader,
             )
+            if advise_scratch_cache:
+                from rtp_llm.utils.ckpt_file_info import ShardPageCache
+
+                if ShardPageCache.enabled():
+                    weights = _advise_after_consumption(ShardPageCache(path), weights)
         elif path.endswith((".bin", ".pt", ".pth")):
             if safetensor_slice_expander is not None:
                 raise ValueError(
@@ -274,13 +288,37 @@ def get_all_weights(
             weights = _load_pytorch(path, device, name_filter, read_spec_resolver, catalog)
         else:
             raise ValueError(f"Unsupported checkpoint format: {path}")
-        for name, tensor in weights:
-            if name in seen:
-                raise RuntimeError(
-                    f"Checkpoint tensor {name!r} appears in more than one shard"
-                )
-            seen.add(name)
-            yield name, tensor
+        try:
+            for name, tensor in weights:
+                if name in seen:
+                    raise RuntimeError(
+                        f"Checkpoint tensor {name!r} appears in more than one shard"
+                    )
+                seen.add(name)
+                yield name, tensor
+        finally:
+            close = getattr(weights, "close", None)
+            if close is not None:
+                close()
+
+
+def _advise_after_consumption(cache, weights):
+    """Count yielded slices, after their synchronous consumer has copied them."""
+    from rtp_llm.models_py.read_spec import unwrap_checkpoint_tensor
+    consumed = False
+    try:
+        for name, value in weights:
+            tensor, _ = unwrap_checkpoint_tensor(value)
+            nbytes = tensor.numel() * tensor.element_size()
+            consumed |= nbytes > 0
+            try:
+                yield name, value
+            finally:
+                cache._note_bytes_read(nbytes)
+    finally:
+        weights.close()
+        if consumed:
+            cache.finish_page_cache()
 
 
 def _read_checkpoint_index(

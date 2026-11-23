@@ -10,6 +10,7 @@ import torch
 
 from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
 from rtp_llm.models_py.module_base import RtpModule
+from rtp_llm.models_py.read_spec import unwrap_checkpoint_tensor
 from rtp_llm.models_py.new_models.deepseek_v4.backbone import (
     OwnedV4Args,
     OwnedV4Transformer,
@@ -124,9 +125,29 @@ class OwnedV4ModelMixin:
     def checkpoint_weight_name_filter(self):
         return self.v4.checkpoint_weight_name_filter()
 
+    @property
+    def tied_target_vocabulary(self):
+        return self.config.model_type == "deepseek_v4" and self.config.tie_word_embeddings
+
+    def allow_checkpoint_read_spec(self, checkpoint_name):
+        # PPU embedding splits hidden columns; the head selects token rows.
+        # Both consumers need the original matrix when the head is omitted.
+        if checkpoint_name == "embed.weight" and self.tied_target_vocabulary:
+            return False
+        return super().allow_checkpoint_read_spec(checkpoint_name)
+
     def load_weights(self, weights):
         items = weights.items() if isinstance(weights, dict) else weights
-        RtpModule.load_weights(self, self.WEIGHTS_MAPPER.apply(items))
+        def with_tied_head():
+            for name, value in items:
+                if name == "embed.weight" and self.tied_target_vocabulary:
+                    tensor, spec = unwrap_checkpoint_tensor(value)
+                    # FT may supply a column shard when it also supplies its
+                    # explicit LM head. Such a shard is not a head source.
+                    if spec is None:
+                        self.v4.head.load_tied_checkpoint_weight(tensor)
+                yield name, value
+        RtpModule.load_weights(self, self.WEIGHTS_MAPPER.apply(with_tied_head()))
 
     def runtime_weight_view(self):
         return {

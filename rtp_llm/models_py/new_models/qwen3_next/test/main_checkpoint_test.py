@@ -182,6 +182,30 @@ def _mtp_config(model_type="qwen35_moe_mtp"):
 
 
 class Qwen3NextLoadTest(unittest.TestCase):
+    def test_classifier_and_vocab_handler_own_complete_sources(self):
+        from dataclasses import replace
+        from rtp_llm.models_py.downstream_heads import handler_weight_mappings
+        from rtp_llm.ops import TaskType
+
+        for tag in ("qwen3_next", "qwen35_dense"):
+            cfg = _config(tie=True)
+            cfg.model_type, cfg.task_type = tag, TaskType.SEQ_CLASSIFICATION
+            if tag == "qwen35_dense":
+                cfg.expert_num = cfg.moe_k = cfg.moe_inter_size = cfg.moe_style = 0
+            data = _dense_weights(include_lm_head=True)
+            data["classifier.weight"] = torch.arange(12).float().reshape(3, 4)
+            names = ("classifier.weight", "model.embed_tokens.weight")
+            with self.subTest(tag=tag), tempfile.TemporaryDirectory() as root:
+                save_file(data, os.path.join(root, "model.safetensors"))
+                loader_cfg = replace(_load_config(tp_size=2, tp_rank=1), custom_weight_mappings=handler_weight_mappings(names))
+                model = NewModelLoader(cfg, loader_cfg, model_path=root).load()
+                view = model.runtime_weight_view()
+                self.assertIsNone(model.lm_head)
+                self.assertNotIn("lm_head", view)
+                self.assertIs(model.norm.weight, view["final_layernorm.gamma"])
+                for name in names:
+                    torch.testing.assert_close(view["__custom__." + name], data[name])
+
     def test_shared_expert_fuses_gate_and_finalizes_only_once(self):
         # Compare BF16 intermediate rounding with the one-store gate of the
         # inference runtime. Use CPU stand-ins for just the CUDA kernel and TP

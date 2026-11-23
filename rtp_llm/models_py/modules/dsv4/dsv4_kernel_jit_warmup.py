@@ -1091,6 +1091,11 @@ def _collect_dsv4_dense_gemm_shapes(model: Any) -> Dict[tuple[str, int, int], di
 
     shapes: Dict[tuple[str, int, int], dict] = {}
     for module_name, module in model.named_modules():
+        owned_backend = getattr(module, "dense_fp8_warmup_backend", None)
+        if callable(owned_backend):
+            module = owned_backend()
+            if module is None:
+                continue  # owner has not built its runtime layout
         cls_name = module.__class__.__name__
         if (
             cls_name == "CudaFp8DeepGEMMLinear"

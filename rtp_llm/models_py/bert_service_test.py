@@ -210,6 +210,65 @@ def check_static_tp_rank(rank, checkpoint, rendezvous, input_major):
 
 
 class BertServiceTest(unittest.TestCase):
+    def test_encoder_embedding_updates_reach_exact_tp_and_pp_owners(self):
+        from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
+        from rtp_llm.models_py.new_weight_manager import NewLoaderWeightManager
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            ref = make_checkpoint(path)
+            tensors = ref.state_dict()
+            names = {
+                "embedding": "embeddings.word_embeddings.weight",
+                "position_encoding.weight": "embeddings.position_embeddings.weight",
+                "token_type_embedding.weight": "embeddings.token_type_embeddings.weight",
+                "pre_decoder_layernorm.gamma": "embeddings.LayerNorm.weight",
+                "pre_decoder_layernorm.bias": "embeddings.LayerNorm.bias",
+            }
+            updates = {
+                alias: torch.arange(tensors[key].numel(), dtype=torch.float32).reshape_as(tensors[key]) + 11
+                for alias, key in names.items()
+            }
+            for kind in ("bert", "roberta"):
+                for stage, rank in ((0, 0), (0, 1), (1, 0)):
+                    with self.subTest(kind=kind, stage=stage, rank=rank):
+                        config = Bert._create_config(directory)
+                        config.model_type = kind
+                        config.max_seq_len = 10
+                        pc = service(directory, "scratch").parallelism_config
+                        pc.tp_size = pc.pp_size = 2
+                        pc.world_size = pc.local_world_size = 4
+                        pc.tp_rank, pc.pp_rank = rank, stage
+                        pc.world_rank = pc.local_rank = stage * 2 + rank
+                        pc.get_attn_tp_size = pc.get_ffn_tp_size = lambda: 2
+                        pc.get_attn_tp_rank = pc.get_ffn_tp_rank = lambda: rank
+                        pc.pp_stage_layer_counts = [1, 1]
+                        load = NewLoaderConfig(
+                            device="cpu", compute_dtype=torch.float32, load_method="scratch",
+                            tp_size=2, tp_rank=rank, parallelism_config=pc,
+                        )
+                        loader = NewModelLoader(config, load, model_path=directory)
+                        owner = loader.load()
+                        manager = NewLoaderWeightManager(owner, loader)
+                        exports = owner.runtime_weight_view()
+                        manager.update_tensors(updates)
+                        self.assertEqual(manager.version, int(stage == 0))
+                        if stage:
+                            self.assertFalse(set(names) & exports.keys())
+                            continue
+                        for alias, src in updates.items():
+                            expected = src.chunk(2, dim=1)[rank] if src.ndim == 2 else src
+                            torch.testing.assert_close(exports[alias], expected)
+                            self.assertIs(exports[alias], owner.get_parameter(names[alias]))
+                        before = exports["embedding"].clone()
+                        with self.assertRaises((RuntimeError, ValueError)):
+                            manager.update_tensors({
+                                "embedding": updates["embedding"] + 7,
+                                "pre_decoder_layernorm.bias": torch.ones(3),
+                            })
+                        torch.testing.assert_close(exports["embedding"], before)
+                        self.assertEqual(manager.version, 1)
+
     def test_deployment_cap_cannot_exceed_learned_position_table(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)

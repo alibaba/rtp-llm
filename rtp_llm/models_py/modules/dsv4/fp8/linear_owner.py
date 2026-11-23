@@ -159,6 +159,11 @@ class Dsv4FP8Linear(Dsv4FP8Parameters):
     def K(self):
         return self.weight.shape[1]
 
+    def dense_fp8_warmup_backend(self):
+        # Do not register the executor as a child: its tensor views belong
+        # to this owner and are invalidated on migration or reloading.
+        return None if self._executor is None else self._shared_input_backend
+
     @property
     def scale_ue8m0(self):
         return True

@@ -25,6 +25,7 @@ from rtp_llm.models_py.module_base import RtpModule, copy_weight_
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 from rtp_llm.models_py.quant_methods.moe_layout import prepare_moe_weight_layout
 from rtp_llm.models_py.quant_methods.moe_quant_key import moe_checkpoint_method_key
+from rtp_llm.models_py.read_spec import LoadedCheckpointTensor
 from rtp_llm.models_py.runtime_weight_update import (
     RuntimeWeightTransaction,
     TensorUpdate,
@@ -455,6 +456,11 @@ class BaseMoEExperts(RtpModule):
                     f"Duplicate MoE checkpoint tensor {self.prefix}.{name}"
                 )
             self._seen_checkpoint_names.add(name)
+            if isinstance(tensor, LoadedCheckpointTensor) and tensor.read_spec.partition == "scratch_moe_tp":
+                from rtp_llm.models_py.scratch_moe_tp import install_part
+
+                install_part(self, name, tensor)
+                continue
             # Stacked (fused-experts) ckpt format: a single 3D tensor holds all
             # experts, e.g. Qwen3-VL-MoE ships ``experts.gate_up_proj`` [E,H,2M]
             # and ``experts.down_proj`` [E,M,H]. Split per-expert and reuse the
@@ -1201,12 +1207,12 @@ class BaseMoEExperts(RtpModule):
                     f"{tuple(source.shape)} {source.dtype}"
                 )
 
-    def bind_eplb_stats(self, log_stats: torch.Tensor, gpu_loads: torch.Tensor) -> None:
+    def bind_eplb_stats(self, log_stats, gpu_loads, live_rows=None) -> None:
         from rtp_llm.models_py.layers.eplb_stats import ExpertRouteStats
 
         self._eplb_stats = ExpertRouteStats(
             log_stats, gpu_loads, num_experts=self.num_experts,
-            ep_size=self.ep_size, device=self.w13.device,
+            ep_size=self.ep_size, device=self.w13.device, live_rows=live_rows,
         )
 
     def _eplb_weight_names(self):

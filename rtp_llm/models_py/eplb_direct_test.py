@@ -529,6 +529,48 @@ def _rank_worker(rank, rendezvous, folder, use_gpu, auxiliary, stages=1):
         dist.destroy_process_group()
 
 
+class GraphBucketStatsTest(unittest.TestCase):
+    def _check_bucket(self, device):
+        from rtp_llm.models_py.layers.eplb_stats import ExpertRouteStats
+
+        # Six of eight rows select the same *valid* expert, exactly as a zero
+        # padding token can. They must not be counted for a two-token request.
+        ids = torch.tensor([[0, 1], [1, -1]] + [[3, 3]] * 6, device=device)
+        physical = torch.where(ids == 3, 0, 3)
+        logical = torch.zeros(4, dtype=torch.int32, device=device)
+        gpu = torch.zeros(2, dtype=torch.int32, device=device)
+        bound = torch.zeros((), dtype=torch.int32, device=device)
+        stats = ExpertRouteStats(
+            logical, gpu, num_experts=4, ep_size=2, device=logical.device, live_rows=bound
+        )
+
+        def record():
+            stats.record(ids, physical, 4)
+
+        replay = record
+        if device == "cuda":
+            record()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                record()
+            replay = graph.replay
+        for n in (2, 5, 0, 8, 2):
+            bound.fill_(n)
+            logical.zero_()
+            gpu.zero_()
+            replay()
+            valid = ids[:n] >= 0
+            self.assertEqual(logical.tolist(), ids[:n][valid].bincount(minlength=4).tolist())
+            self.assertEqual(gpu.tolist(), (physical[:n][valid] // 2).bincount(minlength=2).tolist())
+
+    def test_real_rows_only(self):
+        self._check_bucket("cpu")
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA Graph")
+    def test_changing_real_rows_in_one_captured_graph(self):
+        self._check_bucket("cuda")
+
+
 class DistributedEplbReloadTest(unittest.TestCase):
     def _run(self, use_gpu, auxiliary=False, stages=1):
         with tempfile.TemporaryDirectory() as folder:

@@ -19,7 +19,8 @@ def values(*shape):
     return torch.arange(torch.Size(shape).numel(), dtype=torch.float32).reshape(shape)
 
 
-def load(root, tp=1, rank=0, kv_heads=1, dtype=torch.float32, task_type=None):
+def load(root, tp=1, rank=0, kv_heads=1, dtype=torch.float32, task_type=None,
+         *, online_quant=None, device="cpu", force_cpu=False):
     config = SimpleNamespace(
         ckpt_path=str(root), model_type="llama", num_layers=1, vocab_size=8,
         hidden_size=8, inter_size=8, layernorm_eps=1e-6, is_mtp=False,
@@ -37,13 +38,39 @@ def load(root, tp=1, rank=0, kv_heads=1, dtype=torch.float32, task_type=None):
     )
     quant = CheckpointQuantization.load_from_ckpt(str(root))
     options = NewLoaderConfig(
-        tp_size=tp, tp_rank=rank, compute_dtype=dtype, device="cpu",
+        tp_size=tp, tp_rank=rank, compute_dtype=dtype, device=device,
+        force_cpu_load_weights=force_cpu,
         parallelism_config=parallel, quant_config=QuantizationConfig(
-            quant.get_method() if quant else "none", source_config=quant
+            online_quant or (quant.get_method() if quant else "none"), source_config=quant
         ),
         load_method="scratch",
     )
     return NewModelLoader(config, options, model_path=str(root)).load()
+
+
+def write_meta_source(root):
+    params = {"dim": 8, "n_layers": 1, "n_heads": 2, "n_kv_heads": 1, "norm_eps": 1e-6}
+    (root / "params.json").write_text(json.dumps(params))
+    tensors = {
+        "tok_embeddings.weight": values(8, 8),
+        "output.weight": values(8, 8) + 99,
+        "norm.weight": values(8) + 1,
+        "layers.0.attention_norm.weight": values(8) + 7,
+        "layers.0.ffn_norm.weight": values(8) + 9,
+    }
+    for i, name in enumerate(("wq", "wk", "wv", "wo")):
+        tensors[f"layers.0.attention.{name}.weight"] = values(
+            4 if name in ("wk", "wv") else 8, 8
+        ) + 20 * i
+    for i in (1, 2, 3):
+        tensors[f"layers.0.feed_forward.w{i}.weight"] = values(8, 8) + i
+    for rank in range(2):
+        part = {}
+        for name, tensor in tensors.items():
+            axis = 1 if name.endswith(("wo.weight", "w2.weight", "tok_embeddings.weight")) else 0
+            part[name] = tensor if tensor.ndim == 1 else tensor.chunk(2, axis)[rank].clone()
+        torch.save(part, root / f"consolidated.{rank:02d}.pth")
+    return tensors
 
 
 class LlamaCheckpointFormatsTest(unittest.TestCase):
@@ -296,33 +323,24 @@ class LlamaCheckpointFormatsTest(unittest.TestCase):
     def test_meta_consolidated_pth_without_hf_config(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            params = {"dim": 8, "n_layers": 1, "n_heads": 2, "n_kv_heads": 1, "norm_eps": 1e-6}
-            (root / "params.json").write_text(json.dumps(params))
-            tensors = {
-                "tok_embeddings.weight": values(8, 8),
-                "output.weight": values(8, 8) + 99,
-                "norm.weight": values(8) + 1,
-                "layers.0.attention_norm.weight": values(8) + 7,
-                "layers.0.ffn_norm.weight": values(8) + 9,
-            }
-            for i, name in enumerate(("wq", "wk", "wv", "wo")):
-                tensors[f"layers.0.attention.{name}.weight"] = values(
-                    4 if name in ("wk", "wv") else 8, 8
-                ) + 20 * i
-            for i in (1, 2, 3):
-                tensors[f"layers.0.feed_forward.w{i}.weight"] = values(8, 8) + i
-            for rank in range(2):
-                part = {}
-                for name, tensor in tensors.items():
-                    axis = 1 if name.endswith(("wo.weight", "w2.weight", "tok_embeddings.weight")) else 0
-                    part[name] = tensor if tensor.ndim == 1 else tensor.chunk(2, axis)[rank].clone()
-                torch.save(part, root / f"consolidated.{rank:02d}.pth")
+            tensors = write_meta_source(root)
             model = load(root)
             attn = model.layers[0].self_attn
             q = tensors["layers.0.attention.wq.weight"][[0, 2, 1, 3, 4, 6, 5, 7]]
             k = tensors["layers.0.attention.wk.weight"][[0, 2, 1, 3]]
             v = tensors["layers.0.attention.wv.weight"]
             torch.testing.assert_close(attn.qkv_proj.weight, torch.cat((q, k, v)))
+            from rtp_llm.models_py.quant_methods.groupwise_export import cuda_groupwise_layout
+
+            for rank in range(2):
+                proj = load(root, tp=2, rank=rank, dtype=torch.bfloat16,
+                            online_quant="INT8").layers[0].self_attn.qkv_proj
+                local = torch.cat((q.chunk(2)[rank], k, v)).T.bfloat16()
+                scale = local.abs().amax(0) / 128
+                codes = (local / scale).round().clamp(-128, 127).to(torch.int8)
+                packed = cuda_groupwise_layout(torch.nn.functional.pad(codes, (0, 52, 0, 56)), 8, 80)
+                torch.testing.assert_close(proj.weight, packed)
+                torch.testing.assert_close(proj.weight_scale[:12], scale)
             torch.testing.assert_close(model.embed_tokens.weight, tensors["tok_embeddings.weight"])
             torch.testing.assert_close(model.lm_head.weight, tensors["output.weight"])
             from rtp_llm.ops import TaskType

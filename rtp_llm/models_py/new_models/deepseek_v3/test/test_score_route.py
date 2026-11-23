@@ -326,6 +326,7 @@ class ScoreRouteTest(unittest.TestCase):
                             before_ptr = norm.weight.data_ptr()
                             manager.update_tensors({name: updated})
                             self.assertEqual(manager.version, 1)
+
                             self.assertEqual(norm.weight.data_ptr(), before_ptr)
                             torch.testing.assert_close(
                                 norm.weight, updated, rtol=0, atol=0
@@ -349,6 +350,27 @@ class ScoreRouteTest(unittest.TestCase):
                             ):
                                 manager.update_tensors({name: updated})
                             self.assertEqual(manager.version, 1)
+
+                # The same service configuration can publish a normal classifier
+                # instead of a vocabulary projection (including GLM5's mapper).
+                from rtp_llm.models.downstream_modules.classifier.classifier import ClassifierHandler
+                from rtp_llm.models.downstream_modules.custom_module import CustomModule
+                from rtp_llm.ops import TaskType
+
+                cfg["num_labels"] = 3
+                (Path(root) / "config.json").write_text(json.dumps(cfg))
+                data["classifier.weight"] = _deterministic_values((3, 32), 7).bfloat16()
+                data["classifier.bias"] = torch.arange(3).bfloat16()
+                save_file(data, str(Path(root) / "model.safetensors"))
+                config.task_type = TaskType.SEQ_CLASSIFICATION
+                service.custom_module = CustomModule(config, None)
+                service.custom_module.handler = ClassifierHandler(config)
+                service.custom_module.handler.device = torch.device("cpu")
+                load_owned_model(service)
+                self.assertIsNone(service.py_model.lm_head)
+                linear = service.custom_module.handler.linear
+                torch.testing.assert_close(linear.weight, data["classifier.weight"])
+                torch.testing.assert_close(linear.bias, data["classifier.bias"])
 
 
 if __name__ == "__main__":

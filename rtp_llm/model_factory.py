@@ -478,6 +478,12 @@ class ModelFactory:
         if not sp_config.checkpoint_path:
             return None
 
+        if sp_config.model_type == "qwen_3_moe_eagle3" and sp_config.type in (
+            SpeculativeType.MTP, SpeculativeType.EAGLE
+        ):
+            # Older deployment examples used these names for this exact
+            # draft. Select its real execution and capture strategy on all ranks.
+            sp_config.type = SpeculativeType.EAGLE3
         if (sp_config.type == SpeculativeType.EAGLE3) != (
             sp_config.model_type == "qwen_3_moe_eagle3"
         ):

@@ -16,6 +16,24 @@ from rtp_llm.models_py.quant_methods.nvfp4_quantization import quantize_expert_t
 
 
 class Nvfp4BackendTest(unittest.TestCase):
+    def test_auto_strategy_rejects_other_kernels_layout(self):
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy.fp4 import (
+            CudaFp4EpLowLatencyStrategy, CudaFp4EpNormalStrategy, CudaFp4NoDPStrategy,
+        )
+
+        model = types.SimpleNamespace(quant_config=ModelOptFp4Config(4, 16, True))
+        for backend in ("trtllm", "cutedsl"):
+            cfg = types.SimpleNamespace(moe_strategy="auto", model_config=model,
+                                        moe_config=types.SimpleNamespace(fp4_moe_op=backend))
+            for strategy, required in (
+                (CudaFp4NoDPStrategy, "trtllm"),
+                (CudaFp4EpNormalStrategy, "trtllm"),
+                (CudaFp4EpLowLatencyStrategy, "cutedsl"),
+            ):
+                checks = []
+                strategy.check_conditions(types.SimpleNamespace(check=checks.append), cfg)
+                self.assertEqual(all(checks), required == backend)
+
     def test_marlin_preflight_uses_target_device(self):
         method = fixture._experts(
             online=True,
@@ -59,6 +77,18 @@ class Nvfp4BackendTest(unittest.TestCase):
         self.assertEqual(Qwen4MarlinExecutor.executor_type().name, "MARLIN_NVFP4")
 
     def test_backend_resolution_does_not_mutate_frozen_config(self):
+        for strategy, required in (
+            ("fp4_no_dp", "trtllm"),
+            ("fp4_ep_normal", "trtllm"),
+            ("fp4_ep_low_latency", "cutedsl"),
+        ):
+            for requested in ("auto", "trtllm", "cutedsl"):
+                cfg = types.SimpleNamespace(moe_strategy=strategy, fp4_moe_op=requested)
+                if requested in ("auto", required):
+                    self.assertEqual(_resolve_backend(cfg), required)
+                else:
+                    with self.assertRaisesRegex(ValueError, "requires FP4_MOE_OP"):
+                        _resolve_backend(cfg)
         for backend in ("cutlass", "marlin"):
             cfg = types.SimpleNamespace(
                 fp4_moe_op="auto", moe_strategy="nvfp4_" + backend

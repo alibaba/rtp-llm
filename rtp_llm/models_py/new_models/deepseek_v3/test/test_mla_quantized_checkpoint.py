@@ -10,8 +10,8 @@ from safetensors.torch import save_file
 
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.new_models.deepseek_v3 import attention
-from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 from rtp_llm.models_py.quant_methods import fp8
+from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 
 
 class _MlaLoader(NewModelLoader):
@@ -19,7 +19,9 @@ class _MlaLoader(NewModelLoader):
         return attention.DeepSeekV32MlaAttention(**self.model_config["attention"])
 
 
-def load_checkpoint(method, device, *, compressed, fp8_source=False):
+def load_checkpoint(
+    method, device, *, compressed, fp8_source=False, random_online=False
+):
     h, q, r, k, p, v = (
         (1024, 128, 128, 128, 128, 128)
         if method.startswith("fp8_block")
@@ -50,7 +52,7 @@ def load_checkpoint(method, device, *, compressed, fp8_source=False):
                     -3, 3, ((n + 127) // 128, (cols + 127) // 128), generator=g
                 ).float()
             )
-        elif method == "fp8_block_online":
+        elif method == "fp8_block_online" and not random_online:
             data[name + ".weight"] = torch.randint(
                 -1, 2, (n, cols), generator=g
             ).bfloat16()
@@ -88,6 +90,57 @@ def load_checkpoint(method, device, *, compressed, fp8_source=False):
 
 
 class QuantizedMlaTest(unittest.TestCase):
+    def test_online_fused_and_prefill_round_fp8_only_once(self):
+        from rtp_llm.models_py.kernels.cuda import fp8_quant
+
+        def pack_cpu(s, mn):
+            exp = ((s.view(torch.int32) >> 23) & 255).repeat_interleave(128, 0)[:mn]
+            exp = torch.nn.functional.pad(exp, (0, -exp.shape[1] % 4))
+            return (
+                (exp.reshape(mn, -1, 4) << (torch.arange(4) * 8))
+                .sum(-1)
+                .int()
+                .T.contiguous()
+                .T
+            )
+
+        with mock.patch.object(torch.version, "hip", None), mock.patch.object(
+            fp8, "_select_fp8_runtime_backend", return_value=fp8._CUDA_DEEP_GEMM
+        ), mock.patch.object(
+            fp8, "is_deep_gemm_e8m0_used", return_value=False
+        ), mock.patch.object(
+            attention, "is_deep_gemm_e8m0_used", return_value=True
+        ), mock.patch.object(
+            fp8_quant, "_transform_scale_ue8m0", side_effect=pack_cpu
+        ):
+            layer, data = load_checkpoint(
+                "fp8_block_online", "cpu", compressed=True, random_online=True
+            )
+        fused = torch.cat([data["q_a_proj.weight"], data["kv_a_proj_with_mqa.weight"]])
+        for source, w, s in (
+            (
+                fused,
+                layer._fused_qkv_a_runtime.weight,
+                layer._fused_qkv_a_runtime.weight_scale,
+            ),
+            (data["kv_b_proj.weight"], layer._kv_b_runtime_w, layer._kv_b_runtime_s),
+        ):
+            expected_w, scale = fp8_quant.per_block_cast_to_fp8(source, True)
+            self.assertTrue(
+                torch.equal(w.view(torch.uint8), expected_w.view(torch.uint8))
+            )
+            torch.testing.assert_close(s, pack_cpu(scale, w.shape[0]))
+            first, sf = fp8_quant.per_block_cast_to_fp8(source, False)
+            rounded = (
+                first.float() * sf.repeat_interleave(128, 0).repeat_interleave(128, 1)
+            ).bfloat16()
+            old_w, _ = fp8_quant.per_block_cast_to_fp8(rounded, True)
+            self.assertFalse(torch.equal(w.view(torch.uint8), old_w.view(torch.uint8)))
+        # Decode must not use either of the quantized prefill views.
+        source = data["kv_b_proj.weight"].view(2, 256, 128)
+        torch.testing.assert_close(layer._kc_w, source[:, :128])
+        torch.testing.assert_close(layer._vc_w, source[:, 128:].transpose(1, 2))
+
     @unittest.skipUnless(
         torch.cuda.is_available()
         and not torch.version.hip
