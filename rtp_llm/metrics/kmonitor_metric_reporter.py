@@ -97,6 +97,7 @@ class AccMetrics(Enum):
     OUTPUT_REPETITION_QPS_METRIC = "py_rtp_output_repetition_qps"
     SAME_TOKEN_RUN_QPS_METRIC = "py_rtp_same_token_run_qps"
 
+    VIT_URL_CACHE_LOOKUP_QPS_METRIC = "py_rtp_vit_url_cache_lookup_qps"
     VIT_EMBEDDING_CACHE_HIT_QPS_METRIC = "py_rtp_vit_embedding_cache_hit_qps"
     VIT_EMBEDDING_CACHE_MISS_QPS_METRIC = "py_rtp_vit_embedding_cache_miss_qps"
     VIT_EMBEDDING_CACHE_INFLIGHT_QPS_METRIC = "py_rtp_vit_embedding_cache_inflight_qps"
@@ -327,6 +328,7 @@ class GaugeMetrics(Enum):
         "py_rtp_output_repetition_duplicate_tokens"
     )
 
+    VIT_DOWNLOAD_QUEUE_WAIT_MS_METRIC = "py_rtp_vit_download_queue_wait_ms"
     VIT_DOWNLOAD_RT_METRIC = "py_rtp_vit_download_rt"
     VIT_PREPROCESS_OTHER_RT_METRIC = "py_rtp_vit_preprocess_other_rt"
     VIT_PREPROCESS_QUEUE_SIZE_METRIC = "py_rtp_vit_preprocess_queue_size"

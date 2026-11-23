@@ -603,7 +603,7 @@ def init_vit_group_args(parser, vit_config):
         bind_to=(vit_config, "vit_source_download_concurrency"),
         type=int,
         default=0,
-        help="Source download threads per ViT process; 0 shares the default I/O pool",
+        help="HTTP source download threads per ViT engine, shared with inspection. For DSV4.1, 0 uses MM_PREPROCESS_MAX_WORKERS (at least 1). Other models use the default I/O pool when set to 0.",
     )
 
     for name, parser, default, description in (

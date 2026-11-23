@@ -2,6 +2,7 @@
 
 import hashlib
 import logging
+import mmap
 import multiprocessing
 import os
 import socket
@@ -249,13 +250,27 @@ class URLDataCache:
         return None if data is None else BytesIO(data)
 
     def insert_cache(self, key, source, deadline=None):
-        if self._address is None:
-            self._store.put(key, source.getvalue())
+        if isinstance(source, BytesIO):
+            data = source.getvalue()
+        elif os.fstat(source.fileno()).st_size:
+            with mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ) as view:
+                if self._address is not None:
+                    self._exchange(key, view, deadline)
+                    return
+                data = view[:]
         else:
-            self._exchange(key, source.getvalue(), deadline)
+            data = b""
+        if self._address is None:
+            self._store.put(key, data)
+        else:
+            self._exchange(key, data, deadline)
 
     def get_or_load(self, url, headers, load, deadline=None):
+        # Keep the standalone cache server independent of the metrics runtime.
+        from rtp_llm.multimodal.vit_metrics import report_url_cache_lookup
+
         if self._capacity <= 0 or self._address == "":
+            report_url_cache_lookup("bypass")
             return load(), False
         # The same URL can return different bytes under different credentials.
         key = hashlib.sha256(headers.encode() + b"\0" + url.encode()).digest()
@@ -263,9 +278,12 @@ class URLDataCache:
             cached = self.check_cache(key, deadline)
         except (EOFError, OSError):
             # Bypass publication too when the owner was unreachable on lookup.
+            report_url_cache_lookup("bypass")
             return load(), False
         if cached is not None:
+            report_url_cache_lookup("hit")
             return cached, True
+        report_url_cache_lookup("miss")
         source = load()
         try:
             self.insert_cache(key, source, deadline)

@@ -2,6 +2,13 @@ load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
 load("@arch_config//:arch_select.bzl", "telemetry_test_deps")
 
 py_test(
+    name = "image_source_prefetch_test",
+    srcs = ["image_source_prefetch_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "0", "CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
     name = "shared_url_cache_test",
     srcs = ["shared_url_cache_test.py"],
     deps = ["//rtp_llm:testlib"],

@@ -6,8 +6,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, Iterator, List, Optional, Union
 
-from rtp_llm.metrics import kmonitor
-from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
+from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 
 
 VIT_PHASE_METRICS = os.environ.get("MM_VIT_PHASE_METRICS") == "1"
@@ -86,6 +85,25 @@ def record_vit_preprocess_value(
         metrics.report(metric, float(value), tags)
         return True
     return False
+
+
+def report_vit_preprocess_metric(
+    metric: Union[AccMetrics, GaugeMetrics],
+    value: float,
+    tags: Optional[Dict[str, str]] = None,
+) -> None:
+    """Forward worker samples with the CPU result, or report in the engine."""
+    try:
+        if not record_vit_preprocess_value(metric, value, tags):
+            kmonitor.report(metric, value, tags or {})
+    except Exception:
+        logging.exception("Failed to report ViT metric %s", metric.name)
+
+
+def report_url_cache_lookup(result: str) -> None:
+    report_vit_preprocess_metric(
+        AccMetrics.VIT_URL_CACHE_LOOKUP_QPS_METRIC, 1, {"result": result}
+    )
 
 
 def video_resized_pixel_count(
