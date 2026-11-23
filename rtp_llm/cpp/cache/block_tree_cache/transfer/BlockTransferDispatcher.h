@@ -53,12 +53,14 @@ public:
 private:
     class InflightTicket;
     std::shared_ptr<InflightTicket> trackTransfer() const;
-    struct CoordinatedExecution;
+    struct TargetBlockSafetyHandler;
 
     std::shared_ptr<TransferAsyncContext> executeMultiRank(TransferTask task,
                                                            const char*  completion_operation = nullptr) const;
-    void submitCoordinated(TransferTask task, TransferDoneCallback done, const char* completion_operation) const;
-    std::vector<TransferTargetBlock> targetBlocks(const TransferTask& task) const;
+    void registerTargetsAndSubmitTransfer(TransferTask task,
+                                          TransferDoneCallback done,
+                                          const char* completion_operation) const;
+    std::vector<TransferTargetBlock> resolveTargetBlockRefs(const TransferTask& task) const;
 
     std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine_;
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine_;

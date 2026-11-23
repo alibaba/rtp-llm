@@ -38,8 +38,10 @@ private:
     const BlockTransferDispatcher& dispatcher_;
 };
 
-struct BlockTransferDispatcher::CoordinatedExecution {
-    CoordinatedExecution(std::shared_ptr<BlockTreeReclaimer> reclaimer, TransferCompletionKey key, TransferDoneCallback done):
+struct BlockTransferDispatcher::TargetBlockSafetyHandler {
+    TargetBlockSafetyHandler(std::shared_ptr<BlockTreeReclaimer> reclaimer,
+                             TransferCompletionKey key,
+                             TransferDoneCallback done):
         reclaimer(std::move(reclaimer)), key(std::move(key)), done(std::move(done)) {}
 
     void complete(TransferResult result) {
@@ -154,7 +156,7 @@ BlockTransferDispatcher::executeMultiRank(TransferTask task, const char* complet
     return executePerRank(std::move(task));
 }
 
-std::vector<TransferTargetBlock> BlockTransferDispatcher::targetBlocks(const TransferTask& task) const {
+std::vector<TransferTargetBlock> BlockTransferDispatcher::resolveTargetBlockRefs(const TransferTask& task) const {
     std::vector<TransferTargetBlock> targets;
     const auto& groups = multi_rank_engine_ ? multi_rank_engine_->groupSets() : per_rank_engine_->groupSets();
     for (const auto& descriptor : task.descriptors()) {
@@ -175,38 +177,38 @@ std::vector<TransferTargetBlock> BlockTransferDispatcher::targetBlocks(const Tra
     return targets;
 }
 
-void BlockTransferDispatcher::submitCoordinated(TransferTask task,
-                                               TransferDoneCallback done,
-                                               const char* completion_operation) const {
-    auto execution = std::make_shared<CoordinatedExecution>(reclaimer_, task.traceId(), std::move(done));
+void BlockTransferDispatcher::registerTargetsAndSubmitTransfer(TransferTask task,
+                                                               TransferDoneCallback done,
+                                                               const char* completion_operation) const {
+    auto safety_handler = std::make_shared<TargetBlockSafetyHandler>(reclaimer_, task.traceId(), std::move(done));
     // Construct the subscription before starting any I/O. The child's callback
     // vector may still reject it; that path also passes through this finalizer.
     TransferAsyncContext::DoneCallback complete =
-        [execution](TransferResult result) { execution->complete(std::move(result)); };
+        [safety_handler](TransferResult result) { safety_handler->complete(std::move(result)); };
     TransferResult observation_failure(
         ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "failed to observe submitted transfer completion"));
     std::shared_ptr<TransferAsyncContext> context;
     const bool remote = multi_rank_engine_ != nullptr;
     const auto ranks = remote ? multi_rank_engine_->workerCount() : 1;
-    if (ranks && !reclaimer_->registerTask(execution->key, {remote, ranks}, targetBlocks(task))) {
+    if (ranks && !reclaimer_->registerTask(safety_handler->key, {remote, ranks}, resolveTargetBlockRefs(task))) {
         TransferResult duplicate(ErrorInfo(ErrorCode::INVALID_PARAMS, "duplicate or empty transfer trace"),
                                  CacheCopyError::NOT_EXECUTED);
         duplicate.buffer_safe = true;
-        execution->done(std::move(duplicate));
+        safety_handler->done(std::move(duplicate));
         return;
     }
     try {
         context = executeMultiRank(std::move(task), completion_operation);
         if (!context) {
-            execution->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "transfer engine returned a null context"));
+            safety_handler->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "transfer engine returned a null context"));
             return;
         }
         context->onDone(std::move(complete));
     } catch (...) {
-        if (execution->claimed.load(std::memory_order_acquire))
+        if (safety_handler->claimed.load(std::memory_order_acquire))
             throw; // Preserve exceptions from an inline business completion callback.
         if (!context) {
-            reclaimer_->unregisterTask(execution->key);
+            reclaimer_->unregisterTask(safety_handler->key);
             throw;
         }
         auto result = std::move(observation_failure);
@@ -217,7 +219,7 @@ void BlockTransferDispatcher::submitCoordinated(TransferTask task,
         } catch (...) {
             // A failed observation cannot prove a submitted execution safe.
         }
-        execution->complete(std::move(result));
+        safety_handler->complete(std::move(result));
     }
 }
 
@@ -237,7 +239,7 @@ void BlockTransferDispatcher::runTransfer(TransferTask         task,
         }
         done(std::move(result));
     };
-    submitCoordinated(std::move(task), std::move(callback), completion_operation);
+    registerTargetsAndSubmitTransfer(std::move(task), std::move(callback), completion_operation);
 }
 
 void BlockTransferDispatcher::cancelPendingStagingTransfers() const {
