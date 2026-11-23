@@ -52,11 +52,12 @@ private:
         GROUP,
     };
 
-    // Per-round admission accounting for admitWaitingStreams(). Only streams that actually
-    // made scheduling progress contribute, so a stream whose KV malloc failed and stayed
-    // WAITING does not consume this round's token budget.
+    // Per-round admission accounting for admitWaitingStreams(). Continuous prefill
+    // also includes outstanding reservations from earlier rounds; a failed KV
+    // malloc never owns a reservation.
     struct ScheduleRuntime {
         size_t admitted_stream_count                     = 0;
+        size_t scheduled_stream_count                    = 0;  // Excludes earlier deferred reservations.
         size_t admitted_prefill_token_size_with_cache    = 0;
         size_t admitted_prefill_max_seq_len_with_cache   = 0;
         size_t admitted_prefill_sequence_count           = 0;
@@ -79,7 +80,10 @@ private:
                                   size_t                   admitted_tokens,
                                   size_t                   admitted_max_seq_len,
                                   size_t                   admitted_sequence_count,
-                                  const GenerateStreamPtr& candidate) const;
+                                  const GenerateStreamPtr& candidate,
+                                  bool                     running_included = false) const;
+    bool   usesChunkedPrefillAdmission() const;
+    bool   hasPendingLocalDecode() const;
     size_t prefillTokenCostWithoutCache(const GenerateStreamPtr& stream) const;
     size_t prefillSeqLenWithCache(const GenerateStreamPtr& stream) const;
     size_t prefillTokenCostWithCache(const GenerateStreamPtr& stream) const;
@@ -96,7 +100,8 @@ private:
     // finalized. FIFOSchedulerBase::evaluateWaitingStreams() is left untouched for the other
     // FIFOSchedulerBase subclasses.
     void admitWaitingStreams(std::list<GenerateStreamPtr>&       waiting_streams,
-                             const std::list<GenerateStreamPtr>& already_admitted_streams);
+                             const std::list<GenerateStreamPtr>& already_admitted_streams,
+                             bool                                prepared_only = false);
 
     void cancelGroups(StreamGroupQueue& group_queue);
     void evaluateWaitingGroupQueue();
@@ -111,7 +116,7 @@ private:
     int64_t extraOnflightStreams() const override;
     void    fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const override;
     void    appendExtraRunningTaskList(std::vector<EngineScheduleInfo::TaskInfo>& task_list) const override;
-    bool    partitionChunkContinuations();
+    bool    partitionChunkContinuations(bool has_waiting_prefill = false);
 
     // Explicit request groups (enqueueGroup). Each group is admitted as a whole
     // to an isolated execution boundary; a partially admitted group keeps its
