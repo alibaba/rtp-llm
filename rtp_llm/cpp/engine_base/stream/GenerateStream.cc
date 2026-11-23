@@ -1501,6 +1501,10 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info,
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%s] spec update", streamLogTag().c_str());
+    // An in-flight verify may arrive between final output and the FINISHED transition.
+    if (!update_info.force_update_info && hasEventWithoutLock(StreamEvents::GenerateDone)) {
+        return;
+    }
     if (!prepareUpdateWithoutLock(update_info.error_info, update_info.force_update_info)) {
         return;
     }
