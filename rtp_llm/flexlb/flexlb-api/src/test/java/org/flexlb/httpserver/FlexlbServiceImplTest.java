@@ -213,7 +213,7 @@ class FlexlbServiceImplTest {
     }
 
     @Test
-    void scheduleKeepsOriginalNumericIdWhenStringIdDiffers() {
+    void nonBatchScheduleKeepsIdsWithoutRetainingGenerateInput() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
         when(routeService.route(any()))
                 .thenReturn(
@@ -225,8 +225,7 @@ class FlexlbServiceImplTest {
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                         .setRequestId(123)
                         .setRequestIdStr("007")
-                        .addScheduleRoles(
-                                FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER)
+                        .setGenerateInput(ByteString.copyFromUtf8("ignored in NON_BATCH"))
                         .build(),
                 mock(StreamObserver.class));
 
@@ -234,6 +233,7 @@ class FlexlbServiceImplTest {
         verify(routeService).route(context.capture());
         assertEquals("007", context.getValue().getRequestId());
         assertEquals(123L, context.getValue().getOriginalNumericRequestId());
+        assertNull(context.getValue().getGenerateInputPb());
     }
 
     @ParameterizedTest
