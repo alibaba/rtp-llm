@@ -216,7 +216,9 @@ final class FlexlbConfigValidator {
     private static void validateRouting(RoutingConfig routing) {
         require(routing.getRoles() != null, "router.roles", "is required");
         require(routing.getRoles().getVit() != null, "router.roles.vit", "is required");
-        positive(routing.getRoles().getVit().getLoadMaxAgeMs(), "router.roles.vit.loadMaxAgeMs");
+        var vit = routing.getRoles().getVit();
+        positive(vit.getLoadMaxAgeMs(), "router.roles.vit.loadMaxAgeMs");
+        nonNegative(vit.getMaxExtraInflightInputs(), "router.roles.vit.maxExtraInflightInputs");
         PrefillConfig prefill = routing.getRoles().getPrefill();
         require(prefill != null, "router.roles.prefill", "is required");
         require(prefill.getExecutionTimeEstimator() != null,

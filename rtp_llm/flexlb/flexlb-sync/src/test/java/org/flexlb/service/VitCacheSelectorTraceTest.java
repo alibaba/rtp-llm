@@ -219,6 +219,7 @@ class VitCacheSelectorTraceTest {
 
     @Test
     void affinitySelectionReportsChosenWorkersOriginalLoad() {
+        ctx.getConfig().getRouter().getRoles().getVit().setMaxExtraInflightInputs(41L);
         ctx.getConfig().getRouter().getRoles().getVit().setCacheAffinityEnabled(true);
         ctx.getConfig().getRouter().getRoles().getVit().setLoadMaxAgeMs(60_000);
         long now = System.nanoTime();

@@ -16,13 +16,15 @@ class FlexlbConfigRoleTest {
                 .loadBalanceConfig().getRouter().getRoles().getVit();
         assertFalse(defaults.isCacheAffinityEnabled());
         assertEquals(5000L, defaults.getLoadMaxAgeMs());
+        assertEquals(32L, defaults.getMaxExtraInflightInputs());
 
         var configured = new ConfigService(java.util.Map.of(ConfigService.FLEXLB_CONFIG_ENV, """
                 {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},
-                 "router":{"roles":{"vit":{"cacheAffinityEnabled":true,"loadMaxAgeMs":1200}}}}
+                 "router":{"roles":{"vit":{"cacheAffinityEnabled":true,"loadMaxAgeMs":1200,"maxExtraInflightInputs":4}}}}
                 """)).loadBalanceConfig().getRouter().getRoles().getVit();
         assertTrue(configured.isCacheAffinityEnabled());
         assertEquals(1200L, configured.getLoadMaxAgeMs());
+        assertEquals(4L, configured.getMaxExtraInflightInputs());
         assertFalse(ConfigTestFixtures.parse("""
                 {"router":{"roles":{"vit":{"cacheAffinityEnabled":false}}}}
                 """).getRouter().getRoles().getVit().isCacheAffinityEnabled());
@@ -35,6 +37,8 @@ class FlexlbConfigRoleTest {
                 "\"cacheAffinityEnabled\":null", "\"loadMaxAgeMs\":0",
                 "\"loadMaxAgeMs\":-1", "\"loadMaxAgeMs\":1.5",
                 "\"loadMaxAgeMs\":\"5000\"", "\"loadMaxAgeMs\":null",
+                "\"maxExtraInflightInputs\":-1", "\"maxExtraInflightInputs\":1.5",
+                "\"maxExtraInflightInputs\":\"2\"", "\"maxExtraInflightInputs\":null",
                 "\"cacheAffinityEnable\":true"}) {
             String patch = "{\"router\":{\"roles\":{\"vit\":{" + fields + "}}}}";
             assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse(patch), patch);

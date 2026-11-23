@@ -27,8 +27,10 @@ public final class RoutingConfig {
     @Getter
     @Setter
     public static final class VitConfig {
-        /** Default: least media work. When enabled, cache score takes precedence. */
+        /** Prefer cache within the configured load gap. Disabled by default. */
         private boolean cacheAffinityEnabled;
+        /** Maximum extra inflight media inputs accepted for the cache leader. */
+        private long maxExtraInflightInputs = 32;
         /** Unknown/expired load must never be interpreted as an idle worker. */
         private long loadMaxAgeMs = 5000;
     }

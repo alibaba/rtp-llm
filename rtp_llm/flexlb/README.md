@@ -422,6 +422,14 @@ The prefix percentage uses predictor-effective reusable tokens; the final cache 
 remains compute work. Omit `cacheAffinity` to disable that preference.
 The projection uses a frozen snapshot of current work and cannot predict future arrivals.
 
+ViT routes to the worker with the lowest inflight media count by default. With
+`router.roles.vit.cacheAffinityEnabled` enabled, `maxExtraInflightInputs` under
+the same object sets how many more inflight inputs the cache leader may have
+than the least-loaded eligible worker. A gap equal to the limit is allowed.
+Above the limit, the least-loaded worker wins, with cache affinity breaking
+load ties. The default limit is 32 inflight inputs. Zero permits affinity on
+load ties only.
+
 Decode freezes each route attempt's request identity, priority, complete prompt-plus-output
 demand, capacity limits and admission mode before selecting workers. DIRECT requires
 immediately available dispatch capacity. QUEUE without reclamation can retain a physically

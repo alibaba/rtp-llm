@@ -241,13 +241,56 @@ class VitCacheDirectoryTest {
     }
 
     @Test
-    void optionalAffinityPrecedesLoadAndEqualAffinityUsesLoad() {
+    void defaultAffinityAccepts32ExtraInputsAndFallsBackAt33() {
         var ctx = context("image");
-        load(a, 100L);
-        load(b, 2L);
+        load(b, 100L);
         snapshot(a, "a", "image");
+        load(a, 132L);
         assertEquals(a.getIp(), selector.select(ctx, null).getServerIp());
+        load(a, 133L);
+        assertEquals(b.getIp(), selector.select(ctx, null).getServerIp());
+        load(a, 132L);
         snapshot(b, "b", "image");
+        assertEquals(b.getIp(), selector.select(ctx, null).getServerIp());
+    }
+
+    @Test
+    void loadGapIsRelativeAndFallsBackToTheActualMinimum() {
+        var ctx = context("x", "y");
+        ctx.getConfig().getRouter().getRoles().getVit().setMaxExtraInflightInputs(2L);
+        var middle = worker("10.0.0.3", "one");
+        live.put(middle.getIpPort(), middle);
+        snapshot(a, "a", "x", "y");
+        snapshot(middle, "middle", "x");
+        load(b, 100L);
+        load(middle, 101L);
+        load(a, 102L);
+        assertEquals(a.getIp(), selector.select(ctx, null).getServerIp());
+        load(a, 103L);
+        assertEquals(b.getIp(), selector.select(ctx, null).getServerIp());
+        load(middle, 100L);
+        assertEquals(middle.getIp(), selector.select(ctx, null).getServerIp());
+    }
+
+    @Test
+    void zeroGapCountsLocallyRoutedInputsAndPreservesAffinityOnTies() {
+        var ctx = firstVitRoute(true, "x", "x");
+        ctx.getConfig().getRouter().getRoles().getVit().setMaxExtraInflightInputs(0L);
+        snapshot(a, "a", "x");
+        load(a, 0L);
+        load(b, 0L);
+        assertEquals(a.getIp(), selector.select(ctx, null).getServerIp());
+        assertEquals(b.getIp(), selector.select(ctx, null).getServerIp());
+        assertEquals(a.getIp(), selector.select(ctx, null).getServerIp());
+    }
+
+    @Test
+    void boundedAffinityUsesAvailableLoadAndFallsBackToCacheWhenAllLoadsAreUnknown() {
+        var ctx = context("x");
+        ctx.getConfig().getRouter().getRoles().getVit().setMaxExtraInflightInputs(2L);
+        snapshot(a, "a", "x");
+        assertEquals(a.getIp(), selector.select(ctx, null).getServerIp());
+        load(b, 100L);
         assertEquals(b.getIp(), selector.select(ctx, null).getServerIp());
     }
 
@@ -269,11 +312,11 @@ class VitCacheDirectoryTest {
         var observed = directory.candidates(null, List.of("x", "y")).get(a.getIpPort());
         assertEquals(0, observed.hashHits());
         assertEquals(0, observed.embeddingHits());
-        load(a, 100L);
+        load(a, 30L);
         load(b, 0L);
         assertEquals(a.getIp(), selector.select(firstVitRoute(true, "y"), null).getServerIp());
         load(a, 0L);
-        load(b, 100L);
+        load(b, 30L);
         assertEquals(b.getIp(), selector.select(firstVitRoute(true, "x"), null).getServerIp());
         snapshot(b, "b1", "y");
         assertEquals(b.getIp(), selector.select(firstVitRoute(true, "y"), null).getServerIp());

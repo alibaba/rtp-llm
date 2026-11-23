@@ -20,6 +20,7 @@ import org.springframework.stereotype.Component;
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -60,7 +61,16 @@ public class VitCacheSelector {
     }
 
     /** Keep the exact load sample used for this candidate's routing decision. */
-    private record LoadedCandidate(Candidate candidate, WorkerStatus.VitLoad sample, long routedInputs) {}
+    private record LoadedCandidate(Candidate candidate, WorkerStatus.VitLoad sample, long routedInputs,
+                                   MatchScore score, long load, long tieBreaker) {
+        private static final Comparator<LoadedCandidate> CACHE_FIRST = Comparator
+                .comparing(LoadedCandidate::score, Comparator.reverseOrder())
+                .thenComparingLong(LoadedCandidate::load)
+                .thenComparingLong(LoadedCandidate::tieBreaker);
+        private static final Comparator<LoadedCandidate> LOAD_FIRST = Comparator
+                .comparingLong(LoadedCandidate::load)
+                .thenComparing(CACHE_FIRST);
+    }
 
     private record MatchScore(int hashHits, int embeddingHits, int gpuHits, int pendingHits)
             implements Comparable<MatchScore> {
@@ -197,9 +207,8 @@ public class VitCacheSelector {
             RoutingConfig.VitConfig config, List<String> keys, Map<String, Candidate> candidates, int mediaCount, Span span) {
         long now = System.currentTimeMillis();
         long nowNanos = System.nanoTime();
-        List<LoadedCandidate> best = new ArrayList<>();
-        MatchScore bestScore = null;
-        long bestLoad = Long.MAX_VALUE;
+        LoadedCandidate cacheLeader = null;
+        LoadedCandidate leastLoaded = null;
         for (Candidate candidate : candidates.values()) {
             if (group != null && !Objects.equals(group, candidate.worker().getGroup())) {
                 continue;
@@ -216,21 +225,22 @@ public class VitCacheSelector {
             WorkerStatus.VitLoad sample = candidate.worker().vitLoad();
             long routed = candidate.worker().vitRoutedInputs();
             long load = load(sample, routed, nowNanos, config);
-            int comparison = bestScore == null ? 1 : score.compareTo(bestScore);
-            if (comparison == 0) { comparison = Long.compare(bestLoad, load); }
-            if (comparison > 0) {
-                best.clear();
-                bestScore = score;
-                bestLoad = load;
+            var current = new LoadedCandidate(candidate, sample, routed, score, load,
+                    ThreadLocalRandom.current().nextLong());
+            if (cacheLeader == null || LoadedCandidate.CACHE_FIRST.compare(current, cacheLeader) < 0) {
+                cacheLeader = current;
             }
-            if (comparison >= 0) {
-                best.add(new LoadedCandidate(candidate, sample, routed));
+            if (leastLoaded == null || LoadedCandidate.LOAD_FIRST.compare(current, leastLoaded) < 0) {
+                leastLoaded = current;
             }
         }
-        if (best.isEmpty()) {
+        if (cacheLeader == null) {
             return errorStatus(StrategyErrorType.NO_VIT_WORKER);
         }
-        LoadedCandidate selectedLoad = best.get(ThreadLocalRandom.current().nextInt(best.size()));
+        LoadedCandidate selectedLoad = cacheLeader;
+        if (cacheLeader.load() - leastLoaded.load() > config.getMaxExtraInflightInputs()) {
+            selectedLoad = leastLoaded;
+        }
         Candidate selected = selectedLoad.candidate();
         ServerStatus result = checkedStatus(selected.worker(), selected.worker().getIpPort(), ctx.getRequestId(), group,
                 selectedLoad.routedInputs(), mediaCount);
