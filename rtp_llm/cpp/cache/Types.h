@@ -74,9 +74,12 @@ struct MallocInfo {
     // Override for incrMalloc's seqLength read; -1 = fall back to complete_token_ids->seqLength().
     // Lets the state machine feed the publish-time value instead of racing with the async worker.
     int incr_seq_len_override = -1;
-
     // Initial chunk admission reserves fixed sparse banks for this maximum grant.
     int max_chunk_tokens = 0;
+
+    // During decode lookahead, retain the previous replay's sparse pages
+    // even if the new page table evicts them.
+    std::vector<std::shared_ptr<void>>* previous_decode_pages = nullptr;
 
     int incrSeqLen() const;
 };

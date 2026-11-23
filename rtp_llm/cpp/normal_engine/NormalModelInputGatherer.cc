@@ -501,11 +501,11 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_decode_streams");
     auto ctx = createGatherContext(config_, model_input, stream_groups, GatherContextMode::DECODE);
 
-    const char* device_input_env        = std::getenv("RTP_LLM_DEVICE_INPUT");
-    bool        use_normal_device_state = device_input_env != nullptr && std::string(device_input_env) == "1"
-                                   && stream_groups.totalContextBatchSize() == 0
-                                   && stream_groups.totalDecodeBatchSize() > 0 && !ctx.need_cal_position_id;
-    if (use_normal_device_state) {
+    const bool lookahead               = stream_groups.normalDecodeLookahead();
+    bool       use_normal_device_state = lookahead
+                                   || (deviceInputEnabled() && stream_groups.totalContextBatchSize() == 0
+                                       && stream_groups.totalDecodeBatchSize() > 0 && !ctx.need_cal_position_id);
+    if (use_normal_device_state && !lookahead) {
         for (const auto& stream : stream_groups.decodeStreams()) {
             if (stream->hasMtpCacheSnapshot()) {
                 use_normal_device_state = false;
@@ -530,13 +530,15 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     }
 
     for (const auto& stream : stream_groups.decodeStreams()) {
-        model_input.need_all_logits        = model_input.need_all_logits || stream->calculateLoss();
-        model_input.need_all_hidden_states = model_input.need_all_hidden_states || stream->needReturnHiddenStates();
+        if (!lookahead) {
+            model_input.need_all_logits        = model_input.need_all_logits || stream->calculateLoss();
+            model_input.need_all_hidden_states = model_input.need_all_hidden_states || stream->needReturnHiddenStates();
+        }
         const bool use_mtp_cache_snapshot  = stream->hasMtpCacheSnapshot();
         if (config_.has_engram && !use_mtp_cache_snapshot && !use_normal_device_state) {
             stream->waitPendingAsyncBookkeeping();
         }
-        const auto current_batch_size = use_mtp_cache_snapshot ? 1 : stream->currentBatchSize();
+        const auto current_batch_size = use_mtp_cache_snapshot || lookahead ? 1 : stream->currentBatchSize();
         if (use_mtp_cache_snapshot) {
             RTP_LLM_CHECK_WITH_INFO(stream->maxBatchSize() == 1 && !stream->hasNumBeams(),
                                     "MTP cache snapshots require one non-beam sequence per stream, stream=%ld",
@@ -548,7 +550,9 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
         if (!use_mtp_cache_snapshot) {
             kv_cache = &stream->kvCache();
             RTP_LLM_LOG_DEBUG("decode kv_cache: %s", kv_cache->debugString().c_str());
-            RTP_LLM_LOG_DEBUG("decode stream: %s", stream->debugString().c_str());
+            if (!lookahead) {
+                RTP_LLM_LOG_DEBUG("decode stream: %s", stream->debugString().c_str());
+            }
         }
 
         for (auto i = 0; i < current_batch_size; ++i) {
@@ -565,6 +569,20 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                     std::fill_n(ctx.combo_position_ids + ctx.batch_idx * config_.position_id_len_factor,
                                 config_.position_id_len_factor,
                                 0);
+                }
+            } else if (lookahead) {
+                const auto& state = stream->getNormalAsyncDeviceState();
+                normal_combo_tokens_gpu.push_back(state.last_sample_token_gpu.reshape({1}));
+                ctx.input_lengths[ctx.batch_idx]    = stream->inputLength();
+                ctx.sequence_lengths[ctx.batch_idx] = state.next_real_seq_len - 1;
+                if (model_input.record_lengths) {
+                    model_input.record_lengths->q_tokens[ctx.batch_idx]         = 1;
+                    model_input.record_lengths->kv_tokens_before[ctx.batch_idx] = state.next_real_seq_len - 1;
+                }
+                if (ctx.need_cal_position_id) {
+                    stream->generateNextPositionId(ctx.combo_position_ids
+                                                       + ctx.batch_idx * config_.position_id_len_factor,
+                                                   state.next_real_seq_len);
                 }
             } else if (use_normal_device_state) {
                 const auto&             state = stream->getNormalAsyncDeviceState();
@@ -631,11 +649,13 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
             }
             ctx.batch_idx += 1;
         }
-        addCacheUpdateCopy(ctx,
-                           stream->streamCacheResource().getKVBlockUpdateMapping(),
-                           model_input.kv_cache_group_tags,
-                           /*use_live_lengths=*/true);
-        stream->step();
+        if (!lookahead) {
+            addCacheUpdateCopy(ctx,
+                               stream->streamCacheResource().getKVBlockUpdateMapping(),
+                               model_input.kv_cache_group_tags,
+                               /*use_live_lengths=*/true);
+            stream->step();
+        }
     }
 
     if (use_normal_device_state) {
@@ -643,7 +663,9 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
             model_input.engram_token_windows = torch::cat(normal_engram_windows_gpu, 0);
         }
         model_input.combo_tokens     = torch::cat(normal_combo_tokens_gpu, 0).to(torch::kInt32);
-        model_input.sequence_lengths = torch::cat(normal_sequence_lengths_gpu, 0).to(torch::kInt32);
+        if (!lookahead) {
+            model_input.sequence_lengths = torch::cat(normal_sequence_lengths_gpu, 0).to(torch::kInt32);
+        }
     }
     return absl::OkStatus();
 }
@@ -783,8 +805,9 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
         model_input.mm_features_locs  = model_input.mm_features_locs.slice(0, 0, ctx.mm_feature_index);
         model_input.mm_features_spans = model_input.mm_features_spans.slice(0, 0, ctx.mm_feature_index);
     }
-    model_input.prefix_lengths =
-        deviceInputEnabled() ? publishInt32ToCuda(prefix_lengths_host, host_holder) : prefix_lengths_host;
+    model_input.prefix_lengths = deviceInputEnabled() && !stream_groups.normalDecodeLookahead() ?
+                                     publishInt32ToCuda(prefix_lengths_host, host_holder) :
+                                     prefix_lengths_host;
     if (model_input.custom_output_indexes.defined()) {
         model_input.custom_output_indexes = model_input.custom_output_indexes.narrow(0, 0, custom_output_count);
     }
@@ -950,7 +973,9 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     // in place (device-side clone + per-device c10::Event) and only pays the D2H
     // on its own worker thread, so it reads post-publish CUDA members directly.
     if (deviceInputEnabled()) {
-        publishModelInputCoreTensorsToCuda(model_input, host_holder);
+        if (!stream_groups.normalDecodeLookahead()) {
+            publishModelInputCoreTensorsToCuda(model_input, host_holder);
+        }
         model_input.lm_output_indexes = buildLmOutputIndexesOnCuda(model_input, stream_groups);
     } else {
         model_input.lm_output_indexes = buildLmOutputIndexesOnHost(model_input, stream_groups);

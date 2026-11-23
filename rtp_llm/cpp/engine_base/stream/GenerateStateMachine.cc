@@ -164,7 +164,14 @@ void GenerateStateMachine::handleRunning() {
         // flight.  Once it finishes, complete_token_ids is authoritative and
         // avoids carrying a conservative upper bound into later rounds.
         if (pending) {
-            const int normal_override = stream->getNormalAsyncDeviceState().next_real_seq_len;
+            const auto& normal = stream->getNormalAsyncDeviceState();
+            if (normal.decode_lookahead.value_or(false)) {
+                // moveToNext only skips the join when the next step's pages
+                // are already reserved. Gather from that table while the
+                // worker commits the preceding step's tokens.
+                return;
+            }
+            const int normal_override = normal.next_real_seq_len;
             if (normal_override > 0) {
                 seq_len_override = normal_override;
             } else if (mtp_state.next_seq_len_upper_bound > 0) {

@@ -2410,6 +2410,37 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, DecodeIncrMallocAppliesSparseClean
     EXPECT_EQ(full_pool->freeBlocksNum(), 6u);
 }
 
+TEST_F(HybridTypeCoordinatorCacheManagerTest, DecodeReservationRetainsEvictedPagesUntilReplayCompletes) {
+    auto config = makeTinyHybridConfig();
+    setGroupBlockCounts(config, 7, 7);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    auto batch      = makeBatchResource(1, config, CacheKeysType{}, false);
+    auto linear     = poolForTag(*allocator, "linear");
+    auto full       = poolForTag(*allocator, "full1");
+    auto old_linear = linear->malloc(2).value();
+    auto old_full   = full->malloc(2).value();
+    linear->incRef(old_linear);
+    full->incRef(old_full);
+    batch->mutableBlockIds(0, "linear").assign(old_linear);
+    batch->mutableBlockIds(0, "full1").assign(old_full);
+
+    std::vector<std::shared_ptr<void>> previous_decode_pages;
+    MallocInfo                         info{batch, makeCompleteTokenIds(1, 8, 4)};
+    info.incr_seq_len_override = 9;
+    info.previous_decode_pages = &previous_decode_pages;
+    ASSERT_TRUE(allocator->malloc(info).success);
+    EXPECT_EQ(batch->blocksNum(0, "full1"), 3);
+    EXPECT_EQ(batch->blocksNum(0, "linear"), 3);
+    EXPECT_TRUE(isNullBlockIdx(batch->blocks(0, "linear").front()));
+    EXPECT_EQ(linear->refCount(old_linear.front()), 1u);
+    EXPECT_EQ(full->refCount(old_full.front()), 1u);
+    const auto linear_free_before_release = linear->freeBlocksNum();
+    previous_decode_pages.clear();
+    EXPECT_EQ(linear->freeBlocksNum(), linear_free_before_release + 1);
+    allocator->free(FreeInfo{batch, nullptr});
+}
+
 TEST_F(HybridTypeCoordinatorCacheManagerTest, EstimatePeakNeedBlocks) {
     // Config: [0,1]=linear group (group_id=0), [2,3]=full group (group_id=1). seq_size_per_block=4.
     auto config    = makeTinyHybridConfig();

@@ -124,7 +124,7 @@ class SparseGqaRoutingTest(unittest.TestCase):
                 impl.rope_params = SimpleNamespace(kv_cache_offset=captured)
                 impl.rope_kvcache_impl = SimpleNamespace(
                     prepare_kv_cache_offset=lambda _: refreshed,
-                    prepare=lambda _, forbid_reallocation: SimpleNamespace(
+                    prepare=lambda _, **kwargs: SimpleNamespace(
                         kv_cache_offset=refreshed
                     ),
                 )

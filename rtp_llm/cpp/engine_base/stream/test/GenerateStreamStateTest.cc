@@ -493,6 +493,60 @@ TEST_F(GenerateStreamStateTest, testNormalAsyncPublishedLengthReservesBeforeHost
     stream->decPendingAsyncBookkeepingAndMaybeRelease();
 }
 
+TEST_F(GenerateStreamStateTest, testNormalDecodeLookaheadKeepsReservedPagesUntilCommit) {
+    auto stream = createStream({1, 2});
+    stream->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+    stream->setIsContextStream(false);
+
+    GenerateStream::NormalAsyncDeviceState state;
+    state.next_real_seq_len = 2;
+    state.decode_lookahead  = true;
+    stream->setNormalAsyncDeviceState(state);
+    stream->incPendingAsyncBookkeeping();
+    EXPECT_FALSE(stream->needsAsyncBookkeepingJoinForKvReservation());
+    EXPECT_EQ(stream->moveToNext(), StreamState::RUNNING);
+    EXPECT_EQ(stream->curBlocksNum(), 1u);
+    const bool leased = stream->tryAcquireNormalDecodeLookahead();
+    EXPECT_TRUE(leased);
+    if (leased) {
+        stream->decPendingAsyncBookkeepingAndMaybeRelease();
+    }
+
+    state.next_real_seq_len = 3;
+    stream->setNormalAsyncDeviceState(state);
+    EXPECT_TRUE(stream->needsAsyncBookkeepingJoinForKvReservation());
+    std::vector<std::shared_ptr<void>> previous_decode_pages;
+    stream->reserveNormalDecodeBlocks(previous_decode_pages);
+    const bool still_needs_join = stream->needsAsyncBookkeepingJoinForKvReservation();
+    EXPECT_FALSE(still_needs_join);
+    if (!still_needs_join) {
+        EXPECT_EQ(stream->moveToNext(), StreamState::RUNNING);
+    }
+    EXPECT_EQ(stream->seqLength(), 2u);
+    EXPECT_EQ(stream->curBlocksNum(), 2u);
+    state.next_real_seq_len = 2;
+    state.decode_lookahead  = false;
+    stream->setNormalAsyncDeviceState(state);
+    EXPECT_TRUE(stream->needsAsyncBookkeepingJoinForKvReservation());
+    EXPECT_FALSE(stream->tryAcquireNormalDecodeLookahead());
+    stream->decPendingAsyncBookkeepingAndMaybeRelease();
+}
+
+TEST_F(GenerateStreamStateTest, testNormalDecodeLookaheadAcceptsDefaultSingleSequence) {
+    auto stream            = createStream({1, 2});
+    auto config            = stream->generateConfig();
+    config->max_new_tokens = 4;
+    config->min_new_tokens = 4;
+    for (int sequences : {0, 1}) {
+        config->num_return_sequences = sequences;
+        EXPECT_TRUE(stream->canLookAheadNormalDecode(3));
+        EXPECT_FALSE(stream->canLookAheadNormalDecode(6));
+    }
+    config->num_return_sequences = 2;
+    EXPECT_FALSE(stream->canLookAheadNormalDecode(3));
+}
+
 TEST_F(GenerateStreamStateTest, testIncrementalAsyncAllocationTerminatesBeforeModelAndReleasesOnce) {
     using ::testing::_;
     using ::testing::Return;
