@@ -757,6 +757,13 @@ grpc::Status LocalRpcServer::generateLocalStream(grpc::ServerContext*   context,
 grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        context,
                                                const BatchGenerateInputPB* request,
                                                BatchGenerateOutputsPB*     response) {
+    return generateLocalBatch(context, request, response, nullptr);
+}
+
+grpc::Status LocalRpcServer::generateLocalBatch(grpc::ServerContext*        context,
+                                                const BatchGenerateInputPB* request,
+                                                BatchGenerateOutputsPB*     response,
+                                                PDCancelRegistry*           cancel_registry) {
     grpc::Status rpc_status = grpc::Status::OK;
     auto         rpc_span =
         telemetry::startRpcServerSpan("rtp_llm.batch_generate_call", context, false, "RpcService/BatchGenerateCall");
@@ -824,8 +831,21 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
             // Observation must not replace a business error with a transport error.
         }
     };
-    std::vector<GenerateStreamPtr> streams;
-    BatchStreamCleanupGuard        stream_cleanup_guard(streams);
+    std::vector<GenerateStreamPtr>        streams;
+    std::vector<PDCancelRegistry::Handle> cancel_handles;
+    // Destroy after the stream cleanup guard, including exception/early-return paths.
+    autil::ScopeGuard       cancel_completion([&] {
+        if (!cancel_registry)
+            return;
+        for (size_t i = 0; i < cancel_handles.size(); ++i) {
+            if (!cancel_handles[i])
+                continue;
+            if (i < streams.size() && streams[i])
+                meta_->dequeue(cancel_handles[i]->identity.request_id, streams[i]);
+            cancel_registry->finishLocal(cancel_handles[i]);
+        }
+    });
+    BatchStreamCleanupGuard stream_cleanup_guard(streams);
 
     try {
         RTP_LLM_PROFILE_SCOPE("rpc.batch_generate_call");
@@ -884,13 +904,46 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
             return grpc::Status::OK;
         }
 
-        const auto  enqueue_result    = engine_->enqueueMultiple(inputs);
-        const auto& enqueue_successes = enqueue_result.first;
-        streams                       = enqueue_result.second;
-        if (enqueue_successes.size() != inputs.size() || streams.size() != inputs.size()) {
-            throw std::runtime_error("enqueueMultiple result size mismatch: input=" + std::to_string(inputs.size())
-                                     + " status=" + std::to_string(enqueue_successes.size())
-                                     + " stream=" + std::to_string(streams.size()));
+        // Admit each request before enqueue so an early Cancel is a fence, not
+        // a successful no-op. Rejected/canceled items must not abort their siblings.
+        cancel_handles.resize(batch_size);
+        std::vector<ErrorInfo>                      admission_errors(batch_size, ErrorInfo::OkStatus());
+        std::vector<std::shared_ptr<GenerateInput>> active_inputs;
+        std::vector<size_t>                         active_indices;
+        streams.resize(batch_size);
+        std::vector<bool> enqueue_successes(batch_size, false);
+        for (int i = 0; i < batch_size; ++i) {
+            if (cancel_registry) {
+                const auto timeout = normalizeRpcTimeoutMs(request->inputs(i).generate_config().timeout_ms(),
+                                                           maga_init_params_.pd_sep_config.max_rpc_timeout_ms);
+                admission_errors[i] =
+                    cancel_registry->admit(request->inputs(i), "", "", currentTimeMs() + timeout, cancel_handles[i]);
+            }
+            if (!admission_errors[i].ok()) {
+                streams[i] = engine_->makeStream(inputs[i]);
+                streams[i]->reportError(admission_errors[i].code(), admission_errors[i].ToString());
+                streams[i]->finishWithoutGenerate();
+            } else {
+                active_inputs.push_back(inputs[i]);
+                active_indices.push_back(i);
+            }
+        }
+        if (!active_inputs.empty()) {
+            auto enqueue_result = engine_->enqueueMultiple(active_inputs);
+            if (enqueue_result.first.size() != active_inputs.size()
+                || enqueue_result.second.size() != active_inputs.size()) {
+                BatchStreamCleanupGuard invalid_enqueue_cleanup(enqueue_result.second);
+                throw std::runtime_error("enqueueMultiple result size mismatch");
+            }
+            for (size_t j = 0; j < active_indices.size(); ++j) {
+                const auto i         = active_indices[j];
+                enqueue_successes[i] = enqueue_result.first[j];
+                streams[i]           = enqueue_result.second[j];
+                if (cancel_handles[i] && streams[i]) {
+                    meta_->enqueue(cancel_handles[i]->identity, streams[i]);
+                    cancel_registry->attach(cancel_handles[i], streams[i]);
+                }
+            }
         }
 
         // collectStreamOutput is currently SERIAL: streams[0] must finish before streams[1] is drained.

@@ -1,4 +1,5 @@
 #include <limits>
+#include "autil/Scope.h"
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -535,6 +536,15 @@ public:
         enqueued.set_value(stream);
     }
 
+    std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+    enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs) override {
+        std::vector<GenerateStreamPtr> streams;
+        for (const auto& input : inputs)
+            streams.push_back(makeStream(input));
+        batch_enqueued.set_value(streams);
+        return {std::vector<bool>(streams.size(), true), streams};
+    }
+
     absl::Status stop() override {
         return absl::OkStatus();
     }
@@ -547,7 +557,8 @@ public:
         return {};
     }
 
-    std::promise<GenerateStreamPtr> enqueued;
+    std::promise<GenerateStreamPtr>              enqueued;
+    std::promise<std::vector<GenerateStreamPtr>> batch_enqueued;
 };
 
 class LocalPrefillCancelService: public RpcService::Service {
@@ -666,6 +677,104 @@ TEST(DecodeRpcServerTest, IndependentCancelStopsForwardedFallbackStream) {
     EXPECT_TRUE(stream->finishWithoutGenerate());
     const auto handle = decode->cancel_registry_->find(input.request_id());
     ASSERT_NE(handle, nullptr);
+    EXPECT_TRUE(waitForCancel(
+        [&] { return handle->terminal.load() && !decode->cancel_registry_->needsDownstreamCancel(handle); }));
+}
+
+TEST(DecodeRpcServerTest, UnimplementedBatchFallbackKeepsIndependentCancelLive) {
+    auto prefill                                          = std::make_shared<PrefillRpcServer>();
+    auto prefill_engine                                   = std::make_shared<FallbackPrefillEngine>();
+    prefill->maga_init_params_.pd_sep_config.role_type    = RoleType::PREFILL;
+    prefill->maga_init_params_.parallelism_config.dp_size = 2;
+    prefill->engine_                                      = prefill_engine;
+    prefill->meta_                                        = std::make_shared<RpcServerRuntimeMeta>();
+    prefill->cancel_registry_                             = std::make_shared<PDCancelRegistry>(prefill->meta_);
+    RemoteRpcServiceImpl prefill_service;
+    prefill_service.local_server_   = prefill;
+    prefill_service.prefill_server_ = prefill;
+    grpc::ServerBuilder prefill_builder;
+    int                 prefill_port = 0;
+    prefill_builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &prefill_port);
+    prefill_builder.RegisterService(&prefill_service);
+    auto prefill_rpc = prefill_builder.BuildAndStart();
+    ASSERT_NE(prefill_rpc, nullptr);
+
+    auto decode                                       = std::make_shared<DecodeRpcServer>();
+    decode->maga_init_params_.pd_sep_config.role_type = RoleType::DECODE;
+    decode->engine_                                   = std::make_shared<FallbackPrefillEngine>();
+    decode->meta_                                     = std::make_shared<RpcServerRuntimeMeta>();
+    decode->prefill_server_caller_                    = std::make_shared<PrefillServerCaller>();
+    decode->initCancelRegistry();
+    RemoteRpcServiceImpl decode_service;
+    decode_service.local_server_  = decode;
+    decode_service.decode_server_ = decode;
+    grpc::ServerBuilder decode_builder;
+    int                 decode_port = 0;
+    decode_builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &decode_port);
+    decode_builder.RegisterService(&decode_service);
+    auto decode_rpc = decode_builder.BuildAndStart();
+    ASSERT_NE(decode_rpc, nullptr);
+    auto stub = RpcService::NewStub(
+        grpc::CreateChannel("127.0.0.1:" + std::to_string(decode_port), grpc::InsecureChannelCredentials()));
+    BatchGenerateInputPB batch;
+    for (int64_t id : {301, 302}) {
+        auto* item = batch.add_inputs();
+        item->set_request_id(id);
+        item->add_token_ids(1);
+        auto* config = item->mutable_generate_config();
+        config->set_timeout_ms(10000);
+        config->set_max_new_tokens(2);
+        config->set_num_beams(1);
+        config->set_num_return_sequences(1);
+        config->set_can_use_pd_separation(true);
+        auto* address = config->add_role_addrs();
+        address->set_role(RoleAddrPB::PREFILL);
+        address->set_ip("127.0.0.1");
+        address->set_grpc_port(prefill_port);
+    }
+    auto                enqueued = prefill_engine->batch_enqueued.get_future();
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(10));
+    BatchGenerateOutputsPB response;
+    auto call = std::async(std::launch::async, [&] { return stub->BatchGenerateCall(&context, batch, &response); });
+    // Always release the blocked RPC if an assertion fails.
+    autil::ScopeGuard cancel_call([&] { context.TryCancel(); });
+    ASSERT_EQ(enqueued.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    auto streams = enqueued.get();
+    ASSERT_EQ(streams.size(), 2u);
+    ASSERT_TRUE(waitForCancel([&] { return prefill->cancel_registry_->find(302) != nullptr; }));
+    const auto handle = decode->cancel_registry_->find(301);
+    ASSERT_NE(handle, nullptr);
+    EXPECT_FALSE(handle->local_done.load());
+    EXPECT_FALSE(handle->terminal.load());
+    EXPECT_TRUE(decode->meta_->getEngineScheduleInfo(-1).finished_task_info_list.empty());
+    EXPECT_EQ(streams[0]->generateInput()->group_id, -1);
+
+    grpc::ClientContext cancel_context;
+    cancel_context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(3));
+    CancelRequestPB cancel;
+    cancel.set_request_id(301);  // No route hint: use the live Decode control record.
+    CancelResponsePB cancel_response;
+    ASSERT_TRUE(stub->Cancel(&cancel_context, cancel, &cancel_response).ok());
+    EXPECT_EQ(cancel_response.status(), CANCEL_STATUS_ACCEPTED);
+    ASSERT_TRUE(waitForCancel([&] { return streams[0]->hasError(); }));
+    EXPECT_EQ(streams[0]->statusInfo().code(), ErrorCode::PRIORITY_PREEMPTED);
+    EXPECT_FALSE(streams[1]->hasError());
+    streams[0]->finishWithoutGenerate();
+    EXPECT_EQ(call.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+    // The unaffected sibling finishes normally, not by timeout or client cancellation.
+    streams[1]->generate_status_->status.store(StreamState::RUNNING);
+    streams[1]->step();
+    streams[1]->update(StreamUpdateInfo{.new_tokens     = torch::tensor({{7, 8}}, torch::kInt32),
+                                        .num_new_tokens = 2,
+                                        .cum_log_probs  = torch::tensor({-0.5f})});
+    ASSERT_EQ(call.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    EXPECT_TRUE(call.get().ok());
+    ASSERT_EQ(response.results_size(), 2);
+    EXPECT_EQ(response.results(0).error_info().error_code(), ErrorCodePB::PRIORITY_PREEMPTED);
+    EXPECT_FALSE(response.results(1).has_error_info());
+    EXPECT_TRUE(response.results(1).has_final_output());
+    streams[0]->finishWithoutGenerate();
     EXPECT_TRUE(waitForCancel(
         [&] { return handle->terminal.load() && !decode->cancel_registry_->needsDownstreamCancel(handle); }));
 }

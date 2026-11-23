@@ -361,6 +361,12 @@ void PrefillRpcServer::finishBatchStream(const std::string& key, uint64_t genera
     }
 }
 
+grpc::Status PrefillRpcServer::BatchGenerateCall(grpc::ServerContext*        context,
+                                                 const BatchGenerateInputPB* request,
+                                                 BatchGenerateOutputsPB*     response) {
+    return generateLocalBatch(context, request, response, cancel_registry_.get());
+}
+
 grpc::Status PrefillRpcServer::init(const EngineInitParams&                                maga_init_params,
                                     std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                                     py::object                                             mm_process_engine) {

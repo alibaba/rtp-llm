@@ -118,7 +118,12 @@ public:
     typedef grpc::internal::WriterInterface<GenerateOutputsPB> WriterInterface;
 
 protected:
-    grpc::Status generateLocalStream(grpc::ServerContext*    context,
+    grpc::Status generateLocalBatch(grpc::ServerContext*        context,
+                                    const BatchGenerateInputPB* request,
+                                    BatchGenerateOutputsPB*     response,
+                                    PDCancelRegistry*           cancel_registry);
+
+    grpc::Status generateLocalStream(grpc::ServerContext*   context,
                                      const GenerateInputPB* request,
                                      WriterInterface*       writer,
                                      PDCancelRegistry*      cancel_registry);
