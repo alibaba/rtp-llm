@@ -15,6 +15,7 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import is_qsa_rope_style
 from .qsa_cache_views import _block_table, _typed_2d_pool, _validate_required_blocks
 from .qsa_plans import IncrementalPrefillPlan, TargetVerifyPlan
 from .step_metadata import (
+    cached_indexer_padding,
     cached_prefill_geometry,
     cached_query_geometry,
     cached_step_value,
@@ -602,11 +603,9 @@ def _target_verify_geometry(
         cached_query_geometry(self, prefixes_device, query_len, ratio)
     )
     if self.main_inputs.is_s_padded:
-        active = state_table.ne(0).any(dim=1, keepdim=True) | kv_table.ne(0).any(
-            dim=1, keepdim=True
+        active, visible_lengths, compressed_lengths = cached_indexer_padding(
+            self, visible_lengths, compressed_lengths, state_table, kv_table
         )
-        visible_lengths = torch.where(active, visible_lengths, 0)
-        compressed_lengths = torch.where(active, compressed_lengths, 0)
     max_ctx_len = (max(prefix_values) + query_len) // ratio
     if graph_target:
         required_host = (max_ctx_len + kv_entries_per_block - 1) // kv_entries_per_block

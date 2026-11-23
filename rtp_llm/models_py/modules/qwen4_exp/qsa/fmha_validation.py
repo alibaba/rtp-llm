@@ -372,10 +372,19 @@ def validate_qsa_before_side_write(
     # main-cache transaction owner; no position or history survives a call.
     plan = getattr(qsa_runtime, "_target_verify_plan", None)
     if self.is_target_verify and self.attn_inputs.is_cuda_graph and plan is not None:
+        visible = plan.visible_lengths
+        if self.attn_inputs.is_s_padded:
+            from rtp_llm.models_py.model_desc.qwen4_exp_runtime.step_metadata import (
+                cached_main_padded_lengths,
+            )
+
+            visible = cached_main_padded_lengths(
+                qsa_runtime, visible, self.attn_inputs.kv_cache_kernel_block_id_device
+            )
         self._qsa_target_visible_lengths = (
             self.attn_inputs,
             int(hidden_states.shape[0]),
-            plan.visible_lengths,
+            visible,
         )
 
 

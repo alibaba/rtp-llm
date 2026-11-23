@@ -273,6 +273,41 @@ def prefill_group_rope(
     )
 
 
+def cached_indexer_padding(context, visible, compressed, state_table, kv_table):
+    """Share padding from the same indexer tables within a forward or graph."""
+
+    def materialize():
+        active = state_table.ne(0).any(dim=1, keepdim=True) | kv_table.ne(0).any(
+            dim=1, keepdim=True
+        )
+        return (
+            active,
+            torch.where(active, visible, 0),
+            torch.where(active, compressed, 0),
+        )
+
+    return cached_step_value(
+        context,
+        (
+            "indexer_padding",
+            tensor_signature(visible),
+            tensor_signature(compressed),
+            tensor_signature(state_table),
+            tensor_signature(kv_table),
+        ),
+        materialize,
+    )
+
+
+def cached_main_padded_lengths(context, visible, main_table):
+    """Use the main KV table's padding mask, independent of the side tables."""
+    return cached_step_value(
+        context,
+        ("main_padding", tensor_signature(visible), tensor_signature(main_table)),
+        lambda: torch.where(main_table.ne(0).any(dim=1, keepdim=True), visible, 0),
+    )
+
+
 def cached_text_rope(
     context, positions, rope_config, indexer, *, token_count, dtype, device
 ):

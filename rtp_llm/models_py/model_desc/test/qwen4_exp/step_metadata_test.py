@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import torch
 
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.step_metadata import (
+    cached_indexer_padding,
+    cached_main_padded_lengths,
     cached_prefill_geometry,
     cached_query_geometry,
     cached_step_value,
@@ -125,6 +127,89 @@ class StepMetadataTest(unittest.TestCase):
         context.metadata_cache = {}
         validate().verify()
         self.assertEqual(len(calls), 6)
+
+    def test_padding_separates_distinct_block_tables(self):
+        shared = SimpleNamespace(metadata_cache={})
+        visible = torch.arange(1, 13, dtype=torch.int32).view(3, 4)
+        compressed = visible // 4
+        state = torch.tensor([[0, 2], [0, 0], [0, 0]], dtype=torch.int32)
+        indexer = torch.tensor([[0, 0], [0, 3], [0, 0]], dtype=torch.int32)
+        main = torch.tensor([[0, 0], [0, 2], [0, 6]], dtype=torch.int32)
+        side = cached_indexer_padding(shared, visible, compressed, state, indexer)
+        self.assertIs(
+            side, cached_indexer_padding(shared, visible, compressed, state, indexer)
+        )
+        torch.testing.assert_close(side[0].flatten(), torch.tensor([True, True, False]))
+        torch.testing.assert_close(side[1], visible * side[0])
+        torch.testing.assert_close(side[2], compressed * side[0])
+        actual = cached_main_padded_lengths(shared, side[1], main)
+        torch.testing.assert_close(
+            actual, visible * visible.new_tensor([[0], [1], [0]])
+        )
+        other = cached_indexer_padding(shared, visible, compressed, main, indexer)
+        torch.testing.assert_close(
+            other[0].flatten(), torch.tensor([False, True, True])
+        )
+        self.assertIsNot(side, other)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_graph_replay_updates_indexer_and_main_padding(self):
+        for batch in (2, 4, 8, 16):
+            for query in (1, 2, 3, 4):
+                prefixes = torch.zeros(batch, device="cuda", dtype=torch.int32)
+                state = prefixes.new_zeros((batch, 3))
+                indexer = prefixes.new_zeros((batch, 4))
+                main = prefixes.new_zeros((batch, 5))
+
+                def forward():
+                    context = SimpleNamespace(metadata_cache={})
+                    visible, compressed, _, _ = cached_query_geometry(
+                        context, prefixes, query, 4
+                    )
+                    side = cached_indexer_padding(
+                        context, visible, compressed, state, indexer
+                    )
+                    masked = cached_main_padded_lengths(context, side[1], main)
+                    for _ in range(11):
+                        self.assertIs(
+                            side,
+                            cached_indexer_padding(
+                                context, visible, compressed, state, indexer
+                            ),
+                        )
+                        self.assertIs(
+                            masked, cached_main_padded_lengths(context, side[1], main)
+                        )
+                    return side, masked
+
+                forward()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    side, masked = forward()
+                rows = torch.arange(batch, device="cuda")
+                offsets = torch.arange(1, query + 1, device="cuda", dtype=torch.int32)
+                for replay, length in enumerate((0, 127, 8191, 10239, 32768)):
+                    prefixes.copy_(length + rows)
+                    state.zero_()
+                    indexer.zero_()
+                    main.zero_()
+                    if replay:
+                        state[(rows + replay) % 3 == 0, -1] = 3
+                        indexer[(rows + replay) % 3 == 1, 0] = 5
+                        main[(rows + replay) % 2 == 0, 2] = 7
+                    graph.replay()
+                    active = (state.ne(0).any(1) | indexer.ne(0).any(1))[:, None]
+                    visible = prefixes[:, None] + offsets
+                    torch.testing.assert_close(side[0], active)
+                    torch.testing.assert_close(side[1], torch.where(active, visible, 0))
+                    torch.testing.assert_close(
+                        side[2], torch.where(active, visible // 4, 0)
+                    )
+                    torch.testing.assert_close(
+                        masked,
+                        torch.where(active & main.ne(0).any(1)[:, None], visible, 0),
+                    )
+                graph.reset()
 
     def assert_geometry(self, actual, prefix, query, ratio):
         visible = prefix[:, None] + torch.arange(1, query + 1, device=prefix.device)
