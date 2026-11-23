@@ -360,22 +360,45 @@ int GenerateStream::nextNeedBlockNums(int reserve_step) const {
     return stream_cache_resource_->singleBatchNeedBlocks(seqLength(), reserve_step) * nextBatchSize();
 }
 
-int GenerateStream::estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const {
+int GenerateStream::estimateKVNeedBlocks(int                remaining_tokens,
+                                         int                target_batch_size,
+                                         const std::string& pool_tag) const {
     const int reserve_step   = complete_token_ids_->getReserveStep();
     int       common_seq_len = std::min(complete_token_ids_->commonSeqLength(), seqLength());
     if (target_batch_size > 1) {
         common_seq_len = common_seq_len / seqSizePerBlock() * seqSizePerBlock();
     }
     return stream_cache_resource_->estimatePeakNeedBlocks(
-        seqLength(), common_seq_len, remaining_tokens, reserve_step, target_batch_size);
+        seqLength(), common_seq_len, remaining_tokens, reserve_step, target_batch_size, pool_tag);
 }
 
-int GenerateStream::estimateInitialNeedBlocks() const {
-    return estimateKVNeedBlocks(/*remaining_tokens=*/0, currentBatchSize());
+int GenerateStream::estimateInitialNeedBlocks(const std::string& pool_tag) const {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    return estimateKVNeedBlocks(/*remaining_tokens=*/0, currentBatchSize(), pool_tag);
 }
 
-int GenerateStream::estimatePeakNeedBlocks(int remaining_tokens) const {
-    return estimateKVNeedBlocks(remaining_tokens, maxBatchSize());
+int GenerateStream::estimatePeakNeedBlocks(int remaining_tokens, const std::string& pool_tag) const {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    return estimateKVNeedBlocks(remaining_tokens, maxBatchSize(), pool_tag);
+}
+
+void GenerateStream::drainLinearHistoryForAdmission() {
+    const auto& manager = stream_cache_resource_->resourceContext().cache_manager;
+    if (!manager || !manager->cacheConfig().enable_linear_cache_reclaim) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        if (!stream_cache_resource_->canReclaimLinearHistory(maxBatchSize()) || isContextStream()
+            || stream_cache_resource_->curBlocksNum() == 0) {
+            return;
+        }
+    }
+    // update/specUpdate acquire mutex_ before publishing their committed
+    // watermark. Joining while holding it would deadlock the output worker.
+    waitPendingAsyncBookkeeping();
+    std::lock_guard<std::mutex> lock(*mutex_);
+    stream_cache_resource_->drainLinearHistory();
 }
 
 std::shared_ptr<GenerateInput> GenerateStream::generateInput() const {
@@ -1236,8 +1259,34 @@ bool GenerateStream::needsAsyncBookkeepingJoinForKvReservation() const {
     // leave the next model input with the previous step's shorter block table.
     // MTP publishes its state before claiming the worker, so a nonzero epoch
     // distinguishes its page-table snapshot from normal decode.
+    // With history reclamation, physical growth must follow the host commit:
+    // only then does the retired watermark match the forecast's allocation
+    // boundary. MTP already follows this rule below using its cache snapshot.
     if (state.epoch == 0) {
-        return getNormalAsyncDeviceState().next_real_seq_len <= 0;
+        const auto& manager = stream_cache_resource_->resourceContext().cache_manager;
+        if (!manager || !manager->cacheConfig().enable_linear_cache_reclaim) {
+            return getNormalAsyncDeviceState().next_real_seq_len <= 0;
+        }
+        {
+            std::lock_guard<std::mutex> lock(*mutex_);
+            if (!stream_cache_resource_->canReclaimLinearHistory(maxBatchSize())) {
+                // Reclaim-ineligible streams keep the base KEEP_HISTORY growth
+                // semantics: allocation reads seqLength() exactly like base, so
+                // they must keep the base "join when no published length"
+                // guard. Eligibility only relaxes the join policy for eligible
+                // streams below.
+                return getNormalAsyncDeviceState().next_real_seq_len <= 0;
+            }
+        }
+        const auto& normal_state = getNormalAsyncDeviceState();
+        if (normal_state.epoch == 0 || normal_state.next_real_seq_len <= 0) {
+            return true;
+        }
+        // The scheduler is the sole allocator. Eligible normal streams cannot
+        // fork/remap, and retired NULL slots never need materializing again.
+        return stream_cache_resource_->singleBatchNeedBlocks(normal_state.next_real_seq_len,
+                                                             static_cast<int>(reserve_step_))
+               > 0;
     }
     if (!hasMtpCacheSnapshot(state) || state.next_seq_len_upper_bound <= 0 || stream_cache_resource_ == nullptr) {
         return true;
@@ -1580,6 +1629,9 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info,
                   torch::Tensor(),
                   update_info.update_remote_generate,
                   update_info.force_update_info});
+    // Accepted tokens and both speculative cache swaps are now committed.
+    // The scheduler will reclaim history before its next allocation.
+    stream_cache_resource_->reclaimLinearHistory(nxt_cached_len);
 
     // Freeze TTFT after output update while holding the stream lock; mirrors
     // update(). Later speculative steps re-freeze the same first-token value.
@@ -1670,6 +1722,9 @@ void GenerateStream::updateWithoutLock(const StreamUpdateInfo& update_info,
             return;
         }
     }
+    // The sampled final token has not been executed yet. Publish only the
+    // completed KV prefix, after any batch/cache-layout update succeeds.
+    stream_cache_resource_->reclaimLinearHistory(seqLength() - 1);
 }
 
 // src_batch_indices: [batch_size] int, the element must less than the batch_size of last step.

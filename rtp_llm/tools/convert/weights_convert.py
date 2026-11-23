@@ -360,10 +360,29 @@ class WeightConverter:
             except Exception as e:
                 logging.warning(f"无法读取文件 '{st_file}': {e}")
 
+        # Merge the per-rank preshuffle sidecars written by
+        # dump_weight_as_ft_style: safetensors cannot persist the Python
+        # tensor attribute, so the ft-style replay restores it from this
+        # index entry (see _load_from_ft_style).
+        moe_weights_preshuffled: list = []
+        for sidecar_file in sorted(
+            f for f in os.listdir(output_path) if f.endswith("-preshuffled.json")
+        ):
+            try:
+                with open(
+                    os.path.join(output_path, sidecar_file), encoding="utf-8"
+                ) as sidecar:
+                    moe_weights_preshuffled.extend(
+                        json.load(sidecar).get("moe_weights_preshuffled", [])
+                    )
+            except Exception as e:
+                logging.warning(f"无法读取 preshuffle sidecar '{sidecar_file}': {e}")
+
         index = {
             "metadata": {"total_size": total_size},
             "weight_map": weight_map,
             "is_ft_style_weight": True,
+            "moe_weights_preshuffled": moe_weights_preshuffled,
             "__env__params__": self.env_params,
         }
 

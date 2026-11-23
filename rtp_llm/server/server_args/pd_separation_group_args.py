@@ -1,3 +1,6 @@
+from rtp_llm.server.server_args.util import str2bool
+
+
 def init_pd_separation_group_args(parser, pd_separation_config):
     ##############################################################################################################
     # PD分离的配置
@@ -38,4 +41,13 @@ def init_pd_separation_group_args(parser, pd_separation_config):
         help="RPC 调用最大超时（毫秒），用作 per-request 未传 timeout 时的默认值；"
         "<=0 表示不设置默认生成期限；PD 交接阶段仍有独立的资源清理期限；"
         "per-request generate_config.timeout_ms 优先级更高",
+    )
+
+    pd_separation_group.add_argument(
+        "--decode_linear_tail_only",
+        env_name="DECODE_LINEAR_TAIL_ONLY",
+        bind_to=(pd_separation_config, "decode_linear_tail_only"),
+        type=str2bool,
+        default=False,
+        help="PD decode handoff keeps only active linear states while retaining full-attention prefix reuse",
     )

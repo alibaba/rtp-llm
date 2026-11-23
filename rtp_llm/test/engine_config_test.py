@@ -144,8 +144,9 @@ class EngineConfigTest(TestCase):
         config.max_rpc_timeout_ms = 67890
         config.prefill_retry_times = 3
         config.prefill_retry_timeout_ms = 75
+        config.decode_linear_tail_only = True
         state = config.__getstate__()
-        self.assertEqual(len(state), 12)
+        self.assertEqual(len(state), 13)
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.__getstate__(), state)
         self.assertEqual(restored.role_type, RoleType.DECODE)
@@ -153,8 +154,13 @@ class EngineConfigTest(TestCase):
         self.assertEqual(restored.prefill_retry_times, 3)
         self.assertEqual(restored.prefill_retry_timeout_ms, 75)
         legacy = PDSepConfig.__new__(PDSepConfig)
-        legacy.__setstate__(state[:9] + (600000, 1, 30, 0) + state[9:] + (True, 2000, 0))
+        legacy_state = state[:9] + (600000, 1, 30, 0) + state[9:12] + (True, 2000, 0)
+        legacy.__setstate__(legacy_state + (True,))
         self.assertEqual(legacy.__getstate__(), state)
+        for previous_state in (state[:12], legacy_state):
+            previous = PDSepConfig.__new__(PDSepConfig)
+            previous.__setstate__(previous_state)
+            self.assertEqual(previous.__getstate__(), state[:12] + (False,))
 
     def test_cache_store_config_roundtrip_preserves_active_fields(self):
         config = CacheStoreConfig()

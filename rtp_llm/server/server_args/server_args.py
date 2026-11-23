@@ -31,6 +31,9 @@ from rtp_llm.server.server_args.grpc_group_args import (
 )
 from rtp_llm.server.server_args.hw_kernel_group_args import init_hw_kernel_group_args
 from rtp_llm.server.server_args.jit_group_args import init_jit_group_args
+from rtp_llm.server.server_args.kernel_tuning_group_args import (
+    init_kernel_tuning_group_args,
+)
 from rtp_llm.server.server_args.kv_cache_group_args import init_kv_cache_group_args
 from rtp_llm.server.server_args.load_group_args import init_load_group_args
 from rtp_llm.server.server_args.lora_group_args import init_lora_group_args
@@ -470,6 +473,7 @@ def init_all_group_args(
     )
     init_hw_kernel_group_args(parser, py_env_configs.py_hw_kernel_config)
     init_kv_cache_group_args(parser, py_env_configs.kv_cache_config)
+    init_kernel_tuning_group_args(parser, py_env_configs.kernel_tuning_config)
     init_load_group_args(parser, py_env_configs.load_config, py_env_configs.model_args)
     init_lora_group_args(parser, py_env_configs.lora_config)
     init_master_group_args(parser, py_env_configs.master_config)

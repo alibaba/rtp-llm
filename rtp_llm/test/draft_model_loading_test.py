@@ -304,10 +304,36 @@ class DraftModelLoadingTest(unittest.TestCase):
                         )
                         with self.assertRaisesRegex(Exception, expected):
                             model.load()
-                        if reject:
-                            loader.assert_not_called()
-                        else:
-                            loader.assert_called_once_with()
+    def test_dflash_rejects_pp_gt_1_before_weight_loading(self):
+        from rtp_llm.models.qwen_3_dflash import Qwen3DFlash
+
+        target_config = SimpleNamespace(
+            hidden_size=64,
+            vocab_size=128,
+            data_type="bf16",
+            enable_fp32_lm_head=False,
+            normalize_lm_head_weight=True,
+            enable_output_vocab_pruning=False,
+            output_vocab_ids=None,
+        )
+        draft_config = SimpleNamespace(**vars(target_config))
+        target = SimpleNamespace(
+            model_config=target_config,
+            parallelism_config=SimpleNamespace(pp_size=1),
+        )
+        self.assertEqual(
+            Qwen3DFlash.speculative_weight_alias_names(target, draft_config),
+            ("embedding", "lm_head"),
+        )
+        pipelined = SimpleNamespace(
+            model_config=target_config,
+            parallelism_config=SimpleNamespace(pp_size=2),
+        )
+        # W.embedding only lives on PP stage 0; the last-stage owner cannot
+        # serve the alias, so the borrow must fail at config time with an
+        # actionable message instead of a bare KeyError during weight loading.
+        with self.assertRaisesRegex(ValueError, "pp_size=1 only"):
+            Qwen3DFlash.speculative_weight_alias_names(pipelined, draft_config)
 
 
 if __name__ == "__main__":

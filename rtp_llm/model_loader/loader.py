@@ -1,4 +1,5 @@
 import gc
+import json
 import logging
 import os
 import time
@@ -8,12 +9,15 @@ from typing import Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple
 import safetensors
 import torch
 import torch.nn.functional as F
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import Fp8PerChannelCompressedQuantConfig
 from rtp_llm.lora.lora_weights import LoRAWeights
 from rtp_llm.model_loader.ffn_weight import iter_stacked_moe_weights
 from rtp_llm.model_loader.load_config import LoadConfig, LoadMethod
+from rtp_llm.model_loader.load_quant_w8a8_int8_weight import (
+    is_load_time_w8a8,
+    validate_w8a8_source,
+)
 from rtp_llm.model_loader.model_weight_info import (
     ModelDeployWeightInfo,
     ModelWeightInfo,
@@ -52,6 +56,25 @@ class ModelLoader:
         self.model_config = model_config
         self._task_type = model_config.task_type
         self._load_method = load_method
+        # Some callers construct partial configs (and unit-test loaders bypass
+        # __init__ entirely); a missing quant_config simply disables the
+        # load-time W8A8 path.
+        self._load_time_w8a8 = is_load_time_w8a8(getattr(model_config, "quant_config", None))
+        if self._load_time_w8a8:
+            if load_method not in (LoadMethod.AUTO, LoadMethod.SCRATCH):
+                raise ValueError(
+                    "load-time W8A8 supports LOAD_METHOD=scratch or auto only"
+                )
+            if getattr(model_config, "lora_infos", None):
+                raise ValueError("load-time W8A8 does not support LoRA")
+            targets = validate_w8a8_source(database)
+            self._load_method = LoadMethod.SCRATCH
+            force_cpu_load_weights = True
+            logging.info(
+                "W8A8 quant_source=load_time targets=%d chunk_rows=%d device=cpu load_method=scratch",
+                len(targets),
+                model_config.quant_config.load_chunk_rows,
+            )
         self._weights_info = weights_info
         self._misc_weights_info: Optional[CustomAtomicWeight] = misc_weights_info
         if self._misc_weights_info is None:
@@ -82,6 +105,14 @@ class ModelLoader:
             force_cpu_load_weights=force_cpu_load_weights,
             moe_pure_tp_preshard=moe_pure_tp_preshard,
         )
+        if self._load_time_w8a8 and self._load_config.merge_lora:
+            raise ValueError("load-time W8A8 does not support merging LoRA")
+        if self._load_time_w8a8 and self._load_config.tp_size > 1:
+            logging.warning(
+                "load-time W8A8 TP=%d is enabled but has not been validated on multiple devices; "
+                "channel scales are computed before K-dimension sharding",
+                self._load_config.tp_size,
+            )
 
     def get_load_config(self) -> LoadConfig:
         return self._load_config
@@ -181,6 +212,10 @@ class ModelLoader:
         part_idx = 0
         current_size = 0
         current_dict = OrderedDict()
+        # safetensors cannot persist Python tensor attributes, so the AITER
+        # preshuffle marker is recorded here and restored by
+        # _load_from_ft_style from the merged index entry.
+        preshuffled_keys: list[str] = []
 
         def maybe_save():
             nonlocal current_size, part_idx, current_dict
@@ -218,6 +253,8 @@ class ModelLoader:
                 )
             tensor_size = tensor.numel() * tensor.element_size()
             current_dict[tensor_name] = tensor.cpu().contiguous()
+            if getattr(tensor, "is_shuffled", False):
+                preshuffled_keys.append(tensor_name)
             current_size += tensor_size
             maybe_save()
             self.force_clean_cuda_memory()
@@ -230,6 +267,17 @@ class ModelLoader:
                 f"Saved final partition {part_idx} ({current_size/1024**3:.2f}GB)"
             )
             del current_dict
+
+        # Per-rank sidecar; _generate_safetensor_meta_info merges every
+        # sidecar into the shared index as moe_weights_preshuffled so the
+        # ft-style replay path can restore the AITER preshuffle markers.
+        sidecar_path = f"{filename_prefix}preshuffled.json"
+        with open(sidecar_path, "w", encoding="utf-8") as sidecar:
+            json.dump({"moe_weights_preshuffled": preshuffled_keys}, sidecar)
+        logging.info(
+            f"Recorded {len(preshuffled_keys)} preshuffled MoE tensors in {sidecar_path}"
+        )
+        return preshuffled_keys
 
     @timer_wrapper(description="load_from_ft_style")
     def _load_from_ft_style(self, device: str):
@@ -269,7 +317,11 @@ class ModelLoader:
             source_device,
             direct_io=direct_io and source_device == device,
         )
+        # safetensors cannot persist the Python tensor attribute, so the AITER
+        # preshuffle markers recorded at dump time are restored here.
+        preshuffled_keys = self._load_config.database.preshuffled_keys
         for key, tensor in all_tensors.items():
+            is_preshuffled = key in preshuffled_keys
             if key.startswith(layer_weight_prefix):
                 # 解析键名，例如 "layers.0.weight"
                 parts = key[len(layer_weight_prefix) :].split(".")
@@ -277,11 +329,14 @@ class ModelLoader:
                 name = ".".join(parts[1:])
                 # 将张量移动到设备，并设置到对应的层
                 check_with_info(len(tensor) == 1, f"{name} have {len(tensor)} tensor)")
-                weights[layer_id][name] = tensor[0].to(
+                loaded = tensor[0].to(
                     self._resident_weight_device(
                         resident_devices, layer_id, name, device
                     )
                 )
+                if is_preshuffled:
+                    loaded.is_shuffled = True
+                weights[layer_id][name] = loaded
             elif key.startswith(global_weight_prefix):
                 name = key[len(global_weight_prefix) :]
                 if (
@@ -293,6 +348,8 @@ class ModelLoader:
                 value = tensor[0].to(
                     self._resident_weight_device(resident_devices, None, name, device)
                 )
+                if is_preshuffled:
+                    value.is_shuffled = True
                 global_weights[name] = value
         model_weights.weights = weights
         model_weights.global_weights = global_weights
@@ -588,6 +645,7 @@ class ModelLoader:
                 results = self._load_layer_weights(id, device)
                 for name, tensor in results.items():
                     yield (id, name, tensor)
+                del results
 
         for weight in self._model_weights_info.weights:
             if self._maybe_skip_weight(weight):
@@ -793,6 +851,7 @@ class ModelLoader:
         return device
 
     def _load_from_scratch(self, device: str):
+        started = time.perf_counter()
         weights = self._create_model_weights(device)
         convert_device = self._choose_weight_convert_device(
             device
@@ -802,15 +861,32 @@ class ModelLoader:
 
         for layer_id, name, tensor in self.prepare_weights(convert_device):
             if convert_device != device:
+                # .to(device) returns a new tensor object and silently drops
+                # python tensor attributes (e.g. AITER's is_shuffled marker
+                # on preshuffled MoE kernels, which the deterministic FP8 MoE
+                # executor dispatches on); carry the marker across the move.
+                was_shuffled = getattr(tensor, "is_shuffled", None)
                 tensor = tensor.to(
                     self._resident_weight_device(
                         resident_devices, layer_id, name, device
                     )
                 )
+                if (
+                    was_shuffled is not None
+                    and getattr(tensor, "is_shuffled", None) is None
+                ):
+                    tensor.is_shuffled = was_shuffled
             if layer_id is not None:
                 weights.set_layer_weight(layer_id, name, tensor)
             else:
                 weights.set_global_weight(name, tensor)
+        if getattr(self, "_load_time_w8a8", False):
+            logging.info(
+                "w8a8_load_quant_complete seconds=%.3f tp=%d rank=%d",
+                time.perf_counter() - started,
+                self._load_config.tp_size,
+                self._load_config.tp_rank,
+            )
         return weights
 
     def _load_layer_weights(self, layer_id: int, device: str):

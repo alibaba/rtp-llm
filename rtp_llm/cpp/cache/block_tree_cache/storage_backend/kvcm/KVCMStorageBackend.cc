@@ -537,6 +537,19 @@ public:
         }
     }
 
+    bool requestsOnlyFullGroups(const StorageRequest& request) const {
+        bool has_full_group = false;
+        for (const auto& handles : request.handles) {
+            for (const auto& handle : handles) {
+                if (cache_config_.group(handle.tag).policy.group_type != CacheGroupType::FULL) {
+                    return false;
+                }
+                has_full_group = true;
+            }
+        }
+        return has_full_group;
+    }
+
     StorageMatchResult match(const StorageRequest& request) {
         RTP_LLM_CHECK_WITH_INFO(parallelism_config_.tp_rank == 0,
                                 "KVCM metadata match must run on tp rank 0, got %ld",
@@ -595,7 +608,8 @@ public:
             return {request.local_matched_blocks_num + meta->locations.size(), std::move(meta)};
         }
         kvcm::LocationsView locations_view;
-        if (!group_policy_->filterNeedLoadLocations(locations, locations_view, /*block_mask=*/0)) {
+        if (!group_policy_->filterNeedLoadLocations(
+                locations, locations_view, /*block_mask=*/0, requestsOnlyFullGroups(request))) {
             throw std::runtime_error("KVCM returned an invalid location shape");
         }
         if (locations_view.size() > keys.size() - request.local_matched_blocks_num) {
@@ -655,6 +669,7 @@ public:
         const auto                             meta = std::dynamic_pointer_cast<KVCMMatchMeta>(match_meta);
         RTP_LLM_CHECK_WITH_INFO(meta != nullptr, "KVCM read received invalid match metadata");
         kvcm::LocationsView locations_view;
+        const bool only_full_groups = requestsOnlyFullGroups(request);
         if (meta->filtered) {
             locations_view.resize(meta->locations.size());
             for (size_t i = 0; i < meta->locations.size(); ++i) {
@@ -663,11 +678,25 @@ public:
                 }
             }
         } else {
-            RTP_LLM_CHECK_WITH_INFO(
-                group_policy_->filterNeedLoadLocations(meta->locations, locations_view, /*block_mask=*/0),
-                "KVCM read location filtering failed");
+            RTP_LLM_CHECK_WITH_INFO(group_policy_->filterNeedLoadLocations(meta->locations,
+                                                                          locations_view,
+                                                                          /*block_mask=*/0,
+                                                                          only_full_groups),
+                                   "KVCM read location filtering failed");
         }
         const size_t remote_blocks = request.handles.size() - request.local_matched_blocks_num;
+        if (only_full_groups && locations_view.size() > remote_blocks) {
+            // Full-group-only filtering counts one view row per FULL-group
+            // location, so the re-derived view can legitimately report more
+            // rows than this request reserved handles for (match() counts the
+            // same view the same way, while the allocator caps the handle
+            // range at the final reusable full block). The view is
+            // order-preserving and each row depends only on the rows before
+            // it, so reading the first remote_blocks rows covers exactly the
+            // keys with reserved destination handles; the excess tail rows
+            // belong to keys this request never asked to transfer.
+            locations_view.resize(remote_blocks);
+        }
         RTP_LLM_CHECK_WITH_INFO(locations_view.size() == remote_blocks,
                                 "KVCM read shape mismatch: locations=%zu remote_blocks=%zu",
                                 locations_view.size(),

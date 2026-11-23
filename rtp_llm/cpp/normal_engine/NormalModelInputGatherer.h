@@ -44,6 +44,10 @@ class NormalModelInputGatherer {
 public:
     explicit NormalModelInputGatherer(const NormalModelInputGathererConfig& config);
 
+    // All-or-none batch plan. Empty means the caller must join bookkeeping
+    // before constructing StreamGroups or gathering from host stream state.
+    StreamGroups::NormalDeviceStates prepareDeviceStateInputs(const std::list<GenerateStreamPtr>& streams) const;
+
     absl::StatusOr<GptModelInputs>
     gather(const StreamGroups& stream_groups, TensorHolder& host_holder, bool record_lengths = false) const;
 

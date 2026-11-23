@@ -573,6 +573,8 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
             input->request_deadline_is_handoff_only = configured_timeout == 0;
             input->generate_config->timeout_ms      = configured_timeout;
             auto stream = engine_->makeStream(input);
+            stream->streamCacheResource().setPDDecodeLinearTailOnly(
+                maga_init_params_.pd_sep_config.decode_linear_tail_only);
             stream->setPrefillTpSize(peer->tp_size);
             stream->setPrefillCpSize(peer->cp_size);
             stream->setPrefillPipelineLayout(peer->pipeline_layout);
@@ -989,6 +991,8 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
         input->request_deadline_is_handoff_only = configured_timeout_ms == 0;
         input->generate_config->timeout_ms      = configured_timeout_ms;
         auto stream = engine_->makeStream(input);
+        stream->streamCacheResource().setPDDecodeLinearTailOnly(
+            maga_init_params_.pd_sep_config.decode_linear_tail_only);
         // Until enqueue succeeds, no scheduler owns this stream's terminal transition.
         struct UnenqueuedStreamGuard {
             GenerateStreamPtr stream;

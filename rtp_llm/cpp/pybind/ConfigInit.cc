@@ -517,6 +517,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("reuse_cache_tail_blocks", &KVCacheConfig::reuse_cache_tail_blocks)
         .def_readwrite("linear_pool_blocks", &KVCacheConfig::linear_pool_blocks)
         .def_readwrite("swa_pool_blocks", &KVCacheConfig::swa_pool_blocks)
+        .def_readwrite("enable_linear_cache_reclaim", &KVCacheConfig::enable_linear_cache_reclaim)
+        .def_readwrite("kv_cache_pool_block_weights", &KVCacheConfig::kv_cache_pool_block_weights)
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
         .def_readwrite("ssm_state_dtype", &KVCacheConfig::ssm_state_dtype)
         .def_readwrite("kv_cache_mem_mb", &KVCacheConfig::kv_cache_mem_mb)
@@ -585,7 +587,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      23,
+                                      25,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -662,9 +664,69 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.disk_cache_evict_timeout_ms,
                                       self.disk_cache_evict_max_pending_bytes,
                                       self.block_tree_task_pool_size,
-                                      self.block_tree_frozen_force_release_timeout_ms);
+                                      self.block_tree_frozen_force_release_timeout_ms,
+                                      // v24 appends the linear history reclaim flag and v25
+                                      // the per-pool block weights at the tail so indices 0-78
+                                      // stay identical to main's v23.
+                                      self.enable_linear_cache_reclaim,
+                                      self.kv_cache_pool_block_weights);
             },
-            [](const py::tuple& t) {
+            [](py::tuple t) {
+                // Pickle version ladder after merging main #1643 (dsv41 btc):
+                // v9  = ours enable_linear_cache_reclaim (size 71);
+                // v10 = ours reclaim + pool weights (size 72) or reclaim +
+                //       main's pool budgets (size 73);
+                // v11 = ours reclaim + weights + main's pool budgets (size 74);
+                // v24 = main's v23 (79 fields) + enable_linear_cache_reclaim appended
+                //       at the tail (size 80), keeping main's indices untouched;
+                // v25 = v24 + kv_cache_pool_block_weights appended at the tail
+                //       (size 81).
+                // Each step strips its tail fields and steps the version down so
+                // both families' older states keep decoding through main's ladder.
+                const py::tuple pool_weights_v25_state = t;
+                const bool      has_v25_pool_weights_field =
+                    t.size() == 81 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 25;
+                if (has_v25_pool_weights_field) {
+                    // Drop the tail per-pool weights; indices 0-79 become v24.
+                    t    = t[py::slice(0, 80, 1)].cast<py::tuple>();
+                    t[1] = py::int_(24);
+                }
+                const py::tuple reclaim_v24_state = t;
+                const bool      has_v24_reclaim_field =
+                    t.size() == 80 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 24;
+                if (has_v24_reclaim_field) {
+                    // Drop the tail reclaim flag; indices 0-78 become main's v23.
+                    t    = t[py::slice(0, 79, 1)].cast<py::tuple>();
+                    t[1] = py::int_(23);
+                }
+                const py::tuple merged_pool_state = t;
+                const bool      has_merged_pool_fields =
+                    t.size() == 74 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 11;
+                if (has_merged_pool_fields) {
+                    t    = t[py::slice(0, 72, 1)].cast<py::tuple>();
+                    t[1] = py::int_(10);
+                }
+                const py::tuple pool_weights_state = t;
+                const bool      has_pool_weights_field =
+                    t.size() == 72 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 10;
+                if (has_pool_weights_field) {
+                    t    = t[py::slice(0, 71, 1)].cast<py::tuple>();
+                    t[1] = py::int_(9);
+                }
+                const py::tuple reclaim_pool_state = t;
+                const bool      has_reclaim_pool_fields =
+                    t.size() == 73 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 10;
+                if (has_reclaim_pool_fields) {
+                    t    = t[py::slice(0, 71, 1)].cast<py::tuple>();
+                    t[1] = py::int_(9);
+                }
+                const py::tuple reclaim_state = t;
+                const bool      has_reclaim_field =
+                    t.size() == 71 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 9;
+                if (has_reclaim_field) {
+                    t    = t[py::slice(0, 70, 1)].cast<py::tuple>();
+                    t[1] = py::int_(8);
+                }
                 constexpr size_t kLegacyFieldCount               = 55;
                 constexpr size_t kQueueConfigFieldCount          = 64;
                 constexpr size_t kWriteSyncFieldCount            = 56;
@@ -821,6 +883,49 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
                 if (version >= 8) {
                     c.enable_crc = field(69).cast<bool>();
+                }
+                if (has_reclaim_field) {
+                    c.enable_linear_cache_reclaim = reclaim_state[70].cast<bool>();
+                }
+                if (has_v24_reclaim_field) {
+                    // v24 appended the reclaim flag at index 79 after main's v23 fields.
+                    c.enable_linear_cache_reclaim = reclaim_v24_state[79].cast<bool>();
+                }
+                if (has_v25_pool_weights_field) {
+                    // v25 appended the per-pool weights at index 80 after v24.
+                    c.kv_cache_pool_block_weights = pool_weights_v25_state[80].cast<std::string>();
+                }
+                if (has_pool_weights_field) {
+                    c.kv_cache_pool_block_weights = pool_weights_state[71].cast<std::string>();
+                }
+                if (has_merged_pool_fields) {
+                    // Merged v11 state: our reclaim fields at 70/71, main's
+                    // per-pool budgets at 72/73; reuse_cache_tail_blocks keeps
+                    // its shared mid-tuple slot (index 10).
+                    c.reuse_cache_tail_blocks     = merged_pool_state[10].cast<int>();
+                    c.enable_linear_cache_reclaim = merged_pool_state[70].cast<bool>();
+                    c.kv_cache_pool_block_weights = merged_pool_state[71].cast<std::string>();
+                    c.linear_pool_blocks          = merged_pool_state[72].cast<uint32_t>();
+                    c.swa_pool_blocks             = merged_pool_state[73].cast<uint32_t>();
+                    if (c.reuse_cache_tail_blocks <= 0 || c.linear_pool_blocks == 1 || c.swa_pool_blocks == 1
+                        || c.linear_pool_blocks > static_cast<uint32_t>(std::numeric_limits<int>::max())
+                        || c.swa_pool_blocks > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
+                        throw std::runtime_error("invalid KVCacheConfig tail or pool blocks");
+                    }
+                }
+                if (has_reclaim_pool_fields) {
+                    // Merged v10 state: our reclaim at 70, main's per-pool
+                    // budgets at 71/72; reuse_cache_tail_blocks keeps its
+                    // shared mid-tuple slot (index 10).
+                    c.reuse_cache_tail_blocks     = reclaim_pool_state[10].cast<int>();
+                    c.enable_linear_cache_reclaim = reclaim_pool_state[70].cast<bool>();
+                    c.linear_pool_blocks          = reclaim_pool_state[71].cast<uint32_t>();
+                    c.swa_pool_blocks             = reclaim_pool_state[72].cast<uint32_t>();
+                    if (c.reuse_cache_tail_blocks <= 0 || c.linear_pool_blocks == 1 || c.swa_pool_blocks == 1
+                        || c.linear_pool_blocks > static_cast<uint32_t>(std::numeric_limits<int>::max())
+                        || c.swa_pool_blocks > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
+                        throw std::runtime_error("invalid KVCacheConfig tail or pool blocks");
+                    }
                 }
                 return c;
             }));
@@ -1095,7 +1200,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("EAGLE3", SP_TYPE_EAGLE3)
         .value("EAGLE", SP_TYPE_EAGLE)
         .value("DETERMINISTIC", SP_TYPE_DETERMINISTIC)
-        .value("DSPARK", SP_TYPE_DSPARK);
+        .value("DSPARK", SP_TYPE_DSPARK)
+        .value("DFLASH", SP_TYPE_DFLASH);
 
     // Register SpeculativeExecutionConfig
     py::class_<SpeculativeExecutionConfig>(m, "SpeculativeExecutionConfig")
@@ -1483,6 +1589,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("pdfusion_scheduler_mode", &FIFOSchedulerConfig::pdfusion_scheduler_mode)
         .def_readwrite("decode_prefill_ratio", &FIFOSchedulerConfig::decode_prefill_ratio)
         .def_readwrite("cp_force_single_prefill", &FIFOSchedulerConfig::cp_force_single_prefill)
+        .def_readwrite("force_single_prefill", &FIFOSchedulerConfig::force_single_prefill)
         .def_readwrite("max_inited_kv_cache_streams", &FIFOSchedulerConfig::max_inited_kv_cache_streams)
         .def_readwrite("max_batch_tokens_without_cache", &FIFOSchedulerConfig::max_batch_tokens_without_cache)
         .def_readwrite("prefill_chunk_size", &FIFOSchedulerConfig::prefill_chunk_size)
@@ -1496,10 +1603,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.cp_force_single_prefill,
                                       self.max_inited_kv_cache_streams,
                                       self.max_batch_tokens_without_cache,
-                                      self.prefill_chunk_size);
+                                      self.prefill_chunk_size,
+                                      self.force_single_prefill);
             },
             [](py::tuple t) {
-                if (t.size() != 2 && t.size() != 4 && t.size() != 6 && t.size() != 7 && t.size() != 8)
+                // Tuple ladder after merging main's chunked prefill (#1460):
+                // size 8 = main's prefill_chunk_size (index 7); size 9 appends
+                // force_single_prefill (index 8). Older mainline states keep
+                // decoding unchanged.
+                if (t.size() != 2 && t.size() != 4 && t.size() != 6 && t.size() != 7 && t.size() != 8 && t.size() != 9)
                     throw std::runtime_error("Invalid state!");
                 FIFOSchedulerConfig c;
                 try {
@@ -1518,6 +1630,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     }
                     if (t.size() >= 8) {
                         c.prefill_chunk_size = t[7].cast<int64_t>();
+                    }
+                    if (t.size() >= 9) {
+                        c.force_single_prefill = t[8].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FIFOSchedulerConfig unpickle error: ") + e.what());
@@ -1712,14 +1827,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
 
     // LinearAttentionConfig
     pybind11::class_<LinearAttentionConfig>(m, "LinearAttentionConfig")
-        .def(pybind11::init<int, int, int, int, int, DataType, DataType>(),
-             pybind11::arg("linear_conv_kernel_dim") = 0,
-             pybind11::arg("linear_key_head_dim")    = 0,
-             pybind11::arg("linear_num_key_heads")   = 0,
-             pybind11::arg("linear_num_value_heads") = 0,
-             pybind11::arg("linear_value_head_dim")  = 0,
-             pybind11::arg("ssm_state_dtype")        = DataType::TYPE_BF16,
-             pybind11::arg("conv_state_dtype")       = DataType::TYPE_BF16)
+        .def(pybind11::init<int, int, int, int, int, DataType, DataType, bool>(),
+             pybind11::arg("linear_conv_kernel_dim")         = 0,
+             pybind11::arg("linear_key_head_dim")            = 0,
+             pybind11::arg("linear_num_key_heads")           = 0,
+             pybind11::arg("linear_num_value_heads")         = 0,
+             pybind11::arg("linear_value_head_dim")          = 0,
+             pybind11::arg("ssm_state_dtype")                = DataType::TYPE_BF16,
+             pybind11::arg("conv_state_dtype")               = DataType::TYPE_BF16,
+             pybind11::arg("supports_history_state_reclaim") = false)
         .def("to_string", &LinearAttentionConfig::to_string)
         .def_readwrite("linear_conv_kernel_dim", &LinearAttentionConfig::linear_conv_kernel_dim)
         .def_readwrite("linear_key_head_dim", &LinearAttentionConfig::linear_key_head_dim)
@@ -1727,7 +1843,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("linear_num_value_heads", &LinearAttentionConfig::linear_num_value_heads)
         .def_readwrite("linear_value_head_dim", &LinearAttentionConfig::linear_value_head_dim)
         .def_readwrite("ssm_state_dtype", &LinearAttentionConfig::ssm_state_dtype)
-        .def_readwrite("conv_state_dtype", &LinearAttentionConfig::conv_state_dtype);
+        .def_readwrite("conv_state_dtype", &LinearAttentionConfig::conv_state_dtype)
+        .def_readwrite("supports_history_state_reclaim", &LinearAttentionConfig::supports_history_state_reclaim);
 
     // Register KvCacheDataType enum
     py::enum_<KvCacheDataType>(m, "KvCacheDataType")
@@ -2234,6 +2351,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("load_cache_timeout_ms", &PDSepConfig::load_cache_timeout_ms)
         .def_readwrite("max_rpc_timeout_ms", &PDSepConfig::max_rpc_timeout_ms)
         .def_readwrite("worker_port_offset", &PDSepConfig::worker_port_offset)
+        .def_readwrite("decode_linear_tail_only", &PDSepConfig::decode_linear_tail_only)
         .def("to_string", &PDSepConfig::to_string)
         .def(py::pickle(
             [](const PDSepConfig& self) {
@@ -2248,12 +2366,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.prefill_retry_timeout_ms,
                                       self.load_cache_timeout_ms,
                                       self.max_rpc_timeout_ms,
-                                      self.worker_port_offset);
+                                      self.worker_port_offset,
+                                      self.decode_linear_tail_only);
             },
             [](py::tuple t) {
-                if (t.size() == 12 || t.size() == 19) {
+                if (t.size() == 12 || t.size() == 13 || t.size() == 19 || t.size() == 20) {
                     // The 19-field layout placed four retired fields before these timeouts.
-                    const auto timeout_index = t.size() == 19 ? 13 : 9;
+                    const auto  timeout_index = t.size() >= 19 ? 13 : 9;
                     PDSepConfig c;
                     try {
                         c.role_type                           = t[0].cast<RoleType>();
@@ -2268,12 +2387,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.load_cache_timeout_ms               = t[timeout_index].cast<int64_t>();
                         c.max_rpc_timeout_ms                  = t[timeout_index + 1].cast<int64_t>();
                         c.worker_port_offset                  = t[timeout_index + 2].cast<int64_t>();
+                        if (t.size() == 13 || t.size() == 20)
+                            c.decode_linear_tail_only = t[t.size() == 13 ? 12 : 19].cast<bool>();
                     } catch (const std::exception& e) {
                         throw std::runtime_error(std::string("PDSepConfig unpickle error: ") + e.what());
                     }
                     return c;
                 }
-                throw std::runtime_error("Invalid PDSepConfig state: expected 12 or 19 fields, got "
+                throw std::runtime_error("Invalid PDSepConfig state: expected 12, 13, 19 or 20 fields, got "
                                          + std::to_string(t.size()));
             }));
 
