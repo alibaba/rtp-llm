@@ -106,6 +106,8 @@ public class VitCacheDirectory {
                             worker,
                             snapshot == null ? null : snapshot.instance(),
                             snapshot == null ? Set.of() : snapshot.keys(),
+                            snapshot == null ? Set.of() : snapshot.gpuEmbeddingKeys(),
+                            snapshot == null ? Set.of() : snapshot.cpuEmbeddingKeys(),
                             hashHits,
                             gpuHits + cpuHits,
                             gpuHits));
@@ -260,11 +262,22 @@ public class VitCacheDirectory {
         }
     }
 
+    /**
+     * Cache residency and match scores for one routable ViT generation.
+     */
     public record Candidate(
             WorkerStatus worker,
             String instance,
             Set<String> hashKeys,
+            Set<String> gpuEmbeddingKeys,
+            Set<String> cpuEmbeddingKeys,
             int hashHits,
             int embeddingHits,
-            int gpuHits) {}
+            int gpuHits) {
+        boolean hasCachedImage(String key) {
+            return hashKeys.contains(key)
+                    || gpuEmbeddingKeys.contains(key)
+                    || cpuEmbeddingKeys.contains(key);
+        }
+    }
 }

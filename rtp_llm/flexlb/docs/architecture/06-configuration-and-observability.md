@@ -88,6 +88,12 @@ v3 配置的 `router.roles.vit.cacheAffinityEnabled` 默认是 `true`，新选�
 }
 ```
 
+Master 的 `app.vit.cache.affinity.images` 按图片计数，已加入 Prometheus 默认白名单。
+`kind=total` 统计 `VIT_ONLY` 入口收到的 affinity keys，重复 key 按图片数计入。
+`kind=hit` 统计亲和选路成功后，最终节点的 hash、CPU/GPU embedding 快照或已有临时放置预计能命中的图片。
+每张图最多记一次，计算时点在写入本次临时放置之前。这个指标来自 Master 的选路估算。
+纯负载选路只有总量，空 key 请求没有可计数的图片。
+
 ### UniConfig 连接
 
 Spectrum 部署的扩展配置中启用 Turbo UniConfig：

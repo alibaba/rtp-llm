@@ -27,6 +27,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.service.VitCacheSelector;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -52,6 +53,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -700,6 +702,26 @@ class DefaultRouterTest {
         admitted.value().close();
 
         verify(prefillSelector).select(context, RoleType.PREFILL, null);
+    }
+
+    @Test
+    void countsVitOnlyInputsEvenWhenNoVitWorkerIsSelected() {
+        when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.VIT));
+        var router = router();
+        var selector = mock(VitCacheSelector.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                router, "vitCacheSelector", selector);
+        var context = context(151L);
+        context.getRequest().setVitRouteOnly(true);
+        var keys = List.of("image", "image", "other");
+        context.getRequest().setCacheAffinityKeys(keys);
+        ServerStatus unavailable = new ServerStatus();
+        unavailable.setCode(StrategyErrorType.NO_VIT_WORKER.getErrorCode());
+        when(selector.select(eq(context), nullable(String.class))).thenReturn(unavailable);
+
+        assertEquals(
+                StrategyErrorType.NO_VIT_WORKER.getErrorCode(), router.routeVit(context).getCode());
+        verify(selector).recordVitOnlyInputs(keys);
     }
 
     private static void stubPrefillCommit(PrefillEndpoint prefill) {

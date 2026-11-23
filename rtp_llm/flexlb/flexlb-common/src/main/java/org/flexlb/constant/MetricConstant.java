@@ -448,6 +448,9 @@ public class MetricConstant {
     public static final String CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS =
             "app.cache.routing.candidate.max.hit.tokens";
 
+    /** Images on ViT-only routes, tagged by kind (total or theoretical hit). */
+    public static final String VIT_CACHE_AFFINITY_IMAGES = "app.vit.cache.affinity.images";
+
     /** Cache-affinity routing decisions, tagged by role, engineIp, and decision. */
     public static final String CACHE_AFFINITY_DECISION = "app.cache.affinity.decision.qps";
 

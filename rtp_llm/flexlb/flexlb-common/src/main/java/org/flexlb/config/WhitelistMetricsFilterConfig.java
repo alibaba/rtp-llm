@@ -34,7 +34,7 @@ public class WhitelistMetricsFilterConfig {
     private static final String COUNTER_SUFFIX = "_total";
 
     /**
-     * Default whitelist preset: the six core link latency metrics
+     * Default whitelist preset: core routing metrics
      * (prometheus form; the counter exposition {@code _total} suffix is
      * matched as well). These are the metrics retained when no
      * {@code flexlb.monitor.metric-whitelist} property is set, keeping the
@@ -46,6 +46,7 @@ public class WhitelistMetricsFilterConfig {
      *   <li>Queue wait: batcher queue wait time (enqueue to dispatch trigger)</li>
      *   <li>Dispatch: dispatch-to-ACK time (gRPC dispatch to engine ACK)</li>
      *   <li>Batch decision: exact dispatch count grouped by trigger reason</li>
+     *   <li>ViT-only image count and theoretical cache hits</li>
      * </ul>
      */
     public static final String DEFAULT_METRIC_WHITELIST =
@@ -54,7 +55,8 @@ public class WhitelistMetricsFilterConfig {
                     + "flexlb_app_flexlb_route_submit_time_ms,"
                     + "flexlb_app_routing_queue_wait_time_ms,"
                     + "flexlb_app_flexlb_dispatch_ack_time_ms,"
-                    + "flexlb_app_engine_balancing_master_dispatch_reason";
+                    + "flexlb_app_engine_balancing_master_dispatch_reason,"
+                    + "flexlb_app_vit_cache_affinity_images_total";
 
     private final PrefixAllowSet allowedMetrics;
 
