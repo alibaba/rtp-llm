@@ -17,6 +17,7 @@ import org.springframework.context.annotation.Configuration;
 
 import java.nio.channels.spi.SelectorProvider;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
@@ -26,6 +27,9 @@ import java.util.concurrent.TimeUnit;
  */
 @Configuration
 public class ChannelConfiguration {
+    // gRPC shutdown can race with terminal callbacks. JDK CallerRunsPolicy drops them.
+    private static final RejectedExecutionHandler RUN_GRPC_CALLBACK_INLINE =
+            (callback, executor) -> callback.run();
 
     private final FlexlbConfig config;
 
@@ -42,7 +46,8 @@ public class ChannelConfiguration {
                 TimeUnit.MINUTES,
                 new LinkedBlockingQueue<>(
                         config.getInternalRuntime().getGrpcClientExecutorQueueCapacity()),
-                new NamedThreadFactory("engine-grpc-client-executor"));
+                new NamedThreadFactory("engine-grpc-client-executor"),
+                RUN_GRPC_CALLBACK_INLINE);
     }
 
     /**
@@ -63,7 +68,7 @@ public class ChannelConfiguration {
                 TimeUnit.MINUTES,
                 new LinkedBlockingQueue<>(2000),
                 new NamedThreadFactory("flexlb-forwarder-channel-executor"),
-                new ThreadPoolExecutor.AbortPolicy());
+                RUN_GRPC_CALLBACK_INLINE);
     }
 
     @Bean

@@ -1,5 +1,9 @@
 package org.flexlb.httpserver;
 
+import io.grpc.Metadata;
+import io.grpc.ServerCall;
+import io.grpc.ServerCallHandler;
+import io.grpc.Status;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.flexlb.Application;
 import org.flexlb.config.ConfigService;
@@ -24,14 +28,15 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -42,7 +47,7 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * Checks gRPC executor state metrics and rejection accounting across saturation and shutdown.
+ * Checks gRPC executor metrics, callback fallback, and admission during saturation.
  */
 @Timeout(10)
 class FlexlbGrpcExecutorMetricsTest {
@@ -136,16 +141,18 @@ class FlexlbGrpcExecutorMetricsTest {
     }
 
     @Test
-    void reportsActualSaturationAndShutdownRejectionsWithoutRunningRejectedTasks()
-            throws Exception {
+    void reportsInlineCallbacksDuringSaturationAndShutdown() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.blockFirstTaskAndQueueSecond();
-            Runnable rejectedTask =
+            var runs = new AtomicInteger();
+            Thread submittingThread = Thread.currentThread();
+            Runnable callback =
                     () -> {
-                        throw new AssertionError("Rejected tasks must not execute on the caller");
+                        assertEquals(submittingThread, Thread.currentThread());
+                        runs.incrementAndGet();
                     };
-            assertThrows(
-                    RejectedExecutionException.class, () -> fixture.executor.execute(rejectedTask));
+            fixture.executor.execute(callback);
+            assertEquals(1, runs.get());
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 1);
             fixture.report();
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 1);
@@ -153,8 +160,8 @@ class FlexlbGrpcExecutorMetricsTest {
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 1);
 
             fixture.executor.shutdown();
-            assertThrows(
-                    RejectedExecutionException.class, () -> fixture.executor.execute(rejectedTask));
+            fixture.executor.execute(callback);
+            assertEquals(2, runs.get());
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 2);
             fixture.report();
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 2);
@@ -165,7 +172,7 @@ class FlexlbGrpcExecutorMetricsTest {
     }
 
     @Test
-    void monitorFailureStillAbortsTheRejectedTask() {
+    void monitorFailureStillRunsTheCallback() {
         FlexMonitor monitor = mock(FlexMonitor.class);
         doThrow(new IllegalStateException("monitor unavailable"))
                 .when(monitor)
@@ -179,10 +186,33 @@ class FlexlbGrpcExecutorMetricsTest {
         executor.shutdown();
         Runnable task = mock(Runnable.class);
 
-        assertThrows(RejectedExecutionException.class, () -> executor.execute(task));
+        executor.execute(task);
 
         verify(monitor).report(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 1.0);
-        verifyNoInteractions(task);
+        verify(task).run();
+    }
+
+    @Test
+    void rejectsNewCallsBeforePayloadDeliveryOnlyWhenTheQueueIsFull() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            var interceptor = new GrpcOverloadInterceptor(fixture.executor);
+            ServerCall<String, String> acceptedCall = mock();
+            ServerCallHandler<String, String> acceptedHandler = mock();
+            var headers = new Metadata();
+            interceptor.interceptCall(acceptedCall, headers, acceptedHandler);
+            verify(acceptedHandler).startCall(acceptedCall, headers);
+
+            fixture.blockFirstTaskAndQueueSecond();
+            ServerCall<String, String> rejectedCall = mock();
+            ServerCallHandler<String, String> rejectedHandler = mock();
+            interceptor.interceptCall(rejectedCall, headers, rejectedHandler);
+
+            verify(rejectedCall)
+                    .close(
+                            argThat(status -> status.getCode() == Status.Code.RESOURCE_EXHAUSTED),
+                            any());
+            verifyNoInteractions(rejectedHandler);
+        }
     }
 
     private static FlexlbGrpcServer newServer(FlexMonitor monitor) {

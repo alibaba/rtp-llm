@@ -676,7 +676,7 @@ public class MetricConstant {
             "grpc.server.executor.max.pool.size";
 
     /**
-     * gRPC server executor rejected task counter. Rejection uses AbortPolicy.
+     * Counts gRPC callbacks executed inline after the executor rejected their submission.
      */
     public static final String GRPC_SERVER_EXECUTOR_REJECTED_TASKS =
             "grpc.server.executor.caller.runs";
