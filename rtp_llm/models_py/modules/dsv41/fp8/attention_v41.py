@@ -92,6 +92,46 @@ from rtp_llm.models_py.utils.memory import dispose_tensor
 _CP_SOURCE_RECEIVE_BYTES = 320 * 1024**2
 
 
+def _decode_global_metadata_views(metadata, rows, batch, *, sm90=False):
+    """Reuse only the canonical producer's synchronized int64 companions.
+
+    The raw tensors remain authoritative for legacy/custom metadata. Canonical
+    dense and packed preparation update both widths together before replay.
+    """
+    from rtp_llm.models_py.modules.dsv41.fp8.decode.decode_attn_metadata import (
+        DSv4DecodeAttnMetadataFP8,
+    )
+
+    requests = metadata.req_id_per_token[:rows]
+    starts = metadata.start_pos[:batch]
+    if sm90 and isinstance(metadata, DSv4DecodeAttnMetadataFP8):
+        request_long = metadata.req_id_per_token_long
+        # Packed prefixes are accepted as int64 upstream before start_pos
+        # truncates to int32. Keep the original cast for every packed start.
+        start_long = None if metadata.is_packed else metadata.decode_seq_start_per_req
+        pairs = ((requests, request_long, rows), (starts, start_long, batch))
+        result = []
+        for source, companion, count in pairs:
+            if (
+                source.is_cuda
+                and source.dtype == torch.int32
+                and source.ndim == 1
+                and source.shape == (count,)
+                and source.is_contiguous()
+                and isinstance(companion, torch.Tensor)
+                and companion.device == source.device
+                and companion.dtype == torch.int64
+                and companion.ndim == 1
+                and companion.numel() >= count
+                and companion.is_contiguous()
+            ):
+                result.append(companion[:count])
+            else:
+                result.append(source.long())
+        return result[0], result[1]
+    return requests.long(), starts.long()
+
+
 def _prefill_x_cohort_plan(cp_ctx, projected_row_bytes):
     """Group zigzag rows by AG receive budget, independent of compressor tiles."""
     lengths = cp_ctx.input_lengths_global_host
@@ -4022,8 +4062,9 @@ class AttentionV41FP8(AttentionFP8):
                 start_global_decode,
             )
 
-            req = metadata.req_id_per_token[:T].long()
-            starts = metadata.start_pos[:B].long()
+            req, starts = _decode_global_metadata_views(
+                metadata, T, B, sm90=bool(getattr(self, "_use_v4_kv_cache", False))
+            )
             global_work = start_global_decode(self, x, positions, req, starts)
         try:
             qkv = decode_compute_qkv(

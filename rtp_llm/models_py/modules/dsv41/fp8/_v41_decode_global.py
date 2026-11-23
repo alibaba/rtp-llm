@@ -8,7 +8,8 @@ speculative state before any state writes. The index projection uses the native
 WK/cache epilogue when available; Stage B commits state after projection. This
 kernel boundary prevents a token CTA from overwriting another CTA's history
 when the state ring wraps.
-All metadata stays on the device.
+SM90 FP8-primary indexers retain the original WK/RMSNorm backend and use a
+64-entry page-planar FP8 store. All metadata stays on the device.
 """
 
 from __future__ import annotations
@@ -413,6 +414,10 @@ def is_supported(attn, x, positions, req_ids, starts) -> bool:
         or not frequencies.is_contiguous()
     ):
         return False
+    fp8_indexer = (
+        getattr(attn, "_use_v4_kv_cache", False)
+        and getattr(attn, "_indexer_mode", None) == "fp8_dg"
+    )
     regions = [attn._global_region(), INDEXER_KV]
     if attn.compress_ratio == 2:
         regions.append(CSA_STATE)
@@ -455,13 +460,24 @@ def is_supported(attn, x, positions, req_ids, starts) -> bool:
             pool.dtype != torch.uint8
             or pool.ndim != 3
             or (region == INDEXER_KV and not pool.is_contiguous())
-            or pool.shape[2] not in (
-                (68,) if region == INDEXER_KV
+            or pool.shape[2]
+            not in (
+                ((68, 132) if fp8_indexer else (68,))
+                if region == INDEXER_KV
                 else ((288, 584) if capability == (9, 0) else (288,))
             )
             or pool.stride(2) != 1
             or pool.stride(1) != pool.shape[2]
             or pool.stride(0) < pool.shape[1] * pool.shape[2]
+            or (
+                region == INDEXER_KV
+                and pool.shape[2] == 132
+                and (
+                    pool.shape[1] not in (64, 128)
+                    or tpb // attn.compress_ratio != pool.shape[1]
+                    or attn._source_pool(attn._global_region()).shape[2] != 584
+                )
+            )
             or tpb <= 0
             or tpb % attn.compress_ratio
             or tpb // attn.compress_ratio > pool.shape[1]
@@ -527,7 +543,9 @@ def try_produce_global(
     kernel = _compress_norm_main_store_kernel
     kernel_options = {}
     if main.shape[-1] == 584:
-        from ._v41_sm90_decode_global_kernels import _compress_norm_main_store_kernel as kernel
+        from ._v41_sm90_decode_global_kernels import (
+            _compress_norm_main_store_kernel as kernel,
+        )
 
         kernel_options = {"V4_CACHE": True}
     kernel[(tokens,)](
@@ -571,13 +589,26 @@ def try_produce_global(
         num_warps=4,
         enable_fp_fusion=False,
     )
-    native_index = _try_native_indexer_k(
-        attn, latent, index_positions, index_slots, index
-    )
-    if native_index and attn.compress_ratio == 1:
-        return True
-    projected = latent if native_index else F.linear(latent, attn.index_wk)
-    _index_norm_store_state_kernel[(tokens,)](
+    index_kernel = _index_norm_store_state_kernel
+    if index.shape[2] == 132:
+        from ._v41_sm90_decode_global_kernels import _index_fp8_rope_store_state_kernel
+        from .attention_v41 import rms_norm
+
+        # Preserve BF16 F.linear and the original FlashInfer/Torch RMSNorm
+        # dispatch. The native WK epilogue below writes FP4, not this codec.
+        projected = rms_norm(
+            F.linear(latent, attn.index_wk), attn.index_k_norm, attn.eps
+        )
+        native_index = False
+        index_kernel = _index_fp8_rope_store_state_kernel
+    else:
+        native_index = _try_native_indexer_k(
+            attn, latent, index_positions, index_slots, index
+        )
+        if native_index and attn.compress_ratio == 1:
+            return True
+        projected = latent if native_index else F.linear(latent, attn.index_wk)
+    index_kernel[(tokens,)](
         projected,
         attn.index_k_norm,
         positions,

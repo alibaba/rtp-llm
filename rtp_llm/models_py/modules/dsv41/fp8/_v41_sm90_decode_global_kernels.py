@@ -362,3 +362,102 @@ def _index_norm_store_state_kernel(
                 state + row * 1024 + 512 + columns,
                 tl.load(scores + token * SCORE_STRIDE + columns),
             )
+
+
+@triton.jit
+def _index_fp8_rope_store_state_kernel(
+    normalized,
+    norm_weight,
+    positions,
+    requests,
+    starts,
+    input_lengths,
+    frequencies,
+    index_cache,
+    index_table,
+    values,
+    scores,
+    state,
+    state_table,
+    S: tl.constexpr,
+    VALUE_STRIDE: tl.constexpr,
+    SCORE_STRIDE: tl.constexpr,
+    RATIO: tl.constexpr,
+    EPS: tl.constexpr,
+    INDEX_EB: tl.constexpr,
+    INDEX_TPB: tl.constexpr,
+    INDEX_COLS: tl.constexpr,
+    INDEX_TABLE_STRIDE: tl.constexpr,
+    INDEX_CACHE_STRIDE: tl.constexpr,
+    STATE_EB: tl.constexpr,
+    STATE_TPB: tl.constexpr,
+    STATE_COLS: tl.constexpr,
+    STATE_STRIDE: tl.constexpr,
+    INDEX_BLOCKS: tl.constexpr,
+    STATE_BLOCKS: tl.constexpr,
+    TRAP: tl.constexpr,
+    STATE_ONLY: tl.constexpr = False,
+):
+    token = tl.program_id(0).to(tl.int64)
+    position = tl.load(positions + token).to(tl.int64)
+    request = tl.load(requests + token).to(tl.int64)
+    block, offset, writable = _cache_address(
+        index_table,
+        position,
+        request,
+        INDEX_COLS,
+        INDEX_TABLE_STRIDE,
+        INDEX_TPB,
+        RATIO,
+    )
+    if writable:
+        if TRAP:
+            if block >= INDEX_BLOCKS:
+                _trap()
+        columns = tl.arange(0, 128)
+        key = tl.load(normalized + token * 128 + columns)
+        rotated = _rope_bf16(key, frequencies, (position // RATIO) * RATIO, 128).to(
+            tl.float32
+        )
+        # Same primitives as the original _indexer_k_quant_kernel. A raw
+        # 128-entry block is TWO planar64 pages, not one planar128 block.
+        absmax = tl.max(tl.abs(rotated), axis=0)
+        scale = tl.maximum(absmax / 448.0, 1e-12)
+        q_f32 = rotated / scale
+        q_fp8 = q_f32.to(tl.float8e4nv)
+        slot = block * INDEX_EB + offset
+        page, page_offset = slot // 64, slot % 64
+        base = index_cache + page * (64 * 132)
+        tl.store(base + page_offset * 128 + columns, q_fp8.to(tl.uint8, bitcast=True))
+        scale_dst = (base + 64 * 128 + page_offset * 4).to(tl.pointer_type(tl.float32))
+        tl.store(scale_dst, scale)
+
+    if RATIO == 2:
+        # Every stage-A CTA has finished reading the old ring. Preserve raw
+        # FP32 value/score rows for both accepted and speculative positions.
+        # The original suffix mask prevents stale aliases within each block.
+        block_in_sequence = position // STATE_TPB
+        block = tl.load(
+            state_table + request * STATE_STRIDE + block_in_sequence % STATE_COLS
+        ).to(tl.int64)
+        length = (
+            S
+            if input_lengths is None
+            else tl.load(input_lengths + request).to(tl.int64)
+        )
+        end = tl.load(starts + request).to(tl.int64) + length
+        effective_end = tl.minimum((block_in_sequence + 1) * STATE_TPB, end)
+        if (block > 0) & (position + STATE_EB >= effective_end):
+            if TRAP:
+                if block >= STATE_BLOCKS:
+                    _trap()
+            row = block * STATE_EB + position % STATE_EB
+            columns = tl.arange(0, 512)
+            tl.store(
+                state + row * 1024 + columns,
+                tl.load(values + token * VALUE_STRIDE + columns),
+            )
+            tl.store(
+                state + row * 1024 + 512 + columns,
+                tl.load(scores + token * SCORE_STRIDE + columns),
+            )
