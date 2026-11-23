@@ -246,7 +246,7 @@ class RpcTimeoutTest(TestCase):
         server.start()
         self.addCleanup(pool.shutdown)
         self.addCleanup(lambda: server.stop(0).wait())
-        proxy = VitProxyServer([], 0, default_rpc_timeout_seconds=4)
+        proxy = VitProxyServer([f"127.0.0.1:{port}"], 0, default_rpc_timeout_seconds=4)
         proxy.rpc_server = MagicMock(wraps=server)
         proxy.connection_pool.close_all = MagicMock(
             side_effect=lambda: self.assertTrue(finished.is_set())
