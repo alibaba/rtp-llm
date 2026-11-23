@@ -112,7 +112,7 @@ CacheConfig makeSwaConfig(int block_size = 4) {
     return config;
 }
 
-CacheConfig makeHybridConfig(bool disable_linear_reuse = false) {
+CacheConfig makeHybridConfig(bool disable_linear_reuse = false, bool borrow_prefill_tail = false) {
     CacheConfig config;
     config.dtype                   = DataType::TYPE_FP16;
     config.layer_num               = 4;
@@ -133,6 +133,7 @@ CacheConfig makeHybridConfig(bool disable_linear_reuse = false) {
 
     auto linear_policy                = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
     linear_policy.enable_prefix_reuse = !disable_linear_reuse;
+    linear_policy.prefill_borrow_tail  = borrow_prefill_tail;
     auto full_policy                  = defaultCacheGroupPolicy(CacheGroupType::FULL);
     test::configureIndexedTestGroups(config,
                                      {linear_spec, full_spec},
@@ -694,7 +695,7 @@ TEST(BlockTreeCacheFactoryUtilityTest, TierBlockCountsUseWideIntermediateProduct
 }
 
 TEST_F(BlockTreeCacheFactoryTest, PrefillLinearPromptReferenceSizesHostAndSsd) {
-    auto config = makeHybridConfig();
+    auto config = makeHybridConfig(/*disable_linear_reuse=*/false, /*borrow_prefill_tail=*/true);
     auto allocator = initAllocator<CoordinatorCacheManager>(config);
     block_transfer_engine_test::TempDirGuard disk_dir("block_tree_prefill_linear_ratio");
     KVCacheConfig options;
@@ -740,6 +741,7 @@ TEST_F(BlockTreeCacheFactoryTest, PrefillLinearPromptReferenceSizesHostAndSsd) {
     auto decode_layout = planBlockTreeCacheLayout(config, options, decode);
     ASSERT_NE(decode_layout, nullptr);
     EXPECT_EQ(decode_layout->sizing.linear_ratio.full_pages, 0u);
+    EXPECT_THROW(planBlockTreeCacheLayout(makeHybridConfig(), options, prefill), std::exception);
     options.reuse_cache = false;
     EXPECT_THROW(planBlockTreeCacheLayout(config, options, prefill), std::exception);
 }
@@ -757,7 +759,8 @@ TEST_F(BlockTreeCacheFactoryTest, PpLinearQuotaPlanningAllowsFullOnlyStagesBefor
     auto full_only = makeSingleConfig();
     full_only.reuse_cache_tail_blocks = 2;
 
-    const auto first = planBlockTreeCacheLayout(makeHybridConfig(), options, prefill);
+    const auto hybrid = makeHybridConfig(/*disable_linear_reuse=*/false, /*borrow_prefill_tail=*/true);
+    const auto first = planBlockTreeCacheLayout(hybrid, options, prefill);
     ASSERT_NE(first, nullptr);
     EXPECT_EQ(first->sizing.linear_request.full_page_tokens, 4u);
     EXPECT_EQ(first->sizing.linear_request.prompt_tokens, 32);

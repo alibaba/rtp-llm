@@ -329,9 +329,7 @@ LowerTierLinearPoolRequest planLowerTierLinearPoolRequest(const CacheConfig&    
         return request;
     }
     if (!std::all_of(linear->begin(), linear->end(), [&](const std::string& tag) {
-            const auto& group = config.group(tag);
-            return group.seqSizePerBlock() == config.seq_size_per_block
-                   && group.kernelSeqSizePerBlock() == group.seqSizePerBlock() && !group.policy.shared_chunk_state;
+            return config.group(tag).supportsBorrowedLinearPrefill(config.seq_size_per_block);
         })) {
         return request;
     }
