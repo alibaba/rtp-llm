@@ -347,6 +347,7 @@ public final class FlexlbConfigValidator {
                     "router.roles.prefill.cacheAffinity.remoteDiscount");
         }
 
+        require(routing.getRoles().getVit() != null, "router.roles.vit", "is required");
         require(routing.getRoles().getDecode() != null, "router.roles.decode", "is required");
         DecodeCostEstimatorConfig costEstimator = routing.getRoles().getDecode().getCostEstimator();
         require(costEstimator != null, "router.roles.decode.costEstimator", "is required");
