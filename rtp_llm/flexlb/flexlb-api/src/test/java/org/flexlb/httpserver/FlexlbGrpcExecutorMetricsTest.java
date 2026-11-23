@@ -195,7 +195,7 @@ class FlexlbGrpcExecutorMetricsTest {
     @Test
     void rejectsNewCallsBeforePayloadDeliveryOnlyWhenTheQueueIsFull() throws Exception {
         try (Fixture fixture = new Fixture()) {
-            var interceptor = new GrpcOverloadInterceptor(fixture.executor);
+            var interceptor = new GrpcOverloadInterceptor(fixture.executor, fixture.executor);
             ServerCall<String, String> acceptedCall = mock();
             ServerCallHandler<String, String> acceptedHandler = mock();
             var headers = new Metadata();
