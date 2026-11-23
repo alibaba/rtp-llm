@@ -3,6 +3,7 @@ package org.flexlb.dao.pv;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import io.opentelemetry.api.trace.Span;
 import lombok.Data;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
@@ -23,6 +24,15 @@ public class PvLogData {
     // Identifiers may be absent when entry parsing fails.
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private String requestId;
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private String traceId;
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private String spanId;
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Boolean traceSampled;
 
     private RequestPhase phase;
 
@@ -103,6 +113,15 @@ public class PvLogData {
     }
 
     private void populateCommonFields(BalanceContext ctx) {
+        var traceContext = ctx.getTraceContext();
+        if (traceContext != null) {
+            var span = Span.fromContext(traceContext).getSpanContext();
+            if (span.isValid()) {
+                this.traceId = span.getTraceId();
+                this.spanId = span.getSpanId();
+                this.traceSampled = span.isSampled();
+            }
+        }
         this.phase = ctx.getRequestPhase();
         BalanceContext.RoutingTelemetry telemetry = ctx.getRoutingTelemetry();
         Request request = ctx.getRequest();
