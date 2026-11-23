@@ -20,13 +20,23 @@ public final class RoutingConfig {
     private RolesConfig roles = new RolesConfig();
 
     /**
-     * Holds the independent Prefill and Decode selection policies.
+     * Holds the independent Prefill, Decode and ViT selection policies.
      */
     @Getter
     @Setter
     public static final class RolesConfig {
         private PrefillConfig prefill = new PrefillConfig();
         private DecodeConfig decode = new DecodeConfig();
+        private VitConfig vit = new VitConfig();
+    }
+
+    /**
+     * Controls whether new ViT routes prefer cached media before comparing load.
+     */
+    @Getter
+    @Setter
+    public static final class VitConfig {
+        private boolean cacheAffinityEnabled = true;
     }
 
     /**
