@@ -118,14 +118,14 @@ PAI-vLLM 端的 Encoder 状态上报不属于 FlexLB 实现范围。
 `cache_match_rollback_blocks`、`kv_cache_group_mode` 等。没有显式 TTFT 字段——负载估计由 `stepLatencyMs` 与本地
 `runningQueueTime` 组成。
 
-处理逻辑：版本号新才全量更新（并发/任务表/队列时间）；版本号旧也更新 alive、时间戳并做任务
-对账；`cache_status` 总量恒更新（used = total − available）。带 `CacheHitFeedback` 的完成
-任务会异步送 `CacheAwareService.buildCacheHitComparison`（预测 vs 实际命中对比，出指标 + pv 日志）。
-连续 3 次状态探测失败（RPC 失败或响应转换失败）会把该逻辑 worker 标为不健康并移除其 endpoint；
-同一 frontend 的其他已发布 logical worker 不受影响。任务既没有有效字符串 ID，也没有可兼容读取的
-旧 int64 编码时，整份状态观测被拒收，不发布部分任务状态，并按上述连续失败规则处理。
-新发现的 worker 在首次接受有效状态前不可路由。空响应标为不健康；未初始化状态
-（`status_version=0`）与响应处理异常跳过本轮更新。
+新版本状态更新并发、任务表和队列时间。同版本的有效心跳刷新健康证据并对账当前活动任务。
+版本回退、版本非正数或角色与发现记录不符时，当前 generation 会下线。
+带 `CacheHitFeedback` 的完成任务会异步产出预测与实际命中的对比指标和 PV 日志。
+
+RPC 失败只记录传输失败和超时指标。Master 仍按上次有效状态和 `statusStaleAfterMs` 判断过期。
+收到有效的 `alive=false` 状态时，立即下线对应 logical worker，同一 frontend 的其他
+logical worker 不受影响。空响应、本地响应转换失败和后续处理失败分别上报对应错误。
+任务没有可用请求 ID 时，转换失败会拒收整份观测。新 worker 在首次应用有效状态前不可路由。
 
 ### WorkerStatus 的本地预测与对账
 

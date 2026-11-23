@@ -47,10 +47,11 @@ class GrpcWorkerStatusRunnerTest {
         "DECODE,false,false",
         "PREFILL,true,false",
         "PDFUSION,true,false",
+        "DECODE,false,true",
         "PREFILL,true,true"
     })
-    void repeatedStatusCheckFailuresRetireWorkerAndOnlyClearDetailedCacheIndexes(
-            RoleType role, boolean needsCacheKeys, boolean invalidRole) {
+    void transportFailuresPreserveRoutingAndExplicitDeadStatusRetires(
+            RoleType role, boolean needsCacheKeys, boolean reportedDead) {
         ConfigService config = mock(ConfigService.class);
         when(config.loadBalanceConfig())
                 .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
@@ -62,23 +63,22 @@ class GrpcWorkerStatusRunnerTest {
                 RunnerTestSupport.publishEndpoint(
                         registry, role, status.getLogicalIpPort(), status);
         CacheAwareService cache = mock(CacheAwareService.class);
+        EngineHealthReporter reporter = mock(EngineHealthReporter.class);
+        long lastSuccessfulPoll = status.pollHealth().lastSuccessfulPollUs();
         EngineGrpcService grpc = mock(EngineGrpcService.class);
         when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
                 .thenReturn(
-                        invalidRole
+                        reportedDead
                                 ? CompletableFuture.completedFuture(
                                         EngineRpcService.WorkerStatusPB.newBuilder()
-                                                .setRoleType(
-                                                        EngineRpcService.RoleTypePB
-                                                                .ROLE_TYPE_PREFILL)
-                                                .setRole("DECODE")
+                                                .setRole(role.getCode())
                                                 .setStatusVersion(1L)
-                                                .setAlive(true)
+                                                .setAlive(false)
                                                 .build())
                                 : CompletableFuture.failedFuture(
                                         io.grpc.Status.UNAVAILABLE.asRuntimeException()));
 
-        for (int failure = 1; failure <= 3; failure++) {
+        for (int failure = 1; failure <= (reportedDead ? 1 : 3); failure++) {
             WorkerStatus.PollLease lease = status.tryBeginStatusPoll();
             assertNotNull(lease);
             new GrpcWorkerStatusRunner(
@@ -90,19 +90,30 @@ class GrpcWorkerStatusRunnerTest {
                             status,
                             lease,
                             directory,
-                            mock(EngineHealthReporter.class),
+                            reporter,
                             grpc,
                             5_000L,
                             cache,
                             Runnable::run)
                     .run();
-            if (failure < 3) {
+            if (!reportedDead) {
                 assertSame(status, directory.statusSnapshot(role).get(status.getLogicalIpPort()));
                 assertSame(endpoint, registry.get(role, status.getLogicalIpPort()));
                 verifyNoInteractions(cache);
             }
         }
+        if (!reportedDead) {
+            assertEquals(3, status.pollHealth().consecutiveTransportFailures());
+            assertEquals(lastSuccessfulPoll, status.pollHealth().lastSuccessfulPollUs());
+            assertTrue(status.pollHealth().reportedAlive());
+            return;
+        }
 
+        verify(reporter)
+                .reportStatusCheckerFail(
+                        BalanceStatusEnum.WORKER_STATUS_SERVER_FAILED,
+                        status.getMetricIpPort(),
+                        role);
         assertNull(registry.get(role, status.getLogicalIpPort()));
         assertTrue(directory.statusSnapshot(role).isEmpty());
         assertNull(status.tryBeginStatusPoll(), "retired generation cannot poll again");
@@ -116,7 +127,8 @@ class GrpcWorkerStatusRunnerTest {
     @ParameterizedTest
     @CsvSource({
         "DEADLINE_EXCEEDED,WORKER_STATUS_GRPC_TIMEOUT",
-        "UNAVAILABLE,WORKER_SERVICE_UNAVAILABLE"
+        "UNAVAILABLE,WORKER_SERVICE_UNAVAILABLE",
+        "LOCAL_FAILURE,MASTER_STATUS_PROCESSING_FAILED"
     })
     void reportsFailedRpcLatencyWithSameWorkerTags(
             String grpcCode, BalanceStatusEnum expectedError) {
@@ -125,12 +137,13 @@ class GrpcWorkerStatusRunnerTest {
                         RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, "test-site");
         WorkerDirectory directory = directory(mock(EndpointRegistry.class), status);
         EngineGrpcService grpc = mock(EngineGrpcService.class);
-        io.grpc.Status failure =
-                "DEADLINE_EXCEEDED".equals(grpcCode)
-                        ? io.grpc.Status.DEADLINE_EXCEEDED
-                        : io.grpc.Status.UNAVAILABLE;
+        Throwable failure =
+                "LOCAL_FAILURE".equals(grpcCode)
+                        ? new IllegalStateException("Local completion failed")
+                        : io.grpc.Status.fromCode(io.grpc.Status.Code.valueOf(grpcCode))
+                                .asRuntimeException();
         when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
-                .thenReturn(CompletableFuture.failedFuture(failure.asRuntimeException()));
+                .thenReturn(CompletableFuture.failedFuture(failure));
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
 
         new GrpcWorkerStatusRunner(
