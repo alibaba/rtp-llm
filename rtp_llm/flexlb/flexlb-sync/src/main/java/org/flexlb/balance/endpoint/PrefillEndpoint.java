@@ -165,23 +165,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return result;
     }
 
-    /**
-     * Bind exact NON_BATCH ownership inside the caller's pinned placement
-     * transaction.
-     */
-    public PrefillState.ReservationResult<PrefillState.RouteReservation> reserveRouteOwnership(
-            ScheduledRequest exactItem, long predictedMs) {
-        if (isGenerationRetiringOrRetired()) {
-            return new PrefillState.ReservationResult<>(
-                    PrefillState.CapacityStatus.ENDPOINT_RETIRED, null);
-        }
-        if (!hasFreshSchedulingStatus()) {
-            return new PrefillState.ReservationResult<>(
-                    PrefillState.CapacityStatus.CAPACITY_FULL, null);
-        }
-        return prefillState.reserveRoute(exactItem, predictedMs);
-    }
-
     /** Acquire the generation capability only for the final route commit. */
     public RouteCommitAdmission tryBeginRouteCommitAdmission() {
         if (!hasFreshSchedulingStatus()) {
@@ -201,13 +184,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return prefillState.admissionRejectReason(priority, inflightRequestLimit);
     }
 
-    /** Advisory capacity; publication repeats the count check under the ownership lock. */
     public boolean canAcceptRequest() {
-        return inflightRequestLimit == 0L || prefillState.canAcceptRequest(inflightRequestLimit);
+        return prefillState.canDispatchRoute(inflightRequestLimit);
     }
 
-    public boolean canPreemptQueuedRequest(int priority) {
-        return prefillState.canPreemptQueuedRequest(priority, inflightRequestLimit);
+    /** Wake delivery when this worker has a free NON_BATCH execution slot. */
+    public CapacityBoundary.Availability routeAdmissionAvailability() {
+        return prefillState.routeAvailability(inflightRequestLimit);
     }
 
     /** Advisory endpoint ownership revision captured by queue placement. */
@@ -621,6 +604,14 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
         private RouteCommitAdmission(EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
             this.generationHandoff = generationHandoff;
+        }
+
+        public PrefillState.ReservationResult<PrefillState.RouteReservation> reserve(
+                ScheduledRequest item, long predictedMs) {
+            if (generationHandoff == null) {
+                throw new IllegalStateException("route admission no longer pins the generation");
+            }
+            return prefillState.reserveRoute(item, predictedMs, inflightRequestLimit);
         }
 
         public PrefillState.CommittedHandoff commit(
