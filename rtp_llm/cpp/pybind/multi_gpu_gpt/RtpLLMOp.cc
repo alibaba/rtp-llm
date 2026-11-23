@@ -1,4 +1,5 @@
 #include <cstddef>
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include <memory>
 #include <tuple>
 #include "autil/EnvUtil.h"
@@ -391,6 +392,7 @@ void RtpLLMOp::startHttpServer(py::object model_weights_loader,
 }
 
 void RtpLLMOp::stop() {
+    markKmonServiceDraining();
     const int64_t stop_timeout_ms = getGrpcStopTimeoutMs();
     if (!is_server_shutdown_) {
         if (model_rpc_service_) {
@@ -443,6 +445,7 @@ void RtpLLMOp::restart() {
 
 void registerRtpLLMOp(const py::module& m) {
     pybind11::class_<RtpLLMOp>(m, "RtpLLMOp")
+        .def_static("mark_metrics_draining", &markKmonServiceDraining)
         .def(pybind11::init<>())
         .def("init",
              &RtpLLMOp::init,

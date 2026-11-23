@@ -39,6 +39,7 @@ class ProcessManager:
         shutdown_timeout: int = 600,
         monitor_interval: int = 1,
         allow_defer_first_sigterm: bool = False,
+        service_draining=None,
     ):
         if shutdown_timeout <= 0:
             logging.warning(
@@ -47,6 +48,7 @@ class ProcessManager:
                 "non-draining child."
             )
             shutdown_timeout = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS
+        self.service_draining = service_draining
         self.processes: List[Process] = []
         self.shutdown_requested = False
         self.failure_detected = False
@@ -80,6 +82,8 @@ class ProcessManager:
         logging.info(
             f"Process manager received signal {signum}, initiating shutdown..."
         )
+        if self.service_draining is not None:
+            self.service_draining.value = True
         if self._defer_first_sigterm_if_needed(signum):
             return
         self._cancel_deferred_sigterm_timer()
@@ -325,6 +329,8 @@ class ProcessManager:
 
         Non-staged mode (post-crash all-stop): SIGTERM everyone at once.
         """
+        if self.service_draining is not None:
+            self.service_draining.value = True
         logging.info(f"Sending SIGTERM (drain_timeout={drain_timeout}s)")
         self._used_pre_stop_drain_signal = False
         drain_deadline = self._make_deadline(drain_timeout)
@@ -773,6 +779,8 @@ class ProcessManager:
         Normal SIGTERM/SIGINT shutdown does NOT call this method; the signal
         handler sets shutdown_requested directly, leaving failure_detected=False.
         """
+        if self.service_draining is not None:
+            self.service_draining.value = True
         self.shutdown_requested = True
         self.failure_detected = True
 

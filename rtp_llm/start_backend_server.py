@@ -141,6 +141,7 @@ def local_rank_start(
     world_rank: int = 0,
     pipe_writer=None,
     jit_cache_ready=None,
+    service_draining=None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     _install_hot_hook_runtime(f"backend_rank_{world_rank}")
@@ -193,6 +194,8 @@ def local_rank_start(
 
     def signal_handler(signum, frame):
         nonlocal deferred_sigterm_seen, deferred_sigterm_timer
+        if service_draining is not None:
+            service_draining.value = True
         logging.info(
             f"Local rank received signal {signum}, shutting down gracefully..."
         )
@@ -297,7 +300,7 @@ def local_rank_start(
 
         # Enter service loop to keep the process alive
         logging.info("Entering service loop to keep backend_manager alive")
-        backend_manager.serve_forever()
+        backend_manager.serve_forever(service_draining)
 
     except BaseException as e:
         error_msg = f"start server error: {e}"
@@ -369,6 +372,7 @@ def _create_rank_processes(
     py_env_configs: PyEnvConfigs,
     ctx,
     jit_cache_ready,
+    service_draining=None,
 ):
     """Create and start rank processes."""
     pc = py_env_configs.parallelism_config
@@ -390,6 +394,7 @@ def _create_rank_processes(
                 writer,
                 jit_cache_ready,
             ),
+            kwargs={"service_draining": service_draining},
             name=f"rank-{world_rank}",
         )
         start_memory_saver_configured_process(proc)
@@ -504,6 +509,7 @@ def multi_rank_start(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
+    service_draining=None,
 ):
     """Start multi-rank backend server with proper process management"""
     try:
@@ -516,11 +522,16 @@ def multi_rank_start(
         shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
         monitor_interval=py_env_configs.server_config.monitor_interval,
         allow_defer_first_sigterm=True,
+        service_draining=service_draining,
     )
     ctx = multiprocessing.get_context("spawn")
     jit_cache_ready = ctx.Event()
     processes, rank_pipe_readers = _create_rank_processes(
-        global_controller, py_env_configs, ctx, jit_cache_ready
+        global_controller,
+        py_env_configs,
+        ctx,
+        jit_cache_ready,
+        service_draining=service_draining,
     )
     manager.set_processes(processes, shutdown_group="backend")
     local_world_size = len(processes)
@@ -637,8 +648,11 @@ def start_backend_server(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
+    service_draining=None,
 ):
     _install_hot_hook_runtime("backend_manager")
+    if service_draining is None:
+        service_draining = multiprocessing.get_context("spawn").RawValue("b", False)
     logging.info(f"[PROCESS_START]Start backend server process")
     setproctitle("rtp_llm_backend_server")
     os.makedirs("logs", exist_ok=True)
@@ -657,8 +671,7 @@ def start_backend_server(
 
     if not torch.cuda.is_available():
         return local_rank_start(
-            global_controller,
-            py_env_configs,
+            global_controller, py_env_configs, service_draining=service_draining
         )
 
     pc = py_env_configs.parallelism_config
@@ -672,13 +685,16 @@ def start_backend_server(
         )
 
     if torch.cuda.device_count() > 1 and pc.world_size > 1:
-        return multi_rank_start(global_controller, py_env_configs, pipe_writer)
+        return multi_rank_start(
+            global_controller, py_env_configs, pipe_writer, service_draining=service_draining
+        )
     else:
         return local_rank_start(
             global_controller,
             py_env_configs,
             0,
             pipe_writer,
+            service_draining=service_draining,
         )
 
 
