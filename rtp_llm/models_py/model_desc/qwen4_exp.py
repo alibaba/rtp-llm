@@ -1008,7 +1008,12 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             and not getattr(self.mlp, "_forward_hooks", None)
             and tp2_ws.supports_hyper(hyper_states)
         ):
-            mlp_defer_token = _moe_tp2_defer_slot.set(_DeferSlot(tp2_ws))
+            mlp_defer_token = _moe_tp2_defer_slot.set(
+                _DeferSlot(
+                    tp2_ws,
+                    allow_single=not getattr(self.mlp, "use_ep_shared_allreduce", False),
+                )
+            )
         try:
             with record_function_range("qwen4.moe"):
                 hidden_states = self.mlp(hidden_states)

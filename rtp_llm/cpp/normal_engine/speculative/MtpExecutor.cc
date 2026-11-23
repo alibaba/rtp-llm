@@ -791,7 +791,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     role_type_(params.pd_sep_config.role_type),
     collect_metrics_stream_(cuda_graph::graphGetStreamFromPool(true)),
     target_verify_prepare_runner_(cuda_graph::graphGetStreamFromPool(true)),
-    draft_prefill_prepare_runner_(cuda_graph::graphGetStreamFromPool(false)),
+    draft_prefill_prepare_runner_(cuda_graph::graphGetStreamFromPool(true)),
     spec_logits_verify_runner_(std::make_unique<SpecLogitsVerifyRunner>()),
     spec_logits_verify_async_runner_(cuda_graph::graphGetStreamFromPool(true)),
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)),
@@ -3910,25 +3910,39 @@ MtpExecutor::prepareDecodeDeviceStates(const StreamGroups&                      
 
     // Immutable views can feed the next draft. Host publication remains
     // fenced by the target commit completion passed to the output worker.
+    // Batch-split once per tensor instead of dispatching 8 * batch_size
+    // per-row narrow() ops on the main decode thread.
+    auto split_rows = [batch_size](const torch::Tensor& t, int64_t dim) -> std::vector<torch::Tensor> {
+        return (t.defined() && batch_size > 0) ? t.split(1, dim) : std::vector<torch::Tensor>{};
+    };
+    auto accept_len_rows          = split_rows(accept_len_gpu_all, 0);
+    auto accept_tokens_rows       = split_rows(accept_tokens_gpu_all, 0);
+    auto propose_tokens_rows      = split_rows(propose_tokens_gpu_all, 0);
+    auto next_seq_len_rows        = split_rows(next_seq_len_all, 0);
+    auto next_position_ids_rows   = split_rows(next_position_ids_all, 0);
+    auto next_kv_block_rows       = split_rows(next_kv_cache_block_id, 1);
+    auto next_kv_kblock_rows      = split_rows(next_kv_cache_kernel_block_id, 1);
+    auto last_hidden_rows         = split_rows(last_hidden_all, 0);
+
     std::vector<GenerateStream::MtpAsyncDeviceState> next_states;
     next_states.reserve(batch_size);
-    int64_t idx = 0;
+    size_t idx = 0;
     for (auto& stream : all_streams) {
         GenerateStream::MtpAsyncDeviceState state;
         state.batch             = reusable_batch ? next_batch : nullptr;
-        state.batch_row         = reusable_batch ? idx : -1;
-        state.accept_len_gpu    = accept_len_gpu_all.narrow(0, idx, 1);
-        state.accept_tokens_gpu = accept_tokens_gpu_all.narrow(0, idx, 1);
+        state.batch_row         = reusable_batch ? static_cast<int64_t>(idx) : -1;
+        state.accept_len_gpu    = std::move(accept_len_rows[idx]);
+        state.accept_tokens_gpu = std::move(accept_tokens_rows[idx]);
         state.propose_tokens_gpu =
-            propose_tokens_gpu_all.defined() ? propose_tokens_gpu_all.narrow(0, idx, 1) : torch::Tensor();
-        state.next_seq_len_gpu = next_seq_len_all.narrow(0, idx, 1);
+            !propose_tokens_rows.empty() ? std::move(propose_tokens_rows[idx]) : torch::Tensor();
+        state.next_seq_len_gpu = std::move(next_seq_len_rows[idx]);
         state.next_position_ids_gpu =
-            next_position_ids_all.defined() ? next_position_ids_all.narrow(0, idx, 1) : torch::Tensor();
+            !next_position_ids_rows.empty() ? std::move(next_position_ids_rows[idx]) : torch::Tensor();
         state.next_kv_cache_block_id_gpu =
-            next_kv_cache_block_id.defined() ? next_kv_cache_block_id.narrow(1, idx, 1) : torch::Tensor();
+            !next_kv_block_rows.empty() ? std::move(next_kv_block_rows[idx]) : torch::Tensor();
         state.next_kv_cache_kernel_block_id_gpu =
-            next_kv_cache_kernel_block_id.defined() ? next_kv_cache_kernel_block_id.narrow(1, idx, 1) : torch::Tensor();
-        state.last_hidden_states_gpu = last_hidden_all.defined() ? last_hidden_all.narrow(0, idx, 1) : torch::Tensor();
+            !next_kv_kblock_rows.empty() ? std::move(next_kv_kblock_rows[idx]) : torch::Tensor();
+        state.last_hidden_states_gpu = !last_hidden_rows.empty() ? std::move(last_hidden_rows[idx]) : torch::Tensor();
 
         const auto previous_state = stream->getMtpAsyncDeviceState();
         const bool pending        = stream->hasPendingAsyncBookkeeping();

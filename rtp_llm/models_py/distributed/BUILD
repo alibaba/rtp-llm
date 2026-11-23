@@ -7,6 +7,7 @@ py_library(
         "flashinfer_ipc_all_reduce.py",
         "rocm_rccl.py",
         "symm_mem.py",
+        "tp2_p2p_all_gather.py",
     ],
     deps = [
         "//rtp_llm:torch",

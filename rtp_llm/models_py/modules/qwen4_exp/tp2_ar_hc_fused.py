@@ -32,11 +32,14 @@ _WORKSPACES = {}
 
 
 class _DeferSlot:
-    __slots__ = ("workspace", "consumed")
+    __slots__ = ("workspace", "consumed", "allow_single")
 
-    def __init__(self, workspace: "Qwen4Tp2ArHcWorkspace") -> None:
+    def __init__(
+        self, workspace: "Qwen4Tp2ArHcWorkspace", *, allow_single: bool = True
+    ) -> None:
         self.workspace = workspace
         self.consumed = False
+        self.allow_single = bool(allow_single)
 
 
 class DeferredTp2Sublayer:
@@ -100,7 +103,12 @@ def try_defer_sublayer_tp2(tensor: torch.Tensor, group) -> Optional[DeferredTp2S
     if deferred is not None:
         return deferred
     slot = _moe_tp2_defer_slot.get()
-    if slot is not None and not slot.consumed and group == collective_torch.Group.TP:
+    if (
+        slot is not None
+        and slot.allow_single
+        and not slot.consumed
+        and group == collective_torch.Group.TP
+    ):
         if slot.workspace.can_stage_single(tensor):
             slot.consumed = True
             return DeferredTp2Sublayer(tensor, False, slot.workspace)
@@ -108,25 +116,32 @@ def try_defer_sublayer_tp2(tensor: torch.Tensor, group) -> Optional[DeferredTp2S
 
 
 class Qwen4Tp2ArHcWorkspace:
-    max_rows = 2048
+    max_rows = 12288
+    max_packed_rows = 6144
 
     def __init__(self, group, device: torch.device) -> None:
         from flashinfer.comm import cuda_ipc
 
+        from rtp_llm.models_py.distributed.tp2_p2p_all_gather import (
+            acquire_tp2_shared_ipc_buffers,
+        )
         from rtp_llm.ops.compute_ops import rtp_llm_ops
 
         self.group = group
         self.device = torch.device(device)
         self.rank = dist.get_rank(group)
         self.ops = rtp_llm_ops
+        self.closed = False
         assert dist.get_world_size(group) == 2
         with torch.cuda.device(self.device):
             self.signals = cuda_ipc.create_shared_buffer(
                 self.ops.tp2_ar_hc_meta_size(), group
             )
-            self.buffers = cuda_ipc.create_shared_buffer(
-                self.ops.tp2_ar_hc_buffer_size(), group
+            self.buffers, self.buffer_bytes, max_single_rows = (
+                acquire_tp2_shared_ipc_buffers(group, self.device)
             )
+            self.max_rows = int(max_single_rows)
+            self.max_packed_rows = self.max_rows // 2
             cuda_ipc.cudart.cudaMemset(
                 ctypes.c_void_p(self.signals[self.rank]),
                 0,
@@ -146,9 +161,26 @@ class Qwen4Tp2ArHcWorkspace:
                 self.rank,
                 False,
                 False,
+                self.buffer_bytes,
             )
             torch.cuda.synchronize(self.device)
             dist.barrier(group=group)
+
+    def close(self) -> None:
+        if getattr(self, "closed", True):
+            return
+        from flashinfer.comm import cuda_ipc
+
+        from rtp_llm.models_py.distributed.tp2_p2p_all_gather import (
+            release_tp2_shared_ipc_buffers,
+        )
+
+        self.closed = True
+        torch.cuda.synchronize(self.device)
+        if dist.is_initialized():
+            dist.barrier(group=self.group)
+        cuda_ipc.free_shared_buffer(self.signals, self.group)
+        release_tp2_shared_ipc_buffers(self.group, self.device)
 
     def supports_hyper(self, hyper_x: torch.Tensor) -> bool:
         return (
@@ -185,7 +217,7 @@ class Qwen4Tp2ArHcWorkspace:
             and packed.dtype == torch.bfloat16
             and packed.ndim == 2
             and packed.shape[0] % 2 == 0
-            and 1 <= packed.shape[0] // 2 <= self.max_rows
+            and 1 <= packed.shape[0] // 2 <= self.max_packed_rows
             and packed.shape[1] == 2560
             and packed.is_contiguous()
             and packed.data_ptr() % 16 == 0
@@ -207,6 +239,7 @@ class Qwen4Tp2ArHcWorkspace:
         if not (
             cached_device_capability(self.device) == (9, 0)
             and self.supports_hyper(hyper_x)
+            and 1 <= expected_sub_rows <= self.max_rows
             and deferred.local_tensor.shape == (expected_sub_rows, 2560)
             and gates.shape == (*hyper_x.shape[:-1], 4)
             and gamma.shape == (10240,)
@@ -238,6 +271,7 @@ class Qwen4Tp2ArHcWorkspace:
             deferred.packed_dual,
             bool(collect_scale),
             bool(pdl),
+            getattr(self, "buffer_bytes", 0),
         )
         scale = None
         if collect_scale and amax is not None:
@@ -265,6 +299,7 @@ class Qwen4Tp2ArHcWorkspace:
         if not (
             cached_device_capability(self.device) == (9, 0)
             and self.supports_hyper(hyper_x)
+            and 1 <= expected_sub_rows <= self.max_rows
             and deferred.local_tensor.shape == (expected_sub_rows, 2560)
             and gates.shape == (*hyper_x.shape[:-1], 4)
             and gates.dtype == torch.bfloat16
@@ -285,6 +320,7 @@ class Qwen4Tp2ArHcWorkspace:
             self.rank,
             deferred.packed_dual,
             bool(pdl),
+            getattr(self, "buffer_bytes", 0),
         )
 
 

@@ -203,14 +203,29 @@ class TorchSymmMemCommunicator:
         # The post-rendezvous checks are local verdicts too. If they split the
         # group, some ranks would call multimem_all_reduce_ while others fall
         # back to NCCL, which diverges at request time instead of at startup.
+        requires_multicast = (
+            self.world_size in self._WORLD_SIZES_MULTIMEM[self.device_capability]
+        )
+        local_multicast_ok = (
+            os.getenv("RTP_LLM_SYMM_MEM_DISABLE_MULTICAST", "0") != "1"
+            and handle.multicast_ptr != 0
+            and hasattr(torch.ops.symm_mem, "multimem_all_gather_out")
+        )
         local_ok = True
-        if handle.multicast_ptr == 0:
-            local_ok = False
-            reason = "torch symmetric memory multicast operations are not supported"
-        elif not hasattr(torch.ops.symm_mem, "multimem_all_gather_out"):
+        if requires_multicast:
+            if handle.multicast_ptr == 0:
+                local_ok = False
+                reason = "torch symmetric memory multicast operations are not supported"
+            elif not hasattr(torch.ops.symm_mem, "multimem_all_gather_out"):
+                local_ok = False
+                reason = (
+                    "torch.ops.symm_mem.multimem_all_gather_out is not available in "
+                    "this PyTorch build"
+                )
+        elif not hasattr(torch.ops.symm_mem, "two_shot_all_reduce_"):
             local_ok = False
             reason = (
-                "torch.ops.symm_mem.multimem_all_gather_out is not available in "
+                "torch.ops.symm_mem.two_shot_all_reduce_ is not available in "
                 "this PyTorch build"
             )
         if not local_ok:
@@ -225,12 +240,23 @@ class TorchSymmMemCommunicator:
             self.disabled = True
             return
 
+        self._has_multicast = _agree_across_group(
+            self.group, local_multicast_ok, "multicast"
+        )
+        if not self._has_multicast:
+            logging.info(
+                "TorchSymmMemCommunicator: multicast unavailable on group %s "
+                "(world_size=%d); enabling P2P symmetric-memory all_reduce only.",
+                getattr(self.group, "group_name", "default"),
+                self.world_size,
+            )
+
         self._one_shot_copy_out = None
         if self.world_size == 2:
             one_shot = getattr(torch.ops.symm_mem, "one_shot_all_reduce_copy_out", None)
             if _agree_across_group(
                 self.group,
-                one_shot is not None and "H20" in torch.cuda.get_device_name(self.device),
+                one_shot is not None and self.device_capability == 9,
                 "one-shot",
             ):
                 self._one_shot_copy_out = one_shot
@@ -340,7 +366,12 @@ class TorchSymmMemCommunicator:
             (empirical heuristic from PyTorch fused_all_gather_matmul).
           - Total gathered size (shard * world_size) must fit in the buffer.
         """
-        if self.disabled or shard.dtype != self.dtype or not shard.is_contiguous():
+        if (
+            self.disabled
+            or not getattr(self, "_has_multicast", True)
+            or shard.dtype != self.dtype
+            or not shard.is_contiguous()
+        ):
             return False
         shard_bytes = shard.numel() * shard.element_size()
         if shard_bytes % 4 != 0:

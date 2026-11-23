@@ -1,6 +1,7 @@
 """Compact block-scaled MoE for replicated inputs on Hopper."""
 
 from contextvars import ContextVar
+from functools import lru_cache
 import os
 from typing import Literal
 
@@ -26,7 +27,12 @@ compact_moe_output_buffer: ContextVar[torch.Tensor | None] = ContextVar(
 
 _STABLE_ALIGNMENT_MAX_ROUTES = 5120
 _DENSE_EXPERT_ROWS = 128
-_H20_COMPACT_EAGER_MAX_ROWS = 5120
+_H20_COMPACT_EAGER_MAX_ROWS = 6144
+
+
+@lru_cache(maxsize=None)
+def _device_num_sms(device: torch.device) -> int:
+    return int(torch.cuda.get_device_properties(device).multi_processor_count)
 
 # H20 WGMMA sees the 64 output columns as its M dimension. The token
 # dimension is 16, so each expert needs only ceil(actual_rows / 16) tiles.
@@ -166,11 +172,12 @@ def compact_fp8_decode(
             or os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") == "1"
         )
         if not is_graph:
+            num_sms = _device_num_sms(x.device)
             if tokens < 768:
                 bm, bn, nw, ns, sw = 16, 128, 4, 3, True
             elif tokens < 1792:
                 bm, bn, nw, ns, sw = 32, 64, 4, 3, True
-            elif tokens <= 4096:
+            elif tokens <= 4096 or tokens > 6144 or num_sms > 78:
                 bm, bn, nw, ns, sw = 64, 128, 8, 4, False
             else:
                 bm, bn, nw, ns, sw = 32, 64, 4, 3, True

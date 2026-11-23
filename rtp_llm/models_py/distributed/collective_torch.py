@@ -38,6 +38,7 @@ _rocm_rccl = None
 _symm_mem = None
 _flashinfer_allreduce = None
 _canonical_p2p = None
+_tp2_p2p_allgather = None
 
 
 def _get_rocm_rccl():
@@ -99,6 +100,26 @@ def _init_flashinfer_allreduce(
             torch.device("cuda", parallelism_config.local_rank),
             disable_custom_all_reduce=disable_custom_all_reduce,
         )
+
+
+def _init_tp2_p2p_allgather(
+    parallelism_config: ParallelismConfig,
+    disable_custom_all_reduce: Optional[bool] = None,
+) -> None:
+    global _tp2_p2p_allgather
+    if (
+        parallelism_config.tp_size != 2
+        or parallelism_config.tp_size > parallelism_config.local_world_size
+        or not torch.distributed.is_initialized()
+    ):
+        return
+    from rtp_llm.models_py.distributed.tp2_p2p_all_gather import init_tp2_p2p_allgather
+
+    _tp2_p2p_allgather = init_tp2_p2p_allgather(
+        _get_group(Group.TP),
+        torch.device("cuda", parallelism_config.local_rank),
+        disable_custom_all_reduce=disable_custom_all_reduce,
+    )
 
 
 def _make_cpu_tp_broadcaster_base_path(
@@ -200,6 +221,7 @@ def init_distributed_environment(
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
         _init_flashinfer_allreduce(parallelism_config, disable_custom_all_reduce)
+        _init_tp2_p2p_allgather(parallelism_config, disable_custom_all_reduce)
         return
 
     _normalize_parallelism_ranks(parallelism_config)
@@ -235,6 +257,7 @@ def init_distributed_environment(
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
         _init_flashinfer_allreduce(parallelism_config, disable_custom_all_reduce)
+        _init_tp2_p2p_allgather(parallelism_config, disable_custom_all_reduce)
         return
 
     logging.info(
@@ -276,6 +299,7 @@ def init_distributed_environment(
         rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
     init_user_buffers_environment(parallelism_config)
     _init_flashinfer_allreduce(parallelism_config, disable_custom_all_reduce)
+    _init_tp2_p2p_allgather(parallelism_config, disable_custom_all_reduce)
 
 
 def _create_process_groups(
@@ -680,7 +704,7 @@ def destroy_distributed_environment():
     to reinitialize the distributed environment.
     """
     global _group_map, _parallelism_config, _initialized, _cpu_tp_broadcaster_base_path
-    global _canonical_p2p
+    global _canonical_p2p, _tp2_p2p_allgather
 
     rank = torch.distributed.get_rank()
     logging.info(f"[rank: {rank}] Destroying distributed environment")
@@ -715,6 +739,9 @@ def destroy_distributed_environment():
     if _canonical_p2p is not None:
         _canonical_p2p.close()
     _canonical_p2p = None
+    if _tp2_p2p_allgather is not None:
+        _tp2_p2p_allgather.close()
+    _tp2_p2p_allgather = None
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
     _group_map.clear()
@@ -901,6 +928,8 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
                 return gathered.view(
                     [world_size * tensor.shape[0]] + list(tensor.shape)[1:]
                 )
+        if _tp2_p2p_allgather is not None and _tp2_p2p_allgather.should_use(tensor):
+            return _tp2_p2p_allgather.all_gather(tensor)
 
     process_group = _get_group(group)
     world_size = torch.distributed.get_world_size(process_group)

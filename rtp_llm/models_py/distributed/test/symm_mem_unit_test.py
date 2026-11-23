@@ -106,6 +106,83 @@ class SymmMemConfigurationTest(unittest.TestCase):
                 allocate.assert_not_called()
                 rendezvous.assert_not_called()
 
+    def test_tp2_multicast_zero_enables_p2p_allreduce_on_l20x(self) -> None:
+        import torch
+
+        group = SimpleNamespace(group_name="tp_l20x")
+        fake_buf = SimpleNamespace(
+            dtype=torch.bfloat16,
+            device=torch.device("cuda:0"),
+        )
+        fake_handle = SimpleNamespace(multicast_ptr=0)
+        one_shot_fn = MagicMock()
+        fake_symm_ops = SimpleNamespace(
+            two_shot_all_reduce_=MagicMock(),
+            one_shot_all_reduce_copy_out=one_shot_fn,
+            multimem_all_gather_out=MagicMock(),
+        )
+        with patch.object(symm_mem, "torch_symm_mem_available", True), patch.object(
+            symm_mem.torch.cuda, "set_device"
+        ), patch.object(
+            symm_mem.torch.cuda, "get_device_capability", return_value=(9, 0)
+        ), patch.object(
+            symm_mem.torch.cuda, "get_device_name", return_value="NVIDIA L20X"
+        ), patch.object(
+            symm_mem.dist, "get_rank", return_value=0
+        ), patch.object(
+            symm_mem.dist, "get_world_size", return_value=2
+        ), patch.object(
+            symm_mem, "_agree_across_group", side_effect=lambda _g, ok, _t: ok
+        ), patch.object(
+            symm_mem.torch_symm_mem, "empty", return_value=fake_buf
+        ), patch.object(
+            symm_mem.torch_symm_mem, "rendezvous", return_value=fake_handle
+        ), patch.object(
+            symm_mem.torch.ops, "symm_mem", fake_symm_ops, create=True
+        ):
+            comm = symm_mem.TorchSymmMemCommunicator(group, 0)
+            self.assertFalse(comm.disabled)
+            self.assertFalse(comm._has_multicast)
+            self.assertIs(comm._one_shot_copy_out, one_shot_fn)
+            fake_tensor = SimpleNamespace(
+                dtype=torch.bfloat16,
+                numel=lambda: 2560,
+                element_size=lambda: 2,
+                is_contiguous=lambda: True,
+                dim=lambda: 2,
+                shape=(1, 2560),
+            )
+            self.assertTrue(comm.should_torch_symm_mem_allreduce(fake_tensor))
+            self.assertFalse(comm.should_torch_symm_mem_allgather(fake_tensor))
+
+    def test_tp4_multicast_zero_disables_communicator(self) -> None:
+        group = SimpleNamespace(group_name="tp4_no_mc")
+        fake_handle = SimpleNamespace(multicast_ptr=0)
+        fake_symm_ops = SimpleNamespace(
+            two_shot_all_reduce_=MagicMock(),
+            multimem_all_gather_out=MagicMock(),
+        )
+        with patch.object(symm_mem, "torch_symm_mem_available", True), patch.object(
+            symm_mem.torch.cuda, "set_device"
+        ), patch.object(
+            symm_mem.torch.cuda, "get_device_capability", return_value=(9, 0)
+        ), patch.object(
+            symm_mem.dist, "get_rank", return_value=0
+        ), patch.object(
+            symm_mem.dist, "get_world_size", return_value=4
+        ), patch.object(
+            symm_mem, "_agree_across_group", side_effect=lambda _g, ok, _t: ok
+        ), patch.object(
+            symm_mem.torch_symm_mem, "empty", return_value=object()
+        ), patch.object(
+            symm_mem.torch_symm_mem, "rendezvous", return_value=fake_handle
+        ), patch.object(
+            symm_mem.torch.ops, "symm_mem", fake_symm_ops, create=True
+        ):
+            comm = symm_mem.TorchSymmMemCommunicator(group, 0)
+            self.assertTrue(comm.disabled)
+            self.assertIsNone(comm.buffer)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -216,6 +216,81 @@ class Wave10Sm90FusionTest(unittest.TestCase):
                     torch.equal(st_act.view(torch.uint8), st_ref.view(torch.uint8))
                 )
 
+    def test_linear_shared_sigmoid_mul_and_l20x_compact_moe(self):
+        from unittest.mock import patch
+        from rtp_llm.models_py.modules.qwen4_exp.moe.compact_fp8_decode import (
+            _H20_COMPACT_EAGER_MAX_ROWS,
+            compact_fp8_decode,
+        )
+        from rtp_llm.models_py.modules.qwen4_exp.moe.shared_gate_triton import (
+            try_linear_shared_sigmoid_mul,
+            try_shared_sigmoid_mul,
+        )
+
+        self.assertGreaterEqual(_H20_COMPACT_EAGER_MAX_ROWS, 6144)
+        w = (torch.randn((1, 2560), device="cuda") * 0.05).bfloat16()
+        for rows in (1, 2, 4, 8, 16, 64, 192, 512):
+            x = torch.randn((rows, 2560), device="cuda", dtype=torch.bfloat16)
+            sh = torch.randn((rows, 2560), device="cuda", dtype=torch.bfloat16)
+            gate = torch.nn.functional.linear(x, w)
+            ref = try_shared_sigmoid_mul(gate, sh)
+            act = try_linear_shared_sigmoid_mul(x, w, sh)
+            self.assertIsNotNone(act)
+            torch.testing.assert_close(act, ref, atol=1e-2, rtol=1e-2)
+            out_buf = torch.empty_like(sh)
+            act_inplace = try_linear_shared_sigmoid_mul(x, w, sh, out=out_buf)
+            self.assertEqual(act_inplace.data_ptr(), out_buf.data_ptr())
+            self.assertTrue(torch.equal(out_buf, act))
+
+        # CUDA Graph capture & replay of try_linear_shared_sigmoid_mul
+        gx = torch.randn((64, 2560), device="cuda", dtype=torch.bfloat16)
+        gsh = torch.randn((64, 2560), device="cuda", dtype=torch.bfloat16)
+        gout = torch.empty_like(gsh)
+        try_linear_shared_sigmoid_mul(gx, w, gsh, out=gout)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            try_linear_shared_sigmoid_mul(gx, w, gsh, out=gout)
+        for _ in range(3):
+            gx.copy_(torch.randn_like(gx))
+            gsh.copy_(torch.randn_like(gsh))
+            graph.replay()
+            ref_g = try_shared_sigmoid_mul(torch.nn.functional.linear(gx, w), gsh)
+            torch.testing.assert_close(gout, ref_g, atol=1e-2, rtol=1e-2)
+        graph.reset()
+
+        # Verify 10K/4800 prefill row count (5200) under simulated 132-SM L20X properties
+        from rtp_llm.models_py.modules.qwen4_exp.moe import (
+            compact_fp8_decode as compact_mod,
+        )
+
+        tokens = 5200
+        x_fp8 = torch.randn((tokens, 2560), device="cuda", dtype=torch.bfloat16).to(
+            torch.float8_e4m3fn
+        )
+        x_sc = torch.ones((tokens, 20), device="cuda", dtype=torch.float32) * 0.05
+        ids = torch.randint(0, 16, (tokens, 10), device="cuda", dtype=torch.int32)
+        rw = torch.softmax(
+            torch.randn((tokens, 10), device="cuda", dtype=torch.float32), dim=-1
+        )
+        counts = torch.bincount(ids.view(-1), minlength=16).to(torch.int32)
+        up_w = torch.randn((16, 1024, 2560), device="cuda", dtype=torch.bfloat16).to(
+            torch.float8_e4m3fn
+        )
+        up_s = torch.ones((16, 8, 20), device="cuda", dtype=torch.float32) * 0.02
+        dn_w = torch.randn((16, 2560, 512), device="cuda", dtype=torch.bfloat16).to(
+            torch.float8_e4m3fn
+        )
+        dn_s = torch.ones((16, 20, 4), device="cuda", dtype=torch.float32) * 0.02
+        out_h20 = compact_fp8_decode(
+            x_fp8, x_sc, ids, rw, counts, (up_w, up_s), (dn_w, dn_s)
+        )
+        with patch.object(compact_mod, "_device_num_sms", return_value=132):
+            out_l20x = compact_fp8_decode(
+                x_fp8, x_sc, ids, rw, counts, (up_w, up_s), (dn_w, dn_s)
+            )
+        torch.testing.assert_close(out_l20x, out_h20, atol=2e-2, rtol=2e-2)
+
 
 if __name__ == "__main__":
     unittest.main()
