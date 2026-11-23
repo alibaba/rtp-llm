@@ -1429,14 +1429,17 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPressureReclaimsOtherGroupsWithoutDroppi
     const auto groups = allocator->cacheGroups();
     groups[0]->blockPool()->decRef(blocks[0]);
     const auto full_pool = groups[1]->blockPool();
-    auto       occupied  = full_pool->malloc(full_pool->freeBlocksNum());
+    ASSERT_EQ(full_pool->refCount(blocks[1]), 2u);
+    auto occupied = full_pool->malloc(full_pool->freeBlocksNum());
     ASSERT_TRUE(occupied.has_value());
     full_pool->incRef(*occupied);
     EXPECT_EQ(full_pool->freeBlocksNum(), 0u);
     EXPECT_GT(cache->evictForGroup(groups[1]->tag(), 1), 0);
     EXPECT_GT(full_pool->freeBlocksNum(), 0u);
     EXPECT_TRUE(full_pool->isAllocated(blocks[1]));
-    EXPECT_EQ(full_pool->refCount(blocks[1]), 1u);
+    // The active FULL block cannot free an arena slot. Retain its cache entry
+    // while reclaiming the cache-only LINEAR block.
+    EXPECT_EQ(full_pool->refCount(blocks[1]), 2u);
     EXPECT_FALSE(groups[0]->blockPool()->isAllocated(blocks[0]));
     full_pool->decRef(*occupied);
     full_pool->decRef(blocks[1]);
