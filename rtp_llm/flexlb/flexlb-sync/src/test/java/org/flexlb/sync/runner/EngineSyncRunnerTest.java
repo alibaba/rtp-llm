@@ -35,7 +35,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.atomic.LongAdder;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -73,7 +72,7 @@ class EngineSyncRunnerTest {
 
     private final long syncRequestTimeoutMs = 5000L;
 
-    @Mock private LongAdder syncCount;
+    private final long syncCycleId = 0L;
 
     private final long syncEngineStatusInterval = 20L;
 
@@ -94,7 +93,7 @@ class EngineSyncRunnerTest {
                         cacheAwareService,
                         cacheIntervalService,
                         syncRequestTimeoutMs,
-                        syncCount,
+                        syncCycleId,
                         syncEngineStatusInterval,
                         false,
                         STATUS_STALE_AFTER_US);
@@ -123,7 +122,7 @@ class EngineSyncRunnerTest {
                         cacheAwareService,
                         cacheIntervalService,
                         syncRequestTimeoutMs,
-                        syncCount,
+                        syncCycleId,
                         syncEngineStatusInterval,
                         false,
                         STATUS_STALE_AFTER_US);
@@ -152,7 +151,7 @@ class EngineSyncRunnerTest {
                         cacheAwareService,
                         cacheIntervalService,
                         syncRequestTimeoutMs,
-                        syncCount,
+                        syncCycleId,
                         syncEngineStatusInterval,
                         false,
                         STATUS_STALE_AFTER_US);
@@ -187,7 +186,7 @@ class EngineSyncRunnerTest {
                         cacheAwareService,
                         cacheIntervalService,
                         syncRequestTimeoutMs,
-                        syncCount,
+                        syncCycleId,
                         syncEngineStatusInterval,
                         false,
                         STATUS_STALE_AFTER_US);
@@ -232,7 +231,7 @@ class EngineSyncRunnerTest {
                         cacheAwareService,
                         cacheIntervalService,
                         syncRequestTimeoutMs,
-                        syncCount,
+                        syncCycleId,
                         syncEngineStatusInterval,
                         false,
                         1_000_000L);
@@ -302,7 +301,7 @@ class EngineSyncRunnerTest {
                             cacheAwareService,
                             cacheIntervalService,
                             syncRequestTimeoutMs,
-                            syncCount,
+                            syncCycleId,
                             syncEngineStatusInterval,
                             false,
                             1_000_000L);
@@ -346,7 +345,7 @@ class EngineSyncRunnerTest {
                         cacheAwareService,
                         cacheIntervalService,
                         syncRequestTimeoutMs,
-                        syncCount,
+                        syncCycleId,
                         syncEngineStatusInterval,
                         false,
                         STATUS_STALE_AFTER_US);
@@ -460,7 +459,7 @@ class EngineSyncRunnerTest {
                         cacheAwareService,
                         cacheIntervalService,
                         syncRequestTimeoutMs,
-                        syncCount,
+                        syncCycleId,
                         syncEngineStatusInterval,
                         false,
                         false,
@@ -565,6 +564,30 @@ class EngineSyncRunnerTest {
     }
 
     @Test
+    void prefillCachePollUsesTheScheduledRoundBeforeTakingALease() {
+        var host = WorkerHost.of("127.0.0.1", 8080);
+        when(workerAddressService.getEngineWorkerList(modelName, roleType))
+                .thenReturn(List.of(host));
+        when(cacheIntervalService.getCurrentIntervalMs()).thenReturn(40L);
+        Mockito.doThrow(new RejectedExecutionException())
+                .when(statusCheckExecutor)
+                .submit(any(Runnable.class));
+
+        runPollRound(1L);
+
+        verify(statusCheckExecutor).submit(any(GrpcWorkerStatusRunner.class));
+        verify(statusCheckExecutor, never()).submit(any(GrpcCacheStatusCheckRunner.class));
+        var worker = workerDirectory.statusSnapshot(roleType).get(host.getLogicalIpPort());
+        try (var lease = worker.tryBeginCachePoll()) {
+            assertNotNull(lease);
+        }
+        runPollRound(2L);
+
+        verify(statusCheckExecutor, times(2)).submit(any(GrpcWorkerStatusRunner.class));
+        verify(statusCheckExecutor).submit(any(GrpcCacheStatusCheckRunner.class));
+    }
+
+    @Test
     void should_skip_cache_status_task_when_kvcm_is_enabled() {
         when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
                 .thenReturn(List.of(new WorkerHost("127.0.0.1", 8080)));
@@ -581,7 +604,7 @@ class EngineSyncRunnerTest {
                         cacheAwareService,
                         cacheIntervalService,
                         syncRequestTimeoutMs,
-                        syncCount,
+                        syncCycleId,
                         syncEngineStatusInterval,
                         true,
                         false,
@@ -591,6 +614,25 @@ class EngineSyncRunnerTest {
 
         verify(statusCheckExecutor).submit(any(GrpcWorkerStatusRunner.class));
         verify(statusCheckExecutor, never()).submit(any(GrpcCacheStatusCheckRunner.class));
+    }
+
+    private void runPollRound(long round) {
+        new EngineSyncRunner(
+                        modelName,
+                        workerDirectory,
+                        workerAddressService,
+                        statusCheckExecutor,
+                        engineHealthReporter,
+                        engineGrpcService,
+                        roleType,
+                        cacheAwareService,
+                        cacheIntervalService,
+                        syncRequestTimeoutMs,
+                        round,
+                        syncEngineStatusInterval,
+                        false,
+                        STATUS_STALE_AFTER_US)
+                .run();
     }
 
     private EngineSyncRunner varianceRunner(WorkerDirectory directory) {
@@ -605,7 +647,7 @@ class EngineSyncRunnerTest {
                 cacheAwareService,
                 cacheIntervalService,
                 syncRequestTimeoutMs,
-                syncCount,
+                syncCycleId,
                 syncEngineStatusInterval,
                 false,
                 STATUS_STALE_AFTER_US);
@@ -642,7 +684,7 @@ class EngineSyncRunnerTest {
                         cacheAwareService,
                         cacheIntervalService,
                         syncRequestTimeoutMs,
-                        syncCount,
+                        syncCycleId,
                         syncEngineStatusInterval,
                         false,
                         STATUS_STALE_AFTER_US);

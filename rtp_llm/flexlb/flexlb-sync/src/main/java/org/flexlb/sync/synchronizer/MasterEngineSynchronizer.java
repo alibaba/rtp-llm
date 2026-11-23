@@ -22,7 +22,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.LongAdder;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_INFO;
 
@@ -49,7 +49,7 @@ public final class MasterEngineSynchronizer {
 
     private final long syncRequestTimeoutMs;
 
-    private final LongAdder syncCount = new LongAdder();
+    private final AtomicLong syncCount = new AtomicLong();
     private final Long syncEngineStatusInterval;
 
     private final long statusStaleAfterUs;
@@ -102,11 +102,8 @@ public final class MasterEngineSynchronizer {
     }
 
     public void syncEngineStatus() {
-        syncCount.increment();
-        logger.debug(
-                "sync engine status start, times:{}, modelName:{}",
-                syncCount.longValue(),
-                modelName);
+        long syncCycleId = syncCount.incrementAndGet();
+        logger.debug("sync engine status start, times:{}, modelName:{}", syncCycleId, modelName);
         try {
             for (RoleType roleType : requiredRoles) {
                 engineSyncExecutor.submit(
@@ -122,7 +119,7 @@ public final class MasterEngineSynchronizer {
                                 cacheAwareService,
                                 cacheIntervalService,
                                 syncRequestTimeoutMs,
-                                syncCount,
+                                syncCycleId,
                                 syncEngineStatusInterval,
                                 flexlbConfig.isKvcmCacheMatching(),
                                 flexlbConfig
