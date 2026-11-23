@@ -17,7 +17,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Checks worker status conversion while preserving task identity, phases and cache metadata.
+ * Checks worker status and cache snapshot conversion from protobuf.
  */
 class EngineStatusConverterTest {
 
@@ -339,6 +339,66 @@ class EngineStatusConverterTest {
         assertEquals(1, engine.blockHashLookaheadTokens());
         assertEquals(KvCacheGroupMode.WITH_MAMBA, engine.kvCacheGroupMode());
         assertEquals(1, engine.cacheMatchRollbackBlocks());
+    }
+
+    @Test
+    void prefersPackedCacheKeysOnTheWireAndDeduplicatesSignedKeys() throws Exception {
+        var legacySnapshot =
+                EngineRpcService.CacheStatusPB.newBuilder()
+                        .setVersion(42)
+                        .putCacheKeys(7, true)
+                        .build();
+        var bytes = new ByteArrayOutputStream();
+        legacySnapshot.writeTo(bytes);
+        var wire = CodedOutputStream.newInstance(bytes);
+        wire.writeTag(7, 2);
+        wire.writeUInt32NoTag(3 * Long.BYTES);
+        wire.writeSFixed64NoTag(Long.MIN_VALUE);
+        wire.writeSFixed64NoTag(Long.MAX_VALUE);
+        wire.writeSFixed64NoTag(Long.MIN_VALUE);
+        wire.flush();
+
+        var status =
+                EngineStatusConverter.convertToCacheStatus(
+                        EngineRpcService.CacheStatusPB.parseFrom(bytes.toByteArray()));
+
+        assertEquals(Set.of(Long.MIN_VALUE, Long.MAX_VALUE), status.getCachedKeys());
+        assertEquals(2, status.getCacheKeySize());
+        assertEquals(42, status.getVersion());
+    }
+
+    @Test
+    void fallsBackToLegacyMapKeysRegardlessOfMapValues() {
+        var snapshot =
+                EngineRpcService.CacheStatusPB.newBuilder()
+                        .putCacheKeys(-1, false)
+                        .putCacheKeys(2, true)
+                        .build();
+
+        var status = EngineStatusConverter.convertToCacheStatus(snapshot);
+
+        assertEquals(Set.of(-1L, 2L), status.getCachedKeys());
+        assertEquals(2, status.getCacheKeySize());
+    }
+
+    @Test
+    void keepsVersionAndCapacityWhenNoCacheKeysAreSent() {
+        var snapshot =
+                EngineRpcService.CacheStatusPB.newBuilder()
+                        .setVersion(42)
+                        .setAvailableKvCache(8)
+                        .setTotalKvCache(16)
+                        .setBlockSize(4)
+                        .build();
+
+        var status = EngineStatusConverter.convertToCacheStatus(snapshot);
+
+        assertEquals(Set.of(), status.getCachedKeys());
+        assertEquals(0, status.getCacheKeySize());
+        assertEquals(42, status.getVersion());
+        assertEquals(8, status.getAvailableKvCache());
+        assertEquals(16, status.getTotalKvCache());
+        assertEquals(4, status.getBlockSize());
     }
 
     private static EngineRpcService.WorkerStatusPB.Builder statusBuilder() {
