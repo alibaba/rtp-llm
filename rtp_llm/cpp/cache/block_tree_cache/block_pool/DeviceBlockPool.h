@@ -189,6 +189,8 @@ private:
     torch::Tensor                  cache_aligned_buffer_;
     torch::Tensor                  offload_host_buffer_;
     std::vector<OffloadStoragePtr> offload_storages_;
+    size_t                         offload_gpu_kv_stride_bytes_{0};
+    size_t                         offload_gpu_layer_stride_bytes_{0};
     std::vector<int64_t>           offload_cpu_generations_;
     std::vector<uint8_t>           offload_dirty_;
     BlockIdList                    offload_dirty_blocks_;

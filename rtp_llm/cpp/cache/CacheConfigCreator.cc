@@ -647,9 +647,12 @@ TieredCacheCapacity CacheConfigCreator::configureOffloadCapacity(CacheConfig&   
             block_bytes % pages == 0, "offload tag=%s has a partial page stride", group.tag.c_str());
         addBudgetBytes(budget.fixed_gpu_bytes, block_bytes / pages, resident / page_rows);
         if (dynamic_hot_cache) {
-            addBudgetBytes(budget.fixed_gpu_bytes, sizeof(int64_t), resident);     // allocation epochs shared by tag
-            addBudgetBytes(budget.fixed_gpu_bytes, sizeof(int32_t));               // active hot rows
-            addBudgetBytes(budget.fixed_gpu_bytes, kOffloadAllocationChunkBytes);  // VMM tail rounding
+            const size_t segments = owners * (group.kvScaleStrideBytes() > 0 ? 2 : 1);
+            addBudgetBytes(budget.fixed_gpu_bytes, sizeof(int64_t), resident);  // allocation epochs shared by tag
+            addBudgetBytes(budget.fixed_gpu_bytes, sizeof(int32_t));            // active hot rows
+            // Each dynamic VMM segment aligns its start to a 2 MiB granule so its
+            // permanent HBM backing lives inside a single physical RDMA-registrable handle.
+            addBudgetBytes(budget.fixed_gpu_bytes, kOffloadAllocationChunkBytes, segments);
         }
         // Shared selection state is per runtime; native KV and pack staging are per storage.
         addBudgetBytes(budget.metadata_block_bytes, 8 * static_cast<size_t>(rows), runtimes);

@@ -3476,13 +3476,29 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
                                      draft_event]() mutable {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(spec_bookkeeping_worker)");
 
-        auto worker_streams = stream_groups_copy.allStreams();
+        auto worker_streams    = stream_groups_copy.allStreams();
+        auto tail_event        = draft_event ? draft_event : rejection_event;
+        bool tail_event_synced = false;
 
-        auto dec_guard = std::shared_ptr<void>(nullptr, [worker_streams](void*) {
-            for (auto& s : worker_streams) {
-                s->decPendingAsyncBookkeepingAndMaybeRelease();
+        struct PendingBookkeepingGuard {
+            std::list<GenerateStreamPtr>& streams;
+            std::shared_ptr<torch::Event> tail_event;
+            const bool&                   tail_event_synced;
+            ~PendingBookkeepingGuard() {
+                if (!tail_event_synced && tail_event) {
+                    try {
+                        tail_event->synchronize();
+                    } catch (const std::exception& e) {
+                        RTP_LLM_LOG_ERROR("[stream-async] tail event sync failed during unwind: %s", e.what());
+                    } catch (...) {
+                        RTP_LLM_LOG_ERROR("[stream-async] tail event sync failed during unwind with unknown exception");
+                    }
+                }
+                for (auto& s : streams) {
+                    s->decPendingAsyncBookkeepingAndMaybeRelease();
+                }
             }
-        });
+        } dec_guard{worker_streams, tail_event, tail_event_synced};
 
         if (rejection_event) {
             rejection_event->block(cuda_graph::graphGetCurrentStream());
@@ -3494,6 +3510,14 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         auto status = processor->dispatchDecode(stream_groups_copy, spec_decode_copy, draft_prefill_copy);
         if (!status.ok()) {
             RTP_LLM_LOG_ERROR("[stream-async] dispatchDecode (worker) failed: %s", status.ToString().c_str());
+        }
+        // dispatchDecode synchronizes only transfer_done_event (recorded before
+        // runDraftPrefillForward). Finish waiting on draft_event before dropping
+        // pending async bookkeeping so neither deferred release nor the next
+        // schedule() can free/reuse KV blocks while draft extend/commit is in flight.
+        if (tail_event) {
+            tail_event_synced = true;
+            tail_event->synchronize();
         }
     });
 

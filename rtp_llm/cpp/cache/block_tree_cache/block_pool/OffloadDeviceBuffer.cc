@@ -27,24 +27,40 @@ void checkDriver(CUresult result, const char* operation) {
     }
     RTP_LLM_CHECK_WITH_INFO(result == CUDA_SUCCESS, "%s: %s", operation, message ? message : "CUDA driver error");
 }
+
+size_t alignUp(size_t value, size_t alignment) {
+    RTP_LLM_CHECK(alignment > 0);
+    RTP_LLM_CHECK(value <= std::numeric_limits<size_t>::max() - alignment + 1);
+    return (value + alignment - 1) / alignment * alignment;
+}
 }  // namespace
 
 struct OffloadDeviceBuffer::Impl {
-    CUdeviceptr address = 0;
-    size_t bytes = 0;
-    size_t reserved = 0;
-    size_t granularity = 0;
-    int device = -1;
-    uint32_t maximum = 0;
-    uint32_t page_rows = 0;
-    uint32_t rows = 0;
-    int64_t generation = 0;
-    CUmemAllocationProp prop{};
-    std::vector<OffloadDeviceSegment> segments;
+    struct FixedMapping {
+        size_t                       offset = 0;
+        size_t                       size   = 0;
+        CUmemGenericAllocationHandle handle = 0;
+    };
+
+    CUdeviceptr                               address         = 0;
+    size_t                                    bytes           = 0;
+    size_t                                    reserved        = 0;
+    size_t                                    granularity     = 0;
+    size_t                                    fixed_committed = 0;
+    int                                       device          = -1;
+    uint32_t                                  maximum         = 0;
+    uint32_t                                  page_rows       = 0;
+    uint32_t                                  rows            = 0;
+    bool                                      initialized     = false;
+    int64_t                                   generation      = 0;
+    CUmemAllocationProp                       prop{};
+    std::vector<OffloadDeviceSegment>         segments;
+    std::vector<FixedMapping>                 fixed_mappings;
+    std::vector<uint8_t>                      fixed_chunks;
     std::vector<CUmemGenericAllocationHandle> handles;
-    torch::Tensor active;
-    torch::Tensor epoch;
-    mutable std::mutex mutex;
+    torch::Tensor                             active;
+    torch::Tensor                             epoch;
+    mutable std::mutex                        mutex;
 
     ~Impl() {
         if (!address) {
@@ -60,14 +76,21 @@ struct OffloadDeviceBuffer::Impl {
                 cuMemRelease(handles[i]);
             }
         }
+        for (const auto& mapping : fixed_mappings) {
+            if (mapping.handle) {
+                cuMemUnmap(address + mapping.offset, mapping.size);
+                cuMemRelease(mapping.handle);
+            }
+        }
         cuMemAddressFree(address, reserved);
     }
 };
 
-OffloadDeviceBuffer::OffloadDeviceBuffer(size_t bytes,
-                                         uint32_t max_rows,
-                                         uint32_t rows_per_page,
-                                         std::vector<OffloadDeviceSegment> segments): impl_(std::make_unique<Impl>()) {
+OffloadDeviceBuffer::OffloadDeviceBuffer(size_t                            bytes,
+                                         uint32_t                          max_rows,
+                                         uint32_t                          rows_per_page,
+                                         std::vector<OffloadDeviceSegment> segments):
+    impl_(std::make_unique<Impl>()) {
     auto& state = *impl_;
     RTP_LLM_CHECK(bytes > 0 && rows_per_page > 0 && max_rows > 0 && max_rows % rows_per_page == 0);
     RTP_LLM_CHECK(cudaGetDevice(&state.device) == cudaSuccess);
@@ -76,35 +99,81 @@ OffloadDeviceBuffer::OffloadDeviceBuffer(size_t bytes,
     checkDriver(cuDeviceGetAttribute(&supported, CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED, state.device),
                 "query sparse KV virtual-memory support");
     RTP_LLM_CHECK_WITH_INFO(supported, "dynamic sparse KV hot cache requires CUDA virtual memory management");
-    state.bytes = bytes;
-    state.maximum = max_rows;
-    state.page_rows = rows_per_page;
-    state.segments = std::move(segments);
-    state.prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+    state.bytes              = bytes;
+    state.maximum            = max_rows;
+    state.page_rows          = rows_per_page;
+    state.segments           = std::move(segments);
+    state.prop.type          = CU_MEM_ALLOCATION_TYPE_PINNED;
     state.prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-    state.prop.location.id = state.device;
-    int rdma_supported = 0;
-    checkDriver(cuDeviceGetAttribute(&rdma_supported, CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED,
-                                    state.device), "query sparse KV VMM RDMA support");
+    state.prop.location.id   = state.device;
+    int rdma_supported       = 0;
+    checkDriver(cuDeviceGetAttribute(
+                    &rdma_supported, CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED, state.device),
+                "query sparse KV VMM RDMA support");
     state.prop.allocFlags.gpuDirectRDMACapable = rdma_supported != 0;
     checkDriver(cuMemGetAllocationGranularity(&state.granularity, &state.prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM),
                 "query sparse KV allocation granularity");
     RTP_LLM_CHECK_WITH_INFO(kOffloadAllocationChunkBytes % state.granularity == 0,
                             "CUDA minimum mapping granularity=%zu must divide sparse KV chunk bytes=%zu",
-                            state.granularity, kOffloadAllocationChunkBytes);
-    state.granularity = kOffloadAllocationChunkBytes;
-    RTP_LLM_CHECK(bytes <= std::numeric_limits<size_t>::max() - state.granularity + 1);
-    state.reserved = (bytes + state.granularity - 1) / state.granularity * state.granularity;
-    state.handles.resize(state.reserved / state.granularity, 0);
+                            state.granularity,
+                            kOffloadAllocationChunkBytes);
+    state.granularity         = kOffloadAllocationChunkBytes;
+    state.reserved            = alignUp(bytes, state.granularity);
+    const size_t total_chunks = state.reserved / state.granularity;
+    state.handles.resize(total_chunks, 0);
+    state.fixed_chunks.resize(total_chunks, 0);
+    std::vector<uint8_t> claimed(total_chunks, 0);
     for (const auto& segment : state.segments) {
+        RTP_LLM_CHECK_WITH_INFO(segment.offset % state.granularity == 0,
+                                "offload VMM segment offset=%zu must align to granularity=%zu",
+                                segment.offset,
+                                state.granularity);
         RTP_LLM_CHECK(segment.offset <= bytes && segment.fixed_bytes <= bytes - segment.offset);
         RTP_LLM_CHECK(segment.page_bytes > 0
-                      && max_rows / rows_per_page <= (bytes - segment.offset - segment.fixed_bytes) / segment.page_bytes);
+                      && max_rows / rows_per_page
+                             <= (bytes - segment.offset - segment.fixed_bytes) / segment.page_bytes);
+        const size_t total_bytes = segment.fixed_bytes + (max_rows / rows_per_page) * segment.page_bytes;
+        const size_t begin_chunk = segment.offset / state.granularity;
+        const size_t end_chunk   = (segment.offset + alignUp(total_bytes, state.granularity)) / state.granularity;
+        RTP_LLM_CHECK(end_chunk <= total_chunks);
+        for (size_t i = begin_chunk; i < end_chunk; ++i) {
+            RTP_LLM_CHECK_WITH_INFO(!claimed[i], "offload VMM segments overlap at chunk=%zu", i);
+            claimed[i] = 1;
+        }
     }
     auto options = torch::TensorOptions().device(torch::Device(torch::kCUDA, state.device));
     state.active = torch::zeros({}, options.dtype(torch::kInt32));
-    state.epoch = torch::zeros({max_rows}, options.dtype(torch::kInt64));
-    checkDriver(cuMemAddressReserve(&state.address, state.reserved, 0, 0, 0), "reserve sparse KV virtual addresses");
+    state.epoch  = torch::zeros({max_rows}, options.dtype(torch::kInt64));
+    checkDriver(cuMemAddressReserve(&state.address, state.reserved, state.granularity, 0, 0),
+                "reserve sparse KV virtual addresses");
+    for (const auto& segment : state.segments) {
+        const size_t fixed_mapped = segment.fixed_bytes > 0 ? alignUp(segment.fixed_bytes, state.granularity) : 0;
+        if (fixed_mapped == 0) {
+            continue;
+        }
+        // Keep each segment's permanent HBM backing inside a single physical VMM
+        // handle so GPUDirect RDMA registration (ibv_reg_mr / nvidia-peermem)
+        // never crosses a cuMemCreate handle boundary.
+        CUmemGenericAllocationHandle handle = 0;
+        checkDriver(cuMemCreate(&handle, fixed_mapped, &state.prop, 0), "allocate sparse KV fixed physical backing");
+        const auto mapped = cuMemMap(state.address + segment.offset, fixed_mapped, 0, handle, 0);
+        if (mapped != CUDA_SUCCESS) {
+            cuMemRelease(handle);
+            checkDriver(mapped, "map sparse KV fixed physical backing");
+        }
+        state.fixed_mappings.push_back({segment.offset, fixed_mapped, handle});
+        state.fixed_committed += fixed_mapped;
+        CUmemAccessDesc access{};
+        access.location = state.prop.location;
+        access.flags    = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+        checkDriver(cuMemSetAccess(state.address + segment.offset, fixed_mapped, &access, 1),
+                    "set sparse KV fixed backing access");
+        const size_t begin_chunk = segment.offset / state.granularity;
+        const size_t end_chunk   = (segment.offset + fixed_mapped) / state.granularity;
+        for (size_t i = begin_chunk; i < end_chunk; ++i) {
+            state.fixed_chunks[i] = 1;
+        }
+    }
     resize(0);
 }
 
@@ -112,31 +181,38 @@ OffloadDeviceBuffer::~OffloadDeviceBuffer() = default;
 
 torch::Tensor OffloadDeviceBuffer::tensor() {
     auto owner = shared_from_this();
-    return torch::from_blob(reinterpret_cast<void*>(impl_->address),
-                             {static_cast<int64_t>(impl_->bytes)},
-                             [owner = std::move(owner)](void*) {},
-                             torch::TensorOptions().dtype(torch::kUInt8).device(torch::Device(torch::kCUDA, impl_->device)));
+    return torch::from_blob(
+        reinterpret_cast<void*>(impl_->address),
+        {static_cast<int64_t>(impl_->bytes)},
+        [owner = std::move(owner)](void*) {},
+        torch::TensorOptions().dtype(torch::kUInt8).device(torch::Device(torch::kCUDA, impl_->device)));
 }
 
 void OffloadDeviceBuffer::resize(uint32_t rows, bool grow_only) {
-    auto& state = *impl_;
+    auto&                       state = *impl_;
     std::lock_guard<std::mutex> lock(state.mutex);
     RTP_LLM_CHECK_WITH_INFO(rows <= state.maximum, "hot cache rows=%u exceed maximum=%u", rows, state.maximum);
     rows = (static_cast<uint64_t>(rows) + state.page_rows - 1) / state.page_rows * state.page_rows;
     if (grow_only) {
         rows = std::max(rows, state.rows);
     }
-    c10::cuda::CUDAGuard guard(state.device);
+    c10::cuda::CUDAGuard    guard(state.device);
     cudaStreamCaptureStatus capture;
     RTP_LLM_CHECK(cudaStreamIsCapturing(at::cuda::getCurrentCUDAStream(), &capture) == cudaSuccess);
     RTP_LLM_CHECK_WITH_INFO(capture == cudaStreamCaptureStatusNone, "hot cache resize must run outside graph capture");
-    if (rows == state.rows && state.handles.front()) {
+    if (state.initialized && rows == state.rows) {
         return;
     }
     std::vector<uint8_t> needed(state.handles.size(), 0);
     for (const auto& segment : state.segments) {
+        const size_t fixed_end =
+            segment.offset + (segment.fixed_bytes > 0 ? alignUp(segment.fixed_bytes, state.granularity) : 0);
         const size_t end = segment.offset + segment.fixed_bytes + rows / state.page_rows * segment.page_bytes;
-        for (size_t i = segment.offset / state.granularity; i < (end + state.granularity - 1) / state.granularity; ++i) {
+        if (end <= fixed_end) {
+            continue;
+        }
+        for (size_t i = fixed_end / state.granularity; i < (end + state.granularity - 1) / state.granularity; ++i) {
+            RTP_LLM_CHECK(!state.fixed_chunks[i]);
             needed[i] = 1;
         }
     }
@@ -161,7 +237,7 @@ void OffloadDeviceBuffer::resize(uint32_t rows, bool grow_only) {
             added.push_back(i);
             CUmemAccessDesc access{};
             access.location = state.prop.location;
-            access.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+            access.flags    = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
             checkDriver(cuMemSetAccess(state.address + i * state.granularity, state.granularity, &access, 1),
                         "set sparse KV page access");
         }
@@ -175,7 +251,8 @@ void OffloadDeviceBuffer::resize(uint32_t rows, bool grow_only) {
     }
     for (size_t i = 0; i < needed.size(); ++i) {
         if (!needed[i] && state.handles[i]) {
-            checkDriver(cuMemUnmap(state.address + i * state.granularity, state.granularity), "unmap sparse KV hot pages");
+            checkDriver(cuMemUnmap(state.address + i * state.granularity, state.granularity),
+                        "unmap sparse KV hot pages");
             checkDriver(cuMemRelease(state.handles[i]), "release sparse KV hot pages");
             state.handles[i] = 0;
         }
@@ -185,21 +262,31 @@ void OffloadDeviceBuffer::resize(uint32_t rows, bool grow_only) {
         // pages. Runtime tags from before the shrink must never be cache hits.
         state.epoch.slice(0, rows, state.rows).fill_(++state.generation);
     }
-    state.rows = rows;
+    state.initialized = true;
+    state.rows        = rows;
     state.active.fill_(rows);
-    const auto pages = std::count_if(state.handles.begin(), state.handles.end(), [](auto handle) { return handle != 0; });
+    const auto dynamic_pages =
+        std::count_if(state.handles.begin(), state.handles.end(), [](auto handle) { return handle != 0; });
     RTP_LLM_LOG_INFO("sparse KV hot cache active_rows=%u max_rows=%u committed_bytes=%zu granularity=%zu",
-                     rows, state.maximum, pages * state.granularity, state.granularity);
+                     rows,
+                     state.maximum,
+                     state.fixed_committed + dynamic_pages * state.granularity,
+                     state.granularity);
 }
 
 size_t OffloadDeviceBuffer::committedBytes() const {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    return std::count_if(impl_->handles.begin(), impl_->handles.end(), [](auto handle) { return handle != 0; })
-           * impl_->granularity;
+    const auto                  dynamic_pages =
+        std::count_if(impl_->handles.begin(), impl_->handles.end(), [](auto handle) { return handle != 0; });
+    return impl_->fixed_committed + dynamic_pages * impl_->granularity;
 }
 
-const torch::Tensor& OffloadDeviceBuffer::activeRows() const { return impl_->active; }
-const torch::Tensor& OffloadDeviceBuffer::epoch() const { return impl_->epoch; }
+const torch::Tensor& OffloadDeviceBuffer::activeRows() const {
+    return impl_->active;
+}
+const torch::Tensor& OffloadDeviceBuffer::epoch() const {
+    return impl_->epoch;
+}
 
 #else
 struct OffloadDeviceBuffer::Impl {};
@@ -207,11 +294,23 @@ OffloadDeviceBuffer::OffloadDeviceBuffer(size_t, uint32_t, uint32_t, std::vector
     RTP_LLM_CHECK_WITH_INFO(false, "dynamic sparse KV hot cache requires CUDA");
 }
 OffloadDeviceBuffer::~OffloadDeviceBuffer() = default;
-torch::Tensor OffloadDeviceBuffer::tensor() { return {}; }
-void OffloadDeviceBuffer::resize(uint32_t, bool) { RTP_LLM_CHECK(false); }
-size_t OffloadDeviceBuffer::committedBytes() const { return 0; }
-const torch::Tensor& OffloadDeviceBuffer::activeRows() const { static const torch::Tensor empty; return empty; }
-const torch::Tensor& OffloadDeviceBuffer::epoch() const { static const torch::Tensor empty; return empty; }
+torch::Tensor OffloadDeviceBuffer::tensor() {
+    return {};
+}
+void OffloadDeviceBuffer::resize(uint32_t, bool) {
+    RTP_LLM_CHECK(false);
+}
+size_t OffloadDeviceBuffer::committedBytes() const {
+    return 0;
+}
+const torch::Tensor& OffloadDeviceBuffer::activeRows() const {
+    static const torch::Tensor empty;
+    return empty;
+}
+const torch::Tensor& OffloadDeviceBuffer::epoch() const {
+    static const torch::Tensor empty;
+    return empty;
+}
 #endif
 
 }  // namespace rtp_llm

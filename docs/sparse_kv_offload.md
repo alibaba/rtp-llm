@@ -256,7 +256,7 @@ reserve_blocks = ceil(reserve_step / seq_size_per_block)
 - 使用 CUDA；当前适配 GLM/DSA sparse MLA 和 DeepSeek V4 FP8 CSA。普通 MHA 模型尚没有完整 attention 适配。
 - D 侧要求 `PP=1`，不执行 CP attention。V4 的 TP1 decoder 可以从 CP prefill workers 导入 KV；这不代表 D 侧开启了 CP attention。
 - speculative 路径只支持 GLM-5＋GLM MTP、V4＋DSpark；P/D 两端保持一致的模型和 speculative 配置。不开 speculative 也可使用 offload。
-- D 侧关闭 decode prefix reuse 和 memory/disk/remote prefix connectors；只支持单序列请求，不支持 beam search、`multi_task_prompt` 或 `RTP_LLM_DROP_BROAD_SYNC`。
+- D 侧关闭 decode prefix reuse 和 memory/disk/remote prefix connectors；只支持单序列请求，不支持 beam search 或 `multi_task_prompt`。
 
 **先确认 offload 哪个 cache group，再开启功能。** 当前 group 由模型适配代码选择，没有任意填写 group 列表的 CLI 或请求参数；`hot_rows`、`rr|lru`、`static|dynamic` 都不会改变选中的 group。
 
@@ -416,7 +416,7 @@ curl --fail-with-body --silent --show-error "${PREFILL_URL}/" \
 
 ## 8. 实验与结果
 
-[第 8.1 节](#81-历史-v4-flash-性能对照)和第 8.2 节记录历史 V4 Flash P/D 测试，[第 8.3 节](#83-历史-v4-pro-128k-对照)记录独立 V4 Pro 原型，[第 8.4 节](#84-历史-glm-53-fp4-128k-rdma-4p2d)记录历史 GLM-5.3 FP4 RDMA 4P2D 实验。各节的拓扑、请求和统计口径以对应实验为准。
+[第 8.1 节](#81-历史-v4-flash-性能对照)和第 8.2 节记录历史 V4 Flash P/D 测试，[第 8.3 节](#83-历史-v4-pro-128k-对照)记录独立 V4 Pro 原型，[第 8.4 节](#84-历史-glm-53-fp4-128k-rdma-4p2d)记录历史 GLM-5.3 FP4 RDMA 4P2D 实验。[第 8.5 节](#85-whale-deepseek-v4-flash-线上流量对照)记录 Whale 上的 V4 Flash 线上流量压测。各节的拓扑、请求和统计口径以对应实验为准。
 
 当前默认 `hot_rows=2048`；V4 Flash top-K 为 512 时，热缓存及相关 selection scratch 的容量上限是按 512 配置时的 4 倍，正式 Host KV 容量不因此改变。部署时必须重新核算 HBM 预算，再在相同请求长度、并发和采样设置下测量。
 
@@ -519,6 +519,41 @@ Batch 是每个 D rank 同时进入 decode 的请求数。TPOT 取各请求第 2
 关闭组在该 KV 预算和调度预留下最多可接纳 5 条请求/rank，B5 已实测通过。B8、B16 和 B32 超出关闭组的固定批次容量。开启组的 B32 已实测通过；B2 和 B5 没有本轮开启组记录。
 
 关闭组采自 11 月 19 日，P 用 GPU 0–3、D 用 GPU 4–5，Prefill 请求交接间隔为 2 秒。开启组采自 11 月 20–21 日，P 用 GPU 4–7、D 用 GPU 2–3，交接间隔为 8 秒；B16 采用 11 月 21 日复测。每档各统计一个批次，表格用于查看容量和实测吞吐，开关之间的性能差值还包含部署和运行负载差异。
+
+### 8.5 Whale DeepSeek V4 Flash 线上流量对照
+
+#### 实验配置
+
+- 2026-11-22 使用 Whale 流量复制对 DeepSeek-V4-Flash-0731 做 P/D 分离压测。2P、3P、4P 表示实际接流的 Prefill worker 数，四组均有 4 个 Decode rank。2P 和 3P 关闭组使用同一 `hisparse` 角色，4P 开关组使用同一 `L20A_4TP` 角色。所有组的 Prefill 均关闭 sparse KV offload，开启组仅在 Decode 侧对 `csa_kv` 启用 sparse KV offload。
+- Decode 侧依据 `rtp_llm_kv_cache_total_blocks` 核对每个 rank 的生效容量。`csa_kv`、`hca_kv` 和 `indexer_kv` 的可用块数，关闭组各为 757 block/rank，开启组各为 1,919 block/rank。`swa_kv` 和三类 state 池在四组均为 767 block/rank。这里统计可供调度的池容量。开启组的 CSA 容量包含 Host backing，物理 HBM 预算另计。
+- 4,000 block 来自 2026-11-21 的旧关闭组基线，当时上下文相关池上报 3,999 个可用块，另外一个 block 为保留块。此次四组采用上面核实的 757 / 1,919 block/rank 容量。从这些块数无法核实切换前后 `KV_CACHE_MEM_MB` 的 MiB 预算是否相同。
+- 每组取一个完整的 15 分钟窗口。4P 两组按入口 QPS、输入和输出长度选择相近窗口，开关组的平均输入均约 8.55k token，平均输出为 429 和 425 token。3P 关与 4P 关取同一时段。各指标按窗口内上报样本取均值，Decode 并发是 4 个 rank 的运行请求数之和，KV 使用率取四个 rank 的 CSA 数据。入口与成功 QPS 按各自事件上报，积压请求可跨窗口完成。
+
+#### 15 分钟结果
+
+| 指标 | 2P 关 offload | 3P 关 offload | 4P 关 offload | 4P 开 offload |
+|---|---:|---:|---:|---:|
+| **Decode CSA KV 使用率（%）** | 86.7 | 86.9 | 86.6 | 86.4 |
+| **Decode 平均运行请求数（4 rank 合计）** | 27.6 | 32.1 | 29.2 | 40.7 |
+| **Decode TPS（token/s）** | 3,913 | 4,393 | 4,115 | 4,989 |
+| **Decode 引擎 KV 分配失败 QPS（4 rank 合计）** | 0.358 | 0.216 | 0.370 | 0.096 |
+| Decode CSA KV 可用块（block/rank） | 757 | 757 | 757 | 1,919 |
+| Prefill TPS（实际计算，千 token/s） | 33.2 | 39.7 | 40.3 | 55.6 |
+| 入口 QPS | 19.54 | 22.79 | 22.67 | 22.76 |
+| 成功 QPS | 8.58 | 11.79 | 10.95 | 12.19 |
+| 前端 Error QPS | 0.0166 | 0.0000 | 0.0177 | 0.0155 |
+| TPOT（ms） | 7.14 | 7.40 | 7.21 | 8.18 |
+| TTFT（min） | 28.13 | 45.92 | 5.95 | 5.21 |
+| Master 队列长度 | 315 | 471 | 360 | 330 |
+| Prefill 引擎排队（s） | 7.32 | 4.13 | 6.46 | 2.60 |
+| Prefill 向 Decode 申请资源的 RPC 耗时（s） | 24.72 | 13.44 | 5.94 | 1.45 |
+| 输入长度（token） | 13,149 | 13,973 | 8,553 | 8,562 |
+| 输出长度（token） | 516 | 383 | 425 | 429 |
+| 观测窗口（北京时间） | 18:40:20–18:55:20 | 20:45:00–21:00:00 | 20:45:00–21:00:00 | 19:34:00–19:49:00 |
+
+同一个 4P 集群开 offload 后，Decode 平均并发从 **29.2** 增到 **40.7（+39.1%）**，Decode TPS 从 **4,115** 增到 **4,989（+21.2%）**，引擎 KV 分配失败 QPS 从 **0.370** 降到 **0.096（−74.2%）**。两组 CSA KV 使用率都在 86% 左右。虽然 TPOT 增加 **13.4%**，更大的 KV 池容纳了更多同时解码的请求，总 Decode TPS 仍然提高。
+
+4P 开关组的入口和平均长度接近，支持 KV 容量增大、准入压力下降、Decode 并发上升这条因果解释。两段使用不同时刻的线上请求，Master 积压和 Prefill KV 池也有变化，21.2% 是该窗口对照的实测差异。2P 和 3P 关闭组用于说明 Prefill 规模变化下的线上表现。
 
 ## 9. 验证与边界
 

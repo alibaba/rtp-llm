@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <exception>
 #include <filesystem>
@@ -4206,5 +4207,177 @@ TEST_F(MtpExecutorTest, testErroredSpecLogitsStreamDoesNotAbortExecutor) {
     EXPECT_TRUE(status.ok());
     EXPECT_TRUE(stream->hasError());
 }
+
+#if USING_CUDA
+TEST_F(MtpExecutorTest, DispatchDecodeAsyncWaitsForDraftEventBeforeDeferredRelease) {
+    MtpExecutorTestConfig test_config;
+    test_config.sp_type                       = SP_TYPE_DSPARK;
+    test_config.gen_num_per_cycle             = 2;
+    test_config.dspark_mask_token_id          = 1;
+    test_config.role_type                     = RoleType::DECODE;
+    auto components                           = createMtpExecutorComponents(test_config);
+    components.resource_context.cache_manager = components.executor->cache_manager_;
+
+    const auto main_stream  = cuda_graph::graphGetStreamFromPool(/*is_high_priority=*/false);
+    const auto draft_stream = cuda_graph::graphGetStreamFromPool(/*is_high_priority=*/false);
+    ASSERT_NE(main_stream, draft_stream);
+
+    auto make_spec_update_info = []() {
+        auto stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
+        auto stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
+        auto stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
+        return StreamSpecUpdateInfo{
+            stream_new_tokens, 1, torch::Tensor(), stream_hidden_states, stream_draft_token_probs};
+    };
+
+    const auto cuda_i32               = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto       make_ready_spec_output = [&]() {
+        cuda_graph::GraphStreamGuard   guard(main_stream);
+        spec::SpeculativeSamplerOutput out;
+        out.accept_tokens_cpu = torch::tensor({{3, 4}}, torch::kInt32);
+        out.accept_len_cpu    = torch::tensor({2}, torch::kInt32);
+        out.accept_tokens     = out.accept_tokens_cpu.to(cuda_i32);
+        out.accept_len        = out.accept_len_cpu.to(cuda_i32);
+        out.transfer_done_event->record(main_stream);
+        out.transfer_done_event->synchronize();
+        return out;
+    };
+
+    auto rejection_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+    auto draft_event     = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+
+    // Warm CUDA kernels, caching allocator, event handles, and the bookkeeping worker
+    // before holding draft_stream with cudaLaunchHostFunc; lazy module load or allocation
+    // on a fresh process can synchronize all streams and deadlock against a live host gate.
+    {
+        cuda_graph::GraphStreamGuard guard(main_stream);
+        auto                         warmup_stream = createDecodeStream(components.model_config,
+                                                components.runtime_config,
+                                                components.resource_context,
+                                                                        {0, 1},
+                                                make_spec_update_info());
+        ASSERT_TRUE(warmup_stream->initKVBlock().ok());
+        auto warmup_output = make_ready_spec_output();
+        rejection_event->record(main_stream);
+        draft_event->record(draft_stream);
+        cuda_graph::graphDeviceSynchronize();
+        StreamGroups warmup_groups({warmup_stream});
+        ASSERT_TRUE(components.executor
+                        ->dispatchDecodeAsync(warmup_groups,
+                                              warmup_output,
+                                              /*verify_position_ids=*/torch::Tensor(),
+                                              /*kv_cache_block_id=*/torch::Tensor(),
+                                              /*kv_cache_kernel_block_id=*/torch::Tensor(),
+                                              MergedOutput{},
+                                              rejection_event,
+                                              draft_event)
+                        .ok());
+        components.executor->spec_bookkeeping_runner_.sync(main_stream);
+        warmup_stream->releaseResource();
+        cuda_graph::graphDeviceSynchronize();
+    }
+
+    GenerateStreamPtr stream = createDecodeStream(components.model_config,
+                                                  components.runtime_config,
+                                                  components.resource_context,
+                                                  {0, 1},
+                                                  make_spec_update_info());
+    ASSERT_TRUE(stream->initKVBlock().ok());
+    const int initial_blocks = stream->curBlocksNum();
+    ASSERT_GT(initial_blocks, 0);
+    const int seq_len_before = stream->seqLength();
+
+    auto spec_output = make_ready_spec_output();
+    rejection_event->record(main_stream);
+    rejection_event->synchronize();
+
+    struct Gate {
+        std::mutex              mu;
+        std::condition_variable cv;
+        bool                    started  = false;
+        bool                    released = false;
+        std::atomic<bool>       timed_out{false};
+        void                    release() {
+            {
+                std::lock_guard<std::mutex> lk(mu);
+                released = true;
+            }
+            cv.notify_all();
+        }
+    };
+    auto gate = std::make_shared<Gate>();
+    struct GateReleaseGuard {
+        std::shared_ptr<Gate>   gate;
+        cuda_graph::GraphStream stream;
+        ~GateReleaseGuard() {
+            gate->release();
+            stream.synchronize();
+        }
+    } gate_guard{gate, draft_stream};
+
+    auto host_wait = [](void* user_data) {
+        auto*                        g = static_cast<Gate*>(user_data);
+        std::unique_lock<std::mutex> lk(g->mu);
+        g->started = true;
+        g->cv.notify_all();
+        g->timed_out.store(!g->cv.wait_for(lk, std::chrono::seconds(10), [g] { return g->released; }));
+    };
+    ASSERT_EQ(cudaLaunchHostFunc(draft_stream.stream(), host_wait, gate.get()), cudaSuccess);
+    draft_event->record(draft_stream);
+
+    // Wait until the host callback is actually holding draft_stream before launching the worker.
+    {
+        std::unique_lock<std::mutex> lk(gate->mu);
+        ASSERT_TRUE(gate->cv.wait_for(lk, std::chrono::seconds(5), [&] { return gate->started; }));
+    }
+
+    {
+        cuda_graph::GraphStreamGuard guard(main_stream);
+        StreamGroups                 stream_groups({stream});
+        ASSERT_TRUE(components.executor
+                        ->dispatchDecodeAsync(stream_groups,
+                                              spec_output,
+                                              /*verify_position_ids=*/torch::Tensor(),
+                                              /*kv_cache_block_id=*/torch::Tensor(),
+                                              /*kv_cache_kernel_block_id=*/torch::Tensor(),
+                                              MergedOutput{},
+                                              rejection_event,
+                                              draft_event)
+                        .ok());
+    }
+
+    // Simulate next-step schedule() deferring release while the draft tail is still on GPU.
+    stream->markDeferredRelease();
+
+    // Wait for dispatchDecode() to complete specUpdate() under stream->mutex_
+    // (specUpdate mutates complete_token_ids_ under the same mutex).
+    auto read_seq_len = [&]() {
+        std::lock_guard<std::mutex> lk(*stream->mutex_);
+        return stream->seqLength();
+    };
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (read_seq_len() == seq_len_before && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(read_seq_len(), seq_len_before + 2);
+
+    // Give the worker a chance to unwind if it did NOT synchronize draft_event.
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_TRUE(stream->hasPendingAsyncBookkeeping());
+    {
+        std::lock_guard<std::mutex> lk(*stream->mutex_);
+        EXPECT_FALSE(stream->streamCacheResource().isResourceReleased());
+        EXPECT_EQ(stream->curBlocksNum(), initial_blocks);
+    }
+
+    // Completing draft_event must allow the worker to perform the deferred release.
+    gate->release();
+    components.executor->spec_bookkeeping_runner_.sync(main_stream);
+    EXPECT_FALSE(gate->timed_out.load());
+    EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
+    EXPECT_TRUE(stream->streamCacheResource().isResourceReleased());
+    EXPECT_EQ(stream->curBlocksNum(), 0);
+}
+#endif
 
 }  // namespace rtp_llm

@@ -8,7 +8,10 @@
 
 #include "gtest/gtest.h"
 
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/OffloadDeviceBuffer.h"
+
 #if USING_CUDA
+#include <cuda.h>
 #include <ATen/cuda/CachingHostAllocator.h>
 #endif
 #include "autil/EnvUtil.h"
@@ -398,16 +401,16 @@ TEST(DeviceBlockPoolTest, OffloadDeferredHbmPlacementStagesOnHostAndUpgradesInPl
 }
 
 TEST(DeviceBlockPoolTest, OffloadHotCacheCommitsAndReleasesPhysicalPagesForActiveRequests) {
-    auto config = makeOffloadConfig();
+    auto config                        = makeOffloadConfig();
     config->offload->max_selected_rows = 65536;
-    config->offload->max_requests = 8;
+    config->offload->max_requests      = 8;
     config->offload->dynamic_hot_cache = true;
     DeviceBlockPool pool(config);
     ASSERT_TRUE(pool.init());
     const auto& storages = pool.allLayerOffloadStorage();
-    const auto* address = storages[0]->resident_planes[0].data_ptr();
-    const auto shape = storages[0]->resident_planes[0].sizes().vec();
-    const auto baseline = pool.offloadDeviceSizeBytes();
+    const auto* address  = storages[0]->resident_planes[0].data_ptr();
+    const auto  shape    = storages[0]->resident_planes[0].sizes().vec();
+    const auto  baseline = pool.offloadDeviceSizeBytes();
     EXPECT_EQ(storages[0]->active_hot_rows.item<int>(), 0);
     for (const auto& storage : storages) {
         storage->resident_planes[0].narrow(0, 0, 4).fill_(17);
@@ -445,14 +448,14 @@ TEST(DeviceBlockPoolTest, OffloadHotCacheCommitsAndReleasesPhysicalPagesForActiv
 
 TEST(DeviceBlockPoolTest, StaticOffloadHotCacheKeepsPreallocatedCapacityAcrossRequestCounts) {
     for (bool device_malloc : {false, true}) {
-        auto config = makeOffloadConfig();
-        config->use_device_malloc_backing = device_malloc;
+        auto config                        = makeOffloadConfig();
+        config->use_device_malloc_backing  = device_malloc;
         config->offload->max_selected_rows = 65536;
-        config->offload->max_requests = 8;
+        config->offload->max_requests      = 8;
         DeviceBlockPool pool(config);
         ASSERT_TRUE(pool.init());
         const auto& storages = pool.allLayerOffloadStorage();
-        const auto bytes = pool.offloadDeviceSizeBytes();
+        const auto  bytes    = pool.offloadDeviceSizeBytes();
         ASSERT_GT(bytes, 0u);
         for (const auto& storage : storages) {
             EXPECT_EQ(storage->hot_cache, nullptr);
@@ -996,5 +999,249 @@ TEST(DeviceBlockPoolTest, MallocAllocatesLowestBlockFirst) {
     EXPECT_EQ(*b2, 2);
     EXPECT_EQ(*b3, 3);
 }
+
+#if USING_CUDA
+namespace {
+
+CUmemGenericAllocationHandle retainHandleAt(void* addr) {
+    CUmemGenericAllocationHandle handle = 0;
+    EXPECT_EQ(cuMemRetainAllocationHandle(&handle, addr), CUDA_SUCCESS);
+    return handle;
+}
+
+void expectSingleVmmHandle(void* base, size_t size_bytes, CUmemGenericAllocationHandle* out_handle = nullptr) {
+    ASSERT_NE(base, nullptr);
+    ASSERT_GT(size_bytes, 0u);
+    EXPECT_EQ(reinterpret_cast<uintptr_t>(base) % kOffloadAllocationChunkBytes, 0u);
+
+    auto* bytes = static_cast<char*>(base);
+    auto  first = retainHandleAt(bytes);
+    ASSERT_NE(first, static_cast<CUmemGenericAllocationHandle>(0));
+
+    CUmemAllocationProp prop{};
+    ASSERT_EQ(cuMemGetAllocationPropertiesFromHandle(&prop, first), CUDA_SUCCESS);
+    int device = 0;
+    ASSERT_EQ(cudaGetDevice(&device), cudaSuccess);
+    int rdma_supported = 0;
+    ASSERT_EQ(
+        cuDeviceGetAttribute(&rdma_supported, CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED, device),
+        CUDA_SUCCESS);
+    EXPECT_EQ(prop.allocFlags.gpuDirectRDMACapable != 0, rdma_supported != 0);
+
+    for (size_t offset = kOffloadAllocationChunkBytes; offset < size_bytes; offset += kOffloadAllocationChunkBytes) {
+        auto h = retainHandleAt(bytes + offset);
+        EXPECT_EQ(h, first);
+        if (h) {
+            EXPECT_EQ(cuMemRelease(h), CUDA_SUCCESS);
+        }
+    }
+    auto last = retainHandleAt(bytes + size_bytes - 1);
+    EXPECT_EQ(last, first);
+    if (last) {
+        EXPECT_EQ(cuMemRelease(last), CUDA_SUCCESS);
+    }
+
+    if (out_handle) {
+        *out_handle = first;
+    }
+    EXPECT_EQ(cuMemRelease(first), CUDA_SUCCESS);
+}
+
+std::shared_ptr<DeviceBlockPoolConfig> makeCsaDynamicOffloadConfig(
+    uint32_t layers, uint32_t total, uint32_t hbm, uint32_t max_selected_rows, uint32_t max_requests) {
+    KVCacheSpecDesc desc;
+    desc.tag                          = "csa_kv";
+    desc.cache_type                   = OpaqueKV;
+    desc.entry_elems                  = 594;
+    desc.entry_dtype                  = TYPE_UINT8;
+    desc.entry_count_mode             = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
+    desc.compression_ratio            = 4;
+    desc.block_stride_bytes_alignment = 1;
+    SpecBuildContext ctx;
+    ctx.seq_size_per_block      = 256;
+    ctx.kernel_tokens_per_block = 128;
+    auto spec                   = SpecBuilder::build(desc, ctx);
+    auto cache                  = test::makeSingleGroupCacheConfig(spec, CacheGroupType::FULL, layers, total);
+    cache.tiered_cache_configs.emplace(
+        spec->tag, TieredCacheConfig{total, hbm, max_selected_rows, max_requests, /*dynamic_hot_cache=*/true});
+    return std::make_shared<DeviceBlockPoolConfig>(
+        DeviceBlockPoolConfigHelper::createConfigForGroup(cache, cache.group(spec->tag)));
+}
+
+}  // namespace
+
+TEST(DeviceBlockPoolTest, DynamicOffloadFixedBackingUsesSingleAlignedVmmHandlePerSegment) {
+    // Subcase 1: Exact DSv4 csa_kv geometry from the 13150 / 12 / 512 failure:
+    // 38,016 B/block (2 pages * 19,008 B), 384 hot blocks (24,576 rows), H=2.
+    // Previously layer 1 started 5,888 B before a 2 MiB boundary so even 1 block
+    // straddled two cuMemCreate handles during ibv_reg_mr.
+    {
+        auto config = makeCsaDynamicOffloadConfig(
+            /*layers=*/4, /*total=*/6, /*hbm=*/2, /*max_selected_rows=*/24576, /*max_requests=*/12);
+        DeviceBlockPool pool(config);
+        ASSERT_TRUE(pool.init());
+        const auto& storages = pool.allLayerOffloadStorage();
+        ASSERT_EQ(storages.size(), 4u);
+        const size_t block_bytes = 38016u;
+        const size_t fixed_bytes = 2u * block_bytes;
+        const size_t baseline    = pool.offloadDeviceSizeBytes();
+
+        std::vector<CUmemGenericAllocationHandle> layer_handles(storages.size(), 0);
+        for (size_t layer = 0; layer < storages.size(); ++layer) {
+            const auto buffers = pool.convertIndexToBuffer(static_cast<int>(layer), 0);
+            ASSERT_EQ(buffers.size(), 1u);
+            EXPECT_TRUE(buffers[0].is_cuda);
+            EXPECT_EQ(buffers[0].size_bytes, block_bytes);
+            EXPECT_EQ(buffers[0].addr, storages[layer]->resident_planes[0].data_ptr());
+            expectSingleVmmHandle(buffers[0].addr, fixed_bytes, &layer_handles[layer]);
+            for (size_t prev = 0; prev < layer; ++prev) {
+                EXPECT_NE(layer_handles[layer], layer_handles[prev]);
+            }
+            storages[layer]->resident_planes[0].narrow(0, 0, 4).fill_(static_cast<int>(layer + 11));
+            for (uint32_t block = 0; block < 6; ++block) {
+                const auto b = pool.convertIndexToBuffer(static_cast<int>(layer), block);
+                ASSERT_EQ(b.size(), 1u);
+                EXPECT_EQ(b[0].is_cuda, block < 2);
+                const auto&  plane = block < 2 ? storages[layer]->resident_planes[0] : storages[layer]->host_planes[0];
+                const size_t local = block < 2 ? block : block - 2;
+                EXPECT_EQ(b[0].addr, static_cast<char*>(plane.data_ptr()) + local * block_bytes);
+            }
+        }
+
+        // Growing and shrinking dynamic hot pages must never unmap or swap the fixed RDMA handles.
+        pool.resizeOffloadHotCache(12);
+        const size_t full = pool.offloadDeviceSizeBytes();
+        EXPECT_GT(full, baseline);
+        pool.resizeOffloadHotCache(1);
+        EXPECT_LT(pool.offloadDeviceSizeBytes(), full);
+        pool.resizeOffloadHotCache(0);
+        EXPECT_EQ(pool.offloadDeviceSizeBytes(), baseline);
+        for (size_t layer = 0; layer < storages.size(); ++layer) {
+            CUmemGenericAllocationHandle after = 0;
+            expectSingleVmmHandle(pool.convertIndexToBuffer(static_cast<int>(layer), 0)[0].addr, fixed_bytes, &after);
+            EXPECT_EQ(after, layer_handles[layer]);
+            EXPECT_TRUE(storages[layer]
+                            ->resident_planes[0]
+                            .narrow(0, 0, 4)
+                            .eq(static_cast<int>(layer + 11))
+                            .all()
+                            .item<bool>());
+        }
+    }
+
+    // Subcase 2: Multi-granule fixed backing (H=60 blocks * 38,016 B = 2,280,960 B > 2 MiB).
+    // Block #55 straddles the 2 MiB offset; the entire [0, fixed_bytes) span must still
+    // reside in ONE physical cuMemCreate handle.
+    {
+        auto config = makeCsaDynamicOffloadConfig(
+            /*layers=*/2, /*total=*/64, /*hbm=*/60, /*max_selected_rows=*/8192, /*max_requests=*/4);
+        DeviceBlockPool pool(config);
+        ASSERT_TRUE(pool.init());
+        const auto& storages = pool.allLayerOffloadStorage();
+        ASSERT_EQ(storages.size(), 2u);
+        const size_t block_bytes = 38016u;
+        const size_t fixed_bytes = 60u * block_bytes;
+        ASSERT_GT(fixed_bytes, kOffloadAllocationChunkBytes);
+        const size_t baseline = pool.offloadDeviceSizeBytes();
+
+        std::vector<CUmemGenericAllocationHandle> handles(storages.size(), 0);
+        for (size_t layer = 0; layer < storages.size(); ++layer) {
+            const auto b0  = pool.convertIndexToBuffer(static_cast<int>(layer), 0);
+            const auto b55 = pool.convertIndexToBuffer(static_cast<int>(layer), 55);
+            ASSERT_EQ(b0.size(), 1u);
+            ASSERT_EQ(b55.size(), 1u);
+            expectSingleVmmHandle(b0[0].addr, fixed_bytes, &handles[layer]);
+            auto h55_start = retainHandleAt(b55[0].addr);
+            auto h55_end   = retainHandleAt(static_cast<char*>(b55[0].addr) + block_bytes - 1);
+            EXPECT_EQ(h55_start, handles[layer]);
+            EXPECT_EQ(h55_end, handles[layer]);
+            EXPECT_EQ(cuMemRelease(h55_start), CUDA_SUCCESS);
+            EXPECT_EQ(cuMemRelease(h55_end), CUDA_SUCCESS);
+            storages[layer]->resident_planes[0].narrow(0, 0, 120).fill_(static_cast<int>(layer + 23));
+        }
+
+        pool.resizeOffloadHotCache(4);
+        EXPECT_GT(pool.offloadDeviceSizeBytes(), baseline);
+        pool.resizeOffloadHotCache(0);
+        EXPECT_EQ(pool.offloadDeviceSizeBytes(), baseline);
+        for (size_t layer = 0; layer < storages.size(); ++layer) {
+            CUmemGenericAllocationHandle after = 0;
+            expectSingleVmmHandle(pool.convertIndexToBuffer(static_cast<int>(layer), 0)[0].addr, fixed_bytes, &after);
+            EXPECT_EQ(after, handles[layer]);
+            EXPECT_TRUE(storages[layer]
+                            ->resident_planes[0]
+                            .narrow(0, 0, 120)
+                            .eq(static_cast<int>(layer + 23))
+                            .all()
+                            .item<bool>());
+        }
+    }
+
+    // Subcase 3: Dynamic offload with separate KV and scale planes (INT8 MHA).
+    // Both KV and scale segments must be 2 MiB-aligned with single fixed VMM handles and
+    // matching convertIndexToBuffer addresses.
+    {
+        auto spec  = test::makeResolvedMhaSpec(TYPE_INT8, 2, 8, 8, "sparse_heads");
+        auto cache = test::makeSingleGroupCacheConfig(spec, CacheGroupType::FULL, 2, 6);
+        cache.tiered_cache_configs.emplace(spec->tag, TieredCacheConfig{6, 2, 131072, 4, /*dynamic_hot_cache=*/true});
+        auto config = std::make_shared<DeviceBlockPoolConfig>(
+            DeviceBlockPoolConfigHelper::createConfigForGroup(cache, cache.group(spec->tag)));
+        DeviceBlockPool pool(config);
+        ASSERT_TRUE(pool.init());
+        const auto&  storages = pool.allLayerOffloadStorage();
+        const size_t baseline = pool.offloadDeviceSizeBytes();
+        ASSERT_EQ(storages.size(), 2u);
+
+        for (size_t layer = 0; layer < storages.size(); ++layer) {
+            const auto& storage = *storages[layer];
+            ASSERT_EQ(storage.resident_planes.size(), 4u);
+            const auto buffers = pool.convertIndexToBuffer(static_cast<int>(layer), 0);
+            ASSERT_EQ(buffers.size(), 2u);
+            EXPECT_EQ(buffers[0].addr, storage.resident_planes[0].data_ptr());
+            EXPECT_EQ(buffers[1].addr, storage.resident_planes[2].data_ptr());
+            CUmemGenericAllocationHandle kv_handle    = 0;
+            CUmemGenericAllocationHandle scale_handle = 0;
+            expectSingleVmmHandle(buffers[0].addr, 2u * buffers[0].size_bytes, &kv_handle);
+            expectSingleVmmHandle(buffers[1].addr, 2u * buffers[1].size_bytes, &scale_handle);
+            EXPECT_NE(kv_handle, scale_handle);
+            storage.resident_planes[0].narrow(0, 0, 2).fill_(static_cast<int>(layer + 3));
+            storage.resident_planes[2].narrow(0, 0, 2).fill_(0.5f + static_cast<float>(layer));
+            for (uint32_t block = 0; block < 6; ++block) {
+                const auto b = pool.convertIndexToBuffer(static_cast<int>(layer), block);
+                ASSERT_EQ(b.size(), 2u);
+                const auto&  kv_plane    = block < 2 ? storage.resident_planes[0] : storage.host_planes[0];
+                const auto&  scale_plane = block < 2 ? storage.resident_planes[2] : storage.host_planes[2];
+                const size_t local       = block < 2 ? block : block - 2;
+                EXPECT_EQ(b[0].addr, static_cast<char*>(kv_plane.data_ptr()) + local * b[0].size_bytes);
+                EXPECT_EQ(b[1].addr, static_cast<char*>(scale_plane.data_ptr()) + local * b[1].size_bytes);
+            }
+        }
+
+        pool.resizeOffloadHotCache(4);
+        EXPECT_GT(pool.offloadDeviceSizeBytes(), baseline);
+        pool.resizeOffloadHotCache(0);
+        EXPECT_EQ(pool.offloadDeviceSizeBytes(), baseline);
+        for (size_t layer = 0; layer < storages.size(); ++layer) {
+            EXPECT_TRUE(
+                storages[layer]->resident_planes[0].narrow(0, 0, 2).eq(static_cast<int>(layer + 3)).all().item<bool>());
+            EXPECT_TRUE(storages[layer]
+                            ->resident_planes[2]
+                            .narrow(0, 0, 2)
+                            .eq(0.5f + static_cast<float>(layer))
+                            .all()
+                            .item<bool>());
+        }
+    }
+}
+
+TEST(DeviceBlockPoolTest, OffloadDeviceBufferRejectsUnalignedOrOverlappingSegments) {
+    // Unaligned segment offset must fail fast.
+    EXPECT_ANY_THROW(
+        static_cast<void>(OffloadDeviceBuffer(2 * kOffloadAllocationChunkBytes, 128, 64, {{4096, 1024, 1024}})));
+    // Overlapping segments sharing the same 2 MiB granule must fail fast.
+    EXPECT_ANY_THROW(static_cast<void>(
+        OffloadDeviceBuffer(2 * kOffloadAllocationChunkBytes, 128, 64, {{0, 1024, 1024}, {0, 1024, 1024}})));
+}
+#endif
 
 }  // namespace rtp_llm

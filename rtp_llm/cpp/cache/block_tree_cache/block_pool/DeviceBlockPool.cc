@@ -656,23 +656,40 @@ void DeviceBlockPool::initializeOffloadStorage() {
     RTP_LLM_CHECK_WITH_INFO(layout.kv_block_stride_bytes % pages == 0 && layout.kv_scale_stride_bytes % pages == 0
                                 && layout.kv_scale_stride_bytes <= SIZE_MAX - layout.kv_block_stride_bytes,
                             "invalid offload native page stride");
-    const size_t gpu_pages      = static_cast<size_t>(tiered.hbm_blocks) * pages + resident / page_rows;
-    const size_t host_pages     = static_cast<size_t>(tiered.total_blocks - tiered.hbm_blocks) * pages;
-    const size_t bytes_per_page = (layout.kv_block_stride_bytes + layout.kv_scale_stride_bytes) / pages;
-    cfg.offload_layout.validate(layout.kv_block_stride_bytes / pages, layout.kv_scale_stride_bytes / pages);
-    const size_t gpu_bytes  = checked_product(checked_product(gpu_pages, bytes_per_page), total_layers);
-    const size_t host_bytes = checked_product(checked_product(host_pages, bytes_per_page), total_layers);
+    const size_t gpu_pages        = static_cast<size_t>(tiered.hbm_blocks) * pages + resident / page_rows;
+    const size_t host_pages       = static_cast<size_t>(tiered.total_blocks - tiered.hbm_blocks) * pages;
+    const size_t kv_page_bytes    = layout.kv_block_stride_bytes / pages;
+    const size_t scale_page_bytes = layout.kv_scale_stride_bytes / pages;
+    const size_t bytes_per_page   = kv_page_bytes + scale_page_bytes;
+    cfg.offload_layout.validate(kv_page_bytes, scale_page_bytes);
+    const auto align_dynamic_segment = [&](size_t size) -> size_t {
+        if (!tiered.dynamic_hot_cache || size == 0) {
+            return size;
+        }
+        RTP_LLM_CHECK_WITH_INFO(size <= static_cast<size_t>(INT64_MAX) - kOffloadAllocationChunkBytes + 1,
+                                "offload aligned segment overflow");
+        return (size + kOffloadAllocationChunkBytes - 1) / kOffloadAllocationChunkBytes * kOffloadAllocationChunkBytes;
+    };
+    const size_t gpu_kv_stride    = align_dynamic_segment(checked_product(gpu_pages, kv_page_bytes));
+    const size_t gpu_scale_stride = align_dynamic_segment(checked_product(gpu_pages, scale_page_bytes));
+    RTP_LLM_CHECK_WITH_INFO(gpu_kv_stride <= static_cast<size_t>(INT64_MAX) - gpu_scale_stride,
+                            "offload layer stride overflow");
+    const size_t gpu_layer_stride   = gpu_kv_stride + gpu_scale_stride;
+    const size_t gpu_bytes          = checked_product(gpu_layer_stride, total_layers);
+    const size_t host_kv_bytes      = checked_product(host_pages, kv_page_bytes);
+    const size_t host_layer_bytes   = checked_product(host_pages, bytes_per_page);
+    const size_t host_bytes         = checked_product(host_layer_bytes, total_layers);
+    offload_gpu_kv_stride_bytes_    = gpu_kv_stride;
+    offload_gpu_layer_stride_bytes_ = gpu_layer_stride;
     std::shared_ptr<OffloadDeviceBuffer> device_buffer;
     if (tiered.dynamic_hot_cache) {
         std::vector<OffloadDeviceSegment> segments;
         for (size_t layer = 0; layer < total_layers; ++layer) {
-            const size_t layer_offset  = layer * gpu_pages * bytes_per_page;
-            const size_t kv_page_bytes = layout.kv_block_stride_bytes / pages;
+            const size_t layer_offset = layer * gpu_layer_stride;
             segments.push_back({layer_offset, tiered.hbm_blocks * layout.kv_block_stride_bytes, kv_page_bytes});
             if (layout.kv_scale_stride_bytes) {
-                segments.push_back({layer_offset + gpu_pages * kv_page_bytes,
-                                    tiered.hbm_blocks * layout.kv_scale_stride_bytes,
-                                    layout.kv_scale_stride_bytes / pages});
+                segments.push_back(
+                    {layer_offset + gpu_kv_stride, tiered.hbm_blocks * layout.kv_scale_stride_bytes, scale_page_bytes});
             }
         }
         device_buffer = std::make_shared<OffloadDeviceBuffer>(gpu_bytes, resident, page_rows, std::move(segments));
@@ -700,11 +717,14 @@ void DeviceBlockPool::initializeOffloadStorage() {
     }
     size_t     gpu_offset  = 0;
     size_t     host_offset = 0;
-    const auto plane = [&](const torch::Tensor& buffer, size_t offset, size_t count, const CacheEntryPlane& view) {
-        const size_t kv_page_bytes = layout.kv_block_stride_bytes / pages;
-        const size_t page_bytes    = view.scale ? layout.kv_scale_stride_bytes / pages : kv_page_bytes;
+    const auto plane       = [&](const torch::Tensor&   buffer,
+                           size_t                 offset,
+                           size_t                 scale_offset,
+                           size_t                 count,
+                           const CacheEntryPlane& view) {
+        const size_t page_bytes = view.scale ? scale_page_bytes : kv_page_bytes;
         if (view.scale) {
-            offset += checked_product(count, kv_page_bytes);
+            offset += scale_offset;
         }
         const auto   dtype   = dataTypeToTorchType(view.dtype);
         const size_t element = c10::elementSize(dtype);
@@ -733,12 +753,13 @@ void DeviceBlockPool::initializeOffloadStorage() {
             storage->hot_cache       = device_buffer;
         }
         for (const auto& view : cfg.offload_layout.planes) {
-            storage->resident_planes.push_back(plane(cache_aligned_buffer_, gpu_offset, gpu_pages, view));
-            storage->host_planes.push_back(plane(offload_host_buffer_, host_offset, host_pages, view));
+            storage->resident_planes.push_back(
+                plane(cache_aligned_buffer_, gpu_offset, gpu_kv_stride, gpu_pages, view));
+            storage->host_planes.push_back(plane(offload_host_buffer_, host_offset, host_kv_bytes, host_pages, view));
             storage->resident_planes.back().narrow(0, 0, pages).zero_();
         }
-        gpu_offset += checked_product(gpu_pages, bytes_per_page);
-        host_offset += checked_product(host_pages, bytes_per_page);
+        gpu_offset += gpu_layer_stride;
+        host_offset += host_layer_bytes;
         offload_storages_.push_back(std::move(storage));
     }
     RTP_LLM_CHECK(gpu_offset == gpu_bytes && host_offset == host_bytes);
@@ -1061,15 +1082,17 @@ std::vector<BlockInfo> DeviceBlockPool::convertIndexToBuffer(int layer_id, Block
         const auto& storage = *offload_storages_[layer_id];
         RTP_LLM_CHECK_WITH_INFO(
             block >= 0 && static_cast<uint32_t>(block) < storage.total_blocks, "invalid offload block id=%d", block);
-        const bool             gpu         = static_cast<uint32_t>(block) < storage.hbm_blocks;
-        const size_t           local_block = gpu ? block : block - storage.hbm_blocks;
-        const auto&            backing     = gpu ? cache_aligned_buffer_ : offload_host_buffer_;
-        const auto&            layout      = config().memory_layouts.front();
-        const size_t           pages       = layout.kernel_blocks_per_kv_block;
-        const size_t           page_count  = (gpu ? storage.resident_planes : storage.host_planes).front().size(0);
-        const size_t           kv_bytes    = page_count * (layout.kv_block_stride_bytes / pages);
-        const size_t           layer_bytes = kv_bytes + page_count * (layout.kv_scale_stride_bytes / pages);
-        char*                  base        = static_cast<char*>(backing.data_ptr()) + layer_id * layer_bytes;
+        const bool   gpu         = static_cast<uint32_t>(block) < storage.hbm_blocks;
+        const size_t local_block = gpu ? block : block - storage.hbm_blocks;
+        const auto&  backing     = gpu ? cache_aligned_buffer_ : offload_host_buffer_;
+        const auto&  layout      = config().memory_layouts.front();
+        const size_t pages       = layout.kernel_blocks_per_kv_block;
+        const size_t page_count  = (gpu ? storage.resident_planes : storage.host_planes).front().size(0);
+        const size_t kv_bytes =
+            gpu ? offload_gpu_kv_stride_bytes_ : page_count * (layout.kv_block_stride_bytes / pages);
+        const size_t layer_bytes =
+            gpu ? offload_gpu_layer_stride_bytes_ : kv_bytes + page_count * (layout.kv_scale_stride_bytes / pages);
+        char*                  base = static_cast<char*>(backing.data_ptr()) + layer_id * layer_bytes;
         std::vector<BlockInfo> result;
         const auto             append = [&](size_t offset, size_t stride, DataType dtype) {
             result.push_back({gpu,

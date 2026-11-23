@@ -100,6 +100,13 @@ cc_test(
         "L20_CU13",
         "exclusive-if-local",
     ],
-    deps = pool_test_deps,
+    deps = pool_test_deps + select({
+        "@//:using_cuda": [
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+            "@local_config_cuda//cuda:cuda_driver",
+        ],
+        "//conditions:default": [],
+    }),
     env = {},
 )

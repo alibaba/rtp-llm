@@ -1980,32 +1980,31 @@ EngineInitParams supportedConfig() {
 TEST(SparseKvOffloadConfigTest, AcceptsTpDecodeAndRejectsUnsupportedCombinations) {
     auto params                       = supportedConfig();
     params.parallelism_config.tp_size = 2;
-    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true, false));
-    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(params, true, true, false));
-    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, false, false));
-    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true, true));
+    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true));
+    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(params, true, true));
+    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, false));
     auto glm_mtp                        = params;
     glm_mtp.model_config_.model_type    = "glm_5";
     glm_mtp.sp_config.model_type        = "glm_5_mtp";
     glm_mtp.sp_config.type              = SP_TYPE_EAGLE;
     glm_mtp.sp_config.gen_num_per_cycle = 3;
-    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(glm_mtp, true, true, false));
-    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(glm_mtp, false, true, false));
+    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(glm_mtp, true, true));
+    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(glm_mtp, false, true));
     glm_mtp.sp_config.model_type = "deepseek-v3-mtp";
-    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(glm_mtp, true, true, false));
+    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(glm_mtp, true, true));
     auto v4_dspark                        = params;
     v4_dspark.model_config_.model_type    = "deepseek_v4";
     v4_dspark.sp_config.model_type        = "deepseek_v4_dspark";
     v4_dspark.sp_config.type              = SP_TYPE_DSPARK;
     v4_dspark.sp_config.gen_num_per_cycle = 3;
-    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(v4_dspark, true, true, false));
+    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(v4_dspark, true, true));
     v4_dspark.parallelism_config.tp_size                           = 1;
     v4_dspark.parallelism_config.prefill_cp_config.method          = CPRotateMethod::PREFILL_CP;
     v4_dspark.parallelism_config.prefill_cp_config.prefill_cp_size = 2;
-    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(v4_dspark, true, true, false));
-    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(v4_dspark, false, true, false));
+    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(v4_dspark, true, true));
+    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(v4_dspark, false, true));
     v4_dspark.sp_config.gen_num_per_cycle = 0;
-    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(v4_dspark, true, true, false));
+    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(v4_dspark, true, true));
     const std::vector<std::function<void(EngineInitParams&)>> unsupported = {
         [](auto& p) { p.pd_sep_config.role_type = RoleType::PDFUSION; },
         [](auto& p) { p.parallelism_config.role_type = RoleType::PREFILL; },
@@ -2027,9 +2026,9 @@ TEST(SparseKvOffloadConfigTest, AcceptsTpDecodeAndRejectsUnsupportedCombinations
         SCOPED_TRACE(i);
         auto invalid = params;
         unsupported[i](invalid);
-        EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(invalid, false, true, false));
+        EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(invalid, false, true));
         invalid.kv_cache_config.enable_sparse_kv_offload = false;
-        EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(invalid, true, false, true));
+        EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(invalid, true, false));
     }
 }
 
@@ -2040,18 +2039,18 @@ TEST(SparseKvOffloadConfigTest, RejectsBatchDecodeSizeAboveHotCacheCapacity) {
     auto& batch_size = params.runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
     for (const int64_t valid : {1, 32}) {
         batch_size = valid;
-        EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true, false));
+        EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true));
     }
     for (const int64_t invalid : {-1, 0, 33}) {
         SCOPED_TRACE(invalid);
         batch_size = invalid;
-        EXPECT_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true, false), std::invalid_argument);
+        EXPECT_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true), std::invalid_argument);
     }
     params.kv_cache_config.enable_sparse_kv_offload = false;
-    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true, false));
+    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true));
     params.kv_cache_config.enable_sparse_kv_offload  = true;
     params.runtime_config.use_batch_decode_scheduler = false;
-    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true, false));
+    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true));
 }
 
 TEST(SparseKvOffloadConfigTest, UsesModelDeclarationWithoutHardcodedTagsOrRowWidths) {
@@ -2062,9 +2061,9 @@ TEST(SparseKvOffloadConfigTest, UsesModelDeclarationWithoutHardcodedTagsOrRowWid
     desc.cache_type                            = KVCacheSpecType::OpaqueKV;
     desc.entry_elems                           = 512;
     desc.tag                                   = "custom_sparse_kv";
-    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true, false));
+    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true));
     desc.offload->enabled = false;
-    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true, false));
+    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true));
 }
 
 }  // namespace

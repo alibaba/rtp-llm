@@ -189,10 +189,7 @@ size_t releasePythonKvCache(const pybind11::object& py_model, bool measure_offlo
 #endif
 }  // anonymous namespace
 
-void NormalEngine::validateSparseKvOffloadConfig(const EngineInitParams& params,
-                                                 bool                    has_propose_model,
-                                                 bool                    is_cuda,
-                                                 bool                    drop_broad_sync) {
+void NormalEngine::validateSparseKvOffloadConfig(const EngineInitParams& params, bool has_propose_model, bool is_cuda) {
     const auto& cache = params.kv_cache_config;
     if (!cache.enable_sparse_kv_offload) {
         return;
@@ -224,7 +221,6 @@ void NormalEngine::validateSparseKvOffloadConfig(const EngineInitParams& params,
     RTP_LLM_CHECK_WITH_INFO(cache.multi_task_prompt.empty() && cache.multi_task_prompt_str.empty()
                                 && cache.multi_task_prompt_tokens.empty(),
                             "sparse KV offload does not support multi_task_prompt prefill on DECODE");
-    RTP_LLM_CHECK_WITH_INFO(!drop_broad_sync, "sparse KV offload does not support RTP_LLM_DROP_BROAD_SYNC");
     if (params.runtime_config.use_batch_decode_scheduler) {
         BatchDecodeScheduler::validateOffloadBatchSize(
             params.runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size,
@@ -282,14 +278,12 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     };
     std::unique_ptr<NormalEngine, decltype(cleanup_on_failure)> construction_guard(this, cleanup_on_failure);
     if (kv_cache_config.enable_sparse_kv_offload) {
-        const char* drop_sync = std::getenv("RTP_LLM_DROP_BROAD_SYNC");
 #if USING_CUDA
         constexpr bool is_cuda = true;
 #else
         constexpr bool is_cuda = false;
 #endif
-        validateSparseKvOffloadConfig(
-            params, propose_params_ != nullptr, is_cuda, drop_sync && std::string(drop_sync) == "1");
+        validateSparseKvOffloadConfig(params, propose_params_ != nullptr, is_cuda);
     }
 
     resource_context_.defer_grammar_to_pp_tail = parallelism_config.pp_size > 1 && parallelism_config.pp_rank == 0;

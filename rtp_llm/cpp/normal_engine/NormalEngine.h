@@ -48,10 +48,7 @@ public:
     void startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) override;
 
 private:
-    static void validateSparseKvOffloadConfig(const EngineInitParams& params,
-                                              bool                    has_propose_model,
-                                              bool                    is_cuda,
-                                              bool                    drop_broad_sync);
+    static void validateSparseKvOffloadConfig(const EngineInitParams& params, bool has_propose_model, bool is_cuda);
 
     static int calculateReserveStep(const EngineInitParams& params);
 
