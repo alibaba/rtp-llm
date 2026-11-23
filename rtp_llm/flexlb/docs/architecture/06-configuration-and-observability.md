@@ -195,6 +195,11 @@ UniConfig / Nacos 的 v3 部分更新示例：
   Spring 属性 `flexlb.engine-grpc.keep-alive-time-ms` 和
   `flexlb.engine-grpc.keep-alive-without-calls`，默认 `2000` 和 `true`；
   grpc-java 会把低于 10 秒的出站间隔提升到 10 秒。
+  入站接收分为 `Schedule` 和 `Cancel` 两条通道。默认并发上限分别为
+  `maxReceivingRequests=1024` 和 `maxReceivingControlRequests=128`，设为 0 使用默认值。
+  `receiveTimeoutMs=30000` 限制读完请求体的时间。`receiveBudgetBytes=0` 使用 JVM
+  Direct 上限的四分之一作为总接收预算，其中八分之一分给 Cancel，最多 128 MiB。
+  接收预算按请求体的 wire bytes 计费，调度和推理耗时在接收计时之外。
 - `engineGrpc.kvCacheMaxInboundMessageBytes`：Master 启动时读取 KV Cache 状态响应的
   接收上限，默认 `134217728`（128 MiB）。其他出站通道仍沿用原有上限。
 - `observability.cacheHit`：recent-key window、指标和理论命中日志。理论命中查询、历史池更新、

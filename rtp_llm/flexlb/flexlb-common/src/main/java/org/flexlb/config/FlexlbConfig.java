@@ -131,14 +131,21 @@ public final class FlexlbConfig {
     @Getter
     @Setter
     public static final class GrpcServerConfig {
+        public static final int DEFAULT_MAX_RECEIVING_REQUESTS = 1024;
+        public static final int DEFAULT_MAX_RECEIVING_CONTROL_REQUESTS = 128;
+
         private int executorCoreSize = 1000;
         private int executorMaxSize = 1000;
         private int executorQueueSize = 1000;
+        private int maxReceivingRequests = DEFAULT_MAX_RECEIVING_REQUESTS;
+        private int maxReceivingControlRequests = DEFAULT_MAX_RECEIVING_CONTROL_REQUESTS;
 
         /** 静默时间：下线后每次 Schedule 到达重新计时，期满后等待已接收 RPC 完成。 */
         private long shutdownQuietPeriodMs = 5_000L;
 
         private long permitKeepAliveTimeMs = 30_000L;
+        private long receiveTimeoutMs = 30_000L;
+        private long receiveBudgetBytes;
         private boolean permitKeepAliveWithoutCalls = true;
     }
 

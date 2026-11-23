@@ -23,6 +23,7 @@
   </modules>
   <properties>
     <maven.compiler.release>21</maven.compiler.release>
+    <grpc.version>1.65.1</grpc.version>
     <!-- Match internal_source/java/pom.xml for internal SDK annotation processors. -->
     <lombok.version>1.18.32</lombok.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
