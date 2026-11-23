@@ -31,3 +31,7 @@ route_source="$site/atom/plugin/rtpllm/utils/qwen4_verify_route"
 # Compile the eight-row verifier separately to preserve the four-row code object.
 "${ROCM_PATH:-/opt/rocm}/bin/hipcc" --genco -O3 --offload-arch=gfx942 \
     -DQWEN4_VERIFY_EIGHT_ROWS "$route_source.hip" -o "${route_source}_m8.hsaco"
+apply_atom_overlay main_0189b3506/hc_verify
+hc_source="$site/atom/model_ops/qwen4_exp/hc_verify"
+"${ROCM_PATH:-/opt/rocm}/bin/hipcc" --genco -O3 --offload-arch=gfx942 \
+    "$hc_source.hip" -o "$hc_source.hsaco"

@@ -1,0 +1,190 @@
+--- a/atom/model_ops/qwen4_exp/hyperconnection.py
++++ b/atom/model_ops/qwen4_exp/hyperconnection.py
+@@ -18,6 +18,8 @@
+
+ Parameters are replicated, not TP-sharded: ~13 MB per module.
+ """
++
++import os
+
+ import torch
+ from aiter.tuned_gemm import tgemm
+@@ -79,6 +81,14 @@
+         prefix: str = "",
+     ) -> None:
+         super().__init__()
++        self._verify_project = None
++        if torch.version.hip and os.environ.get("ROLE_TYPE") == "DECODE":
++            from atom.plugin.prepare import is_rtpllm
++
++            if is_rtpllm():
++                from atom.model_ops.qwen4_exp.hc_verify import try_project
++
++                self._verify_project = try_project
+         self.hidden_size = hidden_size
+         self.hc_count = hc_count
+         self.hc_dim = hc_count * hidden_size
+@@ -207,8 +217,15 @@
+             hyper_input, self.hc_norm.weight, eps, self.hc_count, block_out, raw_prev
+         )
+         rank = self.fused_rank
+-        d = tgemm.mm(normed, self.fused_w_cat, otype=normed.dtype)
+-        gate = scaled_silu(d[:, :rank], self.hc_count)
++        projected = None
++        if self._verify_project is not None and has_inject:
++            projected = self._verify_project(normed, self.fused_w_cat, rank, self.hc_count)
++        if projected is None:
++            d = tgemm.mm(normed, self.fused_w_cat, otype=normed.dtype)
++            gate = scaled_silu(d[:, :rank], self.hc_count)
++            raw = d[:, rank : rank + self.hc_count] if has_inject else None
++        else:
++            gate, raw = projected
+         up = tgemm.mm(gate, w_up, otype=gate.dtype)
+         quantized = None
+         if quant_dtype is None:
+@@ -218,7 +235,6 @@
+                 normed, up, self.hc_count, quant_dtype
+             )
+             quantized = (mixed_q, mixed_scale)
+-        raw = d[:, rank : rank + self.hc_count] if has_inject else None
+         return mixed, quantized, (h, raw)
+
+     def apply_pending(
+--- /dev/null
++++ b/atom/model_ops/qwen4_exp/hc_verify.py
+@@ -0,0 +1,59 @@
++"""Qwen4 gated down projection for the MI308X PD decode verifier."""
++import ctypes
++import os
++from functools import lru_cache
++from pathlib import Path
++
++import torch
++
++from atom.model_ops.qwen38_moe_dispatch import rtp_single_verify
++from atom.plugin.rtpllm.utils.topk_compat import _mi308x_topk
++from atom.model_ops.qwen4_exp.hc_verify_triton import split_project, finalize
++
++
++@lru_cache(None)
++def _load_kernel(device):
++    hip = ctypes.CDLL("libamdhip64.so")
++    ptr = ctypes.c_void_p
++    hip.hipModuleLoad.argtypes = [ctypes.POINTER(ptr), ctypes.c_char_p]
++    hip.hipModuleGetFunction.argtypes = [ctypes.POINTER(ptr), ptr, ctypes.c_char_p]
++    hip.hipModuleLaunchKernel.argtypes = [
++        ptr, *([ctypes.c_uint] * 7), ptr, ctypes.POINTER(ptr), ctypes.POINTER(ptr)
++    ]
++    module, func = ptr(), ptr()
++    with torch.cuda.device(device):
++        path = Path(__file__).with_name("hc_verify.hsaco")
++        status = hip.hipModuleLoad(ctypes.byref(module), os.fsencode(path))
++        if not status:
++            status = hip.hipModuleGetFunction(ctypes.byref(func), module, b"hc_4_256_2")
++        if status:
++            raise RuntimeError(f"HC verifier kernel load failed with HIP status {status}")
++    return hip, module, func
++
++
++def try_project(x, weight, rank, hc_count):
++    rows = x.shape[0]
++    if not (
++        rtp_single_verify.get() and rank == 320 and hc_count == 4
++        and rows in (4, 8) and x.shape == (rows, 10240) and weight.shape == (324, 10240)
++        and x.dtype == weight.dtype == torch.bfloat16 and x.device == weight.device
++        and x.is_contiguous() and weight.is_contiguous() and _mi308x_topk(x.device)
++    ):
++        return None
++    gate = x.new_empty((rows, 320))
++    inject = x.new_empty((rows, 4))
++    if rows == 4:
++        hip, _, func = _load_kernel(x.device)
++        ptr = ctypes.c_void_p
++        values = [ptr(t.data_ptr()) for t in (x, weight, gate, inject)]
++        args = (ptr * 4)(*(ctypes.cast(ctypes.byref(v), ptr) for v in values))
++        stream = torch.cuda.current_stream(x.device)
++        status = hip.hipModuleLaunchKernel(func, 324, 2, 1, 256, 1, 1, 0,
++                                           ptr(stream.cuda_stream), args, None)
++        if status:
++            raise RuntimeError(f"HC verifier kernel launch failed with HIP status {status}")
++    else:
++        partials = torch.empty((32, rows, 324), device=x.device, dtype=torch.float32)
++        split_project[(11, 32)](x, weight, partials, rows, 32, 64, 32, num_warps=4)
++        finalize[(rows, 6)](partials, gate, inject, rows, 32, 32, num_warps=2)
++    return gate, inject
+--- /dev/null
++++ b/atom/model_ops/qwen4_exp/hc_verify.hip
+@@ -0,0 +1,43 @@
++#include <hip/hip_runtime.h>
++#include <hip/hip_bfloat16.h>
++#include <math.h>
++using bf=hip_bfloat16;
++using pack=uint4;
++union Vec {pack raw; unsigned short h[8];};
++__device__ __forceinline__ float val(unsigned short b){return __uint_as_float(unsigned(b)<<16);}
++template<int M,int T,int R>
++__device__ void project(const bf* x,const bf* w,bf* gate,bf* raw){
++  constexpr int K=10240,N=324;
++  int col=blockIdx.x, first=blockIdx.y*R, t=threadIdx.x;
++  float acc[R]={};
++  const pack* wt=reinterpret_cast<const pack*>(w+col*K);
++  for(int i=t;i<K/8;i+=T){
++    Vec a;a.raw=wt[i];
++    #pragma unroll
++    for(int row=0;row<R;row++){
++      Vec v;v.raw=reinterpret_cast<const pack*>(x+(first+row)*K)[i];
++      #pragma unroll
++      for(int j=0;j<8;j++) acc[row]=fmaf(val(a.h[j]),val(v.h[j]),acc[row]);
++    }
++  }
++  __shared__ float partial[R][T/64];
++  #pragma unroll
++  for(int r=0;r<R;r++){
++    for(int off=32;off;off>>=1)acc[r]+=__shfl_down(acc[r],off,64);
++    if(!(t%64))partial[r][t/64]=acc[r];
++  }
++  __syncthreads();
++  if(t<R){
++    float sum=0;
++    #pragma unroll
++    for(int i=0;i<T/64;i++)sum+=partial[t][i];
++    bf rounded(sum);
++    if(col<320){
++      float z=float(bf(float(rounded)*0.25f));
++      gate[(first+t)*320+col]=bf(z/(1.f+expf(-z)));
++    }else raw[(first+t)*4+col-320]=rounded;
++  }
++}
++extern "C" __global__ void hc_4_256_2(const bf* x, const bf* weight, bf* gate, bf* inject) {
++  project<4, 256, 2>(x, weight, gate, inject);
++}
+--- /dev/null
++++ b/atom/model_ops/qwen4_exp/hc_verify_triton.py
+@@ -0,0 +1,27 @@
++import triton
++import triton.language as tl
++
++@triton.jit
++def split_project(X,W,P,M:tl.constexpr,BN:tl.constexpr,BK:tl.constexpr,S:tl.constexpr):
++    n=tl.program_id(0)*BN+tl.arange(0,BN)
++    m=tl.arange(0,16)
++    split=tl.program_id(1)
++    k=split*(10240//S)+tl.arange(0,BK)
++    acc=tl.full((16,BN),0,tl.float32)
++    for i in range((10240//S)//BK):
++        x=tl.load(X+m[:,None]*10240+k[None,:],m[:,None]<M,0)
++        w=tl.load(W+n[None,:]*10240+k[:,None],n[None,:]<324,0)
++        acc=tl.dot(x,w,acc)
++        k+=BK
++    tl.store(P+split*M*324+m[:,None]*324+n[None,:],acc,(m[:,None]<M)&(n[None,:]<324))
++
++@triton.jit
++def finalize(P,G,R,M:tl.constexpr,S:tl.constexpr,BS:tl.constexpr):
++    row=tl.program_id(0)
++    n=tl.program_id(1)*64+tl.arange(0,64)
++    s=tl.arange(0,BS)
++    a=tl.load(P+s[:,None]*M*324+row*324+n[None,:],(s[:,None]<S)&(n[None,:]<324),0)
++    d=tl.sum(a,0).to(tl.bfloat16).to(tl.float32)
++    z=(d*0.25).to(tl.bfloat16).to(tl.float32)
++    tl.store(G+row*320+n,z*tl.sigmoid(z),n<320)
++    tl.store(R+row*4+(n-320),d,(n>=320)&(n<324))
