@@ -542,6 +542,8 @@ py_library(
         "openai/**/*.py",
     ]),
     deps = [
+        ":orjson",
+        ":partial_json_parser",
         ":utils",
         ":ops",
         ":config",

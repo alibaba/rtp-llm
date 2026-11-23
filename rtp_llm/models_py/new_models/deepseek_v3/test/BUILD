@@ -99,3 +99,13 @@ py_test(
     env = checkpoint_reader_test_env(),
     deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:models", "//rtp_llm:fastsafetensors", "//rtp_llm:safetensors", "//rtp_llm:torch"],
 )
+
+py_test(
+    name = "test_glm5_mtp_native_output",
+    srcs = ["test_glm5_mtp_native_output.py", "test_glm5_mtp_route.py", "test_nextn_route.py", "test_score_route.py"],
+    env = checkpoint_reader_test_env(),
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+    data = ["//rtp_llm/libs:librtp_compute_ops_so"],
+    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:models", "//rtp_llm:fastsafetensors", "//rtp_llm:safetensors", "//rtp_llm:torch"],
+)

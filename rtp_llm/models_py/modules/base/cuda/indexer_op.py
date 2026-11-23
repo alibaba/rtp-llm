@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import cached_property
 from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
 if TYPE_CHECKING:
@@ -330,12 +331,16 @@ class IndexerOp(nn.Module):
         self._paged_topk_backend = (
             "topk_v3_tie_break" if stable_topk else "dsv4_persistent"
         )
-        from rtp_llm.ops.compute_ops import rtp_llm_ops
-
-        self._paged_topk_op = rtp_llm_ops.dsv4_persistent_topk
         self._prefill_topk_backend = (
             "topk_v3_tie_break" if stable_topk else "dsv4_per_row"
         )
+
+    @cached_property
+    def _paged_topk_op(self):
+        # Loading sparse checkpoint weights does not execute a CUDA kernel.
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        return rtp_llm_ops.dsv4_persistent_topk
 
     def _indexer_cache_view(self, kv_cache: LayerKVCache) -> torch.Tensor:
         entry_elems = self.index_head_dim + self.index_head_dim // self.block_size * 4

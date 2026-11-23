@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
 from torch import nn
@@ -17,7 +19,6 @@ from rtp_llm.models_py.modules import (
     CausalAttention,
     DenseMLP,
     Embedding,
-    FMHAImplBase,
     MlaAttention,
     RMSResNorm,
 )
@@ -37,9 +38,12 @@ from rtp_llm.models_py.modules.hybrid.glm5_cmp import (
     should_enable_glm5_cmp,
 )
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig, RoleType
-from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
 from rtp_llm.utils.model_weight import W
+
+if TYPE_CHECKING:
+    from rtp_llm.models_py.modules import FMHAImplBase
+    from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 
 try:
     from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (

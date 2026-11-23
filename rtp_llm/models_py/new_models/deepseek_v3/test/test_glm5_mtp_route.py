@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -42,61 +43,12 @@ _READERS = (
 )
 
 
-class Glm5DraftRouteTest(unittest.TestCase):
-    def test_dense_scale_mapping_preserves_tp_shard(self):
-        mapper = _Glm5Mapper(WeightsMapper(prefix_mapping={"model.": ""}), packed=True)
-        name = "model.layers.0.self_attn.q_b_proj.scale"
-        spec = make_sharded_read_spec(name, (4, 1), 0, 2, 1)
-        source = torch.tensor([[1.0], [2.0], [4.0], [8.0]])
-        dtypes = [torch.float32]
-        if hasattr(torch, "float8_e8m0fnu"):
-            dtypes.append(torch.float8_e8m0fnu)
-        for dtype in dtypes:
-            with self.subTest(dtype=dtype):
-                local = spec.materialize(source.to(dtype))
-                key, value = next(mapper.apply([(name, local)]))
-                tensor, proof = unwrap_checkpoint_tensor(value)
-                self.assertEqual(key, "layers.0.self_attn.q_b_proj.weight_scale_inv")
-                self.assertIs(proof, spec)
-                torch.testing.assert_close(tensor, source[2:])
+class _ReachedDecoder(Exception):
+    """The driverless test stops after the actual embedding/norm/projection."""
 
-    @unittest.skipUnless(hasattr(torch, "float8_e8m0fnu"), "requires UE8M0 torch dtype")
-    def test_mixed_checkpoint_keeps_fp4_nibbles_and_group32_scales(self):
-        cfg, data, prefix = fixture(False)
-        cfg.update(
-            architectures=["GlmMoeDsaMtpForCausalLM"],
-            model_type="glm_moe_dsa",
-            quantization_config={"expert_dtype": "fp4"},
-        )
-        for expert in range(4):
-            for i, proj in enumerate(("gate_proj", "up_proj", "down_proj")):
-                base = prefix + f"mlp.experts.{expert}.{proj}"
-                data[base + ".weight"] = torch.full(
-                    (32, 16), expert * 3 + i, dtype=torch.int8
-                )
-                data[base + ".weight_scale"] = torch.full((32, 1), 2.0 ** (expert + i))
-        with tempfile.TemporaryDirectory() as root:
-            (Path(root) / "config.json").write_text(json.dumps(cfg))
-            save_file(data, str(Path(root) / "model.safetensors"))
-            for method in _READERS:
-                with self.subTest(method=method):
-                    service = load_service(root, method, cls=_Draft, tag="glm_5_mtp")
-                    experts = service.py_model.layers[0].mlp.experts
-                    self.assertTrue(experts.checkpoint_load_complete())
-                    torch.testing.assert_close(
-                        experts.w13[2, :32],
-                        data[prefix + "mlp.experts.2.up_proj.weight"],
-                    )
-                    torch.testing.assert_close(
-                        experts.w13[2, 32:],
-                        data[prefix + "mlp.experts.2.gate_proj.weight"],
-                    )
-                    torch.testing.assert_close(
-                        experts.w2_scale[2].float(),
-                        data[prefix + "mlp.experts.2.down_proj.weight_scale"],
-                    )
 
-    def test_service_owner_and_both_vocab_layouts(self):
+class _DraftServiceFixture:
+    def check_service_owner_and_both_vocab_layouts(self, *, native_output):
         self.assertIs(get_model_class("glm_5"), Glm5ForCausalLM)
         tag = ModelDict.get_ft_model_type_by_config(
             {"architectures": ["GlmMoeDsaMtpForCausalLM"]}
@@ -206,13 +158,31 @@ class Glm5DraftRouteTest(unittest.TestCase):
                             hidden_states=expected, residual=torch.zeros_like(expected)
                         )
                         with patch.object(
-                            model, "_forward_decoder_layers", return_value=result
+                            model,
+                            "_forward_decoder_layers",
+                            return_value=result,
+                            side_effect=None if native_output else _ReachedDecoder,
                         ) as run:
-                            model(
-                                SimpleNamespace(input_ids=ids, input_hiddens=hidden),
-                                {"default": default},
-                            )
+                            with (
+                                nullcontext()
+                                if native_output
+                                else self.assertRaises(_ReachedDecoder)
+                            ):
+                                output = model(
+                                    SimpleNamespace(
+                                        input_ids=ids, input_hiddens=hidden
+                                    ),
+                                    {"default": default},
+                                )
                         torch.testing.assert_close(run.call_args.args[0], expected)
+                        if native_output:
+                            from rtp_llm.ops.compute_ops import PyModelOutputs
+
+                            self.assertIsInstance(output, PyModelOutputs)
+                            torch.testing.assert_close(
+                                output.hidden_states,
+                                norm(expected, "shared_head.norm.weight").to(expected),
+                            )
                         clone = model.clone_for_cuda_graph()
                         self.assertIsNot(clone.layers[0], model.layers[0])
                         self.assertIs(
@@ -247,6 +217,64 @@ class Glm5DraftRouteTest(unittest.TestCase):
                         experts._configure_factory_adapter(adapter)
                         self.assertEqual(adapter.mega_moe_policy.activation_clamp, 5.0)
                         self.assertEqual(adapter.max_generate_batch_size, 1)
+
+
+class Glm5DraftRouteTest(_DraftServiceFixture, unittest.TestCase):
+    def test_dense_scale_mapping_preserves_tp_shard(self):
+        mapper = _Glm5Mapper(WeightsMapper(prefix_mapping={"model.": ""}), packed=True)
+        name = "model.layers.0.self_attn.q_b_proj.scale"
+        spec = make_sharded_read_spec(name, (4, 1), 0, 2, 1)
+        source = torch.tensor([[1.0], [2.0], [4.0], [8.0]])
+        dtypes = [torch.float32]
+        if hasattr(torch, "float8_e8m0fnu"):
+            dtypes.append(torch.float8_e8m0fnu)
+        for dtype in dtypes:
+            with self.subTest(dtype=dtype):
+                local = spec.materialize(source.to(dtype))
+                key, value = next(mapper.apply([(name, local)]))
+                tensor, proof = unwrap_checkpoint_tensor(value)
+                self.assertEqual(key, "layers.0.self_attn.q_b_proj.weight_scale_inv")
+                self.assertIs(proof, spec)
+                torch.testing.assert_close(tensor, source[2:])
+
+    @unittest.skipUnless(hasattr(torch, "float8_e8m0fnu"), "requires UE8M0 torch dtype")
+    def test_mixed_checkpoint_keeps_fp4_nibbles_and_group32_scales(self):
+        cfg, data, prefix = fixture(False)
+        cfg.update(
+            architectures=["GlmMoeDsaMtpForCausalLM"],
+            model_type="glm_moe_dsa",
+            quantization_config={"expert_dtype": "fp4"},
+        )
+        for expert in range(4):
+            for i, proj in enumerate(("gate_proj", "up_proj", "down_proj")):
+                base = prefix + f"mlp.experts.{expert}.{proj}"
+                data[base + ".weight"] = torch.full(
+                    (32, 16), expert * 3 + i, dtype=torch.int8
+                )
+                data[base + ".weight_scale"] = torch.full((32, 1), 2.0 ** (expert + i))
+        with tempfile.TemporaryDirectory() as root:
+            (Path(root) / "config.json").write_text(json.dumps(cfg))
+            save_file(data, str(Path(root) / "model.safetensors"))
+            for method in _READERS:
+                with self.subTest(method=method):
+                    service = load_service(root, method, cls=_Draft, tag="glm_5_mtp")
+                    experts = service.py_model.layers[0].mlp.experts
+                    self.assertTrue(experts.checkpoint_load_complete())
+                    torch.testing.assert_close(
+                        experts.w13[2, :32],
+                        data[prefix + "mlp.experts.2.up_proj.weight"],
+                    )
+                    torch.testing.assert_close(
+                        experts.w13[2, 32:],
+                        data[prefix + "mlp.experts.2.gate_proj.weight"],
+                    )
+                    torch.testing.assert_close(
+                        experts.w2_scale[2].float(),
+                        data[prefix + "mlp.experts.2.down_proj.weight_scale"],
+                    )
+
+    def test_service_owner_and_both_vocab_layouts(self):
+        self.check_service_owner_and_both_vocab_layouts(native_output=False)
 
 
 if __name__ == "__main__":

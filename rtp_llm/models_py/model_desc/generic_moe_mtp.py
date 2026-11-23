@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import nn
@@ -11,8 +13,10 @@ from rtp_llm.models_py.model_desc.glm5 import Glm5ModelBase
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import LinearFactory, RMSNorm, RMSResNorm
 from rtp_llm.ops import MoeConfig, ParallelismConfig
-from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
+
+if TYPE_CHECKING:
+    from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 
 _MTP_INDEXER_ROLE_NORMAL = 0
 _MTP_INDEXER_ROLE_SEED = 1
@@ -285,6 +289,8 @@ class GenericMoeMTPModel(Glm5ModelBase):
 
         hidden_states, _ = self.norm(result.hidden_states, result.residual)
         self.capture_cp_mtp_hidden(hidden_states)
+        from rtp_llm.ops.compute_ops import PyModelOutputs
+
         return PyModelOutputs(hidden_states)
 
     def _mask_position_zero_embeddings(
