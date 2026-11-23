@@ -26,6 +26,7 @@ try:
         gated_residual_norm_triton as _hc_norm,
         gated_residual_prefill_inject_norm_triton as _hc_prefill_inject_norm,
         gated_residual_prefill_up_mix_triton as _hc_prefill_up_mix,
+        gated_residual_sm90_up_mix_triton as _hc_sm90_up_mix,
         gated_residual_splitk_inject as _hc_splitk_inject,
         gated_residual_up_mix_triton as _hc_up_mix,
     )
@@ -36,6 +37,7 @@ except ImportError:
     _hc_norm = None
     _hc_prefill_inject_norm = None
     _hc_prefill_up_mix = None
+    _hc_sm90_up_mix = None
     _hc_splitk_inject = None
     _hc_up_mix = None
 
@@ -408,8 +410,13 @@ class GatedResidual(nn.Module):
             and mix.dtype == torch.bfloat16
             and mix.device == bf16_up.device
         )
+        if use_bf16_up and _hc_sm90_up_mix is not None:
+            mixed = _hc_sm90_up_mix.try_sm90_bf16_up_mix(
+                mix, bf16_up, normed, self.hc_mult
+            )
         if (
-            _hc_up_mix is not None
+            mixed is None
+            and _hc_up_mix is not None
             and not use_bf16_up
             and up is not None
             and up.bias is None
