@@ -1,5 +1,11 @@
 load("//rtp_llm/models_py/test:defs.bzl", "models_py_test")
 
+models_py_test(
+    name = "silu_and_mul_test",
+    src = "silu_and_mul_test.py",
+    gpu = "L20_CU13",
+)
+
 py_test (
     name = "silu_mul_masked_test",
     srcs = ["silu_mul_masked_test.py"],
