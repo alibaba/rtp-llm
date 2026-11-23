@@ -33,7 +33,6 @@ public:
 
     void configure(int rank, int64_t interval_ms, int64_t timeout_ms, int64_t force_release_timeout_ms,
                    std::shared_ptr<BroadcastManager> broadcast);
-    static bool validConfig(int64_t interval_ms, int64_t timeout_ms, int64_t force_release_timeout_ms);
     bool start();
     void stop() noexcept;
 

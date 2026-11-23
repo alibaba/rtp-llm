@@ -1180,6 +1180,10 @@ TEST_F(KVCacheManagerTest, MetricsThreadSmoke) {
     cache_manager->stopMetricsReporter();
 
     cache_manager.reset();
+
+    KVCacheManager without_reporter(cache_config);
+    ASSERT_TRUE(without_reporter.init());
+    EXPECT_FALSE(without_reporter.metrics_reporter_thread_.joinable());
 }
 
 TEST_F(KVCacheManagerTest, AllocationWaitObservesReleaseGeneration) {
@@ -2197,6 +2201,41 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionFormsNoResponseForUnsupportedRequestTy
     EXPECT_FALSE(response.has_mem_response());
 }
 
+TEST_F(KVCacheManagerTest, CompletionRequestsBeforeAndAfterInit) {
+    const auto cache_config = makeSimpleMhaCacheConfig(1, 4, 2, DataType::TYPE_INT8);
+    ParallelismConfig parallel;
+    parallel.tp_size = 2;
+    parallel.tp_rank = 1;
+    KVCacheManager manager(cache_config, false, nullptr, KVCacheConfig{}, parallel);
+
+    FunctionRequestPB query;
+    query.mutable_completion_query()->add_keys()->set_trace_id("missing");
+    FunctionRequestPB forget;
+    forget.mutable_completion_forget()->add_keys()->set_trace_id("missing");
+
+    auto check_responses = [&](bool admission_closed, TransferCompletionForgetStatusPB forget_status) {
+        FunctionResponsePB response;
+        ASSERT_TRUE(manager.executeFunction(query, response));
+        const auto& query_result = response.completion_query();
+        ASSERT_EQ(query_result.entries_size(), 1);
+        EXPECT_EQ(query_result.rank(), 1u);
+        EXPECT_EQ(query_result.entries(0).key().trace_id(), "missing");
+        EXPECT_EQ(query_result.entries(0).state(), TRANSFER_COMPLETION_UNKNOWN);
+        EXPECT_EQ(query_result.entries(0).admission_closed(), admission_closed);
+
+        ASSERT_TRUE(manager.executeFunction(forget, response));
+        const auto& forget_result = response.completion_forget();
+        ASSERT_EQ(forget_result.entries_size(), 1);
+        EXPECT_EQ(forget_result.rank(), 1u);
+        EXPECT_EQ(forget_result.entries(0).key().trace_id(), "missing");
+        EXPECT_EQ(forget_result.entries(0).status(), forget_status);
+    };
+
+    ASSERT_NO_FATAL_FAILURE(check_responses(false, TRANSFER_FORGET_FAILED));
+    ASSERT_TRUE(manager.init());
+    ASSERT_NO_FATAL_FAILURE(check_responses(true, TRANSFER_FORGET_DONE));
+}
+
 static void appendValidGroupedTransfer(const std::shared_ptr<KVCacheManager>& manager, FunctionRequestPB& request) {
     ASSERT_NE(manager->blockTreeCache(), nullptr);
     const TransferDescriptor descriptor = TransferDescriptor::deviceToHost(/*group_id=*/0, {1}, /*host_block=*/1);
@@ -2334,7 +2373,7 @@ TEST_F(KVCacheManagerTest, ForgetProgressesWithRecoveryDisabledAndWhileItsWorker
     ASSERT_NO_FATAL_FAILURE(check_cleanup(1002));
 }
 
-TEST_F(KVCacheManagerTest, ExecuteFunctionValidatesTimeoutBeforeSubmittingTransfer) {
+TEST_F(KVCacheManagerTest, ExecuteFunctionValidatesTraceAndTimeoutBeforeSubmittingTransfer) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_memory_cache  = true;
@@ -2347,6 +2386,16 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionValidatesTimeoutBeforeSubmittingTransf
     FunctionRequestPB request;
     appendValidGroupedTransfer(manager, request);
     ASSERT_EQ(request.mem_request().copy_items_size(), 1);
+    FunctionRequestPB missing_trace = request;
+    missing_trace.mutable_mem_request()->clear_transfer_trace_id();
+    FunctionResponsePB rejected;
+    ASSERT_TRUE(manager->executeFunction(missing_trace, rejected));
+    EXPECT_EQ(rejected.mem_response().code(), MemoryOperationResponsePB::INVALID_REQUEST);
+    EXPECT_EQ(rejected.mem_response().error_info().error_message(), "transfer execution trace ID is required");
+    EXPECT_TRUE(rejected.mem_response().buffer_safe());
+    ASSERT_EQ(rejected.mem_response().block_errors_size(), 1);
+    EXPECT_EQ(rejected.mem_response().block_errors(0), MemoryOperationResponsePB::INVALID_REQUEST);
+    EXPECT_EQ(engine->submitted_batch_count, 0u);
     for (const int64_t timeout :
          {static_cast<int64_t>(std::numeric_limits<int>::max()) + 1, std::numeric_limits<int64_t>::max()}) {
         request.mutable_mem_request()->set_timeout_ms(timeout);

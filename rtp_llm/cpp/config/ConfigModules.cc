@@ -105,6 +105,19 @@ std::string FMHAConfig::to_string() const {
 }
 
 // KVCacheConfig
+bool KVCacheConfig::validFrozenRecoveryTiming() const {
+    return validFrozenRecoveryTiming(block_tree_frozen_recovery_interval_ms,
+                                     block_tree_frozen_recovery_query_timeout_ms,
+                                     block_tree_frozen_force_release_timeout_ms);
+}
+
+bool KVCacheConfig::validFrozenRecoveryTiming(int64_t interval_ms, int64_t query_timeout_ms,
+                                             int64_t force_release_timeout_ms) {
+    constexpr auto max_ms = std::numeric_limits<int>::max();
+    return interval_ms >= 0 && interval_ms <= max_ms && query_timeout_ms > 0 && query_timeout_ms <= max_ms
+           && force_release_timeout_ms >= 0 && force_release_timeout_ms <= max_ms;
+}
+
 void KVCacheConfig::insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id) {
     std::vector<int> new_tokens_id;  // to convert tokens of type int64_t to type int32_t
     for (auto token_id : tokens_id) {

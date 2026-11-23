@@ -17,6 +17,9 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/store/BlockTreeStorer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
+class FunctionRequestPB;
+class FunctionResponsePB;
+
 namespace rtp_llm {
 class BlockTreeReclaimer;
 
@@ -172,7 +175,6 @@ public:
     CacheStats                                getStats() const;
     std::vector<BlockTreePoolMetricsSnapshot> poolMetricsSnapshots() const;
     void                                      reportMetrics() const;
-    void reportUnfreezeZeroMetrics(const std::vector<BlockTreePoolMetricsSnapshot>& pools) const;
     BlockTreeKeySnapshot                      getKeySnapshot(int64_t latest_version = -1) const;
     void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);
     KVCacheSnapshot logicalCacheSnapshot() const;
@@ -182,6 +184,8 @@ public:
                                            const std::vector<MultiNodeResource>& matched_resources) const;
 
     TransferResult executeTransfer(TransferTask task);
+    static bool
+    executeFunction(BlockTreeCache* cache, int rank, const FunctionRequestPB& request, FunctionResponsePB& response);
     // Accessors
     BlockTree* tree() const {
         return tree_.get();

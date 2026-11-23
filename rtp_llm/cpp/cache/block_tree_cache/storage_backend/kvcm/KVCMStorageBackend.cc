@@ -2869,6 +2869,11 @@ void KVCMStorageBackend::onQuarantineChanged(uint64_t                          g
     impl_->reportQuarantineState(generation, task_count, block_count, breakdown);
 }
 
+bool KVCMStorageBackend::executeRemoteRequest(const RemoteOperationRequestPB& request, FunctionResponsePB& response) {
+    const bool success = execute(request, *response.mutable_remote_response());
+    return success || request.op() == REMOTE_OPERATION_READ || request.op() == REMOTE_OPERATION_WRITE;
+}
+
 bool KVCMStorageBackend::execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response) {
     Impl::ReadExecutionPtr execution;
     if (request.op() == REMOTE_OPERATION_READ) {

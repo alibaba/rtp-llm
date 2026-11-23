@@ -667,8 +667,17 @@ TEST(BlockTreeCacheMetricsTest, UnfreezeMetricsCountUniqueTargetsPerPoolAndBacke
     pools[2].tier = Tier::DEVICE;
     pools[3].pool_name = "disk";
     pools[3].tier = Tier::DISK;
+    auto report_pool_metrics = [&] {
+        RtpLLMCachePoolMetricsCollector collector;
+        collector.report_frozen_ref_blocks = true;
+        for (const auto& pool : pools) {
+            kmonitor::MetricsTags tags("pool_name", pool.pool_name);
+            tags.AddTag("tier", tierName(pool.tier));
+            reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&tags, &collector);
+        }
+    };
     auto expect_zero_metrics = [&] {
-        metrics_reporter.reportUnfreezeZeroMetrics(pools);
+        report_pool_metrics();
         for (const auto& pool : pools) {
             for (const char* backend : {"local", "kvcm"}) {
                 for (bool forced : {false, true}) {
@@ -687,7 +696,7 @@ TEST(BlockTreeCacheMetricsTest, UnfreezeMetricsCountUniqueTargetsPerPoolAndBacke
     metrics_reporter.reportUnfreezeMetrics(targets, backend, true);
     backend = "local";
     metrics_reporter.reportUnfreezeMetrics(targets, backend, true);
-    metrics_reporter.reportUnfreezeZeroMetrics(pools);
+    report_pool_metrics();
     EXPECT_DOUBLE_EQ(snapshot_unfreeze_blocks("first", Tier::HOST, "kvcm", true), 2);
     EXPECT_DOUBLE_EQ(snapshot_unfreeze_blocks("first", Tier::HOST, "local", true), 2);
     EXPECT_DOUBLE_EQ(snapshot_unfreeze_blocks("first", Tier::HOST, "local"), 2);
@@ -709,8 +718,10 @@ TEST(BlockTreeCacheMetricsTest, FrozenMetricIsOwnerOnlyAndIncludesZeroForEveryTi
         collector.report_frozen_ref_blocks = false;
         collector.frozen_ref_blocks        = 9;
         const auto series_before           = metricSeriesCount(metrics->frozen_ref_blocks_metric);
+        const auto unfreeze_series_before  = metricSeriesCount(metrics->unfreeze_blocks_qps_metric);
         ASSERT_TRUE((reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&tags, &collector)));
         EXPECT_EQ(metricSeriesCount(metrics->frozen_ref_blocks_metric), series_before);
+        EXPECT_EQ(metricSeriesCount(metrics->unfreeze_blocks_qps_metric), unfreeze_series_before);
         collector.report_frozen_ref_blocks = true;
         collector.frozen_ref_blocks        = 0;
         ASSERT_TRUE((reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&tags, &collector)));

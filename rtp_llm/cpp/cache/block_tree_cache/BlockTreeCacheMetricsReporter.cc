@@ -106,24 +106,6 @@ void BlockTreeCacheMetricsReporter::reportUnfreezeMetrics(const std::vector<Tran
     }
 }
 
-void BlockTreeCacheMetricsReporter::reportUnfreezeZeroMetrics(const std::vector<BlockTreePoolMetricsSnapshot>& pools) const {
-    if (!metrics_reporter_) {
-        return;
-    }
-    RtpLLMCacheUnfreezeMetricsCollector collector;
-    for (const auto& pool : pools) {
-        for (const char* backend : {"local", "kvcm"}) {
-            for (const char* forced : {"false", "true"}) {
-                kmonitor::MetricsTags tags("pool_name", pool.pool_name);
-                tags.AddTag("tier", tierName(pool.tier));
-                tags.AddTag("backend", backend);
-                tags.AddTag("forced", forced);
-                metrics_reporter_->report<RtpLLMCachePoolMetrics, RtpLLMCacheUnfreezeMetricsCollector>(&tags, &collector);
-            }
-        }
-    }
-}
-
 void BlockTreeCacheMetricsReporter::flushStageMetrics() const {
     if (stage_metrics_)
         stage_metrics_->flush();

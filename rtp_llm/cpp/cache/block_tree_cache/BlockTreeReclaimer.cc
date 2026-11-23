@@ -1,11 +1,11 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 
 #include <algorithm>
-#include <limits>
 #include <numeric>
 #include <set>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 
@@ -86,14 +86,8 @@ void BlockTreeReclaimer::configure(int rank, int64_t interval, int64_t timeout, 
     broadcast_ = std::move(broadcast);
 }
 
-bool BlockTreeReclaimer::validConfig(int64_t interval, int64_t timeout, int64_t force_timeout) {
-    const auto maximum = std::numeric_limits<int>::max();
-    return interval >= 0 && interval <= maximum && timeout > 0 && timeout <= maximum
-           && force_timeout >= 0 && force_timeout <= maximum;
-}
-
 bool BlockTreeReclaimer::start() {
-    if (!validConfig(interval_ms_, timeout_ms_, force_release_timeout_ms_))
+    if (!KVCacheConfig::validFrozenRecoveryTiming(interval_ms_, timeout_ms_, force_release_timeout_ms_))
         return false;
     if (!threads_.empty())
         return true;

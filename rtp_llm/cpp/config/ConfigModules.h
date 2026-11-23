@@ -298,6 +298,9 @@ struct KVCacheConfig {
     int         kvcm_get_broadcast_timeout = 15000;
     int         kvcm_put_broadcast_timeout = 15000;
     std::string kvcm_client_config         = "";
+    bool        validFrozenRecoveryTiming() const;
+    static bool
+    validFrozenRecoveryTiming(int64_t interval_ms, int64_t query_timeout_ms, int64_t force_release_timeout_ms);
     void        insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
     std::string to_string() const;
 };

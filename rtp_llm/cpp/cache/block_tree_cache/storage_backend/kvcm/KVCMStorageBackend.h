@@ -55,6 +55,7 @@ public:
     // Returns whether the request was handled and response is valid. Transfer
     // success, failure, and timeout are carried by response.transfer_status().
     bool execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response);
+    bool executeRemoteRequest(const RemoteOperationRequestPB& request, FunctionResponsePB& response) override;
     void setReclaimer(std::shared_ptr<BlockTreeReclaimer> reclaimer) override;
 
     // Optional EOS publication; true means handled/skipped, not committed.

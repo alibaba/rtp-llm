@@ -26,6 +26,9 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
+class RemoteOperationRequestPB;
+class FunctionResponsePB;
+
 namespace rtp_llm {
 
 class BlockTreeReclaimer;
@@ -169,6 +172,9 @@ private:
 // before derived backend state starts destruction.
 class StorageBackend {
 public:
+    virtual bool executeRemoteRequest(const RemoteOperationRequestPB&, FunctionResponsePB&) {
+        return false;
+    }
     virtual void setReclaimer(std::shared_ptr<BlockTreeReclaimer>) {}
 
     class ExternalIoGuard {

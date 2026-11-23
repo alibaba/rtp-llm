@@ -1,4 +1,3 @@
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/events/KVCMPublisher.h"
 
@@ -23,8 +22,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/KVCMStorageBackend.h"
 #include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #endif
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/KVCacheMetrics.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
@@ -304,9 +301,7 @@ bool KVCacheManager::init() {
     RTP_LLM_CHECK_WITH_INFO(!coordinator_manager_ && !block_tree_cache_ && !metrics_reporter_thread_.joinable(),
                             "KVCacheManager::init called more than once");
     RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "cache specs must not be empty");
-    if (!BlockTreeReclaimer::validConfig(kv_cache_config_.block_tree_frozen_recovery_interval_ms,
-                                         kv_cache_config_.block_tree_frozen_recovery_query_timeout_ms,
-                                         kv_cache_config_.block_tree_frozen_force_release_timeout_ms)) {
+    if (!kv_cache_config_.validFrozenRecoveryTiming()) {
         RTP_LLM_LOG_ERROR("invalid frozen recovery interval/query timeout; interval must be in [0, INT_MAX] "
                           "and query timeout in [1, INT_MAX], force release timeout in [0, INT_MAX]");
         return false;
@@ -378,9 +373,10 @@ bool KVCacheManager::init() {
     coordinator_manager_->attachBlockTreeCache(block_tree_cache_);
     initCacheEventPublisher();
 
-
-    stop_.store(false, std::memory_order_relaxed);
-    metrics_reporter_thread_ = std::thread(&KVCacheManager::reportMetricsLoop, this);
+    if (metrics_reporter_) {
+        stop_.store(false, std::memory_order_relaxed);
+        metrics_reporter_thread_ = std::thread(&KVCacheManager::reportMetricsLoop, this);
+    }
 
     return true;
 }
@@ -747,93 +743,7 @@ KVCacheManager::incrKVCacheRef(const KVCacheResource& resource, const CacheKeysT
 }
 
 bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
-    if (request.has_completion_query() || request.has_completion_forget()) {
-        return BlockTreeReclaimer::executeFunction(block_tree_cache_ ? &block_tree_cache_->reclaimer() : nullptr,
-                                                   parallelism_config_.tp_rank, request, response);
-    }
-    if (request.has_remote_request()) {
-#ifdef RTP_LLM_USE_REMOTE_KV_CACHE
-        if (!block_tree_cache_) {
-            RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: block tree cache is not initialized");
-            return false;
-        }
-        auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend());
-        if (!backend) {
-            RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: KVCM storage backend is not initialized");
-            return false;
-        }
-        const auto& remote_request = request.remote_request();
-        const bool  success        = backend->execute(remote_request, *response.mutable_remote_response());
-        if (remote_request.op() == REMOTE_OPERATION_READ || remote_request.op() == REMOTE_OPERATION_WRITE) {
-            // A handled transfer failure is carried in remote_response so the
-            // coordinator can distinguish failure from timeout. Keep the RPC
-            // successful long enough to deliver that payload to rank 0.
-            return true;
-        }
-        return success;
-#else
-        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: KVCM support is not compiled in");
-        return false;
-#endif
-    }
-    if (!request.has_mem_request()) {
-        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: unsupported request type");
-        return false;
-    }
-    RTP_LLM_LOG_INFO("transfer_lifecycle event=rpc_execute_enter trace=%lu request=%ld rank=%ld timeout_ms=%ld",
-                      request.mem_request().transfer_trace_id(), request.mem_request().transfer_request_id(),
-                      parallelism_config_.tp_rank, request.mem_request().timeout_ms());
-    if (!block_tree_cache_) {
-        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: block tree cache is not initialized");
-        return false;
-    }
-
-    MemoryOperationResponsePB* memory_response = response.mutable_mem_response();
-    memory_response->set_code(MemoryOperationResponsePB::INVALID_REQUEST);
-    memory_response->set_buffer_safe(true);
-    memory_response->mutable_error_info()->set_error_code(static_cast<int64_t>(ErrorCode::INVALID_PARAMS));
-    memory_response->mutable_error_info()->set_error_message("invalid grouped transfer request");
-    memory_response->clear_block_errors();
-    for (int i = 0; i < request.mem_request().copy_items_size(); ++i) {
-        memory_response->add_block_errors(MemoryOperationResponsePB::INVALID_REQUEST);
-    }
-    if (request.mem_request().transfer_trace_id() == 0) {
-        memory_response->mutable_error_info()->set_error_message("transfer execution trace ID is required");
-        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: missing transfer execution trace ID");
-        return true;
-    }
-    std::vector<TransferDescriptor> descriptors;
-    if (!BlockTransferRequestConverter::decodeTransfer(
-            request.mem_request(), descriptors, block_tree_cache_->groupSets())) {
-        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: invalid grouped transfer request");
-        return true;
-    }
-
-    const int64_t timeout_ms = request.mem_request().timeout_ms();
-    if (timeout_ms > std::numeric_limits<int>::max()) {
-        memory_response->mutable_error_info()->set_error_message("transfer timeout exceeds supported range");
-        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: transfer timeout exceeds supported range");
-        return true;
-    }
-    const auto timeout =
-        timeout_ms > 0 ? std::chrono::milliseconds(timeout_ms) : BlockTreeTaskPool::kDefaultQueueWaitTimeout;
-    TransferTask transfer_task(descriptors,
-                               timeout,
-                               request.mem_request().has_transfer_request_id() ?
-                                   std::optional<int64_t>(request.mem_request().transfer_request_id()) :
-                                   std::nullopt);
-    transfer_task.setTraceId(request.mem_request().transfer_trace_id());
-    transfer_task.setWorkflow(request.mem_request().transfer_workflow_id(), request.mem_request().transfer_parent_id());
-    const auto status = block_tree_cache_->executeTransfer(std::move(transfer_task));
-    BlockTransferRequestConverter::encodeTransferResult(*memory_response, status);
-    RTP_LLM_LOG_INFO("transfer_lifecycle event=rpc_execute_exit trace=%lu rank=%ld code=%ld buffer_safe=%d",
-                      request.mem_request().transfer_trace_id(), parallelism_config_.tp_rank,
-                      static_cast<int64_t>(status.status.code()), status.buffer_safe);
-    if (!status.ok()) {
-        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: grouped transfer failed");
-        return true;
-    }
-    return true;
+    return BlockTreeCache::executeFunction(block_tree_cache_.get(), parallelism_config_.tp_rank, request, response);
 }
 
 void KVCacheManager::initCacheEventPublisher(std::shared_ptr<KVCacheEventReporter> reporter) {
@@ -1067,11 +977,6 @@ void KVCacheManager::reportMetricsLoop() {
     uint64_t              previous_queue_full_count    = 0;
     uint64_t              previous_report_failed_count = 0;
     while (!stop_.load(std::memory_order_acquire)) {
-        if (!metrics_reporter_ || !coordinator_manager_) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-            continue;
-        }
-
         RtpLLMCacheMetricsCollector global_metrics = collectGlobalCacheMetrics(coordinator_manager_);
         metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(&tags, &global_metrics);
         if (parallelism_config_.tp_rank == 0 && block_tree_cache_->storageBackend()) {
@@ -1105,9 +1010,6 @@ void KVCacheManager::reportMetricsLoop() {
             coordinator_manager_->poolMetricsSnapshots();
         const std::vector<CachePoolMetricsSnapshot> report_snapshots =
             mergeCachePoolMetricsSnapshots(device_pool_snapshots, tree_pool_snapshots);
-        if (isAllocatorOwner()) {
-            block_tree_cache_->reportUnfreezeZeroMetrics(tree_pool_snapshots);
-        }
         for (const CachePoolMetricsSnapshot& report_snapshot : report_snapshots) {
             reportPoolCacheMetrics(metrics_reporter_, report_snapshot, should_log, isAllocatorOwner());
         }
