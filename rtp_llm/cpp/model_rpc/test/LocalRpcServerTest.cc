@@ -5,6 +5,7 @@
 #include <chrono>
 #include <functional>
 #include <future>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -411,9 +412,17 @@ public:
     absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
         return absl::UnimplementedError("unused");
     }
-    KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
-        return {};
+    KVCacheInfo getCacheStatusInfo(int64_t latest_version, bool need_keys) override {
+        auto result = cache_info;
+        if (!need_keys) {
+            result.version = latest_version;
+            result.cached_keys.clear();
+        } else if (latest_version == result.version) {
+            result.cached_keys.clear();
+        }
+        return result;
     }
+    KVCacheInfo                    cache_info;
     int                            calls = 0;
     std::vector<int64_t>           request_ids;
     std::vector<GenerateStreamPtr> streams;
@@ -431,6 +440,46 @@ public:
 private:
     LocalRpcServer& server_;
 };
+
+TEST(LocalRpcServerTest, CacheStatusWritesPackedKeysAndPreservesVersionAndCapacity) {
+    TestLocalRpcServer server;
+    auto               engine = std::make_shared<BatchTraceEngine>();
+    engine->cache_info        = {64, 128, 16, {std::numeric_limits<int64_t>::min(), -1, 7}, 42};
+    server.setEngineForTest(engine);
+
+    grpc::ServerContext initial_context;
+    CacheVersionPB      request;
+    CacheStatusPB       snapshot;
+    request.set_latest_cache_version(-1);
+    request.set_need_cache_keys(true);
+    ASSERT_TRUE(server.GetCacheStatus(&initial_context, &request, &snapshot).ok());
+    EXPECT_THAT(snapshot.cache_key_list(), ElementsAre(std::numeric_limits<int64_t>::min(), -1, 7));
+    EXPECT_TRUE(snapshot.cache_keys().empty());
+    EXPECT_EQ(snapshot.available_kv_cache(), 64);
+    EXPECT_EQ(snapshot.total_kv_cache(), 128);
+    EXPECT_EQ(snapshot.block_size(), 16);
+    EXPECT_EQ(snapshot.version(), 42);
+
+    grpc::ServerContext unchanged_context;
+    CacheStatusPB       unchanged;
+    engine->cache_info.available_kv_cache = 48;
+    request.set_latest_cache_version(snapshot.version());
+    ASSERT_TRUE(server.GetCacheStatus(&unchanged_context, &request, &unchanged).ok());
+    EXPECT_TRUE(unchanged.cache_key_list().empty());
+    EXPECT_TRUE(unchanged.cache_keys().empty());
+    EXPECT_EQ(unchanged.version(), snapshot.version());
+    EXPECT_EQ(unchanged.available_kv_cache(), 48);
+
+    grpc::ServerContext capacity_context;
+    CacheStatusPB       capacity_only;
+    request.set_need_cache_keys(false);
+    request.set_latest_cache_version(123);
+    ASSERT_TRUE(server.GetCacheStatus(&capacity_context, &request, &capacity_only).ok());
+    EXPECT_TRUE(capacity_only.cache_key_list().empty());
+    EXPECT_TRUE(capacity_only.cache_keys().empty());
+    EXPECT_EQ(capacity_only.version(), 123);
+    EXPECT_EQ(capacity_only.available_kv_cache(), 48);
+}
 
 TEST(LocalRpcServerTest, BatchTraceKeepsPerItemParentsErrorsAndTransportOk) {
     namespace memory = opentelemetry::exporter::memory;

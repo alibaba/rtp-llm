@@ -180,7 +180,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
             long collectedAtNanos = System.nanoTime();
             var result = CacheStatusPB.newBuilder().setTotalKvCache(tokens(snapshot.totalBlocks()))
                 .setAvailableKvCache(tokens(snapshot.availableBlocks())).setBlockSize(config.tokensPerCacheKey()).setVersion(snapshot.version());
-            for (long key : snapshot.keys()) result.putCacheKeys(key, true);
+            for (long key : snapshot.keys()) result.addCacheKeyList(key);
             return new StatusResult<>(result.build(), collectedAtNanos);
         });
     }

@@ -170,17 +170,19 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                             roleType)
                     .thenApply(
                             cacheStatusPB -> {
+                                CacheStatus cacheStatus =
+                                        EngineStatusConverter.convertToCacheStatus(cacheStatusPB);
                                 logger.debug(
                                         "gRPC Cache Status Response - handled for {}, role:{}, cache_key_size:{}, cache_version:{}, "
                                                 + "available_kv_cache:{}, total_kv_cache:{}, block_size:{}",
                                         ipPort,
                                         roleType.name(),
-                                        cacheStatusPB.getCacheKeysMap().size(),
+                                        cacheStatus.getCacheKeySize(),
                                         cacheStatusPB.getVersion(),
                                         cacheStatusPB.getAvailableKvCache(),
                                         cacheStatusPB.getTotalKvCache(),
                                         cacheStatusPB.getBlockSize());
-                                return EngineStatusConverter.convertToCacheStatus(cacheStatusPB);
+                                return cacheStatus;
                             })
                     .handleAsync(
                             (cacheStatus, failure) -> {
