@@ -11,7 +11,7 @@
  from aiter.jit.utils.chip_info import get_gfx
  
 +rtp_single_verify = ContextVar("rtp_single_verify", default=False)
-+FUSION_VERIFY_MOE = os.environ.get("ATOM_QWEN4_FUSION_VERIFY_MOE", "0") == "1"
++FUSION_VERIFY_MOE = os.environ.get("ATOM_QWEN4_FUSION_VERIFY_MOE", "1") == "1"
  _ENABLE_SMALL_DECODE = os.environ.get("ATOM_QWEN38_MOE_SMALL_DECODE", "1") == "1"
  
  
