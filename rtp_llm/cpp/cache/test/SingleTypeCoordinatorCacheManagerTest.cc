@@ -944,6 +944,131 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, LowerTierRejectsMissingCanonicalSw
     }
 }
 
+TEST_F(SingleTypeCoordinatorCacheManagerTest, SeededRegisteredEndpointMatchesAndAuthenticatesSource) {
+    struct IdentityCase {
+        int64_t source_seed;
+        char    source_image;
+        char    query_image;
+    };
+    const auto make_tokens = [](char image_digest) {
+        auto input             = std::make_shared<GenerateInput>();
+        input->input_ids       = torch::arange(1, 34, torch::kInt32);
+        input->generate_config = std::make_shared<GenerateConfig>();
+        if (image_digest != 0) {
+            auto          media = std::make_shared<V41RequestInputs>();
+            V41ImageInput image;
+            image.start              = 0;
+            image.types              = torch::zeros({1}, torch::kInt32);
+            image.n_vit_h            = 1;
+            image.n_vit_w            = 1;
+            image.content_sha256     = std::string(64, image_digest);
+            image.processor_identity = std::string(64, 'p');
+            media->images.push_back(image);
+            input->v41_inputs = media;
+        }
+        auto tokens = std::make_shared<CompleteTokenIds>(1, 1, 64, 4);
+        tokens->init(input);
+        return tokens;
+    };
+    for (const IdentityCase identity : {IdentityCase{123, 0, 0}, {456, 0, 0}, {123, 'a', 'a'}, {123, 'a', 'b'}}) {
+        SCOPED_TRACE("source seed=" + std::to_string(identity.source_seed)
+                     + " images=" + std::to_string(identity.source_image) + "/" + std::to_string(identity.query_image));
+        const bool same_identity = identity.source_seed == 123 && identity.source_image == identity.query_image;
+        for (const int cp_size : {1, 2, 4}) {
+            for (const int endpoint : {3, 4, 7}) {
+                SCOPED_TRACE("cp=" + std::to_string(cp_size) + " G=" + std::to_string(endpoint));
+                auto config                = createSingleTypeTestConfig(1, 32, 4);
+                config.cache_key_hash_seed = 123;
+                ParallelismConfig parallelism;
+                parallelism.tp_size                            = cp_size;
+                parallelism.prefill_cp_config.kv_cache_sharded = true;
+                parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+                resolveSingleTypeCpLayout(config, parallelism);
+                allocator_ = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
+                KVCacheConfig options;
+                options.enable_prefill_partial_tail_reuse = true;
+                allocator_->setBlockTreeCacheConfigForTest(options);
+                ASSERT_TRUE(allocator_->init());
+                auto tokens  = make_tokens(identity.source_image);
+                auto runtime = createBatchKVCacheResource(1, config);
+                initCacheKeys(runtime, tokens, 4, identity.source_seed);
+                MallocInfo cold{runtime, tokens};
+                cold.enable_cache_lookup = false;
+                ASSERT_TRUE(allocator_->malloc(cold).success);
+
+                PrefixCacheRegistration registration;
+                registration.original_input_tokens       = 33;
+                registration.token_ids                   = tokens->completeTokenIdsVec(0);
+                registration.base_keys                   = runtime->cacheKeys(0);
+                registration.required_continuation_ready = true;
+                const auto add_point                     = [&](size_t end, bool internal) {
+                    PrefixCacheRegistrationPoint point;
+                    point.endpoint.pos = end;
+                    point.endpoint.key = cacheKeyAtTokenEnd(*tokens, 0, 4, static_cast<int>(end), identity.source_seed);
+                    point.internal_only = internal;
+                    point.group_bindings.resize(1);
+                    registration.points.push_back(std::move(point));
+                };
+                add_point(endpoint, endpoint % config.canonicalSizePerBlock() != 0);
+                for (size_t end = config.canonicalSizePerBlock(); end <= 32; end += config.canonicalSizePerBlock()) {
+                    if (end != static_cast<size_t>(endpoint)) {
+                        add_point(end, false);
+                    }
+                }
+                allocator_->prepareRegisteredSave(registration, *runtime, 0, tokens.get());
+                ASSERT_TRUE(registration.prepared);
+                for (auto& point : registration.points) {
+                    for (auto& binding : point.group_bindings) {
+                        binding.state = PrefixCacheSaveState::CONTENT_COMPLETE;
+                    }
+                }
+                registration.content_completed = true;
+                InsertInfo insert{runtime, tokens, false};
+                insert.prefix_cache_registration = &registration;
+                size_t resident                  = 0;
+                allocator_->insertIntoCache(insert, resident);
+                allocator_->releaseRegisteredSave(registration);
+                allocator_->free(FreeInfo{runtime, tokens});
+
+                auto query_tokens               = make_tokens(identity.query_image);
+                query_tokens->data(0)[endpoint] = 9000;
+                auto query                      = createBatchKVCacheResource(1, config);
+                initCacheKeys(query, query_tokens, 4, 123);
+                MallocInfo lookup{query, query_tokens};
+                auto       layout =
+                    std::make_shared<MallocInfo::RequestLayout>(*snapshotGlobalCacheRequest(*query, *query_tokens));
+                layout->token_ids.assign(query_tokens->data(0), query_tokens->data(0) + 33);
+                layout->original_input_tokens = 33;
+                layout->partial_tail_reuse    = true;
+                lookup.request_layout         = layout;
+                const auto result             = allocator_->malloc(lookup);
+                ASSERT_TRUE(result.success);
+                EXPECT_EQ(result.reuse_len, same_identity ? endpoint : 0);
+
+                query_tokens->data(0)[endpoint - 1] = 8000;
+                initCacheKeys(query, query_tokens, 4, 123);
+                PrefixCacheRegistration reused;
+                reused.original_input_tokens = 33;
+                reused.token_ids.assign(query_tokens->data(0), query_tokens->data(0) + 33);
+                reused.base_keys                   = query->cacheKeys(0);
+                reused.required_continuation_ready = true;
+                PrefixCacheRegistrationPoint point;
+                point.endpoint.pos  = endpoint - 1;
+                point.endpoint.key  = cacheKeyAtTokenEnd(*query_tokens, 0, 4, endpoint - 1, 123);
+                point.internal_only = true;
+                point.group_bindings.resize(1);
+                reused.points.push_back(std::move(point));
+                allocator_->prepareRegisteredSave(reused, *query, endpoint - 1, query_tokens.get());
+                EXPECT_EQ(reused.points.front().group_bindings.front().state,
+                          same_identity ? PrefixCacheSaveState::CACHED_REF : PrefixCacheSaveState::UNFULFILLED);
+                allocator_->releaseRegisteredSave(reused);
+                allocator_->free(FreeInfo{query, query_tokens});
+                allocator_.reset();
+            }
+        }
+    }
+}
+
 // Dense saves borrow runtime slots; exact recurrent states keep separate endpoints.
 TEST_F(SingleTypeCoordinatorCacheManagerTest, DenseRegisteredEndpointsAliasOneRuntimeBlockWithoutSnapshot) {
     auto config = createSingleTypeTestConfig(1, 12, 4);

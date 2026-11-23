@@ -31,12 +31,28 @@ int64_t cacheKeyAtTokenEnd(CompleteTokenIds&       complete_token_ids,
                            int                     token_end,
                            int64_t                 initial_hash = 0);
 
+// Reuse the preceding complete base key and hash only the final partial segment.
+int64_t cacheKeyAtTokenEnd(CompleteTokenIds&    complete_token_ids,
+                           int                  batch_id,
+                           int                  seq_size_per_block,
+                           int                  token_end,
+                           const CacheKeysType& base_keys,
+                           int64_t              initial_hash = 0);
+
 // Verify a cached segment even when its suffix extends beyond the request's
 // common prefix. Preserve the request's image identity and base-block hashing.
 int64_t cacheKeyForSourceSegment(const CompleteTokenIds& complete_token_ids,
                                  const std::vector<int>& source_tokens,
                                  int                     segment_begin,
                                  int                     seq_size_per_block,
+                                 int64_t                 initial_hash);
+
+// Select the segment's seed from complete base keys, or the configured initial seed.
+int64_t cacheKeyForSourceSegment(const CompleteTokenIds& complete_token_ids,
+                                 const std::vector<int>& source_tokens,
+                                 int                     segment_begin,
+                                 int                     seq_size_per_block,
+                                 const CacheKeysType&    base_keys,
                                  int64_t                 initial_hash);
 
 }  // namespace rtp_llm

@@ -673,23 +673,17 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
             partial_tail.tokens            = request_tokens;
             partial_tail.remote_ceiling    = match_keys.size() * reuse_tokens;
             partial_tail.reuse_unit_tokens = reuse_tokens;
-            partial_tail.endpoint_key      = [tokens    = malloc_info.complete_token_ids,
-                                         base_keys = kv_resource->cacheKeys(0),
-                                         base      = static_cast<int>(config_.seq_size_per_block)](size_t endpoint) {
+            partial_tail.endpoint_key      = [tokens       = malloc_info.complete_token_ids,
+                                         base_keys    = kv_resource->cacheKeys(0),
+                                         initial_hash = config_.cache_key_hash_seed,
+                                         base         = static_cast<int>(config_.seq_size_per_block)](size_t endpoint) {
                 RTP_LLM_CHECK(base > 0 && endpoint <= static_cast<size_t>(tokens->seqLength()));
-                const size_t completed_blocks = endpoint / static_cast<size_t>(base);
-                RTP_LLM_CHECK(completed_blocks <= base_keys.size());
-                const int64_t seed  = completed_blocks == 0 ? 0 : base_keys[completed_blocks - 1];
-                const size_t  begin = completed_blocks * static_cast<size_t>(base);
-                if (begin == endpoint) {
-                    return seed;
-                }
-                const std::vector<int> tail(tokens->data(0) + begin, tokens->data(0) + endpoint);
-                return cacheKeyForSourceSegment(*tokens, tail, static_cast<int>(begin), base, seed);
+                return cacheKeyAtTokenEnd(*tokens, 0, base, static_cast<int>(endpoint), base_keys, initial_hash);
             };
-            partial_tail.source_identity = [tokens    = malloc_info.complete_token_ids,
-                                            base_keys = kv_resource->cacheKeys(0),
-                                            base      = static_cast<int>(config_.seq_size_per_block)](
+            partial_tail.source_identity = [tokens       = malloc_info.complete_token_ids,
+                                            base_keys    = kv_resource->cacheKeys(0),
+                                            initial_hash = config_.cache_key_hash_seed,
+                                            base         = static_cast<int>(config_.seq_size_per_block)](
                                                size_t begin, const std::vector<int>& source, CacheKeyType key) {
                 if (begin > static_cast<size_t>(std::numeric_limits<int>::max()) || base <= 0
                     || source.size() > static_cast<size_t>(std::numeric_limits<int>::max()) - begin
@@ -700,8 +694,8 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
                 if (completed_blocks > base_keys.size()) {
                     return false;
                 }
-                const int64_t seed = completed_blocks == 0 ? 0 : base_keys[completed_blocks - 1];
-                return cacheKeyForSourceSegment(*tokens, source, static_cast<int>(begin), base, seed) == key;
+                return cacheKeyForSourceSegment(*tokens, source, static_cast<int>(begin), base, base_keys, initial_hash)
+                       == key;
             };
             partial_tail.preceding_valid_endpoint = [tokens       = malloc_info.complete_token_ids,
                                                      max_endpoint = config_.maxPrefixReuseTokens(seq_len),
@@ -1319,21 +1313,24 @@ void CoordinatorCacheManager::prepareRegisteredSave(PrefixCacheRegistration& reg
     std::function<bool(size_t, const std::vector<int>&, CacheKeyType)> source_identity;
     if (original_ids != nullptr) {
         const size_t base = config_.seq_size_per_block;
-        source_identity =
-            [original_ids, &registration, base](size_t begin, const std::vector<int>& source, CacheKeyType key) {
-                if (base == 0 || begin % base != 0 || begin > static_cast<size_t>(std::numeric_limits<int>::max())
-                    || source.size() > static_cast<size_t>(std::numeric_limits<int>::max()) - begin) {
-                    return false;
-                }
-                const size_t completed_blocks = begin / base;
-                if (completed_blocks > registration.base_keys.size()) {
-                    return false;
-                }
-                const int64_t seed = completed_blocks == 0 ? 0 : registration.base_keys[completed_blocks - 1];
-                return cacheKeyForSourceSegment(
-                           *original_ids, source, static_cast<int>(begin), static_cast<int>(base), seed)
-                       == key;
-            };
+        source_identity   = [original_ids, &registration, base, initial_hash = config_.cache_key_hash_seed](
+                              size_t begin, const std::vector<int>& source, CacheKeyType key) {
+            if (base == 0 || begin % base != 0 || begin > static_cast<size_t>(std::numeric_limits<int>::max())
+                || source.size() > static_cast<size_t>(std::numeric_limits<int>::max()) - begin) {
+                return false;
+            }
+            const size_t completed_blocks = begin / base;
+            if (completed_blocks > registration.base_keys.size()) {
+                return false;
+            }
+            return cacheKeyForSourceSegment(*original_ids,
+                                            source,
+                                            static_cast<int>(begin),
+                                            static_cast<int>(base),
+                                            registration.base_keys,
+                                            initial_hash)
+                   == key;
+        };
     }
     auto cached = block_tree_cache_->pinRegisteredGroups(registration.token_ids,
                                                          registration.base_keys,

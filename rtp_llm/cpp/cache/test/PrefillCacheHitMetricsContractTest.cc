@@ -98,6 +98,10 @@ TEST(KVCacheHashUtilTest, ExactEndpointUsesBaseSegmentsSeedAndImageIdentity) {
     for (int endpoint : {4, 8, 12, 16}) {
         EXPECT_EQ(cacheKeyAtTokenEnd(*tokens, 0, 4, endpoint, seed), resource->cacheKeys(0)[endpoint / 4 - 1]);
     }
+    for (int endpoint : {0, 3, 4, 7, 8, 10, 12, 16}) {
+        EXPECT_EQ(cacheKeyAtTokenEnd(*tokens, 0, 4, endpoint, resource->cacheKeys(0), seed),
+                  cacheKeyAtTokenEnd(*tokens, 0, 4, endpoint, seed));
+    }
     int64_t    expected = hashInt64Array(resource->cacheKeys(0)[1], tokens->data(0) + 8, tokens->data(0) + 10);
     const auto identity = tokens->imageCacheIdentity(8, 2);
     expected            = hashInt64Array(expected, identity.data(), identity.data() + identity.size());
@@ -109,6 +113,15 @@ TEST(KVCacheHashUtilTest, ExactEndpointUsesBaseSegmentsSeedAndImageIdentity) {
               resource->cacheKeys(0).back());
     EXPECT_NE(cacheKeyForSourceSegment(*make_tokens('b'), source_segment, 8, 4, resource->cacheKeys(0)[1]),
               resource->cacheKeys(0).back());
+    for (int begin : {0, 4, 8}) {
+        const std::vector<int> source(all_tokens.begin() + begin, all_tokens.end());
+        EXPECT_EQ(cacheKeyForSourceSegment(*tokens, source, begin, 4, resource->cacheKeys(0), seed),
+                  resource->cacheKeys(0).back());
+    }
+    tokens->data(0)[9] = 999;
+    EXPECT_EQ(cacheKeyForSourceSegment(*tokens, source_segment, 8, 4, resource->cacheKeys(0), seed),
+              resource->cacheKeys(0).back());
+    EXPECT_NE(cacheKeyAtTokenEnd(*tokens, 0, 4, 16, seed), resource->cacheKeys(0).back());
     EXPECT_EQ(tokens->maxValidReuseLength(10), 4);
     EXPECT_EQ(tokens->maxValidReuseLength(16, 6), 4);
     EXPECT_EQ(tokens->maxValidReuseLength(16), 16);
