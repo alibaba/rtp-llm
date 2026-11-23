@@ -76,8 +76,12 @@ UniConfig 和 Nacos 的内容直接使用同一种配置 JSON，不增加包装�
 
 ### ViT 选路
 
-v3 配置的 `router.roles.vit.cacheAffinityEnabled` 默认是 `true`，新选路优先比较缓存命中。
-设为 `false` 时，Master 按 ViT 在途负载与最近派发量选址，不读取或写入临时缓存放置。
+v3 配置的 `router.roles.vit.cacheAffinityEnabled` 默认是 `true`。
+新选路会比较缓存最优和负载最低的 worker。缓存最优节点的估算在途量最多可多出
+`router.roles.vit.maxExtraInflightInputs` 个媒体输入，默认 32，超过就选负载最低的节点。
+设为 0 时只在同负载下优先命中缓存。所有候选负载未知或过期时，仍按缓存评分选址。
+
+`cacheAffinityEnabled` 设为 `false` 时，Master 按 ViT 在途负载与最近派发量选址，不读取或写入临时缓存放置。
 带 key 的 `VIT_ONLY` 请求仍按媒体输入数量记账，同一个 worker 同时被多个请求选中时，
 记账冲突的请求会重新比较负载。已有 ViT 选址结果继续按逻辑 worker、端口和代际校验。将以下字段合入现有 v3 配置。
 

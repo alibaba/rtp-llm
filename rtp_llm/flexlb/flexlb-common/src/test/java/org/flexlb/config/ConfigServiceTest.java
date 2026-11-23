@@ -794,6 +794,32 @@ class ConfigServiceTest {
     }
 
     @Test
+    void validatesVitCacheAffinityLoadGap() {
+        assertEquals(
+                32L,
+                ConfigTestFixtures.parse("{}")
+                        .getRouter()
+                        .getRoles()
+                        .getVit()
+                        .getMaxExtraInflightInputs());
+        assertEquals(
+                0L,
+                ConfigTestFixtures.parse(
+                                """
+                                {"router":{"roles":{"vit":{"maxExtraInflightInputs":0}}}}
+                                """)
+                        .getRouter()
+                        .getRoles()
+                        .getVit()
+                        .getMaxExtraInflightInputs());
+        assertInvalid(
+                """
+                {"router":{"roles":{"vit":{"maxExtraInflightInputs":-1}}}}
+                """,
+                "router.roles.vit.maxExtraInflightInputs");
+    }
+
+    @Test
     void shipped_examples_parse_using_the_runtime_contract() throws Exception {
         for (String name :
                 new String[] {
