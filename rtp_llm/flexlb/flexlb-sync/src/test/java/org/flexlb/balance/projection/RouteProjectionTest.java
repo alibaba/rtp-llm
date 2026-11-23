@@ -13,9 +13,7 @@ import org.mockito.Mockito;
 import java.util.Comparator;
 import java.util.List;
 import java.util.OptionalLong;
-import java.util.Random;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
@@ -26,66 +24,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Contract tests for the canonical route-projection value boundary.
  */
 class RouteProjectionTest {
-
-    @Test
-    void cachedQueuePrefixesMatchProjectionAcrossPriorityAndExpiration() {
-        var order =
-                Comparator.comparingInt(GroupPlanner.Item::priority)
-                        .thenComparingLong(GroupPlanner.Item::enqueueSeq);
-        var items =
-                IntStream.range(0, 24)
-                        .mapToObj(
-                                i ->
-                                        new GroupPlanner.Item(
-                                                "queued-" + i,
-                                                i / 8,
-                                                i,
-                                                1000,
-                                                1010 + i % 3,
-                                                100 + i,
-                                                0))
-                        .toList();
-        var policy = routeProjection();
-        var evaluator = new CountingEvaluator();
-        var random = new Random(1729);
-        for (int window : List.of(0, 5)) {
-            var queue =
-                    new QueueSnapshot(
-                            1000,
-                            true,
-                            order,
-                            new GroupPlanner.Constraints(2, 10_000, 10_000, 700, window),
-                            items,
-                            null);
-            var inputs = new RouteProjection.Inputs(queue, emptyWork(1000), 1);
-            var uncached = new RouteProjection.Inputs(queue, emptyWork(1000), 1, null);
-            var tail = new RouteProjection.Probe("tail", 4, 1000, 2000, 200, 0, 0);
-            assertEquals(
-                    RouteProjection.project(uncached, tail, evaluator, policy),
-                    RouteProjection.project(inputs, tail, evaluator, policy));
-            int coldTotal = evaluator.invocations();
-            RouteProjection.project(inputs, tail, evaluator, policy);
-            if (window == 0) {
-                assertTrue(evaluator.invocations() - coldTotal < coldTotal / 4);
-            }
-            for (int i = 0; i < 80; i++) {
-                long now = 1000 + i % 15;
-                var probe =
-                        new RouteProjection.Probe(
-                                "probe",
-                                random.nextInt(5),
-                                1000,
-                                i % 4 == 0 ? 1005 : 2000,
-                                100 + random.nextInt(200),
-                                0,
-                                0);
-                assertEquals(
-                        RouteProjection.project(uncached, probe, evaluator, policy, now),
-                        RouteProjection.project(inputs, probe, evaluator, policy, now),
-                        "window=" + window + ", probe=" + i);
-            }
-        }
-    }
 
     @Test
     void unchangedRunningWorkCanReuseItsEarlierClockBase() {
