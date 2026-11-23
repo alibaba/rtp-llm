@@ -85,6 +85,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private final long inflightRequestLimit;
     /** Engine waiting-queue admission gate; null when tokenBalance disables the gate. */
     private final EngineQueueAdmission engineQueueAdmission;
+    /** Integral hotspot release line; null when hotspot release is disabled. */
+    private final HotspotReleaseGate hotspotReleaseGate;
     private final WorkerBatcher runtime;
     private final PrefillState prefillState;
     private final EndpointEventProjector endpointEvents;
@@ -136,6 +138,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
         if (tokenBalance != null) {
             this.prefillState.enableTokenWorkload();
         }
+        this.hotspotReleaseGate = prefillRouting != null
+                && prefillRouting.isHotspotReleaseEnabled()
+                ? new HotspotReleaseGate() : null;
     }
 
     /** Sustained Engine waiting-queue congestion verdict; UNKNOWN before the first status. */
@@ -143,6 +148,22 @@ public class PrefillEndpoint extends WorkerEndpoint {
         EngineQueueAdmission admission = engineQueueAdmission;
         return admission == null
                 ? EngineQueueAdmission.State.UNKNOWN : admission.state();
+    }
+
+    /** Current hotspot release line in hit-rate percent; 0 while the gate is disabled. */
+    public double hotspotReleaseLine() {
+        HotspotReleaseGate gate = hotspotReleaseGate;
+        return gate == null ? 0.0 : gate.line();
+    }
+
+    /** One governor round over this endpoint's release line; no-op while disabled. */
+    public void governHotspotRelease(boolean poolSpare, long nowMs) {
+        HotspotReleaseGate gate = hotspotReleaseGate;
+        if (gate == null) {
+            return;
+        }
+        gate.govern(Math.max(0L, getStatus().committedEngineObservation().waitingQueryLen()),
+                poolSpare, nowMs);
     }
 
     /** Advisory Engine waiting-queue admission gate verdict for diagnostics. */

@@ -12,9 +12,12 @@ import java.util.*;
 public class PrefillElasticSimulation {
     static final int N = 150, INITIAL = 100, ROUNDS = 21;
     static final double TPS = 70_000, TTL = 1_200_000, MAX_WAIT = 60_000, SHED_WAIT = 30_000;
+    // Escape-gate controller: setpoint reuses the engineQueueAdmissionThreshold value (10);
+    // climb 4x faster than decay so release needs sustained pressure and retreat is sticky (hysteresis).
+    static final double ESCAPE_SETPOINT = 10, ESCAPE_CLIMB = 1.2, ESCAPE_DECAY = 0.3;
     static final double[] LOADS = Arrays.stream(System.getProperty("flexlb.sim.loads", "0.2,0.5,0.8,1.2,1.5,1.5").split(",")).mapToDouble(Double::parseDouble).toArray();
     static final double GROWTH = growth(), MEAN_FACTOR = sumGrowth() / ROUNDS;
-    enum Policy { SHORT_TTFT, SHORT_TTFT_CAPPED, CACHE_ONLY, CACHE_WINDOW, ELASTIC, ADAPTIVE }
+    enum Policy { SHORT_TTFT, SHORT_TTFT_CAPPED, CACHE_ONLY, CACHE_WINDOW, ELASTIC, ADAPTIVE, ESCAPE_GATE }
     enum Scene { REPLAY, CONVERSATION, COLD_BURST, TTL_GAP, WARM_REPLAY, HOTSPOT, COLD_BURST_OPEN, SCALE_OUT, HOTSPOT_SCALE_OUT, RECOVERY_BURST, RAMP }
     record Cache(long tokens, double touched) { }
     static final class Query {
@@ -40,6 +43,9 @@ public class PrefillElasticSimulation {
         final ArrayDeque<Query> queue = new ArrayDeque<>();
         final PrefillTokenWorkload work;
         double busyUntil, pendingCompute, collectionDue;
+        // Escape-gate state: integral release line (hit-percent threshold) and smoothed occupancy.
+        double escapeLine, queueSmooth;
+        int inflight, congestedMs;
         boolean collecting, running;
         long input, hit, compute, useful, count;
         // window remains only as a legacy experiment/CSV label; routing has no history window.
@@ -64,6 +70,7 @@ public class PrefillElasticSimulation {
         double lastShedding=-100;
         final Random roots, lengths;
         final long[] corpus = new long[50_000];
+        final double[] corpusFrac = new double[50_000];
         final PriorityQueue<Event> events=new PriorityQueue<>(Comparator.comparingDouble(Event::at).thenComparingLong(Event::sequence));
         final NavigableMap<Long, Query> waiting=new TreeMap<>();
         final Counters c=new Counters();
@@ -92,10 +99,17 @@ public class PrefillElasticSimulation {
             if(independent()) {
                 var random=new Random(seed^0x347abe);double total=0;
                 for(int i=0;i<corpus.length;i++){corpus[i]=Math.max(1,Math.round(100_000*Math.min(20,Math.exp(.9*random.nextGaussian()-.405))));total+=corpus[i];}
+                // Per-session cacheable prefix fraction spans the full production band 0..95%
+                // (skewed toward warm so the fleet-wide mean uncached fraction stays ~0.1 and
+                // nominal_load still calibrates to fleet capacity). The wide band lets the
+                // escape line release low-hit slices first (benefit-ordered); tier-free
+                // corpora make release all-or-nothing and are not representative.
+                var fracRandom=new Random(seed^0x51517);
+                for(int i=0;i<corpusFrac.length;i++)corpusFrac[i]=0.95-0.95*Math.pow(fracRandom.nextDouble(),18);
                 for(int i=0;i<corpus.length;i++) {
                     corpus[i]=Math.max(10,10*Math.round(corpus[i]*100_000.0*corpus.length/total/10));
                     int home=(scene==Scene.HOTSPOT || scene==Scene.HOTSPOT_SCALE_OUT) && i%5!=0 ? i%10 : i%INITIAL;
-                    Cache initial=new Cache(Math.round(.9*corpus[i]),0);
+                    Cache initial=new Cache(Math.round(corpusFrac[i]*corpus[i]),0);
                     workers[home].cache.put((long)i+1,initial);
                     cacheIndex.computeIfAbsent((long)i+1,unused->new HashMap<>()).put(home,initial);
                 }
@@ -163,9 +177,17 @@ public class PrefillElasticSimulation {
             escape &= !affinity;
             q.escaping=escape;
             if(escape && idleCount==0)return -1;
-            if((windowPolicy() || policy==Policy.CACHE_ONLY) && max>0 && !escape) {
+            if((windowPolicy() || policy==Policy.CACHE_ONLY || policy==Policy.ESCAPE_GATE) && max>0 && !escape) {
+                boolean released=false;
                 for(int i:cached.keySet()) {
-                    if(i>=active || pendingTokens[i]>=cap || !PrefillTokenBalance.eligible((long)hits[i],max,affinity))continue;
+                    if(i>=active || !PrefillTokenBalance.eligible((long)hits[i],max,affinity))continue;
+                    // Escape gate: an affinity-pinned leader whose hit on this request falls below
+                    // its own integral line no longer pins the request; only the line grants the
+                    // drift permission, an at-cap leader without release parks the request just
+                    // like CACHE_ONLY. Non-affinity requests are never pinned, so the line must
+                    // not remove their hit-bearing candidates.
+                    if(policy==Policy.ESCAPE_GATE && affinity && hits[i]*100.0<workers[i].escapeLine*q.tokens){released=true;continue;}
+                    if(pendingTokens[i]>=cap)continue;
                     var w=workers[i];
                     double score=windowPolicy() ? (affinity ? 0 : workScores[i]+q.tokens-hits[i])
                         : Math.max(0,w.busyUntil-now)*TPS/1000+w.pendingCompute+q.tokens-hits[i];
@@ -173,7 +195,23 @@ public class PrefillElasticSimulation {
                         best=score;selected=i;
                     }
                 }
-                if(selected>=0)cursor=(selected+1)%N;
+                if(selected<0 && released && affinity) {
+                    // Released from every pinned leader: rank all workers below cap by completion
+                    // time. Released leaders and second copies compete too, so returning to the
+                    // original leader (holding) and drifting are the same rule; own hit is part
+                    // of the score, so drift prefers nodes that can keep part of the prefix.
+                    for(int k=0;k<N;k++) {
+                        int i=(cursor+k)%N;var w=workers[i];
+                        if(i>=active || pendingTokens[i]>=cap)continue;
+                        double score=Math.max(0,w.busyUntil-now)*TPS/1000+w.pendingCompute+q.tokens-hits[i];
+                        if(score<best){best=score;selected=i;}
+                    }
+                    if(selected>=0) {
+                        if(hits[selected]<max)q.escaping=true; // left the max-hit leader; returning is holding
+                        cursor=(selected+1)%N;
+                    }
+                }
+                else if(selected>=0)cursor=(selected+1)%N;
                 return selected;
             }
             for(int k=0;k<N;k++) {
@@ -222,6 +260,32 @@ public class PrefillElasticSimulation {
                 q.migratedFrom=q.worker;q.worker=-1;waiting.put(q.id,q);localMigrations++;
             }
         }
+        /** Integral escape-line governance per worker: the release line climbs while the smoothed
+         * occupancy (waiting queue plus the in-flight batch) stays above the setpoint for a
+         * sustained stretch (the same 5s the rescue path uses as residency), AND the pool still
+         * has spare capacity; it decays 4x slower once occupancy falls back. The in-flight batch
+         * is included because the token cap clamps the waiting queue right at the setpoint,
+         * hiding the overshoot a real engine's sustained-congestion phase would produce. The
+         * sustained qualifier matters: stochastic queue bumps at balanced sub-saturation load
+         * break the chain every few seconds, so the gate never opens there — only a leader
+         * whose queue genuinely never drains (a hotspot) integrates. A saturated pool (no spare
+         * capacity anywhere) makes the line decay instead of freeze: releasing into a full
+         * pool only burns hit for compute that cannot complete, so the system re-pins and
+         * degenerates to plain cache-first plus shedding. Gain fixes speed only, equilibrium
+         * settles at occupancy ~= setpoint. */
+        void governHotspots() {
+            boolean poolSpare=idleCount>0;
+            for(int i=0;i<active;i++) {
+                var w=workers[i];
+                w.queueSmooth=0.9*w.queueSmooth+0.1*(w.queue.size()+w.inflight);
+                double deviation=w.queueSmooth-ESCAPE_SETPOINT;
+                if(deviation>0)w.congestedMs+=20;else w.congestedMs=0;
+                if(deviation>0 && poolSpare && w.congestedMs>=5000)
+                    w.escapeLine=Math.min(100.0,w.escapeLine+ESCAPE_CLIMB*deviation*0.02);
+                else if(deviation>0)w.escapeLine=Math.max(0.0,w.escapeLine-ESCAPE_DECAY*ESCAPE_SETPOINT*0.02);
+                else if(deviation<0)w.escapeLine=Math.max(0.0,w.escapeLine+ESCAPE_DECAY*deviation*0.02);
+            }
+        }
         void route() {
             if(now-lastShedding>=PrefillQueueShedding.SOFT_INTERVAL_MS)migrateLocal();
             // Scan all waiting requests once per 20ms scheduling round; blocked affinity cannot block cold work.
@@ -232,6 +296,7 @@ public class PrefillElasticSimulation {
                 workScores[i]=snapshot.score();pendingTokens[i]=snapshot.pendingTokens();
                 if(i<active && pendingTokens[i]==0)idleCount++;
             }
+            if(policy==Policy.ESCAPE_GATE)governHotspots();
             var candidates=new ArrayList<>(waiting.values());
             if(reorder)for(int start=0;start<candidates.size();start+=32) {
                 candidates.subList(start,Math.min(start+32,candidates.size()))
@@ -291,11 +356,11 @@ public class PrefillElasticSimulation {
                 compute+=q.actualWork;batch.add(q);
             }
             if(batch.isEmpty())return;
-            w.running=true;w.busyUntil=now+compute*1000/TPS;
+            w.running=true;w.inflight=batch.size();w.busyUntil=now+compute*1000/TPS;
             event(w.busyUntil,3,null,i,batch);
         }
         void finish(Event e) {
-            var w=workers[e.worker];w.running=false;
+            var w=workers[e.worker];w.running=false;w.inflight=0;
             for(Query q:e.batch) {
                 w.work.release(q.reserved);
                 // Non-preemptible simulated batch consumes its scheduled work, but cannot report
@@ -324,12 +389,15 @@ public class PrefillElasticSimulation {
         long[] compute(){return Arrays.stream(workers).mapToLong(w->w.compute).toArray();}
         long[] useful(){return Arrays.stream(workers).mapToLong(w->w.useful).toArray();}
         long[] input(){return Arrays.stream(workers).mapToLong(w->w.input).toArray();}
+        double escapeLineMean(){double s=0;for(int i=0;i<active;i++)s+=workers[i].escapeLine;return active==0?0:s/active;}
+        double escapeLineMax(){double m=0;for(int i=0;i<active;i++)m=Math.max(m,workers[i].escapeLine);return m;}
+        int escapeLinesOver50(){int n=0;for(int i=0;i<active;i++)if(workers[i].escapeLine>=50)n++;return n;}
         void write(PrintWriter out,Counters before,long[] beforeCompute,long[] beforeInput,long[] beforeUseful,double start,double seconds,int stage) {
             long[] compute=compute(),input=input();double[] delta=new double[active],deltaInput=new double[active],deltaUseful=new double[active];
             for(int i=0;i<active;i++){delta[i]=compute[i]-beforeCompute[i];deltaInput[i]=input[i]-beforeInput[i];deltaUseful[i]=workers[i].useful-beforeUseful[i];}
             double offered=c.input-before.input, completed=c.completedInput-before.completedInput;
             double theoretical=c.theoretical-before.theoretical;
-            out.printf(Locale.ROOT,"%s,%s,%d,%d,%d,%s,%d,%.3f,%.3f,%.2f,%.3f,%.3f,%.3f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.3f,%.3f,%d,%d,%d,%d,%d,%.6f,%.6f,%.3f,%.0f,%d,%d,%d,%d,%d,%d,%d,%d%n",
+            out.printf(Locale.ROOT,"%s,%s,%d,%d,%d,%s,%d,%.3f,%.3f,%.2f,%.3f,%.3f,%.3f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.3f,%.3f,%d,%d,%d,%d,%d,%.6f,%.6f,%.3f,%.0f,%d,%d,%d,%d,%d,%d,%d,%d,%.3f%n",
                 policy,scene,seed,window,cap,reorder,stage,start,seconds,LOADS[stage],
                 (c.arrivals-before.arrivals)/seconds,(c.completed-before.completed)/seconds,
                 (offered-theoretical)/seconds/(INITIAL*TPS),cv(delta),cv(deltaInput),maxOverMean(delta),jain(delta),
@@ -339,7 +407,7 @@ public class PrefillElasticSimulation {
                 quantile(out==summary?latencies:timelineLatencies,.95),quantile(out==summary?latencies:timelineLatencies,.99),c.dropped-before.dropped,c.expired-before.expired,
                 waiting.size(),inventory(),traceHash,cv(deltaUseful),Arrays.stream(delta).sum()/Math.max(1,c.capacityTokens-before.capacityTokens),
                 c.arrivals==before.arrivals?0:offered/(c.arrivals-before.arrivals),Arrays.stream(delta).sum()-Arrays.stream(deltaUseful).sum(),c.coldArrivals-before.coldArrivals,
-                c.coldCompleted-before.coldCompleted,c.coldDropped-before.coldDropped,c.coldExpired-before.coldExpired,active,rescued,localMigrations,graceTicks);
+                c.coldCompleted-before.coldCompleted,c.coldDropped-before.coldDropped,c.coldExpired-before.coldExpired,active,rescued,localMigrations,graceTicks,escapeLineMean());
             out.flush();
             if(out==summary)for(int i=0;i<active;i++)perWorker.printf(Locale.ROOT,
                 "%s,%s,%d,%d,%d,%s,%d,%d,%.0f,%.0f,%.3f,%.0f%n",policy,scene,seed,window,cap,reorder,stage,i,delta[i],deltaInput[i],delta[i]/seconds,deltaUseful[i]);
@@ -364,7 +432,7 @@ public class PrefillElasticSimulation {
                         if(independent()){session=1+lengths.nextInt(corpus.length);base=corpus[(int)session-1];}
                         traceHash=31*traceHash+Double.doubleToLongBits(base);
                         Query q=new Query(++requestId,session,0,now,base,now);
-                        if(independent()){q.tokens=Math.round(base);q.prefix=Math.round(.9*q.tokens);}
+                        if(independent()){q.tokens=Math.round(base);q.prefix=Math.round(corpusFrac[(int)session-1]*q.tokens);}
                         arrive(q);
                         if(scene==Scene.REPLAY){double at=now;for(int t=1;t<ROUNDS;t++){
                             at+=think(session,t);event(at,1,new Query(++requestId,session,t,at,base,now),-1,null);}}
@@ -403,8 +471,8 @@ public class PrefillElasticSimulation {
             }
             long newWorkerCompute=0;for(int i=INITIAL;i<active;i++)newWorkerCompute+=workers[i].compute;
             System.out.printf("NEW_WORKER_COMPUTE policy=%s scene=%s seed=%d tokens=%d%n",policy,scene,seed,newWorkerCompute);
-            System.out.printf("ELASTIC policy=%s scene=%s seed=%d active=%d rescued=%d local_migrations=%d grace_ticks=%d drops_priority=%s success_priority=%s%n",
-                    policy,scene,seed,active,rescued,localMigrations,graceTicks,Arrays.toString(droppedPriority),Arrays.toString(completedPriority));
+            System.out.printf("ELASTIC policy=%s scene=%s seed=%d active=%d rescued=%d local_migrations=%d grace_ticks=%d drops_priority=%s success_priority=%s escape_max=%.1f escape_over50=%d escape_mean=%.2f%n",
+                    policy,scene,seed,active,rescued,localMigrations,graceTicks,Arrays.toString(droppedPriority),Arrays.toString(completedPriority),escapeLineMax(),escapeLinesOver50(),escapeLineMean());
             System.out.printf("PASS %s %s seed=%d window=%d cap=%d reorder=%s arrivals=%d success=%d drops=%d expire=%d inventory=%d%n",
                 policy,scene,seed,window,cap,reorder,c.arrivals,c.completed,c.dropped,c.expired,inventory());
         }
@@ -426,7 +494,7 @@ public class PrefillElasticSimulation {
         try(var summary=new PrintWriter(Files.newBufferedWriter(out.resolve("summary.csv")));
             var timeline=new PrintWriter(Files.newBufferedWriter(out.resolve("timeline.csv")));
             var workers=new PrintWriter(Files.newBufferedWriter(out.resolve("workers.csv")))) {
-            String header="policy,scene,seed,window_ms,cap,reorder,stage,start_s,duration_s,nominal_load,arrival_qps,success_qps,offered_compute_load,compute_cv,input_cv,max_mean,jain,theoretical_hit,routed_hit,success_hit,p95_s,p99_s,dropped,expired,global_queue,inventory,trace_hash,useful_compute_cv,actual_compute_load,avg_input_tokens,extra_compute_tokens,cold_arrivals,cold_completed,cold_dropped,cold_expired,active_workers,cumulative_rescues,cumulative_local_migrations,cumulative_grace_ticks";
+            String header="policy,scene,seed,window_ms,cap,reorder,stage,start_s,duration_s,nominal_load,arrival_qps,success_qps,offered_compute_load,compute_cv,input_cv,max_mean,jain,theoretical_hit,routed_hit,success_hit,p95_s,p99_s,dropped,expired,global_queue,inventory,trace_hash,useful_compute_cv,actual_compute_load,avg_input_tokens,extra_compute_tokens,cold_arrivals,cold_completed,cold_dropped,cold_expired,active_workers,cumulative_rescues,cumulative_local_migrations,cumulative_grace_ticks,escape_line_mean";
             summary.println(header);timeline.println(header);
             workers.println("policy,scene,seed,window_ms,cap,reorder,stage,worker,compute_tokens,input_tokens,compute_tps,useful_compute_tokens");
             for(String scene:scenes.split(","))for(int seed=1;seed<=seeds;seed++)for(Policy p:Arrays.stream(System.getProperty("flexlb.sim.policies", "SHORT_TTFT,SHORT_TTFT_CAPPED,CACHE_ONLY,CACHE_WINDOW").split(",")).map(Policy::valueOf).toList())

@@ -45,6 +45,14 @@ public final class RoutingConfig {
         private CacheAffinityConfig cacheAffinity;
         /** Select Prefill workers by outstanding uncached token work. */
         private TokenBalanceConfig tokenBalance;
+        /**
+         * Release pinned cache affinity to balanced ranking once a leader's
+         * sustained-congestion line climbs. Applies to both the cache-affinity
+         * and the token-balance ranking; disabled leaves both unchanged.
+         * Enabled by default; balanced fleets keep the line closed on their
+         * own through the sustained-pressure gate.
+         */
+        private boolean hotspotReleaseEnabled = true;
     }
 
     /** Prefill selection by outstanding uncached tokens with hot/cold cache affinity. */

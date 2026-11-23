@@ -34,9 +34,11 @@ import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Prefill 池的候选排序与端点选择：默认按建模 TTFT，可选按未缓存 token 工作量均衡。
+ * 热点逃逸开关在两种排序下都能释放被钉住的缓存亲和，避免单个缓存热点持续过载。
  * 同时向队列丢弃策略提供池占用快照、过载证据与单请求工作量估计。
  */
 @Component
@@ -51,6 +53,9 @@ public class CostBasedPrefillStrategy {
     private final EndpointRoundRobin tieRotation = new EndpointRoundRobin();
     /** Pool-wide sustained-pressure evidence for global shedding admission. */
     private final PrefillQueuePressure queuePressure = new PrefillQueuePressure();
+    /** Hotspot governor window; one selector per window advances the whole pool. */
+    private static final long HOTSPOT_GOVERN_INTERVAL_MS = 100L;
+    private final AtomicLong hotspotGovernAtMs = new AtomicLong();
 
     public CostBasedPrefillStrategy(WorkerDirectory workerDirectory,
                                     CacheAwareService cacheAwareService,
@@ -87,12 +92,17 @@ public class CostBasedPrefillStrategy {
         // Rank known work and cache hits without excluding admission-blocked candidates.
         RoutingConfig.TokenBalanceConfig tokenBalance = config.getRouter()
                 .getRoles().getPrefill().getTokenBalance();
+        boolean hotspotRelease = config.getRouter().getRoles()
+                .getPrefill().isHotspotReleaseEnabled();
+        if (hotspotRelease) {
+            governHotspotRelease(discovery.candidates());
+        }
         int selectedIndex = tokenBalance != null
                 ? selectTokenBalancedCandidate(
-                        survivors, roleType, group, seqLen, tokenBalance)
+                        survivors, roleType, group, seqLen, tokenBalance, hotspotRelease)
                 : selectBestCandidate(
                         survivors, survivors.minimumProjectedTtftMs,
-                        roleType, group, seqLen, config);
+                        roleType, group, seqLen, config, hotspotRelease);
 
         if (selectedIndex < 0) {
             Logger.debug(
@@ -182,27 +192,51 @@ public class CostBasedPrefillStrategy {
      * Rank outstanding uncached token work instead of modeled TTFT. Cold
      * requests go to the least-loaded worker; hot requests only rotate among
      * cache leaders so their prefix reuse is not discarded. Candidates with a
-     * blocked Engine queue are skipped while waiting for capacity.
+     * blocked Engine queue are skipped while waiting for capacity. With
+     * hotspot release enabled, a leader whose integral line climbs above this
+     * request's hit rate stops pinning it: every worker then competes by
+     * outstanding work, counting each candidate's own hit as relief so the
+     * drift prefers nodes that can keep part of the prefix, while returning to
+     * a released leader stays a legal outcome of the same ranking.
      */
     private int selectTokenBalancedCandidate(PrefillCandidateSet survivors,
             RoleType roleType, String group, long seqLen,
-            RoutingConfig.TokenBalanceConfig tokenBalance) {
+            RoutingConfig.TokenBalanceConfig tokenBalance, boolean hotspotRelease) {
         boolean cacheFirst = PrefillTokenBalance.cacheFirst(
                 survivors.maximumCacheHit, seqLen, tokenBalance.getMinPrefixHitPercent());
+        boolean pinnedLeader = false;
+        if (cacheFirst) {
+            for (int index = 0; index < survivors.size(); index++) {
+                if (survivors.cacheHit(index) == survivors.maximumCacheHit
+                        && !PrefillTokenBalance.hotspotReleases(
+                                survivors.endpoint(index).hotspotReleaseLine(),
+                                survivors.cacheHit(index), seqLen)) {
+                    pinnedLeader = true;
+                    break;
+                }
+            }
+        }
         double[] scores = new double[survivors.size()];
         double minimumScore = Double.MAX_VALUE;
         int eligibleCount = 0;
         for (int index = 0; index < survivors.size(); index++) {
             long cacheHit = survivors.cacheHit(index);
             PrefillEndpoint endpoint = survivors.endpoint(index);
-            if (!PrefillTokenBalance.eligible(cacheHit, survivors.maximumCacheHit, cacheFirst)
-                    || endpoint.engineQueueAdmissionBlocked()) {
+            // While a pinned leader exists only leaders compete; once every
+            // leader released, the whole pool competes by balanced work.
+            boolean pinEligible = !pinnedLeader
+                    || cacheHit == survivors.maximumCacheHit
+                            && !PrefillTokenBalance.hotspotReleases(
+                                    endpoint.hotspotReleaseLine(), cacheHit, seqLen);
+            if (!pinEligible || endpoint.engineQueueAdmissionBlocked()) {
                 scores[index] = Double.MAX_VALUE;
                 continue;
             }
-            double score = cacheFirst
+            long plannedTokens = hotspotRelease
+                    ? Math.max(0L, seqLen - cacheHit) : seqLen;
+            double score = cacheFirst && pinnedLeader
                     ? 0.0
-                    : endpoint.tokenWorkloadScore() + Math.max(0L, seqLen);
+                    : endpoint.tokenWorkloadScore() + plannedTokens;
             scores[index] = score;
             minimumScore = Math.min(minimumScore, score);
             eligibleCount++;
@@ -348,13 +382,20 @@ public class CostBasedPrefillStrategy {
                 "observedAtMs", System.currentTimeMillis(), "details", Map.copyOf(details)));
     }
 
-    /** Rank modeled work and cache hits before checking the selected endpoint admission. */
+    /**
+     * Rank modeled work and cache hits before checking the selected endpoint
+     * admission. With hotspot release enabled, a cache leader whose integral
+     * release line climbed past a request's hit rate no longer pins it: the
+     * request falls back to plain TTFT ranking, where remaining partial hits
+     * still shorten modeled work.
+     */
     int selectBestCandidate(PrefillCandidateSet survivors,
                             long minProjectedTtftMs,
                             RoleType roleType,
                             String group,
                             long seqLen,
-                            FlexlbConfig config) {
+                            FlexlbConfig config,
+                            boolean hotspotRelease) {
         if (survivors.size() == 0) {
             return -1;
         }
@@ -395,13 +436,25 @@ public class CostBasedPrefillStrategy {
                         continue;
                     }
                     minimumHitRateMet = true;
-                    if (survivors.projectedTtftMs(i) <= affinityCutoffMs) {
+                    if (hotspotRelease) {
+                        // The leader's release line replaces the TTFT cap.
+                        if (!PrefillTokenBalance.hotspotReleases(
+                                survivors.endpoint(i).hotspotReleaseLine(),
+                                hitTokens, seqLen)) {
+                            preferredCandidates.set(i);
+                        }
+                    } else if (survivors.projectedTtftMs(i) <= affinityCutoffMs) {
                         preferredCandidates.set(i);
                     }
                 }
-                affinityReason = !preferredCandidates.isEmpty()
-                        ? "CACHE_LEADER"
-                        : minimumHitRateMet ? "OVER_CAP" : "LOW_CACHE_HIT";
+                if (!preferredCandidates.isEmpty()) {
+                    affinityReason = "CACHE_LEADER";
+                } else if (minimumHitRateMet) {
+                    affinityReason = hotspotRelease
+                            ? "HOTSPOT_RELEASE" : "OVER_CAP";
+                } else {
+                    affinityReason = "LOW_CACHE_HIT";
+                }
             }
         }
 
@@ -626,6 +679,39 @@ public class CostBasedPrefillStrategy {
             matching.add(entry);
         }
         return new EndpointDiscovery(directory, matching);
+    }
+
+    /**
+     * Advance every Prefill endpoint's hotspot release line at most once per
+     * window: one concurrent selector wins the CAS and governs the whole pool
+     * snapshot in a single pass. A pool with any fully idle worker counts as
+     * having spare capacity, so congestion there is load imbalance, not
+     * fleet saturation, and the line is still allowed to climb.
+     */
+    private void governHotspotRelease(List<EndpointRegistry.PrefillRoutingEntry> candidates) {
+        if (candidates.isEmpty()) {
+            return;
+        }
+        long nowMs = System.currentTimeMillis();
+        long lastMs = hotspotGovernAtMs.get();
+        if (lastMs >= 0L && nowMs - lastMs < HOTSPOT_GOVERN_INTERVAL_MS) {
+            return;
+        }
+        if (!hotspotGovernAtMs.compareAndSet(lastMs, nowMs)) {
+            return;
+        }
+        boolean poolSpare = false;
+        for (EndpointRegistry.PrefillRoutingEntry routingEntry : candidates) {
+            PrefillEndpoint endpoint = routingEntry.endpoint();
+            if (endpoint.queuedRequestCount() == 0
+                    && endpoint.getInflightBatchCount() == 0) {
+                poolSpare = true;
+                break;
+            }
+        }
+        for (EndpointRegistry.PrefillRoutingEntry routingEntry : candidates) {
+            routingEntry.endpoint().governHotspotRelease(poolSpare, nowMs);
+        }
     }
 
     private Map<String, Integer> getCacheMatchResults(
