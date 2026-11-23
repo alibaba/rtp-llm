@@ -151,6 +151,10 @@ logical worker 不受影响。空响应、本地响应转换失败和后续处�
 cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `cached_keys`（block hash 集合）
 经 `CacheAwareService.updateFromWorkerStatus()` 喂给本地索引（仅 PREFILL/PDFUSION）。
 
+Cache RPC 由独立的池投递，心跳使用原有的状态查询池。两者的响应应用继续走现有的状态应用池。
+`workerRegistry.cacheStatus.pollExecutorThreads` 和 `pollExecutorQueueCapacity` 默认分别为 32
+和 15000，启动时读取。队列满时拒绝本次 cache 投递并归还该 worker 的 poll lease，后续轮次可重试。
+
 **动态间隔**：`DefaultDynamicCacheIntervalService` 维护 30 样本滚动平均 diff 大小，目标
 `CACHE_STATUS_DIFF_SIZE(30)`；偏差 >10% 时按 ±30% 调整间隔，钳制在
 [`CACHE_STATUS_MIN_INTERVAL_MS(50)`, `CACHE_STATUS_MAX_INTERVAL_MS(3000)`]——diff 大则加快

@@ -42,6 +42,7 @@ public class EngineSyncRunner implements Runnable {
     private final WorkerAddressService workerAddressService;
 
     private final ExecutorService statusCheckExecutor;
+    private final ExecutorService cachePollExecutor;
     private final ExecutorService statusApplicationExecutor;
 
     private final EngineHealthReporter engineHealthReporter;
@@ -87,6 +88,7 @@ public class EngineSyncRunner implements Runnable {
                 workerAddressService,
                 statusCheckExecutor,
                 statusCheckExecutor,
+                statusCheckExecutor,
                 engineHealthReporter,
                 engineGrpcService,
                 roleType,
@@ -105,6 +107,7 @@ public class EngineSyncRunner implements Runnable {
             WorkerDirectory workerDirectory,
             WorkerAddressService workerAddressService,
             ExecutorService statusCheckExecutor,
+            ExecutorService cachePollExecutor,
             ExecutorService statusApplicationExecutor,
             EngineHealthReporter engineHealthReporter,
             EngineGrpcService engineGrpcService,
@@ -122,6 +125,7 @@ public class EngineSyncRunner implements Runnable {
         this.workerAddressService = workerAddressService;
         this.workerDirectory = Objects.requireNonNull(workerDirectory, "workerDirectory");
         this.statusCheckExecutor = statusCheckExecutor;
+        this.cachePollExecutor = cachePollExecutor;
         this.statusApplicationExecutor = statusApplicationExecutor;
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
@@ -426,7 +430,7 @@ public class EngineSyncRunner implements Runnable {
                                 syncRequestTimeoutMs,
                                 cacheFullSnapshotDebugMode,
                                 statusApplicationExecutor);
-                statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
+                cachePollExecutor.submit(grpcCacheStatusCheckRunner);
                 handedOff = true;
             } catch (RejectedExecutionException e) {
                 logger.debug(

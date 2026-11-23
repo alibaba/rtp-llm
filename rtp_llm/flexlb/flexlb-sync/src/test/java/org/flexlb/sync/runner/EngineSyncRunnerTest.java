@@ -12,6 +12,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.discovery.ServiceDiscovery;
+import org.flexlb.engine.grpc.EngineRpcService.CacheStatusPB;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -30,9 +31,12 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -453,6 +457,7 @@ class EngineSyncRunnerTest {
                         workerAddressService,
                         statusCheckExecutor,
                         statusCheckExecutor,
+                        statusCheckExecutor,
                         engineHealthReporter,
                         engineGrpcService,
                         RoleType.PREFILL,
@@ -598,6 +603,7 @@ class EngineSyncRunnerTest {
                         workerAddressService,
                         statusCheckExecutor,
                         statusCheckExecutor,
+                        statusCheckExecutor,
                         engineHealthReporter,
                         engineGrpcService,
                         RoleType.PREFILL,
@@ -614,6 +620,90 @@ class EngineSyncRunnerTest {
 
         verify(statusCheckExecutor).submit(any(GrpcWorkerStatusRunner.class));
         verify(statusCheckExecutor, never()).submit(any(GrpcCacheStatusCheckRunner.class));
+    }
+
+    @Test
+    void saturatedCacheExecutorReleasesLeaseWhileHeartbeatContinues() throws Exception {
+        WorkerHost host = WorkerHost.of("127.0.0.1", 8080);
+        when(workerAddressService.getEngineWorkerList(modelName, roleType))
+                .thenReturn(List.of(host));
+        var releaseWorker = new CountDownLatch(1);
+        var workerStarted = new CountDownLatch(1);
+        try (var executor =
+                new ThreadPoolExecutor(
+                        1,
+                        1,
+                        0L,
+                        TimeUnit.MILLISECONDS,
+                        new ArrayBlockingQueue<>(1),
+                        new ThreadPoolExecutor.AbortPolicy())) {
+            try {
+                executor.submit(
+                        () -> {
+                            workerStarted.countDown();
+                            return releaseWorker.await(5, TimeUnit.SECONDS);
+                        });
+                assertTrue(workerStarted.await(5, TimeUnit.SECONDS));
+                var queued = executor.submit(() -> {});
+
+                var runner =
+                        new EngineSyncRunner(
+                                modelName,
+                                workerDirectory,
+                                workerAddressService,
+                                statusCheckExecutor,
+                                executor,
+                                statusCheckExecutor,
+                                engineHealthReporter,
+                                engineGrpcService,
+                                roleType,
+                                cacheAwareService,
+                                cacheIntervalService,
+                                syncRequestTimeoutMs,
+                                syncCycleId,
+                                syncEngineStatusInterval,
+                                false,
+                                false,
+                                STATUS_STALE_AFTER_US);
+                runner.run();
+
+                verify(statusCheckExecutor).submit(any(GrpcWorkerStatusRunner.class));
+                Mockito.verifyNoInteractions(engineGrpcService);
+                var worker = workerDirectory.statusSnapshot(roleType).get(host.getLogicalIpPort());
+                assertNotNull(worker);
+                try (var lease = worker.tryBeginCachePoll()) {
+                    assertNotNull(lease);
+                }
+
+                releaseWorker.countDown();
+                queued.get(5, TimeUnit.SECONDS);
+                Mockito.doAnswer(
+                                invocation -> {
+                                    invocation.getArgument(0, Runnable.class).run();
+                                    return null;
+                                })
+                        .when(statusCheckExecutor)
+                        .execute(any(Runnable.class));
+                var retried = new CountDownLatch(1);
+                when(engineGrpcService.getCacheStatusAsync(
+                                any(), anyInt(), any(), anyLong(), anyLong(), any()))
+                        .thenAnswer(
+                                ignored -> {
+                                    retried.countDown();
+                                    return CompletableFuture.completedFuture(
+                                            CacheStatusPB.getDefaultInstance());
+                                });
+                runner.run();
+                assertTrue(retried.await(5, TimeUnit.SECONDS));
+                executor.submit(() -> {}).get(5, TimeUnit.SECONDS);
+                try (var lease = worker.tryBeginCachePoll()) {
+                    assertNotNull(lease);
+                }
+                verify(statusCheckExecutor, never()).submit(any(GrpcCacheStatusCheckRunner.class));
+            } finally {
+                releaseWorker.countDown();
+            }
+        }
     }
 
     private void runPollRound(long round) {
