@@ -225,6 +225,10 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     RTP_LLM_CHECK_WITH_INFO(!deviceInputEnabled(),
                             "RTP_LLM_DEVICE_INPUT (device-input mode) is not yet supported on Ascend NPU; "
                             "unset RTP_LLM_DEVICE_INPUT on Ascend deployments.");
+    RTP_LLM_CHECK_WITH_INFO(!parallelism_config.prefill_cp_config.is_enabled(),
+                            "Context parallelism (prefill_cp) is not supported on Ascend NPU: "
+                            "no CP attention implementation is registered; "
+                            "unset CP_ROTATE_METHOD on Ascend deployments.");
     c10::DeviceGuard ctor_device_guard(
         c10::Device(torch::kPrivateUse1, static_cast<c10::DeviceIndex>(parallelism_config.local_rank)));
     RTP_LLM_LOG_INFO("Ascend NormalEngine ctor: set device to %d", parallelism_config.local_rank);
