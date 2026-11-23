@@ -38,7 +38,7 @@ export MODEL_SERVICE_CONFIG='{"service_id":"rocm_pd_qwen4","role_endpoints":[{"g
 mkdir -p "$LOG_PATH" "$FLYDSL_RUNTIME_CACHE_DIR"
 mkdir -p "$out/$role/intended_run"; cd "$out/$role/intended_run"
 exec "$python" -m rtp_llm.start_server \
-  --checkpoint_path "$model" --tokenizer_path "$model" --model_type atom_qwen4_exp \
+  --checkpoint_path "$model" --tokenizer_path "$model" --model_type qwen4_exp \
   --external_model_packages atom.plugin.rtpllm.models \
   --tp_size 2 --ep_size 2 --dp_size 1 \
   --max_seq_len 32768 --concurrency_limit 16 --max_context_batch_size 8 \
@@ -46,7 +46,7 @@ exec "$python" -m rtp_llm.start_server \
   --kv_cache_mem_mb 66570 --seq_size_per_block 64 \
   --reuse_cache "$reuse" --reuse_cache_tail_blocks 3 \
   --enable_cuda_graph true --decode_capture_config 1,2,4,8,16 \
-  --sp_type mtp --sp_model_type atom_qwen4_exp_mtp \
+  --sp_type mtp --sp_model_type qwen4_exp_mtp \
   --sp_checkpoint_path "$model" --gen_num_per_cycle 3 \
   --pdfusion_scheduler_mode ratio --decode_prefill_ratio 0 \
   --load_cache_timeout_ms 120000 --start_port "$port"

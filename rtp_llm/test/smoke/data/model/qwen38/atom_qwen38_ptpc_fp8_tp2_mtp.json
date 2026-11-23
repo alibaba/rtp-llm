@@ -1,5 +1,5 @@
 {
-    "model_type": "atom_qwen4_exp",
+    "model_type": "qwen4_exp",
     "model_path": "/mnt/nas1/hf/Qwen3.8-Flash-Next-PTPC-FP8",
     "endpoint": "/v1/chat/completions",
     "query_result": [
