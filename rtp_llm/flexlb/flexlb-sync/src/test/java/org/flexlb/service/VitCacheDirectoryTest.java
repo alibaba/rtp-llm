@@ -62,6 +62,7 @@ class VitCacheDirectoryTest {
     private WorkerStatus b;
     private EngineGrpcClient grpc;
     private LBStatusConsistencyService consistency;
+    private WorkerDirectory workers;
 
     @BeforeEach
     void setUp() {
@@ -69,10 +70,8 @@ class VitCacheDirectoryTest {
         b = worker("10.0.0.2", "two");
         live.put(a.getLogicalIpPort(), a);
         live.put(b.getLogicalIpPort(), b);
-        var workers = mock(WorkerDirectory.class);
-        when(workers.statusSnapshot(RoleType.VIT)).thenAnswer(call -> Map.copyOf(live));
-        when(workers.endpointAddressSnapshot(RoleType.VIT))
-                .thenAnswer(call -> new java.util.ArrayList<>(live.keySet()));
+        workers = mock(WorkerDirectory.class);
+        when(workers.vitRoutingSnapshot()).thenAnswer(call -> Map.copyOf(live));
         when(workers.captureEndpoint(eq(RoleType.VIT), any()))
                 .thenAnswer(
                         call -> {
@@ -151,6 +150,23 @@ class VitCacheDirectoryTest {
 
         selected.setEngineIndex(0);
         assertFalse(selector.validate(request, "one").isSuccess());
+    }
+
+    @Test
+    void capturesOnlyTheWinningGenerationAndRejectsAReplacementBeforeAccounting() {
+        snapshot(a, "a1", "image");
+        snapshot(b, "b1");
+        var route = context("image");
+        route.getRequest().setVitRouteOnly(true);
+        var replacement = worker(a.getIp(), "one");
+        when(workers.captureEndpoint(RoleType.VIT, a.getLogicalIpPort()))
+                .thenReturn(new WorkerEndpoint(replacement).tryPinGeneration());
+        assertFalse(selector.select(route, null).isSuccess());
+        assertEquals(0L, a.vitRoutedInputs());
+        assertEquals(0L, replacement.vitRoutedInputs());
+        verify(workers).captureEndpoint(RoleType.VIT, a.getLogicalIpPort());
+        verify(workers, org.mockito.Mockito.never())
+                .captureEndpoint(RoleType.VIT, b.getLogicalIpPort());
     }
 
     @Test

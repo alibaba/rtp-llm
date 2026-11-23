@@ -95,6 +95,25 @@ class EndpointRegistryRoleTest {
     }
 
     @Test
+    void vitRoutingSnapshotKeepsExactGenerationsAcrossReplacement() {
+        WorkerStatus original = status(RoleType.VIT, 8021);
+        String address = original.getLogicalIpPort();
+        EndpointTestSupport.publishEndpoint(registry, RoleType.VIT, address, original);
+        var before = registry.vitRoutingSnapshot();
+        assertSame(original, before.get(address));
+        assertThrows(UnsupportedOperationException.class, before::clear);
+
+        retire(RoleType.VIT, address, original);
+        assertTrue(registry.vitRoutingSnapshot().isEmpty());
+        assertNull(registry.capture(RoleType.VIT, address));
+
+        WorkerStatus replacement = status(RoleType.VIT, 8021);
+        EndpointTestSupport.publishEndpoint(registry, RoleType.VIT, address, replacement);
+        assertSame(original, before.get(address));
+        assertSame(replacement, registry.vitRoutingSnapshot().get(address));
+    }
+
+    @Test
     void should_not_mix_roles_when_ip_port_is_shared() {
         String ipPort = "127.0.0.1:8080";
         WorkerEndpoint prefill =
