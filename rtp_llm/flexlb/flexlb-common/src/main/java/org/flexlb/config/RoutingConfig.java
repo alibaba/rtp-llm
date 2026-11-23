@@ -31,12 +31,17 @@ public final class RoutingConfig {
     }
 
     /**
-     * Controls whether new ViT routes prefer cached media before comparing load.
+     * Controls whether new ViT routes prefer cached media within the allowed load gap.
      */
     @Getter
     @Setter
     public static final class VitConfig {
+        public static final long DEFAULT_MAX_EXTRA_INFLIGHT_INPUTS = 32L;
+
         private boolean cacheAffinityEnabled = true;
+
+        /** How many more in-flight media inputs the best cache match may have. */
+        private long maxExtraInflightInputs = DEFAULT_MAX_EXTRA_INFLIGHT_INPUTS;
     }
 
     /**

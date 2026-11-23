@@ -3,6 +3,7 @@ package org.flexlb.service;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import org.flexlb.balance.strategy.SelectedRole;
+import org.flexlb.config.RoutingConfig.VitConfig;
 import org.flexlb.constant.MetricConstant;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -20,6 +21,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
+import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -131,16 +133,19 @@ public class VitCacheSelector {
             BalanceContext ctx, String group, List<String> requestKeys) {
         int mediaCount = ctx.getRequest().isVitRouteOnly() ? requestKeys.size() : 0;
         var config = ctx.getConfig();
-        if (requestKeys.isEmpty()
-                || (config != null
-                        && !config.getRouter().getRoles().getVit().isCacheAffinityEnabled())) {
+        VitConfig vit = config == null ? null : config.getRouter().getRoles().getVit();
+        if (requestKeys.isEmpty() || (vit != null && !vit.isCacheAffinityEnabled())) {
             return selectByLoad(ctx, group, mediaCount);
         }
+        long maxExtraInflightInputs =
+                vit == null
+                        ? VitConfig.DEFAULT_MAX_EXTRA_INFLIGHT_INPUTS
+                        : vit.getMaxExtraInflightInputs();
         var keys = List.copyOf(new LinkedHashSet<>(requestKeys));
         var candidates = directory.candidates(group, keys);
         // Rank and record cold-key placements together so concurrent requests share a placement.
         synchronized (pending) {
-            return rankAndPin(ctx, group, keys, candidates, mediaCount);
+            return rankAndPin(ctx, group, keys, candidates, mediaCount, maxExtraInflightInputs);
         }
     }
 
@@ -218,13 +223,12 @@ public class VitCacheSelector {
             String group,
             List<String> keys,
             Map<String, Candidate> candidates,
-            int mediaCount) {
+            int mediaCount,
+            long maxExtraInflightInputs) {
         long now = System.currentTimeMillis();
         long nowNanos = System.nanoTime();
-        Candidate selected = null;
-        int ties = 0;
-        MatchScore bestScore = null;
-        long bestLoad = Long.MAX_VALUE;
+        RankedCandidate bestCache = null;
+        RankedCandidate lowestLoad = null;
         for (Candidate candidate : candidates.values()) {
             if (group != null && !Objects.equals(group, candidate.worker().getGroup())) {
                 continue;
@@ -241,23 +245,24 @@ public class VitCacheSelector {
                             candidate.embeddingHits(),
                             candidate.gpuHits(),
                             pendingHits);
-            int comparison = bestScore == null ? 1 : score.compareTo(bestScore);
             long load = candidate.worker().vitLoadEstimate(nowNanos, MAX_LOAD_AGE_NANOS);
-            if (comparison == 0) {
-                comparison = Long.compare(bestLoad, load);
+            var ranked =
+                    new RankedCandidate(
+                            candidate, score, load, ThreadLocalRandom.current().nextLong());
+            if (bestCache == null || RankedCandidate.CACHE_FIRST.compare(ranked, bestCache) < 0) {
+                bestCache = ranked;
             }
-            if (comparison > 0) {
-                ties = 0;
-                bestScore = score;
-                bestLoad = load;
-            }
-            if (comparison >= 0 && ThreadLocalRandom.current().nextInt(++ties) == 0) {
-                selected = candidate;
+            if (lowestLoad == null || RankedCandidate.LOAD_FIRST.compare(ranked, lowestLoad) < 0) {
+                lowestLoad = ranked;
             }
         }
-        if (selected == null) {
+        if (bestCache == null) {
             return null;
         }
+        Candidate selected =
+                bestCache.load() - lowestLoad.load() > maxExtraInflightInputs
+                        ? lowestLoad.candidate()
+                        : bestCache.candidate();
         var worker = selected.worker();
         var result = pinRouteWorker(ctx, group, worker);
         if (result == null) {
@@ -375,6 +380,19 @@ public class VitCacheSelector {
                     && expiry > now
                     && (instance == null || Objects.equals(instance, candidate.instance()));
         }
+    }
+
+    /**
+     * Keeps each candidate's cache score and load together for both rankings.
+     */
+    private record RankedCandidate(
+            Candidate candidate, MatchScore score, long load, long tieBreaker) {
+        private static final Comparator<RankedCandidate> CACHE_FIRST =
+                Comparator.comparing(RankedCandidate::score, Comparator.reverseOrder())
+                        .thenComparingLong(RankedCandidate::load)
+                        .thenComparingLong(RankedCandidate::tieBreaker);
+        private static final Comparator<RankedCandidate> LOAD_FIRST =
+                Comparator.comparingLong(RankedCandidate::load).thenComparing(CACHE_FIRST);
     }
 
     /**
