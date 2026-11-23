@@ -2154,6 +2154,49 @@ class FlexlbServiceImplTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void traceRecordsSelectedVitGrpcAddressOnlyForVitOnlySchedule(boolean vitOnly) {
+        ServerStatus vit = new ServerStatus();
+        vit.setRole(RoleType.VIT);
+        vit.setServerIp("10.0.0.30");
+        vit.setHttpPort(8000);
+        vit.setGrpcPort(30461);
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        response.setServerStatus(List.of(vit));
+        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(response));
+
+        RecordingExporter exporter = new RecordingExporter();
+        try (var provider =
+                io.opentelemetry.sdk.trace.SdkTracerProvider.builder()
+                        .addSpanProcessor(
+                                io.opentelemetry.sdk.trace.export.SimpleSpanProcessor.create(
+                                        exporter))
+                        .build()) {
+            var span = provider.get("test").spanBuilder("Schedule").startSpan();
+            var request =
+                    FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                            .setRequestId(991L)
+                            .setVitRouteOnly(vitOnly)
+                            .build();
+            Context.current()
+                    .withValue(
+                            org.flexlb.interceptor.GrpcTraceInterceptor.OTEL_CONTEXT_KEY,
+                            io.opentelemetry.context.Context.root().with(span))
+                    .run(() -> service.schedule(request, mock(StreamObserver.class)));
+            span.end();
+
+            assertEquals(
+                    vitOnly ? "10.0.0.30:30461" : null,
+                    exporter.spans
+                            .getFirst()
+                            .getAttributes()
+                            .get(org.flexlb.telemetry.FlexlbTrace.VIT_ADDRESS));
+        }
+    }
+
     @Test
     void forwardedWireEndpointsAreRecordedBeforePublicationWithoutInternalResponse() {
         verifyTraceAtResponse(true, false, true, true);
