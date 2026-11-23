@@ -136,6 +136,21 @@ public final class FlexlbTrace {
         return start(name, parent, SpanKind.SERVER);
     }
 
+    /** Records a point on the Schedule span without exporting an extra child span. */
+    public static void recordScheduleEvent(Context context, String name) {
+        if (!enabled) {
+            return;
+        }
+        try {
+            Span span = spanFromContext(context);
+            if (span.isRecording()) {
+                span.addEvent(name);
+            }
+        } catch (Throwable ignored) {
+            // Telemetry must never interrupt the scheduler.
+        }
+    }
+
     /** Emits a scheduling event and a timestamped child span. */
     public static void schedulingEvent(Context context, String name) {
         if (!enabled) {
