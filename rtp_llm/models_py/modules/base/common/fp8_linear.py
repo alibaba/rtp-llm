@@ -1,6 +1,7 @@
 """Graph-compatible consumers for per-tensor FP8 parameters."""
 
 from contextvars import ContextVar
+import os
 
 import torch
 from torch import nn
@@ -9,6 +10,7 @@ from torch.nn import functional as F
 from rtp_llm.models_py.kernels.cuda.fp8_input_quant import (
     _quantize_projection_input as _quantize_cuda_projection_input,
 )
+from rtp_llm.models_py.utils.device_capability import cached_device_capability
 from rtp_llm.utils.fp8_constants import FP8_STORAGE_SCALE_SUFFIX
 
 _prequantized_fp8_input: ContextVar = ContextVar("_prequantized_fp8_input", default=None)
@@ -122,7 +124,11 @@ class Fp8Linear(nn.Module):
                     1 <= gate_up.shape[0] <= 512
                     and gate_up.shape[1] == 640
                     and tuple(self.weight.shape) == (2560, 320)
-                    and torch.cuda.get_device_capability(gate_up.device) == (9, 0)
+                    and (
+                        torch.cuda.is_current_stream_capturing()
+                        or os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") == "1"
+                    )
+                    and cached_device_capability(gate_up.device) == (9, 0)
                 )
             )
             and gate_up.dtype == torch.bfloat16
@@ -144,7 +150,7 @@ class Fp8Linear(nn.Module):
         result = try_silu_mul_fp8_quant(gate_up, output=padded)
         if result is None:
             return None
-        return self._run_quantized(*result, gate_up.shape[:-1], rows).to(gate_up.dtype)
+        return self._run_quantized(*result, gate_up.shape[:-1], rows)
 
     def forward(self, x, *, input_scale=None):
         if self.compute_weight is not None:

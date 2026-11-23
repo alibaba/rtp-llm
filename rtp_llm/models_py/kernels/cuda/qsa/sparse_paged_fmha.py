@@ -20,7 +20,10 @@ import triton.language as tl
 from rtp_llm.models_py.kernels.cuda.qsa.contracts import (
     qsa_strict_validation_enabled,
 )
-from rtp_llm.models_py.utils.device_capability import sm90_pdl_enabled
+from rtp_llm.models_py.utils.device_capability import (
+    cached_device_capability,
+    sm90_pdl_enabled,
+)
 
 _BLOCK_K = 64
 
@@ -260,7 +263,7 @@ def _grouped_split_supported(
     """
     if torch.version.hip is not None or not q.is_cuda:
         return False
-    if torch.cuda.get_device_capability(q.device) != (9, 0):
+    if cached_device_capability(q.device) != (9, 0):
         return False
     if q.dtype != torch.bfloat16 or q.dim() != 4:
         return False
@@ -739,7 +742,7 @@ def _supports_sm90_paged_packing(q, kv_cache, page_size, kv_head_num):
         and kv_head_num == 1
         and page_size in (64, 128)
         and kv_cache.shape[0] * page_size <= 2**31
-        and torch.cuda.get_device_capability(q.device) == (9, 0)
+        and cached_device_capability(q.device) == (9, 0)
     )
 
 

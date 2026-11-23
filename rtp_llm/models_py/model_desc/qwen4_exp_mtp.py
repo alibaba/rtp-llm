@@ -14,6 +14,7 @@ from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpModel
 from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
     exact_head_rms_norm,
 )
+from rtp_llm.models_py.modules.hybrid.gated_residual import grouped_rms_norm
 from rtp_llm.models_py.modules.qwen4_exp.weight_views import (
     Qwen4LinearFactory as LinearFactory,
 )

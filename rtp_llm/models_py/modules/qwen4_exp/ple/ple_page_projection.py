@@ -7,6 +7,7 @@ from rtp_llm.models_py.kernels.cuda.qwen4_ple.page_quant import (
     _valid_page_size,
     quantize_pages,
 )
+from rtp_llm.models_py.utils.device_capability import cached_device_capability
 
 
 def project_pages_pair(x, first, second, page_size=128):

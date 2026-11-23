@@ -5,6 +5,7 @@ from torch import nn
 
 from rtp_llm.models_py.distributed.collective_torch import Group, _get_group, all_gather
 from rtp_llm.models_py.distributed.collective_utils import exchange_group_state
+from rtp_llm.models_py.utils.device_capability import cached_device_capability
 
 
 class Fp8VocabEmbedding(nn.Module):
@@ -67,7 +68,7 @@ class Fp8VocabEmbedding(nn.Module):
             return
         # Device capability can differ across TP ranks. Agree before any rank
         # enters the optional scale gather, retaining BF16 transport otherwise.
-        eligible = torch.cuda.get_device_capability(self.device) in ((9, 0), (12, 0))
+        eligible = cached_device_capability(self.device) in ((9, 0), (12, 0))
         if not all(
             exchange_group_state(
                 _get_group(Group.TP), eligible, "vocabulary_byte_gather"

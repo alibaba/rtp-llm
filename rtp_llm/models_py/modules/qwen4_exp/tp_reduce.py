@@ -9,7 +9,9 @@ from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.all_reduce import get_all_reduce
 from rtp_llm.models_py.distributed.collective_utils import exchange_group_state
 from rtp_llm.models_py.modules.qwen4_exp._profiler import record_function_range
-from rtp_llm.models_py.modules.qwen4_exp.tp2_ar_hc_fused import try_defer_attn_tp2
+from rtp_llm.models_py.modules.qwen4_exp.tp2_ar_hc_fused import (
+    try_defer_sublayer_tp2,
+)
 
 # Model close can also run on a single rank after partial initialization.
 # Retain IPC mappings until process exit rather than freeing a peer's input.
@@ -129,7 +131,7 @@ def prepare_target_reduce(config, parallelism):
 
 
 def all_reduce_target_graph(tensor, group, *, inplace=True):
-    deferred = try_defer_attn_tp2(tensor, group)
+    deferred = try_defer_sublayer_tp2(tensor, group)
     if deferred is not None:
         return deferred
     with record_function_range("qwen4.tp_all_reduce"):

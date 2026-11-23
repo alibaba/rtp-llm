@@ -1376,13 +1376,15 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             )
 
             if attn_tp_size == 2 and self.decode_gdn.ssm_state_dtype == torch.float32:
+                from rtp_llm.models_py.utils.device_capability import (
+                    cached_device_capability,
+                )
+
                 packed_decode = try_packed_decode
                 if (
                     self.use_sm90_gdn_fp8_decode
-                    and torch.cuda.get_device_properties(
-                        self.in_proj_ba.weight.device
-                    ).multi_processor_count
-                    == 78
+                    and cached_device_capability(self.in_proj_ba.weight.device)
+                    == (9, 0)
                 ):
                     packed_decode = partial(try_packed_decode, tune_h20=True)
                 elif (
@@ -1391,7 +1393,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                     and not _is_rocm
                     and fused_w.is_cuda
                     and fused_w.dtype == torch.bfloat16
-                    and torch.cuda.get_device_capability(fused_w.device) == (9, 0)
+                    and cached_device_capability(fused_w.device) == (9, 0)
                     and torch.cuda.get_device_properties(
                         fused_w.device
                     ).multi_processor_count
@@ -1714,7 +1716,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             or attn_meta.is_cp_linear_attn
         ), "prefill_conv1d_meta is required for prefill"
         is_prefill = attention_inputs.is_prefill and not attn_meta.is_target_verify
-        overlap_ba = not is_prefill and hidden_states.shape[0] <= 256
+        overlap_ba = not is_prefill and hidden_states.shape[0] <= 512
         defer_ba_wait = (
             overlap_ba
             and torch.cuda.is_current_stream_capturing()

@@ -16,7 +16,10 @@ import triton
 
 from rtp_llm.models_py.kernels.cuda.qsa.main_qk_cache import _main_qk_norm_rope_cache
 
-from rtp_llm.models_py.utils.device_capability import sm90_pdl_enabled
+from rtp_llm.models_py.utils.device_capability import (
+    cached_device_capability,
+    sm90_pdl_enabled,
+)
 
 _TORCH_GIT = "70d99e998b4955e0049d13a98d77ae1b14db1f45"
 
@@ -85,7 +88,7 @@ def prepare_main_qk_cache(qkv, positions, norm, config, cache, scales, plan, par
     from rtp_llm.ops import RopeStyle
 
     rows = qkv.shape[0] if qkv.ndim == 2 else 0
-    capability = torch.cuda.get_device_capability(qkv.device) if qkv.is_cuda else None
+    capability = cached_device_capability(qkv.device) if qkv.is_cuda else None
     if capability == (12, 0):
         arch_ok = (
             getattr(torch.version, "git_version", None) == _TORCH_GIT
@@ -93,7 +96,7 @@ def prepare_main_qk_cache(qkv, positions, norm, config, cache, scales, plan, par
         )
     elif capability == (9, 0):
         min_rows = 4 if hasattr(params, "max_seq_len") else 1
-        arch_ok = torch.version.hip is None and min_rows <= rows <= 256
+        arch_ok = torch.version.hip is None and min_rows <= rows <= 512
     else:
         arch_ok = False
     has_pos = positions is not None and positions.numel() > 0
