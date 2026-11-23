@@ -160,8 +160,8 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
 
 ### LOCAL_SYNC 两级索引
 
-- **大表** `GlobalCacheIndex`：`ConcurrentHashMap<Long blockHash, Set<String engineIpPort>>`，
-  变更加单把 `ReentrantLock`。`batchCalculatePrefixMatchLength`：按序遍历请求 block 链，
+- **大表** `GlobalCacheIndex`：以原生 `long` 为键，使用哈希高位分成 256 个分片。
+  单块的 worker 映射和计数在分片锁下更新。`batchCalculatePrefixMatchLength` 按序遍历请求 block 链，
   用候选集过滤 + 首个未命中即淘汰该引擎（早停），返回每引擎的前缀匹配块数。
 - **小表** `EngineLocalView`：`ConcurrentHashMap<String engineIpPort, Set<Long>>`。
   `calculateDiff` 在专用 ForkJoinPool 上并行算 added/removed，diff 大小回馈动态间隔服务。

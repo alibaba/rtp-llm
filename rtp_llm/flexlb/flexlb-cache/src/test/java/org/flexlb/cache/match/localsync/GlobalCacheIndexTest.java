@@ -10,6 +10,11 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+import java.util.stream.LongStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -55,6 +60,41 @@ class GlobalCacheIndexTest {
         globalCacheIndex.addCacheBlock(3L, "engine1");
         assertEquals(1L, globalCacheIndex.totalBlocks());
         assertEquals(1L, globalCacheIndex.totalMappings());
+    }
+
+    @Test
+    void retiringOneOwnerWhileAnotherAddsTheSameBlocksPreservesTheNewOwner() throws Exception {
+        Set<Long> keys = LongStream.range(-2048, 2048).boxed().collect(Collectors.toSet());
+        keys.add(Long.MIN_VALUE);
+        keys.add(Long.MAX_VALUE);
+        keys.forEach(key -> globalCacheIndex.addCacheBlock(key, "retiring"));
+        var start = new CountDownLatch(1);
+        try (var pool = Executors.newFixedThreadPool(2)) {
+            var retirement =
+                    pool.submit(
+                            () -> {
+                                start.await();
+                                globalCacheIndex.removeAllCacheBlockOfEngine("retiring", keys);
+                                return null;
+                            });
+            var refresh =
+                    pool.submit(
+                            () -> {
+                                start.await();
+                                keys.forEach(key -> globalCacheIndex.addCacheBlock(key, "live"));
+                                return null;
+                            });
+            start.countDown();
+            retirement.get(5, TimeUnit.SECONDS);
+            refresh.get(5, TimeUnit.SECONDS);
+        }
+
+        assertEquals(keys.size(), globalCacheIndex.totalBlocks());
+        assertEquals(keys.size(), globalCacheIndex.totalMappings());
+        assertEquals(
+                Map.of("live", keys.size()),
+                globalCacheIndex.batchCalculatePrefixMatchLength(
+                        List.of("retiring", "live"), List.copyOf(keys)));
     }
 
     @Test
