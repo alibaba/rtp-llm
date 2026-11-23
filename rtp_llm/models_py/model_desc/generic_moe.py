@@ -144,12 +144,11 @@ class GenericMoeLayer(nn.Module):
         # Get quant_config from model_config
         quant_config = config.quant_config
         moe_strategy = moe_config.moe_strategy
-        if moe_strategy == "mega_moe_se" and getattr(
-            config, "glm53_nvfp4_bf16_mtp", False
-        ):
-            moe_strategy = "auto"
-        native_nvfp4 = uses_glm53_native_nvfp4_moe(
+        glm53_nvfp4_moe = uses_glm53_native_nvfp4_moe(
             config.model_type, quant_config, moe_strategy
+        ) or (
+            moe_strategy == "mega_moe_se"
+            and getattr(config, "glm53_nvfp4_bf16_mtp", False)
         )
         if glm53_moe_enabled(config) or (
             config.model_type == "glm_5_mtp"
@@ -183,7 +182,7 @@ class GenericMoeLayer(nn.Module):
             parallelism_config.get_attn_tp_size()
             if glm53_moe_enabled(config)
             and (
-                native_nvfp4
+                glm53_nvfp4_moe
                 or moe_strategy in ("mega_moe", "mega_moe_fp8", "mega_moe_fp8_se")
             )
             and self.ep_size > 1
@@ -244,7 +243,7 @@ class GenericMoeLayer(nn.Module):
             "mega_moe_fp8_se",
             "mega_moe_fused",
         ):
-            if native_nvfp4:
+            if glm53_nvfp4_moe:
                 from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_nvfp4 import (
                     MegaMoeNvfp4SEWrapper,
                 )
@@ -297,7 +296,6 @@ class GenericMoeLayer(nn.Module):
                 quant_config=quant_config,
                 enable_cuda_graph=enable_cuda_graph,
             )
-            config_adapter.moe_strategy = moe_strategy
             self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
 
         self.w1 = weights.get(W.moe_w1, None)
