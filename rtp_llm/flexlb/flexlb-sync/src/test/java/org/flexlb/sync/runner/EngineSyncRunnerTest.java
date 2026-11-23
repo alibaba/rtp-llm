@@ -529,6 +529,42 @@ class EngineSyncRunnerTest {
     }
 
     @Test
+    void discoveryLookupFailureContinuesPollingKnownLogicalWorkerOnItsControlPort() {
+        var host = new WorkerHost("127.0.0.1", 8080, 8081, 8085, 18082, "", "", "", 1, 2);
+        when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
+                .thenReturn(List.of(host))
+                .thenThrow(new IllegalStateException("discovery lookup unavailable"))
+                .thenReturn(List.of());
+        Mockito.doThrow(new RejectedExecutionException())
+                .when(statusCheckExecutor)
+                .submit(any(Runnable.class));
+
+        engineSyncRunner.run();
+        var worker = workerDirectory.statusSnapshot(RoleType.PREFILL).get(host.getLogicalIpPort());
+        assertNotNull(worker);
+        markStatusExpired(worker);
+        Mockito.clearInvocations(statusCheckExecutor);
+        Mockito.doReturn(null).when(statusCheckExecutor).submit(any(Runnable.class));
+        when(engineGrpcService.getWorkerStatusAsync(any(), anyInt(), anyLong(), anyLong(), any()))
+                .thenReturn(new java.util.concurrent.CompletableFuture<>());
+
+        engineSyncRunner.run();
+
+        var submitted = ArgumentCaptor.forClass(Runnable.class);
+        verify(statusCheckExecutor, times(2)).submit(submitted.capture());
+        assertTrue(
+                workerDirectory.isCurrentStatus(RoleType.PREFILL, host.getLogicalIpPort(), worker));
+        assertTrue(worker.isActiveGeneration());
+        submitted.getAllValues().getFirst().run();
+        verify(engineGrpcService)
+                .getWorkerStatusAsync(
+                        "127.0.0.1", 18082, -1L, syncRequestTimeoutMs, RoleType.PREFILL);
+
+        engineSyncRunner.run();
+        assertFalse(worker.isActiveGeneration());
+    }
+
+    @Test
     void should_skip_cache_status_task_when_kvcm_is_enabled() {
         when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
                 .thenReturn(List.of(new WorkerHost("127.0.0.1", 8080)));
@@ -656,7 +692,10 @@ class EngineSyncRunnerTest {
                 "pollHealth",
                 new AtomicReference<>(
                         new WorkerStatus.PollHealth(
-                                System.nanoTime() / 1_000 - 2_000_000L, 20_000L, 0L, true)));
+                                System.nanoTime() / 1_000 - 2 * STATUS_STALE_AFTER_US,
+                                20_000L,
+                                0L,
+                                true)));
     }
 
     private static WorkerStatus varianceStatus(String ip, int port, double stepLatencyMs) {
