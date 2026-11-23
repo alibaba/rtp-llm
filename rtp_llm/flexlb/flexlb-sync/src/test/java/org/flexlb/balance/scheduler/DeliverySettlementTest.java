@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import com.google.protobuf.ByteString;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DeliverySettlementTestSupport;
@@ -30,6 +31,7 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -189,6 +191,7 @@ class DeliverySettlementTest {
         for (int i = 1; i < members.size(); i++) {
             Member member = members.get(i);
             member.claim().complete(DeliveryResult.delivered());
+            assertNull(member.item().ctx().getGenerateInputPb());
             assertTrue(member.item().future().get(5, TimeUnit.SECONDS).isSuccess());
             new EndpointEventProjector(registry)
                     .onPrefillStatus(prefill, RoleType.PREFILL, ledger.finish(20L, member.item()));
@@ -248,8 +251,11 @@ class DeliverySettlementTest {
         Member replacement = member(50L, 51L);
         ledger.commit(51L, List.of(replacement.item()));
 
+        assertNotNull(old.item().ctx().getGenerateInputPb());
         reject(old);
 
+        assertNull(old.item().ctx().getGenerateInputPb());
+        assertNotNull(replacement.item().ctx().getGenerateInputPb());
         assertOccupancy(1, 1);
         assertFalse(replacement.item().future().isDone());
     }
@@ -370,6 +376,7 @@ class DeliverySettlementTest {
         ledger.commit(70L, List.of(member.item()));
         member.claim()
                 .complete(new DeliveryResult(status, new IllegalStateException("lost response")));
+        assertNull(member.item().ctx().getGenerateInputPb());
         assertOccupancy(1, 1);
         assertFalse(member.item().future().isDone());
         verify(member.item().decodeEp(), never())
@@ -392,6 +399,7 @@ class DeliverySettlementTest {
         member.claim()
                 .complete(
                         DeliveryResult.notSent(new IllegalStateException("request build failed")));
+        assertNull(member.item().ctx().getGenerateInputPb());
         assertFalse(member.item().future().get(5, TimeUnit.SECONDS).isSuccess());
         assertOccupancy(0, 0);
         verify(member.item().decodeEp())
@@ -749,6 +757,7 @@ class DeliverySettlementTest {
             DecodeEndpoint decode,
             DecodeEndpoint.ReservationHandle reservation) {
         var context = RequestLifecycleTestSupport.context(config, id);
+        context.setGenerateInputPb(ByteString.copyFromUtf8("input-" + id));
         var future = registry.register(context);
         var item =
                 new ScheduledRequest(

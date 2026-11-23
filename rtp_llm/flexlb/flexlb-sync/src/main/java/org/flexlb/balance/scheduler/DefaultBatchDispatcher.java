@@ -383,6 +383,11 @@ public class DefaultBatchDispatcher {
             return;
         }
 
+        // The outbound message now owns the input it needs, including during transport retries.
+        for (ScheduledRequest item : items) {
+            item.ctx().setGenerateInputPb(null);
+        }
+
         // 2. Log dispatch
         try {
             logDispatch(batchId, items, prefillEp, task.predictedMs(), task.reason());

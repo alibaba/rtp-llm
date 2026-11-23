@@ -469,6 +469,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             return;
         }
 
+        context.setGenerateInputPb(null);
         var response = forwardResult.response();
         if (isAdmissionRequest(context)
                 && forwardResult.mayHaveSent()
@@ -1310,6 +1311,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             } catch (IllegalArgumentException error) {
                 throw new InvalidScheduleRequestException(error.getMessage(), error);
             }
+            if (!pb.getVitRouteOnly()) {
+                ctx.setGenerateInputPb(pb.getGenerateInput());
+            }
         }
 
         Request request = new Request();
@@ -1381,10 +1385,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         ctx.setSchedulingMetadata(schedulingMetadata);
         if (!pb.getVitRouteOnly()) {
             requestSchedulerReporter.reportRequest(schedulingMetadata.priority());
-        }
-
-        if (!pb.getGenerateInput().isEmpty()) {
-            ctx.setGenerateInputPb(pb.getGenerateInput());
         }
 
         // Capture gRPC server entry time from interceptor context for delay metric splitting

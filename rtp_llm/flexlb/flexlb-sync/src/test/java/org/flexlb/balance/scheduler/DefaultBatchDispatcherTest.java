@@ -41,6 +41,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -1346,6 +1347,8 @@ class DefaultBatchDispatcherTest {
                 .thenAnswer(
                         inv -> {
                             sent.add(inv.getArgument(2));
+                            assertNull(first.ctx().getGenerateInputPb());
+                            assertNull(second.ctx().getGenerateInputPb());
                             return CompletableFuture.completedFuture(
                                     ackResponse(92L, List.of(501L, 502L)));
                         });
@@ -1386,13 +1389,6 @@ class DefaultBatchDispatcherTest {
         assertEquals(
                 replaced ? "" : "vendor=two",
                 secondSent.getRequestInfo().getTraceContext().getTracestate());
-        assertEquals(
-                "vendor=one",
-                EngineRpcService.GenerateInputPB.parseFrom(first.ctx().getGenerateInputPb())
-                        .getRequestInfo()
-                        .getTraceContext()
-                        .getTracestate(),
-                "dispatch must not mutate the queued payload");
     }
 
     private PrefillEndpoint createPrefillEndpoint() {
