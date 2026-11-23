@@ -81,11 +81,8 @@ class PureDpRouterBase(FusedMoeDataRouter):
         checker.check(config.dp_size > 1)
         checker.check(config.ep_size == config.dp_size)
         checker.check(resolver.use_all_gather(config))
-        # CUDA Graph capture/replay freezes shapes; PureDP _pad_to_max derives
-        # max_n via runtime all_gather + .item(), which is graph-unsafe (D2H
-        # sync mid-capture, dynamic pad shape on replay). Force fallback to
-        # DeepEP when CUDA Graph is on.
-        checker.check(not config.enable_cuda_graph)
+        # BI agrees on a common decode bucket across the stage before replay.
+        checker.check(not config.enable_cuda_graph or config.batch_invariant)
 
     def __init__(
         self,
@@ -143,7 +140,8 @@ class PureDpRouterBase(FusedMoeDataRouter):
     ) -> ExpertForwardPayload:
         assert a1_scale is None and a2_scale is None, "not support quanted moe"
 
-        a1, topk_weights, topk_ids, _ = self._pad_to_max(a1, topk_weights, topk_ids)
+        if not (self.config.batch_invariant and torch.cuda.is_current_stream_capturing()):
+            a1, topk_weights, topk_ids, _ = self._pad_to_max(a1, topk_weights, topk_ids)
 
         a1_full = all_gather(a1, group=Group.STAGE)
         topk_weights_full = all_gather(topk_weights, group=Group.STAGE)

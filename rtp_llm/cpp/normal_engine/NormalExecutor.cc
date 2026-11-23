@@ -444,6 +444,10 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
         if (forward_start_us) {
             recorded_batch->setDpForward(parallelism_config_.dp_rank, forward_step, forward_start_us, monotonicTimeUs());
         }
+        if (recorded_batch && model_output.decode_cuda_graph) {
+            const auto& graph = *model_output.decode_cuda_graph;
+            recorded_batch->setDecodeCudaGraph(graph.status, graph.bucket, graph.real_requests, graph.dp_real_requests);
+        }
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     if (expert_balancer_) {

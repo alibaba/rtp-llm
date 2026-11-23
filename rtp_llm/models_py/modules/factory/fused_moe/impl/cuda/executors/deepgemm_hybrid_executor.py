@@ -201,7 +201,11 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         checker.check(resolver.is_bf16(config))
         checker.check(has_deep_gemm())
         checker.check(get_sm()[0] >= 9)
-        checker.check(not config.enable_cuda_graph or get_sm()[0] == 12)
+        checker.check(
+            not config.enable_cuda_graph
+            or get_sm()[0] == 12
+            or (config.batch_invariant and get_sm() == (10, 3))
+        )
 
     def __init__(
         self,
@@ -723,7 +727,9 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 expert_alignment,
             )
 
-        if not self.enable_cuda_graph:
+        if not self.enable_cuda_graph or (
+            self._batch_invariant and not _is_cuda_graph_warmup_or_capture()
+        ):
             num_recv_tokens_per_expert_cpu = (
                 payload.expert_tokens_meta.expert_num_tokens_cpu
             )

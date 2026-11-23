@@ -47,6 +47,27 @@ torch::Tensor toHostAsync(const torch::Tensor& tensor, bool& has_d2h) {
     return host;
 }
 
+// Positive votes are captured decode buckets. Negative votes force eager;
+// their order gives a deterministic reason when several ranks block replay.
+enum DecodeGraphFallback { Unavailable = -1, AboveCapture = -2, HasPrefill = -3 };
+
+int agreeDecodeGraphBucket(int local_bucket, int32_t local_requests, int64_t dp_size, DecodeCudaGraphInfo& info) {
+    const auto send = torch::tensor({local_bucket, local_requests},
+                                    torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    const std::vector<torch::Tensor> recv{torch::empty({dp_size * 2}, send.options())};
+    execAllGather({recv, ParallelMode::STAGE, {send}, false});
+    const auto votes = recv.front().cpu();
+    const auto* data = votes.data_ptr<int32_t>();
+    int bucket = local_bucket;
+    info.dp_real_requests.reserve(dp_size);
+    for (int64_t rank = 0; rank < dp_size; ++rank) {
+        const int peer_bucket = data[2 * rank];
+        bucket = std::min(bucket, peer_bucket) < 0 ? std::min(bucket, peer_bucket) : std::max(bucket, peer_bucket);
+        info.dp_real_requests.push_back(data[2 * rank + 1]);
+    }
+    return bucket;
+}
+
 /** Pair init() with a full drain on exceptional exits. On the normal tracked
  * path, finish submissions here and leave publication completion and error
  * handling to the caller. */
@@ -947,7 +968,10 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
                                            torch_ext::BertEmbeddingInputs()});
     auto* runner          = selectGraphRunner(attention_inputs_);
     auto& state           = selectGraphState(attention_inputs_);
-    if (moe_forward_allows_graph_ && enable_cuda_graph_ && runner != nullptr
+    // DP/EP selects the shared bucket in forward after every rank has voted.
+    // The runner prepares that bucket inline before replay.
+    if (moe_forward_allows_graph_ && !(batch_invariant_cuda_graph_ && device_props_.dp_size > 1)
+        && enable_cuda_graph_ && runner != nullptr
         && runner->canRun(py_model_inputs, state, CudaGraphCheckMode::PREPARE)) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
         runner->prepareAttentionInputs(py_model_inputs, state, skip_forward_event_sync);
@@ -1011,8 +1035,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 && has_context_request ?
             generation_prefill_cuda_graph_init_status_ :
             GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
-    const auto with_generation_prefill_cuda_graph_status = [&](GptModelOutputs outputs) {
+    std::optional<DecodeCudaGraphInfo> decode_cuda_graph;
+    const auto with_graph_status = [&](GptModelOutputs outputs) {
         outputs.generation_prefill_cuda_graph_status = generation_prefill_cuda_graph_status;
+        outputs.decode_cuda_graph = std::move(decode_cuda_graph);
         return outputs;
     };
 
@@ -1096,8 +1122,31 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             && generation_prefill_graph_runner_ != nullptr && !is_generation_prefill_runner) {
             generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::MIXED_PREFILL_DECODE_NOT_SUPPORTED;
         }
-        const bool can_run_graph = moe_forward_allows_graph_ && !capture_hidden_states && enable_cuda_graph_
-                                   && graph_runner != nullptr && graph_runner->canRun(py_model_inputs, graph_state);
+        const bool pure_decode = !has_context_request && token_ids.dim() == 1
+                                 && token_ids.numel() == inputs.sequence_lengths.size(0);
+        bool can_run_graph = moe_forward_allows_graph_ && !capture_hidden_states && enable_cuda_graph_
+                             && graph_runner != nullptr && (!batch_invariant_cuda_graph_ || pure_decode)
+                             && graph_runner->canRun(py_model_inputs, graph_state);
+        if (batch_invariant_cuda_graph_) {
+            const int local_vote = can_run_graph ? graph_state.current_real_graph_bs :
+                                   has_context_request ? HasPrefill :
+                                   graph_state.decode_batch_exceeds_capture ? AboveCapture : Unavailable;
+            auto& info = decode_cuda_graph.emplace();
+            info.real_requests = inputs.is_fake_stream ? 0 : inputs.input_lengths.size(0);
+            const int vote = device_props_.dp_size > 1 ?
+                                 agreeDecodeGraphBucket(local_vote, info.real_requests, device_props_.dp_size, info) :
+                                 local_vote;
+            can_run_graph = vote > 0;
+            if (can_run_graph) {
+                graph_state.current_real_graph_bs = vote;
+                info.bucket = vote;
+                info.status = "replay";
+            } else if (vote == HasPrefill) {
+                info.status = "prefill";
+            } else if (vote == AboveCapture) {
+                info.status = "above_capture";
+            }
+        }
         // The eager Python instance retains this wrapper's SEED/REUSE role and
         // shares its request-local TopK buffer with the graph clones. Batches
         // outside the captured buckets must use that same role eagerly.
@@ -1144,7 +1193,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         };
         if (!py_model_outputs.pp_intermediates.empty()) {
             /** Non-tail stages may return only boundary tensors; leave their layout intact for the next stage. */
-            return with_generation_prefill_cuda_graph_status(attach_model_outputs(GptModelOutputs{}));
+            return with_graph_status(attach_model_outputs(GptModelOutputs{}));
         }
         /** Capture consumes the packed Python output directly; ordinary outputs retain their owned clone. */
         auto hidden_states =
@@ -1154,7 +1203,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 // Python returns normalized [B*gamma, hidden_dim]. Reuse the
                 // regular C++ lm_head and TP logits gather for every proposal
                 // row; the speculative executor owns only Markov sampling.
-                return with_generation_prefill_cuda_graph_status(
+                return with_graph_status(
                     attach_model_outputs(callForwardPostLayers(hidden_states, inputs, true)));
             }
             // Commit only updates the draft KV cache and has no logits
@@ -1163,7 +1212,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             GptModelOutputs outputs;
             outputs.hidden_states     = hidden_states;
             outputs.all_hidden_states = hidden_states;
-            return with_generation_prefill_cuda_graph_status(attach_model_outputs(std::move(outputs)));
+            return with_graph_status(attach_model_outputs(std::move(outputs)));
         }
         if (capture_hidden_states) {
             auto        capture_input_lengths  = inputs.input_lengths;
@@ -1193,7 +1242,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                     hidden_state_capture_publisher_->rejectLayout(std::move(local_layout_error));
                     auto fallback_last_hidden = hidden_state_capture_publisher_->makeFallback(
                         hidden_states, capture_input_ids.numel(), token_ids.device());
-                    return with_generation_prefill_cuda_graph_status(attach_model_outputs(
+                    return with_graph_status(attach_model_outputs(
                         callForwardPostLayers(fallback_last_hidden, inputs, true, fallback_last_hidden.size(0))));
                 }
             }
@@ -1212,7 +1261,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                                                                capture_expected_rows,
                                                                                capture_layout_context,
                                                                                token_ids.device());
-            return with_generation_prefill_cuda_graph_status(attach_model_outputs(
+            return with_graph_status(attach_model_outputs(
                 callForwardPostLayers(last_hidden_states, inputs, true, last_hidden_states.size(0))));
         }
         if (device_props_.enable_prefill_cp && has_context_request) {
@@ -1221,7 +1270,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 if (has_mtp_hidden_buffer_ && !has_py_mtp_last_hidden_getter_) {
                     cp_mtp_last_hidden_states_ = hidden_states;
                 }
-                return with_generation_prefill_cuda_graph_status(
+                return with_graph_status(
                     attach_model_outputs(forwardPostLayersLastHidden(hidden_states, inputs)));
             }
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
@@ -1233,10 +1282,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                     inputs.lm_output_indexes.to(hidden_states.options().dtype(torch::kLong), /*non_blocking=*/true);
                 cp_mtp_last_hidden_states_ = hidden_states.index_select(0, indexes);
             }
-            return with_generation_prefill_cuda_graph_status(
+            return with_graph_status(
                 attach_model_outputs(callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens)));
         }
-        return with_generation_prefill_cuda_graph_status(
+        return with_graph_status(
             attach_model_outputs(callForwardPostLayers(hidden_states, inputs, true)));
 
     } catch (const py::error_already_set& e) {

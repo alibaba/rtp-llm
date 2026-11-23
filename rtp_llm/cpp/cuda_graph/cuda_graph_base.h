@@ -34,6 +34,7 @@ struct CudaGraphState {
     int                              graph_token_capacity{0};
     int                              graph_request_capacity{0};
     int                              captured_backend_batch_size{0};
+    bool                             decode_batch_exceeds_capture{false};
     GenerationPrefillCudaGraphStatus generation_prefill_status{GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
 };
 

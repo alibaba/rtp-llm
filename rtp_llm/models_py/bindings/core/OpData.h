@@ -146,6 +146,13 @@ public:
     std::string debugString(bool force = false) const;
 };
 
+struct DecodeCudaGraphInfo {
+    const char*          status = "unavailable";
+    int                  bucket = 0;
+    int                  real_requests = 0;
+    std::vector<int32_t> dp_real_requests;
+};
+
 struct GptModelOutputs {
     torch::Tensor logits;
     // Same selected LM output rows as logits, independent of need_all_logits.
@@ -176,6 +183,7 @@ struct GptModelOutputs {
 
     /** Downstream activations from a non-last target stage. */
     std::map<std::string, torch::Tensor> pp_intermediates;
+    std::optional<DecodeCudaGraphInfo> decode_cuda_graph;
 };
 
 struct CopyParams {

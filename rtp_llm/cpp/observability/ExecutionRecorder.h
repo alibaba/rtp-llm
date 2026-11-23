@@ -140,6 +140,12 @@ public:
         record_["forward_start_us"] = start_us;
         record_["forward_end_us"]   = end_us;
     }
+    void setDecodeCudaGraph(const char* status, int bucket, int real_requests, const std::vector<int32_t>& dp_requests) {
+        record_["decode_cuda_graph"] = {{"status", status},
+                                        {"bucket", bucket},
+                                        {"real_requests", real_requests},
+                                        {"dp_real_requests", dp_requests}};
+    }
     std::vector<RecordedTokenTiming> timings;
 
 private:

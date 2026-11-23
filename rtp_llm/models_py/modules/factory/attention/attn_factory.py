@@ -421,13 +421,15 @@ class AttnImplFactory(object):
         if getattr(hw_kernel_config, "batch_invariant", False):
             from .cuda_impl.batch_invariant import BatchInvariantAttention
 
-            if is_cuda_graph or not BatchInvariantAttention.support(
+            if not BatchInvariantAttention.support(
                 attn_configs, attn_inputs
             ):
                 raise ValueError(
-                    "batch-invariant attention requires eager causal BF16 GQA"
+                    "batch-invariant attention requires causal BF16 GQA"
                 )
-            attn_inputs.is_cuda_graph = False
+            if is_cuda_graph and attn_inputs.is_prefill:
+                raise ValueError("batch-invariant CUDA graph requires pure decode")
+            attn_inputs.is_cuda_graph = is_cuda_graph
             return BatchInvariantAttention(attn_configs, attn_inputs)
 
         if (

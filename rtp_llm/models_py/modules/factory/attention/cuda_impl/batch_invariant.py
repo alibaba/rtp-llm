@@ -2,7 +2,10 @@ from typing import Optional
 
 import torch
 
-from rtp_llm.models_py.modules.factory.attention.common import reshape_paged_kv_cache
+from rtp_llm.models_py.modules.factory.attention.common import (
+    copy_kv_cache_offset,
+    reshape_paged_kv_cache,
+)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.models_py.triton_kernels.attention.batch_invariant import (
     batch_invariant_paged_attention,
@@ -21,6 +24,7 @@ class BatchInvariantAttention(FMHAImplBase):
 
     def __init__(self, config: AttentionConfigs, inputs: PyAttentionInputs):
         self.config = config
+        self.is_prefill = inputs.is_prefill
         self.block_table = inputs.kv_cache_kernel_block_id_device
         device = self.block_table.device
         if inputs.is_prefill:
@@ -55,6 +59,15 @@ class BatchInvariantAttention(FMHAImplBase):
             and config.kv_cache_dtype == KvCacheDataType.BASE
             and not inputs.is_target_verify
         )
+
+    def support_cuda_graph(self) -> bool:
+        return not self.is_prefill
+
+    def prepare_cuda_graph(self, inputs: PyAttentionInputs) -> None:
+        # The runner updates the captured block table, lengths and positions
+        # in place. RoPE also keeps a derived block-offset buffer.
+        params = self.rope.prepare(inputs, forbid_reallocation=True)
+        copy_kv_cache_offset(self.rope_params.kv_cache_offset, params.kv_cache_offset)
 
     def forward(
         self, qkv: torch.Tensor, kv_cache: Optional[LayerKVCache], layer_idx: int = 0

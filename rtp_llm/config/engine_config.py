@@ -374,10 +374,8 @@ def configure_batch_invariant_model(
         conflicts.append("requires a text generation task")
     if model_config.lora_infos:
         conflicts.append("LoRA adapters are unsupported")
-    if hw.enable_cuda_graph or hw.enable_decode_cascade_attention:
-        conflicts.append(
-            "ENABLE_CUDA_GRAPH and ENABLE_DECODE_CASCADE_ATTENTION must be disabled"
-        )
+    if hw.enable_decode_cascade_attention:
+        conflicts.append("ENABLE_DECODE_CASCADE_ATTENTION must be disabled")
     if engine_config.sp_config.type != SpeculativeType.NONE:
         conflicts.append("speculative decoding and MTP must be disabled")
     if engine_config.runtime_config.use_batch_decode_scheduler:

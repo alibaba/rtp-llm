@@ -14,7 +14,7 @@ namespace rtp_llm {
 // mode conflict checks. Keep this scope shared by engine validation and runner
 // ownership; speculative execution is checked separately within that scope.
 inline bool isGenerationPrefillCudaGraphRequested(const HWKernelConfig& hw_kernel_config, RoleType role_type) {
-    return role_type == RoleType::PDFUSION && hw_kernel_config.enable_cuda_graph
+    return role_type == RoleType::PDFUSION && hw_kernel_config.enable_cuda_graph && !hw_kernel_config.batch_invariant
            && !hw_kernel_config.generation_prefill_capture_token_buckets.empty();
 }
 

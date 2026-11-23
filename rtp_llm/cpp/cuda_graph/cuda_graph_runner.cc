@@ -1343,6 +1343,7 @@ bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs
     }
     int cuda_graph_bs        = inputs.attention_inputs.input_lengths.size(0);
     state.current_batch_size = cuda_graph_bs;
+    state.decode_batch_exceeds_capture = false;
     RTP_LLM_LOG_DEBUG("canRun judge for batch size: %d", cuda_graph_bs);
     if (capture_range_.empty()) {
         if (observe_fallback) {
@@ -1353,6 +1354,7 @@ bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs
     auto it = std::lower_bound(capture_range_.begin(), capture_range_.end(), state.current_batch_size);
     // No captured graph for batch >= current (all captures smaller)
     if (it == capture_range_.end()) {
+        state.decode_batch_exceeds_capture = true;
         if (observe_fallback) {
             RTP_LLM_LOG_WARNING("decode batch size %d exceeds max captured %d, fallback to normal run",
                                 state.current_batch_size,
