@@ -2065,7 +2065,8 @@ TEST(CacheConfigTest, ExactBlockBudgetHandlesIndependentPools) {
 }
 
 TEST(CacheConfigTest, ExactBlockBudgetAccountsForProjectedStatePageBoundaries) {
-    const KVCacheBlockBudget budget{10, 3, 5, {{16, 8}}};
+    KVCacheBlockBudget budget{10, 3, 5};
+    budget.projected_pools = {{16, 8}};
     EXPECT_EQ(maxKVCacheBlockNumForBudget(33, budget), 0u);
     EXPECT_EQ(maxKVCacheBlockNumForBudget(34, budget), 1u);
     EXPECT_EQ(maxKVCacheBlockNumForBudget(113, budget), 8u);
