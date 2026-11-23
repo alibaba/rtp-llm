@@ -325,7 +325,6 @@ class MMScheduler:
         device: Optional[str] = None,
         forward_profiler: Optional[Callable[[], AbstractContextManager]] = None,
         prefetch_batches: int = 0,
-        prefetch_fill_batch: bool = False,
         allow_idle_work: bool = False,
     ):
         if batch_wait_ms < 0:
@@ -343,10 +342,6 @@ class MMScheduler:
         if prefetch_batches not in (0, 1):
             raise ValueError("prefetch_batches must be 0 or 1")
         self._prefetch_batches = prefetch_batches
-        if prefetch_fill_batch and not prefetch_batches:
-            raise ValueError("prefetch_fill_batch requires prefetch_batches=1")
-        self._prefetch_fill_batch = prefetch_fill_batch
-        self._collect_wakeup = threading.Event()
         self._batch_stats = Counter()
         self._batch_stats_lock = threading.Lock()
         self._batch_wait_ms = batch_wait_ms
@@ -428,8 +423,6 @@ class MMScheduler:
         vit_media.enqueue(chunk.work_items)
         chunk.queue_wait_reported = False
         self._waiting.put(chunk)
-        if self._prefetch_fill_batch:
-            self._collect_wakeup.set()
         self._report_queue_depth()
 
     def batching_stats(self):
@@ -894,10 +887,10 @@ class MMScheduler:
             # timed out on a long forward and close() already returned.
             self._fail_all_queued()
 
-    def _collect_and_prepare_batch(self, batch, demanded=None):
+    def _collect_and_prepare_batch(self, batch):
         # Sole queue consumer in prefetch mode. Exactly ONE outstanding Future:
         # no unbounded executor task queue or a second GPU forward lane.
-        chunks = self._collect_batch(demanded, batch=batch.chunks)
+        chunks = self._collect_batch(batch=batch.chunks)
         if chunks is None:
             return None
         batch.collected_at = time.monotonic()
@@ -922,16 +915,9 @@ class MMScheduler:
             while not self._stopped.is_set():
                 if pending is None:
                     lookahead = PrefetchedMMBatch([])
-                    demanded = threading.Event() if self._prefetch_fill_batch else None
                     pending = pool.submit(
-                        self._collect_and_prepare_batch, lookahead, demanded
+                        self._collect_and_prepare_batch, lookahead
                     )
-                # Flush a partial lookahead when the sole GPU consumer needs it.
-                # While the consumer is busy, collection may continue up to the
-                # unchanged media/work caps instead of sealing a small batch early.
-                if demanded is not None:
-                    demanded.set()
-                    self._collect_wakeup.set()
                 # Waiting and reading the outcome are separate: a polling timeout
                 # is not a producer TimeoutError, even if it finishes just after
                 # the wait. Only result() on a completed Future can report failure.
@@ -961,9 +947,8 @@ class MMScheduler:
                     # Collection/H2D of B may overlap GPU compute/completion of A.
                     # Keep its envelope even if the producer fails after dequeue.
                     lookahead = PrefetchedMMBatch([])
-                    demanded = threading.Event() if self._prefetch_fill_batch else None
                     pending = pool.submit(
-                        self._collect_and_prepare_batch, lookahead, demanded
+                        self._collect_and_prepare_batch, lookahead
                     )
                     if current.failure is not None:
                         self._fail_batch(claimed, *current.failure)
@@ -986,7 +971,6 @@ class MMScheduler:
             # _pending. close(timeout) can return False while this drains, but
             # must never free pinned memory still read by an in-flight copy.
             self._stopped.set()
-            self._collect_wakeup.set()
             pool.shutdown(wait=True)
             if current is not None:
                 self._reject_batch(current.chunks)
@@ -1038,11 +1022,10 @@ class MMScheduler:
             # silently retry eager on this owner or accept more requests.
             logging.exception("MMScheduler: idle GPU maintenance failed; stopping")
             self._stopped.set()
-            self._collect_wakeup.set()
             raise
 
     def _collect_batch(
-        self, demanded=None, idle_work=False, batch=None
+        self, idle_work=False, batch=None
     ) -> Optional[List[_EmbeddingChunk]]:
         # Preserve ownership of dequeued chunks if collection raises. Prefetch
         # supplies this list so the consumer can fail the affected requests.
@@ -1085,6 +1068,8 @@ class MMScheduler:
         n_images = first.n_images
         batch_work = first.work_estimate
 
+        # Bound lookahead by the same collection window as the regular path.
+        # A slow forward must not give the next batch longer to grow.
         deadline = time.monotonic() + self._batch_wait_ms / 1000.0
         reason = "capacity"
 
@@ -1092,33 +1077,14 @@ class MMScheduler:
             if self._stopped.is_set():
                 reason = "stopped"
                 break
-            if demanded is not None:
-                # Clear BEFORE checking the queue: arrivals and consumer demand
-                # after this point set the event, so no wakeup can be lost.
-                self._collect_wakeup.clear()
-                try:
-                    chunk = self._waiting.get_nowait()
-                except queue.Empty:
-                    remaining = deadline - time.monotonic()
-                    if demanded.is_set() and remaining <= 0:
-                        reason = "consumer_demand"
-                        break
-                    timeout = _STOP_POLL_INTERVAL_S
-                    if demanded.is_set():
-                        timeout = min(timeout, max(0, remaining))
-                    self._collect_wakeup.wait(timeout)
-                    continue
-            else:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    reason = "deadline"
-                    break
-                try:
-                    chunk = self._waiting.get(
-                        timeout=min(remaining, _STOP_POLL_INTERVAL_S)
-                    )
-                except queue.Empty:
-                    continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                reason = "deadline"
+                break
+            try:
+                chunk = self._waiting.get(timeout=min(remaining, _STOP_POLL_INTERVAL_S))
+            except queue.Empty:
+                continue
             batch.append(chunk)
             self._report_queue_depth()
             if chunk.request.cancelled.is_set():
@@ -1272,7 +1238,6 @@ class MMScheduler:
         # so close must not touch _pending / _waiting while it is alive.
         with self._lock:
             self._stopped.set()
-        self._collect_wakeup.set()
         self._executor.join(timeout=timeout)
         if self._executor.is_alive():
             # A forward is still stuck past the join timeout. The executor's finally

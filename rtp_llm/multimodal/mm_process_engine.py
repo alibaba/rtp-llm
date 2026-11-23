@@ -351,8 +351,6 @@ class MMProcessEngine:
                 allow_idle_work=(
                     vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE
                 ),
-                # Fill the existing bounded lookahead whenever it is provisioned.
-                prefetch_fill_batch=bool(scheduler_args.get("prefetch_batches", 0)),
                 **scheduler_args,
             )
         except Exception:
