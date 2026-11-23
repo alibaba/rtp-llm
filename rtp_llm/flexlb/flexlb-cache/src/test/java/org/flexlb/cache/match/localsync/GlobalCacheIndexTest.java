@@ -9,6 +9,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -38,7 +39,7 @@ class GlobalCacheIndexTest {
         globalCacheIndex.removeCacheBlock("engine1", 1L);
         assertEquals(2L, globalCacheIndex.totalBlocks());
         assertEquals(2L, globalCacheIndex.totalMappings());
-        globalCacheIndex.removeAllCacheBlockOfEngine("engine2");
+        globalCacheIndex.removeAllCacheBlockOfEngine("engine2", Set.of(1L));
         assertEquals(1L, globalCacheIndex.totalBlocks());
         assertEquals(1L, globalCacheIndex.totalMappings());
         globalCacheIndex.removeCacheBlock("missing", 2L);
