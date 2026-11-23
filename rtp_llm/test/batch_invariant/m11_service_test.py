@@ -8,7 +8,6 @@ from unittest.mock import patch
 
 import requests
 
-from rtp_llm.config.py_config_modules import ServerConfig
 from rtp_llm.test.batch_invariant import service_test
 from rtp_llm.test.smoke.qwen4_m11_smoke_test import Qwen4M11SmokeTest
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
@@ -50,12 +49,7 @@ def main():
         try:
             if not server.start_server(str(checkpoint), "qwen4_exp", timeout=1800):
                 raise RuntimeError("M11 BI service did not become healthy")
-            config = ServerConfig()
-            config.start_port = int(server.port)
-            addresses = []
-            for rank in range(8):
-                config.set_local_rank(rank)
-                addresses.append(f"127.0.0.1:{config.rpc_server_port}")
+            addresses = service_test.rank_rpc_addresses(server.port, 8)
             log_dir = run_dir / "logs"
             (run_dir / "service.json").write_text(
                 json.dumps(

@@ -929,6 +929,11 @@ void KVCacheManager::stopCacheEventPublisher() {
     cache_event_publisher_.reset();
 }
 
+std::vector<KVCachePoolMetricsSnapshot> KVCacheManager::devicePoolMetricsSnapshots() const {
+    return coordinator_manager_ ? coordinator_manager_->poolMetricsSnapshots() :
+                                  std::vector<KVCachePoolMetricsSnapshot>{};
+}
+
 void KVCacheManager::reportMetricsLoop() {
     RTP_LLM_PROFILE_FUNCTION();
     kmonitor::MetricsTags tags;
@@ -951,8 +956,7 @@ void KVCacheManager::reportMetricsLoop() {
 
         block_tree_cache_->reportMetrics();
         const std::vector<BlockTreePoolMetricsSnapshot> tree_pool_snapshots = block_tree_cache_->poolMetricsSnapshots();
-        const std::vector<KVCachePoolMetricsSnapshot>   device_pool_snapshots =
-            coordinator_manager_->poolMetricsSnapshots();
+        const std::vector<KVCachePoolMetricsSnapshot>   device_pool_snapshots = devicePoolMetricsSnapshots();
         const std::vector<CachePoolMetricsSnapshot> report_snapshots =
             mergeCachePoolMetricsSnapshots(device_pool_snapshots, tree_pool_snapshots);
         for (const CachePoolMetricsSnapshot& report_snapshot : report_snapshots) {

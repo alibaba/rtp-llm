@@ -983,6 +983,23 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     auto kv_info = engine_->getCacheStatusInfo(-1, false);
     response->set_available_kv_cache(kv_info.available_kv_cache);
     response->set_total_kv_cache(kv_info.total_kv_cache);
+    if (request->include_kv_cache_pools()) {
+        const auto& cache_manager = engine_->resourceContext().cache_manager;
+        if (cache_manager) {
+            for (const auto& snapshot : cache_manager->devicePoolMetricsSnapshots()) {
+                auto* pool = response->add_kv_cache_pools();
+                pool->set_pool_name(snapshot.pool_name);
+                pool->set_block_size_bytes(snapshot.block_size_bytes);
+                pool->set_total_blocks(snapshot.total_blocks);
+                pool->set_free_blocks(snapshot.free_blocks);
+                pool->set_used_blocks(snapshot.used_blocks);
+                pool->set_available_blocks(snapshot.available_blocks);
+                pool->set_active_blocks(snapshot.active_blocks);
+                pool->set_reserve_blocks(snapshot.reserve_blocks);
+                pool->set_request_ref_blocks(snapshot.request_ref_blocks);
+            }
+        }
+    }
     reportWorkerStatusTime(request_begin_time_us, request_after_ws_time_us);
     return grpc::Status::OK;
 }

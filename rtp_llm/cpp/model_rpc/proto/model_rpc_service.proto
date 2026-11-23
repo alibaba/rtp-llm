@@ -556,6 +556,7 @@ message RemoteStoreResponsePB {
 message StatusVersionPB {
     int64 latest_cache_version = 1;
     int64 latest_finished_version = 2;
+    bool include_kv_cache_pools = 3;
 }
 
 message CacheVersionPB {
@@ -725,6 +726,19 @@ message WorkerStepMetricsPB {
     double budget_fill_ratio = 8;
 }
 
+message WorkerKvCachePoolPB {
+    string pool_name = 1;
+    uint64 block_size_bytes = 2;
+    // The allocator excludes the sentinel block from total_blocks.
+    uint64 total_blocks = 3;
+    uint64 free_blocks = 4;
+    uint64 used_blocks = 5;
+    uint64 available_blocks = 6;
+    uint64 active_blocks = 7;
+    uint64 reserve_blocks = 8;
+    uint64 request_ref_blocks = 9;
+}
+
 message WorkerStatusPB {
     string role = 1;              // 字符串角色名，如 "PREFILL"，向后兼容
     // LocalRpcServer::GetWorkerStatus currently does not populate this field, so
@@ -760,6 +774,7 @@ message WorkerStatusPB {
     // Number of matched cache blocks that must be recomputed by the engine.
     int32 cache_match_rollback_blocks = 26;
     WorkerStepMetricsPB last_step_metrics = 27;
+    repeated WorkerKvCachePoolPB kv_cache_pools = 28;
 }
 
 message EmbeddingInputPB {

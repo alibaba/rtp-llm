@@ -25,6 +25,18 @@ PEER_STEPS = 128
 COMPARED_FIELDS = ("tokens", "logits", "logprobs", "sampled_logprobs")
 
 
+def rank_rpc_addresses(port, count):
+    from rtp_llm.config.py_config_modules import ServerConfig
+
+    config = ServerConfig()
+    config.start_port = int(port)
+    addresses = []
+    for rank in range(count):
+        config.set_local_rank(rank)
+        addresses.append(f"127.0.0.1:{config.rpc_server_port}")
+    return addresses
+
+
 @dataclass
 class Output:
     tokens: np.ndarray

@@ -43,3 +43,14 @@ custom_smoke_test(
     ],
     test_envs = {"RTP_TEST_WATCHDOG_SECONDS": "5400"},
 )
+
+custom_smoke_test(
+    name = "qwen4_m11_continuous",
+    main = "m11_continuous_server.py",
+    smoke_args = QWEN4_M11_SMOKE_ARGS,
+    gpu_type = ["SM103_CU13"],
+    data = ["//rtp_llm:sdk"],
+    deps = [":service_test_lib"],
+    tags = ["manual"],
+    test_envs = {"RTP_TEST_WATCHDOG_SECONDS": "14400"},
+)

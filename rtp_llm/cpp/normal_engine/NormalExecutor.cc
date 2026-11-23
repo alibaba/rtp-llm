@@ -75,7 +75,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     warm_up_(warm_up),
     record_aligned_moe_forwards_(
         (params.moe_config.use_all_gather && !params.moe_config.use_deepep_low_latency)
-        || (params.hw_kernel_config.batch_invariant && params.moe_config.moe_strategy == "mega_moe")),
+        || params.moe_config.moe_strategy == "mega_moe"),
     metrics_reporter_(params.metrics_reporter),
     tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
         params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr)),
