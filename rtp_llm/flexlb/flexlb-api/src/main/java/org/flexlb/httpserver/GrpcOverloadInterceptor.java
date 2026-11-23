@@ -13,9 +13,11 @@ import java.util.concurrent.ThreadPoolExecutor;
  */
 final class GrpcOverloadInterceptor implements ServerInterceptor {
     private final ThreadPoolExecutor executor;
+    private final ThreadPoolExecutor controlExecutor;
 
-    GrpcOverloadInterceptor(ThreadPoolExecutor executor) {
+    GrpcOverloadInterceptor(ThreadPoolExecutor executor, ThreadPoolExecutor controlExecutor) {
         this.executor = executor;
+        this.controlExecutor = controlExecutor;
     }
 
     @Override
@@ -23,7 +25,12 @@ final class GrpcOverloadInterceptor implements ServerInterceptor {
             ServerCall<RequestT, ResponseT> call,
             Metadata headers,
             ServerCallHandler<RequestT, ResponseT> next) {
-        if (executor.isShutdown() || executor.getQueue().remainingCapacity() == 0) {
+        var method = call.getMethodDescriptor();
+        var callExecutor =
+                method != null && GrpcReceivingGuard.isControlRpc(method.getFullMethodName())
+                        ? controlExecutor
+                        : executor;
+        if (callExecutor.isShutdown() || callExecutor.getQueue().remainingCapacity() == 0) {
             call.close(
                     Status.RESOURCE_EXHAUSTED.withDescription("FlexLB gRPC executor saturated"),
                     new Metadata());
