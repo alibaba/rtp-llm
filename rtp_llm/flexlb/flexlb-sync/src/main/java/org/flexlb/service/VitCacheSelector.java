@@ -10,6 +10,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.VitCacheDirectory.Candidate;
 import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.telemetry.FlexlbTrace;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -209,27 +210,52 @@ public class VitCacheSelector {
 
     private SelectedRole pinSelectedWorker(BalanceContext ctx, String group) {
         ServerStatus selected = ctx.getRequest().getSelectedVit();
-        if (selected == null
-                || selected.getRole() != RoleType.VIT
-                || selected.getServerIp() == null
-                || selected.getHttpPort() <= 0) {
-            return null;
+        if (selected == null) {
+            return rejectSelectedWorker(ctx, "missing_selection");
+        }
+        if (selected.getRole() != RoleType.VIT) {
+            return rejectSelectedWorker(ctx, "role_mismatch");
+        }
+        if (selected.getServerIp() == null || selected.getHttpPort() <= 0) {
+            return rejectSelectedWorker(ctx, "missing_address");
         }
         var pin = workers.captureEndpoint(RoleType.VIT, selected.getPhysicalIpPort());
         if (pin == null) {
-            return null;
+            return rejectSelectedWorker(ctx, "endpoint_unavailable");
         }
         WorkerStatus worker = pin.endpoint().getStatus();
-        if (worker == null
-                || Objects.requireNonNullElse(selected.getEngineIndex(), 0) != worker.getEngineIndex()
-                || (group != null && !Objects.equals(group, worker.getGroup()))
-                || !Objects.equals(selected.getGrpcPort(), worker.getGrpcPort())
-                || !Objects.equals(selected.getGroup(), worker.getGroup())
-                || selected.getWorkerGeneration() != pin.generationId()) {
+        String rejection = selectedWorkerRejection(selected, worker, group, pin.generationId());
+        if (rejection != null) {
             pin.close();
-            return null;
+            return rejectSelectedWorker(ctx, rejection);
         }
         return SelectedRole.stateless(pin, status(worker, ctx.getRequestId()));
+    }
+
+    private static SelectedRole rejectSelectedWorker(BalanceContext ctx, String reason) {
+        FlexlbTrace.setScheduleAttribute(
+                ctx.getTraceContext(), FlexlbTrace.VIT_VALIDATION_REASON, reason);
+        return null;
+    }
+
+    private static String selectedWorkerRejection(
+            ServerStatus selected, WorkerStatus worker, String group, long generation) {
+        if (worker == null) {
+            return "endpoint_unavailable";
+        }
+        if (Objects.requireNonNullElse(selected.getEngineIndex(), 0) != worker.getEngineIndex()) {
+            return "engine_index_mismatch";
+        }
+        if (group != null && !Objects.equals(group, worker.getGroup())) {
+            return "policy_group_mismatch";
+        }
+        if (!Objects.equals(selected.getGrpcPort(), worker.getGrpcPort())) {
+            return "grpc_port_mismatch";
+        }
+        if (!Objects.equals(selected.getGroup(), worker.getGroup())) {
+            return "selected_group_mismatch";
+        }
+        return selected.getWorkerGeneration() == generation ? null : "generation_mismatch";
     }
 
     private static ServerStatus errorStatus(StrategyErrorType error) {

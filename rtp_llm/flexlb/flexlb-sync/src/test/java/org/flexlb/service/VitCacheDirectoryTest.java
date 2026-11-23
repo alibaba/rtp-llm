@@ -4,6 +4,9 @@ import io.grpc.Server;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.nio.NioEventLoopGroup;
+import io.opentelemetry.api.OpenTelemetry;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.context.Context;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.FlexlbConfig;
@@ -22,6 +25,7 @@ import org.flexlb.engine.grpc.core.GrpcChannelFactory;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
 import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.telemetry.FlexlbTrace;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -44,6 +48,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -436,6 +441,40 @@ class VitCacheDirectoryTest {
             assertEquals(other.getIp(), selector.select(context("cold"), null).getServerIp());
         } finally {
             executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void tracesWhyAnEarlierVitSelectionWasRejected() {
+        snapshot(a, "a1", "image");
+        var ctx = context("image");
+        var selected = selector.select(ctx, "one");
+        ctx.getRequest().setSelectedVit(selected);
+        Span span = mock(Span.class);
+        when(span.storeInContext(any())).thenCallRealMethod();
+        ctx.setTraceContext(Context.root().with(span));
+        FlexlbTrace.configure(OpenTelemetry.noop(), "test");
+        try {
+            assertTrue(selector.validate(ctx, "one").isSuccess());
+            verify(span, never()).setAttribute(eq(FlexlbTrace.VIT_VALIDATION_REASON), any());
+
+            assertFalse(selector.validate(ctx, "two").isSuccess());
+            verify(span).setAttribute(FlexlbTrace.VIT_VALIDATION_REASON, "policy_group_mismatch");
+
+            selected.setGrpcPort(9000);
+            assertFalse(selector.validate(ctx, "one").isSuccess());
+            verify(span).setAttribute(FlexlbTrace.VIT_VALIDATION_REASON, "grpc_port_mismatch");
+
+            selected.setGrpcPort(a.getGrpcPort());
+            selected.setWorkerGeneration(0);
+            assertFalse(selector.validate(ctx, "one").isSuccess());
+            verify(span).setAttribute(FlexlbTrace.VIT_VALIDATION_REASON, "generation_mismatch");
+
+            live.remove(a.getLogicalIpPort());
+            assertFalse(selector.validate(ctx, "one").isSuccess());
+            verify(span).setAttribute(FlexlbTrace.VIT_VALIDATION_REASON, "endpoint_unavailable");
+        } finally {
+            FlexlbTrace.configure(null, "");
         }
     }
 
