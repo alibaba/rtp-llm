@@ -59,6 +59,15 @@ def cuda13_suites():
                 gpu_type = ["SM100_ARM_CU13"],
                 data = ["//rtp_llm:sdk", ":smoke_framework_srcs"],
             ),
+
+        ],
+        tags = ["manual"],
+    )
+
+    # Real Master coverage runs independently of the ordinary ARM smoke suite.
+    native.test_suite(
+        name = "smoke_flexlb_arm",
+        tests = [
             # DSpark speculative decode with CP page-RR. This is the blocking
             # regression for publishing both target and draft SWA_KV before decode
             # dispatch; missing draft publication fails with EC_FAILED_LOAD_BUFFER.
@@ -70,7 +79,7 @@ def cuda13_suites():
                 name="smoke_v4_flash_0731_pd_cp2ep2_dp2ep2_dspark_cprr_async_xgrammar_json_sm100",
                 task_info="data/model/deepseek_v4/q_r_v4_flash_0731_pd_cp2ep2_dp2ep2_dspark_async_xgrammar_json_sm100_arm.json",
                 sleep_time_qr=10,
-                data=["//rtp_llm/flexlb:flexlb_jar"],
+                data=["//rtp_llm/flexlb:flexlb_jar", "//rtp_llm/flexlb:smoke_java_runtime"],
                 test_envs={"SMOKE_START_FLEXLB_MASTER": "1"},
                 smoke_args={
                     "frontend": "--role_type FRONTEND --use_local 1 --warm_up 0 --act_type BF16 --max_seq_len 8192 --seq_size_per_block 256 --prefill_cp_size 2 --prefill_cp_kv_cache_sharded 1 --cp_rotate_method PREFILL_CP --think_mode 1",

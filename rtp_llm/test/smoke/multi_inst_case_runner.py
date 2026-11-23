@@ -2,6 +2,7 @@ import copy
 import json
 import logging
 import os
+import platform
 import shlex
 import shutil
 import socket
@@ -159,7 +160,16 @@ class SeparatedCaseRunner(CaseRunner):
                 "FLEXLB_API_JAR", workspace / "rtp_llm/flexlb/flexlb-api.jar"
             )
         )
-        java = Path(os.environ.get("FLEXLB_JAVA") or shutil.which("java") or "")
+        runtime_arch = "java_arm" if platform.machine() in ("aarch64", "arm64") else "java_x86"
+        bundled_java = workspace / "rtp_llm/flexlb/ci_prebuilt" / runtime_arch / "bin/java"
+        java = Path(
+            os.environ.get("FLEXLB_JAVA")
+            or (
+                str(bundled_java)
+                if bundled_java.is_file()
+                else shutil.which("java") or ""
+            )
+        )
         if not jar.is_file() or not java.is_file():
             raise FileNotFoundError(
                 f"FlexLB smoke needs Java 21 and jar; java={java}, jar={jar}"
@@ -219,9 +229,14 @@ class SeparatedCaseRunner(CaseRunner):
                 "RTP_LLM_TRACE_CONFIG": '{"enabled":false}',
             }
         )
+        # ARM AJDK 21 crashes in both C2 matching and C1 nmethod installation.
+        # The smoke Master uses the interpreter while retaining the real service.
+        compiler_args = ["-Xint"] if runtime_arch == "java_arm" else []
         process = subprocess.Popen(
             [
                 str(java),
+                *compiler_args,
+                f"-XX:ErrorFile={log_dir / 'hs_err_pid%p.log'}",
                 f"-Dserver.port={port}",
                 "-jar",
                 str(jar),
@@ -262,6 +277,15 @@ class SeparatedCaseRunner(CaseRunner):
             process.terminate()
             process.wait(timeout=10)
             stream.close()
+            for diagnostic in [log_path, *sorted(log_dir.glob("hs_err_pid*.log"))]:
+                try:
+                    with diagnostic.open("rb") as source:
+                        source.seek(0, os.SEEK_END)
+                        source.seek(max(0, source.tell() - 32768))
+                        tail = source.read().decode("utf-8", errors="replace")
+                    logging.error("FlexLB startup diagnostic %s:\n%s", diagnostic, tail)
+                except OSError:
+                    logging.exception("Cannot read FlexLB diagnostic %s", diagnostic)
             raise
 
     def _assert_vit_cache_affinity(
