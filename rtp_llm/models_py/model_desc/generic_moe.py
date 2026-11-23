@@ -5,6 +5,7 @@ import torch
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.quant_config import uses_glm53_native_nvfp4_moe
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models.glm53_prefill_parallel import (
     MlaCPParallelismView,
@@ -142,6 +143,14 @@ class GenericMoeLayer(nn.Module):
 
         # Get quant_config from model_config
         quant_config = config.quant_config
+        moe_strategy = moe_config.moe_strategy
+        if moe_strategy == "mega_moe_se" and getattr(
+            config, "glm53_nvfp4_bf16_mtp", False
+        ):
+            moe_strategy = "auto"
+        native_nvfp4 = uses_glm53_native_nvfp4_moe(
+            config.model_type, quant_config, moe_strategy
+        )
         if glm53_moe_enabled(config) or (
             config.model_type == "glm_5_mtp"
             and weights[W.moe_gate].dtype == torch.float32
@@ -173,8 +182,10 @@ class GenericMoeLayer(nn.Module):
         self.routed_tp_size = (
             parallelism_config.get_attn_tp_size()
             if glm53_moe_enabled(config)
-            and moe_config.moe_strategy
-            in ("mega_moe", "mega_moe_fp8", "mega_moe_fp8_se")
+            and (
+                native_nvfp4
+                or moe_strategy in ("mega_moe", "mega_moe_fp8", "mega_moe_fp8_se")
+            )
             and self.ep_size > 1
             and not cp_prefill_enabled
             and not is_decode_role
@@ -211,51 +222,53 @@ class GenericMoeLayer(nn.Module):
             "mega_moe_fused",
             "mega_moe_fp8_se",
         )
-        self._use_mega_moe_fused_shared = (
-            moe_config.moe_strategy in fused_shared_strategies
-        )
+        self._use_mega_moe_fused_shared = moe_strategy in fused_shared_strategies
         if self._use_mega_moe_fused_shared:
             if not self.add_shared_expert:
-                raise ValueError(
-                    f"moe_strategy={moe_config.moe_strategy} requires shared experts"
-                )
+                raise ValueError(f"moe_strategy={moe_strategy} requires shared experts")
             if shared_expert_gate_weight is not None:
                 raise ValueError(
-                    f"moe_strategy={moe_config.moe_strategy} does not support "
+                    f"moe_strategy={moe_strategy} does not support "
                     "shared_expert_gate"
                 )
             if use_ep_shared_allreduce_at_init:
                 raise ValueError(
-                    f"moe_strategy={moe_config.moe_strategy} does not support EP "
+                    f"moe_strategy={moe_strategy} does not support EP "
                     "shared-expert all-reduce with ffn_tp_size > 1"
                 )
 
-        if moe_config.moe_strategy in (
+        if moe_strategy in (
             "mega_moe",
             "mega_moe_se",
             "mega_moe_fp8",
             "mega_moe_fp8_se",
             "mega_moe_fused",
         ):
-            if moe_config.moe_strategy == "mega_moe_se":
+            if native_nvfp4:
+                from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_nvfp4 import (
+                    MegaMoeNvfp4SEWrapper,
+                )
+
+                wrapper_cls = MegaMoeNvfp4SEWrapper
+            elif moe_strategy == "mega_moe_se":
                 from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_se_wrapper import (
                     MegaMoeSEWrapper,
                 )
 
                 wrapper_cls = MegaMoeSEWrapper
-            elif moe_config.moe_strategy == "mega_moe_fused":
+            elif moe_strategy == "mega_moe_fused":
                 from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_fused_wrapper import (
                     MegaMoeFusedWrapper,
                 )
 
                 wrapper_cls = MegaMoeFusedWrapper
-            elif moe_config.moe_strategy == "mega_moe_fp8_se":
+            elif moe_strategy == "mega_moe_fp8_se":
                 from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_fp8_se_wrapper import (
                     MegaMoeFp8SEWrapper,
                 )
 
                 wrapper_cls = MegaMoeFp8SEWrapper
-            elif moe_config.moe_strategy == "mega_moe_fp8":
+            elif moe_strategy == "mega_moe_fp8":
                 from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_fp8_wrapper import (
                     MegaMoeFp8Wrapper,
                 )
@@ -284,6 +297,7 @@ class GenericMoeLayer(nn.Module):
                 quant_config=quant_config,
                 enable_cuda_graph=enable_cuda_graph,
             )
+            config_adapter.moe_strategy = moe_strategy
             self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
 
         self.w1 = weights.get(W.moe_w1, None)

@@ -1,5 +1,6 @@
 import functools
 import logging
+import os
 import re
 
 # Forward references for type hints
@@ -11,6 +12,7 @@ from rtp_llm.config.quant_config import (
     Fp8PerTensorQuantConfig,
     ModelOptFp4Config,
     QuantizationConfig,
+    uses_glm53_native_nvfp4_moe,
 )
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from rtp_llm.model_loader.ffn_weight import FfnConfig, FfnWeight
@@ -429,9 +431,17 @@ class ModelDeployWeightInfo:
         # MoE wrapper with the FP8→FP4 variant. `database` / `quant_config`
         # auto-detect offline FP4 MoE (`expert_dtype=fp4` or legacy
         # `experts.*.weight_scale`) and pick UE8M0 vs float32 scale dtype.
-        weight_info = _apply_mega_moe_fp4_wrappers(
-            weight_info, database=database, quant_config=self._quant_config
-        )
+        if not (
+            getattr(self.model_config, "glm53_nvfp4_bf16_mtp", False)
+            or uses_glm53_native_nvfp4_moe(
+                getattr(self.model_config, "model_type", ""),
+                self._quant_config,
+                os.getenv("MOE_STRATEGY"),
+            )
+        ):
+            weight_info = _apply_mega_moe_fp4_wrappers(
+                weight_info, database=database, quant_config=self._quant_config
+            )
 
         if self.tie_word_embeddings:
             logging.info("fix tie_word_embeddings")

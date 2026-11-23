@@ -59,6 +59,7 @@ class ModelConfig(CppModelConfig):
     _python_fields = {
         "is_mtp",
         "is_glm53_mtp",
+        "glm53_nvfp4_bf16_mtp",
         "mtp_layer_offset",
         "normalize_lm_head_weight",
         "enable_fp32_lm_head",
@@ -502,6 +503,7 @@ class ModelConfig(CppModelConfig):
         # Additional Python-only fields
         self.is_mtp: bool = False
         self.is_glm53_mtp: bool = False
+        self.glm53_nvfp4_bf16_mtp: bool = False
         self.mtp_layer_offset: int = 0
         self.normalize_lm_head_weight: bool = False
         self.enable_fp32_lm_head: bool = True
@@ -566,7 +568,7 @@ class ModelConfig(CppModelConfig):
         """
         # Load quant_config
         quant_config = QuantizationConfig.load_from_ckpt(self.ckpt_path)
-        if (
+        self.glm53_nvfp4_bf16_mtp = (
             self.is_glm53_mtp
             and isinstance(quant_config, ModelOptFp4Config)
             and all(
@@ -575,13 +577,13 @@ class ModelConfig(CppModelConfig):
                     self.mtp_layer_offset, self.mtp_layer_offset + self.num_layers
                 )
             )
-        ):
+        )
+        if self.glm53_nvfp4_bf16_mtp:
             # ModelOpt may leave the draft layers BF16 in the main checkpoint.
             quant_config = None
-        if not quant_config:
-            if self.quantization:
-                quant_config = init_quant_config(self.quantization)
-                logging.info(f"need_load_quant by {quant_config.get_method()}")
+        elif not quant_config and self.quantization:
+            quant_config = init_quant_config(self.quantization)
+            logging.info(f"need_load_quant by {quant_config.get_method()}")
 
         # Set quant_algo if quant_config exists
         if quant_config:

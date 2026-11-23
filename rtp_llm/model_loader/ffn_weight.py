@@ -296,6 +296,7 @@ class MoeConfig(BaseModel):
     expert_num: int = -1
     # align_size is used for dynamic padding calculation
     align_size: int = 0  # 0 means no padding needed (for MoE)
+    native_nvfp4: bool = False
 
 
 class MoeAtomicWeight(AtomicWeight):
@@ -634,6 +635,8 @@ class MoeWeight(CompositeWeight):
     def _postprocess(
         self, tensor: Dict[str, torch.Tensor], device: str, load_config: LoadConfig
     ):
+        if self.config.native_nvfp4:
+            return super()._postprocess(tensor, device, load_config)
         moe_w1 = tensor.get(W.moe_w1)
         moe_w2 = tensor.get(W.moe_w2)
         for weight, keys in [

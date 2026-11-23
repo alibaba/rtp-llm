@@ -43,6 +43,12 @@ QW_SUFFIX = ".weight"
 QS_SUFFIX = ".weight_scale"
 QS_2_SUFFIX = ".weight_scale_2"
 
+
+def _stack_moe_projection_scales(tensors: List[torch.Tensor]) -> torch.Tensor:
+    """Keep the two scales for each expert in checkpoint projection order."""
+    return torch.stack(tensors).reshape(2, -1).transpose(0, 1).contiguous()
+
+
 def gemm_group_fp4_gpt_style_tp_strategy():
     gemm_group_fp4_weight_tp_strategy: Dict[str, Any] = {
         W.attn_o_w: sp_neg1,
@@ -151,6 +157,9 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
     ):
         kernel: WeightModule = None
         scale: WeightModule = None
+        self.native_nvfp4 = isinstance(src_weight_info, MoeAtomicWeight) and getattr(
+            src_weight_info.config, "native_nvfp4", False
+        )
 
         if src_weight_info.name == W.attn_qkv_w:
             kernel, scale, scale_2, input_scale = self._get_qkv_quant_weight(src_weight_info)
@@ -493,7 +502,7 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
                 CkptWeightInfo(w.name[: -len(W_SUFFIX)] + QS_2_SUFFIX, identity)
                 for w in src_weight_info.weights
             ],
-            stack_moe_w1_s2,
+            _stack_moe_projection_scales if self.native_nvfp4 else stack_moe_w1_s2,
             data_type=torch.float32,
             config=src_weight_info.config,
         )
@@ -517,6 +526,8 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
         load_config: LoadConfig,
     ):
         processed_res = super()._postprocess(tensor, device, load_config)
+        if self.native_nvfp4:
+            return processed_res
         kernel_weight = processed_res[self.kernel.name]
         if self.scale is not None:
             scale_weight = processed_res[self.scale.name]

@@ -165,6 +165,11 @@ class MegaMoeWrapper(nn.Module):
             max_tokens_per_rank=max_tokens_per_rank,
         )
 
+        self._setup_expert_weights(weights)
+        torch.cuda.empty_cache()
+        self.expert_num = n_routed_experts
+
+    def _setup_expert_weights(self, weights: Dict[str, torch.Tensor]) -> None:
         w1 = weights.pop(W.moe_w1, None)
         w2 = weights.pop(W.moe_w2, None)
         s1 = weights.pop(W.moe_s1, None)
@@ -205,9 +210,6 @@ class MegaMoeWrapper(nn.Module):
                 "weights with checkpoint scales. "
                 f"Got moe_w1 dtype={w1.dtype}, moe_w2 dtype={w2.dtype}."
             )
-        torch.cuda.empty_cache()
-
-        self.expert_num = n_routed_experts
 
     def _forward_chunked(
         self,

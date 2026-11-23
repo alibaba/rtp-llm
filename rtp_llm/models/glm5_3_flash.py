@@ -7,10 +7,10 @@ from typing import Any, Dict, List
 import torch
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.config.quant_config import ModelOptFp4Config
+from rtp_llm.config.quant_config import ModelOptFp4Config, uses_glm53_native_nvfp4_moe
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import MlaAttnAtomicWeight
-from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnWeight
+from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnWeight, MoeWeight
 from rtp_llm.model_loader.linear_attn_weight import (
     LinearAttnAtomicWeight,
     LinearAttnConfig,
@@ -415,15 +415,22 @@ class Glm53FlashWeight(DeepSeekV2Weight):
 
     def _get_hf_ffn_layer_weight_info(self, layer_id: int):
         weights = super()._get_hf_ffn_layer_weight_info(layer_id)
-        if layer_id in self.moe_layer_index_ and shared_expert_local_enabled(
+        if layer_id not in self.moe_layer_index_:
+            return weights
+        native_nvfp4 = uses_glm53_native_nvfp4_moe(
+            self.model_config.model_type, self._quant_config, os.getenv("MOE_STRATEGY")
+        )
+        replicate_shared = shared_expert_local_enabled(
             self.model_config.model_type, self.role_type
-        ):
-            for weight in weights:
-                if isinstance(weight, FfnWeight):
-                    weight.config.replicate_for_prefill_tokens = True
-                    for atomic in weight.sub_weights.values():
-                        if isinstance(atomic, FfnAtomicWeight):
-                            atomic.config.replicate_for_prefill_tokens = True
+        )
+        for weight in weights:
+            if isinstance(weight, MoeWeight) and native_nvfp4:
+                weight.config.native_nvfp4 = True
+            if isinstance(weight, FfnWeight) and replicate_shared:
+                weight.config.replicate_for_prefill_tokens = True
+                for atomic in weight.sub_weights.values():
+                    if isinstance(atomic, FfnAtomicWeight):
+                        atomic.config.replicate_for_prefill_tokens = True
         return weights
 
     def _get_kda_weight_info(self) -> List[WeightModule]:

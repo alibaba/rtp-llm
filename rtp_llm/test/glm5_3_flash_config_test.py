@@ -176,12 +176,58 @@ class Glm53FlashConfigTest(unittest.TestCase):
                 json.dump(hf_config, stream)
 
             draft = Glm5Mtp._create_config(checkpoint)
+            draft.ckpt_path = checkpoint
+            draft.quantization = "modelopt_fp4"
             draft.init_precision_config(KVCacheConfig(), "BF16")
             target = parse_glm53_flash_config(hf_config, checkpoint)
             target.init_precision_config(KVCacheConfig(), "BF16")
 
         self.assertIsNone(draft.quant_config)
+        self.assertTrue(draft.glm53_nvfp4_bf16_mtp)
         self.assertEqual(target.quant_config.get_method(), "modelopt_fp4")
+
+    def test_native_nvfp4_preserves_two_projection_scales(self):
+        from rtp_llm.config.quant_config import (
+            Fp8BlockWiseQuantConfig,
+            ModelOptFp4Config,
+            uses_glm53_native_nvfp4_moe,
+        )
+        from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig
+        from rtp_llm.model_loader.per_group_fp4_quant_weight import PerGroupFp4Weight
+
+        quant = ModelOptFp4Config(bits=4, group_size=16, is_quanted=True)
+        self.assertTrue(
+            uses_glm53_native_nvfp4_moe("glm5_3_flash", quant, "mega_moe_se")
+        )
+        self.assertFalse(
+            uses_glm53_native_nvfp4_moe("glm5_3_flash", quant, "mega_moe_fp8_se")
+        )
+        self.assertFalse(
+            uses_glm53_native_nvfp4_moe(
+                "glm5_3_flash", Fp8BlockWiseQuantConfig(is_quanted=True), "mega_moe_se"
+            )
+        )
+        raw = MoeAtomicWeight(
+            W.moe_w1,
+            [
+                CkptWeightInfo(
+                    "model.language_model.layers.{i}.mlp.experts.{expert_id}."
+                    + projection
+                    + ".weight"
+                )
+                for projection in ("up_proj", "gate_proj")
+            ],
+            config=MoeConfig(expert_num=2, native_nvfp4=True),
+        )
+        wrapped = raw.create(raw, quant)
+        self.assertIsInstance(wrapped, PerGroupFp4Weight)
+        self.assertTrue(wrapped.native_nvfp4)
+        loaded = [
+            torch.tensor([value], dtype=torch.float32) for value in (1.0, 2.0, 3.0, 4.0)
+        ]
+        torch.testing.assert_close(
+            wrapped.scale_2.process_fun(loaded), torch.tensor([[1.0, 3.0], [2.0, 4.0]])
+        )
 
     def test_explicit_fp4_moe_selects_online_or_offline_loader(self):
         from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig

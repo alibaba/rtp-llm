@@ -717,6 +717,21 @@ class ModelOptFp4Config(QuantizationConfig):
         return ModelOptFp4Config(**config)
 
 
+def uses_glm53_native_nvfp4_moe(
+    model_type: str,
+    quant_config: Optional[QuantizationConfig],
+    moe_strategy: Optional[str],
+) -> bool:
+    return (
+        model_type == "glm5_3_flash"
+        and moe_strategy == "mega_moe_se"
+        and isinstance(quant_config, ModelOptFp4Config)
+        and quant_config.is_quanted()
+        and not quant_config.mixed_attention
+        and quant_config.group_size() == 16
+    )
+
+
 class W4a8Int4PerChannelQuantConfig(QuantizationConfig):
     def __init__(
         self,
