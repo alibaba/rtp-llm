@@ -87,6 +87,7 @@ class Int8FTExportTest(unittest.TestCase):
         exporter = FTExportWeights.__new__(FTExportWeights)
         exporter._info = ModelWeightInfo([norm], [[output]])
         exporter._custom = ()
+        exporter._head_provenance = {}
         exporter._task_type = TaskType.LANGUAGE_MODEL
         exporter._attention_only = False
         exporter._config = config
@@ -144,11 +145,20 @@ class Int8FTExportTest(unittest.TestCase):
                 torch.testing.assert_close(actual[key], value, rtol=0, atol=0)
                 torch.testing.assert_close(fst[key], value, rtol=0, atol=0)
 
-    def test_existing_per_tensor_tp2_static_scale_mapping_limitation_is_visible(self):
+    def test_per_tensor_tp2_replicates_calibration_steps(self):
         with tempfile.TemporaryDirectory() as root:
             save_file(self.checkpoint(), os.path.join(root, "model.safetensors"))
-            with self.assertRaises(KeyError):
-                self.export(root, os.path.join(root, "ft"), tp=2)
+            dest = Path(root) / "ft"
+            self.export(root, str(dest), tp=2)
+            fields = load_file(next(dest.glob("*.safetensors")))
+            key = "rank_00_00_00.layers.0."
+            torch.testing.assert_close(
+                fields[key + W.attention_output_static_quant], torch.tensor([4.0])
+            )
+            torch.testing.assert_close(
+                fields[key + W.attention_output_static_quant_reciprocal],
+                torch.tensor([0.25]),
+            )
 
     def test_weight_only_numerics_dense_and_experts_preserve_max128(self):
         for dtype in (torch.float16, torch.bfloat16, torch.float32):

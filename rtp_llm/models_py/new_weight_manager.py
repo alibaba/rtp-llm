@@ -172,6 +172,14 @@ class NewLoaderWeightManager:
                             f"Published global {canonical!r} has no unique parameter owner"
                         )
                     mapped = paths[0]
+                if (
+                    mapped in ("embed_tokens.weight", "lm_head.weight")
+                    and getattr(self._model, "_ft_unknown_tied_vocab", False)
+                ):
+                    raise ValueError(
+                        "Cannot update tied vocabulary: FT LM-head provenance is unknown; "
+                        "re-export the original checkpoint to record its source"
+                    )
                 if mapped == "lm_head.weight" and tied_output:
                     raise ValueError(
                         "Tied LM head is a non-owning alias; update model.embed_tokens.weight"

@@ -40,6 +40,7 @@ from rtp_llm.models_py.new_models.qwen3.language import (
 )
 from rtp_llm.models_py.new_models.qwen3_next.gdn import Qwen3NextGatedDeltaNet
 from rtp_llm.models_py.new_models.qwen3_next.gdn_parameters import _finite_positive_real
+from rtp_llm.models_py.new_models.qwen_visual_namespace import is_visual_checkpoint_name
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 from rtp_llm.models_py.read_spec import unwrap_checkpoint_tensor
 from rtp_llm.models_py.weight_mapper import WeightsMapper
@@ -861,9 +862,10 @@ class Qwen3NextForCausalLM(Qwen3NextModel, RtpModule):
         }
     )
 
-    @staticmethod
-    def _is_core_checkpoint_weight(name: str) -> bool:
-        return not (name.startswith("mtp.") or name.startswith("model.visual."))
+    def _is_core_checkpoint_weight(self, name: str) -> bool:
+        if self.config.model_type in ("qwen35_dense", "qwen35_moe"):
+            return not (name.startswith("mtp.") or is_visual_checkpoint_name(name))
+        return not name.startswith(("mtp.", "model.visual."))
 
     def checkpoint_weight_name_filter(self) -> Optional[Callable[[str], bool]]:
         return lambda name: self._is_core_checkpoint_weight(
@@ -1143,6 +1145,11 @@ class Qwen3NextForCausalLM(Qwen3NextModel, RtpModule):
         self._init_capture_context(
             self._capture_canonical_layer, self._capture_canonical_final
         )
+
+    def load_ft_checkpoint(self, checkpoint):
+        from .ft_checkpoint import load_qwen_next_ft
+
+        load_qwen_next_ft(self, checkpoint)
 
     def runtime_weight_view(self) -> dict[str, torch.Tensor]:
         result = {}

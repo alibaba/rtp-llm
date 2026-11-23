@@ -1,3 +1,5 @@
+load("//rtp_llm/models_py:checkpoint_test_platforms.bzl", "checkpoint_reader_test_env")
+
 py_library(
     name = "draft_body",
     srcs = ["__init__.py", "body.py", "proposal.py", "service.py"],
@@ -28,7 +30,7 @@ py_test(
         srcs = ["draft_body_test.py", "service_test.py"],
         main = "service_test.py",
         args = cases,
-        env = {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1", "NEWLOADER_TEST_NATIVE_FST": "1"},
+        env = checkpoint_reader_test_env({"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}),
         tags = tags,
         exec_properties = properties,
         deps = [":draft_body", "//rtp_llm:model_factory", "//rtp_llm:models", "//rtp_llm:sdk", "//rtp_llm:transformers", "//rtp_llm/models_py:new_weight_loader", "//rtp_llm:safetensors"],

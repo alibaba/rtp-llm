@@ -19,7 +19,8 @@ from rtp_llm.models_py.weight_mapper import WeightsMapper
 
 class DeepSeekVLV2ForCausalLM(GqaMoeForCausalLM):
     WEIGHTS_MAPPER = WeightsMapper(
-        prefix_mapping={"language.model.": "", "language.": ""}
+        # Disk uses language.model.*; online updates use canonical model.*.
+        prefix_mapping={"language.model.": "", "language.": "", "model.": ""}
     )
 
     @staticmethod
@@ -42,6 +43,12 @@ class DeepSeekVLV2ForCausalLM(GqaMoeForCausalLM):
             use_qk_norm=False,
             correction_bias=has_correction_bias(path, depth, prefix="language."),
         )
+        if layout.correction_bias:
+            # VL2's legacy router selects sigmoid GroupTopK by the presence of
+            # this tensor. The HF parser defaults missing scoring_func to
+            # softmax: publish the resolved value to both the runtime config
+            # and its layer constructors before building the routed layers.
+            config.scoring_func = 1
         install_gqa_moe_parameters(
             owner,
             cfg,
@@ -54,14 +61,31 @@ class DeepSeekVLV2ForCausalLM(GqaMoeForCausalLM):
     def __init__(self, model_config, load_config):
         super().__init__(model_config, load_config)
         self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
+        self._handler_checkpoint_sources = frozenset(
+            mapping[1] for mapping in load_config.custom_weight_mappings
+        )
 
     def checkpoint_weight_name_filter(self):
         stage_owns = super().checkpoint_weight_name_filter()
         return lambda name: (
-            name.startswith("language.")
-            and self._layout.target_owns(name.removeprefix("language."))
+            (
+                name in self._handler_checkpoint_sources
+                or (
+                    name.startswith("language.")
+                    and self._layout.target_owns(name.removeprefix("language."))
+                )
+            )
             and stage_owns(name)
         )
+
+    @staticmethod
+    def online_checkpoint_name(name):
+        # Preserve the canonical layer name so the update manager can validate
+        # layer bounds and check PP ownership before resolving the leaf.
+        return name.removeprefix("language.")
+
+    def online_weight_name_filter(self):
+        return super().checkpoint_weight_name_filter()
 
     def _input_embeddings(self, inputs):
         mm = getattr(inputs, "multimodal_inputs", None)

@@ -121,11 +121,15 @@ class MlaRuntimeLayoutMixin:
         return result
 
     def runtime_weight_view(self) -> Dict[str, torch.Tensor]:
-        return {
+        result = {
             "embedding": self.embed_tokens.weight,
             "final_layernorm.gamma": self.norm.weight,
-            "lm_head": self.lm_head.weight,
         }
+        if self.lm_head is not None:
+            result["lm_head"] = self.lm_head.weight
+        if getattr(self, "handler_heads", None) is not None:
+            result.update(self.handler_heads.exports())
+        return result
 
     def initialize(self, init_resource):
         ok = super().initialize(init_resource)
@@ -639,6 +643,44 @@ class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GenericMoeModel, RtpModule):
 
     WEIGHTS_MAPPER = WeightsMapper(prefix_mapping={"model.": ""})
     decoder_layer_cls = DeepSeekV32DecoderLayer
+
+    @classmethod
+    def from_ft_checkpoint_header(cls, model_config, load_config, checkpoint):
+        from rtp_llm.models_py.downstream_heads import ReplicatedHandlerHeads
+        from rtp_llm.ops import TaskType
+
+        owner = cls(model_config, load_config)
+        task = model_config.task_type
+        if task == TaskType.LANGUAGE_MODEL:
+            return owner
+        if model_config.model_type not in {
+            "deepseek2", "deepseek3", "deepseek_v31", "deepseek_v32",
+            "kimi_k2", "glm4_moe_lite", "glm_5",
+        } or task not in {
+            TaskType.DENSE_EMBEDDING, TaskType.ALL_EMBEDDING,
+            TaskType.SPARSE_EMBEDDING, TaskType.COLBERT_EMBEDDING,
+            TaskType.BGE_M3, TaskType.SEQ_CLASSIFICATION, TaskType.RERANKER,
+        }:
+            raise ValueError(f"No MLA FT downstream contract for {model_config.model_type} / {task}")
+        # FTExportWeights omits the generation projection for downstream
+        # tasks. A handler can independently request a *full* vocabulary
+        # tensor under its replicated __custom__ role.
+        owner.lm_head = None
+        owner.handler_heads = ReplicatedHandlerHeads(
+            load_config.custom_weight_mappings, owner.WEIGHTS_MAPPER,
+            model_config.hidden_size, load_config.compute_dtype,
+            projection_layers=load_config.custom_projection_layers,
+            protected_roots={"embed_tokens", "lm_head", "layers", "norm", "handler_heads"},
+        )
+        owner.supports_custom_weight_mappings = True
+        owner.supports_handler_projection_layers = True
+        owner.supports_ft_handler_heads = True
+        return owner
+
+    def load_ft_checkpoint(self, checkpoint):
+        from .ft_checkpoint import load_mla_ft_checkpoint
+
+        return load_mla_ft_checkpoint(self, checkpoint)
 
     @staticmethod
     def _checkpoint_layer_index(name: str) -> Optional[int]:

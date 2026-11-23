@@ -95,7 +95,9 @@ def create_stage_expert_balancer(loader, model, model_config):
     if not expected and not attention_only:
         return None  # Valid dense-only PP stage.
     if attention_only or any(
-        not isinstance(module, BaseMoEExperts) for module in experts.values()
+        not isinstance(module, BaseMoEExperts)
+        or not module.quant_method.supports_eplb_weight_install
+        for module in experts.values()
     ):
         mode = model_config.eplb_config.eplb_mode
         if getattr(mode, "name", mode) != "STATS":
@@ -103,7 +105,7 @@ def create_stage_expert_balancer(loader, model, model_config):
                 "This routed expert layout supports EPLB statistics but not weight rebalancing"
             )
         model._newloader_eplb_num_layers = model_config.num_layers
-        model._newloader_eplb_bind_stats = partial(_bind_stats, experts)
+        model._newloader_eplb_bind_stats = partial(_bind_stats, experts, stats_only=True)
         return _StatsOnlyBalancer()
     return NewLoaderExpertBalancer(loader, model, model_config)
 
@@ -336,6 +338,16 @@ class NewLoaderExpertBalancer:
             self._staged = None
 
 
-def _bind_stats(experts, logical, gpu_loads):
+def _bind_stats(experts, logical, gpu_loads, *, stats_only=False):
     for layer_id, module in experts.items():
+        if (
+            stats_only
+            and isinstance(module, BaseMoEExperts)
+            and module.ep_size > 1
+            and module._parallelism_config.get_attn_tp_rank() != 0
+        ):
+            # The StatsOnly C++ collector sums source counters across EP.
+            # Replicated attention-TP inputs must contribute once per DP group;
+            # CP origins have attention TP rank zero and contribute separately.
+            continue
         module.bind_eplb_stats(logical[layer_id], gpu_loads[layer_id])

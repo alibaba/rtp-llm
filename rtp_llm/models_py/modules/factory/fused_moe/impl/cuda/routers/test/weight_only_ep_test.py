@@ -2,6 +2,7 @@
 
 import multiprocessing as mp
 import os
+from types import SimpleNamespace
 
 import torch
 
@@ -14,6 +15,7 @@ from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,
 )
 from rtp_llm.models_py.distributed.deepep_wrapper import DeepEPWrapper
+from rtp_llm.models_py.eplb_controller import create_stage_expert_balancer
 from rtp_llm.models_py.layers.moe_experts import BaseMoEExperts
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.test.deepep_normal_router_test import (
     init_router,
@@ -36,6 +38,8 @@ def make_layer(config, method, dtype):
     model.data_type = "bf16" if dtype == torch.bfloat16 else "fp16"
     model.activation_type = "SiGLU"
     model.moe_inter_size = inter
+    model.num_layers = 1
+    model.moe_layer_index = [0]
     layer = BaseMoEExperts(
         num_experts=model.expert_num,
         top_k=model.moe_k,
@@ -87,7 +91,19 @@ def run_worker(rank, use_fp8, token_counts, parallelism, port, topk_ids_dtype):
     try:
         for dtype in (torch.float16, torch.bfloat16):
             for method in ("awq", "gptq", "INT8"):
+                config.model_config.eplb_config.eplb_mode = "STATS"
                 layer = make_layer(config, method, dtype)
+                controller = create_stage_expert_balancer(
+                    SimpleNamespace(
+                        load_config=SimpleNamespace(parallelism_config=parallelism)
+                    ),
+                    layer,
+                    config.model_config,
+                )
+                assert controller.eplb_stats_only
+                counts = torch.zeros((1, layer.num_experts), dtype=torch.int32)
+                loads = torch.zeros((1, config.ep_size), dtype=torch.int32)
+                layer._newloader_eplb_bind_stats(counts, loads)
                 if tp_mode:
                     expected_router = "PureTpRouterWeightOnly"
                 elif dtype == torch.float16:
@@ -108,7 +124,18 @@ def run_worker(rank, use_fp8, token_counts, parallelism, port, topk_ids_dtype):
                         .contiguous()
                     )
                     wei = torch.tensor([0.25, 0.75]).expand(n, 2).contiguous()
+                    counts.zero_()
+                    loads.zero_()
                     actual = layer(x, wei, ids)
+                    ref_counts = torch.bincount(
+                        ids.flatten().long(), minlength=last + 1
+                    )
+                    if config.tp_rank != 0:
+                        ref_counts.zero_()  # Replicated TP tokens are counted once.
+                    torch.testing.assert_close(counts[0], ref_counts.int())
+                    torch.testing.assert_close(
+                        loads[0], ref_counts.reshape(config.ep_size, -1).sum(1).int()
+                    )
                     # AWQ: q-z=3; GPTQ: q-(z+1)=2. Online INT8 uses
                     # max/128 and clips positive-max code 128 to 127.
                     coefficient = {"awq": 3, "gptq": 2, "INT8": 127 / 128}[method]

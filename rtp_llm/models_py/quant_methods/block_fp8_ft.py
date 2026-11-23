@@ -334,6 +334,8 @@ def block_moe_ft_bindings(layer, source_prefix, target, checkpoint, layer_id):
         128,
     ]:
         raise ValueError("Expected a block-FP8 expert owner with 128x128 runtime tiles")
+    # The runtime layer index need not match the archive's source layer (MTP).
+    layer._ft_expert_binding_layout = (block_moe_ft_bindings, source_prefix, layer_id)
     bindings = []
     placement = layer._expert_placement
     declared = checkpoint.index_metadata.get("ft_export_backend")

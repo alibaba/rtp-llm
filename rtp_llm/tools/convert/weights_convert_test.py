@@ -144,6 +144,17 @@ class WeightsConvertParallelismTest(unittest.TestCase):
 
 
 class FTExportJobTest(unittest.TestCase):
+    def test_fractional_heads_rejected_before_database_open(self):
+        from rtp_llm.tools.convert.ft_export_job import create_ft_export_job
+
+        model = Mock()
+        model.model_config.attn_config.head_num = 6
+        model.parallelism_config.get_attn_tp_size.return_value = 4
+        with patch("rtp_llm.utils.database.CkptDatabase") as database:
+            with self.assertRaisesRegex(ValueError, "head_num=6.*tp_size=4"):
+                create_ft_export_job(model)
+            database.assert_not_called()
+
     def test_dspark_export_declares_sampler_and_proposal_fields(self):
         import torch
         from types import SimpleNamespace
@@ -175,6 +186,8 @@ class FTExportJobTest(unittest.TestCase):
 
         model = Mock()
         model.model_config.ckpt_path = "/checkpoint"
+        model.model_config.attn_config.head_num = 8
+        model.parallelism_config.get_attn_tp_size.return_value = 2
         model.model_config.ptuning_path = "/prefix"
         model.model_config.lora_infos = {"adapter": "/adapter"}
         model.loader_recycle_handles = False

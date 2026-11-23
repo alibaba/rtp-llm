@@ -74,6 +74,35 @@ def checkpoint():
 
 
 class PpuMoEOwnerTest(unittest.TestCase):
+
+    def test_ft_local_projection_is_not_sharded_twice(self):
+        from rtp_llm.models_py.modules.dsv4.ppu.resources import split_shared_weight
+
+        payload = checkpoint()
+        for rank in (0, 1):
+            owner = create_ppu_moe(config(2, rank, 1), 0, object())
+            for attr in ("weight", "scale"):
+                name = "shared_experts.w2." + attr
+                full = payload["ffn." + name]
+                local = split_shared_weight(
+                    full, 2, rank, projection="w2", scale=attr == "scale"
+                )
+                owner.load_weights({name: owner.prepare_ft_projection(name, local)})
+                self.assertTrue(
+                    torch.equal(
+                        owner._target(name).view(torch.uint8), local.view(torch.uint8)
+                    )
+                )
+                name = "experts.1.w1." + attr
+                local = payload["ffn." + name].chunk(2)[rank]
+                owner.load_weights({name: owner.prepare_ft_projection(name, local)})
+                self.assertTrue(
+                    torch.equal(
+                        owner._target(name).view(torch.uint8),
+                        local.contiguous().view(torch.uint8),
+                    )
+                )
+
     def load(self, state, cfg, method):
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
             MODEL_REGISTRY, {cfg.model_type: Fixture}

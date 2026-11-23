@@ -279,6 +279,16 @@ class BaseMoEExperts(RtpModule):
         # methods own quantized loading. The built-in fallback is kept only for
         # unquantized weights when no method is registered.
         self.quant_method = self._quant_config.get_moe_quant_method(self, self.prefix)
+        if (
+            self._dynamic_eplb_enabled
+            and not self.quant_method.supports_eplb_weight_install
+        ):
+            mode = getattr(eplb_config, "eplb_mode", None)
+            if getattr(mode, "name", mode) != "STATS":
+                raise ValueError(
+                    f"{raw_qt} MoE supports EPLB statistics only; rebalancing "
+                    "its packed expert weights and scales is not supported"
+                )
 
         self._init_buffers(params_dtype)
 
@@ -1144,6 +1154,14 @@ class BaseMoEExperts(RtpModule):
             and all(parameter.device.type == "cpu" for parameter in self.parameters())
         )
 
+    def eplb_kernel_weights(
+        self, raw: Dict[str, torch.Tensor], *, prepare: bool
+    ) -> Dict[str, torch.Tensor]:
+        """Include executor-owned copies in the same transaction as routing."""
+        executor = getattr(self.fused_moe, "fused_experts", None)
+        view = getattr(executor, "eplb_kernel_weights", None)
+        return view(raw, prepare=prepare) if callable(view) else {}
+
     def eplb_runtime_weight_view(self) -> Dict[str, torch.Tensor]:
         from rtp_llm.utils.model_weight import W
 
@@ -1153,6 +1171,9 @@ class BaseMoEExperts(RtpModule):
             )
         result = dict(self._runtime_weights_dict)
         if self._dynamic_eplb_enabled:
+            result.update(
+                self.eplb_kernel_weights(self._runtime_weights_dict, prepare=False)
+            )
             result[W.logic_expert_cnt] = self._eplb_logic_expert_cnt
             result[W.log2phy] = self._eplb_log2phy
         return result
@@ -1197,6 +1218,7 @@ class BaseMoEExperts(RtpModule):
             W.moe_s1,
             W.moe_s2,
             *self.quant_method.eplb_aux_weight_names(),
+            *self.eplb_kernel_weights(self._runtime_weights_dict, prepare=False),
         )
 
     def _record_eplb_stats(
@@ -1217,6 +1239,8 @@ class BaseMoEExperts(RtpModule):
         """Install a completely loaded plan while preserving captured addresses."""
         from rtp_llm.utils.model_weight import W
 
+        if not self.quant_method.supports_eplb_weight_install:
+            raise RuntimeError("This quantized MoE supports EPLB statistics only")
         if not self._dynamic_eplb_enabled:
             raise RuntimeError(
                 f"MoE layer {self.layer_idx} was not initialized for EPLB"

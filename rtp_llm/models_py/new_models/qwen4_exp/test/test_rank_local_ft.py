@@ -109,13 +109,18 @@ def write_rank_pair(root):
 
 
 class Qwen4FTTest(unittest.TestCase):
-    def check_rank1(self, backend):
+    def check_rank1(self, backend, pruned=False):
         with tempfile.TemporaryDirectory() as directory:
             write_rank_pair(Path(directory))
             topology = CheckpointTopology(tp_size=2, tp_rank=1, ep_size=2, ep_rank=1)
             ft = FTCheckpoint.open(directory, topology)
             ft.read_backend = backend
             config = {"ckpt_path": directory, "model_type": "qwen4_exp", "moe_k": 1}
+            if pruned:
+                config.update(
+                    enable_output_vocab_pruning=True, output_vocab_padded_size=16,
+                    output_vocab_ids=[0, 1, 2, 3, 4, 5, 6, 7, 10, 29, 31],
+                )
             load = NewLoaderConfig(
                 tp_size=2,
                 tp_rank=1,
@@ -145,6 +150,17 @@ class Qwen4FTTest(unittest.TestCase):
             torch.testing.assert_close(
                 model.embed_tokens.weight, ft.read("global.embedding")
             )
+            if pruned:
+                # Rank 1 needs ID 10 from rank 0 and IDs 29/31 from rank 1.
+                full = torch.cat([
+                    ft.read_rank_slice("global.lm_head", peer, (slice(None), slice(None)))
+                    for peer in range(2)
+                ])
+                expected = full.new_zeros(8, 16)
+                expected[:3] = full[[10, 29, 31]]
+                torch.testing.assert_close(model.lm_head.weight, expected)
+            else:
+                torch.testing.assert_close(model.lm_head.weight, ft.read("global.lm_head"))
             torch.testing.assert_close(
                 model.layers[0].self_attn.qkv_proj.weight,
                 ft.read("layers.0.self_attention_weights.query_weight.kernel").t(),
@@ -166,6 +182,11 @@ class Qwen4FTTest(unittest.TestCase):
 
     def test_native_fst_rank1(self):
         self.check_rank1("fastsafetensors")
+
+    def test_pruned_ft_reads_original_token_rows_from_peer_ranks(self):
+        for backend in ("scratch", "fastsafetensors"):
+            with self.subTest(backend=backend):
+                self.check_rank1(backend, pruned=True)
 
 
 if __name__ == "__main__":

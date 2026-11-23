@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
@@ -100,7 +101,111 @@ def _gloo_load(rank, folder, rendezvous):
         dist.destroy_process_group()
 
 
+@register_model("_ft_eplb_test_owner")
+class _ExpertModel(RtpModule):
+    def __init__(self, config, load):
+        super().__init__()
+        from rtp_llm.models_py.layers.moe_experts import BaseMoEExperts
+
+        self.experts = BaseMoEExperts(
+            num_experts=4, top_k=1, hidden_size=16, moe_intermediate_size=32,
+            tp_size=load.tp_size, tp_rank=load.tp_rank, ep_size=load.ep_size,
+            ep_rank=load.ep_rank, params_dtype=torch.float32, model_config=config,
+            parallelism_config=load.parallelism_config, moe_config=None,
+            quant_config=None, layer_idx=0, prefix="experts",
+        )
+
+    def load_ft_checkpoint(self, cp):
+        from rtp_llm.models_py.quant_methods.channel_tensor_moe_ft import nonblock_moe_ft_bindings
+
+        # Simulate a draft: runtime layer zero belongs to archive layer seven.
+        bindings = nonblock_moe_ft_bindings(self.experts, "layers.7.", "experts", cp, 7)
+        cp.load_parameters(self, bindings)
+
+
 class RankLocalFTTest(unittest.TestCase):
+    def _eplb_loader(self, root, method, *, rank=0, size=1):
+        pc = SimpleNamespace(dp_size=1, dp_rank=0, pp_size=1, pp_rank=0)
+        cfg = SimpleNamespace(
+            model_type="_ft_eplb_test_owner", num_layers=8, expert_num=4,
+            quant_config=None, activation_type="SiGLU",
+            eplb_config=SimpleNamespace(enable_eplb=True),
+        )
+        return NewModelLoader(
+            cfg, NewLoaderConfig(
+                load_method=method, device="cpu", tp_size=size, ep_size=size,
+                tp_rank=rank, ep_rank=rank, parallelism_config=pc,
+            ), model_path=root,
+        )
+
+    def test_ft_eplb_reload_reads_peer_rows_with_selected_backend(self):
+        from contextlib import nullcontext
+        from rtp_llm.models_py import fst_range_reader
+        from rtp_llm.utils.model_weight import W
+
+        w13 = torch.stack([torch.full((64, 16), float(i + 1)) for i in range(4)])
+        w2 = torch.stack([torch.full((16, 32), float(i + 11)) for i in range(4)])
+        with tempfile.TemporaryDirectory() as root:
+            for rank in range(2):
+                records = [
+                    (7, "partial_moe_weights." + name + ".kernel", value[rank*2:rank*2+2])
+                    for name, value in (("intermediate_weight", w13), ("intermediate_weight2", w2))
+                ]
+                write_ft_shards(records, root, tp_rank=rank, ep_rank=rank)
+            generate_ft_index(root, {"TP_SIZE": 2, "DP_SIZE": 1, "EP_SIZE": 2})
+            idx = Path(root, "model.safetensors.index.json")
+            metadata = json.loads(idx.read_text())
+            metadata["ft_export_backend"] = "cuda"
+            idx.write_text(json.dumps(metadata))
+            for method in ("scratch", "fastsafetensors"):
+                for rank in range(2):
+                    with self.subTest(method=method, rank=rank):
+                        loader = self._eplb_loader(root, method, rank=rank, size=2)
+                        model = loader.load()
+                        rows = [3, 1, 0, 2]
+                        selected = rows[rank*2:rank*2+2]
+                        ctx = patch.object(
+                            fst_range_reader, "iter_fst_range_tensors",
+                            wraps=fst_range_reader.iter_fst_range_tensors,
+                        ) if method == "fastsafetensors" else nullcontext()
+                        with ctx as reader:
+                            staged = loader.load_moe_layer_weights(
+                                model, layer_id=0, physical_to_logical=rows,
+                                ep_rank=rank, ep_size=2,
+                            )
+                        if reader is not None:
+                            self.assertGreater(reader.call_count, 0)
+                        for key, expected in ((W.moe_w1, w13), (W.moe_w2, w2)):
+                            torch.testing.assert_close(staged[key], expected[selected])
+                        torch.testing.assert_close(model.experts.w2, w2[rank*2:rank*2+2])
+
+    def test_pytorch_ep1_eplb_reload_stacked_and_per_expert(self):
+        from rtp_llm.utils.model_weight import W
+
+        for stacked in (False, True):
+            with self.subTest(stacked=stacked), tempfile.TemporaryDirectory() as root:
+                w13 = torch.stack([torch.full((64, 16), float(i + 1)) for i in range(4)])
+                w2 = torch.stack([torch.full((16, 32), float(i + 11)) for i in range(4)])
+                if stacked:
+                    state = {"experts.gate_up_proj.weight": w13, "experts.down_proj.weight": w2}
+                else:
+                    state = {}
+                    for i in range(4):
+                        for name, value in (("gate_proj", w13[i, :32]), ("up_proj", w13[i, 32:]), ("down_proj", w2[i])):
+                            state[f"experts.{i}.{name}.weight"] = value
+                torch.save({"state_dict": state}, Path(root, "pytorch_model.bin"))
+                loader = self._eplb_loader(root, "scratch")
+                model = loader.load()
+                rows = [3, 0, 1, 2]
+                staged = loader.load_moe_layer_weights(
+                    model, layer_id=0, physical_to_logical=rows, ep_rank=0, ep_size=1
+                )
+                for key, expected in ((W.moe_w1, w13), (W.moe_w2, w2)):
+                    torch.testing.assert_close(staged[key], expected[rows])
+                torch.testing.assert_close(model.experts.w2, w2)
+                with self.assertRaisesRegex(RuntimeError, "fastsafetensors"):
+                    self._eplb_loader(root, "fastsafetensors").load()
+
     def test_replicated_ft_classifier_preserves_serialized_role_and_dtype(self):
         from rtp_llm.models_py.downstream_heads import ReplicatedHandlerHeads
         from rtp_llm.models_py.weight_mapper import WeightsMapper

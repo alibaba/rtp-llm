@@ -1,3 +1,13 @@
+load("//rtp_llm/models_py:checkpoint_test_platforms.bzl", "checkpoint_reader_test_env")
+
+py_library(
+    name = "hybrid_ft_fixture",
+    srcs = ["test_language.py"],
+    testonly = True,
+    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:models"],
+    visibility = ["//rtp_llm/models_py/new_models/qwen3_next/test:__pkg__"],
+)
+
 py_test(
     name = "test_kimi_gpu",
     srcs = ["test_kimi_gpu.py", "test_kimi_vision.py", "test_kimi_compressed.py"],
@@ -45,6 +55,7 @@ py_test(
 py_test(
     name = "test_kimi_vision",
     srcs = ["test_kimi_vision.py"],
+    env = checkpoint_reader_test_env({}),
     deps = [
         "//rtp_llm:safetensors",
         "//rtp_llm:torch",

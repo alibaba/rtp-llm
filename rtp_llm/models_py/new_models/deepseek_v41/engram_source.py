@@ -25,7 +25,18 @@ class EngramSource:
         self.root = Path(directory).resolve()
         self.prefix = f"layers.{layer_id}.engram."
         with (self.root / "model.safetensors.index.json").open() as stream:
-            index = json.load(stream)["weight_map"]
+            index = json.load(stream)
+        if index.get("is_ft_style_weight") is True:
+            self.root = self.root / "v41_engram"
+            sidecar = self.root / "model.safetensors.index.json"
+            if not sidecar.is_file():
+                raise ValueError(
+                    "This V4.1 FT archive lacks its host Engram tables; re-export "
+                    "from the original indexed HF checkpoint"
+                )
+            with sidecar.open() as stream:
+                index = json.load(stream)
+        index = index["weight_map"]
         self.paths = {}
         for name in specs:
             shard = Path(index[self.prefix + name])

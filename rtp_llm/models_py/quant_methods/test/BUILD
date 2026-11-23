@@ -92,6 +92,22 @@ py_test(
     deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:safetensors"],
 )
 
+[
+    py_test(
+        name = "test_weight_only_int8_" + name,
+        srcs = ["test_weight_only_int8.py", "test_weight_only_int8_sm90_sm100.py"],
+        main = "test_weight_only_int8_sm90_sm100.py",
+        env = {"W8A16_EXPECT_SM": major},
+        tags = [gpu],
+        exec_properties = {"gpu": gpu, "gpu_count": "1"},
+        deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:safetensors"],
+    )
+    for name, major, gpu in [
+        ("sm90", "9", "H20_CU13"),
+        ("sm100", "10", "SM100_ARM_CU13"),
+    ]
+]
+
 py_test(
     name = "test_groupwise_checkpoint",
     srcs = ["test_groupwise_checkpoint.py"],
@@ -222,8 +238,13 @@ py_test(
     name = "groupwise_runtime_rocm_test",
     srcs = ["groupwise_runtime_test.py"],
     main = "groupwise_runtime_test.py",
-    env = {"RUN_GROUPWISE_NATIVE_GPU_TESTS": "1"},
-    tags = ["manual", "rocm"],
+    env = {"RUN_GROUPWISE_NATIVE_GPU_TESTS": "1", "GPU_COUNT": "1"},
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7", "gpu_count": "1"},
+    target_compatible_with = select({
+        "//:using_rocm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
     deps = [
         "//rtp_llm/models_py:new_weight_loader",
         "//rtp_llm:torch",

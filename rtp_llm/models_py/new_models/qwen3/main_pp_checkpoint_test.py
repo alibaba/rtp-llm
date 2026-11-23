@@ -85,6 +85,27 @@ class MainPPCheckpointTest(unittest.TestCase):
             get_ffn_tp_rank=lambda: rank,
         )
 
+    def test_tail_warmup_preserves_all_upstream_capture_slots(self):
+        config = model_config()
+        config.capture_aux_hidden_layer_ids = [0, 1]
+        pc = self.stage_parallel(1)
+        pc.pp_stage_layer_counts = [2, 1]
+        load = NewLoaderConfig(
+            device="cpu", load_method="scratch", compute_dtype=torch.float32,
+            parallelism_config=pc,
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            save_file(checkpoint(), os.path.join(folder, "model.safetensors"))
+            model = NewModelLoader(config, load, model_path=folder).load()
+            template = torch.ones(3, 4)
+            warmup = model.make_empty_intermediate_tensors(template)
+            self.assertIs(warmup["hidden_states"], template)
+            prefix = warmup["mtp_aux_hidden_states"]
+            torch.testing.assert_close(prefix, template.new_zeros((3, 8)))
+            model.begin_aux_hidden_capture(template, False, prefix)
+            model.finish_aux_hidden_capture()
+            torch.testing.assert_close(model.get_mtp_target_hidden_states(3), prefix)
+
     def test_tied_pp_update_validates_embedding_source_on_both_stages(self):
         config = model_config()
         config.enable_fp32_lm_head = True

@@ -59,6 +59,11 @@ class _DraftMapper:
 
 
 class DeepSeekV4DSparkForCausalLM(OwnedV4ModelMixin, DeepSeekV4DSparkModel, RtpModule):
+    preserved_ft_parameter_loans = {
+        "v4.embed.weight": "global.embedding",
+        "v4.head.weight": "global.lm_head",
+    }
+
     @property
     def eplb_attention_only(self):
         return self._commit_only_prefill

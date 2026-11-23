@@ -263,13 +263,14 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         import torch.distributed as dist
 
         inter = _mega_intermediate_size(self.cfg)
-        self._transform_routed_weights(
+        l1, l2 = self._transform_routed_weights(
             partial(take_weight, layer_weights), deep_gemm, inter
         )
-
+        self._mega_l1_w, self._mega_l1_sf = l1
+        self._mega_l2_w, self._mega_l2_sf = l2
         self._setup_buffer_and_warmup()
 
-    def setup_weights_from_fp4(self, w1_w, w1_s, w2_w, w2_s, w1_layout="gate_up"):
+    def _prepare_weights_from_fp4(self, w1_w, w1_s, w2_w, w2_s, w1_layout="gate_up"):
         if self._fp8_routed:
             raise ValueError("FP8 MegaMoE only accepts FP8 per-block weights")
         import deep_gemm
@@ -281,7 +282,13 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         )
         weights = dict(routed_w13=w1_w, routed_s13=w1_s, routed_w2=w2_w, routed_s2=w2_s)
         del w1_w, w1_s, w2_w, w2_s
-        self._transform_routed_weights(weights.pop, deep_gemm, inter, w1_layout)
+        return self._transform_routed_weights(weights.pop, deep_gemm, inter, w1_layout)
+
+    def setup_weights_from_fp4(self, w1_w, w1_s, w2_w, w2_s, w1_layout="gate_up"):
+        l1, l2 = self._prepare_weights_from_fp4(w1_w, w1_s, w2_w, w2_s, w1_layout)
+        del w1_w, w1_s, w2_w, w2_s
+        self._mega_l1_w, self._mega_l1_sf = l1
+        self._mega_l2_w, self._mega_l2_sf = l2
         self._setup_buffer_and_warmup()
 
     def setup_shared_expert_from_fp8(self, w1_w, w1_s, w2_w, w2_s):
@@ -369,7 +376,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         if not self._defer_jit_until_shared_weights:
             self._maybe_warmup_jit_once()
 
-    def setup_weights_from_fp8(self, *args, **kwargs) -> None:
+    def _prepare_weights_from_fp8(self, *args, **kwargs):
         from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.weights import (
             transform_fp8_mega_weights,
             transform_fp8_to_fp4_mega_weights,
@@ -382,14 +389,17 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         )
         if not self._fp8_routed:
             kwargs["transform_name"] = self._fp4_transform_name
-        l1, l2 = transform(self.cfg, *args, **kwargs)
+        return transform(self.cfg, *args, **kwargs)
+
+    def setup_weights_from_fp8(self, *args, **kwargs) -> None:
+        l1, l2 = self._prepare_weights_from_fp8(*args, **kwargs)
         self._mega_l1_w, self._mega_l1_sf = l1
         self._mega_l2_w, self._mega_l2_sf = l2
         self._setup_buffer_and_warmup()
 
     def _transform_routed_weights(
         self, take, deep_gemm, inter: int, w1_layout=None
-    ) -> torch.device:
+    ):
         """Stack EP-local routed-expert SFs into the int32 UTCCP-transposed
         layout ``fp8_fp4_mega_moe`` expects.
 
@@ -475,14 +485,39 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         del w13, s13_int, w2, s2_int
         torch.cuda.empty_cache()
 
-        # Stash as plain attributes (not Parameters — the kernel reads
-        # raw int8/int32 buffers with no autograd).  Original stacked
-        # fp32 SFs are dropped now that the int layout has been derived.
-        self._mega_l1_w = l1_w
-        self._mega_l1_sf = l1_sf
-        self._mega_l2_w = l2_w
-        self._mega_l2_sf = l2_sf
-        return device
+        return (l1_w, l1_sf), (l2_w, l2_sf)
+
+    def eplb_kernel_weights(
+        self, raw: Dict[str, torch.Tensor], *, prepare: bool
+    ) -> Dict[str, torch.Tensor]:
+        """Return the kernel-private tensors not already updated by the owner.
+
+        Preparation runs on a disposable rank-local stack in the loader thread.
+        Never replace live tensors, graph clones, symmetric arenas or JIT state.
+        """
+        if prepare:
+            from .mega_moe_runtime import consume_prepared_routed_weights
+
+            l1, l2 = consume_prepared_routed_weights(
+                dict(raw),
+                self.cfg.moe_w1_layout,
+                self._prepare_weights_from_fp4,
+                self._prepare_weights_from_fp8,
+            )
+        else:
+            l1 = (self._mega_l1_w, self._mega_l1_sf)
+            l2 = (self._mega_l2_w, self._mega_l2_sf)
+        # DeepGEMM can pass W2 through unchanged. It must be snapshotted and
+        # installed only once. Other live buffers are transformed allocations.
+        return {
+            key: tensor
+            for key, tensor in zip(
+                ("mega.l1_w", "mega.l1_sf", "mega.l2_w", "mega.l2_sf"), (*l1, *l2)
+            )
+            if not any(
+                tensor.is_set_to(source) for source in raw.values() if source is not None
+            )
+        }
 
     def _resolve_jit_warmup_token_counts(
         self, num_sms: int, deep_gemm=None

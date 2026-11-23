@@ -10,7 +10,11 @@ from types import SimpleNamespace
 import torch
 from safetensors.torch import save_file
 
-from rtp_llm.config.quant_config import AWQConfig, GPTQConfig
+from rtp_llm.config.quant_config import (
+    AWQConfig,
+    GPTQConfig,
+    WeightOnlyInt8PerChannelQuantConfig,
+)
 from rtp_llm.models_py.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -151,6 +155,34 @@ def decode(layer):
 
 
 class GroupwiseOwnerTest(unittest.TestCase):
+    def test_weight_only_stats_can_observe_but_never_install_experts(self):
+        for method in ("awq", "gptq", "INT8"):
+            source = (
+                WeightOnlyInt8PerChannelQuantConfig()
+                if method == "INT8"
+                else source_config(method, 4)
+            )
+            config = SimpleNamespace(
+                activation_type="SiGLU",
+                quant_config=source,
+                eplb_config=SimpleNamespace(
+                    enable_eplb=lambda: True, eplb_mode="STATS"
+                ),
+            )
+            load = NewLoaderConfig(
+                device="cpu", quant_config=QuantizationConfig(method, source)
+            )
+            with self.subTest(method=method):
+                layer = ExpertOwner(config, load).experts
+                with self.assertRaisesRegex(RuntimeError, "statistics only"):
+                    layer.apply_eplb_plan(None, None, None, {})
+                for mode in ("EPLB", "ALL"):
+                    config.eplb_config.eplb_mode = mode
+                    with self.assertRaisesRegex(
+                        ValueError, method + " MoE.*statistics only"
+                    ):
+                        ExpertOwner(config, load)
+
     def load(
         self,
         values,

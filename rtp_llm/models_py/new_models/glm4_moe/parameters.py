@@ -78,6 +78,14 @@ def install_gqa_moe_parameters(owner, cfg, *, layer_ids, partitioned, layout, qk
         if last
         else None
     )
+    # Non-generation tasks consume normalized hidden states. Any raw output
+    # projection requested by a classifier/reranker belongs to its handler,
+    # not to the TP-sharded, optionally normalized/scaled generation head.
+    needs_lm_head = last
+    if needs_lm_head and hasattr(model_config, "task_type"):
+        from rtp_llm.ops import TaskType
+
+        needs_lm_head = model_config.task_type == TaskType.LANGUAGE_MODEL
     owner.lm_head = (
         ParallelLMHead(
             cfg["vocab_size"],
@@ -87,8 +95,8 @@ def install_gqa_moe_parameters(owner, cfg, *, layer_ids, partitioned, layout, qk
             params_dtype=cfg["lm_head_params_dtype"],
             **output_vocab_head_kwargs(model_config),
         )
-        if last
+        if needs_lm_head
         else None
     )
-    if owner.tie_word_embeddings and first and last:
+    if owner.tie_word_embeddings and first and owner.lm_head is not None:
         owner.embed_tokens.tie_output_head(owner.lm_head)

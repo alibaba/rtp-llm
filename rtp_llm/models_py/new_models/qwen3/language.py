@@ -779,6 +779,17 @@ class Qwen3ForCausalLM(GptModelBase, RtpModule):
     def _input_embeddings(self, inputs):
         return self.embed_tokens(inputs.input_ids)
 
+    def make_empty_intermediate_tensors(self, hidden_template):
+        tensors = super().make_empty_intermediate_tensors(hidden_template)
+        if self._mtp_aux_capture_layer_ids and not self.config.is_mtp:
+            previous_parts, _ = self._aux_hidden_capture_parts()
+            if previous_parts:
+                # A real upstream stage sends just its completed captures.
+                tensors["mtp_aux_hidden_states"] = hidden_template.new_zeros(
+                    (hidden_template.shape[0], previous_parts * hidden_template.shape[-1])
+                )
+        return tensors
+
     def validate_weights_loaded(self, loaded_tensor_ids=None):
         self.handler_heads.validate()
         super().validate_weights_loaded(loaded_tensor_ids)

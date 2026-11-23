@@ -144,6 +144,100 @@ def checkpoint(commit=False, layer_prefix="layers"):
 
 
 class BackboneCheckpointTest(unittest.TestCase):
+    def test_rank_local_ft_matches_hf_on_both_tp_ep_ranks(self):
+        from rtp_llm.models_py.ft_checkpoint import CheckpointTopology, FTCheckpoint
+        from rtp_llm.models_py.new_models.deepseek_v4.ft_checkpoint import (
+            load_v4_ft_checkpoint,
+        )
+        from rtp_llm.tools.convert.ft_export_metadata import generate_ft_index
+        from rtp_llm.tools.convert.ft_export_writer import write_ft_shards
+
+        values = checkpoint()
+
+        # Same names, tensor order and split axes as DeepSeekV41Weight. Give
+        # each TP/EP file independent bytes (including rank 1's padded head).
+        def records(rank):
+            yield None, "embedding", values["embed.weight"].chunk(2, 1)[rank]
+            yield None, "lm_head", (
+                values["head.weight"]
+                if rank == 0
+                else torch.zeros_like(values["head.weight"])
+            )
+            yield None, "final_layernorm.gamma", values["norm.weight"]
+            yield None, "final_layernorm.beta", torch.zeros(64, dtype=torch.bfloat16)
+            for index in range(3):
+                p = f"layers.{index}."
+                for key, val in values.items():
+                    if not key.startswith(p):
+                        continue
+                    leaf = key[len(p) :]
+                    if leaf.startswith(("ffn.experts.", "ffn.shared_experts.")):
+                        continue
+                    if leaf.startswith("hc_"):
+                        name = "v4.hc." + leaf[3:]
+                        if leaf.endswith("_scale"):
+                            val = val[:, None]
+                    elif leaf.startswith("ffn.gate."):
+                        name = "v4.router." + leaf.split(".")[-1]
+                    elif leaf.startswith(("attn.indexer.", "attn.compressor.")):
+                        name = (
+                            "v41."
+                            if leaf
+                            in ("attn.indexer.wk.weight", "attn.indexer.k_norm.weight")
+                            else "v4."
+                        ) + leaf[5:]
+                    else:
+                        name = "v4." + leaf
+                    yield index, name, val
+                for attr in ("weight", "scale"):
+                    shared = p + "ffn.shared_experts."
+                    yield index, f"v4.shared.w13.{attr}", torch.cat(
+                        [values[f"{shared}{proj}.{attr}"] for proj in ("w1", "w3")]
+                    )
+                    yield index, f"v4.shared.w2.{attr}", values[shared + "w2." + attr]
+                    for proj in ("w1", "w2", "w3"):
+                        yield index, f"v4.routed.{proj}.{attr}", torch.stack(
+                            [
+                                values[p + f"ffn.experts.{expert}.{proj}.{attr}"]
+                                for expert in range(2 * rank, 2 * rank + 2)
+                            ]
+                        )
+
+        with tempfile.TemporaryDirectory() as root:
+            for rank in range(2):
+                write_ft_shards(records(rank), root, tp_rank=rank, ep_rank=rank)
+            generate_ft_index(root, {"TP_SIZE": "2", "EP_SIZE": "2"})
+            for rank in range(2):
+                cfg = args(rank)
+                cfg.embedding_tp_size, cfg.embedding_tp_rank = 2, rank
+                tree = OwnedV41Transformer(cfg)
+                owner = SimpleNamespace(
+                    v4=tree,
+                    _v4_args=cfg,
+                    config=SimpleNamespace(model_type="deepseek_v41"),
+                    checkpoint_weight_name_filter=tree.checkpoint_weight_name_filter,
+                    load_weights=tree.load_weights,
+                )
+                archive = FTCheckpoint.open(
+                    root,
+                    CheckpointTopology(
+                        tp_size=2, ep_size=2, tp_rank=rank, ep_rank=rank
+                    ),
+                )
+                load_v4_ft_checkpoint(owner, archive)
+                NewModelLoader._validate_loaded_weights(tree)
+                reference = self.load(values, rank)
+                for name, actual in tree.named_parameters():
+                    self.assertTrue(
+                        torch.equal(
+                            actual.contiguous().view(torch.uint8),
+                            reference.get_parameter(name)
+                            .contiguous()
+                            .view(torch.uint8),
+                        ),
+                        name,
+                    )
+
     def test_block_norm_selection_uses_serving_device_not_staging_device(self):
         from unittest.mock import patch
 

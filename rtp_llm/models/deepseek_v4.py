@@ -1006,6 +1006,20 @@ class DeepSeekV4MtpWeight(DeepSeekV4Weight, DeepSeekV3MtpWeight):
 
     _LAYER_PREFIX: str = "mtp.{i}"
 
+    def get_weight_info(self):
+        info = super().get_weight_info()
+        # A native FP8 projection already serializes its scale. Keep the
+        # standalone descriptor only when no composite owns that record;
+        # otherwise the FT writer correctly rejects the duplicate global.
+        owned_scales = {
+            name
+            for field in info.weights
+            for name in getattr(field, "sub_weights", {})
+            if name in (W.v4_mtp_e_proj_s, W.v4_mtp_h_proj_s)
+        }
+        info.weights = [field for field in info.weights if field.name not in owned_scales]
+        return info
+
     def _process_meta(self, meta_dict, weight_keys):  # type: ignore[override]
         super()._process_meta(meta_dict, weight_keys)
         self._num_hash_layers = 0

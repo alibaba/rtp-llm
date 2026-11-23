@@ -41,7 +41,13 @@ def vision_router_layers(checkpoint_path):
         match = re.fullmatch(r"(layers|mtp)\.(\d+)\.ffn\.gate\.bias_vl", name)
         if match:
             result[match[1]].append(int(match[2]))
-    return {prefix: tuple(sorted(ids)) for prefix, ids in result.items()}
+        else:
+            ft = re.fullmatch(
+                r"rank_\d+_\d+_\d+\.layers\.(\d+)\.v4\.router\.bias_vl", name
+            )
+            if ft:
+                result["layers"].append(int(ft[1]))
+    return {prefix: tuple(sorted(set(ids))) for prefix, ids in result.items()}
 
 
 class _BackboneMapper:
@@ -67,6 +73,13 @@ class OwnedV41Mixin:
         "embedding": "v4.embed.weight",
         "lm_head": "v4.head.weight",
     }
+
+    def load_ft_checkpoint(self, checkpoint):
+        from rtp_llm.models_py.new_models.deepseek_v4.ft_checkpoint import (
+            load_v4_ft_checkpoint,
+        )
+
+        load_v4_ft_checkpoint(self, checkpoint)
 
     def validate_runtime_device(self, device):
         super().validate_runtime_device(device)

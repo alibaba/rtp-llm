@@ -1,7 +1,7 @@
 # Quantization
 RTP-LLM currently supports weight only quantization, including int8 and int4. It can significantly reduce the video memory footprint and accelerate the decoding phase.
 Known issues: Weight Only quantization may cause performance degradation for long sequences during the Prefill phase
-Currently, all quantization methods are supported in SM70 and above
+CUDA architecture requirements depend on the quantization method and its runtime kernel.
 
 ## Support Quant
 
@@ -55,6 +55,9 @@ input step, e.g. `self_attn.qkv_input_scale`, `self_attn.o_proj_input_scale`,
 `mlp.gate_proj_input_scale` (shared by gate and up), and
 `mlp.down_proj_input_scale`. Missing calibration is an error; the loader
 does not substitute a guessed step. Routed experts remain floating point.
+Dense, unswizzled FT export preserves the calibration and inverse for each
+projection. If an older FT archive lacks the QKV input step, re-export it
+from the original calibrated checkpoint.
 
 
 ## BlockWiseFp8
@@ -96,7 +99,14 @@ You can Provide PreQuantified Model Weight, The model config needs to contain qu
 
 
 ## Int8WeightOnly
-Support Load Quant.You can use Load Quant by set args, Example<br>
+For dense projections, the loader quantizes FP16/BF16 checkpoint weights to INT8
+with one scale per output channel. SM8.x uses PyTorch's CUDA mixed-dtype linear
+operator. On SM90 and SM100 the loader checks that the installed Triton compiler
+can run the packed-weight kernel before publishing the model. Other devices
+(including SM120) are not enabled for this dense path; CPU loading is for
+staging only. This does not imply support for every MoE executor.
+
+Example:
 ```
 python3 -m rtp_llm.start_server --checkpoint_path XXXX  --model_type qwen_3  --quantization int8
 ```

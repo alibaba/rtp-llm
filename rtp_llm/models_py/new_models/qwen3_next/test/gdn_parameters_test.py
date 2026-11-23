@@ -267,6 +267,10 @@ class GdnOwnershipTest(unittest.TestCase):
                     m.out_proj.weight_scale_inv, out[:, rank : rank + 1]
                 )
 
+    @unittest.skipIf(
+        os.environ.get("NEWLOADER_TEST_NATIVE_FST") == "0",
+        "this platform lock does not ship the native FST reader",
+    )
     def test_cpu_fst_stream_projects_ba_into_the_rank_local_owner(self):
         from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 

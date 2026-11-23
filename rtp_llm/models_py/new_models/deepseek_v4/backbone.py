@@ -23,7 +23,7 @@ from rtp_llm.models_py.new_models.deepseek_v4.commit_attention import (
     OwnedCommitOnlyAttentionFP8,
 )
 from rtp_llm.models_py.new_models.deepseek_v4.hc import OwnedHCHead, OwnedHCUnit
-from rtp_llm.models_py.new_models.deepseek_v4.load_geometry import make_lm_head
+from rtp_llm.models_py.new_models.deepseek_v4.load_geometry import make_lm_head, vocabulary_allocation
 from rtp_llm.models_py.weight_mapper import WeightsMapper
 
 
@@ -223,11 +223,13 @@ class OwnedV4Transformer(V4Transformer, RtpModule):
             return
         # Existing V4 Python execution embeds full hidden vectors. Attention
         # TP and head TP are independent; do not slice embedding hidden_dim.
-        self.embed = VocabParallelEmbedding(
-            args.vocab_size, args.dim, params_dtype=params_dtype
-        )
+        with vocabulary_allocation(args, "v4.embed.weight"):
+            self.embed = VocabParallelEmbedding(
+                args.vocab_size, args.dim, params_dtype=params_dtype
+            )
         self.norm = _checkpoint_norm(args, params_dtype)
-        self.head = make_lm_head(args, head_dtype)
+        with vocabulary_allocation(args, "v4.head.weight"):
+            self.head = make_lm_head(args, head_dtype)
         self.head_hc = OwnedHCHead(
             dim=args.dim,
             hc_mult=args.hc_mult,

@@ -86,7 +86,8 @@ def make_qwen4_experts(plan, layer_idx, load, *, prefix=None):
         method, source_config=source, hw_kernel_config=load.py_hw_kernel_config
     )
     if prefix is None:
-        prefix = f"{plan.prefix}layers.{layer_idx}.mlp.experts"
+        # EPLB compares WEIGHTS_MAPPER output to the registered owner path.
+        prefix = f"layers.{layer_idx}.mlp.experts"
     owner = Qwen4RoutedExperts(
         num_experts=e,
         top_k=config.moe_k,
@@ -105,6 +106,6 @@ def make_qwen4_experts(plan, layer_idx, load, *, prefix=None):
         prefix=prefix,
     )
     owner.has_shared_expert_gate = (
-        prefix.rsplit(".", 1)[0] + ".shared_expert_gate.weight" in plan.shapes
+        f"{plan.prefix}layers.{layer_idx}.mlp.shared_expert_gate.weight" in plan.shapes
     )
     return owner

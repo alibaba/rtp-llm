@@ -110,6 +110,49 @@ def _engine(root, method):
 
 
 class DraftNativeOutputTest(unittest.TestCase):
+    @torch.inference_mode()
+    def test_pipeline_warmup_matches_real_stage_capture_contract(self):
+        from rtp_llm.ops.compute_ops import PyAttentionInputs
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            BaseModel, "_get_device_str", return_value="cpu"
+        ):
+            root = Path(tmp)
+            target_cfg = _write_model(root / "target")
+            draft_cfg = _write_model(root / "draft", draft=True)
+            stages = []
+            for rank in range(2):
+                engine = _engine(tmp, "scratch")
+                pc = engine.parallelism_config
+                pc.pp_size = pc.world_size = pc.local_world_size = 2
+                pc.pp_rank = pc.world_rank = pc.local_rank = rank
+                pc.pp_stage_layer_counts = [1, 1]
+                ModelFactory._setup_dspark_configs(engine.sp_config, target_cfg, draft_cfg)
+                stages.append(ModelFactory._create_model(target_cfg, engine).py_model)
+
+            attn = SimpleNamespace(forward=lambda qkv, cache, idx: qkv[:, :4])
+            for verify in (False, True):
+                meta = PyAttentionInputs()
+                meta.is_target_verify = verify
+                inputs = SimpleNamespace(input_ids=torch.tensor([1, 2]), attention_inputs=meta,
+                                         capture_hidden_states=False, pp_intermediates={})
+                live = stages[0](inputs, attn).pp_intermediates
+                template = live["hidden_states"]
+                self.assertEqual(set(stages[0].make_empty_intermediate_tensors(template)), {"hidden_states"})
+                warmup = stages[1].make_empty_intermediate_tensors(template)
+                self.assertEqual(set(warmup), set(live))
+                self.assertIs(warmup["hidden_states"], template)
+                prefix = "mtp_aux_hidden_states"
+                torch.testing.assert_close(warmup[prefix], torch.zeros_like(live[prefix]))
+                self.assertEqual(live[prefix].shape, (2, 4))
+                inputs.pp_intermediates = live
+                actual = stages[1](inputs, attn).mtp_target_hidden_states.clone()
+                torch.testing.assert_close(actual[:, :4], live[prefix])
+                inputs.pp_intermediates = warmup
+                warmed = stages[1](inputs, attn).mtp_target_hidden_states
+                torch.testing.assert_close(warmed[:, :4], warmup[prefix])
+                torch.testing.assert_close(warmed[:, 4:], actual[:, 4:])
+
     def test_target_exports_decoder_boundaries_for_draft(self):
         from rtp_llm.ops.compute_ops import PyAttentionInputs
 

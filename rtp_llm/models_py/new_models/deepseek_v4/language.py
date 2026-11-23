@@ -40,6 +40,11 @@ class OwnedV4ModelMixin:
     # destination; CPU source tensors do not become runtime parameters.
     arm_cuda_streamed_scratch = True
 
+    def load_ft_checkpoint(self, checkpoint):
+        from .ft_checkpoint import load_v4_ft_checkpoint
+
+        load_v4_ft_checkpoint(self, checkpoint)
+
     runtime_parameter_paths = {
         "embedding": "v4.embed.weight",
         "lm_head": "v4.head.weight",

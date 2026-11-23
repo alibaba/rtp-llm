@@ -63,6 +63,58 @@ class EngramSourceTest(unittest.TestCase):
             json.dumps({"weight_map": index})
         )
 
+    def test_ft_export_streams_only_engram_and_serves_both_readers(self):
+        from safetensors import safe_open
+        from rtp_llm.tools.convert.ft_export_engram import export_v41_engram
+
+        with tempfile.TemporaryDirectory() as work:
+            source, output = Path(work) / "hf", Path(work) / "ft"
+            source.mkdir()
+            output.mkdir()
+            self.fixture(source)
+            (source / "config.json").write_text(json.dumps({"text_config": self.cfg}))
+            (output / "model.safetensors.index.json").write_text(
+                json.dumps({"is_ft_style_weight": True, "weight_map": {}})
+            )
+            # One shard is exclusively Engram, the other shares a decoder tensor.
+            mixed = source / "layer-1.safetensors"
+            with safe_open(str(mixed), framework="pt") as shard:
+                before = {key: shard.get_tensor(key).clone() for key in shard.keys()}
+            save_file({**before, "decoder.unrelated": torch.ones(10)}, mixed)
+            specs = {"embed.weight": ((8, 32), "F8_E4M3", torch.float8_e4m3fn)}
+            with self.assertRaisesRegex(ValueError, "original indexed HF"):
+                EngramSource(output, 1, specs, "scratch")
+            export_v41_engram(source, output)
+            side = output / "v41_engram"
+            index = json.loads((side / "model.safetensors.index.json").read_text())[
+                "weight_map"
+            ]
+            self.assertEqual(len(index), 12)
+            for layer in (1, 14):
+                with safe_open(
+                    str(source / f"layer-{layer}.safetensors"), framework="pt"
+                ) as orig, safe_open(
+                    str(side / index[f"layers.{layer}.engram.embed.weight"]),
+                    framework="pt",
+                ) as got:
+                    self.assertNotIn("decoder.unrelated", got.keys())
+                    for key in got.keys():
+                        self.assertTrue(
+                            torch.equal(
+                                orig.get_tensor(key).view(torch.uint8),
+                                got.get_tensor(key).view(torch.uint8),
+                            ),
+                            key,
+                        )
+            for method in ("scratch", "fastsafetensors"):
+                eng = EngramSource(output, 1, specs, method)
+                self.assertTrue(
+                    torch.equal(
+                        eng.load("embed.weight").view(torch.uint8),
+                        before["layers.1.engram.embed.weight"].view(torch.uint8),
+                    )
+                )
+
     def test_ready_is_reported_only_after_local_engram_tables_bind(self):
         from tokenizers import Tokenizer, models
         from transformers import PreTrainedTokenizerFast

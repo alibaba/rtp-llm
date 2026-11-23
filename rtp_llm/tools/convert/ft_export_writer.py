@@ -15,6 +15,7 @@ def write_ft_shards(
     ep_rank=0,
     max_size=6 * 1024**3,
     after_tensor=None,
+    head_provenance=None,
 ):
     os.makedirs(output_dir, exist_ok=True)
     filename_prefix = f"{output_dir}/model-{tp_rank:02d}-{dp_rank:02d}-"
@@ -24,9 +25,15 @@ def write_ft_shards(
 
     def save_partition():
         path = f"{filename_prefix}part-{part:05d}.safetensors"
+        source = (head_provenance or {}).get("source")
+        metadata = None
+        if source is not None and rank_prefix + "global.lm_head" in pending:
+            if source not in ("lm_head", "embedding"):
+                raise ValueError("Unknown FT LM-head source")
+            metadata = {"ft_lm_head_source": source}
         for attempt in range(2):
             try:
-                save_file(pending, path)
+                save_file(pending, path, metadata=metadata)
                 return
             except Exception:
                 if attempt == 1:

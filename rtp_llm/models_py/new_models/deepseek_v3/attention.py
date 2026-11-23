@@ -55,7 +55,15 @@ class _CudaRuntimeFusedFp8Linear(nn.Module):
             raise ValueError(f"invalid FP8 block size {block_size!r}")
         self.register_buffer("weight", weight.contiguous(), persistent=False)
         self.register_buffer(
-            "weight_scale", weight_scale.contiguous(), persistent=False
+            # DeepGEMM packs UE8M0 into an MN-major, TMA-aligned view.
+            # Row-major contiguous() would destroy its column stride.
+            "weight_scale",
+            (
+                weight_scale
+                if weight_scale.dtype == torch.int32
+                else weight_scale.contiguous()
+            ),
+            persistent=False,
         )
         self.block_size = block_size
         self._fp8_logical_output_size = weight.shape[0]
@@ -85,6 +93,55 @@ class _CudaRuntimeFusedFp8Linear(nn.Module):
             disable_ue8m0_cast=not scale_ue8m0,
         )
         return output.view(*x.shape[:-1], self.weight.shape[0])
+
+
+class _MlaInt8Projection(nn.Module):
+    """A runtime projection owns the same packed layout as other W8A16 linears."""
+
+    def __init__(self, weight):
+        super().__init__()
+        from rtp_llm.models_py.quant_methods.weight_only_int8 import (
+            pack_weight_only_int8,
+        )
+
+        self.output_size = weight.shape[0]
+        packed, scale = pack_weight_only_int8(weight)
+        self.register_buffer("weight", packed, persistent=False)
+        self.register_buffer("weight_scale", scale, persistent=False)
+
+    def forward(self, x):
+        from rtp_llm.models_py.quant_methods.weight_only_int8 import (
+            apply_packed_weight_only_int8,
+        )
+
+        return apply_packed_weight_only_int8(
+            x, self.weight, self.weight_scale, self.output_size
+        )
+
+
+class _MixedMlaAProjection(nn.Module):
+    """Honor a quantization exclusion that only applies to one A projection."""
+
+    def __init__(self, q, kv, quantize_q):
+        super().__init__()
+        self.int8 = _MlaInt8Projection(q if quantize_q else kv)
+        self.register_buffer("floating", kv if quantize_q else q, persistent=False)
+        self.quantize_q = quantize_q
+
+    def forward(self, x):
+        integer = self.int8(x)
+        floating = torch.nn.functional.linear(x, self.floating)
+        return torch.cat(
+            (integer, floating) if self.quantize_q else (floating, integer), dim=-1
+        )
+
+
+class _MlaKernelWeights(dict):
+    """Tensor view for MLA kernels, with an optional module-owned prefill projection."""
+
+    def __init__(self, kv_b_projection):
+        super().__init__()
+        self.kv_b_projection = kv_b_projection
 
 
 def _rounded_fp8_values(weight: torch.Tensor) -> torch.Tensor:
@@ -222,6 +279,7 @@ def _kernel_fp8_weight_and_scale(
 def _prepare_fused_fp8_runtime_weight(
     weight: torch.Tensor,
     scale: torch.Tensor,
+    ft_owner=None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Apply the same UE8M0 conversion as the child FP8 linear hook.
 
@@ -231,6 +289,10 @@ def _prepare_fused_fp8_runtime_weight(
     pre-requantized FP32 block scales.
     """
     if is_deep_gemm_e8m0_used(weight.device):
+        if ft_owner is not None and getattr(ft_owner, "_packed_block_fp8_ft", None):
+            from rtp_llm.models_py.quant_methods.block_fp8_ft import block_ft_runtime_pair
+
+            return block_ft_runtime_pair(ft_owner, weight, scale, "weight_scale_inv", _resolve_requant_weight_ue8m0())
         return _resolve_requant_weight_ue8m0()(weight, scale)
     return weight, scale
 
@@ -284,6 +346,9 @@ class DeepSeekV32MlaAttention(RtpModule):
         self._online_fp8 = (
             quant_config is not None and quant_config.quant_type == "fp8_block_online"
         )
+        self._online_int8 = (
+            quant_config is not None and quant_config.quant_type == "INT8"
+        )
         self._checkpoint_weights_released = False
 
         # The checkpoint stores the A projections as FP8 per-block tensors.
@@ -296,6 +361,7 @@ class DeepSeekV32MlaAttention(RtpModule):
         a_proj_quant_config = (
             quant_config
             if quant_config is not None
+            and not self._online_int8
             and not quant_config.quant_type.endswith("_online")
             else QuantizationConfig(quant_type="none")
         )
@@ -366,7 +432,9 @@ class DeepSeekV32MlaAttention(RtpModule):
         # module has derived the exact kc/vc decode views; process_weights then
         # creates a separate FP8 runtime view for prefill on CUDA.
         kv_b_quant_config = (
-            QuantizationConfig(quant_type="none") if self._online_fp8 else quant_config
+            QuantizationConfig(quant_type="none")
+            if self._online_fp8 or self._online_int8
+            else quant_config
         )
         self.kv_b_proj = ColumnParallelLinear(
             input_size=kv_lora_rank,
@@ -401,6 +469,7 @@ class DeepSeekV32MlaAttention(RtpModule):
         # --- Fused weights (built after loading) ---
         self.register_buffer("_fused_qkv_a_w", None, persistent=False)
         self._fused_qkv_a_runtime: Optional[nn.Module] = None
+        self._kv_b_int8: Optional[nn.Module] = None
         self.register_buffer("_kv_b_w", None, persistent=False)
         self.register_buffer("_kv_b_runtime_w", None, persistent=False)
         self.register_buffer("_kv_b_runtime_s", None, persistent=False)
@@ -475,6 +544,7 @@ class DeepSeekV32MlaAttention(RtpModule):
                     [q_a_scale.detach(), kv_a_scale.detach()],
                     dim=0,
                 ),
+                ft_owner=self.q_a_proj,
             )
             self._fused_qkv_a_runtime = _CudaRuntimeFusedFp8Linear(
                 fused_a_weight,
@@ -485,13 +555,22 @@ class DeepSeekV32MlaAttention(RtpModule):
         else:
             q_a_w = _linear_weight_bf16(self.q_a_proj)
             kv_a_w = _linear_weight_bf16(self.kv_a_proj_with_mqa)
-            fused_a_bf16 = torch.cat([q_a_w, kv_a_w], dim=0).contiguous()
-            if (
-                self.q_lora_rank > 0
-                and not is_hip
-                and self.quant_config is not None
-                and self.quant_config.quant_type == "fp8_block_online"
-            ):
+            quantize_q = self._online_int8 and not self.quant_config.is_layer_ignored(
+                self.q_a_proj.prefix
+            )
+            quantize_kv = self._online_int8 and not self.quant_config.is_layer_ignored(
+                self.kv_a_proj_with_mqa.prefix
+            )
+            fused_a_bf16 = (
+                torch.cat((q_a_w, kv_a_w)) if quantize_q == quantize_kv else None
+            )
+            if fused_a_bf16 is None:
+                self._fused_qkv_a_runtime = _MixedMlaAProjection(
+                    q_a_w, kv_a_w, quantize_q
+                )
+            elif quantize_q:
+                self._fused_qkv_a_runtime = _MlaInt8Projection(fused_a_bf16)
+            elif self.q_lora_rank > 0 and not is_hip and self._online_fp8:
                 from rtp_llm.models_py.kernels.cuda.fp8_quant import (
                     per_block_cast_to_fp8,
                 )
@@ -518,21 +597,21 @@ class DeepSeekV32MlaAttention(RtpModule):
         head_num = self.num_heads
         nope = self.nope_head_dim
         v_head = self.v_head_dim
-        t = (
-            kv_b_w.transpose(0, 1)
-            .contiguous()
-            .view(self.kv_lora_rank, head_num, nope + v_head)
-        )
-        # _kc_w shape: [head_num, nope, kv_lora_rank]
-        self._kc_w = t[:, :, :nope].permute(1, 2, 0).contiguous()
-        # _vc_w shape: [head_num, kv_lora_rank, v_head]
-        self._vc_w = t[:, :, nope:].transpose(0, 1).contiguous()
+        t = kv_b_w.transpose(0, 1).contiguous().view(self.kv_lora_rank, head_num, nope + v_head)
+        if not getattr(self, "_ft_absorb_weights", False):
+            self._kc_w = t[:, :, :nope].permute(1, 2, 0).contiguous()
+            self._vc_w = t[:, :, nope:].transpose(0, 1).contiguous()
         # _kv_b_w: [kv_lora_rank, head_num * (nope + v_head)] — transposed kv_b
         # for BF16 FlashInfer prefill. Decode/absorb always consumes the exact
         # BF16 checkpoint-derived kc/vc views above. CUDA online-FP8 builds a
         # separate quantized prefill view only after those derivations.
         kv_b_scale = _fp8_scale_parameter(self.kv_b_proj)
-        if self._online_fp8 and not is_hip:
+        if self._online_int8 and not self.quant_config.is_layer_ignored(
+            self.kv_b_proj.prefix
+        ):
+            # KC/VC were derived from the checkpoint before this quantization.
+            self._kv_b_int8 = _MlaInt8Projection(kv_b_w)
+        elif self._online_fp8 and not is_hip:
             from rtp_llm.models_py.kernels.cuda.fp8_quant import per_block_cast_to_fp8
 
             runtime_weight, runtime_scale = per_block_cast_to_fp8(
@@ -555,19 +634,22 @@ class DeepSeekV32MlaAttention(RtpModule):
         """Expose only the kv_b/kc/vc tensors consumed by MLA factories."""
         from rtp_llm.utils.model_weight import W
 
-        if self._fused_qkv_a_w is None:
+        if self._fused_qkv_a_w is None and self._fused_qkv_a_runtime is None:
             raise RuntimeError(
                 "process_weights_after_loading() must be called before "
                 "_build_mla_kernel_weights()"
             )
-        weights: Dict[str, torch.Tensor] = {}
+        weights = _MlaKernelWeights(self._kv_b_int8)
         # Prefill consumes kv_b through the attention factory. Preserve the
         # FP8 weight/scale pair so it selects the same block-quantized linear
         # as the legacy loader; kc/vc remain dequantized derived views for the
         # absorb/decode paths.
         kv_b_weight = self.kv_b_proj.weight.data
         kv_b_scale = _fp8_scale_parameter(self.kv_b_proj)
-        if self._kv_b_runtime_w is not None:
+        if self._kv_b_int8 is not None:
+            weights[W.mla_kv_b_w] = self._kv_b_int8.weight
+            weights[W.mla_kv_b_s] = self._kv_b_int8.weight_scale
+        elif self._kv_b_runtime_w is not None:
             if self._kv_b_runtime_s is None:
                 raise RuntimeError("online-FP8 MLA kv_b runtime scale is missing")
             (
@@ -603,7 +685,7 @@ class DeepSeekV32MlaAttention(RtpModule):
         intentionally irreversible: weight refresh requires rebuilding the
         module so checkpoint-shaped parameters and quantization state exist.
         """
-        if self._fused_qkv_a_w is None:
+        if self._fused_qkv_a_w is None and self._fused_qkv_a_runtime is None:
             raise RuntimeError("MLA runtime weights must be built before release")
         parameter_names = ("weight", "weight_scale", "weight_scale_inv")
         _release_parameter_storage(self.q_a_proj, parameter_names)
@@ -658,18 +740,13 @@ class DeepSeekV32MlaAttention(RtpModule):
         input_shape = hidden_states.shape[:-1]
         q_c = None
 
+        if self._fused_qkv_a_runtime is not None:
+            fused_qkv_a = self._fused_qkv_a_runtime(hidden_states)
+        elif self._fused_qkv_a_w is not None:
+            fused_qkv_a = torch.nn.functional.linear(hidden_states, self._fused_qkv_a_w)
+        else:
+            raise RuntimeError("process_weights_after_loading() must run first")
         if self.q_lora_rank > 0:
-            # The legacy path executes q_a + kv_a as one FP8 GEMM. Keep the
-            # checkpoint-facing modules independent, but use their fused
-            # runtime view so activation quantization and accumulation match.
-            if self._fused_qkv_a_runtime is not None:
-                fused_qkv_a = self._fused_qkv_a_runtime(hidden_states)
-            else:
-                if self._fused_qkv_a_w is None:
-                    raise RuntimeError("process_weights_after_loading() must run first")
-                fused_qkv_a = torch.nn.functional.linear(
-                    hidden_states, self._fused_qkv_a_w
-                )
             q, kv_a = torch.split(
                 fused_qkv_a,
                 [self.q_lora_rank, self.kv_lora_rank + self.rope_head_dim],
@@ -685,13 +762,9 @@ class DeepSeekV32MlaAttention(RtpModule):
             # q_b projection
             q = self.q_b_proj(q_c)
         else:
-            # Match the legacy no-LoRA path's single fused BF16 projection.
-            if self._fused_qkv_a_w is None:
-                raise RuntimeError("process_weights_after_loading() must run first")
-            fused_qkv = torch.nn.functional.linear(hidden_states, self._fused_qkv_a_w)
             q_offset = self.num_heads * self.q_head_dim
             q_output, kv_output = torch.split(
-                fused_qkv,
+                fused_qkv_a,
                 [q_offset, self.kv_lora_rank + self.rope_head_dim],
                 dim=-1,
             )

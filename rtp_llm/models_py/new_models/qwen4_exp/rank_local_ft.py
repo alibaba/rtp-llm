@@ -26,7 +26,7 @@ class RankPlan:
         return self.lowranks[relative]
 
 
-def rank_local_plan(config, load, ft):
+def rank_local_plan(config, load, ft, *, draft=False):
     plan = RankPlan()
     plan.root = ft.root
     plan.model_config = config
@@ -51,12 +51,15 @@ def rank_local_plan(config, load, ft):
         if isinstance(config, dict)
         else getattr(config, "qwen4_ple_prefetch_mb", 256)
     )
-    plan.num_layers = plan.positive("num_hidden_layers")
+    # The copied config.json describes the target backbone even when the
+    # exporter was invoked with model_type=qwen4_exp_mtp. Its archive has
+    # exactly one full-attention layer, numbered zero, and no PLE.
+    plan.num_layers = 1 if draft else plan.positive("num_hidden_layers")
     plan.hidden_size = plan.positive("hidden_size")
     plan.hc_mult = plan.positive("hc_count")
     plan.vocab_size = plan.positive("vocab_size")
     plan.layer_types, plan.shapes, plan.lowranks = [], {}, {}
-    plan.ple_layers = tuple(n - 1 for n in plan.text.get("ple_layer_ids", ()))
+    plan.ple_layers = () if draft else tuple(n - 1 for n in plan.text.get("ple_layer_ids", ()))
     if len(set(plan.ple_layers)) != len(plan.ple_layers) or any(
         not 0 <= n < plan.num_layers for n in plan.ple_layers
     ):
@@ -96,14 +99,49 @@ def rank_local_plan(config, load, ft):
             )
         if p + "ffn_weights.shared_expert_gate.kernel" in ft.entries:
             plan.shapes[p + "mlp.shared_expert_gate.weight"] = (1, plan.hidden_size)
-    if plan.text.get("layer_types", plan.layer_types) != plan.layer_types:
+    layout = plan.text.get("mtp", {}) if draft else plan.text
+    if layout.get("layer_types", plan.layer_types) != plan.layer_types:
         raise ValueError(
             "Qwen4 FT attention types do not match the model configuration"
         )
     return plan
 
 
-def load_rank_local(model, ft):
+def _pruned_ft_head(ft, head):
+    # WeightConverter uses a fresh ModelArgs with pruning disabled. Its
+    # global.lm_head is in original token order, partitioned after padding;
+    # the input embedding, by contrast, is partitioned on hidden columns.
+    name = "global.lm_head"
+    tp = ft.topology.tp_size
+    shape = ft.read_rank_slice(name, 0)
+    if (
+        len(shape) != 2 or shape[1] != head.hidden_size
+        or shape[0] * tp < head.checkpoint_vocab_size
+    ):
+        raise ValueError("Qwen4 FT LM head does not cover the original vocabulary")
+    rows_per_peer, _ = shape
+    selected = []
+    ids = head.local_output_vocab_ids
+    for peer in range(tp):
+        if ft.read_rank_slice(name, peer) != shape:
+            raise ValueError("Inconsistent Qwen4 FT LM head shard shapes")
+        start = rows_per_peer * peer
+        offsets = [row - start for row in ids if start <= row < start + rows_per_peer]
+        if offsets:
+            first = offsets[0]
+            span = ft.read_rank_slice(
+                name, peer, (slice(first, offsets[-1] + 1), slice(None))
+            )
+            if span.dtype != head.weight.dtype:
+                raise ValueError("Qwen4 FT LM head does not match the configured head dtype")
+            if len(offsets) != span.shape[0]:
+                span = span.index_select(0, torch.tensor(offsets, device=span.device) - first)
+            selected.append(span)
+    values = torch.cat(selected, dim=0) if selected else head.weight.new_empty((0, head.hidden_size), device="cpu")
+    return head.prepare_local_checkpoint_weight(values)
+
+
+def load_rank_local(model, ft, *, draft=False):
     bindings = []
 
     def identity(xs):
@@ -125,8 +163,26 @@ def load_rank_local(model, ft):
             if suffix != "inject" or inject:
                 add(src + "_" + suffix, dest + "." + leaf + ".weight")
 
-    add("global.embedding", "embed_tokens.weight")
-    add("global.lm_head", "lm_head.weight")
+    loans = getattr(model, "_rtp_borrowed_parameter_bindings", {}) if draft else {}
+    if "embed_tokens.weight" not in loans:
+        add("global.embedding", "embed_tokens.weight")
+    if getattr(model.lm_head, "output_vocab_ids", ()):
+        bindings.append(RuntimeTensorBinding(
+            ("global.lm_head",), "lm_head.weight", identity,
+            read=lambda: (_pruned_ft_head(ft, model.lm_head),),
+        ))
+    elif "lm_head.weight" not in loans:
+        add("global.lm_head", "lm_head.weight")
+    if draft:
+        # Qwen4ExpMTPWeight._create_global_weights writes both FC matrices
+        # transposed; the two raw zero-centered RMS norm vectors are unchanged.
+        for src, dest, conv in (
+            ("multi_tokens_predict_enorm.weight", "pre_fc_norm_embedding", identity),
+            ("multi_tokens_predict_hnorm.weight", "pre_fc_norm_hidden", identity),
+            ("qwen4.mtp.fc_embedding.weight", "fc_embedding", transpose),
+            ("qwen4.mtp.fc_hidden.weight", "fc_hidden", transpose),
+        ):
+            add("global." + src, "mtp_input_projection." + dest + ".weight", conv)
     hc("global.qwen4.hc.mixer", "hyper_connection_mixer", False)
     for i, layer in enumerate(model.layers):
         p = f"layers.{i}."

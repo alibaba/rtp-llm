@@ -199,6 +199,35 @@ class GroupwiseRuntimeCPUTest(unittest.TestCase):
             )
         )
 
+    def test_preflight_binds_the_actual_grouped_gemm_keywords(self):
+        # Derive the call shape from the production adapter so adding another
+        # kernel argument also exercises its load-time ABI check.
+        call = next(
+            node
+            for node in ast.walk(ast.parse(inspect.getsource(runtime._projection)))
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "gemm"
+        )
+        parameters = [
+            inspect.Parameter(kw.arg, inspect.Parameter.KEYWORD_ONLY)
+            for kw in call.keywords
+        ]
+        module = mock.Mock()
+        module._fused_moe_kernel_gptq_awq = {}
+        runtime._load_backend.cache_clear()
+        self.addCleanup(runtime._load_backend.cache_clear)
+        with mock.patch.object(runtime.importlib, "import_module", return_value=module):
+            for omitted in parameters:
+                with self.subTest(omitted=omitted.name):
+                    module.fused_moe.__signature__ = inspect.Signature(
+                        p for p in parameters if p != omitted
+                    )
+                    with self.assertRaisesRegex(RuntimeError, "integer ABI"):
+                        runtime._load_backend()
+            module.fused_moe.__signature__ = inspect.Signature(parameters)
+            self.assertIs(runtime._load_backend()[0], module.fused_moe)
+
 
 @unittest.skipUnless(
     os.environ.get("RUN_GROUPWISE_NATIVE_GPU_TESTS") == "1",

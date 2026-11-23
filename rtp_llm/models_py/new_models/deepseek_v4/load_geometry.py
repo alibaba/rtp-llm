@@ -1,5 +1,9 @@
 """Check that the weight reader and the existing V4 runtime use the same ranks."""
 
+from contextlib import nullcontext
+
+import torch
+
 from rtp_llm.models_py.expert_placement import expert_placement_for_layer
 from rtp_llm.models_py.layers.embedding import ParallelLMHead, output_vocab_head_kwargs
 
@@ -8,6 +12,14 @@ def configure_lm_head(args, model_config, load_config):
     args.lm_head_tp_size = load_config.lm_head_tp_size
     args.lm_head_tp_rank = load_config.lm_head_tp_rank
     args.output_head_options = output_vocab_head_kwargs(model_config)
+    args.borrowed_parameter_paths = getattr(load_config, "borrowed_parameter_paths", ())
+
+
+def vocabulary_allocation(args, name):
+    """A validated loan replaces this leaf before loading; only its metadata is needed."""
+    if name in getattr(args, "borrowed_parameter_paths", ()):
+        return torch.device("meta")
+    return nullcontext()
 
 
 def make_lm_head(args, dtype):

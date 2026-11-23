@@ -44,7 +44,7 @@ class _Owner(RtpModule):
             source_kind=config["source_kind"],
             shapes=shapes,
         )
-        self.experts = make_qwen4_experts(plan, 0, load)
+        self.experts = make_qwen4_experts(plan, 0, load, prefix="experts")
         if "model.language_model.layers.0.mlp.shared_expert_gate.weight" in shapes:
             self.shared_expert_gate = torch.nn.Linear(
                 128, 1, bias=False, dtype=torch.bfloat16

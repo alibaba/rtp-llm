@@ -704,6 +704,11 @@ class KimiLinearForCausalLM(KimiLinearModel, RtpModule):
         if not has_lm_head and self.tie_word_embeddings:
             self.lm_head._copy_local_tied_weight(self.embed_tokens.weight.data)
 
+    def load_ft_checkpoint(self, checkpoint):
+        from .ft_checkpoint import load_kimi_linear_ft
+
+        load_kimi_linear_ft(self, checkpoint)
+
     def runtime_weight_view(self) -> Dict[str, torch.Tensor]:
         return {
             "embedding": self.embed_tokens.weight,

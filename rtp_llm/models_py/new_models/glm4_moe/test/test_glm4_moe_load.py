@@ -57,6 +57,45 @@ def make_config(path, *, qk_norm=True, correction=True, top_k=2, normalize=True)
 
 
 class Glm4MoeLoadTest(unittest.TestCase):
+    def test_non_generation_owns_final_norm_and_only_declared_handler_heads(self):
+        from dataclasses import replace
+
+        from rtp_llm.models_py.downstream_heads import handler_weight_mappings
+        from rtp_llm.ops import TaskType
+
+        for task, has_projection, mappings, tie in (
+            (TaskType.DENSE_EMBEDDING, False, (), False),
+            (TaskType.DENSE_EMBEDDING, True, (), True),
+            (TaskType.SEQ_CLASSIFICATION, False, ("classifier.weight",), False),
+            (TaskType.RERANKER, True, ("lm_head.weight",), True),
+        ):
+            with self.subTest(task=task, tied=tie), tempfile.TemporaryDirectory() as root:
+                data = checkpoint()
+                if not has_projection:
+                    del data["lm_head.weight"]
+                if "classifier.weight" in mappings:
+                    data["classifier.weight"] = torch.arange(12).reshape(3, 4).float()
+                config = self.load(root, data)
+                config.task_type = task
+                config.tie_word_embeddings = tie
+                config.logit_scale = 3.0
+                config.normalize_lm_head_weight = True
+                load = replace(
+                    make_load_config(),
+                    custom_weight_mappings=handler_weight_mappings(mappings),
+                )
+                owner = NewModelLoader(config, load, model_path=root).load()
+                exports = owner.runtime_weight_view()
+                self.assertIsNone(owner.lm_head)
+                self.assertNotIn("lm_head", exports)
+                torch.testing.assert_close(exports["final_layernorm.gamma"], data["model.norm.weight"])
+                self.assertEqual(
+                    {name for name in exports if name.startswith("__custom__.")},
+                    {"__custom__." + name for name in mappings},
+                )
+                for name in mappings:
+                    torch.testing.assert_close(exports["__custom__." + name], data[name])
+
     def load(self, directory, weights, **options):
         config = make_config(directory, **options)
         save_file(weights, os.path.join(directory, "model.safetensors"))

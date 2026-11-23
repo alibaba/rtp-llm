@@ -1,6 +1,21 @@
+load("//rtp_llm/models_py:checkpoint_test_platforms.bzl", "checkpoint_reader_test_env")
+
+py_test(
+    name = "hybrid_ft_test",
+    srcs = ["hybrid_ft_test.py", "main_checkpoint_test.py"],
+    main = "hybrid_ft_test.py",
+    deps = [
+        "//rtp_llm/models_py:new_weight_loader",
+        "//rtp_llm/models_py/new_models/kimi_linear/test:hybrid_ft_fixture",
+        "//rtp_llm/models_py/new_models/kimi_k25/test:hybrid_ft_fixture",
+        "//rtp_llm/tools/convert:convert",
+    ],
+)
+
 py_test(
     name = "gdn_parameters_test",
     srcs = ["gdn_parameters_test.py"],
+    env = checkpoint_reader_test_env({}),
     deps = ["//rtp_llm/models_py:new_weight_loader"],
 )
 

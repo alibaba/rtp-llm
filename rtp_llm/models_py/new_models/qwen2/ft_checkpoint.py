@@ -27,20 +27,45 @@ def _bias(values):
     return value.reshape(-1)
 
 
+def _validate_cache_reciprocal(value):
+    # Non-MLA, non-per-tensor-FP8 exporters synthesize exactly this FP32 [1]
+    # unit for FP8 KV cache. It is not a learned activation-quantization scale.
+    if value.shape != (1,) or value.dtype != torch.float32 or value.item() != 1.0:
+        raise ValueError(
+            "Invalid FT FP8 KV-cache dummy reciprocal: expected FP32 [1.0]"
+        )
+
+
 def load_dense_ft_checkpoint(model, checkpoint):
     if type(model).__name__ not in (
-        "Qwen1ForCausalLM", "Qwen2ForCausalLM", "Qwen2EmbeddingBackbone", "LlamaForCausalLM"
+        "Qwen1ForCausalLM",
+        "Qwen2ForCausalLM",
+        "Qwen2EmbeddingBackbone",
+        "LlamaForCausalLM",
     ):
         raise ValueError("No dense FT adapter for this model")
     return load_gqa_ffn_ft_checkpoint(model, checkpoint)
 
 
-def load_gqa_ffn_ft_checkpoint(model, checkpoint, *, extra_bindings=()):
+def load_gqa_ffn_ft_checkpoint(
+    model,
+    checkpoint,
+    *,
+    extra_bindings=(),
+    attention_bindings=None,
+    final_norm_keys=("global.final_layernorm.gamma", "global.final_layernorm.beta"),
+    layer_ffn=None,
+    source_validators=None,
+):
     from rtp_llm.models_py.quant_methods.fp8 import (
         Fp8BlockLinearMethod,
         Fp8LinearMethod,
         Fp8PerChannelLinearMethod,
     )
+    from rtp_llm.models_py.quant_methods.per_tensor_int8 import (
+        PerTensorInt8LinearMethod,
+    )
+    from rtp_llm.models_py.quant_methods.per_tensor_int8_ft import static_int8_bindings
 
     fp8_methods = (Fp8LinearMethod, Fp8PerChannelLinearMethod, Fp8BlockLinearMethod)
 
@@ -71,19 +96,30 @@ def load_gqa_ffn_ft_checkpoint(model, checkpoint, *, extra_bindings=()):
         return value
 
     layers = ft_layer_bindings(model)
-    for _, _, layer in layers:
-        ffn = (
-            getattr(layer.mlp, "shared_experts", None)
-            if hasattr(layer.mlp, "experts")
-            else layer.mlp
+    owned_attention = {}
+    if layer_ffn is None:
+        layer_ffn = lambda layer: (layer.mlp, "mlp", "shared_experts")
+    for layer_id, key, layer in layers:
+        owned_attention[key] = (
+            attention_bindings(
+                checkpoint, layer, f"layers.{layer_id}.", f"layers.{key}.", swizzled
+            )
+            if attention_bindings is not None
+            else None
         )
+        mlp, _, shared_name = layer_ffn(layer)
+        ffn = getattr(mlp, shared_name, None) if hasattr(mlp, "experts") else mlp
         for linear in (
-            layer.self_attn.qkv_proj,
-            layer.self_attn.o_proj,
+            *(
+                (layer.self_attn.qkv_proj, layer.self_attn.o_proj)
+                if owned_attention[key] is None
+                else ()
+            ),
             *((ffn.gate_up_proj, ffn.down_proj) if ffn is not None else ()),
         ):
             if not isinstance(
-                linear.quant_method, (UnquantizedLinearMethod, *fp8_methods)
+                linear.quant_method,
+                (UnquantizedLinearMethod, PerTensorInt8LinearMethod, *fp8_methods),
             ):
                 raise ValueError(
                     "Dense FT has no declared adapter for this quantized runtime layout"
@@ -193,6 +229,15 @@ def load_gqa_ffn_ft_checkpoint(model, checkpoint, *, extra_bindings=()):
 
     embedding = model.embed_tokens
     head = model.lm_head
+    head_source = checkpoint.index_metadata.get("ft_lm_head_source")
+    if head_source not in (None, "embedding", "lm_head"):
+        raise ValueError("Invalid FT LM-head provenance")
+    if any(
+        key.endswith((".global.embedding", ".global.lm_head"))
+        for key in getattr(checkpoint, "_overlay", {})
+    ):
+        # This patch is outside the exporter's recorded source decision.
+        head_source = None
     if head is None and "global.lm_head" in checkpoint.entries:
         # A generation FT archive is also a valid source for a non-generation
         # deployment of this backbone. Only exclude the unused *projection*;
@@ -339,12 +384,10 @@ def load_gqa_ffn_ft_checkpoint(model, checkpoint, *, extra_bindings=()):
         )
     if model.norm is not None:
         bindings.append(
-            RuntimeTensorBinding(
-                ("global.final_layernorm.gamma",), "norm.weight", _identity
-            )
+            RuntimeTensorBinding((final_norm_keys[0],), "norm.weight", _identity)
         )
-    validators = {}
-    if "global.final_layernorm.beta" in checkpoint.entries:
+    validators = dict(source_validators or {})
+    if final_norm_keys[1] in checkpoint.entries:
 
         def zero_final_beta(value):
             if (
@@ -354,34 +397,69 @@ def load_gqa_ffn_ft_checkpoint(model, checkpoint, *, extra_bindings=()):
             ):
                 raise ValueError("Dense RMSNorm FT final beta must be exactly zero")
 
-        validators["global.final_layernorm.beta"] = zero_final_beta
+        validators[final_norm_keys[1]] = zero_final_beta
     for layer_id, key, layer in layers:
         src = f"layers.{layer_id}."
         dst = f"layers.{key}."
-        for old, target, convert in (
+        cache_unit = (
+            src
+            + "self_attention_weights.attention_output_weight.static_quant_reciprocal"
+        )
+        if (
+            owned_attention[key] is None
+            and cache_unit in checkpoint.entries
+            and not isinstance(
+                layer.self_attn.o_proj.quant_method,
+                (Fp8LinearMethod, PerTensorInt8LinearMethod),
+            )
+        ):
+            validators[cache_unit] = _validate_cache_reciprocal
+        fields = [
             ("pre_layernorm_weights.gamma", "input_layernorm.weight", _identity),
             (
                 "post_layernorm_weights.gamma",
                 "post_attention_layernorm.weight",
                 _identity,
             ),
-            (
-                "self_attention_weights.query_weight.kernel",
-                "self_attn.qkv_proj.weight",
-                kernel,
-            ),
-            (
-                "self_attention_weights.attention_output_weight.kernel",
-                "self_attn.o_proj.weight",
-                kernel,
-            ),
-        ):
+        ]
+        if owned_attention[key] is not None:
+            attn_fields, attn_validators = owned_attention[key]
+            bindings.extend(attn_fields)
+            validators.update(attn_validators)
+        else:
+            fields.extend(
+                (
+                    (
+                        "self_attention_weights.query_weight.kernel",
+                        "self_attn.qkv_proj.weight",
+                        kernel,
+                    ),
+                    (
+                        "self_attention_weights.attention_output_weight.kernel",
+                        "self_attn.o_proj.weight",
+                        kernel,
+                    ),
+                )
+            )
+        for old, target, convert in fields:
             if target in ("self_attn.qkv_proj.weight", "self_attn.o_proj.weight"):
                 linear = (
                     layer.self_attn.qkv_proj
                     if "qkv_proj" in target
                     else layer.self_attn.o_proj
                 )
+                if isinstance(linear.quant_method, PerTensorInt8LinearMethod):
+                    bindings.extend(
+                        static_int8_bindings(
+                            linear,
+                            src + old,
+                            dst + target.removesuffix(".weight"),
+                            "qkv" if "qkv_proj" in target else "out",
+                            src,
+                            swizzled,
+                        )
+                    )
+                    continue
                 if isinstance(linear.quant_method, fp8_methods):
                     bindings.extend(
                         fp8_bindings(
@@ -394,7 +472,7 @@ def load_gqa_ffn_ft_checkpoint(model, checkpoint, *, extra_bindings=()):
                     )
                     continue
             bindings.append(RuntimeTensorBinding((src + old,), dst + target, convert))
-        if layer.self_attn.qkv_proj.bias is not None:
+        if owned_attention[key] is None and layer.self_attn.qkv_proj.bias is not None:
             bindings.append(
                 RuntimeTensorBinding(
                     (src + "self_attention_weights.query_weight.bias",),
@@ -404,7 +482,7 @@ def load_gqa_ffn_ft_checkpoint(model, checkpoint, *, extra_bindings=()):
                     ).reshape(shape),
                 )
             )
-        for qk in ("q", "k"):
+        for qk in ("q", "k") if owned_attention[key] is None else ():
             if getattr(layer.self_attn, qk + "_norm", None) is not None:
                 bindings.append(
                     RuntimeTensorBinding(
@@ -413,8 +491,9 @@ def load_gqa_ffn_ft_checkpoint(model, checkpoint, *, extra_bindings=()):
                         _identity,
                     )
                 )
-        ffn, ffn_target = layer.mlp, "mlp."
-        if hasattr(layer.mlp, "experts"):
+        mlp, mlp_path, shared_name = layer_ffn(layer)
+        ffn, ffn_target = mlp, mlp_path + "."
+        if hasattr(mlp, "experts"):
             from rtp_llm.models_py.quant_methods.block_fp8_ft import (
                 block_moe_ft_bindings,
             )
@@ -424,30 +503,33 @@ def load_gqa_ffn_ft_checkpoint(model, checkpoint, *, extra_bindings=()):
 
             expert_binding = (
                 block_moe_ft_bindings
-                if layer.mlp.experts._quant_family == "fp8_per_block"
+                if mlp.experts._quant_family == "fp8_per_block"
                 else nonblock_moe_ft_bindings
             )
             bindings.extend(
                 expert_binding(
-                    layer.mlp.experts, src, dst + "mlp.experts", checkpoint, layer_id
+                    mlp.experts, src, dst + mlp_path + ".experts", checkpoint, layer_id
                 )
             )
             bindings.append(
                 RuntimeTensorBinding(
                     (src + "partial_moe_weights.gate.kernel",),
-                    dst + "mlp.gate.weight",
+                    dst + mlp_path + ".gate.weight",
                     kernel,
                 )
             )
-            if getattr(layer.mlp.gate, "e_score_correction_bias", None) is not None:
+            if getattr(mlp.gate, "e_score_correction_bias", None) is not None:
                 bindings.append(
                     RuntimeTensorBinding(
                         (src + "partial_moe_weights.e_score_correction_bias",),
-                        dst + "mlp.gate.e_score_correction_bias",
+                        dst + mlp_path + ".gate.e_score_correction_bias",
                         _identity,
                     )
                 )
-            ffn, ffn_target = layer.mlp.shared_experts, "mlp.shared_experts."
+            ffn, ffn_target = (
+                getattr(mlp, shared_name, None),
+                mlp_path + "." + shared_name + ".",
+            )
         if ffn is None:
             continue
         down_names = (src + "ffn_weights.intermediate_weight2.kernel",)
@@ -479,6 +561,20 @@ def load_gqa_ffn_ft_checkpoint(model, checkpoint, *, extra_bindings=()):
             (gate_names, "gate_up", ffn_target + "gate_up_proj.weight"),
         ):
             linear = ffn.down_proj if projection == "down" else ffn.gate_up_proj
+            if isinstance(linear.quant_method, PerTensorInt8LinearMethod):
+                if len(names) != 1:
+                    raise ValueError("Static INT8 FT requires a fused gate/up kernel")
+                bindings.extend(
+                    static_int8_bindings(
+                        linear,
+                        names[0],
+                        dst + target.removesuffix(".weight"),
+                        projection,
+                        src,
+                        swizzled,
+                    )
+                )
+                continue
             if isinstance(linear.quant_method, fp8_methods):
                 if len(names) != 1 and not isinstance(
                     linear.quant_method, Fp8BlockLinearMethod
@@ -502,8 +598,8 @@ def load_gqa_ffn_ft_checkpoint(model, checkpoint, *, extra_bindings=()):
                     names,
                     dst + target,
                     _identity,
-                    lambda names=names, projection=projection, width=local_width, hidden=hidden: ffn_local(
-                        names, projection, width, hidden
+                    lambda names=names, projection=projection, width=local_width, hidden=hidden: (
+                        ffn_local(names, projection, width, hidden)
                     ),
                 )
             )
@@ -511,5 +607,17 @@ def load_gqa_ffn_ft_checkpoint(model, checkpoint, *, extra_bindings=()):
     if handler is not None:
         bindings.extend(handler.ft_bindings(checkpoint))
     checkpoint.load_parameters(model, tuple(bindings), validators)
+    tied_config = getattr(model, "tie_word_embeddings", False)
+    # Historic FT files always emit two tensors and have no origin marker.
+    # Keep serving their exact bytes, but do not guess future update ownership.
+    model._ft_unknown_tied_vocab = tied_config and head_source is None and (
+        head is not None or getattr(model, "_pipeline_partitioned", False)
+    )
     if head is not None:
-        head._explicit_checkpoint_loaded = True
+        mirrored = tied_config and head_source == "embedding"
+        head._explicit_checkpoint_loaded = not mirrored
+        if mirrored:
+            head._tied_checkpoint_loaded = True
+            config = model.config
+            rows = config.get("input_vocab_size") if isinstance(config, dict) else getattr(config, "input_vocab_size", None)
+            head._tied_checkpoint_source_rows = rows or head.checkpoint_vocab_size

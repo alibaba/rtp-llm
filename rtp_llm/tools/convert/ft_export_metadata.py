@@ -25,12 +25,15 @@ def generate_ft_index(
     if not files:
         raise ValueError(f"No safetensors shards in {output_path}")
     weight_map = {}
+    head_sources = set()
     total_size = 0
     for name in files:
         path = os.path.join(output_path, name)
         total_size += os.path.getsize(path)
         with safe_open(path, framework="pt") as checkpoint:
             for key in checkpoint.keys():
+                if key.endswith(".global.lm_head"):
+                    head_sources.add((checkpoint.metadata() or {}).get("ft_lm_head_source"))
                 if key in weight_map:
                     raise ValueError(
                         f"Duplicate FT tensor {key} in {weight_map[key]} and {name}"
@@ -51,6 +54,10 @@ def generate_ft_index(
     }
     if module_metadata is not None:
         index["module_export_metadata"] = dict(module_metadata)
+    if head_sources and head_sources != {None}:
+        if len(head_sources) != 1 or not head_sources <= {"embedding", "lm_head"}:
+            raise ValueError("FT LM-head provenance is invalid or disagrees between ranks")
+        index["ft_lm_head_source"] = head_sources.pop()
     with open(
         os.path.join(output_path, "model.safetensors.index.json"),
         "w",

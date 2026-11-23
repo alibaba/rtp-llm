@@ -20,5 +20,5 @@ def init_lora_group_args(parser, lora_config):
         bind_to=(lora_config, 'merge_lora'),
         type=str2bool,
         default=True,
-        help="Lora合并",
+        help="启动时将单个 LoRA 合并到所有请求使用的权重。关闭此项或配置多个适配器时，仅加载基座模型；原生引擎不支持按请求切换 LoRA。",
     )

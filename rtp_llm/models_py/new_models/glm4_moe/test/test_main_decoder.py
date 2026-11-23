@@ -2,6 +2,7 @@
 
 import gc
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -119,39 +120,40 @@ class MainDecoderTest(unittest.TestCase):
         return result
 
     def test_real_scratch_and_fst(self):
-        import fastsafetensors.cpp as native
-
-        self.assertTrue(native.__file__.endswith(".so"))
+        scratch = None
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
             src = self.make(path)
             save_file(src, str(path / "model.safetensors"))
-            scratch = self.load(path, "scratch")
-            fast = self.load(path, "fastsafetensors")
+            loaded = self.load(path, "scratch")
+            if os.environ.get("NEWLOADER_TEST_NATIVE_FST") != "0":
+                import fastsafetensors.cpp as native
+
+                self.assertTrue(native.__file__.endswith(".so"))
+                scratch = loaded
+                loaded = self.load(path, "fastsafetensors")
         gc.collect()
-        self.assertEqual(
-            set(dict(fast.named_parameters())), set(dict(scratch.named_parameters()))
-        )
-        for name, param in fast.named_parameters():
-            torch.testing.assert_close(
-                param, dict(scratch.named_parameters())[name], rtol=0, atol=0
-            )
+        if scratch is not None:
+            expected = dict(scratch.named_parameters())
+            self.assertEqual(set(dict(loaded.named_parameters())), set(expected))
+            for name, param in loaded.named_parameters():
+                torch.testing.assert_close(param, expected[name], rtol=0, atol=0)
         torch.testing.assert_close(
-            fast.embed_tokens.weight, src["model.embed_tokens.weight"]
+            loaded.embed_tokens.weight, src["model.embed_tokens.weight"]
         )
-        torch.testing.assert_close(fast.lm_head.weight, src["lm_head.weight"])
-        torch.testing.assert_close(fast.norm.weight, src["model.norm.weight"])
-        self.assertEqual(fast._layout.dense_width, 8)
-        self.assertEqual(fast._layout.shared_width, 4)
-        self.assertEqual(fast.layers[0].mlp.gate_up_proj.weight.shape, (16, 4))
-        self.assertTrue(fast.layers[1].mlp.experts.is_cpu_checkpoint_staging())
-        self.assertTrue(fast._layout.correction_bias)
-        qkv = fast.layers[0].self_attn.qkv_proj
+        torch.testing.assert_close(loaded.lm_head.weight, src["lm_head.weight"])
+        torch.testing.assert_close(loaded.norm.weight, src["model.norm.weight"])
+        self.assertEqual(loaded._layout.dense_width, 8)
+        self.assertEqual(loaded._layout.shared_width, 4)
+        self.assertEqual(loaded.layers[0].mlp.gate_up_proj.weight.shape, (16, 4))
+        self.assertTrue(loaded.layers[1].mlp.experts.is_cpu_checkpoint_staging())
+        self.assertTrue(loaded._layout.correction_bias)
+        qkv = loaded.layers[0].self_attn.qkv_proj
         torch.testing.assert_close(
             qkv.bias,
             torch.cat([src[f"model.layers.0.self_attn.{p}_proj.bias"] for p in "qkv"]),
         )
-        w = fast.layers[1].mlp.experts.w13[2]
+        w = loaded.layers[1].mlp.experts.w13[2]
         torch.testing.assert_close(
             w,
             torch.cat(

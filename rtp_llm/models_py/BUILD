@@ -142,7 +142,9 @@ py_test(
             "MKL_NUM_THREADS": "1",
             "NEWLOADER_TEST_NATIVE_FST": "1",
         },
-        deps = [":new_weight_loader", ":new_loader_core", ":models", "//rtp_llm:models", "//rtp_llm:fastsafetensors"],
+        deps = [":new_weight_loader", ":new_loader_core", ":models", "//rtp_llm:models", "//rtp_llm:fastsafetensors"] + (
+            ["//rtp_llm/tools/convert:convert"] if name == "qwen4_mtp_native_service_checkpoint_test" else []
+        ),
     )
     for name, main, extra, native_runtime in [
         ("qwen4_native_service_checkpoint_test", "new_models/qwen4_exp/test/test_native_service.py", ["new_models/qwen4_exp/test/test_precision_profiles.py"], True),
@@ -260,7 +262,7 @@ py_test(
     srcs = ["rank_local_ft_test.py"],
     env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
     deps = [
-        ":new_loader_core",
+        ":new_weight_loader",
         "//rtp_llm:fastsafetensors",
         "//rtp_llm/tools/convert:ft_export_metadata",
         "//rtp_llm/tools/convert:ft_export_writer",
@@ -322,6 +324,8 @@ py_test(
     env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
     deps = [
         ":new_weight_loader",
+        "//rtp_llm:models",
+        "//rtp_llm/tools/convert:convert",
         "//rtp_llm:safetensors",
         "//rtp_llm:utils",
         "//rtp_llm/tools/convert:ft_export_metadata",
@@ -367,7 +371,10 @@ py_test(
     srcs = ["new_models/deepseek_v41/backbone_test.py"],
     main = "new_models/deepseek_v41/backbone_test.py",
     env = ue8m0_test_env(),
-    deps = [":new_weight_loader", "//rtp_llm:safetensors", "//rtp_llm:torch"],
+    deps = [
+        ":new_weight_loader", "//rtp_llm:safetensors", "//rtp_llm:torch",
+        "//rtp_llm/tools/convert:ft_export_metadata", "//rtp_llm/tools/convert:ft_export_writer",
+    ],
 )
 
 py_test(
@@ -388,7 +395,7 @@ py_test(
     name = "v41_dspark_auxiliary_test",
     srcs = ["new_models/deepseek_v41_dspark/auxiliary_test.py"],
     main = "new_models/deepseek_v41_dspark/auxiliary_test.py",
-    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
+    env = checkpoint_reader_test_env({"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}),
     deps = [":new_weight_loader"],
 )
 
@@ -492,6 +499,7 @@ py_library(
         "//rtp_llm/model_loader/tipc:tipc",
         "//rtp_llm:fastsafetensors",
         "//rtp_llm:ops",
+        "//rtp_llm:triton",
         "//rtp_llm/models_py/distributed:collective_torch",
     ] + select({
         # The ROCm fastsafetensors wrapper imports fast_safetensors, shipped
@@ -541,7 +549,7 @@ py_test(
         name = name,
         srcs = [entry] + extra,
         main = entry,
-        deps = [":new_weight_loader", "//rtp_llm:models"],
+        deps = [":new_weight_loader", "//rtp_llm:models"] + (["//rtp_llm/tools/convert:ft_export_engram"] if name == "v41_engram_source_test" else []),
         env = {
             "CUDA_VISIBLE_DEVICES": "",
             "HIP_VISIBLE_DEVICES": "",
@@ -683,6 +691,14 @@ py_test(
 )
 
 py_test(
+    name = "multimodal_dense_ft_test",
+    srcs = ["new_models/multimodal_dense_ft_test.py"],
+    main = "new_models/multimodal_dense_ft_test.py",
+    env = checkpoint_reader_test_env(),
+    deps = [":new_weight_loader", "//rtp_llm:models", "//rtp_llm/tools/convert:convert"],
+)
+
+py_test(
     name = "qwen3_dspark_sampler_checkpoint_test",
     srcs = ["new_models/qwen3_dspark_weights_test.py"],
     main = "new_models/qwen3_dspark_weights_test.py",
@@ -727,6 +743,28 @@ py_test(
         ":new_weight_loader",
         "//rtp_llm:transformers",
     ],
+)
+
+py_test(
+    name = "glm5_packed_mega_eplb_sm100_test",
+    srcs = ["new_models/glm5/mega_eplb_sm100_test.py"],
+    main = "new_models/glm5/mega_eplb_sm100_test.py",
+    deps = [":new_weight_loader", "//rtp_llm:models"],
+    tags = ["SM100_ARM_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_arm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "glm5_packed_mega_eplb_test",
+    srcs = ["new_models/glm5/mega_eplb_test.py"],
+    main = "new_models/glm5/mega_eplb_test.py",
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+    deps = [":new_weight_loader", "//rtp_llm:models"],
+    target_compatible_with = ue8m0_test_platforms(),
 )
 
 py_test(

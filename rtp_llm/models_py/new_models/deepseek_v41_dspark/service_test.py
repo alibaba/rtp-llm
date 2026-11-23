@@ -111,15 +111,19 @@ class V41DraftServiceTest(unittest.TestCase):
                 path = Path(directory) / "model.safetensors"
                 save_file(values(commit), str(path))
                 config, load = config_and_load(directory, 0, commit)
-                draft = DeepSeekV41DSparkForCausalLM(config, load)
                 loans = aliases_from_runtime_exports(
                     target,
                     {
                         name: target_view.get_global_weight(name)
                         for name in ("embedding", "lm_head")
                     },
-                    draft.runtime_parameter_paths,
+                    DeepSeekV41DSparkForCausalLM.runtime_parameter_paths,
                 )
+                draft = NewModelLoader(
+                    config, load, model_path=directory, parameter_aliases=loans
+                )._create_model()
+                self.assertTrue(draft.v4.embed.weight.is_meta)
+                self.assertTrue(draft.v4.head.weight.is_meta)
                 bind_borrowed_parameters(draft, loans, "cpu")
                 load_into(draft, path, 0, native_fst=True)
                 self.assertIs(draft.v4.embed.weight, target.v4.embed.base.weight)

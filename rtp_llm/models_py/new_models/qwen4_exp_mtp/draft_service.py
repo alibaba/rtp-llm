@@ -27,17 +27,7 @@ from rtp_llm.models_py.weight_mapper import WeightsMapper
 class _DraftPlan(Qwen4CheckpointPlan):
     def __init__(self, directory, config):
         super().__init__(directory, config)
-        spec = self.text.get("mtp") or {}
-        if (
-            spec.get("hybrid") is not True
-            or spec.get("num_hidden_layers") != 1
-            or spec.get("layer_types") != ["full_attention"]
-            or self.text.get("mtp_use_dedicated_embeddings", False)
-            or spec.get("mtp_use_hidden_state_from_layer") is not None
-        ):
-            raise ValueError(
-                "Qwen4 MTP requires one full-attention draft layer using final target HC states"
-            )
+        self.validate_spec(self.text)
         self.prefix, self.num_layers = "mtp.", 1
         self.layer_types, self.ple_layers = ("full_attention",), ()
         self.positive("indexer_head_dim")
@@ -50,9 +40,42 @@ class _DraftPlan(Qwen4CheckpointPlan):
             if self.prefix + name not in self.shapes:
                 raise ValueError(f"Missing Qwen4 MTP anchor: {name}")
 
+    @staticmethod
+    def validate_spec(text):
+        spec = text.get("mtp") or {}
+        if (
+            spec.get("hybrid") is not True
+            or spec.get("num_hidden_layers") != 1
+            or spec.get("layer_types") != ["full_attention"]
+            or text.get("mtp_use_dedicated_embeddings", False)
+            or spec.get("mtp_use_hidden_state_from_layer") is not None
+        ):
+            raise ValueError(
+                "Qwen4 MTP requires one full-attention draft layer using final target HC states"
+            )
+
 
 class Qwen4MTPDraftWeights(RtpModule):
     """Load only mtp.* plus the source vocabulary when it isn't a target loan."""
+
+    preserved_ft_parameter_loans = {
+        "embed_tokens.weight": "global.embedding",
+        "lm_head.weight": "global.lm_head",
+    }
+
+    @classmethod
+    def from_ft_checkpoint_header(cls, config, load, checkpoint):
+        from rtp_llm.models_py.new_models.qwen4_exp.rank_local_ft import rank_local_plan
+
+        plan = rank_local_plan(config, load, checkpoint, draft=True)
+        _DraftPlan.validate_spec(plan.text)
+        plan.positive("indexer_head_dim")
+        return cls(config, load, checkpoint_plan=plan)
+
+    def load_ft_checkpoint(self, checkpoint):
+        from rtp_llm.models_py.new_models.qwen4_exp.rank_local_ft import load_rank_local
+
+        load_rank_local(self, checkpoint, draft=True)
 
     runtime_parameter_paths = {
         "embedding": "embed_tokens.weight",
@@ -108,12 +131,12 @@ class Qwen4MTPDraftWeights(RtpModule):
             device=device,
         )
 
-    def __init__(self, config, load):
+    def __init__(self, config, load, *, checkpoint_plan=None):
         super().__init__()
         directory = (
             config["ckpt_path"] if isinstance(config, dict) else config.ckpt_path
         )
-        self.checkpoint_plan = plan = _DraftPlan(directory, config)
+        self.checkpoint_plan = plan = checkpoint_plan or _DraftPlan(directory, config)
         if load.compute_dtype != torch.bfloat16:
             raise ValueError("Qwen4 draft requires BF16 compute")
         self._vocab_loan = loan = load.prepared_runtime_loan
@@ -303,7 +326,7 @@ def _bind_draft(owner, config, load):
 class Qwen4ExpMTPForCausalLM(Qwen4MTPDraftWeights):
     """Direct Qwen4 draft service using the original target/draft cache runtime."""
 
-    def __init__(self, config, load):
+    def __init__(self, config, load, *, checkpoint_plan=None):
         from rtp_llm.config.qwen4_exp_config import (
             freeze_runtime_config,
             resolve_qwen4_parallelism,
@@ -329,7 +352,7 @@ class Qwen4ExpMTPForCausalLM(Qwen4MTPDraftWeights):
             raise ValueError(
                 "Qwen4 MTP draft requires one QSA layer without target PLE"
             )
-        super().__init__(config, load)
+        super().__init__(config, load, checkpoint_plan=checkpoint_plan)
         self.load_config = load
         object.__setattr__(self, "_runtime", None)
 

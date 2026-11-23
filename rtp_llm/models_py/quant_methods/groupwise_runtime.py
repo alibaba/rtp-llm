@@ -206,6 +206,7 @@ def _load_backend():
         "A",
         "B",
         "C",
+        "A_scale",
         "B_scale",
         "B_zp",
         "topk_weights",
@@ -213,13 +214,26 @@ def _load_backend():
         "sorted_token_ids",
         "expert_ids",
         "num_tokens_post_padded",
+        "mul_routed_weight",
+        "top_k",
+        "compute_type",
+        "use_fp8_w8a8",
         "use_int8_w8a16",
         "use_int4_w4a16",
         "block_shape",
         "config",
     }
-    if not callable(gemm) or not required.issubset(inspect.signature(gemm).parameters):
-        raise RuntimeError("Aiter fused_moe lacks the grouped AWQ/GPTQ integer ABI")
+    try:
+        signature = inspect.signature(gemm)
+        if not required.issubset(signature.parameters):
+            raise TypeError("missing grouped GEMM arguments")
+        # _projection calls by keyword. Name membership alone accepts both
+        # positional-only arguments and an extra mandatory wheel argument.
+        signature.bind(**dict.fromkeys(required))
+    except (TypeError, ValueError) as error:
+        raise RuntimeError(
+            "Aiter fused_moe lacks the grouped AWQ/GPTQ integer ABI"
+        ) from error
     kernel = getattr(module, "_fused_moe_kernel_gptq_awq", None)
     if kernel is None or not hasattr(kernel, "__getitem__") or not callable(sorter):
         raise RuntimeError(
@@ -466,10 +480,6 @@ def build_moe_executor(layer):
         "rtp_llm.models_py.modules.factory.fused_moe.impl." + platform + ".routers."
     )
 
-    if getattr(layer, "_dynamic_eplb_enabled", False):
-        raise RuntimeError(
-            "Grouped AWQ/GPTQ native EPLB runtime-state transaction is not yet implemented; source-only parameter replacement is unsafe"
-        )
     states = getattr(layer, "_groupwise_runtime", None)
     if not isinstance(states, dict) or set(states) != {"w13", "w2"}:
         raise RuntimeError("Grouped MoE has no finalized native expert states")

@@ -1,6 +1,12 @@
 package(default_visibility = ["//:__subpackages__"])
 
 py_library(
+    name = "ft_export_engram",
+    srcs = ["ft_export_engram.py"],
+    deps = ["//rtp_llm:safetensors_torch"],
+)
+
+py_library(
     name = "ft_export_metadata",
     srcs = ["ft_export_metadata.py"],
     deps = ["//rtp_llm:safetensors_torch"],

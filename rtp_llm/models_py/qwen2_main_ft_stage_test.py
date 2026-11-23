@@ -37,6 +37,64 @@ def produce_records(rank):
 
 
 class MainFTStageTest(unittest.TestCase):
+    def test_tied_ft_vocab_update_uses_source_not_equal_archive_values(self):
+        from rtp_llm.models_py.new_weight_manager import NewLoaderWeightManager
+
+        rows = torch.arange(32, dtype=torch.float32).reshape(8, 4)
+        config = SimpleNamespace(
+            model_type="qwen_2", num_layers=3, is_mtp=False, vocab_size=8, hidden_size=4,
+            inter_size=4, attn_config=SimpleNamespace(head_num=2, kv_head_num=1, size_per_head=2),
+            layernorm_eps=1e-6, enable_fp32_lm_head=False, tie_word_embeddings=True,
+            capture_aux_hidden_layer_ids=[], hidden_state_capture_layer_ids=[],
+        )
+        for source in ("embedding", "lm_head", None):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
+                for rank in range(2):
+                    records = [
+                        (i, key, torch.cat([rows, torch.zeros_like(rows)]).chunk(2)[rank]
+                         if key == "lm_head" else value)
+                        for i, key, value in produce_records(rank)
+                    ]
+                    write_ft_shards(
+                        records, directory, tp_rank=rank, ep_rank=rank,
+                        head_provenance={"source": source},
+                    )
+                generate_ft_index(directory, {"TP_SIZE": 2, "DP_SIZE": 1, "EP_SIZE": 2})
+                for pp, stage in ((1, 0), (2, 0), (2, 1)):
+                    pc = SimpleNamespace(
+                        tp_size=2, tp_rank=0, ep_size=2, ep_rank=0, pp_size=pp,
+                        pp_rank=stage, pp_stage_layer_counts=[1, 2] if pp == 2 else [],
+                        dp_size=1, dp_rank=0, world_size=pp * 2, world_rank=stage * 2,
+                        get_attn_tp_size=lambda: 2, get_attn_tp_rank=lambda: 0,
+                        get_ffn_tp_size=lambda: 2, get_ffn_tp_rank=lambda: 0,
+                    )
+                    loader = NewModelLoader(config, NewLoaderConfig(
+                        tp_size=2, tp_rank=0, ep_size=2, ep_rank=0, compute_dtype=torch.float32,
+                        device="cpu", load_method="scratch", quant_config=QuantizationConfig("none"),
+                        parallelism_config=pc,
+                    ), model_path=directory)
+                    model = loader.load()
+                    manager = NewLoaderWeightManager(model, loader)
+                    request = {"model.embed_tokens.weight": rows + 8}
+                    if source is None:
+                        with self.assertRaisesRegex(ValueError, "provenance"):
+                            manager.update_tensors(request)
+                        self.assertEqual(manager.version, 0)
+                    else:
+                        manager.update_tensors(request)
+                    if model.embed_tokens is not None:
+                        expected = rows if source is None else rows + 8
+                        torch.testing.assert_close(model.embed_tokens.weight, expected[:4])
+                    if model.lm_head is not None:
+                        expected = rows + 8 if source == "embedding" else rows
+                        torch.testing.assert_close(model.lm_head.weight, expected[:4])
+                        if source == "lm_head":
+                            manager.update_tensors({"lm_head.weight": rows + 19})
+                            torch.testing.assert_close(model.lm_head.weight, rows[:4] + 19)
+                        else:
+                            with self.assertRaises(ValueError):
+                                manager.update_tensors({"lm_head.weight": rows + 19})
+
     def test_qkv_operator_bias_rank_follows_attention_partition(self):
         from rtp_llm.models_py.new_models.qwen2.language import (
             Qwen2Attention,

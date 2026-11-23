@@ -84,6 +84,15 @@ _active_weight_database: ContextVar[Optional[BaseDatabase]] = ContextVar(
 )
 
 
+def _choose_ft_head_source(tensors, *, transforms, provenance):
+    # The first viable source wins (an explicit head takes precedence).
+    # Record the decision after conversion succeeds, not from tensor equality
+    # or mere presence of a name in the archive.
+    result = choose_available(tensors, transforms)
+    provenance["source"] = "lm_head" if tensors[0] is not None else "embedding"
+    return result
+
+
 def _apply_mega_moe_fp4_wrappers(
     weight_info: "ModelWeightInfo",
     database: Optional[BaseDatabase] = None,
@@ -750,10 +759,14 @@ class ModelDeployWeightInfo:
             ]
         )
         lm_head_merge_funcs = [lm_head.process_fun, word_emb.process_fun]
+        self.ft_head_provenance = {}
         lm_head = AtomicWeight(
             W.lm_head,
             lm_head_ckpt_weigth_infos,
-            functools.partial(choose_available, origin_func_list=lm_head_merge_funcs),
+            functools.partial(
+                _choose_ft_head_source, transforms=lm_head_merge_funcs,
+                provenance=self.ft_head_provenance,
+            ),
         )
         origin_weight_info.weights[lm_head_idx] = lm_head
         return origin_weight_info

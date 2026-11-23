@@ -148,6 +148,12 @@ def service(path, method, model_type="_service_direct_leaf"):
 
 
 class DirectServingBoundaryTest(unittest.TestCase):
+    def test_unported_service_type_reports_missing_owner_before_device_or_io(self):
+        tag = "example_arch_without_an_owner"
+        service = SimpleNamespace(model_config=SimpleNamespace(model_type=tag))
+        with self.assertRaisesRegex(ValueError, f"{tag}.*no direct checkpoint owner"):
+            load_owned_model(service)
+
     def test_two_gloo_ranks_combine_collective_and_indexed_range_reads(self):
         from pathlib import Path
 

@@ -63,6 +63,34 @@ def source_checkpoint(directory, kind):
 
 
 class PrecisionPlanTest(unittest.TestCase):
+    def test_bf16_eplb_reloads_mapped_expert_prefix(self):
+        from rtp_llm.utils.model_weight import W
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            MODEL_REGISTRY, {"qwen4_exp": Qwen4TargetWeights}
+        ):
+            config, _ = source_checkpoint(directory, "bf16")
+            pc = ParallelismConfig()
+            pc.world_size = pc.tp_size = pc.ep_size = 1
+            pc = resolve_qwen4_parallelism(config, pc)
+            load = NewLoaderConfig.from_runtime(
+                pc, device="cpu", compute_dtype=torch.bfloat16, load_method="scratch",
+                moe_config=MoeConfig(), py_hw_kernel_config=HWKernelConfig(),
+            )
+            loader = NewModelLoader(config, load, model_path=directory)
+            owner = loader.load()
+            try:
+                leaf = owner.layers[0].mlp.experts
+                self.assertTrue(leaf.has_shared_expert_gate)
+                remap = list(reversed(range(leaf.num_experts)))
+                staged = loader.load_moe_layer_weights(
+                    owner, layer_id=0, physical_to_logical=remap, ep_size=1, ep_rank=0
+                )
+                torch.testing.assert_close(staged[W.moe_w1], leaf.w13[remap])
+                torch.testing.assert_close(staged[W.moe_w2], leaf.w2[remap])
+            finally:
+                owner.close()
+
     @unittest.skipUnless(os.environ.get("NEWLOADER_TEST_NATIVE_FST") == "1", "native FST opt-in")
     def test_two_rank_whole_bf16_and_mixed_fst(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1,5 +1,6 @@
 """Real checkpoint -> generic stacked experts; sequential rank views, no GPU."""
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -333,6 +334,10 @@ class GenericExpertsCheckpointTest(unittest.TestCase):
     def test_scratch(self):
         self.exercise("scratch")
 
+    @unittest.skipIf(
+        os.environ.get("NEWLOADER_TEST_NATIVE_FST") == "0",
+        "this platform lock does not ship the native FST reader",
+    )
     def test_native_fst(self):
         import fastsafetensors.cpp as native
 

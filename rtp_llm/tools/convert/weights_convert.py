@@ -338,6 +338,10 @@ class WeightConverter:
                 "done",
             ],
         )
+        if self.model_type == "deepseek_v41":
+            from rtp_llm.tools.convert.ft_export_engram import export_v41_engram
+
+            export_v41_engram(input_path, output_path)
         self._generate_safetensor_meta_info(output_path, ranks)
         # touch done
         done_file = os.path.join(output_path, "done")

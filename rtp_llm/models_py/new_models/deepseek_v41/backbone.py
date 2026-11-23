@@ -12,7 +12,7 @@ from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.modules.dsv41.bounded_replay import (
     enabled as bounded_replay_enabled,
 )
-from rtp_llm.models_py.new_models.deepseek_v4.load_geometry import make_lm_head
+from rtp_llm.models_py.new_models.deepseek_v4.load_geometry import make_lm_head, vocabulary_allocation
 from rtp_llm.models_py.new_models.deepseek_v41.attention import (
     OwnedV41Attention,
     OwnedV41CommitAttention,
@@ -199,16 +199,18 @@ class OwnedV41Transformer(RtpModule):
         if self.commit_only:
             self.embed = self.head = self.norm = self.head_hc = None
             return
-        self.embed = OwnedV41Matrix(
-            args.vocab_size,
-            args.dim,
-            shard_dim=1,
-            tp_size=args.embedding_tp_size,
-            tp_rank=args.embedding_tp_rank,
-            dtype=torch.bfloat16,
-        )
+        with vocabulary_allocation(args, "v4.embed.weight"):
+            self.embed = OwnedV41Matrix(
+                args.vocab_size,
+                args.dim,
+                shard_dim=1,
+                tp_size=args.embedding_tp_size,
+                tp_rank=args.embedding_tp_rank,
+                dtype=torch.bfloat16,
+            )
         self.norm = self.norm_type(args.dim, args.norm_eps, torch.bfloat16)
-        self.head = make_lm_head(args, head_dtype)
+        with vocabulary_allocation(args, "v4.head.weight"):
+            self.head = make_lm_head(args, head_dtype)
         self.head_hc = self.head_type(self.layers[-1].ffn_hc)
 
     @property

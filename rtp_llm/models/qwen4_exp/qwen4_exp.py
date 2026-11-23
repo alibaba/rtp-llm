@@ -64,24 +64,26 @@ class Qwen4Exp(Qwen35Moe):
 
     @staticmethod
     def _validate_checkpoint(config: ModelConfig) -> None:
-        if getattr(config, "_qwen4_nvfp4_source", False):
+        nvfp4 = getattr(config, "_qwen4_nvfp4_source", False)
+        if not (nvfp4 or getattr(config, "_qwen4_fp8_source", False)):
+            return
+        root = Path(config.ckpt_path)
+        index = json.loads((root / "model.safetensors.index.json").read_text())
+        if getattr(config, "is_mtp", False) and index.get("is_ft_style_weight") is True:
+            raise ValueError(
+                "Cannot import a legacy Qwen4 MTP FT archive with NVFP4 experts: "
+                "the producer's expert layout is not established. Use the original "
+                "HF checkpoint. source_bf16 selects dense storage only; the routed "
+                "experts remain NVFP4."
+            )
+        config_json = json.loads((root / "config.json").read_text())
+        if nvfp4:
             from rtp_llm.models.qwen4_exp.moe_nvfp4 import validate_nvfp4_manifest
 
-            root = Path(config.ckpt_path)
-            validate_nvfp4_manifest(
-                json.loads((root / "config.json").read_text()),
-                json.loads((root / "model.safetensors.index.json").read_text())[
-                    "weight_map"
-                ],
-            )
-            return
-        if not getattr(config, "_qwen4_fp8_source", False):
+            validate_nvfp4_manifest(config_json, index["weight_map"])
             return
         from rtp_llm.models.qwen4_exp.moe_fp8 import validate_moe_fp8_checkpoint
 
-        root = Path(config.ckpt_path)
-        config_json = json.loads((root / "config.json").read_text())
-        index = json.loads((root / "model.safetensors.index.json").read_text())
         validate_moe_fp8_checkpoint(config_json, index["weight_map"], root)
 
     def _py_model_class(self):

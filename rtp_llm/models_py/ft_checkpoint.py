@@ -7,6 +7,7 @@ explicitly declare each supported boundary conversion before using it.
 
 import json
 import re
+from copy import copy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping
@@ -17,24 +18,26 @@ from safetensors import safe_open
 _KEY = re.compile(r"^rank_(\d+)_(\d+)_(\d+)\.(global\..+|layers\.\d+\..+)$")
 
 
-def validate_format_parameter_ownership(model: torch.nn.Module) -> None:
-    """Reject loans before format adapters can write or migrate their storage.
-
-    Existing FT/Meta adapters import complete models, not draft checkpoints
-    whose embedding/head are borrowed from a live target. Supporting that
-    combination needs an explicit source-exclusion and postprocess contract;
-    silently copying into the borrowed Parameter would corrupt the target.
-    """
+def validate_format_parameter_ownership(model: torch.nn.Module, *, ft=False):
+    """Only FT adapters declaring the exact skipped source/target may keep loans."""
     borrowed = [
         f"{path}.{name}" if path else name
         for path, module in model.named_modules()
         for name in getattr(module, "_rtp_borrowed_parameter_names", ())
     ]
-    if borrowed:
+    if not borrowed:
+        return {}
+    preserve = getattr(model, "preserved_ft_parameter_loans", {}) if ft else {}
+    bindings = getattr(model, "_rtp_borrowed_parameter_bindings", {})
+    if set(borrowed) != set(bindings) or not set(borrowed) <= preserve.keys():
         raise PermissionError(
             "FT/Meta checkpoint adapters cannot overwrite borrowed parameters: "
             + ", ".join(sorted(borrowed))
         )
+    from rtp_llm.models_py.borrowed_parameters import validate_borrowed_parameters
+
+    validate_borrowed_parameters(model)
+    return {target: preserve[target] for target in borrowed}
 
 
 def _unique_json_object(pairs):
@@ -375,7 +378,31 @@ class FTCheckpoint:
         ]
         if any(part.dtype != parts[0].dtype for part in parts[1:]):
             raise ValueError(f"FT source EP ranks use inconsistent dtype for {name}")
-        return parts[0] if len(parts) == 1 else torch.cat(parts, dim=0)
+        if len(parts) == 1:
+            return parts[0]
+        dtype = parts[0].dtype
+        if dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
+            # A changed placement commonly needs several noncontiguous runs.
+            # Not all supported CPU builds implement cat for either FP8 dtype.
+            return torch.cat([part.view(torch.uint8) for part in parts], dim=0).view(dtype)
+        return torch.cat(parts, dim=0)
+
+    def reload_expert_module(self, live, staging):
+        """Rebuild the exact import bindings on a private one-layer staging tree."""
+        layout = getattr(live, "_ft_expert_binding_layout", None)
+        if layout is None:
+            raise ValueError("FT owner did not declare an expert reload layout")
+        factory, source_prefix, source_layer = layout
+        root = torch.nn.Module()
+        root.add_module("experts", staging)
+        # Keep the original peer-rank catalog, overlays and chosen reader. Only
+        # the scope checked by load_parameters is restricted; never mutate the
+        # startup catalog (callbacks on other layers may run concurrently).
+        view = copy(self)
+        bindings = factory(staging, source_prefix, "experts", view, source_layer)
+        keys = {name for binding in bindings for name in binding.sources}
+        view.entries = {name: self.entries[name] for name in keys}
+        view.load_parameters(root, tuple(bindings))
 
     def read(self, name: str) -> torch.Tensor:
         key, path = self.entries[name]
@@ -458,18 +485,27 @@ class FTCheckpoint:
         adapter must prove quantization/device layouts and declare all bindings.
         Unknown source tensors or unbound destination parameters are errors.
         """
-        validate_format_parameter_ownership(model)
+        preserved = validate_format_parameter_ownership(model, ft=True)
         targets = dict(model.named_parameters(remove_duplicate=False))
+        loan_ids = {id(targets[path]) for path in preserved}
+        for path in preserved:
+            del targets[path]
         for path, module in model.named_modules():
             for name, value in module._buffers.items():
                 if value is not None and name not in module._non_persistent_buffers_set:
                     targets[f"{path}.{name}" if path else name] = value
-        used_sources, used_targets = set(), set()
+        if any(id(value) in loan_ids for value in targets.values()):
+            raise PermissionError("FT adapter cannot write an alias of a borrowed parameter")
+        used_sources, used_targets = self.entries.keys() & preserved.values(), set()
         for name, validate in (source_validators or {}).items():
+            if name in preserved.values():
+                raise ValueError(f"FT validator cannot consume borrowed source {name}")
             validate(self.read(name))
             used_sources.add(name)
         target_owners = {}
         for binding in bindings:
+            if set(binding.sources).intersection(preserved.values()):
+                raise ValueError(f"FT binding cannot consume a borrowed source: {binding.target}")
             if not binding.sources:
                 raise ValueError(f"FT binding has no source: {binding.target}")
             if binding.target in used_targets or binding.target not in targets:

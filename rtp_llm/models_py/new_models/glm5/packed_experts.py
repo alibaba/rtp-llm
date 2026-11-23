@@ -83,7 +83,8 @@ class Glm5PackedExpertMethod(FusedMoEMethodBase):
         return True
 
     def process_weights_after_loading(self, layer):
-        # The MegaMoE executor packs the complete rank-local stack once.
+        # The MegaMoE executor packs the complete rank-local stack at startup
+        # and again on private staging storage when EPLB changes the placement.
         pass
 
     def add_weight_tensors(self, layer, weights):

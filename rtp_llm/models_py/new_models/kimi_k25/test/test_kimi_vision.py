@@ -120,6 +120,10 @@ def check_loaded_forward(test, device, load_method=NewLoaderLoadMethod.SCRATCH):
 
 
 class KimiVisionTest(unittest.TestCase):
+    @unittest.skipIf(
+        os.environ.get("NEWLOADER_TEST_NATIVE_FST") == "0",
+        "this platform lock does not ship the native FST reader",
+    )
     def test_native_fst_keeps_vision_weights_after_checkpoint_close(self):
         check_loaded_forward(self, "cpu", NewLoaderLoadMethod.FASTSAFETENSORS)
 

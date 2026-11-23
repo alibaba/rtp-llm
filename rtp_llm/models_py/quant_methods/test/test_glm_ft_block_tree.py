@@ -224,7 +224,8 @@ class GlmFTBlockTest(unittest.TestCase):
                 )
             )
             hf, ft = channel_inputs() if channel else inputs()
-            write_ft(root, ft)
+            # The fixture encodes the CUDA export ABI, independent of the test host.
+            write_ft(root, ft, producer="cuda")
             base = tree(root, channel)
             self.assertTrue(base._layout.correction_bias)
             for name, tensor in hf.items():

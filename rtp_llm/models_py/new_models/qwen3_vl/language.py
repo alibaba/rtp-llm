@@ -52,7 +52,18 @@ class _LanguageRuntime(Qwen3VLMultimodalMixin):
         )
 
 
-class Qwen2VLForCausalLM(_LanguageRuntime, Qwen2ForCausalLM):
+class _DenseVLTextFT:
+    def load_ft_checkpoint(self, checkpoint):
+        from rtp_llm.models_py.new_models.qwen2.ft_checkpoint import (
+            load_gqa_ffn_ft_checkpoint,
+        )
+
+        # Converter shards contain only text weights. The vision service
+        # loads its separate HF tower; the text injectors own no tensors.
+        load_gqa_ffn_ft_checkpoint(self, checkpoint)
+
+
+class Qwen2VLForCausalLM(_DenseVLTextFT, _LanguageRuntime, Qwen2ForCausalLM):
     """Biased Qwen2 decoder; its independent vision owner consumes visual.*."""
 
     def checkpoint_weight_name_filter(self):
@@ -80,7 +91,7 @@ class _Qwen3VLRuntime(_LanguageRuntime):
         ) and (owns_stage is None or owns_stage(key))
 
 
-class Qwen3VLForCausalLM(_Qwen3VLRuntime, Qwen3ForCausalLM):
+class Qwen3VLForCausalLM(_DenseVLTextFT, _Qwen3VLRuntime, Qwen3ForCausalLM):
     pass
 
 

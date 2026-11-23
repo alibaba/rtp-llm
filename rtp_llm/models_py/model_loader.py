@@ -396,6 +396,8 @@ class NewLoaderConfig:
     lm_head_tp_size: Optional[int] = None
     lm_head_tp_rank: Optional[int] = None
     keep_mla_checkpoint_weights: bool = False
+    # Construction hint only: binding still validates each owner and parameter.
+    borrowed_parameter_paths: Tuple[str, ...] = ()
     custom_weight_mappings: Tuple[Tuple[str, str] | Tuple[str, str, torch.dtype], ...] = ()
     custom_projection_layers: Tuple[Tuple[str, Optional[str]], ...] = ()
     # Experimental consumer bypass retains source file staging until batch
@@ -636,12 +638,16 @@ class NewModelLoader:
             _validate_runtime_device(device, "device override")
             effective_config = replace(effective_config, device=device)
         self.model_config = model_config
-        self.load_config = effective_config
         self.model_path = model_path
         self.parameter_aliases = dict(parameter_aliases or {})
+        paths = tuple(self.parameter_aliases)
+        if paths != effective_config.borrowed_parameter_paths:
+            effective_config = replace(effective_config, borrowed_parameter_paths=paths)
+        self.load_config = effective_config
         self._ckpt_files = None
         self._checkpoint_catalog_cache = _CHECKPOINT_CATALOG_UNSET
         self._selected_load_method: Optional[NewLoaderLoadMethod] = None
+        self._eplb_ft_checkpoint: Optional[FTCheckpoint] = None
 
     @property
     def loaded_method(self) -> Optional[NewLoaderLoadMethod]:
@@ -723,6 +729,13 @@ class NewModelLoader:
             reload_experts = live_experts.clone_empty_for_placement(placement)
         self._validate_runtime_backends(reload_experts, reload_device)
 
+        if self._eplb_ft_checkpoint is not None:
+            self._eplb_ft_checkpoint.reload_expert_module(live_experts, reload_experts)
+            return self._finish_eplb_reload(
+                live_experts, reload_experts, reload_device, layer_id, ep_rank,
+                self._eplb_ft_checkpoint.read_backend,
+            )
+
         model_filter = self._model_checkpoint_name_filter(model)
         prefix = live_experts.prefix + "."
 
@@ -769,10 +782,14 @@ class NewModelLoader:
             if overlay is not None
             else read_spec_resolver
         )
+        # EP1 owns every logical row. Per-key and stacked PyTorch weights are
+        # dispatched by the staging owner using its *new* slot placement. No
+        # safetensors slice expansion is necessary (or valid for a .bin file).
+        expander = expert_filter if ep_size > 1 else None
         base_expander = (
-            overlay.base_slice_expander(expert_filter)
+            overlay.base_slice_expander(expander)
             if overlay is not None
-            else expert_filter
+            else expander
         )
         method = self._selected_load_method
         if method is None:
@@ -804,7 +821,7 @@ class NewModelLoader:
 
         if overlay is not None:
             weights = overlay.prepend(
-                weights, name_filter, read_spec_resolver, expert_filter
+                weights, name_filter, read_spec_resolver, expander
             )
 
         try:
@@ -821,14 +838,25 @@ class NewModelLoader:
             if callable(close_weights):
                 close_weights()
 
+        return self._finish_eplb_reload(
+            live_experts, reload_experts, reload_device, layer_id, ep_rank, method.value
+        )
+
+    @staticmethod
+    def _finish_eplb_reload(
+        live_experts, reload_experts, reload_device, layer_id, ep_rank, backend
+    ):
         reload_experts.validate_weights_loaded()
         reload_experts.to(reload_device)
         result = reload_experts.prepare_eplb_reload_weights()
+        # Some kernels execute transformed copies rather than the owner's
+        # raw tensors. Stage those copies too, before any rank votes ready.
+        result.update(live_experts.eplb_kernel_weights(result, prepare=True))
         logger.info(
             "NewLoader reloaded EPLB layer %d on EP rank %d with %s",
             layer_id,
             ep_rank,
-            method.value,
+            backend,
         )
         # Return detached CPU tensors so background-thread CUDA postprocessing
         # is complete before the all-rank ready flag is published.  The C++
@@ -2337,6 +2365,7 @@ class NewModelLoader:
         # Backend selection alone does not publish a model. On retry, do not
         # expose the previous attempt's backend as evidence for this attempt.
         self._selected_load_method = None
+        self._eplb_ft_checkpoint = None
         requested_method = self.load_config.load_method
         meta_checkpoint = None
         if self._model_type() == "llama":
@@ -2377,7 +2406,7 @@ class NewModelLoader:
         if ft_checkpoint is not None:
             # Format adapters own their import and return before the HF/FST
             # borrowed-parameter filters. Do not let them mutate target loans.
-            validate_format_parameter_ownership(model)
+            validate_format_parameter_ownership(model, ft=meta_checkpoint is None)
             overlay = self._finetune_overlay(checkpoint_files)
             if overlay is not None:
                 ft_checkpoint.apply_overlay(overlay)
@@ -2425,10 +2454,27 @@ class NewModelLoader:
                 ),
             )
             importer(ft_checkpoint)
+            ft_rebalance = False
+            if isinstance(ft_checkpoint, FTCheckpoint):
+                cfg = getattr(self.model_config, "eplb_config", None)
+                mode = getattr(cfg, "eplb_mode", None)
+                if getattr(mode, "name", mode) != "STATS":
+                    for leaf in model.modules():
+                        if not (
+                            getattr(leaf, "_supports_newloader_eplb", False)
+                            and getattr(leaf, "_dynamic_eplb_enabled", False)
+                        ):
+                            continue
+                        if getattr(leaf, "_ft_expert_binding_layout", None) is None:
+                            raise ValueError(
+                                f"FT dynamic EPLB lacks a reload layout for {leaf.prefix}"
+                            )
+                        ft_rebalance = True
             self._validate_loaded_weights(model)
             model.to(self.load_config.device)
             self._validate_loaded_weights(model)
             self._run_post_load_hooks(model)
+            validate_borrowed_parameters(model, self.load_config.device)
             if startup_lora is not None:
                 # Format adapters may import already packed runtime parameters.
                 from rtp_llm.models_py.lora_checkpoint import (
@@ -2437,6 +2483,10 @@ class NewModelLoader:
 
                 merge_startup_lora_checkpoint(model, self, *startup_lora)
             model.eval()
+            if ft_rebalance:
+                # Keep the stage's immutable catalog, not a second model.
+                # No FT reader/overlay survives for ordinary or STATS serving.
+                self._eplb_ft_checkpoint = ft_checkpoint
             self._selected_load_method = (
                 NewLoaderLoadMethod.FASTSAFETENSORS
                 if ft_checkpoint.read_backend == "fastsafetensors"

@@ -13,7 +13,7 @@ from rtp_llm.models_py.model_loader import (
     NewModelLoader,
 )
 from rtp_llm.models_py.quant_methods import QuantizationConfig
-from rtp_llm.models_py.registry import get_model_class
+from rtp_llm.models_py.registry import get_model_class, is_model_registered
 
 
 @dataclass
@@ -52,6 +52,12 @@ def _runtime_view(module, config, device):
 def load_owned_model(service, *, publish_runtime=True):
     """Build locally first; never expose a half-loaded module to serving."""
     config = service.model_config
+    if not is_model_registered(config.model_type):
+        raise ValueError(
+            f"Cannot serve model_type={config.model_type!r}: no direct checkpoint "
+            "owner is registered. Architecture detection alone does not provide "
+            "a loader. Check rtp_llm.models_py.registry.list_models()."
+        )
     owner_cls = get_model_class(config.model_type)
     aliases = {}
     device = service._get_device_str()
@@ -133,10 +139,21 @@ def load_owned_model(service, *, publish_runtime=True):
     logging.info(
         "Using NewModelLoader for model_type=%s requested=%s", config.model_type, method
     )
-    adapters = config.lora_infos
-    if adapters and (not service.merge_lora or len(adapters) != 1):
-        raise ValueError("Direct startup LoRA requires one merged checkpoint adapter")
-    module = loader.load(startup_lora=next(iter((adapters or {}).items()), None))
+    adapters = config.lora_infos or {}
+    merged_adapter = (
+        next(iter(adapters.items()))
+        if len(adapters) == 1 and service.merge_lora
+        else None
+    )
+    if adapters and merged_adapter is None:
+        logging.warning(
+            "Starting with unmodified base weights: %d configured LoRA adapter(s), "
+            "merge_lora=%s. Per-request LoRA selection is not supported by the "
+            "native engine; requests naming an adapter will be rejected.",
+            len(adapters),
+            service.merge_lora,
+        )
+    module = loader.load(startup_lora=merged_adapter)
     actual = loader.loaded_method
     requested = load_config.load_method
     if actual is None or (
@@ -171,8 +188,14 @@ def load_owned_model(service, *, publish_runtime=True):
     # Construct both before publishing anything that RPC workers can observe.
     if admin_lock is None:
         admin_lock = threading.RLock()
+    # Native admission accepts the static adapter's name as an assertion of
+    # already-merged weights, never as a request to change shared storage.
+    module.startup_merged_lora_name = merged_adapter[0] if merged_adapter else ""
     rank_local_lora = RankLocalCheckpointAdapters(
-        module, loader, startup_adapters=tuple(adapters or ()), admin_lock=admin_lock
+        module,
+        loader,
+        startup_adapters=(merged_adapter[0],) if merged_adapter else (),
+        admin_lock=admin_lock,
     )
     weight_manager = NewLoaderWeightManager(
         module, loader, adapters=rank_local_lora, admin_lock=admin_lock

@@ -41,7 +41,13 @@ class DSparkV4CheckpointLayout:
         # The released draft contains a training confidence predictor in its
         # final stage. Inference samples with the Markov tables, not this head.
         # Leave unexpected stage tensors visible to strict dispatch.
-        if name == "mtp.2.confidence_head.proj.weight":
+        # Embedding and LM head are shared target globals, unlike the final
+        # stage's own norm and HC head. Never load a second copy into them.
+        if name in (
+            "mtp.2.confidence_head.proj.weight",
+            "mtp.2.embed.weight",
+            "mtp.2.head.weight",
+        ):
             return False
         if name in self._shared or self.auxiliary(name):
             return True

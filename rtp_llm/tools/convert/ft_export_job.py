@@ -16,6 +16,14 @@ def create_ft_export_job(model):
     from rtp_llm.utils.model_weight import CkptWeightInfo
 
     config = model.model_config
+    # Width can split evenly while the cut still lands inside a Q head.
+    # Use attention TP (not global TP) just as the descriptors do.
+    tp = model.parallelism_config.get_attn_tp_size()
+    heads = config.attn_config.head_num
+    if tp < 1 or heads % tp:
+        raise ValueError(
+            f"Invalid FT attention TP: head_num={heads} must be divisible by tp_size={tp}"
+        )
     database = CkptDatabase(
         config.ckpt_path,
         config.ptuning_path,

@@ -17,7 +17,15 @@ def _cat_fp8(values, dim):
 
 class PerTensorFP8FTProjection:
     def __init__(
-        self, layer, checkpoint, kernel_name, scale_name, projection, *, swizzled=False
+        self,
+        layer,
+        checkpoint,
+        kernel_name,
+        scale_name,
+        projection,
+        *,
+        swizzled=False,
+        owner_partition=None,
     ):
         self.layer, self.checkpoint = layer, checkpoint
         self.swizzled = swizzled
@@ -27,7 +35,14 @@ class PerTensorFP8FTProjection:
             projection,
         )
         self.tp, self.rank = checkpoint.topology.tp_size, checkpoint.topology.tp_rank
-        if (layer.tp_size, layer.tp_rank) != (self.tp, self.rank):
+        # Hybrid attention can partition Q/K/V/Z in its parent before passing
+        # the local matrix to a nominally TP=1 linear child.
+        partition = (
+            (layer.tp_size, layer.tp_rank)
+            if owner_partition is None
+            else owner_partition
+        )
+        if partition != (self.tp, self.rank):
             raise ValueError("FP8 FT projection topology does not match the layer")
         self.shape = tuple(layer.weight.shape)
         self.local_width = (

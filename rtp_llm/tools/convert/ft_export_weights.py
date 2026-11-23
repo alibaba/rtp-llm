@@ -34,6 +34,11 @@ class FTExportWeights:
             register_ft_export_descriptors()
 
         self._info = weights_info.create_model_weight_info(database)
+        self._head_provenance = (
+            getattr(weights_info, "ft_head_provenance", {})
+            if getattr(model_config, "tie_word_embeddings", False)
+            else {"source": "lm_head"}
+        )
         self._custom = tuple(misc_weights_info or ())
         self._task_type = model_config.task_type
         self._attention_only = weights_info.is_attn_model
@@ -97,4 +102,5 @@ class FTExportWeights:
             tp_rank=config.tp_rank,
             dp_rank=config.dp_rank,
             ep_rank=config.ep_rank,
+            head_provenance=self._head_provenance,
         )

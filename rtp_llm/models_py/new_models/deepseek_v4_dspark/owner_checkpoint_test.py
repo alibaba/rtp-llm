@@ -117,6 +117,25 @@ def weights():
 
 
 class V4DraftOwnerTest(unittest.TestCase):
+    def test_proposal_allocates_no_storage_for_explicit_vocab_loans(self):
+        with tempfile.TemporaryDirectory() as folder:
+            cfg, load, independent = build(Path(folder), commit_only=False)
+            target = Globals()
+            for names in (("embed",), ("head",), ("embed", "head")):
+                aliases = {
+                    f"v4.{name}.weight": BorrowedParameter(target, f"{name}.weight")
+                    for name in names
+                }
+                owner = NewModelLoader(
+                    cfg, load, model_path=folder, parameter_aliases=aliases
+                )._create_model()
+                for name in ("embed", "head"):
+                    self.assertFalse(independent.get_parameter(f"v4.{name}.weight").is_meta)
+                    self.assertEqual(owner.get_parameter(f"v4.{name}.weight").is_meta, name in names)
+                bind_borrowed_parameters(owner, aliases, "cpu")
+                for path, loan in aliases.items():
+                    self.assertIs(owner.get_parameter(path), loan.parameter())
+
     def test_proposal_dispatches_complete_three_stage_checkpoint(self):
         from rtp_llm.models_py.new_models.deepseek_v4.backbone_test import (
             Dsv4FullBackboneCheckpointTest,
@@ -138,6 +157,8 @@ class V4DraftOwnerTest(unittest.TestCase):
                 tensors[name] = value
             tensors["mtp.0.ffn.gate.bias"] = torch.zeros(4)
             tensors["mtp.2.confidence_head.proj.weight"] = torch.ones(1, 128)
+            for key in ("embed.weight", "head.weight"):
+                tensors["mtp.2." + key] = torch.full_like(tensors[key], -900)
             tensors.update(
                 {
                     key: value
@@ -153,6 +174,9 @@ class V4DraftOwnerTest(unittest.TestCase):
             torch.save(tensors, path)
             loader = NewModelLoader(cfg, load_cfg, model_path=folder)
             include = model.checkpoint_weight_name_filter()
+            for key in ("embed.weight", "head.weight"):
+                self.assertTrue(include(key))
+                self.assertFalse(include("mtp.2." + key))
             resolve = loader._checkpoint_read_spec_resolver(model, include, None)
             model.load_weights(
                 get_all_weights(
@@ -161,6 +185,8 @@ class V4DraftOwnerTest(unittest.TestCase):
             )
             NewModelLoader._validate_loaded_weights(model)
             for name in (
+                "embed.weight",
+                "head.weight",
                 "mtp.1.attn.wkv.scale",
                 "mtp.2.norm.weight",
                 "mtp.0.main_proj.weight",
@@ -197,6 +223,64 @@ class V4DraftOwnerTest(unittest.TestCase):
                 model.auxiliary.markov_head.markov_w1.weight,
             )
             self.assertIsNone(model.weight)
+
+    def test_commit_ft_preserves_loaded_target_vocab(self):
+        from safetensors.torch import save_file
+        from rtp_llm.models_py.ft_checkpoint import (
+            CheckpointTopology,
+            FTCheckpoint,
+            validate_format_parameter_ownership,
+        )
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            _, _, model = build(root)
+            target = Globals()
+            aliases = {
+                "v4.embed.weight": BorrowedParameter(target, "embed.weight"),
+                "v4.head.weight": BorrowedParameter(target, "head.weight"),
+            }
+            bind_borrowed_parameters(model, aliases, "cpu")
+            self.assertEqual(
+                set(validate_format_parameter_ownership(model, ft=True)), set(aliases)
+            )
+            with self.assertRaises(PermissionError):
+                validate_format_parameter_ownership(model)
+            values = weights()
+            fields = {
+                "global.embedding": values["embed.weight"],
+                "global.lm_head": values["head.weight"],
+            }
+            for key, val in values.items():
+                if key.startswith("mtp.0.main_"):
+                    fields["global.v4.dspark." + key[len("mtp.0.") :]] = val
+                elif ".attn." in key:
+                    _, idx, suffix = key.split(".", 2)
+                    fields[f"layers.{idx}.v4.{suffix}"] = val
+            exported = {"rank_00_00_00." + key: val for key, val in fields.items()}
+            filename = "v4-draft.safetensors"
+            save_file(exported, str(root / filename))
+            (root / "model.safetensors.index.json").write_text(
+                json.dumps(
+                    {
+                        "is_ft_style_weight": True,
+                        "weight_map": dict.fromkeys(exported, filename),
+                    }
+                )
+            )
+            archive = FTCheckpoint.open(folder, CheckpointTopology())
+            model.load_ft_checkpoint(archive)
+            NewModelLoader._validate_loaded_weights(model)
+            validate_borrowed_parameters(model)
+            self.assertIs(model.v4.head.weight, target.head.weight)
+            self.assertTrue(torch.all(target.head.weight == 2))
+            self.assertTrue(torch.all(target.embed.weight == 1))
+            self.assertTrue(
+                torch.equal(
+                    model.main_proj.scale.view(torch.uint8),
+                    values["mtp.0.main_proj.scale"].view(torch.uint8),
+                )
+            )
 
     def test_real_commit_checkpoint_and_target_loans(self):
         with tempfile.TemporaryDirectory() as folder:

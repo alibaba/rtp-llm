@@ -93,6 +93,73 @@ def shared_checkpoint(directory, kind="nvfp4"):
 
 
 class DraftNativeServiceTest(unittest.TestCase):
+    def test_ambiguous_quantized_ft_is_not_validated_as_an_hf_manifest(self):
+        # Only the dispatch boundary: no claim that this header is a usable
+        # quantized export or that its missing packed layout can be recovered.
+        with tempfile.TemporaryDirectory() as archive:
+            (Path(archive) / "model.safetensors.index.json").write_text(
+                json.dumps({"is_ft_style_weight": True, "weight_map": {}})
+            )
+            for fp8_source in (False, True):
+                config = SimpleNamespace(
+                    ckpt_path=archive, is_mtp=True,
+                    _qwen4_fp8_source=fp8_source, _qwen4_nvfp4_source=not fp8_source,
+                )
+                with self.assertRaisesRegex(ValueError, "original HF checkpoint"):
+                    Qwen4ExpMTP._validate_checkpoint(config)
+
+    def test_bf16_ft_writer_round_trip_with_owned_and_borrowed_vocab(self):
+        from rtp_llm.tools.convert.ft_export_job import create_ft_export_job
+        from rtp_llm.tools.convert.ft_export_metadata import generate_ft_index
+
+        with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as archive:
+            tc, dc, _ = shared_checkpoint(source, "bf16")
+            pc = ParallelismConfig()
+            pc.world_size = pc.tp_size = pc.ep_size = 1
+            pc.world_rank = pc.tp_rank = pc.ep_rank = pc.local_rank = 0
+            hw = HWKernelConfig()
+            hw.enable_cuda_graph = hw.use_swizzleA = False
+            kwargs = dict(parallelism_config=pc, hw_kernel_config=hw,
+                          kv_cache_config=KVCacheConfig(), fmha_config=None,
+                          moe_config=MoeConfig(), load_method="scratch",
+                          max_generate_batch_size=2, vit_config=None, merge_lora=False)
+            descriptor = CheckpointOnlyDraft(model_config=dc, **kwargs)
+            create_ft_export_job(descriptor).dump_weight_as_ft_style("cpu", archive)
+            raw = (Path(source) / "config.json").read_text()
+            (Path(archive) / "config.json").write_text(raw)
+            generate_ft_index(archive, {"TP_SIZE": "1", "EP_SIZE": "1", "DP_SIZE": "1"})
+            original = CheckpointOnlyDraft.from_config(model_config=dc, **kwargs)
+            target = CheckpointOnlyQwen4.from_config(model_config=tc, **kwargs)
+            self.addCleanup(original.py_model.close)
+            self.addCleanup(target.py_model.close)
+            # Give the live target distinct values: the second import must not
+            # overwrite either loan with the valid but now stale archive copy.
+            with torch.inference_mode():
+                target.py_model.embed_tokens.weight.add_(1)
+                target.py_model.lm_head.weight.add_(2)
+            saved = {k: getattr(target.py_model, k).weight.clone() for k in ("embed_tokens", "lm_head")}
+            for method in ("scratch", "fastsafetensors"):
+                for borrow in (False, True):
+                    with self.subTest(method=method, borrow=borrow):
+                        config = CheckpointOnlyDraft._create_config_from_json(archive, json.loads(raw))
+                        config.data_type, config.generate_env_config = "bf16", None
+                        config.enable_fp32_lm_head = False
+                        alias = (dict(weight_alias_owner=target, weight_alias_names=("embedding", "lm_head"))
+                                 if borrow else {})
+                        actual = CheckpointOnlyDraft.from_config(
+                            model_config=config, **dict(kwargs, load_method=method), **alias)
+                        self.addCleanup(actual.py_model.close)
+                        expected = dict(original.py_model.named_parameters())
+                        params = dict(actual.py_model.named_parameters())
+                        self.assertEqual(params.keys(), expected.keys())
+                        for name, param in params.items():
+                            owner = name.partition(".")[0]
+                            if borrow and name in ("embed_tokens.weight", "lm_head.weight"):
+                                self.assertIs(param, getattr(target.py_model, owner).weight)
+                                torch.testing.assert_close(param, saved[owner], rtol=0, atol=0)
+                            else:
+                                torch.testing.assert_close(param, expected[name], rtol=0, atol=0)
+
     def test_rank_local_mixed_roles_and_live_vocabulary(self):
         with tempfile.TemporaryDirectory() as directory:
             torch.multiprocessing.spawn(

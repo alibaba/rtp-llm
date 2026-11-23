@@ -254,6 +254,35 @@ class LegacyScalarFTTest(unittest.TestCase):
                 ft[p + "static_quant"] = torch.tensor(2.0 ** (-i - 1))
         return ft
 
+    def test_eplb_swaps_quantized_weights_and_scales_together(self):
+        from rtp_llm.models_py.expert_placement import ExpertPlacement
+
+        for source, family, static in (
+            (Fp8BlockWiseQuantConfig(is_quanted=True), "fp8_per_block", False),
+            (Fp8PerChannelCompressedQuantConfig(is_quanted=True), "fp8_per_channel", False),
+            (Fp8PerTensorCompressedQuantConfig(is_quanted=True, dynamic=False), "fp8_per_tensor", True),
+        ):
+            with tempfile.TemporaryDirectory() as root:
+                write_ft(root, self.fixture(family, static), producer="cuda")
+                config, load = self.make(root, source)
+                loader = NewModelLoader(config, load, model_path=root)
+                for method in ("scratch", "fastsafetensors"):
+                    with self.subTest(family=family, method=method):
+                        cp = FTCheckpoint.open(root, CheckpointTopology())
+                        cp.read_backend = method
+                        tree = loader._create_checkpoint_model(cp)
+                        tree.load_ft_checkpoint(cp)
+                        live = tree.experts
+                        staging = live.clone_empty_for_placement(ExpertPlacement(2, 1, 0, (1, 0)))
+                        cp.reload_expert_module(live, staging)
+                        staging.validate_weights_loaded()
+                        for name in ("w13", "w2", "w13_scale", "w2_scale"):
+                            expected = getattr(live, name)
+                            actual = getattr(staging, name)
+                            if name in ("w13", "w2"):
+                                expected, actual = expected.view(torch.uint8), actual.view(torch.uint8)
+                            torch.testing.assert_close(actual, expected.flip(0), atol=0, rtol=0)
+
     def test_legacy_files_and_online_origin(self):
         from dataclasses import replace
 

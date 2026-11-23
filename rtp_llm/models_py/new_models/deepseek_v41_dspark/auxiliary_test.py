@@ -1,5 +1,6 @@
 """Real V4.1 draft auxiliary checkpoint protocol, not CUDA execution."""
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,6 +29,9 @@ def payload():
     }
 
 
+@unittest.skipUnless(
+    hasattr(torch, "float8_e8m0fnu"), "the draft projection requires the UE8M0 dtype"
+)
 class V41DSparkAuxiliaryTest(unittest.TestCase):
     def test_cuda_drafts_bind_the_runtime_norm_to_the_checkpoint_parameter(self):
         from unittest.mock import patch
@@ -44,8 +48,7 @@ class V41DSparkAuxiliaryTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "norm.safetensors"
             save_file({key: weight}, str(path))
-            # Select the production CUDA binding, but stage the two real FST
-            # loads on CPU. No GPU or arithmetic is needed for this contract.
+            # Select the production CUDA binding; checkpoint reads stay on CPU.
             with patch.object(torch.version, "cuda", "13.0"):
                 v4 = DSparkAuxiliaryWeights(128, (1,), 16, 16, 4, device="cuda")
                 v41 = V41DSparkAuxiliaryWeights(128, (1,), 16, 4, device="cuda")
@@ -57,21 +60,26 @@ class V41DSparkAuxiliaryTest(unittest.TestCase):
                     self.assertIsInstance(model.main_norm, RuntimeNorm)
                     self.assertIs(type(model.main_norm).forward, RuntimeNorm.forward)
                     param = model.main_norm.weight
+                    method = (
+                        "scratch"
+                        if os.environ.get("NEWLOADER_TEST_NATIVE_FST") == "0"
+                        else "fastsafetensors"
+                    )
                     loader = NewModelLoader(
                         SimpleNamespace(model_type="deepseek_v41_dspark"),
-                        NewLoaderConfig(device="cpu", load_method="fastsafetensors"),
+                        NewLoaderConfig(device="cpu", load_method=method),
                         model_path=folder,
                     )
                     include = model.checkpoint_weight_name_filter()
-                    dispatch(
-                        loader._fastsafetensors_weights_iterator(
-                            [str(path)],
-                            "cpu",
-                            include,
-                            None,
-                            loader._checkpoint_read_spec_resolver(model, include, None),
-                        )
+                    resolver = loader._checkpoint_read_spec_resolver(
+                        model, include, None
                     )
+                    reader = (
+                        loader._fastsafetensors_weights_iterator
+                        if method == "fastsafetensors"
+                        else get_all_weights
+                    )
+                    dispatch(reader([str(path)], "cpu", include, None, resolver))
                     self.assertIs(model.main_norm.weight, param)
                     self.assertTrue(torch.equal(param, weight))
                     self.assertEqual(model.main_norm.variance_epsilon, 1e-6)

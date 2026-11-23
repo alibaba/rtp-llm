@@ -72,6 +72,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     layout conversion.
     """
 
+    # False if installing source weights alone leaves packed runtime state stale.
+    supports_eplb_weight_install = True
+
     @abstractmethod
     def create_weights(
         self,

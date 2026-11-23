@@ -7,5 +7,7 @@ py_test(
         "//rtp_llm:multimodal",
         "//rtp_llm/models_py:new_weight_loader",
         "//rtp_llm/models_py/new_models/glm4_moe/test:checkpoint_test_support",
+        "//rtp_llm/tools/convert:ft_export_metadata",
+        "//rtp_llm/tools/convert:ft_export_writer",
     ],
 )

@@ -148,6 +148,7 @@ class GenericMoeMTPModel(Glm5ModelBase):
             role if self._mtp_indexer_share_enabled else _MTP_INDEXER_ROLE_NORMAL
         )
 
+    @torch.inference_mode()
     def load_mtp_indexer_topk(self, topk_indices: torch.Tensor) -> None:
         if not self._mtp_indexer_share_enabled:
             return

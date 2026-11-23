@@ -77,6 +77,44 @@ def _checkpoint(root):
 
 
 class TargetWeightsTest(unittest.TestCase):
+    def test_pruned_head_preserves_input_tokens_and_checkpoint_token_order(self):
+        emb = "model.language_model.embed_tokens.weight"
+        ids = list(range(0, 32, 2)) + [31]
+        # P==V: old head passed the engine's shape check but emitted wrong tokens.
+        for tied, explicit in ((False, True), (True, False), (True, True)):
+            with self.subTest(tied=tied, explicit=explicit), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                data = _checkpoint(root)
+                data[emb] = torch.arange(36 * 128).reshape(36, 128).bfloat16()
+                if not explicit:
+                    del data["lm_head.weight"]
+                save_file(data, str(root / "model.safetensors"))
+                (root / "model.safetensors.index.json").write_text(json.dumps({
+                    "weight_map": {name: "model.safetensors" for name in data}
+                }))
+                source = data["lm_head.weight"] if explicit else data[emb]
+                expected = torch.zeros(32, 128)
+                expected[:len(ids)] = source[ids].float()
+                for rank in (0, 1):
+                    cfg = dict(
+                        model_type="_qwen4_whole_target_checkpoint", ckpt_path=directory,
+                        num_experts=2, moe_k=1, input_vocab_size=36, tie_word_embeddings=tied,
+                        enable_output_vocab_pruning=True, output_vocab_ids=ids,
+                        output_vocab_padded_size=32, enable_fp32_lm_head=True,
+                    )
+                    loader = NewModelLoader(cfg, NewLoaderConfig(
+                        device="cpu", compute_dtype=torch.bfloat16, load_method="scratch",
+                        tp_size=2, tp_rank=rank, ep_size=2, ep_rank=rank,
+                    ), model_path=directory)
+                    model = loader.load()
+                    try:
+                        torch.testing.assert_close(model.embed_tokens.weight, data[emb].chunk(2, 1)[rank])
+                        torch.testing.assert_close(model.lm_head.weight, expected.chunk(2)[rank])
+                        spec = model.resolve_checkpoint_read_spec("lm_head.weight", (32, 128))
+                        self.assertEqual(spec.row_indices, tuple(ids[rank * 16:(rank + 1) * 16]))
+                    finally:
+                        model.close()
+
     def test_prefill_role_and_ple_document_boundary(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

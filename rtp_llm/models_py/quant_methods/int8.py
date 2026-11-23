@@ -1,9 +1,8 @@
 """INT8 checkpoint conversion primitives, not an inference method registration.
 
-Current CUDA/ROCm Linear and MoE registries have no weight-only INT8 executor.
-Keep the still-used CPU/FT-export conversion independent from DeviceImpl without
-advertising a runnable NewLoader quantization method. The caller owns any
-backend-specific packing of the returned signed, unpacked INT8 tensor.
+Shared by the CPU/FT exporter and online weight-only methods. Device-specific
+packing, executor selection and device admission belong to their callers, not
+to the signed, unpacked per-channel quantizer below.
 """
 
 from typing import Tuple

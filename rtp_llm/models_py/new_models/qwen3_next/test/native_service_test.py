@@ -80,6 +80,10 @@ def shared_checkpoint(kind):
     result["mtp.pre_fc_norm_embedding.weight"] = torch.ones(4)
     result["mtp.pre_fc_norm_hidden.weight"] = torch.ones(4)
     result["mtp.fc.weight"] = torch.arange(32, dtype=torch.float32).reshape(4, 8)
+    if kind.startswith("qwen35_"):
+        # A supported exporter nests vision next to the text layers. Both
+        # readers must leave it for the independent visual owner.
+        result["model.language_model.visual.patch_embed.proj.weight"] = torch.ones(3, 4)
     return result
 
 

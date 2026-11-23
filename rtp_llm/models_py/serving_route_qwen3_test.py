@@ -1,8 +1,10 @@
 """Public BaseModel.from_config -> Qwen3 owner, on a real main native ABI."""
 
+import json
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 import torch
@@ -36,13 +38,15 @@ class CheckpointOnlyQwen3(QwenV3):
 
 
 class Qwen3ServiceRouteTest(unittest.TestCase):
-    def _load(self, root, method, cls=CheckpointOnlyQwen3):
+    def _load(
+        self, root, method, cls=CheckpointOnlyQwen3, *, adapters=None, merge=False
+    ):
         fixture = service(root, method)
         config = model_config()
         config.model_type = "qwen_3"
         config.ckpt_path = root
         config.quant_config = None
-        config.lora_infos = {}
+        config.lora_infos = adapters or {}
         config.generate_env_config = None
         config.compute_dtype = torch.float32
         config.data_type = torch.float32
@@ -61,9 +65,55 @@ class Qwen3ServiceRouteTest(unittest.TestCase):
                 enable_cuda_graph=False, use_swizzleA=False
             ),
             load_method=method,
-            merge_lora=False,
+            merge_lora=merge,
             vit_config=None,
         )
+
+    def test_static_lora_and_unmerged_startup_numerics(self):
+        with tempfile.TemporaryDirectory() as root:
+            weights = checkpoint()
+            target = "model.layers.0.self_attn.o_proj"
+            save_file(weights, os.path.join(root, "model.safetensors"))
+            adapters = {}
+            a = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
+            b = torch.tensor([[1.0], [0.0], [-1.0], [2.0]])
+            for sign, name in ((1, "first"), (-2, "second")):
+                path = Path(root) / name
+                path.mkdir()
+                (path / "adapter_config.json").write_text(
+                    json.dumps({"r": 1, "lora_alpha": 1})
+                )
+                save_file(
+                    {
+                        f"base_model.model.{target}.lora_A.weight": a,
+                        f"base_model.model.{target}.lora_B.weight": sign * b,
+                    },
+                    str(path / "adapter_model.safetensors"),
+                )
+                adapters[name] = str(path)
+            x = torch.tensor([[2.0, -1.0, 0.0, 1.0]])
+            for method in ("scratch", "fastsafetensors"):
+                for names, merge, merged in (
+                    ((), False, ""),
+                    (("first",), False, ""),
+                    (("first", "second"), True, ""),
+                    (("first",), True, "first"),
+                ):
+                    with self.subTest(method=method, names=names, merge=merge):
+                        model = self._load(
+                            root, method, adapters={n: adapters[n] for n in names}, merge=merge
+                        )
+                        self.assertEqual(model.py_model.startup_merged_lora_name, merged)
+                        expected = weights[target + ".weight"]
+                        if merged:
+                            expected = expected + b @ a
+                        torch.testing.assert_close(
+                            model.py_model.layers[0].self_attn.o_proj(x),
+                            torch.nn.functional.linear(x, expected),
+                        )
+                        if not merged:
+                            with model.rank_local_lora.base_update_guard():
+                                pass  # Unmerged configuration must not lock base updates.
 
     def test_explicit_projection_chain_loads_from_checkpoint(self):
         class Processor(CustomHandler):

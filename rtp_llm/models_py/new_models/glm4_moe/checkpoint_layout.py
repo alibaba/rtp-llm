@@ -24,9 +24,16 @@ def _integer(value, field, minimum):
     return value
 
 
-def _has_bias(names, layers):
+def _has_bias(names, layers, prefix):
     for name in names:
-        parts = name.split(".")
+        # Only HF names carry the language namespace. FT writes the same
+        # top-level rank_* runtime names for text-only and multimodal models.
+        if name.startswith("rank_"):
+            parts = name.split(".")
+        elif name.startswith(prefix + "model.layers."):
+            parts = name.removeprefix(prefix).split(".")
+        else:
+            continue
         if (
             len(parts) == 6
             and parts[:2] == ["model", "layers"]
@@ -52,9 +59,7 @@ def _has_bias(names, layers):
 
 def has_correction_bias(path, layers, *, prefix=""):
     def matches(names):
-        return _has_bias(
-            (n.removeprefix(prefix) for n in names if n.startswith(prefix)), layers
-        )
+        return _has_bias(names, layers, prefix)
 
     # Use the same logical checkpoint as the loader, not optimizer/adapter shards
     # or extra keys that are physically present but absent from the index.

@@ -10,6 +10,7 @@ from rtp_llm.models_py.quant_methods.unquantized import UnquantizedFusedMoEMetho
 
 @register_moe_quant_method("INT8")
 class WeightOnlyInt8MoEMethod(UnquantizedFusedMoEMethod):
+    supports_eplb_weight_install = False
     requires_staged_device_postprocess = True
 
     def validate_runtime_device(self, device):

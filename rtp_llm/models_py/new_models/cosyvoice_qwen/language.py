@@ -6,6 +6,15 @@ from rtp_llm.models_py.new_models.qwen2.language import Qwen2ForCausalLM
 
 
 class CosyVoiceQwenForCausalLM(Qwen2ForCausalLM):
+    def load_ft_checkpoint(self, checkpoint):
+        from rtp_llm.models_py.new_models.qwen2.ft_checkpoint import (
+            load_gqa_ffn_ft_checkpoint,
+        )
+
+        # Audio features have no parameters here. Use the two actual owners'
+        # vocabulary sizes, not the smaller output vocabulary for both tables.
+        load_gqa_ffn_ft_checkpoint(self, checkpoint)
+
     def __init__(self, model_config, load_config):
         if isinstance(model_config, dict):
             # The runtime requires a native ModelConfig, not an HF mapping.

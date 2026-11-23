@@ -74,7 +74,6 @@ class LlamaCheckpointFormatsTest(unittest.TestCase):
             UnquantizedFusedMoEMethod,
         )
 
-
     def test_real_llama_smooth_converter_projection_layout(self):
         from rtp_llm.utils.smooth_quant_convert.llama.convert import (
             split_and_save_weight,
@@ -143,10 +142,27 @@ class LlamaCheckpointFormatsTest(unittest.TestCase):
 
     def test_calibrated_decoder_int8_legacy_suffixes(self):
         from safetensors.torch import save_file
+        from rtp_llm.config.kv_cache_config import KVCacheConfig
+        from rtp_llm.models.llama import Llama
+        from rtp_llm.ops import HWKernelConfig, ParallelismConfig, TaskType
+        from rtp_llm.tools.convert.ft_export_job import create_ft_export_job
 
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            (root / "config.json").write_text('{"model_type":"llama"}')
+            (root / "config.json").write_text(
+                json.dumps(
+                    dict(
+                        model_type="llama",
+                        num_hidden_layers=1,
+                        num_attention_heads=2,
+                        num_key_value_heads=1,
+                        hidden_size=8,
+                        intermediate_size=8,
+                        vocab_size=8,
+                        rms_norm_eps=1e-6,
+                    )
+                )
+            )
             (root / "pertensorquant.ini").touch()
             layer = "model.layers.0."
             tensors = {
@@ -172,19 +188,57 @@ class LlamaCheckpointFormatsTest(unittest.TestCase):
                     torch.int8
                 )
                 tensors[base + ".scales"] = (
-                    torch.tensor([0.25]) if width == 4 else (values(1, width) + 1) / 8
+                    torch.tensor([0.25 + i / 8])
+                    if width == 4
+                    else (values(1, width) + 1 + i) / 8
                 )
-            for proj in (
-                "self_attn.qkv",
-                "self_attn.o_proj",
-                "mlp.gate_proj",
-                "mlp.down_proj",
+            for proj, step in (
+                ("self_attn.qkv", 0.5),
+                ("self_attn.o_proj", 0.125),
+                ("mlp.gate_proj", 0.75),
+                ("mlp.down_proj", 0.875),
             ):
-                tensors[layer + proj + "_input_scale"] = torch.tensor([0.5])
+                tensors[layer + proj + "_input_scale"] = torch.tensor([step])
             path = root / "model.safetensors"
             save_file(tensors, path)
+            ft = root / "ft"
+            config = Llama.create_config(str(root))
+            config.data_type, config.task_type, config.lora_infos = (
+                "fp32",
+                TaskType.LANGUAGE_MODEL,
+                {},
+            )
+            config.init_precision_config(KVCacheConfig(), "fp32")
+            for rank in range(2):
+                pc = ParallelismConfig()
+                pc.tp_size, pc.tp_rank, pc.ep_size = 2, rank, 1
+                pc.ffn_tp_size, pc.ffn_tp_rank = 2, rank
+                pc.world_size, pc.world_rank, pc.local_world_size = 2, rank, 2
+                descriptor = SimpleNamespace(
+                    model_config=config,
+                    parallelism_config=pc,
+                    get_weight_cls=Llama.get_weight_cls,
+                    hw_kernel_config=HWKernelConfig(),
+                    kv_cache_config=KVCacheConfig(),
+                    merge_lora=False,
+                    load_method="scratch",
+                    force_cpu_load_weights=True,
+                    moe_pure_tp_preshard=False,
+                    loader_recycle_handles=False,
+                    _init_custom_module=lambda: None,
+                )
+                create_ft_export_job(descriptor).dump_weight_as_ft_style("cpu", str(ft))
+            generate_ft_index(str(ft), {"TP_SIZE": 2, "DP_SIZE": 1, "EP_SIZE": 1})
+            (ft / "config.json").write_bytes((root / "config.json").read_bytes())
+            (ft / "pertensorquant.ini").touch()
             for rank in range(2):
                 model = load(root, 2, rank)
+                restored = load(ft, 2, rank)
+                for (name, original), (loaded_name, actual) in zip(
+                    model.named_parameters(), restored.named_parameters(), strict=True
+                ):
+                    self.assertEqual(name, loaded_name)
+                    torch.testing.assert_close(original, actual, rtol=0, atol=0)
                 qkv = model.layers[0].self_attn.qkv_proj
                 x = (values(3, 8) - 5) / 3
                 outputs = []
@@ -211,6 +265,33 @@ class LlamaCheckpointFormatsTest(unittest.TestCase):
             save_file(tensors, path)
             with self.assertRaisesRegex(RuntimeError, "input_scale"):
                 load(root)
+            # A historical archive missing QKV calibration cannot be repaired
+            # from weight scales: never invent a static activation step.
+            from safetensors import safe_open
+            from safetensors.torch import load_file
+
+            shard = next(ft.glob("model-00-00-part-*.safetensors"))
+            fields = load_file(shard)
+            with safe_open(shard, framework="pt") as handle:
+                metadata = handle.metadata()
+            gate_scale = "rank_00_00_00.layers.0.ffn_weights.intermediate_weight13.weight_only_quant_scale"
+            flat = fields[gate_scale].reshape(-1).clone()
+            fields[gate_scale] = flat.reshape(2, -1).T.contiguous()
+            save_file(fields, shard, metadata=metadata)
+            legacy = load(ft, 2, 0)
+            torch.testing.assert_close(
+                legacy.layers[0].mlp.gate_up_proj.weight_scale.flatten(), flat
+            )
+            field = "rank_00_00_00.layers.0.pre_layernorm_weights.static_quant"
+            fields[field] = torch.tensor([4.0])
+            save_file(fields, shard, metadata=metadata)
+            with self.assertRaisesRegex(ValueError, "reciprocal static INT8"):
+                load(ft, 2, 0)
+            del fields[field]
+            save_file(fields, shard, metadata=metadata)
+            generate_ft_index(str(ft), {"TP_SIZE": 2, "DP_SIZE": 1, "EP_SIZE": 1})
+            with self.assertRaisesRegex(ValueError, "Missing FT sources.*input_scale"):
+                load(ft, 2, 0)
 
     def test_meta_consolidated_pth_without_hf_config(self):
         with tempfile.TemporaryDirectory() as temp:

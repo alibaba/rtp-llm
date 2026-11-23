@@ -12,6 +12,20 @@ from rtp_llm.tools.convert.ft_export_metadata import generate_ft_index
 
 
 class FTExportIndexTest(unittest.TestCase):
+    def test_head_source_must_agree_across_ranks(self):
+        for other in (None, "lm_head"):
+            with self.subTest(other=other), tempfile.TemporaryDirectory() as tmp:
+                for rank, source in enumerate(("embedding", other)):
+                    meta = {"ft_lm_head_source": source} if source else None
+                    save_file(
+                        {f"rank_0{rank}_00_00.global.lm_head": torch.ones(2, 4)},
+                        str(Path(tmp) / f"rank-{rank}.safetensors"),
+                        metadata=meta,
+                    )
+                with self.assertRaisesRegex(ValueError, "provenance"):
+                    generate_ft_index(tmp, {})
+                self.assertFalse((Path(tmp) / "model.safetensors.index.json").exists())
+
     def test_rank_coordinates_and_quantized_bytes_are_preserved(self):
         with tempfile.TemporaryDirectory() as tmp:
             dest = Path(tmp)

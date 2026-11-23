@@ -215,6 +215,9 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         if (py::hasattr(params.py_model, "custom_output_handler")) {
             custom_output_selector_ = params.py_model.attr("custom_output_handler").attr("select_token_position");
         }
+        if (py::hasattr(params.py_model, "startup_merged_lora_name")) {
+            startup_merged_lora_name_ = params.py_model.attr("startup_merged_lora_name").cast<std::string>();
+        }
     }
     // Reject an explicitly requested generation-prefill/speculative combination
     // on PDFUSION before warmup or runner creation. The shared request predicate
@@ -1174,6 +1177,9 @@ bool NormalEngine::validateStreamForScheduling(const GenerateStreamPtr& stream) 
 std::shared_ptr<GenerateStream> NormalEngine::createStream(const std::shared_ptr<GenerateInput>& input) {
     try {
         input->generate_config->validatePrefillOnly();
+        if (startup_merged_lora_name_.has_value()) {
+            input->generate_config->validateStaticLoraSelection(*startup_merged_lora_name_);
+        }
     } catch (const std::invalid_argument& error) {
         // Keep invalid request handling on the stream error path instead of exposing
         // validation exceptions to direct engine callers or RPC adapters.

@@ -372,24 +372,23 @@ class MlaFlashInferPrefillOp(object):
         )
 
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
-        self.kv_b_proj = LinearFactory.create_linear_from_weights(
-            self.weights[layer_id],
-            W.mla_kv_b_w,
-            W.mla_kv_b_s,
-            None,
-            self.quant_config,
-        )
-
-        kv = self.kv_b_proj(compressed_kv)
+        kv = self._project_kv_b(compressed_kv, layer_id)
         kv = kv.view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
         k_nope = kv[:, :, : self.qk_nope_head_dim]
         value_states = kv[:, :, self.qk_nope_head_dim :]
         k = self._concat_and_cast_mha_k(k_nope, k_pe)
-
-        # TODO: add TRT prefill support
         attn_output = self.prefill_wrapper.run(q, k, value_states)
-        attn_output = attn_output.view(-1, self.num_heads, self.v_head_dim)
-        return attn_output
+        return attn_output.view(-1, self.num_heads, self.v_head_dim)
+
+    def _project_kv_b(self, compressed_kv, layer_id):
+        weights = self.weights[layer_id]
+        projection = getattr(weights, "kv_b_projection", None)
+        if projection is not None:
+            return projection(compressed_kv)
+        self.kv_b_proj = LinearFactory.create_linear_from_weights(
+            weights, W.mla_kv_b_w, W.mla_kv_b_s, None, self.quant_config
+        )
+        return self.kv_b_proj(compressed_kv)
 
 
 class MlaFlashInferDecodeOp(object):

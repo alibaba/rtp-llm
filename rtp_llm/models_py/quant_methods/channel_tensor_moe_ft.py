@@ -10,6 +10,7 @@ from rtp_llm.models_py.quant_methods.block_fp8_ft import (
 
 
 def nonblock_moe_ft_bindings(owner, prefix, target, checkpoint, layer_id):
+    owner._ft_expert_binding_layout = (nonblock_moe_ft_bindings, prefix, layer_id)
     family = owner._quant_family
     if family == "none":
         return _plain_expert_bindings(owner, prefix, target, checkpoint, layer_id)

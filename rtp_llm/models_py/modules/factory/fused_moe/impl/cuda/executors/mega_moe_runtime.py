@@ -55,33 +55,12 @@ def setup_prepared_mega_moe(executor, weights):
         )
     cfg.warmup_include_capacity = True
 
-    keys = (W.moe_w1, W.moe_s1, W.moe_w2, W.moe_s2)
-    if any(weights.get(key) is None for key in keys):
-        raise ValueError("MegaMoE requires load-time FP4 or FP8 weights and scales")
-    w1, s1, w2, s2 = (weights.pop(key) for key in keys)
-    if w1.dtype == torch.int8 and w2.dtype == torch.int8:
-        executor.setup_weights_from_fp4(w1, s1, w2, s2, w1_layout=policy.w1_layout)
-    elif w1.dtype == torch.float8_e4m3fn and w2.dtype == torch.float8_e4m3fn:
-        first_w, second_w = w1.chunk(2, dim=1)
-        first_s, second_s = s1.chunk(2, dim=1)
-        if policy.w1_layout == "up_gate":
-            up, gate, up_s, gate_s = first_w, second_w, first_s, second_s
-        else:
-            gate, up, gate_s, up_s = first_w, second_w, first_s, second_s
-        executor.setup_weights_from_fp8(
-            w1_fp8=gate,
-            w1_scale=gate_s,
-            w2_fp8=w2,
-            w2_scale=s2,
-            w3_fp8=up,
-            w3_scale=up_s,
-        )
-    else:
-        raise ValueError(
-            "MegaMoE requires FP4 int8 or FP8 e4m3 checkpoint weights, "
-            f"got {w1.dtype} and {w2.dtype}"
-        )
-    del w1, s1, w2, s2
+    consume_prepared_routed_weights(
+        weights,
+        policy.w1_layout,
+        executor.setup_weights_from_fp4,
+        executor.setup_weights_from_fp8,
+    )
     if executor.includes_shared_expert:
         if parallelism.get_ffn_tp_size() != 1:
             raise ValueError("MegaMoE shared experts require full weights on each rank")
@@ -97,6 +76,35 @@ def setup_prepared_mega_moe(executor, weights):
         del w1, s1, w2, s2
         executor.maybe_warmup_fused_shared_jit_once()
     torch.cuda.empty_cache()
+
+
+def consume_prepared_routed_weights(weights, layout, from_fp4, from_fp8):
+    """Use the same checkpoint layout at startup and during a staged EPLB reload."""
+    keys = (W.moe_w1, W.moe_s1, W.moe_w2, W.moe_s2)
+    if any(weights.get(key) is None for key in keys):
+        raise ValueError("MegaMoE requires load-time FP4 or FP8 weights and scales")
+    w1, s1, w2, s2 = (weights.pop(key) for key in keys)
+    if w1.dtype == torch.int8 and w2.dtype == torch.int8:
+        return from_fp4(w1, s1, w2, s2, w1_layout=layout)
+    if w1.dtype == torch.float8_e4m3fn and w2.dtype == torch.float8_e4m3fn:
+        first_w, second_w = w1.chunk(2, dim=1)
+        first_s, second_s = s1.chunk(2, dim=1)
+        if layout == "up_gate":
+            up, gate, up_s, gate_s = first_w, second_w, first_s, second_s
+        else:
+            gate, up, gate_s, up_s = first_w, second_w, first_s, second_s
+        return from_fp8(
+            w1_fp8=gate,
+            w1_scale=gate_s,
+            w2_fp8=w2,
+            w2_scale=s2,
+            w3_fp8=up,
+            w3_scale=up_s,
+        )
+    raise ValueError(
+        "MegaMoE requires FP4 int8 or FP8 e4m3 checkpoint weights, "
+        f"got {w1.dtype} and {w2.dtype}"
+    )
 
 
 def execute_prepared_mega_moe(executor, payload, execute, *args):

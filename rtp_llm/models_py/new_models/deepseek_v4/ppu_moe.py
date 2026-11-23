@@ -79,6 +79,25 @@ class OwnedPpuMoE(OwnedFp8Fp4MoE):
             )
         return make_sharded_read_spec(name, shape, axis, self.tp_size, self.tp_rank)
 
+    def prepare_ft_projection(self, name, tensor):
+        """Mark an already-sliced M890P FT projection; full exports stay full."""
+        axis = self._split_dim(name)
+        if axis is None or tensor.shape != self._target(name).shape:
+            return tensor
+        shape = list(tensor.shape)
+        shape[axis] *= self.tp_size
+        if (
+            name.startswith("shared_experts.")
+            and name.endswith(".scale")
+            and tensor.dtype == torch.float32
+        ):
+            # split_shared_weight stores exact powers of two in float32.
+            raw = tensor.to(torch.float8_e8m0fnu)
+            if not torch.equal(raw.float(), tensor):
+                raise ValueError(f"FT PPU shared scale is not exactly UE8M0: {name}")
+            tensor = raw
+        return self.checkpoint_read_spec(name, tuple(shape)).wrap_sharded_tensor(tensor)
+
     def load_weights(self, weights):
         for name, value in weights.items():
             name = self._relative_name(name)

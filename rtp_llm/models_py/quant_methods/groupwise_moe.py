@@ -23,6 +23,7 @@ from rtp_llm.models_py.read_spec import ReadSpec, unwrap_checkpoint_tensor
 
 @register_moe_quant_method("awq", "gptq")
 class GroupwiseMoEMethod(FusedMoEMethodBase):
+    supports_eplb_weight_install = False
     owns_checkpoint_loading = True
     requires_staged_device_postprocess = True
 

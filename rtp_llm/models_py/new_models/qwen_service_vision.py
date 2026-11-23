@@ -4,6 +4,7 @@ import torch
 
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule, copy_weight_
+from rtp_llm.models_py.new_models.qwen_visual_namespace import is_visual_checkpoint_name
 from rtp_llm.models_py.read_spec import unwrap_checkpoint_tensor
 from rtp_llm.models_py.registry import register_model
 
@@ -39,7 +40,7 @@ class QwenServiceVisionOwner(RtpModule):
     def checkpoint_weight_name_filter(self):
         if self.prefix is not None:
             return lambda name: name.startswith(self.prefix)
-        return lambda name: name.startswith("visual.") or ".visual." in name
+        return is_visual_checkpoint_name
 
     def load_weights(self, weights):
         seen = set()

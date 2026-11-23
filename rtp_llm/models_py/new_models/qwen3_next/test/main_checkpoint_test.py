@@ -273,7 +273,16 @@ class Qwen3NextLoadTest(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as model_path:
             weights["model.language_model.layers.1.input_layernorm.weight"] = torch.ones(4)
+            weights["model.language_model.visual.weight"] = torch.arange(8).float().reshape(2, 4)
             save_file(weights, os.path.join(model_path, "model.safetensors"))
+            from rtp_llm.models_py.new_models.qwen_service_vision import load_service_vision
+
+            for method in ("scratch", "fastsafetensors"):
+                visual = load_service_vision(
+                    torch.nn.Linear(4, 2, bias=False), model_path, torch.float32,
+                    "cpu", method, prefix=None,
+                )
+                torch.testing.assert_close(visual.weight, weights["model.language_model.visual.weight"])
             for rank in range(2):
                 with self.subTest(rank=rank):
                     model = NewModelLoader(
@@ -286,6 +295,7 @@ class Qwen3NextLoadTest(unittest.TestCase):
                     self.assertFalse(model.owns_lora_checkpoint_target("layers.1.self_attn.q_proj.weight"))
                     # Keys outside even the source geometry must still reach strict validation.
                     self.assertTrue(model.checkpoint_weight_name_filter()("model.language_model.layers.9.bad"))
+                    self.assertTrue(model.checkpoint_weight_name_filter()("model.language_model.visual_adapter.unknown"))
                     self.assertEqual(model._cfg["expert_num"], 0)
                     self.assertFalse(hasattr(model.layers[0].mlp, "experts"))
                     q_gate = weights[

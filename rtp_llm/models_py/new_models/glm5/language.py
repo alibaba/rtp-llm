@@ -126,6 +126,10 @@ class _Glm5MoE(DeepSeekV32MoEBlock):
     def forward_prepacked(self, hidden_states, topk_ids, topk_weights):
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
+        if self.experts.requires_expert_id_mapping:
+            # CMP wrote logical decisions into the arena. The prepacked kernel
+            # reads that same address directly, bypassing BaseMoEExperts.forward.
+            topk_ids.copy_(self.experts._map_logical_to_physical(topk_ids))
         routed = self.fused_moe.forward_prepacked(hidden_states)
         if self.fused_moe.includes_shared_expert or self.shared_experts is None:
             return routed
@@ -281,6 +285,14 @@ class _Glm5Decoder(DeepSeekV32DecoderLayer):
 
 class _OwnedGlm5:
     decoder_layer_cls = _Glm5Decoder
+
+    def load_ft_checkpoint(self, checkpoint):
+        if self.decoder_layer_cls is _PackedGlm5Decoder:
+            # The standalone FT writer does not select a MegaMoE strategy.
+            # Its ordinary FP8/float expert descriptor cannot preserve FP4
+            # nibbles or their group-32 UE8M0 scales.
+            raise ValueError("GLM-5 packed FP4 experts require the original HF checkpoint; the FT writer has no lossless packed-expert contract")
+        return super().load_ft_checkpoint(checkpoint)
 
     def __init__(self, model_config, load_config):
         # Glm5._create_config already normalized quantization_config.expert_dtype.
