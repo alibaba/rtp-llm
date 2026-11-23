@@ -26,7 +26,7 @@ from rtp_llm.ops import ParallelismConfig, TaskType
 from rtp_llm.utils.base_model_datatypes import GenerateInput
 
 
-def fixture(root, *, head):
+def fixture(root, *, head, extra_weights=None):
     raw = dict(
         architectures=["Qwen2ForCausalLM"],
         model_type="qwen2",
@@ -64,6 +64,7 @@ def fixture(root, *, head):
         ("down_proj", 4, 8),
     ):
         values[prefix + "mlp." + role + ".weight"] = torch.eye(rows, cols)
+    values.update(extra_weights or {})
     shards = {}
     for index, (key, tensor) in enumerate(values.items()):
         shard_name = f"model-{index % 2}.safetensors"
@@ -78,10 +79,10 @@ def fixture(root, *, head):
     return values
 
 
-def load(root, name, method):
+def load(root, name, method, *, task=None):
     cfg = ModelFactory.get_model_cls(name).create_config(str(root))
     cfg.model_type, cfg.tokenizer_path, cfg.data_type = name, str(root), "fp32"
-    cfg.task_type = (
+    cfg.task_type = task if task is not None else (
         TaskType.DENSE_EMBEDDING
         if name == "qwen_2_embedding"
         else TaskType.LANGUAGE_MODEL
@@ -112,6 +113,107 @@ def load(root, name, method):
 
 
 class Qwen2ServiceVariantsTest(unittest.TestCase):
+    def test_score_handler_role_is_independent_of_checkpoint_path(self):
+        from rtp_llm.model_loader.weight_module import CustomAtomicWeight
+        from rtp_llm.models.downstream_modules.custom_module import (
+            CustomHandler,
+            CustomModule,
+        )
+        from rtp_llm.utils.model_weight import CkptWeightInfo
+
+        matrix, offset = "document_head.matrix_values", "metadata.label_offsets"
+        wt = torch.arange(12).reshape(3, 4).float() + 0.013
+        bias = torch.tensor([1.001, 2.003, 3.005], dtype=torch.float64)
+        mappings = (
+            ("__custom__.score.weight", matrix, torch.bfloat16),
+            ("__custom__.score.bias", offset, torch.float32),
+        )
+
+        class Head(CustomHandler):
+            def init(self, params):
+                self.params = params
+
+            def score(self, hidden):
+                return torch.nn.functional.linear(
+                    hidden.float(),
+                    self.params["score.weight"].float(),
+                    self.params.get("score.bias"),
+                )
+
+        class DeclaredHead(Head):
+            def checkpoint_weight_mappings(self):
+                return mappings
+
+        class ExtensionHead(Head):
+            def custom_weight_info(self):
+                return [
+                    CustomAtomicWeight(role, [CkptWeightInfo(source)], data_type=dtype)
+                    for role, source, dtype in mappings
+                ]
+
+        class WeightOnly(Head):
+            def checkpoint_weight_mappings(self):
+                return mappings[:1]
+
+        def start(root, method, head_type):
+            def custom_module(model):
+                module = CustomModule(model.model_config, model.tokenizer)
+                module.handler = head_type(model.model_config)
+                return module
+
+            with patch.object(BaseModel, "_init_custom_module", custom_module):
+                return load(root, "qwen_2", method, task=TaskType.SEQ_CLASSIFICATION)
+
+        for method in ("scratch", "fastsafetensors"):
+            for head in (DeclaredHead, ExtensionHead, WeightOnly):
+                with self.subTest(
+                    method=method, head=head
+                ), tempfile.TemporaryDirectory() as path:
+                    root = Path(path)
+                    tensors = {matrix: wt}
+                    expected = {"score.weight": wt.bfloat16()}
+                    if head is not WeightOnly:
+                        tensors[offset] = bias
+                        expected["score.bias"] = bias.float()
+                    fixture(root, head=False, extra_weights=tensors)
+                    svc = start(root, method, head)
+                    handler = svc.custom_module.handler
+                    params = handler.params
+                    self.assertEqual(set(params), set(expected))
+                    self.assertIsNone(svc.py_model.lm_head)
+                    for role, value in expected.items():
+                        self.assertIs(
+                            params[role],
+                            svc.weight.get_global_weight("__custom__." + role),
+                        )
+                        torch.testing.assert_close(params[role], value, rtol=0, atol=0)
+                    hidden = torch.tensor([[0.0, 1.0, 0.0, -1.0]])
+                    projected = hidden @ expected["score.weight"].float().T
+                    torch.testing.assert_close(
+                        handler.score(hidden),
+                        projected + expected.get("score.bias", 0),
+                    )
+            for source, tensors, error in (
+                ("model.layers.0.input_layernorm.weight", {}, "model-owned"),
+                ("model.norm.weight", {}, "model-owned"),
+                ("model.embed_tokens.weight", {}, "model-owned"),
+                (matrix, {matrix: wt, offset: torch.ones(2)}, "label counts"),
+                (matrix, {matrix: torch.ones(3, 5), offset: bias}, "Invalid downstream"),
+                (matrix, {matrix: wt.long(), offset: bias}, "Invalid downstream"),
+                (matrix, {matrix: wt}, "Missing downstream"),
+            ):
+                class InvalidHead(Head):
+                    def checkpoint_weight_mappings(self):
+                        return ((mappings[0][0], source), mappings[1])
+
+                with self.subTest(
+                    method=method, source=source, error=error
+                ), tempfile.TemporaryDirectory() as path:
+                    root = Path(path)
+                    fixture(root, head=False, extra_weights=tensors)
+                    with self.assertRaisesRegex((ValueError, RuntimeError), error):
+                        start(root, method, InvalidHead)
+
     def test_smoke_model_owners_accept_parallel_fst_worker_batches(self):
         # A normal CPU FST load uses the range reader, not the installed
         # ParallelLoader worker used by accelerator smoke. Run that actual

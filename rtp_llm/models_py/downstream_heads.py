@@ -7,6 +7,29 @@ from rtp_llm.models_py.module_base import _mark_loaded
 from rtp_llm.models_py.read_spec import unwrap_checkpoint_tensor
 
 
+def handler_role_name(role):
+    prefix = "__custom__."
+    if not isinstance(role, str) or not role.startswith(prefix) or role == prefix:
+        raise ValueError(f"Invalid replicated handler role {role!r}")
+    return role[len(prefix) :]
+
+
+def check_encoder_handler_alias(role, source, canonical):
+    # Encoder handlers may own their pooler/classifier parameters. Their
+    # input embeddings, normalization, and encoder layers have real owners.
+    if handler_role_name(role) != source and canonical.split(".", 1)[0] in {
+        "embeddings",
+        "encoder",
+        "layers",
+        "final_norm",
+        "handler_heads",
+        "custom_params",
+    }:
+        raise ValueError(
+            f"Handler role {role} cannot consume model-owned source {source}"
+        )
+
+
 def handler_weight_mappings(names):
     """Turn declared checkpoint names into the embedding engine's global export roles."""
     if not isinstance(names, tuple) or not all(
@@ -53,7 +76,10 @@ class DecoderHandlerOwner:
             getattr(load_config, "custom_weight_mappings", ()),
             self.WEIGHTS_MAPPER, hidden_size, load_config.compute_dtype,
             projection_layers=getattr(load_config, "custom_projection_layers", ()),
-            protected_roots={"embed_tokens", "lm_head", "norm", "layers", "handler_heads"},
+            protected_roots={
+                "embed_tokens", "lm_head", "norm", "layers", "handler_heads",
+                "hyper_connection_mixer",
+            },
         )
 
     def _capture_handler_inputs(self, items):
@@ -112,6 +138,7 @@ class ReplicatedHandlerHeads(nn.Module):
         self.hidden_size = hidden_size
         self.sources = {}
         self.dtypes = {}
+        self.validation_names = {}
         projections = set(projection_sources)
         self.chain = []
         chain_weights, chain_biases = set(), set()
@@ -147,14 +174,30 @@ class ReplicatedHandlerHeads(nn.Module):
         for mapping in mappings:
             target, source, declared_dtype = unpack_handler_mapping(mapping)
             name = mapper.map_name(source)
+            role = handler_role_name(target)
+            # Score projections are defined by their output role, not the
+            # storage path. Their two tensors can live under unrelated names.
+            score = role in ("score.weight", "score.bias")
+            namespace = name.removeprefix("model.").split(".", 1)[0]
+            if score and (
+                namespace in protected_roots
+                or namespace in {"visual", "vision_tower", "mm_projector", "mtp"}
+                or (role != source and name in chain_weights | chain_biases)
+            ):
+                raise ValueError(
+                    f"Handler role {role} cannot consume model-owned source "
+                    f"or overlap a projection chain: {source}"
+                )
             if (
                 name not in self.allowed
                 and name not in projections
                 and name not in chain_weights
                 and name not in chain_biases
+                and not (score and protected_roots)
             ) or name in self.sources:
                 raise ValueError(f"Unsupported or ambiguous handler source {source}")
             self.sources[name] = (str(len(self.sources)), target)
+            self.validation_names[name] = ("role", role) if score else ("source", name)
             self.dtypes[name] = dtype if declared_dtype is None else declared_dtype
         self.params = nn.ParameterDict()
         self.register_buffer("_anchor", torch.empty(0, dtype=dtype), persistent=False)
@@ -172,7 +215,8 @@ class ReplicatedHandlerHeads(nn.Module):
         ):
             raise ValueError(f"Downstream checkpoint tensor {name} must be replicated")
         is_bias = name in self.chain_biases or (
-            name not in self.chain_weights and name.endswith(".bias")
+            name not in self.chain_weights
+            and self.validation_names[name][1].endswith(".bias")
         )
         if (
             not tensor.is_floating_point()
@@ -237,15 +281,18 @@ class ReplicatedHandlerHeads(nn.Module):
                 raise ValueError(
                     f"Invalid handler projection bias {bias}: expected {width} outputs"
                 )
-        for name, (b_key, _) in self.sources.items():
-            if (
-                name.endswith(".bias")
-                and name not in self.chain_biases
-                and name not in self.chain_weights
-            ):
-                weight = name[:-4] + "weight"
-                if weight in self.sources:
-                    w_key, _ = self.sources[weight]
+        pairs = {
+            self.validation_names[name]: key
+            for name, (key, _) in self.sources.items()
+            if name not in self.chain_biases and name not in self.chain_weights
+        }
+        if ("role", "score.bias") in pairs and ("role", "score.weight") not in pairs:
+            raise ValueError("A score bias requires a declared score weight")
+        for (namespace, name), b_key in pairs.items():
+            if name.endswith(".bias"):
+                weight = (namespace, name[:-4] + "weight")
+                if weight in pairs:
+                    w_key = pairs[weight]
                     if self.params[w_key].shape[0] != self.params[b_key].shape[0]:
                         raise ValueError(
                             f"Classifier weight and bias label counts disagree for {name}"

@@ -9,6 +9,7 @@ from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, Engin
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.models_py.downstream_heads import (
+    handler_role_name,
     handler_weight_mappings,
     unpack_handler_mapping,
 )
@@ -39,7 +40,12 @@ class CustomModule(object):
         return self.handler
 
     def checkpoint_weight_mappings(self):
-        declared = handler_weight_mappings(self.handler.checkpoint_weight_names())
+        declare = getattr(self.handler, "checkpoint_weight_mappings", None)
+        declared = (
+            declare()
+            if callable(declare)
+            else handler_weight_mappings(self.handler.checkpoint_weight_names())
+        )
         specs = getattr(self.handler, "custom_weight_info", None)
         if not callable(specs):
             return declared
@@ -66,10 +72,7 @@ class CustomModule(object):
             ):
                 raise ValueError("Unsupported custom handler checkpoint transform")
             source = record.weights[0].tensor_name(None)
-            if record.name != CustomAtomicWeight.prefix + source:
-                raise ValueError(
-                    "Custom handler must declare a replicated checkpoint source"
-                )
+            handler_role_name(record.name)
             mapping = (
                 (record.name, source, record.data_type)
                 if record.data_type is not None
@@ -82,8 +85,8 @@ class CustomModule(object):
     def init(self, weight):
         self.handler.init(
             {
-                name: weight.get_global_weight(role)
-                for role, name, _ in map(
+                handler_role_name(role): weight.get_global_weight(role)
+                for role, _, _ in map(
                     unpack_handler_mapping, self.checkpoint_weight_mappings()
                 )
             }
@@ -103,6 +106,15 @@ class CustomHandler(object):
             for name in layer
             if name is not None
         )
+
+    def checkpoint_weight_mappings(self) -> tuple:
+        """Replicated (export role, checkpoint key[, dtype]) declarations.
+
+        Override when a handler's stable role (e.g. "__custom__.score.weight")
+        differs from a model's file key. init() receives the role without
+        "__custom__."; the checkpoint name is used only for reading.
+        """
+        return handler_weight_mappings(self.checkpoint_weight_names())
 
     def checkpoint_projection_layers(self) -> tuple:
         """Optional ordered (checkpoint weight, optional bias) linear stack on hidden states."""

@@ -8,7 +8,10 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from rtp_llm.models_py.downstream_heads import unpack_handler_mapping
+from rtp_llm.models_py.downstream_heads import (
+    check_encoder_handler_alias,
+    unpack_handler_mapping,
+)
 from rtp_llm.models_py.module_base import RtpModule, _mark_loaded
 from rtp_llm.models_py.read_spec import (
     ReadSpec,
@@ -196,6 +199,10 @@ class JinaEncoder(RtpModule):
         if getattr(load.parallelism_config, "pp_size", 1) != 1:
             raise NotImplementedError(
                 "Jina direct encoder has no PP stage ownership contract"
+            )
+        for role, source, *_ in load.custom_weight_mappings:
+            check_encoder_handler_alias(
+                role, source, self.WEIGHTS_MAPPER.map_name(source)
             )
         self._custom = {
             source: (str(i), target, requested_dtype)

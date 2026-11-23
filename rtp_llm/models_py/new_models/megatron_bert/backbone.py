@@ -8,7 +8,10 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from rtp_llm.models_py.downstream_heads import unpack_handler_mapping
+from rtp_llm.models_py.downstream_heads import (
+    check_encoder_handler_alias,
+    unpack_handler_mapping,
+)
 from rtp_llm.models_py.module_base import RtpModule, _mark_loaded
 from rtp_llm.models_py.read_spec import make_sharded_read_spec, unwrap_checkpoint_tensor
 
@@ -155,6 +158,9 @@ class MegatronParameters:
         self.final_norm = nn.LayerNorm(h, eps=config.layernorm_eps, dtype=dtype)
         self.custom_params = nn.ParameterDict()
         mappings = tuple(map(unpack_handler_mapping, load.custom_weight_mappings))
+        base_mapper = _Names({})
+        for role, source, _ in mappings:
+            check_encoder_handler_alias(role, source, base_mapper.map_name(source))
         self._custom = {f"p{i}": runtime for i, (runtime, _, _) in enumerate(mappings)}
         self._custom_dtype = {
             f"p{i}": dt or dtype for i, (_, _, dt) in enumerate(mappings)

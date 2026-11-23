@@ -8,7 +8,10 @@ from pathlib import Path
 import torch
 from torch import nn
 
-from rtp_llm.models_py.downstream_heads import ReplicatedHandlerHeads
+from rtp_llm.models_py.downstream_heads import (
+    ReplicatedHandlerHeads,
+    check_encoder_handler_alias,
+)
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.read_spec import ReadSpec, unwrap_checkpoint_tensor
@@ -199,6 +202,10 @@ class BertEncoderOwner(GptModelBase, RtpModule):
         self.local_heads = config.attn_config.head_num // load.attn_tp_size
         self.head_dim = config.attn_config.size_per_head
         mappings = tuple(load.custom_weight_mappings)
+        for role, source, *_ in mappings:
+            check_encoder_handler_alias(
+                role, source, self.WEIGHTS_MAPPER.map_name(source)
+            )
         self._ft_handler_roles = tuple(mapping[0] for mapping in mappings)
         self.all_handler_sources = {
             self.WEIGHTS_MAPPER.map_name(mapping[1]) for mapping in mappings
