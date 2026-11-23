@@ -1,4 +1,6 @@
 import os
+import sys
+import types
 import unittest
 from itertools import product
 from unittest.mock import Mock, patch
@@ -9,6 +11,7 @@ from rtp_llm.start_server import (
     _iter_serving_world_ranks,
     start_dash_sc_server_impl,
     start_frontend_server_impl,
+    start_prompt_generator_impl,
 )
 
 
@@ -81,6 +84,48 @@ class StartFrontendRankTest(unittest.TestCase):
                 self.assertEqual(list(_iter_serving_world_ranks(config)), expected)
                 self.assertEqual(config.parallelism_config.local_world_size, 4)
                 self.assertEqual(config.parallelism_config.world_rank, world_rank)
+
+    def test_prompt_generator_uses_serving_world_ranks_and_registers_children(self):
+        module_name = "internal_source.rtp_llm.prompt_generator.service.start_server"
+        pg_module = types.ModuleType(module_name)
+        pg_module.start_prompt_generator = Mock()
+        for pp, expected in ((1, [8, 10, 12, 14]), (2, [8])):
+            config = self.config(pp=pp, dp=8 // pp, tp=2,
+                                 local_world_size=8, world_rank=8)
+            config.server_config.prompt_generator_server_count = 2
+            controller, manager = Mock(), Mock()
+            events = []
+            children = []
+
+            def make_process(**kwargs):
+                child = Mock()
+                child.start.side_effect = lambda: events.append(("start", child))
+                children.append((kwargs, child))
+                return child
+
+            manager.add_processes.side_effect = lambda ps, **kw: events.append(("register", ps[0]))
+            with (
+                self.subTest(pp=pp),
+                patch.dict(sys.modules, {module_name: pg_module}),
+                patch.dict(os.environ, {"LOCAL_WORLD_SIZE": "1"}),
+                patch("rtp_llm.start_server.multiprocessing.Process", side_effect=make_process),
+            ):
+                result = start_prompt_generator_impl(controller, config, manager)
+            self.assertEqual([kw["args"][1:3] for kw, _ in children],
+                             [(rank, sid) for rank in expected for sid in range(2)])
+            self.assertEqual(result, [child for _, child in children])
+            self.assertEqual(events, [event for _, child in children
+                                      for event in (("start", child), ("register", child))])
+            for kwargs, child in children:
+                self.assertIs(kwargs["target"], pg_module.start_prompt_generator)
+                self.assertIs(kwargs["args"][0], config)
+                self.assertIs(kwargs["args"][3], controller)
+                manager.add_processes.assert_any_call([child], shutdown_group="frontend")
+            manager.register_health_check.assert_called_once()
+            with patch("rtp_llm.start_server.check_server_health", return_value=True) as health:
+                self.assertTrue(manager.register_health_check.call_args.kwargs["check_ready_fn"]())
+                health.assert_called_once_with(config.server_config.start_port, "/pg_health")
+            self.assertEqual(config.parallelism_config.world_rank, 8)
 
     def test_launchers_pass_global_rank_and_children_keep_local_ports(self):
         entry_points = (
