@@ -72,6 +72,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     private LeaderSelector leaderSelector;
 
     @Getter private volatile boolean isMaster;
+    private volatile long leadershipEpoch;
     private volatile boolean markOffline;
     private volatile boolean autoRejoin = true;
 
@@ -123,6 +124,12 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
         initializeIpAndPort(configuredIp);
         initializeZookeeperClient();
         reportMasterEvent(ZkMasterEvent.LB_SERVICE_INIT);
+    }
+
+    /** Returns zero when this process is not the leader. */
+    public long getLeadershipEpoch() {
+        long epoch = leadershipEpoch;
+        return isMaster && leadershipEpoch == epoch ? epoch : 0L;
     }
 
     /**
@@ -195,6 +202,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
         }
 
         // Become master
+        leadershipEpoch++;
         isMaster = true;
         reportMasterEvent(ZkMasterEvent.MASTER_TAKE_LEADERSHIP);
 

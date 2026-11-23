@@ -1,9 +1,11 @@
 package org.flexlb.service;
 
+import org.flexlb.cache.match.theory.RecentCacheKeyWindow;
 import org.flexlb.cache.match.theory.TheoryCacheKeyHistory;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.consistency.MasterElectService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
@@ -45,6 +47,43 @@ class TheoryCacheHitReporterTest {
     @AfterEach
     void closeReporters() {
         reporters.forEach(TheoryCacheHitReporter::closeTheoryLog);
+    }
+
+    @Test
+    void startsFreshHistoryOnEachLeadershipTerm() throws Exception {
+        TheoryCacheHitReporter reporter = newReporter();
+        inject(reporter, "theoryCacheKeyHistory", smallWindow());
+        inject(reporter, "cacheMetricsReporter", cacheMetricsReporter);
+        MasterElectService election = mock(MasterElectService.class);
+        inject(reporter, "masterElectService", election);
+        FlexlbConfig config = new FlexlbConfig();
+
+        reportWithConfiguration(reporter, context(config, List.of(1L)));
+        awaitReports(reporter);
+        verify(cacheMetricsReporter, Mockito.never())
+                .reportClusterRecentCacheKeyHitMetrics(
+                        Mockito.any(), Mockito.anyLong(), Mockito.anyLong());
+
+        when(election.getLeadershipEpoch()).thenReturn(1L);
+        reportWithConfiguration(reporter, context(config, List.of(1L)));
+        awaitReports(reporter);
+        reportWithConfiguration(reporter, context(config, List.of(1L)));
+        awaitReports(reporter);
+
+        when(election.getLeadershipEpoch()).thenReturn(2L);
+        reportWithConfiguration(reporter, context(config, List.of(1L)));
+        awaitReports(reporter);
+
+        var snapshots = ArgumentCaptor.forClass(RecentCacheKeyWindow.Snapshot.class);
+        verify(cacheMetricsReporter, Mockito.times(3))
+                .reportClusterRecentCacheKeyHitMetrics(
+                        snapshots.capture(), Mockito.anyLong(), Mockito.anyLong());
+        assertEquals(
+                List.of(0L, 1L, 0L),
+                snapshots.getAllValues().stream()
+                        .map(RecentCacheKeyWindow.Snapshot::getRequestHitOccurrences)
+                        .toList());
+        assertEquals(0L, snapshots.getAllValues().getLast().getHistoryCoverageMs());
     }
 
     @Test
