@@ -235,6 +235,11 @@ public final class WorkerDirectory implements WorkerStatusProvider {
         }
     }
 
+    /** Immutable, non-owning ViT generations for routing. */
+    public Map<String, WorkerStatus> vitRoutingSnapshot() {
+        return endpointRegistry.vitRoutingSnapshot();
+    }
+
     /** Immutable, non-owning address snapshot for lazy selection. */
     public List<String> endpointAddressSnapshot(RoleType role) {
         return endpointRegistry.endpointAddressSnapshot(role);
