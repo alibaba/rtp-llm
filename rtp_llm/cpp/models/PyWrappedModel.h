@@ -190,6 +190,7 @@ private:
     const bool                       owns_generation_prefill_cuda_graph_{false};
     bool                             enable_cuda_graph_{false};
     const bool                       batch_invariant_cuda_graph_{false};
+    const int64_t                    dp_size_{1};
     bool                             is_prefill_cuda_graph_mode_{false};
     GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_init_status_{
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
@@ -257,6 +258,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                                                                params.sp_config.type)),
     enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph && allow_cuda_graph && pp_size_ == 1),
     batch_invariant_cuda_graph_(enable_cuda_graph_ && params.hw_kernel_config.batch_invariant),
+    dp_size_(params.parallelism_config.dp_size),
     is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
     generation_prefill_cuda_graph_init_status_(owns_generation_prefill_cuda_graph_ ?
                                                    GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE :

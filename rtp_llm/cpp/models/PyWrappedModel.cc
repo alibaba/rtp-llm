@@ -58,14 +58,16 @@ int agreeDecodeGraphBucket(int local_bucket, int32_t local_requests, int64_t dp_
     execAllGather({recv, ParallelMode::STAGE, {send}, false});
     const auto votes = recv.front().cpu();
     const auto* data = votes.data_ptr<int32_t>();
-    int bucket = local_bucket;
+    int max_bucket = 0;
+    int fallback   = 0;
     info.dp_real_requests.reserve(dp_size);
     for (int64_t rank = 0; rank < dp_size; ++rank) {
         const int peer_bucket = data[2 * rank];
-        bucket = std::min(bucket, peer_bucket) < 0 ? std::min(bucket, peer_bucket) : std::max(bucket, peer_bucket);
+        max_bucket = std::max(max_bucket, peer_bucket);
+        fallback   = std::min(fallback, peer_bucket);
         info.dp_real_requests.push_back(data[2 * rank + 1]);
     }
-    return bucket;
+    return fallback < 0 ? fallback : max_bucket;
 }
 
 /** Pair init() with a full drain on exceptional exits. On the normal tracked
@@ -970,8 +972,8 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
     auto& state           = selectGraphState(attention_inputs_);
     // DP/EP selects the shared bucket in forward after every rank has voted.
     // The runner prepares that bucket inline before replay.
-    if (moe_forward_allows_graph_ && !(batch_invariant_cuda_graph_ && device_props_.dp_size > 1)
-        && enable_cuda_graph_ && runner != nullptr
+    if (moe_forward_allows_graph_ && !(batch_invariant_cuda_graph_ && dp_size_ > 1) && enable_cuda_graph_
+        && runner != nullptr
         && runner->canRun(py_model_inputs, state, CudaGraphCheckMode::PREPARE)) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
         runner->prepareAttentionInputs(py_model_inputs, state, skip_forward_event_sync);
@@ -1133,8 +1135,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                    graph_state.decode_batch_exceeds_capture ? AboveCapture : Unavailable;
             auto& info = decode_cuda_graph.emplace();
             info.real_requests = inputs.is_fake_stream ? 0 : inputs.input_lengths.size(0);
-            const int vote = device_props_.dp_size > 1 ?
-                                 agreeDecodeGraphBucket(local_vote, info.real_requests, device_props_.dp_size, info) :
+            const int vote = dp_size_ > 1 ?
+                                 agreeDecodeGraphBucket(local_vote, info.real_requests, dp_size_, info) :
                                  local_vote;
             can_run_graph = vote > 0;
             if (can_run_graph) {

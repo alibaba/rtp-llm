@@ -140,7 +140,11 @@ class PureDpRouterBase(FusedMoeDataRouter):
     ) -> ExpertForwardPayload:
         assert a1_scale is None and a2_scale is None, "not support quanted moe"
 
-        if not (self.config.batch_invariant and torch.cuda.is_current_stream_capturing()):
+        if not (
+            self.config.batch_invariant
+            and self.config.enable_cuda_graph
+            and torch.cuda.is_current_stream_capturing()
+        ):
             a1, topk_weights, topk_ids, _ = self._pad_to_max(a1, topk_weights, topk_ids)
 
         a1_full = all_gather(a1, group=Group.STAGE)

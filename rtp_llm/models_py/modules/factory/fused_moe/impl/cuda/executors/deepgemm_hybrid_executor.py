@@ -727,9 +727,10 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 expert_alignment,
             )
 
-        if not self.enable_cuda_graph or (
-            self._batch_invariant and not _is_cuda_graph_warmup_or_capture()
-        ):
+        static_layout = self.enable_cuda_graph and (
+            not self._batch_invariant or _is_cuda_graph_warmup_or_capture()
+        )
+        if not static_layout:
             num_recv_tokens_per_expert_cpu = (
                 payload.expert_tokens_meta.expert_num_tokens_cpu
             )
@@ -786,7 +787,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         output_index = torch.full_like(topk_idx, -1)
         scatter_num_tokens_per_expert = num_recv_tokens_per_expert
         scatter_alignment = expert_alignment
-        if not self.is_sm120 and not self.enable_cuda_graph:
+        if not self.is_sm120 and not static_layout:
             padded_num_tokens_per_expert = [
                 align_up_math(int(x), expert_alignment)
                 for x in num_recv_tokens_per_expert_cpu
@@ -811,10 +812,10 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             output_index,
             scale_ue8m0=is_deep_gemm_e8m0_used(),
             align_m=scatter_alignment,
-            derive_counts_from_topk=self.is_sm120 and self.enable_cuda_graph,
+            derive_counts_from_topk=self.is_sm120 and static_layout,
         )
         # Preserve the eager input lifetime without invalidating graph buffers.
-        if not self.enable_cuda_graph:
+        if not static_layout:
             dispose_tensor(hidden_states_fp8)
         gateup_output = torch.empty(
             (all_tokens, N),
