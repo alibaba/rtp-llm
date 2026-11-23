@@ -152,6 +152,25 @@ void BlockTreeStorer::observePublicationSkipped(std::optional<int64_t> request_i
     }
 }
 
+BlockTreeStorer::Fork BlockTreeStorer::ForkBatch::pathAt(size_t index, bool include_ancestor_resources) const {
+    Fork        path;
+    const auto& point    = points[index];
+    size_t      previous = 0;
+    for (size_t i = 0; i < token_ends.size() && token_ends[i] < point.token_end; ++i) {
+        path.keys.push_back(keys[i]);
+        path.token_ends.push_back(token_ends[i]);
+        path.token_segments.emplace_back(token_ids.begin() + previous, token_ids.begin() + token_ends[i]);
+        path.resources.push_back(include_ancestor_resources ? resources[i] :
+                                                              std::vector<GroupSetResource>(point.resources.size()));
+        previous = token_ends[i];
+    }
+    path.keys.push_back(point.key);
+    path.token_ends.push_back(point.token_end);
+    path.token_segments.emplace_back(token_ids.begin() + previous, token_ids.begin() + point.token_end);
+    path.resources.push_back(point.resources);
+    return path;
+}
+
 void BlockTreeStorer::stopAdmissionLocked() {
     stopping_.store(true);
 }
@@ -167,7 +186,7 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
                                               std::optional<int64_t>                            observation_request_id,
                                               bool                                              internal_fork,
                                               bool*                                             ready_after_insert,
-                                              std::optional<Fork>                               followup_fork) {
+                                              std::optional<ForkBatch>                          followup_forks) {
     resident_prefix_length = 0;
     assert(!is_resident || target_tier == Tier::DEVICE);
     RTP_LLM_CHECK_WITH_INFO(target_tier == Tier::DEVICE || target_tier == Tier::HOST || target_tier == Tier::DISK,
@@ -185,15 +204,29 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
                             internal_fork,
                             ready_after_insert);
     } else {
-        submitLowerTierLocked(cache_keys,
-                              resources,
-                              target_tier,
-                              token_segments,
-                              prefix_plan_state,
-                              observation_request_id,
-                              token_ends,
-                              internal_fork,
-                              std::move(followup_fork));
+        std::shared_ptr<PendingForkBatch> batch;
+        if (followup_forks && !followup_forks->points.empty()) {
+            batch = std::make_shared<PendingForkBatch>(
+                PendingForkBatch{std::move(*followup_forks), target_tier, observation_request_id});
+            for (const auto& row : batch->publication.resources) {
+                referenceForkRowLocked(row, true);
+            }
+            for (const auto& point : batch->publication.points) {
+                referenceForkRowLocked(point.resources, true);
+            }
+        }
+        const auto task = cache_keys.empty() && batch ? nullptr :
+                                                        submitLowerTierLocked(cache_keys,
+                                                                              resources,
+                                                                              target_tier,
+                                                                              token_segments,
+                                                                              prefix_plan_state,
+                                                                              observation_request_id,
+                                                                              token_ends,
+                                                                              internal_fork);
+        if (batch) {
+            deferForkLocked(task, batch);
+        }
         return {};
     }
     return storage_backend_ && !internal_fork ?
@@ -290,22 +323,22 @@ StorageRequest BlockTreeStorer::makeStorageRequest(const CacheKeysType&         
     return request;
 }
 
-void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                              cache_keys,
-                                            const std::vector<std::vector<GroupSetResource>>& resources,
-                                            Tier                                              target_tier,
-                                            const std::vector<std::vector<int>>*              token_segments,
-                                            PrefixCachePlanState*                             prefix_plan_state,
-                                            std::optional<int64_t>                            observation_request_id,
-                                            const std::vector<size_t>*                        token_ends,
-                                            bool                                              internal_fork,
-                                            std::optional<Fork>                               followup_fork) {
+BlockTreeStorer::StoreTaskPtr
+BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                              cache_keys,
+                                       const std::vector<std::vector<GroupSetResource>>& resources,
+                                       Tier                                              target_tier,
+                                       const std::vector<std::vector<int>>*              token_segments,
+                                       PrefixCachePlanState*                             prefix_plan_state,
+                                       std::optional<int64_t>                            observation_request_id,
+                                       const std::vector<size_t>*                        token_ends,
+                                       bool                                              internal_fork) {
     if (token_ends != nullptr
         && (token_ends->size() != cache_keys.size() || token_segments == nullptr
             || token_segments->size() != cache_keys.size())) {
-        return;
+        return nullptr;
     }
     if (internal_fork && (token_ends == nullptr || cache_keys.empty())) {
-        return;
+        return nullptr;
     }
     const bool plan_reached = tree_->observabilityEnabled() && !cache_keys.empty()
                               && resources.size() == cache_keys.size();
@@ -327,7 +360,7 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
             logPrefixPublication(tree_->observabilityInstance(), observation_request_id, target_tier,
                                  nullptr, "store_stopped", plan_points.size());
         }
-        return;
+        return nullptr;
     }
 
     StoreTaskPtr task = std::make_shared<StoreTask>(
@@ -344,9 +377,6 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
     block_tree_cache_detail::ScopeRollback prepare_guard(
         [this, &task, &failure_reason]() { settleLocked(*task, /*publish=*/false, failure_reason); });
 
-    if (followup_fork) {
-        deferForkLocked(*task, std::move(*followup_fork));
-    }
     std::vector<TreeNode*> stored_ancestors;
     if (internal_fork) {
         stored_ancestors = tree_->findNode(cache_keys);
@@ -361,7 +391,7 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
     }
     if (!store_task_runner_.prepareTask(*task, resources, stored_ancestors)) {
         task->error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "store task preparation failed");
-        return;
+        return nullptr;
     }
     const int64_t queue_begin = currentTimeUs();
     auto          on_timeout  = [this, task, queue_begin]() {
@@ -397,43 +427,64 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
                             tierName(target_tier),
                             task->descriptors().size());
         task->error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "store business task submission rejected");
-        return;
+        return nullptr;
     }
     prepare_guard.dismiss();
+    return task;
 }
 
-void BlockTreeStorer::deferForkLocked(StoreTask& task, Fork fork) {
-    std::vector<MultiNodeResource> pins;
-    for (const auto& group : tree_->groupSets()) {
-        const size_t      group_id = group->groupSetId();
-        MultiNodeResource pin{group_id, Tier::DEVICE};
-        for (const auto& row : fork.resources) {
-            if (row[group_id].hasCompleteDeviceValue()) {
-                pin.node_blocks.emplace_back(nullptr, row[group_id].device_blocks);
-            }
+void BlockTreeStorer::referenceForkRowLocked(const std::vector<GroupSetResource>& resources, bool acquire) {
+    for (size_t id = 0; id < resources.size() && id < tree_->groupSets().size(); ++id) {
+        if (!resources[id].hasCompleteDeviceValue()) {
+            continue;
         }
-        if (!pin.node_blocks.empty()) {
-            pins.push_back(std::move(pin));
+        const MultiNodeResource pin{id, Tier::DEVICE, {{nullptr, resources[id].device_blocks}}};
+        if (acquire) {
+            tree_->groupSets()[id]->referenceBlocks(pin, BlockTreeRefType::STORE);
+        } else {
+            tree_->groupSets()[id]->unreferenceBlocks(pin, BlockTreeRefType::STORE);
         }
     }
-    for (const auto& pin : pins) {
-        tree_->groupSets()[pin.group_set_id]->referenceBlocks(pin, BlockTreeRefType::STORE);
-    }
-    task.followup_locked = [this,
-                            tier       = task.target_tier,
-                            request_id = task.observation_request_id,
-                            fork       = std::move(fork),
-                            pins       = std::move(pins)] {
-        block_tree_cache_detail::ScopeRollback release_pins([&] {
-            for (const auto& pin : pins) {
-                tree_->groupSets()[pin.group_set_id]->unreferenceBlocks(pin, BlockTreeRefType::STORE);
-            }
-        });
-        submitLowerTierLocked(
-            fork.keys, fork.resources, tier, &fork.token_segments, nullptr, request_id, &fork.token_ends, true);
-    };
 }
 
+void BlockTreeStorer::deferForkLocked(const StoreTaskPtr& task, const std::shared_ptr<PendingForkBatch>& batch) {
+    if (task) {
+        // Only queued tasks receive a continuation. Synchronous rollback never
+        // invokes the next submission recursively.
+        task->followup_locked = [this, batch] { advanceForksLocked(batch); };
+    } else {
+        advanceForksLocked(batch);
+    }
+}
+
+void BlockTreeStorer::advanceForksLocked(const std::shared_ptr<PendingForkBatch>& batch) {
+    auto& publication = batch->publication;
+    while (batch->next < publication.points.size() && !stopping_.load()) {
+        const auto path = publication.pathAt(batch->next);
+        const auto task = submitLowerTierLocked(path.keys,
+                                                path.resources,
+                                                batch->tier,
+                                                &path.token_segments,
+                                                nullptr,
+                                                batch->request_id,
+                                                &path.token_ends,
+                                                true);
+        // prepareTask now owns the submitted leaf's source; failed preparation
+        // has already released its temporary references.
+        referenceForkRowLocked(publication.points[batch->next].resources, false);
+        ++batch->next;
+        if (task) {
+            deferForkLocked(task, batch);
+            return;
+        }
+    }
+    for (; batch->next < publication.points.size(); ++batch->next) {
+        referenceForkRowLocked(publication.points[batch->next].resources, false);
+    }
+    for (const auto& row : publication.resources) {
+        referenceForkRowLocked(row, false);
+    }
+}
 void BlockTreeStorer::runStoreTask(const StoreTaskPtr& task) {
     if (stopping_.load()) {
         scheduleStoreSettlement(task,

@@ -29,6 +29,22 @@ public:
         std::vector<size_t>                        token_ends;
     };
 
+    struct ForkBatch {
+        struct Point {
+            CacheKeyType                  key;
+            size_t                        token_end;
+            std::vector<GroupSetResource> resources;
+        };
+
+        CacheKeysType                              keys;
+        std::vector<std::vector<GroupSetResource>> resources;
+        std::vector<int>                           token_ids;
+        std::vector<size_t>                        token_ends;
+        std::vector<Point>                         points;
+
+        Fork pathAt(size_t index, bool include_ancestor_resources = true) const;
+    };
+
     // Invoked with the shared cache mutex held.
     using SettledFn = std::function<void(bool check_watermark)>;
 
@@ -51,10 +67,10 @@ public:
                                  const std::vector<std::vector<int>>*              token_segments    = nullptr,
                                  PrefixCachePlanState*                             prefix_plan_state = nullptr,
                                  const std::vector<size_t>*                        token_ends        = nullptr,
-                                 std::optional<int64_t> observation_request_id                       = std::nullopt,
-                                 bool                   internal_fork                                = false,
-                                 bool*                  ready_after_insert                           = nullptr,
-                                 std::optional<Fork>    followup_fork                                = std::nullopt);
+                                 std::optional<int64_t>   observation_request_id                     = std::nullopt,
+                                 bool                     internal_fork                              = false,
+                                 bool*                    ready_after_insert                         = nullptr,
+                                 std::optional<ForkBatch> followup_forks                             = std::nullopt);
     void             stopAdmissionLocked();
     void observePublicationSkipped(std::optional<int64_t> request_id,
                                    Tier tier,
@@ -64,6 +80,13 @@ public:
 private:
     using StoreTask    = StoreTaskRunner::Task;
     using StoreTaskPtr = std::shared_ptr<StoreTask>;
+
+    struct PendingForkBatch {
+        ForkBatch              publication;
+        Tier                   tier;
+        std::optional<int64_t> request_id;
+        size_t                 next{0};
+    };
 
     void             publishDeviceLocked(const CacheKeysType&                              cache_keys,
                                          const std::vector<std::vector<GroupSetResource>>& resources,
@@ -78,16 +101,17 @@ private:
     StorageRequest   makeStorageRequest(const CacheKeysType&                              cache_keys,
                                         const std::vector<std::vector<GroupSetResource>>& resources,
                                         const std::vector<size_t>*                         token_ends = nullptr) const;
-    void             submitLowerTierLocked(const CacheKeysType&                              cache_keys,
+    StoreTaskPtr     submitLowerTierLocked(const CacheKeysType&                              cache_keys,
                                            const std::vector<std::vector<GroupSetResource>>& resources,
                                            Tier                                              target_tier,
                                            const std::vector<std::vector<int>>*              token_segments,
                                            PrefixCachePlanState*                             prefix_plan_state,
                                            std::optional<int64_t>                            observation_request_id,
                                            const std::vector<size_t>*                        token_ends,
-                                           bool                                              internal_fork,
-                                           std::optional<Fork>                               followup_fork = std::nullopt);
-    void             deferForkLocked(StoreTask& task, Fork fork);
+                                           bool                                              internal_fork);
+    void             referenceForkRowLocked(const std::vector<GroupSetResource>& resources, bool acquire);
+    void             deferForkLocked(const StoreTaskPtr& task, const std::shared_ptr<PendingForkBatch>& batch);
+    void             advanceForksLocked(const std::shared_ptr<PendingForkBatch>& batch);
     void             runStoreTask(const StoreTaskPtr& task);
     void             scheduleStoreSettlement(const StoreTaskPtr& task,
                                              ErrorInfo            error,

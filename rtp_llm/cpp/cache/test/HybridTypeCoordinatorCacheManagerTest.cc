@@ -13,6 +13,8 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
+#include "rtp_llm/cpp/cache/PrefixCacheRegistration.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/test/BlockTreeCacheAllocatorTestHelper.h"
@@ -349,6 +351,274 @@ protected:
         createDevice();
     }
 };
+
+class RegisteredHybridPublicationTest: public HybridTypeCoordinatorCacheManagerTest {
+protected:
+    void SetUp() override {
+        HybridTypeCoordinatorCacheManagerTest::SetUp();
+        config_                         = makeSimpleHybridMhaCacheConfig(4, 32, 32, DataType::TYPE_FP16);
+        config_.cache_min_replay_tokens = 1;
+        ASSERT_EQ(config_.canonicalSizePerBlock(), 32u);
+        allocator_ = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config_);
+        ASSERT_TRUE(allocator_->init());
+        for (const auto& group : allocator_->cacheGroups()) {
+            initial_free_.push_back(group->blockPool()->freeBlocksNum());
+        }
+    }
+
+    void TearDown() override {
+        finishRequest();
+        if (allocator_ && allocator_->blockTreeCacheOwner()) {
+            for (const auto& group : allocator_->cacheGroups()) {
+                allocator_->blockTreeCacheOwner()->evictForGroup(group->tag(), 1000);
+            }
+            for (size_t i = 0; i < initial_free_.size(); ++i) {
+                EXPECT_EQ(allocator_->cacheGroups()[i]->blockPool()->freeBlocksNum(), initial_free_[i]);
+                EXPECT_EQ(allocator_->cacheGroups()[i]->blockPool()->referencedBlocksNum(), 0u);
+            }
+        }
+        allocator_.reset();
+    }
+
+    CompleteTokenIdsPtr tokens(int length, int common_prefix = std::numeric_limits<int>::max()) {
+        auto ids         = std::make_shared<CompleteTokenIds>(1, 1, length + 64, 32);
+        auto input       = std::make_shared<GenerateInput>();
+        input->input_ids = torch::empty({length}, torch::kInt32);
+        auto* values     = input->input_ids.data_ptr<int32_t>();
+        for (int i = 0; i < length; ++i) {
+            values[i] = i < common_prefix ? i + 1 : 1000 + i;
+        }
+        input->generate_config = std::make_shared<GenerateConfig>();
+        ids->init(input);
+        return ids;
+    }
+
+    BatchKVCacheResourcePtr resource(const CompleteTokenIdsPtr& ids) {
+        auto result = makeBatchResource(1, config_, {});
+        initCacheKeys(result, ids, 32);
+        return result;
+    }
+
+    void startRequest(int                        length,
+                      const std::vector<size_t>& internal,
+                      const std::vector<size_t>& original      = {32},
+                      int                        common_prefix = std::numeric_limits<int>::max()) {
+        finishRequest();
+        tokens_  = tokens(length, common_prefix);
+        runtime_ = resource(tokens_);
+        MallocInfo cold{runtime_, tokens_};
+        cold.enable_cache_lookup          = false;
+        cold.enable_remove_skipped_blocks = false;
+        ASSERT_TRUE(allocator_->malloc(cold).success);
+        registration_                             = {};
+        registration_.original_input_tokens       = length;
+        registration_.token_ids                   = tokens_->completeTokenIdsVec(0);
+        registration_.base_keys                   = runtime_->cacheKeys(0);
+        registration_.required_continuation_ready = true;
+        const auto append                         = [&](size_t end, bool internal_only) {
+            PrefixCacheRegistrationPoint point;
+            point.endpoint.pos   = end;
+            point.endpoint.index = (end - 1) / 32;
+            point.endpoint.key   = cacheKeyAtTokenEnd(*tokens_, 0, 32, end);
+            point.internal_only  = internal_only;
+            for (const auto& group : allocator_->blockTreeCacheOwner()->groupSets()) {
+                PrefixCacheGroupSaveBinding binding;
+                binding.group_set_id = group->groupSetId();
+                point.group_bindings.push_back(std::move(binding));
+            }
+            registration_.points.push_back(std::move(point));
+        };
+        for (size_t end : original) {
+            append(end, false);
+        }
+        for (size_t end : internal) {
+            append(end, true);
+        }
+    }
+
+    void prepare(size_t resume = 0) {
+        allocator_->prepareRegisteredSave(registration_, *runtime_, resume, tokens_.get());
+        ASSERT_TRUE(registration_.prepared);
+    }
+
+    void complete() {
+        for (auto& point : registration_.points) {
+            for (auto& binding : point.group_bindings) {
+                if (binding.state != PrefixCacheSaveState::REGISTERED) {
+                    continue;
+                }
+                ASSERT_TRUE(binding.resource.hasCompleteDeviceValue());
+                const auto& group = allocator_->blockTreeCacheOwner()->groupSets()[binding.group_set_id];
+                if (group->groupType() == CacheGroupType::LINEAR) {
+                    auto buffers =
+                        allocator_->convertIndexToBuffer(0, "linear", binding.resource.device_blocks.front());
+                    ASSERT_FALSE(buffers.empty());
+                    auto sentinel = torch::from_blob(
+                        buffers.front().addr, {1}, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
+                    sentinel.fill_(static_cast<int64_t>(point.endpoint.pos));
+                }
+                binding.state                   = PrefixCacheSaveState::CONTENT_COMPLETE;
+                registration_.content_completed = true;
+            }
+        }
+        runtimeSyncAndCheck();
+    }
+
+    void publish() {
+        InsertInfo info{runtime_, tokens_, false};
+        info.prefix_cache_registration = &registration_;
+        size_t resident                = 0;
+        allocator_->insertIntoCache(info, resident);
+    }
+
+    CacheKeysType endpointPath(size_t end) {
+        CacheKeysType path;
+        for (size_t ancestor = 32; ancestor < end; ancestor += 32) {
+            path.push_back(registration_.base_keys[ancestor / 32 - 1]);
+        }
+        path.push_back(cacheKeyAtTokenEnd(*tokens_, 0, 32, end));
+        return path;
+    }
+
+    void expectReuse(int length, int common_prefix, int expected) {
+        auto query_tokens = tokens(length, common_prefix);
+        auto query        = resource(query_tokens);
+        auto layout = std::make_shared<MallocInfo::RequestLayout>(*snapshotGlobalCacheRequest(*query, *query_tokens));
+        layout->token_ids             = query_tokens->completeTokenIdsVec(0);
+        layout->original_input_tokens = length;
+        layout->partial_tail_reuse    = true;
+        MallocInfo lookup{query, query_tokens};
+        lookup.request_layout               = layout;
+        lookup.enable_remove_skipped_blocks = false;
+        const auto hit                      = allocator_->malloc(lookup);
+        ASSERT_TRUE(hit.success);
+        size_t reused = hit.reuse_len;
+        if (hit.async_context) {
+            hit.async_context->waitDone();
+            ASSERT_TRUE(hit.async_context->success());
+            const auto load = std::dynamic_pointer_cast<LoadAsyncContext>(hit.async_context);
+            ASSERT_NE(load, nullptr);
+            reused = load->matchedTokenEndpoint();
+        }
+        RTP_LLM_LOG_INFO("registered_publication_probe length=%d common_prefix=%d used_pos=%zu expected=%d",
+                         length,
+                         common_prefix,
+                         reused,
+                         expected);
+        EXPECT_EQ(reused, static_cast<size_t>(expected));
+        if (reused == static_cast<size_t>(expected) && expected > 0) {
+            const auto block = query->blocks(0, "linear")[config_.endpointBlockPosition("linear", expected)];
+            if (isNullBlockIdx(block)) {
+                allocator_->free(FreeInfo{query, query_tokens});
+                FAIL() << "Restored LINEAR endpoint has no retained state: " << expected;
+            }
+            const auto buffers = allocator_->convertIndexToBuffer(0, "linear", block);
+            ASSERT_FALSE(buffers.empty());
+            auto sentinel =
+                torch::from_blob(buffers.front().addr, {1}, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA))
+                    .cpu();
+            EXPECT_EQ(sentinel.item<uint8_t>(), expected);
+            RTP_LLM_LOG_INFO("registered_publication_probe used_pos=%zu linear_sentinel=%d",
+                             reused,
+                             static_cast<int>(sentinel.item<uint8_t>()));
+        }
+        allocator_->free(FreeInfo{query, query_tokens});
+    }
+
+    void finishRequest() {
+        if (!runtime_) {
+            return;
+        }
+        allocator_->releaseRegisteredSave(registration_);
+        EXPECT_TRUE(registration_.source_pins.empty());
+        EXPECT_TRUE(registration_.cached_source_pins.empty());
+        EXPECT_TRUE(registration_.runtime_source_pins.empty());
+        allocator_->free(FreeInfo{runtime_, tokens_});
+        runtime_.reset();
+    }
+
+    void expectIndependentEndpoints(const std::vector<size_t>& endpoints) {
+        ASSERT_NO_FATAL_FAILURE(startRequest(90, endpoints));
+        ASSERT_NO_FATAL_FAILURE(prepare());
+        ASSERT_NO_FATAL_FAILURE(complete());
+        publish();
+        for (size_t end : endpoints) {
+            SCOPED_TRACE(end);
+            const auto path = allocator_->blockTreeCacheOwner()->tree()->findNode(endpointPath(end));
+            EXPECT_EQ(path.size(), (end - 1) / 32 + 1);
+            if (path.size() == (end - 1) / 32 + 1) {
+                EXPECT_EQ(path.back()->token_end, end);
+                for (const auto& group : allocator_->blockTreeCacheOwner()->groupSets()) {
+                    EXPECT_TRUE(group->hasDeviceCoverage(path, end));
+                }
+            }
+        }
+        finishRequest();
+        for (size_t end : endpoints) {
+            SCOPED_TRACE(end);
+            ASSERT_NO_FATAL_FAILURE(expectReuse(end + 1, end, end));
+        }
+    }
+
+    CacheConfig                                            config_;
+    std::shared_ptr<TestHybridTypeCoordinatorCacheManager> allocator_;
+    BatchKVCacheResourcePtr                                runtime_;
+    CompleteTokenIdsPtr                                    tokens_;
+    PrefixCacheRegistration                                registration_;
+    std::vector<size_t>                                    initial_free_;
+};
+
+TEST_F(RegisteredHybridPublicationTest, PublishesEverySameBlockAndCrossBlockEndpoint) {
+    expectIndependentEndpoints({35, 37, 39, 41, 65});
+}
+
+TEST_F(RegisteredHybridPublicationTest, UnreadyMiddlePointDoesNotSuppressLaterEndpoint) {
+    ASSERT_NO_FATAL_FAILURE(startRequest(90, {35, 37, 41}));
+    ASSERT_NO_FATAL_FAILURE(prepare());
+    ASSERT_NO_FATAL_FAILURE(complete());
+    registration_.points[2].group_bindings[0].state = PrefixCacheSaveState::UNFULFILLED;
+    publish();
+    finishRequest();
+    ASSERT_NO_FATAL_FAILURE(expectReuse(38, 37, 35));
+    ASSERT_NO_FATAL_FAILURE(expectReuse(42, 41, 41));
+}
+
+TEST_F(RegisteredHybridPublicationTest, InternalInputEndPublishesWithoutCanonicalSpine) {
+    ASSERT_NO_FATAL_FAILURE(startRequest(25, {17, 25}, {}));
+    ASSERT_NO_FATAL_FAILURE(prepare());
+    ASSERT_NO_FATAL_FAILURE(complete());
+    publish();
+    finishRequest();
+    ASSERT_NO_FATAL_FAILURE(expectReuse(18, 17, 17));
+    ASSERT_NO_FATAL_FAILURE(expectReuse(26, 25, 25));
+    ASSERT_NO_FATAL_FAILURE(expectReuse(25, 25, 17));
+}
+
+TEST_F(RegisteredHybridPublicationTest, UnreadyInternalInputEndCannotEnterCanonicalSpine) {
+    ASSERT_NO_FATAL_FAILURE(startRequest(25, {25}, {}));
+    ASSERT_NO_FATAL_FAILURE(prepare());
+    ASSERT_NO_FATAL_FAILURE(complete());
+    registration_.points.front().group_bindings[0].state = PrefixCacheSaveState::UNFULFILLED;
+    publish();
+    EXPECT_TRUE(allocator_->blockTreeCacheOwner()->tree()->findNode(endpointPath(25)).empty());
+    finishRequest();
+    ASSERT_NO_FATAL_FAILURE(expectReuse(26, 25, 0));
+}
+
+TEST_F(RegisteredHybridPublicationTest, ResumeSkipsUnsavedEarlierPointsWithoutReplay) {
+    ASSERT_NO_FATAL_FAILURE(startRequest(90, {35, 37, 65}, {}));
+    ASSERT_NO_FATAL_FAILURE(prepare(37));
+    for (size_t i : {0u, 1u}) {
+        for (const auto& binding : registration_.points[i].group_bindings) {
+            EXPECT_EQ(binding.state, PrefixCacheSaveState::UNFULFILLED);
+        }
+    }
+    ASSERT_NO_FATAL_FAILURE(complete());
+    publish();
+    finishRequest();
+    ASSERT_NO_FATAL_FAILURE(expectReuse(38, 37, 0));
+    ASSERT_NO_FATAL_FAILURE(expectReuse(66, 65, 65));
+}
 
 TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateHybridConfigAllowsOnlyFullGroups) {
     auto cfg = makeTinyModelConfig(/*num_layers=*/2);

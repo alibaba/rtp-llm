@@ -182,7 +182,7 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
                               std::optional<int64_t>                            observation_request_id,
                               bool                                              internal_fork,
                               bool*                                             ready_after_insert,
-                              std::optional<BlockTreeStorer::Fork>              followup_fork) {
+                              std::optional<BlockTreeStorer::ForkBatch>         followup_forks) {
     size_t           resident_prefix_length = 0;
     StorageWriteTask storage_write;
     if (ready_after_insert != nullptr) {
@@ -220,7 +220,7 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
                                             observation_request_id,
                                             internal_fork,
                                             ready_after_insert,
-                                            std::move(followup_fork));
+                                            std::move(followup_forks));
     }
     if (storage_write) {
         storage_backend_->write(std::move(storage_write));
