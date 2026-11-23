@@ -164,6 +164,7 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
   用候选集过滤 + 首个未命中即淘汰该引擎（早停），返回每引擎的前缀匹配块数。
 - **小表** `EngineLocalView` 按逻辑 worker 保存原生 `long` 键集。
   `calculateDiff` 在专用 ForkJoinPool 上分别计算两组原生增删键，diff 大小回馈动态间隔服务。
+  `workerRegistry.cacheStatus.diffParallelism` 默认 8，Master 启动时读取，有效并行度受 JVM 可见 CPU 数限制。
 - `KvCacheManager`：门面——`findMatchingEngines`（候选来自 `WorkerStatusProvider`）、
   `updateEngineCache`（diff 后双表应用）、`removeStaleEngineCaches`、`clear`。
   状态更新与清理按逻辑 worker 串行执行。清理从小表取出该 worker 的键，只删除大表中
