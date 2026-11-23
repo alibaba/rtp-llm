@@ -2,6 +2,7 @@ package org.flexlb.cache.match.localsync;
 
 import it.unimi.dsi.fastutil.HashCommon;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
+import it.unimi.dsi.fastutil.longs.LongIterators;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -35,8 +36,8 @@ public class GlobalCacheIndex {
      *                      index identifies one independently routable engine behind the physical
      *                      frontend
      */
-    public void addCacheBlock(Long blockCacheKey, String engineIpPort) {
-        if (blockCacheKey == null || engineIpPort == null) {
+    public void addCacheBlock(long blockCacheKey, String engineIpPort) {
+        if (engineIpPort == null) {
             log.warn(
                     "Invalid parameters: blockCacheKey={}, engineIpPort={}",
                     blockCacheKey,
@@ -53,8 +54,8 @@ public class GlobalCacheIndex {
      * @param engineIp      logical worker identity in {@code ip:port@engineIndex} format
      * @param blockCacheKey Cache block hash value
      */
-    public void removeCacheBlock(String engineIp, Long blockCacheKey) {
-        if (blockCacheKey == null || engineIp == null) {
+    public void removeCacheBlock(String engineIp, long blockCacheKey) {
+        if (engineIp == null) {
             return;
         }
 
@@ -73,8 +74,8 @@ public class GlobalCacheIndex {
         }
 
         BlockIndex currentIndex = index;
-        for (long blockCacheKey : blockCacheKeys) {
-            currentIndex.remove(blockCacheKey, engineIp);
+        for (var keys = LongIterators.asLongIterator(blockCacheKeys.iterator()); keys.hasNext(); ) {
+            currentIndex.remove(keys.nextLong(), engineIp);
         }
     }
 

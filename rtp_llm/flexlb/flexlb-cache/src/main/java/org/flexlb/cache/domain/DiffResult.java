@@ -1,5 +1,7 @@
 package org.flexlb.cache.domain;
 
+import it.unimi.dsi.fastutil.longs.LongSet;
+import it.unimi.dsi.fastutil.longs.LongSets;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -7,8 +9,6 @@ import lombok.NoArgsConstructor;
 
 import java.io.Serial;
 import java.io.Serializable;
-import java.util.Collections;
-import java.util.Set;
 
 /**
  * Diff calculation result
@@ -27,12 +27,12 @@ public class DiffResult implements Serializable {
     /**
      * Added cache blocks
      */
-    @Builder.Default private Set<Long> addedBlocks = Collections.emptySet();
+    @Builder.Default private LongSet addedBlocks = LongSets.EMPTY_SET;
 
     /**
      * Removed cache blocks
      */
-    @Builder.Default private Set<Long> removedBlocks = Collections.emptySet();
+    @Builder.Default private LongSet removedBlocks = LongSets.EMPTY_SET;
 
     /**
      * Engine IP
@@ -57,8 +57,8 @@ public class DiffResult implements Serializable {
     public static DiffResult empty(String engineIp) {
         return DiffResult.builder()
                 .engineIp(engineIp)
-                .addedBlocks(Collections.emptySet())
-                .removedBlocks(Collections.emptySet())
+                .addedBlocks(LongSets.EMPTY_SET)
+                .removedBlocks(LongSets.EMPTY_SET)
                 .build();
     }
 }

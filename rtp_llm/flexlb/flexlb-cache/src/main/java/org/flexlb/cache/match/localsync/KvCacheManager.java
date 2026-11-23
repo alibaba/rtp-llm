@@ -203,18 +203,15 @@ public class KvCacheManager implements EngineCacheInvalidator {
         }
 
         // Apply added cache blocks
-        for (Long addedBlock : diffResult.getAddedBlocks()) {
-            boolean contains = newCacheBlocks.contains(addedBlock);
-            if (contains) {
-                // Update local view
-                engineLocalView.addOrUpdateCacheBlock(engineIPort, addedBlock);
-                // Update global index
-                globalCacheIndex.addCacheBlock(addedBlock, engineIPort);
-            }
+        for (var added = diffResult.getAddedBlocks().iterator(); added.hasNext(); ) {
+            long block = added.nextLong();
+            engineLocalView.addOrUpdateCacheBlock(engineIPort, block);
+            globalCacheIndex.addCacheBlock(block, engineIPort);
         }
 
         // Apply removed cache blocks
-        for (Long removedBlock : diffResult.getRemovedBlocks()) {
+        for (var removed = diffResult.getRemovedBlocks().iterator(); removed.hasNext(); ) {
+            long removedBlock = removed.nextLong();
             // Remove from local view
             engineLocalView.removeCacheBlock(engineIPort, removedBlock);
             // Remove from global index
