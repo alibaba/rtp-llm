@@ -166,6 +166,8 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
   `calculateDiff` 在专用 ForkJoinPool 上并行算 added/removed，diff 大小回馈动态间隔服务。
 - `KvCacheManager`：门面——`findMatchingEngines`（候选来自 `WorkerStatusProvider`）、
   `updateEngineCache`（diff 后双表应用）、`removeStaleEngineCaches`、`clear`。
+  状态更新与清理按逻辑 worker 串行执行。清理从小表取出该 worker 的键，只删除大表中
+  对应的 worker 映射，共享同一缓存块的其他 worker 仍可命中。
 - `LocalSyncCacheMatchProvider` 仅在 LOCAL_SYNC 模式订阅 `EngineAddressResolver`，按最新
   `WorkerHost` 集合清理已下线 frontend 的本地 cache；KVCM 模式不注册该 listener。
 
