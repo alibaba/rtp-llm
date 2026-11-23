@@ -49,6 +49,11 @@ class Bert(BaseModel):
     def support_cuda_graph(self) -> bool:
         return True
 
+    def support_embedding_prefill_graph(self) -> bool:
+        # Verified for the embedding engine's cache-less prefill graph: bert
+        # position/type ids are refreshed into the capture buffers at replay.
+        return True
+
     def _create_python_model(self):
         from rtp_llm.models_py.model_desc.bert import BertModel
 

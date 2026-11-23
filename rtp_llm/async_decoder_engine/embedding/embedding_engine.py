@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import pickle
+from dataclasses import replace
 from typing import Optional
 
 from typing_extensions import override
@@ -62,7 +64,67 @@ class EmbeddingCppEngine(BaseEngine):
             )
         self.cpp_engine.init(
             self.model,
-            self.engine_config,
+            self._graph_gated_engine_config(),
             self.model.vit_config,
             self.mm_process_engine,
         )
+
+    def _graph_gated_engine_config(self) -> EngineConfig:
+        """Gate the cache-less embedding prefill CUDA graph on model support
+        and on this device's backend capability.
+
+        The embedding prefill CUDA graph is opt-in per model family: only
+        wrappers declaring ``support_embedding_prefill_graph`` may capture.
+        Everything else keeps the eager path even when the server was started
+        with ``--enable_cuda_graph`` (for example qwen2-gte, whose flashinfer
+        paged-prefill attention cannot even instantiate at capture-warmup
+        bucket shapes). Independently, a declaring family still captures only
+        when this device has a cache-less graph-capable prefill attention
+        backend (today: TRT-LLM FMHA v2 non-paged prefill on CUDA sm90/sm12x
+        with CUDA >= 12.9 and matching dtype/head dims); otherwise the engine
+        degrades to eager instead of failing at graph-capture warmup. The
+        multimodal engine and any other consumer keep the original config; only
+        the config handed to the embedding engine is a copy with graphs
+        disabled.
+        """
+        hw_kernel_config = self.engine_config.hw_kernel_config
+        if not hw_kernel_config.enable_cuda_graph:
+            return self.engine_config
+        if not _declares_embedding_prefill_graph(self.model):
+            logging.warning(
+                "model %s does not declare support_embedding_prefill_graph; "
+                "embedding prefill CUDA graph disabled, using eager path",
+                type(self.model).__name__,
+            )
+        elif not _cacheless_prefill_graph_backend_available(self.model):
+            logging.warning(
+                "no cache-less graph-capable prefill attention backend on this "
+                "device for model %s; embedding prefill CUDA graph disabled, "
+                "using eager path",
+                type(self.model).__name__,
+            )
+        else:
+            return self.engine_config
+        gated = replace(self.engine_config)
+        gated.hw_kernel_config = pickle.loads(pickle.dumps(hw_kernel_config))
+        gated.hw_kernel_config.enable_cuda_graph = False
+        return gated
+
+
+def _declares_embedding_prefill_graph(model) -> bool:
+    flag = getattr(model, "support_embedding_prefill_graph", None)
+    if flag is None:
+        return False
+    return bool(flag() if callable(flag) else flag)
+
+
+def _cacheless_prefill_graph_backend_available(model) -> bool:
+    """Whether this device can capture the model's embedding prefill graph."""
+    from rtp_llm.models_py.modules.factory.attention.attn_factory import (
+        has_cacheless_prefill_cuda_graph_backend,
+    )
+
+    attn_configs = model.model_config.getAttentionConfigs(
+        model.parallelism_config.get_attn_tp_size()
+    )
+    return has_cacheless_prefill_cuda_graph_backend(attn_configs, model.fmha_config)

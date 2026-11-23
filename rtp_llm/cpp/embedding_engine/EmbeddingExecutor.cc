@@ -65,6 +65,18 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, py::object 
         parallelism_config,
     });
     model_init_params.metrics_reporter = metrics_reporter_;
+    // Graph geometry for the cache-less embedding prefill CUDA graph: the
+    // embedding model has no KV cache, so the executor publishes the minimal
+    // kernel block table width directly instead of a cache layer layout.
+    model_init_params.hw_kernel_config        = params.hw_kernel_config;
+    model_init_params.max_seq_len             = model_config_.max_seq_len;
+    model_init_params.hidden_size             = model_config_.hidden_size;
+    model_init_params.concurrency_config      = params.concurrency_config;
+    model_init_params.runtime_config          = params.runtime_config;
+    if (params.hw_kernel_config.enable_cuda_graph) {
+        model_init_params.cacheless_prefill_graph = true;
+        model_init_params.kernel_block_table_width = 1;
+    }
 
     RTP_LLM_CHECK_WITH_INFO(!params.py_model.is_none(), "py_model must be provided, legacy C++ GptModel path removed");
     RTP_LLM_LOG_INFO("init executor with python model");

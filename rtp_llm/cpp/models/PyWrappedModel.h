@@ -439,7 +439,13 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                  dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
                                                                                   "forward";
     py_forward_method_         = py_model_.attr(forward_method);
-    if (enable_cuda_graph_ && !params.kv_cache_layer_layout.has_value()) {
+    // A cache-less embedding prefill graph has no KV-cache topology by
+    // construction: the embedding executor publishes the minimal
+    // kernel_block_table_width for its graph buffers instead of a layer
+    // layout. Keep requiring the layout for every other graph role.
+    const bool cacheless_prefill_graph =
+        is_prefill_cuda_graph_mode_ && params.cacheless_prefill_graph && params.kernel_block_table_width > 0;
+    if (enable_cuda_graph_ && !params.kv_cache_layer_layout.has_value() && !cacheless_prefill_graph) {
         // No published topology means there is no trustworthy model geometry
         // for any graph role (including prefill warmup). Keep the eager path.
         RTP_LLM_LOG_WARNING(
