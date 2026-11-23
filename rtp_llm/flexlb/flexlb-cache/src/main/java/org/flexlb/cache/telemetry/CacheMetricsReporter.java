@@ -2,6 +2,7 @@ package org.flexlb.cache.telemetry;
 
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.match.theory.RecentCacheKeyWindow;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
@@ -13,6 +14,10 @@ import org.springframework.stereotype.Component;
 import javax.annotation.PostConstruct;
 
 import static org.flexlb.constant.MetricConstant.CACHE_AFFINITY_DECISION;
+import static org.flexlb.constant.MetricConstant.CACHE_CLUSTER_RECENT_HISTORY_COVERAGE_MS;
+import static org.flexlb.constant.MetricConstant.CACHE_CLUSTER_RECENT_HISTORY_READY;
+import static org.flexlb.constant.MetricConstant.CACHE_CLUSTER_RECENT_HIT_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_CLUSTER_RECENT_INPUT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_DIFF_ADDED_BLOCKS_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_DIFF_REMOVED_BLOCKS_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_BYTES;
@@ -341,9 +346,26 @@ public class CacheMetricsReporter {
         monitor.report(CACHE_AFFINITY_DECISION, tags, 1.0);
     }
 
-    /**
-     * Report theory cache-hit tokens for one request.
-     */
+    /** Reports coverage on the Leader and emits token counts for complete windows. */
+    public void reportClusterRecentCacheKeyHitMetrics(
+            RecentCacheKeyWindow.Snapshot snapshot, long hitTokens, long inputTokens) {
+        FlexMetricTags tags =
+                FlexMetricTags.of(
+                        "timeWindowMs",
+                        String.valueOf(snapshot.getTimeWindowMs()),
+                        "isMaster",
+                        "true");
+        monitor.report(
+                CACHE_CLUSTER_RECENT_HISTORY_COVERAGE_MS, tags, snapshot.getHistoryCoverageMs());
+        boolean historyComplete = snapshot.isHistoryComplete();
+        monitor.report(CACHE_CLUSTER_RECENT_HISTORY_READY, tags, historyComplete ? 1L : 0L);
+        if (historyComplete && inputTokens > 0L) {
+            monitor.report(CACHE_CLUSTER_RECENT_HIT_TOKENS, tags, hitTokens);
+            monitor.report(CACHE_CLUSTER_RECENT_INPUT_TOKENS, tags, inputTokens);
+        }
+    }
+
+    /** Reports theory cache-hit tokens for one request. */
     public void reportTheoryCacheHitMetrics(long hitTokens, long inputTokens) {
         if (inputTokens <= 0L) {
             return;
@@ -450,6 +472,10 @@ public class CacheMetricsReporter {
         monitor.register(CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS, FlexMetricType.COUNTER);
         monitor.register(CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS, FlexMetricType.COUNTER);
         monitor.register(CACHE_KVCM_SELECTED_INPUT_TOKENS, FlexMetricType.COUNTER);
+        monitor.register(CACHE_CLUSTER_RECENT_HISTORY_COVERAGE_MS, FlexMetricType.GAUGE);
+        monitor.register(CACHE_CLUSTER_RECENT_HISTORY_READY, FlexMetricType.GAUGE);
+        monitor.register(CACHE_CLUSTER_RECENT_HIT_TOKENS, FlexMetricType.COUNTER);
+        monitor.register(CACHE_CLUSTER_RECENT_INPUT_TOKENS, FlexMetricType.COUNTER);
         monitor.register(CACHE_THEORY_HIT_COUNT, FlexMetricType.COUNTER);
         monitor.register(CACHE_THEORY_TOTAL_COUNT, FlexMetricType.COUNTER);
         monitor.register(CACHE_THEORY_HIT_RATIO, FlexMetricType.GAUGE);

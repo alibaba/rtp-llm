@@ -15,5 +15,10 @@ public interface MasterElectService {
 
     boolean isMaster();
 
+    /** Returns the active ZooKeeper leadership term, or zero without cluster leadership. */
+    default long getLeadershipEpoch() {
+        return 0L;
+    }
+
     default void refreshMasterHost(boolean forceSync) {}
 }
