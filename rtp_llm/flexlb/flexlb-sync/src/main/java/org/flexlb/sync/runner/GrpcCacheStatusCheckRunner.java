@@ -18,7 +18,6 @@ import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
-import java.util.concurrent.atomic.LongAdder;
 
 import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
 
@@ -54,8 +53,6 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     private final boolean debug;
     private final long requestTimeoutMs;
 
-    private final LongAdder syncCount;
-    private final Long syncEngineStatusInterval;
     private final Executor callbackExecutor;
 
     public GrpcCacheStatusCheckRunner(
@@ -71,8 +68,6 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             CacheAwareService cacheAwareService,
             DynamicCacheIntervalService cacheIntervalService,
             long requestTimeoutMs,
-            LongAdder syncCount,
-            Long syncEngineStatusInterval,
             boolean fullSnapshotDebugMode,
             Executor callbackExecutor) {
 
@@ -90,8 +85,6 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 cacheAwareService,
                 cacheIntervalService,
                 requestTimeoutMs,
-                syncCount,
-                syncEngineStatusInterval,
                 fullSnapshotDebugMode,
                 callbackExecutor);
     }
@@ -110,8 +103,6 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             CacheAwareService cacheAwareService,
             DynamicCacheIntervalService cacheIntervalService,
             long requestTimeoutMs,
-            LongAdder syncCount,
-            Long syncEngineStatusInterval,
             boolean fullSnapshotDebugMode,
             Executor callbackExecutor) {
 
@@ -133,8 +124,6 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 java.util.Objects.requireNonNull(cacheIntervalService, "cacheIntervalService");
         this.debug = fullSnapshotDebugMode;
         this.requestTimeoutMs = requestTimeoutMs;
-        this.syncCount = syncCount;
-        this.syncEngineStatusInterval = syncEngineStatusInterval;
         this.callbackExecutor = callbackExecutor;
     }
 
@@ -143,21 +132,6 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         boolean asyncInitiated = false;
         try {
             logger.debug("GrpcCacheStatusCheckRunner run for {}", ipPort);
-            long prefillCacheStatusCheckInterval = cacheIntervalService.getCurrentIntervalMs();
-            long roundInterval = prefillCacheStatusCheckInterval / syncEngineStatusInterval;
-            roundInterval = Math.max(roundInterval, 1);
-
-            // EngineSyncRunner is invoked on the status-poll cadence. Prefill
-            // cache polling uses an integer number of those ticks so a changing
-            // interval does not require a second scheduler or timer.
-            if (roleType.requiresCacheKeys() && syncCount.longValue() % roundInterval != 0) {
-                logger.debug(
-                        "Skip prefill cache status check for {} because not in {}ms interval",
-                        ipPort,
-                        prefillCacheStatusCheckInterval);
-                return;
-            }
-
             long startTime = System.nanoTime() / 1000;
             long currentCacheVersion = getCurrentCacheVersion();
 
