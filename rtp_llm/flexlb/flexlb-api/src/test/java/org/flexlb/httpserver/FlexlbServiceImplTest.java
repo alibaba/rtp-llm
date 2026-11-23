@@ -2052,12 +2052,25 @@ class FlexlbServiceImplTest {
             verify(serverLatencyRecorder, never()).recordCompletion(any(), anyLong());
             verify(engineHealthReporter, never()).reportRequestPayload(any());
 
-            // The interceptor owns the span lifecycle; nothing is exported yet.
-            assertEquals(0, exporter.spans.size());
+            // The interceptor still owns the Schedule server span.
+            assertEquals(
+                    0,
+                    exporter.spans.stream()
+                            .filter(
+                                    data ->
+                                            data.getKind()
+                                                    == io.opentelemetry.api.trace.SpanKind.SERVER)
+                            .count());
             org.flexlb.telemetry.FlexlbTrace.finish(serverSpan, null);
 
-            assertEquals(1, exporter.spans.size());
-            io.opentelemetry.sdk.trace.data.SpanData span = exporter.spans.get(0);
+            io.opentelemetry.sdk.trace.data.SpanData span =
+                    exporter.spans.stream()
+                            .filter(
+                                    candidate ->
+                                            candidate.getKind()
+                                                    == io.opentelemetry.api.trace.SpanKind.SERVER)
+                            .findFirst()
+                            .orElseThrow();
             assertEquals(
                     io.opentelemetry.api.trace.StatusCode.ERROR, span.getStatus().getStatusCode());
             assertEquals(
@@ -2070,7 +2083,9 @@ class FlexlbServiceImplTest {
                             .get(
                                     io.opentelemetry.api.common.AttributeKey.longKey(
                                             "flexlb.schedule.code")));
-            assertTrue(span.getEvents().isEmpty());
+            assertEquals(
+                    List.of("flexlb.response.ready"),
+                    span.getEvents().stream().map(event -> event.getName()).toList());
         } finally {
             org.flexlb.telemetry.FlexlbTrace.configure(null, "");
             sdk.close();
@@ -2087,7 +2102,11 @@ class FlexlbServiceImplTest {
                                 io.opentelemetry.sdk.trace.export.SimpleSpanProcessor.create(
                                         exporter))
                         .build()) {
-            var span = provider.get("test").spanBuilder("schedule").startSpan();
+            var span =
+                    provider.get("test")
+                            .spanBuilder("schedule")
+                            .setSpanKind(io.opentelemetry.api.trace.SpanKind.SERVER)
+                            .startSpan();
             when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
             when(lbStatusConsistencyService.isMaster()).thenReturn(false);
             when(grpcForwarder.forwardScheduleToMaster(any()))
@@ -2108,8 +2127,14 @@ class FlexlbServiceImplTest {
                                                     .build(),
                                             mock(StreamObserver.class)));
             org.flexlb.telemetry.FlexlbTrace.finishWithGrpcStatus(span, "OK", 0, true);
-            assertEquals(1, exporter.spans.size());
-            var data = exporter.spans.get(0);
+            var data =
+                    exporter.spans.stream()
+                            .filter(
+                                    candidate ->
+                                            candidate.getKind()
+                                                    == io.opentelemetry.api.trace.SpanKind.SERVER)
+                            .findFirst()
+                            .orElseThrow();
             assertEquals(
                     io.opentelemetry.api.trace.StatusCode.ERROR, data.getStatus().getStatusCode());
             assertEquals(
@@ -2122,7 +2147,9 @@ class FlexlbServiceImplTest {
                             .get(
                                     io.opentelemetry.api.common.AttributeKey.longKey(
                                             "flexlb.schedule.code")));
-            assertTrue(data.getEvents().isEmpty());
+            assertFalse(
+                    data.getEvents().stream()
+                            .anyMatch(event -> event.getName().contains("rejected")));
             verify(routeService, never()).route(any());
         }
     }
@@ -2511,8 +2538,14 @@ class FlexlbServiceImplTest {
                                 }
                             })
                     .join();
-            assertEquals(1, exporter.spans.size());
-            var data = exporter.spans.getFirst();
+            var data =
+                    exporter.spans.stream()
+                            .filter(
+                                    candidate ->
+                                            candidate.getKind()
+                                                    == io.opentelemetry.api.trace.SpanKind.SERVER)
+                            .findFirst()
+                            .orElseThrow();
             assertEquals(
                     success
                             ? io.opentelemetry.api.trace.StatusCode.OK
