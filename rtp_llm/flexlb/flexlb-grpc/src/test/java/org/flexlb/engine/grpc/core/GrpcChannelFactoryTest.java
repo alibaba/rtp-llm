@@ -10,6 +10,7 @@ import io.grpc.StatusRuntimeException;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.bootstrap.Bootstrap;
+import io.netty.channel.EventLoopGroup;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -26,6 +27,7 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.StreamSupport;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -45,8 +47,21 @@ class GrpcChannelFactoryTest {
         try (AnnotationConfigApplicationContext context = createChannelContext(Map.of())) {
             GrpcChannelFactory factory = context.getBean(GrpcChannelFactory.class);
             assertNotNull(factory);
+            assertEngineGrpcSizing(context, 32, 10_000, 8);
             assertEquals(2_000L, factory.getKeepAliveTimeMillis());
             assertTrue(factory.isKeepAliveWithoutCalls());
+        }
+    }
+
+    @Test
+    void appliesEngineGrpcExecutorSizingToChannelBeans() {
+        var config = new FlexlbConfig();
+        var engineGrpc = config.getEngineGrpc();
+        engineGrpc.setExecutorThreads(3);
+        engineGrpc.setExecutorQueueCapacity(17);
+        engineGrpc.setEventLoopThreads(2);
+        try (var context = createChannelContext(Map.of(), config)) {
+            assertEngineGrpcSizing(context, 3, 17, 2);
         }
     }
 
@@ -164,6 +179,17 @@ class GrpcChannelFactoryTest {
                                 message ->
                                         message.contains("Unknown channel option")
                                                 && message.contains("TCP_USER_TIMEOUT")));
+    }
+
+    private static void assertEngineGrpcSizing(
+            AnnotationConfigApplicationContext context, int threads, int capacity, int ioThreads) {
+        var executor =
+                context.getBean("managedChannelThreadPoolExecutor", ThreadPoolExecutor.class);
+        assertEquals(threads, executor.getCorePoolSize());
+        assertEquals(threads, executor.getMaximumPoolSize());
+        assertEquals(capacity, executor.getQueue().remainingCapacity());
+        var eventLoops = context.getBean("managedChannelEventLoopGroup", EventLoopGroup.class);
+        assertEquals(ioThreads, StreamSupport.stream(eventLoops.spliterator(), false).count());
     }
 
     private static AnnotationConfigApplicationContext createChannelContext(
