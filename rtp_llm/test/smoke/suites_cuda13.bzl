@@ -70,12 +70,16 @@ def cuda13_suites():
                 name="smoke_v4_flash_0731_pd_cp2ep2_dp2ep2_dspark_cprr_async_xgrammar_json_sm100",
                 task_info="data/model/deepseek_v4/q_r_v4_flash_0731_pd_cp2ep2_dp2ep2_dspark_async_xgrammar_json_sm100_arm.json",
                 sleep_time_qr=10,
+                data=["//rtp_llm/flexlb:flexlb_jar"],
+                test_envs={"SMOKE_START_FLEXLB_MASTER": "1"},
                 smoke_args={
+                    "frontend": "--role_type FRONTEND --use_local 1 --warm_up 0 --act_type BF16 --max_seq_len 8192 --seq_size_per_block 256 --prefill_cp_size 2 --prefill_cp_kv_cache_sharded 1 --cp_rotate_method PREFILL_CP --think_mode 1",
                     # Leave enough KV space for HCA state and the 8K context after the CRC workspace.
                     "prefill": ("--max_seq_len 8192 --enable_cuda_graph 0 --act_type BF16 --tp_size 2 --ep_size 2 --moe_strategy mega_moe_se --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --memory_cache_size_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --prefill_cp_kv_cache_sharded 1 --reserver_runtime_mem_mb 65536 --max_context_batch_size 1 --fp8_kv_cache 1 --sp_type dspark --gen_num_per_cycle 3 --sp_model_type deepseek_v4_dspark --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V4-Flash-DSpark --sp_act_type bf16 --think_mode 1 --enable_fp32_lm_head 0" + HOST_REUSE_AFTER_DEMOTION_ARGS),
                     "decode": "--max_seq_len 8192 --enable_cuda_graph 1 --decode_capture_config '1,2,4,8,16' --act_type BF16 --tp_size 1 --dp_size 2 --ep_size 2 --moe_strategy mega_moe_se --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 1024 --use_deepep_moe 1 --use_deepep_low_latency 1 --load_cache_timeout_ms 30000 --reserver_runtime_mem_mb 10240 --fp8_kv_cache 1 --sp_type dspark --gen_num_per_cycle 3 --sp_model_type deepseek_v4_dspark --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V4-Flash-DSpark --sp_act_type bf16 --cp_rotate_method PREFILL_CP --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2 --think_mode 1 --enable_fp32_lm_head 0",
                 },
                 envs={
+                    "frontend": ["THINK_START_TAG=<think>", "THINK_END_TAG=</think>"],
                     "prefill": [
                         "ENABLE_DSPARK=1",
                         "SP_TYPE=dspark",

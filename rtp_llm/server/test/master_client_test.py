@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from rtp_llm.config.exceptions import (
     AdmissionRejectReason,
@@ -127,6 +128,38 @@ class _FakeInputPB:
 
 
 class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
+
+    async def test_selected_vit_round_trips_optional_engine_index(self):
+        for index in (None, 0, 1):
+            with self.subTest(index=index):
+                status = FlexlbServerStatusPB(
+                    role="VIT",
+                    server_ip="127.0.0.1",
+                    http_port=8000,
+                    grpc_port=8001,
+                    worker_generation=42,
+                )
+                if index is not None:
+                    status.engine_index = index
+                client = _CaptureMasterClient()
+                client._send_schedule_request = AsyncMock(
+                    return_value=FlexlbScheduleResponsePB(
+                        success=True, code=200, server_status=[status]
+                    )
+                )
+                args = dict(
+                    block_cache_keys=[],
+                    cache_key_block_size=64,
+                    input=_FakeInput(),
+                    request_id=99,
+                )
+                first = await client.get_backend_role_addrs(**args, vit_only=True)
+                await client.get_backend_role_addrs(
+                    **args, selected_vit=first.result["server_status"][0]
+                )
+                sent = client._send_schedule_request.call_args.args[1].selected_vit
+                self.assertEqual(sent, status)
+
     def test_python_reason_enum_matches_schedule_wire_values(self):
         self.assertEqual(
             int(AdmissionRejectReason.UNSPECIFIED),
