@@ -1,15 +1,12 @@
-"""AWQ/GPTQ runtime bridge to Aiter's native grouped integer GEMM.
+"""Packed affine integer projection for CUDA and ROCm.
 
-No floating weight matrix is materialized. Checkpoint integer words are
-repacked into the native kernel ABI; dequantization happens inside that GEMM.
-CUDA mixed-GEMM and NVFP4 layouts are not interchangeable with this ABI.
+Decode only the current tile in the shared Triton kernel. Pinned ROCm Aiter's
+A16W4 MoE is MXFP4 with E8M0 scales, not this asymmetric integer format.
 """
 
 import importlib
-import inspect
 import logging
 from dataclasses import dataclass
-from functools import lru_cache
 
 import torch
 
@@ -71,8 +68,8 @@ class GroupwiseRuntimeState:
         return dict(
             layout=(
                 "cuda_wna16_v1"
-                if self.weight.is_cuda and torch.version.hip is None
-                else "aiter_wna16_v1"
+                if torch.version.hip is None
+                else "rocm_wna16_v1"
             ),
             method=self.layout.method,
             source_bits=self.layout.bits,
@@ -104,7 +101,7 @@ def prepare_groupwise_state(qweight, qzeros, scales, layout):
     """Pure integer repacking, usable on CPU for exact checkpoint regressions.
 
     GPTQ can have an effective zero point of 16 (stored nibble 15 + 1). A
-    four-bit zero-point ABI cannot represent it. Select Aiter's existing W8A16
+    four-bit zero-point ABI cannot represent it. Select the native W8A16
     branch for that projection, retaining integer values and recording the 2x
     weight-storage promotion. Never clip, wrap, or dequantize to float weights.
     """
@@ -188,60 +185,6 @@ def prepare_groupwise_state(qweight, qzeros, scales, layout):
     return GroupwiseRuntimeState(weight, scale, zero, layout, runtime_bits, reason)
 
 
-@lru_cache(maxsize=1)
-def _load_backend():
-    try:
-        module = importlib.import_module("aiter.ops.triton.moe.moe_op")
-        sorter_module = importlib.import_module(
-            "aiter.ops.triton.moe.moe_align_block_size"
-        )
-        language = importlib.import_module("triton.language")
-    except (ImportError, OSError, RuntimeError) as error:
-        raise RuntimeError(
-            "ROCm AWQ/GPTQ requires importable Aiter grouped integer GEMM and routing kernels"
-        ) from error
-    gemm = getattr(module, "fused_moe", None)
-    sorter = getattr(sorter_module, "moe_align_block_size_triton", None)
-    required = {
-        "A",
-        "B",
-        "C",
-        "A_scale",
-        "B_scale",
-        "B_zp",
-        "topk_weights",
-        "topk_ids",
-        "sorted_token_ids",
-        "expert_ids",
-        "num_tokens_post_padded",
-        "mul_routed_weight",
-        "top_k",
-        "compute_type",
-        "use_fp8_w8a8",
-        "use_int8_w8a16",
-        "use_int4_w4a16",
-        "block_shape",
-        "config",
-    }
-    try:
-        signature = inspect.signature(gemm)
-        if not required.issubset(signature.parameters):
-            raise TypeError("missing grouped GEMM arguments")
-        # _projection calls by keyword. Name membership alone accepts both
-        # positional-only arguments and an extra mandatory wheel argument.
-        signature.bind(**dict.fromkeys(required))
-    except (TypeError, ValueError) as error:
-        raise RuntimeError(
-            "Aiter fused_moe lacks the grouped AWQ/GPTQ integer ABI"
-        ) from error
-    kernel = getattr(module, "_fused_moe_kernel_gptq_awq", None)
-    if kernel is None or not hasattr(kernel, "__getitem__") or not callable(sorter):
-        raise RuntimeError(
-            "Aiter grouped AWQ/GPTQ kernel or token-alignment symbol is missing"
-        )
-    return gemm, sorter, language
-
-
 def validate_runtime_device(device, method, bits):
     if method not in ("awq", "gptq") or type(bits) is not int or bits not in (4, 8):
         raise ValueError("AWQ/GPTQ runtime requires an explicit 4/8-bit method")
@@ -260,16 +203,23 @@ def validate_integer_device(device):
             or torch.cuda.get_device_capability(device)[0] < 8
         ):
             raise RuntimeError("CUDA integer projections require a CUDA SM80+ device")
-        importlib.import_module("rtp_llm.models_py.quant_methods.groupwise_cuda")
-        return
-    if not torch.cuda.is_available():
-        raise RuntimeError("ROCm AWQ/GPTQ accelerator is unavailable")
-    arch = getattr(torch.cuda.get_device_properties(device), "gcnArchName", "")
-    if not any(part in arch for part in ("gfx942", "gfx950")):
-        raise RuntimeError(
-            f"Aiter grouped AWQ/GPTQ requires a verified eight-XCD architecture, got {arch!r}"
+    else:
+        if not torch.cuda.is_available():
+            raise RuntimeError("ROCm AWQ/GPTQ accelerator is unavailable")
+        arch = getattr(torch.cuda.get_device_properties(device), "gcnArchName", "")
+        arch = arch.split(":", 1)[0]
+        if arch not in ("gfx942", "gfx950"):
+            raise RuntimeError(
+                f"ROCm integer projections require gfx942 or gfx950, got {arch}"
+            )
+    try:
+        backend = importlib.import_module(
+            "rtp_llm.models_py.quant_methods.groupwise_triton"
         )
-    _load_backend()
+    except ImportError as exc:
+        raise RuntimeError("Triton integer projection backend is unavailable") from exc
+    if not callable(getattr(backend, "project", None)):
+        raise RuntimeError("Triton integer projection backend requires callable project")
 
 
 def _validate_parameters(layer, parameter_names):
@@ -349,9 +299,6 @@ def _projection(
     x,
     topk_ids,
     topk_weights,
-    sorted_ids,
-    expert_ids,
-    count,
     *,
     input_top_k,
     multiply_weights,
@@ -366,68 +313,16 @@ def _projection(
         )
     if x.ndim != 2 or x.shape[1] != state.layout.input_size:
         raise ValueError("Grouped integer GEMM activation shape mismatch")
-    if torch.version.hip is None:
-        from rtp_llm.models_py.quant_methods.groupwise_cuda import project
+    from rtp_llm.models_py.quant_methods.groupwise_triton import project
 
-        return project(state, x, topk_ids, topk_weights, input_top_k, multiply_weights)
-    gemm, _, language = _load_backend()
-    output = torch.empty(
-        (*topk_ids.shape, state.layout.output_size), dtype=x.dtype, device=x.device
-    )
-    gemm(
-        A=x.contiguous(),
-        B=state.weight,
-        C=output,
-        A_scale=None,
-        B_scale=state.scale,
-        B_zp=state.zero,
-        topk_weights=topk_weights,
-        topk_ids=topk_ids,
-        sorted_token_ids=sorted_ids,
-        expert_ids=expert_ids,
-        num_tokens_post_padded=count,
-        mul_routed_weight=multiply_weights,
-        top_k=input_top_k,
-        compute_type=(
-            language.float16 if x.dtype == torch.float16 else language.bfloat16
-        ),
-        use_fp8_w8a8=False,
-        use_int8_w8a16=state.runtime_bits == 8,
-        use_int4_w4a16=state.runtime_bits == 4,
-        block_shape=[0, state.layout.group],
-        config={
-            "BLOCK_SIZE_M": 16,
-            "BLOCK_SIZE_N": 64,
-            "BLOCK_SIZE_K": 64,
-            "GROUP_SIZE_M": 4,
-            "num_warps": 4,
-        },
-    )
-    return output
+    return project(state, x, topk_ids, topk_weights, input_top_k, multiply_weights)
 
 
-def _route(topk_ids, experts):
-    # Native align's histogram does not accept -1. Put inactive routes into one
-    # extra bucket, then use GEMM's explicit expert=-1 zero-output contract.
+def _validate_routes(topk_ids, experts):
     torch._assert_async(
         ((topk_ids >= -1) & (topk_ids < experts)).all(),
         "Groupwise router supplied an invalid local expert ID",
     )
-    if torch.version.hip is None:
-        return None, None, None
-    _, sorter, _ = _load_backend()
-    safe_ids = torch.where(topk_ids < 0, experts, topk_ids).to(torch.int32).contiguous()
-    capacity = ((topk_ids.numel() + (experts + 1) * 15 + 15) // 16) * 16
-    sorted_ids = torch.full(
-        (capacity,), topk_ids.numel(), dtype=torch.int32, device=topk_ids.device
-    )
-    expert_ids = torch.full(
-        (capacity // 16,), -1, dtype=torch.int32, device=topk_ids.device
-    )
-    count = torch.zeros((1,), dtype=torch.int32, device=topk_ids.device)
-    sorter(safe_ids, experts + 1, 16, sorted_ids, expert_ids, count)
-    expert_ids = torch.where(expert_ids == experts, -1, expert_ids)
-    return sorted_ids, expert_ids, count
 
 
 def linear(layer, x, bias=None):
@@ -445,7 +340,6 @@ def linear(layer, x, bias=None):
         flat,
         ids,
         weights,
-        *_route(ids, 1),
         input_top_k=1,
         multiply_weights=False,
     ).reshape(*original, state.layout.output_size)
@@ -594,13 +488,12 @@ def build_moe_executor(layer):
             weights = weights.float().contiguous()
             # Both EP transports deliver rank-local IDs and -1 holes. With
             # unsharded experts (EP=1), global and local IDs are identical.
-            routing = _route(ids, w13.weight.shape[0])
+            _validate_routes(ids, w13.weight.shape[0])
             first = _projection(
                 w13,
                 x,
                 ids,
                 weights,
-                *routing,
                 input_top_k=ids.shape[1],
                 multiply_weights=apply_router_weight_on_input,
             )
@@ -613,7 +506,6 @@ def build_moe_executor(layer):
                 activated,
                 ids,
                 weights,
-                *routing,
                 input_top_k=1,
                 multiply_weights=not apply_router_weight_on_input,
             )

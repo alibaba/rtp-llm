@@ -64,9 +64,6 @@ def decode_native(state):
 
 
 class GroupwiseRuntimeCPUTest(unittest.TestCase):
-    def tearDown(self):
-        runtime._load_backend.cache_clear()
-
     def test_real_integer_checkpoint_repacking_awq_gptq_4_8(self):
         for method in ("awq", "gptq"):
             for bits in (4, 8):
@@ -175,17 +172,38 @@ class GroupwiseRuntimeCPUTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "SM80"):
                 runtime.validate_runtime_device("cuda", "awq", 4)
 
-    def test_backend_import_and_symbol_failures_are_explicit(self):
-        with mock.patch.object(
-            runtime.importlib, "import_module", side_effect=ImportError("missing ABI")
-        ):
-            with self.assertRaisesRegex(RuntimeError, "importable Aiter"):
-                runtime._load_backend()
-        with mock.patch.object(
-            runtime.importlib, "import_module", return_value=object()
-        ):
-            with self.assertRaisesRegex(RuntimeError, "integer ABI"):
-                runtime._load_backend()
+    def test_rocm_preflight_uses_affine_integer_backend_on_supported_archs(self):
+        with mock.patch.object(torch.version, "hip", "7.2"), mock.patch.object(
+            torch.cuda, "is_available", return_value=True
+        ), mock.patch.object(
+            torch.cuda, "get_device_properties"
+        ) as properties, mock.patch.object(runtime.importlib, "import_module") as load:
+            for arch in ("gfx942:sramecc+:xnack-", "gfx950"):
+                properties.return_value.gcnArchName = arch
+                runtime.validate_integer_device("cuda:0")
+                load.assert_called_with(
+                    "rtp_llm.models_py.quant_methods.groupwise_triton"
+                )
+            load.reset_mock()
+            properties.return_value.gcnArchName = "gfx90a"
+            with self.assertRaisesRegex(RuntimeError, "gfx942 or gfx950"):
+                runtime.validate_integer_device("cuda:0")
+            load.assert_not_called()
+
+    def test_integer_backend_missing_module_or_entry_point_fails_preflight(self):
+        with mock.patch.object(torch.version, "hip", None), mock.patch.object(
+            torch.cuda, "is_available", return_value=True
+        ), mock.patch.object(
+            torch.cuda, "get_device_capability", return_value=(9, 0)
+        ), mock.patch.object(runtime.importlib, "import_module") as load:
+            load.side_effect = ModuleNotFoundError("triton")
+            with self.assertRaisesRegex(RuntimeError, "backend is unavailable"):
+                runtime.validate_integer_device("cuda:0")
+            load.side_effect = None
+            for backend in (object(), mock.Mock(project=1)):
+                load.return_value = backend
+                with self.assertRaisesRegex(RuntimeError, "requires callable project"):
+                    runtime.validate_integer_device("cuda:0")
 
     def test_no_torch_float_matmul_execution_path(self):
         tree = ast.parse(inspect.getsource(runtime))
@@ -199,39 +217,10 @@ class GroupwiseRuntimeCPUTest(unittest.TestCase):
             )
         )
 
-    def test_preflight_binds_the_actual_grouped_gemm_keywords(self):
-        # Derive the call shape from the production adapter so adding another
-        # kernel argument also exercises its load-time ABI check.
-        call = next(
-            node
-            for node in ast.walk(ast.parse(inspect.getsource(runtime._projection)))
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "gemm"
-        )
-        parameters = [
-            inspect.Parameter(kw.arg, inspect.Parameter.KEYWORD_ONLY)
-            for kw in call.keywords
-        ]
-        module = mock.Mock()
-        module._fused_moe_kernel_gptq_awq = {}
-        runtime._load_backend.cache_clear()
-        self.addCleanup(runtime._load_backend.cache_clear)
-        with mock.patch.object(runtime.importlib, "import_module", return_value=module):
-            for omitted in parameters:
-                with self.subTest(omitted=omitted.name):
-                    module.fused_moe.__signature__ = inspect.Signature(
-                        p for p in parameters if p != omitted
-                    )
-                    with self.assertRaisesRegex(RuntimeError, "integer ABI"):
-                        runtime._load_backend()
-            module.fused_moe.__signature__ = inspect.Signature(parameters)
-            self.assertIs(runtime._load_backend()[0], module.fused_moe)
-
 
 @unittest.skipUnless(
     os.environ.get("RUN_GROUPWISE_NATIVE_GPU_TESTS") == "1",
-    "requires explicitly allocated ROCm GPU",
+    "requires explicitly allocated CUDA or ROCm GPU",
 )
 class GroupwiseNativeGPUTest(unittest.TestCase):
     def test_int8_expert_method_selects_real_per_channel_gpu_projection(self):
@@ -259,9 +248,8 @@ class GroupwiseNativeGPUTest(unittest.TestCase):
             x,
             ids,
             routing,
-            *runtime._route(ids, 2),
             input_top_k=1,
-            multiply_weights=False
+            multiply_weights=False,
         )
         expected = torch.stack([x[i] @ expected_w[1 - i].T for i in range(2)])
         torch.testing.assert_close(actual[:, 0], expected, atol=0.06, rtol=0.01)
@@ -269,9 +257,9 @@ class GroupwiseNativeGPUTest(unittest.TestCase):
     def test_native_dense_and_promoted_zero(self):
         runtime.validate_runtime_device("cuda", "gptq", 4)
         for method in ("awq", "gptq"):
-            for maximum_zero in (False, True):
+            for bits, maximum_zero in ((4, False), (4, True), (8, False), (8, True)):
                 q, z, s, layout, values, zero = checkpoint(
-                    method, maximum_zero=maximum_zero
+                    method, bits, maximum_zero=maximum_zero
                 )
                 layer = torch.nn.Module()
                 for name, value in (
@@ -284,6 +272,10 @@ class GroupwiseNativeGPUTest(unittest.TestCase):
                     )
                 layer._groupwise_layout = layout
                 runtime.finalize_linear(layer)
+                self.assertEqual(
+                    layer._groupwise_runtime.runtime_bits,
+                    8 if method == "gptq" and maximum_zero else bits,
+                )
                 pointer = layer.qweight.data_ptr()
                 runtime.finalize_linear(layer)
                 self.assertEqual(pointer, layer.qweight.data_ptr())
@@ -300,19 +292,19 @@ class GroupwiseNativeGPUTest(unittest.TestCase):
         fixtures = [checkpoint(expert=i) for i in range(2)]
         state = runtime.prepare_groupwise_state(
             *(torch.stack([f[i] for f in fixtures]).cuda() for i in range(3)),
-            fixtures[0][3]
+            fixtures[0][3],
         )
         x = torch.randn(3, 32, dtype=torch.bfloat16, device="cuda") / 8
         ids = torch.tensor([[0, 1], [1, -1], [-1, 0]], dtype=torch.int32, device="cuda")
-        weights = torch.tensor([[0.25, 0.75], [1, 0], [0, 1]], device="cuda")
+        # Inactive routes must write zero even with a nonzero router weight.
+        weights = torch.tensor([[0.25, 0.75], [1.0, 0.4], [0.6, 1.0]], device="cuda")
         result = runtime._projection(
             state,
             x,
             ids,
             weights,
-            *runtime._route(ids, 2),
             input_top_k=2,
-            multiply_weights=True
+            multiply_weights=True,
         )
         expected = torch.zeros_like(result)
         for token, routes in enumerate(ids.cpu().tolist()):
