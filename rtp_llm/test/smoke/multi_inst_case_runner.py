@@ -149,43 +149,41 @@ class SeparatedCaseRunner(CaseRunner):
             type="Vipserver", address=f"127.0.0.1:{port}", protocol="http", path="/"
         )
 
-    def _start_master(self, ports: Dict[str, int], port: int):
+    def _start_master(self, endpoints: GroupEndPoint, port: int):
         """Start a local FlexLB master for the optional full-topology smoke."""
         workspace = Path(os.environ.get("TEST_SRCDIR", "")) / os.environ.get(
             "TEST_WORKSPACE", ""
         )
-        bundle = workspace / "rtp_llm/test/smoke/flexlb_runtime"
-        jar = Path(os.environ.get("FLEXLB_API_JAR", bundle / "flexlb-api.jar"))
-        java = Path(os.environ.get("FLEXLB_JAVA", bundle / "java/bin/java"))
-        if not java.is_file():
-            java = Path(shutil.which("java") or "")
+        jar = Path(
+            os.environ.get(
+                "FLEXLB_API_JAR", workspace / "rtp_llm/flexlb/flexlb-api.jar"
+            )
+        )
+        java = Path(os.environ.get("FLEXLB_JAVA") or shutil.which("java") or "")
         if not jar.is_file() or not java.is_file():
             raise FileNotFoundError(
                 f"FlexLB smoke needs Java 21 and jar; java={java}, jar={jar}"
             )
-        roles = {
-            "prefill": [PREFILL_ROLE_NAME],
-            "decode": [DECODE_ROLE_NAME],
-            "vit": self.vit_roles,
-        }
         hosts = {
-            f"smoke.{role}": [f"127.0.0.1:{ports[name]}" for name in names]
-            for role, names in roles.items()
-            if all(name in ports for name in names) and names
+            role: endpoint.address.split(",")
+            for role, endpoint in (
+                ("prefill", endpoints.prefill_endpoint),
+                ("decode", endpoints.decode_endpoint),
+                ("vit", endpoints.vit_endpoint),
+            )
+            if endpoint is not None
         }
-        group = {"group": "default"}
-        for role in hosts:
-            name = role.removeprefix("smoke.")
-            group[f"{name}_endpoint"] = {
-                "address": role,
+        group = {"group": endpoints.group}
+        for role, addresses in hosts.items():
+            group[f"{role}_endpoint"] = {
+                "address": f"smoke.{role}",
+                "discovery": {"type": "static-env", "hosts": addresses},
                 "protocol": "http",
                 "path": "/",
             }
         route = {
             "service_id": SMOKE_SERVICE_ID,
-            "load_balance": True,
             "role_endpoints": [group],
-            "hosts": hosts,
         }
         config = {
             "schemaVersion": 3,
@@ -236,11 +234,6 @@ class SeparatedCaseRunner(CaseRunner):
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
-        expected = {
-            role.upper(): len(names)
-            for role, names in roles.items()
-            if names and all(name in ports for name in names)
-        }
         deadline = time.monotonic() + 120
         url = f"http://127.0.0.1:{port}/rtp_llm/master/info"
         try:
@@ -255,10 +248,10 @@ class SeparatedCaseRunner(CaseRunner):
                     )
                     with urllib.request.urlopen(request, timeout=2) as response:
                         info = json.load(response)
-                    summary = info.get("worker_summary", {})
+                    summary = info.get("worker_summary") or {}
                     if info.get("ready") and all(
-                        summary.get(role, {}).get("alive") == count
-                        for role, count in expected.items()
+                        summary.get(role.upper(), {}).get("alive") == len(addresses)
+                        for role, addresses in hosts.items()
                     ):
                         return process, stream
                 except (OSError, ValueError):
@@ -522,9 +515,9 @@ class SeparatedCaseRunner(CaseRunner):
         master_locks = []
         master_port = None
         if start_master:
-            if frontend_envs is None or not has_pd or len(self.vit_roles) < 2:
+            if frontend_envs is None or not has_pd or len(self.vit_roles) == 1:
                 raise ValueError(
-                    "local FlexLB smoke requires frontend, PD, and two ViTs"
+                    "local FlexLB smoke requires frontend, PD, and zero or at least two ViTs"
                 )
             master_ports, master_locks = PortManager().get_consecutive_ports(3)
             master_port = master_ports[0]
@@ -544,8 +537,14 @@ class SeparatedCaseRunner(CaseRunner):
         route_json = service_route.model_dump_json()
         for role in backend_roles:
             envs[role]["MODEL_SERVICE_CONFIG"] = route_json
+        master_only_frontend = start_master and not self.vit_roles
         if frontend_envs is not None:
-            frontend_envs["MODEL_SERVICE_CONFIG"] = route_json
+            # A text request must fail if the master cannot supply its P/D route.
+            frontend_envs["MODEL_SERVICE_CONFIG"] = (
+                service_route.model_dump_json(exclude={"role_endpoints"})
+                if master_only_frontend
+                else route_json
+            )
 
         configs = [
             {
@@ -576,7 +575,7 @@ class SeparatedCaseRunner(CaseRunner):
                     state.err_msg = f"{role} server start failed, {state.err_msg}"
                     return state
             if master_port is not None:
-                master, master_stream = self._start_master(ports, master_port)
+                master, master_stream = self._start_master(group, master_port)
             if frontend_envs is not None:
                 frontend_state = TaskStates()
                 frontend_port = MagaServerManager.get_free_port()
@@ -586,6 +585,9 @@ class SeparatedCaseRunner(CaseRunner):
                     self.task_info,
                     port=frontend_port,
                     role_name=FRONTEND_ROLE_NAME,
+                    health_check_path=(
+                        "/frontend_health" if master_only_frontend else "/health"
+                    ),
                 )
                 if not frontend_state.ret or frontend is None:
                     frontend_state.err_msg = (
@@ -807,7 +809,9 @@ class DpSeperationCaseRunner(CaseRunner):
         if enable_remote_cache and self.remote_kvcm_server is not None:
             started.append(self.remote_kvcm_server)
         try:
-            server_managers, task_states_list = self.start_servers_parallel(server_configs)
+            server_managers, task_states_list = self.start_servers_parallel(
+                server_configs
+            )
             started.extend(m for m in server_managers if m is not None)
 
             decode_server_manager, decode_task_states = (
@@ -987,7 +991,9 @@ class FrontAppSeperationCaseRunner(CaseRunner):
                 role_name="frontend",
             )
             if task_states.ret != True:
-                task_states.err_msg = "frontend server start failed, " + task_states.err_msg
+                task_states.err_msg = (
+                    "frontend server start failed, " + task_states.err_msg
+                )
                 return task_states
             assert (
                 frontend_server_manager is not None
@@ -1006,9 +1012,13 @@ class FrontAppSeperationCaseRunner(CaseRunner):
                 role_name="pd_fusion",  # Fixed: use "pd_fusion" to match BUILD file key
             )
             if task_states.ret != True:
-                task_states.err_msg = "PDFUSION server start failed, " + task_states.err_msg
+                task_states.err_msg = (
+                    "PDFUSION server start failed, " + task_states.err_msg
+                )
                 return task_states
-            assert server_manager is not None, "PDFUSION server manager should not be None"
+            assert (
+                server_manager is not None
+            ), "PDFUSION server manager should not be None"
 
             if str_to_bool(os.environ.get("SMOKE_KEEP_SERVER_ALIVE", "False")):
                 return self._keep_servers_alive(

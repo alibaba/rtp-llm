@@ -217,9 +217,7 @@ smoke_test(
         "vit_0": ["MM_CACHE_GPU_MAX_BYTES=2147483648", "MM_CACHE_CPU_MAX_BYTES=2147483648"],
         "vit_1": ["MM_CACHE_GPU_MAX_BYTES=2147483648", "MM_CACHE_CPU_MAX_BYTES=2147483648"],
     },
-    data = [
-        ":flexlb_runtime_bundle",
-    ],
+    data = ["//rtp_llm/flexlb:flexlb_jar"],
     gpu_type = ["SM103_CU13"],
     sleep_time_qr = 2,
     test_envs = {
