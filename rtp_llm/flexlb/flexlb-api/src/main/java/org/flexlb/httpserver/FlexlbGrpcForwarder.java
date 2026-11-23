@@ -111,7 +111,7 @@ public class FlexlbGrpcForwarder {
                     forwardInflightBytes.get());
             reportForwardResult(ipOf(masterHostIpPort), "FORWARD_BUDGET_EXHAUSTED");
             return CompletableFuture.completedFuture(
-                    MasterForwardResult.failed("FORWARD_BUDGET_EXHAUSTED", masterHostIpPort));
+                    MasterForwardResult.notSent("FORWARD_BUDGET_EXHAUSTED", masterHostIpPort));
         }
 
         AtomicBoolean forwardBytesSettled = new AtomicBoolean();
@@ -155,36 +155,52 @@ public class FlexlbGrpcForwarder {
                         public void onSuccess(
                                 FlexlbScheduleProtocol.FlexlbScheduleResponsePB response) {
                             settleForwardBytes.run();
-                            if (response == null) {
-                                trace.finish(
-                                        Status.UNKNOWN
-                                                .withDescription("MISSING_RESPONSE")
-                                                .asRuntimeException());
+                            try {
+                                if (response == null) {
+                                    trace.finish(
+                                            Status.UNKNOWN
+                                                    .withDescription("MISSING_RESPONSE")
+                                                    .asRuntimeException());
+                                } else {
+                                    reportForwardResult(
+                                            masterIp, String.valueOf(response.getCode()));
+                                    trace.finishResponse(response);
+                                }
+                            } finally {
                                 result.complete(
-                                        MasterForwardResult.failed(
-                                                "MISSING_RESPONSE", masterHostIpPort));
-                                return;
+                                        response == null
+                                                ? MasterForwardResult.failed(
+                                                        "MISSING_RESPONSE", masterHostIpPort)
+                                                : MasterForwardResult.forwarded(
+                                                        response, masterHostIpPort));
                             }
-                            reportForwardResult(masterIp, String.valueOf(response.getCode()));
-                            trace.finishResponse(response);
-                            result.complete(
-                                    MasterForwardResult.forwarded(response, masterHostIpPort));
                         }
 
                         @Override
                         public void onFailure(Throwable error) {
                             settleForwardBytes.run();
-                            trace.finish(error);
-                            result.complete(forwardFailure(RequestId.parse(request), guard, error));
+                            try {
+                                trace.finish(error);
+                            } finally {
+                                result.complete(
+                                        forwardFailure(RequestId.parse(request), guard, error));
+                            }
                         }
                     },
                     Runnable::run);
         } catch (RuntimeException callbackRegistrationError) {
             settleForwardBytes.run();
-            trace.finish(callbackRegistrationError);
-            rpcFuture.cancel(true);
-            result.complete(
-                    forwardFailure(RequestId.parse(request), guard, callbackRegistrationError));
+            try {
+                trace.finish(callbackRegistrationError);
+            } finally {
+                try {
+                    rpcFuture.cancel(true);
+                } finally {
+                    result.complete(
+                            forwardFailure(
+                                    RequestId.parse(request), guard, callbackRegistrationError));
+                }
+            }
         }
 
         // gRPC already propagates the inbound Context deadline/cancellation to
@@ -193,8 +209,11 @@ public class FlexlbGrpcForwarder {
         result.whenComplete(
                 (ignored, error) -> {
                     if (result.isCancelled()) {
-                        trace.finish(Status.CANCELLED.asRuntimeException());
-                        rpcFuture.cancel(true);
+                        try {
+                            trace.finish(Status.CANCELLED.asRuntimeException());
+                        } finally {
+                            rpcFuture.cancel(true);
+                        }
                     }
                 });
         return result;
@@ -617,12 +636,22 @@ public class FlexlbGrpcForwarder {
 
     private MasterForwardResult forwardFailure(
             String requestId, ForwardGuard guard, Throwable error) {
-        return new MasterForwardResult(
-                null,
-                true,
-                recordForwardFailure(requestId, guard, ForwardOperation.SCHEDULE, error),
-                nullToEmpty(guard.masterHostIpPort()),
-                error);
+        String masterHost = nullToEmpty(guard.masterHostIpPort());
+        try {
+            return new MasterForwardResult(
+                    null,
+                    true,
+                    recordForwardFailure(requestId, guard, ForwardOperation.SCHEDULE, error),
+                    masterHost,
+                    error,
+                    true);
+        } catch (RuntimeException reportingError) {
+            Logger.warn(
+                    "Failed to report forwarded Schedule failure for {}",
+                    requestId,
+                    reportingError);
+            return MasterForwardResult.failed(error, masterHost);
+        }
     }
 
     private static Context entryTraceContext() {
@@ -656,15 +685,16 @@ public class FlexlbGrpcForwarder {
             boolean masterFound,
             String failure,
             String masterHost,
-            Throwable error) {
+            Throwable error,
+            boolean mayHaveSent) {
 
         static MasterForwardResult forwarded(
                 FlexlbScheduleProtocol.FlexlbScheduleResponsePB response, String masterHost) {
-            return new MasterForwardResult(response, true, "", masterHost, null);
+            return new MasterForwardResult(response, true, "", masterHost, null, true);
         }
 
         static MasterForwardResult noMaster() {
-            return new MasterForwardResult(null, false, "MASTER_NULL", "", null);
+            return new MasterForwardResult(null, false, "MASTER_NULL", "", null, false);
         }
 
         static MasterForwardResult blocked(String reason, String masterHost) {
@@ -673,16 +703,20 @@ public class FlexlbGrpcForwarder {
                             .setCode(StrategyErrorType.NOT_MASTER.getErrorCode())
                             .setErrorMessage(reason)
                             .build();
-            return new MasterForwardResult(response, true, reason, masterHost, null);
+            return new MasterForwardResult(response, true, reason, masterHost, null, false);
         }
 
         static MasterForwardResult failed(String failure, String masterHost) {
-            return new MasterForwardResult(null, true, failure, masterHost, null);
+            return new MasterForwardResult(null, true, failure, masterHost, null, true);
         }
 
         static MasterForwardResult failed(Throwable error, String masterHost) {
             Status.Code code = Status.fromThrowable(error).getCode();
-            return new MasterForwardResult(null, true, code.name(), masterHost, error);
+            return new MasterForwardResult(null, true, code.name(), masterHost, error, true);
+        }
+
+        static MasterForwardResult notSent(String failure, String masterHost) {
+            return new MasterForwardResult(null, true, failure, masterHost, null, false);
         }
     }
 

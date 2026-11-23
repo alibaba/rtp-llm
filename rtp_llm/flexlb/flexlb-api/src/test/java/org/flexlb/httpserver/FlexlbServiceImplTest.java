@@ -6,6 +6,7 @@ import com.google.protobuf.ByteString;
 import com.google.protobuf.CodedOutputStream;
 import io.grpc.Context;
 import io.grpc.Status;
+import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DeliveryClaimKind;
@@ -61,6 +62,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
@@ -1348,6 +1351,11 @@ class FlexlbServiceImplTest {
 
         verify(routeService, never()).route(any());
         verify(grpcForwarder).forwardScheduleToMaster(request);
+        verify(grpcForwarder)
+                .forwardCompensatingCancelToMaster(
+                        argThat(cancel -> cancel.getRequestIdStr().equals("12348")),
+                        eq("10.0.0.2:7001"),
+                        any());
         verifyNoMoreInteractions(grpcForwarder);
         ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> captor =
                 ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
@@ -1360,6 +1368,41 @@ class FlexlbServiceImplTest {
         assertPvContains("\"scheduleOrigin\":\"FORWARD_FAILED\"");
         assertPvContains("\"requestExpiresAtMs\":");
         assertPvContains("\"realMasterHost\":\"10.0.0.2:7001\"");
+    }
+
+    @Test
+    void transportCancellationBeforeForwardResultCompensatesOnceWithoutAReply() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
+        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
+        CompletableFuture<FlexlbGrpcForwarder.MasterForwardResult> pending =
+                new CompletableFuture<>();
+        when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(pending);
+        when(grpcForwarder.forwardCompensatingCancelToMaster(any(), anyString(), any()))
+                .thenReturn(CompletableFuture.completedFuture(null));
+        ServerCallStreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock();
+        var request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestIdStr("forwarded-before-cancel")
+                        .build();
+        service.schedule(request, observer);
+        var handler = ArgumentCaptor.forClass(Runnable.class);
+        verify(observer).setOnCancelHandler(handler.capture());
+        handler.getValue().run();
+        verify(grpcForwarder, never()).forwardCompensatingCancelToMaster(any(), anyString(), any());
+
+        pending.complete(
+                FlexlbGrpcForwarder.MasterForwardResult.failed(
+                        Status.CANCELLED.asRuntimeException(), "original:7001"));
+        handler.getValue().run();
+
+        verify(grpcForwarder)
+                .forwardCompensatingCancelToMaster(
+                        argThat(
+                                cancel ->
+                                        cancel.getRequestIdStr().equals("forwarded-before-cancel")),
+                        eq("original:7001"),
+                        any());
+        verify(routeService, never()).route(any());
     }
 
     @Test
