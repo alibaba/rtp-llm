@@ -75,6 +75,10 @@ public final class FlexlbConfigValidator {
         require(config.getRouter() != null, "router", "is required");
         require(config.getWorkerRegistry() != null, "workerRegistry", "is required");
         require(config.getObservability() != null, "observability", "is required");
+        require(config.getEngineGrpc() != null, "engineGrpc", "is required");
+        positive(
+                config.getEngineGrpc().getKvCacheMaxInboundMessageBytes(),
+                "engineGrpc.kvCacheMaxInboundMessageBytes");
         require(config.getServiceDiscovery() != null, "serviceDiscovery", "is required");
         require(config.getCacheMatching() != null, "cacheMatching", "is required");
         require(config.getOptimizer() != null, "optimizer", "is required");
