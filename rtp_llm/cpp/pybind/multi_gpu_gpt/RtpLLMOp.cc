@@ -152,7 +152,6 @@ void RtpLLMOp::init(py::object model,
                     py::object engine_config,
                     py::object vit_config,
                     py::object propose_model,
-                    py::object token_processor,
                     py::object mm_process_engine,
                     py::object trace_config) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -216,7 +215,6 @@ void RtpLLMOp::init(py::object model,
                                       this,
                                       std::move(params),
                                       std::move(propose_params),
-                                      std::move(token_processor),
                                       std::move(mm_process_engine),
                                       std::move(telemetry_config));
     grpc_server_thread_.detach();
@@ -368,15 +366,13 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
 
 void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_init_params,
                              std::unique_ptr<ProposeModelEngineInitParams> propose_params,
-                             py::object                                    token_processor,
                              py::object                                    mm_process_engine,
                              telemetry::TelemetryConfig                    trace_config) {
     std::string server_address;
     {
         pybind11::gil_scoped_acquire acquire;
-        int64_t                      http_port = maga_init_params.server_config.attr("http_port").cast<int64_t>();
-        int64_t model_rpc_port                 = maga_init_params.server_config.attr("rpc_server_port").cast<int64_t>();
-        auto    role_type                      = maga_init_params.pd_sep_config.role_type;
+        int64_t model_rpc_port = maga_init_params.server_config.attr("rpc_server_port").cast<int64_t>();
+        auto    role_type      = maga_init_params.pd_sep_config.role_type;
         // NOTE: ip/ip段可自定义为所需范围。
         server_address = "0.0.0.0:" + std::to_string(model_rpc_port);
         // trace telemetry runtime: init once role/rank are known; only
@@ -421,13 +417,6 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
             RTP_LLM_FAIL("init rpc server failed, error msg: %s", grpc_status.error_message().c_str());
         }
 
-        // NOTE: ip/ip段可自定义为所需范围。
-        std::string http_server_address("tcp:0.0.0.0:" + std::to_string(http_port));
-        http_server_.reset(new HttpApiServer(model_rpc_service_->getEngine(),
-                                             model_rpc_service_->getMultimodalProcessor(),
-                                             http_server_address,
-                                             maga_init_params,
-                                             token_processor));
         if (model_rpc_port < 0) {
             is_server_ready_ = true;
             return;
@@ -457,21 +446,6 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
     is_server_ready_ = true;
     grpc_server_->Wait();
     RTP_LLM_LOG_INFO("Server exit on %s", server_address.c_str());
-}
-
-void RtpLLMOp::startHttpServer(py::object model_weights_loader,
-                               py::object world_info,
-                               py::object tokenizer,
-                               py::object render) {
-    if (http_server_ == nullptr) {
-        RTP_LLM_FAIL("normal HTTP Server nullptr error.");
-        return;
-    }
-    if (http_server_->start(model_weights_loader, world_info, tokenizer, render)) {
-        RTP_LLM_LOG_INFO("normal HTTP Server listening on %s", http_server_->getListenAddr().c_str());
-    } else {
-        RTP_LLM_FAIL("normal HTTP Server start fail.");
-    }
 }
 
 void RtpLLMOp::setServing(bool serving) {
@@ -509,10 +483,6 @@ void RtpLLMOp::stop() {
             pybind11::gil_scoped_acquire acquire;
             model_rpc_service_.reset();
         }
-        if (http_server_) {
-            http_server_->stop();
-            http_server_.reset();
-        }
         is_server_shutdown_ = true;
         // bounded flush of remaining spans; never blocks process exit
         {
@@ -529,16 +499,6 @@ RtpLLMOp::~RtpLLMOp() {
     stop();
 }
 
-void RtpLLMOp::pause() {
-    auto engine = model_rpc_service_->getEngine();
-    engine->pause();
-}
-
-void RtpLLMOp::restart() {
-    auto engine = model_rpc_service_->getEngine();
-    engine->restart();
-}
-
 void registerRtpLLMOp(const py::module& m) {
     pybind11::class_<RtpLLMOp>(m, "RtpLLMOp")
         .def(pybind11::init<>())
@@ -548,15 +508,8 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("engine_config"),
              py::arg("vit_config"),
              py::arg("propose_model"),
-             py::arg("token_processor"),
              py::arg("mm_process_engine"),
              py::arg("trace_config") = py::none())
-        .def("start_http_server",
-             &RtpLLMOp::startHttpServer,
-             py::arg("model_weights_loader"),
-             py::arg("world_info"),
-             py::arg("tokenizer"),
-             py::arg("render"))
         .def("set_serving", &RtpLLMOp::setServing)
         .def("stop", &RtpLLMOp::stop);
 }

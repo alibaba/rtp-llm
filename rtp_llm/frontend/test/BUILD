@@ -71,19 +71,6 @@ py_test(
     ],
 )
 
-py_test(
-    name = "token_processor_test",
-    srcs = ["token_processor_test.py"],
-    data = [
-        "//rtp_llm/test/model_test/fake_test/testdata",
-    ],
-    deps = [
-        "//rtp_llm:frontend",
-        "//rtp_llm:testlib",
-    ],
-    exec_properties = {"gpu": "L20_CU13"},
-    tags = ["L20_CU13"],
-)
 
 py_test(
     name = "request_id_generator_test",

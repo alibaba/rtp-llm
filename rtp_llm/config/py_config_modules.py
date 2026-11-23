@@ -112,10 +112,6 @@ class ServerConfig:
         return self._server_base() + 4
 
     @property
-    def http_port(self) -> int:
-        return self._server_base() + 5
-
-    @property
     def embedding_rpc_server_port(self) -> int:
         return self._server_base() + 7
 
@@ -166,7 +162,6 @@ class ServerConfig:
             f"rpc_server_port: {self.rpc_server_port}\n"
             f"cache_store_listen_port: {self.cache_store_listen_port}\n"
             f"cache_store_rdma_listen_port: {self.cache_store_rdma_listen_port}\n"
-            f"http_port: {self.http_port}\n"
             f"embedding_rpc_server_port: {self.embedding_rpc_server_port}\n"
             f"dash_sc_grpc_server_port: {self.dash_sc_grpc_server_port}"
         )

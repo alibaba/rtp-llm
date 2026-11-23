@@ -85,13 +85,6 @@ public:
 
     WorkerStatusInfo getWorkerStatusInfo(int64_t latest_finished_version);
 
-    std::shared_ptr<EngineBase> getEngine() const {
-        return engine_;
-    }
-    std::shared_ptr<MultimodalProcessor> getMultimodalProcessor() const {
-        return mm_processor_;
-    }
-
     int64_t tpSize() const {
         return maga_init_params_.parallelism_config.tp_size;
     }
