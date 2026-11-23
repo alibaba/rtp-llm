@@ -961,3 +961,9 @@ py_test(
     tags = ["H20_CU13"],
     exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
 )
+
+py_test(
+    name = "tp2_ar_hc_policy_test",
+    srcs = ["tp2_ar_hc_policy_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+)

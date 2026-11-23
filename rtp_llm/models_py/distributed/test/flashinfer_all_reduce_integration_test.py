@@ -8,7 +8,6 @@ from unittest import mock
 
 import torch
 import torch.distributed as dist
-from rtp_llm.models_py.distributed import flashinfer_all_reduce as flashinfer_ar_module
 from rtp_llm.models_py.distributed.flashinfer_all_reduce import FlashInferAllReduce
 from rtp_llm.test.utils.port_util import PortManager
 
@@ -16,23 +15,26 @@ from rtp_llm.test.utils.port_util import PortManager
 def _worker(rank: int, port: int) -> None:
     os.environ["MASTER_ADDR"] = "127.0.0.1"
     os.environ["MASTER_PORT"] = str(port)
-    # The runtime switch is pinned off; construct with enabled_by_config patched
-    # to exercise the (still supported) FlashInfer all-reduce path directly.
     torch.cuda.set_device(rank)
     dist.init_process_group("nccl", rank=rank, world_size=2)
-    with mock.patch.object(
-        flashinfer_ar_module, "enabled_by_config", return_value=True
-    ):
-        communicator = FlashInferAllReduce(
-            dist.group.WORLD, torch.device("cuda", rank), single_node=True
-        )
+    try:
+        for hidden_size in (5120, 2560):
+            _check_eager_and_graph_replay(rank, hidden_size)
+    finally:
+        dist.destroy_process_group()
+
+
+def _check_eager_and_graph_replay(rank: int, hidden_size: int) -> None:
+    communicator = FlashInferAllReduce(
+        dist.group.WORLD, torch.device("cuda", rank), single_node=True, disable_custom_all_reduce=False
+    )
     assert not communicator.disabled
 
     try:
         for tokens in (1, 4, 16, 128):
             base = torch.arange(
-                tokens * 5120, device="cuda", dtype=torch.float32
-            ).reshape(tokens, 5120)
+                tokens * hidden_size, device="cuda", dtype=torch.float32
+            ).reshape(tokens, hidden_size)
             input_tensor = ((base.remainder(251) - 125) / 64).to(torch.bfloat16) * (
                 rank + 1
             )
@@ -44,7 +46,10 @@ def _worker(rank: int, port: int) -> None:
             torch.testing.assert_close(output, reference, rtol=0, atol=0)
 
         static_input = torch.full(
-            (16, 5120), rank + 1, device="cuda", dtype=torch.bfloat16
+            (32 if hidden_size == 2560 else 16, hidden_size),
+            rank + 1,
+            device="cuda",
+            dtype=torch.bfloat16,
         )
         capture_stream = torch.cuda.Stream()
         capture_stream.wait_stream(torch.cuda.current_stream())
@@ -58,18 +63,34 @@ def _worker(rank: int, port: int) -> None:
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, stream=capture_stream):
             graph_output = communicator.all_reduce(static_input)
+            if hidden_size == 2560:
+                routed, shared = graph_output.chunk(2)
+                graph_merged = routed + shared
 
         for value in (2, 5, -3, 7, 11):
-            static_input.fill_(value * (rank + 1))
+            pattern = torch.arange(
+                static_input.numel(), device="cuda", dtype=torch.float32
+            ).reshape_as(static_input)
+            static_input.copy_(
+                ((pattern.remainder(251) - 125) / 64 + value) * (rank + 1)
+            )
+            expected = static_input.clone()
+            dist.all_reduce(expected)
+            if hidden_size == 2560:
+                routed, shared = static_input.chunk(2)
+                routed_ref, shared_ref = routed.clone(), shared.clone()
+                dist.all_reduce(routed_ref)
+                dist.all_reduce(shared_ref)
+                merged_ref = routed_ref + shared_ref
             dist.barrier()
             graph.replay()
             torch.cuda.synchronize()
-            expected = torch.full_like(graph_output, value * 3)
             torch.testing.assert_close(graph_output, expected, rtol=0, atol=0)
+            if hidden_size == 2560:
+                torch.testing.assert_close(graph_merged, merged_ref, rtol=0, atol=0)
         dist.barrier()
     finally:
         communicator.destroy()
-        dist.destroy_process_group()
 
 
 class FlashInferAllReduceIntegrationTest(unittest.TestCase):
