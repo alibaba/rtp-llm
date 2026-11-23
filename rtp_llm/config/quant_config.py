@@ -3,6 +3,7 @@ import os
 import weakref
 from abc import ABC, abstractmethod
 from enum import Enum
+from fnmatch import fnmatchcase
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -256,6 +257,7 @@ class QuantizationConfig(ABC):
                         "is_quanted": True,
                         "mixed_attention": mixed_attention,
                         "scale_fmt": quant_config.get("scale_fmt", None),
+                        "exclude_modules": quant_config.get("ignore") or (),
                     }
                 )
 
@@ -671,6 +673,7 @@ class ModelOptFp4Config(QuantizationConfig):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
         self.mixed_attention = kwargs.get("mixed_attention", False)
         self.scale_fmt = kwargs.get("scale_fmt", None)
+        self.exclude_modules = set(kwargs.get("exclude_modules", ()))
         hybrid_attn_quant_method = kwargs.get("hybrid_attn_quant_method", None)
         if hybrid_attn_quant_method is not None:
             method_norm = str(hybrid_attn_quant_method).upper()
@@ -696,6 +699,18 @@ class ModelOptFp4Config(QuantizationConfig):
 
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
         return [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
+
+    def excludes_module(self, module_name: str) -> bool:
+        # GLM5Next exports have used both paths for the language model.
+        language_prefix = "model.language_model."
+        names = [module_name]
+        if module_name.startswith(language_prefix):
+            names.append("model." + module_name[len(language_prefix) :])
+        return any(
+            fnmatchcase(name, pattern) or name.startswith(pattern + ".")
+            for name in names
+            for pattern in self.exclude_modules
+        )
 
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":

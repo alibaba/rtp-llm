@@ -12,7 +12,6 @@ logger = logging.getLogger(__name__)
 
 from flashinfer import autotune, fp4_quantize, mm_fp4
 
-from rtp_llm.models_py.kernels.cuda.fp4_kernel import cutlass_scaled_fp4_mm_wrapper
 from rtp_llm.ops import HWKernelConfig
 
 
@@ -64,6 +63,12 @@ class CudaFp4GEMMLinear(LinearBase):
         self.input_scale = input_scales
         self.bias = bias
         self.backend = os.getenv("RTP_LLM_FP4_GEMM_BACKEND", "cute-dsl")
+        if self.backend == "sgl_cutlass":
+            from rtp_llm.models_py.kernels.cuda.fp4_kernel import (
+                cutlass_scaled_fp4_mm_wrapper,
+            )
+
+            self._cutlass_scaled_fp4_mm = cutlass_scaled_fp4_mm_wrapper
         self.alpha = self.weight_scale_2 * self.input_scale
         self.input_scale_inv = 1 / self.input_scale
 
@@ -98,7 +103,7 @@ class CudaFp4GEMMLinear(LinearBase):
         assert input_fp4.dtype == torch.uint8
 
         if self.backend == "sgl_cutlass":
-            output = cutlass_scaled_fp4_mm_wrapper(
+            output = self._cutlass_scaled_fp4_mm(
                 input_fp4,
                 self.weight,
                 input_scale_interleaved.view(torch.float8_e4m3fn),

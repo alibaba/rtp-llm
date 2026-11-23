@@ -101,7 +101,88 @@ def _test_config():
     }
 
 
+def _modelopt_nvfp4_config(ignored_modules):
+    params = {"type": "float", "num_bits": 4, "group_size": 16}
+    return {
+        "quant_method": "modelopt",
+        "config_groups": {"group_0": {"weights": params, "input_activations": params}},
+        "ignore": ignored_modules,
+    }
+
+
 class Glm53FlashConfigTest(unittest.TestCase):
+    def test_modelopt_exclusions_preserve_unquantized_shared_experts(self):
+        from rtp_llm.config.quant_config import QuantizationConfig
+        from rtp_llm.model_loader.ffn_weight import (
+            FfnAtomicWeight,
+            FfnConfig,
+            FfnWeight,
+        )
+        from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
+        from rtp_llm.model_loader.per_group_fp4_quant_weight import PerGroupFp4Weight
+
+        with tempfile.TemporaryDirectory() as checkpoint:
+            with open(os.path.join(checkpoint, "config.json"), "w") as stream:
+                json.dump(
+                    {
+                        "quantization_config": _modelopt_nvfp4_config(
+                            ["model.layers.1.mlp.shared_experts*"]
+                        )
+                    },
+                    stream,
+                )
+            quant_config = QuantizationConfig.load_from_ckpt(checkpoint)
+
+        def shared_ffn():
+            config = FfnConfig(is_gated_activation=True)
+            return FfnWeight(
+                sub_weights=[
+                    FfnAtomicWeight(
+                        name,
+                        [
+                            CkptWeightInfo(
+                                "model.language_model.layers.{i}.mlp.shared_experts."
+                                + projection
+                                + ".weight"
+                            )
+                        ],
+                        config=config,
+                    )
+                    for name, projection in (
+                        (W.ffn_w1, "gate_proj"),
+                        (W.ffn_w2, "down_proj"),
+                        (W.ffn_w3, "up_proj"),
+                    )
+                ],
+                config=config,
+            )
+
+        loader = Glm53FlashWeight.__new__(Glm53FlashWeight)
+        loader._quant_config = quant_config
+        weights = loader._fix_merge_w1_w3(
+            ModelWeightInfo(weights=[], layer_weights=[[shared_ffn()], [shared_ffn()]])
+        ).to_quant_weight_info(quant_config)
+        self.assertIsInstance(weights.layer_weights[0][0].w13, PerGroupFp4Weight)
+        self.assertIsInstance(weights.layer_weights[1][0].w13, FfnAtomicWeight)
+        self.assertIsInstance(weights.layer_weights[1][0].w2, FfnAtomicWeight)
+
+    def test_modelopt_excluded_draft_layer_stays_bf16(self):
+        hf_config = _test_config()
+        hf_config["quantization_config"] = _modelopt_nvfp4_config(
+            ["model.language_model.layers.45*"]
+        )
+        with tempfile.TemporaryDirectory() as checkpoint:
+            with open(os.path.join(checkpoint, "config.json"), "w") as stream:
+                json.dump(hf_config, stream)
+
+            draft = Glm5Mtp._create_config(checkpoint)
+            draft.init_precision_config(KVCacheConfig(), "BF16")
+            target = parse_glm53_flash_config(hf_config, checkpoint)
+            target.init_precision_config(KVCacheConfig(), "BF16")
+
+        self.assertIsNone(draft.quant_config)
+        self.assertEqual(target.quant_config.get_method(), "modelopt_fp4")
+
     def test_explicit_fp4_moe_selects_online_or_offline_loader(self):
         from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
         from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig
@@ -579,10 +660,14 @@ class Glm53FlashConfigTest(unittest.TestCase):
 
     def test_list_eos_tokens(self):
         config_json = _test_config()
+        config_json.update(bos_token_id=None, eos_token_id=None, pad_token_id=None)
+        config_json["text_config"]["bos_token_id"] = None
         config_json["text_config"]["eos_token_id"] = [154820, 154827, 154829]
         config_json["text_config"]["pad_token_id"] = 154820
         config = parse_glm53_flash_config(config_json)
+        self.assertEqual(config.special_tokens.bos_token_id, -1)
         self.assertEqual(config.special_tokens.eos_token_id, 154820)
+        self.assertEqual(config.special_tokens.pad_token_id, 154820)
         self.assertEqual(
             config.special_tokens.stop_words_id_list,
             [[154820], [154827], [154829]],

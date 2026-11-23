@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 import torch
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.quant_config import ModelOptFp4Config
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import MlaAttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnWeight
@@ -212,18 +213,20 @@ def parse_glm53_flash_config(
     config.qk_norm = True
     config.enable_fp32_lm_head = False
 
-    config.special_tokens.bos_token_id = int(
-        config_json.get("bos_token_id", text_config.get("bos_token_id", -1))
-    )
-    eos_token_ids = config_json.get("eos_token_id", text_config.get("eos_token_id", 0))
+    def token_setting(name: str, default: int):
+        value = config_json.get(name)
+        if value is None:
+            value = text_config.get(name)
+        return default if value is None else value
+
+    config.special_tokens.bos_token_id = int(token_setting("bos_token_id", -1))
+    eos_token_ids = token_setting("eos_token_id", 0)
     if not isinstance(eos_token_ids, list):
         eos_token_ids = [eos_token_ids]
     if not eos_token_ids:
         raise ValueError("GLM-5.3-Flash eos_token_id must not be empty")
     config.special_tokens.eos_token_id = int(eos_token_ids[0])
-    config.special_tokens.pad_token_id = int(
-        config_json.get("pad_token_id", text_config.get("pad_token_id", 0))
-    )
+    config.special_tokens.pad_token_id = int(token_setting("pad_token_id", 0))
     config.special_tokens.stop_words_id_list = [
         [int(token_id)] for token_id in eos_token_ids
     ]
@@ -553,6 +556,41 @@ class Glm53FlashWeight(DeepSeekV2Weight):
             for weight in layer_weights:
                 self._prefix_checkpoint_names(weight)
         return weight_info
+
+    def _fix_merge_w1_w3(self, weight_info: ModelWeightInfo) -> ModelWeightInfo:
+        weight_info = super()._fix_merge_w1_w3(weight_info)
+        quant_config = self._quant_config
+        if (
+            not isinstance(quant_config, ModelOptFp4Config)
+            or not quant_config.exclude_modules
+        ):
+            return weight_info
+
+        self._mark_modelopt_exclusions(weight_info.weights, quant_config)
+        for layer_id, layer in enumerate(weight_info.layer_weights):
+            self._mark_modelopt_exclusions(layer, quant_config, layer_id)
+        return weight_info
+
+    @staticmethod
+    def _mark_modelopt_exclusions(
+        weights: List[WeightModule],
+        quant_config: ModelOptFp4Config,
+        layer_id: int = 0,
+    ) -> None:
+        # Run after gate/up projections have been merged into the FFN weight.
+        for weight in weights:
+            for atomic in weight.get_components():
+                modules = [
+                    item.name.replace("{i}", str(layer_id)).removesuffix(".weight")
+                    for item in atomic.weights
+                ]
+                excluded = [quant_config.excludes_module(name) for name in modules]
+                if any(excluded):
+                    if not all(excluded):
+                        raise ValueError(
+                            f"{atomic.name} merges excluded and NVFP4 weights: {modules}"
+                        )
+                    atomic.quantization_disabled = True
 
 
 class Glm53Flash(BaseModel):

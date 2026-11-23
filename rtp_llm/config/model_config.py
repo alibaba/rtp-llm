@@ -566,6 +566,18 @@ class ModelConfig(CppModelConfig):
         """
         # Load quant_config
         quant_config = QuantizationConfig.load_from_ckpt(self.ckpt_path)
+        if (
+            self.is_glm53_mtp
+            and isinstance(quant_config, ModelOptFp4Config)
+            and all(
+                quant_config.excludes_module(f"model.language_model.layers.{index}")
+                for index in range(
+                    self.mtp_layer_offset, self.mtp_layer_offset + self.num_layers
+                )
+            )
+        ):
+            # ModelOpt may leave the draft layers BF16 in the main checkpoint.
+            quant_config = None
         if not quant_config:
             if self.quantization:
                 quant_config = init_quant_config(self.quantization)
