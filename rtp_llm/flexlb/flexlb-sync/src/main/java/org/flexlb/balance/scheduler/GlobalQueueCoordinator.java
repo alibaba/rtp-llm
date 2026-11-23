@@ -417,7 +417,10 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         for (var entry : costOrderPending) {
             var estimate = costOrderEstimates.get(entry);
             if (estimate == null || now - estimate.atNanos() >= TimeUnit.SECONDS.toNanos(1)) {
-                estimate = null;
+                // Stale-while-revalidate: this round keeps ranking on the last
+                // completed estimate; the background renewal swaps in the new value
+                // when it lands, so an expired estimate never falls back to
+                // arrival order while its refresh is still in flight.
                 if (!refreshingCosts) { stale.add(entry); }
             }
             candidates.add(benefitCandidate(entry, estimate));
@@ -440,12 +443,18 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                 try {
                     tokens = router.estimateQueuedTokens(entry.context, entry.routingGroup);
                 } catch (RuntimeException unavailable) {
-                    Logger.debug("Prefill token estimate unavailable; preserving arrival order", unavailable);
+                    Logger.debug("Prefill token estimate renewal failed; keeping the last value", unavailable);
                 }
                 lock.lock();
                 try {
                     if (!entry.removed && registered.get(entry.future) == entry) {
-                        costOrderEstimates.put(entry, new WorkEstimate(System.nanoTime(), tokens));
+                        // A failed renewal keeps the last completed benefit instead of
+                        // demoting the entry to unknown; the refreshed timestamp paces
+                        // the next retry by the estimate TTL.
+                        WorkEstimate previous = costOrderEstimates.get(entry);
+                        costOrderEstimates.put(entry, new WorkEstimate(System.nanoTime(),
+                                tokens != null ? tokens
+                                        : previous == null ? null : previous.tokens()));
                     }
                 } finally {
                     lock.unlock();

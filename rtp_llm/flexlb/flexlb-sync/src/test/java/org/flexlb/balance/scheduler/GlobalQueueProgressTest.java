@@ -574,6 +574,80 @@ class GlobalQueueProgressTest {
     }
 
     @Test
+    void staleEstimateKeepsRankingWhileRefreshIsInFlight() throws Exception {
+        var started = new CountDownLatch(2);
+        var releaseOne = new CountDownLatch(1);
+        var releaseOther = new CountDownLatch(1);
+        var hotRefreshStarted = new CountDownLatch(1);
+        var finishHotRefresh = new CountDownLatch(1);
+        var hotLookups = new AtomicInteger();
+        try (Fixture f = new Fixture(RoleType.PREFILL, false, true)) {
+            when(f.router.estimateQueuedTokens(any(), nullable(String.class))).thenAnswer(call -> {
+                BalanceContext context = call.getArgument(0);
+                if (context.getRequestId() == 2301L) {
+                    if (hotLookups.incrementAndGet() == 1) {
+                        return new CostBasedPrefillStrategy.TokenEstimate(9216L, 8192L);
+                    }
+                    // The renewal of the expired hot estimate stays in flight.
+                    hotRefreshStarted.countDown();
+                    await(finishHotRefresh);
+                }
+                return new CostBasedPrefillStrategy.TokenEstimate(1024L, 0L);
+            });
+            f.onSelection = id -> {
+                if (id == 2298L) {
+                    started.countDown();
+                    await(releaseOne);
+                } else if (id == 2299L) {
+                    started.countDown();
+                    await(releaseOther);
+                }
+            };
+            try {
+                f.submit(2298L, "b");
+                f.submit(2299L, "b");
+                await(started);
+                f.submit(2301L, "b");
+                awaitCondition(() -> estimateRecorded(f, 2301L));
+                Thread.sleep(300L);
+                f.submit(2302L, "b");
+                awaitCondition(() -> estimateRecorded(f, 2302L));
+                // The hot estimate passes its freshness window while the cold one is
+                // still fresh; the hot renewal is parked inside the estimator.
+                Thread.sleep(800L);
+                // A capacity event wakes the decision loop; both planners stay pinned
+                // so the round can only rank, not admit.
+                f.release("b");
+                assertTrue(hotRefreshStarted.await(2, TimeUnit.SECONDS));
+                releaseOne.countDown();
+                awaitCondition(() -> f.admitted.contains(2301L) || f.admitted.contains(2302L));
+                var firstOfPair = f.admissionOrder.stream()
+                        .filter(id -> id == 2301L || id == 2302L).findFirst().orElseThrow();
+                assertEquals(2301L, firstOfPair,
+                        "an expired estimate must keep ranking by its last value instead of falling back to arrival order");
+            } finally {
+                releaseOne.countDown();
+                releaseOther.countDown();
+                finishHotRefresh.countDown();
+            }
+            awaitCondition(() -> f.admitted.size() == 4);
+        }
+    }
+
+    private static boolean estimateRecorded(Fixture f, long requestId) {
+        Object queue = ReflectionTestUtils.getField(f.scheduler, "globalQueue");
+        var lock = (ReentrantLock) ReflectionTestUtils.getField(queue, "lock");
+        lock.lock();
+        try {
+            var estimates = (Map<?, ?>) ReflectionTestUtils.getField(queue, "costOrderEstimates");
+            return estimates.keySet().stream().map(GlobalQueueEntry.class::cast)
+                    .anyMatch(entry -> entry.context.getRequestId() == requestId);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    @Test
     void sustainedArrivalsDrainAfterAnInitiallySlowCostRefresh() throws Exception {
         int backlog = 48;
         int arrivals = 30;
