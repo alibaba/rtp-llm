@@ -26,7 +26,7 @@ from rtp_llm.ops import ParallelismConfig, TaskType
 from rtp_llm.utils.base_model_datatypes import GenerateInput
 
 
-def fixture(root, *, head, extra_weights=None):
+def fixture(root, *, head, extra_weights=None, tied=False):
     raw = dict(
         architectures=["Qwen2ForCausalLM"],
         model_type="qwen2",
@@ -37,7 +37,7 @@ def fixture(root, *, head, extra_weights=None):
         intermediate_size=8,
         vocab_size=8,
         max_position_embeddings=32,
-        tie_word_embeddings=False,
+        tie_word_embeddings=tied,
         rms_norm_eps=1e-6,
     )
     (root / "config.json").write_text(json.dumps(raw))
@@ -79,9 +79,9 @@ def fixture(root, *, head, extra_weights=None):
     return values
 
 
-def load(root, name, method, *, task=None):
+def load(root, name, method, *, task=None, data_type="fp32"):
     cfg = ModelFactory.get_model_cls(name).create_config(str(root))
-    cfg.model_type, cfg.tokenizer_path, cfg.data_type = name, str(root), "fp32"
+    cfg.model_type, cfg.tokenizer_path, cfg.data_type = name, str(root), data_type
     cfg.task_type = task if task is not None else (
         TaskType.DENSE_EMBEDDING
         if name == "qwen_2_embedding"
@@ -113,6 +113,36 @@ def load(root, name, method, *, task=None):
 
 
 class Qwen2ServiceVariantsTest(unittest.TestCase):
+    def test_fp32_lm_head_preserves_checkpoint_precision(self):
+        # Neither FP16 nor BF16 can keep the low bits of these values.
+        table = 1 + (torch.arange(32).reshape(8, 4).float() + 1) / 131072
+        for explicit_head in (False, True):
+            weights = {"model.embed_tokens.weight": table}
+            if explicit_head:
+                weights["lm_head.weight"] = -table
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                fixture(root, head=explicit_head, extra_weights=weights, tied=True)
+                for method in ("scratch", "fastsafetensors"):
+                    for name, dtype in (
+                        ("fp16", torch.float16),
+                        ("bf16", torch.bfloat16),
+                    ):
+                        with self.subTest(
+                            head=explicit_head, method=method, dtype=name
+                        ):
+                            svc = load(root, "qwen_2", method, data_type=name)
+                            exports = svc.py_model.runtime_weight_view()
+                            torch.testing.assert_close(
+                                exports["embedding"], table.to(dtype), rtol=0, atol=0
+                            )
+                            torch.testing.assert_close(
+                                exports["lm_head"],
+                                weights.get("lm_head.weight", table),
+                                rtol=0,
+                                atol=0,
+                            )
+
     def test_score_handler_role_is_independent_of_checkpoint_path(self):
         from rtp_llm.model_loader.weight_module import CustomAtomicWeight
         from rtp_llm.models.downstream_modules.custom_module import (
