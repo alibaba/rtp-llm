@@ -195,6 +195,8 @@ UniConfig / Nacos 的 v3 部分更新示例：
   Spring 属性 `flexlb.engine-grpc.keep-alive-time-ms` 和
   `flexlb.engine-grpc.keep-alive-without-calls`，默认 `2000` 和 `true`；
   grpc-java 会把低于 10 秒的出站间隔提升到 10 秒。
+- `engineGrpc.kvCacheMaxInboundMessageBytes`：Master 启动时读取 KV Cache 状态响应的
+  接收上限，默认 `134217728`（128 MiB）。其他出站通道仍沿用原有上限。
 - `observability.cacheHit`：recent-key window、指标和理论命中日志。理论命中查询、历史池更新、
   指标与请求日志由独立单线程按入队顺序处理；请求线程仅提交任务。
   后台任务直接读取路由完成后保持不变的请求字段；日志与指标开关在执行时从配置服务读取。

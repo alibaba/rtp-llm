@@ -67,7 +67,12 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
             CacheMatchConfiguration cacheMatchConfiguration,
             @Value("${flexlb.engine-grpc.enqueue-timeout-ms:5000}") long enqueueTimeoutMillis) {
         this.channelFactory = channelFactory;
-        this.channelPool = new GrpcChannelPool<>(key -> channelFactory.create(key.target()));
+        this.channelPool =
+                new GrpcChannelPool<>(
+                        key ->
+                                key.serviceType() == ServiceType.CACHE_STATUS
+                                        ? channelFactory.createKvCacheStatus(key.target())
+                                        : channelFactory.create(key.target()));
         this.grpcReporter = grpcReporter;
         this.kvcmEnabled = cacheMatchConfiguration.isKvcmEnabled();
         if (enqueueTimeoutMillis <= 0L) {

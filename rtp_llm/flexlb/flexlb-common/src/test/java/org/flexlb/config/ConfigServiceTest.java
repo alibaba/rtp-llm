@@ -120,6 +120,22 @@ class ConfigServiceTest {
     }
 
     @Test
+    void engineKvCacheResponseLimitUsesConfigDefaultsAndOverrides() {
+        assertEquals(
+                128 * 1024 * 1024,
+                ConfigTestFixtures.parse("{}").getEngineGrpc().getKvCacheMaxInboundMessageBytes());
+        var configured =
+                ConfigTestFixtures.parse(
+                        "{\"engineGrpc\":{\"kvCacheMaxInboundMessageBytes\":1048576}}");
+        assertEquals(1_048_576, configured.getEngineGrpc().getKvCacheMaxInboundMessageBytes());
+        assertThrows(
+                ConfigValidationException.class,
+                () ->
+                        ConfigTestFixtures.parse(
+                                "{\"engineGrpc\":{\"kvCacheMaxInboundMessageBytes\":0}}"));
+    }
+
+    @Test
     void requires_explicit_request_timeout_and_defaults_decision_lifetime() {
         assertThrows(ConfigValidationException.class, () -> new ConfigService((String) null));
         assertThrows(ConfigValidationException.class, () -> new ConfigService("   "));

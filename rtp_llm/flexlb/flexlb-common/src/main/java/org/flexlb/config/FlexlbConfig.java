@@ -23,6 +23,7 @@ public final class FlexlbConfig {
     private WorkerRegistryConfig workerRegistry = new WorkerRegistryConfig();
     private ObservabilityConfig observability = new ObservabilityConfig();
     private GrpcServerConfig grpcServer = new GrpcServerConfig();
+    private EngineGrpcConfig engineGrpc = new EngineGrpcConfig();
     private ServiceDiscoveryRuntimeConfig serviceDiscovery = new ServiceDiscoveryRuntimeConfig();
     private CacheMatchingConfig cacheMatching = new LocalSyncCacheMatchingConfig();
     private OptimizerRuntimeConfig optimizer = new OptimizerRuntimeConfig();
@@ -139,5 +140,14 @@ public final class FlexlbConfig {
 
         private long permitKeepAliveTimeMs = 30_000L;
         private boolean permitKeepAliveWithoutCalls = true;
+    }
+
+    /**
+     * Sets the receive limit for KV cache snapshots on Engine gRPC channels.
+     */
+    @Getter
+    @Setter
+    public static final class EngineGrpcConfig {
+        private int kvCacheMaxInboundMessageBytes = 128 * 1024 * 1024;
     }
 }
