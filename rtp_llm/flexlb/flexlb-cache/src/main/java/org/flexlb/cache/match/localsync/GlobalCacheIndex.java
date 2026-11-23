@@ -1,5 +1,7 @@
 package org.flexlb.cache.match.localsync;
 
+import it.unimi.dsi.fastutil.HashCommon;
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -10,36 +12,20 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.stream.IntStream;
 
 /**
- * Global cache index (large hash table)
- * Manages block_hash_id -> Set<EngineIP:EnginePort> mapping
- *
- * @author FlexLB
+ * Tracks logical worker owners of each cache block and matches their cached prefixes.
+ * Blocks are stored in shards so updates and retirements can proceed on different shards.
  */
 @Slf4j
 @Component
 public class GlobalCacheIndex {
-    /**
-     * Core storage structure: block_hash_id -> Set<engine_ip:engine_port>
-     */
-    private final ConcurrentHashMap<Long, Set<String>> blockToEnginesMap =
-            new ConcurrentHashMap<>();
-
-    /**
-     * Serializes index mutations and mapping-count updates
-     */
-    private final ReentrantLock lock = new ReentrantLock();
-
-    /**
-     * Statistics
-     */
-    private final LongAdder totalMappings = new LongAdder();
-
     /** Per-caller compaction storage; cache queries never retain this array. */
     private final ThreadLocal<String[]> prefixCandidates =
             ThreadLocal.withInitial(() -> new String[0]);
+
+    private volatile BlockIndex index = new BlockIndex();
 
     /**
      * Add cache block to specified engine
@@ -58,19 +44,7 @@ public class GlobalCacheIndex {
             return;
         }
 
-        lock.lock();
-        try {
-            Set<String> engines =
-                    blockToEnginesMap.computeIfAbsent(
-                            blockCacheKey, k -> ConcurrentHashMap.newKeySet());
-
-            boolean added = engines.add(engineIpPort);
-            if (added) {
-                totalMappings.increment();
-            }
-        } finally {
-            lock.unlock();
-        }
+        index.add(blockCacheKey, engineIpPort);
     }
 
     /**
@@ -84,12 +58,7 @@ public class GlobalCacheIndex {
             return;
         }
 
-        lock.lock();
-        try {
-            removeOwner(engineIp, blockCacheKey);
-        } finally {
-            lock.unlock();
-        }
+        index.remove(blockCacheKey, engineIp);
     }
 
     /**
@@ -103,13 +72,9 @@ public class GlobalCacheIndex {
             return;
         }
 
-        lock.lock();
-        try {
-            for (Long blockCacheKey : blockCacheKeys) {
-                removeOwner(engineIp, blockCacheKey);
-            }
-        } finally {
-            lock.unlock();
+        BlockIndex currentIndex = index;
+        for (long blockCacheKey : blockCacheKeys) {
+            currentIndex.remove(blockCacheKey, engineIp);
         }
     }
 
@@ -133,33 +98,16 @@ public class GlobalCacheIndex {
      * Clear all data
      */
     public void clear() {
-
-        lock.lock();
-        try {
-            blockToEnginesMap.clear();
-            totalMappings.reset();
-        } finally {
-            lock.unlock();
-        }
+        index = new BlockIndex();
         log.info("Cleared global cache index");
     }
 
     public long totalBlocks() {
-        return blockToEnginesMap.mappingCount();
+        return index.totalBlocks.sum();
     }
 
     public long totalMappings() {
-        return totalMappings.sum();
-    }
-
-    private void removeOwner(String engineIp, Long blockCacheKey) {
-        Set<String> engines = blockToEnginesMap.get(blockCacheKey);
-        if (engines != null && engines.remove(engineIp)) {
-            totalMappings.decrement();
-            if (engines.isEmpty()) {
-                blockToEnginesMap.remove(blockCacheKey);
-            }
-        }
+        return index.totalMappings.sum();
     }
 
     /**
@@ -172,7 +120,8 @@ public class GlobalCacheIndex {
     private Map<String, Integer> calculatePrefixMatchLength(
             List<String> engineIpPorts, List<Long> blockCacheKeys) {
 
-        Set<String> firstBlockOwners = getEnginesForBlock(blockCacheKeys.getFirst());
+        BlockIndex currentIndex = index;
+        Set<String> firstBlockOwners = currentIndex.ownersFor(blockCacheKeys.getFirst());
         if (firstBlockOwners.isEmpty()) {
             return Collections.emptyMap();
         }
@@ -201,7 +150,7 @@ public class GlobalCacheIndex {
 
         Map<String, Integer> result = null;
         for (int blockIndex = 1; blockIndex < blockCacheKeys.size(); blockIndex++) {
-            Set<String> blockOwners = getEnginesForBlock(blockCacheKeys.get(blockIndex));
+            Set<String> blockOwners = currentIndex.ownersFor(blockCacheKeys.get(blockIndex));
             int nextSurvivorCount = 0;
             for (int candidateIndex = 0; candidateIndex < survivorCount; candidateIndex++) {
                 String candidate = candidates[candidateIndex];
@@ -230,20 +179,69 @@ public class GlobalCacheIndex {
     }
 
     /**
-     * Get engine set for specified cache block
-     */
-    private Set<String> getEnginesForBlock(Long blockCacheKey) {
-        if (blockCacheKey == null) {
-            return Collections.emptySet();
-        }
-        Set<String> engines = blockToEnginesMap.get(blockCacheKey);
-        return engines != null ? engines : Collections.emptySet();
-    }
-
-    /**
      * Check if collection is empty
      */
     private boolean isEmpty(List<?> list) {
         return list == null || list.isEmpty();
+    }
+
+    /**
+     * Holds the shard tables and counts that are replaced together when the index is cleared.
+     */
+    private static final class BlockIndex {
+        private static final int SHARD_BITS = 8;
+
+        private final List<Long2ObjectOpenHashMap<Set<String>>> shards =
+                IntStream.range(0, 1 << SHARD_BITS)
+                        .mapToObj(index -> new Long2ObjectOpenHashMap<Set<String>>())
+                        .toList();
+        private final LongAdder totalBlocks = new LongAdder();
+        private final LongAdder totalMappings = new LongAdder();
+
+        private void add(long key, String worker) {
+            var shard = shardFor(key);
+            synchronized (shard) {
+                Set<String> owners = shard.get(key);
+                if (owners == null) {
+                    owners = ConcurrentHashMap.newKeySet();
+                    owners.add(worker);
+                    shard.put(key, owners);
+                    totalBlocks.increment();
+                    totalMappings.increment();
+                } else if (owners.add(worker)) {
+                    totalMappings.increment();
+                }
+            }
+        }
+
+        private Long2ObjectOpenHashMap<Set<String>> shardFor(long key) {
+            // fastutil uses the low hash bits for the entry slot within a shard.
+            return shards.get((int) (HashCommon.mix(key) >>> (Long.SIZE - SHARD_BITS)));
+        }
+
+        private void remove(long key, String worker) {
+            var shard = shardFor(key);
+            synchronized (shard) {
+                Set<String> owners = shard.get(key);
+                if (owners != null && owners.remove(worker)) {
+                    totalMappings.decrement();
+                    if (owners.isEmpty()) {
+                        shard.remove(key);
+                        totalBlocks.decrement();
+                    }
+                }
+            }
+        }
+
+        private Set<String> ownersFor(Long key) {
+            if (key == null) {
+                return Collections.emptySet();
+            }
+            var shard = shardFor(key);
+            synchronized (shard) {
+                Set<String> owners = shard.get(key.longValue());
+                return owners == null ? Collections.emptySet() : owners;
+            }
+        }
     }
 }
