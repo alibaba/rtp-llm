@@ -33,9 +33,10 @@ import static org.mockito.Mockito.when;
 
 /**
  * End-to-end hotspot release scenarios over real endpoints and committed
- * status reports: a sustained HOTSPOT opens the line, drifts the request to
- * balanced ranking, and re-pins after relief; a transient RAMP burst below
- * the sustained window must never open the line.
+ * status reports: a sustained HOTSPOT opens the line against the
+ * fleet-relative setpoint, drifts the request to balanced ranking, and
+ * re-pins after relief; a transient RAMP burst below the sustained window,
+ * and a deep-queue but balanced large-batch fleet, must never open the line.
  */
 class HotspotReleaseScenarioTest {
 
@@ -65,7 +66,7 @@ class HotspotReleaseScenarioTest {
         config.getRouter().getRoles().getPrefill().setTokenBalance(tokenBalance);
         config.getDispatcher().setMaxInflightPerPrefillWorker(100);
         config.getRouter().getRoles().getPrefill()
-                .setHotspotReleaseEnabled(true);
+                .getHotspotRelease().setEnabled(true);
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
         registry = StrategyTestSupport.endpointRegistry(configService);
@@ -103,8 +104,10 @@ class HotspotReleaseScenarioTest {
         try {
             assertEquals(LEADER_IP, selectedIp(), "closed line must pin the cache leader");
 
-            // 8s of sustained waiting-queue pressure: 5s gate plus climbing.
-            driveGovernor(8L);
+            // 12s of sustained waiting-queue pressure: 5s gate, then climbing
+            // against the fleet-relative setpoint (median 15 -> setpoint 22,
+            // so 1.2*(30-22) = 9.6pp/s for the remaining 7s).
+            driveGovernor(12L);
             assertTrue(leader.hotspotReleaseLine() > 50.0,
                     "sustained pressure with an idle worker must open the line");
             assertEquals(IDLE_IP, selectedIp(),
@@ -140,6 +143,28 @@ class HotspotReleaseScenarioTest {
         }
     }
 
+    /**
+     * Large-batch fleet: every worker runs a deep, healthy queue (leader 40,
+     * peer 30). The fleet-relative setpoint (median 35 -> 52) sits above the
+     * leader's own depth, so sustained pressure must not open the line —
+     * congestion is judged against the fleet, not the absolute floor.
+     */
+    @Test
+    void healthyBusyFleetNeverOpensTheLine() {
+        republishWaiting(leader, 40L);
+        republishWaiting(idle, 30L);
+        PrefillTokenWorkload.Reservation backlog = leader.planTokenWork(1_500L);
+        try {
+            driveGovernor(12L);
+            assertEquals(0.0, leader.hotspotReleaseLine(), 1e-9,
+                    "a busy-but-balanced fleet must stay pinned");
+            assertEquals(LEADER_IP, selectedIp(),
+                    "the cache leader must keep the pin under healthy depth");
+        } finally {
+            backlog.close();
+        }
+    }
+
     /** One selection round; the request is a 50% hit on the leader. */
     private String selectedIp() {
         Request request = new Request();
@@ -166,8 +191,13 @@ class HotspotReleaseScenarioTest {
         long rounds = seconds * 10L;
         for (long round = 1; round <= rounds; round++) {
             long at = now - rounds * 100L + round * 100L;
-            leader.governHotspotRelease(true, at);
-            idle.governHotspotRelease(true, at);
+            long setpoint = CostBasedPrefillStrategy.hotspotReleaseSetpoint(
+                    config.getRouter().getRoles().getPrefill().getHotspotRelease(),
+                    new long[] {
+                            leader.getStatus().committedEngineObservation().waitingQueryLen(),
+                            idle.getStatus().committedEngineObservation().waitingQueryLen()});
+            leader.governHotspotRelease(setpoint, true, at);
+            idle.governHotspotRelease(setpoint, true, at);
         }
     }
 

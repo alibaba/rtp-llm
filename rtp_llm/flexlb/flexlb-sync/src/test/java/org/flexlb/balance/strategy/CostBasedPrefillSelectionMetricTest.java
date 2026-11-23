@@ -374,7 +374,7 @@ class CostBasedPrefillSelectionMetricTest {
         // The TTFT affinity cap only governs with the hotspot release gate
         // closed; the gate-on replacement is covered by
         // CostBasedPrefillHotspotReleaseTest.
-        config.getRouter().getRoles().getPrefill().setHotspotReleaseEnabled(false);
+        config.getRouter().getRoles().getPrefill().getHotspotRelease().setEnabled(false);
         configureAffinity(maxExtraTtftMs, minPrefixHitPercent);
 
         try (SelectedRole selected = select()) {

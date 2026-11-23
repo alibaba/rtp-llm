@@ -138,9 +138,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
         if (tokenBalance != null) {
             this.prefillState.enableTokenWorkload();
         }
-        this.hotspotReleaseGate = prefillRouting != null
-                && prefillRouting.isHotspotReleaseEnabled()
-                ? new HotspotReleaseGate() : null;
+        RoutingConfig.HotspotReleaseConfig hotspotRelease =
+                prefillRouting == null ? null : prefillRouting.getHotspotRelease();
+        this.hotspotReleaseGate = hotspotRelease != null && hotspotRelease.isEnabled()
+                ? new HotspotReleaseGate(hotspotRelease.getSustainedPressureMs()) : null;
     }
 
     /** Sustained Engine waiting-queue congestion verdict; UNKNOWN before the first status. */
@@ -157,13 +158,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     /** One governor round over this endpoint's release line; no-op while disabled. */
-    public void governHotspotRelease(boolean poolSpare, long nowMs) {
+    public void governHotspotRelease(long setpoint, boolean poolSpare, long nowMs) {
         HotspotReleaseGate gate = hotspotReleaseGate;
         if (gate == null) {
             return;
         }
         gate.govern(Math.max(0L, getStatus().committedEngineObservation().waitingQueryLen()),
-                poolSpare, nowMs);
+                setpoint, poolSpare, nowMs);
     }
 
     /** Advisory Engine waiting-queue admission gate verdict for diagnostics. */

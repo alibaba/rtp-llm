@@ -338,6 +338,16 @@ final class FlexlbConfigValidator {
             nonNegative(tokenBalance.getEngineQueueOverloadDurationMs(),
                     "router.roles.prefill.tokenBalance.engineQueueOverloadDurationMs");
         }
+        RoutingConfig.HotspotReleaseConfig hotspotRelease = prefill.getHotspotRelease();
+        if (hotspotRelease != null) {
+            require(hotspotRelease.getOutlierFactor() >= 1.0,
+                    "router.roles.prefill.hotspotRelease.outlierFactor",
+                    "must be at least 1.0");
+            nonNegative(hotspotRelease.getSustainedPressureMs(),
+                    "router.roles.prefill.hotspotRelease.sustainedPressureMs");
+            nonNegative(hotspotRelease.getSetpointFloor(),
+                    "router.roles.prefill.hotspotRelease.setpointFloor");
+        }
 
         require(routing.getRoles().getDecode() != null,
                 "router.roles.decode", "is required");

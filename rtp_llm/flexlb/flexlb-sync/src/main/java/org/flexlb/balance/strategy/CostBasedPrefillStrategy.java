@@ -31,6 +31,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.AbstractList;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.BitSet;
 import java.util.List;
 import java.util.Map;
@@ -93,9 +94,9 @@ public class CostBasedPrefillStrategy {
         RoutingConfig.TokenBalanceConfig tokenBalance = config.getRouter()
                 .getRoles().getPrefill().getTokenBalance();
         boolean hotspotRelease = config.getRouter().getRoles()
-                .getPrefill().isHotspotReleaseEnabled();
+                .getPrefill().getHotspotRelease().isEnabled();
         if (hotspotRelease) {
-            governHotspotRelease(discovery.candidates());
+            governHotspotRelease(discovery.candidates(), config);
         }
         int selectedIndex = tokenBalance != null
                 ? selectTokenBalancedCandidate(
@@ -684,11 +685,15 @@ public class CostBasedPrefillStrategy {
     /**
      * Advance every Prefill endpoint's hotspot release line at most once per
      * window: one concurrent selector wins the CAS and governs the whole pool
-     * snapshot in a single pass. A pool with any fully idle worker counts as
-     * having spare capacity, so congestion there is load imbalance, not
-     * fleet saturation, and the line is still allowed to climb.
+     * snapshot in a single pass over the fleet's committed waiting depths —
+     * every endpoint integrates against the shared fleet-relative setpoint.
+     * A pool with any fully idle worker counts as having spare capacity, so
+     * congestion there is load imbalance, not fleet saturation, and the line
+     * is still allowed to climb.
      */
-    private void governHotspotRelease(List<EndpointRegistry.PrefillRoutingEntry> candidates) {
+    private void governHotspotRelease(
+            List<EndpointRegistry.PrefillRoutingEntry> candidates,
+            FlexlbConfig config) {
         if (candidates.isEmpty()) {
             return;
         }
@@ -700,18 +705,43 @@ public class CostBasedPrefillStrategy {
         if (!hotspotGovernAtMs.compareAndSet(lastMs, nowMs)) {
             return;
         }
+        long[] waitingDepths = new long[candidates.size()];
         boolean poolSpare = false;
+        int depthIndex = 0;
         for (EndpointRegistry.PrefillRoutingEntry routingEntry : candidates) {
             PrefillEndpoint endpoint = routingEntry.endpoint();
+            waitingDepths[depthIndex++] = Math.max(0L,
+                    endpoint.getStatus().committedEngineObservation().waitingQueryLen());
             if (endpoint.queuedRequestCount() == 0
                     && endpoint.getInflightBatchCount() == 0) {
                 poolSpare = true;
-                break;
             }
         }
+        long setpoint = hotspotReleaseSetpoint(
+                config.getRouter().getRoles().getPrefill().getHotspotRelease(),
+                waitingDepths);
         for (EndpointRegistry.PrefillRoutingEntry routingEntry : candidates) {
-            routingEntry.endpoint().governHotspotRelease(poolSpare, nowMs);
+            routingEntry.endpoint().governHotspotRelease(setpoint, poolSpare, nowMs);
         }
+    }
+
+    /**
+     * Fleet-relative congestion zero point: max(floor, outlierFactor x fleet
+     * median waiting depth). A large-batch engine whose healthy queue is deep
+     * stays below its own median-scaled setpoint, while a shallow-queue
+     * hotspot clears the floor. Package-private so the scenario tests drive
+     * the exact production formula.
+     */
+    static long hotspotReleaseSetpoint(
+            RoutingConfig.HotspotReleaseConfig release, long[] waitingDepths) {
+        long[] sorted = waitingDepths.clone();
+        Arrays.sort(sorted);
+        double median = sorted.length % 2 == 1
+                ? sorted[sorted.length / 2]
+                : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2.0;
+        double floor = Math.max(1L, release.getSetpointFloor());
+        double outlierFactor = Math.max(1.0, release.getOutlierFactor());
+        return (long) Math.max(floor, outlierFactor * median);
     }
 
     private Map<String, Integer> getCacheMatchResults(

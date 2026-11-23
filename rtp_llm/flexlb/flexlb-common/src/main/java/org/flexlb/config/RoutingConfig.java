@@ -49,10 +49,30 @@ public final class RoutingConfig {
          * Release pinned cache affinity to balanced ranking once a leader's
          * sustained-congestion line climbs. Applies to both the cache-affinity
          * and the token-balance ranking; disabled leaves both unchanged.
-         * Enabled by default; balanced fleets keep the line closed on their
-         * own through the sustained-pressure gate.
          */
-        private boolean hotspotReleaseEnabled = true;
+        private HotspotReleaseConfig hotspotRelease = new HotspotReleaseConfig();
+    }
+
+    /**
+     * Integral hotspot release line tuning. The line's zero point is
+     * fleet-relative: a worker only counts as congested once its waiting
+     * depth exceeds max(setpointFloor, outlierFactor × fleet median depth)
+     * for sustainedPressureMs, so large-batch engines with a deep healthy
+     * queue stay pinned while small engines surface a shallow-queue
+     * hotspot. Climb/decay slopes stay fixed: their 4:1 asymmetry is the
+     * anti-oscillation contract and has no business meaning to tune.
+     */
+    @Getter
+    @Setter
+    public static final class HotspotReleaseConfig {
+        /** Master switch; balanced fleets keep the line closed on their own. */
+        private boolean enabled = true;
+        /** Fleet-median multiple above which a worker counts as congested; at least 1.0. */
+        private double outlierFactor = 1.5;
+        /** Sustained-above-setpoint window before the line may climb, in milliseconds. */
+        private long sustainedPressureMs = 5_000L;
+        /** Absolute floor of the dynamic setpoint; mirror the fleet's queue-admission baseline. */
+        private long setpointFloor = 10L;
     }
 
     /** Prefill selection by outstanding uncached tokens with hot/cold cache affinity. */

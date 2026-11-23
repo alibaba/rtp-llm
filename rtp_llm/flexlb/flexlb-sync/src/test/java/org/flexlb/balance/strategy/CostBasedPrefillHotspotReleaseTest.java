@@ -99,7 +99,7 @@ class CostBasedPrefillHotspotReleaseTest {
                 tokenContext(config), RoleType.PREFILL, "g").value()) {
             assertEquals("leader", selected.serverStatus().getServerIp());
         }
-        verify(leader, never()).governHotspotRelease(anyBoolean(), anyLong());
+        verify(leader, never()).governHotspotRelease(anyLong(), anyBoolean(), anyLong());
     }
 
     @Test
@@ -153,7 +153,7 @@ class CostBasedPrefillHotspotReleaseTest {
         config.getRouter().getRoles().getPrefill()
                 .setTokenBalance(new RoutingConfig.TokenBalanceConfig());
         config.getRouter().getRoles().getPrefill()
-                .setHotspotReleaseEnabled(hotspotRelease);
+                .getHotspotRelease().setEnabled(hotspotRelease);
         return config;
     }
 

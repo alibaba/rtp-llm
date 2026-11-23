@@ -12,9 +12,10 @@ import java.util.*;
 public class PrefillElasticSimulation {
     static final int N = 150, INITIAL = 100, ROUNDS = 21;
     static final double TPS = 70_000, TTL = 1_200_000, MAX_WAIT = 60_000, SHED_WAIT = 30_000;
-    // Escape-gate controller: setpoint reuses the engineQueueAdmissionThreshold value (10);
-    // climb 4x faster than decay so release needs sustained pressure and retreat is sticky (hysteresis).
-    static final double ESCAPE_SETPOINT = 10, ESCAPE_CLIMB = 1.2, ESCAPE_DECAY = 0.3;
+    // Escape-gate controller: setpoint is fleet-relative, max(floor 10, 1.5 x fleet-median
+    // occupancy), mirroring production's dynamic zero point; climb 4x faster than decay so
+    // release needs sustained pressure and retreat is sticky (hysteresis).
+    static final double ESCAPE_FLOOR = 10, ESCAPE_OUTLIER = 1.5, ESCAPE_CLIMB = 1.2, ESCAPE_DECAY = 0.3;
     static final double[] LOADS = Arrays.stream(System.getProperty("flexlb.sim.loads", "0.2,0.5,0.8,1.2,1.5,1.5").split(",")).mapToDouble(Double::parseDouble).toArray();
     static final double GROWTH = growth(), MEAN_FACTOR = sumGrowth() / ROUNDS;
     enum Policy { SHORT_TTFT, SHORT_TTFT_CAPPED, CACHE_ONLY, CACHE_WINDOW, ELASTIC, ADAPTIVE, ESCAPE_GATE }
@@ -275,14 +276,25 @@ public class PrefillElasticSimulation {
          * settles at occupancy ~= setpoint. */
         void governHotspots() {
             boolean poolSpare=idleCount>0;
+            double[] sorted=new double[active];
             for(int i=0;i<active;i++) {
                 var w=workers[i];
                 w.queueSmooth=0.9*w.queueSmooth+0.1*(w.queue.size()+w.inflight);
-                double deviation=w.queueSmooth-ESCAPE_SETPOINT;
+                sorted[i]=w.queueSmooth;
+            }
+            // Fleet-relative zero point: a deep healthy queue scales the setpoint up
+            // with the fleet median; a shallow-queue hotspot still clears the floor.
+            Arrays.sort(sorted);
+            double median=(sorted.length%2==1)?sorted[sorted.length/2]
+                :(sorted[sorted.length/2-1]+sorted[sorted.length/2])/2;
+            double setpoint=Math.max(ESCAPE_FLOOR,ESCAPE_OUTLIER*median);
+            for(int i=0;i<active;i++) {
+                var w=workers[i];
+                double deviation=w.queueSmooth-setpoint;
                 if(deviation>0)w.congestedMs+=20;else w.congestedMs=0;
                 if(deviation>0 && poolSpare && w.congestedMs>=5000)
                     w.escapeLine=Math.min(100.0,w.escapeLine+ESCAPE_CLIMB*deviation*0.02);
-                else if(deviation>0)w.escapeLine=Math.max(0.0,w.escapeLine-ESCAPE_DECAY*ESCAPE_SETPOINT*0.02);
+                else if(deviation>0)w.escapeLine=Math.max(0.0,w.escapeLine-ESCAPE_DECAY*setpoint*0.02);
                 else if(deviation<0)w.escapeLine=Math.max(0.0,w.escapeLine+ESCAPE_DECAY*deviation*0.02);
             }
         }

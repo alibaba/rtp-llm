@@ -38,4 +38,33 @@ class PrefillTokenBalanceConfigTest {
             assertThrows(ConfigValidationException.class, () -> parse(value));
         }
     }
+
+    @Test void hotspotReleaseDefaultsToEnabledAndValidatesTuning() {
+        var defaults = ConfigTestFixtures.parse("{}")
+                .getRouter().getRoles().getPrefill().getHotspotRelease();
+        assertEquals(true, defaults.isEnabled());
+        assertEquals(1.5, defaults.getOutlierFactor());
+        assertEquals(5_000L, defaults.getSustainedPressureMs());
+        assertEquals(10L, defaults.getSetpointFloor());
+        assertEquals(false, hotspotParse("{\"enabled\":false}").isEnabled());
+        assertThrows(ConfigValidationException.class,
+                () -> hotspotParse("{\"outlierFactor\":0.5}"));
+        assertThrows(ConfigValidationException.class,
+                () -> hotspotParse("{\"sustainedPressureMs\":-1}"));
+        assertThrows(ConfigValidationException.class,
+                () -> hotspotParse("{\"setpointFloor\":-1}"));
+    }
+
+    /** The pre-1.5-fleet-release boolean switch was replaced by the object form; keep it loud. */
+    @Test void removedHotspotReleaseBooleanSwitchIsRejected() {
+        assertThrows(ConfigValidationException.class,
+                () -> ConfigTestFixtures.parse(
+                        "{\"router\":{\"roles\":{\"prefill\":{\"hotspotReleaseEnabled\":false}}}}"));
+    }
+
+    private RoutingConfig.HotspotReleaseConfig hotspotParse(String release) {
+        return ConfigTestFixtures.parse(
+                        "{\"router\":{\"roles\":{\"prefill\":{\"hotspotRelease\":" + release + "}}}}")
+                .getRouter().getRoles().getPrefill().getHotspotRelease();
+    }
 }
