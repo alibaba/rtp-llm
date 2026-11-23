@@ -69,6 +69,24 @@ TEST(GroupSetTest, UsesPlannedBackingLayoutWithoutRecomputingStorage) {
     EXPECT_EQ(group->storageBytes(), 4096u);
 }
 
+TEST(GroupSetTest, DeviceIndexSkipsPoolsWithoutLocalLayers) {
+    const auto model_topology = makeTestTopology({makeGroupBase({1}), makeGroupBase({0})});
+    const auto stage_topology = CacheTopology::create(model_topology->groups(), {model_topology->layer(0)});
+
+    auto config                  = std::make_shared<DeviceBlockPoolConfig>();
+    config->physical_block_count = stage_topology->group("group0").block_num;
+    config->allocate_storage     = false;
+    const auto unbacked_pool     = std::make_shared<DeviceBlockPool>(config);
+    ASSERT_TRUE(unbacked_pool->init());
+    const auto unbacked_group = makeTestGroupSet(0, stage_topology, {"group0"}, {unbacked_pool});
+    EXPECT_EQ(getLocalDeviceIndex(*unbacked_group), -1);
+
+    const auto local_pool  = makeTestDevicePool({{64, 16}}, stage_topology->group("group1").block_num - 1, "local");
+    const auto mixed_group = makeTestGroupSet(0, stage_topology, {"group0", "group1"}, {unbacked_pool, local_pool});
+    EXPECT_EQ(getLocalDeviceIndex(*mixed_group), local_pool->deviceIndex());
+    EXPECT_TRUE(isPlainDeviceTransferGroup(*mixed_group));
+}
+
 TEST(GroupSetTest, CopyGeometryPreservesFullLogicalBlocksAndPhysicalLayers) {
     const auto topology      = makeTestTopology({makeGroupBase({0, 2}), makeGroupBase({1})});
     const auto pool          = makeTestDevicePool({{64, 16}, {64, 16}}, 4, "group_set_copy_geometry");

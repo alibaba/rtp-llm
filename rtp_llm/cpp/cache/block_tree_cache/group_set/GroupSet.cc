@@ -83,7 +83,6 @@ void GroupSet::initialize(size_t                               group_set_id,
             physical_payload_bytes += group_bytes;
         }
     }
-    RTP_LLM_CHECK_WITH_INFO(physical_payload_bytes > 0, "GroupSet physical payload must be positive");
 
     group_set_id_  = group_set_id;
     topology_      = std::move(topology);

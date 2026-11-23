@@ -27,6 +27,7 @@ struct BlockTreeCacheLayout {
     BlockTreeCacheSizing                   sizing;
     std::optional<BlockTreeCacheBlockNums> block_nums;
     BlockTreeCrcWorkspacePlan              crc_workspaces;
+    std::unordered_map<CacheGroupType, size_t> disk_eviction_block_bytes;
 };
 
 using BlockTreeCacheLayoutPtr = std::shared_ptr<BlockTreeCacheLayout>;

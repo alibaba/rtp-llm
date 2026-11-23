@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
 
 #include "gtest/gtest.h"
 
@@ -103,6 +104,15 @@ TEST(HostBlockPoolTest, BlockBufferAcceptsValidUnallocatedBlock) {
     HostBlockBuffer buffer = pool.blockBuffer(1);
     EXPECT_EQ(buffer.block, 1);
     EXPECT_NE(buffer.addr, nullptr);
+}
+
+TEST(HostBlockPoolTest, BlockBufferRejectsValidBlockWithoutLocalBacking) {
+    auto config              = makeConfig(4, 0, 0);
+    config->allocate_storage = false;
+    HostBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+    ASSERT_TRUE(pool.validBlock(1));
+    EXPECT_THROW(pool.blockBuffer(1), std::runtime_error);
 }
 
 TEST(HostBlockPoolTest, InitAllocatesPinnedMemory) {

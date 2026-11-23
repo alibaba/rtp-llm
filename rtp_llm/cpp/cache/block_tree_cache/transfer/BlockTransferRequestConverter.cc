@@ -16,52 +16,35 @@ namespace rtp_llm {
 
 namespace {
 
-enum class GroupSetResolution {
-    MATCHED,
-    ABSENT,
-    INVALID
-};
-
-GroupSetResolution resolveGroupSet(const MemoryOperationRequestPB::CopyItem& item,
-                                   const std::vector<GroupSetPtr>&           group_sets,
-                                   const GroupSet*&                          match) {
-    match = nullptr;
+const GroupSet* resolveGroupSet(const MemoryOperationRequestPB::CopyItem& item,
+                                const std::vector<GroupSetPtr>&           group_sets) {
     if (item.group_tags_size() == 0) {
-        return GroupSetResolution::INVALID;
+        return nullptr;
     }
     std::unordered_set<std::string> requested_tags;
     for (const auto& tag : item.group_tags()) {
         if (tag.empty() || !requested_tags.emplace(tag).second) {
-            return GroupSetResolution::INVALID;
+            return nullptr;
         }
     }
-    bool            has_overlap = false;
-    const GroupSet* exact_match = nullptr;
+    const GroupSet* match = nullptr;
     for (const auto& candidate : group_sets) {
-        if (!candidate) {
+        if (!candidate || candidate->groupTags().size() != requested_tags.size()) {
             continue;
         }
-        const size_t overlap = static_cast<size_t>(std::count_if(
+        const bool same_members = std::all_of(
             candidate->groupTags().begin(), candidate->groupTags().end(), [&requested_tags](const std::string& tag) {
                 return requested_tags.find(tag) != requested_tags.end();
-            }));
-        if (overlap == 0) {
+            });
+        if (!same_members) {
             continue;
         }
-        has_overlap = true;
-        if (overlap != requested_tags.size() || overlap != candidate->groupTags().size()) {
-            continue;
+        if (match != nullptr) {
+            return nullptr;
         }
-        if (exact_match != nullptr) {
-            return GroupSetResolution::INVALID;
-        }
-        exact_match = candidate.get();
+        match = candidate.get();
     }
-    if (exact_match != nullptr) {
-        match = exact_match;
-        return GroupSetResolution::MATCHED;
-    }
-    return has_overlap ? GroupSetResolution::INVALID : GroupSetResolution::ABSENT;
+    return match;
 }
 
 }  // namespace
@@ -174,7 +157,6 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
 bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestPB&  request,
                                                    std::vector<TransferDescriptor>& descriptors,
                                                    const std::vector<GroupSetPtr>&  group_sets,
-                                                   bool                             allow_absent_group_sets,
                                                    std::vector<size_t>*             wire_item_indices) {
     // This boundary is shared by the real RPC service and native smoke workers.
     // group_set links in-process ranks to worker_init and dispatcher_init logs.
@@ -211,19 +193,11 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
         decoded_item_indices.reserve(static_cast<size_t>(request.copy_items_size()));
     }
     for (int item_index = 0; item_index < request.copy_items_size(); ++item_index) {
-        const CopyItem&          item          = request.copy_items(item_index);
-        const GroupSet*          group_set_ptr = nullptr;
-        const GroupSetResolution resolution    = resolveGroupSet(item, group_sets, group_set_ptr);
-        if (resolution == GroupSetResolution::INVALID) {
-            RTP_LLM_LOG_WARNING("invalid or partially overlapping BlockTree GroupSet membership");
+        const auto&     item          = request.copy_items(item_index);
+        const GroupSet* group_set_ptr = resolveGroupSet(item, group_sets);
+        if (group_set_ptr == nullptr) {
+            RTP_LLM_LOG_WARNING("cannot resolve BlockTree GroupSet membership");
             return false;
-        }
-        if (resolution == GroupSetResolution::ABSENT) {
-            if (!allow_absent_group_sets) {
-                RTP_LLM_LOG_WARNING("cannot resolve BlockTree GroupSet membership");
-                return false;
-            }
-            continue;
         }
         const GroupSet&    group_set = *group_set_ptr;
         TransferDescriptor descriptor;
@@ -268,6 +242,9 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
             }
             default:
                 return false;
+        }
+        if (group_set.payloadBytes() == 0) {
+            continue;
         }
         decoded.push_back(std::move(descriptor));
         if (wire_item_indices) {
