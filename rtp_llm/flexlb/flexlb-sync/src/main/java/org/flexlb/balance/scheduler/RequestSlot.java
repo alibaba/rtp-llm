@@ -932,6 +932,11 @@ public final class RequestSlot {
             encoderEndpoint.forgetRequest(requestId);
             encoderEndpoint = null;
         }
+        // A claimed batch can still be assembling this member even after its slot terminates.
+        // Its dispatcher or delivery completion will release the input.
+        if (context != null && deliveryClaimKind != DeliveryClaimKind.BATCH_ENQUEUE) {
+            context.setGenerateInputPb(null);
+        }
         item = null;
         context = null;
         cleanupProgress = null;
@@ -1865,6 +1870,8 @@ public final class RequestSlot {
                 return;
             }
             claim.completeCalled = true;
+            // Also covers submission failures before the dispatcher could build the batch.
+            claim.item.ctx().setGenerateInputPb(null);
             if (failed) {
                 failureResponse =
                         selectDeliveryFailureLocked(
