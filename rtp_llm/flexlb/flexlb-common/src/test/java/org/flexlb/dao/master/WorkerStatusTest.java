@@ -471,13 +471,16 @@ class WorkerStatusTest {
             status.lock.lock();
             try {
                 status.recordSuccessfulPoll(true);
-                WorkerStatus.PollHealth afterFirst = status.recordTransportFailure();
-                WorkerStatus.PollHealth afterSecond = status.recordTransportFailure();
-                assertEquals(1L, afterFirst.consecutiveTransportFailures());
-                assertEquals(2L, afterSecond.consecutiveTransportFailures());
-                assertTrue(afterSecond.reportedAlive());
             } finally {
                 status.lock.unlock();
+            }
+            for (long failures = 1; failures <= 2; failures++) {
+                try (WorkerStatus.PollLease poll = status.tryBeginStatusPoll()) {
+                    status.recordStatusRpcResult(
+                            poll, System.nanoTime() / 1000, false, false, true);
+                }
+                assertEquals(failures, status.pollHealth().consecutiveTransportFailures());
+                assertTrue(status.pollHealth().reportedAlive());
             }
             assertSame(status.pollHealth(), status.pollHealth());
         }

@@ -56,6 +56,7 @@ public final class MasterEngineSynchronizer {
 
     private final ScheduledThreadPoolExecutor scheduler;
     private final ThreadPoolExecutor statusCheckExecutor;
+    private final ThreadPoolExecutor statusApplicationExecutor;
     private final ThreadPoolExecutor engineSyncExecutor;
 
     public MasterEngineSynchronizer(
@@ -88,6 +89,8 @@ public final class MasterEngineSynchronizer {
         engineSyncExecutor = executor(engineThreads, "engine-sync-executor");
         int statusThreads = flexlbConfig.getInternalRuntime().getStatusCheckExecutorThreads();
         statusCheckExecutor = executor(statusThreads, "status-checker-executor");
+        statusApplicationExecutor = executor(statusThreads, "status-application-executor");
+        statusApplicationExecutor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
         this.scheduler =
                 new ScheduledThreadPoolExecutor(
                         5,
@@ -112,6 +115,7 @@ public final class MasterEngineSynchronizer {
                                 workerDirectory,
                                 workerAddressService,
                                 statusCheckExecutor,
+                                statusApplicationExecutor,
                                 engineHealthReporter,
                                 engineGrpcService,
                                 roleType,
@@ -137,6 +141,7 @@ public final class MasterEngineSynchronizer {
         scheduler.shutdown();
         engineSyncExecutor.shutdown();
         statusCheckExecutor.shutdown();
+        statusApplicationExecutor.shutdown();
     }
 
     private static ThreadPoolExecutor executor(int threads, String name) {
@@ -156,6 +161,10 @@ public final class MasterEngineSynchronizer {
                     ENGINE_BALANCING_THREAD_POOL_INFO, "engineSyncExecutor", engineSyncExecutor);
             engineHealthReporter.reportThreadPoolInfo(
                     ENGINE_BALANCING_THREAD_POOL_INFO, "statusCheckExecutor", statusCheckExecutor);
+            engineHealthReporter.reportThreadPoolInfo(
+                    ENGINE_BALANCING_THREAD_POOL_INFO,
+                    "statusApplicationExecutor",
+                    statusApplicationExecutor);
         } catch (Throwable failure) {
             logger.warn("Failed to report worker sync executor metrics", failure);
         }
