@@ -76,7 +76,17 @@ def make_prompt(encode, length, lead):
     return prompt
 
 
-def make_request(ids, steps, *, measure=False, fixed=True, streaming=True):
+def make_request(
+    ids,
+    steps,
+    *,
+    measure=False,
+    fixed=True,
+    streaming=True,
+    continuation=CONTINUATION,
+    request_id=None,
+    timeout_s=180,
+):
     generate = pb.GenerateConfigPB(
         max_new_tokens=steps,
         num_beams=1,
@@ -88,15 +98,17 @@ def make_request(ids, steps, *, measure=False, fixed=True, streaming=True):
         ignore_eos=True,
         return_incremental=streaming,
         is_streaming=streaming,
-        timeout_ms=180_000,
+        timeout_ms=timeout_s * 1000,
         return_logits=measure,
         return_softmax_probs=measure,
     )
     generate.aux_info.value = measure
     if measure and fixed:
-        generate.regex.value = CONTINUATION
+        generate.regex.value = continuation
     return pb.GenerateInputPB(
-        request_id=time.time_ns(), token_ids=ids, generate_config=generate
+        request_id=time.time_ns() if request_id is None else request_id,
+        token_ids=ids,
+        generate_config=generate,
     )
 
 
@@ -112,26 +124,21 @@ def read_tensor(tensor, data_type, field, dtype):
     )
 
 
-def collect(call, steps, vocab_size):
-    tokens, logits, sampled = [], [], []
-    for response in call:
-        output = response.flatten_output
-        ids = read_tensor(output.output_ids, pb.TensorPB.INT32, "int32_data", "<i4")
-        if not ids.size:
-            continue
-        row = read_tensor(output.logits, pb.TensorPB.FP32, "fp32_data", "<f4")
-        probs = read_tensor(
-            output.aux_info[0].softmax_probs, pb.TensorPB.FP32, "fp32_data", "<f4"
-        )
-        assert ids.size == probs.size == 1, (ids.shape, probs.shape)
-        assert row.ndim and row.shape[-1] == vocab_size and row.size == vocab_size, (
-            row.shape,
-            vocab_size,
-        )
-        assert np.isfinite(row).all() and 0 < probs.item() <= 1
-        tokens.append(ids.item())
-        logits.append(row.reshape(vocab_size))
-        sampled.append(probs.item())
+def read_generation_step(output, ids, vocab_size):
+    row = read_tensor(output.logits, pb.TensorPB.FP32, "fp32_data", "<f4")
+    probs = read_tensor(
+        output.aux_info[0].softmax_probs, pb.TensorPB.FP32, "fp32_data", "<f4"
+    )
+    assert ids.size == probs.size == 1, (ids.shape, probs.shape)
+    assert row.ndim and row.shape[-1] == vocab_size and row.size == vocab_size, (
+        row.shape,
+        vocab_size,
+    )
+    assert np.isfinite(row).all() and 0 < probs.item() <= 1
+    return row.reshape(vocab_size), probs.item()
+
+
+def generation_output(tokens, logits, sampled, steps, vocab_size):
     assert len(tokens) == steps, (len(tokens), steps, tokens)
     logits = np.stack(logits)
     assert logits.shape == (steps, vocab_size), logits.shape
@@ -146,7 +153,21 @@ def collect(call, steps, vocab_size):
     )
 
 
-def compare(reference, actual, name):
+def collect(call, steps, vocab_size):
+    tokens, logits, sampled = [], [], []
+    for response in call:
+        output = response.flatten_output
+        ids = read_tensor(output.output_ids, pb.TensorPB.INT32, "int32_data", "<i4")
+        if not ids.size:
+            continue
+        row, prob = read_generation_step(output, ids, vocab_size)
+        tokens.append(ids.item())
+        logits.append(row)
+        sampled.append(prob)
+    return generation_output(tokens, logits, sampled, steps, vocab_size)
+
+
+def compare(reference, actual, name, *, require_equal=True):
     differences, first_differences = {}, {}
     for field in COMPARED_FIELDS:
         first, second = getattr(reference, field), getattr(actual, field)
@@ -158,6 +179,7 @@ def compare(reference, actual, name):
             index = np.unravel_index(mismatch.argmax(), mismatch.shape)
             first_differences[field] = {
                 "index": [int(position) for position in index],
+                "generation_step": int(index[0]) + 1,
                 "reference": first[index].item(),
                 "actual": second[index].item(),
                 "reference_bits": hex(first_bits[index]),
@@ -171,7 +193,9 @@ def compare(reference, actual, name):
         "first_differences": first_differences,
     }
     print(json.dumps(result), flush=True)
-    assert not first_differences, f"{name}: {differences}"
+    if require_equal:
+        assert not first_differences, f"{name}: {differences}"
+    return result
 
 
 def record_offsets(log_dir):

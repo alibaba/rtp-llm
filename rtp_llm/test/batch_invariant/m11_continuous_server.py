@@ -96,7 +96,9 @@ def main():
             while not stop.exists():
                 pid = server.server_pid
                 if pid is None or not Path(f"/proc/{pid}").is_dir():
-                    raise RuntimeError(f"M11 ratio service exited: {server.log_file_path}")
+                    raise RuntimeError(
+                        f"M11 ratio service exited: {server.log_file_path}"
+                    )
                 time.sleep(1)
         finally:
             server.stop_server()
