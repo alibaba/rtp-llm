@@ -74,6 +74,20 @@ UniConfig 和 Nacos 的内容直接使用同一种配置 JSON，不增加包装�
 `ENABLE_STDOUT_LOG`、`ENABLE_FALLBACK` 不再覆盖 JSON。行为配置只认
 所选来源的 `FLEXLB_CONFIG` 文档，避免嵌套字段到环境变量名的隐式转换。
 
+### ViT 选路
+
+v3 配置的 `router.roles.vit.cacheAffinityEnabled` 默认是 `true`，新选路优先比较缓存命中。
+设为 `false` 时，Master 按 ViT 在途负载与最近派发量选址，不读取或写入临时缓存放置。
+带 key 的 `VIT_ONLY` 请求仍按媒体输入数量记账，同一个 worker 同时被多个请求选中时，
+记账冲突的请求会重新比较负载。已有 ViT 选址结果继续按逻辑 worker、端口和代际校验。将以下字段合入现有 v3 配置。
+
+```json
+{
+  "schemaVersion": 3,
+  "router": { "roles": { "vit": { "cacheAffinityEnabled": false } } }
+}
+```
+
 ### UniConfig 连接
 
 Spectrum 部署的扩展配置中启用 Turbo UniConfig：

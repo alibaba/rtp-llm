@@ -104,10 +104,13 @@ public class VitCacheSelector {
 
     private SelectedRole selectNewWorker(
             BalanceContext ctx, String group, List<String> requestKeys) {
-        if (requestKeys.isEmpty()) {
-            return selectByLoad(ctx, group);
-        }
         int mediaCount = ctx.getRequest().isVitRouteOnly() ? requestKeys.size() : 0;
+        var config = ctx.getConfig();
+        if (requestKeys.isEmpty()
+                || (config != null
+                        && !config.getRouter().getRoles().getVit().isCacheAffinityEnabled())) {
+            return selectByLoad(ctx, group, mediaCount);
+        }
         var keys = List.copyOf(new LinkedHashSet<>(requestKeys));
         var candidates = directory.candidates(group, keys);
         // Rank and record cold-key placements together so concurrent requests share a placement.
@@ -116,26 +119,41 @@ public class VitCacheSelector {
         }
     }
 
-    private SelectedRole selectByLoad(BalanceContext ctx, String group) {
-        long nowNanos = System.nanoTime();
-        long nowUs = TimeUnit.NANOSECONDS.toMicros(nowNanos);
-        WorkerStatus selected = null;
-        long bestLoad = Long.MAX_VALUE;
-        int ties = 0;
-        for (WorkerStatus worker : workers.vitRoutingSnapshot().values()) {
-            if (!VitCacheDirectory.isRoutableForGroup(worker, group, nowUs)) {
-                continue;
+    private SelectedRole selectByLoad(BalanceContext ctx, String group, int mediaCount) {
+        while (true) {
+            long nowNanos = System.nanoTime();
+            long nowUs = TimeUnit.NANOSECONDS.toMicros(nowNanos);
+            WorkerStatus selected = null;
+            long selectedRoutedInputs = 0;
+            long bestLoad = Long.MAX_VALUE;
+            int ties = 0;
+            for (WorkerStatus worker : workers.vitRoutingSnapshot().values()) {
+                if (!VitCacheDirectory.isRoutableForGroup(worker, group, nowUs)) {
+                    continue;
+                }
+                long routedInputs = worker.vitRoutedInputs();
+                long load = worker.vitLoadEstimate(nowNanos, MAX_LOAD_AGE_NANOS, routedInputs);
+                if (load < bestLoad) {
+                    bestLoad = load;
+                    ties = 0;
+                }
+                if (load == bestLoad && ThreadLocalRandom.current().nextInt(++ties) == 0) {
+                    selected = worker;
+                    selectedRoutedInputs = routedInputs;
+                }
             }
-            long load = worker.vitLoadEstimate(nowNanos, MAX_LOAD_AGE_NANOS);
-            if (load < bestLoad) {
-                bestLoad = load;
-                ties = 0;
+            if (selected == null) {
+                return null;
             }
-            if (load == bestLoad && ThreadLocalRandom.current().nextInt(++ties) == 0) {
-                selected = worker;
+            var result = pinRouteWorker(ctx, group, selected);
+            if (result == null
+                    || mediaCount == 0
+                    || selected.tryRecordVitRoute(selectedRoutedInputs, mediaCount)) {
+                return result;
             }
+            // Another route changed the selected worker's load. Release its pin and rank again.
+            result.close();
         }
-        return selected == null ? null : pinRouteWorker(ctx, group, selected);
     }
 
     private SelectedRole pinRouteWorker(BalanceContext ctx, String group, WorkerStatus worker) {

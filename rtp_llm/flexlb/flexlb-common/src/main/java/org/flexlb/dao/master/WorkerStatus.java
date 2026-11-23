@@ -151,14 +151,15 @@ public class WorkerStatus {
         return committedStatus.get().cursor();
     }
 
-    /** Observe assignments before submitting the ViT status RPC. */
-    public long vitRoutedInputs() {
-        return vitRoutedInputs.get();
-    }
-
     /** Charge the selected generation for the media inputs routed to it. */
     public void recordVitRoute(int mediaCount) {
         vitRoutedInputs.addAndGet(mediaCount);
+    }
+
+    /** Charges the route only if no other route changed the counter used for ranking. */
+    public boolean tryRecordVitRoute(long observedRoutedInputs, int mediaCount) {
+        return vitRoutedInputs.compareAndSet(
+                observedRoutedInputs, observedRoutedInputs + mediaCount);
     }
 
     /**
@@ -174,12 +175,17 @@ public class WorkerStatus {
 
     /** Estimate inflight media from a recent sample and the subsequent assignments. */
     public long vitLoadEstimate(long nowNanos, long maxAgeNanos) {
-        VitLoad sample = vitLoad;
-        if (sample == null || nowNanos - sample.receivedNanos() > maxAgeNanos) {
-            return Long.MAX_VALUE;
-        }
-        long unreported = vitRoutedInputs.get() - sample.routedAtPollStart();
-        return Math.min(sample.reportedInputs(), Long.MAX_VALUE - unreported) + unreported;
+        return estimateVitLoad(vitLoad, nowNanos, maxAgeNanos, vitRoutedInputs());
+    }
+
+    /** Observe assignments before submitting the ViT status RPC. */
+    public long vitRoutedInputs() {
+        return vitRoutedInputs.get();
+    }
+
+    /** Estimates load using the same assignment count that the caller will commit against. */
+    public long vitLoadEstimate(long nowNanos, long maxAgeNanos, long observedRoutedInputs) {
+        return estimateVitLoad(vitLoad, nowNanos, maxAgeNanos, observedRoutedInputs);
     }
 
     /**
@@ -648,6 +654,16 @@ public class WorkerStatus {
                 + ", pollHealth="
                 + pollHealth.get()
                 + '}';
+    }
+
+    private static long estimateVitLoad(
+            VitLoad sample, long nowNanos, long maxAgeNanos, long observedRoutedInputs) {
+        if (sample == null || nowNanos - sample.receivedNanos() > maxAgeNanos) {
+            return Long.MAX_VALUE;
+        }
+        // A poll published after the counter read may already cover more assignments.
+        long unreported = Math.max(0L, observedRoutedInputs - sample.routedAtPollStart());
+        return Math.min(sample.reportedInputs(), Long.MAX_VALUE - unreported) + unreported;
     }
 
     private PollHealth recordSuccessfulPoll(boolean reportedAlive, long nowUs) {

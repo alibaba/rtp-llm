@@ -8,6 +8,7 @@ import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.context.Context;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
@@ -24,6 +25,7 @@ import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.engine.grpc.core.GrpcChannelFactory;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
+import org.flexlb.service.config.merger.FlexlbConfigMerger;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.telemetry.FlexlbTrace;
 import org.junit.jupiter.api.AfterEach;
@@ -34,7 +36,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -154,6 +158,66 @@ class VitCacheDirectoryTest {
 
         route.getRequest().setSelectedVit(selected);
         assertTrue(loadSelector.validate(route, "two").isSuccess());
+    }
+
+    @Test
+    void loadOnlyModeIgnoresAffinityAndChargesEachMediaInputOnce() {
+        var config =
+                FlexlbConfigMerger.merge(
+                        SchedulingTestConfig.newConfig(),
+                        """
+                {"router":{"roles":{"vit":{"cacheAffinityEnabled":false}}}}
+                """,
+                        "FLEXLB_CONFIG");
+        snapshot(a, "a1", "image");
+        a.recordVitLoad(OptionalLong.of(8), a.vitRoutedInputs(), System.nanoTime());
+        b.recordVitLoad(OptionalLong.of(1), b.vitRoutedInputs(), System.nanoTime());
+        assertEquals(
+                a.getLogicalIpPort(), selector.select(context("image"), null).getLogicalIpPort());
+
+        var route = context(config, "image", "image");
+        route.getRequest().setVitRouteOnly(true);
+        var selected = selector.select(route, null);
+        assertEquals(b.getLogicalIpPort(), selected.getLogicalIpPort());
+        assertEquals(2L, b.vitRoutedInputs());
+        assertEquals(0L, a.vitRoutedInputs());
+
+        route.getRequest().setSelectedVit(selected);
+        assertTrue(selector.validate(route, "two").isSuccess());
+        assertEquals(2L, b.vitRoutedInputs());
+    }
+
+    @Test
+    void loadOnlyModeRanksAgainAfterLosingTheAssignmentRace() throws Exception {
+        var config = new FlexlbConfig();
+        config.getRouter().getRoles().getVit().setCacheAffinityEnabled(false);
+        a.recordVitLoad(OptionalLong.of(0), 0L, System.nanoTime());
+        b.recordVitLoad(OptionalLong.of(1), 0L, System.nanoTime());
+        CountDownLatch bothSelectedA = new CountDownLatch(2);
+        var endpoint = new WorkerEndpoint(a);
+        when(workers.captureEndpoint(RoleType.VIT, a.getLogicalIpPort()))
+                .thenAnswer(
+                        call -> {
+                            bothSelectedA.countDown();
+                            assertTrue(bothSelectedA.await(5, TimeUnit.SECONDS));
+                            return endpoint.tryPinGeneration();
+                        });
+
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var first = context(config, "image", "image");
+            first.getRequest().setVitRouteOnly(true);
+            var second = context(config, "image", "image");
+            second.getRequest().setVitRouteOnly(true);
+            var one = executor.submit(() -> selector.select(first, null).getLogicalIpPort());
+            var two = executor.submit(() -> selector.select(second, null).getLogicalIpPort());
+            assertEquals(
+                    Set.of(a.getLogicalIpPort(), b.getLogicalIpPort()),
+                    Set.of(one.get(6, TimeUnit.SECONDS), two.get(6, TimeUnit.SECONDS)));
+        }
+        assertEquals(2L, a.vitRoutedInputs());
+        assertEquals(2L, b.vitRoutedInputs());
+        verify(workers, times(2)).captureEndpoint(RoleType.VIT, a.getLogicalIpPort());
+        verify(workers).captureEndpoint(RoleType.VIT, b.getLogicalIpPort());
     }
 
     @Test
@@ -555,11 +619,15 @@ class VitCacheDirectoryTest {
     }
 
     private BalanceContext context(String... keys) {
+        return context(new FlexlbConfig(), keys);
+    }
+
+    private BalanceContext context(FlexlbConfig config, String... keys) {
         Request request = new Request();
         request.setRequestId("123");
         request.setCacheAffinityKeys(List.of(keys));
         request.setGenerateTimeout(30000);
-        BalanceContext context = new BalanceContext(new FlexlbConfig());
+        BalanceContext context = new BalanceContext(config);
         context.setRequest(request);
         return context;
     }
