@@ -9,6 +9,7 @@ import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.grpc.EngineStatusConverter;
@@ -136,48 +137,13 @@ public class GrpcWorkerStatusRunner implements Runnable {
                             latestFinishedTaskVersion,
                             syncRequestTimeoutMs,
                             roleType)
-                    .thenApply(
-                            response -> {
-                                if (response == null) {
-                                    return null;
-                                }
-                                long receivedNanos = System.nanoTime();
-                                OptionalLong vitLoad =
-                                        roleType == RoleType.VIT && response.hasMmInflightInputs()
-                                                ? OptionalLong.of(
-                                                        response.getMmInflightInputs().getValue())
-                                                : OptionalLong.empty();
-                                return new ReceivedStatus(response, vitLoad, receivedNanos);
-                            })
-                    .handleAsync(
-                            (received, failure) -> {
-                                try {
-                                    Throwable cause = unwrapCompletionFailure(failure);
-                                    if (cause != null) {
-                                        reportPollFailure(cause, startTime);
-                                    } else {
-                                        handleStatusResponse(
-                                                received, vitRoutedAtPollStart, startTime);
-                                    }
-                                } catch (Throwable callbackFailure) {
-                                    logger.error(
-                                            "Worker status callback failed for {}",
-                                            ipPort,
-                                            callbackFailure);
-                                }
-                                return null;
-                            },
-                            callbackExecutor)
                     .whenComplete(
-                            (ignored, callbackFailure) -> {
-                                pollLease.close();
-                                if (callbackFailure != null) {
-                                    logger.error(
-                                            "Worker status callback was not scheduled for {}",
-                                            ipPort,
-                                            unwrapCompletionFailure(callbackFailure));
-                                }
-                            });
+                            (response, failure) ->
+                                    onRpcComplete(
+                                            response,
+                                            unwrapCompletionFailure(failure),
+                                            vitRoutedAtPollStart,
+                                            startTime));
             asyncInitiated = true;
         } finally {
             if (!asyncInitiated) {
@@ -186,14 +152,116 @@ public class GrpcWorkerStatusRunner implements Runnable {
         }
     }
 
-    private static int defaultWorkerStatusPort(WorkerStatus workerStatus) {
-        return workerStatus.getGrpcPort();
+    private void onRpcComplete(
+            EngineRpcService.WorkerStatusPB response,
+            Throwable failure,
+            long vitRoutedAtPollStart,
+            long startTime) {
+        long receivedNanos = System.nanoTime();
+        boolean apply;
+        try {
+            if (!workerDirectory.isCurrentStatus(roleType, ipPort, workerStatus)) {
+                return;
+            }
+            boolean valid = failure == null && isValidHeartbeat(response);
+            workerStatus.recordStatusRpcResult(
+                    pollLease,
+                    receivedNanos / 1000,
+                    valid,
+                    valid && response.getAlive(),
+                    failure instanceof StatusException
+                            || failure instanceof StatusRuntimeException);
+            // Keep the finished-task cursor unchanged while an earlier response is
+            // in use. The next poll will ask again for any unapplied changes.
+            apply = failure == null && workerStatus.tryBeginStatusApplication(pollLease);
+        } finally {
+            pollLease.close();
+        }
+        if (failure != null) {
+            reportPollFailure(failure, startTime);
+            return;
+        }
+        if (!apply) {
+            return;
+        }
+        try {
+            callbackExecutor.execute(
+                    () -> {
+                        try {
+                            OptionalLong vitLoad =
+                                    roleType == RoleType.VIT
+                                                    && response != null
+                                                    && response.hasMmInflightInputs()
+                                            ? OptionalLong.of(
+                                                    response.getMmInflightInputs().getValue())
+                                            : OptionalLong.empty();
+                            ReceivedStatus received =
+                                    response == null
+                                            ? null
+                                            : new ReceivedStatus(response, vitLoad, receivedNanos);
+                            handleStatusResponse(received, vitRoutedAtPollStart, startTime);
+                        } catch (Throwable callbackFailure) {
+                            logger.error(
+                                    "Worker status callback failed for {}",
+                                    ipPort,
+                                    callbackFailure);
+                        } finally {
+                            workerStatus.finishStatusApplication(pollLease);
+                        }
+                    });
+        } catch (RuntimeException rejected) {
+            workerStatus.finishStatusApplication(pollLease);
+            logger.error("Worker status callback was not scheduled for {}", ipPort, rejected);
+        }
     }
 
-    private static Throwable unwrapCompletionFailure(Throwable failure) {
-        return failure instanceof CompletionException && failure.getCause() != null
-                ? failure.getCause()
-                : failure;
+    private boolean isValidHeartbeat(EngineRpcService.WorkerStatusPB response) {
+        if (response == null
+                || response.getStatusVersion() <= 0L
+                || response.getStatusVersion()
+                        < workerStatus.appliedStatusCursor().statusVersion()) {
+            return false;
+        }
+        try {
+            return RoleTypeProtoConverter.fromWorkerStatus(response) == roleType;
+        } catch (IllegalArgumentException invalidRole) {
+            return false;
+        }
+    }
+
+    private void reportPollFailure(Throwable failure, long startTime) {
+        if (!(failure instanceof StatusException || failure instanceof StatusRuntimeException)) {
+            reportStatusCheckFailure(BalanceStatusEnum.MASTER_STATUS_PROCESSING_FAILED, startTime);
+            return;
+        }
+        Status.Code code = Status.fromThrowable(failure).getCode();
+        log("gRPC worker status check failed, code=" + code + ", msg=" + failure.getMessage());
+        reportStatusCheckFailure(
+                code == Status.Code.DEADLINE_EXCEEDED
+                        ? BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT
+                        : BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE,
+                startTime);
+    }
+
+    private void reportStatusCheckFailure(BalanceStatusEnum error, long startTime) {
+        engineHealthReporter.reportStatusCheckerFail(
+                error, workerStatus.getMetricIpPort(), roleType);
+        engineHealthReporter.reportStatusCheckFailureLatency(
+                error,
+                workerStatus.getMetricIpPort(),
+                roleType,
+                Math.max(0L, System.nanoTime() / 1000 - startTime));
+    }
+
+    private void log(String msg) {
+        logger.debug(
+                "[gRPC][{}][{}][{}][{}][{}μs]: {}",
+                id,
+                site,
+                ipPort,
+                modelName,
+                System.nanoTime() / 1000 - createTimeUs,
+                msg);
     }
 
     private void handleStatusResponse(
@@ -217,6 +285,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             WorkerStatus.StatusObservation committedObservation;
             Runnable statusProjection = NO_STATUS_PROJECTION;
             Runnable activityProjection = NO_STATUS_PROJECTION;
+            Runnable freshnessProjection = NO_STATUS_PROJECTION;
             EndpointRegistry.DetachedGeneration endpointToRetire = null;
             boolean generationRetiring = false;
             workerStatus.lock.lock();
@@ -267,7 +336,6 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                     + ", response="
                                     + responseVersion);
                 }
-                workerStatus.recordSuccessfulPoll(observation.alive());
                 WorkerEndpoint exactEndpoint =
                         workerDirectory.exactEndpoint(roleType, ipPort, workerStatus);
 
@@ -332,14 +400,23 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     workerStatus.recordVitLoad(
                             received.vitLoad(), vitRoutedAtPollStart, received.receivedNanos());
                 }
+                if (ep != null) {
+                    long nowUs = System.nanoTime() / 1000;
+                    boolean wasFresh = workerStatus.hasFreshSchedulingStatus(nowUs);
+                    workerStatus.recordStatusApplied(received.receivedNanos() / 1000);
+                    if (!wasFresh && workerStatus.hasFreshSchedulingStatus(nowUs)) {
+                        freshnessProjection = ep::signalPlacementCapacityChanged;
+                    }
+                }
             } finally {
                 workerStatus.lock.unlock();
                 try {
                     statusProjection.run();
                     activityProjection.run();
+                    freshnessProjection.run();
                 } finally {
                     if (generationRetiring) {
-                        workerDirectory.completeRetirement(
+                        workerDirectory.completeRetirementAsync(
                                 roleType,
                                 ipPort,
                                 workerStatus,
@@ -363,16 +440,6 @@ public class GrpcWorkerStatusRunner implements Runnable {
             logger.error("Worker status response handling failed after callback for {}", ipPort, e);
             reportStatusCheckFailure(BalanceStatusEnum.MASTER_STATUS_PROCESSING_FAILED, startTime);
         }
-    }
-
-    private void reportStatusCheckFailure(BalanceStatusEnum error, long startTime) {
-        engineHealthReporter.reportStatusCheckerFail(
-                error, workerStatus.getMetricIpPort(), roleType);
-        engineHealthReporter.reportStatusCheckFailureLatency(
-                error,
-                workerStatus.getMetricIpPort(),
-                roleType,
-                Math.max(0L, System.nanoTime() / 1000 - startTime));
     }
 
     private EndpointRegistry.EndpointPublication applyNewStatusVersion(
@@ -498,39 +565,14 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 System.nanoTime() / 1000 - startTime);
     }
 
-    private void reportPollFailure(Throwable failure, long startTime) {
-        if (!(failure instanceof StatusException || failure instanceof StatusRuntimeException)) {
-            reportStatusCheckFailure(BalanceStatusEnum.MASTER_STATUS_PROCESSING_FAILED, startTime);
-            return;
-        }
-        workerStatus.lock.lock();
-        try {
-            if (workerDirectory.isCurrentStatus(roleType, ipPort, workerStatus)
-                    && workerStatus.isActiveGeneration()) {
-                // Expiration still uses the last successfully received status.
-                workerStatus.recordTransportFailure();
-            }
-        } finally {
-            workerStatus.lock.unlock();
-        }
-        Status.Code code = Status.fromThrowable(failure).getCode();
-        log("gRPC worker status check failed, code=" + code + ", msg=" + failure.getMessage());
-        reportStatusCheckFailure(
-                code == Status.Code.DEADLINE_EXCEEDED
-                        ? BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT
-                        : BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE,
-                startTime);
+    private static int defaultWorkerStatusPort(WorkerStatus workerStatus) {
+        return workerStatus.getGrpcPort();
     }
 
-    private void log(String msg) {
-        logger.debug(
-                "[gRPC][{}][{}][{}][{}][{}μs]: {}",
-                id,
-                site,
-                ipPort,
-                modelName,
-                System.nanoTime() / 1000 - createTimeUs,
-                msg);
+    private static Throwable unwrapCompletionFailure(Throwable failure) {
+        return failure instanceof CompletionException && failure.getCause() != null
+                ? failure.getCause()
+                : failure;
     }
 
     /**

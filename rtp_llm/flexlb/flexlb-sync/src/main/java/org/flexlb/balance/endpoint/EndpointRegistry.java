@@ -441,7 +441,7 @@ public class EndpointRegistry {
         endpoints.computeIfPresent(
                 ipPort,
                 (ignored, current) -> {
-                    captured.set(current.tryPinGeneration());
+                    captured.set(current.tryPinSchedulingGeneration());
                     return current;
                 });
         return captured.get();

@@ -73,6 +73,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
             int priority,
             AdmissionCapacity capacity) {
         requirePinnedGeneration(pin);
+        if (!hasFreshSchedulingStatus()) {
+            return null;
+        }
         return state.reserve(
                 requestId, inputKvTokens, inputAndMaxOutputKvTokens, priority, true, capacity);
     }
@@ -202,7 +205,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             long inputAndMaxOutputKvTokens,
             int priority,
             AdmissionCapacity capacity) {
-        GenerationPin pin = tryPinGeneration();
+        GenerationPin pin = tryPinSchedulingGeneration();
         if (pin == null) {
             return false;
         }
@@ -312,6 +315,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
             signalPlacementCapacityChanged();
         }
         return () -> endpointEvents.onDecodeStatus(this, result.facts());
+    }
+
+    @Override
+    public void signalPlacementCapacityChanged() {
+        WorkerStatus.TopologySnapshot topology = getStatus().topologySnapshot();
+        placementAvailability.capacityChanged(RoleType.DECODE, topology.group(), ipPort());
     }
 
     public Runnable initializeFromPreparedStatus(
@@ -435,11 +444,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 logger.warn("Decode capacity listener failed", listenerFailure);
             }
         }
-    }
-
-    private void signalPlacementCapacityChanged() {
-        WorkerStatus.TopologySnapshot topology = getStatus().topologySnapshot();
-        placementAvailability.capacityChanged(RoleType.DECODE, topology.group(), ipPort());
     }
 
     /**

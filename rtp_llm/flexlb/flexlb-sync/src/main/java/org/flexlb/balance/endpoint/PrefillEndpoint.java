@@ -119,10 +119,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
     /** Publish one exact route after validating its generation pin. */
     public boolean offerPinned(GenerationPin exactPin, ScheduledRequest exactItem) {
         requirePinnedGeneration(exactPin);
-        return runtime.offer(exactItem);
+        return hasFreshSchedulingStatus() && runtime.offer(exactItem);
     }
 
     /** Publish a role/group-scoped edge after real queue or status progress. */
+    @Override
     public void signalPlacementCapacityChanged() {
         WorkerStatus.TopologySnapshot topology = getStatus().topologySnapshot();
         placementAvailability.capacityChanged(getStatus().getRole(), topology.group(), ipPort());
@@ -174,11 +175,18 @@ public class PrefillEndpoint extends WorkerEndpoint {
             return new PrefillState.ReservationResult<>(
                     PrefillState.CapacityStatus.ENDPOINT_RETIRED, null);
         }
+        if (!hasFreshSchedulingStatus()) {
+            return new PrefillState.ReservationResult<>(
+                    PrefillState.CapacityStatus.CAPACITY_FULL, null);
+        }
         return prefillState.reserveRoute(exactItem, predictedMs);
     }
 
     /** Acquire the generation capability only for the final route commit. */
     public RouteCommitAdmission tryBeginRouteCommitAdmission() {
+        if (!hasFreshSchedulingStatus()) {
+            return null;
+        }
         EndpointGenerationLifecycle.HandoffPermit handoffPermit = tryAcquireGenerationHandoff();
         return handoffPermit == null ? null : new RouteCommitAdmission(handoffPermit);
     }
@@ -215,6 +223,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public PrefillState.ReservationResult<PrefillState.RouteReservation> reserveUnqueuedRoute(
             GenerationPin pin, ScheduledRequest item, long predictedMs) {
         requirePinnedGeneration(pin);
+        if (!hasFreshSchedulingStatus()) {
+            return new PrefillState.ReservationResult<>(
+                    PrefillState.CapacityStatus.CAPACITY_FULL, null);
+        }
         return prefillState.reserveUnqueuedRoute(item, predictedMs, inflightRequestLimit);
     }
 
