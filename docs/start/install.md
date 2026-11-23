@@ -131,8 +131,10 @@ their dependency lock.
 The 2026-11-23 production-shape run additionally compared b12x and CUTLASS
 at local E256/K2560/N640/topk10 for every integer M1–16 on both EP ranks.
 All 32 synthetic and 32 captured-route cases passed. The largest relative
-L2 error on captured routes was 3.77%; each backend's eager and CUDA Graph
-results were bitwise identical.
+L2 error on captured routes was 3.77%. The regression compares b12x against
+CUTLASS eager with a 5% relative L2 limit. Separately, it checks two Graph
+replays of each backend against that backend's eager BF16 output, bit for bit.
+All 128 CUTLASS and 128 b12x replays passed on SM120.
 
 The Qwen4 FP8-to-NVFP4 recipe selects Hybrid automatically for compatible
 SM120 TP2/EP2 Decode workers. The static backend requires this recipe.
@@ -186,9 +188,13 @@ use `--quantization` with the existing packed format and the desired options:
 
 `decode_lsa_enabled` defaults to true. A rank that opts out reports that
 decision in the layout exchange, so both ranks retain the standard collective.
-`decode_lsa_startup_timeout_s` sets the first layout exchange deadline
-(default 120 seconds). Set the same value on both ranks. MTP draft models
-skip the LSA setup and its layout exchange.
+LSA uses the main TP group's 36,500-day slow-start policy for each host
+exchange during layout, allocation, capability and readiness checks. To bound
+each exchange, set `decode_lsa_startup_timeout_s` to the same positive number
+of seconds on both ranks. A store timeout fails startup for the TP group.
+MTP draft models skip the LSA exchanges. The two-rank SM120 regression
+delays rank 1 by 123 seconds before the layout exchange, then verifies native
+LSA activation and output after the peer arrives.
 
 `decode_lsa_timeout_ms` in the ModelOpt FP4 config defaults to 0: wait on the
 owner's cancellation flag without a device deadline. Both ranks agree

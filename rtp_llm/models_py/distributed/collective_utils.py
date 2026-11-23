@@ -19,5 +19,9 @@ def exchange_group_state(group, state, tag, *, timeout_s=120):
     store = dist.distributed_c10d._get_default_store()
     keys = [prefix + str(rank) for rank in range(dist.get_world_size(group))]
     store.set(keys[dist.get_rank(group)], json.dumps(state).encode())
-    store.wait(keys, timedelta(seconds=timeout_s))
+    # LSA startup opts into the same long wait as the main TP group.
+    timeout = (
+        timedelta(days=36500) if timeout_s is None else timedelta(seconds=timeout_s)
+    )
+    store.wait(keys, timeout)
     return [json.loads(store.get(key)) for key in keys]

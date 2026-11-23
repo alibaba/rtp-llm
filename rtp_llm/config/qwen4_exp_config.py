@@ -276,7 +276,7 @@ def build_qwen4_quant_config(quantization, source_fp8):
             decode_shared_gemm_nk=getattr(requested, "decode_shared_gemm_nk", False),
             decode_lsa_enabled=getattr(requested, "decode_lsa_enabled", True),
             decode_lsa_startup_timeout_s=getattr(
-                requested, "decode_lsa_startup_timeout_s", 120
+                requested, "decode_lsa_startup_timeout_s", None
             ),
             decode_lsa_timeout_ms=getattr(requested, "decode_lsa_timeout_ms", 0),
             prefill_library=getattr(requested, "prefill_library", None),

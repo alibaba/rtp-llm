@@ -110,8 +110,9 @@ class Nvfp4HybridExecutorTest(unittest.TestCase):
                 ("1", "PDFUSION", baseline),
                 ("0", "DECODE", baseline),
             ]:
-                with self.subTest(enabled=enabled, role=role), patch.dict(
-                    "os.environ", {"RTP_NVFP4_HYBRID_MOE": enabled}
+                with (
+                    self.subTest(enabled=enabled, role=role),
+                    patch.dict("os.environ", {"RTP_NVFP4_HYBRID_MOE": enabled}),
                 ):
                     self.assertIs(
                         registry.get_strategy(
@@ -819,23 +820,27 @@ class B12xNvfp4GpuTest(unittest.TestCase):
                     self.assertEqual(x.shape, (rows, hidden))
                     self.assertEqual(ids.shape, (rows, top_k))
                     actual = adapter(x, ids, weights)
-                    result = cutlass_fused_moe(
-                        input=x,
-                        input_sf=None,
-                        token_selected_experts=ids,
-                        token_final_scales=weights,
-                        fc1_expert_weights=w1,
-                        fc2_expert_weights=w2,
-                        output_dtype=torch.bfloat16,
-                        quant_scales=scales,
-                        tp_size=1,
-                        tp_rank=0,
-                        ep_size=2,
-                        ep_rank=ep_rank,
-                        activation_type=ActivationType.Swiglu,
-                        enable_pdl=False,
-                    )
-                    expected = result[0] if isinstance(result, list) else result
+
+                    def run_cutlass():
+                        result = cutlass_fused_moe(
+                            input=x,
+                            input_sf=None,
+                            token_selected_experts=ids,
+                            token_final_scales=weights,
+                            fc1_expert_weights=w1,
+                            fc2_expert_weights=w2,
+                            output_dtype=torch.bfloat16,
+                            quant_scales=scales,
+                            tp_size=1,
+                            tp_rank=0,
+                            ep_size=2,
+                            ep_rank=ep_rank,
+                            activation_type=ActivationType.Swiglu,
+                            enable_pdl=False,
+                        )
+                        return result[0] if isinstance(result, list) else result
+
+                    expected = run_cutlass().clone()
                     local = (ids // experts == ep_rank).any(dim=1)
                     self.assertGreater(expected.float().norm().item(), 0)
                     self.assertTrue(torch.isfinite(actual).all().item())
@@ -843,15 +848,25 @@ class B12xNvfp4GpuTest(unittest.TestCase):
                     delta = actual.float() - expected.float()
                     relative_l2 = (delta.norm() / expected.float().norm()).item()
                     self.assertLessEqual(relative_l2, 0.05)
-                    graph = torch.cuda.CUDAGraph()
-                    with torch.cuda.graph(graph):
-                        replayed = adapter(x, ids, weights)
-                    graph.replay()
-                    torch.testing.assert_close(replayed, actual, atol=0, rtol=0)
+                    for forward, eager in (
+                        (lambda: adapter(x, ids, weights), actual.clone()),
+                        (run_cutlass, expected),
+                    ):
+                        graph = torch.cuda.CUDAGraph()
+                        with torch.cuda.graph(graph):
+                            replayed = forward()
+                        for _ in range(2):
+                            replayed.fill_(float("nan"))
+                            graph.replay()
+                            self.assertTrue(
+                                torch.equal(
+                                    replayed.view(torch.int16), eager.view(torch.int16)
+                                )
+                            )
                     print(
                         f"B12X_PRODUCTION_CASE ep_rank={ep_rank} rows={rows} "
                         f"capture={fixture is not None} rel_l2={relative_l2:.8f} "
-                        f"max_abs={delta.abs().max().item():.8f}",
+                        f"max_abs={delta.abs().max().item():.8f} bitwise_replays_per_backend=2",
                         flush=True,
                     )
 

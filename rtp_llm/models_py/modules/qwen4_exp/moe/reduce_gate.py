@@ -3,6 +3,7 @@
 import logging
 import os
 import socket
+from functools import partial
 
 import torch
 import torch.distributed as dist
@@ -127,7 +128,8 @@ def prepare_model_reduce(model, config, parallelism):
 
     quant_config = getattr(config, "quant_config", None)
     timeout_ms = getattr(quant_config, "decode_lsa_timeout_ms", 0)
-    startup_timeout_s = getattr(quant_config, "decode_lsa_startup_timeout_s", 120)
+    startup_timeout_s = getattr(quant_config, "decode_lsa_startup_timeout_s", None)
+    exchange = partial(exchange_group_state, group, timeout_s=startup_timeout_s)
     state = {
         "timeout_ms": timeout_ms,
         "startup_timeout_s": startup_timeout_s,
@@ -197,9 +199,7 @@ def prepare_model_reduce(model, config, parallelism):
         state["bus_id"] = ops.device(device.index)
     except Exception as error:
         state["error"] = str(error)
-    peers = exchange_group_state(
-        group, state, "qwen38-lsa-layout", timeout_s=startup_timeout_s
-    )
+    peers = exchange(state, "qwen38-lsa-layout")
     if (
         any(peer["error"] is not None for peer in peers)
         or len({peer["host"] for peer in peers}) != 1
@@ -235,7 +235,7 @@ def prepare_model_reduce(model, config, parallelism):
             )
         except Exception as error:
             state["error"] = str(error)
-        peers = exchange_group_state(group, state, "qwen38-lsa-allocation")
+        peers = exchange(state, "qwen38-lsa-allocation")
         if any(peer["error"] is not None for peer in peers):
             logger.info("MoE LSA local setup unavailable: %s", peers)
             return None
@@ -249,7 +249,7 @@ def prepare_model_reduce(model, config, parallelism):
             ops.check_capability(handle)
         except Exception as error:
             state["error"] = str(error)
-        peers = exchange_group_state(group, state, "qwen38-lsa-capability")
+        peers = exchange(state, "qwen38-lsa-capability")
         if any(peer["error"] is not None for peer in peers):
             logger.info("MoE LSA communicator capability unavailable: %s", peers)
             return None
@@ -262,7 +262,7 @@ def prepare_model_reduce(model, config, parallelism):
             ops.check_activation(handle)
         except Exception as error:
             state["error"] = str(error)
-        peers = exchange_group_state(group, state, "qwen38-lsa-ready")
+        peers = exchange(state, "qwen38-lsa-ready")
         if any(peer["error"] is not None for peer in peers):
             logger.info("MoE LSA activation unavailable: %s", peers)
             return None

@@ -875,15 +875,13 @@ class ModelOptFp4Config(QuantizationConfig):
         self.decode_lsa_enabled = kwargs.get("decode_lsa_enabled", True)
         if type(self.decode_lsa_enabled) is not bool:
             raise ValueError("decode_lsa_enabled must be a boolean")
-        self.decode_lsa_startup_timeout_s = kwargs.get(
-            "decode_lsa_startup_timeout_s", 120
-        )
-        if (
+        self.decode_lsa_startup_timeout_s = kwargs.get("decode_lsa_startup_timeout_s")
+        if self.decode_lsa_startup_timeout_s is not None and (
             type(self.decode_lsa_startup_timeout_s) is not int
             or not 1 <= self.decode_lsa_startup_timeout_s <= 2**31 - 1
         ):
             raise ValueError(
-                "decode_lsa_startup_timeout_s must be an integer from 1 through 2147483647"
+                "decode_lsa_startup_timeout_s must be null or an integer from 1 through 2147483647"
             )
         self.decode_lsa_timeout_ms = kwargs.get("decode_lsa_timeout_ms", 0)
         if (

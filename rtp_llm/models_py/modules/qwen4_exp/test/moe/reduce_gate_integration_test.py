@@ -19,6 +19,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
+from rtp_llm.models_py.distributed.collective_utils import exchange_group_state
 from rtp_llm.models_py.modules.qwen4_exp.moe.reduce_gate import (
     prepare_model_reduce,
 )
@@ -381,6 +382,40 @@ def run_missing_peer(rank, group_options):
     os._exit(0)
 
 
+def prepare_with_delayed_peer(model, config, parallelism, rank, timeout_s):
+    stages = []
+
+    def exchange(group, state, tag, **kwargs):
+        assert kwargs["timeout_s"] == timeout_s
+        stages.append(tag)
+        # Rank 0 enters the real store wait while the other worker is still
+        # loading. Cross the former deadline once; exercise every later stage.
+        delay = 123 if timeout_s is None and tag == "qwen38-lsa-layout" else 1
+        dist.barrier(group=group)
+        start = time.monotonic()
+        if rank == 1:
+            time.sleep(delay)
+        peers = exchange_group_state(group, state, tag, **kwargs)
+        elapsed = time.monotonic() - start
+        if rank == 0:
+            assert elapsed >= delay - 0.5, (tag, elapsed)
+            print(
+                f"LSA_STARTUP_WAIT stage={tag} policy={timeout_s} elapsed_s={elapsed:.3f}",
+                flush=True,
+            )
+        return peers
+
+    with patch(
+        "rtp_llm.models_py.modules.qwen4_exp.moe.reduce_gate.exchange_group_state",
+        side_effect=exchange,
+    ):
+        owner = prepare_model_reduce(model, config, parallelism)
+    assert stages == [
+        f"qwen38-lsa-{name}" for name in ("layout", "allocation", "capability", "ready")
+    ]
+    return owner
+
+
 def check_startup_fallback(model, config, parallelism, rank, device):
     from rtp_llm.ops import rtp_llm_ops
 
@@ -597,6 +632,7 @@ def run_hidden_size(device, rank, hidden_size):
                 decode_lsa_startup_timeout_s=120 + rank
             )
             assert prepare_model_reduce(model, config, parallelism) is None
+            config.quant_config = SimpleNamespace()
             with patch.dict(os.environ, {"NCCL_P2P_DISABLE": str(rank)}):
                 assert prepare_model_reduce(model, config, parallelism) is None
             # Decline before native communicator creation on either rank.
@@ -626,7 +662,13 @@ def run_hidden_size(device, rank, hidden_size):
             config.quant_config = SimpleNamespace(decode_lsa_timeout_ms=2000)
             check_startup_fallback(model, config, parallelism, rank, device)
             check_shared_packing(rank, device)
-        owner = prepare_model_reduce(model, config, parallelism)
+        if hidden_size == 2560:
+            owner = prepare_with_delayed_peer(model, config, parallelism, rank, None)
+        elif hidden_size == 4096:
+            config.quant_config = SimpleNamespace(decode_lsa_startup_timeout_s=30)
+            owner = prepare_with_delayed_peer(model, config, parallelism, rank, 30)
+        else:
+            owner = prepare_model_reduce(model, config, parallelism)
     assert owner is not None, "SM120 CUDA 13 native LSA unavailable"
     assert mlp._reduce_shared_gate is owner
     assert not owner.supports(
