@@ -31,7 +31,9 @@ struct BlockTreeCacheLayout {
 
 using BlockTreeCacheLayoutPtr = std::shared_ptr<BlockTreeCacheLayout>;
 
-BlockTreeCacheLayoutPtr planBlockTreeCacheLayout(const CacheConfig& cache_config, const KVCacheConfig& kv_cache_config);
+BlockTreeCacheLayoutPtr planBlockTreeCacheLayout(const CacheConfig&       cache_config,
+                                                const KVCacheConfig&     kv_cache_config,
+                                                const ParallelismConfig& parallelism_config = {});
 
 std::string resolveDiskMountPath(const std::string& disk_paths_csv, int64_t local_world_size, int64_t local_rank);
 

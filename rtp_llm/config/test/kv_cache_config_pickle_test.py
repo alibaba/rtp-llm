@@ -13,10 +13,9 @@ EVENT_PICKLE_FIELDS = tuple(BASE_EVENT_FIELD_VALUES)
 
 
 def _version_twenty_two_state(config):
-    state = config.__getstate__()
+    state = config.__getstate__()[:79]
     # The former host-placement option was between pool counts and scan interval.
-    # Drop the v24 tail reclaim flag so older states keep their mainline shapes.
-    return (state[0], 22, *state[2:53], True, *state[53:79])
+    return (state[0], 22, *state[2:53], True, *state[53:])
 
 
 def _version_twenty_state(config):
@@ -85,8 +84,8 @@ class KVCacheConfigPickleTest(TestCase):
         config.reserve_block_ratio = 9
         config.kv_cache_event_instance_group = "weighted-pools"
         state = config.__getstate__()
-        self.assertEqual(state[:2], ("KVCacheConfig", 25))
-        self.assertEqual(len(state), 81)
+        self.assertEqual(state[:2], ("KVCacheConfig", 26))
+        self.assertEqual(len(state), 82)
         self.assertEqual(state[80], config.kv_cache_pool_block_weights)
         self.assertTrue(state[79])
 
@@ -149,8 +148,8 @@ class KVCacheConfigPickleTest(TestCase):
                 config.kv_cache_pool_block_weights = '{"full":7,"linear":2}'
                 state = config.__getstate__()
                 v22_state = _version_twenty_two_state(config)
-                self.assertEqual(len(state), 81)
-                self.assertEqual(state[:2], ("KVCacheConfig", 25))
+                self.assertEqual(len(state), 82)
+                self.assertEqual(state[:2], ("KVCacheConfig", 26))
                 self.assertEqual(state[63:68], tuple(BASE_EVENT_FIELD_VALUES.values()))
                 self.assertIs(state[68], enable_crc)
                 self.assertEqual(state[77], 6)
@@ -411,8 +410,7 @@ class KVCacheConfigPickleTest(TestCase):
                 for _ in range(2):
                     config = pickle.loads(pickle.dumps(config))
                     self.assertEqual(getattr(config, name), timeout)
-                    # v25 keeps frozen timeout at index 78; the v24/v25 tail
-                    # flags follow it.
+                    # The added cache settings follow the frozen timeout at index 78.
                     self.assertEqual(config.__getstate__()[78], timeout)
                     self.assertIn(f"{name}: {timeout}\n", config.to_string())
         for timeout in (-1, 2**31):
@@ -421,7 +419,7 @@ class KVCacheConfigPickleTest(TestCase):
             ):
                 state = KVCacheConfig().__getstate__()
                 restored = KVCacheConfig.__new__(KVCacheConfig)
-                restored.__setstate__((*state[:78], timeout, state[79], state[80]))
+                restored.__setstate__((*state[:78], timeout, *state[79:]))
 
     def test_previous_versions_use_default_frozen_force_release_timeout(self):
         source = KVCacheConfig()
@@ -458,6 +456,18 @@ class KVCacheConfigPickleTest(TestCase):
                     restored.block_tree_task_pool_size, 6 if version == 19 else 4
                 )
                 self.assertEqual(restored.block_tree_transfer_worker_count, 7)
+
+    def test_lower_tier_linear_pool_prompt_tokens_round_trip(self):
+        source = KVCacheConfig()
+        self.assertEqual(source.lower_tier_linear_pool_avg_prompt_tokens, -1)
+        source.lower_tier_linear_pool_avg_prompt_tokens = 2048
+        state = source.__getstate__()
+        self.assertEqual(state[79], 2048)
+        restored = pickle.loads(pickle.dumps(source))
+        self.assertEqual(restored.lower_tier_linear_pool_avg_prompt_tokens, 2048)
+        previous = KVCacheConfig.__new__(KVCacheConfig)
+        previous.__setstate__((state[0], 23, *state[2:79]))
+        self.assertEqual(previous.lower_tier_linear_pool_avg_prompt_tokens, -1)
 
     def test_malformed_event_states_are_rejected(self):
         state = KVCacheConfig().__getstate__()

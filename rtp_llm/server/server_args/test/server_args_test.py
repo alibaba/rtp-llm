@@ -810,6 +810,23 @@ class CacheConfigArgumentsTest(TestCase):
                     expected,
                 )
 
+    def test_lower_tier_linear_pool_prompt_reference(self):
+        cases = (
+            ([], {}, -1),
+            ([], {"LOWER_TIER_LINEAR_POOL_AVG_PROMPT_TOKENS": "128"}, 128),
+            (
+                ["--lower_tier_linear_pool_avg_prompt_tokens", "256"],
+                {"LOWER_TIER_LINEAR_POOL_AVG_PROMPT_TOKENS": "128"},
+                256,
+            ),
+        )
+        for args, env, expected in cases:
+            with self.subTest(args=args, env=env):
+                config = self.parse_cache_config(args, env)
+                self.assertEqual(
+                    config.lower_tier_linear_pool_avg_prompt_tokens, expected
+                )
+
     def test_remote_task_budget_is_independent_of_host_and_sdk(self):
         cases = (
             ([], {}, 5000),

@@ -301,8 +301,72 @@ std::vector<BlockInfo> resolveStorageBuffers(const CacheConfig&                c
 
 }  // namespace
 
-BlockTreeCacheLayoutPtr planBlockTreeCacheLayout(const CacheConfig&   cache_config,
-                                                 const KVCacheConfig& kv_cache_config) {
+namespace {
+
+LowerTierLinearPoolRatio planLowerTierLinearPoolRatio(const CacheConfig&                         config,
+                                                      const KVCacheConfig&                       options,
+                                                      const ParallelismConfig&                   parallelism,
+                                                      const std::vector<std::vector<std::string>>& group_members) {
+    constexpr const char* name = "LOWER_TIER_LINEAR_POOL_AVG_PROMPT_TOKENS";
+    const int tokens = options.lower_tier_linear_pool_avg_prompt_tokens;
+    if ((!options.enable_memory_cache && !options.enable_disk_cache) || parallelism.role_type != RoleType::PREFILL
+        || tokens == -1) {
+        return {};
+    }
+    RTP_LLM_CHECK_WITH_INFO(tokens > 0, "%s must be -1 or positive", name);
+    const auto tail_blocks = config.reuse_cache_tail_blocks;
+    RTP_LLM_CHECK_WITH_INFO(options.reuse_cache && tail_blocks > 0 && tail_blocks < std::numeric_limits<int>::max(),
+                            "%s requires REUSE_CACHE and a finite REUSE_CACHE_TAIL_BLOCKS",
+                            name);
+    const auto find_members = [&](CacheGroupType type) {
+        return std::find_if(group_members.begin(), group_members.end(), [&](const auto& members) {
+            return config.group(members.front()).policy.group_type == type;
+        });
+    };
+    const auto full = find_members(CacheGroupType::FULL);
+    const auto linear = find_members(CacheGroupType::LINEAR);
+    RTP_LLM_CHECK_WITH_INFO(full != group_members.end() && linear != group_members.end(),
+                            "%s requires reusable FULL and LINEAR pools",
+                            name);
+    RTP_LLM_CHECK_WITH_INFO(std::all_of(linear->begin(), linear->end(), [&](const std::string& tag) {
+                                const auto& group = config.group(tag);
+                                return group.seqSizePerBlock() == config.seq_size_per_block
+                                       && group.kernelBlocksPerKvBlock() == 1 && !group.policy.shared_chunk_state;
+                            }),
+                            "%s requires one LINEAR state checkpoint per base page",
+                            name);
+    std::optional<CPSlotMapper> mapper;
+    if (config.local_kv_cache_sharded) {
+        const auto max_int = std::numeric_limits<int>::max();
+        RTP_LLM_CHECK_WITH_INFO(parallelism.tp_size > 1 && parallelism.tp_size <= max_int
+                                    && config.seq_size_per_block <= static_cast<size_t>(max_int),
+                                "%s requires a valid CP page span",
+                                name);
+        mapper.emplace(/*cp_rank=*/0,
+                       static_cast<int>(parallelism.tp_size),
+                       static_cast<int>(config.seq_size_per_block));
+    }
+    const auto full_page_span = [&](const std::string& tag) {
+        return mapper ? mapper->logicalSeqSizePerBlock(config, tag) : config.group(tag).seqSizePerBlock();
+    };
+    const auto page_tokens = full_page_span(full->front());
+    RTP_LLM_CHECK_WITH_INFO(page_tokens > 0 && std::all_of(full->begin(), full->end(), [&](const auto& tag) {
+                                return full_page_span(tag) == page_tokens;
+                            }),
+                            "%s requires a common FULL page span",
+                            name);
+    const LowerTierLinearPoolRatio ratio{static_cast<uint32_t>(1 + (tokens - 1) / page_tokens),
+                                         static_cast<uint32_t>(tail_blocks) + 1};
+    RTP_LLM_LOG_INFO("%s=%d full_page_tokens=%zu full_reference_blocks=%u linear_reference_blocks=%u",
+                     name, tokens, page_tokens, ratio.full_pages, ratio.linear_states);
+    return ratio;
+}
+
+}  // namespace
+
+BlockTreeCacheLayoutPtr planBlockTreeCacheLayout(const CacheConfig&       cache_config,
+                                                const KVCacheConfig&     kv_cache_config,
+                                                const ParallelismConfig& parallelism_config) {
     auto layout = std::make_shared<BlockTreeCacheLayout>();
     if (!buildBlockTreeGroupMembers(cache_config, layout->group_members)) {
         return nullptr;
@@ -337,6 +401,8 @@ BlockTreeCacheLayoutPtr planBlockTreeCacheLayout(const CacheConfig&   cache_conf
     layout->sizing.disk_budget_bytes =
         budget_bytes(kv_cache_config.enable_disk_cache, kv_cache_config.disk_cache_size_mb);
     layout->sizing.host_swa_block_ratio = kv_cache_config.memory_cache_swa_block_ratio;
+    layout->sizing.linear_ratio =
+        planLowerTierLinearPoolRatio(cache_config, kv_cache_config, parallelism_config, layout->group_members);
     return layout;
 }
 
@@ -443,7 +509,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         return nullptr;
     }
     if (layout == nullptr) {
-        layout = planBlockTreeCacheLayout(cache_config, kv_cache_config);
+        layout = planBlockTreeCacheLayout(cache_config, kv_cache_config, parallelism_config);
     }
     if (layout == nullptr || layout->group_members.size() != layout->backing_layouts.size()) {
         RTP_LLM_LOG_ERROR("failed to build a consistent BlockTreeCache layout");
@@ -455,22 +521,24 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     const auto&              group_members   = layout->group_members;
     const auto&              backing_layouts = layout->backing_layouts;
     std::vector<GroupSetPtr> group_sets;
-    std::vector<size_t> device_block_counts;
-    std::vector<size_t> pool_strides;
+    std::vector<size_t>         device_block_counts;
+    std::vector<size_t>         pool_strides;
+    std::vector<CacheGroupType> types;
     for (size_t i = 0; i < group_members.size(); ++i) {
         device_block_counts.push_back(
             poolForTag(cache_config.topology(), group_pools, group_members[i].front())->totalBlocksNum() + 1);
         pool_strides.push_back(backing_layouts[i].pool_stride);
+        types.push_back(cache_config.group(group_members[i].front()).policy.group_type);
     }
 
-    const auto tier_block_counts = [&](size_t bytes, const TierBlockNumOverrides* agreed) {
+    const auto tier_block_counts = [&](size_t bytes, const TierBlockNumOverrides* agreed, double swa_ratio = 1.0) {
         if (agreed == nullptr) {
-            return computeTierBlockCounts(bytes, device_block_counts, pool_strides);
+            return computeLocalTierBlockCounts(
+                bytes, device_block_counts, pool_strides, types, layout->sizing.linear_ratio, swa_ratio);
         }
         std::vector<size_t> counts;
         for (size_t i = 0; i < group_members.size(); ++i) {
-            const auto type  = cache_config.topology().group(group_members[i].front()).policy.group_type;
-            const auto found = agreed->find(type);
+            const auto found = agreed->find(types[i]);
             RTP_LLM_CHECK_WITH_INFO(found != agreed->end(), "missing negotiated BlockTreeCache capacity");
             const size_t count = found->second;
             RTP_LLM_CHECK_WITH_INFO(count >= 2 && count <= static_cast<size_t>(std::numeric_limits<BlockIdxType>::max())
@@ -484,28 +552,17 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
 
     std::vector<std::shared_ptr<HostBlockPool>> host_pools(group_members.size());
     if (host_enabled && !group_members.empty()) {
-        const size_t                bytes = static_cast<size_t>(kv_cache_config.memory_cache_size_mb) * 1024UL * 1024UL;
-        std::vector<size_t>         strides;
-        std::vector<CacheGroupType> types;
-        for (size_t i = 0; i < group_members.size(); ++i) {
-            strides.push_back(backing_layouts[i].pool_stride);
-            types.push_back(cache_config.topology().group(group_members[i].front()).policy.group_type);
-        }
+        const size_t bytes = static_cast<size_t>(kv_cache_config.memory_cache_size_mb) * bytes_per_mb;
         std::vector<size_t> usable;
-        const bool          has_host_ratio = kv_cache_config.memory_cache_swa_block_ratio != 1.0
-                                    && std::find(types.begin(), types.end(), CacheGroupType::FULL) != types.end()
-                                    && std::find(types.begin(), types.end(), CacheGroupType::SWA) != types.end();
-        if (layout->block_nums) {
-            // Cross-stage physical capacities are authoritative once negotiated.
-            usable = tier_block_counts(bytes, &layout->block_nums->host);
-            for (auto& count : usable) {
-                --count;  // Host pools reserve block zero separately.
-            }
-        } else if (has_host_ratio) {
-            // Non-default HOST ratios override device proportions; 1.0 preserves the device ratio.
-            usable = computeHostUsableBlockCounts(bytes, strides, types, kv_cache_config.memory_cache_swa_block_ratio);
+        const auto swa_ratio = kv_cache_config.memory_cache_swa_block_ratio;
+        const bool legacy_host_ratio = layout->sizing.linear_ratio.full_pages == 0 && swa_ratio != 1.0
+                                       && std::find(types.begin(), types.end(), CacheGroupType::FULL) != types.end()
+                                       && std::find(types.begin(), types.end(), CacheGroupType::SWA) != types.end();
+        if (!layout->block_nums && legacy_host_ratio) {
+            usable = computeHostUsableBlockCounts(bytes, pool_strides, types, swa_ratio);
         } else {
-            usable = tier_block_counts(bytes, nullptr);
+            // Cross-stage physical capacities are authoritative once negotiated.
+            usable = tier_block_counts(bytes, layout->block_nums ? &layout->block_nums->host : nullptr, swa_ratio);
             for (auto& count : usable) {
                 --count;  // Host pools reserve block zero separately.
             }
@@ -526,8 +583,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                              pool_name.c_str(),
                              usable[group_set_id],
                              usable[group_set_id] + 1,
-                             strides[group_set_id],
-                             (usable[group_set_id] + 1) * strides[group_set_id],
+                             pool_strides[group_set_id],
+                             (usable[group_set_id] + 1) * pool_strides[group_set_id],
                              bytes,
                              kv_cache_config.memory_cache_swa_block_ratio);
             host_pools[group_set_id] =

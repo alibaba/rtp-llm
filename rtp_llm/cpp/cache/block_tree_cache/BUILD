@@ -291,6 +291,7 @@ cc_library(
         ":disk_io_executor",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:cache_capacity_negotiator",
+        "//rtp_llm/cpp/cache:cp_slot_mapper",
         "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:single_type_cache_manager",

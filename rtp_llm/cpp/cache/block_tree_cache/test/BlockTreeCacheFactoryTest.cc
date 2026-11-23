@@ -693,6 +693,57 @@ TEST(BlockTreeCacheFactoryUtilityTest, TierBlockCountsUseWideIntermediateProduct
               (std::vector<size_t>{size_t{1} << 30}));
 }
 
+TEST_F(BlockTreeCacheFactoryTest, PrefillLinearPromptReferenceSizesHostAndSsd) {
+    auto config = makeHybridConfig();
+    auto allocator = initAllocator<CoordinatorCacheManager>(config);
+    block_transfer_engine_test::TempDirGuard disk_dir("block_tree_prefill_linear_ratio");
+    KVCacheConfig options;
+    options.reuse_cache = true;
+    options.enable_memory_cache = true;
+    options.memory_cache_size_mb = 1;
+    options.enable_disk_cache = true;
+    options.disk_cache_size_mb = 2;
+    options.disk_cache_paths = disk_dir.path;
+    options.lower_tier_linear_pool_avg_prompt_tokens = 32;
+    options.enable_crc = false;
+    ParallelismConfig prefill;
+    prefill.role_type = RoleType::PREFILL;
+    auto layout = planBlockTreeCacheLayout(config, options, prefill);
+    ASSERT_NE(layout, nullptr);
+    EXPECT_EQ(layout->sizing.linear_ratio.full_pages, 8u);
+    EXPECT_EQ(layout->sizing.linear_ratio.linear_states, 3u);
+    auto cache = createBlockTreeCache(config, options, allocator, prefill, nullptr, nullptr, nullptr, layout);
+    ASSERT_NE(cache, nullptr);
+    ASSERT_EQ(cache->groupSets().size(), 2u);
+    const auto& linear = cache->groupSets()[0];
+    const auto& full = cache->groupSets()[1];
+    ASSERT_EQ(linear->groupType(), CacheGroupType::LINEAR);
+    ASSERT_EQ(full->groupType(), CacheGroupType::FULL);
+    const size_t full_host = full->hostPool()->totalBlocksNum();
+    const size_t full_disk = full->diskPool()->totalBlocksNum();
+    EXPECT_EQ(linear->hostPool()->totalBlocksNum(), (3 * full_host + 7) / 8);
+    EXPECT_EQ(linear->diskPool()->totalBlocksNum(), (3 * full_disk + 7) / 8);
+    EXPECT_GT(full_disk, full_host);
+
+    auto cp_config = config;
+    cp_config.local_kv_cache_sharded = true;
+    auto cp_prefill = prefill;
+    cp_prefill.tp_size = 2;
+    options.lower_tier_linear_pool_avg_prompt_tokens = 33;
+    auto cp_layout = planBlockTreeCacheLayout(cp_config, options, cp_prefill);
+    ASSERT_NE(cp_layout, nullptr);
+    EXPECT_EQ(cp_layout->sizing.linear_ratio.full_pages, 5u);
+    EXPECT_EQ(cp_layout->sizing.linear_ratio.linear_states, 3u);
+
+    ParallelismConfig decode;
+    decode.role_type = RoleType::DECODE;
+    auto decode_layout = planBlockTreeCacheLayout(config, options, decode);
+    ASSERT_NE(decode_layout, nullptr);
+    EXPECT_EQ(decode_layout->sizing.linear_ratio.full_pages, 0u);
+    options.reuse_cache = false;
+    EXPECT_THROW(planBlockTreeCacheLayout(config, options, prefill), std::exception);
+}
+
 TEST_F(BlockTreeCacheFactoryTest, FactoryConsumesNegotiatedBlockCounts) {
     const auto    config = makeSingleConfig();
     block_transfer_engine_test::TempDirGuard disk_dir("negotiated_tier_counts");

@@ -191,6 +191,7 @@ struct KVCacheConfig {
     double  block_tree_disk_evict_low_watermark_ratio    = kDefaultDiskLowWatermarkRatio;
     double  block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
     int      reuse_cache_tail_blocks                           = std::numeric_limits<int>::max();
+    int      lower_tier_linear_pool_avg_prompt_tokens = -1;
     uint32_t linear_pool_blocks                                = 0;
     uint32_t swa_pool_blocks                                   = 0;
     // Opt-in request policy; only models declaring history-state reclaim support may enable it.

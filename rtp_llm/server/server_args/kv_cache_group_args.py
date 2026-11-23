@@ -34,6 +34,20 @@ def _reuse_tail_blocks(value):
     return count
 
 
+def _lower_tier_linear_pool_avg_prompt_tokens(value):
+    try:
+        tokens = int(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError(
+            "lower_tier_linear_pool_avg_prompt_tokens must be an integer"
+        ) from error
+    if tokens != -1 and not 1 <= tokens <= 2147483647:
+        raise argparse.ArgumentTypeError(
+            "lower_tier_linear_pool_avg_prompt_tokens must be -1 or positive"
+        )
+    return tokens
+
+
 def _pool_blocks(value):
     try:
         count = int(value)
@@ -244,6 +258,18 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="每个 Linear 独立池的物理 block 总数（含 block 0）；0 表示自动计算，模型专用配置优先。",
     )
     kv_cache_group.add_argument(
+        "--lower_tier_linear_pool_avg_prompt_tokens",
+        env_name="LOWER_TIER_LINEAR_POOL_AVG_PROMPT_TOKENS",
+        bind_to=(kv_cache_config, "lower_tier_linear_pool_avg_prompt_tokens"),
+        type=_lower_tier_linear_pool_avg_prompt_tokens,
+        default=-1,
+        help=(
+            "Prefill HOST 和 SSD 共用的 FULL 参考长度，单位为 token，可填多轮请求的等效增量。"
+            "按 FULL 页跨度向上取整，再用 REUSE_CACHE_TAIL_BLOCKS + 1 除以参考页数得到 LINEAR/FULL 块数比。"
+            "-1 沿用原有容量分配。"
+        ),
+    )
+    kv_cache_group.add_argument(
         "--swa_pool_blocks",
         env_name="SWA_POOL_BLOCKS",
         bind_to=(kv_cache_config, "swa_pool_blocks"),
@@ -386,12 +412,13 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         default=128,
         help=(
             "每 rank 的磁盘 staging 参考块数 B，必须为不小于 2 的偶数。"
-            "异步模式以 SWA 块为参考，load worker 数为 W。"
-            "仅 load WorkLoop 分配私有 FULL/SWA 池；SWA 容量按 B/W 分配，余数依次分给前几个 loop，"
+            "异步模式以 SWA/LINEAR 状态块为参考，load worker 数为 W。"
+            "仅 load WorkLoop 分配两个私有 staging 池；状态池容量按 B/W 分配，余数依次分给前几个 loop，"
             "FULL 使用等量字节预算并按自身 stride 换算容量；每个 loop 的两类池容量均须容纳实际传输批大小，"
             "否则初始化失败；磁盘 staging 容量不会降低该批大小。"
             "stride 覆盖对应 group 的存储大小和磁盘 stride，并按 4096 字节对齐；"
-            "无 SWA 时以 FULL stride 为参考，无 FULL 时使用 SWA stride。总预算不随 worker 数增加。"
+            "SWA 与 LINEAR 共用一组，按两者较大的 stride 定容。无 SWA 和 LINEAR 时以 FULL stride 为参考。"
+            "总预算不随 worker 数增加。"
             "legacy 按 B×最大 stride 的总字节预算平分 FULL/SWA 池。"
         ),
     )

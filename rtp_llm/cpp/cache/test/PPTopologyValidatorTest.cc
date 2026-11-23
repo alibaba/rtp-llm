@@ -500,4 +500,35 @@ TEST(PPTopologyValidatorTest, RejectsInvalidHostRatioInSizingAndWireFormat) {
     }
 }
 
+TEST(PPTopologyValidatorTest, PrefillLinearQuotaIsNegotiatedAcrossStageBudgets) {
+    auto first = makeHybridSnapshot(100, 25);
+    auto second = makeHybridSnapshot(80, 20);
+    first.block_tree.host_budget_bytes = 15 * 4096;
+    first.block_tree.disk_budget_bytes = 30 * 4096;
+    second.block_tree.host_budget_bytes = 12 * 4096;
+    second.block_tree.disk_budget_bytes = 21 * 4096;
+    first.block_tree.linear_ratio = {4, 1};
+    second.block_tree.linear_ratio = {4, 1};
+
+    const auto decoded = StageCacheSnapshot::deserialize(second.serialize());
+    EXPECT_EQ(decoded.block_tree.linear_ratio.full_pages, 4u);
+    EXPECT_EQ(decoded.block_tree.linear_ratio.linear_states, 1u);
+    const auto result = validatePPTopology({first, decoded});
+    ASSERT_TRUE(result.ok) << result.error;
+    EXPECT_EQ(result.agreed.block_tree.host.at(CacheGroupType::FULL), 9u);
+    EXPECT_EQ(result.agreed.block_tree.host.at(CacheGroupType::LINEAR), 3u);
+    EXPECT_EQ(result.agreed.block_tree.disk.at(CacheGroupType::FULL), 16u);
+    EXPECT_EQ(result.agreed.block_tree.disk.at(CacheGroupType::LINEAR), 5u);
+
+    EXPECT_THROW(StageCacheSnapshot::deserialize(second.serialize() + "|extra"), std::exception);
+    const auto legacy = StageCacheSnapshot::deserialize(makeHybridSnapshot(100, 25).serialize());
+    EXPECT_EQ(legacy.block_tree.linear_ratio.full_pages, 0u);
+    EXPECT_EQ(legacy.block_tree.linear_ratio.linear_states, 0u);
+
+    second.block_tree.linear_ratio = {5, 1};
+    const auto mismatch = validatePPTopology({first, second});
+    EXPECT_FALSE(mismatch.ok);
+    EXPECT_NE(mismatch.error.find("LINEAR pool ratio"), std::string::npos);
+}
+
 }  // namespace rtp_llm
