@@ -15,6 +15,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.ForkJoinTask;
 
@@ -73,7 +74,7 @@ class KvCacheManagerTest {
         ForkJoinPool closingPool =
                 new ForkJoinPool(1) {
                     @Override
-                    public ForkJoinTask<?> submit(Runnable task) {
+                    public <T> ForkJoinTask<T> submit(Callable<T> task) {
                         shutdown();
                         return super.submit(task);
                     }
