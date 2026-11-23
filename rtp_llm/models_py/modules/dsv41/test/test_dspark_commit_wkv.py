@@ -404,9 +404,12 @@ class DSparkCommitWKVSM90Test(unittest.TestCase):
         self.assertIsNotNone(prepared)
         self.assertTrue(prepared.sm90)
         self.assertIsNone(prepared.stacked)
-        for rows in (1, 4, 16):
+        for rows in (1, 4, 16, 97, 128, 256, 257):
             x = torch.randn(rows, 5120, device="cuda", dtype=torch.bfloat16)
-            expected = [linear(x) for linear in self.linears]
+            expected = [
+                linear.forward_quantized(*linear._quantize_input(x))
+                for linear in self.linears
+            ]
             with patch.object(
                 _sm90_quant_scale_fused,
                 "quantize_g32",
@@ -422,7 +425,7 @@ class DSparkCommitWKVSM90Test(unittest.TestCase):
             for got, wanted in zip(actual, expected):
                 exact(self, got, wanted)
 
-        x = torch.randn(4, 5120, device="cuda", dtype=torch.bfloat16)
+        x = torch.randn(128, 5120, device="cuda", dtype=torch.bfloat16)
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
@@ -436,7 +439,11 @@ class DSparkCommitWKVSM90Test(unittest.TestCase):
                 x.normal_()
                 graph.replay()
                 for actual, linear in zip(captured, self.linears):
-                    exact(self, actual, linear(x))
+                    exact(
+                        self,
+                        actual,
+                        linear.forward_quantized(*linear._quantize_input(x)),
+                    )
         torch.cuda.current_stream().wait_stream(stream)
 
         with self.assertRaisesRegex(ValueError, "shared, not stacked"):

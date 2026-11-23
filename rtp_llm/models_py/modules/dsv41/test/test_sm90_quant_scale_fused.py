@@ -334,6 +334,118 @@ class SM90QuantScaleFusedTest(unittest.TestCase):
                 for a, b in zip((woa[0][:, g], woa[1][:, g]), _baseline(ref[:, g])):
                     _bytes_equal(a, b)
 
+    def test_all_bf16_bit_patterns_at_dense_g32_256_rows(self):
+        # Every BF16 code is the sole absmax of one full G32 group. Keep
+        # M=256 inside the dense fast path while exercising a large K.
+        codes = torch.arange(65536, device="cuda", dtype=torch.int32)
+        values = codes.to(torch.int16).view(torch.bfloat16)
+        x = values.repeat_interleave(32).reshape(256, 8192)
+        before = x.clone()
+        for policy in ("legacy", "v2", "auto"):
+            with patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": policy}):
+                # Auto CUDA v3 only defines finite inputs. The direct-scale
+                # auto contract for NaN/Inf remains explicit legacy CUDA.
+                with patch.dict(
+                    os.environ,
+                    {"DSV4_FP8_QUANT_KERNEL": "legacy" if policy == "auto" else policy},
+                ):
+                    expected = _baseline(x)
+                for mn_major in (False, True):
+                    with self.subTest(policy=policy, mn_major=mn_major):
+                        actual = fused.quantize_g32(x, mn_major=mn_major)
+                        for a, b in zip(actual, expected):
+                            _bytes_equal(a, b)
+                        self.assertTrue(actual[0].is_contiguous())
+                        self.assertEqual(
+                            actual[1].stride(),
+                            (
+                                (1, fused.mn_major_row_stride(256))
+                                if mn_major
+                                else (256, 1)
+                            ),
+                        )
+                        _bytes_equal(x, before)
+
+    def test_dense_g32_large_row_odd_stride_and_unaligned_input(self):
+        width = 5120
+        for rows in (17, 128):
+            for offset in (0, 1):
+                backing = torch.randn(
+                    (rows, width + 1), device="cuda", dtype=torch.bfloat16
+                )
+                x = backing[:, offset : offset + width]
+                before = x.clone()
+                self.assertEqual(x.stride(), (width + 1, 1))
+                self.assertEqual(x.storage_offset(), offset)
+                for policy in ("legacy", "v2", "auto"):
+                    with patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": policy}):
+                        expected = _baseline(x)
+                        independent = _finite_oracle(x, policy == "v2")
+                        for a, b in zip(expected, independent):
+                            _bytes_equal(a, b)
+                        for mn_major in (False, True):
+                            with self.subTest(
+                                rows=rows,
+                                offset=offset,
+                                policy=policy,
+                                mn_major=mn_major,
+                            ):
+                                actual = fused.quantize_g32(x, mn_major=mn_major)
+                                for a, b in zip(actual, expected):
+                                    _bytes_equal(a, b)
+                                self.assertEqual(
+                                    actual[1].stride(),
+                                    (
+                                        (1, fused.mn_major_row_stride(rows))
+                                        if mn_major
+                                        else (width // 32, 1)
+                                    ),
+                                )
+                                _bytes_equal(x, before)
+
+    def test_dense_g32_128_rows_graph_changed_nonfinite_and_tiny_groups(self):
+        finite = torch.randn((128, 5120), device="cuda", dtype=torch.bfloat16)
+        mixed = -finite
+        mixed[:, :32].fill_(float("inf"))
+        mixed[:, 32:64].fill_(float("-inf"))
+        mixed[:, 64:96].fill_(float("nan"))
+        mixed[:, 96:128].fill_(2**-133)
+        mixed[:, 128:160].fill_(-(2**-133))
+        mixed[:, 160:192].fill_(-0.0)
+        mixed[:, 192:224].fill_(torch.finfo(torch.bfloat16).max)
+        zero = torch.zeros_like(finite)
+        states = (
+            ("mixed_nonfinite", mixed, True),
+            ("all_zero", zero, False),
+            ("finite_changed", finite, False),
+            ("mixed_nonfinite_again", mixed, True),
+        )
+        for policy in ("legacy", "v2", "auto"):
+            with patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": policy}):
+                for mn_major in (False, True):
+                    x = finite.clone()
+                    for _ in range(3):
+                        fused.quantize_g32(x, mn_major=mn_major)
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        actual = fused.quantize_g32(x, mn_major=mn_major)
+                    for label, state, nonfinite in states:
+                        with self.subTest(
+                            policy=policy, mn_major=mn_major, state=label
+                        ):
+                            x.copy_(state)
+                            graph.replay()
+                            reference_policy = (
+                                "legacy" if policy == "auto" and nonfinite else policy
+                            )
+                            with patch.dict(
+                                os.environ, {"DSV4_FP8_QUANT_KERNEL": reference_policy}
+                            ):
+                                expected = _baseline(x)
+                            for a, b in zip(actual, expected):
+                                _bytes_equal(a, b)
+                            _bytes_equal(x, state)
+
     @unittest.skipUnless(
         os.environ.get("DSV41_QUANT_SCALE_BENCH") == "1", "explicit clean benchmark"
     )

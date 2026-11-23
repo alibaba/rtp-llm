@@ -30,7 +30,21 @@ def test_unpack_all_exponents_and_group_alignment(rows, groups):
     )
 
 
-@pytest.mark.parametrize("rows", [1, 7, 17, 128])
+def _packed_quant_reference(x):
+    from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+
+    q, packed = sgl_per_token_group_quant_fp8(
+        x.contiguous(),
+        group_size=32,
+        eps=torch.finfo(torch.float32).tiny,
+        column_major_scales=True,
+        scale_tma_aligned=True,
+        scale_ue8m0=True,
+    )
+    return q, unpack_ue8m0_input_scales(packed)[:, : x.shape[1] // 32]
+
+
+@pytest.mark.parametrize("rows", [1, 7, 16, 17, 96, 97, 127, 128, 191, 251, 256, 257])
 @pytest.mark.parametrize("policy", ["legacy", "v2"])
 def test_quant_exact_dynamic_graph(rows, policy, monkeypatch):
     monkeypatch.setenv("DSV4_FP8_QUANT_KERNEL", policy)
@@ -50,6 +64,19 @@ def test_quant_exact_dynamic_graph(rows, policy, monkeypatch):
             q.view(torch.uint8), reference_q.view(torch.uint8), rtol=0, atol=0
         )
         torch.testing.assert_close(scales, reference_scales, rtol=0, atol=0)
+        # The packed CUDA producer and Torch UE8M0 decode are independent of
+        # this Triton kernel; retaining the eager self-check alone can hide
+        # a graph/eager bug shared by both native-scale calls.
+        original_q, original_scales = _packed_quant_reference(x)
+        torch.testing.assert_close(
+            q.view(torch.uint8), original_q.view(torch.uint8), rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            scales.contiguous().view(torch.int32),
+            original_scales.contiguous().view(torch.int32),
+            rtol=0,
+            atol=0,
+        )
 
 
 @pytest.mark.parametrize("rows", [1, 7, 17, 128])

@@ -1,4 +1,4 @@
-"""Numerical gates for BS 0..16 and DSpark gamma 3..5 on SM90."""
+"""SM90 decode numerics and independent dense/WO_A row-dispatch boundaries."""
 
 import os
 import unittest
@@ -97,14 +97,108 @@ class DecodeBatchNumerics(unittest.TestCase):
                 torch.float8_e8m0fnu
             )
             linear = Sm90DeepGEMMMXFP8Linear(weight, scale)
-            for m in (0, 16, 17, 32, 48, 64, 65, 80, 90, 96):
+            for m in (
+                0,
+                16,
+                17,
+                32,
+                48,
+                64,
+                65,
+                80,
+                90,
+                96,
+                97,
+                127,
+                128,
+                191,
+                255,
+                256,
+            ):
                 x = torch.randn((m, k), device="cuda", dtype=torch.bfloat16)
                 expected = linear.forward_quantized(*packed_reference(x))
                 assert_bytes(self, linear.forward_bf16(x), expected)
             with self.assertRaises(ValueError):
                 linear.forward_bf16(
-                    torch.empty((97, k), device="cuda", dtype=torch.bfloat16)
+                    torch.empty((257, k), device="cuda", dtype=torch.bfloat16)
                 )
+
+    def test_dense_wrapper_selects_direct_only_through_256_rows(self):
+        from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+
+        n, k = 256, 512
+        weight = (torch.randn((n, k), device="cuda") * 0.01).to(torch.float8_e4m3fn)
+        scale = torch.ones((n // 32, k // 32), device="cuda").to(torch.float8_e8m0fnu)
+        linear = V41MXFP8Linear(weight, scale)
+        for rows in (96, 97, 127, 128, 191, 255, 256, 257):
+            with self.subTest(rows=rows):
+                x = torch.randn((rows, k), device="cuda", dtype=torch.bfloat16)
+                expected = linear.forward_quantized(*packed_reference(x))
+                out = torch.empty((rows, n), device="cuda", dtype=torch.bfloat16)
+                with patch.object(
+                    linear._sm90_linear,
+                    "forward_bf16",
+                    wraps=linear._sm90_linear.forward_bf16,
+                ) as direct, patch.object(
+                    linear, "_quantize_input", wraps=linear._quantize_input
+                ) as packed:
+                    self.assertIs(linear(x, out=out), out)
+                assert_bytes(self, out, expected)
+                if rows <= 256:
+                    direct.assert_called_once()
+                    packed.assert_not_called()
+                else:
+                    direct.assert_not_called()
+                    packed.assert_called_once()
+                if rows in (128, 256):
+                    # Exercise the real wrapper's native scales and GEMM in
+                    # one graph, after the eager call warmed this shape.
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        linear(x, out=out)
+                    for factor in (0.03125, 8.0):
+                        x.copy_(torch.randn_like(x) * factor)
+                        graph.replay()
+                        expected = linear.forward_quantized(*packed_reference(x))
+                        assert_bytes(self, out, expected)
+
+    def test_grouped_woa_direct_threshold_remains_96(self):
+        from rtp_llm.models_py.modules.dsv41.fp8._v41_sm90_output_projection import (
+            Sm90GroupedOutputProjection,
+        )
+
+        for groups in (1, 8):
+            n, k = 256, 512
+            weight = (torch.randn((groups, n, k), device="cuda") * 0.01).to(
+                torch.float8_e4m3fn
+            )
+            scale = torch.ones((groups, n // 32, k // 32), device="cuda").to(
+                torch.float8_e8m0fnu
+            )
+            linear = Sm90GroupedOutputProjection(weight, scale)
+            for rows in (96, 97):
+                with self.subTest(groups=groups, rows=rows):
+                    x = torch.randn(
+                        (rows, groups, 512), device="cuda", dtype=torch.bfloat16
+                    )
+                    phase = torch.randn((rows, 32), device="cuda")
+                    frequencies = torch.polar(torch.ones_like(phase), phase)
+                    expected = linear.forward_quantized(
+                        *linear.quantize(x, frequencies)
+                    )
+                    with patch.object(
+                        fused, "quantize_wo_a_g32", wraps=fused.quantize_wo_a_g32
+                    ) as direct, patch.object(
+                        linear, "quantize", wraps=linear.quantize
+                    ) as packed:
+                        actual = linear(x, frequencies)
+                    assert_bytes(self, actual, expected)
+                    if rows == 96:
+                        direct.assert_called_once()
+                        packed.assert_not_called()
+                    else:
+                        direct.assert_not_called()
+                        packed.assert_called_once()
 
     def test_grouped_woa_with_request_frequency_broadcast(self):
         from rtp_llm.models_py.modules.dsv41.fp8._v41_sm90_output_projection import (

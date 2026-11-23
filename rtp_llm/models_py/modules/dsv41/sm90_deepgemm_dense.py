@@ -7,9 +7,9 @@ from functools import lru_cache
 import torch
 
 
-# BS <= 16 with up to five draft tokens and one target bonus token. Keep
-# larger matrices on their established quantizer until separately measured.
-SM90_DIRECT_SCALE_MAX_TOKENS = 96
+# Dense verification batches can write native scales directly through 256 rows.
+# Larger matrices keep the packed quantizer and scale-unpack path.
+SM90_DENSE_DIRECT_SCALE_MAX_TOKENS = 256
 
 
 def native_mn_major_scales(linear) -> bool:
@@ -133,11 +133,11 @@ class Sm90DeepGEMMMXFP8Linear:
             x.dtype != torch.bfloat16
             or x.device != self.weight.device
             or x.shape[-1] != self.K
-            or x.numel() // self.K > SM90_DIRECT_SCALE_MAX_TOKENS
+            or x.numel() // self.K > SM90_DENSE_DIRECT_SCALE_MAX_TOKENS
         ):
             raise ValueError(
                 "Direct G32 scales require same-device BF16 with "
-                f"M<={SM90_DIRECT_SCALE_MAX_TOKENS}"
+                f"M<={SM90_DENSE_DIRECT_SCALE_MAX_TOKENS}"
             )
         q, scales = quantize_g32(x.reshape(-1, self.K).contiguous(), mn_major=True)
         return self._forward_with_scales(q.view(x.shape), scales, out)

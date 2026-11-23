@@ -138,7 +138,6 @@ def _capture(fn):
     return graph, output
 
 
-
 class SM90OutputProjectionTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -182,6 +181,87 @@ class SM90OutputProjectionTest(unittest.TestCase):
                 self.assertTrue(torch.equal(actual, module(o, freqs)), (groups, rows))
             self.assertTrue(torch.equal(weight.view(torch.uint8), weight_before))
             self.assertTrue(torch.equal(scales.view(torch.uint8), scales_before))
+
+    def test_extended_direct_scales_match_packed_and_independent_oracle(self):
+        from rtp_llm.models_py.modules.dsv41._sm90_quant_scale_fused import (
+            quantize_wo_a_g32,
+        )
+
+        module, weight, scales = self.fixture(8, 1024, 4096)
+        self.assertEqual(module._direct_scale_max_tokens, 256)
+        with patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": "auto"}):
+            for rows in (97, 128, 160, 256):
+                with self.subTest(rows=rows):
+                    o, freqs = _input(rows, 8, 4096, strided=rows == 128)
+                    o.mul_(0.125)
+                    before, freq_before = o.clone(), freqs.clone()
+                    rotated = _inverse_rope_bf16(o, freqs).reshape(rows, 8, 4096)
+                    independent_q, independent_packed = _independent_quantize(
+                        rotated, backend="auto"
+                    )
+                    q, packed = module.quantize(o, freqs)
+                    direct_q, direct_scales = quantize_wo_a_g32(
+                        o, freqs, n_groups=8, heads_per_group=8, mn_major=True
+                    )
+                    shifts = torch.arange(4, device=o.device, dtype=torch.int64) * 8
+                    exponents = ((packed.long()[..., None] >> shifts) & 255).reshape(
+                        rows, 8, 128
+                    )
+                    self.assertEqual(_byte_differences(q, independent_q), 0)
+                    self.assertEqual(_byte_differences(packed, independent_packed), 0)
+                    self.assertEqual(_byte_differences(direct_q, q), 0)
+                    self.assertEqual(
+                        _byte_differences(
+                            direct_scales, torch.exp2(exponents.float() - 127)
+                        ),
+                        0,
+                    )
+                    expected = module.forward_quantized(q, packed)
+                    actual = module(o, freqs)
+                    self.assertTrue(torch.equal(actual, expected))
+                    self.assertEqual(
+                        _metrics(actual, _fp32_oracle(q, packed, weight, scales))[
+                            "violations"
+                        ],
+                        0,
+                    )
+                    self.assertEqual(_byte_differences(o, before), 0)
+                    self.assertEqual(_byte_differences(freqs, freq_before), 0)
+
+    def test_extended_direct_scales_graph_uses_changed_strided_inputs(self):
+        module, _, _ = self.fixture(8, 1024, 4096)
+        o, freqs = _input(128, 8, 4096, strided=True, shared_freqs=True)
+        o.mul_(0.125)
+        baseline = lambda: module.forward_quantized(*module.quantize(o, freqs))
+        old_graph, old_output = _capture(baseline)
+        new_graph, new_output = _capture(lambda: module(o, freqs))
+        for factor in (0.03125, 1.0, 8.0):
+            o.copy_(torch.randn_like(o) * factor)
+            freqs.copy_(
+                torch.polar(torch.ones_like(freqs.real), torch.randn_like(freqs.real))
+            )
+            old_graph.replay()
+            new_graph.replay()
+            torch.cuda.synchronize()
+            self.assertTrue(torch.equal(new_output, old_output), factor)
+            self.assertTrue(torch.equal(new_output, baseline()), factor)
+
+    def test_direct_scale_extension_keeps_other_shapes_and_large_rows(self):
+        module, _, _ = self.fixture(8, 1024, 4096)
+        for rows in (1, 16, 48, 96, 257):
+            with self.subTest(rows=rows):
+                o, freqs = _input(rows, 8, 4096)
+                o.mul_(0.125)
+                expected = module.forward_quantized(*module.quantize(o, freqs))
+                with patch.object(module, "quantize", wraps=module.quantize) as packed:
+                    self.assertTrue(torch.equal(module(o, freqs), expected))
+                    self.assertEqual(packed.call_count, int(rows > 256))
+        small, _, _ = self.fixture(1, 256, 512)
+        self.assertEqual(small._direct_scale_max_tokens, 96)
+        o, freqs = _input(97, 1, 512)
+        with patch.object(small, "quantize", wraps=small.quantize) as packed:
+            small(o, freqs)
+            self.assertEqual(packed.call_count, 1)
 
     def test_graph_observes_changed_inputs_and_scales(self):
         module, _, _ = self.fixture()

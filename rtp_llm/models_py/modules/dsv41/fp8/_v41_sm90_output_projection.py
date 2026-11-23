@@ -12,9 +12,9 @@ import logging
 import torch
 from rtp_llm.models_py.modules.dsv41._fused_inv_rope_fp8_quant_triton import fused_inv_rope_fp8_quant
 from rtp_llm.models_py.modules.dsv41.fp8._v41_output_projection import quantization_scale_min
-from rtp_llm.models_py.modules.dsv41.sm90_deepgemm_dense import (
-    SM90_DIRECT_SCALE_MAX_TOKENS,
-)
+
+# WO_A's inverse-RoPE quantizer retains its separately qualified row range.
+_SM90_WO_A_DIRECT_SCALE_MAX_TOKENS = 96
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,11 @@ class Sm90GroupedOutputProjection(torch.nn.Module):
                 "%d per-group GEMM launches",
                 self.G,
             )
+        self._direct_scale_max_tokens = (
+            256
+            if self._einsum is not None and (self.G, self.N, self.K) == (8, 1024, 4096)
+            else _SM90_WO_A_DIRECT_SCALE_MAX_TOKENS
+        )
         self.register_buffer("weight", weight.contiguous(), persistent=False)
         self.register_buffer("weight_scale", native_scales.float().contiguous(), persistent=False)
         self._warmed_shapes = set()
@@ -263,7 +268,7 @@ class Sm90GroupedOutputProjection(torch.nn.Module):
             raise RuntimeError(
                 "Eagerly warm each grouped WO_A token count before CUDA graph capture"
             )
-        if tokens <= SM90_DIRECT_SCALE_MAX_TOKENS:
+        if tokens <= self._direct_scale_max_tokens:
             from rtp_llm.models_py.modules.dsv41._sm90_quant_scale_fused import (
                 quantize_wo_a_g32,
             )

@@ -268,7 +268,7 @@ def quantize_g32(x, *, out_q=None, out_scale=None, mn_major=False):
         # More groups per CTA amortize scheduling at verification-batch sizes.
         # Each reduction still owns exactly one G32 group; the numerical
         # policy and the TMA scale layout are independent of this tiling.
-        groups = 32 if 16 < rows <= 96 else 4
+        groups = 32 if 16 < rows <= 256 else 4
         _dense_quant_kernel[(rows, triton.cdiv(width, groups * 32))](
             x,
             q,
