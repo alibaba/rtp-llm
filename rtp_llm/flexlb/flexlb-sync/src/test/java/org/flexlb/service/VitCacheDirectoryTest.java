@@ -12,6 +12,7 @@ import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.constant.MetricConstant;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
@@ -25,6 +26,8 @@ import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.engine.grpc.core.GrpcChannelFactory;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
+import org.flexlb.metric.FlexMetricTags;
+import org.flexlb.metric.FlexMonitor;
 import org.flexlb.service.config.merger.FlexlbConfigMerger;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.telemetry.FlexlbTrace;
@@ -56,6 +59,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -64,6 +68,7 @@ import static org.mockito.Mockito.when;
 class VitCacheDirectoryTest {
     private VitCacheDirectory directory;
     private VitCacheSelector selector;
+    private final FlexMonitor monitor = mock(FlexMonitor.class);
 
     private final Map<String, WorkerStatus> live = new HashMap<>();
 
@@ -92,7 +97,7 @@ class VitCacheDirectoryTest {
         grpc = mock(EngineGrpcClient.class);
         consistency = mock(LBStatusConsistencyService.class);
         directory = new VitCacheDirectory(workers, grpc, consistency);
-        selector = new VitCacheSelector(directory, workers);
+        selector = new VitCacheSelector(directory, workers, monitor);
     }
 
     @AfterEach
@@ -109,7 +114,7 @@ class VitCacheDirectoryTest {
 
         route.getRequest().setVitRouteOnly(true);
         var cacheDirectory = mock(VitCacheDirectory.class);
-        var loadSelector = new VitCacheSelector(cacheDirectory, workers);
+        var loadSelector = new VitCacheSelector(cacheDirectory, workers, monitor);
         var selected = loadSelector.select(route, null);
         assertTrue(selected.isSuccess());
         assertEquals(b.getLogicalIpPort(), selected.getLogicalIpPort());
@@ -146,6 +151,7 @@ class VitCacheDirectoryTest {
         route.getRequest().setSelectedVit(selected);
         assertTrue(selector.validate(route, "two").isSuccess());
         assertEquals(2L, b.vitRoutedInputs());
+        verifyNoInteractions(monitor);
     }
 
     @Test
@@ -179,6 +185,29 @@ class VitCacheDirectoryTest {
         assertEquals(2L, b.vitRoutedInputs());
         verify(workers, times(2)).captureEndpoint(RoleType.VIT, a.getLogicalIpPort());
         verify(workers).captureEndpoint(RoleType.VIT, b.getLogicalIpPort());
+    }
+
+    @Test
+    void theoreticalCacheHitsCountOriginalImagesOnceBeforePublishingPlacements() {
+        tierSnapshot(a, List.of("both"), List.of("both", "gpu"), List.of("cpu"));
+        var route = context("both", "both", "gpu", "cpu", "cold", "cold");
+        route.getRequest().setVitRouteOnly(true);
+        var total = FlexMetricTags.of("kind", "total");
+        var hit = FlexMetricTags.of("kind", "hit");
+
+        selector.recordVitOnlyInputs(route.getRequest().getCacheAffinityKeys());
+        assertEquals(a.getIp(), selector.select(route, "one").getServerIp());
+        var reports = org.mockito.Mockito.inOrder(monitor);
+        reports.verify(monitor).report(MetricConstant.VIT_CACHE_AFFINITY_IMAGES, total, 6);
+        reports.verify(monitor).prepare(MetricConstant.VIT_CACHE_AFFINITY_IMAGES, hit);
+        reports.verify(monitor).report(MetricConstant.VIT_CACHE_AFFINITY_IMAGES, hit, 4);
+
+        assertEquals(a.getIp(), selector.select(route, "one").getServerIp());
+        reports.verify(monitor).report(MetricConstant.VIT_CACHE_AFFINITY_IMAGES, hit, 6);
+
+        var fullRoute = context("both");
+        assertEquals(a.getIp(), selector.select(fullRoute, "one").getServerIp());
+        verifyNoMoreInteractions(monitor);
     }
 
     @Test
