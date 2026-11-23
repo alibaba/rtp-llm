@@ -100,6 +100,19 @@ class Qwen3DFlash(QwenV3):
                 "DFlash cannot borrow the target embedding/lm-head while output "
                 "vocabulary pruning is enabled on the target model"
             )
+        # The draft checkpoint carries no standalone embedding matrix; the
+        # shared W.embedding lives only on PP stage 0 of the target. With
+        # pp_size > 1 the last-stage owner does not hold it locally, and
+        # resolving the alias would crash with a bare KeyError during weight
+        # loading. Fail at config time with an actionable message instead.
+        if getattr(target_model, "parallelism_config", None) is not None and (
+            getattr(target_model.parallelism_config, "pp_size", 1) > 1
+        ):
+            raise ValueError(
+                "DFlash speculative drafting requires the target embedding "
+                "matrix, which is not local to the last pipeline stage; "
+                "sp_type=dflash currently supports pp_size=1 only"
+            )
         compatible = (
             "hidden_size",
             "vocab_size",
