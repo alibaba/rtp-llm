@@ -1,4 +1,4 @@
-# Qwen4 M11 Indexer timeline
+# Qwen4 M11 timeline
 
 Use one 8-GPU B300 host and a CUDA 13 RTP-LLM runtime built from this checkout
 with its pinned CUDA 13 dependencies, including FlashInfer 0.7.4. The checkpoint
@@ -11,10 +11,12 @@ prompts using that checkpoint's tokenizer.
 | Decode | 32 | 4 | 32768 | 16 | 3 CUDA Graph replays |
 | Cold prefill | 8 | 1 | 16384 | 1 | 1 eager forward |
 | Prefix-hit prefill (optional) | 8 | 1 | 16384 (14336 cached + 2048 new) | 1 | 1 eager forward |
+| Short prefix-hit prefill (optional) | 64 | 8 | 32776 (32768 cached + 8 new) | 1 | 1 eager forward |
 | MTP with CUDA Graph (optional) | 1 | 1 on rank 0 | 4608 | 20 | 4 MTP decode steps |
 
 Both phases run on one TP1/DP8/EP8 `PDFUSION` server, with MXFP8 online quantization,
-FlashInfer GDN and Indexer, native QSA, and single-launch Indexer preparation.
+FlashInfer GDN and Indexer, QToken-KvBlock G8 attention, and single-launch
+Indexer preparation.
 Prefill runs without chunked prefill. Cold prefill scores in 4096-token windows,
 and prefix-hit prefill scores directly from paged KV in one window. The driver
 runs an unprofiled warmup and measurement before arming all eight ranks for each
@@ -41,6 +43,11 @@ CUDA 13 configuration and `--test_timeout=10800`, and make the checkpoint
 accessible to the test worker.
 The target uses the Bazel test GPU lock and writes to the undeclared outputs.
 
+Add `--short_prefix` (Bazel `--test_arg=--short_prefix`) to append a prefill
+batch of eight requests per rank, each adding eight tokens after a 32K cached
+prefix. The driver checks the exact cache hit and keeps up to three
+surrounding decode forwards used for DP alignment in the trace.
+
 Add `--prefix_cache` to the direct command (Bazel `--test_arg=--prefix_cache`)
 to append the prefix-hit case. The driver seeds the cache on each DP rank before
 each prefix-hit batch, then routes the continuation to the same rank. It checks
@@ -63,8 +70,10 @@ in a Linux memfd and keeps it alive until the server stops. Allow an additional
 The output contains 16 raw Chrome Trace JSON files in `timelines/`, unprofiled
 `decode_metrics.json` and `prefill_metrics.json`, and server logs. With
 `--prefix_cache`, it adds eight `-prefix14336` timelines and
-`prefill_prefix_cache_metrics.json`. The driver checks each rank for the expected
-CUDA Graph replays, fused Indexer preparation, and FlashInfer score and TopK launches.
+`prefill_prefix_cache_metrics.json`. With `--short_prefix`, it also captures
+eight `-prefix32768` timelines and `prefill_prefix_cache_metrics.json`.
+The driver checks each rank for CUDA Graph replays, Indexer preparation,
+FlashInfer score and TopK, and the QSA preparation, attention, and gate kernels.
 With `--mtp`, the output contains eight MTP traces and `mtp_metrics.json`. Each
 run writes its server arguments and backend environment to `launch.json`.
 

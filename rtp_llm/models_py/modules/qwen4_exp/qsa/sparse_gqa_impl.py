@@ -23,7 +23,7 @@ target verification and bounded draft prefill support CUDA Graph. Layout and
 publication preflights complete before either side or main-cache writes.
 """
 
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 
@@ -35,7 +35,7 @@ from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     AttnImplFactory,
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import AttentionConfigs, FMHAConfig, ParallelismConfig
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, ParallelismConfig, RopeStyle
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 from rtp_llm.ops.fused_rope_kvcache_op import (
     FusedRopeKVCacheDecodeOp,
@@ -45,6 +45,9 @@ from rtp_llm.ops.fused_rope_kvcache_op import (
 from . import fmha_inputs, fmha_validation
 from .flashinfer_indexer import use_flashinfer_qsa
 from .fmha_plans import IncrementalPrefillInputs, PagedInputs
+
+if TYPE_CHECKING:
+    from .flashinfer_qtoken import PagedQTokenG8
 
 
 class SparseGqaFmhaImpl(FMHAImplBase):
@@ -78,6 +81,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         self._qsa_main_cache_mutation_started = False
         self._qsa_target_visible_lengths = None
         self._qsa_main_geometry = None
+        self._flashinfer_qtoken: Optional["PagedQTokenG8"] = None
         self._validate_runtime_mode()
         rope_writer_cls = (
             FusedRopeKVCachePrefillOpQKVOut
@@ -200,8 +204,88 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         indexer,
         hidden_states: torch.Tensor,
     ) -> None:
+        self._prepare_flashinfer_qtoken(qsa_runtime, hidden_states)
         return fmha_validation.validate_qsa_before_side_write(
             self, qsa_runtime, indexer, hidden_states
+        )
+
+    def _prepare_flashinfer_qtoken(self, runtime, hidden_states):
+        from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context import (
+            Qwen4ExpQSARuntimeContext,
+        )
+
+        if (
+            getattr(self, "_flashinfer_qtoken", None) is not None
+            or type(runtime) is not Qwen4ExpQSARuntimeContext
+            or runtime.main_inputs is not self.attn_inputs
+            or runtime.main_cache is None
+        ):
+            return
+        pool = runtime.main_cache.kv_cache_base
+        if (
+            pool.dtype != torch.bfloat16
+            or hidden_states.dtype != torch.bfloat16
+            or not pool.is_cuda
+            or torch.version.hip is not None
+            or torch.cuda.get_device_capability(pool.device) not in ((10, 0), (10, 3))
+            or self.attn_configs.indexer_topk != 512
+            or (self.head_num, self.kv_head_num, self.head_dim) != (64, 4, 256)
+            or self.attn_configs.kernel_tokens_per_block != 128
+        ):
+            return
+        from .flashinfer_qtoken import PagedQTokenG8
+
+        inputs = self.attn_inputs
+        lengths = inputs.input_lengths if self.is_prefill else inputs.sequence_lengths
+        tokens = hidden_states.shape[0]
+        table = inputs.kv_cache_kernel_block_id_device
+        batch = lengths.numel()
+        if lengths.device.type != "cpu" or not batch or not tokens:
+            return
+        page_size, pages = fmha_validation._validate_main_cache_layout(
+            self, pool, table, batch, pool.device
+        )
+        host_table = inputs.kv_cache_kernel_block_id
+        if (
+            not isinstance(host_table, torch.Tensor)
+            or host_table.device.type != "cpu"
+            or host_table.shape != table.shape
+            or host_table.dtype != torch.int32
+        ):
+            return
+        if self.is_prefill:
+            if inputs.prefix_lengths.device.type != "cpu":
+                return
+            query_lengths = lengths.tolist()
+            prefixes = inputs.prefix_lengths.tolist()
+            if len(prefixes) != batch or (
+                not self._is_draft_graph() and sum(query_lengths) != tokens
+            ):
+                raise ValueError(
+                    "QToken prefill query lengths do not partition the projection"
+                )
+            ends = [p + n for p, n in zip(prefixes, query_lengths)]
+        else:
+            if batch != tokens:
+                raise ValueError("QToken decode needs one projected query per request")
+            query_lengths, prefixes = [1] * batch, lengths.tolist()
+            ends = [n + 1 for n in prefixes]
+        rows = host_table.numpy()
+        for row, end, base, length in zip(rows, ends, prefixes, query_lengths):
+            if length < 0 or base < 0 or end > row.size * page_size:
+                raise ValueError("QToken visible KV exceeds the page table")
+            if not length or (inputs.is_s_padded and not row.any()):
+                continue
+            visible = row[: (end + page_size - 1) // page_size]
+            if ((visible <= 0) | (visible >= pages)).any():
+                raise ValueError("QToken visible KV resolves to an invalid page")
+        self._flashinfer_qtoken = PagedQTokenG8(
+            inputs,
+            hidden_states.shape,
+            pool,
+            split_kv=not self.is_prefill
+            or self.is_target_verify
+            or max(query_lengths) <= 8,
         )
 
     def set_selected_indices(self, selected_indices: torch.Tensor) -> None:
@@ -385,6 +469,14 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         self, qkv, kv_cache, layer_idx, gate, norm
     ):
         if (
+            self._use_qtoken_selection()
+            and gate.dtype == torch.bfloat16
+            and gate.is_contiguous()
+        ):
+            return self.forward(
+                qkv, kv_cache, layer_idx, qk_norm=norm, output_gate=gate
+            )
+        if (
             norm is not None
             and self.is_target_verify
             and not self._is_mtp_draft
@@ -417,6 +509,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             (
                 self.is_target_verify
                 or not self.is_prefill
+                or self._use_qtoken_selection()
                 or (
                     self._is_draft_graph()
                     and gate.shape == (qkv.shape[0], self.q_width)
@@ -429,6 +522,69 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         ):
             return self.forward(qkv, kv_cache, layer_idx, output_gate=gate)
         return self.forward(qkv, kv_cache, layer_idx) * torch.sigmoid(gate)
+
+    def _use_qtoken_selection(self):
+        return (
+            getattr(self, "_flashinfer_qtoken", None) is not None
+            and self._trusted_selected_indices
+            and self._selected_indices is not None
+            and self._selected_indices.shape[-1] == 2051
+        )
+
+    def _forward_flashinfer_qtoken(self, qkv, kv_cache, selected, gate, norm):
+        from libth_transformer_config import get_rope_cache_once
+
+        from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+            ZeroCenteredFusedQKRMSNorm,
+        )
+
+        rope = self.attn_configs.rope_config
+        pos = self.rope_params.position_ids
+        fused_writer = (
+            type(norm) is ZeroCenteredFusedQKRMSNorm
+            and "forward" not in norm.__dict__
+            and not self.attn_configs.use_logn_attn
+            and rope.style == RopeStyle.Mrope
+            and (rope.dim, rope.index_factor, rope.base, rope.scale, rope.offset)
+            == (64, 3, 10000000.0, 1.0, 0)
+            and (rope.mrope_dim1, rope.mrope_dim2, rope.mrope_dim3) == (11, 11, 10)
+            and isinstance(pos, torch.Tensor)
+            and pos.dtype == torch.int32
+            and pos.device == qkv.device
+            and pos.is_contiguous()
+            and pos.numel() == 3 * qkv.shape[0]
+            and qkv.is_contiguous()
+            and all(
+                weight.shape == (256,)
+                and weight.device == qkv.device
+                and weight.dtype in (torch.bfloat16, torch.float32)
+                and weight.is_contiguous()
+                for weight in (norm.q_weight, norm.k_weight)
+            )
+        )
+        if fused_writer:
+            # Match the native writer's process-wide RoPE cache initialization.
+            get_rope_cache_once(rope, self.attn_configs.max_seq_len)
+        elif norm is not None:
+            qkv = norm(qkv)
+        self._qsa_main_cache_mutation_started = True
+        if not fused_writer:
+            qkv = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+        backend = self._flashinfer_qtoken
+        assert backend is not None
+        pool = kv_cache.kv_cache_base
+        backend.prepare(
+            qkv.reshape(qkv.shape[0], -1),
+            selected,
+            pool,
+            pos.view(-1, 3) if fused_writer else None,
+            norm if fused_writer else None,
+            zero_tail=True,
+        )
+        common.apply_write_cache_store(
+            self.write_cache_store_impl, self.attn_inputs, kv_cache
+        )
+        return backend.attend(pool, gate)
 
     def forward(
         self,
@@ -446,12 +602,18 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         tensor directly. Both forms use packed ``[total_tokens, K]`` indices;
         the legacy uniform ``[B, S, K]`` form is accepted after validation.
         """
+        use_qtoken = selected_indices is None and self._use_qtoken_selection()
         if output_gate is not None and not (
             output_gate.shape == (qkv.shape[0], self.q_width)
             and output_gate.dtype == torch.bfloat16
             and output_gate.device == qkv.device
             and output_gate.is_contiguous()
-            and (self.is_target_verify or not self.is_prefill or self._is_draft_graph())
+            and (
+                self.is_target_verify
+                or not self.is_prefill
+                or self._is_draft_graph()
+                or use_qtoken
+            )
         ):
             raise ValueError(
                 "fused QSA output gate requires a packed paged decode plan"
@@ -470,6 +632,13 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             )
 
         self._paged_kv_scale_args(kv_cache)
+        if use_qtoken:
+            output = self._forward_flashinfer_qtoken(
+                qkv, kv_cache, selected_indices, output_gate, qk_norm
+            )
+            self._selected_indices = None
+            self._trusted_prefill_cu_seqlens = None
+            return output
         if self._is_draft_graph():
             output = self._forward_draft_graph(
                 qkv, kv_cache, selected_indices, output_gate
@@ -530,8 +699,6 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 qkv = prepared
                 writer = getattr(self, "_norm_rope_plain_writer", None)
                 if writer is None:
-                    from rtp_llm.ops import RopeStyle
-
                     config = AttentionConfigs()
                     for name in (
                         "head_num",

@@ -473,6 +473,102 @@ class QsaFlashInferTest(unittest.TestCase):
         expected = torch.cat(expected).reshape_as(actual).to(actual.dtype)
         torch.testing.assert_close(actual, expected, rtol=0.02, atol=0.01)
 
+    def test_qtoken_g8_paged_gate_and_live_decode_metadata(self):
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.flashinfer_qtoken import (
+            PagedQTokenG8,
+        )
+
+        if torch.cuda.get_device_capability() not in ((10, 0), (10, 3)):
+            self.skipTest("Qwen4 QToken G8 requires SM100 or SM103")
+        torch.manual_seed(47)
+        pool = torch.randn((5, 262272), device="cuda", dtype=torch.bfloat16) * 0.2
+        table = torch.tensor([[1], [3]], device="cuda", dtype=torch.int32)
+        keys, values = PagedQTokenG8._cache_views(pool)
+        slots = torch.arange(2051, device="cuda", dtype=torch.int32)
+        for is_prefill, lengths in ((True, [9, 3]), (False, [1, 1])):
+            with self.subTest(prefill=is_prefill):
+                cu = torch.tensor([0, lengths[0], sum(lengths)], dtype=torch.int32)
+                prefixes = torch.tensor([11, 69], dtype=torch.int32)
+                visible = torch.cat(
+                    [torch.arange(p + 1, p + n + 1) for p, n in zip(prefixes, lengths)]
+                ).cuda()
+                selected = torch.where(slots < visible[:, None], slots, -1).int()
+                inputs = SimpleNamespace(
+                    is_prefill=is_prefill,
+                    is_target_verify=False,
+                    is_cuda_graph=not is_prefill,
+                    cu_seqlens_device=cu.cuda(),
+                    decode_cu_seqlens_device=cu.cuda(),
+                    input_lengths=torch.tensor(lengths, dtype=torch.int32),
+                    prefix_lengths=prefixes,
+                    prefix_lengths_device=prefixes.cuda(),
+                    sequence_lengths_plus_1_device=(prefixes + 1).cuda(),
+                    kv_cache_kernel_block_id_device=table,
+                )
+                query = (
+                    torch.randn(
+                        (sum(lengths), 64, 256), device="cuda", dtype=pool.dtype
+                    )
+                    * 0.2
+                )
+                gate = torch.randn_like(query)
+                backend = PagedQTokenG8(
+                    inputs, query.shape, pool, split_kv=not is_prefill
+                )
+
+                def run():
+                    backend.prepare(query.flatten(1), selected, pool)
+                    return backend.attend(pool, gate).view_as(query)
+
+                def reference():
+                    result = []
+                    row = 0
+                    for page, count in zip(table.flatten().tolist(), lengths):
+                        for _ in range(count):
+                            end = visible[row].item()
+                            q = query[row].float().view(4, 16, 256)
+                            k, v = (
+                                keys[page, :, :end].float(),
+                                values[page, :, :end].float(),
+                            )
+                            scores = torch.einsum("hgd,hsd->hgs", q, k) * 0.0625
+                            result.append(
+                                torch.einsum("hgs,hsd->hgd", scores.softmax(-1), v)
+                            )
+                            row += 1
+                    rounded = torch.stack(result).view_as(query).bfloat16()
+                    return (rounded.float() * gate.float().sigmoid()).bfloat16()
+
+                torch.testing.assert_close(run(), reference(), rtol=0.02, atol=0.003)
+                if not is_prefill:
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        output = run()
+                    table.copy_(table.flip(0))
+                    visible.add_(3)
+                    inputs.sequence_lengths_plus_1_device.copy_(visible)
+                    selected.copy_(torch.where(slots < visible[:, None], slots, -1))
+                    query.neg_()
+                    gate.add_(0.5)
+                    graph.replay()
+                    torch.testing.assert_close(output, run(), rtol=0, atol=0)
+                    torch.testing.assert_close(
+                        output, reference(), rtol=0.02, atol=0.003
+                    )
+
+    def test_qtoken_gate_preserves_fp32_sigmoid_until_store(self):
+        from rtp_llm.models_py.kernels.cuda.qsa.qtoken_gate import apply_qtoken_gate
+
+        if torch.cuda.get_device_capability() not in ((10, 0), (10, 3)):
+            self.skipTest("Qwen4 QToken G8 requires SM100 or SM103")
+        output = torch.full((1, 64, 256), 1.5, device="cuda", dtype=torch.bfloat16)
+        gate = torch.full_like(output, 0.5)
+        # Rounding sigmoid(0.5) before multiplying would store 0.9296875.
+        expected = torch.full_like(output, 0.93359375)
+        torch.testing.assert_close(
+            apply_qtoken_gate(output, gate), expected, rtol=0, atol=0
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

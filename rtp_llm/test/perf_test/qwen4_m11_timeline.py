@@ -16,7 +16,12 @@ PREFILL_PREFIX_LENGTH = 14336  # 14K cached + 2K new fits the paged Indexer work
 
 
 def _wait_for_traces(
-    directory: Path, tag: str, phase: str, steps: int, prefix_length: int
+    directory: Path,
+    tag: str,
+    phase: str,
+    steps: int,
+    prefix_length: int,
+    alignment_steps: int = 0,
 ) -> None:
     deadline = time.monotonic() + 180
     paths = []
@@ -29,7 +34,14 @@ def _wait_for_traces(
             try:
                 for path in paths:
                     events = json.loads(path.read_text())["traceEvents"]
-                    _check_trace(events, path, phase, steps, prefix_length)
+                    _check_trace(
+                        events,
+                        path,
+                        phase,
+                        steps,
+                        prefix_length,
+                        alignment_steps,
+                    )
             except json.JSONDecodeError:
                 pass  # Kineto exports asynchronously after the request returns.
             else:
@@ -39,7 +51,12 @@ def _wait_for_traces(
 
 
 def _check_trace(
-    events, path: Path, phase: str, steps: int, prefix_length: int = 0
+    events,
+    path: Path,
+    phase: str,
+    steps: int,
+    prefix_length: int = 0,
+    alignment_steps: int = 0,
 ) -> None:
     graphs = sum(
         event.get("cat") == "cuda_runtime"
@@ -73,8 +90,9 @@ def _check_trace(
         )
     score = sum(score_kernel in name for name in kernel_names)
     topk = sum(topk_kernel in name for name in kernel_names)
+    graph_count_ok = graphs == steps if phase == "decode" else graphs <= alignment_steps
     if (
-        graphs != (steps if phase == "decode" else 0)
+        not graph_count_ok
         or prep != 15 * steps
         or score != 15 * steps * windows
         or topk != score
@@ -82,10 +100,46 @@ def _check_trace(
         raise RuntimeError(
             f"Unexpected {phase} trace in {path}: {graphs=} {prep=} {score=} {topk=}"
         )
+    _check_qtoken(events, path, phase, steps)
+
+
+def _check_qtoken(events, path, phase, steps):
+    """Separate the real forward from any DP alignment steps in the raw trace."""
+    previous_by_stream = {}
+    phase_by_stream = {}
+    conversions = launches = gates = 0
+    for event in sorted(events, key=lambda event: event.get("ts", 0)):
+        if event.get("cat") not in {"kernel", "gpu_kernel", "gpu_memcpy", "gpu_memset"}:
+            continue
+        stream = event.get("args", {}).get("stream")
+        name = event.get("name", "")
+        if name in {"_prepare_fused_prefill", "_prepare_fused_decode"}:
+            phase_by_stream[stream] = name.removeprefix("_prepare_fused_")
+        if phase_by_stream.get(stream) == phase:
+            if name == "_qsa_qtoken_prepare":
+                conversions += 1
+                previous = previous_by_stream.get(stream, "")
+                if "deep_gemm::sm100_fp8_fp4_gemm_1d1d_impl" not in previous:
+                    raise RuntimeError(
+                        f"Unexpected operation before QToken prepare in {path}: {previous}"
+                    )
+            launches += "decode_gen_kernel" in name
+            gates += name == "_qtoken_output_gate"
+        previous_by_stream[stream] = name
+    if (conversions, launches, gates) != (15 * steps,) * 3:
+        raise RuntimeError(
+            f"Unexpected QToken G8 launches in {path}: {conversions=} {launches=} {gates=}"
+        )
 
 
 def _capture(
-    phase: str, port: int, checkpoint: Path, output: Path, prefix_length: int = 0
+    phase: str,
+    port: int,
+    checkpoint: Path,
+    output: Path,
+    prefix_length: int = 0,
+    short_prefix: bool = False,
+    alignment_steps: int = 0,
 ) -> None:
     import grpc
     import requests
@@ -101,6 +155,9 @@ def _capture(
         "prefill": (16384, 8, 1, 1),
         "mtp": (4608, 1, 20, 4),
     }[phase]
+    if short_prefix:
+        length = prefix_length + 8
+        batch = 8 * WORLD_SIZE
     tag = f"qwen4-m11-dp8ep8-{phase}-b{batch}-s{length}"
     metric_name = phase
     if prefix_length:
@@ -121,14 +178,17 @@ def _capture(
             response.raise_for_status()
             return response.json()
 
-    if phase != "mtp":
+    def set_batch_size(size):
         scheduler = post(
             "/update_scheduler_info",
-            {"batch_size": batch // WORLD_SIZE, "mode": phase},
+            {"batch_size": size, "mode": phase},
             60,
         )
         if scheduler.get("status") != "ok":
             raise RuntimeError(f"Could not select {phase} scheduler mode: {scheduler}")
+
+    if phase != "mtp":
+        set_batch_size(batch // WORLD_SIZE)
 
     def infer(prompt, input_length, reuse, *, cache_enabled=False, rank=None):
         config = {
@@ -172,7 +232,10 @@ def _capture(
         with grpc.insecure_channel(address) as channel:
             RpcServiceStub(channel).StartProfile(
                 StartProfileRequestPB(
-                    trace_name=tag, start_step=0, num_steps=steps, enable_all_rank=True
+                    trace_name=tag,
+                    start_step=0,
+                    num_steps=steps + alignment_steps,
+                    enable_all_rank=True,
                 ),
                 timeout=30,
             )
@@ -196,21 +259,32 @@ def _capture(
     def prepare_batch(pool, case):
         seed, target = cases[case]
         if seed is None:
-            return lambda _: infer(
-                target, length, 0, rank=0 if phase == "mtp" else None
+            return lambda rank: infer(
+                target,
+                length,
+                0,
+                rank=rank if phase == "mtp" or alignment_steps else None,
             )
         # Seed the matching prefix on each DP rank before profiling. A fresh
         # case keeps the previous continuation from becoming a longer hit.
+        if short_prefix:
+            set_batch_size(1)
         list(
             pool.map(
                 lambda rank: infer(
                     seed, prefix_length + PAGE_SIZE, 0, cache_enabled=True, rank=rank
                 ),
-                range(batch),
+                range(WORLD_SIZE if short_prefix else batch),
             )
         )
+        if short_prefix:
+            set_batch_size(batch // WORLD_SIZE)
         return lambda rank: infer(
-            target, length, prefix_length, cache_enabled=True, rank=rank
+            target,
+            length,
+            prefix_length,
+            cache_enabled=True,
+            rank=rank % WORLD_SIZE if short_prefix else rank,
         )
 
     with ThreadPoolExecutor(max_workers=batch) as pool:
@@ -221,7 +295,14 @@ def _capture(
         with ThreadPoolExecutor(max_workers=WORLD_SIZE) as profile_pool:
             list(profile_pool.map(arm, range(WORLD_SIZE)))
         list(pool.map(profiled_batch, range(batch)))
-    _wait_for_traces(output / "timelines", tag, phase, steps, prefix_length)
+    _wait_for_traces(
+        output / "timelines",
+        tag,
+        phase,
+        steps,
+        prefix_length,
+        alignment_steps,
+    )
     (output / f"{metric_name}_metrics.json").write_text(
         json.dumps({**asdict(metrics), "reuse_len": prefix_length}, indent=2) + "\n"
     )
@@ -235,6 +316,11 @@ def main() -> None:
         "--prefix_cache",
         action="store_true",
         help="Also profile a 14K prefix hit in 16K prefill.",
+    )
+    mode.add_argument(
+        "--short_prefix",
+        action="store_true",
+        help="Profile cold prefill and 8 requests per rank with 8 new tokens over a 32K prefix.",
     )
     mode.add_argument(
         "--mtp", action="store_true", help="Profile DP8/EP8 MTP with CUDA Graph."
@@ -260,11 +346,15 @@ def main() -> None:
         --world_size 8 --local_world_size 8 --world_rank 0 --tp_size 1 --dp_size 8 --ep_size 8 --pp_size 1
         --load_method scratch --act_type BF16 --quantization MXFP8 --moe_strategy mega_moe_se --use_deepep_moe 0
         --vit_separation 2 --enable_fp32_lm_head 0 --fake_balance_expert 0
-        --max_context_batch_size 1 --concurrency_limit 32
         --prefill_chunk_size 0 --seq_size_per_block 128 --kernel_seq_size_per_block 128
         --enable_cuda_graph 1 --warm_up 0 --startup_health_check_timeout 3000
         --frontend_pre_stop_drain_seconds 0 --dash_sc_grpc_pre_stop_drain_seconds 0
     """
+    if args.short_prefix:
+        server_args += " --max_context_batch_size 8 --concurrency_limit 64"
+    else:
+        server_args += " --max_context_batch_size 1 --concurrency_limit 32"
+
     if args.mtp:
         server_args += """
             --max_seq_len 8192 --max_batch_tokens_size 8192 --kv_cache_mem_mb 8192 --linear_pool_blocks 8
@@ -272,6 +362,11 @@ def main() -> None:
             --sp_type mtp --sp_model_type qwen4_exp_mtp --sp_act_type BF16 --sp_quantization MXFP8 --gen_num_per_cycle 3
         """
         server_args += f" --sp_checkpoint_path {shlex.quote(str(checkpoint))}"
+    elif args.short_prefix:
+        server_args += """
+            --max_seq_len 33024 --max_batch_tokens_size 33024 --kv_cache_mem_mb 16384 --linear_pool_blocks 16
+            --decode_capture_config 4 --use_batch_decode_scheduler 1
+        """
     else:
         server_args += """
             --max_seq_len 32784 --max_batch_tokens_size 16384 --kv_cache_mem_mb 16384 --linear_pool_blocks 16
@@ -279,19 +374,19 @@ def main() -> None:
         """
     # Limit recurrent checkpoints to the tail. Each seed ends one page after
     # the shared prefix, so the matching GDN boundary is retained.
-    server_args += f" --reuse_cache {int(args.prefix_cache or args.mtp)}"
-    if args.prefix_cache or args.mtp:
+    reuse_cache = args.prefix_cache or args.short_prefix or args.mtp
+    server_args += f" --reuse_cache {int(reuse_cache)}"
+    if reuse_cache:
         server_args += " --reuse_cache_tail_blocks 4"
     with shared_ple(checkpoint, output) as manifest:
         server_env = {
             "BATCH_DECODE_SCHEDULER_WARMUP_TYPE": "0",
             "FT_SERVER_TEST": "1",
-            "GEN_TIMELINE_SYNC": "1",
+            "GEN_TIMELINE_SYNC": "0" if args.short_prefix else "1",
             "OMP_NUM_THREADS": "4",
             "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
             "QWEN4_GDN_BACKEND": "flashinfer",
             "QWEN4_PLE_SHARED_TABLE": str(manifest),
-            "QWEN4_QSA_BACKEND": "native",
             "QWEN4_QSA_FUSED_INDEXER_PREP": "1",
             "QWEN4_QSA_INDEXER_BACKEND": "flashinfer",
             "QWEN4_QSA_INDEXER_CHUNK_SIZE": "4096",
@@ -313,11 +408,27 @@ def main() -> None:
                 timeout=3000,
             ):
                 raise RuntimeError(f"Qwen4 did not start. See {server.log_file_path}")
-            for phase in ("mtp",) if args.mtp else ("decode", "prefill"):
-                _capture(phase, server.port, checkpoint, output)
-            if args.prefix_cache:
+            phases = ("mtp",) if args.mtp else ("decode", "prefill")
+            # The DP engine can run short decode forwards to keep ranks aligned.
+            # Retain those steps in the raw trace and check the one real prefill.
+            alignment_steps = 3 if args.short_prefix else 0
+            for phase in phases:
                 _capture(
-                    "prefill", server.port, checkpoint, output, PREFILL_PREFIX_LENGTH
+                    phase,
+                    server.port,
+                    checkpoint,
+                    output,
+                    alignment_steps=alignment_steps if phase == "prefill" else 0,
+                )
+            if args.prefix_cache or args.short_prefix:
+                _capture(
+                    "prefill",
+                    server.port,
+                    checkpoint,
+                    output,
+                    32768 if args.short_prefix else PREFILL_PREFIX_LENGTH,
+                    short_prefix=args.short_prefix,
+                    alignment_steps=alignment_steps,
                 )
         finally:
             server.stop_server()

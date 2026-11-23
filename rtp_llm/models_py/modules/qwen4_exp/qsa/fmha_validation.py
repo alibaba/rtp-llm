@@ -323,14 +323,19 @@ def validate_qsa_before_side_write(
             "qwen4_exp QSA paged token count does not match batch/query geometry"
         )
     kwargs = {"checks": checks} if checks is not None else {}
-    page_size = self._validate_main_paged_geometry(
-        qsa_runtime.main_cache.kv_cache_base,
-        self.attn_inputs.kv_cache_kernel_block_id_device,
-        sequence_bases,
-        query_lengths,
-        hidden_states.device,
-        graph_capture=graph_capture,
-        **kwargs,
+    qtoken = getattr(self, "_flashinfer_qtoken", None)
+    page_size = (
+        self._validate_main_paged_geometry(
+            qsa_runtime.main_cache.kv_cache_base,
+            self.attn_inputs.kv_cache_kernel_block_id_device,
+            sequence_bases,
+            query_lengths,
+            hidden_states.device,
+            graph_capture=graph_capture,
+            **kwargs,
+        )
+        if qtoken is None
+        else 128
     )
     if not graph_capture and not is_incremental_prefill:
         from rtp_llm.models_py.model_desc.qwen4_exp_runtime.prefill_preflight import (

@@ -494,9 +494,18 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                     type(self) is Qwen4ExpAttention
                     and type(self.qsa_indexer) is Qwen4ExpQSAIndexer
                     and type(fmha_impl) is _sparse_gqa_backend.SparseGqaFmhaImpl
-                    and bool(qsa_runtime.main_inputs.is_prefill)
-                    and not bool(qsa_runtime.main_inputs.is_target_verify)
-                    and not bool(qsa_runtime.main_inputs.is_cuda_graph)
+                    and (
+                        (
+                            qsa_runtime.main_inputs.is_prefill
+                            and not qsa_runtime.main_inputs.is_target_verify
+                            and not qsa_runtime.main_inputs.is_cuda_graph
+                        )
+                        or (
+                            type(qsa_runtime) is Qwen4ExpQSARuntimeContext
+                            and getattr(fmha_impl, "_flashinfer_qtoken", None)
+                            is not None
+                        )
+                    )
                     and "_qsa_selected_indices" not in self.__dict__
                     and "forward_causal_from_projected" not in self.qsa_indexer.__dict__
                     and callable(trusted_setter)

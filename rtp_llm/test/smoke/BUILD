@@ -181,7 +181,6 @@ test_suite(
         tags = ["manual"],
         test_envs = {
             "QWEN4_GDN_BACKEND": "flashinfer",
-            "QWEN4_QSA_BACKEND": "native",
             "QWEN4_QSA_INDEXER_BACKEND": "flashinfer",
             "QWEN4_QSA_FUSED_INDEXER_PREP": "1",
         },
