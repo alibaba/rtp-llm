@@ -452,9 +452,12 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                         // demoting the entry to unknown; the refreshed timestamp paces
                         // the next retry by the estimate TTL.
                         WorkEstimate previous = costOrderEstimates.get(entry);
-                        costOrderEstimates.put(entry, new WorkEstimate(System.nanoTime(),
-                                tokens != null ? tokens
-                                        : previous == null ? null : previous.tokens()));
+                        var updated = new WorkEstimate(System.nanoTime(), tokens != null ? tokens
+                                : previous == null ? null : previous.tokens());
+                        costOrderEstimates.put(entry, updated);
+                        if (tokens != null && waitingRequests.isWaiting(entry)) {
+                            waitingRequests.updatePrefillCost(benefitCandidate(entry, updated));
+                        }
                     }
                 } finally {
                     lock.unlock();
@@ -611,7 +614,8 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         lock.lock();
         try {
             if (!isQueued(plan.entry)) { return true; }
-            parked = waitingRequests.park(plan.entry, plan.waitKey(), plan.availabilitySequence);
+            var rank = prefillCostOrder ? benefitCandidate(plan.entry, costOrderEstimates.get(plan.entry)) : null;
+            parked = waitingRequests.park(plan.entry, plan.waitKey(), plan.availabilitySequence, rank);
             PrefillQueueShedding.Estimate estimate = plan.entry.sheddingEstimate;
             if (estimate != null && estimate.hitTokens() == 0L) {
                 plan.entry.knownColdRequest = true;

@@ -10,11 +10,14 @@ final class PrefillCostOrder {
 
     static <T> List<T> first(List<Candidate<T>> ready, boolean priorityOrdering, int limit) {
         if (limit <= 0 || ready.isEmpty()) { return List.of(); }
-        Comparator<Candidate<T>> order = Comparator.comparingInt(
-                candidate -> priorityOrdering ? -candidate.priority() : 0);
-        return ready.stream().sorted(order.thenComparing(PrefillCostOrder::compareEstimates)
-                        .thenComparingLong(Candidate::sequence))
+        return ready.stream().sorted(comparator(priorityOrdering))
                 .limit(limit).map(Candidate::value).toList();
+    }
+
+    static <T> Comparator<Candidate<T>> comparator(boolean priorityOrdering) {
+        return Comparator.<Candidate<T>>comparingInt(candidate -> priorityOrdering ? -candidate.priority() : 0)
+                .thenComparing(PrefillCostOrder::compareEstimates)
+                .thenComparingLong(Candidate::sequence);
     }
 
     private static int compareEstimates(Candidate<?> left, Candidate<?> right) {

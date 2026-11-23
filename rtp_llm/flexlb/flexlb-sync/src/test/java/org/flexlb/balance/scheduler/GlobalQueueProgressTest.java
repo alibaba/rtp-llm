@@ -573,6 +573,56 @@ class GlobalQueueProgressTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void samePrefillWorkerRetriesHotWaiterFirst(boolean estimateAfterPark) throws Exception {
+        long cold = 1802L;
+        long hot = 1801L;
+        var plannerStarted = new CountDownLatch(1);
+        var releasePlanner = new CountDownLatch(1);
+        var hotLookupStarted = new CountDownLatch(1);
+        var releaseEstimate = new CountDownLatch(estimateAfterPark ? 1 : 0);
+        try (Fixture f = new Fixture(RoleType.PREFILL, true, true, null, 1)) {
+            when(f.router.estimateQueuedTokens(any(), nullable(String.class))).thenAnswer(call -> {
+                BalanceContext context = call.getArgument(0);
+                boolean isHot = context.getRequestId() == hot;
+                if (isHot) {
+                    hotLookupStarted.countDown();
+                    await(releaseEstimate);
+                }
+                return new CostBasedPrefillStrategy.TokenEstimate(1000, isHot ? 900 : 0);
+            });
+            f.onSelection = id -> {
+                if (id == 1799L) {
+                    plannerStarted.countDown();
+                    await(releasePlanner);
+                }
+            };
+            try {
+                f.submit(1799L, "b");
+                await(plannerStarted);
+                f.admissionBlocked.addAll(List.of(cold, hot));
+                f.submit(cold, "a");
+                awaitCondition(() -> estimateRecorded(f, cold));
+                f.submit(hot, "a");
+                await(hotLookupStarted);
+                if (!estimateAfterPark) { awaitCondition(() -> estimateRecorded(f, hot)); }
+                releasePlanner.countDown();
+
+                RequestLifecycleTestSupport.awaitGlobalCapacityWaiters(f.scheduler, 2);
+                releaseEstimate.countDown();
+                awaitCondition(() -> estimateRecorded(f, hot));
+                f.admissionBlocked.clear();
+                f.release("a");
+                awaitCondition(() -> f.admissionOrder.size() == 3);
+                assertEquals(List.of(1799L, hot, cold), f.admissionOrder);
+            } finally {
+                releaseEstimate.countDown();
+                releasePlanner.countDown();
+            }
+        }
+    }
+
     @Test
     void staleEstimateKeepsRankingWhileRefreshIsInFlight() throws Exception {
         var started = new CountDownLatch(2);

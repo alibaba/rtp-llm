@@ -1,5 +1,7 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.scheduler.PrefillCostOrder.Candidate;
+
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
@@ -19,20 +21,24 @@ import java.util.function.Consumer;
  * requests. A wakeup grants a fresh route decision, never an endpoint reservation.</p>
  */
 final class PlacementWaitQueue {
+    private record Waiter(Domain domain, Candidate<GlobalQueueEntry> rank) { }
+
     private final PlacementAvailability availability;
-    private final Comparator<GlobalQueueEntry> order;
+    private final Comparator<Waiter> waiterOrder;
     private final Map<PlacementKey, Domain> domains = new HashMap<>();
-    private final Map<GlobalQueueEntry, Domain> waiting = new IdentityHashMap<>();
+    private final Map<GlobalQueueEntry, Waiter> waiting = new IdentityHashMap<>();
     private final Map<GlobalQueueEntry, Domain> retrying = new IdentityHashMap<>();
     private final NavigableSet<Domain> ready;
 
     PlacementWaitQueue(boolean priorityOrdering, PlacementAvailability availability) {
         this.availability = Objects.requireNonNull(availability, "availability");
         Comparator<GlobalQueueEntry> fifo = Comparator.comparingLong(entry -> entry.sequence);
-        order = priorityOrdering
+        Comparator<GlobalQueueEntry> order = priorityOrdering
                 ? Comparator.<GlobalQueueEntry>comparingInt(entry -> entry.priority).reversed().thenComparing(fifo)
                 : fifo;
-        ready = new TreeSet<>((left, right) -> order.compare(left.entries.first(), right.entries.first()));
+        waiterOrder = Comparator.comparing(Waiter::rank, PrefillCostOrder.comparator(priorityOrdering));
+        ready = new TreeSet<>((left, right) ->
+                order.compare(left.entries.first().rank.value(), right.entries.first().rank.value()));
     }
 
     boolean isWaiting(GlobalQueueEntry entry) {
@@ -41,6 +47,10 @@ final class PlacementWaitQueue {
 
     /** The only park boundary: do not sleep through an edge published during planning. */
     boolean park(GlobalQueueEntry entry, PlacementKey blocker, long observedSequence) {
+        return park(entry, blocker, observedSequence, null);
+    }
+
+    boolean park(GlobalQueueEntry entry, PlacementKey blocker, long observedSequence, Candidate<GlobalQueueEntry> rank) {
         Objects.requireNonNull(blocker, "blocker");
         if (availability.lastChangedSequence(waitKey(blocker)) > observedSequence) {
             return false;
@@ -50,10 +60,28 @@ final class PlacementWaitQueue {
         PlacementKey key = waitKey(blocker);
         Domain domain = domains.computeIfAbsent(key, Domain::new);
         unindex(domain);
-        domain.entries.add(entry);
-        waiting.put(entry, domain);
-        index(domain);
+        addWaiter(domain, rank != null && domain.isPrefillWorker() ? rank
+                : new Candidate<>(entry, entry.priority, entry.sequence, 0L, null));
         return true;
+    }
+
+    /** An asynchronous lookup can finish after the request parks. Replace its immutable tree key. */
+    void updatePrefillCost(Candidate<GlobalQueueEntry> rank) {
+        Waiter previous = waiting.get(rank.value());
+        if (previous == null || !previous.domain.isPrefillWorker() || previous.rank.equals(rank)) {
+            return;
+        }
+        Domain domain = previous.domain;
+        unindex(domain);
+        domain.entries.remove(previous);
+        addWaiter(domain, rank);
+    }
+
+    private void addWaiter(Domain domain, Candidate<GlobalQueueEntry> rank) {
+        var waiter = new Waiter(domain, rank);
+        domain.entries.add(waiter);
+        waiting.put(rank.value(), waiter);
+        index(domain);
     }
 
     /** Constant number of domain lookups, independent of backlog size. */
@@ -74,7 +102,7 @@ final class PlacementWaitQueue {
     void resumeReady(int limit, Consumer<GlobalQueueEntry> resume) {
         for (int count = 0; count < limit && !ready.isEmpty(); count++) {
             Domain domain = ready.pollFirst();
-            GlobalQueueEntry entry = domain.entries.pollFirst();
+            GlobalQueueEntry entry = domain.entries.pollFirst().rank.value();
             domain.active = true;
             domain.available = false;
             waiting.remove(entry);
@@ -109,10 +137,11 @@ final class PlacementWaitQueue {
     }
 
     private void removeWaiting(GlobalQueueEntry entry) {
-        Domain domain = waiting.remove(entry);
-        if (domain != null) {
+        Waiter waiter = waiting.remove(entry);
+        if (waiter != null) {
+            Domain domain = waiter.domain;
             unindex(domain);
-            domain.entries.remove(entry);
+            domain.entries.remove(waiter);
             index(domain);
         }
     }
@@ -148,9 +177,13 @@ final class PlacementWaitQueue {
 
     private final class Domain {
         private final PlacementKey key;
-        private final NavigableSet<GlobalQueueEntry> entries = new TreeSet<>(order);
+        private final NavigableSet<Waiter> entries = new TreeSet<>(waiterOrder);
         private boolean available;
         private boolean active;
+
+        private boolean isPrefillWorker() {
+            return key.endpoint() != null && key.role().supportsPrefill();
+        }
 
         private Domain(PlacementKey key) {
             this.key = key;
