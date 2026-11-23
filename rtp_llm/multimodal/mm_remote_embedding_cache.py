@@ -32,6 +32,7 @@ from rtp_llm.multimodal.kvcm.tensor_object import (
     plan_object,
     unpack_object,
 )
+from rtp_llm.multimodal.vit_metrics import VIT_PHASE_METRICS
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
 # Python 3.10 keeps future wait timeouts separate from built-in IO timeouts.
@@ -627,6 +628,7 @@ class MMRemoteEmbeddingCache:
             raise
 
     def _lookup_object_meta(self, client, key, trace_id, timeout_ms, deadline):
+        diagnostic_start_ns = time.perf_counter_ns() if VIT_PHASE_METRICS else None
         outcome = "error"
         try:
             with self._observe_inflight("metadata"), self._observe_stage(
@@ -660,6 +662,12 @@ class MMRemoteEmbeddingCache:
             outcome = "timeout"
             raise
         finally:
+            if diagnostic_start_ns is not None:
+                self._report_metric(
+                    GaugeMetrics.VIT_REMOTE_EMB_METADATA_RT_METRIC,
+                    (time.perf_counter_ns() - diagnostic_start_ns) / 1e6,
+                    {"status": outcome},
+                )
             self._report_outcome(
                 "metadata", "success" if outcome in ("hit", "miss") else "error"
             )

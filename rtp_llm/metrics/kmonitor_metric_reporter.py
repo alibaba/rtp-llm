@@ -248,6 +248,9 @@ class GaugeMetrics(Enum):
     VIT_REMOTE_EMB_WRITE_RT_METRIC = "py_rtp_vit_remote_embedding_cache_write_rt"
 
     VIT_REMOTE_EMB_STAGE_RT_METRIC = "py_rtp_vit_remote_embedding_cache_stage_rt_ms"
+    # Client-observed metadata lookup, including Python resume and validation,
+    # tagged by lookup outcome before any payload admission or transfer.
+    VIT_REMOTE_EMB_METADATA_RT_METRIC = "py_rtp_vit_remote_embedding_cache_metadata_rt_ms"
     VIT_REMOTE_EMB_GDR_LOCK_HOLD_RT_METRIC = (
         "py_rtp_vit_remote_embedding_cache_gdr_lock_hold_ms"
     )
@@ -404,6 +407,7 @@ class MetricReporter(object):
                     )
                 elif metric in (
                     GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_METADATA_RT_METRIC,
                     GaugeMetrics.VIT_EMBEDDING_CACHE_HIT_RT_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_GDR_LOCK_HOLD_RT_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_QUEUE_WAIT_METRIC,

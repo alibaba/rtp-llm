@@ -51,6 +51,7 @@ class MetricReporterTest(unittest.TestCase):
                 if metric
                 not in (
                     GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_METADATA_RT_METRIC,
                     GaugeMetrics.VIT_EMBEDDING_CACHE_HIT_RT_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_GDR_LOCK_HOLD_RT_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_QUEUE_WAIT_METRIC,
@@ -154,6 +155,27 @@ class MetricReporterTest(unittest.TestCase):
             },
         )
         self.assertTrue(all(p.tags == hold_tags for p in samples))
+
+    def test_metadata_latency_has_independent_hit_and_miss_buckets(self):
+        reporter, _ = self.make_reporter()
+        reporter.init()
+        metric = GaugeMetrics.VIT_REMOTE_EMB_METADATA_RT_METRIC
+        reporter.report(metric, 4, {"status": "hit"})
+        reporter.report(metric, 500, {"status": "miss"})
+        report = reporter._matic_map[metric.value].fetch_reported_data()
+        buckets = {
+            (point.tags["status"], point.tags["le"]): point.value
+            for point in report
+            if point.metric_name == metric.value + "_bucket"
+        }
+        self.assertEqual(
+            [
+                buckets[status, upper]
+                for status in ("hit", "miss")
+                for upper in ("10", "+Inf")
+            ],
+            [1, 1, 0, 1],
+        )
 
     def test_remote_gauges_keep_interval_means_and_arena_watermarks(self):
         reporter, _ = self.make_reporter()

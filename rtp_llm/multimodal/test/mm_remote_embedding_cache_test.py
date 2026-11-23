@@ -253,6 +253,49 @@ class RemoteCacheTest(unittest.TestCase):
         self.assertEqual(event["error_code"], "ER_INVALID_GRPCSTATUS")
         self.assertEqual(event["trace_id"], "native-get")
 
+    def test_metadata_diagnostic_preserves_get_outcomes_and_is_opt_in(self):
+        remote = self.remote(Store())
+        client = Mock()
+        module = "rtp_llm.multimodal.mm_remote_embedding_cache"
+        metric = GaugeMetrics.VIT_REMOTE_EMB_METADATA_RT_METRIC
+        with patch(f"{module}.kmonitor.report") as report, patch(
+            f"{module}.VIT_PHASE_METRICS", True
+        ):
+            client.get_object_meta.side_effect = [
+                SimpleNamespace(size_bytes=12),
+                None,
+                TimeoutError("Get expired"),
+                SimpleNamespace(size_bytes=0),
+            ]
+            deadline = time.monotonic() + 1
+            self.assertEqual(
+                remote._lookup_object_meta(client, "key", "trace", 50, deadline).size_bytes,
+                12,
+            )
+            self.assertIsNone(
+                remote._lookup_object_meta(client, "key", "trace", 50, deadline)
+            )
+            with self.assertRaises(TimeoutError):
+                remote._lookup_object_meta(client, "key", "trace", 50, deadline)
+            with self.assertRaises(ValueError):
+                remote._lookup_object_meta(client, "key", "trace", 50, deadline)
+        samples = self.metric_values(report, metric)
+        self.assertEqual(
+            [tags["status"] for _, tags in samples],
+            ["hit", "miss", "timeout", "invalid"],
+        )
+        self.assertTrue(all(value >= 0 for value, _ in samples))
+
+        with patch(f"{module}.kmonitor.report") as report, patch(
+            f"{module}.VIT_PHASE_METRICS", False
+        ):
+            client.get_object_meta.side_effect = None
+            client.get_object_meta.return_value = None
+            self.assertIsNone(
+                remote._lookup_object_meta(client, "key", "trace", 50, deadline)
+            )
+        self.assertEqual(self.metric_values(report, metric), [])
+
     def test_metadata_transport_retry_uses_only_remaining_request_time(self):
         failure = RuntimeError("transport failed")
         failure.code = SimpleNamespace(name="ER_INVALID_GRPCSTATUS")

@@ -45,6 +45,7 @@ BOUNDS_MS = (
 BUCKET_LABELS = tuple(map(str, BOUNDS_MS)) + ("+Inf",)
 PREFIX = "py_rtp_vit_remote_embedding_cache_"
 STAGE_RT = PREFIX + "stage_rt_ms"
+METADATA_RT = PREFIX + "metadata_rt_ms"
 QUEUE_RT = PREFIX + "queue_wait_ms"
 GDR_LOCK_HOLD_RT = PREFIX + "gdr_lock_hold_ms"
 OPERATION_QPS = PREFIX + "operation_qps"
@@ -203,6 +204,7 @@ class EmbLatencyMetric(MetricBase):
     def __init__(self, name, tags):
         super().__init__(name, tags)
         self._is_stage = name == STAGE_RT
+        self._is_metadata = name == METADATA_RT
         self._is_queue = name == QUEUE_RT
         self._is_gdr_lock_hold = name == GDR_LOCK_HOLD_RT
         self._is_local_hit = name == LOCAL_HIT_RT
@@ -240,6 +242,8 @@ class EmbLatencyMetric(MetricBase):
             if entry is None:
                 if self._is_local_hit:
                     bounds = LOCAL_HIT_BOUNDS_MS
+                elif self._is_metadata:
+                    bounds = BOUNDS_MS
                 elif key == self._object_outcome:
                     bounds = OBJECT_RT_BOUNDS_MS
                 elif self._is_stage and key[:2] in (
