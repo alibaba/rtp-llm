@@ -259,10 +259,6 @@ public class RequestRegistry {
         }
     }
 
-    public void finishYielded(ScheduledRequest victim, String detail) {
-        finishVictim(victim, StrategyErrorType.PRIORITY_PREEMPTED, detail);
-    }
-
     public Optional<PreemptionRegistration> tryClaim(
             String requestId, long reservationToken, long attemptToken, String detail) {
         RequestSlot entry = requestSlots.get(requestId);
@@ -733,16 +729,6 @@ public class RequestRegistry {
         }
     }
 
-    void onQueuedItemPreempted(ScheduledRequest victim, ScheduledRequest incoming) {
-        finishYielded(victim, "preempted by higher-priority request " + incoming.requestId());
-        requestReporter.reportVictim(
-                victim.priority(),
-                incoming.priority(),
-                "prefill_queued",
-                "prefill_inflight_requests");
-        requestReporter.reportPriorityPreempt("prefill_queued");
-    }
-
     /**
      * Retain registered IDs, including terminal records, during endpoint orphan cleanup.
      * Called under endpoint locks: never acquire a Slot lock here. Read the current
@@ -850,13 +836,6 @@ public class RequestRegistry {
         }
         if (interrupted) {
             Thread.currentThread().interrupt();
-        }
-    }
-
-    private void finishVictim(ScheduledRequest item, StrategyErrorType error, String detail) {
-        RequestSlot slot = entryFor(item);
-        if (slot != null) {
-            slot.recordSchedulingFailure(error, detail);
         }
     }
 

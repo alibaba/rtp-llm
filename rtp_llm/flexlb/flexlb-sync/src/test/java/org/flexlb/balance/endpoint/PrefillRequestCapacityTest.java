@@ -38,14 +38,17 @@ class PrefillRequestCapacityTest {
                     () -> {});
 
     @Test
-    void waitingPreparedAndCommittedRequestsShareOneCount() {
+    void waitingRequestsDoNotConsumePreparedOrCommittedRouteCapacity() {
         ScheduledRequest queued = item(1), immediate = item(2);
         assertTrue(enqueue(queued, 2L));
         var registration = reserve(immediate, 2L).reservation();
         assertNotNull(registration);
         assertEquals(2L, state.observedRequestCount());
         assertFalse(enqueue(item(3), 2L));
-        assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(item(3), 2L).status());
+        try (var spare = reserve(item(3), 2L).reservation()) {
+            assertNotNull(spare);
+            assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(item(4), 2L).status());
+        }
         try (var handoff = commit(immediate, registration)) {
             assertEquals(2L, state.observedRequestCount());
         }
@@ -148,9 +151,10 @@ class PrefillRequestCapacityTest {
         assertNotNull(
                 reserve(item(2), 2L).reservation(),
                 "an intervening ownership mutation does not invalidate remaining capacity");
+        assertNotNull(reserve(item(3), 2L).reservation());
         assertEquals(
                 PrefillState.CapacityStatus.CAPACITY_FULL,
-                reserve(item(3), 2L).status(),
+                reserve(item(4), 2L).status(),
                 "the old available snapshot cannot authorize overselling current capacity");
     }
 

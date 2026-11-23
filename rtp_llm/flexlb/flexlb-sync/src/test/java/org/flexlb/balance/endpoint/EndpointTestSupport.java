@@ -210,25 +210,21 @@ public final class EndpointTestSupport {
         List<ScheduledRequest> items = List.copyOf(exactItems);
         List<PrefillState.RouteReservation> reservations = new ArrayList<>(items.size());
         boolean committed = false;
+        var admission = endpoint.tryBeginRouteCommitAdmission();
+        if (admission == null) {
+            throw new IllegalStateException("route endpoint retired");
+        }
         try {
             for (ScheduledRequest item : items) {
                 PrefillState.ReservationResult<PrefillState.RouteReservation> result =
-                        endpoint.reserveRouteOwnership(item, predictedMs);
+                        admission.reserve(item, predictedMs);
                 if (result.status() != PrefillState.CapacityStatus.ACQUIRED) {
                     throw new IllegalStateException(
                             "route reservation rejected: " + result.status());
                 }
                 reservations.add(result.reservation());
             }
-            PrefillEndpoint.RouteCommitAdmission admission =
-                    endpoint.tryBeginRouteCommitAdmission();
-            if (admission == null) {
-                throw new IllegalStateException("route endpoint retired");
-            }
-            PrefillState.CommittedHandoff handoff;
-            try (admission) {
-                handoff = admission.commit(items, reservations);
-            }
+            PrefillState.CommittedHandoff handoff = admission.commit(items, reservations);
             committed = true;
             return List.of(handoff);
         } finally {
@@ -237,6 +233,7 @@ public final class EndpointTestSupport {
                     reservations.get(index).close();
                 }
             }
+            admission.close();
         }
     }
 

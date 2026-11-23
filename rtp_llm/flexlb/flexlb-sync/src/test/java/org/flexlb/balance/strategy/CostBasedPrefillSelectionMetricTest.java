@@ -164,19 +164,9 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @ParameterizedTest
-    @CsvSource({
-        "5,1,false,BLOCKED",
-        "50,1,false,BLOCKED",
-        "5,2,false,SUCCESS",
-        "50,1,true,SUCCESS",
-        "10,1,true,BLOCKED",
-        "5,1,true,BLOCKED"
-    })
-    void fullRequestCapacityIsSelectableOnlyWithEligibleQueuedPreemption(
-            int incomingPriority,
-            int requestLimit,
-            boolean preemptQueued,
-            PlacementResult.Status expectedStatus) {
+    @CsvSource({"5,1,false", "50,1,false", "5,2,false", "50,1,true", "10,1,true", "5,1,true"})
+    void queuedNonBatchRequestsRemainSelectableAndKeepTheirQueuePosition(
+            int incomingPriority, int requestLimit, boolean preemptQueued) {
         registry.close();
         config.queueScheduler().getDecision().setMaxRequests(2);
         config.getDispatcher().setMaxInflightPerPrefillWorker(requestLimit);
@@ -223,15 +213,10 @@ class CostBasedPrefillSelectionMetricTest {
         PlacementResult<SelectedRole, RoleType> result =
                 strategy.select(context, RoleType.PREFILL, null);
 
-        assertEquals(expectedStatus, result.status());
-        if (expectedStatus == PlacementResult.Status.BLOCKED) {
-            verify(cache, Mockito.never()).findMatchingEngines(any());
-        }
-        if (result.status() == PlacementResult.Status.SUCCESS) {
-            try (SelectedRole selected = result.value()) {
-                assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
-                assertTrue(selected.prefillWorkMs() > 0L);
-            }
+        try (SelectedRole selected = result.value()) {
+            assertEquals(PlacementResult.Status.SUCCESS, result.status());
+            assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
+            assertTrue(selected.prefillWorkMs() > 0L);
         }
         assertEquals(
                 1,
