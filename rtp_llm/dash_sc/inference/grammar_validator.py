@@ -1078,7 +1078,14 @@ class GrammarValidator:
                 daemon=True,
             )
             self._coordinator_thread = coordinator
-            coordinator.start()
+            try:
+                coordinator.start()
+            except RuntimeError:
+                self._spawning -= deficit
+                self._coordinator_running = False
+                self._coordinator_thread = None
+                # Pool warmup is opportunistic. Requests retry through _ensure_pool.
+                logger.exception("Unable to start the grammar sandbox coordinator")
 
     def _spawn_many(self, count: int) -> None:
         unattempted = 0

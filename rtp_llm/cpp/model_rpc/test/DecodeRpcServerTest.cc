@@ -61,6 +61,112 @@ private:
     DecodeRpcServer                       server_;
 };
 
+class AllocationErrorContext final: public LoadAsyncContext {
+public:
+    AllocationErrorContext(const std::shared_ptr<LoadContextCoordinator>& coordinator, ErrorInfo error):
+        LoadAsyncContext({}, {}, 0, 1, coordinator), error_(std::move(error)) {}
+
+    ErrorInfo errorInfo() const override {
+        return error_;
+    }
+
+private:
+    ErrorInfo error_;
+};
+
+// Allocate and free real blocks; inject only the completed backend load result.
+class AllocationErrorCacheManager final: public CoordinatorCacheManager {
+public:
+    AllocationErrorCacheManager(const CacheConfig& config, ErrorInfo error):
+        CoordinatorCacheManager(config), error_(std::move(error)) {}
+
+    size_t allocated_blocks{0};
+    size_t released_blocks{0};
+
+    void free(const FreeInfo& info) override {
+        released_blocks += info.batch_kv_cache_resource->curBlocksNum();
+        CoordinatorCacheManager::free(info);
+    }
+
+protected:
+    MallocResult initMallocForCommonLen(const MallocInfo& info) override {
+        auto result = CoordinatorCacheManager::initMallocForCommonLen(info);
+        if (result.success) {
+            auto coordinator = std::make_shared<LoadContextCoordinator>([](const auto&) { return true; }, [](auto&) {});
+            auto context     = std::make_shared<AllocationErrorContext>(coordinator, error_);
+            RTP_LLM_CHECK(coordinator->registerContext(context));
+            context->setSettlementReadyCallback([](const auto& ready) { EXPECT_TRUE(ready->settle(false)); });
+            result.async_context  = std::move(context);
+            result.load_attempted = true;
+        }
+        return result;
+    }
+
+    MallocResult incrMalloc(const MallocInfo& info) override {
+        auto result      = CoordinatorCacheManager::incrMalloc(info);
+        allocated_blocks = info.batch_kv_cache_resource->curBlocksNum();
+        return result;
+    }
+
+private:
+    ErrorInfo error_;
+};
+
+class AllocationErrorEngine final: public EngineBase {
+public:
+    static EngineInitParams parameters() {
+        EngineInitParams params;
+        params.model_config_.max_seq_len = 16;
+        return params;
+    }
+
+    explicit AllocationErrorEngine(ErrorInfo error): EngineBase(parameters()) {
+        const auto config = test::makeSimpleMhaCacheConfig(1, 8, 2, DataType::TYPE_FP16);
+        cache             = std::make_shared<KVCacheManager>(config, false, nullptr);
+        if (!cache->init()) {
+            throw std::runtime_error("allocation test cache initialization failed");
+        }
+        allocator = std::make_shared<AllocationErrorCacheManager>(config, std::move(error));
+        if (!allocator->init()) {
+            throw std::runtime_error("allocation test allocator initialization failed");
+        }
+        cache->coordinator_manager_     = allocator;
+        resource_context_.cache_manager = cache;
+        resource_context_.role_type     = RoleType::DECODE;
+    }
+
+    GenerateStreamPtr makeStream(const std::shared_ptr<GenerateInput>& input) override {
+        const auto params = parameters();
+        stream            = std::make_shared<NormalGenerateStream>(
+            input, params.model_config_, params.runtime_config, resource_context_, nullptr);
+        return stream;
+    }
+    GenerateStreamPtr enqueue(const std::shared_ptr<GenerateInput>& input) override {
+        ADD_FAILURE() << "failed allocation reached engine enqueue";
+        return makeStream(input);
+    }
+    void enqueue(GenerateStreamPtr&) override {
+        ADD_FAILURE() << "failed allocation reached engine enqueue";
+    }
+    absl::Status startLoop() override {
+        return absl::OkStatus();
+    }
+
+    absl::Status stop() override {
+        return absl::OkStatus();
+    }
+    absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
+        return absl::UnimplementedError("unused in allocation test");
+    }
+    KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
+        return {};
+    }
+
+    std::shared_ptr<KVCacheManager>              cache;
+    std::shared_ptr<AllocationErrorCacheManager> allocator;
+    GenerateStreamPtr                            stream;
+};
+
 GroupBase makeRpcGroup(std::string tag) {
     auto spec = std::make_shared<MHAKVCacheSpec>(tag, 8, 8, 1);
 
@@ -606,6 +712,474 @@ TEST(DecodeRpcServerTest, MtpLoadPlanIgnoresInactiveModules) {
 
     ASSERT_EQ(plan.size(), 1);
     EXPECT_EQ(plan[0].engine_init_params, propose_params.mtp_model_params_->at(0).get());
+}
+
+class HandoffProcessor: public BaseLogitsProcessor {
+public:
+    explicit HandoffProcessor(GenerateStream& stream): stream_(stream) {}
+
+    std::optional<ErrorInfo> process(const SamplerInputs&, size_t, size_t) override {
+        return std::nullopt;
+    }
+    void                     updateMultiSeqStatus(const std::vector<int>&) override {}
+    std::optional<ErrorInfo> updateStatus(const torch::Tensor& tokens, int32_t count) override {
+        ++update_calls;
+        had_sp_buffer_at_update = stream_.getSPOutputBuffer() != nullptr;
+        committed_tokens.insert(committed_tokens.end(), tokens.data_ptr<int32_t>(), tokens.data_ptr<int32_t>() + count);
+        if (fail_update) {
+            return ErrorInfo(ErrorCode::INVALID_PARAMS, "handoff processor update failed");
+        }
+        return std::nullopt;
+    }
+    std::optional<int64_t> committedOutputLen() const override {
+        return committed_tokens.size();
+    }
+
+    int              update_calls            = 0;
+    bool             fail_update             = false;
+    bool             had_sp_buffer_at_update = false;
+    std::vector<int> committed_tokens;
+
+private:
+    GenerateStream& stream_;
+};
+
+class HandoffEngine: public EngineBase {
+public:
+    HandoffEngine(): EngineBase(EngineInitParams()) {}
+    std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>&) override {
+        return nullptr;
+    }
+    void enqueue(std::shared_ptr<GenerateStream>& stream) override {
+        ++enqueue_count;
+        /** Drive the scheduler transition, then complete the request without a model step. */
+        stream->moveToNext();
+        stream->reportEvent(StreamEvents::GenerateDone);
+        stream->moveToNext();
+    }
+    absl::Status startLoop() override {
+        return absl::OkStatus();
+    }
+
+    absl::Status stop() override {
+        return absl::OkStatus();
+    }
+    absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
+        return absl::UnimplementedError("not used by DecodeRpcBootstrapTest");
+    }
+    KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
+        return {};
+    }
+
+    bool isDSpark() override {
+        return is_dspark;
+    }
+
+    int  enqueue_count = 0;
+    bool is_dspark     = false;
+};
+
+class HandoffRpcService: public RpcService::Service {
+public:
+    explicit HandoffRpcService(DecodeRpcServer& server): server_(server) {}
+
+    grpc::Status RemoteGenerate(grpc::ServerContext* context, ServerStream* writer) override {
+        DecodeRpcContext             rpc_context{writer};
+        kmonitor::MetricsReporterPtr reporter;
+        DecodeGenerateContext        decode_context(rpc_context, 5000, context, reporter, server_.meta_);
+        decode_context.request_id  = stream->streamId();
+        decode_context.request_key = std::to_string(stream->streamId());
+        decode_context.time_info   = {};
+        decode_context.setStream(stream);
+        try {
+            server_.localGenerate(decode_context);
+        } catch (const std::exception& error) {
+            decode_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, error.what());
+        }
+        decode_context.markRpcHandlingCompleted();
+        return decode_context.error_status;
+    }
+
+    GenerateStreamPtr stream;
+
+private:
+    DecodeRpcServer& server_;
+};
+
+class DecodeRpcBootstrapTest: public DeviceTestBase {
+protected:
+    void SetUp() override {
+        DeviceTestBase::SetUp();
+        engine_                                            = std::make_shared<HandoffEngine>();
+        rpc_.engine_                                       = engine_;
+        rpc_.meta_                                         = std::make_shared<RpcServerRuntimeMeta>();
+        rpc_.maga_init_params_.sp_config.type              = SP_TYPE_MTP;
+        rpc_.maga_init_params_.sp_config.gen_num_per_cycle = 3;
+        rpc_.maga_init_params_.parallelism_config.pp_size  = 2;
+        cache_manager_ = std::make_shared<KVCacheManager>(makeMhaCacheConfig(1, 16, 1, 8, 4, DataType::TYPE_FP16));
+        ASSERT_TRUE(cache_manager_->init());
+        service_ = std::make_unique<HandoffRpcService>(rpc_);
+        grpc::ServerBuilder builder;
+        int                 port = 0;
+        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+        builder.RegisterService(service_.get());
+        server_ = builder.BuildAndStart();
+        ASSERT_NE(server_, nullptr);
+        ASSERT_NE(port, 0);
+        stub_ = RpcService::NewStub(
+            grpc::CreateChannel("127.0.0.1:" + std::to_string(port), grpc::InsecureChannelCredentials()));
+    }
+
+    void TearDown() override {
+        if (server_) {
+            server_->Shutdown();
+            server_->Wait();
+        }
+        DeviceTestBase::TearDown();
+    }
+
+    std::shared_ptr<NormalGenerateStream> makeStream() {
+        ModelConfig model;
+        model.max_seq_len                      = 64;
+        model.vocab_size                       = 128;
+        model.input_vocab_size                 = 128;
+        model.num_layers                       = 1;
+        model.attn_config.tokens_per_block     = 4;
+        model.special_tokens.eos_token_id      = -1;
+        auto input                             = std::make_shared<GenerateInput>();
+        input->request_id                      = 42;
+        input->begin_time_us                   = currentTimeUs();
+        input->input_ids                       = torch::tensor({1, 2, 3}, torch::kInt32);
+        input->generate_config                 = std::make_shared<GenerateConfig>();
+        input->generate_config->max_new_tokens = 16;
+        input->generate_config->is_streaming   = true;
+        ResourceContext resources;
+        resources.role_type     = RoleType::DECODE;
+        resources.cache_manager = cache_manager_;
+        auto stream = std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, resources, nullptr);
+        processor_  = std::make_shared<HandoffProcessor>(*stream);
+        stream->sampling_state_.logits_processors = {processor_};
+        EXPECT_TRUE(stream->stream_cache_resource_->initKVBlock().ok());
+        EXPECT_GT(stream->curBlocksNum(), 0);
+        stream->reportEvent(StreamEvents::LoadInitiated);
+        stream->reportEvent(StreamEvents::CanRun);
+        EXPECT_EQ(stream->getStatus(), StreamState::WAITING);
+        return stream;
+    }
+
+    GenerateRequestPB makeRequest(bool remote_payload = true) {
+        GenerateRequestPB request;
+        request.set_stage(RemoteStage::GENERATE);
+        request.set_first_generate_token_id(7);
+        request.add_position_ids(2);
+        request.add_position_ids(12);
+        if (remote_payload) {
+            for (int token : {7, 8, 9, 10}) {
+                request.add_propose_token_ids(token);
+            }
+            QueryConverter::transTensorPB(request.mutable_propose_probs(), torch::full({1, 128}, 1.0f / 128));
+            QueryConverter::transTensorPB(request.mutable_propose_hidden(), torch::full({1, 8}, 0.5f));
+        }
+        return request;
+    }
+
+    grpc::Status runHandoff(const GenerateStreamPtr& stream, const GenerateRequestPB& request) {
+        if (rpc_.maga_init_params_.parallelism_config.pp_size == 1
+            && rpc_.maga_init_params_.sp_config.type != SP_TYPE_NONE) {
+            propose_params_ = std::make_unique<ProposeModelEngineInitParams>(
+                rpc_.maga_init_params_.sp_config.type, rpc_.maga_init_params_.sp_config.gen_num_per_cycle);
+            rpc_.propose_maga_init_params_ = propose_params_.get();
+        } else {
+            rpc_.propose_maga_init_params_ = nullptr;
+        }
+        service_->stream       = stream;
+        engine_->enqueue_count = 0;
+        grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+        auto call = stub_->RemoteGenerate(&context);
+        EXPECT_TRUE(call->Write(request));
+        EXPECT_TRUE(call->WritesDone());
+        GenerateOutputsPB response;
+        int               output_count = 0;
+        while (call->Read(&response)) {
+            ++output_count;
+        }
+        const auto status = call->Finish();
+        EXPECT_EQ(output_count, 0) << "D must not emit the anchor a second time";
+        EXPECT_TRUE(rpc_.meta_->getEngineScheduleInfo(0).running_task_info_list.empty());
+        /** The fixture has no scheduler loop to consume RPC teardown's terminal event. */
+        stream->moveToNext();
+        EXPECT_EQ(stream->getStatus(), StreamState::FINISHED);
+        EXPECT_TRUE(stream->stream_cache_resource_->isResourceReleased());
+        EXPECT_EQ(cache_manager_->freeBlocksNum(), 15);
+        return status;
+    }
+
+    DecodeRpcServer                               rpc_;
+    std::unique_ptr<ProposeModelEngineInitParams> propose_params_;
+    std::shared_ptr<HandoffEngine>                engine_;
+    std::shared_ptr<KVCacheManager>               cache_manager_;
+    std::shared_ptr<HandoffProcessor>             processor_;
+    std::unique_ptr<HandoffRpcService>            service_;
+    std::unique_ptr<grpc::Server>                 server_;
+    std::unique_ptr<RpcService::Stub>             stub_;
+};
+
+TEST_F(DecodeRpcBootstrapTest, PpMtpAndEaglePreserveUnpaddedHandoff) {
+    for (auto type : {SP_TYPE_MTP, SP_TYPE_EAGLE}) {
+        SCOPED_TRACE(type);
+        rpc_.maga_init_params_.sp_config.type = type;
+        for (int64_t count : {1, 3, 4}) {
+            rpc_.maga_init_params_.sp_config.gen_num_per_cycle = count;
+            for (bool tensor_payload : {false, true}) {
+                SCOPED_TRACE("K=" + std::to_string(count) + ", tensor_payload=" + std::to_string(tensor_payload));
+                auto stream  = makeStream();
+                auto request = makeRequest(false);
+                request.add_propose_token_ids(7);
+                request.add_propose_token_ids(8);
+                if (tensor_payload) {
+                    /** Invalid tensor encodings must never reach QueryConverter in the PP MTP branch. */
+                    request.mutable_propose_hidden();
+                    request.mutable_propose_probs();
+                }
+                ASSERT_TRUE(runHandoff(stream, request).ok());
+                EXPECT_EQ(engine_->enqueue_count, 1);
+                EXPECT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{1, 2, 3, 7}));
+                EXPECT_EQ(stream->last_output_pos_, 4);
+                EXPECT_EQ(processor_->update_calls, 1);
+                EXPECT_FALSE(processor_->had_sp_buffer_at_update);
+                EXPECT_EQ(processor_->committed_tokens, (std::vector<int>{7}));
+                EXPECT_EQ(stream->reuseLength(), 3);
+                EXPECT_EQ(stream->getMtpTokenIndex(), 3);
+                EXPECT_FALSE(stream->isContextStream());
+                const auto buffer = stream->getSPOutputBuffer();
+                ASSERT_NE(buffer, nullptr);
+                EXPECT_EQ(buffer->propose_step, count);
+                EXPECT_EQ(buffer->tokens.sizes().vec(), (std::vector<int64_t>{1, 2}));
+                EXPECT_EQ(buffer->tokens.scalar_type(), torch::kInt32);
+                EXPECT_TRUE(buffer->tokens.is_pinned());
+                const std::vector<int> expected_tokens{7, 8};
+                EXPECT_TRUE(
+                    torch::equal(buffer->tokens, torch::tensor(expected_tokens, torch::kInt32).reshape({1, 2})));
+                EXPECT_FALSE(buffer->hidden_states.defined());
+                EXPECT_FALSE(buffer->all_probs.defined());
+                EXPECT_EQ(stream->getProposeToken(), expected_tokens);
+                EXPECT_EQ(stream->getMtpAsyncDeviceState().next_seq_len_upper_bound, -1);
+                EXPECT_TRUE(torch::equal(stream->getContextPositionIds(), torch::tensor({2, 12}, torch::kInt32)));
+            }
+        }
+    }
+}
+
+TEST_F(DecodeRpcBootstrapTest, PpHandoffPreservesLongerProposalPayload) {
+    for (auto type : {SP_TYPE_MTP, SP_TYPE_EAGLE}) {
+        SCOPED_TRACE(type);
+        rpc_.maga_init_params_.sp_config.type              = type;
+        rpc_.maga_init_params_.sp_config.gen_num_per_cycle = 1;
+        auto       stream                                  = makeStream();
+        const auto request                                 = makeRequest();
+        ASSERT_TRUE(runHandoff(stream, request).ok());
+        EXPECT_EQ(engine_->enqueue_count, 1);
+        const std::vector<int> expected_tokens{7, 8, 9, 10};
+        EXPECT_EQ(stream->getProposeToken(), expected_tokens);
+        const auto buffer = stream->getSPOutputBuffer();
+        ASSERT_NE(buffer, nullptr);
+        EXPECT_EQ(buffer->propose_step, 1);
+        EXPECT_TRUE(torch::equal(buffer->tokens, torch::tensor(expected_tokens, torch::kInt32).reshape({1, 4})));
+        // The wire carries real draft tensors; a PP D rebuilds draft inputs locally instead.
+        EXPECT_FALSE(buffer->hidden_states.defined());
+        EXPECT_FALSE(buffer->all_probs.defined());
+    }
+}
+
+TEST_F(DecodeRpcBootstrapTest, InvalidProposalPayloadFailsBeforeEnqueue) {
+    struct Case {
+        SpeculativeType type;
+        int             token_count;
+    };
+    const std::vector<Case> cases = {{SP_TYPE_MTP, 0},
+                                     {SP_TYPE_MTP, 1},
+                                     {SP_TYPE_EAGLE, 0},
+                                     {SP_TYPE_EAGLE, 1},
+                                     {SP_TYPE_DSPARK, 1},
+                                     {SP_TYPE_DSPARK, 2}};
+    for (int pp_size : {1, 2}) {
+        rpc_.maga_init_params_.parallelism_config.pp_size = pp_size;
+        for (const auto& c : cases) {
+            SCOPED_TRACE("pp_size=" + std::to_string(pp_size) + ", type=" + std::to_string(c.type)
+                         + ", token_count=" + std::to_string(c.token_count));
+            rpc_.maga_init_params_.sp_config.type = c.type;
+            engine_->is_dspark                    = c.type == SP_TYPE_DSPARK;
+            auto stream                           = makeStream();
+            auto request                          = makeRequest(false);
+            for (int idx = 0; idx < c.token_count; ++idx) {
+                request.add_propose_token_ids(7 + idx);
+            }
+            const auto status = runHandoff(stream, request);
+            /** The test service maps assertion exceptions to INTERNAL. */
+            EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
+            EXPECT_NE(status.error_message().find("speculative handoff has invalid proposal count"), std::string::npos);
+            EXPECT_EQ(engine_->enqueue_count, 0);
+            EXPECT_EQ(stream->getSPOutputBuffer(), nullptr);
+        }
+    }
+}
+
+TEST_F(DecodeRpcBootstrapTest, NonPipelineHandoffRestoresRemoteDraftState) {
+    rpc_.maga_init_params_.parallelism_config.pp_size = 1;
+    for (auto type : {SP_TYPE_MTP, SP_TYPE_EAGLE}) {
+        rpc_.maga_init_params_.sp_config.type = type;
+        for (int64_t count : {1, 3, 4}) {
+            rpc_.maga_init_params_.sp_config.gen_num_per_cycle = count;
+            for (int wire_count : {2, 4}) {
+                SCOPED_TRACE("type=" + std::to_string(type) + ", K=" + std::to_string(count)
+                             + ", wire_count=" + std::to_string(wire_count));
+                for (const auto& [stream_flag, mtp_flag] :
+                     std::vector<std::pair<std::string, std::string>>{{"0", "0"}, {"1", "0"}, {"0", "1"}, {"1", "1"}}) {
+                    SCOPED_TRACE("stream_async=" + stream_flag + ", mtp_async=" + mtp_flag);
+                    autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", stream_flag);
+                    autil::EnvGuard mtp_async("RTP_LLM_MTP_ASYNC_DEVICE_STATE", mtp_flag);
+                    auto            stream  = makeStream();
+                    auto            request = makeRequest();
+                    /** Accept both the two-token P payload and longer payloads. */
+                    request.mutable_propose_token_ids()->Truncate(wire_count);
+                    const std::vector<int> expected_tokens(request.propose_token_ids().begin(),
+                                                           request.propose_token_ids().end());
+                    ASSERT_TRUE(runHandoff(stream, request).ok());
+                    EXPECT_EQ(engine_->enqueue_count, 1);
+                    EXPECT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{1, 2, 3, 7}));
+                    EXPECT_EQ(processor_->update_calls, 1);
+                    EXPECT_FALSE(processor_->had_sp_buffer_at_update);
+                    EXPECT_EQ(processor_->committed_tokens, (std::vector<int>{7}));
+                    EXPECT_EQ(stream->reuseLength(), 3);
+                    EXPECT_EQ(stream->getMtpTokenIndex(), 3);
+                    EXPECT_TRUE(torch::equal(stream->getContextPositionIds(), torch::tensor({2, 12}, torch::kInt32)));
+                    const auto buffer = stream->getSPOutputBuffer();
+                    ASSERT_NE(buffer, nullptr);
+                    EXPECT_EQ(buffer->propose_step, count);
+                    EXPECT_TRUE(torch::equal(buffer->tokens,
+                                             torch::tensor(expected_tokens, torch::kInt32).reshape({1, wire_count})));
+                    EXPECT_EQ(stream->getProposeToken(), expected_tokens);
+                    EXPECT_TRUE(buffer->hidden_states.is_cuda());
+                    EXPECT_TRUE(buffer->all_probs.is_cuda());
+                    EXPECT_TRUE(torch::equal(buffer->hidden_states.cpu(),
+                                             QueryConverter::transTensor(request.propose_hidden())));
+                    EXPECT_TRUE(
+                        torch::equal(buffer->all_probs.cpu(), QueryConverter::transTensor(request.propose_probs())));
+                    ASSERT_TRUE(buffer->propose_tokens_gpu.defined());
+                    EXPECT_TRUE(buffer->propose_tokens_gpu.is_cuda());
+                    EXPECT_EQ(buffer->propose_tokens_gpu.scalar_type(), torch::kInt32);
+                    EXPECT_EQ(buffer->propose_tokens_gpu.sizes().vec(), (std::vector<int64_t>{1, wire_count - 1}));
+                    EXPECT_TRUE(torch::equal(buffer->propose_tokens_gpu.cpu(), buffer->draftTokens()));
+                    const auto& state         = stream->getMtpAsyncDeviceState();
+                    const bool  async_enabled = stream_flag == "1" || mtp_flag == "1";
+                    EXPECT_EQ(state.previous_seq_len_upper_bound, async_enabled ? 4 : -1);
+                    EXPECT_EQ(state.next_seq_len_upper_bound, async_enabled ? 4 : -1);
+                    EXPECT_EQ(state.next_seq_len_gpu.defined(), async_enabled);
+                    EXPECT_EQ(state.propose_tokens_gpu.defined(), async_enabled);
+                    EXPECT_EQ(state.last_hidden_states_gpu.defined(), async_enabled);
+                    EXPECT_EQ(state.draft_all_probs_gpu.defined(), async_enabled);
+                    if (async_enabled) {
+                        EXPECT_GT(state.epoch, 0);
+                        EXPECT_TRUE(torch::equal(state.propose_tokens_gpu, buffer->propose_tokens_gpu));
+                        EXPECT_TRUE(torch::equal(state.last_hidden_states_gpu, buffer->hidden_states));
+                        EXPECT_TRUE(torch::equal(state.draft_all_probs_gpu, buffer->all_probs));
+                        EXPECT_EQ(state.accept_len_gpu.item<int32_t>(), 1);
+                        EXPECT_EQ(state.accept_tokens_gpu[0][0].item<int32_t>(), 7);
+                        EXPECT_EQ(state.next_seq_len_gpu.item<int32_t>(), 4);
+                    } else {
+                        EXPECT_EQ(state.epoch, 0);
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_F(DecodeRpcBootstrapTest, PpDSparkPreservesEmptyHandoff) {
+    rpc_.maga_init_params_.sp_config.type = SP_TYPE_DSPARK;
+    engine_->is_dspark                    = true;
+    autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", "1");
+    autil::EnvGuard mtp_async("RTP_LLM_MTP_ASYNC_DEVICE_STATE", "1");
+    for (int64_t count : {1, 3, 4}) {
+        rpc_.maga_init_params_.sp_config.gen_num_per_cycle = count;
+        for (bool tensor_payload : {false, true}) {
+            SCOPED_TRACE("K=" + std::to_string(count) + ", tensor_payload=" + std::to_string(tensor_payload));
+            auto stream  = makeStream();
+            auto request = makeRequest(false);
+            ASSERT_EQ(request.propose_token_ids_size(), 0);
+            if (tensor_payload) {
+                /** PP ignores remote draft features and probabilities. */
+                request.mutable_propose_hidden();
+                request.mutable_propose_probs();
+            }
+            ASSERT_TRUE(runHandoff(stream, request).ok());
+            EXPECT_EQ(engine_->enqueue_count, 1);
+            EXPECT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{1, 2, 3, 7}));
+            EXPECT_EQ(stream->last_output_pos_, 4);
+            EXPECT_EQ(processor_->update_calls, 1);
+            EXPECT_FALSE(processor_->had_sp_buffer_at_update);
+            EXPECT_EQ(processor_->committed_tokens, (std::vector<int>{7}));
+            EXPECT_EQ(stream->reuseLength(), 3);
+            EXPECT_EQ(stream->getMtpTokenIndex(), 3);
+            EXPECT_FALSE(stream->isContextStream());
+            EXPECT_EQ(stream->getSPOutputBuffer(), nullptr);
+            EXPECT_TRUE(stream->getProposeToken().empty());
+            EXPECT_FALSE(stream->contain_propose_token_);
+            EXPECT_EQ(stream->getMtpAsyncDeviceState().next_seq_len_upper_bound, -1);
+            EXPECT_FALSE(stream->getMtpAsyncDeviceState().propose_tokens_gpu.defined());
+            EXPECT_TRUE(torch::equal(stream->getContextPositionIds(), torch::tensor({2, 12}, torch::kInt32)));
+        }
+    }
+}
+
+TEST_F(DecodeRpcBootstrapTest, NormalHandoffCommitsAnchorWithoutSpeculativeBuffer) {
+    rpc_.maga_init_params_.sp_config.type = SP_TYPE_NONE;
+    auto stream                           = makeStream();
+    ASSERT_TRUE(runHandoff(stream, makeRequest(false)).ok());
+    EXPECT_EQ(engine_->enqueue_count, 1);
+    EXPECT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{1, 2, 3, 7}));
+    EXPECT_EQ(stream->last_output_pos_, 4);
+    EXPECT_EQ(processor_->update_calls, 1);
+    EXPECT_EQ(processor_->committed_tokens, (std::vector<int>{7}));
+    EXPECT_EQ(stream->getSPOutputBuffer(), nullptr);
+}
+
+TEST_F(DecodeRpcBootstrapTest, AsyncFlagsNeverPublishUnsupportedPpState) {
+    for (const auto& [stream_flag, mtp_flag] :
+         std::vector<std::pair<std::string, std::string>>{{"0", "0"}, {"1", "0"}, {"0", "1"}, {"1", "1"}}) {
+        SCOPED_TRACE("stream_async=" + stream_flag + ", mtp_async=" + mtp_flag);
+        autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", stream_flag);
+        autil::EnvGuard mtp_async("RTP_LLM_MTP_ASYNC_DEVICE_STATE", mtp_flag);
+        auto            stream = makeStream();
+        ASSERT_TRUE(runHandoff(stream, makeRequest()).ok());
+        EXPECT_EQ(stream->getMtpAsyncDeviceState().epoch, 0);
+        EXPECT_EQ(stream->getMtpAsyncDeviceState().next_seq_len_upper_bound, -1);
+        EXPECT_FALSE(stream->getMtpAsyncDeviceState().propose_tokens_gpu.defined());
+        EXPECT_FALSE(stream->getMtpAsyncDeviceState().last_hidden_states_gpu.defined());
+    }
+}
+
+TEST_F(DecodeRpcBootstrapTest, AnchorErrorsFollowTheCommonStreamErrorPath) {
+    for (int pp_size : {1, 2}) {
+        rpc_.maga_init_params_.parallelism_config.pp_size = pp_size;
+        for (int anchor : {-1, 128}) {
+            auto stream  = makeStream();
+            auto request = makeRequest();
+            request.set_first_generate_token_id(anchor);
+            EXPECT_FALSE(runHandoff(stream, request).ok());
+            EXPECT_EQ(stream->statusInfo().code(), ErrorCode::OUT_OF_VOCAB_RANGE);
+            EXPECT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{1, 2, 3}));
+            EXPECT_EQ(processor_->update_calls, 0);
+            EXPECT_EQ(engine_->enqueue_count, 1);
+        }
+        auto stream             = makeStream();
+        processor_->fail_update = true;
+        EXPECT_FALSE(runHandoff(stream, makeRequest()).ok());
+        EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+        EXPECT_EQ(processor_->update_calls, 1);
+        EXPECT_EQ(engine_->enqueue_count, 1);
+    }
 }
 
 TEST(DecodeRpcServerTest, ReadFailureLogContainsPeerErrorAndEveryBlockKey) {

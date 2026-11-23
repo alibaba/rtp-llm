@@ -293,3 +293,30 @@ py_test(
         "//rtp_llm:utils",
     ],
 )
+
+py_test(
+    name = "ppu_entrypoint_test",
+    srcs = ["ppu_entrypoint_test.py"],
+    deps = ["//rtp_llm:utils"],
+    # Exercise the same lightweight entrypoint used by the PPU model target.
+    data = ["//rtp_llm/models_py:ppu_entrypoint"],
+)
+
+py_test(
+    name = "dsa_indexing_test",
+    srcs = ["dsa_indexing_test.py"],
+    data = ["//rtp_llm:utils/dsa_indexing.py"],
+)
+
+py_test(
+    name = "gang_info_test",
+    srcs = ["gang_info_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
+
+
+py_test(
+    name = "signal_guard_test",
+    srcs = ["signal_guard_test.py"],
+    deps = ["//rtp_llm:utils"],
+)

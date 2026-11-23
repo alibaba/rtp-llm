@@ -253,27 +253,27 @@ class MMProcessEngine:
         self.mm_part = mm_part
 
         self._remote_embedding_cache = None
+        self._remote_cache_init = None
         if vit_config.mm_remote_cache_enable:
-            from rtp_llm.multimodal.mm_remote_embedding_cache import (
-                MMRemoteEmbeddingCache,
+            if vit_config.mm_cache_cpu_max_bytes <= 0:
+                raise ValueError(
+                    "MM_REMOTE_CACHE_ENABLE requires a nonzero CPU embedding cache"
+                )
+            cuda_device = (
+                torch.device("cuda", torch.cuda.current_device())
+                if torch.cuda.is_available()
+                else None
             )
-
-            self._remote_embedding_cache = MMRemoteEmbeddingCache.from_configs(
+            # SCR: the KVCM client and its RDMA resources must not be captured in
+            # the checkpoint, so connect them from start_remote_embedding_cache()
+            # after the controller releases the template barrier.
+            self._remote_cache_init = (
                 model_config,
                 vit_config,
-                kv_cache_config=kv_cache_config,
-                request_scoped_inspection=getattr(
-                    mm_part, "inspection_verdict_is_request_scoped", False
-                ),
-                device=(
-                    torch.device("cuda", torch.cuda.current_device())
-                    if torch.cuda.is_available()
-                    else None
-                ),
+                kv_cache_config,
+                cuda_device,
             )
-            logging.info(
-                "ViT shared remote cache enabled; accepted encoder results upload directly"
-            )
+
 
         # threading.Lock: protects gRPC-handler-thread access within this
         # process. multiprocessing.Lock would round-trip through an OS
@@ -402,6 +402,11 @@ class MMProcessEngine:
             shards=max(1, cache_shards),
             report_metrics=True,
             async_publication=self.vit_config.mm_cache_async_publish,
+            on_cpu_evict=(
+                self._submit_remote_eviction
+                if vit_config.mm_remote_cache_enable
+                else None
+            ),
         )
         hash_cache_class = MMHashKeyCache
         if (
@@ -2381,6 +2386,32 @@ class MMProcessEngine:
             self._fail_async_compute(cache_key, entry, e)
         finally:
             self._cancel_greennet(handle)
+
+    def start_remote_embedding_cache(self) -> None:
+        """Start the optional KVCM client and its service discovery."""
+        if self._remote_cache_init is None:
+            return
+        from rtp_llm.multimodal.mm_remote_embedding_cache import MMRemoteEmbeddingCache
+
+        model_config, vit_config, kv_cache_config, cuda_device = self._remote_cache_init
+        self._remote_embedding_cache = MMRemoteEmbeddingCache.from_configs(
+            model_config,
+            vit_config,
+            kv_cache_config=kv_cache_config,
+            request_scoped_inspection=getattr(
+                self.mm_part, "inspection_verdict_is_request_scoped", False
+            ),
+            device=cuda_device,
+        )
+        self._remote_cache_init = None
+        logging.info(
+            "ViT shared remote cache enabled; accepted encoder results upload directly"
+        )
+
+    def _submit_remote_eviction(self, key: str, entry: MMEmbeddingCacheEntry) -> None:
+        remote_cache = self._remote_embedding_cache
+        if remote_cache is not None:
+            remote_cache.submit_eviction(key, entry)
 
     def stop(self) -> None:
         """Shutdown asynchronous work, the scheduler and preprocessing workers."""

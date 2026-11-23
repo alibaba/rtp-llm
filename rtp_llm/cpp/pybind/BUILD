@@ -175,6 +175,7 @@ cc_library(
         "//rtp_llm/cpp/telemetry",
         "//rtp_llm/cpp/multimodal_processor:multimodal_processor",
         ":config_extract",
+        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:signal_utils",
         "//:rtp_compute_ops",
         "@xgrammar//:xgrammar",

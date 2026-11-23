@@ -39,6 +39,25 @@ class NormalEngineTest: public DeviceTestBase {
 public:
 };
 
+namespace {
+
+/** Exercise real speculative initialization without loading a checkpoint or submitting model work. */
+std::unique_ptr<ProposeModelEngineInitParams> makeLocalProposalParams(const EngineInitParams& params) {
+    auto modules    = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
+    auto draft      = std::make_unique<EngineInitParams>(params);
+    draft->model_id = params.model_id + 1;
+    if (params.sp_config.type == SP_TYPE_DSPARK) {
+        const auto options                  = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+        draft->gpt_weights.dspark_markov_w1 = torch::zeros({params.model_config_.vocab_size, 1}, options);
+        draft->gpt_weights.dspark_markov_w2 = torch::zeros({params.model_config_.vocab_size, 1}, options);
+    }
+    modules->push_back(std::move(draft));
+    return std::make_unique<ProposeModelEngineInitParams>(
+        params.sp_config.type, params.sp_config.gen_num_per_cycle, std::move(modules));
+}
+
+}  // namespace
+
 TEST_F(NormalEngineTest, testExecuteStepPersistsAcrossProfilerWindows) {
     class NoopExecutor: public Executor {
     public:
@@ -846,7 +865,29 @@ TEST_F(NormalEngineTest, testPdRolesIgnoreGenerationPrefillWithOrWithoutSpeculat
             params.parallelism_config.role_type = role_type;
             params.pd_sep_config.role_type      = role_type;
             params.sp_config.type               = speculative_type;
-            EXPECT_NO_THROW({ NormalEngine engine(params, nullptr); });
+            auto         proposal = speculative_type == SP_TYPE_NONE ? nullptr : makeLocalProposalParams(params);
+            NormalEngine engine(params, std::move(proposal));
+            ASSERT_TRUE(engine.startLoop().ok());
+            if (speculative_type == SP_TYPE_NONE) {
+                ASSERT_NE(dynamic_cast<NormalExecutor*>(engine.executor_.get()), nullptr);
+            } else {
+                ASSERT_NE(dynamic_cast<MtpExecutor*>(engine.executor_.get()), nullptr);
+            }
+            const int expected_reserve = speculative_type == SP_TYPE_NONE   ? 0 :
+                                         speculative_type == SP_TYPE_DSPARK ? 9 :
+                                                                              4;
+            EXPECT_EQ(engine.reserve_step_, expected_reserve);
+
+            std::list<GenerateStreamPtr> streams;
+            engine.mayAddFakeStream(streams);
+            ASSERT_EQ(streams.size(), 1u);
+            EXPECT_TRUE(streams.front()->isFakeStream());
+            EXPECT_EQ(streams.front()->isContextStream(), role_type == RoleType::PREFILL);
+            if (role_type == RoleType::DECODE && speculative_type != SP_TYPE_NONE) {
+                const auto& buffer = streams.front()->getSPOutputBuffer();
+                ASSERT_NE(buffer, nullptr);
+                EXPECT_EQ(buffer->propose_step, 3);
+            }
         }
     }
 }

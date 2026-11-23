@@ -326,8 +326,12 @@ void KVCacheManager::stopMetricsReporter() {
 // 初始化和配置相关
 
 bool KVCacheManager::init() {
+    return prepare() && startServices();
+}
+
+bool KVCacheManager::prepare() {
     RTP_LLM_CHECK_WITH_INFO(!coordinator_manager_ && !block_tree_cache_ && !metrics_reporter_thread_.joinable(),
-                            "KVCacheManager::init called more than once");
+                            "KVCacheManager::prepare called more than once");
     RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "cache specs must not be empty");
     if (kv_cache_config_.block_tree_frozen_recovery_interval_ms < 0
         || kv_cache_config_.block_tree_frozen_recovery_interval_ms > std::numeric_limits<int>::max()
@@ -364,8 +368,29 @@ bool KVCacheManager::init() {
     for (const auto& pool : coordinator_manager_->groupBlockPools()) {
         pool->setCapacityChangeCallback(capacity_changed);
     }
-    const bool requires_broadcast_manager = parallelism_config_.tp_size > 1 && parallelism_config_.tp_rank == 0
-                                            && !runtime_config_.worker_grpc_addrs.empty();
+    return true;
+}
+
+void KVCacheManager::updateRuntimeEndpoints(const RuntimeConfig& runtime_config, const std::string& pod_ip) {
+    RTP_LLM_CHECK_WITH_INFO(!block_tree_cache_, "cache endpoints can only be updated before cache services start");
+    runtime_config_.worker_addrs      = runtime_config.worker_addrs;
+    runtime_config_.worker_grpc_addrs = runtime_config.worker_grpc_addrs;
+    auto& endpoint = kv_cache_config_.kv_cache_event_host_ip_port;
+    const auto port = endpoint.rfind(':');
+    if (kv_cache_config_.kv_cache_event_publisher_type == "kvcm" && port != std::string::npos && !pod_ip.empty()) {
+        endpoint = pod_ip + endpoint.substr(port);
+    }
+}
+
+bool KVCacheManager::startServices() {
+    if (block_tree_cache_) {
+        return true;
+    }
+    RTP_LLM_CHECK_WITH_INFO(coordinator_manager_ != nullptr, "KV cache must be prepared before services start");
+    // This branch has no per-rank PP index, so the TP root of the world is the
+    // only rank that owns the cross-rank block broadcast.
+    const bool requires_broadcast_manager =
+        parallelism_config_.tp_size > 1 && parallelism_config_.tp_rank == 0 && !runtime_config_.worker_grpc_addrs.empty();
     std::shared_ptr<BroadcastManager> broadcast_manager;
     if (requires_broadcast_manager) {
         broadcast_manager = createMultiRankBlockTransferManager();
@@ -400,7 +425,7 @@ bool KVCacheManager::init() {
                                              broadcast_manager,
                                              metrics_reporter_);
     if (!block_tree_cache_) {
-        RTP_LLM_LOG_ERROR("KVCacheManager::init: failed to create BlockTreeCache");
+        RTP_LLM_LOG_ERROR("KVCacheManager::startServices: failed to create BlockTreeCache");
         return false;
     }
     transfer_broadcast_manager_ = std::move(broadcast_manager);

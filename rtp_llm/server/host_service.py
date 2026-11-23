@@ -252,6 +252,9 @@ class MasterService:
         self._probe_executor = ThreadPoolExecutor(max_workers=self.max_parallel_probes)
         self._snapshot_lock = threading.Lock()
         self._route_snapshot = RouteSnapshot.empty()
+        self.backend_refresh_thread = None
+        if not self.master_vip.domain:
+            return
         self.backend_refresh_thread = threading.Thread(
             target=self.refresh_master_addr,
             name="rtp_llm_master_addr_refresh",

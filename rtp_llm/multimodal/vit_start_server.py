@@ -84,6 +84,7 @@ def vit_start_server(
         f"[VIT_SERVER_{server_id}] Creating multimodal process engine finished"
     )
 
+    vit_process_engine.start_remote_embedding_cache()
     app = VitEndpointApp(py_env_configs, vit_process_engine, local_rank)
     app.start(
         grpc_port=grpc_port,

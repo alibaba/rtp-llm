@@ -1150,11 +1150,11 @@ def create_backend_rpc_server_visitor(
     from rtp_llm.config.engine_config import EngineConfig
     from rtp_llm.distribute.distributed_server import (
         get_dp_addrs_from_world_info,
-        get_world_info,
+        get_frontend_world_info,
     )
 
     engine_config = EngineConfig.create(py_env_configs, nccl_comm_config=None)
-    world_info = get_world_info(
+    world_info = get_frontend_world_info(
         server_config=py_env_configs.server_config,
         distribute_config=py_env_configs.distribute_config,
         parallelism_config=py_env_configs.parallelism_config,
@@ -1167,7 +1167,7 @@ def create_backend_rpc_server_visitor(
     if py_env_configs.vit_config:
         vit_separation = py_env_configs.vit_config.vit_separation
 
-    return BackendRPCServerVisitor(
+    visitor = BackendRPCServerVisitor(
         max_seq_len=model_config.max_seq_len,
         seq_size_per_block=model_config.attn_config.tokens_per_block,
         pd_sep_config=engine_config.pd_sep_config,
@@ -1183,3 +1183,5 @@ def create_backend_rpc_server_visitor(
         mm_model_config=getattr(model_config, "mm_model_config", None),
         model_config=model_config,
     )
+
+    return visitor

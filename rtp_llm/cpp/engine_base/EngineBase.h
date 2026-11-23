@@ -58,6 +58,9 @@ public:
 
     virtual std::shared_ptr<GenerateStream> makeStream(const std::shared_ptr<GenerateInput>& input);
 
+    // Construction prepares model state; the owner starts computation after runtime setup.
+    virtual absl::Status startLoop() = 0;
+
     virtual absl::Status stop() = 0;
 
     virtual absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,

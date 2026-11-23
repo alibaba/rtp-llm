@@ -264,7 +264,12 @@ def set_parallelism_config(
         py_ffn_disaggregate_config: Optional FFN disaggregate config to apply when enabled.
     """
     world_size = parallelism_config.world_size
-    need_local = world_size > 1 and parallelism_config.local_world_size == 1
+    explicit_local_size = os.environ.get("LOCAL_WORLD_SIZE")
+    need_local = (
+        world_size > 1
+        and parallelism_config.local_world_size == 1
+        and not (explicit_local_size and int(explicit_local_size) == 1)
+    )
     if need_local:
         if torch.cuda.is_available():
             n = min(torch.cuda.device_count(), world_size)

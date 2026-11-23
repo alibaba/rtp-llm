@@ -101,6 +101,9 @@ private:
     ErrorInfo checkExpandLength(const ExpandedOutput& expand_output);
 
 public:
+    // SCR defers the RDMA transport until the controller releases the barrier.
+    virtual void startTransport() {}
+
     ErrorInfo updateMultimodalFeatures(GenerateInput& input);
 
     ErrorInfo updateMultimodalFeatures(GenerateInput&            input,

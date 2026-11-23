@@ -18,6 +18,11 @@ from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
 )
+from rtp_llm.utils.scr.template_utils import (
+    ScrParticipantManifest,
+    arrive_scr_template_barrier,
+    is_scr_template_phase_active,
+)
 
 setup_logging()
 
@@ -38,6 +43,7 @@ def start_frontend_server(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     ready_flag=None,
+    scr_manifest: ScrParticipantManifest | None = None,
 ):
     _install_hot_hook_runtime(f"frontend_rank_{rank_id}_server_{server_id}")
     # Set rank_id and server_id on the passed config so port properties match this rank
@@ -70,8 +76,28 @@ def start_frontend_server(
         set_global_controller(global_controller)
         separated_frontend = py_env_configs.role_config.role_type == RoleType.FRONTEND
         app = FrontendApp(py_env_configs, separated_frontend)
+
+
+        def on_prebind() -> None:
+            if scr_manifest is None or not is_scr_template_phase_active():
+                return
+            # The launcher passes the world rank as rank_id, so it matches the
+            # participant id frozen in the manifest.
+            worker_id = scr_manifest.worker_id("frontend", f"{rank_id}:{server_id}")
+            result = arrive_scr_template_barrier(
+                worker_id=worker_id,
+                worker_num=scr_manifest.worker_num,
+                fail_closed=True,
+            )
+            logging.info(
+                "sCR frontend reached prebind arrival worker_id=%d worker_num=%d result=%r",
+                worker_id,
+                scr_manifest.worker_num,
+                result,
+            )
+
         app.startup_ready_flag = ready_flag
-        app.start()
+        app.start(on_prebind=on_prebind)
     except BaseException as e:
         logging.error(
             f"start frontend server error: {e}, trace: {traceback.format_exc()}"

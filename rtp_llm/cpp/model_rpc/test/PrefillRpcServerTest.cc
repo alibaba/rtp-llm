@@ -138,6 +138,10 @@ public:
         return nullptr;
     }
     void         enqueue(std::shared_ptr<GenerateStream>&) override {}
+    absl::Status startLoop() override {
+        return absl::OkStatus();
+    }
+
     absl::Status stop() override {
         return absl::OkStatus();
     }

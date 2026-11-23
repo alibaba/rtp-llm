@@ -2,8 +2,11 @@ import logging
 import multiprocessing
 import os
 import sys
+import tempfile
 import time
 import traceback
+from contextlib import contextmanager
+from typing import Iterator
 
 from rtp_llm.utils.prefill_supervisor import MODE_ENV as PREFILL_SUPERVISOR_MODE_ENV
 
@@ -44,6 +47,16 @@ from rtp_llm.utils.process_manager import (
     DEFER_FIRST_SIGTERM_VALUE,
     ProcessManager,
 )
+from rtp_llm.utils.scr.template_utils import ScrParticipantManifest
+from rtp_llm.utils.scr.template_utils import (
+    arrive_scr_template_barrier as arrive_scr_checkpoint_barrier,
+)
+from rtp_llm.utils.scr.template_utils import (
+    build_scr_participant_manifest,
+    get_scr_barrier_return_time,
+    is_scr_template_phase_active,
+)
+from rtp_llm.utils.signal_guard import ignore_sigpipe
 from rtp_llm.utils.warmup import configure_warmup
 
 setup_logging()
@@ -66,6 +79,59 @@ STARTUP_REAL_WARMUP_MAX_NEW_TOKENS = 1
 STARTUP_REAL_WARMUP_TOKEN_ID = 100
 
 
+def _build_scr_participant_manifest(
+    py_env_configs: PyEnvConfigs,
+) -> ScrParticipantManifest | None:
+    """Freeze the Epsilon quorum for all participating processes in this Pod.
+
+    Worker IDs are Pod-local. The controller must scope each rendezvous to a
+    single Pod, including when a deployment has multiple Pods.
+    """
+
+    # A feature-enabled normal serving process must not enter a template
+    # rendezvous or advertise participants before the controller selects a
+    # checkpoint/restore phase.
+    role = py_env_configs.role_config.role_type
+    # A standalone ViT Pod owns its own listeners and never enters Epsilon.
+    if role == RoleType.VIT or not is_scr_template_phase_active():
+        return None
+
+    participants: list[tuple[str, object]] = [("start_server", "0")]
+    if role != RoleType.FRONTEND:
+        # ViT separation describes the deployment. Prefill and decode still
+        # own their LLM ranks. The backend dispatches from this frozen plan.
+        pc = py_env_configs.parallelism_config
+        local_world_size = pc.local_world_size
+        if (
+            local_world_size <= 0
+            or pc.world_size % local_world_size
+            or pc.world_rank % local_world_size
+            or not 0 <= pc.world_rank < pc.world_size
+        ):
+            raise ValueError("SCR backend ranks require aligned Pod topology")
+        if local_world_size > 1:
+            participants.append(("backend_manager", "0"))
+        for world_rank in range(pc.world_rank, pc.world_rank + local_world_size):
+            participants.append(("backend_rank", str(world_rank)))
+
+    frontend_specs = [
+        (rank, server_id)
+        for rank in _iter_serving_world_ranks(py_env_configs)
+        for server_id in range(py_env_configs.server_config.frontend_server_count)
+    ]
+    for rank, server_id in frontend_specs:
+        participants.append(("frontend", f"{rank}:{server_id}"))
+        participants.append(("dash_sc", f"{rank}:{server_id}"))
+
+    manifest = build_scr_participant_manifest(participants)
+    logging.info(
+        "sCR unified process manifest frozen: worker_num=%d participants=%s",
+        manifest.worker_num,
+        dict(manifest.participant_ids),
+    )
+    return manifest
+
+
 class StartupRealWarmupAddressResolutionError(RuntimeError):
     pass
 
@@ -74,7 +140,10 @@ def check_server_health(server_port, path="/health"):
     try:
         import requests
 
-        response = requests.get(f"http://localhost:{server_port}{path}", timeout=60)
+        # Probe the local listener directly, including in proxy environments.
+        with requests.Session() as session:
+            session.trust_env = False
+            response = session.get(f"http://127.0.0.1:{server_port}{path}", timeout=60)
         health_ok = False
         if response.status_code == 200:
             try:
@@ -116,12 +185,15 @@ def start_backend_server_impl(
     global_controller,
     py_env_configs: PyEnvConfigs,
     process_manager: ProcessManager = None,
+    scr_manifest: ScrParticipantManifest | None = None,
 ):
     from rtp_llm.start_backend_server import start_backend_server
 
     # only for debug
     if py_env_configs.profiling_debug_logging_config.debug_load_server:
-        start_backend_server(global_controller, py_env_configs, None)
+        start_backend_server(
+            global_controller, py_env_configs, None, scr_manifest=scr_manifest
+        )
         os._exit(-1)
 
     # Create pipe for subprocess startup status communication
@@ -138,7 +210,13 @@ def start_backend_server_impl(
     try:
         backend_process = torch.multiprocessing.Process(
             target=start_backend_server,
-            args=(global_controller, py_env_configs, pipe_writer, os.getpid()),
+            args=(
+                global_controller,
+                py_env_configs,
+                pipe_writer,
+                os.getpid(),
+                scr_manifest,
+            ),
             name="backend_manager",
         )
         backend_process.start()
@@ -235,11 +313,25 @@ def _iter_serving_ranks(py_env_configs: PyEnvConfigs):
             )
 
 
+def _iter_serving_world_ranks(py_env_configs: PyEnvConfigs) -> Iterator[int]:
+    """Yield the world rank of every rank that hosts frontend/dash_sc."""
+    pc = py_env_configs.parallelism_config
+    local_world_size = pc.world_size
+    if "LOCAL_WORLD_SIZE" in os.environ:
+        local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
+    if local_world_size <= 0:
+        raise ValueError("local_world_size must be positive to enumerate serving ranks")
+    node_base = pc.world_rank // local_world_size * local_world_size
+    for local_rank in _iter_serving_ranks(py_env_configs):
+        yield node_base + local_rank
+
+
 @timer_wrapper(description="start dash_sc server")
 def start_dash_sc_server_impl(
     global_controller,
     py_env_configs: PyEnvConfigs,
     process_manager=None,
+    scr_manifest: ScrParticipantManifest | None = None,
 ):
     from rtp_llm.start_dash_sc_server import start_dash_sc_server
 
@@ -249,12 +341,14 @@ def start_dash_sc_server_impl(
 
     worker_specs = [
         (rank, server_id)
-        for rank in _iter_serving_ranks(py_env_configs)
+        for rank in _iter_serving_world_ranks(py_env_configs)
         for server_id in range(frontend_server_count)
     ]
     if not worker_specs:
         return dash_sc_processes
 
+    # The Epsilon barrier coordinates the complete process tree; this local
+    # barrier still coordinates DashSc listener binding among sibling workers.
     bind_barrier = multiprocessing.Barrier(len(worker_specs))
     for rank, server_id in worker_specs:
         pipe_reader, pipe_writer = multiprocessing.Pipe(duplex=False)
@@ -271,6 +365,7 @@ def start_dash_sc_server_impl(
                 py_env_configs,
                 pipe_writer,
                 bind_barrier,
+                scr_manifest,
             ),
             name=f"dash_sc_server_{rank}_{server_id}",
         )
@@ -326,6 +421,19 @@ def start_dash_sc_server_impl(
         )
 
     return dash_sc_processes
+
+
+@contextmanager
+def _vit_without_scr():
+    # Spawn imports modules before invoking the child entry point. Disable
+    # RTP-LLM template participation before spawning standalone ViT.
+    key = "RTPLLM_ENABLE_SCR"
+    saved = os.environ.pop(key, None)
+    try:
+        yield
+    finally:
+        if saved is not None:
+            os.environ[key] = saved
 
 
 @timer_wrapper(description="start vit server")
@@ -498,6 +606,7 @@ def start_frontend_server_impl(
     py_env_configs: PyEnvConfigs,
     process_manager=None,
     frontend_ready_flags=None,
+    scr_manifest: ScrParticipantManifest | None = None,
 ):
     from rtp_llm.start_frontend_server import start_frontend_server
 
@@ -523,8 +632,10 @@ def start_frontend_server_impl(
 
     # To reduce the number of frontend servers, we only start those with tp_rank=0;
     # however, since k8s needs to check machine heartbeat, rank 0 on each machine also needs to be started.
+    node_base = pc.world_rank // local_world_size * local_world_size
     for rank in range(local_world_size):
         for i in range(frontend_server_count):
+            world_rank = node_base + rank
             if rank == 0 or (pc.world_rank + rank) % pc.tp_size == 0:
                 logging.info(
                     f"[PROCESS_SPAWN]Start frontend server process rank_{rank}_server_{i} outer"
@@ -537,11 +648,12 @@ def start_frontend_server_impl(
                 process = multiprocessing.Process(
                     target=start_frontend_server,
                     args=(
-                        rank,
+                        world_rank,
                         i,
                         global_controller,
                         py_env_configs,
                         ready_flag,
+                        scr_manifest,
                     ),
                     name=f"frontend_server_{i}",
                 )
@@ -632,7 +744,7 @@ def _setup_startup_warmup_health_gate(py_env_configs: PyEnvConfigs, *, required=
         else None
     )
     gate_file = managed_gate or os.path.join(
-        "/tmp",
+        tempfile.gettempdir(),
         "rtp_llm_startup_warmup_ready_"
         f"{os.getpid()}_{int(py_env_configs.server_config.start_port)}",
     )
@@ -684,8 +796,38 @@ def _withdraw_readiness(gate_file):
         logging.exception("failed to withdraw Prefill readiness")
 
 
+def _start_parent_scr_arrival(
+    scr_manifest: ScrParticipantManifest | None,
+) -> int | None:
+    """Synchronously enter the same Epsilon quorum as every spawned process.
+
+    The parent has no listener to defer.  Waiting synchronously prevents the
+    parent from running health checks and marking the service ready before the
+    controller has captured the complete process tree.
+    """
+
+    if scr_manifest is None or not is_scr_template_phase_active():
+        return None
+    worker_id = scr_manifest.worker_id("start_server", "0")
+    result = arrive_scr_checkpoint_barrier(
+        worker_id=worker_id,
+        worker_num=scr_manifest.worker_num,
+        fail_closed=True,
+    )
+    logging.info(
+        "sCR parent reached pre-service arrival worker_id=%d worker_num=%d result=%r",
+        worker_id,
+        scr_manifest.worker_num,
+        result,
+    )
+    return result
+
+
 def main():
     _install_hot_hook_runtime("main")
+    # Ranks must survive a closed helper/RPC pipe: a SIGPIPE death here would
+    # still be captured by the checkpoint and break the restored process group.
+    ignore_sigpipe("at server start")
     py_env_configs: PyEnvConfigs = setup_args()
     setup_and_configure_server(py_env_configs)
     if os.environ.get(PREFILL_SUPERVISOR_MODE_ENV) == "worker":
@@ -708,6 +850,7 @@ def start_server(py_env_configs: PyEnvConfigs):
         py_env_configs.runtime_config.model_warm_up,
     )
     start_time = time.time()
+    barrier_return_time = None
     try:
         multiprocessing.set_start_method("spawn", force=True)
         torch.multiprocessing.set_start_method("spawn", force=True)
@@ -768,6 +911,15 @@ def start_server(py_env_configs: PyEnvConfigs):
         _role_is_prefill(py_env_configs)
         and os.environ.get(PREFILL_SUPERVISOR_MODE_ENV) == "worker"
     )
+    if (
+        is_scr_template_phase_active()
+        and py_env_configs.role_config.role_type != RoleType.VIT
+    ):
+        # Children derive local rank from the launcher-resolved topology.
+        os.environ["LOCAL_WORLD_SIZE"] = str(
+            py_env_configs.parallelism_config.local_world_size
+        )
+    scr_manifest = _build_scr_participant_manifest(py_env_configs)
     startup_warmup_gate_file = _setup_startup_warmup_health_gate(
         py_env_configs, required=supervise_readiness
     )
@@ -775,7 +927,8 @@ def start_server(py_env_configs: PyEnvConfigs):
     try:
         if py_env_configs.role_config.role_type == RoleType.VIT:
             logging.info("start vit server")
-            vit_processes = start_vit_server_impl(py_env_configs, process_manager)
+            with _vit_without_scr():
+                vit_processes = start_vit_server_impl(py_env_configs, process_manager)
             process_manager.add_processes(vit_processes)
 
         if (
@@ -785,7 +938,7 @@ def start_server(py_env_configs: PyEnvConfigs):
             # For backend server, vit_process_engine is None when vit is separated
             logging.info("start backend server")
             backend_process = start_backend_server_impl(
-                global_controller, py_env_configs, process_manager
+                global_controller, py_env_configs, process_manager, scr_manifest
             )
             process_manager.add_process(backend_process, shutdown_group="backend")
 
@@ -799,17 +952,26 @@ def start_server(py_env_configs: PyEnvConfigs):
                 frontend_ready_flags=(
                     frontend_ready_flags if supervise_readiness else None
                 ),
+                scr_manifest=scr_manifest,
             )
             process_manager.add_processes(frontend_process, shutdown_group="frontend")
 
             logging.info("start dash_sc server")
             dash_sc_processes = start_dash_sc_server_impl(
-                global_controller, py_env_configs, process_manager
+                global_controller, py_env_configs, process_manager, scr_manifest
             )
             if dash_sc_processes:
                 process_manager.add_processes(
                     dash_sc_processes, shutdown_group="frontend"
                 )
+
+        # All actual children now have stable identities.  The parent joins
+        # the same Epsilon wait_mode=1 quorum; no local UDS/barrier is needed.
+        _start_parent_scr_arrival(scr_manifest)
+        if scr_manifest is not None and is_scr_template_phase_active():
+            # Include runtime fixup/release, health checks and real warmup, but
+            # not the checkpoint's saved startup or the time spent in storage.
+            barrier_return_time = get_scr_barrier_return_time()
 
         # Start parallel health checks and wait for completion
         if not process_manager.run_health_checks():
@@ -830,8 +992,14 @@ def start_server(py_env_configs: PyEnvConfigs):
         logging.info(
             f"Backend RPC service is listening on 0.0.0.0, IP/IP range can be customized as needed"
         )
-        consume_s = time.time() - start_time
-        logging.info(f"start server took {consume_s:.2f}s")
+        if barrier_return_time is not None:
+            consume_s = time.monotonic() - barrier_return_time
+            logging.info(
+                f"start server took {consume_s:.2f}s (timing_scope=post_scr_barrier)"
+            )
+        else:
+            consume_s = time.time() - start_time
+            logging.info(f"start server took {consume_s:.2f}s")
     except Exception as e:
         logging.error(f"start failed, trace: {traceback.format_exc()}")
         # If a SIGTERM/SIGINT already triggered shutdown before this exception,

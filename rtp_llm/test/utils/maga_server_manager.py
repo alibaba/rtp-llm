@@ -5,7 +5,6 @@ import os
 import random
 import shlex
 import signal as signal_mod
-import socket
 import subprocess
 import sys
 import threading
@@ -155,6 +154,9 @@ class MagaServerManager(object):
         ptuning_path: Optional[str] = None,
         log_to_file: bool = True,
         timeout: int = 1600,
+        *,
+        wait_ready: bool = True,
+        server_module: str = "rtp_llm.start_server",
     ):
         if model_path is None:
             model_path = os.environ.get("CHECKPOINT_PATH")
@@ -269,6 +271,9 @@ class MagaServerManager(object):
             )
             self.stop_server()
             return False
+
+        if not wait_ready:
+            return True
 
         return self.wait_sever_done(timeout)
 

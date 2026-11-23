@@ -302,7 +302,6 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         }
         RTP_LLM_LOG_INFO("Prefill async scheduling enabled: one execution and one host preparation");
     }
-    step_profiler_.configureFromConfig(profiling_debug_logging_config);
     if (start_loop) {
         (void)startLoop();
     }
@@ -659,8 +658,7 @@ void NormalEngine::initializeAndPublishCacheManager(ResourceContext&            
     const auto& cache_config = cache_manager->cacheConfig();
     RTP_LLM_LOG_INFO("cache manager initialized with config %s", cache_config.debugString().c_str());
 
-    // Publish the cache state only after allocation, BlockTree/backend setup,
-    // and callback registration have all completed successfully.
+    // Publish the allocations only after the selected preparation has succeeded.
     kv_cache_group_num             = cache_config.groupNums();
     resource_context.cache_manager = std::move(cache_manager);
     resource_context.role_type     = role_type;
@@ -693,7 +691,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                      kv_cache_group_num_,
                                      pd_sep_config.role_type,
                                      std::move(cache_manager),
-                                     [](KVCacheManager& manager) { return manager.init(); });
+                                     [](KVCacheManager& manager) { return manager.prepare(); });
 }
 
 absl::Status NormalEngine::initSystemPrompt() {
@@ -715,6 +713,12 @@ KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_c
 }
 
 absl::Status NormalEngine::startLoop() {
+    if (!executor_) {
+        return absl::FailedPreconditionError("cannot start engine loop without an executor");
+    }
+    if (loop_thread_) {
+        return absl::OkStatus();
+    }
     if (!cpu_tp_shutdown_ && shouldCoordinateCpuTpShutdown(parallelism_config, ffn_disaggregate_config)) {
         CpuTpBroadcaster::instance().claimEngineSession(parallelism_config.tp_rank, parallelism_config.tp_size);
         cpu_tp_shutdown_ = true;
@@ -724,11 +728,16 @@ absl::Status NormalEngine::startLoop() {
     c10::DeviceGuard startup_device_guard(
         c10::Device(c10::kCUDA, static_cast<c10::DeviceIndex>(parallelism_config.local_rank)));
 #endif
+    if (!resource_context_.cache_manager->startServices()) {
+        return absl::InternalError("failed to start KV cache services");
+    }
     if (parallelism_config.tp_rank == 0) {
         RTP_LLM_LOG_INFO("start init system prompt");
         THROW_IF_STATUS_ERROR(initSystemPrompt());
         RTP_LLM_LOG_INFO("init system prompt done");
     }
+    // System prompts run on the constructor thread; keep Kineto on the engine loop.
+    step_profiler_.configureFromConfig(profiling_debug_logging_config);
     RTP_LLM_LOG_INFO("start normal engine loop");
     running_     = true;
     loop_thread_ = autil::Thread::createThread(std::bind(&NormalEngine::loop, this), "normal_engine_loop");
@@ -736,6 +745,10 @@ absl::Status NormalEngine::startLoop() {
 }
 
 absl::Status NormalEngine::stop() {
+    /** RPC shutdown releases the executor; the destructor can call stop again. */
+    if (!executor_) {
+        return absl::OkStatus();
+    }
     RTP_LLM_LOG_INFO("stop normal engine");
     running_                    = false;
     const auto scheduler_status = scheduler_->stop();

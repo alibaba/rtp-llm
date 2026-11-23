@@ -96,6 +96,7 @@ createFocusedEngine(int64_t max_context_batch_size = 128, int64_t max_batch_toke
     };
     auto engine                        = std::make_shared<EngineType>(params, nullptr);
     NormalExecutor::test_model_factory = nullptr;
+    THROW_IF_STATUS_ERROR(engine->startLoop());
     return engine;
 }
 

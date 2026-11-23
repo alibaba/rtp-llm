@@ -597,6 +597,14 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
             "kv_cache_event_snapshot_interval_ms must be positive when remote cache is disabled"
         )
 
+    # Native metrics and spawned workers must observe the CLI-resolved switch
+    # before model construction and service imports.
+    from rtp_llm.utils.scr.lifecycle import RTPLLM_ENABLE_SCR_ENV
+
+    os.environ[RTPLLM_ENABLE_SCR_ENV] = (
+        "1" if py_env_configs.server_config.enable_scr else "0"
+    )
+
     # Normalize the two switches before model construction and process spawn.
     from rtp_llm.utils.warmup import configure_warmup
 

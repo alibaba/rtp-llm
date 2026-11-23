@@ -5,7 +5,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, create_autospec, patch
+from unittest.mock import AsyncMock, Mock, create_autospec, patch
 
 from fastapi.responses import ORJSONResponse, StreamingResponse
 from fastapi.testclient import TestClient
@@ -216,6 +216,90 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         embedding_response = embedding_client.post("/v1/embeddings", json={})
         self.assertEqual(embedding_response.status_code, 503)
         self.assertEqual(embedding_response.headers.get("retry-after"), "1")
+
+    def test_ready_callback_runs_from_asgi_startup(self):
+        """Readiness callbacks must not be placed after blocking server.run."""
+        ready = []
+        app_owner = FrontendApp.__new__(FrontendApp)
+        app_owner.frontend_server = FakeFrontendServer()
+        app_owner.shutdown_manager = FrontendShutdownManager()
+        app_owner.separated_frontend = True
+        app_owner.server_config = SimpleNamespace(http_port=0)
+        app_owner.grpc_client = None
+        app_owner._on_ready = lambda: ready.append("ready")
+
+        with TestClient(app_owner.create_app()):
+            self.assertEqual(ready, ["ready"])
+
+    def test_prebind_callback_gates_tracing_and_http_bind(self):
+        events = []
+        app_owner = FrontendApp.__new__(FrontendApp)
+        app_owner.frontend_server = FakeFrontendServer()
+        app_owner.frontend_server.start = Mock(
+            side_effect=lambda: events.append("frontend_start")
+        )
+        app_owner.shutdown_manager = FrontendShutdownManager()
+        app_owner.separated_frontend = True
+        app_owner.server_config = SimpleNamespace(
+            ip="127.0.0.1",
+            server_port=18080,
+            frontend_server_id=0,
+            rank_id=0,
+            timeout_keep_alive=5,
+            shutdown_timeout=10,
+            frontend_pre_stop_drain_seconds=0,
+            pre_stop_drain_headroom_seconds=0,
+        )
+        app_owner.grpc_client = None
+        app_owner.create_app = Mock(
+            side_effect=lambda: events.append("create_app") or object()
+        )
+
+        sock = Mock()
+        sock.fileno.return_value = 42
+        sock.bind.side_effect = lambda *_args: events.append("bind")
+        socket_factory = Mock(
+            side_effect=lambda *_args, **_kwargs: events.append("socket") or sock
+        )
+        server = Mock()
+        prebind = lambda: events.append("prebind")
+
+        with patch(
+            "rtp_llm.frontend.frontend_app.init_telemetry",
+            side_effect=lambda *_args: events.append("tracing"),
+        ) as init_tracing, \
+            patch("rtp_llm.frontend.frontend_app.socket.socket", socket_factory), \
+            patch("rtp_llm.frontend.frontend_app.Config"), \
+            patch(
+                "rtp_llm.frontend.frontend_app.GracefulShutdownServer",
+                return_value=server,
+            ), \
+            patch(
+                "rtp_llm.frontend.frontend_app.get_uvicorn_logging_config",
+                return_value={},
+            ), \
+            patch("rtp_llm.frontend.frontend_app.gc.collect"), \
+            patch("rtp_llm.frontend.frontend_app.gc.freeze"):
+            with self.assertRaisesRegex(RuntimeError, "SCR restore failed"):
+                app_owner.start(
+                    on_prebind=Mock(side_effect=RuntimeError("SCR restore failed"))
+                )
+            socket_factory.assert_not_called()
+            app_owner.frontend_server.start.assert_not_called()
+            app_owner.create_app.assert_not_called()
+            init_tracing.assert_not_called()
+            server.run.assert_not_called()
+            events.clear()
+
+            app_owner.start(on_prebind=prebind)
+
+        self.assertEqual(
+            events,
+            ["prebind", "frontend_start", "create_app", "tracing", "socket", "bind"],
+        )
+        init_tracing.assert_called_once_with("frontend", 0)
+        socket_factory.assert_called_once()
+        server.run.assert_called_once_with()
 
     def test_pre_stop_unavailable_rejects_new_business(self):
         app_owner = FrontendApp.__new__(FrontendApp)
