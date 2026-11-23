@@ -240,10 +240,17 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
         stop_word_slice_list,
         is_streaming,
     ):
+        if status.compact_logprobs:
+            status.reasoning_logprob_text += delta_text
         text = status.delta_output_string + delta_text
+        original_length = len(text)
         text, should_buffer = self._process_stop_words(
             text, stop_words_str, stop_word_slice_list, is_streaming, status
         )
+        if status.compact_logprobs and len(text) < original_length:
+            removed = original_length - len(text)
+            status.reasoning_logprob_text = status.reasoning_logprob_text[:-removed]
+            status.reasoning_logprob_stopped = True
         status.delta_output_string = text if should_buffer else ""
         if should_buffer:
             return None
@@ -252,9 +259,15 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
             status.finish_reason = FinisheReason.stop
         if not events:
             return None
+        if status.compact_logprobs:
+            status.reasoning_logprob_ready_text = status.reasoning_logprob_text
         return OutputDelta(
             output_str=self._protocol_message(status, events),
-            logprobs=await self._generate_log_probs(status, output),
+            logprobs=(
+                None
+                if status.compact_logprobs
+                else await self._generate_log_probs(status, output)
+            ),
             input_length=output.aux_info.input_len,
             output_length=output.aux_info.output_len,
             reuse_length=output.aux_info.reuse_len,

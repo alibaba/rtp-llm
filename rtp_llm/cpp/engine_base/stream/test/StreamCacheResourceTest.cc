@@ -3435,6 +3435,7 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
         for (bool eos : {false, true}) {
             SCOPED_TRACE(::testing::Message() << "requested=" << requested << ", hybrid=" << hybrid << ", eos=" << eos
                                               << ", prompt_scores=" << prompt_scores);
+            const bool compact = hybrid && !requested;
             const std::string key = "first-token-outputs";
             ASSERT_NO_FATAL_FAILURE(prepareP2PRegistrationResource(true, key, hybrid));
             auto&      prefill_connector = *cache_manager_->p2p_connector_->prefill_;
@@ -3460,6 +3461,8 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
                 config.return_all_probs         = requested ? ReturnAllProbsMode::DEFAULT : ReturnAllProbsMode::NONE;
                 config.calculate_loss           = requested ? 2 : 0;
                 config.return_prompt_logits     = prompt_scores;
+                config.return_logprobs          = compact;
+                config.top_logprobs             = compact ? 1 : 0;
                 ModelConfig model;
                 model.max_seq_len                  = 32;
                 model.vocab_size                   = 16;
@@ -3507,11 +3510,14 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
                              .loss              = requested ? loss : torch::Tensor{},
                              .all_hidden_states = all_hidden,
                              .prompt_logits     = prompt_scores ? std::make_optional(scores) : std::nullopt,
-                             .generation_prefill_cuda_graph_status = graph_status});
+                             .generation_prefill_cuda_graph_status = graph_status,
+                             .token_logprobs        = compact ? torch::full({1, 1}, -0.5f) : torch::Tensor{},
+                             .top_logprob_token_ids = compact ? torch::full({1, 1, 1}, 7, torch::kInt32) : torch::Tensor{},
+                             .top_logprobs          = compact ? torch::full({1, 1, 1}, -0.5f) : torch::Tensor{}});
             ASSERT_FALSE(prefill->hasError());
             PrefillResultStore::SideChannelData published;
             ASSERT_TRUE(prefill_connector.stream_store_->takePrefillPayload(key, published));
-            EXPECT_EQ(published.first_token_tensors.size(), requested ? 7u : 0u);
+            EXPECT_EQ(published.first_token_tensors.size(), (requested ? 7u : 0u) + (compact ? 3u : 0u));
             EXPECT_EQ(published.multimodal_lengths, (std::map<int, int>{{1, 4}, {2, 2}}));
             EXPECT_EQ(published.prefill_use_independent_block_pools, hybrid);
             EXPECT_EQ(published.prompt_logits.has_value(), prompt_scores);
@@ -3552,6 +3558,14 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
             ASSERT_EQ(output_result.value().generate_outputs.size(), 1u);
             const auto& output = output_result.value().generate_outputs.front();
             EXPECT_EQ(output.output_ids.item<int32_t>(), 7);
+            ASSERT_EQ(output.token_logprobs.has_value(), compact);
+            ASSERT_EQ(output.top_logprob_token_ids.has_value(), compact);
+            ASSERT_EQ(output.top_logprobs.has_value(), compact);
+            if (compact) {
+                EXPECT_FLOAT_EQ(output.token_logprobs->item<float>(), -0.5f);
+                EXPECT_EQ(output.top_logprob_token_ids->item<int32_t>(), 7);
+                EXPECT_FLOAT_EQ(output.top_logprobs->item<float>(), -0.5f);
+            }
             EXPECT_EQ(decode->generateInput()->multimodalLengths(), published.multimodal_lengths);
             // A handoff must retain existing cache hits without counting newly transferred KV.
             EXPECT_EQ(decode->initialReuseLength(), local_prefix);

@@ -137,6 +137,7 @@ message GenerateConfigPB {
     bool enable_remote_cache = 53;
     string unique_key = 54;
     reserved 55;
+    reserved "response_format";
     google.protobuf.Int32Value group_timeout = 56;
     string profile_trace_name = 57;
     // 生成式推荐：组合 token 粒度去重与曝光过滤
@@ -168,6 +169,8 @@ message GenerateConfigPB {
     bool prefill_only = 76;
     bool frontend_metric_streaming = 77;
     google.protobuf.Int32Value logits_index = 78;
+    uint32 top_logprobs = 79;
+    bool return_logprobs = 80;
 }
 
 message MMPreprocessConfigPB {
@@ -376,6 +379,11 @@ message FlattenOutputPB {
     PromptLogitsOutputPB prompt_logits = 9;
     // Output of the deployment-registered post-layers CustomHandler.
     TensorPB custom_output = 10;
+    TensorPB token_logprobs = 11;
+    TensorPB top_logprob_token_ids = 12;
+    TensorPB top_logprobs = 13;
+    repeated int32 logprobs_offsets = 14;
+    repeated int32 logprobs_counts = 15;
 }
 
 message GenerateOutputsPB {

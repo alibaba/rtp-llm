@@ -1177,6 +1177,23 @@ TEST_F(NormalEngineTest, testPrefillTimelineFromActualForward) {
               times.prefill_forward_time_us - times.scheduler_enqueue_time_us);
 }
 
+TEST_F(NormalEngineTest, testPipelineParallelismRejectsCompactLogprobsBeforeScheduling) {
+    auto engine = createMockEngine(CustomConfig{});
+    ASSERT_TRUE(engine->stop().ok());
+    engine->parallelism_config.pp_size = 2;
+    auto query                              = make_shared<GenerateInput>();
+    query->input_ids                        = torch::tensor({1, 2}, torch::kInt32);
+    query->generate_config                  = make_shared<GenerateConfig>();
+    query->generate_config->return_logprobs = true;
+
+    auto stream = engine->makeStream(query);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_EQ(engine->getScheduler().onflightStreams(), 0);
+    query->generate_config->return_logprobs  = false;
+    query->generate_config->return_all_probs = ReturnAllProbsMode::DEFAULT;
+    EXPECT_FALSE(engine->makeStream(query)->hasError());
+}
+
 TEST_F(NormalEngineTest, testDecodeRoleRejectsPrefillOnlyBeforeScheduling) {
     CustomConfig config;
     config.role_type = RoleType::DECODE;
