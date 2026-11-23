@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import com.google.protobuf.ByteString;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EncoderEndpoint;
@@ -707,15 +708,19 @@ class RequestRegistryTest {
 
     @Test
     void cancelRequiresTheExpectedBatchGenerationAndUnknownIdsStayAbsent() {
-        CompletableFuture<Response> future = lifecycle.register(context(501L));
+        var ctx = context(501L);
+        ctx.setGenerateInputPb(ByteString.copyFromUtf8("still queued"));
+        CompletableFuture<Response> future = lifecycle.register(ctx);
 
         assertNull(lifecycle.cancelRequest("999", 0L, CancelReason.CLIENT_CANCELLED));
         assertNull(lifecycle.cancelRequest("501", 91L, CancelReason.CLIENT_CANCELLED));
         assertFalse(future.isDone());
+        assertNotNull(ctx.getGenerateInputPb());
 
         RequestState exact = lifecycle.cancelRequest("501", 0L, CancelReason.CLIENT_CANCELLED);
         assertNotNull(exact);
         assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), future.join().getCode());
+        assertNull(ctx.getGenerateInputPb());
     }
 
     @Test

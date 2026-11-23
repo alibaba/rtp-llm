@@ -136,9 +136,10 @@ public class RouteService {
                     new IllegalStateException(
                             "RequestScheduler is required for the configured scheduling path"));
         }
-        if (balanceContext.getRequestPhase() != RequestPhase.ENCODER
-                && balanceContext.getConfig().getDispatcher().requiresGenerateInput()
-                && !hasValidGenerateInput(balanceContext)) {
+        boolean requiresGenerateInput =
+                balanceContext.getRequestPhase() != RequestPhase.ENCODER
+                        && balanceContext.getConfig().getDispatcher().requiresGenerateInput();
+        if (requiresGenerateInput && !hasValidGenerateInput(balanceContext)) {
             Logger.warn(
                     "{} dispatcher rejected request without serialized generate input: request_id={}",
                     balanceContext.getConfig().getDispatcher().typeName(),
@@ -147,6 +148,9 @@ public class RouteService {
                     Response.buildErrorResponse(
                             StrategyErrorType.GENERATE_INPUT_REQUIRED,
                             "missing serialized generate_input for batch dispatch"));
+        }
+        if (!requiresGenerateInput) {
+            balanceContext.setGenerateInputPb(null);
         }
         return submitScheduled(balanceContext);
     }
