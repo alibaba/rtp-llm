@@ -421,6 +421,9 @@ public final class FlexlbConfigValidator {
                 "must be at least twice statusRpcTimeoutMs");
         require(workers.getCacheStatus() != null, "workerRegistry.cacheStatus", "is required");
         positive(
+                workers.getCacheStatus().getDiffParallelism(),
+                "workerRegistry.cacheStatus.diffParallelism");
+        positive(
                 workers.getCacheStatus().getTargetDiffSize(),
                 "workerRegistry.cacheStatus.targetDiffSize");
         positive(

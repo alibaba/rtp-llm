@@ -2,6 +2,8 @@ package org.flexlb.cache.match.localsync;
 
 import org.flexlb.cache.domain.DiffResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.RoleType;
@@ -49,15 +51,14 @@ class KvCacheManagerTest {
 
     @Test
     void engineLocalViewCreatesPoolForDiffAndClosesItOnShutdown() {
-        EngineLocalView view = new EngineLocalView();
-        ReflectionTestUtils.setField(
-                view, "dynamicIntervalManager", mock(DynamicCacheIntervalService.class));
+        EngineLocalView view = localViewWithParallelism(1);
         assertNull(ReflectionTestUtils.getField(view, "customPool"));
 
         try {
             assertEquals(
                     Set.of(11L), view.calculateDiff("10.0.0.1:8080", Set.of(11L)).getAddedBlocks());
             ForkJoinPool pool = (ForkJoinPool) ReflectionTestUtils.getField(view, "customPool");
+            assertEquals(1, pool.getParallelism());
             view.shutdown();
             assertTrue(pool.isShutdown());
             assertThrows(
@@ -70,7 +71,7 @@ class KvCacheManagerTest {
 
     @Test
     void diffFallsBackWhenPoolClosesBeforeSubmission() {
-        EngineLocalView view = new EngineLocalView();
+        EngineLocalView view = localViewWithParallelism(8);
         ForkJoinPool closingPool =
                 new ForkJoinPool(1) {
                     @Override
@@ -80,8 +81,6 @@ class KvCacheManagerTest {
                     }
                 };
         ReflectionTestUtils.setField(view, "customPool", closingPool);
-        ReflectionTestUtils.setField(
-                view, "dynamicIntervalManager", mock(DynamicCacheIntervalService.class));
         try {
             view.addOrUpdateCacheBlock("engine", 11L);
 
@@ -260,23 +259,19 @@ class KvCacheManagerTest {
 
     private KvCacheManager kvCacheManagerWithRealIndexes() {
         KvCacheManager manager = new KvCacheManager();
-        EngineLocalView localView = new EngineLocalView();
-        ReflectionTestUtils.setField(
-                localView,
-                "dynamicIntervalManager",
-                new DynamicCacheIntervalService() {
-                    @Override
-                    public void updateDiffStatistics(int diffSize) {}
-
-                    @Override
-                    public long getCurrentIntervalMs() {
-                        return 0;
-                    }
-                });
+        EngineLocalView localView = localViewWithParallelism(8);
         ReflectionTestUtils.setField(manager, "globalCacheIndex", new GlobalCacheIndex());
         ReflectionTestUtils.setField(manager, "engineLocalView", localView);
         ReflectionTestUtils.setField(manager, "workerStatusProvider", workerStatusProvider);
         ReflectionTestUtils.setField(manager, "cacheMetricsReporter", cacheMetricsReporter);
         return manager;
+    }
+
+    private static EngineLocalView localViewWithParallelism(int parallelism) {
+        FlexlbConfig config = new FlexlbConfig();
+        config.getWorkerRegistry().getCacheStatus().setDiffParallelism(parallelism);
+        ConfigService configService = mock(ConfigService.class);
+        when(configService.loadBalanceConfig()).thenReturn(config);
+        return new EngineLocalView(configService, mock(DynamicCacheIntervalService.class));
     }
 }

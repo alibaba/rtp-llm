@@ -32,6 +32,7 @@ public final class WorkerRegistryConfig {
     @Setter
     public static final class CacheStatusConfig {
         private int targetDiffSize = 30;
+        private int diffParallelism = 8;
         private long minRefreshIntervalMs = 50;
         private long maxRefreshIntervalMs = 3000;
         private boolean fullSnapshotDebugMode;

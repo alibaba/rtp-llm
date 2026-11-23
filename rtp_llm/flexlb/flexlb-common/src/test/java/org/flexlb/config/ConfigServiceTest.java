@@ -184,6 +184,7 @@ class ConfigServiceTest {
         assertEquals(3000L, health.getCleanupIntervalMs());
         var cache = config.getWorkerRegistry().getCacheStatus();
         assertEquals(30, cache.getTargetDiffSize());
+        assertEquals(8, cache.getDiffParallelism());
         assertEquals(50L, cache.getMinRefreshIntervalMs());
         assertEquals(3000L, cache.getMaxRefreshIntervalMs());
         assertFalse(cache.isFullSnapshotDebugMode());
@@ -286,7 +287,7 @@ class ConfigServiceTest {
                       "cacheAffinity":{"maxExtraTtftMs":25,"minPrefixHitPercent":10}},
                       "decode":{"availability":{"maxKvUsagePercent":85,"maxEngineRequests":128}}}},
                   "workerRegistry":{"health":{"statusPollIntervalMs":25},
-                    "cacheStatus":{"minRefreshIntervalMs":100,"maxRefreshIntervalMs":2000}},
+                    "cacheStatus":{"minRefreshIntervalMs":100,"maxRefreshIntervalMs":2000,"diffParallelism":2}},
                   "observability":{"cacheHit":{"recentKeyWindow":{"durationMs":60000,"maxKeyOccurrences":100000},
                     "requestTraceLogEnabled":true,"theoryLog":{}}}
                 }
@@ -296,6 +297,7 @@ class ConfigServiceTest {
         assertTrue(
                 config.priorityOrdering().getPreemption().allows(VictimStage.DECODE_ENGINE_OWNED));
         assertEquals(12, config.fixedWindowDecision().getMaxRequests());
+        assertEquals(2, config.getWorkerRegistry().getCacheStatus().getDiffParallelism());
         assertEquals(90L, config.fixedWindowDecision().getMaxPredictedExecutionMs());
         assertEquals(4, config.getDispatcher().getMaxInflightPerPrefillWorker());
         assertEquals(
@@ -727,6 +729,9 @@ class ConfigServiceTest {
             assertThrows(
                     ConfigValidationException.class, () -> ConfigTestFixtures.parse(patch), patch);
         }
+        assertInvalid(
+                "{\"workerRegistry\":{\"cacheStatus\":{\"diffParallelism\":0}}}",
+                "workerRegistry.cacheStatus.diffParallelism");
         assertInvalid(
                 "{\"router\":{\"roles\":{\"prefill\":{\"executionTimeEstimator\":{\"expression\":\"sum(unknownTokens)\"}}}}}",
                 "expression");
