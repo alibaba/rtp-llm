@@ -82,9 +82,8 @@ std::shared_ptr<const LinearPrefillPlan> borrowedLinearPrefillPlan(
     const GroupBase& group,
     const std::shared_ptr<CPSlotMapper>& mapper,
     std::optional<int64_t> reused_tokens = std::nullopt) {
-    if (malloc_info.linear_prefill_prompt_tokens <= 0 || !malloc_info.reuse_cache
-        || malloc_info.pd_decode_linear_tail_only
-        || config.reuse_cache_tail_blocks == std::numeric_limits<int>::max()
+    if (malloc_info.linear_prefill_prompt_tokens <= 0 || malloc_info.pd_decode_linear_tail_only
+        || (malloc_info.reuse_cache && config.reuse_cache_tail_blocks == std::numeric_limits<int>::max())
         || !group.supportsBorrowedLinearPrefill(config.seq_size_per_block)
         || malloc_info.batch_kv_cache_resource->batchSize() != 1) {
         return nullptr;
@@ -92,9 +91,10 @@ std::shared_ptr<const LinearPrefillPlan> borrowedLinearPrefillPlan(
     const auto& existing = malloc_info.batch_kv_cache_resource->cacheResource(0).blockIds(group.tag).linearPrefillPlan();
     const auto reused = reused_tokens.value_or(existing ? existing->reusedTokens() : 0);
     const auto checkpoint_tokens = group.seqSizePerBlock() * (mapper && mapper->isSharded() ? mapper->cpSize() : 1);
-    return std::make_shared<LinearPrefillPlan>(malloc_info.linear_prefill_prompt_tokens,
-                                               group.seqSizePerBlock(), checkpoint_tokens,
-                                               config.reuse_cache_tail_blocks, reused);
+    // Without prefix reuse, the request tail holds the state for every chunk.
+    const auto tail_checkpoints = malloc_info.reuse_cache ? config.reuse_cache_tail_blocks : 0;
+    return std::make_shared<LinearPrefillPlan>(
+        malloc_info.linear_prefill_prompt_tokens, group.seqSizePerBlock(), checkpoint_tokens, tail_checkpoints, reused);
 }
 
 RequiredPositions chunkCachePositions(const MallocInfo& malloc_info,
@@ -1342,7 +1342,11 @@ void CoordinatorCacheManager::reclaimLinearHistory(const BatchKVCacheResourcePtr
         }
         const auto& group = kv_cache_groups_[static_cast<size_t>(group_id)];
         const auto& ids = resource->cacheResource(0).blockIds(group->tag());
-        size_t      end = std::min(group->historyReclaimEnd(committed_tokens), ids.blocksNum());
+        if (ids.linearPrefillPlan()) {
+            ends.push_back(0);
+            continue;
+        }
+        size_t end = std::min(group->historyReclaimEnd(committed_tokens), ids.blocksNum());
         if (reuse_cache) {
             end = std::min(end, keys.size());
         }
@@ -1970,6 +1974,7 @@ void CoordinatorCacheManager::rollbackInitMalloc(BatchKVCacheResource&          
                 referenced_blocks[static_cast<size_t>(group_id)]);
         }
         block_ids.resize(0);
+        block_ids.setLinearPrefillPlan(nullptr);
     }
     kv_resource.cacheResource(0).setDeviceReuseBlockNum(0);
 }

@@ -218,15 +218,19 @@ bool StreamCacheResource::copyChunkKernelBlocks(int batch, const std::string& ta
 }
 
 void StreamCacheResource::completeLinearPrefillChunk(int completed_tokens) {
-    if (resource_context_.role_type != RoleType::PREFILL || !reuseCache()
-        || resource_context_.cache_manager->cacheConfig().reuse_cache_tail_blocks == std::numeric_limits<int>::max()) {
+    if (!stream_->chunkedPrefillEnabled()) {
         return;
     }
+    const bool trace_last_n = linear_prefill_trace::enabled() && reuseCache();
     for (int batch = 0; batch < batch_kv_cache_resource_->batchSize(); ++batch) {
         for (const auto& tag : batch_kv_cache_resource_->cacheResource(batch).groupTags()) {
-            auto& ids = batch_kv_cache_resource_->mutableBlockIds(batch, tag);
-            if (linear_prefill_trace::enabled() && ids.linearPrefillPlan()) {
-                const auto round = ids.linearPrefillPlan()->round(stream_->prefixLength(), stream_->currentChunkLen());
+            auto&       ids  = batch_kv_cache_resource_->mutableBlockIds(batch, tag);
+            const auto& plan = ids.linearPrefillPlan();
+            if (!plan) {
+                continue;
+            }
+            if (trace_last_n) {
+                const auto round = plan->round(stream_->prefixLength(), stream_->currentChunkLen());
                 std::ostringstream fields;
                 fields << "\"request_id\":" << stream_->streamId() << ",\"batch\":" << batch
                        << ",\"group_tag\":" << linear_prefill_trace::quote(tag)
@@ -368,11 +372,7 @@ int StreamCacheResource::estimatePeakNeedBlocks(int                seq_len,
                                                                    target_batch_size,
                                                                    linearCachePolicy(target_batch_size),
                                                                    pool_tag,
-                                                                   resource_context_.role_type == RoleType::PREFILL
-                                                                        && stream_->isContextStream()
-                                                                        && stream_->chunkedPrefillEnabled()
-                                                                        && !stream_->isFakeStream() ?
-                                                                        stream_->inputLength() : 0);
+                                                                   linearPrefillPromptTokens(reuseCache()));
 }
 
 LinearCachePolicy StreamCacheResource::linearCachePolicy(int target_batch_size) const {
@@ -384,6 +384,14 @@ LinearCachePolicy StreamCacheResource::linearCachePolicy(int target_batch_size) 
     }
     return canReclaimLinearHistory(target_batch_size) ? LinearCachePolicy::RECLAIM_COMMITTED :
                                                         LinearCachePolicy::KEEP_HISTORY;
+}
+
+int StreamCacheResource::linearPrefillPromptTokens(bool reuse_cache) const {
+    const auto role = resource_context_.role_type;
+    return (role == RoleType::PREFILL || (role == RoleType::PDFUSION && !reuse_cache))
+                   && stream_->isContextStream() && stream_->chunkedPrefillEnabled() && !stream_->isFakeStream()
+                   && !pd_decode_linear_tail_only_ ?
+               stream_->inputLength() : 0;
 }
 
 void StreamCacheResource::publishReuseLengths(int total, int host, int disk, int backend) {
@@ -440,10 +448,7 @@ absl::Status StreamCacheResource::initKVBlock() {
     malloc_info.pd_decode_linear_tail_only  = pd_decode_linear_tail_only_;
     malloc_info.max_chunk_tokens =
         stream_->chunkedPrefillEnabled() && stream_->isContextStream() ? stream_->maxChunkSize() : 0;
-    if (resource_context_.role_type == RoleType::PREFILL && stream_->isContextStream()
-        && stream_->chunkedPrefillEnabled() && !stream_->isFakeStream()) {
-        malloc_info.linear_prefill_prompt_tokens = stream_->inputLength();
-    }
+    malloc_info.linear_prefill_prompt_tokens = linearPrefillPromptTokens(malloc_info.reuse_cache);
 
     MallocResult result = resource_context_.cache_manager->malloc(malloc_info);
     recordCacheReuseMallocResult(result);
@@ -470,7 +475,7 @@ absl::Status StreamCacheResource::initKVBlock() {
     // HOST/DISK reuse is published after the asynchronous load completes.
     publishReuseLengths(result.reuse_len, 0, 0, 0);
     allocator_load_context_ = std::move(result.async_context);
-    if (!allocator_load_context_) {
+    if (!allocator_load_context_ && malloc_info.reuse_cache) {
         traceLinearPrefillAllocation(*batch_kv_cache_resource_, stream_->streamId(),
                                       resource_context_.cache_manager->cacheConfig().reuse_cache_tail_blocks);
     }
@@ -606,8 +611,10 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
         return absl::DeadlineExceededError("match-to-ready deadline exceeded");
     }
     if (malloc_status == MallocStatus::NONE) {
-        traceLinearPrefillAllocation(*batch_kv_cache_resource_, stream_->streamId(),
-                                      resource_context_.cache_manager->cacheConfig().reuse_cache_tail_blocks);
+        if (reuseCache()) {
+            traceLinearPrefillAllocation(*batch_kv_cache_resource_, stream_->streamId(),
+                                          resource_context_.cache_manager->cacheConfig().reuse_cache_tail_blocks);
+        }
         if (load_context && (load_success || load_context->localLoadSucceeded())) {
             traceLinearCacheLoaded(*load_context, *resource_context_.cache_manager,
                                     stream_->streamId(), stream_->initialReuseLength());

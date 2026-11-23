@@ -7434,7 +7434,12 @@ static void verifyChunkedPrefillWithoutCrossRequestReuse(RoleType role_type) {
             config.max_seq_len           = 1 << 20;
             config.max_batch_tokens_size = 1 << 20;
             config.prefill_chunk_size    = 49152;
-            const auto cache_config      = makeChunkedCpHybridCache();
+            auto cache_config = makeChunkedCpHybridCache();
+            auto groups       = cache_config.groups();
+            for (auto& group : groups) {
+                group.policy.prefill_borrow_tail = group.policy.group_type == CacheGroupType::LINEAR;
+            }
+            cache_config.setTopology(std::move(groups), cache_config.topology().layers());
             ChunkSchedulerTestEnv<SchedulerType> env(config, cache_config, makeChunkedCpParallelism());
             // Keep a real cache tier enabled so disabling reuse must suppress both matching and publication.
             env.resource_context.enable_device_cache = true;
@@ -7471,11 +7476,12 @@ static void verifyChunkedPrefillWithoutCrossRequestReuse(RoleType role_type) {
                                 EXPECT_GT(pool->refCount(table[begin - 1]), 0u);
                                 EXPECT_NE(std::find(owned.begin(), owned.end(), table[begin - 1]), owned.end());
                             }
-                            for (size_t pos = begin; pos <= tail; ++pos) {
-                                ASSERT_GT(table[pos], 0);
-                                EXPECT_GT(pool->refCount(table[pos]), 0u);
-                                EXPECT_NE(std::find(owned.begin(), owned.end(), table[pos]), owned.end());
-                                EXPECT_NE(table[pos], previous_tails[group_id]);
+                            ASSERT_EQ(std::count_if(owned.begin(), owned.end(), [](auto id) { return id > 0; }), 1);
+                            ASSERT_GT(owned.back(), 0);
+                            EXPECT_EQ(table[tail], owned.back());
+                            EXPECT_GT(pool->refCount(table[tail]), 0u);
+                            for (size_t pos = begin; pos < tail; ++pos) {
+                                EXPECT_TRUE(isNullBlockIdx(table[pos]));
                             }
                             previous_tails[group_id] = table[tail];
                         }
@@ -7483,6 +7489,35 @@ static void verifyChunkedPrefillWithoutCrossRequestReuse(RoleType role_type) {
                     stream->update(makeSingleTokenUpdate(3));
                     ASSERT_FALSE(stream->hasError());
                     prefix += chunk_len;
+                }
+                if (role_type == RoleType::PDFUSION && !stream->streamCacheResource().reuseCache()) {
+                    // The aligned prompt forces the first Decode token onto a new page.
+                    for (int step = 0; step < 2; ++step) {
+                        auto decode = env.scheduler().schedule();
+                        ASSERT_TRUE(decode.ok()) << decode.status();
+                        ASSERT_EQ(decode->streams.size(), 1u);
+                        ASSERT_EQ(decode->streams.front().get(), stream.get());
+                        ASSERT_FALSE(stream->isContextStream());
+                        ASSERT_EQ(stream->seqLength(), prefix + step + 1);
+                        for (size_t group_id = 0; group_id < cache_config.groups().size(); ++group_id) {
+                            const auto& group = cache_config.groups()[group_id];
+                            if (group.policy.group_type != CacheGroupType::LINEAR) {
+                                continue;
+                            }
+                            const auto& table = stream->kvCachePtr()->kernelBlocks(0, group.tag);
+                            const size_t input_page = (stream->seqLength() - 2) / group.seqSizePerBlock();
+                            const size_t output_page = (stream->seqLength() - 1) / group.seqSizePerBlock();
+                            ASSERT_LT(output_page, table.size());
+                            EXPECT_EQ(table[input_page], previous_tails[group_id]);
+                            ASSERT_GT(table[output_page], 0);
+                            if (step == 0) {
+                                EXPECT_NE(table[input_page], table[output_page]);
+                            }
+                            previous_tails[group_id] = table[output_page];
+                        }
+                        stream->update(makeSingleTokenUpdate(4 + step));
+                        ASSERT_FALSE(stream->hasError());
+                    }
                 }
                 ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
                 auto reaped = env.scheduler().schedule();
@@ -7510,7 +7545,8 @@ static void verifyChunkedPrefillWithoutCrossRequestReuse(RoleType role_type) {
             env.resource_context.reuse_cache = global_reuse;
             for (const int prompt_token : {1, 2}) {
                 SCOPED_TRACE(testing::Message() << "prompt_token=" << prompt_token);
-                auto stream = env.makeStream(std::vector<int>(131072, prompt_token), 1);
+                auto stream = env.makeStream(std::vector<int>(131072, prompt_token),
+                                             role_type == RoleType::PDFUSION ? 3 : 1);
                 stream->generateConfig()->reuse_cache = request_reuse;
                 // Token 1 has a reusable prefix; token 2 has none. Both must run
                 // every chunk, retain LINEAR states, and leave the shared cache unchanged.

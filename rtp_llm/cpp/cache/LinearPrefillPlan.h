@@ -36,7 +36,7 @@ public:
         page_tokens_(page_tokens),
         checkpoint_tokens_(checkpoint_tokens),
         reused_tokens_(reused_tokens) {
-        if (prompt_tokens <= 0 || page_tokens <= 0 || checkpoint_tokens <= 0 || tail_checkpoints <= 0
+        if (prompt_tokens <= 0 || page_tokens <= 0 || checkpoint_tokens <= 0 || tail_checkpoints < 0
             || checkpoint_tokens % page_tokens != 0 || reused_tokens < 0 || reused_tokens >= prompt_tokens
             || reused_tokens % checkpoint_tokens != 0) {
             throw std::invalid_argument("invalid LINEAR prefill checkpoint geometry or reuse boundary");
@@ -54,7 +54,9 @@ public:
     int64_t pageTokens() const { return page_tokens_; }
     int64_t checkpointTokens() const { return checkpoint_tokens_; }
     int64_t borrowedPosition() const { return (prompt_tokens_ - 1) / page_tokens_; }
-    bool hasSeparateTail() const { return prompt_tokens_ % checkpoint_tokens_ != 0; }
+    bool hasSeparateTail() const {
+        return checkpoint_positions_.empty() || prompt_tokens_ % checkpoint_tokens_ != 0;
+    }
     const std::vector<int64_t>& checkpointPositions() const { return checkpoint_positions_; }
 
     // Existing prefix state is an independent read-only hold. Missing slots in

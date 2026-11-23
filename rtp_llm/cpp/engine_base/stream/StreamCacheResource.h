@@ -196,6 +196,7 @@ public:
 
 private:
     LinearCachePolicy linearCachePolicy(int target_batch_size) const;
+    int               linearPrefillPromptTokens(bool reuse_cache) const;
     void         clearCacheReuseState();
     void         recordCacheReuseMallocResult(const MallocResult& result);
     void         publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);
