@@ -36,6 +36,8 @@ from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
 class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
     local_cache_tier: LocalCacheTier = "device"
+    extra_prefill_args: str = ""
+    probe_options = {}
 
     def setUp(self):
         self.model_path = Path(os.environ["T07_FOUR_LAYER_CHECKPOINT"])
@@ -184,6 +186,7 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
                     "trace_dir": str(self.trace_dir),
                     "trace_case": "four_layer",
                     "function_hooks": function_hooks,
+                    **self.probe_options,
                 }
             )
         )
@@ -194,6 +197,11 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
         self.prefill = MagaServerManager(
             env_args={
                 **common_env,
+                **(
+                    {"kmonitorEnableLogFileSink": "true"}
+                    if self.probe_options.get("segment_capture")
+                    else {}
+                ),
                 "REMOTE_SERVER_PORT": decode_port,
                 "RTP_HOT_HOOK": "1",
                 "RTP_HOT_HOOK_CONFIG": str(hook_config),
@@ -214,7 +222,11 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
                     else ""
                 ),
                 "RTP_LLM_PREFIX_CACHE_OBSERVABILITY": (
-                    "true" if ac02 or f800_writer_fault else "false"
+                    "true"
+                    if ac02
+                    or f800_writer_fault
+                    or self.probe_options.get("segment_capture")
+                    else "false"
                 ),
             },
             device_ids=cards[:1],
@@ -223,6 +235,7 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
             smoke_args_str=(
                 common_args
                 + local_cache_args(self.local_cache_tier, self.output_dir)
+                + self.extra_prefill_args
                 + " --role_type PREFILL --enable_cuda_graph 0"
                 + " --enable_prefill_partial_tail_reuse "
                 + (
@@ -330,6 +343,17 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
         )
         response_end_ns = time.time_ns()
         (self.output_dir / f"{label}.http.txt").write_text(response.text)
+        (self.output_dir / f"{label}.http.meta.json").write_text(
+            json.dumps(
+                {
+                    "label": label,
+                    "status_code": response.status_code,
+                    "request_start_unix_ns": request_start_ns,
+                    "response_end_unix_ns": response_end_ns,
+                },
+                indent=2,
+            )
+        )
         if expect_error:
             try:
                 error = response.json()

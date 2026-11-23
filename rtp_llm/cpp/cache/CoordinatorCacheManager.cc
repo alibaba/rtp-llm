@@ -117,6 +117,11 @@ int requestReserveStep(const MallocInfo& info) {
 RequiredPositions chunkCachePositions(const MallocInfo& malloc_info, const GroupBase& group) {
     RequiredPositions positions;
     const int         seq_len = requestIncrSeqLength(malloc_info);
+    // Shared chunk state has no history bank, but forward still needs its current
+    // write slot, including after restoring an endpoint with zero pending state.
+    if (group.policy.shared_chunk_state && seq_len > 0) {
+        positions.insert((static_cast<size_t>(seq_len) - 1) / group.seqSizePerBlock());
+    }
     const auto        count   = group.chunkCacheBlockCount(
         seq_len, malloc_info.max_chunk_tokens, malloc_info.reuse_cache, requestReserveStep(malloc_info));
     if (count > 0) {
@@ -1501,8 +1506,8 @@ void CoordinatorCacheManager::prepareRegisteredSave(PrefixCacheRegistration& reg
                 const auto&  group = config_.group(tag);
                 const size_t resume_slot =
                     resume_endpoint == 0 ? 0 : config_.endpointBlockPosition(tag, resume_endpoint);
-                if (resume_endpoint > 0 && resume_endpoint % config_.globalSizePerBlock(group.tag) != 0
-                    && slot == resume_slot) {
+                if (resume_endpoint > 0 && !group_set->hasZeroStateDemand(resume_endpoint)
+                    && resume_endpoint % config_.globalSizePerBlock(group.tag) != 0 && slot == resume_slot) {
                     auto source_it =
                         std::find_if(registration.source_pins.begin(),
                                      registration.source_pins.end(),

@@ -20,6 +20,8 @@
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
+#include "rtp_llm/cpp/cache/PrefixCacheRegistration.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/KVCacheMetrics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
@@ -2339,6 +2341,140 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4HCAStateReuseEnabledAllocatesT
     EXPECT_TRUE(isNullBlockIdx(hca_blocks[8]));
     EXPECT_FALSE(isNullBlockIdx(hca_blocks[9]));
     EXPECT_EQ(hca_free_before - poolForTag(*allocator, "hca_state")->freeBlocksNum(), 1u);
+}
+
+TEST_F(HybridPoolCoordinatorCacheManagerTest, HostAlignedHcaResumeAllocatesSuffixWriteWithoutHistoricalState) {
+    CacheConfig config;
+    config.dtype                      = DataType::TYPE_FP16;
+    config.layer_num                  = 2;
+    config.seq_size_per_block         = 256;
+    config.cache_min_replay_tokens    = 1;
+    auto full                         = makeResolvedMhaSpec(config.dtype, 1, 1, 256, "full");
+    auto state                        = makeResolvedOpaqueSpec(true, "hca_state", DataType::TYPE_FP32, 512, 256);
+    auto state_policy                 = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    state_policy.shared_chunk_state   = true;
+    state_policy.sliding_window_size  = 128;
+    state_policy.active_tail_blocks   = 1;
+    state_policy.validate_tail_blocks = false;
+    state_policy.reuse_mode           = CacheReuseMode::PRECISE_ONLY;
+    config.fromGroupedSpecs({full, state},
+                            {{0}, {1}},
+                            {CacheGroupType::FULL, CacheGroupType::SWA},
+                            {"full", "hca_state"},
+                            {defaultCacheGroupPolicy(CacheGroupType::FULL), state_policy});
+    config.setGroupBlockLayout(
+        {"full", "hca_state"}, {8, 8}, {full->block_size_bytes(), state->block_size_bytes()}, {0, 0});
+    auto          allocator = makeAllocator(config, RoleType::PREFILL);
+    KVCacheConfig options;
+    options.enable_memory_cache               = true;
+    options.memory_cache_size_mb              = 1;
+    options.enable_prefill_partial_tail_reuse = true;
+    allocator->setBlockTreeCacheConfigForTest(options);
+    ASSERT_TRUE(allocator->init());
+    const auto cache = allocator->blockTreeCacheOwner();
+    ASSERT_EQ(cache->groupSets().size(), 2u);
+    const auto hca = cache->groupSets()[1];
+    ASSERT_TRUE(hca->hasZeroStateDemand(128));
+    auto       tokens = makeCompleteTokenIds(1, 133, 256);
+    const auto source = block_tree_cache_test::allocateDeviceBlocksForTest(*cache->groupSets()[0], 1);
+    ASSERT_EQ(source.size(), 1u);
+    std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(2));
+    resources[0][0].device_blocks = source.front();
+    auto prefix                   = tokens->completeTokenIdsVec(0);
+    prefix.resize(128);
+    const std::vector<std::vector<int>> segments{prefix};
+    const std::vector<size_t>           ends{128};
+    cache->insert({cacheKeyAtTokenEnd(*tokens, 0, 256, 128)},
+                  resources,
+                  Tier::HOST,
+                  false,
+                  &segments,
+                  nullptr,
+                  &ends,
+                  std::nullopt,
+                  true);
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+    block_tree_cache_test::unreferenceDeviceBlocksForTest(*cache->groupSets()[0], source);
+
+    auto runtime = makeBatchResource(1, config);
+    initCacheKeys(runtime, tokens, 256);
+    auto layout       = std::make_shared<MallocInfo::RequestLayout>(*snapshotGlobalCacheRequest(*runtime, *tokens));
+    layout->token_ids = tokens->completeTokenIdsVec(0);
+    layout->original_input_tokens = 133;
+    layout->partial_tail_reuse    = true;
+    MallocInfo info{runtime, tokens};
+    info.request_layout               = layout;
+    info.enable_remove_skipped_blocks = false;
+    const auto   hca_pool             = poolForTag(*allocator, "hca_state");
+    const size_t free_hca             = hca_pool->freeBlocksNum();
+    const auto   held                 = block_tree_cache_test::allocateDeviceBlocksForTest(*hca, free_hca);
+    ASSERT_EQ(held.size(), free_hca);
+    const auto denied = allocator->malloc(info);
+    EXPECT_FALSE(denied.success);
+    EXPECT_EQ(denied.status, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED);
+    EXPECT_EQ(runtime->curBlocksNum(), 0u);
+    block_tree_cache_test::unreferenceDeviceBlocksForTest(*hca, held);
+    const auto result = allocator->malloc(info);
+    ASSERT_TRUE(result.success);
+    ASSERT_NE(result.async_context, nullptr);
+    result.async_context->waitDone();
+    ASSERT_TRUE(result.async_context->success());
+    const auto load = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
+    ASSERT_NE(load, nullptr);
+    EXPECT_EQ(load->matchedTokenEndpoint(), 128u);
+    EXPECT_EQ(load->matchedTokens(Tier::HOST), 128u);
+    for (const auto& desc : load->loadDescs()) {
+        EXPECT_NE(desc.group_set_id, hca->groupSetId());
+    }
+    ASSERT_EQ(runtime->blocks(0, "hca_state").size(), 1u);
+    EXPECT_FALSE(isNullBlockIdx(runtime->blocks(0, "hca_state")[0]));
+
+    PrefixCacheRegistration registration;
+    registration.original_input_tokens       = 133;
+    registration.token_ids                   = tokens->completeTokenIdsVec(0);
+    registration.base_keys                   = runtime->cacheKeys(0);
+    registration.required_continuation_ready = true;
+    PrefixCacheRegistrationPoint point;
+    point.endpoint.pos   = 133;
+    point.endpoint.index = 0;
+    point.endpoint.key   = cacheKeyAtTokenEnd(*tokens, 0, 256, 133);
+    for (const auto& group : cache->groupSets()) {
+        PrefixCacheGroupSaveBinding binding;
+        binding.group_set_id = group->groupSetId();
+        point.group_bindings.push_back(std::move(binding));
+    }
+    registration.points.push_back(std::move(point));
+    allocator->prepareRegisteredSave(registration, *runtime, 128, tokens.get());
+    const auto& binding = registration.points[0].group_bindings[1];
+    EXPECT_EQ(binding.state, PrefixCacheSaveState::REGISTERED) << binding.unfulfilled_reason;
+    EXPECT_TRUE(binding.resource.hasCompleteDeviceValue());
+    for (const auto& mapping : registration.copy_mappings) {
+        EXPECT_NE(mapping.tag, "hca_state");
+    }
+    allocator->releaseRegisteredSave(registration);
+    allocator->free({runtime, tokens});
+    EXPECT_EQ(hca_pool->freeBlocksNum(), free_hca);
+
+    // Even a suffix ending at an empty accumulator boundary needs writable state
+    // during forward; it does not acquire any historical state from HOST.
+    auto aligned_tokens  = makeCompleteTokenIds(1, 256, 256);
+    auto aligned_runtime = makeBatchResource(1, config);
+    initCacheKeys(aligned_runtime, aligned_tokens, 256);
+    auto aligned_layout =
+        std::make_shared<MallocInfo::RequestLayout>(*snapshotGlobalCacheRequest(*aligned_runtime, *aligned_tokens));
+    aligned_layout->token_ids             = aligned_tokens->completeTokenIdsVec(0);
+    aligned_layout->original_input_tokens = 256;
+    aligned_layout->partial_tail_reuse    = true;
+    MallocInfo aligned_info{aligned_runtime, aligned_tokens};
+    aligned_info.request_layout               = aligned_layout;
+    aligned_info.enable_remove_skipped_blocks = false;
+    const auto aligned                        = allocator->malloc(aligned_info);
+    ASSERT_TRUE(aligned.success);
+    EXPECT_EQ(aligned.reuse_len, 128u);
+    EXPECT_TRUE(hca->hasZeroStateDemand(256));
+    EXPECT_FALSE(isNullBlockIdx(aligned_runtime->blocks(0, "hca_state")[0]));
+    allocator->free({aligned_runtime, aligned_tokens});
+    EXPECT_EQ(hca_pool->freeBlocksNum(), free_hca);
 }
 
 TEST_F(HybridPoolCoordinatorCacheManagerTest, TokenAggregatorsIgnoreSmallHCAStatePool) {

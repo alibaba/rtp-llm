@@ -29,6 +29,7 @@ from rtp_llm.test.smoke.local_tier_restore_probe import (
 
 _source_ids: dict[tuple[int, str], torch.Tensor] = {}
 _source_rows: dict[tuple[int, str], dict[str, torch.Tensor]] = {}
+_segment_prime_rows: dict[tuple[int, str], dict[str, torch.Tensor]] = {}
 _sequence = 0
 _decode_sequence = 0
 _private_fork_cache = None
@@ -358,6 +359,7 @@ class _ReferenceCache:
         cp_mode=False,
         cp_size=1,
         independent=False,
+        registered_prefix=False,
     ):
         self.group_tags = list(production.group_tags)
         self.layer_count = int(production.layer_count)
@@ -407,7 +409,7 @@ class _ReferenceCache:
                 )
                 if independent:
                     continue
-                if cp_mode or resume_endpoint == 1300:
+                if registered_prefix or cp_mode or resume_endpoint == 1300:
                     self._seed_registered_prefix(key, table)
                 else:
                     self._seed_prefix(key, table)
@@ -493,6 +495,8 @@ class _ReferenceCache:
         physical = self.get_seq_size_per_block(tag)
         pages = physical // self.get_kernel_seq_size_per_block(tag)
         endpoint = self._resume_endpoint
+        if tag == "hca_state" and endpoint % 128 == 0:
+            return
         global_last_slot = (endpoint - 1) // physical
         # FULL pages are round-robin owned by CP ranks; each rank's table
         # contains only its local pages. Fixed STATE/SWA tables retain global
@@ -518,19 +522,31 @@ class _ReferenceCache:
                 destination_id = int(table[0, column])
                 if destination_id <= 0:
                     continue
+                page_source = source
+                if (
+                    tag in DSV4_KERNEL_ROW_TAGS
+                    and slot == last_slot
+                    and key in _segment_prime_rows
+                ):
+                    selected = source["save_block_ids"].reshape(-1)[
+                        source["save_positions"].reshape(-1) == endpoint
+                    ]
+                    if selected.numel() == 1 and int(selected[0]) == -1:
+                        page_source = _segment_prime_rows[key]
                 source_id = (
                     saved_id * pages + offset
                     if slot == last_slot and saved_id is not None
-                    else int(source["runtime_table"][0, column])
+                    else int(page_source["runtime_table"][0, column])
                 )
                 if source_id <= 0:
                     raise AssertionError(
                         f"missing A CP prefix column {key} column={column}"
                     )
-                self._copy_source_row(key, source_id, destination_id)
+                self._copy_source_row(key, source_id, destination_id, page_source)
 
-    def _copy_source_row(self, key, source_id, destination_id):
-        source = _source_rows[key]
+    def _copy_source_row(self, key, source_id, destination_id, source=None):
+        if source is None:
+            source = _source_rows[key]
         source_row = torch.nonzero(source["ids"] == source_id).reshape(-1)
         if source_row.numel() != 1:
             raise RuntimeError(f"missing A1300 source row {key} id={source_id}")
@@ -715,6 +731,7 @@ def _run_direct_reference(ctx, directory, end_position):
         cp_mode=cp_mode,
         cp_size=cp_size,
         independent=resume_endpoint == 0,
+        registered_prefix=bool(ctx.runtime.config.get("segment_capture", False)),
     )
     args = list(ctx.args)
     args[1] = reference
@@ -931,7 +948,7 @@ def _run_private_fork_reference(ctx, directory, end_position, resume_endpoint):
 
 
 def after_forward_layers(ctx):
-    global _sequence, _source_production_cache
+    global _sequence, _source_production_cache, _source_rows, _segment_prime_rows
 
     _finish_forward_cost()
 
@@ -946,11 +963,25 @@ def after_forward_layers(ctx):
     end_position = _end_position(ctx)
     source_end, fork_at, b_resume = _private_fork_geometry(cp_mode)
     resume = int(ctx.kwargs["attn_inputs"].prefix_lengths.reshape(-1)[0])
-    source_capture = end_position in (1025, 1300) or (
-        os.environ.get("T10_PRIVATE_FORK_REFERENCE") == "1"
-        and (resume, end_position) == (0, source_end)
+    segment_capture = bool(ctx.runtime.config.get("segment_capture", False))
+    previous_source_rows = dict(_source_rows)
+    source_capture = (
+        (
+            segment_capture
+            and (
+                resume == 0
+                or end_position
+                == ctx.runtime.config.get("segment_capture_resumed_source")
+            )
+            and end_position in ctx.runtime.config["segment_source_ends"]
+        )
+        or end_position in (1025, 1300)
+        or (
+            os.environ.get("T10_PRIVATE_FORK_REFERENCE") == "1"
+            and (resume, end_position) == (0, source_end)
+        )
     )
-    if end_position not in (
+    if not segment_capture and end_position not in (
         768,
         800,
         1025,
@@ -1172,6 +1203,20 @@ def after_forward_layers(ctx):
             )
             (directory / error_name).write_text(traceback.format_exc())
             raise
+    if segment_capture:
+        if (
+            source_capture
+            and resume == 0
+            and ctx.runtime.config.get("segment_capture_resumed_source")
+        ):
+            _segment_prime_rows = dict(_source_rows)
+        captured_source_rows = _source_rows
+        if source_capture and resume > 0:
+            _source_rows = previous_source_rows
+        try:
+            _run_direct_reference(ctx, directory, end_position)
+        finally:
+            _source_rows = captured_source_rows
     if os.environ.get("T10_F800_FATAL_COLD_REFERENCE") == "1" and (
         resume,
         end_position,

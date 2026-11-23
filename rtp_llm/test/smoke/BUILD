@@ -981,3 +981,73 @@ custom_smoke_test(
     tags = ["manual", "local_precise_reuse"],
     data = _LOCAL_PRECISE_REUSE_DATA,
 )
+
+custom_smoke_test(
+    name = "segment_0731_device",
+    main = "segment_0731_test.py",
+    args = ["device", "1", "full", "2048"],
+    smoke_args = "--world_size 2 --tp_size 1 --ep_size 1 --dp_size 1 --max_seq_len 2048",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual", "segment_0731"],
+    data = _LOCAL_PRECISE_REUSE_DATA + ["segment_0731_tokens.json"],
+)
+
+custom_smoke_test(
+    name = "segment_0731_host",
+    main = "segment_0731_test.py",
+    args = ["host", "1", "full", "2048"],
+    smoke_args = "--world_size 2 --tp_size 1 --ep_size 1 --dp_size 1 --max_seq_len 2048",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual", "segment_0731"],
+    data = _LOCAL_PRECISE_REUSE_DATA + ["segment_0731_tokens.json"],
+)
+
+custom_smoke_test(
+    name = "segment_0731_disk",
+    main = "segment_0731_test.py",
+    args = ["disk", "1", "full", "2048"],
+    smoke_args = "--world_size 2 --tp_size 1 --ep_size 1 --dp_size 1 --max_seq_len 2048",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual", "segment_0731"],
+    data = _LOCAL_PRECISE_REUSE_DATA + ["segment_0731_tokens.json"],
+)
+
+custom_smoke_test(
+    name = "segment_0731_cp4_host",
+    main = "segment_0731_test.py",
+    args = ["host", "4", "full", "2048"],
+    smoke_args = "--world_size 4 --tp_size 1 --ep_size 1 --dp_size 1 --max_seq_len 2048",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual", "segment_0731"],
+    data = _LOCAL_PRECISE_REUSE_DATA + ["segment_0731_tokens.json"],
+)
+
+custom_smoke_test(
+    name = "segment_0731_cp4_disk",
+    main = "segment_0731_test.py",
+    args = ["disk", "4", "full", "2048"],
+    smoke_args = "--world_size 4 --tp_size 1 --ep_size 1 --dp_size 1 --max_seq_len 2048",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual", "segment_0731"],
+    data = _LOCAL_PRECISE_REUSE_DATA + ["segment_0731_tokens.json"],
+)
+
+custom_smoke_test(
+    name = "segment_0731_demote_host",
+    main = "segment_0731_demotion_test.py",
+    args = ["host", "1", "full", "2048"],
+    smoke_args = "--world_size 2 --tp_size 1 --ep_size 1 --dp_size 1 --max_seq_len 2048",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual", "segment_0731"],
+    data = _LOCAL_PRECISE_REUSE_DATA + ["segment_0731_tokens.json", "segment_0731_test.py"],
+)
+
+custom_smoke_test(
+    name = "segment_0731_demote_disk",
+    main = "segment_0731_demotion_test.py",
+    args = ["disk", "1", "full", "2048"],
+    smoke_args = "--world_size 2 --tp_size 1 --ep_size 1 --dp_size 1 --max_seq_len 2048",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual", "segment_0731"],
+    data = _LOCAL_PRECISE_REUSE_DATA + ["segment_0731_tokens.json", "segment_0731_test.py"],
+)

@@ -69,6 +69,7 @@ class DeepSeekV4TailReuseFourLayerCP4Test(DeepSeekV4TailReuseFourLayerTest):
                     "dump_dir": str(self.probe_dir),
                     "trace_dir": str(self.trace_dir),
                     "trace_case": "four_layer_cp4",
+                    **self.probe_options,
                     "function_hooks": [
                         {
                             "target": "rtp_llm.models_py.modules.dsv4.prefill.forward.forward_layers",
@@ -90,6 +91,14 @@ class DeepSeekV4TailReuseFourLayerCP4Test(DeepSeekV4TailReuseFourLayerTest):
         )
         self.prefill = MagaServerManager(
             env_args={
+                **(
+                    {
+                        "kmonitorEnableLogFileSink": "true",
+                        "RTP_LLM_PREFIX_CACHE_OBSERVABILITY": "true",
+                    }
+                    if self.probe_options.get("segment_capture")
+                    else {}
+                ),
                 "LOAD_PYTHON_MODEL": "1",
                 "LOG_LEVEL": "INFO",
                 "FT_SERVER_TEST": "1",
@@ -123,6 +132,7 @@ class DeepSeekV4TailReuseFourLayerCP4Test(DeepSeekV4TailReuseFourLayerTest):
                 " --role_type PREFILL --enable_cuda_graph 0"
                 " --cp_rotate_method ALL_GATHER --enable_prefill_partial_tail_reuse 1"
                 + local_cache_args(self.local_cache_tier, self.output_dir, self.cp_size)
+                + self.extra_prefill_args
             ),
         )
         self.addCleanup(self.prefill.stop_server)
@@ -132,7 +142,7 @@ class DeepSeekV4TailReuseFourLayerCP4Test(DeepSeekV4TailReuseFourLayerTest):
             )
         )
 
-    def _request_cp4(self, label: str, prompt: str):
+    def _request_cp4(self, label: str, prompt: str, reuse: bool = True):
         before_probe = set(self.probe_dir.glob("prefill_rank*_*.pt"))
         before_trace = set(self.trace_dir.glob("four_layer_cp4/rank*_step*.pt"))
         query = {
@@ -144,7 +154,7 @@ class DeepSeekV4TailReuseFourLayerCP4Test(DeepSeekV4TailReuseFourLayerTest):
                 "top_k": 1,
                 "top_p": 1.0,
                 "random_seed": 7,
-                "reuse_cache": True,
+                "reuse_cache": reuse,
                 "enable_device_cache": True,
                 "enable_memory_cache": False,
                 "enable_disk_cache": False,
@@ -161,6 +171,17 @@ class DeepSeekV4TailReuseFourLayerCP4Test(DeepSeekV4TailReuseFourLayerTest):
         )
         response_end_ns = time.time_ns()
         (self.output_dir / f"{label}.http.txt").write_text(response.text)
+        (self.output_dir / f"{label}.http.meta.json").write_text(
+            json.dumps(
+                {
+                    "label": label,
+                    "status_code": response.status_code,
+                    "request_start_unix_ns": request_start_ns,
+                    "response_end_unix_ns": response_end_ns,
+                },
+                indent=2,
+            )
+        )
         response.raise_for_status()
         actual = response.json()
         self.assertNotIn("error_code", actual, actual)
