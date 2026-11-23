@@ -8,15 +8,15 @@
 #include <functional>
 #include <initializer_list>
 #include <memory>
+#include <mutex>
+#include <stdexcept>
 #include <optional>
 #include <string>
 #include <utility>
-#include <variant>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSetResource.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBufferSafety.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
 
@@ -117,52 +117,19 @@ inline ErrorInfo transferStatusToErrorInfo(TransferStatus status) {
     }
     return ErrorInfo(ErrorCode::UNKNOWN_ERROR, "unknown block transfer status");
 }
-enum class TransferRpcDispatchState {
-    NOT_SUBMITTED,
-    POSSIBLY_SUBMITTED,
-    SUBMITTED
-};
+struct TransferCompletionKey {
+    enum class LegacyWireField { NONE, TRANSFER_TRACE_ID, KVCM_TRACE_ID };
 
-// Preserve the existing execution identity and its namespace: ordinary transfer
-// uses a numeric trace, while KVCM READ uses the original string from its request.
-using TransferExecutionTrace = std::variant<uint64_t, std::string>;
+    std::string trace_id;
+    LegacyWireField legacy_wire_field{LegacyWireField::NONE};
 
-inline bool validTransferExecutionTrace(const TransferExecutionTrace& trace) noexcept {
-    if (const auto* numeric = std::get_if<uint64_t>(&trace)) {
-        return *numeric != 0;
-    }
-    const auto* remote = std::get_if<std::string>(&trace);
-    return remote && !remote->empty();
-}
+    TransferCompletionKey() = default;
+    TransferCompletionKey(uint64_t id):
+        trace_id(id == 0 ? std::string{} : std::to_string(id)), legacy_wire_field(LegacyWireField::TRANSFER_TRACE_ID) {}
+    TransferCompletionKey(std::string id, LegacyWireField legacy_field = LegacyWireField::NONE):
+        trace_id(std::move(id)), legacy_wire_field(legacy_field) {}
 
-// A snapshot of one participant in one actual execution. A missing status is
-// unknown, never an implicit successful RPC. Local executions have remote=false.
-struct TransferRankSnapshot {
-    size_t                        rank{0};
-    std::string                   server_address;
-    bool                          remote{true};
-    TransferRpcDispatchState      dispatch_state{TransferRpcDispatchState::NOT_SUBMITTED};
-    std::string                   dispatch_error;
-    bool                          cq_received{false};
-    bool                          cq_ok{false};
-    std::optional<int>            grpc_code;
-    std::string                   grpc_message;
-    bool                          response_received{false};
-    bool                          response_valid{false};
-    std::string                   response_error;
-    std::optional<int64_t>        worker_error_code;
-    std::string                   worker_error_message;
-    std::optional<CacheCopyError> worker_copy_error;
-    std::vector<CacheCopyError>   block_errors;
-    std::optional<bool>           buffer_safe;
-    std::optional<int>            worker_transfer_status;
-    std::optional<bool>           sdk_failed;
-};
-
-struct TransferExecutionDiagnostics {
-    TransferExecutionTrace            trace_id{uint64_t{0}};
-    std::string                       failure_reason;
-    std::vector<TransferRankSnapshot> ranks;
+    bool operator==(const TransferCompletionKey& other) const { return trace_id == other.trace_id; }
 };
 
 // Results are ordered like the task's descriptors; NONE means the target copy completed,
@@ -193,6 +160,10 @@ struct TransferResult {
 
     bool ok() const {
         return status.ok();
+    }
+
+    bool checkNeedFreeze() const noexcept {
+        return !buffer_safe;
     }
 
     // Completion evidence must survive failure to allocate the diagnostic itself.
@@ -253,10 +224,7 @@ struct TransferResult {
     // False means unproven, not necessarily in-flight. Business success, error
     // codes and NOT_EXECUTED diagnostics never implicitly grant this proof.
     bool buffer_safe{false};
-    // Leaf execution diagnostics belong to this exact trace. The coordinator
-    // captures them before merging into a parent task; merge() never conflates
-    // snapshots belonging to different executions.
-    std::shared_ptr<const TransferExecutionDiagnostics> execution_diagnostics;
+    std::vector<size_t> still_io_worker_ids;
 };
 
 struct DeviceHostCopyTemplate {
@@ -446,6 +414,72 @@ private:
     size_t                    size_{0};
 };
 
+class TransferBufferSafety {
+public:
+    explicit TransferBufferSafety(std::function<void()> safe_callback): safe_callback_(std::move(safe_callback)) {}
+
+    bool bufferSafe() const noexcept {
+        return reported_.load(std::memory_order_acquire);
+    }
+
+    void report(bool buffer_safe) noexcept {
+        if (!buffer_safe || reported_.exchange(true, std::memory_order_acq_rel)) {
+            return;
+        }
+        auto callback = std::move(safe_callback_);
+        if (callback) {
+            callback();
+        }
+    }
+
+private:
+    std::atomic<bool>     reported_{false};
+    std::function<void()> safe_callback_;
+};
+
+class TransferBufferSafetyTracker {
+public:
+    explicit TransferBufferSafetyTracker(std::function<void()> safe_callback):
+        safe_callback_(std::move(safe_callback)) {}
+
+    void addBatch() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (submitting_finished_) {
+            throw std::logic_error("cannot add a transfer batch after submission finished");
+        }
+        ++remaining_;
+    }
+
+    void finishSubmitting() noexcept {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (submitting_finished_)
+                return;
+            submitting_finished_ = true;
+        }
+        completeBatch();
+    }
+
+    void completeBatch() noexcept {
+        std::function<void()> callback;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (--remaining_ == 0) {
+                callback.swap(safe_callback_);
+            }
+        }
+        if (callback) {
+            callback();
+        }
+    }
+
+private:
+    std::mutex            mutex_;
+    size_t                remaining_{1};
+    bool                  submitting_finished_{false};
+    std::function<void()> safe_callback_;
+};
+
 // Task descriptors are immutable and shared across RPC transport and local batching.
 // Copies share storage; subtasks select a contiguous range without copying it.
 class TransferTask {
@@ -553,24 +587,6 @@ public:
         task.begin_ += begin;
         task.end_              = begin_ + end;
         task.completion_proof_ = std::move(proof);
-        return task;
-    }
-
-    // Construction gives each independently submitted RPC batch a new trace ID
-    // as its execution identity. Nested worker batches inherit that trace ID
-    // through subtask(), while the workflow links independent RPC batches.
-    TransferTask rpcSubtask(std::vector<TransferDescriptor> descriptors) const {
-        return subtask(std::move(descriptors)).rpcSubtask();
-    }
-
-    // Each independently submitted RPC has its own execution identity while
-    // retaining the descriptor range and the absolute deadline.
-    TransferTask rpcSubtask() const {
-        auto task = *this;
-        task.completion_proof_.reset();
-        task.trace_id_        = next_trace_id_.fetch_add(1, std::memory_order_relaxed);
-        task.workflow_id_     = workflow_id_;
-        task.parent_trace_id_ = trace_id_;
         return task;
     }
 

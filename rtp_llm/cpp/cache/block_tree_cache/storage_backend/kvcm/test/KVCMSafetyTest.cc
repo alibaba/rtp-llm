@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 
 #include <cuda_runtime.h>
@@ -259,14 +260,14 @@ TEST(KVCMSafetyTest, BroadcastWaitClassifiesDeadlineAndRpcFailureBeforeFreezing)
             EXPECT_FALSE(timeout);
             EXPECT_EQ(exception.reason(), StorageQuarantineReason::RPC_ERROR);
         }
-        ASSERT_EQ(backend->frozenTasks().size(), 1u);
+        ASSERT_EQ(backend->reclaimer_->frozen_.size(), 1u);
         ASSERT_EQ(environment.device_pool->treeRefCount(environment.block_id), 1u);
         const auto error = readStatus(*backend.backend, makeStorageRequest(environment), matched.match_meta);
         EXPECT_EQ(error.code(), timeout ? ErrorCode::DEADLINE_EXCEEDED : ErrorCode::EXECUTION_EXCEPTION);
         EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
         // Direct readImpl and asynchronous read are distinct executions and
         // retain separate holds even when they target the same physical block.
-        EXPECT_EQ(backend->frozenTasks().size(), 2u);
+        EXPECT_EQ(backend->reclaimer_->frozen_.size(), 2u);
         EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 2u);
         EXPECT_EQ(environment.device_pool->refCount(environment.block_id), 2u);
         EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
@@ -287,7 +288,7 @@ TEST(KVCMSafetyTest, RejectedBroadcastHasNoSubmittedWorkersAndDoesNotFreeze) {
     EXPECT_EQ(readStatus(*backend.backend, makeStorageRequest(environment), matched.match_meta).code(),
               ErrorCode::EXECUTION_EXCEPTION);
     EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
-    EXPECT_TRUE(backend->frozenTasks().empty());
+    EXPECT_TRUE(backend->reclaimer_->frozen_.empty());
     EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 0u);
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), 1u);
 }

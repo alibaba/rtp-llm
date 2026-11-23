@@ -29,6 +29,8 @@
 namespace rtp_llm {
 namespace {
 
+using block_transfer_engine_test::bufferSafeResult;
+
 kmonitor::MetricsTags stageTags(const char* stage, const char* source, bool success) {
     kmonitor::MetricsTags tags("operation", "load");
     tags.AddTag("source_tier", source);
@@ -110,10 +112,10 @@ public:
         const bool result = results_.front();
         results_.pop_front();
         if (result) {
-            return std::make_shared<CompletedTransferAsyncContext>(ErrorInfo::OkStatus());
+            return std::make_shared<CompletedTransferAsyncContext>(bufferSafeResult());
         }
         return std::make_shared<CompletedTransferAsyncContext>(
-            ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "submission failed"));
+            bufferSafeResult(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "submission failed")));
     }
 
     std::vector<std::vector<TransferDescriptor>> batches_;
@@ -136,7 +138,7 @@ public:
             released = released_;
         }
         if (released) {
-            context->complete(ErrorInfo::OkStatus());
+            context->complete(bufferSafeResult());
         }
         return context;
     }
@@ -156,7 +158,7 @@ public:
             contexts  = contexts_;
         }
         for (const auto& context : contexts) {
-            context->complete(ErrorInfo::OkStatus());
+            context->complete(bufferSafeResult());
         }
     }
 
@@ -361,8 +363,8 @@ TEST_P(ConcurrentLoadTaskRunnerTest, BothDirectionsSubmitAndDrainBeforeCompletio
     EXPECT_EQ(engine->batches_[1].front().source_tier, Tier::DISK);
     const auto finish = [&](size_t index) {
         const bool success = index == 0 ? host_success : disk_success;
-        engine->contexts_[index]->complete(success ? ErrorInfo::OkStatus() :
-                                                     ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "copy failed"));
+        const auto status = success ? ErrorInfo::OkStatus() : ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "copy failed");
+        engine->contexts_[index]->complete(bufferSafeResult(status));
     };
     finish(host_first ? 0 : 1);
     EXPECT_FALSE(result.has_value());
@@ -398,8 +400,8 @@ TEST_P(ConcurrentLoadTaskRunnerTest, PreservesStageMetricsAndReportsOnlyTheSucce
     ASSERT_EQ(engine->contextCount(), 2u);
     const auto finish = [&](size_t index) {
         const bool success = index == 0 ? host_success : disk_success;
-        engine->contexts_[index]->complete(success ? ErrorInfo::OkStatus() :
-                                                     ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "copy failed"));
+        const auto status = success ? ErrorInfo::OkStatus() : ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "copy failed");
+        engine->contexts_[index]->complete(bufferSafeResult(status));
     };
     finish(host_first ? 0 : 1);
     EXPECT_EQ(completions, 0u);
@@ -554,7 +556,7 @@ TEST(LoadTaskRunnerTest, SimultaneousCompletionsReportExactlyOneDirectionalWait)
             cv.notify_all();
             cv.wait(lock, [&] { return ready == 2; });
         }
-        engine->contexts_[index]->complete(ErrorInfo::OkStatus());
+        engine->contexts_[index]->complete(bufferSafeResult());
     };
     std::thread host(finish, 0);
     std::thread disk(finish, 1);
@@ -592,10 +594,12 @@ TEST(LoadTaskRunnerTest, ConcurrentFailuresPreserveUnknownCompletionAndCorruptio
             ASSERT_EQ(engine->contextCount(), 2u);
             const auto finish = [&](size_t index) {
                 const bool unknown = (index == 0) == host_unknown;
-                engine->contexts_[index]->complete(TransferResult(
+                TransferResult completion(
                     ErrorInfo(unknown ? ErrorCode::TRANSFER_COMPLETION_UNKNOWN : ErrorCode::EXECUTION_EXCEPTION,
                               unknown ? "completion unknown" : "CRC mismatch"),
-                    unknown ? CacheCopyError::RPC_FAILED : CacheCopyError::CRC_MISMATCH));
+                    unknown ? CacheCopyError::RPC_FAILED : CacheCopyError::CRC_MISMATCH);
+                completion.buffer_safe = !unknown;
+                engine->contexts_[index]->complete(std::move(completion));
             };
             finish(host_first ? 0 : 1);
             EXPECT_FALSE(result.has_value());

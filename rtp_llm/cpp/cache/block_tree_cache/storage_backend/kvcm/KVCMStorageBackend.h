@@ -7,8 +7,6 @@
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTaskRegistry.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
 class RemoteOperationRequestPB;
@@ -21,7 +19,6 @@ class MetricsReporter;
 namespace rtp_llm {
 
 class BroadcastManager;
-class TransferCompletionCleanup;
 namespace kvcm {
 class ClientWrapper;
 }
@@ -66,19 +63,8 @@ public:
     // Returns whether the request was handled and response is valid. Transfer
     // success, failure, and timeout are carried by response.transfer_status().
     bool execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response);
-    // Local READ completion evidence; this accessor does not issue a query RPC.
-    const TransferTaskRegistry& taskRegistry() const;
-    void cleanupExpiredMissing();
-
-    // Recovery query atomically prevents a previously unseen READ from starting.
-    TransferTaskRegistry::State queryReadCompletion(const std::string& trace_id) const;
-    // Removes only completed READ evidence. Running executions remain queryable.
-    TransferTaskRegistry::ForgetResult forgetReadCompletion(const std::string& trace_id, bool released = false);
-    // Configure before serving READ requests; cleanup does not own their buffers.
-    void setCompletionCleanup(std::shared_ptr<TransferCompletionCleanup> cleanup);
-    // Retained non-protected READ targets; enumeration removes only RELEASED
-    // records. It never queries completion or releases frozen references.
-    std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const;
+    bool executeRemoteRequest(const RemoteOperationRequestPB& request, FunctionResponsePB& response) override;
+    void setReclaimer(std::shared_ptr<BlockTreeReclaimer> reclaimer) override;
 
 protected:
     bool               initImpl() override;
@@ -95,7 +81,8 @@ protected:
 
 private:
     class Impl;
-    std::unique_ptr<Impl> impl_;
+    std::shared_ptr<BlockTreeReclaimer> reclaimer_;
+    std::shared_ptr<Impl> impl_;
 };
 
 }  // namespace rtp_llm

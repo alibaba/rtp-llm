@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
@@ -356,6 +357,7 @@ TEST_F(KVCMIndependentPoolTest, PartialWriteFailureAbortsSessionAndReleasesSourc
         EXPECT_EQ(pools_[group]->treeRefCount(blocks_[group]), 0u);
         EXPECT_EQ(pools_[group]->refCount(blocks_[group]), 1u);
     }
+    EXPECT_TRUE(backend_->reclaimer_->frozen_.empty());
     backend_->shutdown();
     EXPECT_EQ(state_->destroyed, 3u);
     refs_.clear();

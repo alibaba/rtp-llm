@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "kmonitor/client/MetricsReporter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
@@ -18,6 +19,8 @@
 
 namespace rtp_llm {
 namespace {
+
+using block_transfer_engine_test::bufferSafeResult;
 
 using ScriptedTransferEngine = block_tree_cache_test::ScriptedPerRankBlockTransferEngine;
 
@@ -62,7 +65,9 @@ public:
         const auto& descriptors = task.descriptors();
         batches_.emplace_back(descriptors.begin(), descriptors.end());
         if (on_submit_) {
+            block_tree_cache_detail::ScopeRollback unsubmitted([&] { task.completionProof()->report(true); });
             on_submit_();
+            unsubmitted.dismiss();
         }
         ++batch_count_;
         return ScriptedTransferEngine::executeBatch(std::move(task));
@@ -107,8 +112,8 @@ public:
     }
 
     void complete(size_t index, bool success) {
-        contexts_.at(index)->complete(success ? ErrorInfo::OkStatus() :
-                                                ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected failure"));
+        const auto status = success ? ErrorInfo::OkStatus() : ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected failure");
+        contexts_.at(index)->complete(bufferSafeResult(status));
     }
 
 private:

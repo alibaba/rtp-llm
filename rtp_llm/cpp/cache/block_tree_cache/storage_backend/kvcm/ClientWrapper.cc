@@ -664,6 +664,11 @@ ClientWrapper::loadKvCachesForTagWithStatus(const std::string&                  
     return ec;
 }
 
+bool ClientWrapper::queryReadBufferSafety(const std::string& trace_id, int64_t deadline_ms) {
+    std::shared_lock lock(transfer_mutex_);
+    return !transfer_clients_.empty() && querySdkReadBufferSafety(*transfer_clients_.front(), trace_id, deadline_ms);
+}
+
 void ClientWrapper::discardReadRecovery(const std::string& trace_id) {
     std::shared_lock lock(transfer_mutex_);
     if (!transfer_clients_.empty())

@@ -76,6 +76,7 @@ cudaError_t copyCudaResult(const char* phase, cudaError_t result) {
     std::abort();
 }
 
+#if CUDART_VERSION >= 12080
 [[noreturn]] void failCopyStreams(const DeviceHostCopyExecutionContext& context,
                                   const char*                           phase,
                                   size_t                                tile_num,
@@ -87,6 +88,7 @@ cudaError_t copyCudaResult(const char* phase, cudaError_t result) {
                     tile_num,
                     error);
 }
+#endif
 
 class CudaDeviceHostCopyStreams final: public DeviceHostCopyStreams {
 public:
