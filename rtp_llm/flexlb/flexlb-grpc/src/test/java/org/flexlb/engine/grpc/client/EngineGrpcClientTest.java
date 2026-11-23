@@ -22,6 +22,7 @@ import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.stubbing.Answer;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -54,13 +55,14 @@ class EngineGrpcClientTest {
         GrpcReporter grpcReporter = mock(GrpcReporter.class);
         CacheMatchConfiguration cacheMatchConfiguration = mock(CacheMatchConfiguration.class);
         List<ManagedChannel> createdChannels = new ArrayList<>();
-        when(channelFactory.create(any()))
-                .thenAnswer(
-                        invocation -> {
-                            ManagedChannel channel = mock(ManagedChannel.class);
-                            createdChannels.add(channel);
-                            return channel;
-                        });
+        Answer<ManagedChannel> recordChannel =
+                invocation -> {
+                    ManagedChannel channel = mock(ManagedChannel.class);
+                    createdChannels.add(channel);
+                    return channel;
+                };
+        when(channelFactory.create(any())).thenAnswer(recordChannel);
+        when(channelFactory.createKvCacheStatus(any())).thenAnswer(recordChannel);
 
         EngineGrpcClient client =
                 new EngineGrpcClient(
@@ -74,7 +76,8 @@ class EngineGrpcClientTest {
         listener.getValue().onAddressUpdate(List.of(host));
 
         verify(channelFactory, times(2)).create(new GrpcTarget("10.0.0.1", 8081));
-        verify(channelFactory, times(4)).create(new GrpcTarget("10.0.0.1", 18002));
+        verify(channelFactory, times(3)).create(new GrpcTarget("10.0.0.1", 18002));
+        verify(channelFactory).createKvCacheStatus(new GrpcTarget("10.0.0.1", 18002));
 
         listener.getValue().onAddressUpdate(List.of());
         for (ManagedChannel channel : createdChannels) {
@@ -106,6 +109,7 @@ class EngineGrpcClientTest {
 
         verify(channelFactory, times(2)).create(new GrpcTarget("10.0.0.1", 8081));
         verify(channelFactory, times(2)).create(new GrpcTarget("10.0.0.1", 18002));
+        verify(channelFactory, times(0)).createKvCacheStatus(any());
 
         client.shutdown();
     }
@@ -117,6 +121,7 @@ class EngineGrpcClientTest {
         GrpcReporter grpcReporter = mock(GrpcReporter.class);
         CacheMatchConfiguration cacheMatchConfiguration = mock(CacheMatchConfiguration.class);
         when(channelFactory.create(any())).thenReturn(mock(ManagedChannel.class));
+        when(channelFactory.createKvCacheStatus(any())).thenReturn(mock(ManagedChannel.class));
         EngineGrpcClient client =
                 new EngineGrpcClient(
                         addressResolver, channelFactory, grpcReporter, cacheMatchConfiguration);
@@ -133,8 +138,10 @@ class EngineGrpcClientTest {
                                         "10.0.0.1", 8080, 8081, 8085, 18003, "", "", "", 1, 2)));
 
         verify(channelFactory, times(2)).create(new GrpcTarget("10.0.0.1", 8081));
-        verify(channelFactory, times(4)).create(new GrpcTarget("10.0.0.1", 18002));
-        verify(channelFactory, times(4)).create(new GrpcTarget("10.0.0.1", 18003));
+        verify(channelFactory, times(3)).create(new GrpcTarget("10.0.0.1", 18002));
+        verify(channelFactory, times(3)).create(new GrpcTarget("10.0.0.1", 18003));
+        verify(channelFactory).createKvCacheStatus(new GrpcTarget("10.0.0.1", 18002));
+        verify(channelFactory).createKvCacheStatus(new GrpcTarget("10.0.0.1", 18003));
         client.shutdown();
     }
 
@@ -170,6 +177,7 @@ class EngineGrpcClientTest {
                                 InProcessChannelBuilder.forName(serverName)
                                         .directExecutor()
                                         .build());
+        when(channelFactory.createKvCacheStatus(any())).thenReturn(mock(ManagedChannel.class));
         EngineGrpcClient client =
                 new EngineGrpcClient(
                         addressResolver, channelFactory, grpcReporter, cacheMatchConfiguration);
@@ -192,7 +200,7 @@ class EngineGrpcClientTest {
                                     1000)
                             .get(2, TimeUnit.SECONDS)
                             .getAlive());
-            verify(channelFactory, times(4)).create(new GrpcTarget("10.0.0.1", 18002));
+            verify(channelFactory, times(3)).create(new GrpcTarget("10.0.0.1", 18002));
         } finally {
             client.shutdown();
             server.shutdownNow().awaitTermination(2, TimeUnit.SECONDS);
@@ -335,6 +343,7 @@ class EngineGrpcClientTest {
                                         .directExecutor()
                                         .intercept(deadlineRecorder)
                                         .build());
+        when(channelFactory.createKvCacheStatus(any())).thenReturn(mock(ManagedChannel.class));
         EngineGrpcClient client =
                 new EngineGrpcClient(
                         addressResolver,
@@ -388,7 +397,7 @@ class EngineGrpcClientTest {
             verify(grpcReporter).reportConnectionDuration(eq("GetWorkerStatus"), anyLong());
             verify(grpcReporter)
                     .reportCallMetrics(eq("GetWorkerStatus"), anyLong(), anyInt(), eq(true));
-            verify(channelFactory, times(5)).create(new GrpcTarget("10.0.0.1", 18002));
+            verify(channelFactory, times(4)).create(new GrpcTarget("10.0.0.1", 18002));
             verify(channelFactory, times(2)).create(new GrpcTarget("10.0.0.1", 8081));
         } finally {
             client.shutdown();

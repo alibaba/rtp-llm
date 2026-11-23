@@ -5,9 +5,15 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import io.grpc.ConnectivityState;
 import io.grpc.ManagedChannel;
+import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
+import io.grpc.netty.NettyServerBuilder;
+import io.grpc.stub.StreamObserver;
 import io.netty.bootstrap.Bootstrap;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.engine.grpc.config.ChannelConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
@@ -23,6 +29,7 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -52,6 +59,60 @@ class GrpcChannelFactoryTest {
             GrpcChannelFactory factory = context.getBean(GrpcChannelFactory.class);
             assertEquals(30_000L, factory.getKeepAliveTimeMillis());
             assertFalse(factory.isKeepAliveWithoutCalls());
+        }
+    }
+
+    @Test
+    void appliesConfiguredLimitOnlyToKvCacheStatusChannels() throws Exception {
+        var response =
+                EngineRpcService.CacheStatusPB.newBuilder()
+                        .setMultimodalCache(
+                                EngineRpcService.MultimodalCacheStatusPB.newBuilder()
+                                        .addKeys("x".repeat(1_024)))
+                        .build();
+        var server =
+                NettyServerBuilder.forPort(0)
+                        .addService(
+                                new RpcServiceGrpc.RpcServiceImplBase() {
+                                    @Override
+                                    public void getCacheStatus(
+                                            EngineRpcService.CacheVersionPB request,
+                                            StreamObserver<EngineRpcService.CacheStatusPB>
+                                                    observer) {
+                                        observer.onNext(response);
+                                        observer.onCompleted();
+                                    }
+                                })
+                        .build()
+                        .start();
+        var config = new FlexlbConfig();
+        config.getEngineGrpc().setKvCacheMaxInboundMessageBytes(512);
+        try (var context = createChannelContext(Map.of(), config)) {
+            var factory = context.getBean(GrpcChannelFactory.class);
+            var target = new GrpcTarget("127.0.0.1", server.getPort());
+            var request = EngineRpcService.CacheVersionPB.getDefaultInstance();
+            var regularChannel = factory.create(target);
+            var cacheChannel = factory.createKvCacheStatus(target);
+            try {
+                var cacheStub =
+                        RpcServiceGrpc.newBlockingStub(cacheChannel)
+                                .withDeadlineAfter(5, TimeUnit.SECONDS);
+                var error =
+                        assertThrows(
+                                StatusRuntimeException.class,
+                                () -> cacheStub.getCacheStatus(request));
+                assertEquals(Status.Code.RESOURCE_EXHAUSTED, error.getStatus().getCode());
+                assertEquals(
+                        response,
+                        RpcServiceGrpc.newBlockingStub(regularChannel)
+                                .withDeadlineAfter(5, TimeUnit.SECONDS)
+                                .getCacheStatus(request));
+            } finally {
+                regularChannel.shutdownNow();
+                cacheChannel.shutdownNow();
+            }
+        } finally {
+            server.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
         }
     }
 
@@ -90,8 +151,13 @@ class GrpcChannelFactoryTest {
 
     private static AnnotationConfigApplicationContext createChannelContext(
             Map<String, Object> properties) {
+        return createChannelContext(properties, new FlexlbConfig());
+    }
+
+    private static AnnotationConfigApplicationContext createChannelContext(
+            Map<String, Object> properties, FlexlbConfig config) {
         ConfigService configService = mock(ConfigService.class);
-        when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        when(configService.loadBalanceConfig()).thenReturn(config);
         AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext();
         context.getEnvironment()
                 .getPropertySources()
