@@ -1,5 +1,8 @@
 package org.flexlb.balance.scheduler;
 
+import io.opentelemetry.api.OpenTelemetry;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.context.Context;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.EndpointRegistry.PrefillRoutingEntry;
@@ -15,6 +18,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.telemetry.FlexlbTrace;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -292,6 +296,35 @@ class GlobalQueueProgressTest {
         }
     }
 
+    @Test
+    void tracesActualRequeueButNotTheCompletedRequestNoOp() throws Exception {
+        Span span = mock(Span.class);
+        when(span.storeInContext(any())).thenCallRealMethod();
+        when(span.isRecording()).thenReturn(true);
+        FlexlbTrace.configure(OpenTelemetry.noop(), "test");
+        try (Fixture f = new Fixture(RoleType.PREFILL)) {
+            BalanceContext context = RequestLifecycleTestSupport.context(f.config, 1L);
+            context.setTraceContext(Context.root().with(span));
+            f.submit(context, "b", 50);
+            awaitCondition(
+                    () -> f.admitted.contains(1L) && f.scheduler.getQueuedRequestCount() == 0);
+
+            var queue =
+                    (GlobalQueueCoordinator)
+                            ReflectionTestUtils.getField(f.scheduler, "globalQueue");
+            var previous = mock(ScheduledRequest.class);
+            var future = f.requests.get(1L);
+            when(previous.future()).thenReturn(future);
+            assertTrue(queue.requeue(previous));
+
+            future.complete(new Response());
+            assertTrue(queue.requeue(previous));
+            verify(span).addEvent("flexlb.queue.requeued");
+        } finally {
+            FlexlbTrace.configure(null, "");
+        }
+    }
+
     /**
      * Controls planner slots, capacity release and shutdown for global queue progress tests.
      */
@@ -416,8 +449,11 @@ class GlobalQueueProgressTest {
         }
 
         private void submit(long id, String group, int priority) {
-            groups.put(id, group);
-            BalanceContext context = RequestLifecycleTestSupport.context(config, id);
+            submit(RequestLifecycleTestSupport.context(config, id), group, priority);
+        }
+
+        private void submit(BalanceContext context, String group, int priority) {
+            groups.put(Long.parseLong(context.getRequestId()), group);
             context.setSchedulingMetadata(
                     org.flexlb.dao.SchedulingMetadata.explicit(
                             priority, System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(1)));
