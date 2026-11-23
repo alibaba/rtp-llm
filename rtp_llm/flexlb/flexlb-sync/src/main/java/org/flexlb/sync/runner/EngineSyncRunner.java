@@ -24,7 +24,6 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.atomic.LongAdder;
 import java.util.stream.Collectors;
 
 /**
@@ -56,7 +55,7 @@ public class EngineSyncRunner implements Runnable {
 
     private final long syncRequestTimeoutMs;
 
-    private final LongAdder syncCount;
+    private final long syncCycleId;
 
     private final Long syncEngineStatusInterval;
 
@@ -77,7 +76,7 @@ public class EngineSyncRunner implements Runnable {
             CacheAwareService cacheAwareService,
             DynamicCacheIntervalService cacheIntervalService,
             long syncRequestTimeoutMs,
-            LongAdder syncCount,
+            long syncCycleId,
             Long syncEngineStatusInterval,
             boolean cacheFullSnapshotDebugMode,
             long statusStaleAfterUs) {
@@ -93,7 +92,7 @@ public class EngineSyncRunner implements Runnable {
                 cacheAwareService,
                 cacheIntervalService,
                 syncRequestTimeoutMs,
-                syncCount,
+                syncCycleId,
                 syncEngineStatusInterval,
                 false,
                 cacheFullSnapshotDebugMode,
@@ -112,7 +111,7 @@ public class EngineSyncRunner implements Runnable {
             CacheAwareService cacheAwareService,
             DynamicCacheIntervalService cacheIntervalService,
             long syncRequestTimeoutMs,
-            LongAdder syncCount,
+            long syncCycleId,
             Long syncEngineStatusInterval,
             boolean kvcmEnabled,
             boolean cacheFullSnapshotDebugMode,
@@ -130,7 +129,7 @@ public class EngineSyncRunner implements Runnable {
         this.cacheIntervalService =
                 Objects.requireNonNull(cacheIntervalService, "cacheIntervalService");
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
-        this.syncCount = syncCount;
+        this.syncCycleId = syncCycleId;
         this.syncEngineStatusInterval = syncEngineStatusInterval;
         this.kvcmEnabled = kvcmEnabled;
         this.cacheFullSnapshotDebugMode = cacheFullSnapshotDebugMode;
@@ -205,6 +204,7 @@ public class EngineSyncRunner implements Runnable {
 
             logger.debug(
                     "Submitting status check tasks for {} workers", latestEngineWorkerList.size());
+            boolean pollCache = shouldPollCache();
             for (WorkerHost host : latestEngineWorkerList) {
                 String workerIpPort = host.getLogicalIpPort();
                 String site = host.getSite();
@@ -223,7 +223,12 @@ public class EngineSyncRunner implements Runnable {
 
                 if (workerStatus != null && workerStatus.isActiveGeneration()) {
                     workerStatus.recordDiscoveredStatusPort(host.getWorkerStatusPort());
-                    submitPolls(workerStatus, host.getWorkerStatusPort(), site, host.getGroup());
+                    submitPolls(
+                            workerStatus,
+                            host.getWorkerStatusPort(),
+                            site,
+                            host.getGroup(),
+                            pollCache);
                 }
             }
             logger.debug(
@@ -323,6 +328,7 @@ public class EngineSyncRunner implements Runnable {
                 failure);
         engineHealthReporter.reportStatusCheckerFail(
                 BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
+        boolean pollCache = shouldPollCache();
         for (WorkerStatus worker : known.values()) {
             int statusPort = worker.discoveredStatusPort();
             if (statusPort > 0
@@ -330,12 +336,30 @@ public class EngineSyncRunner implements Runnable {
                     && workerDirectory.isCurrentStatus(
                             roleType, worker.getLogicalIpPort(), worker)) {
                 var topology = worker.topologySnapshot();
-                submitPolls(worker, statusPort, topology.site(), topology.group());
+                submitPolls(worker, statusPort, topology.site(), topology.group(), pollCache);
             }
         }
     }
 
-    private void submitPolls(WorkerStatus workerStatus, int statusPort, String site, String group) {
+    private boolean shouldPollCache() {
+        if (kvcmEnabled) {
+            return false;
+        }
+        if (!roleType.requiresCacheKeys()) {
+            return true;
+        }
+        long roundInterval =
+                Math.max(
+                        1L, cacheIntervalService.getCurrentIntervalMs() / syncEngineStatusInterval);
+        return syncCycleId % roundInterval == 0L;
+    }
+
+    private void submitPolls(
+            WorkerStatus workerStatus,
+            int statusPort,
+            String site,
+            String group,
+            boolean pollCache) {
         String workerIpPort = workerStatus.getLogicalIpPort();
         WorkerStatus.PollLease statusPollLease = workerStatus.tryBeginStatusPoll();
         if (statusPollLease != null) {
@@ -376,8 +400,7 @@ public class EngineSyncRunner implements Runnable {
                     "Skip status check for worker: {}, previous request in progress", workerIpPort);
         }
 
-        WorkerStatus.PollLease cachePollLease =
-                kvcmEnabled ? null : workerStatus.tryBeginCachePoll();
+        WorkerStatus.PollLease cachePollLease = pollCache ? workerStatus.tryBeginCachePoll() : null;
         if (cachePollLease != null) {
             boolean handedOff = false;
             try {
@@ -400,8 +423,6 @@ public class EngineSyncRunner implements Runnable {
                                 cacheAwareService,
                                 cacheIntervalService,
                                 syncRequestTimeoutMs,
-                                syncCount,
-                                syncEngineStatusInterval,
                                 cacheFullSnapshotDebugMode,
                                 statusApplicationExecutor);
                 statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
