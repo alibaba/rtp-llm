@@ -39,6 +39,8 @@ struct BlockPoolConfigBase {
     BlockPoolType pool_type{BlockPoolType::DEVICE};
     std::string   pool_name;
     size_t        physical_block_count{0};
+    // Offline metadata replay: retain capacity/refcounts without KV payload backing.
+    bool metadata_only{false};
 };
 
 // IBlockPool owns allocation and Tree-internal lifetime shared by Device, Host, and Disk.
@@ -61,6 +63,9 @@ public:
 
     void setCapacityChangeCallback(std::function<void()> callback);
 
+    bool metadataOnly() const {
+        return config_->metadata_only;
+    }
     const std::string&  poolName() const;
     virtual std::string debugString() const;
     virtual size_t      blockSizeBytes() const = 0;

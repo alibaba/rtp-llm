@@ -45,6 +45,8 @@ public:
         return std::max(0, prompt_tokens - std::max(1, cache_min_replay_tokens));
     }
 
+    bool metadata_only = false;  // Offline cache lifecycle without KV payload backing.
+
     bool use_typed_cache_regions                  = false;
     bool use_opaque_kv_cache_store                = false;
     bool disable_decode_first_malloc_device_reuse = false;

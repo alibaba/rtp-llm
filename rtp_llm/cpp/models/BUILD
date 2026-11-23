@@ -24,8 +24,10 @@ cc_library(
         "position_ids/PositionIdsGenerator.cc",
     ],
     deps = [
-        "//:rtp_compute_ops"
-    ],
+    ] + select({
+        "//tools/btc_offline:without_model_ops": ["//tools/btc_offline:torch_headers_and_runtime"],
+        "//conditions:default": ["//:rtp_compute_ops"],
+    }),
     visibility = ["//visibility:public"],
 )
 

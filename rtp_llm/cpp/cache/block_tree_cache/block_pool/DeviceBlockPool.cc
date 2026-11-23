@@ -649,9 +649,11 @@ bool DeviceBlockPool::init() {
     RTP_LLM_CHECK(!initialized());
     const auto& cfg = config();
 
-    initializeCacheBuffer();
-    initializeLayerMappings();
-    initializeLayoutStrategies();
+    if (!cfg.metadata_only) {
+        initializeCacheBuffer();
+        initializeLayerMappings();
+        initializeLayoutStrategies();
+    }
 
     markInitialized();
 
@@ -666,6 +668,7 @@ bool DeviceBlockPool::init() {
 }
 
 void DeviceBlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
+    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool has no registerable KV backing");
     if (cache_store) {
         cache_store_ = std::move(cache_store);
     }
@@ -773,14 +776,17 @@ std::pair<int, int> DeviceBlockPool::mapGlobalLayerIdToLocal(int global_layer_id
 }
 
 std::vector<torch::Tensor> DeviceBlockPool::allLayerCacheBase() const {
+    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool has no KV payload");
     return global_layer_kv_tensors_;
 }
 
 std::vector<torch::Tensor> DeviceBlockPool::allLayerScaleCacheBase() const {
+    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool has no KV payload");
     return global_layer_kv_scale_tensors_;
 }
 
 BlockAddrInfo DeviceBlockPool::convertIndexToAddr(int layer_id, BlockIdxType block) const {
+    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool has no KV payload");
     RTP_LLM_CHECK(initialized());
     auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
     checkLayoutValidity(layout_index);
@@ -788,6 +794,7 @@ BlockAddrInfo DeviceBlockPool::convertIndexToAddr(int layer_id, BlockIdxType blo
 }
 
 std::vector<BlockInfo> DeviceBlockPool::convertIndexToBuffer(int layer_id, BlockIdxType block) const {
+    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool has no KV payload");
     RTP_LLM_CHECK(initialized());
     auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
     checkLayoutValidity(layout_index);
@@ -796,6 +803,7 @@ std::vector<BlockInfo> DeviceBlockPool::convertIndexToBuffer(int layer_id, Block
 
 std::vector<BlockInfo>
 DeviceBlockPool::convertIndexToBuffer(int layer_id, BlockIdxType block, int partition_count, int partition_id) const {
+    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool has no KV payload");
     RTP_LLM_CHECK(initialized());
     auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
     checkLayoutValidity(layout_index);
@@ -804,6 +812,7 @@ DeviceBlockPool::convertIndexToBuffer(int layer_id, BlockIdxType block, int part
 }
 
 MemoryType DeviceBlockPool::where() const {
+    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool has no KV payload");
     if (cache_aligned_buffer_.is_cuda()) {
         return MemoryType::MEMORY_GPU;
     }
@@ -855,7 +864,7 @@ std::string DeviceBlockPool::debugString() const {
         << ", remote_connector_ref_blocks="
         << referenced_blocks[static_cast<size_t>(DeviceBlockRefType::REMOTE_CONNECTOR)]
         << ", pd_connector_ref_blocks=" << referenced_blocks[static_cast<size_t>(DeviceBlockRefType::PD_CONNECTOR)]
-        << ", where=" << memoryTypeName(where()) << "}";
+        << ", where=" << (config().metadata_only ? "METADATA_ONLY" : memoryTypeName(where())) << "}";
     return oss.str();
 }
 

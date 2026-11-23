@@ -6,11 +6,14 @@ cc_library(
         "GenerateConfig.h",
     ],
     deps = [
+        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/config:role_types",
         "//rtp_llm/cpp/config:special_tokens",
         "@havenask//aios/autil:json",
-        "//:rtp_compute_ops",
-    ],
+    ] + select({
+        "//tools/btc_offline:without_model_ops": ["//tools/btc_offline:torch_headers_and_runtime"],
+        "//conditions:default": ["//:rtp_compute_ops"],
+    }),
     visibility = ["//visibility:public"],
 )
 
@@ -20,10 +23,14 @@ cc_library(
         "GenerateTypes.h",
     ],
     deps = [
+        ":generate_config",
+        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/models:position_ids_generator",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
-        "//:rtp_compute_ops",
-    ],
+    ] + select({
+        "//tools/btc_offline:without_model_ops": ["//tools/btc_offline:torch_headers_and_runtime"],
+        "//conditions:default": ["//:rtp_compute_ops"],
+    }),
     visibility = ["//visibility:public"],
 )
 
@@ -35,8 +42,10 @@ cc_library(
         ":generate_types",
         ":generate_config",
         "//rtp_llm/cpp/utils:error_code",
-        "//:rtp_compute_ops",
-    ],
+    ] + select({
+        "//tools/btc_offline:without_model_ops": ["//tools/btc_offline:torch_headers_and_runtime"],
+        "//conditions:default": ["//:rtp_compute_ops"],
+    }),
     visibility = ["//visibility:public"],
 )
 

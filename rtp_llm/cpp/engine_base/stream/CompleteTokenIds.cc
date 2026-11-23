@@ -69,6 +69,13 @@ void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input
     RTP_LLM_LOG_DEBUG("complete tokenids init done, %s", showStatus(0).c_str());
 }
 
+void CompleteTokenIds::initCacheMetadata(int input_length) {
+    RTP_LLM_CHECK(batch_size_ == 1 && max_batch_size_ == 1 && input_length > 0 && input_length <= max_seq_len_);
+    RTP_LLM_CHECK(!complete_token_ids_.defined());
+    seq_length_ = common_len_ = start_check_seq_length_ = input_length;
+    reserve_step_                                       = 0;
+}
+
 std::vector<int32_t> CompleteTokenIds::imageCacheIdentity(int begin, int count) const {
     std::vector<int32_t> result;
     if (!v41_inputs_) {

@@ -111,6 +111,7 @@ public:
     const DeviceBlockPoolConfig& config() const;
 
     void* getBaseAddress() const {
+        RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool has no KV address");
         return cache_base_ptr_;
     }
     bool usesDedicatedDeviceAllocation() const {

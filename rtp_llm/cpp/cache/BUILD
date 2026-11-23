@@ -221,6 +221,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        "//rtp_llm/models_py/bindings/core:type_convert",
         ":cache_types",
     ] + torch_deps(),
 )

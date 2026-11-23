@@ -13,6 +13,8 @@ public:
 
 public:
     void init(const std::shared_ptr<GenerateInput>& generate_input, size_t extra_reserve_token_num = 0);
+    // Length-only pure-text cache view: token access remains unavailable.
+    void initCacheMetadata(int input_length);
 
     std::vector<int> completeTokenIdsVec(int batch_id);
     std::vector<int> commonCompleteTokenIdsVec(int batch_id);

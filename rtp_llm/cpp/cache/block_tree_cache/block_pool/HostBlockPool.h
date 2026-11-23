@@ -40,6 +40,9 @@ public:
     // the pool is not initialized or the block index is out of range.
     HostBlockBuffer blockBuffer(BlockIdxType block) const;
 
+    size_t allocatedPayloadBytes() const {
+        return backing_ ? config().physical_block_count * strideBytes() : 0;
+    }
     size_t payloadBytes() const;
     size_t strideBytes() const;
     size_t blockSizeBytes() const override;
