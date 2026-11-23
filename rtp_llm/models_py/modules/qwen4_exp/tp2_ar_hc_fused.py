@@ -1,4 +1,4 @@
-"""Fused TP2 P2P AllReduce + 4-branch Hyper-Connection Residual Injection & Norm.
+"""Opt-in TP2 P2P AllReduce + Hyper-Connection Residual Injection & Norm.
 
 Stages TP-partial sublayer outputs (single-branch Attention/GDN `[rows, 2560]`
 or packed dual-branch MoE `[2 * rows, 2560]`) into persistent 2-slot ping-pong
@@ -308,7 +308,9 @@ def _tp2_peers_can_access(group, device: torch.device) -> bool:
 
 
 def prepare_tp2_ar_hc_workspace(config, parallelism, device: Optional[torch.device] = None):
-    if os.getenv("RTP_QWEN4_DISABLE_TP2_AR_HC_FUSED", "0") == "1":
+    # Keep FlashInfer as the default until fused HC passes full-model parity.
+    # Explicitly setting this rollback switch to 0 opts into the fused path.
+    if os.getenv("RTP_QWEN4_DISABLE_TP2_AR_HC_FUSED", "1") == "1":
         return None
     if os.getenv("FT_DISABLE_CUSTOM_AR", "").strip().lower() in (
         "1",
