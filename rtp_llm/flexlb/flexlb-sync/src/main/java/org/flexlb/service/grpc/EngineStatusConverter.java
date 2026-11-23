@@ -65,18 +65,25 @@ public class EngineStatusConverter {
      * Convert a cache snapshot, preferring packed keys when present.
      */
     public static CacheStatus convertToCacheStatus(EngineRpcService.CacheStatusPB cacheStatusPB) {
+        return convertToCacheStatus(
+                cacheStatusPB,
+                new HashSet<>(
+                        cacheStatusPB.getCacheKeyListCount() > 0
+                                ? cacheStatusPB.getCacheKeyListList()
+                                : cacheStatusPB.getCacheKeysMap().keySet()));
+    }
+
+    /**
+     * Refresh capacity using a key set already owned by the acknowledged cache version.
+     */
+    public static CacheStatus convertToCacheStatus(
+            EngineRpcService.CacheStatusPB cacheStatusPB, Set<Long> cachedKeys) {
         CacheStatus cacheStatus = new CacheStatus();
         cacheStatus.setAvailableKvCache(cacheStatusPB.getAvailableKvCache());
         cacheStatus.setTotalKvCache(cacheStatusPB.getTotalKvCache());
         cacheStatus.setBlockSize(cacheStatusPB.getBlockSize());
         cacheStatus.setVersion(cacheStatusPB.getVersion());
 
-        // Copy the keys so the cached set does not retain the protobuf response.
-        Set<Long> cachedKeys =
-                new HashSet<>(
-                        cacheStatusPB.getCacheKeyListCount() > 0
-                                ? cacheStatusPB.getCacheKeyListList()
-                                : cacheStatusPB.getCacheKeysMap().keySet());
         cacheStatus.setCachedKeys(cachedKeys);
         cacheStatus.setCacheKeySize(cachedKeys.size());
         return cacheStatus;
