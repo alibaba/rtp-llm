@@ -1,5 +1,10 @@
 package org.flexlb.dao.pv;
 
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.SpanContext;
+import io.opentelemetry.api.trace.TraceFlags;
+import io.opentelemetry.api.trace.TraceState;
+import io.opentelemetry.context.Context;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -7,6 +12,8 @@ import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Map;
@@ -21,6 +28,31 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Checks request log data construction and serialized fields.
  */
 class PvLogDataTest {
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void correlatesPvWithSavedTraceWithoutAnActiveSpan(boolean sampled) throws Exception {
+        BalanceContext context = new BalanceContext();
+        SpanContext span =
+                SpanContext.create(
+                        "11111111111111111111111111111111",
+                        "2222222222222222",
+                        sampled ? TraceFlags.getSampled() : TraceFlags.getDefault(),
+                        TraceState.getDefault());
+        context.setTraceContext(Context.root().with(Span.wrap(span)));
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        try (var ignored = Context.root().makeCurrent()) {
+            var json = mapper.readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)));
+            assertEquals(span.getTraceId(), json.path("traceId").asText());
+            assertEquals(span.getSpanId(), json.path("spanId").asText());
+            assertEquals(sampled, json.get("traceSampled").asBoolean());
+        }
+        context.setTraceContext(Context.root());
+        var untraced = mapper.readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)));
+        assertFalse(untraced.has("traceId"));
+        assertFalse(untraced.has("spanId"));
+        assertFalse(untraced.has("traceSampled"));
+    }
 
     @Test
     void keepsCacheSelectionWhenSelectedCandidateHasNoEndpoint() {
