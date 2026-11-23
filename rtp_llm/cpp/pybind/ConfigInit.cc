@@ -633,6 +633,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("kvcm_model_sdk_config", &KVCacheConfig::kvcm_model_sdk_config)
         .def_readwrite("kvcm_model_user_data", &KVCacheConfig::kvcm_model_user_data)
         .def_readwrite("kvcm_model_extra_info", &KVCacheConfig::kvcm_model_extra_info)
+        .def_readwrite("kvcm_model_checkpoint_path", &KVCacheConfig::kvcm_model_checkpoint_path)
         .def_readwrite("kvcm_instance_id_salt", &KVCacheConfig::kvcm_instance_id_salt)
         .def_readwrite("kvcm_asyncwrapper_thread_num", &KVCacheConfig::kvcm_asyncwrapper_thread_num)
         .def_readwrite("kvcm_asyncwrapper_queue_size", &KVCacheConfig::kvcm_asyncwrapper_queue_size)
@@ -673,7 +674,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      22,
+                                      23,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -767,7 +768,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.block_tree_frozen_recovery_interval_ms,
                                       self.block_tree_frozen_recovery_query_timeout_ms,
                                       self.block_tree_task_pool_size,
-                                      self.block_tree_frozen_force_release_timeout_ms);
+                                      self.block_tree_frozen_force_release_timeout_ms,
+                                      self.kvcm_model_checkpoint_path);
             },
             [](py::tuple t) {
                 if (t.size() < 2 || !py::isinstance<py::str>(t[0]) || !py::isinstance<py::int_>(t[1])
@@ -777,7 +779,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                          || (t.size() == 90 && t[1].cast<int>() == 17) || (t.size() == 91 && t[1].cast<int>() == 18)
                          || (t.size() == 92 && t[1].cast<int>() == 19) || (t.size() == 94 && t[1].cast<int>() == 20)
                          || (t.size() == 95 && t[1].cast<int>() == 21)
-                         || (t.size() == 96 && t[1].cast<int>() == 22))) {
+                         || (t.size() == 96 && t[1].cast<int>() == 22)
+                         || (t.size() == 97 && t[1].cast<int>() == 23))) {
                     throw std::runtime_error("invalid KVCacheConfig state");
                 }
 
@@ -887,6 +890,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
                 if (t.size() >= 96) {
                     c.block_tree_frozen_force_release_timeout_ms = t[95].cast<int64_t>();
+                }
+                if (t.size() >= 97) {
+                    c.kvcm_model_checkpoint_path = t[96].cast<std::string>();
                 }
                 if (c.block_tree_frozen_recovery_interval_ms < 0
                     || c.block_tree_frozen_recovery_interval_ms > std::numeric_limits<int>::max()

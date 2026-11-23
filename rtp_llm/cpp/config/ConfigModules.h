@@ -292,6 +292,8 @@ struct KVCacheConfig {
     std::string kvcm_model_sdk_config                = R"([{"type":"local","sdk_log_level":"DEBUG"}])";
     std::string kvcm_model_user_data                 = "";
     std::string kvcm_model_extra_info                = "";
+    // Internal resolved main-model path for automatic identity; empty uses the original env input.
+    std::string kvcm_model_checkpoint_path           = "";
     std::string kvcm_instance_id_salt                = "";
     size_t      kvcm_asyncwrapper_thread_num         = 16;
     size_t      kvcm_asyncwrapper_queue_size         = 10000;

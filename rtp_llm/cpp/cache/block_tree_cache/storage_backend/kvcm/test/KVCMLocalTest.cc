@@ -105,6 +105,7 @@ TEST(KVCMLocalTest, ManagerKeepsRemoteControlIndependentOfHbmPublicationSettings
         RuntimeConfig runtime;
         runtime.model_name = "control_fixture";
         if (mode == 3) {
+            config.kvcm_model_checkpoint_path = "/models/identity-only";
             auto infos = std::make_shared<kvcm::KVCMConfig::LocationSpecInfoMap>();
             infos->emplace("tp0_Fdefault", environment.cache_config.blockSizeBytesForGroup("default"));
             auto groups = std::make_shared<kvcm::KVCMConfig::LocationSpecGroups>();
@@ -845,6 +846,38 @@ TEST(KVCMLocalTest, DecodePublicationParsesSdkOptionsAndKeepsBackendContracts) {
         EXPECT_NO_THROW(initialized = initSingleRank(*backend.backend, environment));
         EXPECT_EQ(initialized, value.valid);
     }
+    });
+}
+
+TEST(KVCMLocalTest, AutomaticIdentityUsesResolvedCheckpointWithoutChangingEnvironment) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    ::rtp_llm::test::withDecodePublicationStartup([] {
+        const auto instance = [](const std::string& source, const std::string& resolved) {
+            autil::EnvGuard checkpoint("CHECKPOINT_PATH", source);
+            auto environment = makeBackendEnvironment("checkpoint_identity");
+            auto client = std::make_shared<MockClientWrapper>();
+            std::string id;
+            EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Invoke(
+                [&](const auto& configs, auto, const auto&, const auto&) {
+                    id = configs.at("")->instance_id();
+                    return true;
+                }));
+            EXPECT_CALL(*client, shutdown()).Times(1);
+            KVCacheConfig config;
+            config.kvcm_model_checkpoint_path = resolved;
+            auto backend = makeBackend(environment, singleRankConfig(), client, nullptr, nullptr, false, config);
+            EXPECT_TRUE(initSingleRank(*backend.backend, environment));
+            EXPECT_FALSE(id.empty());
+            EXPECT_EQ(autil::EnvUtil::getEnv("CHECKPOINT_PATH", std::string("")), source);
+            backend.backend->shutdown();
+            return id;
+        };
+        // Equivalent to the old env-sync hash, while leaving the raw URI visible to other readers.
+        const auto local = instance("/mnt/fuse/a", "");
+        EXPECT_EQ(instance("oss://models/target", "/mnt/fuse/a"), local);
+        EXPECT_EQ(instance("oss://models/stale", "/mnt/fuse/a"), local);
+        EXPECT_NE(instance("oss://models/target", ""), local);
+        EXPECT_NE(instance("oss://models/target", "/mnt/fuse/b"), local);
     });
 }
 

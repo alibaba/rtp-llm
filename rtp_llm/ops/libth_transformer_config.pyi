@@ -803,6 +803,7 @@ class KVCacheConfig:
     kvcm_meta_channel_connection_timeout: int
     kvcm_meta_channel_retry_time: int
     kvcm_model_extra_info: str
+    kvcm_model_checkpoint_path: str
     kvcm_model_sdk_config: str
     kvcm_model_user_data: str
     kvcm_put_broadcast_timeout: int

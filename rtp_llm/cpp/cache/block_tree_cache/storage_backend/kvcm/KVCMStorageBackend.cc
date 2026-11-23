@@ -2075,8 +2075,11 @@ private:
         const std::string model_name = runtime_config_.model_name;
         const std::string dtype      = getDataTypeStr(cache_config_.dtype);
         std::string       extra      = kv_cache_config_.kvcm_model_extra_info;
+        const auto checkpoint_path = kv_cache_config_.kvcm_model_checkpoint_path.empty() ?
+                                         autil::EnvUtil::getEnv("CHECKPOINT_PATH", std::string("")) :
+                                         kv_cache_config_.kvcm_model_checkpoint_path;
         extra += '/' + autil::EnvUtil::getEnv("BIZ_NAME", std::string("")) + '/'
-                 + std::to_string(hashString(autil::EnvUtil::getEnv("CHECKPOINT_PATH", std::string(""))));
+                 + std::to_string(hashString(checkpoint_path));
         // Publication scheduling must share the original P namespace. Target
         // geometry is already represented by wire TP and location specifications.
         std::string draft_info;

@@ -471,16 +471,17 @@ def setup_default_args(py_env_configs):
 
 
 def fetch_model_files_to_local(py_env_configs: PyEnvConfigs):
-    """Fetch model files and align CHECKPOINT_PATH with the resolved load path."""
+    """Fetch model files and retain the resolved path for KVCM identity only."""
     # Fetch checkpoint_path from model_args
     model_args = py_env_configs.model_args
+    py_env_configs.kv_cache_config.kvcm_model_checkpoint_path = ""
     if model_args.ckpt_path:
         checkpoint_source = model_args.ckpt_path
         model_args.ckpt_path = fetch_remote_file_to_local(checkpoint_source)
         # Match the supervisor's identity without another mount. NAS mounts
         # contain a PID, so preserve their existing raw-URI identity.
         if urlparse(checkpoint_source).scheme != "nas":
-            os.environ["CHECKPOINT_PATH"] = model_args.ckpt_path
+            py_env_configs.kv_cache_config.kvcm_model_checkpoint_path = model_args.ckpt_path
 
     # Fetch tokenizer_path from model_args
     tokenizer_path = model_args.tokenizer_path
