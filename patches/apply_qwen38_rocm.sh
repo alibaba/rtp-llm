@@ -28,3 +28,6 @@ apply_atom_overlay topk512/verify_route
 route_source="$site/atom/plugin/rtpllm/utils/qwen4_verify_route"
 "${ROCM_PATH:-/opt/rocm}/bin/hipcc" --genco -O3 --offload-arch=gfx942 \
     "$route_source.hip" -o "$route_source.hsaco"
+# Compile the eight-row verifier separately to preserve the four-row code object.
+"${ROCM_PATH:-/opt/rocm}/bin/hipcc" --genco -O3 --offload-arch=gfx942 \
+    -DQWEN4_VERIFY_EIGHT_ROWS "$route_source.hip" -o "${route_source}_m8.hsaco"

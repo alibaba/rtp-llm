@@ -49,7 +49,7 @@
              else:
 -                out = self.experts(hidden_states=hidden_states, router_logits=logits)
 +                out = None
-+                if hidden_states.shape[0] == 4 and self._small_verify_route is not None:
++                if hidden_states.shape[0] in (4, 8) and self._small_verify_route is not None:
 +                    out = self._small_verify_route(self, hidden_states, logits)
 +                if out is None:
 +                    out = self.experts(hidden_states=hidden_states, router_logits=logits)
@@ -111,7 +111,7 @@
 
 --- /dev/null
 +++ b/atom/plugin/rtpllm/utils/small_verify_route.py
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,90 @@
 +"""MI308X Qwen4 verifier route layout consumed by the sorted FlyDSL GEMMs."""
 +import ctypes
 +import logging
@@ -138,23 +138,24 @@
 +
 +
 +@lru_cache(None)
-+def _kernel(device):
++def _kernel(device, rows):
 +    hip = ctypes.CDLL("libamdhip64.so")
 +    hip.hipModuleLoad.argtypes = [ctypes.POINTER(_ptr), ctypes.c_char_p]
 +    hip.hipModuleGetFunction.argtypes = [ctypes.POINTER(_ptr), _ptr, ctypes.c_char_p]
 +    hip.hipModuleLaunchKernel.argtypes = [_ptr, *([ctypes.c_uint] * 7), _ptr,
 +                                          ctypes.POINTER(_ptr), ctypes.POINTER(_ptr)]
 +    module, function = _ptr(), _ptr()
-+    binary = Path(__file__).with_name("qwen4_verify_route.hsaco")
++    symbol = f"qwen4_verify_route_m{rows}"
++    binary = Path(__file__).with_name("qwen4_verify_route.hsaco" if rows == 4 else symbol + ".hsaco")
 +    with torch.cuda.device(device):
 +        _check(hip.hipModuleLoad(ctypes.byref(module), os.fsencode(binary)))
-+        _check(hip.hipModuleGetFunction(ctypes.byref(function), module, b"qwen4_verify_route_m4"))
-+    logging.getLogger(__name__).info("Loaded Qwen4 M=4 fused verify routing on %s", device)
++        _check(hip.hipModuleGetFunction(ctypes.byref(function), module, symbol.encode("ascii")))
++    logging.getLogger(__name__).info("Loaded Qwen4 M=%d fused verify routing on %s", rows, device)
 +    return hip, module, function
 +
 +
 +def prepare_flydsl_routes(logits, topk_ids, expert_mask):
-+    # At most one 16-row tile per selected expert when there are four verifier rows.
++    # At most one 16-row tile per selected expert for these four- and eight-row verifier graphs.
 +    rows, topk = topk_ids.shape
 +    device = logits.device
 +    tiles = rows * topk
@@ -164,13 +165,13 @@
 +    sizes = torch.empty(2, device=device, dtype=torch.int32)
 +    output = torch.empty((rows, 2560), device=device, dtype=torch.bfloat16)
 +    valid = pass_scheduled_tokens_gpu(rows)
-+    hip, _, function = _kernel(device)
++    hip, _, function = _kernel(device, rows)
 +    tensors = (logits, topk_ids, expert_mask, tokens, weights, experts, sizes, output, valid)
 +    values = [_ptr(t.data_ptr()) if t is not None else _ptr() for t in tensors]
 +    args = (_ptr * len(values))(*(ctypes.cast(ctypes.byref(p), _ptr) for p in values))
 +    # One routing CTA followed by 40 CTAs that clear the GEMM2 accumulation buffer.
 +    stream = torch.cuda.current_stream(device)
-+    _check(hip.hipModuleLaunchKernel(function, 41, 1, 1, 256, 1, 1, 0,
++    _check(hip.hipModuleLaunchKernel(function, 41, 1, 1, rows * 64, 1, 1, 0,
 +                                     _ptr(stream.cuda_stream), args, None))
 +    return tokens, weights, experts, sizes, output
 +
@@ -190,11 +191,11 @@
 +        and ex.moe_parallel_config.dp_size == 1 and ex.moe_parallel_config.dp_logical_ratio == 1
 +        and quant.__class__.__name__ == "CompressedTensorsFp8MoEMethod"
 +        and quant.fused_experts is None and quant.quant_type == QuantType.per_Token
-+        and logits.shape == (4, 513) and logits.dtype == torch.bfloat16 and logits.is_contiguous()
++        and logits.shape in ((4, 513), (8, 513)) and logits.dtype == torch.bfloat16 and logits.is_contiguous()
 +    ):
 +        return None
 +    # These buffers carry the preinitialized rank-specific shared and dummy expert IDs.
-+    weights, ids = topk_meta_rows(4)
++    weights, ids = topk_meta_rows(logits.shape[0])
 +    return maybe_small_decode(
 +        hidden_states, ex.w13_weight, ex.w2_weight, weights, ids, ex.expert_mask,
 +        ActivationType.Silu, quant.quant_type, False, ex.w13_weight_scale, ex.w2_weight_scale,
@@ -203,7 +204,7 @@
 +    )
 --- /dev/null
 +++ b/atom/plugin/rtpllm/utils/qwen4_verify_route.hip
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,216 @@
 +#include <hip/hip_bfloat16.h>
 +#include <hip/hip_runtime.h>
 +#include <math.h>
@@ -212,6 +213,14 @@
 +// One wave per verifier row. The kGlobalExperts-expert bitmap replaces Opus'
 +// global workspace.
 +constexpr int kGlobalExperts = 514; // 512 routed, one shared, one masked dummy.
++#ifdef QWEN4_VERIFY_EIGHT_ROWS
++template <int M> __device__ void verify_route(const hip_bfloat16 *logits,
++                                                 const int *shared_ids,
++                                                 const int *mask, int *tokens,
++                                                 float *weights, int *experts,
++                                                 int *sizes, hip_bfloat16 *out,
++                                                 const int *valid_rows) {
++#else
 +constexpr int M = 4;
 +extern "C" __global__ void qwen4_verify_route_m4(const hip_bfloat16 *logits,
 +                                                 const int *shared_ids,
@@ -219,6 +228,7 @@
 +                                                 float *weights, int *experts,
 +                                                 int *sizes, hip_bfloat16 *out,
 +                                                 const int *valid_rows) {
++#endif
 +  constexpr int T = M * 64;
 +  int t = threadIdx.x, row = t / 64, lane = t % 64;
 +  if (blockIdx.x) {
@@ -291,6 +301,73 @@
 +      atomicOr((unsigned *)&hits[e], 1u << row);
 +  }
 +  __syncthreads();
++#ifdef QWEN4_VERIFY_EIGHT_ROWS
++  // Eight wavefronts cover all 512 routed experts in a single ballot pass.
++  bool local = mask[t], active = local && hits[t];
++  auto active_bits = __ballot(active), local_bits = __ballot(local);
++  unsigned long long lower = (1ull << lane) - 1;
++  if (!lane) {
++    wave_count[row] = __popcll(active_bits);
++    wave_local[row] = __popcll(local_bits);
++  }
++  __syncthreads();
++  int tile = __popcll(active_bits & lower);
++  int local_id = __popcll(local_bits & lower);
++  #pragma unroll
++  for (int i = 0; i < M; ++i) {
++    if (i < row) {
++      tile += wave_count[i];
++      local_id += wave_local[i];
++    }
++  }
++  if (active) {
++    group[t] = tile;
++    experts[tile] = local_id;
++  }
++  if (t == T - 1) {
++    tile += active;
++    local_id += local;
++    for (int z = T; z < kGlobalExperts; ++z) {
++      if (mask[z]) {
++        if (hits[z]) {
++          group[z] = tile;
++          experts[tile++] = local_id;
++        }
++        ++local_id;
++      }
++    }
++    total = tile;
++    sizes[0] = tile * 16;
++    sizes[1] = M;
++  }
++  __syncthreads();
++  // Cooperatively initialize padded slots, then scatter valid routes.
++  for (int i = t; i < total * 16; i += T) {
++    tokens[i] = (12 << 24) | M;
++    weights[i] = 0.f;
++  }
++  __syncthreads();
++  // Within each expert, increasing row order matches Opus. High bits encode the
++  // TopK slot.
++  if (lane < 12) {
++    int e = route_id[row][lane];
++    if (e >= 0 && mask[e]) {
++      unsigned bits = hits[e];
++      int off = __popc(bits & ((1u << row) - 1)), start = group[e] * 16;
++      tokens[start + off] = (lane << 24) | row;
++      weights[start + off] = route_w[row][lane];
++    }
++  }
++}
++extern "C" __global__ void qwen4_verify_route_m8(const hip_bfloat16 *logits,
++                                                 const int *shared_ids,
++                                                 const int *mask, int *tokens,
++                                                 float *weights, int *experts,
++                                                 int *sizes, hip_bfloat16 *out,
++                                                 const int *valid_rows) {
++  verify_route<8>(logits, shared_ids, mask, tokens, weights, experts, sizes, out, valid_rows);
++}
++#else
 +  // Prefix sums over local and active experts map each routed group to a 16-row
 +  // tile.
 +  for (int base = 0; base < kGlobalExperts; base += T) {
@@ -343,3 +420,4 @@
 +    }
 +  }
 +}
++#endif
