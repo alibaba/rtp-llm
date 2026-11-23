@@ -41,8 +41,7 @@ def configure_compiler():
     return compiler
 
 
-def build_deep_gemm(
-    part,
+def build_mhc(
     sources,
     root,
     binding,
@@ -55,8 +54,7 @@ def build_deep_gemm(
     import torch
     from torch.utils.cpp_extension import include_paths, library_paths
 
-    mhc = part == "mhc"
-    source = sources["deep_gemm" if mhc else "deep_gemm_mqa"]
+    source = sources["deep_gemm"]
     root.mkdir(exist_ok=True)
     shutil.copytree(source / "csrc", root / "csrc")
     headers = [
@@ -66,25 +64,18 @@ def build_deep_gemm(
         sources["fmt"] / "include/fmt",
     ]
     include_dirs = [kernel_dir, root, root / "include"]
-    if mhc:
-        headers.append(sources["deep_jit"] / "include/deep_jit")
-        (root / "compat").mkdir()
-        shutil.copyfile(format_header, root / "compat/format")
-        include_dirs.insert(0, root / "compat")
-        (root / "licenses").mkdir()
-        for name, license_file in licenses.items():
-            shutil.copyfile(license_file, root / "licenses" / (name + ".txt"))
-        module = "mhc_isolated"
-        flags = ["-std=c++20", "-Ddeep_jit=deep_jit_mhc_isolated"]
-    else:
-        shutil.copyfile(source / "LICENSE", root / "LICENSE")
-        module = "_rtp_llm_fp8_mqa"
-        flags = ["-std=c++17", "-fno-gnu-unique", "-Dfmt=fmt_mqa_isolated"]
+    headers.append(sources["deep_jit"] / "include/deep_jit")
+    (root / "compat").mkdir()
+    shutil.copyfile(format_header, root / "compat/format")
+    include_dirs.insert(0, root / "compat")
+    (root / "licenses").mkdir()
+    for name, license_file in licenses.items():
+        shutil.copyfile(license_file, root / "licenses" / (name + ".txt"))
     for path in headers:
         shutil.copytree(path, root / "include" / path.name)
     # Upstream binding headers use quoted csrc paths. Both the compiler and
     # the installed JIT must see the same isolated source/header layout.
-    binary = root / (module + sysconfig.get_config_var("EXT_SUFFIX"))
+    binary = root / ("mhc_isolated" + sysconfig.get_config_var("EXT_SUFFIX"))
     include_dirs.extend(
         [cuda / "include", cuda / "include/cccl", sysconfig.get_paths()["include"]]
     )
@@ -97,8 +88,9 @@ def build_deep_gemm(
         "-Wno-deprecated-declarations",
         "-Wno-psabi",
         "-D_GLIBCXX_USE_CXX11_ABI=" + str(int(torch.compiled_with_cxx11_abi())),
-        f"-Ddeep_gemm=deep_gemm_{part}_isolated",
-        *flags,
+        "-Ddeep_gemm=deep_gemm_mhc_isolated",
+        "-Ddeep_jit=deep_jit_mhc_isolated",
+        "-std=c++20",
         *["-I" + str(path) for path in include_dirs + include_paths()],
         str(binding),
         "-o",
@@ -114,18 +106,15 @@ def build_deep_gemm(
         "-lcudart",
         "-lcublasLt",
     ]
-    if not mhc:
-        command.append("-lnvrtc")
     # DeepJIT resolves libdw at runtime with dlopen. Only the build needs its
     # declarations; wheel users do not need elfutils development headers.
     with tempfile.TemporaryDirectory() as temp:
-        if mhc:
-            elfutils = Path(temp) / "elfutils"
-            elfutils.mkdir()
-            for header in elfutils_headers:
-                include = elfutils if header.name.startswith("libdw") else Path(temp)
-                shutil.copyfile(header, include / header.name)
-            command.insert(1, "-I" + temp)
+        elfutils = Path(temp) / "elfutils"
+        elfutils.mkdir()
+        for header in elfutils_headers:
+            include = elfutils if header.name.startswith("libdw") else Path(temp)
+            shutil.copyfile(header, include / header.name)
+        command.insert(1, "-I" + temp)
         subprocess.run(command, check=True)
 
 
@@ -236,7 +225,7 @@ def named_paths(values):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="part", required=True)
-    for part in ("mhc", "mqa", "sparse"):
+    for part in ("mhc", "sparse"):
         build = commands.add_parser(part)
         build.add_argument("--source", action="append", required=True)
         build.add_argument("--binding", type=Path, required=True)
@@ -276,8 +265,7 @@ def main():
             Path(CUDA_HOME),
         )
     else:
-        build_deep_gemm(
-            args.part,
+        build_mhc(
             sources,
             args.output.absolute(),
             args.binding.absolute(),

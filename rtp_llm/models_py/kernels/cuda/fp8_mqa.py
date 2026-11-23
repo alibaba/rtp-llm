@@ -1,92 +1,60 @@
-"""FP8 indexer kernels with a private native/JIT runtime.
-
-The CUDA 13 wheel supplies this extension independently of global DeepGEMM.
-Other builds can keep using legacy FP8 APIs when their DeepGEMM provides them.
-No modules or environment variables belonging to global DeepGEMM are replaced.
-"""
+"""Load the packaged FP8 MQA adapter or use a legacy DeepGEMM installation."""
 
 import importlib.util
-import os
 from functools import lru_cache
 from pathlib import Path
 
-import torch
-
-_ROOT = Path(__file__).parents[3] / "libs/fp8_mqa_isolated"
+_ADAPTER = Path(__file__).parents[3] / "libs/fp8_mqa_adapter.py"
 
 
-def _binary():
-    paths = sorted(_ROOT.glob("_rtp_llm_fp8_mqa*.so"))
-    if len(paths) > 1:
-        raise RuntimeError("Expected exactly one isolated FP8 MQA library")
-    return paths[0] if paths else None
+def _legacy_backend():
+    try:
+        import deep_gemm
+    except ImportError:
+        return None
+    if hasattr(deep_gemm, "get_legacy_paged_mqa_logits_metadata"):
+        # This release needs its FP32-scale adapter to select the schedule.
+        return None
+    if all(
+        callable(getattr(deep_gemm, name, None))
+        for name in (
+            "fp8_mqa_logits",
+            "fp8_paged_mqa_logits",
+            "get_paged_mqa_logits_metadata",
+        )
+    ):
+        return deep_gemm
+    return None
 
 
 def available() -> bool:
-    if _binary() is not None:
-        return True
-    try:
-        import deep_gemm
-
-        return all(
-            callable(getattr(deep_gemm, name, None))
-            for name in (
-                "fp8_mqa_logits",
-                "fp8_paged_mqa_logits",
-                "get_paged_mqa_logits_metadata",
-            )
-        )
-    except ImportError:
-        return False
+    return _ADAPTER.is_file() or _legacy_backend() is not None
 
 
 @lru_cache(maxsize=1)
 def _backend():
-    binary = _binary()
-    if binary is None:
-        import deep_gemm
-
-        if not available():
-            raise RuntimeError(
-                "The RTP wheel is missing the isolated FP8 MQA extension"
-            )
-        return deep_gemm
-    if torch.cuda.is_initialized() and torch.cuda.is_current_stream_capturing():
-        raise RuntimeError("Warm up isolated FP8 MQA before CUDA Graph capture")
-    spec = importlib.util.spec_from_file_location("_rtp_llm_fp8_mqa", binary)
-    native = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(native)
-    from torch.utils.cpp_extension import CUDA_HOME
-
-    cuda = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH") or CUDA_HOME
-    if not cuda:
-        raise RuntimeError("CUDA toolkit is required by the FP8 MQA JIT compiler")
-    native.init(str(_ROOT), str(cuda))
-    return native
-
-
-def _configured_backend():
-    native = _backend()
-    # Retain the process's SM/PDL budget without sharing its C++ runtime.
-    import deep_gemm
-
-    if native is not deep_gemm:
-        native.set_num_sms(int(deep_gemm.get_num_sms()))
-        native.set_pdl(bool(deep_gemm.get_pdl()))
-    return native
+    if _ADAPTER.is_file():
+        spec = importlib.util.spec_from_file_location("fp8_mqa_adapter", _ADAPTER)
+        adapter = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(adapter)
+        return adapter
+    backend = _legacy_backend()
+    if backend is None:
+        raise RuntimeError("No DeepGEMM FP32-scale FP8 MQA backend is available")
+    return backend
 
 
 def get_num_sms():
-    return int(_configured_backend().get_num_sms())
+    return int(_backend().get_num_sms())
 
 
 def fp8_mqa_logits(*args, **kwargs):
-    return _configured_backend().fp8_mqa_logits(*args, **kwargs)
+    return _backend().fp8_mqa_logits(*args, **kwargs)
 
 
 def get_paged_mqa_logits_metadata(*args, **kwargs):
-    return _configured_backend().get_paged_mqa_logits_metadata(*args, **kwargs)
+    return _backend().get_paged_mqa_logits_metadata(*args, **kwargs)
 
 
 def fp8_paged_mqa_logits(*args, **kwargs):
-    return _configured_backend().fp8_paged_mqa_logits(*args, **kwargs)
+    return _backend().fp8_paged_mqa_logits(*args, **kwargs)

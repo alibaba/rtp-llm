@@ -7,24 +7,20 @@ _BINDINGS = "//rtp_llm/models_py/bindings/cuda/blackwell:"
 _KERNELS = "@rtp_blackwell_kernels//csrc/kernels/blackwell:"
 _COMPONENTS = {
     "mhc": ["deep_gemm", "deep_jit", "cutlass_mhc", "fmt"],
-    "mqa": ["deep_gemm_mqa", "cutlass_mhc", "fmt"],
     "sparse": ["flash_mla", "cutlass_mla"],
 }
 
 def _extensions_impl(ctx):
     outputs = {
         "mhc": ctx.actions.declare_directory("mega_mhc_isolated"),
-        "mqa": ctx.actions.declare_directory("fp8_mqa_isolated"),
         "sparse": ctx.actions.declare_file("rtp_fp8_sparse_decode.abi3.so"),
     }
     bindings = {
         "mhc": ctx.file._mhc_binding,
-        "mqa": ctx.file._mqa_binding,
         "sparse": ctx.file._sparse_binding,
     }
     kernels = {
         "mhc": [ctx.file.mhc_runtime],
-        "mqa": [ctx.file.mqa_runtime],
         "sparse": ctx.files.sparse_sources + ctx.files.sparse_headers,
     }
     sources = {name: target.files for target, name in ctx.attr.sources.items()}
@@ -48,8 +44,6 @@ def _extensions_impl(ctx):
             for name, license in licenses.items():
                 args.add("--license", name + "=" + license.path)
             inputs.extend(licenses.values())
-        elif part == "mqa":
-            inputs.append(licenses["deep_gemm_mqa"])
         ctx.actions.run(
             executable = builder,
             arguments = [args],
@@ -60,7 +54,9 @@ def _extensions_impl(ctx):
             use_default_shell_env = True,
         )
 
-    assets = outputs.values() + [ctx.file._check]
+    mqa_adapter = ctx.actions.declare_file("fp8_mqa_adapter.py")
+    ctx.actions.symlink(output = mqa_adapter, target_file = ctx.file.mqa_adapter)
+    assets = outputs.values() + [ctx.file._check, mqa_adapter]
     manifest = ctx.actions.declare_file("glm53_extensions.json")
     args = ctx.actions.args()
     args.add("manifest")
@@ -90,14 +86,13 @@ _extensions = rule(
         "sources": attr.label_keyed_string_dict(),
         "license_files": attr.label_keyed_string_dict(),
         "mhc_runtime": attr.label(allow_single_file = [".h"]),
-        "mqa_runtime": attr.label(allow_single_file = [".h"]),
+        "mqa_adapter": attr.label(allow_single_file = [".py"]),
         "sparse_sources": attr.label_list(allow_files = [".cpp", ".cu"]),
         "sparse_headers": attr.label_list(allow_files = [".h"]),
         "elfutils_headers": attr.label_list(allow_files = [".h"]),
         # PyTorch's headers, libraries and CUDAExtension must match the target wheel.
         "_builder": attr.label(default = _BINDINGS + "build_extension", executable = True, cfg = "target"),
         "_mhc_binding": attr.label(default = _BINDINGS + "mhc_binding.cpp", allow_single_file = True),
-        "_mqa_binding": attr.label(default = _BINDINGS + "mqa_binding.cpp", allow_single_file = True),
         "_sparse_binding": attr.label(default = _BINDINGS + "sparse_mla_registration.cpp", allow_single_file = True),
         "_format": attr.label(default = _BINDINGS + "format", allow_single_file = True),
         "_check": attr.label(default = "//rtp_llm/libs:glm53_extension_check.py", allow_single_file = True),
@@ -113,7 +108,7 @@ def blackwell_extensions(name):
         sources = {"@rtp_blackwell_%s//:sources" % repo: repo for repo in BLACKWELL_SOURCES},
         license_files = {"@rtp_blackwell_%s//:license" % repo: repo for repo in BLACKWELL_SOURCES},
         mhc_runtime = _KERNELS + "mhc_runtime.h",
-        mqa_runtime = _KERNELS + "mqa_runtime.h",
+        mqa_adapter = "@rtp_blackwell_kernels//:rtp_kernel/fp8_mqa.py",
         sparse_sources = [_KERNELS + f for f in ["sparse_fp8_decode.cpp", "sparse_fp8_kernel.cu"]],
         sparse_headers = [_KERNELS + f for f in ["sparse_fp8_decode.h", "sparse_fp8_layout.h"]],
         elfutils_headers = ["@rtp_blackwell_elfutils//:" + f for f in [

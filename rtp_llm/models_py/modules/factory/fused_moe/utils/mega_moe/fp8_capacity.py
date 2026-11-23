@@ -5,10 +5,10 @@ from importlib.metadata import PackageNotFoundError, version
 
 logger = logging.getLogger(__name__)
 
-# The hash-pinned public wheel predates the Python query, but its bundled
-# mega_moe_fp8.cuh defines this exact candidate set and a 1920-token ring.
-_PUBLIC_DEEPGEMM_VERSION = "2.8.2+522942a.cu132"
-_PUBLIC_BLOCK_M_CANDIDATES = (8, 16, 32, 64, 96, 128, 192, 240)
+# Both pinned 2.8.2 wheels ship this candidate set and a 1920-token ring
+# in mega_moe_fp8.cuh. The runtime alignment query is still checked.
+_VERIFIED_DEEPGEMM_VERSIONS = {"2.8.2+522942a.cu132", "2.8.2+a5165ad.cu132"}
+_VERIFIED_BLOCK_M_CANDIDATES = (8, 16, 32, 64, 96, 128, 192, 240)
 
 
 def _candidate_block_ms(deep_gemm):
@@ -16,8 +16,8 @@ def _candidate_block_ms(deep_gemm):
     if callable(query):
         return query()
     try:
-        if version("deep-gemm") == _PUBLIC_DEEPGEMM_VERSION:
-            return _PUBLIC_BLOCK_M_CANDIDATES
+        if version("deep-gemm") in _VERIFIED_DEEPGEMM_VERSIONS:
+            return _VERIFIED_BLOCK_M_CANDIDATES
     except PackageNotFoundError:
         pass
     return ()

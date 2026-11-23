@@ -18,13 +18,6 @@ BLACKWELL_SOURCES = {
         srcs = ["include/**", "tools/util/include/**"],
     ),
     "deep_gemm": MHC_SOURCE,
-    # This revision exposes the legacy FP8 indexer ABI. Keep its cubins separate.
-    "deep_gemm_mqa": struct(
-        repository = "deepseek-ai/DeepGEMM",
-        commit = "559d79fb6994a58b8a15b4b93bf13ccc16edf247",
-        sha256 = "8a6c67b6f74d4a3a242c4dad7714d147797b2ecc5d55c52925bbdf6155207d2c",
-        srcs = ["csrc/**", "deep_gemm/include/deep_gemm/**"],
-    ),
     "deep_jit": struct(
         repository = "deepseek-ai/DeepJIT",
         commit = "2efdab421e1cfb17fe8bc20e11ca72aa6d0e6c43",

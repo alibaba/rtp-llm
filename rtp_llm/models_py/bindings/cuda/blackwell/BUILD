@@ -8,7 +8,6 @@ package(default_visibility = [
 exports_files([
     "format",
     "mhc_binding.cpp",
-    "mqa_binding.cpp",
     "sparse_mla_registration.cpp",
 ])
 
