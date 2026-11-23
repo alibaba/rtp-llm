@@ -22,7 +22,9 @@ public enum BalanceStatusEnum {
 
     // Worker Status related errors (3100-3199)
     WORKER_SERVICE_UNAVAILABLE(3102, "Worker service unavailable!"),
-    WORKER_STATUS_GRPC_TIMEOUT(3104, "Worker gRPC timeout!");
+    WORKER_STATUS_GRPC_TIMEOUT(3104, "Worker gRPC timeout!"),
+    MASTER_STATUS_PROCESSING_FAILED(3107, "Master status processing failed!"),
+    WORKER_STATUS_SERVER_FAILED(3110, "Worker status reported alive=false!");
 
     private final int code;
 
