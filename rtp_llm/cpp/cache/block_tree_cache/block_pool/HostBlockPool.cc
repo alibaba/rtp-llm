@@ -100,6 +100,11 @@ bool HostBlockPool::init() {
                             cfg.stride_bytes,
                             cfg.alignment);
 
+    if (cfg.metadata_only) {
+        markInitialized();
+        return true;
+    }
+
     // block 0's slot is allocated as backing but is never handed out by malloc().
     RTP_LLM_CHECK_WITH_INFO(cfg.physical_block_count <= std::numeric_limits<size_t>::max() / cfg.stride_bytes,
                             "host block pool [%s] backing size overflow",
@@ -123,6 +128,7 @@ bool HostBlockPool::init() {
 }
 
 HostBlockBuffer HostBlockPool::blockBuffer(BlockIdxType block) const {
+    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool has no KV address");
     RTP_LLM_CHECK(initialized());
     RTP_LLM_CHECK(validBlock(block));
     const auto& cfg  = config();

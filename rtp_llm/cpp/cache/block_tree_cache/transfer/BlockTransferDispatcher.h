@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
@@ -26,6 +27,8 @@ public:
 
     BlockTransferDispatcher(std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine,
                             std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine = nullptr);
+    using MetadataSubmitter = std::function<std::shared_ptr<TransferAsyncContext>(TransferTask)>;
+    BlockTransferDispatcher(std::vector<GroupSetPtr> groups, MetadataSubmitter submitter);
     ~BlockTransferDispatcher();
 
     // The per-rank engine groups and batches the logical request.
@@ -79,6 +82,8 @@ public:
     }
 
 private:
+    std::vector<GroupSetPtr> metadata_groups_;
+    MetadataSubmitter        metadata_submit_;
     class InflightTicket;
     std::shared_ptr<InflightTicket> trackTransfer() const;
     struct CoordinatedExecution;

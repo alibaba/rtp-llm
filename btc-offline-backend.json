@@ -1,0 +1,18 @@
+{
+  "target": "//tools/btc_offline:replay",
+  "checks": [
+    "//tools/btc_offline:metadata_pool_test",
+    "//tools/btc_offline:metadata_replay_test",
+    "//tools/btc_offline:evaluation_replay_test"
+  ],
+  "dependency_contract": {
+    "require": [
+      "//rtp_llm/cpp/cache:coordinator_cache_manager",
+      "//rtp_llm/cpp/cache/block_tree_cache:block_tree_cache",
+      "//rtp_llm/cpp/cache/block_tree_cache/benchmark:metadata_no_payload_ops"
+    ],
+    "forbid": [
+      "//:rtp_compute_ops"
+    ]
+  }
+}

@@ -62,6 +62,15 @@ public:
                              const char* operation,
                              const char* source_tier,
                              const char* target_tier) const noexcept;
+    // Configure before starting cache workers. Observer must not re-enter BTC.
+    using EvictionObserver          = std::function<void(Tier, CacheGroupType, bool, size_t, size_t)>;
+    using CompletedEvictionObserver = std::function<void(Tier, Tier, CacheGroupType, const char*, size_t)>;
+    void setCompletedEvictionObserver(CompletedEvictionObserver observer) {
+        completed_eviction_observer_ = std::move(observer);
+    }
+    void setEvictionObserver(EvictionObserver observer) {
+        eviction_observer_ = std::move(observer);
+    }
 
     std::vector<CachePoolMetrics>
          collectPoolMetrics(const std::vector<GroupSetPtr>&       group_sets,
@@ -111,6 +120,9 @@ public:
 private:
     std::vector<CacheGroupType> eviction_metric_group_types_;
 
+    void          observeRelease(const TransferDescriptor&, const std::vector<GroupSetPtr>&, const char*) const;
+    CompletedEvictionObserver completed_eviction_observer_;
+    EvictionObserver          eviction_observer_;
     struct PoolIOSample {
         size_t                                read_bytes{0};
         size_t                                write_bytes{0};

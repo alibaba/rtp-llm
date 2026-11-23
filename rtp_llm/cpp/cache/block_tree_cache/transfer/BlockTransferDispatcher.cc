@@ -175,6 +175,9 @@ BlockTransferDispatcher::BlockTransferDispatcher(std::shared_ptr<PerRankBlockTra
                      static_cast<const void*>(per_rank_engine_.get()));
 }
 
+BlockTransferDispatcher::BlockTransferDispatcher(std::vector<GroupSetPtr> groups, MetadataSubmitter submitter):
+    metadata_groups_(std::move(groups)), metadata_submit_(std::move(submitter)) {}
+
 BlockTransferDispatcher::~BlockTransferDispatcher() {
     shutdown();
 }
@@ -235,7 +238,7 @@ std::shared_ptr<TransferAsyncContext> BlockTransferDispatcher::executePerRank(Tr
         ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "failed to observe submitted local transfer completion"));
     task.setCompletionProof(std::move(proof));
     close_submission.dismiss();
-    auto child = per_rank_engine_->execute(std::move(task));
+    auto child = metadata_submit_ ? metadata_submit_(std::move(task)) : per_rank_engine_->execute(std::move(task));
     if (!child) {
         context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "transfer engine returned a null context"));
     } else {
@@ -303,7 +306,9 @@ FrozenTask::ExecutionInfo BlockTransferDispatcher::buildExecutionInfo(const Tran
         info.expected_peers.push_back({0, "local"});
     }
     info.expected_rank_count = info.expected_peers.size();
-    const auto& groups       = multi_rank_engine_ ? multi_rank_engine_->groupSets() : per_rank_engine_->groupSets();
+    const auto& groups       = metadata_submit_   ? metadata_groups_ :
+                               multi_rank_engine_ ? multi_rank_engine_->groupSets() :
+                                                    per_rank_engine_->groupSets();
     info.descriptors.reserve(task.descriptors().size());
     for (const auto& descriptor : task.descriptors()) {
         FrozenTask::DescriptorInfo saved;
@@ -434,11 +439,13 @@ void BlockTransferDispatcher::runTransfer(TransferTask         task,
 }
 
 void BlockTransferDispatcher::cancelPendingStagingTransfers() const {
-    per_rank_engine_->cancelPendingStagingTransfers();
+    if (per_rank_engine_) {
+        per_rank_engine_->cancelPendingStagingTransfers();
+    }
 }
 
 BlockTreeQueueSizes BlockTransferDispatcher::queueSizes() const {
-    return per_rank_engine_->queueSizes();
+    return per_rank_engine_ ? per_rank_engine_->queueSizes() : BlockTreeQueueSizes{};
 }
 
 }  // namespace rtp_llm

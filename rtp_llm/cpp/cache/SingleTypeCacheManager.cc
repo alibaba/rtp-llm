@@ -7,6 +7,8 @@
 namespace rtp_llm {
 
 bool SingleTypeCacheManager::init() {
+    if (block_pool_->metadataOnly())
+        return true;
     auto layer_tensors = block_pool_->allLayerCacheBase();
     auto scale_tensors = block_pool_->allLayerScaleCacheBase();
 

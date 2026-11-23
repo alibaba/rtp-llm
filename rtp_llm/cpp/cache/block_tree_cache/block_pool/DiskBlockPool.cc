@@ -91,6 +91,11 @@ bool DiskBlockPool::init() {
     RTP_LLM_CHECK_WITH_INFO(
         !cfg.work_dir.empty(), "disk block pool [%s] work_dir must not be empty", cfg.pool_name.c_str());
 
+    if (cfg.metadata_only) {
+        markInitialized();
+        return true;
+    }
+
     std::string effective_dir = cfg.work_dir;
     if (cfg.mount_guard != nullptr) {
         effective_dir = cfg.mount_guard->workDir();
@@ -118,6 +123,7 @@ bool DiskBlockPool::init() {
 
 BlockIOStatus DiskBlockPool::read(BlockIdxType block, void* dst, size_t bytes) {
     RTP_LLM_CHECK(initialized());
+    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool forbids payload IO");
     if (!validBlock(block)) {
         return BlockIOStatus::INVALID_BLOCK;
     }
@@ -133,6 +139,7 @@ BlockIOStatus DiskBlockPool::read(BlockIdxType block, void* dst, size_t bytes) {
 
 BlockIOStatus DiskBlockPool::write(BlockIdxType block, const void* src, size_t bytes) {
     RTP_LLM_CHECK(initialized());
+    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool forbids payload IO");
     if (!validBlock(block)) {
         return BlockIOStatus::INVALID_BLOCK;
     }
@@ -152,6 +159,7 @@ BlockIOStatus DiskBlockPool::prepareBatch(const BlockIdList&         blocks,
                                           size_t                     bytes_per_block,
                                           std::vector<Request>&      requests) const {
     RTP_LLM_CHECK(initialized());
+    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only disk pool forbids payload I/O");
     RTP_LLM_CHECK_WITH_INFO(blocks.size() == buffers.size(),
                             "disk block pool [%s] batch blocks/buffers size mismatch, blocks=[%zu] buffers=[%zu]",
                             poolName().c_str(),

@@ -1651,6 +1651,7 @@ bool CoordinatorCacheManager::doInit() {
     for (const auto& group : topology_groups) {
         const int              group_id    = static_cast<int>(group_pool_configs.size());
         DeviceBlockPoolConfig  pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config_, group);
+        pool_config.metadata_only         = config_.metadata_only;
         const CacheGroupPolicy policy      = group.policy;
         if (policy.memory_placement == CacheMemoryPlacement::DEVICE) {
             pool_config.use_pinned_cpu_backing = allocation_type_ == AllocationType::HOST;
@@ -1720,7 +1721,7 @@ bool CoordinatorCacheManager::doInit() {
     }
 
 #if USING_CUDA || USING_ROCM
-    if (allocation_type_ == AllocationType::DEVICE && group_nums == 1
+    if (!config_.metadata_only && allocation_type_ == AllocationType::DEVICE && group_nums == 1
         && topology_groups.front().policy.group_type == CacheGroupType::FULL) {
         const auto&                    group         = topology_groups.front();
         const auto                     kv_tensors    = kv_cache_groups_.front()->allLayerCacheBase();
@@ -1930,6 +1931,13 @@ void CoordinatorCacheManager::blockBatchCopyForForward(const torch::Tensor&     
 }
 
 void CoordinatorCacheManager::blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>& copy_mapping) {
+    if (config_.metadata_only) {
+        for (const auto& mapping : copy_mapping) {
+            const auto& pool = group_block_pools_[groupIdForTag(mapping.tag)];
+            RTP_LLM_CHECK(pool->isAllocated(mapping.src) && pool->isAllocated(mapping.dst));
+        }
+        return;
+    }
     if (copy_mapping.empty()) {
         return;
     }
