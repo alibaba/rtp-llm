@@ -27,6 +27,7 @@ std::string cacheGroupPolicySummary(const CacheGroupPolicy& policy) {
        << ", charge_to_paged_budget=" << policy.charge_to_paged_budget
        << ", memory_placement=" << static_cast<int>(policy.memory_placement)
        << ", active_tail_blocks=" << policy.active_tail_blocks << ", shared_chunk_state=" << policy.shared_chunk_state
+       << ", prefill_borrow_tail=" << policy.prefill_borrow_tail
        << ", validate_tail_blocks=" << policy.validate_tail_blocks
        << ", cp_mapping=" << static_cast<int>(policy.cp_mapping) << ", cp_slice=" << static_cast<int>(policy.cp_slice)
        << '}';
@@ -471,10 +472,17 @@ uint32_t CacheConfig::blockNumForGroup(const GroupBase& group, uint32_t baseline
     RTP_LLM_CHECK_WITH_INFO(weight > 0, "cache pool '%s' block weight must be positive", group.tag.c_str());
     // Main's #1574 rule: a group either pins its own explicit block count or
     // follows the global baseline; pool weights scale the baseline share.
-    const uint64_t blocks =
-        group.policy.explicit_block_num > 0 ?
-            group.policy.explicit_block_num :
-            static_cast<uint64_t>(baseline) * weight;
+    const uint64_t unweighted_blocks = usesLinearPrefillPoolRatio(group) ?
+                                           linear_prefill_pool_ratio.physicalBlocks(baseline) :
+                                           baseline;
+    const uint64_t limit = std::numeric_limits<int32_t>::max();
+    RTP_LLM_CHECK_WITH_INFO(group.policy.explicit_block_num > 0 || unweighted_blocks <= limit / weight,
+                            "cache pool '%s' weighted block count exceeds int32 block ID range: baseline=%u weight=%u",
+                            group.tag.c_str(),
+                            baseline,
+                            weight);
+    const uint64_t blocks = group.policy.explicit_block_num > 0 ? group.policy.explicit_block_num :
+                                                                unweighted_blocks * weight;
     RTP_LLM_CHECK_WITH_INFO(
         blocks <= static_cast<uint64_t>(std::numeric_limits<int32_t>::max()),
         "cache pool '%s' block count exceeds int32 block ID range: baseline=%u weight=%u blocks=%lu",
@@ -510,6 +518,7 @@ void CacheConfig::finalizeBlockNums(uint32_t                   global_block_num,
     for (auto& sub_cfg : mtp_sub_configs) {
         if (sub_cfg != nullptr) {
             sub_cfg->pool_block_weights = pool_block_weights;
+            sub_cfg->linear_prefill_pool_ratio = linear_prefill_pool_ratio;
             sub_cfg->finalizeBlockNums(global_block_num, runtime_config, pp_overrides);
         }
     }

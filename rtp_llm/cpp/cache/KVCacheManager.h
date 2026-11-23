@@ -96,7 +96,9 @@ public:
                                bool                           enable_reuse_cache,
                                int                            target_batch_size,
                                LinearCachePolicy              linear_cache_policy = LinearCachePolicy::KEEP_HISTORY,
-                               const std::string&             pool_tag            = {}) const;
+                               const std::string&             pool_tag            = {},
+
+                               int                            linear_prefill_prompt_tokens = 0) const;
 
     // 块操作相关
     void blockCopy(int src_block_index, int dest_block_index);

@@ -639,7 +639,9 @@ int KVCacheManager::estimatePeakNeedBlocks(const BatchKVCacheResourcePtr& batch_
                                            bool                           enable_reuse_cache,
                                            int                            target_batch_size,
                                            LinearCachePolicy              linear_cache_policy,
-                                           const std::string&             pool_tag) const {
+                                           const std::string&             pool_tag,
+
+                                           int                            linear_prefill_prompt_tokens) const {
     return coordinator_manager_->estimateBatchPeakNeedBlocks(batch_kv_cache_resource,
                                                              seq_len,
                                                              common_seq_len,
@@ -648,7 +650,9 @@ int KVCacheManager::estimatePeakNeedBlocks(const BatchKVCacheResourcePtr& batch_
                                                              enable_reuse_cache,
                                                              target_batch_size,
                                                              linear_cache_policy,
-                                                             pool_tag);
+                                                             pool_tag,
+
+                                                             linear_prefill_prompt_tokens);
 }
 
 // 块操作相关

@@ -84,8 +84,8 @@ class KVCacheConfigPickleTest(TestCase):
         config.reserve_block_ratio = 9
         config.kv_cache_event_instance_group = "weighted-pools"
         state = config.__getstate__()
-        self.assertEqual(state[:2], ("KVCacheConfig", 26))
-        self.assertEqual(len(state), 82)
+        self.assertEqual(state[:2], ("KVCacheConfig", 27))
+        self.assertEqual(len(state), 83)
         self.assertEqual(state[80], config.kv_cache_pool_block_weights)
         self.assertTrue(state[79])
 
@@ -148,8 +148,8 @@ class KVCacheConfigPickleTest(TestCase):
                 config.kv_cache_pool_block_weights = '{"full":7,"linear":2}'
                 state = config.__getstate__()
                 v22_state = _version_twenty_two_state(config)
-                self.assertEqual(len(state), 82)
-                self.assertEqual(state[:2], ("KVCacheConfig", 26))
+                self.assertEqual(len(state), 83)
+                self.assertEqual(state[:2], ("KVCacheConfig", 27))
                 self.assertEqual(state[63:68], tuple(BASE_EVENT_FIELD_VALUES.values()))
                 self.assertIs(state[68], enable_crc)
                 self.assertEqual(state[77], 6)
@@ -365,6 +365,20 @@ class KVCacheConfigPickleTest(TestCase):
         self.assertEqual(restored.swa_pool_blocks, 0)
         self.assertFalse(restored.enable_crc)
 
+    def test_linear_pool_avg_prompt_tokens_survives_worker_spawn(self):
+        config = KVCacheConfig()
+        self.assertEqual(config.linear_pool_avg_prompt_tokens, -1)
+        config.linear_pool_avg_prompt_tokens = 100_000
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertEqual(restored.linear_pool_avg_prompt_tokens, 100_000)
+        state = config.__getstate__()
+        legacy = KVCacheConfig.__new__(KVCacheConfig)
+        legacy.__setstate__((state[0], 23, *state[2:79]))
+        self.assertEqual(legacy.linear_pool_avg_prompt_tokens, -1)
+        disabled = KVCacheConfig.__new__(KVCacheConfig)
+        disabled.__setstate__((*state[:82], 0))
+        self.assertEqual(disabled.linear_pool_avg_prompt_tokens, -1)
+
     def test_pool_settings_round_trip_and_version10_defaults(self):
         config = KVCacheConfig()
         config.memory_cache_swa_block_ratio = 0.5
@@ -462,12 +476,42 @@ class KVCacheConfigPickleTest(TestCase):
         self.assertEqual(source.lower_tier_linear_pool_avg_prompt_tokens, -1)
         source.lower_tier_linear_pool_avg_prompt_tokens = 2048
         state = source.__getstate__()
-        self.assertEqual(state[79], 2048)
+        self.assertEqual(state[81], 2048)
         restored = pickle.loads(pickle.dumps(source))
         self.assertEqual(restored.lower_tier_linear_pool_avg_prompt_tokens, 2048)
         previous = KVCacheConfig.__new__(KVCacheConfig)
         previous.__setstate__((state[0], 23, *state[2:79]))
         self.assertEqual(previous.lower_tier_linear_pool_avg_prompt_tokens, -1)
+        previous = KVCacheConfig.__new__(KVCacheConfig)
+        previous.__setstate__((state[0], 26, *state[2:82]))
+        self.assertEqual(previous.lower_tier_linear_pool_avg_prompt_tokens, 2048)
+        self.assertEqual(previous.linear_pool_avg_prompt_tokens, -1)
+
+    def test_earlier_sizing_pickle_versions_preserve_pool_settings(self):
+        state = KVCacheConfig().__getstate__()
+        for version, tail, expected_device in ((24, (2048,), -1), (25, (2048, 4096), 4096)):
+            with self.subTest(version=version):
+                previous = KVCacheConfig.__new__(KVCacheConfig)
+                previous.__setstate__((state[0], version, *state[2:79], *tail))
+                self.assertEqual(previous.lower_tier_linear_pool_avg_prompt_tokens, 2048)
+                self.assertEqual(previous.linear_pool_avg_prompt_tokens, expected_device)
+                self.assertFalse(previous.enable_linear_cache_reclaim)
+                self.assertEqual(previous.kv_cache_pool_block_weights, "")
+
+    def test_previous_reclaim_and_weights_pickle_versions_keep_their_fields(self):
+        config = KVCacheConfig()
+        config.enable_linear_cache_reclaim = True
+        config.kv_cache_pool_block_weights = '{"full":7,"linear":2}'
+        state = config.__getstate__()
+        for version, size in ((24, 80), (25, 81)):
+            with self.subTest(version=version):
+                previous = KVCacheConfig.__new__(KVCacheConfig)
+                previous.__setstate__((state[0], version, *state[2:size]))
+                self.assertTrue(previous.enable_linear_cache_reclaim)
+                expected_weights = config.kv_cache_pool_block_weights if version == 25 else ""
+                self.assertEqual(previous.kv_cache_pool_block_weights, expected_weights)
+                self.assertEqual(previous.lower_tier_linear_pool_avg_prompt_tokens, -1)
+                self.assertEqual(previous.linear_pool_avg_prompt_tokens, -1)
 
     def test_malformed_event_states_are_rejected(self):
         state = KVCacheConfig().__getstate__()

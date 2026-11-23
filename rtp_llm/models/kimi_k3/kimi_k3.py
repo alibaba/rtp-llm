@@ -155,6 +155,7 @@ class KimiK3(BaseModel):
                 if desc.cache_type == KVCacheSpecType.LINEAR:
                     # KDA states use head shards, independently of MLA page ownership.
                     desc.tp_transfer_mode = TpCacheTransferMode.LINEAR_QKV
+                    desc.prefill_borrow_tail = True
                     if model_config.attn_config.mla_fp8_compute:
                         # FP8 MLA does not change recurrent or conv storage.
                         desc.dtype = DataType.TYPE_BF16

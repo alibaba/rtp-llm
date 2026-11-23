@@ -152,6 +152,7 @@ std::string KVCacheConfig::to_string() const {
         << "reuse_cache_tail_blocks: " << reuse_cache_tail_blocks << "\n"
         << "lower_tier_linear_pool_avg_prompt_tokens: " << lower_tier_linear_pool_avg_prompt_tokens << "\n"
         << "linear_pool_blocks: " << linear_pool_blocks << "\n"
+        << "linear_pool_avg_prompt_tokens: " << linear_pool_avg_prompt_tokens << "\n"
         << "swa_pool_blocks: " << swa_pool_blocks << "\n"
         << "enable_linear_cache_reclaim: " << enable_linear_cache_reclaim << "\n"
         << "kv_cache_pool_block_weights: " << kv_cache_pool_block_weights << "\n"

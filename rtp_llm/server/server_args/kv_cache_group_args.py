@@ -60,6 +60,18 @@ def _pool_blocks(value):
     return count
 
 
+def _linear_pool_avg_prompt_tokens(value):
+    try:
+        tokens = int(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError("linear_pool_avg_prompt_tokens must be an integer") from error
+    if tokens != -1 and not 1 <= tokens <= 2147483647:
+        raise argparse.ArgumentTypeError(
+            "linear_pool_avg_prompt_tokens must be -1 or in [1, 2147483647]"
+        )
+    return tokens
+
+
 def _positive_finite_ratio(value):
     try:
         ratio = float(value)
@@ -267,6 +279,18 @@ def init_kv_cache_group_args(parser, kv_cache_config):
             "Prefill HOST 和 SSD 共用的 FULL 参考长度，单位为 token，可填多轮请求的等效增量。"
             "按 FULL 页跨度向上取整，再用 REUSE_CACHE_TAIL_BLOCKS + 1 除以参考页数得到 LINEAR/FULL 块数比。"
             "-1 沿用原有容量分配。"
+        ),
+    )
+    kv_cache_group.add_argument(
+        "--linear_pool_avg_prompt_tokens",
+        env_name="LINEAR_POOL_AVG_PROMPT_TOKENS",
+        bind_to=(kv_cache_config, "linear_pool_avg_prompt_tokens"),
+        type=_linear_pool_avg_prompt_tokens,
+        default=-1,
+        help=(
+            "用于 Prefill LINEAR/KDA 池定容的平均完整 prompt token 数。"
+            "每份参考长度对应 REUSE_CACHE_TAIL_BLOCKS + 1 个 LINEAR 槽，含一个尾块。"
+            "-1 沿用默认定容，LINEAR_POOL_BLOCKS 优先。"
         ),
     )
     kv_cache_group.add_argument(
