@@ -40,6 +40,7 @@ public class WorkerStatus {
     private volatile boolean reportedDead;
     private volatile long lastStatusAppliedUs;
     private volatile long statusFreshnessUs;
+    private volatile int discoveredStatusPort;
 
     private final AtomicReference<PollLease> statusApplicationLease = new AtomicReference<>();
 
@@ -67,6 +68,17 @@ public class WorkerStatus {
                                 initialStatus, new AppliedStatusCursor(-1L, -1L)));
         long discoveredAtUs = System.nanoTime() / 1000;
         pollHealth = new AtomicReference<>(new PollHealth(discoveredAtUs, 0L, 0L, false));
+    }
+
+    /**
+     * Returns the last discovered worker control port, or zero before discovery supplies it.
+     */
+    public int discoveredStatusPort() {
+        return discoveredStatusPort;
+    }
+
+    public void recordDiscoveredStatusPort(int port) {
+        discoveredStatusPort = port;
     }
 
     /** Create one fully initialized service-discovery generation. */
