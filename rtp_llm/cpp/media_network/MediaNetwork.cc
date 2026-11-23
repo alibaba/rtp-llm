@@ -83,7 +83,7 @@ Endpoint endpoint(const std::string& url, const Policy& policy, bool media) {
     auto host_end = authority.find(':');
     if (authority.front() == '[') {
         auto bracket = authority.find(']');
-        if (bracket == std::string::npos)
+        if (media || bracket == std::string::npos)
             throw Failure("invalid_url");
         host_end = bracket + 1;
     }
@@ -309,6 +309,9 @@ void exchange(CURL* curl, Job& job, const Policy& policy, const std::string& pro
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_PROTOCOLS, long(CURLPROTO_HTTP | CURLPROTO_HTTPS));
         curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+        // Some resolvers delay AAAA replies beyond the media connect timeout.
+        if (req.media)
+            curl_easy_setopt(curl, CURLOPT_IPRESOLVE, static_cast<long>(CURL_IPRESOLVE_V4));
         curl_easy_setopt(curl, CURLOPT_PROXY, proxy.c_str());
         if (!proxy.empty())
             curl_easy_setopt(curl, CURLOPT_NOPROXY, "");

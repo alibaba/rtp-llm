@@ -28,6 +28,8 @@ class Handler(BaseHTTPRequestHandler):
                 pass
         elif self.path == "/redirect":
             self.reply(302, b"", "/binary")
+        elif self.path == "/redirect-v6":
+            self.reply(302, b"", "http://[::1]/image")
         elif self.path == "/policy":
             self.reply(302, b"", "http://denied.invalid/image")
         elif self.path == "/retry" and self.server.visits.count("/retry") == 1:
@@ -110,6 +112,16 @@ class MediaNetworkTest(unittest.TestCase):
             self.server.release.set()
         self.assertIs(self.net.next(), pending)
         self.assertEqual(pending.result()[1], "cancelled")
+
+    def test_media_uses_ipv4(self):
+        self.assertEqual(
+            self.fetch("/unused", url="http://[::1]/image")[1], "invalid_url"
+        )
+        self.assertEqual(self.fetch("/redirect-v6")[1], "invalid_url")
+        proxy = f"http://localhost:{self.server.server_port}"
+        target = "http://127.0.0.1:1/binary"
+        self.assertEqual(self.fetch("/unused", url=target, proxy=proxy)[0], 200)
+        self.assertIn(target, self.server.visits)
 
     def test_service_body(self):
         for method in ("PUT", "POST"):
