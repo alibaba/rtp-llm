@@ -26,13 +26,15 @@ public final class WorkerRegistryConfig {
     }
 
     /**
-     * Bounds adaptive cache refresh intervals and the target size of metadata diffs.
+     * Configures cache poll submission, adaptive refresh and local metadata diffs.
      */
     @Getter
     @Setter
     public static final class CacheStatusConfig {
         private int targetDiffSize = 30;
         private int diffParallelism = 8;
+        private int pollExecutorThreads = 32;
+        private int pollExecutorQueueCapacity = 15_000;
         private long minRefreshIntervalMs = 50;
         private long maxRefreshIntervalMs = 3000;
         private boolean fullSnapshotDebugMode;
