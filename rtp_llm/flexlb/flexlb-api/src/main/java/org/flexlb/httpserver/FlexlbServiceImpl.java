@@ -178,7 +178,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                                     callerContext.run(
                                             () ->
                                                     handleForwardCompletion(
-                                                            request,
                                                             requestContext,
                                                             responseObserver,
                                                             completionClaimed,
@@ -194,8 +193,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                             ? ScheduleOrigin.LOCAL_MASTER
                             : ScheduleOrigin.LOCAL_STANDALONE;
             errorOrigin = routeOrigin;
-            routeAndComplete(
-                    request, requestContext, responseObserver, completionClaimed, routeOrigin);
+            routeAndComplete(requestContext, responseObserver, completionClaimed, routeOrigin);
 
         } catch (Exception e) {
             String requestId = RequestId.parse(request);
@@ -452,7 +450,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     private void handleForwardCompletion(
-            FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
             BalanceContext context,
             StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver,
             AtomicBoolean completionClaimed,
@@ -468,11 +465,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
         if (shouldScheduleLocally(context, forwardResult)) {
             routeAndComplete(
-                    request,
-                    context,
-                    responseObserver,
-                    completionClaimed,
-                    ScheduleOrigin.LOCAL_FALLBACK);
+                    context, responseObserver, completionClaimed, ScheduleOrigin.LOCAL_FALLBACK);
             return;
         }
 
@@ -536,7 +529,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     private void routeAndComplete(
-            FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
             BalanceContext context,
             StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver,
             AtomicBoolean completionClaimed,
