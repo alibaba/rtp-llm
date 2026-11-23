@@ -31,6 +31,32 @@ def sm120_suites():
                 smoke_args = "--seq_size_per_block 16 --act_type FP16",
                 gpu_type = ["RTX_5000_PRO_CU13"],
             ),
+            smoke_test(
+                name = "roberta_cudagraph_sm120",
+                task_info = "data/model/bert/roberta_q_r.json",
+                # Embedding prefill CUDA graph: asserts graph replay matches the
+                # eager FP16 golden (roberta_q_r.json is the eager test's task
+                # info). Buckets cover the 10-token query exactly and a larger
+                # bucket exercises padded replay. Small concurrency caps the
+                # max_bs * max_seq_len capture buffers.
+                smoke_args = "--seq_size_per_block 16 --act_type FP16 --concurrency_limit 2 --enable_cuda_graph 1 --prefill_capture_config '10,16'",
+                gpu_type = ["RTX_5000_PRO_CU13"],
+            ),
+            smoke_test(
+                name = "roberta_fp8pb_sm120",
+                task_info = "data/model/bert/roberta_q_r_fp8pb.json",
+                # Online FP8 per-block weight quantization at load time.
+                smoke_args = "--seq_size_per_block 16 --act_type BF16 --quantization FP8_PER_BLOCK",
+                gpu_type = ["RTX_5000_PRO_CU13"],
+            ),
+            smoke_test(
+                name = "roberta_fp8pb_cudagraph_sm120",
+                task_info = "data/model/bert/roberta_q_r_fp8pb.json",
+                # Same task_info as roberta_fp8pb_sm120: asserts prefill-graph
+                # replay matches eager FP8 per-block outputs.
+                smoke_args = "--seq_size_per_block 16 --act_type BF16 --quantization FP8_PER_BLOCK --concurrency_limit 2 --enable_cuda_graph 1 --prefill_capture_config '10,16'",
+                gpu_type = ["RTX_5000_PRO_CU13"],
+            ),
         ],
     )
 

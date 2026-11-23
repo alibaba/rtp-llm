@@ -241,6 +241,34 @@ def rocm_oss_suites():
                 smoke_args="--task_type RERANKER --max_context_batch_size 10 --act_type FP16 --seq_size_per_block 16 --use_aiter_pa 1 --use_asm_pa 1",
                 gpu_type=["MI308X-ROCM7"],
             ),
+            # PTPC golden (roberta_ptpc_expect.pt) holds the MI308X actual
+            # recorded on the ROCm CI pool (run 93305557); the similarity
+            # values in roberta_q_r_ptpc.json remain the eager-FP16 reference
+            # (compares within tolerance).
+            smoke_test(
+                name="rocm_embedding_roberta_ptpc",
+                task_info="data/model/bert/roberta_q_r_ptpc.json",
+                smoke_args="--quantization FP8_PER_CHANNEL_COMPRESSED --use_swizzleA 1 --seq_size_per_block 16 --use_aiter_pa 1 --use_asm_pa 1 --act_type BF16",
+                gpu_type=["MI308X-ROCM7"],
+            ),
+            # Embedding prefill hip graph is not ready on MI308X: capture
+            # warmup at server init hangs (health check never passes; the CI
+            # watchdog kills the test after 1800s with no artifacts, see run
+            # 93305557). Keep both cases commented out until the ROCm capture
+            # hang is debugged; eager PTPC (rocm_embedding_roberta_ptpc)
+            # covers the quantization path in CI.
+            # smoke_test(
+            #     name="rocm_embedding_roberta_hipgraph",
+            #     task_info="data/model/bert/roberta_q_r.json",
+            #     smoke_args="--enable_cuda_graph 1 --prefill_capture_config '10,16' --concurrency_limit 2 --seq_size_per_block 16 --use_aiter_pa 1 --use_asm_pa 1 --act_type FP16",
+            #     gpu_type=["MI308X-ROCM7"],
+            # ),
+            # smoke_test(
+            #     name="rocm_embedding_roberta_ptpc_hipgraph",
+            #     task_info="data/model/bert/roberta_q_r_ptpc.json",
+            #     smoke_args="--quantization FP8_PER_CHANNEL_COMPRESSED --use_swizzleA 1 --enable_cuda_graph 1 --prefill_capture_config '10,16' --concurrency_limit 2 --seq_size_per_block 16 --use_aiter_pa 1 --use_asm_pa 1 --act_type BF16",
+            #     gpu_type=["MI308X-ROCM7"],
+            # ),
             smoke_test(
                 name="rocm_embedding_bge_reranker_fmha_fallback",
                 task_info="data/model/bert/classifier_q_r.json",
