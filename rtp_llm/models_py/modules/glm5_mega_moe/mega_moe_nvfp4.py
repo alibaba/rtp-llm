@@ -6,6 +6,7 @@ from dataclasses import replace
 import torch
 import torch.distributed as dist
 
+from rtp_llm.models.glm53_prefill_parallel import shared_expert_local_enabled
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.model_weight import W
 
@@ -288,7 +289,16 @@ class MegaMoeNvfp4SEWrapper(MegaMoeWrapper):
     forward_prepacked = None
 
     def __init__(self, config, parallelism_config, weights, *args, **kwargs):
-        if parallelism_config.get_ffn_tp_size() != 1:
+        # Prefill token sharding replicates the shared expert even when FFN
+        # tensor parallelism still shards the dense layers.
+        if (
+            parallelism_config.get_ffn_tp_size() != 1
+            and not shared_expert_local_enabled(
+                config.model_type,
+                parallelism_config.role_type,
+                is_glm53_mtp=getattr(config, "is_glm53_mtp", False),
+            )
+        ):
             raise ValueError(
                 "NVFP4 MegaMoE requires a full shared expert on each EP rank"
             )

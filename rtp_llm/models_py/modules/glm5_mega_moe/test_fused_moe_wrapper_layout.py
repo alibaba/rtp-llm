@@ -1,3 +1,4 @@
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -9,8 +10,10 @@ from rtp_llm.models_py.modules.glm5_mega_moe import (
     mega_moe_fp8_se_wrapper,
     mega_moe_fp8_wrapper,
     mega_moe_fused_wrapper,
+    mega_moe_nvfp4,
     mega_moe_wrapper,
 )
+from rtp_llm.ops import RoleType
 from rtp_llm.utils.model_weight import W
 
 
@@ -59,6 +62,51 @@ def _parallelism(role_type=None):
 
 
 class MegaMoeWrapperLayoutTest(unittest.TestCase):
+    def test_nvfp4_prefill_accepts_replicated_shared_weights_under_tp8(self):
+        parallelism = SimpleNamespace(
+            ep_size=8,
+            ep_rank=0,
+            role_type=RoleType.PREFILL,
+            get_ffn_tp_size=lambda: 8,
+        )
+        implementations = (
+            ("glm5_3_flash", mega_moe_nvfp4.GLM53Nvfp4MegaMoE, False),
+            ("glm_5_mtp", mega_moe_nvfp4.GLM53Bf16DraftMegaMoE, True),
+        )
+        for model_type, implementation, draft in implementations:
+            with self.subTest(model_type=model_type):
+                config = _config()
+                config.expert_num = 16
+                config.model_type = model_type
+                config.is_glm53_mtp = draft
+                config.glm53_nvfp4_bf16_mtp = draft
+                weights = {
+                    W.ffn_w13: torch.ones((8, 8), dtype=torch.bfloat16),
+                    W.ffn_w2: torch.ones((4, 8), dtype=torch.bfloat16),
+                }
+                with patch.dict(
+                    os.environ, {"GLM53_PREFILL_SHARED_EXPERT_LOCAL": "1"}
+                ), patch.object(
+                    implementation, "setup_native_weights", autospec=True
+                ) as setup:
+                    wrapper = mega_moe_nvfp4.MegaMoeNvfp4SEWrapper(
+                        config, parallelism, weights
+                    )
+                    setup.assert_called_once_with(wrapper.mega_moe, weights)
+                    l1, l2 = wrapper.mega_moe._load_shared_weights(weights)
+                    self.assertEqual(tuple(l1.shape), (8, 8))
+                    self.assertEqual(tuple(l2.shape), (8, 4))
+
+    def test_nvfp4_rejects_sharded_shared_expert(self):
+        config = _config()
+        config.model_type = "glm5_3_flash"
+        parallelism = SimpleNamespace(
+            role_type=RoleType.PREFILL, get_ffn_tp_size=lambda: 8
+        )
+        with patch.dict(os.environ, {"GLM53_PREFILL_SHARED_EXPERT_LOCAL": "0"}):
+            with self.assertRaisesRegex(ValueError, "full shared expert"):
+                mega_moe_nvfp4.MegaMoeNvfp4SEWrapper(config, parallelism, {})
+
     def test_logical_chunk_budget_does_not_use_buffer_padding(self):
         wrapper = object.__new__(mega_moe_wrapper.MegaMoeWrapper)
         torch.nn.Module.__init__(wrapper)
