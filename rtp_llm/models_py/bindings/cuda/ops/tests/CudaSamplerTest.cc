@@ -10,13 +10,16 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/attention_input_metadata.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/greedy_top1_renorm.h"
 #include <ATen/cuda/CUDAGeneratorImpl.h>
+#include <ATen/cuda/CUDAGraph.h>
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <set>
 #include <string>
 #include <vector>
 #include <c10/cuda/CUDAGuard.h>
@@ -24,6 +27,15 @@ using namespace std;
 using namespace rtp_llm;
 
 namespace {
+
+bool deepSelectDeviceAvailable() {
+    const auto* properties = at::cuda::getDeviceProperties(0);
+    return torch_ext::deepselect_fp32_available()
+           && torch_ext::deepselectFp32DeviceSupported(properties->major,
+                                                       properties->minor,
+                                                       torch_ext::deepselect_fp32_sm90_image_available(),
+                                                       properties->sharedMemPerBlockOptin);
+}
 
 void assertAllValid(const torch::Tensor& valid) {
     ASSERT_TRUE(valid.defined());
@@ -284,10 +296,8 @@ TEST_F(CudaSamplerTest, testBatchedSeedOffsetsCpuBenchmark) {
 }
 
 TEST_F(CudaSamplerTest, testDeepSelect4096ReturnsOriginalValues) {
-    const auto* properties = at::cuda::getDeviceProperties(0);
-    if (!torch_ext::deepselect_fp32_available() || properties->major != 10
-        || (properties->minor != 0 && properties->minor != 3)) {
-        GTEST_SKIP() << "DeepSelect FP32 requires SM100 or SM103";
+    if (!deepSelectDeviceAvailable()) {
+        GTEST_SKIP() << "DeepSelect FP32 native architecture image is unavailable";
     }
     const auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
     for (int64_t vocab_size : {4096, 129280}) {
@@ -302,11 +312,193 @@ TEST_F(CudaSamplerTest, testDeepSelect4096ReturnsOriginalValues) {
     }
 }
 
+TEST_F(CudaSamplerTest, testDeepSelectArchitectureImageAndDecodeRange) {
+    for (bool image : {false, true}) {
+        for (int64_t rows : {0, 1, 6, 96, 128, 129, 256}) {
+            EXPECT_EQ(torch_ext::deepselectFp32TopkDispatch(9, 0, image, 227 * 1024, rows),
+                      image && rows >= 1 && rows <= 128);
+            EXPECT_FALSE(torch_ext::deepselectFp32TopkDispatch(9, 0, image, 227 * 1024 - 1, rows));
+            for (int minor : {0, 3}) {
+                EXPECT_TRUE(torch_ext::deepselectFp32TopkDispatch(10, minor, image, 0, rows));
+            }
+        }
+        for (const auto& arch : {std::pair<int, int>{8, 9}, {9, 1}, {10, 1}, {12, 0}}) {
+            EXPECT_FALSE(torch_ext::deepselectFp32DeviceSupported(arch.first, arch.second, image, 227 * 1024));
+        }
+    }
+}
+
+TEST_F(CudaSamplerTest, testDeepSelectRawFiniteCountsSubnormalsStridesAndDynamicBounds) {
+    if (!deepSelectDeviceAvailable()) {
+        GTEST_SKIP() << "DeepSelect FP32 native architecture image is unavailable";
+    }
+    constexpr int64_t  rows = 8, vocab = 16384, stride = vocab + 256;
+    std::vector<float> host(rows * stride, 0);
+    for (int64_t row = 0; row < rows; ++row) {
+        for (int64_t col = 0; col < vocab; ++col) {
+            float value = static_cast<float>(col % 1021 - 510);
+            if (row % 3 == 1) {
+                const uint32_t bits = uint32_t(col % 1024 + 1) | (col % 2 ? 0x80000000u : 0);
+                std::memcpy(&value, &bits, sizeof(value));
+            } else if (row % 3 == 2) {
+                value = std::copysign(0.0f, col % 2 ? -1.0f : 1.0f);
+            }
+            host[row * stride + 8 + col] = value;
+        }
+        host[row * stride + 8 + 3] = std::numeric_limits<float>::quiet_NaN();
+        host[row * stride + 8 + 4] = -std::numeric_limits<float>::quiet_NaN();
+        host[row * stride + 8 + 5] = std::numeric_limits<float>::infinity();
+        host[row * stride + 8 + 6] = -std::numeric_limits<float>::infinity();
+    }
+    const auto floats  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    auto       backing = cudaTensor(host, {rows, stride});
+    auto       logits  = backing.narrow(1, 8, vocab);
+    auto       ends    = cudaIntTensor({0, 17, 511, 512, 513, 4095, 4096, vocab}, {rows});
+    auto       check   = [&](const torch::Tensor& output, int64_t k, bool filter_finite) {
+        const auto scores = logits.cpu().contiguous();
+        const auto bounds = ends.cpu();
+        const auto ids    = output.cpu().contiguous();
+        for (int64_t row = 0; row < rows; ++row) {
+            const int64_t      end = std::max<int64_t>(0, std::min<int64_t>(vocab, bounds[row].item<int32_t>()));
+            std::vector<float> expected, actual;
+            std::set<int32_t>  unique;
+            for (int64_t col = 0; col < end; ++col) {
+                const float value = scores.data_ptr<float>()[row * vocab + col];
+                expected.push_back(std::isnan(value) ? std::numeric_limits<float>::infinity() : value);
+            }
+            std::sort(expected.begin(), expected.end(), std::greater<float>());
+            expected.resize(std::min<int64_t>(end, k));
+            if (filter_finite) {
+                expected.erase(
+                    std::remove_if(expected.begin(), expected.end(), [](float value) { return !std::isfinite(value); }),
+                    expected.end());
+            }
+            for (int64_t col = 0; col < k; ++col) {
+                const int32_t id = ids.data_ptr<int32_t>()[row * k + col];
+                if (id < 0) {
+                    EXPECT_EQ(id, -1);
+                    continue;
+                }
+                ASSERT_LT(id, end);
+                EXPECT_TRUE(unique.insert(id).second);
+                const float value = scores.data_ptr<float>()[row * vocab + id];
+                if (filter_finite) {
+                    EXPECT_TRUE(std::isfinite(value));
+                }
+                actual.push_back(std::isnan(value) ? std::numeric_limits<float>::infinity() : value);
+            }
+            std::sort(actual.begin(), actual.end(), std::greater<float>());
+            EXPECT_EQ(actual, expected) << "row=" << row << " k=" << k << " finite=" << filter_finite;
+        }
+    };
+    for (int64_t k : {512, 1024, 4096}) {
+        ends.copy_(cudaIntTensor({0, 17, 511, 512, 513, 4095, 4096, vocab}, {rows}));
+        auto output_backing = torch::full({rows, k + 16}, 12345, floats.dtype(torch::kInt32));
+        auto output         = output_backing.narrow(1, 8, k);
+        for (bool finite : {false, true}) {
+            if (finite && k == 1024) {
+                EXPECT_THROW(torch_ext::deepselect_fp32(logits, ends, output, true), c10::Error);
+                continue;
+            }
+            torch_ext::deepselect_fp32(logits, ends, output, finite);
+            check(output, k, finite);
+        }
+        if (k != 512) {
+            auto values = torch::empty({rows, k}, floats);
+            torch_ext::deepselect_fp32(logits, ends, output, false, &values);
+            auto expected = logits.gather(1, output.clamp_min(0).to(torch::kLong));
+            auto valid    = output.ge(0);
+            EXPECT_TRUE(torch::equal(values.view(torch::kInt32).masked_select(valid),
+                                     expected.view(torch::kInt32).masked_select(valid)));
+        }
+        EXPECT_TRUE(output_backing.narrow(1, 0, 8).eq(12345).all().item<bool>());
+        EXPECT_TRUE(output_backing.narrow(1, k + 8, 8).eq(12345).all().item<bool>());
+        at::cuda::getCurrentCUDAStream().synchronize();
+        const auto                       stream = at::cuda::getStreamFromPool();
+        const c10::cuda::CUDAStreamGuard stream_guard(stream);
+        torch_ext::deepselect_fp32(logits, ends, output, false);
+        stream.synchronize();
+        at::cuda::CUDAGraph graph;
+        graph.capture_begin();
+        torch_ext::deepselect_fp32(logits, ends, output, false);
+        graph.capture_end();
+        for (int32_t end : {256, 16384}) {
+            logits.neg_();
+            ends.fill_(end);
+            graph.replay();
+            check(output, k, false);
+        }
+    }
+}
+
+TEST_F(CudaSamplerTest, testTargetDefaultCap1024PreservesCompactDistributionAndRng) {
+    if (!deepSelectDeviceAvailable()) {
+        GTEST_SKIP() << "DeepSelect FP32 native architecture image is unavailable";
+    }
+    constexpr int64_t vocab = 129280, k = 1024;
+    const auto        floats = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    for (int64_t gamma : {5, 7}) {
+        for (int64_t worker_bs = 1; worker_bs <= 16; ++worker_bs) {
+            const int64_t rows = worker_bs * (gamma + 1);
+            SCOPED_TRACE("bs=" + std::to_string(worker_bs) + " gamma=" + std::to_string(gamma));
+            // Distinct representable logits make the selected support unique.
+            auto scores           = (torch::arange(vocab, floats) / 4096.0f).repeat({rows, 1});
+            auto fallback_backing = torch::empty({rows, vocab + 1}, floats);
+            auto fallback         = fallback_backing.narrow(1, 0, vocab);
+            fallback.copy_(scores);  // unaligned row stride forces the original ATen selector
+            auto run = [&](const torch::Tensor& logits) {
+                auto         tokens = torch::full({rows, 3}, 12345, floats.dtype(torch::kInt32));
+                auto         probs  = torch::empty({rows, k}, floats);
+                auto         ids    = torch::empty({rows, k}, floats.dtype(torch::kInt32));
+                GreedyParams params({logits,
+                                     cudaIntTensor(std::vector<int32_t>(rows, -1), {rows}),
+                                     cudaIntTensor(std::vector<int32_t>(rows, 2), {rows}),
+                                     tokens,
+                                     2,
+                                     pinnedIntTensor(std::vector<int32_t>(rows, 0)),
+                                     pinnedFloatTensor(std::vector<float>(rows, 1.0f)),
+                                     pinnedFloatTensor(std::vector<float>(rows, 1.0f))});
+                params.output_all_probs          = probs;
+                params.output_all_probs_indices  = ids;
+                params.skip_logits_probs_restore = true;
+                params.force_topk                = k;
+                for (int64_t row = 0; row < rows; ++row) {
+                    auto generator = torch::make_generator<at::CUDAGeneratorImpl>();
+                    generator.set_current_seed(20261123 + row);
+                    params.generator.push_back(generator);
+                }
+                auto output = execSampleGreedy(prepareSamplingParams(params, rows));
+                check_cuda_error();
+                assertAllValid(output.success);
+                EXPECT_TRUE(tokens.narrow(1, 0, 2).eq(12345).all().item<bool>());
+                EXPECT_TRUE(tokens.select(1, 2).ge(vocab - k).all().item<bool>());
+                EXPECT_TRUE(tokens.select(1, 2).lt(vocab).all().item<bool>());
+                auto                       sorted  = ids.sort(-1);
+                auto                       aligned = probs.gather(1, std::get<1>(sorted));
+                std::vector<torch::Tensor> states;
+                for (const auto& generator : params.generator) {
+                    states.push_back(generator.get_state());
+                }
+                return std::make_tuple(std::get<0>(sorted), aligned, states);
+            };
+            const auto actual    = run(scores);
+            const auto reference = run(fallback);
+            EXPECT_TRUE(torch::equal(std::get<0>(actual), std::get<0>(reference)));
+            EXPECT_TRUE(torch::allclose(std::get<1>(actual), std::get<1>(reference), 2.0e-6, 1.0e-7));
+            const auto expected = torch::softmax(torch::arange(vocab - k, vocab, floats) / 4096.0f, -1);
+            EXPECT_TRUE(torch::allclose(std::get<1>(actual), expected.expand({rows, k}), 2.0e-6, 1.0e-7));
+            for (int64_t row = 0; row < rows; ++row) {
+                EXPECT_TRUE(torch::equal(std::get<2>(actual)[row], std::get<2>(reference)[row]));
+            }
+            // An unordered selector may change the categorical coupling to a
+            // seed; support/q and the unchanged generator continuation are the contract.
+        }
+    }
+}
+
 TEST_F(CudaSamplerTest, testDeepSelect4096SparseLogitsKeepValidUniqueIndices) {
-    const auto* properties = at::cuda::getDeviceProperties(0);
-    if (!torch_ext::deepselect_fp32_available() || properties->major != 10
-        || (properties->minor != 0 && properties->minor != 3)) {
-        GTEST_SKIP() << "DeepSelect FP32 requires SM100 or SM103";
+    if (!deepSelectDeviceAvailable()) {
+        GTEST_SKIP() << "DeepSelect FP32 native architecture image is unavailable";
     }
     constexpr int64_t vocab_size = 129280;
     const auto        options    = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
@@ -339,10 +531,8 @@ TEST_F(CudaSamplerTest, testDeepSelect4096SparseLogitsKeepValidUniqueIndices) {
 }
 
 TEST_F(CudaSamplerTest, testDeepSelect4096SparseAndBoundaryWidths) {
-    const auto* properties = at::cuda::getDeviceProperties(0);
-    if (!torch_ext::deepselect_fp32_available() || properties->major != 10
-        || (properties->minor != 0 && properties->minor != 3)) {
-        GTEST_SKIP() << "DeepSelect FP32 requires SM100 or SM103";
+    if (!deepSelectDeviceAvailable()) {
+        GTEST_SKIP() << "DeepSelect FP32 native architecture image is unavailable";
     }
     const auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
     for (int64_t vocab : {8192, 128256, 129280, 130048, 131072}) {
@@ -2048,10 +2238,8 @@ TEST_F(CudaSamplerTest, testForceTopKReturnsVocabularyProbabilities) {
 }
 
 TEST_F(CudaSamplerTest, testForceTopK4096SparseMaskPreservesProbabilityMass) {
-    const auto* properties = at::cuda::getDeviceProperties(0);
-    if (!torch_ext::deepselect_fp32_available() || properties->major != 10
-        || (properties->minor != 0 && properties->minor != 3)) {
-        GTEST_SKIP() << "DeepSelect FP32 requires SM100 or SM103";
+    if (!deepSelectDeviceAvailable()) {
+        GTEST_SKIP() << "DeepSelect FP32 native architecture image is unavailable";
     }
     constexpr int64_t vocab_size = 129280;
     const auto        options    = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);

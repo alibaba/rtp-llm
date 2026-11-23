@@ -301,13 +301,43 @@ cc_library(
 
 cc_library(
     name = "deepselect_fp32",
-    srcs = ["deepselect_fp32.cu", "draft_markov_topk.cu"],
+    srcs = ["draft_markov_topk.cu"],
     hdrs = ["deepselect_fp32.h"] + draft_topk_hdrs + glob([
         "deepselect/**/*.h",
         "deepselect/**/*.cuh",
     ]),
     copts = copts() + cuda_default_copts_without_arch() + draft_topk_copts + select({
         "@//:using_cuda13_x86": deepselect_cuda_copts,
+        "@//:using_cuda13_arm": deepselect_cuda_copts,
+        "@//:using_cuda12_9": deepselect_cuda_copts,
+        "//conditions:default": [],
+    }),
+    deps = torch_deps() + [
+        ":deepselect_fp32_selector",
+        ":markov_scaled_logits",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + select({
+        "@//:using_cuda13_x86": ["@cutlass4.0//:cutlass"],
+        "@//:using_cuda13_arm": ["@cutlass4.0//:cutlass"],
+        "@//:using_cuda12_9": ["@cutlass4.0//:cutlass"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "deepselect_fp32_selector",
+    srcs = ["deepselect_fp32.cu"],
+    hdrs = ["deepselect_fp32.h"] + glob([
+        "deepselect/**/*.h",
+        "deepselect/**/*.cuh",
+    ]),
+    copts = copts() + cuda_default_copts_without_arch() + select({
+        "@//:using_cuda13_x86": deepselect_cuda_copts + [
+            "-DRTP_DEEPSELECT_FP32_SM90_IMAGE=1",
+            "--cuda-include-ptx=sm_90a", "--cuda-gpu-arch=sm_90a",
+        ],
         "@//:using_cuda13_arm": deepselect_cuda_copts,
         "@//:using_cuda12_9": deepselect_cuda_copts,
         "//conditions:default": [],

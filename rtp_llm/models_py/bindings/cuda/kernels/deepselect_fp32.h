@@ -8,6 +8,24 @@ namespace torch_ext {
 
 bool deepselect_fp32_available();
 
+// Only the CUDA13 x86 target emits the additional native Hopper image.
+bool deepselect_fp32_sm90_image_available();
+
+constexpr bool deepselectFp32DeviceSupported(int major, int minor, bool has_sm90_image, uint64_t shared_memory) {
+    if (major == 9 && minor == 0) {
+        return has_sm90_image && shared_memory >= 227 * 1024;
+    }
+    return major == 10 && (minor == 0 || minor == 3);
+}
+
+// The Hopper automatic route is qualified for decode/target-verify rows only.
+// Raw primitive tests may exercise larger batches; Blackwell keeps its range.
+constexpr bool
+deepselectFp32TopkDispatch(int major, int minor, bool has_sm90_image, uint64_t shared_memory, int64_t rows) {
+    return deepselectFp32DeviceSupported(major, minor, has_sm90_image, shared_memory)
+           && (major != 9 || (rows >= 1 && rows <= 128));
+}
+
 // Draft only. Returns temperature-scaled FP32 values and int64 vocabulary IDs.
 std::tuple<torch::Tensor, torch::Tensor>
 draft_markov_topk(const torch::Tensor& logits, const torch::Tensor& bias, const torch::Tensor& temperature, int64_t k);
@@ -48,7 +66,8 @@ void deepselect_fp32(const torch::Tensor& logits,
 torch::Tensor
 markov_scaled_logits(const torch::Tensor& logits, const torch::Tensor& markov_bias, const torch::Tensor& temperature);
 
-// K<=512, K=1024 and K=4096 use DeepSelect on supported Blackwell inputs; other
+// K<=512, K=1024 and K=4096 use DeepSelect on supported Blackwell inputs and
+// qualified Hopper decode rows in builds with a native SM90a image; other
 // shapes use ATen topk. Returned indices are int64. K1024 and K4096 return the
 // selected values straight from the selector; K<=512 gathers them after the
 // wider bucket is trimmed.

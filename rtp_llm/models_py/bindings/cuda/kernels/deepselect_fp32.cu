@@ -127,6 +127,14 @@ bool deepselect_fp32_available() {
 #endif
 }
 
+bool deepselect_fp32_sm90_image_available() {
+#if !defined(USE_ROCM) && CUDART_VERSION >= 12090 && defined(RTP_DEEPSELECT_FP32_SM90_IMAGE)
+    return true;
+#else
+    return false;
+#endif
+}
+
 static void deepselect_fp32_impl(const torch::Tensor& logits,
                                  const torch::Tensor& ends,
                                  torch::Tensor&       output,
@@ -200,8 +208,11 @@ static void deepselect_fp32_impl(const torch::Tensor& logits,
     }
     const c10::cuda::CUDAGuard device_guard(logits.device());
     const cudaDeviceProp*      properties = at::cuda::getDeviceProperties(logits.get_device());
-    TORCH_CHECK(properties->major == 10 && (properties->minor == 0 || properties->minor == 3),
-                "DeepSelect FP32 requires SM100 or SM103");
+    TORCH_CHECK(deepselectFp32DeviceSupported(properties->major,
+                                              properties->minor,
+                                              deepselect_fp32_sm90_image_available(),
+                                              properties->sharedMemPerBlockOptin),
+                "DeepSelect FP32 requires a native supported architecture image and sufficient shared memory");
     if (rows == 0) {
         return;
     }
@@ -319,10 +330,18 @@ std::tuple<torch::Tensor, torch::Tensor> deepselect_fp32_topk(const torch::Tenso
     // which removes the post-selection gather over the full row.
     const bool fused_values = k == 1024 || k == 4096;
     if ((k == 4096 || k == 1024 || (k > 0 && k <= 512)) && logits.is_cuda() && logits.scalar_type() == torch::kFloat32
-        && logits.dim() == 2 && logits.size(1) >= width && logits.size(1) < MAX_VOCAB_SIZE && logits_row_major_view
-        && at::cuda::getDeviceProperties(logits.get_device())->major == 10
-        && (at::cuda::getDeviceProperties(logits.get_device())->minor == 0
-            || at::cuda::getDeviceProperties(logits.get_device())->minor == 3)) {
+        && logits.dim() == 2 && logits.size(1) >= width && logits.size(1) < MAX_VOCAB_SIZE && logits_row_major_view) {
+        // getDeviceProperties returns ATen's cached device metadata; this adds
+        // neither a hot-path CUDA property query nor a runtime environment flag.
+        const auto* properties = at::cuda::getDeviceProperties(logits.get_device());
+        if (!deepselectFp32TopkDispatch(properties->major,
+                                        properties->minor,
+                                        deepselect_fp32_sm90_image_available(),
+                                        properties->sharedMemPerBlockOptin,
+                                        logits.size(0))) {
+            auto selected = torch::topk(logits, k, -1, /*largest=*/true, /*sorted=*/false);
+            return {std::get<0>(selected), std::get<1>(selected)};
+        }
         auto indices = torch::empty({logits.size(0), width}, logits.options().dtype(torch::kInt32));
         auto ends    = torch::full({logits.size(0)}, logits.size(1), logits.options().dtype(torch::kInt32));
         auto values  = fused_values ? torch::empty({logits.size(0), width}, logits.options()) : torch::Tensor();
