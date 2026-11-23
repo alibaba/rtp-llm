@@ -2567,8 +2567,9 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionSkipsDeclaredGroupWithoutLocalLayersAn
         auto manager = makeStageTransferManager(pp_size);
         ASSERT_TRUE(manager->init());
         manager->blockTreeCache()->stopBackgroundTasks();
-        auto engine                                      = std::make_shared<RecordingBatchTransferEngine>();
-        manager->block_tree_cache_->transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(engine);
+        auto engine = std::make_shared<RecordingBatchTransferEngine>();
+        manager->block_tree_cache_->transfer_dispatcher_ =
+            std::make_unique<BlockTransferDispatcher>(engine, manager->block_tree_cache_->reclaimer_);
 
         FunctionRequestPB request;
         auto*             mem_request = request.mutable_mem_request();
@@ -2609,8 +2610,9 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionPreservesWireErrorsAcrossEmptyPPGroupS
     auto manager = makeStageTransferManager(2);
     ASSERT_TRUE(manager->init());
     manager->blockTreeCache()->stopBackgroundTasks();
-    auto engine                                      = std::make_shared<RecordingBatchTransferEngine>();
-    manager->block_tree_cache_->transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(engine);
+    auto engine = std::make_shared<RecordingBatchTransferEngine>();
+    manager->block_tree_cache_->transfer_dispatcher_ =
+        std::make_unique<BlockTransferDispatcher>(engine, manager->block_tree_cache_->reclaimer_);
 
     FunctionRequestPB request;
     ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(
@@ -2677,8 +2679,7 @@ TEST_F(KVCacheManagerTest, FrozenForceReleaseTimeoutReachesRecoveryWorker) {
         auto        engine       = std::make_shared<RecordingBatchTransferEngine>(groups);
         engine->completion_error = ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "local I/O outcome unknown");
         auto& dispatcher = manager->block_tree_cache_->transfer_dispatcher_;
-        dispatcher = std::make_unique<BlockTransferDispatcher>(engine);
-        dispatcher->setReclaimer(manager->block_tree_cache_->reclaimer_);
+        dispatcher = std::make_unique<BlockTransferDispatcher>(engine, manager->block_tree_cache_->reclaimer_);
         auto pool = groups.front()->hostPool();
         ASSERT_NE(pool, nullptr);
         const auto block = pool->malloc();
@@ -2707,8 +2708,8 @@ TEST_F(KVCacheManagerTest, FrozenForceReleaseTimeoutReachesRecoveryWorker) {
         age(std::chrono::minutes(10));
         EXPECT_EQ(reclaimer.frozen_.empty(), timeout_ms != 0);
         reclaimer.drainForget();
-        EXPECT_EQ(reclaimer.forget_queue_.size(), timeout_ms == 0 ? 0u : 1u);
-        EXPECT_EQ(reclaimer.records_.size(), 1u);
+        EXPECT_TRUE(reclaimer.forget_queue_.empty());
+        EXPECT_EQ(reclaimer.records_.size(), timeout_ms == 0 ? 1u : 0u);
         engine->last_proof->report(true);
         reclaimer.queryFrozen();
         reclaimer.drainForget();
@@ -2737,9 +2738,9 @@ TEST_F(KVCacheManagerTest, ForgetProgressesWithRecoveryDisabledAndWhileItsWorker
         ASSERT_TRUE(reclaimer.registerTask(trace, {false, 1}, {}));
         reclaimer.unregisterTask(trace);
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-        while (reclaimer.localState(id) != TransferTaskRegistry::State::UNKNOWN && std::chrono::steady_clock::now() < deadline)
+        while (reclaimer.localState(id) != BlockTreeReclaimer::State::UNKNOWN && std::chrono::steady_clock::now() < deadline)
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        EXPECT_EQ(reclaimer.localState(id), TransferTaskRegistry::State::UNKNOWN);
+        EXPECT_EQ(reclaimer.localState(id), BlockTreeReclaimer::State::UNKNOWN);
     };
     ASSERT_NO_FATAL_FAILURE(check_cleanup(1001));
     reclaimer.stop();
@@ -2771,7 +2772,8 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionValidatesTraceAndTimeoutBeforeSubmitti
     ASSERT_TRUE(manager->init());
     auto engine = std::make_shared<RecordingBatchTransferEngine>();
     manager->block_tree_cache_->stopBackgroundTasks();
-    manager->block_tree_cache_->transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(engine);
+    manager->block_tree_cache_->transfer_dispatcher_ =
+        std::make_unique<BlockTransferDispatcher>(engine, manager->block_tree_cache_->reclaimer_);
     FunctionRequestPB request;
     appendValidGroupedTransfer(manager, request);
     ASSERT_EQ(request.mem_request().copy_items_size(), 1);
@@ -2830,7 +2832,8 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionSubmitsAllMemoryItemsAsOneBatch) {
     ASSERT_TRUE(manager->init());
     auto engine = std::make_shared<RecordingBatchTransferEngine>();
     manager->block_tree_cache_->stopBackgroundTasks();
-    manager->block_tree_cache_->transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(engine);
+    manager->block_tree_cache_->transfer_dispatcher_ =
+        std::make_unique<BlockTransferDispatcher>(engine, manager->block_tree_cache_->reclaimer_);
     FunctionRequestPB                     request;
     const std::vector<TransferDescriptor> descriptors = {
         TransferDescriptor::deviceToHost(0, {1}, 1),
@@ -2857,7 +2860,8 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionReportsHighestRankErrorWithoutRecordIn
     auto engine              = std::make_shared<RecordingBatchTransferEngine>();
     engine->completion_error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected batch failure");
     manager->block_tree_cache_->stopBackgroundTasks();
-    manager->block_tree_cache_->transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(engine);
+    manager->block_tree_cache_->transfer_dispatcher_ =
+        std::make_unique<BlockTransferDispatcher>(engine, manager->block_tree_cache_->reclaimer_);
     FunctionRequestPB request;
     const auto        prepare_request = [&] {
         request.clear_mem_request();

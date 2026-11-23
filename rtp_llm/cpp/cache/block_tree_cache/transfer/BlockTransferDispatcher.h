@@ -22,6 +22,7 @@ public:
     using TransferDoneCallback = std::function<void(TransferResult)>;
 
     BlockTransferDispatcher(std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine,
+                            std::shared_ptr<BlockTreeReclaimer>           reclaimer,
                             std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine = nullptr);
     ~BlockTransferDispatcher();
 
@@ -48,8 +49,6 @@ public:
     // queued business settlement must be drained separately afterwards.
     void waitForTransfers() const;
 
-    void setReclaimer(std::shared_ptr<BlockTreeReclaimer> reclaimer) { reclaimer_ = std::move(reclaimer); }
-
 private:
     class InflightTicket;
     std::shared_ptr<InflightTicket> trackTransfer() const;
@@ -68,7 +67,7 @@ private:
     mutable std::condition_variable               inflight_cv_;
     mutable size_t                                inflight_count_{0};
     std::function<void()>                         drain_observer_for_test_;
-    std::shared_ptr<BlockTreeReclaimer> reclaimer_{std::make_shared<BlockTreeReclaimer>()};
+    std::shared_ptr<BlockTreeReclaimer> reclaimer_;
 };
 
 using BlockTransferDispatcherPtr = std::shared_ptr<BlockTransferDispatcher>;

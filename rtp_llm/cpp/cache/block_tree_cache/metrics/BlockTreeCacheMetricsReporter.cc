@@ -5,6 +5,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/IBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/CacheStageMetrics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
@@ -87,14 +88,14 @@ void BlockTreeCacheMetricsReporter::reportUnfreezeMetrics(const std::vector<Tran
     };
     std::unordered_map<const IBlockPool*, PoolTargets> targets;
     for (const auto& target : blocks) {
-            auto& pool_targets = targets[target.pool.get()];
+        auto& pool_targets = targets[target.pool.get()];
         switch (target.pool->poolType()) {
             case BlockPoolType::DEVICE: pool_targets.tier = Tier::DEVICE; break;
             case BlockPoolType::HOST: pool_targets.tier = Tier::HOST; break;
             case BlockPoolType::DISK: pool_targets.tier = Tier::DISK; break;
         }
-            pool_targets.blocks.insert(target.block);
-        }
+        pool_targets.blocks.insert(target.block);
+    }
     for (const auto& [pool, pool_targets] : targets) {
         RtpLLMCacheUnfreezeMetricsCollector collector;
         collector.blocks = static_cast<int64_t>(pool_targets.blocks.size());

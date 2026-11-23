@@ -84,12 +84,6 @@ public:
     void freezeBlock(BlockIdxType block) noexcept;
     bool isFrozen(BlockIdxType block) const;
 
-    // Prepare, but do not acquire or release, one FROZEN reference per block.
-    // Call while ordinary references protect these allocations, before frozen
-    // holds are acquired. Invoke the returned closure exactly once after the
-    // caller acquires its frozen holds, and this pool must outlive the closure.
-    // Preparation may allocate; release cannot allocate and isolates capacity
-    // notification failures so a completed decrement is never retried.
     std::function<void()> prepareFrozenReferenceRelease(BlockIdList blocks);
 
     // Number of distinct blocks carrying at least one tree reference of this type.

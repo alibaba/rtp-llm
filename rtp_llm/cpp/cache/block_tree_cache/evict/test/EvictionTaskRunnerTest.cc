@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -129,7 +130,8 @@ protected:
                                 makeRunnerTestGroupSet(1, "eviction_runner_1", disk_pool),
                                 makeRunnerTestGroupSet(2, "eviction_runner_2", disk_pool)};
         transfer_engine_     = std::make_shared<BatchCountingTransferEngine>(group_sets_, false);
-        transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(transfer_engine_);
+        transfer_dispatcher_ =
+            std::make_unique<BlockTransferDispatcher>(transfer_engine_, std::make_shared<BlockTreeReclaimer>());
     }
 
     EvictionTaskRunner makeRunner() {
@@ -186,7 +188,7 @@ TEST(EvictionTransferTaskTest, ConstructorOwnsDescriptorsAndTimings) {
 
 TEST_F(EvictionTaskRunnerTest, SubmitsPrimaryWithoutBlocking) {
     auto                    deferred_engine = std::make_shared<DeferredTransferEngine>(group_sets_);
-    BlockTransferDispatcher dispatcher(deferred_engine);
+    BlockTransferDispatcher dispatcher(deferred_engine, std::make_shared<BlockTreeReclaimer>());
     EvictionTaskRunner      runner(group_sets_, &dispatcher);
     auto                    task = std::make_shared<EvictionTransferTask>(makeCopyTask());
     std::optional<bool>     result;
@@ -231,7 +233,7 @@ TEST_F(EvictionTaskRunnerTest, SubmitsAllDescriptorsAsOneLogicalTransfer) {
 
 TEST_F(EvictionTaskRunnerTest, RunTransferOwnsTransferMetricsLifetime) {
     auto                    deferred_engine = std::make_shared<DeferredTransferEngine>(group_sets_);
-    BlockTransferDispatcher dispatcher(deferred_engine);
+    BlockTransferDispatcher dispatcher(deferred_engine, std::make_shared<BlockTreeReclaimer>());
     EvictionTaskRunner      runner(group_sets_, &dispatcher);
     auto                    task = std::make_shared<EvictionTransferTask>(makeCopyTask());
     std::optional<bool>     result;

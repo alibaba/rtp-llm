@@ -33,6 +33,7 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         ":completion_rpc_test_server",
+        "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
         "//rtp_llm/cpp/model_rpc:broadcast_manager",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
         "@grpc//:grpc++",

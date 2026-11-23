@@ -24,7 +24,8 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tr
                                std::shared_ptr<StorageBackend>                storage_backend,
                                std::unique_ptr<BlockTransferDispatcher>       transfer_dispatcher,
                                std::unique_ptr<BlockTreeTaskPool>             task_pool,
-                               std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter):
+                               std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter,
+                               std::shared_ptr<BlockTreeReclaimer>            reclaimer):
     config_(std::move(config)),
     tree_(std::move(tree)),
     storage_backend_(std::move(storage_backend)),
@@ -59,15 +60,12 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tr
             [this](bool check_watermark) { onWorkflowSettledLocked(check_watermark); }),
     storer_(tree_.get(), evictor_, *metrics_reporter_, storage_backend_, [this](bool check_watermark) {
         onWorkflowSettledLocked(check_watermark);
-    }) {
-    reclaimer_ = std::make_shared<BlockTreeReclaimer>(metrics_reporter_);
-    if (transfer_dispatcher_)
-        transfer_dispatcher_->setReclaimer(reclaimer_);
+    }),
+    reclaimer_(std::move(reclaimer)) {
     metrics_reporter_->initEvictionMetricGroupTypes(tree_->groupSets());
     if (storage_backend_) {
-        storage_backend_->setReclaimer(reclaimer_);
         storage_backend_->setStageMetricsReporter(metrics_reporter_);
-}
+    }
 }
 
 bool BlockTreeCache::init() {

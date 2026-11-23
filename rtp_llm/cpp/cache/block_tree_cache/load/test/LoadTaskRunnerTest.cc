@@ -21,6 +21,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
@@ -306,7 +307,7 @@ TEST(LoadTaskRunnerTest, InlineHostAndDiskCompletionSucceeds) {
     const std::vector<GroupSetPtr> group_sets{group};
     LoadTaskRunner                 runner(group_sets, 30'000, 30'000);
     auto                           engine = std::make_shared<RecordingPerRankEngine>(std::deque<bool>{true, true});
-    BlockTransferDispatcher        dispatcher(engine);
+    BlockTransferDispatcher        dispatcher(engine, std::make_shared<BlockTreeReclaimer>());
     BlockTreeCacheMetricsReporter  metrics_reporter{nullptr};
     auto                           task =
         makeLoadTask({TransferDescriptor::hostToDevice(0, 1, {1}), TransferDescriptor::diskToDevice(0, 2, {2})});
@@ -326,7 +327,7 @@ TEST(LoadTaskRunnerTest, InlineHostFailureStillSubmitsDiskBatch) {
     const std::vector<GroupSetPtr> group_sets{group};
     LoadTaskRunner                 runner(group_sets, 30'000, 30'000);
     auto                           engine = std::make_shared<RecordingPerRankEngine>(std::deque<bool>{false, true});
-    BlockTransferDispatcher        dispatcher(engine);
+    BlockTransferDispatcher        dispatcher(engine, std::make_shared<BlockTreeReclaimer>());
     BlockTreeCacheMetricsReporter  metrics_reporter{nullptr};
     auto                           task =
         makeLoadTask({TransferDescriptor::hostToDevice(0, 1, {1}), TransferDescriptor::diskToDevice(0, 2, {2})});
@@ -345,7 +346,7 @@ TEST_P(ConcurrentLoadTaskRunnerTest, BothDirectionsSubmitAndDrainBeforeCompletio
     const std::vector<GroupSetPtr> group_sets{makeTaskRunnerTestGroupSet()};
     LoadTaskRunner                 runner(group_sets, 30'000, 30'000);
     auto                           engine = std::make_shared<PendingPerRankEngine>();
-    BlockTransferDispatcher        dispatcher(engine);
+    BlockTransferDispatcher        dispatcher(engine, std::make_shared<BlockTreeReclaimer>());
     BlockTreeCacheMetricsReporter  metrics_reporter{nullptr};
     auto                           task =
         makeLoadTask({TransferDescriptor::hostToDevice(0, 1, {1}), TransferDescriptor::diskToDevice(0, 2, {2})});
@@ -386,7 +387,7 @@ TEST_P(ConcurrentLoadTaskRunnerTest, PreservesStageMetricsAndReportsOnlyTheSucce
     const std::vector<GroupSetPtr> group_sets{makeTaskRunnerTestGroupSet()};
     LoadTaskRunner                 runner(group_sets, 30'000, 30'000);
     auto                           engine = std::make_shared<PendingPerRankEngine>();
-    BlockTransferDispatcher        dispatcher(engine);
+    BlockTransferDispatcher        dispatcher(engine, std::make_shared<BlockTreeReclaimer>());
     auto                           raw = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
     BlockTreeCacheMetricsReporter  reporter(raw, true, std::chrono::hours(1));
     auto                           task =
@@ -470,7 +471,7 @@ TEST(LoadTaskRunnerTest, InlineTransfersReportWaitBeforeBusinessCompletion) {
     const std::vector<GroupSetPtr> group_sets{makeTaskRunnerTestGroupSet()};
     LoadTaskRunner                 runner(group_sets, 30'000, 30'000);
     auto                           engine = std::make_shared<RecordingPerRankEngine>(std::deque<bool>{true, true});
-    BlockTransferDispatcher        dispatcher(engine);
+    BlockTransferDispatcher        dispatcher(engine, std::make_shared<BlockTreeReclaimer>());
     auto                           raw = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
     BlockTreeCacheMetricsReporter  reporter(raw, true, std::chrono::hours(1));
     auto                           task =
@@ -510,7 +511,7 @@ TEST(LoadTaskRunnerTest, SingleDirectionDoesNotReportWaitingForAnAbsentTransfer)
     LoadTaskRunner                 runner(group_sets, 30'000, 30'000);
     for (Tier tier : {Tier::HOST, Tier::DISK}) {
         auto                    engine = std::make_shared<PendingPerRankEngine>();
-        BlockTransferDispatcher dispatcher(engine);
+        BlockTransferDispatcher dispatcher(engine, std::make_shared<BlockTreeReclaimer>());
         auto                    raw = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
         BlockTreeCacheMetricsReporter reporter(raw, true, std::chrono::hours(1));
         auto task = makeLoadTask({tier == Tier::HOST ? TransferDescriptor::hostToDevice(0, 1, {1}) :
@@ -534,7 +535,7 @@ TEST(LoadTaskRunnerTest, SimultaneousCompletionsReportExactlyOneDirectionalWait)
     const std::vector<GroupSetPtr> group_sets{makeTaskRunnerTestGroupSet()};
     LoadTaskRunner                 runner(group_sets, 30'000, 30'000);
     auto                           engine = std::make_shared<PendingPerRankEngine>();
-    BlockTransferDispatcher        dispatcher(engine);
+    BlockTransferDispatcher        dispatcher(engine, std::make_shared<BlockTreeReclaimer>());
     auto                           raw = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
     BlockTreeCacheMetricsReporter  reporter(raw, true, std::chrono::hours(1));
     auto                           task =
@@ -584,7 +585,7 @@ TEST(LoadTaskRunnerTest, ConcurrentFailuresPreserveUnknownCompletionAndCorruptio
             ASSERT_NE(disk_target, NULL_BLOCK_IDX);
             LoadTaskRunner                runner(group_sets, 30'000, 30'000);
             auto                          engine = std::make_shared<PendingPerRankEngine>(group_sets);
-            BlockTransferDispatcher       dispatcher(engine);
+            BlockTransferDispatcher       dispatcher(engine, std::make_shared<BlockTreeReclaimer>());
             BlockTreeCacheMetricsReporter metrics_reporter{nullptr};
             auto                          task = makeLoadTask({TransferDescriptor::hostToDevice(0, 1, {host_target}),
                                                                TransferDescriptor::diskToDevice(0, 2, {disk_target})});
@@ -620,7 +621,7 @@ TEST(LoadTaskRunnerTest, ExpiredHostStillWaitsForDiskTransfer) {
     const std::vector<GroupSetPtr> group_sets{makeTaskRunnerTestGroupSet()};
     LoadTaskRunner                 runner(group_sets, 30'000, 30'000);
     auto                           engine = std::make_shared<PendingPerRankEngine>();
-    BlockTransferDispatcher        dispatcher(engine);
+    BlockTransferDispatcher        dispatcher(engine, std::make_shared<BlockTreeReclaimer>());
     BlockTreeCacheMetricsReporter  metrics_reporter{nullptr};
     auto                           task =
         makeLoadTask({TransferDescriptor::hostToDevice(0, 1, {1}), TransferDescriptor::diskToDevice(0, 2, {2})});
@@ -641,7 +642,7 @@ TEST(LoadTaskRunnerTest, ExpiredBusinessTaskDoesNotReachTransferEngine) {
     const std::vector<GroupSetPtr> group_sets{group};
     LoadTaskRunner                 runner(group_sets, 30'000, 30'000);
     auto                           engine = std::make_shared<RecordingPerRankEngine>(std::deque<bool>{true});
-    BlockTransferDispatcher        dispatcher(engine);
+    BlockTransferDispatcher        dispatcher(engine, std::make_shared<BlockTreeReclaimer>());
     BlockTreeCacheMetricsReporter  metrics_reporter{nullptr};
     auto                           task = makeLoadTask({TransferDescriptor::hostToDevice(0, 1, {1})});
     task->host_to_device_task.deadline_ = TransferTask::Clock::now() - std::chrono::milliseconds(1);
@@ -659,7 +660,7 @@ TEST(LoadTaskRunnerTest, DiskFailureFailsLoadAfterHostSuccess) {
     const std::vector<GroupSetPtr> group_sets{group};
     LoadTaskRunner                 runner(group_sets, 30'000, 30'000);
     auto                           engine = std::make_shared<RecordingPerRankEngine>(std::deque<bool>{true, false});
-    BlockTransferDispatcher        dispatcher(engine);
+    BlockTransferDispatcher        dispatcher(engine, std::make_shared<BlockTreeReclaimer>());
     BlockTreeCacheMetricsReporter  metrics_reporter{nullptr};
     auto                           task =
         makeLoadTask({TransferDescriptor::hostToDevice(0, 1, {1}), TransferDescriptor::diskToDevice(0, 2, {2})});
@@ -675,7 +676,7 @@ TEST(LoadTaskRunnerTest, SplitsEachDirectionByGroupSetId) {
     const std::vector<GroupSetPtr> group_sets{makeTaskRunnerTestGroupSet(0), makeTaskRunnerTestGroupSet(1)};
     LoadTaskRunner                 runner(group_sets, 30'000, 30'000);
     auto                    engine = std::make_shared<RecordingPerRankEngine>(std::deque<bool>{true, true, true, true});
-    BlockTransferDispatcher dispatcher(engine, nullptr);
+    BlockTransferDispatcher dispatcher(engine, std::make_shared<BlockTreeReclaimer>());
     BlockTreeCacheMetricsReporter metrics_reporter{nullptr};
     auto                          task = makeLoadTask({TransferDescriptor::hostToDevice(0, 1, {1}),
                                                        TransferDescriptor::hostToDevice(0, 2, {2}),
@@ -707,7 +708,7 @@ TEST(LoadTaskRunnerTest, PendingTransferDoesNotRetainOuterWorker) {
     const std::vector<GroupSetPtr> group_sets{makeTaskRunnerTestGroupSet()};
     LoadTaskRunner                 runner(group_sets, 30'000, 30'000);
     auto                           engine = std::make_shared<PendingPerRankEngine>();
-    BlockTransferDispatcher        dispatcher(engine);
+    BlockTransferDispatcher        dispatcher(engine, std::make_shared<BlockTreeReclaimer>());
     BlockTreeCacheMetricsReporter  metrics_reporter{nullptr};
     BlockTreeTaskPool              outer_pool(1, 8, "AsyncLoadOuter");
     ASSERT_TRUE(outer_pool.start());
@@ -753,7 +754,7 @@ TEST(LoadTaskRunnerTest, HundredPendingTransfersAreNotCappedByFourOuterWorkers) 
     const std::vector<GroupSetPtr> group_sets{makeTaskRunnerTestGroupSet()};
     LoadTaskRunner                 runner(group_sets, 30'000, 30'000);
     auto                           engine = std::make_shared<PendingPerRankEngine>();
-    BlockTransferDispatcher        dispatcher(engine);
+    BlockTransferDispatcher        dispatcher(engine, std::make_shared<BlockTreeReclaimer>());
     BlockTreeCacheMetricsReporter  metrics_reporter{nullptr};
     BlockTreeTaskPool              outer_pool(/*thread_count=*/4,
                                  /*queue_size=*/kBusinessCount + BlockTreeTaskPool::kLoadReservedSlots,

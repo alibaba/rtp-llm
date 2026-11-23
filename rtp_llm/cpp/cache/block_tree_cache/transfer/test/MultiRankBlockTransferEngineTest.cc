@@ -256,11 +256,13 @@ TEST(RequestLevelBroadcastTest, EachRankReceivesWholeRequestAndMergesLocalBatche
     auto                           state = std::make_shared<MultiRankBlockTransferRpcState>();
     std::vector<std::shared_ptr<RecordingLocalTransferEngine>> engines;
     std::vector<MultiRankBlockTransferRpcConfig>               configs;
+    auto coordinator_reclaimer = std::make_shared<BlockTreeReclaimer>();
     for (size_t rank = 0; rank < 2; ++rank) {
         auto engine = std::make_shared<RecordingLocalTransferEngine>(2, rank == 1 ? 3 : NULL_BLOCK_IDX);
 
         MultiRankBlockTransferRpcConfig config{true, MemoryOperationResponsePB::OK, grpc::Status::OK, state};
-        config.local_dispatcher = std::make_shared<BlockTransferDispatcher>(engine, nullptr);
+        config.local_dispatcher = std::make_shared<BlockTransferDispatcher>(
+            engine, rank == 0 ? coordinator_reclaimer : std::make_shared<BlockTreeReclaimer>());
         config.groups           = groups;
         configs.push_back(std::move(config));
         engines.push_back(std::move(engine));
@@ -270,7 +272,7 @@ TEST(RequestLevelBroadcastTest, EachRankReceivesWholeRequestAndMergesLocalBatche
     ASSERT_NE(manager, nullptr);
     auto                    multi  = std::make_shared<MultiRankBlockTransferEngine>(groups, manager);
     auto                            sender = std::make_shared<RecordingLocalTransferEngine>(2, NULL_BLOCK_IDX);
-    BlockTransferDispatcher dispatcher(sender, multi);
+    BlockTransferDispatcher dispatcher(sender, coordinator_reclaimer, multi);
     std::vector<TransferDescriptor> descriptors;
     const std::vector<size_t>       group_ids{0, 0, 0, 0, 1, 1, 1};
     for (size_t i = 0; i < group_ids.size(); ++i)
@@ -314,7 +316,8 @@ TEST(RequestLevelBroadcastTest, MixedDirectionsRejectBeforeBroadcast) {
     auto                                                          manager = makeBroadcastManager(configs, servers);
     ASSERT_NE(manager, nullptr);
     auto multi = std::make_shared<MultiRankBlockTransferEngine>(std::vector<GroupSetPtr>{group}, manager);
-    BlockTransferDispatcher dispatcher(std::make_shared<RecordingLocalTransferEngine>(2, NULL_BLOCK_IDX), multi);
+    auto sender = std::make_shared<RecordingLocalTransferEngine>(2, NULL_BLOCK_IDX);
+    BlockTransferDispatcher dispatcher(sender, std::make_shared<BlockTreeReclaimer>(), multi);
     std::vector<TransferDescriptor> descriptors;
     for (size_t i = 0; i < 5; ++i) {
         descriptors.push_back(TransferDescriptor::hostToDevice(0, 1, {1}));
@@ -343,11 +346,13 @@ TEST(RequestLevelBroadcastTest, DiskLoadBroadcastsWholeTaskAndUsesBackendBatchLi
     auto                           state = std::make_shared<MultiRankBlockTransferRpcState>();
     std::vector<std::shared_ptr<RecordingLocalTransferEngine>> engines;
     std::vector<MultiRankBlockTransferRpcConfig>               configs;
+    auto coordinator_reclaimer = std::make_shared<BlockTreeReclaimer>();
     for (size_t rank = 0; rank < 2; ++rank) {
         auto engine = std::make_shared<RecordingLocalTransferEngine>(2, NULL_BLOCK_IDX);
 
         MultiRankBlockTransferRpcConfig config{true, MemoryOperationResponsePB::OK, grpc::Status::OK, state};
-        config.local_dispatcher = std::make_shared<BlockTransferDispatcher>(engine, nullptr);
+        config.local_dispatcher = std::make_shared<BlockTransferDispatcher>(
+            engine, rank == 0 ? coordinator_reclaimer : std::make_shared<BlockTreeReclaimer>());
         config.groups           = groups;
         configs.push_back(std::move(config));
         engines.push_back(std::move(engine));
@@ -356,7 +361,8 @@ TEST(RequestLevelBroadcastTest, DiskLoadBroadcastsWholeTaskAndUsesBackendBatchLi
     auto                                                          manager = makeBroadcastManager(configs, servers);
     ASSERT_NE(manager, nullptr);
     auto                    multi = std::make_shared<MultiRankBlockTransferEngine>(groups, manager);
-    BlockTransferDispatcher dispatcher(std::make_shared<RecordingLocalTransferEngine>(2, NULL_BLOCK_IDX), multi);
+    BlockTransferDispatcher dispatcher(
+        std::make_shared<RecordingLocalTransferEngine>(2, NULL_BLOCK_IDX), coordinator_reclaimer, multi);
     std::vector<TransferDescriptor> descriptors;
     for (size_t i = 0; i < 5; ++i)
         descriptors.push_back(TransferDescriptor::diskToDevice(0, i + 1, {1}));
@@ -389,6 +395,7 @@ TEST(MultiRankDiskBytesTest, EvictionUsesEachRanksPhysicalStrideAndIndependentFi
     std::vector<std::shared_ptr<PerRankBlockTransferEngine>> engines;
     std::vector<MultiRankBlockTransferRpcConfig>             configs;
     std::vector<TransferDescriptor>                          descriptors;
+    auto coordinator_reclaimer = std::make_shared<BlockTreeReclaimer>();
     for (size_t rank = 0; rank < payloads.size(); ++rank) {
         auto host = makeHostPool(payloads[rank], block_count, true);
         auto disk = makeDiskPool(
@@ -419,7 +426,8 @@ TEST(MultiRankDiskBytesTest, EvictionUsesEachRanksPhysicalStrideAndIndependentFi
 
         MultiRankBlockTransferRpcConfig config{true, MemoryOperationResponsePB::OK, grpc::Status::OK};
         config.groups           = {group};
-        config.local_dispatcher = std::make_shared<BlockTransferDispatcher>(engine, nullptr);
+        config.local_dispatcher = std::make_shared<BlockTransferDispatcher>(
+            engine, rank == 0 ? coordinator_reclaimer : std::make_shared<BlockTreeReclaimer>());
         configs.push_back(std::move(config));
         groups.push_back(group);
         engines.push_back(engine);
@@ -430,7 +438,7 @@ TEST(MultiRankDiskBytesTest, EvictionUsesEachRanksPhysicalStrideAndIndependentFi
     ASSERT_NE(manager, nullptr);
     const std::vector<GroupSetPtr> coordinator_groups{groups.front()};
     auto                           multi = std::make_shared<MultiRankBlockTransferEngine>(coordinator_groups, manager);
-    BlockTransferDispatcher        dispatcher(engines.front(), multi);
+    BlockTransferDispatcher        dispatcher(engines.front(), coordinator_reclaimer, multi);
     EvictionTaskRunner             runner(coordinator_groups, &dispatcher);
     BlockTreeCacheMetricsReporter  reporter(nullptr);
     auto task = std::make_shared<EvictionTransferTask>(TransferTask(descriptors, std::chrono::seconds(10)));
@@ -700,9 +708,8 @@ TEST_F(MultiRankBlockTransferEngineTest, DispatcherPreservesTaskWireIdentityAcro
         worker.buffer_safe.reset();
     auto manager = makeBroadcastManager(configs, servers);
     ASSERT_NE(manager, nullptr);
-    auto                         cache  = makeBroadcastCache(manager);
-    auto                         engine = std::make_shared<MultiRankBlockTransferEngine>(cache->groupSets(), manager);
-    BlockTransferDispatcher      dispatcher(cache->transfer_dispatcher_->per_rank_engine_, engine);
+    auto cache = makeBroadcastCache(manager);
+    auto& dispatcher = *cache->transfer_dispatcher_;
     TransferTask                 first_task({TransferDescriptor::hostToDevice(0, 1, {1}),
                                        TransferDescriptor::hostToDevice(0, 2, {2}),
                                        TransferDescriptor::hostToDevice(0, 3, {3}),
@@ -734,12 +741,8 @@ TEST_F(MultiRankBlockTransferEngineTest, DispatcherPreservesTaskWireIdentityAcro
     // Even successful RPCs from every rank must not grant it implicitly.
     EXPECT_FALSE(first_result.buffer_safe);
     EXPECT_FALSE(second_result.buffer_safe);
-    auto& reclaimer = *dispatcher.reclaimer_;
-    ASSERT_EQ(reclaimer.frozen_.size(), 2u);
-    while (!reclaimer.frozen_.empty()) {
-        const auto key = reclaimer.frozen_.begin()->first;
-        EXPECT_TRUE(reclaimer.forceRelease(key));
-    }
+    EXPECT_TRUE(cache->reclaimer().forceRelease(first_trace));
+    EXPECT_TRUE(cache->reclaimer().forceRelease(second_trace));
     dispatcher.waitForTransfers();
     std::lock_guard<std::mutex> lock(state->mutex);
     ASSERT_EQ(state->requests.size(), 4u);
@@ -825,7 +828,7 @@ TEST_F(MultiRankBlockTransferEngineTest, RemoteOnlyDispatcherDrainsSlowestRankAn
     ASSERT_NE(manager, nullptr);
     auto cache      = makeBroadcastCache(manager);
     auto engine     = std::make_shared<MultiRankBlockTransferEngine>(cache->groupSets(), manager);
-    auto dispatcher = std::make_shared<BlockTransferDispatcher>(nullptr, engine);
+    auto dispatcher = std::make_shared<BlockTransferDispatcher>(nullptr, cache->reclaimer_, engine);
     block_tree_cache_detail::ScopeRollback cleanup([&] {
         if (!rank_signaled) {
             release_rank.set_value();
@@ -2089,7 +2092,7 @@ static void mixedBroadcastLosesCompletion(bool through_dispatcher) {
         task = TransferTask(
             {TransferDescriptor::deviceToHost(0, {2}, first), TransferDescriptor::deviceToHost(1, {4}, second)},
             std::chrono::seconds(5));
-        BlockTransferDispatcher dispatcher(nullptr, engine);
+        BlockTransferDispatcher dispatcher(nullptr, std::make_shared<BlockTreeReclaimer>(), engine);
         std::promise<ErrorInfo> completion;
         auto                    finished = completion.get_future();
         dispatcher.runTransfer(std::move(task),

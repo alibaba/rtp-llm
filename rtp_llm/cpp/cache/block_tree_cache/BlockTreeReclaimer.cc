@@ -6,6 +6,7 @@
 #include <optional>
 #include <set>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/IBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
@@ -13,6 +14,7 @@
 
 namespace rtp_llm {
 namespace {
+constexpr size_t kQueryBatchSize = 64;
 constexpr size_t kForgetBatchSize = 1024;
 
 void encodeCompletionKey(const TransferCompletionKey& key, TransferCompletionKeyPB& wire) {
@@ -269,61 +271,71 @@ void BlockTreeReclaimer::releaseExpired() {
 }
 
 void BlockTreeReclaimer::queryFrozen() {
-    std::vector<std::pair<Route, std::vector<size_t>>> work;
+    std::vector<TransferCompletionKey> local;
+    std::map<std::vector<size_t>, std::vector<TransferCompletionKey>> remote;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        for (const auto& [id, task] : frozen_)
-            work.emplace_back(task.forget.front(), task.pending);
+        for (const auto& [id, task] : frozen_) {
+            const auto& route = task.forget.front();
+            if (!route.participants.remote)
+                local.push_back(route.trace);
+            else if (broadcast_ && broadcast_->workerNum() == route.participants.ranks)
+                remote[task.pending].push_back(route.trace);
+        }
     }
-    for (const auto& [route, pending] : work) {
+    for (const auto& trace : local) {
         if (stopped_)
-            break;
-        std::vector<size_t> safe;
+            return;
+        const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms_);
         try {
-            safe = query(route, pending);
+            const auto state = queryOne(trace.trace_id, deadline);
+            if (!stopped_ && Clock::now() <= deadline && (state == State::BUFFER_SAFE || state == State::REJECTED))
+                markWorkerSafe(trace, 0);
         } catch (...) {
             continue;
         }
-        for (const auto worker : safe) {
+    }
+    for (const auto& [workers, traces] : remote) {
+        for (size_t begin = 0; begin < traces.size(); begin += kQueryBatchSize) {
             if (stopped_)
                 return;
-            markWorkerSafe(route.trace, worker);
+            try {
+                queryWorkers(workers, traces.data() + begin, std::min(kQueryBatchSize, traces.size() - begin));
+            } catch (...) {
+                continue;
+            }
         }
     }
 }
 
-std::vector<size_t> BlockTreeReclaimer::query(const Route& route, const std::vector<size_t>& workers) {
+void BlockTreeReclaimer::queryWorkers(const std::vector<size_t>& workers, const TransferCompletionKey* traces,
+                                      size_t count) {
     const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms_);
-    if (!route.participants.remote) {
-        const auto state = queryOne(route.trace.trace_id, deadline);
-        if (Clock::now() <= deadline && (state == State::BUFFER_SAFE || state == State::REJECTED))
-            return {0};
-        return {};
-    }
-    if (!broadcast_ || broadcast_->workerNum() != route.participants.ranks)
-        return {};
     FunctionRequestPB request;
-    encodeCompletionKey(route.trace, *request.mutable_completion_query()->add_keys());
+    for (size_t j = 0; j < count; ++j)
+        encodeCompletionKey(traces[j], *request.mutable_completion_query()->add_keys());
     auto rpc = callWorkers(*broadcast_, workers, request, deadline, "completion_query");
     if (!rpc)
-        return {};
-    std::vector<size_t> safe;
+        return;
     for (size_t i = 0; i < workers.size(); ++i) {
         auto reply = rpc->responseIfSucceeded(i, deadline);
         if (!reply || !reply->has_completion_query())
             continue;
         const auto& response = reply->completion_query();
+        const auto& entries = response.entries();
         if (response.worker_case() != TransferCompletionQueryResponsePB::kRank || response.rank() != workers[i]
-            || response.entries_size() != 1)
+            || static_cast<size_t>(entries.size()) > count
+            || !std::equal(entries.begin(), entries.end(), traces, [](const auto& entry, const auto& trace) {
+                   return decodeCompletionTraceId(entry.key()) == trace.trace_id;
+               }))
             continue;
-        const auto& entry = response.entries(0);
-        if (decodeCompletionTraceId(entry.key()) != route.trace.trace_id)
-            continue;
-        if ((entry.state() == TRANSFER_COMPLETION_BUFFER_SAFE && !entry.admission_closed())
-            || (entry.state() == TRANSFER_COMPLETION_UNKNOWN && entry.admission_closed()))
-            safe.push_back(workers[i]);
+        for (int j = 0; j < entries.size() && !stopped_; ++j) {
+            const auto& entry = entries.Get(j);
+            if ((entry.state() == TRANSFER_COMPLETION_BUFFER_SAFE && !entry.admission_closed())
+                || (entry.state() == TRANSFER_COMPLETION_UNKNOWN && entry.admission_closed()))
+                markWorkerSafe(traces[j], workers[i]);
+        }
     }
-    return safe;
 }
 
 std::vector<bool> BlockTreeReclaimer::forget(const std::vector<TransferCompletionKey>& traces, Participants participants, bool forced) {
@@ -426,7 +438,7 @@ bool BlockTreeReclaimer::ioFinishedOnWorkerWithTraceID(const std::string& id) {
     return true;
 }
 
-std::vector<TransferTaskRegistry::State> BlockTreeReclaimer::queryIfIoFinishedInOneWorkerWithTraceIDs(const std::vector<std::string>& ids) {
+std::vector<BlockTreeReclaimer::State> BlockTreeReclaimer::queryIfIoFinishedInOneWorkerWithTraceIDs(const std::vector<std::string>& ids) {
     std::vector<State> result;
     result.reserve(ids.size());
     for (const auto& id : ids)
@@ -434,7 +446,7 @@ std::vector<TransferTaskRegistry::State> BlockTreeReclaimer::queryIfIoFinishedIn
     return result;
 }
 
-std::vector<TransferTaskRegistry::ForgetResult> BlockTreeReclaimer::forgetTaskInfoOnWorker(const std::vector<std::string>& ids, bool forced) {
+std::vector<BlockTreeReclaimer::ForgetResult> BlockTreeReclaimer::forgetTaskInfoOnWorker(const std::vector<std::string>& ids, bool forced) {
     std::vector<ForgetResult> result;
     result.reserve(ids.size());
     for (const auto& id : ids)
@@ -467,7 +479,7 @@ void BlockTreeReclaimer::cleanupExpiredMissing() {
     }
 }
 
-TransferTaskRegistry::State BlockTreeReclaimer::localState(const std::string& id) const {
+BlockTreeReclaimer::State BlockTreeReclaimer::localState(const std::string& id) const {
     std::lock_guard<std::mutex> lock(worker_mutex_);
     const auto it = records_.find(id);
     return it == records_.end() ? State::UNKNOWN : it->second.state;
@@ -496,7 +508,7 @@ BlockTreeReclaimer::Record& BlockTreeReclaimer::findOrRejectMissing(const std::s
     return record;
 }
 
-TransferTaskRegistry::State BlockTreeReclaimer::queryOne(const std::string& id, Clock::time_point deadline) {
+BlockTreeReclaimer::State BlockTreeReclaimer::queryOne(const std::string& id, Clock::time_point deadline) {
     if (id.empty())
         return State::UNKNOWN;
     std::unique_lock<std::mutex> lock(worker_mutex_);
@@ -516,7 +528,7 @@ TransferTaskRegistry::State BlockTreeReclaimer::queryOne(const std::string& id, 
     return record.state;
 }
 
-TransferTaskRegistry::ForgetResult BlockTreeReclaimer::forgetOne(const std::string& id, bool forced) {
+BlockTreeReclaimer::ForgetResult BlockTreeReclaimer::forgetOne(const std::string& id, bool forced) {
     if (id.empty())
         return ForgetResult::INVALID;
     std::unique_lock<std::mutex> lock(worker_mutex_);
@@ -584,11 +596,25 @@ bool BlockTreeReclaimer::executeFunction(BlockTreeReclaimer* owner, int rank, co
         auto* query_response = response.mutable_completion_query();
         query_response->Clear();
         query_response->set_rank(static_cast<uint32_t>(rank));
-        for (const auto& key : request.completion_query().keys()) {
+        const auto& keys = request.completion_query().keys();
+        if (static_cast<size_t>(keys.size()) > kQueryBatchSize)
+            return false;
+        const bool batch = owner && keys.size() > 1;
+        if (batch)
+            deadline = std::min(deadline, Clock::now() + std::chrono::milliseconds(owner->timeout_ms_));
+        for (int i = 0; i < keys.size(); ++i) {
+            auto key_deadline = deadline;
+            if (batch) {
+                const auto now = Clock::now();
+                if (now >= deadline)
+                    break;
+                key_deadline = now + (deadline - now) / (keys.size() - i);
+            }
+            const auto& key = keys.Get(i);
+            const auto trace_id = decodeCompletionTraceId(key);
+            const auto state = owner ? owner->queryOne(trace_id, key_deadline) : State::UNKNOWN;
             auto* entry = query_response->add_entries();
             entry->mutable_key()->CopyFrom(key);
-            const auto trace_id = decodeCompletionTraceId(key);
-            const auto state = owner ? owner->queryOne(trace_id, deadline) : State::UNKNOWN;
             switch (state) {
                 case State::REJECTED:
                     entry->set_state(TRANSFER_COMPLETION_UNKNOWN);

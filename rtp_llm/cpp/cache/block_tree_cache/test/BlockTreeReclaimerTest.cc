@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/IBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/CompletionRpcTestServer.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 
@@ -112,8 +113,19 @@ enum class Reply { RUNNING, UNKNOWN, WRONG_RANK, WRONG_KEY, INVALID_STATE, TRANS
 
 TEST(BlockTreeReclaimerTest, RecoveryRequiresEvidenceForTheOriginalTraceAndEveryParticipant) {
     std::atomic<Reply> reply{Reply::RUNNING};
+    std::atomic<size_t> batched_calls{0};
     auto handler = [&](size_t rank, const auto& request, auto& response) {
         answerQuery(rank, request, response);
+        const auto& keys = request.completion_query().keys();
+        if (keys.size() == 2) {
+            ++batched_calls;
+            if (rank == 0)
+                response.mutable_completion_query()->mutable_entries()->RemoveLast();
+        } else if (keys.size() == 1 && keys.Get(0).trace_id() == "93") {
+            EXPECT_EQ(rank, 1u);
+        } else if (keys.size() == 1 && keys.Get(0).trace_id() == "read-94") {
+            EXPECT_EQ(rank, 0u);
+        }
         if (rank == 0)
             return grpc::Status::OK;
         auto* row = response.mutable_completion_query()->mutable_entries(0);
@@ -159,6 +171,19 @@ TEST(BlockTreeReclaimerTest, RecoveryRequiresEvidenceForTheOriginalTraceAndEvery
         owner.queryFrozen();
         EXPECT_TRUE(owner.frozen_.empty());
     }
+    for (const TransferCompletionKey& key : {TransferCompletionKey{uint64_t{93}}, TransferCompletionKey{std::string("read-94")}}) {
+        ASSERT_TRUE(owner.registerTask(key, {true, addresses.size()}, {}));
+        owner.freezeTargetBlocksWithTraceIDAndStillIOWorkerID(key, {}, {0, 1});
+    }
+    reply = Reply::RUNNING;
+    owner.queryFrozen();
+    EXPECT_EQ(batched_calls.load(), 2u);
+    EXPECT_EQ(owner.frozen_.at("93").pending, (std::vector<size_t>{1}));
+    EXPECT_EQ(owner.frozen_.at("read-94").pending, (std::vector<size_t>{0}));
+    reply = Reply::SAFE;
+    owner.queryFrozen();
+    EXPECT_TRUE(owner.frozen_.empty());
+    EXPECT_EQ(batched_calls.load(), 2u);
 }
 
 TEST(BlockTreeReclaimerTest, AcceptsLegacyTraceAndRejectsConflictingFields) {
@@ -255,7 +280,7 @@ using Registry     = BlockTreeReclaimer;
 using State        = Registry::State;
 using ForgetResult = Registry::ForgetResult;
 
-TEST(TransferTaskRegistryTest, OptionalCallbacksCanPublishCompletionAndRetryForget) {
+TEST(BlockTreeReclaimerTest, OptionalCallbacksCanPublishCompletionAndRetryForget) {
     Registry worker;
     int queries = 0;
     int forgets = 0;
@@ -277,7 +302,7 @@ TEST(TransferTaskRegistryTest, OptionalCallbacksCanPublishCompletionAndRetryForg
     EXPECT_EQ(forgets, 2);
 }
 
-TEST(TransferTaskRegistryTest, ForcedForgetRemovesRunningRecordAfterActiveQuery) {
+TEST(BlockTreeReclaimerTest, ForcedForgetRemovesRunningRecordAfterActiveQuery) {
     Registry worker;
     bool discarded = false;
     ASSERT_TRUE(worker.registerOnWorkerTaskWithTraceID("read", [&](auto) {
@@ -295,7 +320,7 @@ TEST(TransferTaskRegistryTest, ForcedForgetRemovesRunningRecordAfterActiveQuery)
     }
 }
 
-TEST(TransferTaskRegistryTest, MissingAdmissionFenceSurvivesForgetUntilLateArrivalOrExpiry) {
+TEST(BlockTreeReclaimerTest, MissingAdmissionFenceSurvivesForgetUntilLateArrivalOrExpiry) {
     auto now = Registry::Clock::time_point{};
     Registry registry;
     registry.now_ = [&] { return now; };

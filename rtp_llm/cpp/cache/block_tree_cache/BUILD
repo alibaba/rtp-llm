@@ -143,8 +143,6 @@ cc_library(
         "TreeNode.h",
         "transfer/TransferAsyncContext.h",
         "transfer/TransferBatchAsyncContext.h",
-        "transfer/FrozenTaskReclaimer.h",
-        "transfer/TransferTaskRegistry.h",
         "transfer/TransferStageState.h",
         "transfer/CrcCopyExecutor.h",
         "transfer/DeviceHostCopyGeometry.h",

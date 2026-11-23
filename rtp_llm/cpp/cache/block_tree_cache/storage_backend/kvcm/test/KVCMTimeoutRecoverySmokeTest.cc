@@ -121,8 +121,6 @@ struct NativeWorker {
         runtime.model_name = "native_timeout_smoke";
         backend = std::make_shared<KVCMStorageBackend>(environment.cache_config, config, runtime, parallel,
             SpeculativeExecutionConfig{}, broadcast, false, nullptr, client);
-        if (!initSingleRank(*backend, environment))
-            return false;
         manager = std::make_shared<KVCacheManager>(environment.cache_config, false, nullptr, config, parallel);
         auto full = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{environment.device_pool}, nullptr, nullptr);
         full->initialize(0, environment.cache_config.topologyPtr(), {"default"});
@@ -133,7 +131,7 @@ struct NativeWorker {
             10, 1000,
             config.block_tree_frozen_force_release_timeout_ms, std::move(broadcast));
         backend->setReclaimer(manager->block_tree_cache_->reclaimer_);
-        return true;
+        return initSingleRank(*backend, environment);
     }
 
     StorageRequest request(std::chrono::milliseconds timeout, const std::vector<BlockIdxType>& blocks) const {
@@ -170,8 +168,11 @@ TEST_F(KVCMTimeoutRecoverySmokeTest, ReadRejectsTraceAlreadyRegisteredByBlockTra
     RemoteOperationResponsePB response;
     EXPECT_FALSE(worker.backend->execute(read, response));
     EXPECT_EQ(response.transfer_status(), REMOTE_TRANSFER_STATUS_FAILED);
-    EXPECT_EQ(worker.backend->reclaimer_.get(), &registry);
-    EXPECT_EQ(registry.localState("71"), TransferTaskRegistry::State::RUNNING);
+    EXPECT_EQ(registry.localState("71"), BlockTreeReclaimer::State::RUNNING);
+
+    read.set_trace_id("72");
+    ASSERT_TRUE(worker.backend->execute(read, response));
+    EXPECT_EQ(registry.localState("72"), BlockTreeReclaimer::State::BUFFER_SAFE);
 }
 
 TEST_F(KVCMTimeoutRecoverySmokeTest, LostNativeReadReplyRecoversThroughWorkerQueryAndForget) {
@@ -211,8 +212,8 @@ TEST_F(KVCMTimeoutRecoverySmokeTest, LostNativeReadReplyRecoversThroughWorkerQue
     block_tree_cache_detail::ScopeRollback stop([&] { reclaimer.stop(); });
     ASSERT_TRUE(waitForRecovery([&] {
         return !owner.environment.device_pool->isFrozen(target.get().front())
-               && owner.backend->reclaimer_->localState(trace) == TransferTaskRegistry::State::UNKNOWN
-               && peer.backend->reclaimer_->localState(trace) == TransferTaskRegistry::State::UNKNOWN;
+               && reclaimer.localState(trace) == BlockTreeReclaimer::State::UNKNOWN
+               && peer.manager->block_tree_cache_->reclaimer().localState(trace) == BlockTreeReclaimer::State::UNKNOWN;
     }));
     EXPECT_EQ(queries_to_safe_worker.load(), 0u);
 }

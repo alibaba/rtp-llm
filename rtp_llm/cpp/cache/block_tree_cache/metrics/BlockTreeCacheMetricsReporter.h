@@ -18,7 +18,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/ReuseMetrics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/TransferMetrics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTaskReclaimer.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace kmonitor {

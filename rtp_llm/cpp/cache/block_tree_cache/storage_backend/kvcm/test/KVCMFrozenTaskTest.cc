@@ -32,26 +32,27 @@ TEST(KVCMFrozenTaskTest, TargetsExcludeLocalPrefixFilteredLinearStateAndUnsentTa
     request.handles.resize(3);
     std::vector<std::string> trace{"block_tree_read_1"};
     size_t tags = 0;
-    EXPECT_CALL(*client, loadKvCachesForTag(_, _, _, _)).Times(4)
+    EXPECT_CALL(*client, loadKvCachesForTagWithStatus(_, _, _, _)).Times(4)
         .WillRepeatedly(Invoke([&](const auto&, const auto&, auto&, const auto&) {
-            EXPECT_EQ(backend->reclaimer_->localState(trace.front()), TransferTaskRegistry::State::RUNNING);
-            return ++tags < 4;
+            EXPECT_EQ(backend.reclaimer->localState(trace.front()), BlockTreeReclaimer::State::RUNNING);
+            client->load_status = ++tags == 4 ? kv_cache_manager::ER_SDK_TIMEOUT : kv_cache_manager::ER_OK;
+            return *client->load_status;
         }));
     EXPECT_TRUE(readResult(*backend.backend, request, matched.match_meta).ok());
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
-    EXPECT_EQ(backend->reclaimer_->localState(trace.front()), TransferTaskRegistry::State::BUFFER_SAFE);
-    EXPECT_TRUE(backend->reclaimer_->frozen_.empty());
+    EXPECT_EQ(backend.reclaimer->localState(trace.front()), BlockTreeReclaimer::State::BUFFER_SAFE);
+    EXPECT_TRUE(backend.reclaimer->frozen_.empty());
     trace.front() = "block_tree_read_2";
     std::promise<ErrorInfo> done;
     auto completed = done.get_future();
     backend->read(std::move(request), std::move(matched.match_meta), [&](ErrorInfo error) {
-        EXPECT_EQ(backend->reclaimer_->frozen_.count(trace.front()), 1u);
+        EXPECT_EQ(backend.reclaimer->frozen_.count(trace.front()), 1u);
         done.set_value(std::move(error));
     });
-    EXPECT_FALSE(await(completed).ok());
-    EXPECT_EQ(backend->reclaimer_->localState(trace.front()), TransferTaskRegistry::State::RUNNING);
+    EXPECT_EQ(await(completed).code(), ErrorCode::DEADLINE_EXCEEDED);
+    EXPECT_EQ(backend.reclaimer->localState(trace.front()), BlockTreeReclaimer::State::RUNNING);
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
-    const auto& record = backend->reclaimer_->frozen_.at(trace.front());
+    const auto& record = backend.reclaimer->frozen_.at(trace.front());
     std::set<std::pair<IBlockPool*, BlockIdxType>> targets;
     for (const auto& target : record.targets)
         targets.emplace(target.pool.get(), target.block);

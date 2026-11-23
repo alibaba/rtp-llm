@@ -245,7 +245,8 @@ protected:
     }
     std::shared_ptr<TransferAsyncContext> executeRequest(TransferTask task) {
         if (!request_dispatcher || request_dispatcher->per_rank_engine_ != engine)
-            request_dispatcher = std::make_unique<BlockTransferDispatcher>(engine);
+            request_dispatcher =
+                std::make_unique<BlockTransferDispatcher>(engine, std::make_shared<BlockTreeReclaimer>());
         return request_dispatcher->executePerRank(std::move(task));
     }
     void enableMetrics(bool stages = true) {
@@ -677,7 +678,7 @@ TEST_F(TransferWorkLoopTest, OrdinaryEntryExceptionCompletesOnlyThatTask) {
     EXPECT_TRUE(context->done());
     EXPECT_FALSE(context->success());
     EXPECT_TRUE(context->result().buffer_safe);
-    EXPECT_EQ(registry.localState(trace), TransferTaskRegistry::State::BUFFER_SAFE);
+    EXPECT_EQ(registry.localState(trace), BlockTreeReclaimer::State::BUFFER_SAFE);
     EXPECT_EQ(context->errorInfo().ToString(), "batch preparation failed");
     EXPECT_EQ(owner.outstandingBatches(), 0u);
 }
@@ -916,7 +917,7 @@ TEST_F(TransferWorkLoopTest, ResidentDiskBatchesFitDerivedWorkerQueues) {
 TEST_F(TransferWorkLoopTest, ResidentBatchesIncludeInflightCallbackAndEntryCleanup) {
     enableMetrics();
     initialize(2, 2);
-    BlockTransferDispatcher dispatcher(engine);
+    BlockTransferDispatcher dispatcher(engine, std::make_shared<BlockTreeReclaimer>());
     const auto              check_backlog = [&](size_t expected) {
         const auto sizes = dispatcher.queueSizes();
         EXPECT_EQ(sizes.background, expected);
@@ -1047,7 +1048,7 @@ TEST_F(TransferWorkLoopTest, StartedExpiredTaskAndDroppedContextStillFinishAfter
 
 TEST_F(TransferWorkLoopTest, DispatcherShutdownWaitsForDirectExecuteCallbackAndOwnerCleanup) {
     initialize();
-    BlockTransferDispatcher dispatcher(engine);
+    BlockTransferDispatcher dispatcher(engine, std::make_shared<BlockTreeReclaimer>());
     io->blocked = true;
     // Direct execute is not registered in the Dispatcher's callback-chain table.
     auto context = dispatcher.executePerRank(writes());

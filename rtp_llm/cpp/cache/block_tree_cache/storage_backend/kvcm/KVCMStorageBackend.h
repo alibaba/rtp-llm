@@ -81,7 +81,6 @@ protected:
 
 private:
     class Impl;
-    std::shared_ptr<BlockTreeReclaimer> reclaimer_;
     std::shared_ptr<Impl> impl_;
 };
 
