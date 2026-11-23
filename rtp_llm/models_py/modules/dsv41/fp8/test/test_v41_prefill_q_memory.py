@@ -256,6 +256,226 @@ class PrefillQMemoryTest(unittest.TestCase):
             self.assertIs(attention._prefill_q_rope(empty, freqs[:0], 2), empty)
         kernel.assert_not_called()
 
+    def test_fp8_only_prefill_sparse_attention_slices_quantized_chunks(self):
+        rows, chunk, q_rank = 10, 4, 128
+        padded = (rows + 3) // 4 * 4
+        q8 = torch.zeros(rows, q_rank, dtype=torch.float8_e4m3fn)
+        sf = torch.empty_strided(
+            (padded, q_rank // 128), (1, padded), dtype=torch.int32
+        )[:rows]
+        for r in range(rows):
+            sf[r, 0] = r + 100
+        seen = []
+
+        def fake_project_q(linear, qr, qr_quantized=None, out=None):
+            self.assertIsNone(qr)
+            self.assertIsNotNone(qr_quantized)
+            cq8, csf = qr_quantized
+            seen.append((cq8.shape[0], csf.shape, csf.stride(), csf[:, 0].tolist()))
+            out.zero_()
+            return out.view(-1, 2, 8)
+
+        mega = SimpleNamespace(
+            supports_query=lambda _: False,
+            supports_quantized_query=lambda pair: pair is not None,
+            supports_prefill=lambda *args: True,
+            project_q=fake_project_q,
+            prefill=lambda q, kv, idx, pos, lengths: (q, None),
+            project_output=lambda pair, linear, out, prefill_wo_a=None: out.zero_(),
+        )
+        owner = SimpleNamespace(
+            dim=6,
+            n_heads=2,
+            head_dim=8,
+            rope_head_dim=2,
+            wq_b=object(),
+            wo_b=object(),
+            _mega_attention=mega,
+            _mega_position_chunks=attention.AttentionV41FP8._mega_position_chunks.__get__(
+                SimpleNamespace(_shared_attention={})
+            ),
+            _prefill_output_all_reduce=lambda out: None,
+        )
+        workspace = PrefillWorkspace(
+            torch.device("cpu"), q_rows=chunk, q_dim=16, reserve_cp=False, align_bytes=1
+        )
+        common = SimpleNamespace(
+            freqs_cis=torch.ones(rows, 1, dtype=torch.complex64),
+            position_ids=torch.arange(rows, dtype=torch.int32),
+            cp_on=False,
+            workspace=workspace,
+        )
+        qkv = PrefillQKV(
+            qr=None, q=None, kv_full=torch.zeros(rows, 8), qr_quantized=(q8, sf)
+        )
+        with patch.object(attention, "_FLASH_MLA_SPARSE_Q_CHUNK", chunk):
+            out = attention.AttentionV41FP8._prefill_sparse_attention(
+                owner,
+                qkv,
+                common,
+                kv=torch.zeros(1, 1, 8),
+                indices=torch.zeros(rows, 1, dtype=torch.int32),
+                topk_length=torch.ones(rows, dtype=torch.int32),
+                profile_name="test",
+            )
+        self.assertEqual(tuple(out.shape), (rows, 6))
+        self.assertEqual(
+            seen,
+            [
+                (4, (4, 1), (1, 12), [100, 101, 102, 103]),
+                (4, (4, 1), (1, 12), [104, 105, 106, 107]),
+                (2, (2, 1), (1, 12), [108, 109]),
+            ],
+        )
+
+    def test_try_fused_qr_kv_uses_fp8_only_and_emits_norm_for_hot_hooks(self):
+        owner = attention.AttentionV41FP8.__new__(attention.AttentionV41FP8)
+        torch.nn.Module.__init__(owner)
+        x = torch.zeros(1, 4, 16, dtype=torch.bfloat16)
+        common = SimpleNamespace(workspace=SimpleNamespace(fp8_quant_kernel="auto"))
+        captured = []
+
+        def fake_proj(self_arg, x_arg, sq_arg, *, quant_kernel, emit_norm):
+            captured.append((quant_kernel, emit_norm))
+            return (None if not emit_norm else x_arg, x_arg, (x_arg, x_arg))
+
+        with patch(
+            "rtp_llm.models_py.modules.dsv41._v41_query_quant.try_project_prefill_quantized_qkv",
+            side_effect=fake_proj,
+        ):
+            with patch(
+                "rtp_llm.utils.hot_hook_runtime.runtime",
+                return_value=SimpleNamespace(enabled=False),
+            ):
+                owner._try_fused_qr_kv(x, common=common)
+            with patch(
+                "rtp_llm.utils.hot_hook_runtime.runtime",
+                return_value=SimpleNamespace(enabled=True),
+            ):
+                owner._try_fused_qr_kv(x, common=common)
+        self.assertEqual(captured, [("auto", False), ("auto", True)])
+
+    def test_ced_l20_compaction_preserves_fp8_only_tma_layout(self):
+        from contextlib import nullcontext
+
+        from rtp_llm.models_py.modules.dsv41 import block as block_mod
+
+        for keep_idx in ([0, 2, 4, 5, 8], [1, 3, 6, 7], []):
+            with self.subTest(keep_len=len(keep_idx)):
+                rows, dim, cols, packs = 10, 4, 1280, 10
+                padded = (rows + 3) // 4 * 4
+                q8 = (
+                    (torch.arange(rows * cols) % 251)
+                    .to(torch.uint8)
+                    .view(rows, cols)
+                    .view(torch.float8_e4m3fn)
+                )
+                sf = torch.empty_strided(
+                    (padded, packs), (1, padded), dtype=torch.int32
+                )[:rows]
+                for r in range(rows):
+                    for c in range(packs):
+                        sf[r, c] = r * 100 + c
+                idx = torch.tensor(keep_idx, dtype=torch.long)
+                qkv = PrefillQKV(
+                    qr=None,
+                    q=None,
+                    kv_full=torch.zeros(rows, 8),
+                    qr_quantized=(q8, sf),
+                )
+                seen_qkv = []
+                common = SimpleNamespace(cp_ctx=None)
+                attn = SimpleNamespace(
+                    _shared_attention={},
+                    freqs_cis=torch.ones(rows, 1, dtype=torch.complex64),
+                    index_weights=torch.ones(2, dim, dtype=torch.bfloat16),
+                    can_fuse_prefill_attn_norm_input_quant=lambda *args: False,
+                    _set_compressor_pool_context=lambda: None,
+                    _clear_compressor_pool_context=lambda: None,
+                    _prefill_produce=lambda x, pos, sq: (common, qkv, None, None, None),
+                    _prefill_query=lambda x, meta, qkv_arg, swa, starts, *, indexer_weights=None: (
+                        seen_qkv.append(qkv_arg)
+                        or torch.zeros(len(keep_idx), dim, dtype=torch.bfloat16)
+                    ),
+                )
+                exchange = SimpleNamespace(
+                    send_sizes=[len(keep_idx)],
+                    compact=lambda t, _idx=idx: t.index_select(0, _idx),
+                )
+                plan = SimpleNamespace(
+                    early_indexer=False,
+                    early_indexer_fallback=False,
+                    original_context=SimpleNamespace(chunk_length=rows),
+                    exchange=exchange,
+                    compact_l20=lambda blk, r, p, c, ids: (
+                        r.index_select(0, idx),
+                        p,
+                        c,
+                        ids.index_select(0, idx),
+                    ),
+                    l20_query_metadata=lambda meta, freqs: meta,
+                    router_projection=lambda ffn: nullcontext(),
+                )
+                norm = SimpleNamespace(
+                    weight=SimpleNamespace(data=torch.ones(dim, dtype=torch.bfloat16)),
+                    variance_epsilon=1e-6,
+                    __call__=lambda t: t,
+                )
+                blk = SimpleNamespace(
+                    attn=attn,
+                    attn_norm=norm,
+                    ffn_norm=norm,
+                    ffn=lambda x, ids, expert_load=None: x,
+                    _try_mega_mhc=lambda *a, **kw: None,
+                    _sync_after_first_cp_prefill_attention=lambda: None,
+                    _prefill_fast_hc_impls=lambda: (
+                        lambda x: (x, None, None),
+                        lambda x: (x, None, None),
+                        lambda out, res, p, c: out,
+                        lambda out, res, p, c: out,
+                    ),
+                )
+                with (
+                    patch.object(
+                        block_mod, "_prefill_fast_norm", side_effect=lambda n, t: t
+                    ),
+                    patch(
+                        "rtp_llm.models_py.modules.dsv41.fp8.attention.bind_attn_cache",
+                        side_effect=lambda *a, **kw: nullcontext(),
+                    ),
+                ):
+                    block_mod.Block.forward_prefill_ced_l20(
+                        blk,
+                        torch.zeros(rows, dim, dtype=torch.bfloat16),
+                        torch.arange(rows, dtype=torch.int32),
+                        torch.arange(rows, dtype=torch.int32),
+                        plan,
+                        None,
+                    )
+                self.assertEqual(len(seen_qkv), 1)
+                compacted = seen_qkv[0]
+                self.assertIsNone(compacted.qr)
+                self.assertIsNotNone(compacted.qr_quantized)
+                c_q8, c_sf = compacted.qr_quantized
+                t_c = len(keep_idx)
+                expected_padded = (t_c + 3) // 4 * 4
+                self.assertEqual(c_q8.dtype, torch.float8_e4m3fn)
+                self.assertEqual(tuple(c_q8.shape), (t_c, cols))
+                torch.testing.assert_close(
+                    c_q8.view(torch.uint8),
+                    q8.view(torch.uint8).index_select(0, idx),
+                    rtol=0,
+                    atol=0,
+                )
+                self.assertEqual(tuple(c_sf.shape), (t_c, packs))
+                self.assertEqual(c_sf.stride(), (1, expected_padded or 1))
+                torch.testing.assert_close(
+                    c_sf.contiguous(),
+                    sf.contiguous().index_select(0, idx),
+                    rtol=0,
+                    atol=0,
+                )
+
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class PrefillQRopeCudaTest(unittest.TestCase):
@@ -344,6 +564,77 @@ class PrefillQRopeCudaTest(unittest.TestCase):
             attention._prefill_q_rope(q, freqs, 64)
             torch.cuda.synchronize()
             self.assertLess(torch.cuda.max_memory_allocated() - allocated, 1 << 20)
+
+    def test_fp8_only_chunked_q_projection_and_indexer_bit_exact(self):
+        if torch.cuda.get_device_capability()[0] < 10:
+            self.skipTest("MXFP8 prefill Q projection requires SM10x")
+        from rtp_llm.models_py.modules.dsv41._v41_fused_qkv import strided_q_rmsnorm
+        from rtp_llm.models_py.modules.dsv41._v41_query_quant import query_norm_quant
+        from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+
+        torch.manual_seed(31)
+        owner = attention.AttentionV41FP8.__new__(attention.AttentionV41FP8)
+        torch.nn.Module.__init__(owner)
+        owner.n_heads, owner.head_dim, owner.rope_head_dim = 64, 512, 64
+        q_dim, q_rank = owner.n_heads * owner.head_dim, 1280
+        owner.wq_b = V41MXFP8Linear(
+            (torch.randn(q_dim, q_rank, device="cuda") * 0.02).to(torch.float8_e4m3fn),
+            torch.ones(q_dim // 32, q_rank // 32, device="cuda").to(
+                torch.float8_e8m0fnu
+            ),
+        )
+        owner.index_wq = V41MXFP8Linear(
+            (torch.randn(1024, q_rank, device="cuda") * 0.02).to(torch.float8_e4m3fn),
+            torch.ones(1024 // 32, q_rank // 32, device="cuda").to(
+                torch.float8_e8m0fnu
+            ),
+        )
+        q_norm = torch.randn(q_rank, device="cuda", dtype=torch.bfloat16)
+        for rows, chunk_rows in ((257, 128), (1025, 384)):
+            with self.subTest(rows=rows, chunk_rows=chunk_rows):
+                raw = torch.randn(1, rows, 1792, device="cuda", dtype=torch.bfloat16)
+                x_q = raw[..., :q_rank]
+                qr_ref = strided_q_rmsnorm(x_q, q_norm, 1e-6).squeeze(0)
+                qr_none, (q8_3d, sf) = query_norm_quant(
+                    x_q, q_norm, 1e-6, emit_norm=False
+                )
+                self.assertIsNone(qr_none)
+                q8 = q8_3d.squeeze(0)
+                # Verify fp8_only working set is strictly smaller than BF16 qr.
+                self.assertLess(
+                    q8.numel() * q8.element_size() + sf.numel() * sf.element_size(),
+                    qr_ref.numel() * qr_ref.element_size(),
+                )
+                # Indexer query projection bit-exactness.
+                torch.testing.assert_close(
+                    owner.index_wq.forward_quantized(q8, sf),
+                    owner.index_wq(qr_ref),
+                    rtol=0,
+                    atol=0,
+                )
+                # Chunked Q projection + RoPE bit-exactness across unaligned tail.
+                angles = torch.randn(rows, 32, device="cuda")
+                freqs = torch.polar(torch.ones_like(angles), angles)
+                expected = owner._lin(owner.wq_b, qr_ref).view(rows, 64, 512)
+                attention.rope_only(expected, freqs, 64)
+                workspace = PrefillWorkspace(
+                    torch.device("cuda"),
+                    q_rows=chunk_rows,
+                    q_dim=q_dim,
+                    reserve_cp=False,
+                    align_bytes=1,
+                )
+                for start in range(0, rows, chunk_rows):
+                    end = min(start + chunk_rows, rows)
+                    actual = owner._project_prefill_q(
+                        None,
+                        freqs[start:end],
+                        workspace,
+                        qr_quantized=(q8[start:end], sf[start:end]),
+                    )
+                    torch.testing.assert_close(
+                        actual, expected[start:end], rtol=0, atol=0
+                    )
 
 
 if __name__ == "__main__":

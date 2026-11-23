@@ -717,7 +717,33 @@ class Block(nn.Module):
                         self, residual, post, comb, input_ids
                     )
                     indexer_weights = plan.exchange.compact(indexer_weights)
-                    qkv = qkv._replace(qr=plan.exchange.compact(qkv.qr))
+                    compact_qr = (
+                        None if qkv.qr is None else plan.exchange.compact(qkv.qr)
+                    )
+                    compact_qr_q = None
+                    if getattr(qkv, "qr_quantized", None) is not None:
+                        q8, sf = qkv.qr_quantized
+                        c_q8 = plan.exchange.compact(q8.view(torch.uint8)).view(
+                            q8.dtype
+                        )
+                        c_sf_rm = plan.exchange.compact(sf.contiguous())
+                        t_c = c_sf_rm.shape[0]
+                        padded_t = (t_c + 3) // 4 * 4
+                        c_sf = torch.empty_strided(
+                            (padded_t, c_sf_rm.shape[1]),
+                            (1, padded_t or 1),
+                            device=c_sf_rm.device,
+                            dtype=c_sf_rm.dtype,
+                        )
+                        if padded_t != t_c:
+                            c_sf = c_sf[:t_c]
+                        if t_c:
+                            c_sf.copy_(c_sf_rm)
+                        compact_qr_q = (c_q8, c_sf)
+                    if hasattr(qkv, "qr_quantized"):
+                        qkv = qkv._replace(qr=compact_qr, qr_quantized=compact_qr_q)
+                    else:
+                        qkv = qkv._replace(qr=compact_qr)
                     common = plan.l20_query_metadata(common, self.attn.freqs_cis)
                     shared = self.attn._shared_attention
                     if references is not None:

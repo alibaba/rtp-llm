@@ -274,6 +274,28 @@ class MegaAttention(torch.nn.Module):
             and not qr.requires_grad
         )
 
+    def supports_quantized_query(self, qr_quantized) -> bool:
+        if qr_quantized is None:
+            return False
+        q8, sf = qr_quantized
+        return (
+            q8.device == self.query_weight.device
+            and sf.device == q8.device
+            and q8.dtype == torch.float8_e4m3fn
+            and sf.dtype == torch.int32
+            and q8.ndim in (2, 3)
+            and q8.shape[-1] == self.query_weight.shape[1]
+            and q8.numel() > 0
+            and q8.is_contiguous()
+            and sf.ndim == 2
+            and sf.shape
+            == (q8.numel() // q8.shape[-1], self.query_weight.shape[1] // 128)
+            and sf.stride(0) == 1
+            and sf.stride(1) % 4 == 0
+            and sf.data_ptr() % 16 == 0
+            and not q8.requires_grad
+        )
+
     def project_q(self, linear, qr, qr_quantized=None, out=None):
         """Emit fused Q layout directly from Wq; no normalization or rotation."""
         import deep_gemm
@@ -281,10 +303,12 @@ class MegaAttention(torch.nn.Module):
         quantized, scales = (
             linear._quantize_input(qr) if qr_quantized is None else qr_quantized
         )
-        rows = qr.numel() // self.query_weight.shape[1]
+        rows = quantized.numel() // self.query_weight.shape[1]
         if out is None:
             out = torch.empty(
-                (rows, self.heads * _HEAD_DIM), dtype=qr.dtype, device=qr.device
+                (rows, self.heads * _HEAD_DIM),
+                dtype=torch.bfloat16 if qr is None else qr.dtype,
+                device=quantized.device,
             )
         deep_gemm.fp8_fp4_gemm_nt(
             (quantized.reshape(rows, -1), scales),

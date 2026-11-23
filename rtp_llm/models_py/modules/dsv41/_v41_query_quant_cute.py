@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import ctypes
+import threading
+from functools import lru_cache
+
 import cuda.bindings.driver as cuda_drv
 import cutlass
 import cutlass.cute.arch as cute_arch
@@ -345,9 +349,10 @@ def _quant4_f(y01, y23, rec2, *, loc=None, ip=None) -> Uint32:
 
 
 class _QueryNormQuant1280:
-    def __init__(self, stride_x: int, pdl: bool):
+    def __init__(self, stride_x: int, pdl: bool, emit_norm: bool = True):
         self.stride_x = int(stride_x)
         self.pdl = pdl
+        self.emit_norm = emit_norm
 
     @cute.jit
     def __call__(
@@ -395,7 +400,6 @@ class _QueryNormQuant1280:
         if cutlass.const_expr(self.pdl):
             cute_arch.griddepcontrol_wait()
         xw = _ldg128(x_addr)
-        y_addr = y_ptr.toint() + row64 * (2 * D) + t16
         q_addr = q_ptr.toint() + row64 * D + t64 * 8
 
         xs = [_unpack2p(xw[i]) for i in range(4)]
@@ -420,8 +424,10 @@ class _QueryNormQuant1280:
         inv2 = _dup2(inv)
 
         nw = [_norm_pair2(xs[i], gs[i], inv2) for i in range(4)]
-        yw = [nw[i][0] for i in range(4)]
-        _stg128(y_addr, yw[0], yw[1], yw[2], yw[3])
+        if cutlass.const_expr(self.emit_norm):
+            y_addr = y_ptr.toint() + row64 * (2 * D) + t16
+            yw = [nw[i][0] for i in range(4)]
+            _stg128(y_addr, yw[0], yw[1], yw[2], yw[3])
 
         m8 = _max4_f32(nw[0][1], nw[1][1], nw[2][1], nw[3][1])
         base = lane & 28
@@ -459,6 +465,97 @@ class _QueryNormQuant1280:
 
 
 _COMPILED: dict = {}
+_COMPILED_FP8_ONLY: dict = {}
+_FAST_LAUNCHERS: dict = {}
+
+
+@lru_cache(maxsize=16)
+def _is_sm100(device_index: int) -> bool:
+    return torch.cuda.get_device_capability(device_index) == (10, 0)
+
+
+class _FastCuteLauncher:
+    """Thread-local direct CAPI launcher avoiding per-call CuTeDSL Python marshaling."""
+
+    def __init__(self, executor):
+        self._executor = executor
+        self._capi = executor._default_executor.capi_func
+        self._tls = threading.local()
+
+    def _slots(self):
+        slots = getattr(self._tls, "slots", None)
+        if slots is None:
+            c_x = ctypes.c_void_p(0)
+            c_w = ctypes.c_void_p(0)
+            c_y = ctypes.c_void_p(0)
+            c_q = ctypes.c_void_p(0)
+            c_sf = ctypes.c_void_p(0)
+            c_rows = ctypes.c_int32(0)
+            c_ssf = ctypes.c_int32(0)
+            c_eps = ctypes.c_float(0.0)
+            c_st = ctypes.c_void_p(0)
+            c_res = ctypes.c_int32(0)
+            arr = (ctypes.c_void_p * 10)(
+                ctypes.addressof(c_x),
+                ctypes.addressof(c_w),
+                ctypes.addressof(c_y),
+                ctypes.addressof(c_q),
+                ctypes.addressof(c_sf),
+                ctypes.addressof(c_rows),
+                ctypes.addressof(c_ssf),
+                ctypes.addressof(c_eps),
+                ctypes.addressof(c_st),
+                ctypes.addressof(c_res),
+            )
+            slots = (c_x, c_w, c_y, c_q, c_sf, c_rows, c_ssf, c_eps, c_st, c_res, arr)
+            self._tls.slots = slots
+        return slots
+
+    def launch(
+        self, x_ptr, w_ptr, y_ptr, q_ptr, sf_ptr, rows, stride_sf, eps, stream_ptr
+    ):
+        c_x, c_w, c_y, c_q, c_sf, c_rows, c_ssf, c_eps, c_st, c_res, arr = self._slots()
+        c_x.value = x_ptr
+        c_w.value = w_ptr
+        c_y.value = y_ptr
+        c_q.value = q_ptr
+        c_sf.value = sf_ptr
+        c_rows.value = rows
+        c_ssf.value = stride_sf
+        c_eps.value = eps
+        c_st.value = stream_ptr
+        c_res.value = 0
+        self._capi(arr)
+        err = c_res.value
+        if err != 0:
+            raise RuntimeError(f"CuTeDSL query_norm_quant CUDA error: {err}")
+
+
+def _build_fast_launcher(executor, args, stream):
+    dexec = getattr(executor, "_default_executor", None)
+    if (
+        dexec is None
+        or getattr(dexec, "_kernel_ptrs", None) is not None
+        or not getattr(dexec, "_has_cuda_result", False)
+        or getattr(dexec, "_num_extra_args", 0) != 1
+        or getattr(dexec, "capi_func", None) is None
+    ):
+        return None
+    exe_args, _ = executor.generate_execution_args(*args, stream)
+    if len(exe_args) != 9:
+        return None
+    return _FastCuteLauncher(executor)
+
+
+def _alloc_scales(rows: int, device: torch.device) -> torch.Tensor:
+    padded_rows = (rows + 3) // 4 * 4
+    scales = torch.empty_strided(
+        (padded_rows, PACKS),
+        (1, padded_rows or 1),
+        device=device,
+        dtype=torch.int32,
+    )
+    return scales if padded_rows == rows else scales[:rows]
 
 
 def _supported(x: torch.Tensor, weight: torch.Tensor) -> bool:
@@ -470,7 +567,7 @@ def _supported(x: torch.Tensor, weight: torch.Tensor) -> bool:
         or weight.shape != (D,)
         or not weight.is_contiguous()
         or weight.device != x.device
-        or torch.cuda.get_device_capability(x.device) != (10, 0)
+        or not _is_sm100(x.device.index)
     ):
         return False
     flat = x.view(-1, D)
@@ -483,39 +580,75 @@ def _supported(x: torch.Tensor, weight: torch.Tensor) -> bool:
 
 
 def try_query_norm_quant(
-    x: torch.Tensor, weight: torch.Tensor, eps: float, *, pdl: bool
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    *,
+    pdl: bool,
+    emit_norm: bool = True,
 ):
     if not _supported(x, weight):
         return None
     flat = x.view(-1, D)
     rows = flat.shape[0]
-    with torch.cuda.device(x.device):
-        normalized = torch.empty(x.shape, device=x.device, dtype=torch.bfloat16)
-        quantized = torch.empty(x.shape, device=x.device, dtype=torch.float8_e4m3fn)
-        scales = torch.empty(
-            (PACKS, (rows + 3) // 4 * 4), device=x.device, dtype=torch.int32
-        ).T[:rows]
-        result = normalized, (quantized, scales)
-        if not rows:
-            return result
+    device = x.device
+    normalized = (
+        torch.empty(x.shape, device=device, dtype=torch.bfloat16) if emit_norm else None
+    )
+    quantized = torch.empty(x.shape, device=device, dtype=torch.float8_e4m3fn)
+    scales = _alloc_scales(rows, device)
+    result = normalized, (quantized, scales)
+    if not rows:
+        return result
+    stride_x = flat.stride(0)
+    dev_idx = device.index
+    cache = _COMPILED if emit_norm else _COMPILED_FP8_ONLY
+    key = (dev_idx, stride_x, pdl)
+    fast_key = (dev_idx, stride_x, pdl, emit_norm)
+    fast = _FAST_LAUNCHERS.get(fast_key) if key in cache else None
+    if fast is not None:
+        stream_ptr = torch.cuda.current_stream(device).cuda_stream
+        y_ptr = normalized.data_ptr() if emit_norm else quantized.data_ptr()
+        launch_args = (
+            flat.data_ptr(),
+            weight.data_ptr(),
+            y_ptr,
+            quantized.data_ptr(),
+            scales.data_ptr(),
+            rows,
+            scales.stride(1),
+            eps,
+            stream_ptr,
+        )
+        if torch.cuda.current_device() != dev_idx:
+            with torch.cuda.device(device):
+                fast.launch(*launch_args)
+        else:
+            fast.launch(*launch_args)
+        return result
+    with torch.cuda.device(device):
         gmem = cute.AddressSpace.gmem
         bf16 = cutlass.BFloat16
+        y_src = normalized if emit_norm else quantized
         args = (
             make_ptr(bf16, x.data_ptr(), gmem, assumed_align=16),
             make_ptr(bf16, weight.data_ptr(), gmem, assumed_align=16),
-            make_ptr(bf16, normalized.data_ptr(), gmem, assumed_align=16),
+            make_ptr(bf16, y_src.data_ptr(), gmem, assumed_align=16),
             make_ptr(bf16, quantized.data_ptr(), gmem, assumed_align=16),
             make_ptr(Int32, scales.data_ptr(), gmem, assumed_align=4),
             Int32(rows),
             Int32(scales.stride(1)),
             Float32(eps),
         )
-        stride_x = flat.stride(0)
-        key = (x.device.index, stride_x, pdl)
-        executor = _COMPILED.get(key)
-        stream = cuda_drv.CUstream(torch.cuda.current_stream(x.device).cuda_stream)
+        executor = cache.get(key)
+        stream = cuda_drv.CUstream(torch.cuda.current_stream(device).cuda_stream)
         if executor is None:
-            executor = cute.compile(_QueryNormQuant1280(stride_x, pdl), *args, stream)
-            _COMPILED[key] = executor
+            executor = cute.compile(
+                _QueryNormQuant1280(stride_x, pdl, emit_norm=emit_norm), *args, stream
+            )
+            cache[key] = executor
         executor(*args, stream)
+        fast = _build_fast_launcher(executor, args, stream)
+        if fast is not None:
+            _FAST_LAUNCHERS[fast_key] = fast
     return result
