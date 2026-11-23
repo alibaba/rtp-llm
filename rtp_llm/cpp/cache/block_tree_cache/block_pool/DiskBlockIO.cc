@@ -52,6 +52,15 @@ BlockTreePosixDiskBlockIO::openAndPreallocate(const std::string& file_path, size
         return DiskBlockIOStatus::IO_ERROR;
     }
 
+    // The mount guard owns the cache directory, and O_EXCL proved that this
+    // process created the file. Only the descriptor is needed for cache I/O.
+    // Unlink before allocating so an abrupt exit also releases the space.
+    if (::unlink(file_path.c_str()) != 0) {
+        RTP_LLM_LOG_ERROR("unlink disk block file failed, file=%s, error=%s", file_path.c_str(), std::strerror(errno));
+        close();
+        return DiskBlockIOStatus::IO_ERROR;
+    }
+
     int rc = ::posix_fallocate(fd_, 0, static_cast<off_t>(bytes));
     if (rc == EOPNOTSUPP || rc == ENOSYS) {
         RTP_LLM_LOG_WARNING("posix_fallocate unsupported, falling back to ftruncate, file=%s, bytes=%zu, error=%s",

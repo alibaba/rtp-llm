@@ -3,14 +3,17 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskIOExecutor.h"
 
 #include <algorithm>
-#include <cstdio>
+#include <cerrno>
 #include <chrono>
+#include <csignal>
+#include <cstdio>
 #include <future>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <sys/stat.h>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #include "gtest/gtest.h"
@@ -33,8 +36,11 @@ TEST(DiskBlockIOTest, OpenPreallocateWriteReadAndClose) {
 
     // The file must be preallocated to at least the requested size.
     struct stat st{};
-    ASSERT_EQ(::stat(path.c_str(), &st), 0);
+    ASSERT_EQ(::fstat(io.fd_, &st), 0);
     EXPECT_GE(static_cast<size_t>(st.st_size), 4096u);
+    EXPECT_EQ(st.st_nlink, 0u);
+    EXPECT_EQ(::access(path.c_str(), F_OK), -1);
+    EXPECT_EQ(errno, ENOENT);
 
     std::vector<char> write_buf(4096);
     for (size_t i = 0; i < write_buf.size(); ++i) {
@@ -59,14 +65,17 @@ TEST(DiskBlockIOTest, OpenIsExclusiveAndRejectsExistingFile) {
     const std::string path = testFilePath("exclusive.bin");
     ::remove(path.c_str());
 
+    FILE* existing = ::fopen(path.c_str(), "wb");
+    ASSERT_NE(existing, nullptr);
+    ASSERT_GE(::fputs("owned by another writer", existing), 0);
+    ASSERT_EQ(::fclose(existing), 0);
+
     BlockTreePosixDiskBlockIO first;
-    ASSERT_EQ(first.openAndPreallocate(path, 4096, /*buffered_io=*/true), DiskBlockIOStatus::OK);
-
-    // A second exclusive create on the same, still-existing path must fail (O_EXCL).
-    BlockTreePosixDiskBlockIO second;
-    EXPECT_EQ(second.openAndPreallocate(path, 4096, /*buffered_io=*/true), DiskBlockIOStatus::IO_ERROR);
-
+    EXPECT_EQ(first.openAndPreallocate(path, 4096, /*buffered_io=*/true), DiskBlockIOStatus::IO_ERROR);
     first.close();
+    struct stat st{};
+    ASSERT_EQ(::stat(path.c_str(), &st), 0);
+    EXPECT_EQ(st.st_size, 23);
     ::remove(path.c_str());
 
     // After removal the exclusive create succeeds again.
@@ -74,6 +83,27 @@ TEST(DiskBlockIOTest, OpenIsExclusiveAndRejectsExistingFile) {
     EXPECT_EQ(third.openAndPreallocate(path, 4096, /*buffered_io=*/true), DiskBlockIOStatus::OK);
     third.close();
     ::remove(path.c_str());
+}
+
+TEST(DiskBlockIODeathTest, SigkillLeavesNoBackingFile) {
+    const std::string path = testFilePath("sigkill.bin");
+    ::remove(path.c_str());
+
+    const auto outcome = [&] {
+        BlockTreePosixDiskBlockIO io;
+        if (io.openAndPreallocate(path, 4096, /*buffered_io=*/true) != DiskBlockIOStatus::OK) {
+            ::_exit(1);
+        }
+        ::kill(::getpid(), SIGKILL);
+        ::_exit(2);
+    };
+    ASSERT_EXIT(outcome(), ::testing::KilledBySignal(SIGKILL), "");
+
+    const int access_result = ::access(path.c_str(), F_OK);
+    const int access_error = errno;
+    ::remove(path.c_str());
+    EXPECT_EQ(access_result, -1);
+    EXPECT_EQ(access_error, ENOENT);
 }
 
 TEST(DiskBlockIOTest, BackingFilePermissionsAre0600) {
@@ -84,7 +114,7 @@ TEST(DiskBlockIOTest, BackingFilePermissionsAre0600) {
     ASSERT_EQ(io.openAndPreallocate(path, 4096, /*buffered_io=*/true), DiskBlockIOStatus::OK);
 
     struct stat st{};
-    ASSERT_EQ(::stat(path.c_str(), &st), 0);
+    ASSERT_EQ(::fstat(io.fd_, &st), 0);
     EXPECT_EQ(st.st_mode & 0777, 0600u);
 
     io.close();
@@ -255,8 +285,10 @@ TEST(DiskBlockPoolTest, InitPreallocatesFileAndSkipsOffsetZero) {
     DiskBlockPool          pool(config);
     ASSERT_TRUE(pool.init());
 
+    auto* io = dynamic_cast<BlockTreePosixDiskBlockIO*>(pool.io_.get());
+    ASSERT_NE(io, nullptr);
     struct stat st{};
-    ASSERT_EQ(::stat(pool.filePath().c_str(), &st), 0);
+    ASSERT_EQ(::fstat(io->fd_, &st), 0);
     EXPECT_GE(static_cast<size_t>(st.st_size), config->disk_size_bytes);
 
     // physical_block_count(4) - reserved block 0 = 3 usable blocks.
@@ -387,13 +419,14 @@ TEST(DiskBlockPoolTest, SharedMountGuardCreatesGuardWorkDirAndBackingFile) {
     DiskBlockPool pool(config);
     ASSERT_TRUE(pool.init());
 
-    // Backing file must live inside the guard's rtp_llm_disk_kv work dir, not directly
-    // under the mount.
+    // The backing file is created in the guard's work directory before unlinking.
     const std::string expected_dir = mount + "/rtp_llm_disk_kv/";
     EXPECT_EQ(pool.filePath().rfind(expected_dir, 0), 0u);
 
+    auto* io = dynamic_cast<BlockTreePosixDiskBlockIO*>(pool.io_.get());
+    ASSERT_NE(io, nullptr);
     struct stat st{};
-    ASSERT_EQ(::stat(pool.filePath().c_str(), &st), 0);
+    ASSERT_EQ(::fstat(io->fd_, &st), 0);
     EXPECT_GE(static_cast<size_t>(st.st_size), config->disk_size_bytes);
 
     ::remove(pool.filePath().c_str());
