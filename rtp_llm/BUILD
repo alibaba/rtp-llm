@@ -176,6 +176,7 @@ py_library(
         "utils/**/*.py",
     ], exclude = _JIT_CACHE_SRCS + _JIT_CACHE_ENV_SRCS + [
         "utils/warmup.py",
+        "utils/numa.py",
         "utils/test/*.py",
         "utils/test/**/*.py",
     ]),
@@ -183,6 +184,7 @@ py_library(
     deps = [
         ":jit_cache_env",
         ":torch",
+        ":numa",
         ":safetensors",
         #":decord",
         ":lru-dict",
@@ -196,6 +198,11 @@ py_library(
 py_library(
     name = "warmup",
     srcs = ["utils/warmup.py"],
+)
+
+py_library(
+    name = "numa",
+    srcs = ["utils/numa.py"],
 )
 
 py_library(
