@@ -255,7 +255,11 @@ class MMSchedulerTest(TestCase):
 
         fake.prepare_embedding_batch = prepare
         sched = MMScheduler(
-            fake, batch_wait_ms=10, max_batch_size=8, prefetch_batches=1
+            fake,
+            batch_wait_ms=10,
+            max_batch_size=8,
+            prefetch_batches=1,
+            prefetch_fill_batch=True,
         )
         try:
             first = sched.submit([_FakeWorkItem(preprocess_result=torch.tensor([1]))])
@@ -272,6 +276,40 @@ class MMSchedulerTest(TestCase):
         finally:
             release_forward.set()
             self.assertTrue(sched.close())
+
+    def test_prefetch_keeps_collecting_during_a_normal_forward(self):
+        release_forward = threading.Event()
+        staged_next = threading.Event()
+        fake = _FakeMMPart(block_until=release_forward)
+
+        def prepare(data, _types):
+            if any(int(t.item()) == 2 for t in data):
+                staged_next.set()
+
+        fake.prepare_embedding_batch = prepare
+        with mock.patch(
+            "rtp_llm.multimodal.mm_scheduler._MAX_PREFETCH_COLLECTION_S", 2.0
+        ):
+            sched = MMScheduler(
+                fake,
+                batch_wait_ms=10,
+                max_batch_size=8,
+                prefetch_batches=1,
+                prefetch_fill_batch=True,
+            )
+            try:
+                first = sched.submit([_FakeWorkItem(preprocess_result=torch.tensor([1]))])
+                self.assertTrue(fake.forward_entered.wait(3))
+                second = sched.submit([_FakeWorkItem(preprocess_result=torch.tensor([2]))])
+                self.assertFalse(staged_next.wait(0.05))
+                third = sched.submit([_FakeWorkItem(preprocess_result=torch.tensor([3]))])
+                release_forward.set()
+                for receipt in (first, second, third):
+                    sched.wait(receipt)
+                self.assertEqual(fake.call_values, [[1.0], [2.0, 3.0]])
+            finally:
+                release_forward.set()
+                self.assertTrue(sched.close())
 
     def test_idle_maintenance_runs_after_completion_in_both_modes(self):
         for prefetch in (0, 1):
