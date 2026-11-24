@@ -5,7 +5,11 @@
 #include <cstdlib>
 #include <new>
 
+#ifdef RTP_BTC_RANK_STANDALONE
+#include "rtp_llm/cpp/cache/block_tree_cache/external/StandaloneDiagnostics.h"
+#else
 #include "rtp_llm/cpp/utils/Logger.h"
+#endif
 
 namespace rtp_llm {
 namespace {

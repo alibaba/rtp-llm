@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ExternalBlockTreeMatch.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
@@ -138,6 +139,17 @@ public:
                                bool                               enable_storage_backend = true,
                                std::optional<int64_t>             request_id             = {},
                                bool                               skip_linear            = false);
+    // Uses one native tree walk with explicit per-endpoint coverage from the external
+    // scheduler. The caller retains selected slots before changing external allocations.
+    ExternalBlockTreeMatchResult match(const CacheKeysType&                       cache_keys,
+                                       const std::vector<ExternalMatchEndpoint>& endpoints,
+                                       ExternalMatchMode                         mode,
+                                       const ExternalJoinLookup&                 lookup_join = {});
+    ExternalBlockTreeMatchResult matchWholePages(const CacheKeysType&                 cache_keys,
+                                                 size_t                               maximum_tokens,
+                                                 size_t                               hash_step,
+                                                 const std::vector<ExternalPageGroup>& groups,
+                                                 const ExternalJoinLookup&            lookup_join);
     void                 insert(const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& resources,
                                 Tier                                              target_tier);

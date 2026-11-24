@@ -7,7 +7,11 @@
 #include <optional>
 #include <stdexcept>
 
+#ifdef RTP_BTC_RANK_STANDALONE
+#include "rtp_llm/cpp/cache/block_tree_cache/external/StandaloneDiagnostics.h"
+#else
 #include "rtp_llm/cpp/utils/Logger.h"
+#endif
 
 namespace rtp_llm {
 namespace {
@@ -25,7 +29,7 @@ HostStagingBlockPool::HostStagingBlockPool(size_t block_count, size_t stride_byt
     block_count_(block_count),
     stride_bytes_(stride_bytes),
     backing_(stagingBytes(block_count_, stride_bytes_), kAlignment, "host staging block pool") {
-    const size_t total_bytes = block_count_ * stride_bytes_;
+    [[maybe_unused]] const size_t total_bytes = block_count_ * stride_bytes_;
     free_id_list_.reserve(block_count_);
     for (size_t block_id = 0; block_id < block_count_; ++block_id) {
         free_id_list_.push_back(block_id);

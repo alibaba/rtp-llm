@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 
 #include <algorithm>
+#include <stdexcept>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/CacheLockGuard.h"
@@ -113,12 +114,16 @@ BlockTreeCache::~BlockTreeCache() {
     }
     RTP_LLM_LOG_INFO("load tickets closed, draining cache tasks...");
     task_pool_->stopAdmission();
-    transfer_dispatcher_->cancelPendingStagingTransfers();
+    if (transfer_dispatcher_) {
+        transfer_dispatcher_->cancelPendingStagingTransfers();
+    }
     task_pool_->waitForIdle();
     // Task-body idleness does not imply asynchronous RPC/transfer completion.
     // Keep dispatcher and cache state alive until transfer callbacks return,
     // then drain the settlement tasks those callbacks submitted.
-    transfer_dispatcher_->shutdown();
+    if (transfer_dispatcher_) {
+        transfer_dispatcher_->shutdown();
+    }
     task_pool_->waitForIdle();
     transfer_dispatcher_.reset();
     task_pool_.reset();
@@ -189,6 +194,140 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType&               ca
     }
     metrics_reporter_->reportCacheReuseTimeMetrics(result.reuse_time_metrics);
     return result;
+}
+
+namespace {
+
+std::optional<ExternalMatchBinding> externalBinding(const TreeNode& node, ExternalMatchPosition need,
+                                                    const ExternalJoinLookup& lookup_join) {
+    const auto& resource = node.group_set_resources[need.group];
+    const bool ready = resource.hasCompleteDeviceValue() && resource.transfer_state == GroupSetTransferState::IDLE;
+    if (!ready && lookup_join) {
+        if (const auto joined = lookup_join(node, need.group)) {
+            return ExternalMatchBinding{need.group, need.row, Tier::DEVICE, joined->slot, ExternalBindingKind::JOIN,
+                                        joined->generation, joined->operation};
+        }
+    }
+    if (!resource.isMatchUsable() || resource.transfer_state != GroupSetTransferState::IDLE)
+        return std::nullopt;
+    const auto tier = resource.getTopTier();
+    const auto slot = tier == Tier::DEVICE ? resource.device_blocks.front() :
+                      tier == Tier::HOST   ? resource.host_block : resource.disk_block;
+    return ExternalMatchBinding{need.group, need.row, tier, slot,
+                                ready ? ExternalBindingKind::READY : ExternalBindingKind::LOAD};
+}
+
+ExternalBlockTreeMatchResult matchExternalEndpoints(
+    const std::vector<TreeNode*>& path, size_t groups,
+    const std::vector<ExternalMatchEndpoint>& endpoints, const ExternalJoinLookup& lookup_join) {
+    ExternalBlockTreeMatchResult result;
+    for (auto endpoint = endpoints.rbegin(); endpoint != endpoints.rend(); ++endpoint) {
+        if (endpoint->needs.empty()) {
+            continue;
+        }
+        std::vector<ExternalMatchBinding> bindings;
+        bindings.reserve(endpoint->needs.size());
+        bool device_only = true;
+        for (const auto& need : endpoint->needs) {
+            if (need.group >= groups) {
+                throw std::invalid_argument("external match refers to an unknown group");
+            }
+            if (need.row >= path.size()) {
+                break;
+            }
+            const auto binding = externalBinding(*path[need.row], need, lookup_join);
+            if (!binding)
+                break;
+            bindings.push_back(*binding);
+            device_only = device_only && binding->kind == ExternalBindingKind::READY;
+        }
+        if (bindings.size() != endpoint->needs.size()) {
+            continue;
+        }
+        if (result.total_tokens == 0) {
+            result.total_tokens = endpoint->tokens;
+            result.bindings = bindings;
+        }
+        if (device_only) {
+            result.device_tokens = endpoint->tokens;
+            result.device_bindings = std::move(bindings);
+            break;
+        }
+    }
+    RTP_LLM_LOG_DEBUG("external BlockTreeCache::match nodes=%zu D=%zu L=%zu",
+                      path.size(), result.device_tokens, result.total_tokens);
+    return result;
+}
+
+}  // namespace
+
+ExternalBlockTreeMatchResult BlockTreeCache::match(
+    const CacheKeysType& cache_keys, const std::vector<ExternalMatchEndpoint>& endpoints,
+    ExternalMatchMode, const ExternalJoinLookup& lookup_join) {
+    CacheLockGuard lock(mutex_, *metrics_reporter_, "external_match");
+    const auto groups = tree_->externalGroupCount();
+    if (!groups)
+        throw std::logic_error("external match requires an external BlockTree");
+    return matchExternalEndpoints(tree_->findNode(cache_keys), groups, endpoints, lookup_join);
+}
+
+ExternalBlockTreeMatchResult BlockTreeCache::matchWholePages(
+    const CacheKeysType& cache_keys, size_t maximum_tokens, size_t hash_step,
+    const std::vector<ExternalPageGroup>& groups, const ExternalJoinLookup& lookup_join) {
+    CacheLockGuard lock(mutex_, *metrics_reporter_, "external_match");
+    if (hash_step == 0 || groups.empty() || groups.size() != tree_->externalGroupCount())
+        throw std::invalid_argument("invalid external whole-page match geometry");
+    std::vector<size_t> strides;
+    for (const auto& group : groups) {
+        if (!group.block_size || group.block_size % hash_step)
+            throw std::invalid_argument("external group must be a whole number of hash rows");
+        strides.push_back(group.block_size / hash_step);
+    }
+
+    const auto path = tree_->findNode(cache_keys);
+    const size_t limit = std::min(path.size(), maximum_tokens / hash_step);
+    // FULL coverage is cumulative. A missing recurrent checkpoint affects
+    // only its own boundary; a later complete checkpoint can restore a hit.
+    std::vector<bool> full_available(groups.size(), true), full_ready(groups.size(), true);
+    size_t total_rows = 0, device_rows = 0;
+    for (size_t row = 0; row < limit; ++row) {
+        bool available = true, ready = true;
+        for (size_t group = 0; group < groups.size(); ++group) {
+            if ((row + 1) % strides[group]) {
+                available = ready = false;
+                continue;
+            }
+            const auto binding = externalBinding(*path[row], {group, row}, lookup_join);
+            const bool page_ready = binding && binding->kind == ExternalBindingKind::READY;
+            if (groups[group].last_checkpoint) {
+                available = available && binding.has_value();
+                ready = ready && page_ready;
+            } else {
+                full_available[group] = full_available[group] && binding.has_value();
+                full_ready[group] = full_ready[group] && page_ready;
+                available = available && full_available[group];
+                ready = ready && full_ready[group];
+            }
+        }
+        if (available) total_rows = row + 1;
+        if (ready) device_rows = row + 1;
+    }
+    // Materialize only the winning endpoints. Use the same binding order,
+    // tier priority and JOIN handling as the generic external matcher.
+    std::vector<ExternalMatchEndpoint> endpoints;
+    auto add = [&](size_t rows) {
+        if (!rows) return;
+        auto& endpoint = endpoints.emplace_back(ExternalMatchEndpoint{rows * hash_step, {}});
+        for (size_t group = 0; group < groups.size(); ++group) {
+            const size_t pages = rows / strides[group];
+            const size_t first = groups[group].last_checkpoint ? pages - 1 : 0;
+            for (size_t i = first; i < pages; ++i)
+                endpoint.needs.push_back({group, (i + 1) * strides[group] - 1});
+        }
+    };
+    add(device_rows);
+    if (total_rows != device_rows) add(total_rows);
+    return matchExternalEndpoints(path, groups.size(), endpoints, lookup_join);
 }
 
 void BlockTreeCache::insert(const CacheKeysType&                              cache_keys,

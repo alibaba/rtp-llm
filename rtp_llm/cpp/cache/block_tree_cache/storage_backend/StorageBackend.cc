@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <mutex>
 #include <exception>
+#include <limits>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
@@ -52,6 +53,7 @@ struct StorageTaskState {
     StorageRequest    request;
     uint64_t          trace_id{0};
     std::vector<Pin>  pins;
+    std::function<void()> release_host_source;
     std::once_flag    finish_once;
     std::atomic<bool> completion_started{false};
     void              finish(bool freeze_pins = false) {
@@ -65,6 +67,7 @@ struct StorageTaskState {
                     pin.release();
             }
             pins.clear();
+            if (release_host_source) release_host_source();
         });
     }
 
@@ -116,6 +119,63 @@ struct BlockKeyHash {
 
 StorageWriteTask::StorageWriteTask(std::shared_ptr<storage_backend_detail::StorageTaskState> state):
     state_(std::move(state)) {}
+
+StorageWriteTask StorageBackend::prepareWrite(IBlockPool& host_pool, BlockIdxType source) {
+    // Use main's task-owned release callback for this Host source. Prepare
+    // its ownership record before acquiring the EVICT pin; a failed native
+    // retain must never run a release for an unacquired reference.
+    auto state = std::make_shared<storage_backend_detail::StorageTaskState>();
+    std::function<void()> release = [&host_pool, source] {
+        host_pool.decTreeRef(source, BlockTreeRefType::EVICT);
+    };
+    host_pool.incTreeRef(source, BlockTreeRefType::EVICT);
+    state->release_host_source = std::move(release);
+    return StorageWriteTask(std::move(state));
+}
+
+uint64_t StorageBackend::HostWrites::write(size_t group, std::string hash, BlockIdxType slot) {
+    if (slot < 0 || static_cast<size_t>(slot) >= pool_.totalBlocksNum())
+        throw std::out_of_range("Host storage source outside registered pool");
+    if (last_ticket_ == std::numeric_limits<uint64_t>::max())
+        throw std::overflow_error("Host storage write ticket space exhausted");
+    const uint64_t ticket = ++last_ticket_;
+    auto task = StorageBackend::prepareWrite(pool_, slot + 1);
+    pending_.emplace(ticket, Entry{{ticket, group, std::move(hash), slot}, std::move(task)});
+    return ticket;
+}
+
+void StorageBackend::HostWrites::dispatch(const std::function<void(const std::vector<const Source*>&)>& submit) {
+    std::vector<const Source*> batch;
+    for (const auto& [ticket, entry] : pending_) {
+        if (!entry.sent) {
+            batch.push_back(&entry.source);
+            if (batch.size() == 256)
+                break;
+        }
+    }
+    // Construct the entire outbound batch before consuming any admissions.
+    submit(batch);
+    for (const auto* source : batch)
+        pending_.at(source->ticket).sent = true;
+}
+
+bool StorageBackend::HostWrites::settle(
+    uint64_t ticket, bool committed, const std::function<void(const Source&, bool)>& done) {
+    auto it = pending_.find(ticket);
+    if (it == pending_.end() || !it->second.sent)
+        return false;
+    // Commit metadata while the write still owns its immutable source. A
+    // failed backend write never grants permission to evict that source.
+    done(it->second.source, committed);
+    pending_.erase(it);
+    return true;
+}
+
+size_t StorageBackend::HostWrites::countIf(const std::function<bool(BlockIdxType)>& include) const {
+    return std::count_if(pending_.begin(), pending_.end(), [&](const auto& item) {
+        return include(item.second.source.slot);
+    });
+}
 
 StorageBackend::StorageBackend(std::shared_ptr<StorageBackendExecutor>        executor,
                                std::shared_ptr<BlockTreeCacheMetricsReporter> reporter,

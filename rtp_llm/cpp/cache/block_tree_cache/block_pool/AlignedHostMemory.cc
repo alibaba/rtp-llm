@@ -1,5 +1,60 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/AlignedHostMemory.h"
 
+#ifdef RTP_BTC_RANK_STANDALONE
+
+#ifdef RTP_BTC_TPU_RANK
+#include <cstdlib>
+#else
+#include <cuda_runtime_api.h>
+#endif
+
+#include <limits>
+#include <stdexcept>
+
+namespace rtp_llm {
+
+AlignedHostMemory::AlignedHostMemory(size_t usable_bytes, size_t alignment, const std::string& allocation_name) {
+    if (!usable_bytes || !alignment || alignment - 1 > std::numeric_limits<size_t>::max() - usable_bytes)
+        throw std::invalid_argument(allocation_name + ": invalid backing size or alignment");
+    void* allocation = nullptr;
+    backing_bytes_ = usable_bytes + alignment - 1;
+#ifdef RTP_BTC_TPU_RANK
+    // This pool is disk staging. The TPU rank registers its shared Host
+    // slots separately through TpuPageDma.
+    allocation = std::malloc(backing_bytes_);
+    if (!allocation)
+        throw std::bad_alloc();
+    pinned_allocation_ = std::shared_ptr<void>(allocation, std::free);
+#else
+    const auto status = cudaHostAlloc(&allocation, backing_bytes_, cudaHostAllocPortable);
+    if (status != cudaSuccess)
+        throw std::runtime_error(allocation_name + ": " + cudaGetErrorString(status));
+    pinned_allocation_ = std::shared_ptr<void>(allocation, [](void* ptr) { (void)cudaFreeHost(ptr); });
+    registered_ = true;
+#endif
+    const auto address = reinterpret_cast<uintptr_t>(allocation);
+    const auto remainder = address % alignment;
+    data_ = reinterpret_cast<uint8_t*>(remainder ? address + alignment - remainder : address);
+}
+
+AlignedHostMemory::~AlignedHostMemory() = default;
+
+uint8_t* AlignedHostMemory::data() const {
+    return data_;
+}
+
+bool AlignedHostMemory::isRegistered() const {
+    return registered_;
+}
+
+size_t AlignedHostMemory::backingBytes() const {
+    return backing_bytes_;
+}
+
+}  // namespace rtp_llm
+
+#else
+
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
@@ -200,3 +255,5 @@ size_t AlignedHostMemory::backingBytes() const {
 }
 
 }  // namespace rtp_llm
+
+#endif  // RTP_BTC_RANK_STANDALONE
