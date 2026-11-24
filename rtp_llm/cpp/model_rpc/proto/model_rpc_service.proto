@@ -202,6 +202,16 @@ message MultimodalInputsPB {
     V41RequestInputsPB v41_inputs = 5;
     // Remaining request budget for typed prepared images (no URL configs).
     int64 timeout_ms = 4;
+    // Request-level download region parsed by the sender from the
+    // gateway-injected x_dashscope_inner_workspace_meta header. One value
+    // applies to every multimodal_inputs entry of this request.
+    string region = 6;
+    // Request-scoped content-inspection override parsed by the sender from
+    // x-dashscope-datainspection. Unset follows the process configuration;
+    // false forces inspection off; true still requires the provider enabled.
+    google.protobuf.BoolValue input_inspection_enabled = 7;
+    // Issued by the selected ViT during hash routing.
+    string inspection_ticket = 8;
 }
 
 enum TensorDataTypePB {
@@ -255,6 +265,8 @@ message MultimodalOutputPB {
     repeated MMRdmaSlotPB output_rdma_slots = 5;
     // Compact CPU row hashes stay inline for either transport.
     TensorPB multimodal_feature_hash = 7;
+    // A negotiated offer must be claimed before posting any NIC READ.
+    bool rdma_claim_required = 8;
 }
 
 message ReleaseLeasePB {
@@ -276,6 +288,7 @@ message RequestInfoPB {
 }
 
 message MultimodalTokenSpanPB {
+    repeated sint32 row_hashes = 3 [packed = true];
     int32 offset = 1;
     int32 length = 2;
 }
@@ -322,6 +335,8 @@ message GenerateInputPB {
     V41RequestInputsPB v41_inputs = 12;
     // Master has already admitted this request to the selected Prefill.
     bool enqueued_by_master = 13;
+    // Per-request metadata accompanying the legacy repeated media field.
+    MultimodalInputsPB multimodal_request = 14;
 }
 
 message AuxInfoPB {
@@ -466,6 +481,7 @@ enum ErrorCodePB {
     MM_EMPTY_ENGINE_ERROR = 904;
     MM_NOT_SUPPORTED_ERROR = 905;
     MM_DOWNLOAD_FAILED = 906;
+    MM_IMAGE_PIXEL_LIMIT_EXCEEDED = 910;
     OUT_OF_VOCAB_RANGE = 8101;
     OUTPUT_QUEUE_FULL = 8102;
     OUTPUT_QUEUE_IS_EMPTY = 8103;
@@ -525,6 +541,7 @@ message CacheStatusPB {
     int64 version = 4;
     map<int64, bool> cache_keys = 5;
     MultimodalCacheStatusPB multimodal_cache = 6;
+    repeated sfixed64 cache_key_list = 7 [packed = true];
 }
 
 message MultimodalCacheStatusPB {
@@ -715,6 +732,8 @@ message WorkerStatusPB {
     // Number of matched cache blocks that must be recomputed by the engine.
     int32 cache_match_rollback_blocks = 26;
     WorkerStepMetricsPB last_step_metrics = 27;
+    // In-flight media on a ViT worker; absent when no valid sample is available.
+    google.protobuf.Int64Value mm_inflight_inputs = 28;
 }
 
 message EmbeddingInputPB {
@@ -1351,10 +1370,18 @@ service RpcService {
 // because VIT proxy and LLM backend are always deployed together in this service.
 // Frontend routing metadata only. Omit inputs for a cache-only probe; supplying
 // inputs computes missing hashes and waits for any enabled safety inspection.
+message GreenNetQueryPB {
+    string inspection_ticket = 1;
+    int64 request_id = 2;
+}
+
 message MultimodalHashRequestPB {
     repeated string keys = 1;
     MultimodalInputsPB inputs = 2;
     int64 timeout_ms = 3;
+    bool defer_inspection = 4;
+    google.protobuf.BoolValue input_inspection_enabled = 5;
+    int64 request_id = 6;
 }
 
 message MultimodalHashEntryPB {
@@ -1373,6 +1400,7 @@ message MultimodalHashResponsePB {
     string worker_instance = 1;
     reserved 2;
     repeated MultimodalHashEntryPB entries = 3;
+    string inspection_ticket = 4;
 }
 
 service MultimodalRpcService {
@@ -1380,8 +1408,10 @@ service MultimodalRpcService {
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputPB);
     // Best-effort release after the LLM finishes reading remote slots.
+    rpc ClaimRdmaLease(ReleaseLeasePB) returns (EmptyPB);
     rpc ReleaseRdmaLease(ReleaseLeasePB) returns (EmptyPB);
     rpc GetMultimodalHashes(MultimodalHashRequestPB) returns (MultimodalHashResponsePB);
     rpc AsyncSubmitEmbedding(MultimodalInputsPB) returns (EmptyPB);
+    rpc GetGreenNetVerdict(GreenNetQueryPB) returns (EmptyPB);
     rpc WaitGreenNetVerdict(MultimodalInputsPB) returns (EmptyPB);
 }

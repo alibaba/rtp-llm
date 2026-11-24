@@ -2,6 +2,8 @@
 #include "rtp_llm/cpp/multimodal_processor/V41Input.h"
 #include <cstdint>
 #include <memory>
+#include <limits>
+#include <stdexcept>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -13,6 +15,8 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
+
+class MultimodalInputsPB;
 
 namespace rtp_llm {
 
@@ -41,6 +45,10 @@ public:
 
     int promptLength() {
         return inputLength() - prefix_length;
+    }
+
+    bool hasMultimodalInputs() const {
+        return multimodal_inputs && !multimodal_inputs->empty();
     }
 
     std::map<int, int> multimodalLengths() const {
@@ -82,10 +90,83 @@ public:
     }
 
     void updatePrefix(const std::vector<int>& prefix_prompt) {
-        prefix_length = prefix_prompt.size();
-        auto prefix_tensor =
-            torch::from_blob(const_cast<int*>(prefix_prompt.data()), {(int64_t)prefix_prompt.size()}, torch::kInt32);
-        input_ids = torch::cat({prefix_tensor, input_ids}, 0);
+        // Stage replacements first so malformed backend metadata cannot
+        // partially shift a request.
+        auto       next_mask        = text_tokens_mask;
+        auto       next_locs        = mm_locs;
+        auto       next_cache_spans = multimodal_cache_spans;
+        const auto added            = static_cast<int64_t>(prefix_prompt.size());
+        if (added > 0) {
+            const auto token_count = input_ids.numel();
+            if (added > std::numeric_limits<int32_t>::max() - token_count) {
+                throw std::invalid_argument("system prefix exceeds int32 multimodal coordinates");
+            }
+            // A P->D ALLOCATE request carries expanded token IDs and the
+            // cache-identity sidecar, but intentionally does not carry ViT
+            // features, locations or the execution-time text mask.  Decode
+            // still has to prepend the same resident system prompt and shift
+            // the sidecar.  Raw media without that sidecar is not a cache-only
+            // request and must remain fail-closed when its mask is missing.
+            const bool has_cache_spans      = multimodal_cache_spans && !multimodal_cache_spans->empty();
+            const bool needs_execution_mask = (multimodal_features && !multimodal_features->empty())
+                                              || (mm_locs && mm_locs->numel() != 0)
+                                              || (hasMultimodalInputs() && !has_cache_spans);
+            if (!text_tokens_mask && needs_execution_mask) {
+                throw std::invalid_argument("multimodal system prefix requires a text token mask");
+            }
+            if (text_tokens_mask) {
+                const auto& mask = *text_tokens_mask;
+                if (!mask.defined() || !mask.device().is_cpu() || mask.scalar_type() != torch::kInt32 || mask.dim() != 1
+                    || mask.numel() != token_count) {
+                    throw std::invalid_argument("system prefix text mask does not match the input");
+                }
+                auto        stable_mask = mask.contiguous();
+                const auto* values      = stable_mask.data_ptr<int32_t>();
+                for (int64_t pos = 0; pos < token_count; ++pos) {
+                    if (values[pos] != 0 && values[pos] != 1) {
+                        throw std::invalid_argument("system prefix text mask must be binary");
+                    }
+                }
+                next_mask = torch::cat({torch::ones({added}, mask.options()), mask}, 0);
+            }
+            if (mm_locs) {
+                const auto& locs = *mm_locs;
+                if (!locs.defined() || !locs.device().is_cpu() || locs.scalar_type() != torch::kInt32
+                    || locs.dim() != 1) {
+                    throw std::invalid_argument("system prefix locations must be CPU int32");
+                }
+                auto        stable_locs = locs.contiguous();
+                const auto* values      = stable_locs.data_ptr<int32_t>();
+                for (int64_t index = 0; index < locs.numel(); ++index) {
+                    if (values[index] < 0 || values[index] >= token_count) {
+                        throw std::invalid_argument("system prefix image location is outside the input");
+                    }
+                }
+                next_locs = locs + added;
+            }
+            if (multimodal_cache_spans) {
+                auto    shifted      = std::make_shared<MultimodalCacheSpans>(*multimodal_cache_spans);
+                int64_t previous_end = 0;
+                for (auto& span : *shifted) {
+                    const int64_t end = static_cast<int64_t>(span.offset) + span.row_hashes.size();
+                    if (span.offset < previous_end || span.row_hashes.empty() || end > token_count) {
+                        throw std::invalid_argument("multimodal cache span is invalid");
+                    }
+                    span.offset += static_cast<int32_t>(added);
+                    previous_end = end;
+                }
+                next_cache_spans = std::move(shifted);
+            }
+            // mm_position_ids and mm_extra_input are per-image local coordinates/
+            // values, not request token offsets; their contents must not shift.
+        }
+        auto prefix_tensor     = torch::from_blob(const_cast<int*>(prefix_prompt.data()), {added}, torch::kInt32);
+        auto next_ids          = torch::cat({prefix_tensor, input_ids}, 0);
+        input_ids              = std::move(next_ids);
+        text_tokens_mask       = std::move(next_mask);
+        mm_locs                = std::move(next_locs);
+        multimodal_cache_spans = std::move(next_cache_spans);
+        prefix_length          = prefix_prompt.size();
         if (custom_output_token_position >= 0) {
             custom_output_token_position += prefix_length;
         }
@@ -99,8 +180,10 @@ public:
     bool                            need_release_resource = true;
     bool                            fake_query            = false;
     // For multi-modality models
-    std::optional<std::map<int, int>> handoff_multimodal_lengths;
+    std::optional<std::map<int, int>>           handoff_multimodal_lengths;
     std::optional<std::vector<MultimodalInput>> multimodal_inputs;
+    std::shared_ptr<const MultimodalCacheSpans> multimodal_cache_spans;
+    std::shared_ptr<const MultimodalInputsPB>   multimodal_request;
     std::shared_ptr<const V41RequestInputs>     v41_inputs;
     std::optional<std::vector<torch::Tensor>>   multimodal_features;
     std::optional<torch::Tensor>                text_tokens_mask;  // text part for 1 and multimodal part for 0
@@ -115,8 +198,8 @@ public:
 
     // Auto-TPM QoS priority (task40): 30/40/50/60/70; 0 = not set. TPS metrics
     // tagging only — never used for engine-side scheduling decisions.
-    int32_t priority = 0;
-    int64_t request_deadline_ms = 0;  // Local P2P deadline.
+    int32_t priority                         = 0;
+    int64_t request_deadline_ms              = 0;  // Local P2P deadline.
     bool    request_deadline_is_handoff_only = false;
 
     // Selected position in input_ids; -1 means no custom output.
@@ -256,13 +339,13 @@ inline std::string StreamStateToString(StreamState state) {
 class StreamEvents {
 public:
     enum EventType : uint32_t {
-        None               = 0,
-        LoadInitiated      = 1 << 0,  // 已尝试加载缓存
-        CanRun             = 1 << 1,  // 调度器允许运行
-        GenerateDone       = 1 << 2,  // 本地生成完成（RUNNING -> FINISHED）
-        Error              = 1 << 3,  // 出错，任何状态 -> FINISHED
+        None                = 0,
+        LoadInitiated       = 1 << 0,  // 已尝试加载缓存
+        CanRun              = 1 << 1,  // 调度器允许运行
+        GenerateDone        = 1 << 2,  // 本地生成完成（RUNNING -> FINISHED）
+        Error               = 1 << 3,  // 出错，任何状态 -> FINISHED
         PrefillHandoffReady = 1 << 4,  // Prefill output is ready for Decode handoff
-        CachePrepared = 1 << 5,  // KV allocation/cache load completed by the enqueue-time worker
+        CachePrepared       = 1 << 5,  // KV allocation/cache load completed by the enqueue-time worker
     };
 
     void append(EventType event) {

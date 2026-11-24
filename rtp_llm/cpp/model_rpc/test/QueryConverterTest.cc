@@ -21,6 +21,37 @@ namespace rtp_llm {
 
 class QueryConverterTest: public DeviceTestBase {};
 
+TEST_F(QueryConverterTest, MultimodalInputKeepsTypesAndCanonicalMarkerWithoutCopyingMedia) {
+    GenerateInputPB wire;
+    wire.mutable_generate_config()->set_max_new_tokens(256);
+    for (int32_t token : {7, 8, 9, 129264, 10, 11, 12, 13}) {
+        wire.add_token_ids(token);
+    }
+    const std::string source = "data:image/png;base64,iVBORwD/";
+    auto*             media  = wire.add_multimodal_inputs();
+    media->set_multimodal_url(source);
+    media->set_multimodal_type(1);
+    auto* video = wire.add_multimodal_inputs();
+    video->set_multimodal_url("https://example.com/test.mp4");
+    video->set_multimodal_type(2);
+
+    wire.mutable_multimodal_request()->set_inspection_ticket("ticket");
+    auto input = QueryConverter::transQuery(&wire);
+    EXPECT_EQ(input->input_ids.numel(), wire.token_ids_size());
+    EXPECT_EQ(input->input_ids[3].item<int32_t>(), 129264);
+    EXPECT_EQ(wire.multimodal_inputs(0).multimodal_url(), source);
+    ASSERT_TRUE(input->multimodal_request);
+    EXPECT_EQ(input->multimodal_request->inspection_ticket(), "ticket");
+    EXPECT_EQ(input->multimodal_request->multimodal_inputs(0).multimodal_url(), source);
+    EXPECT_TRUE(input->multimodal_inputs->at(0).url.empty());
+    EXPECT_TRUE(input->hasMultimodalInputs());
+    EXPECT_EQ(input->multimodal_inputs->at(1).mm_type, 2);
+    EXPECT_THROW(input->updatePrefix({7}), std::invalid_argument);
+
+    input->multimodal_features = std::vector<torch::Tensor>{torch::zeros({3, 4}), torch::zeros({5, 4})};
+    EXPECT_EQ(input->multimodalLengths(), (std::map<int, int>{{1, 3}, {2, 5}}));
+}
+
 TEST_F(QueryConverterTest, RejectInvalidCompactLogprobsBeforeStreamCreation) {
     for (const int invalid_case : {0, 1, 2, 3}) {
         GenerateInputPB input;

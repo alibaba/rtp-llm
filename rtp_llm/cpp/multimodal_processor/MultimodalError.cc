@@ -9,7 +9,7 @@ namespace {
 // ExceptionType.CANCELLED_ERROR in rtp_llm/config/exceptions.py.
 constexpr int kPythonCancelledErrorCode = 499;
 
-constexpr std::array<ErrorCode, 12> kMultimodalErrorCodes = {{
+constexpr std::array<ErrorCode, 13> kMultimodalErrorCodes = {{
     ErrorCode::MM_LONG_PROMPT_ERROR,
     ErrorCode::MM_WRONG_FORMAT_ERROR,
     ErrorCode::MM_PROCESS_ERROR,
@@ -19,6 +19,7 @@ constexpr std::array<ErrorCode, 12> kMultimodalErrorCodes = {{
     ErrorCode::MM_REMOTE_RPC_FAILED,
     ErrorCode::UNSAFE_INPUT_CONTENT,
     ErrorCode::UNSAFE_OUTPUT_CONTENT,
+    ErrorCode::MM_IMAGE_PIXEL_LIMIT_EXCEEDED,
     ErrorCode::CONCURRENCY_LIMIT_ERROR,
     ErrorCode::GENERATE_TIMEOUT,
     ErrorCode::CANCELLED,

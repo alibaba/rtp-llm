@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include <string>
 #include <vector>
 #include <torch/python.h>
@@ -8,7 +9,6 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/MMTransportMode.h"
 #include "rtp_llm/cpp/model_rpc/MultimodalPbConverter.h"
-#include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
 #include "rtp_llm/cpp/multimodal_processor/transport/MMRemoteOutputTransportFactory.h"
@@ -34,15 +34,34 @@ public:
         MultimodalProcessor(py::none(), mm_model_config, max_seq_len, metrics_reporter),
         output_transport_(createMMRemoteOutputTransport(transport_config, metrics_reporter, device_id)) {}
 
-    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                                      std::string                                 ip_port    = "",
-                                                      int64_t                                     request_id = 0,
-                                                      grpc::ServerContext* server_context = nullptr) override {
-        if (ip_port == "") {
+    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput>& mm_inputs,
+                                                      const std::string&                  ip_port,
+                                                      int64_t                             request_id,
+                                                      grpc::ServerContext*                server_context,
+                                                      std::optional<bool>) override {
+        if (ip_port.empty()) {
             return ErrorInfo(ErrorCode::MM_EMPTY_ENGINE_ERROR, "ip:port is empty in remote multimodal processing");
         }
-        auto request_pb = MultimodalPbConverter::inputsToPb(mm_inputs, request_id);
-        return output_transport_->fetch(ip_port, request_pb, server_context);
+        auto request = MultimodalPbConverter::inputsToPb(mm_inputs, request_id);
+        return output_transport_->fetch(ip_port, request, server_context);
+    }
+
+    ErrorResult<MultimodalOutput> MultimodalEmbeddingFromRpc(const MultimodalInputsPB& inputs,
+                                                             const std::string&        ip_port,
+                                                             int64_t                   request_id,
+                                                             grpc::ServerContext*      server_context) override {
+        if (ip_port.empty()) {
+            return ErrorInfo(ErrorCode::MM_EMPTY_ENGINE_ERROR, "ip:port is empty in remote multimodal processing");
+        }
+        auto request = inputs;
+        request.set_request_id(request_id);
+        // The receiving transport advertises its own RDMA capability.
+        request.clear_support_rdma();
+        // Generate RPCs only accept media references.
+        for (auto& item : *request.mutable_multimodal_inputs()) {
+            item.clear_multimodal_tensor();
+        }
+        return output_transport_->fetch(ip_port, request, server_context);
     }
 
     ErrorResult<MultimodalOutput> V41MultimodalEmbedding(const V41RequestInputs& inputs,

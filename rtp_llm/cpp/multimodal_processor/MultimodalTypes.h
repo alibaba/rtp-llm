@@ -8,6 +8,17 @@
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputClass.h"
 
 namespace rtp_llm {
+// Backend-only cache identity for a fully assembled multimodal tensor segment.
+// Model-specific layout (grid, delimiter kinds, patch metadata) stays inside
+// the ViT implementation; the LLM side only needs the final token offset and
+// one stable hash per embedding row.
+struct MultimodalCacheSpan {
+    int32_t              offset = 0;
+    std::vector<int32_t> row_hashes;
+};
+
+using MultimodalCacheSpans = std::vector<MultimodalCacheSpan>;
+
 struct MultimodalOutput {
     std::vector<torch::Tensor>                mm_features       = {};
     std::optional<std::vector<torch::Tensor>> mm_position_ids   = std::nullopt;

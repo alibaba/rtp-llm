@@ -10,11 +10,11 @@
 
 namespace rtp_llm {
 
-ErrorInfo updateMultimodalFeaturesWithTrace(
-    MultimodalProcessor& processor,
-    std::shared_ptr<GenerateInput>& input,
-    const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span,
-    grpc::ServerContext* server_context) {
+ErrorInfo
+updateMultimodalFeaturesWithTrace(MultimodalProcessor&                                                processor,
+                                  std::shared_ptr<GenerateInput>&                                     input,
+                                  const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span,
+                                  grpc::ServerContext*                                                server_context) {
     if (!telemetry::TelemetryRuntime::isActive() || parent_span == nullptr || !input->multimodal_inputs
         || input->multimodal_inputs->empty()) {
         return processor.updateMultimodalFeatures(input, server_context);
@@ -84,11 +84,11 @@ ErrorInfo validatePDHandoff(const GenerateInputPB& request) {
     return ErrorInfo::OkStatus();
 }
 
-ErrorInfo preprocessForPD(std::shared_ptr<GenerateInput>& input,
-                          MultimodalProcessor*            processor,
-                          bool                            is_mtp_eagle,
-                          RoleType                        role,
-                          grpc::ServerContext*            server_context,
+ErrorInfo preprocessForPD(std::shared_ptr<GenerateInput>&                                     input,
+                          MultimodalProcessor*                                                processor,
+                          bool                                                                is_mtp_eagle,
+                          RoleType                                                            role,
+                          grpc::ServerContext*                                                server_context,
                           const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& span) {
     input->generate_config->pd_separation        = true;
     input->generate_config->force_disable_sp_run = !is_mtp_eagle;
@@ -119,8 +119,10 @@ ErrorInfo preprocessForPD(std::shared_ptr<GenerateInput>& input,
             }
             input->text_tokens_mask = std::move(mask);
             input->mm_locs          = std::move(locs);
-        } else if (processor && (input->v41_inputs
-                                 || (input->multimodal_inputs && !input->multimodal_inputs->empty()))) {
+            // Decode only uses the expanded layout; the original wire request is forwarded to Prefill.
+            input->multimodal_request.reset();
+        } else if (processor
+                   && (input->v41_inputs || (input->multimodal_inputs && !input->multimodal_inputs->empty()))) {
             return updateMultimodalFeaturesWithTrace(*processor, input, span, server_context);
         } else if (input->multimodal_inputs && !input->multimodal_inputs->empty() && !input->v41_inputs) {
             return {ErrorCode::MM_WRONG_FORMAT_ERROR, "Decode requires frontend-expanded multimodal token IDs"};

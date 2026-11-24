@@ -86,16 +86,14 @@ inline constexpr std::pair<ErrorCodePB, ErrorCode> kErrorCodePairs[] = {
     {ErrorCodePB::CACHE_STORE_LOAD_BUFFER_TIMEOUT, ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT},
     {ErrorCodePB::P2P_CONNECTOR_CALL_PREFILL_FAILED, ErrorCode::P2P_CONNECTOR_CALL_PREFILL_FAILED},
     {ErrorCodePB::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED, ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED},
-    {ErrorCodePB::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
-     ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED},
+    {ErrorCodePB::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED},
     {ErrorCodePB::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
      ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED},
     {ErrorCodePB::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED,
      ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED},
     {ErrorCodePB::P2P_CONNECTOR_WORKER_ASYMMETRIC_TP_FAILED, ErrorCode::P2P_CONNECTOR_WORKER_ASYMMETRIC_TP_FAILED},
     {ErrorCodePB::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT, ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT},
-    {ErrorCodePB::P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED,
-     ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED},
+    {ErrorCodePB::P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED, ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED},
     {ErrorCodePB::P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED,
      ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED},
     {ErrorCodePB::P2P_CONNECTOR_WORKER_READ_TRANSFER_RDMA_FAILED,
@@ -106,8 +104,7 @@ inline constexpr std::pair<ErrorCodePB, ErrorCode> kErrorCodePairs[] = {
     {ErrorCodePB::P2P_CONNECTOR_WORKER_READ_FAILED, ErrorCode::P2P_CONNECTOR_WORKER_READ_FAILED},
     {ErrorCodePB::P2P_CONNECTOR_WORKER_READ_CANCELED, ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED},
     {ErrorCodePB::P2P_CONNECTOR_WORKER_READ_TIMEOUT, ErrorCode::P2P_CONNECTOR_WORKER_READ_TIMEOUT},
-    {ErrorCodePB::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE,
-     ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE},
+    {ErrorCodePB::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE, ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE},
     {ErrorCodePB::INVALID_PARAMS, ErrorCode::INVALID_PARAMS},
     {ErrorCodePB::EXECUTION_EXCEPTION, ErrorCode::EXECUTION_EXCEPTION},
     {ErrorCodePB::GENERATE_TIMEOUT, ErrorCode::GENERATE_TIMEOUT},
@@ -132,6 +129,7 @@ inline constexpr std::pair<ErrorCodePB, ErrorCode> kErrorCodePairs[] = {
     {ErrorCodePB::MM_EMPTY_ENGINE_ERROR, ErrorCode::MM_EMPTY_ENGINE_ERROR},
     {ErrorCodePB::MM_NOT_SUPPORTED_ERROR, ErrorCode::MM_NOT_SUPPORTED_ERROR},
     {ErrorCodePB::MM_DOWNLOAD_FAILED, ErrorCode::MM_DOWNLOAD_FAILED},
+    {ErrorCodePB::MM_IMAGE_PIXEL_LIMIT_EXCEEDED, ErrorCode::MM_IMAGE_PIXEL_LIMIT_EXCEEDED},
     {ErrorCodePB::OUT_OF_VOCAB_RANGE, ErrorCode::OUT_OF_VOCAB_RANGE},
     {ErrorCodePB::OUTPUT_QUEUE_FULL, ErrorCode::OUTPUT_QUEUE_FULL},
     {ErrorCodePB::OUTPUT_QUEUE_IS_EMPTY, ErrorCode::OUTPUT_QUEUE_IS_EMPTY},
@@ -198,8 +196,7 @@ inline ErrorInfo errorInfoFromGrpcStatus(const grpc::Status& status, const std::
     }
     return ErrorInfo(transGrpcStatusToErrorCode(status.error_code()),
                      (location.empty() ? "grpc_code=" : location + " grpc_code=")
-                         + std::to_string(static_cast<int>(status.error_code())) + ": "
-                         + status.error_message());
+                         + std::to_string(static_cast<int>(status.error_code())) + ": " + status.error_message());
 }
 
 inline grpc::Status grpcStatusFromErrorInfo(const ErrorInfo& error) {

@@ -20,6 +20,28 @@ MultimodalInputsPB MultimodalPbConverter::inputsToPb(const std::vector<Multimoda
     return mm_inputs_pb;
 }
 
+std::vector<MultimodalInput> MultimodalPbConverter::mediaReferencesFromPb(const MultimodalInputsPB& inputs) {
+    std::vector<MultimodalInput> media;
+    media.reserve(inputs.multimodal_inputs_size());
+    for (const auto& item : inputs.multimodal_inputs()) {
+        const auto& config = item.mm_preprocess_config();
+        media.emplace_back(item.multimodal_url(),
+                           torch::empty(1),
+                           item.multimodal_type(),
+                           config.width(),
+                           config.height(),
+                           config.min_pixels(),
+                           config.max_pixels(),
+                           config.fps(),
+                           config.min_frames(),
+                           config.max_frames(),
+                           std::vector<float>(config.crop_positions().begin(), config.crop_positions().end()),
+                           config.mm_timeout_ms(),
+                           config.max_long_side_pixel() > 0 ? config.max_long_side_pixel() : -1);
+    }
+    return media;
+}
+
 ErrorResult<MultimodalOutput> MultimodalPbConverter::inlineOutputFromPb(const MultimodalOutputPB& output_pb) {
     // Convert malformed remote data into an error instead of propagating torch exceptions.
     try {
