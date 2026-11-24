@@ -379,6 +379,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     // to host before branching.
     for (auto* t : {&py_attn_inputs.prefix_lengths, &py_attn_inputs.sequence_lengths, &py_attn_inputs.input_lengths}) {
         if (t->defined() && t->is_cuda()) {
+#if USING_ROCM
             const torch::Tensor* host_mirror = nullptr;
             if (t == &py_attn_inputs.prefix_lengths) {
                 host_mirror = &inputs.mtp_prefix_lengths_host;
@@ -387,6 +388,9 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
             }
             *t = host_mirror && host_mirror->defined() && host_mirror->device().is_cpu()
                              && host_mirror->sizes() == t->sizes() ? normalize_i32(*host_mirror) : normalize_i32(t->cpu());
+#else
+            *t = normalize_i32(t->cpu());
+#endif
         }
     }
 #endif
@@ -399,6 +403,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         && py_attn_inputs.prefix_lengths.defined() && py_attn_inputs.prefix_lengths.is_cuda()) {
         py_attn_inputs.prefix_lengths = normalize_i32(py_attn_inputs.prefix_lengths.cpu());
     }
+#if USING_ROCM
     // When MTP supplied a host mirror, retain its original GPU tensor for
     // device consumers. Copying the mirror back would add a redundant H2D
     // transfer to every decode round.
@@ -408,6 +413,10 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.input_lengths_device = inputs.mtp_input_lengths_host.defined() && inputs.input_lengths.is_cuda() ?
                                               normalize_i32(inputs.input_lengths) :
                                               to_device_i32(py_attn_inputs.input_lengths);
+#else
+    py_attn_inputs.prefix_lengths_device = to_device_i32(py_attn_inputs.prefix_lengths);
+    py_attn_inputs.input_lengths_device  = to_device_i32(py_attn_inputs.input_lengths);
+#endif
     py_attn_inputs.mtp_indexer_seed_rows = to_device_i32(inputs.lm_output_indexes);
 
     if (inputs.combo_position_ids.defined()) {
@@ -1062,6 +1071,7 @@ GptModelOutputs PyWrappedModel::forwardImpl(const GptModelInputs& inputs, bool w
         py_model_inputs.capture_hidden_states  = capture_hidden_states;
         py_model_inputs.need_all_logits        = inputs.need_all_logits;
         py_model_inputs.need_all_hidden_states = inputs.need_all_hidden_states;
+#if USING_ROCM
         // Plugin-owned cache planes are not part of RTP's KV block copy. Give
         // plugins the same tagged copy mapping before either eager forward or
         // graph replay, so their side state follows a relocated prefix block.
@@ -1071,6 +1081,7 @@ GptModelOutputs PyWrappedModel::forwardImpl(const GptModelInputs& inputs, bool w
                 py_model_.attr("copy_plugin_cache_blocks")(inputs.kv_cache_update_mapping, inputs.kv_cache_group_tags);
             }
         }
+#endif
         if (inputs.engram_token_windows.defined()) {
             buffer_holder_.hold_host(inputs.engram_token_windows);
             py_model_inputs.engram_token_windows = inputs.engram_token_windows.to(torch::kCUDA, /*non_blocking=*/true);
@@ -1117,10 +1128,12 @@ GptModelOutputs PyWrappedModel::forwardImpl(const GptModelInputs& inputs, bool w
                 result.draft_probs = std::move(draft.draft_probs);
                 return result;
             }
+#if USING_ROCM
             if (!py_model_inputs.attention_inputs.is_prefill
                 && py::hasattr(py_model_, "activate_draft_lm_head_graph")) {
                 py_model_.attr("activate_draft_lm_head_graph")(graph_state.current_real_graph_bs);
             }
+#endif
             if (is_generation_prefill_runner) {
                 generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::REPLAYED;
             }
@@ -1312,11 +1325,15 @@ torch::Tensor PyWrappedModel::computeLogits(const torch::Tensor& hidden) {
             }
         }
     }
+#if USING_ROCM
     if (device_props_.tp_size > 1) {
         RTP_LLM_PROFILE_SCOPE("py_model.computeLogits(tp_sync_logits)");
         logits = tpSyncEmbeddingOrLogits(logits);
     }
     return logits.to(torch::kFloat32);
+#else
+    return logits;
+#endif
 }
 
 torch::Tensor PyWrappedModel::tpSyncEmbeddingOrLogits(const torch::Tensor& input) {
@@ -1425,6 +1442,12 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             }
         }
         printTorchTensorData(logits, "logits");
+#if !USING_ROCM
+        if (device_props_.tp_size > 1) {
+            RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(tp_sync_logits)");
+            logits = tpSyncEmbeddingOrLogits(logits);
+        }
+#endif
         if (description_.output_vocab_size > 0) {
             RTP_LLM_CHECK_WITH_INFO(logits.dim() == 2
                                         && static_cast<size_t>(logits.size(1)) == description_.output_vocab_padded_size,
@@ -1475,6 +1498,12 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
     torch::Tensor last_hidden = hidden;
     auto          logits      = computeLogits(last_hidden);
     printTorchTensorData(logits, "logits");
+#if !USING_ROCM
+    if (device_props_.tp_size > 1) {
+        RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayersLastHidden(tp_sync_logits)");
+        logits = tpSyncEmbeddingOrLogits(logits);
+    }
+#endif
     if (check_nan_) {
         RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");
         RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");

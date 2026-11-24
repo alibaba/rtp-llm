@@ -659,11 +659,13 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                               0,
                                               dst_inputs.kv_cache_kernel_block_id_device.numel(),
                                               0);
+#if USING_ROCM
                 addCudaGraphPrepareFillRegion(fill_params,
                                               dst_inputs.kv_cache_block_id_device,
                                               0,
                                               dst_inputs.kv_cache_block_id_device.numel(),
                                               0);
+#endif
             }
         }
         if (is_target_verify_ && has_padded_rows) {
@@ -772,7 +774,6 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         for (auto& [tag, dst_inputs] : py_model_inputs_.attention_inputs_by_tag) {
             (void)tag;
             dst_inputs.kv_cache_kernel_block_id_device.fill_(0);
-            dst_inputs.kv_cache_block_id_device.fill_(0);
         }
     }
     if (isGenerationPrefillCudaGraph() && position_id_len_factor_ > 0) {
@@ -877,8 +878,10 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
 #endif
             tryAddStridedD2DCopy(src_inputs.kv_cache_kernel_block_id_device,
                                  dst_inputs.kv_cache_kernel_block_id_device);
+#if USING_ROCM
             tryAddStridedD2DCopy(src_inputs.kv_cache_block_id_device,
                                  dst_inputs.kv_cache_block_id_device);
+#endif
         }
     }
 
@@ -1192,7 +1195,9 @@ void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, Cu
                                     "CUDA graph capture has no attention input for tag=%s",
                                     tag.c_str());
             add_block_table(src_inputs.kv_cache_kernel_block_id_device, dst_it->second.kv_cache_kernel_block_id_device);
+#if USING_ROCM
             add_block_table(src_inputs.kv_cache_block_id_device, dst_it->second.kv_cache_block_id_device);
+#endif
         }
     }
     fusedCopy(d2d_copies);
@@ -1774,10 +1779,12 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.kv_cache_kernel_block_id_device =
         torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
 
+#if USING_ROCM
     if (kv_cache_group_tags_.size() > 1) {
         inputs.attention_inputs.kv_cache_block_id_device =
             torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
     }
+#endif
 
     inputs.attention_inputs.kv_cache_kernel_block_id =
         torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
@@ -1836,8 +1843,11 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
                     torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
                 tagged_inputs.kv_cache_kernel_block_id =
                     torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
+#if USING_ROCM
                 tagged_inputs.kv_cache_block_id_device = torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
+#endif
             }
+#if USING_ROCM
             const auto layout =
                 kv_cache_state_layouts_.empty() ? LinearStateLayout::LEGACY : kv_cache_state_layouts_[group_id];
             const int state_slots =
@@ -1854,6 +1864,7 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
                     .fill_(kDummyRequestStateBlockId);
                 tagged_inputs.kv_cache_kernel_block_id.narrow(1, 0, state_slots).fill_(kDummyRequestStateBlockId);
             }
+#endif
             const auto [it, inserted] =
                 inputs.attention_inputs_by_tag.emplace(kv_cache_group_tags_[group_id], std::move(tagged_inputs));
             (void)it;
@@ -2196,11 +2207,19 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         // materialized before graphCaptureBegin rather than during capture.
         ScopedEnvFlag                    cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
         ScopedCudaGraphWarmupForwardFlag forward_phase;
-        runCaptureForward(key);
+        if (mtp_draft_steps_ > 0) {
+            runCaptureForward(key);
+        } else {
+            py_forward_method_(inputs, attn_pyobj);
+        }
         if (!py_after_warmup_method_.is_none()) {
             py_after_warmup_method_(inputs);
         }
-        runCaptureForward(key);
+        if (mtp_draft_steps_ > 0) {
+            runCaptureForward(key);
+        } else {
+            py_forward_method_(inputs, attn_pyobj);
+        }
         if (!py_after_warmup_method_.is_none()) {
             py_after_warmup_method_(inputs);
         }

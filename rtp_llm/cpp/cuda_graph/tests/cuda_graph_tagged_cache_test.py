@@ -1270,6 +1270,8 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         self._check_split_request_state_graph(1)
 
     def _check_split_request_state_graph(self, ssm_slots: int) -> None:
+        if torch.version.hip is None:
+            self.skipTest("ROCm split request-state graph layout")
         for target_verify in (False, True):
             with self.subTest(target_verify=target_verify):
                 model = SplitRequestStateBlockTableModel()
