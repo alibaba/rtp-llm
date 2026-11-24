@@ -13,6 +13,13 @@ filegroup(
 )
 
 py_test(
+    name = "tau2_coverage_test",
+    srcs = ["tau2_coverage.py", "test/tau2_coverage_test.py"],
+    main = "test/tau2_coverage_test.py",
+    imports = [".."],
+)
+
+py_test(
     name = "disk_path_preparation_test",
     srcs = glob(
         ["*.py"],
