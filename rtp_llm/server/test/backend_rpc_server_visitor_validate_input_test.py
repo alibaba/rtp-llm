@@ -6,7 +6,7 @@ import torch
 from pydantic import ValidationError
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import GenerateConfig, RoleType
+from rtp_llm.config.generate_config import GenerateConfig, ReturnAllProbsMode, RoleType
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.utils.base_model_datatypes import GenerateInput
 
@@ -62,6 +62,34 @@ class BackendRPCServerVisitorValidateInputTest(unittest.IsolatedAsyncioTestCase)
                 pd_sep_config=pd_sep_config,
                 addresses=[],
             )
+
+    async def test_compact_logprobs_reaches_rpc(self):
+        self.visitor.sp_config = SimpleNamespace(model_type="mtp")
+        for top_k in (0, 3):
+            with self.subTest(top_k=top_k):
+                request = _make_input(1, 8, return_logprobs=True, top_logprobs=top_k)
+                stream = await self.visitor.enqueue(request)
+                self.assertEqual([output async for output in stream], [])
+                self.assertIs(self.model_rpc_client.inputs[-1], request)
+
+    async def test_compact_logprobs_batch_reaches_rpc(self):
+        requests = [_make_input(1, 8, return_logprobs=True, top_logprobs=3)]
+        self.assertEqual(await self.visitor.batch_enqueue(requests), [])
+        self.assertEqual(self.model_rpc_client.batches, [requests])
+
+    async def test_sp_keeps_rejecting_legacy_full_probabilities(self):
+        self.visitor.sp_config = SimpleNamespace(model_type="mtp")
+        self.visitor.check_sp_supported(_make_input(1, 1))
+        for mode in (ReturnAllProbsMode.DEFAULT, ReturnAllProbsMode.ORIGINAL):
+            with self.subTest(mode=mode):
+                with self.assertRaises(FtRuntimeException) as ctx:
+                    self.visitor.check_sp_supported(
+                        _make_input(1, 1, return_all_probs=mode)
+                    )
+                self.assertEqual(
+                    ctx.exception.exception_type, ExceptionType.UNSUPPORTED_OPERATION
+                )
+                self.assertIn("return_all_probs", str(ctx.exception))
 
     async def test_prefill_only_accepts_nonempty_prompt_without_generation_capacity(
         self,

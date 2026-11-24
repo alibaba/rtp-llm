@@ -348,7 +348,10 @@ void DecodeLoadHelper::Result::parseSideChannelPayload(P2PSideChannelPayload& si
                                  "first_token_loss",
                                  "first_token_softmax_probs",
                                  "first_token_cum_log_probs",
-                                 "first_token_all_probs"}) {
+                                 "first_token_all_probs",
+                                 "first_token_logprobs",
+                                 "first_token_top_logprob_token_ids",
+                                 "first_token_top_logprobs"}) {
             const auto it = tensors.find(name);
             if (it != tensors.end() && it->second.has_tensor()) {
                 side_channel_payload.first_token_tensors[name].Swap(it->second.mutable_tensor());

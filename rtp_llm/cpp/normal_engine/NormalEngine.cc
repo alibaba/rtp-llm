@@ -1176,6 +1176,10 @@ bool NormalEngine::validateStreamForScheduling(const GenerateStreamPtr& stream) 
     if (stream->hasError()) {
         return false;
     }
+    if (parallelism_config.pp_size > 1 && stream->generateConfig()->return_logprobs) {
+        stream->reportError(ErrorCode::INVALID_PARAMS, "compact logprobs is unsupported with pipeline parallelism");
+        return false;
+    }
     if (pd_sep_config.role_type != RoleType::DECODE || !stream->generateConfig()->isPrefillOnly()) {
         return true;
     }

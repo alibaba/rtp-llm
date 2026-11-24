@@ -21,6 +21,43 @@ namespace rtp_llm {
 
 class QueryConverterTest: public DeviceTestBase {};
 
+TEST_F(QueryConverterTest, RejectInvalidCompactLogprobsBeforeStreamCreation) {
+    for (const int invalid_case : {0, 1, 2, 3}) {
+        GenerateInputPB input;
+        input.add_token_ids(1);
+        auto* config = input.mutable_generate_config();
+        config->set_max_new_tokens(8);
+        config->set_num_beams(1);
+        config->set_return_logprobs(true);
+        if (invalid_case == 0) {
+            config->add_variable_num_beams(2);
+        } else if (invalid_case == 1) {
+            config->set_top_logprobs(21);
+        } else if (invalid_case == 2) {
+            config->set_num_return_sequences(2);
+        } else {
+            config->set_max_new_tokens(0);
+            config->set_prefill_only(true);
+        }
+        EXPECT_THROW(QueryConverter::transQuery(&input), std::invalid_argument);
+    }
+}
+
+TEST_F(QueryConverterTest, MainPrefillWireFieldsKeepTheirMeaningWithCompactLogprobs) {
+    const char      wire[] = {'\xda', '\x04', '\x02', '\x08', '\x00', '\xe0', '\x04', '\x01'};
+    GenerateInputPB input;
+    input.add_token_ids(0);
+    auto* config_pb = input.mutable_generate_config();
+    ASSERT_TRUE(config_pb->ParseFromArray(wire, sizeof(wire)));
+    ASSERT_TRUE(config_pb->has_aux_info());
+    EXPECT_FALSE(config_pb->aux_info().value());
+    EXPECT_TRUE(config_pb->prefill_only());
+    EXPECT_FALSE(config_pb->return_logprobs());
+    const auto config = QueryConverter::transQuery(&input)->generate_config;
+    EXPECT_TRUE(config->isPrefillOnly());
+    EXPECT_FALSE(config->aux_info);
+}
+
 TEST_F(QueryConverterTest, PrefillOnlyFlagWithZeroMaxNewTokensMeansPrefillOnly) {
     for (const bool enable_disk_cache : {false, true}) {
         SCOPED_TRACE(enable_disk_cache);

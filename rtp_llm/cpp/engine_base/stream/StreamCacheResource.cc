@@ -174,7 +174,10 @@ void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* s
              .force_update_info      = false,
              .prompt_logits          = std::move(prompt_logits),
              .generation_prefill_cuda_graph_status =
-                 static_cast<GenerationPrefillCudaGraphStatus>(payload.generation_prefill_cuda_graph_status)});
+                 static_cast<GenerationPrefillCudaGraphStatus>(payload.generation_prefill_cuda_graph_status),
+             .token_logprobs        = output_tensor("first_token_logprobs"),
+             .top_logprob_token_ids = output_tensor("first_token_top_logprob_token_ids"),
+             .top_logprobs          = output_tensor("first_token_top_logprobs")});
         // DSpARK resumes from the prompt tail without a Prefill proposal.
         stream->initSpeculativeHandoffPositions();
     }
