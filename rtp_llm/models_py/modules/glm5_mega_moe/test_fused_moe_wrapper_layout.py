@@ -85,17 +85,49 @@ class MegaMoeWrapperLayoutTest(unittest.TestCase):
                     W.ffn_w2: torch.ones((4, 8), dtype=torch.bfloat16),
                 }
                 with patch.dict(
-                    os.environ, {"GLM53_PREFILL_SHARED_EXPERT_LOCAL": "1"}
+                    os.environ,
+                    {
+                        "GLM53_PREFILL_SHARED_EXPERT_LOCAL": "1",
+                        "GLM53_NVFP4_PREFILL_FAST_MATH": "1",
+                    },
                 ), patch.object(
                     implementation, "setup_native_weights", autospec=True
                 ) as setup:
                     wrapper = mega_moe_nvfp4.MegaMoeNvfp4SEWrapper(
                         config, parallelism, weights
                     )
-                    setup.assert_called_once_with(wrapper.mega_moe, weights)
+                    if draft:
+                        setup.assert_called_once_with(wrapper.mega_moe, weights)
+                    else:
+                        setup.assert_called_once_with(
+                            wrapper.mega_moe, weights, fast_math=True
+                        )
                     l1, l2 = wrapper.mega_moe._load_shared_weights(weights)
                     self.assertEqual(tuple(l1.shape), (8, 8))
                     self.assertEqual(tuple(l2.shape), (8, 4))
+
+    def test_nvfp4_fast_math_defaults_off_and_decode_ignores_opt_in(self):
+        config = _config()
+        config.model_type = "glm5_3_flash"
+        env = "GLM53_NVFP4_PREFILL_FAST_MATH"
+        cases = ((RoleType.PREFILL, None), (RoleType.DECODE, "1"))
+        for role, value in cases:
+            with self.subTest(role=role), patch.dict(os.environ), patch.object(
+                mega_moe_nvfp4.GLM53Nvfp4MegaMoE, "setup_native_weights", autospec=True
+            ) as setup:
+                if value is None:
+                    os.environ.pop(env, None)
+                else:
+                    os.environ[env] = value
+                parallelism = _parallelism(role)
+                parallelism.get_ffn_tp_size = lambda: 1
+                weights = {}
+                wrapper = mega_moe_nvfp4.MegaMoeNvfp4SEWrapper(
+                    config, parallelism, weights
+                )
+                setup.assert_called_once_with(
+                    wrapper.mega_moe, weights, fast_math=False
+                )
 
     def test_nvfp4_rejects_sharded_shared_expert(self):
         config = _config()

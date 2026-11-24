@@ -1,6 +1,7 @@
 """Native ModelOpt NVFP4 routed experts with a BF16 shared expert."""
 
 import logging
+import os
 from dataclasses import replace
 
 import torch
@@ -117,9 +118,12 @@ class _GLM53SharedMegaMoE(GLM5MegaMoE):
 
 
 class GLM53Nvfp4MegaMoE(_GLM53SharedMegaMoE):
-    def setup_native_weights(self, weights: dict[str, torch.Tensor]) -> None:
+    def setup_native_weights(
+        self, weights: dict[str, torch.Tensor], *, fast_math: bool = False
+    ) -> None:
         import deep_gemm
 
+        self._fast_math = fast_math
         cfg = self.cfg
         group = self._mega_group = self._get_group()
         routed_w1 = weights.pop(W.moe_w1)
@@ -172,6 +176,11 @@ class GLM53Nvfp4MegaMoE(_GLM53SharedMegaMoE):
 
         self._finish_setup()
 
+    def clone_for_cuda_graph(self) -> "GLM53Nvfp4MegaMoE":
+        clone = super().clone_for_cuda_graph()
+        clone._fast_math = self._fast_math
+        return clone
+
     def _allocate_buffer(self, dimensions):
         import deep_gemm
 
@@ -218,7 +227,7 @@ class GLM53Nvfp4MegaMoE(_GLM53SharedMegaMoE):
             shared_l2_weights=self._shared_l2,
             activation=_ACTIVATION,
             activation_clamp=_activation_clamp(self.cfg),
-            fast_math=False,
+            fast_math=self._fast_math,
             l2_input_scales=l2_scale,
         )
         return output
@@ -303,16 +312,22 @@ class MegaMoeNvfp4SEWrapper(MegaMoeWrapper):
                 "NVFP4 MegaMoE requires a full shared expert on each EP rank"
             )
         self._bf16_draft = getattr(config, "glm53_nvfp4_bf16_mtp", False)
-        self._draft_prefill = (
-            self._bf16_draft and parallelism_config.role_type == RoleType.PREFILL
-        )
+        self._prefill = parallelism_config.role_type == RoleType.PREFILL
         super().__init__(config, parallelism_config, weights, *args, **kwargs)
 
     def _get_mega_moe_cls(self):
         return GLM53Bf16DraftMegaMoE if self._bf16_draft else GLM53Nvfp4MegaMoE
 
     def _setup_expert_weights(self, weights: dict[str, torch.Tensor]) -> None:
-        if self._draft_prefill:
+        if not self._bf16_draft:
+            # Opt in to the approximate SwiGLU implementation for NVFP4 Prefill.
+            fast_math = (
+                self._prefill and os.environ.get("GLM53_NVFP4_PREFILL_FAST_MATH") == "1"
+            )
+            self.mega_moe.setup_native_weights(weights, fast_math=fast_math)
+            return
+
+        if self._prefill:
             # The draft has its own symmetric buffer. Bound it independently
             # of the target's 1M-context budget and use its TP-padded chunks.
             cfg = self.mega_moe.cfg
