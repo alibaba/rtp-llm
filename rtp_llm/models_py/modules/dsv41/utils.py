@@ -4,7 +4,6 @@ import weakref
 
 import torch
 from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
-
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.base.common.embedding import Embedding
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
@@ -28,12 +27,28 @@ class V41MXFP8Linear(torch.nn.Module):
         super().__init__()
         self.weight = weight
         self.N, self.K = weight.shape
-        self.weight_scales = self.pack_scales(scales)
+        self._sm120_linear = None
+        if weight.is_cuda and torch.cuda.get_device_capability(weight.device) == (
+            12,
+            0,
+        ):
+            from rtp_llm.models_py.modules.dsv41.v41_mxfp8 import (
+                V41MXFP8Linear as SM120MXFP8Linear,
+            )
+
+            self._sm120_linear = SM120MXFP8Linear(weight, scales)
+            self.weight_scales = self._sm120_linear._packed_scales
+        else:
+            self.weight_scales = self.pack_scales(scales)
 
     def pack_scales(self, scales: torch.Tensor) -> torch.Tensor:
         if scales.shape != ((self.N + 31) // 32, (self.K + 31) // 32):
             raise ValueError(
                 f"Invalid V4.1 FP8 scales: {(self.N, self.K)}, {scales.shape}"
+            )
+        if self._sm120_linear is not None:
+            return self._sm120_linear._interleave(
+                scales.view(torch.uint8).repeat_interleave(32, dim=0)
             )
         rows = torch.arange(self.N, device=scales.device) // 32
         return get_mn_major_tma_aligned_packed_ue8m0_tensor(
@@ -79,6 +94,21 @@ class V41MXFP8Linear(torch.nn.Module):
             else torch.empty(shape, device=x_q.device, dtype=torch.bfloat16)
         )
         if m:
+            if self._sm120_linear is not None:
+                # Preserve the caller's group32 quantization. Each packed
+                # int32 holds four UE8M0 exponents; only their layout changes.
+                # clone forces dense strides for singleton packed columns too.
+                linear_scales = (
+                    x_s.clone(memory_format=torch.contiguous_format)
+                    .view(torch.uint8)[:, : self.K // 32]
+                    .contiguous()
+                )
+                self._sm120_linear.forward_quantized(
+                    x_q.reshape(m, self.K),
+                    linear_scales,
+                    out=output.reshape(m, self.N),
+                )
+                return output
             import deep_gemm
 
             deep_gemm.fp8_fp4_gemm_nt(

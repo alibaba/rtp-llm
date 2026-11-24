@@ -24,7 +24,6 @@ from typing import TYPE_CHECKING, Dict, Optional
 
 import torch
 import torch.nn as nn
-
 from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv41.chunk_env import (
     DEFAULT_DSV4_CHUNK_TOKENS,
@@ -449,6 +448,7 @@ class MoE(nn.Module):
         shape: torch.Size,
         routing_metadata: Optional[GateRoutingMetadata] = None,
         expert_load: Optional[ExpertLoadContext] = None,
+        collective_extent: Optional[int] = None,
     ) -> torch.Tensor:
         global _CHUNKED_MOE_LOGGED
         T = x.size(0)
@@ -465,7 +465,10 @@ class MoE(nn.Module):
                 x.device,
             )
         out = _get_or_create_final_out(T, self.dim, x.dtype, x.device)[:T]
-        for token_start in range(0, T, chunk_tokens):
+        extent = T if collective_extent is None else collective_extent
+        for global_start in range(0, extent, chunk_tokens):
+            # Empty EP peers still enter every collective-bearing chunk.
+            token_start = min(global_start, T)
             token_end = min(token_start + chunk_tokens, T)
             self._run_chunk(
                 x[token_start:token_end],
@@ -530,6 +533,17 @@ class MoE(nn.Module):
                     2,
                     f"L{self.layer_id:02d}_moe_x_in_{dbg_pos_name}",
                     x[dbg_pos_mask].contiguous(),
+                )
+        if getattr(self._strategy, "requires_synchronized_chunk_schedule", False):
+            extent = self._strategy.synchronized_chunk_extent(x.size(0), x.device)
+            if extent > int(self.max_tokens_per_rank):
+                return self._forward_chunked(
+                    x,
+                    input_ids_flat,
+                    shape,
+                    routing_metadata,
+                    expert_load=expert_load,
+                    collective_extent=extent,
                 )
         if self._should_chunk(x.size(0)):
             return self._forward_chunked(

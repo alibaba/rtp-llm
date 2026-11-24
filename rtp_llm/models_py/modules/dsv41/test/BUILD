@@ -5,6 +5,49 @@ load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_sm100_py_test")
 package(default_visibility = ["//visibility:public"])
 
 py_test(
+    name = "test_sm120_v41_moe",
+    srcs = ["test_sm120_v41_moe.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    tags = ["dsv41_cuda13", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+    env = {"GPU_COUNT": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    legacy_create_init = 0,
+)
+
+py_test(
+    name = "test_sm120_sparse_attention",
+    srcs = ["test_sm120_sparse_attention.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    tags = ["dsv41_cuda13", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+    env = {"GPU_COUNT": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    legacy_create_init = 0,
+)
+
+py_test(
+    name = "test_mxfp8_dense_sm120",
+    srcs = ["test_mxfp8_dense.py"],
+    main = "test_mxfp8_dense.py",
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    tags = ["dsv41_cuda13", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+    env = {"GPU_COUNT": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    legacy_create_init = 0,
+)
+
+py_test(
     name = "test_v41_native_cache_specs",
     srcs = ["test_v41_native_cache_specs.py"],
     deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],

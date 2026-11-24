@@ -23,6 +23,10 @@ def _pad_heads(q, attn_sink):
 def flash_mla_sparse_fwd(
     q, kv, indices, sm_scale, d_v=512, attn_sink=None, topk_length=None
 ):
+    if q.is_cuda and torch.cuda.get_device_capability(q.device) == (12, 0):
+        from .fp8.sm120_sparse_attention import sparse_prefill
+
+        return sparse_prefill(q, kv, indices, sm_scale, d_v, attn_sink, topk_length)
     from flash_mla import flash_mla_sparse_fwd as native
 
     q, sink, heads = _pad_heads(q, attn_sink)
@@ -33,6 +37,20 @@ def flash_mla_sparse_fwd(
 
 
 def flash_mla_with_kvcache(*, q, attn_sink=None, **kwargs):
+    if q.is_cuda and torch.cuda.get_device_capability(q.device) == (12, 0):
+        from .fp8.sm120_sparse_attention import sparse_decode
+
+        return sparse_decode(
+            q,
+            attn_sink,
+            kwargs["k_cache"],
+            kwargs["indices"],
+            kwargs["softmax_scale"],
+            kwargs.get("topk_length"),
+            kwargs.get("extra_k_cache"),
+            kwargs.get("extra_indices_in_kvcache"),
+            kwargs.get("extra_topk_length"),
+        )
     from flash_mla import flash_mla_with_kvcache as native
 
     q, sink, heads = _pad_heads(q, attn_sink)

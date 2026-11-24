@@ -35,6 +35,7 @@ from .grouped_fp4 import (  # noqa: F401  ep_size==1 + kernel
 )
 from .deepep import DeepEPStrategy  # noqa: F401  targeted tests/experiments
 from .local_loop import LocalLoopStrategy  # noqa: F401  universal fallback
+from .sm120_v41 import Sm120V41Strategy  # noqa: F401  explicit PP1 SM120 route
 
 __all__ = [
     "MoeCfg",

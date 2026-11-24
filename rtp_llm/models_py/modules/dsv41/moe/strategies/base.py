@@ -33,7 +33,6 @@ from typing import ClassVar, Dict, Optional, Type
 
 import torch
 import torch.nn as nn
-
 from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 
 
@@ -353,7 +352,11 @@ def select_strategy(
         for cls in _STRATEGY_PRIORITY:
             if cls.name == forced:
                 if cls.can_handle(cfg):
-                    if cfg.ep_size > 1 and cls.name not in ("mega", "mega_se"):
+                    if cfg.ep_size > 1 and cls.name not in (
+                        "mega",
+                        "mega_se",
+                        "sm120_v41",
+                    ):
                         raise RuntimeError(
                             "DSV4 EP MoE requires MegaMoEStrategy. "
                             f"Requested strategy {forced!r} would bypass Mega "
