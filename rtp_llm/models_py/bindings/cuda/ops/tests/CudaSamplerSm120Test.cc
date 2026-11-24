@@ -1,3 +1,4 @@
+#include "rtp_llm/models_py/bindings/core/SamplingParams.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/split_softmax.h"
 #include "rtp_llm/models_py/bindings/common/kernels/sampling_penalty_kernels.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -97,7 +98,7 @@ TEST_F(CudaSamplerSm120Test, testSplitSoftmaxPreservesSeededTokensAndRngWithClos
                                              std::nullopt,
                                              std::nullopt,
                                              generators});
-                        auto         result = execSampleGreedy(params);
+                        auto         result = execSampleGreedy(prepareSamplingParams(params, params.logits.size(0)));
                         check_cuda_error();
                         ASSERT_TRUE(result.success.all().item<bool>());
                         if (reference) {
@@ -290,7 +291,7 @@ TEST_F(CudaSamplerSm120Test, testTiledTemperaturePreservesSeededTokensProbabilit
                                              std::nullopt,
                                              std::nullopt,
                                              generators});
-                        auto         result = execSampleGreedy(params);
+                        auto         result = execSampleGreedy(prepareSamplingParams(params, params.logits.size(0)));
                         check_cuda_error();
                         ASSERT_TRUE(result.success.all().item<bool>());
                         if (reference) {

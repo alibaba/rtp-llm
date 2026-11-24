@@ -150,6 +150,7 @@ void per_token_group_quant_8bit(torch::Tensor input,
                                 bool          scale_ue8m0 = false) {
     CHECK_INPUT(input);
     CHECK_INPUT(output_q);
+    TORCH_CHECK(output_q.numel() == input.numel(), "legacy group quantization requires matching input/output sizes");
 
     const int num_groups = input.numel() / group_size;
 

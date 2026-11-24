@@ -27,7 +27,31 @@ cudaError_t invokeRejectionSampling(DType*       draft_probs,
                                     int          num_speculative_tokens,
                                     int          target_vocab_size,
                                     cudaStream_t stream,
-                                    bool         draft_probs_point_mass = false);
+                                    bool         draft_probs_point_mass  = false,
+                                    bool         target_probs_point_mass = false,
+                                    // Optional post-rejection finalization folded into the kernel:
+                                    // force_mask (nullable, [batch_size] device bool) overrides
+                                    // forced rows with all draft tokens + the target bonus token
+                                    // and a full accept count; finalize_outputs additionally resets
+                                    // every -1 padding slot to 0. With finalize_outputs the kernel
+                                    // writes every element of both output buffers on every path, so
+                                    // callers may pass uninitialized outputs. Defaults keep the
+                                    // legacy kernel contract byte-for-byte.
+                                    const bool* force_mask       = nullptr,
+                                    bool        finalize_outputs = false,
+                                    // Optional [batch_size] CUDA int32 lengths. Physical strides
+                                    // stay num_speculative_tokens / num_speculative_tokens+1.
+                                    // A row verifies only its prefix L and uses target row L for
+                                    // the bonus. Values are clamped to [0, num_speculative_tokens]
+                                    // on device. nullptr preserves the full-width behavior.
+                                    const int32_t* valid_draft_lengths  = nullptr,
+                                    const IdType*  target_candidate_ids = nullptr,
+                                    const DType*   accept_target_probs  = nullptr,
+                                    const DType*   accept_draft_probs   = nullptr,
+                                    // Optional [batch] output in the existing result payload.
+                                    // Counts target-verified draft candidates, before rejection,
+                                    // output caps or EOS/window clipping; no bonus token.
+                                    int32_t* output_verified_draft_lengths = nullptr);
 
 cudaError_t invokeSplitRejectionSampling(const float* draft_probs,
                                          const int*   draft_ids,
@@ -45,4 +69,30 @@ cudaError_t invokeSplitRejectionSampling(const float* draft_probs,
                                          float*       tile_sums,
                                          int*         rejected_positions,
                                          cudaStream_t stream);
+
+cudaError_t invokeRemapDraftTopk(const int32_t* draft_candidate_ids,
+                                const float* draft_probs,
+                                const int32_t* draft_token_ids,
+                                const int32_t* target_candidate_ids,
+                                const float* target_probs,
+                                float* aligned_draft_probs,
+                                float* accept_target_probs,
+                                float* accept_draft_probs,
+                                int batch_size,
+                                int num_speculative_tokens,
+                                // Target candidate width: the width of
+                                // target_candidate_ids/target_probs and of the
+                                // aligned draft output.
+                                int compact_width,
+                                // Draft candidate width: the width of
+                                // draft_candidate_ids/draft_probs when the draft
+                                // side is compact (0 for a dense draft). Draft and
+                                // target widths may differ: the draft may run a
+                                // narrower cap because truncating q is exact for
+                                // speculative rejection, truncating p is not.
+                                int draft_compact_width,
+                                // Draft probability row stride when the draft side
+                                // is dense (ignored when draft_candidate_ids is set).
+                                int          draft_prob_width,
+                                cudaStream_t stream);
 }  // namespace rtp_llm

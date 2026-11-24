@@ -65,6 +65,23 @@ public:
         uint32_t lane_idx = threadIdx.x % 32;
 
         if (end_vocab_idx <= args.topk) {
+            if constexpr (Config::canonicalize_nan) {
+                static_assert(!Config::sorted_value && !Config::return_value);
+                const auto* input =
+                    static_cast<const ValueT*>(args.input) + uint64_t(batch_idx) * args.stride_input_batch;
+                auto* output =
+                    static_cast<OutIdxT*>(args.output_index) + uint64_t(batch_idx) * args.stride_output_index_batch;
+                for (uint32_t slot = threadIdx.x; slot < args.topk; slot += NUM_THREADS) {
+                    bool valid = slot < end_vocab_idx;
+                    if constexpr (Config::filter_finite) {
+                        if (valid) {
+                            valid = (__bfloat16_as_ushort(__ldg(input + slot)) & 0x7fffu) < 0x7f80u;
+                        }
+                    }
+                    output[slot] = valid ? static_cast<OutIdxT>(slot) : static_cast<OutIdxT>(-1);
+                }
+                return;
+            }
             EpilogueT::template topk_select_epilogue<true>(
                 (ValueT*)smem.surviving_topk_pairs[0],
                 (uint32_t*)(smem.surviving_topk_pairs[1]),
@@ -118,10 +135,34 @@ public:
 
         // `__syncthreads_or` is also the barrier that makes the last `reconstruct`'s writes visible before
         // `stage_output_and_epilogue` reads the survivor buffer.
-        have_nan = __syncthreads_or(have_nan) != 0;
-        if (have_nan) {
-            BF16Base::take_action_when_have_nan(args, batch_idx);
+        if constexpr (Config::canonicalize_nan && !Config::sorted_index) {
+            // Dense selection canonicalizes NaNs in registers before ranking.
+            // Selected pair values retain enough information to filter every
+            // nonfinite entry without re-reading or converting the score row.
+            __syncthreads();
+            auto* output =
+                static_cast<OutIdxT*>(args.output_index) + uint64_t(batch_idx) * args.stride_output_index_batch;
+            for (uint32_t slot = threadIdx.x; slot < args.topk; slot += NUM_THREADS) {
+                const uint64_t pair  = smem.surviving_topk_pairs[survivor_buf_idx][slot];
+                const uint32_t index = static_cast<uint32_t>(pair);
+                bool           valid = index < end_vocab_idx;
+                if constexpr (Config::filter_finite) {
+                    valid = valid && ((pair >> 32) & 0x7fffu) < 0x7f80u;
+                }
+                output[slot] = valid ? static_cast<OutIdxT>(index) : static_cast<OutIdxT>(-1);
+            }
             return;
+        } else if constexpr (!Config::canonicalize_nan) {
+            have_nan = __syncthreads_or(have_nan) != 0;
+            if (have_nan) {
+                BF16Base::take_action_when_have_nan(args, batch_idx);
+                return;
+            }
+        } else {
+            // Candidate scores canonicalize NaNs like dense token selection,
+            // but still need the upstream window-ordered index epilogue.
+            static_assert(!Config::filter_finite && !Config::sorted_value && !Config::return_value);
+            __syncthreads();
         }
 
         BF16Base::template stage_output_and_epilogue<Config::sorted_index>(
@@ -153,6 +194,12 @@ void run_topk_select_kernel(const TopkSelectArgs& args) {
 
     using Kernel = TopkSelectKernelBF16Normal<Config>;
     KU_ASSERT(args.topk <= Kernel::MAX_TOPK, "topk is too large. Maximum allowed: %d\n", Kernel::MAX_TOPK);
+    if constexpr (Config::pin_last_index) {
+        static_assert(Config::canonicalize_nan && Config::sorted_index && Config::cluster_size == 1
+                      && !Config::sorted_value && !Config::return_value && !Config::filter_finite);
+        // Candidate reconstruction packs two live survivors per unit.
+        KU_ASSERT(args.topk > 0 && args.topk % 2 == 0, "Complete candidates require a positive even K");
+    }
     static_assert(INPUT_STRIDE_ALIGNMENT_REQUIREMENT % 16 == 0);
 
     auto             kernel    = topk_kernel<Kernel>;

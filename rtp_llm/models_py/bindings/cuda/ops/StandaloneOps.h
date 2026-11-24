@@ -5,6 +5,16 @@
 
 namespace rtp_llm {
 
+struct MarkovArgmaxStepParams;
+
+// Greedy Markov step with caller-owned token output and optional next embedding.
+// Mapping and embedding lookup are fused into the unchanged final argmax reduction.
+torch::Tensor cudaMarkovArgmaxStep(const MarkovArgmaxStepParams& params,
+                                   const torch::Tensor&          output_tokens,
+                                   const torch::Tensor&          d2t_map,
+                                   const torch::Tensor&          embedding_weights,
+                                   const torch::Tensor&          next_embedding);
+
 // Standalone op functions that call CUDA kernels directly without exec_ctx_-> dispatch.
 
 // In-place softmax over rows (no mask, no bias).

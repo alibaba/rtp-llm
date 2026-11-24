@@ -46,6 +46,9 @@ GreedyOutput     sampleGreedy(const GreedyParams& params);
 torch::Tensor    sampleFromProbs(const torch::Tensor& probabilities);
 BeamSearchOutput sampleBeamSearch(BeamSearchParams params);
 void             rejectionSampling(const RejectionSamplingParams& params);
+bool             rejectionSamplingSupportsFinalize();
+void             markovSoftmaxStep(const MarkovSoftmaxStepParams& params);
+torch::Tensor    markovArgmaxStep(const MarkovArgmaxStepParams& params);
 void             mappingDraft2Target(const MappingDraft2TargetParams& params);
 void             multiMergeCopy(const MultiMergeCopyParams& params);
 }  // namespace rtp_llm
@@ -668,7 +671,15 @@ void execMultiMergeCopy(const MultiMergeCopyParams& params) {
 // === Sample ops ===
 
 GreedyOutput execSampleGreedy(const GreedyParams& params) {
-    return sampleGreedy(params);
+    // Cropping padded vocabulary can leave strided rows. Penalty kernels
+    // consume dense rows, so normalize layout at the sampling boundary.
+    auto contiguous_params   = params;
+    contiguous_params.logits = params.logits.contiguous();
+    auto output              = sampleGreedy(contiguous_params);
+    if (!params.logits.is_contiguous() && !params.skip_logits_probs_restore) {
+        params.logits.copy_(contiguous_params.logits);
+    }
+    return output;
 }
 
 torch::Tensor execSampleFromProbs(const torch::Tensor& probabilities) {
@@ -681,6 +692,18 @@ BeamSearchOutput execSampleBeamSearch(BeamSearchParams params) {
 
 void execRejectionSampling(const RejectionSamplingParams& params) {
     rejectionSampling(params);
+}
+
+bool execRejectionSamplingSupportsFinalize() {
+    return rejectionSamplingSupportsFinalize();
+}
+
+void execMarkovSoftmaxStep(const MarkovSoftmaxStepParams& params) {
+    markovSoftmaxStep(params);
+}
+
+torch::Tensor execMarkovArgmaxStep(const MarkovArgmaxStepParams& params) {
+    return markovArgmaxStep(params);
 }
 
 void execMappingDraft2Target(const MappingDraft2TargetParams& params) {
@@ -910,21 +933,6 @@ void initRuntime(size_t device_id) {
     });
 
     RTP_LLM_LOG_INFO("init devices done");
-}
-
-// === MOE / EPLB ===
-
-OverallExpertStats execCreateMoeExpertStates(const ExpertStatsParams& params) {
-    OverallExpertStats states;
-    states.layer_num               = params.layer_num;
-    states.ep_size                 = params.ep_size;
-    states.log_exp_num             = params.log_exp_num;
-    states.phy_exp_num             = params.phy_exp_num;
-    states.stats_buf.log_stats_buf = torch::zeros({(int64_t)params.layer_num, (int64_t)params.log_exp_num},
-                                                  torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
-    states.stats_buf.gpu_loads_buf = torch::zeros({(int64_t)params.layer_num, (int64_t)params.ep_size},
-                                                  torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
-    return states;
 }
 
 // ============================================================

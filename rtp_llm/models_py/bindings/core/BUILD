@@ -69,6 +69,8 @@ cc_library(
     name = "common_defines",
     hdrs = [
         "CommonDefines.h",
+        # Header-only policy used by the CUDA sampler and its CPU tests.
+        "SampleTemperature.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -98,13 +100,20 @@ cc_library(
         ":tensor_holder",
         "//rtp_llm/cpp/models/models_weight:weights_define",
         "//rtp_llm/cpp/model_utils:model_utils",
-        "//rtp_llm/cpp/models:stats",
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/cpp/utils:stack_trace",
         "//rtp_llm/cpp/utils:tensor_debug_utils",
     ],
     copts = copts(),
     alwayslink = True,
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "sampling_params_hdr",
+    hdrs = ["SamplingParams.h"],
+    deps = [":op_data"],
+    copts = copts(),
     visibility = ["//visibility:public"],
 )
 
@@ -120,7 +129,6 @@ cc_library(
         ":device_data",
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/cpp/models:stats",
         "//rtp_llm/models_py/bindings/common/kernels:fuse_copy_util",
     ] + torch_deps() + select({
         "@//:using_rocm": ["@local_config_rocm//rocm:rocm_headers"],
@@ -154,7 +162,6 @@ cc_library(
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/models_py/bindings:op_defs",
-        "//rtp_llm/cpp/models:stats",
         "//rtp_llm/cpp/models/models_weight:weights_define",
         "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
@@ -198,6 +205,7 @@ filegroup(
     srcs = [
         "CudaOps.cc",
         "CudaSampleOp.cc",
+        "SamplingParams.cc",
         "CudaBeamSearchOp.cc",
     ],
     visibility = ["//visibility:public"],
@@ -237,7 +245,6 @@ cc_library(
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/models_py/bindings:op_defs",
-        "//rtp_llm/cpp/models:stats",
         "//rtp_llm/cpp/models/models_weight:weights_define",
         "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
@@ -272,9 +279,11 @@ cc_library(
     srcs = [
         "CudaOps.cc",
         "CudaSampleOp.cc",
+        "SamplingParams.cc",
         "CudaBeamSearchOp.cc",
     ],
     deps = [
+        ":sampling_params_hdr",
         ":exec_ops_hdr",
         ":device_data",
         ":op_data",
@@ -287,7 +296,6 @@ cc_library(
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/models_py/bindings:op_defs",
-        "//rtp_llm/cpp/models:stats",
         "//rtp_llm/cpp/models/models_weight:weights_define",
         "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/cpp/utils:core_utils",
@@ -315,6 +323,7 @@ cc_library(
             "//rtp_llm/models_py/bindings/cuda/kernels/sampling:softmax_host",
             "//rtp_llm/models_py/bindings/cuda/kernels/sampling:temperature_host",
             "//rtp_llm/models_py/bindings/cuda/kernels/sampling:host_utils",
+            "//rtp_llm/models_py/bindings/cuda/kernels:deepselect_fp32",
         ],
         "//conditions:default": [],
     }),
@@ -327,8 +336,10 @@ cc_library(
     name = "rejection_sampling_ops_test_lib",
     srcs = [
         "CudaSampleOp.cc",
+        "SamplingParams.cc",
     ],
     deps = [
+        ":sampling_params_hdr",
         ":common_defines",
         ":op_data",
         "//rtp_llm/cpp/utils:debug_utils",
@@ -350,6 +361,7 @@ cc_library(
             "//rtp_llm/models_py/bindings/cuda/kernels/sampling:softmax_host",
             "//rtp_llm/models_py/bindings/cuda/kernels/sampling:temperature_host",
             "//rtp_llm/models_py/bindings/cuda/kernels/sampling:host_utils",
+            "//rtp_llm/models_py/bindings/cuda/kernels:deepselect_fp32",
         ],
         "//conditions:default": [],
     }),
@@ -362,8 +374,9 @@ cc_library(
 # fallback remains compile- and testable under --config=cpu.
 cc_library(
     name = "generic_sampler_fallback_test_lib",
-    srcs = ["CudaSampleOp.cc"],
+    srcs = ["CudaSampleOp.cc", "SamplingParams.cc"],
     deps = [
+        ":sampling_params_hdr",
         ":common_defines",
         ":op_data",
     ] + torch_deps(),
@@ -398,6 +411,7 @@ cc_library(
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:device_pin",
+        "//rtp_llm/cpp/utils:profiling_scope",
         "//rtp_llm/models_py/bindings:op_defs",
         "@havenask//aios/autil:env_util",
         "@havenask//aios/autil:lock_free",

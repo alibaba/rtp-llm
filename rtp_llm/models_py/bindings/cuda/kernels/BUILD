@@ -33,12 +33,57 @@ dsv4_indexer_topk_cuda_copts = copts() + cuda_default_copts_without_arch() + [
     '--cuda-include-ptx=sm_103', '--cuda-gpu-arch=sm_103',
 ]
 
+# DeepSelect uses Blackwell TMA and 256-bit memory operations. Compile only
+# architecture-specific cubins. The small vendored subset uses C++17 syntax
+# to work with RTP's Bazel CUDA wrapper as well as GCC 13 / CUDA 13.2.
+deepselect_cuda_copts = [
+    "-O3",
+    "-U__CUDA_NO_HALF_OPERATORS__",
+    "-U__CUDA_NO_HALF_CONVERSIONS__",
+    "-U__CUDA_NO_HALF2_OPERATORS__",
+    "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+    "-nvcc_options=expt-relaxed-constexpr",
+    "-nvcc_options=expt-extended-lambda",
+    "-nvcc_options=use_fast_math",
+    "-nvcc_options=ftz=false",
+    "--cuda-include-ptx=sm_100a", "--cuda-gpu-arch=sm_100a",
+    "--cuda-include-ptx=sm_103a", "--cuda-gpu-arch=sm_103a",
+]
+
+# Compile the same headers as the locked FlashInfer wheel (no extra download,
+# Python dispatch or service-time JIT). These are the transitive header inputs
+# of fast_topk_clusters_exact.cuh, including the TVM FFI check macro.
+fi13 = {"@//:using_cuda13_x86": "pip_gpu_cuda13_torch", "@//:using_cuda13_arm": "pip_cuda13_arm_torch"}
+fi_includes = ["flashinfer_python/site-packages/flashinfer/data/include", "apache_tvm_ffi/site-packages/tvm_ffi/include"]
+fi_headers = ["flashinfer/" + h + ".cuh" for h in ["fast_topk_clusters_exact", "topk_common", "vec_dtypes"]]
+tvm_headers = ["dlpack/dlpack.h"] + ["tvm/ffi/" + h + ".h" for h in ["error", "base_details", "c_api", "endian", "memory", "object"]]
+draft_topk_hdrs = select(dict([
+    (arch, ["@" + repo + "_flashinfer_python//:site-packages/flashinfer/data/include/" + h for h in fi_headers] +
+           ["@" + repo + "_apache_tvm_ffi//:site-packages/tvm_ffi/include/" + h for h in tvm_headers])
+    for arch, repo in fi13.items()
+] + [("//conditions:default", [])]))
+draft_topk_copts = select(dict([
+    (arch, ["-DRTP_FLASHINFER_DRAFT_TOPK"] + ["-Iexternal/" + repo + "_" + inc for inc in fi_includes])
+    for arch, repo in fi13.items()
+] + [("//conditions:default", [])]))
+
 cuda_deps = [
     "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
     ":cuda_utils_common",
     "@local_config_cuda//cuda:cuda_headers",
     "@local_config_cuda//cuda:cudart",
 ]
+
+cc_library(
+    name = "expert_load",
+    srcs = ["expert_load.cu"],
+    hdrs = ["expert_load.h"],
+    deps = torch_deps() + [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = cuda_copts(),
+)
 
 cc_library(
     name = "cuda_utils_common",
@@ -130,6 +175,7 @@ cc_library(
         "per_token_group_quant_8bit_v2.h",
     ],
     deps = [
+        ":v41_quantization",
         "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
         "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
         ":cuda_utils_common",
@@ -172,6 +218,7 @@ cc_library(
     srcs = ["attention_input_metadata.cu"],
     hdrs = ["attention_input_metadata.h"],
     deps = [
+        ":cuda_graph_prepare",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ] + torch_deps(),
@@ -201,6 +248,15 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "dsv41_grouped_score_bounds",
+    srcs = ["dsv41_grouped_score_bounds.cu"],
+    hdrs = ["dsv41_grouped_score_bounds.h"],
+    deps = [":cuda_utils_common"] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
 # Exact radix-select TopK for the DeepSeek V4 decode indexer. This is kept separate
 # from the vLLM-derived dsv4_persistent_topk so real-inference A/B tests can
 # select either implementation without rebuilding.
@@ -218,6 +274,37 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
     ] + torch_deps(),
     copts = dsv4_indexer_topk_cuda_copts,
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "topk_v3_jit_headers",
+    srcs = ["topk_v3.cuh", "topk_v3_compat.cuh"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "deepselect_fp32",
+    srcs = ["deepselect_fp32.cu", "draft_markov_topk.cu"],
+    hdrs = ["deepselect_fp32.h"] + draft_topk_hdrs + glob([
+        "deepselect/**/*.h",
+        "deepselect/**/*.cuh",
+    ]),
+    copts = copts() + cuda_default_copts_without_arch() + draft_topk_copts + select({
+        "@//:using_cuda13_x86": deepselect_cuda_copts,
+        "@//:using_cuda13_arm": deepselect_cuda_copts,
+        "@//:using_cuda12_9": deepselect_cuda_copts,
+        "//conditions:default": [],
+    }),
+    deps = torch_deps() + [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + select({
+        "@//:using_cuda13_x86": ["@cutlass4.0//:cutlass"],
+        "@//:using_cuda13_arm": ["@cutlass4.0//:cutlass"],
+        "@//:using_cuda12_9": ["@cutlass4.0//:cutlass"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )
 
@@ -242,7 +329,7 @@ cc_library(
     name = "cuda_graph_prepare",
     srcs = ["cuda_graph_prepare.cu"],
     hdrs = ["cuda_graph_prepare.h"],
-    deps = torch_deps() + select({
+    deps = ["//rtp_llm/models_py/bindings/common/kernels:fuse_copy_util"] + torch_deps() + select({
         "@//:using_cuda": [
             "@local_config_cuda//cuda:cuda_headers",
             "@local_config_cuda//cuda:cudart",
@@ -277,13 +364,28 @@ cc_library(
 )
 
 cc_library(
+    name = "dspark_confidence",
+    srcs = ["dspark_confidence.cu"],
+    hdrs = ["dspark_confidence.h"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    # Statistics preserve ATen's FP32 subnormal and reduction semantics.
+    copts = cuda_copts() + ["-nvcc_options=ftz=false"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "mtp_target_verify_prepare",
     srcs = ["mtp_target_verify_prepare.cu"],
     hdrs = ["mtp_target_verify_prepare.h"],
     deps = [
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
         "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/models_py/bindings/core:op_data",
     ] + torch_deps(),
     copts = cuda_copts(),
     visibility = ["//visibility:public"],
@@ -385,20 +487,6 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-deepselect_bf16_cuda_copts = [
-    "-DRTP_DEEPSELECT_BF16_ENABLED",
-    "-O3",
-    "-U__CUDA_NO_HALF_OPERATORS__",
-    "-U__CUDA_NO_HALF_CONVERSIONS__",
-    "-U__CUDA_NO_HALF2_OPERATORS__",
-    "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-    "-nvcc_options=expt-relaxed-constexpr",
-    "-nvcc_options=expt-extended-lambda",
-    "-nvcc_options=use_fast_math",
-    "-nvcc_options=ftz=false",
-    "--cuda-include-ptx=sm_100a", "--cuda-gpu-arch=sm_100a",
-    "--cuda-include-ptx=sm_103a", "--cuda-gpu-arch=sm_103a",
-]
 
 cc_library(
     name = "deepselect_bf16",
@@ -408,9 +496,9 @@ cc_library(
         "deepselect/**/*.cuh",
     ]),
     copts = copts() + cuda_default_copts_without_arch() + select({
-        "@//:using_cuda13_x86": deepselect_bf16_cuda_copts,
-        "@//:using_cuda13_arm": deepselect_bf16_cuda_copts,
-        "@//:using_cuda12_9": deepselect_bf16_cuda_copts,
+        "@//:using_cuda13_x86": deepselect_cuda_copts,
+        "@//:using_cuda13_arm": deepselect_cuda_copts,
+        "@//:using_cuda12_9": deepselect_cuda_copts,
         "//conditions:default": [],
     }),
     deps = torch_deps() + [
@@ -423,4 +511,23 @@ cc_library(
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
+)
+
+
+cc_library(
+    name = "v41_quantization",
+    srcs = [
+        "per_token_group_quant_8bit_v3.cu",
+    ],
+    hdrs = [
+        "per_token_group_quant_8bit_v3.h",
+    ],
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+        "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
+        ":cuda_utils_common",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    # Match legacy BF16 quantization, preserving finite subnormal inputs.
+    copts = cuda_copts() + ["-nvcc_options=ftz=false"],
 )

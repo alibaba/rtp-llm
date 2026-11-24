@@ -1,4 +1,4 @@
-load("//:def.bzl", "rocm_copts", "any_cuda_copts")
+load("//:def.bzl", "copts", "rocm_copts", "any_cuda_copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 package(default_visibility = ["//rtp_llm:__subpackages__"])
 
@@ -116,5 +116,13 @@ cc_library(
     ],
     deps = rocm_deps + torch_deps() + [":rocm_trtllm_allreduce_sync"],
     copts = rocm_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "mtp_target_verify_prepare",
+    srcs = ["mtp_target_verify_prepare.cc"],
+    deps = ["//rtp_llm/models_py/bindings/core:exec_ops_hdr"],
+    copts = copts(),
     visibility = ["//visibility:public"],
 )
