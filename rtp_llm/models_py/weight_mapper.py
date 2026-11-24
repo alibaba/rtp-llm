@@ -1,5 +1,7 @@
+import errno
 import glob
 import json
+import mmap
 import ntpath
 import os
 import re
@@ -222,6 +224,29 @@ def _load_safetensors(
             yield name, handle.get_tensor(name)
 
 
+def _can_map_cpu_archive(path: str) -> bool:
+    # torch.load uses a process-wide mmap policy. Never opt a checkpoint into
+    # a writable shared mapping; owners may update source views in place.
+    if (
+        os.name != "posix"
+        or torch.serialization.get_default_mmap_options() != mmap.MAP_PRIVATE
+    ):
+        return False
+    with open(path, "rb") as handle:
+        if handle.read(4) != b"PK\x03\x04":  # pre-ZIP torch.save format
+            return False
+        try:
+            # Probe the same whole-file mapping without faulting tensor pages.
+            # Some file systems support reads but not private maps. Do not
+            # retry a real I/O, disconnection or memory error on a second path.
+            with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_COPY):
+                return True
+        except OSError as error:
+            if error.errno in (errno.ENODEV, errno.ENOSYS, errno.EOPNOTSUPP):
+                return False
+            raise
+
+
 def _load_pytorch(
     path: str,
     device: str,
@@ -229,7 +254,14 @@ def _load_pytorch(
     read_spec_resolver: Optional[ReadSpecResolver] = None,
     catalog: Optional[CheckpointCatalog] = None,
 ) -> Iterator[Tuple[str, torch.Tensor]]:
-    payload = torch.load(path, map_location=device, weights_only=True)
+    # Each CPU reader otherwise materializes the entire ZIP shard in anonymous
+    # memory before yielding even a single rank-local tensor.
+    options = (
+        {"mmap": _can_map_cpu_archive(path)}
+        if torch.device(device).type == "cpu"
+        else {}
+    )
+    payload = torch.load(path, map_location=device, weights_only=True, **options)
     state_dict = _unwrap_pytorch_state_dict(payload)
     allowed = (
         catalog.shard_keys(path, (key for key, value in state_dict.items() if isinstance(value, torch.Tensor)))

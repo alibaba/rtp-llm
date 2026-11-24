@@ -379,6 +379,13 @@ py_test(
 )
 
 py_test(
+    name = "pytorch_archive_reader_test",
+    srcs = ["pytorch_archive_reader_test.py"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
+    deps = [":new_loader_core"],
+)
+
+py_test(
     name = "checkpoint_source_test",
     srcs = ["checkpoint_source_test.py"],
     env = {
