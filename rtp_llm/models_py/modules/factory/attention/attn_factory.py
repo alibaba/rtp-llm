@@ -153,7 +153,9 @@ def get_mla_impl(
 
 
 def _is_fmha_impl_disabled(
-    impl_class_name: str, fmha_config: Optional[FMHAConfig]
+    impl_class_name: str,
+    fmha_config: Optional[FMHAConfig],
+    selection_mode: CudaGraphSelectionMode = CudaGraphSelectionMode.EAGER,
 ) -> bool:
     """Check if a FMHA implementation is disabled in fmha_config.
 
@@ -210,7 +212,18 @@ def _is_fmha_impl_disabled(
         return not fmha_config.use_aiter_pa
     # Aiter Triton implementations
     elif "AiterDecodeImplTriton" in impl_class_name:
-        return not fmha_config.use_triton_pa
+        if fmha_config.use_triton_pa:
+            return False
+        # ASM decode bakes the block-table width (mblk) at capture time, so it
+        # corrupts long-sequence softmax on CUDA graph replay. The seq-driven
+        # Triton decode kernel is graph-safe and reads the same ASM KV layout,
+        # so use it as the decode-graph substitute when ASM PA is configured.
+        if (
+            selection_mode == CudaGraphSelectionMode.DECODE_GRAPH
+            and fmha_config.use_asm_pa
+        ):
+            return False
+        return True
     # Default: not disabled
     return False
 
@@ -251,7 +264,7 @@ def get_fmha_impl(
             continue
 
         # Skip if this FMHA implementation is disabled in config
-        if _is_fmha_impl_disabled(impl_class_name, fmha_config):
+        if _is_fmha_impl_disabled(impl_class_name, fmha_config, selection_mode):
             continue
 
         # Check support before creating instance

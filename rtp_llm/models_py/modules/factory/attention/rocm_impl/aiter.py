@@ -2253,6 +2253,13 @@ class AiterDecodeImplAsm(AiterDecodeImplBase):
             and attn_configs.size_per_head in ASM_DECODE_HEAD_SIZES
         )
 
+    def support_cuda_graph(self) -> bool:
+        # pa_fwd_asm bakes block_tables_stride0 (mblk) into the captured kernel,
+        # so replay processes tail blocks beyond the live sequence and corrupts
+        # softmax once the active length crosses a partition boundary. The
+        # seq-driven Triton decode backend is the graph-safe substitute.
+        return False
+
     def forward(
         self,
         qkv: torch.Tensor,
