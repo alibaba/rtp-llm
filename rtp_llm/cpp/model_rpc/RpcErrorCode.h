@@ -6,7 +6,7 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
-#include "rtp_llm/cpp/disaggregate/cache_store/CommonDefine.h"
+#include <unordered_map>
 
 namespace rtp_llm {
 
@@ -35,6 +35,7 @@ inline grpc::StatusCode transErrorCodeToGrpc(ErrorCode error_code) {
         {ErrorCode::P2P_CONNECTOR_WORKER_READ_TIMEOUT, grpc::StatusCode::DEADLINE_EXCEEDED},
         {ErrorCode::OUT_OF_VOCAB_RANGE, grpc::StatusCode::OUT_OF_RANGE},
         {ErrorCode::LONG_PROMPT_ERROR, grpc::StatusCode::OUT_OF_RANGE},
+        {ErrorCode::INVALID_PARAMS, grpc::StatusCode::INVALID_ARGUMENT},
     };
     auto it = error_code_map.find(error_code);
     if (it != error_code_map.end()) {
@@ -44,6 +45,13 @@ inline grpc::StatusCode transErrorCodeToGrpc(ErrorCode error_code) {
     }
 }
 
+// Reverse of transErrorCodeToGrpc: extract a representative ErrorCode from a
+// grpc::StatusCode received over the wire. Lossy by design — multiple
+// ErrorCodes share the same grpc status (e.g. MALLOC_FAILED and
+// DECODE_MALLOC_FAILED both → RESOURCE_EXHAUSTED), so we pick the most
+// common producer for each status. Used by PrefillServerCallerContext
+// when wrapping prefill's gRPC failures back into ErrorInfo for downstream
+// consumers, so they don't all collapse to UNKNOWN_ERROR.
 inline ErrorCode transGrpcStatusToErrorCode(grpc::StatusCode status_code) {
     const static std::unordered_map<grpc::StatusCode, ErrorCode> status_code_map = {
         {grpc::StatusCode::CANCELLED, ErrorCode::CANCELLED},
@@ -112,6 +120,40 @@ inline constexpr std::pair<ErrorCodePB, ErrorCode> kErrorCodePairs[] = {
     {ErrorCodePB::P2P_CONNECTOR_TRANSFER_QUEUE_REJECTED, ErrorCode::P2P_CONNECTOR_TRANSFER_QUEUE_REJECTED},
     {ErrorCodePB::P2P_CONNECTOR_TRANSFER_COPY_FAILED, ErrorCode::P2P_CONNECTOR_TRANSFER_COPY_FAILED},
     {ErrorCodePB::P2P_CONNECTOR_TRANSFER_CONTEXT_DESTROYED, ErrorCode::P2P_CONNECTOR_TRANSFER_CONTEXT_DESTROYED},
+    {ErrorCodePB::LONG_PROMPT_ERROR, ErrorCode::LONG_PROMPT_ERROR},
+    {ErrorCodePB::CONCURRENCY_LIMIT_ERROR, ErrorCode::CONCURRENCY_LIMIT_ERROR},
+    {ErrorCodePB::PRIORITY_PREEMPTED, ErrorCode::PRIORITY_PREEMPTED},
+    {ErrorCodePB::MALLOC_FAILED, ErrorCode::MALLOC_FAILED},
+    {ErrorCodePB::ERROR_GENERATE_CONFIG_FORMAT, ErrorCode::ERROR_GENERATE_CONFIG_FORMAT},
+    {ErrorCodePB::EXCEEDS_KV_CACHE_MAX_LEN, ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN},
+    {ErrorCodePB::MM_LONG_PROMPT_ERROR, ErrorCode::MM_LONG_PROMPT_ERROR},
+    {ErrorCodePB::MM_WRONG_FORMAT_ERROR, ErrorCode::MM_WRONG_FORMAT_ERROR},
+    {ErrorCodePB::MM_PROCESS_ERROR, ErrorCode::MM_PROCESS_ERROR},
+    {ErrorCodePB::MM_EMPTY_ENGINE_ERROR, ErrorCode::MM_EMPTY_ENGINE_ERROR},
+    {ErrorCodePB::MM_NOT_SUPPORTED_ERROR, ErrorCode::MM_NOT_SUPPORTED_ERROR},
+    {ErrorCodePB::MM_DOWNLOAD_FAILED, ErrorCode::MM_DOWNLOAD_FAILED},
+    {ErrorCodePB::OUT_OF_VOCAB_RANGE, ErrorCode::OUT_OF_VOCAB_RANGE},
+    {ErrorCodePB::OUTPUT_QUEUE_FULL, ErrorCode::OUTPUT_QUEUE_FULL},
+    {ErrorCodePB::OUTPUT_QUEUE_IS_EMPTY, ErrorCode::OUTPUT_QUEUE_IS_EMPTY},
+    {ErrorCodePB::FINISHED, ErrorCode::FINISHED},
+    {ErrorCodePB::GET_HOST_FAILED, ErrorCode::GET_HOST_FAILED},
+    {ErrorCodePB::CONNECT_FAILED, ErrorCode::CONNECT_FAILED},
+    {ErrorCodePB::CONNECT_TIMEOUT, ErrorCode::CONNECT_TIMEOUT},
+    {ErrorCodePB::DEADLINE_EXCEEDED, ErrorCode::DEADLINE_EXCEEDED},
+    {ErrorCodePB::CONNECTION_RESET_BY_PEER, ErrorCode::CONNECTION_RESET_BY_PEER},
+    {ErrorCodePB::REMOTE_ALLOCATE_RESOURCE_WRITE_FAILED, ErrorCode::REMOTE_ALLOCATE_RESOURCE_WRITE_FAILED},
+    {ErrorCodePB::REMOTE_ALLOCATE_RESOURCE_READ_FAILED, ErrorCode::REMOTE_ALLOCATE_RESOURCE_READ_FAILED},
+    {ErrorCodePB::REMOTE_LOAD_KV_CACHE_FAILED, ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED},
+    {ErrorCodePB::REMOTE_GENERATE_FAILED, ErrorCode::REMOTE_GENERATE_FAILED},
+    {ErrorCodePB::DECODE_MALLOC_FAILED, ErrorCode::DECODE_MALLOC_FAILED},
+    {ErrorCodePB::LOAD_KV_CACHE_FAILED, ErrorCode::LOAD_KV_CACHE_FAILED},
+    {ErrorCodePB::WAIT_TO_RUN_TIMEOUT, ErrorCode::WAIT_TO_RUN_TIMEOUT},
+    {ErrorCodePB::KEEP_ALIVE_TIMEOUT, ErrorCode::KEEP_ALIVE_TIMEOUT},
+    {ErrorCodePB::CACHE_STORE_PUSH_ITEM_FAILED, ErrorCode::CACHE_STORE_PUSH_ITEM_FAILED},
+    {ErrorCodePB::CACHE_STORE_LOAD_UNKNOWN_ERROR, ErrorCode::CACHE_STORE_LOAD_UNKNOWN_ERROR},
+    {ErrorCodePB::CACHE_STORE_STORE_FAILED, ErrorCode::CACHE_STORE_STORE_FAILED},
+    {ErrorCodePB::GET_PART_NODE_STATUS_FAILED, ErrorCode::GET_PART_NODE_STATUS_FAILED},
+    {ErrorCodePB::GET_ALL_NODE_STATUS_FAILED, ErrorCode::GET_ALL_NODE_STATUS_FAILED},
 };
 
 }  // namespace rpc_error_detail

@@ -1800,14 +1800,16 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                             ? loggedGenerateConfig
                                     .path("max_new_tokens")
                                     .asInt(Math.max(1, shape.outputLength()))
-                            : Math.max(1, shape.outputLength());
+                            : shape.outputLength();
+            // The measured path is admission by the Master batch dispatcher.
+            maxNewTokens = Math.max(2, maxNewTokens);
 
             EngineRpcService.GenerateConfigPB.Builder generateConfig =
                     EngineRpcService.GenerateConfigPB.newBuilder()
                             .setMaxNewTokens(maxNewTokens)
                             .setNumBeams(1)
-                            .setNumReturnSequences(
-                                    loggedGenerateConfig.path("num_return_sequences").asInt(1))
+                            .setNumReturnSequences(1)
+                            .setCanUsePdSeparation(true)
                             .setMinNewTokens(loggedGenerateConfig.path("min_new_tokens").asInt())
                             .setTopP((float) loggedGenerateConfig.path("top_p").asDouble(1.0))
                             .setTopK(loggedGenerateConfig.path("top_k").asInt())

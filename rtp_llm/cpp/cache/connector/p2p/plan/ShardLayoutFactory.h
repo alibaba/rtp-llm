@@ -61,8 +61,8 @@ public:
     /// @brief 由本端布局推导对端布局（跨端协议零改动的落点，见设计文档 §3.2）。
     /// @param peer_tp_size 对端 tp_size。decode 侧取自 Meta::P2PRoutingContext::prefill_tp_size，
     ///        prefill 侧取自 decode_transfer_servers.size()。
-    /// @param peer_kv_cache_sharded 对端是否开 KV cache CP 分片。这是部署级同配开关
-    ///        （OpaqueKVCacheSpec::fixedRegionCpSize 的 DECODE 分支已依赖此前提）。
+    /// @param peer_kv_cache_sharded 对端实际是否开 KV cache CP 分片；Decode 使用握手结果，
+    ///        不使用本端的 Prefill CP 配置推导对端分片。
     static ShardLayout peerOf(const ShardLayout& self,
                               int                peer_tp_size,
                               bool               peer_kv_cache_sharded,
@@ -74,9 +74,8 @@ public:
         // Decode 则仍按自身 TP 切 head。双方用下列规范值即可镜像还原对端布局，
         // 无需在 P2P 协议中新增 method 字段。
         if (peer_role == RoleType::PREFILL) {
-            peer_pc.prefill_cp_config.method = self.pc.prefill_cp_config.is_prefill_enabled() ?
-                                                   CPRotateMethod::ALL_GATHER :
-                                                   CPRotateMethod::DISABLED;
+            peer_pc.prefill_cp_config.method =
+                peer_kv_cache_sharded ? CPRotateMethod::ALL_GATHER : CPRotateMethod::DISABLED;
         } else {
             peer_pc.prefill_cp_config.method = self.pc.prefill_cp_config.is_enabled() ?
                                                    CPRotateMethod::PREFILL_CP :

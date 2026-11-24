@@ -378,7 +378,7 @@ void NormalEngine::initScheduler() {
                                          resource_context_.cache_manager,
                                          metrics_reporter_));
         RTP_LLM_LOG_INFO("create pipeline parallel scheduler done");
-    } else if (runtime_config.use_batch_decode_scheduler) {
+    } else if (runtime_config.use_batch_decode_scheduler && pd_sep_config.role_type != RoleType::DECODE) {
         scheduler_.reset(new BatchDecodeScheduler(
             runtime_config, resource_context_.cache_manager, metrics_reporter_, parallelism_config.dp_rank));
         RTP_LLM_LOG_INFO("create batch decode scheduler done");
@@ -1240,9 +1240,14 @@ std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<G
 void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
     stream->setReserveStep(reserveStepForStream(stream->generateConfig()->isPrefillOnly()));
     if (!validateStreamForScheduling(stream)) {
+        stream->finishWithoutGenerate();
         return;
     }
-    (void)scheduler_->enqueue(stream);
+    const auto status = scheduler_->enqueue(stream);
+    if (!status.ok()) {
+        stream->reportError(ErrorCode::EXECUTION_EXCEPTION, status.ToString());
+        stream->finishWithoutGenerate();
+    }
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
@@ -1295,6 +1300,13 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
         enqueue_successes[schedulable_indexes[i]] = schedulable_result.first[i];
     }
     return {std::move(enqueue_successes), std::move(streams)};
+}
+
+std::vector<GenerateStreamPtr> NormalEngine::batchEnqueue(const std::vector<GenerateStreamPtr>& streams) {
+    for (const auto& stream : streams) {
+        stream->setReserveStep(reserve_step_);
+    }
+    return scheduler_->enqueueGroup(streams).second;
 }
 
 absl::Status NormalEngine::step() try {

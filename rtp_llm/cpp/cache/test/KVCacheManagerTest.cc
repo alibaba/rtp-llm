@@ -24,6 +24,11 @@
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorPrefill.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerPrefillRead.h"
+#include "rtp_llm/cpp/cache/connector/p2p/test/MockGenerateStream.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateStateMachine.h"
 #include "rtp_llm/cpp/cache/events/KVCacheEventReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
@@ -44,6 +49,8 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 
@@ -56,14 +63,16 @@ const std::vector<std::string> kDsv4Tags    = {
     "swa_kv", "csa_kv", "indexer_kv", "indexer_state", "csa_state", "hca_kv", "hca_state"};
 
 double snapshotUnfreezeBlocks(const kmonitor::MetricsReporterPtr& reporter,
-                              const std::string& pool_name, Tier tier, const char* backend) {
+                              const std::string&                  pool_name,
+                              Tier                                tier,
+                              const char*                         backend) {
     kmonitor::MetricsTags tags("pool_name", pool_name);
     tags.AddTag("tier", tierName(tier));
     tags.AddTag("backend", backend);
     tags.AddTag("forced", "false");
-    auto* metric = reporter->getMetricsGroup<RtpLLMCachePoolMetrics>()->unfreeze_blocks_qps_metric;
-    const auto serving_tags = kmonTagsWithServiceStatus(&tags);
-    auto* series = metric->DeclareMetric(&serving_tags);
+    auto*                   metric = reporter->getMetricsGroup<RtpLLMCachePoolMetrics>()->unfreeze_blocks_qps_metric;
+    const auto              serving_tags = kmonTagsWithServiceStatus(&tags);
+    auto*                   series       = metric->DeclareMetric(&serving_tags);
     kmonitor::MetricsRecord record(nullptr, nullptr, 0);
     series->Snapshot(&record, 1000);
     EXPECT_TRUE(metric->UndeclareMetric(series));
@@ -1181,14 +1190,17 @@ TEST_F(KVCacheManagerTest, DSV4IndependentPoolsUseGpuBacking) {
         auto config = makeCompactDSV4ManagerConfig(/*block_num=*/8);
 
         PDSepConfig pd_sep_config;
-        pd_sep_config.role_type = role_type;
+        pd_sep_config.role_type             = role_type;
+        pd_sep_config.cache_store_rdma_mode = false;
+        RuntimeConfig runtime_config;
+        runtime_config.worker_grpc_addrs = {"127.0.0.1:12345"};
         KVCacheConfig kv_cache_config;
         auto          cache_manager = std::make_shared<KVCacheManager>(config,
                                                               /*warmup=*/false,
                                                               nullptr,
                                                               kv_cache_config,
                                                               ParallelismConfig{},
-                                                              RuntimeConfig{},
+                                                              runtime_config,
                                                               SpeculativeExecutionConfig{},
                                                               pd_sep_config);
         ASSERT_TRUE(cache_manager->init());
@@ -1444,6 +1456,116 @@ TEST_F(KVCacheManagerTest, SetKVBlockValueAndBlockCopy) {
     std::fill(expected_layer0.begin() + k_bytes, expected_layer0.end(), 2);
     assertBlockBytesEq(cache_manager, /*layer_id=*/0, block_dst, expected_layer0);
     assertBlockBytesEq(cache_manager, /*layer_id=*/1, block_dst, expected_block);
+}
+
+TEST_F(KVCacheManagerTest, FailedPrefillPublicationTerminatesRequestAndWakesPayloadWait) {
+    auto cache_config = makeSimpleMhaCacheConfig(1, 6, 2, rtp_llm::DataType::TYPE_INT8);
+    auto manager      = std::make_shared<KVCacheManager>(cache_config, false);
+    ASSERT_TRUE(manager->init());
+
+    P2PConnectorConfig config;
+    config.role_type                   = RoleType::PREFILL;
+    config.worker_config.tp_size       = 1;
+    config.worker_config.tp_rank       = 0;
+    config.worker_config.layer_all_num = 1;
+    config.worker_config.topology      = cache_config.topologyPtr();
+    auto worker = std::make_shared<P2PWorkerPrefillRead>(config.worker_config, nullptr, nullptr, nullptr);
+    ASSERT_TRUE(worker->init());
+    auto connector                     = std::make_shared<P2PConnector>(config, nullptr, nullptr);
+    connector->prefill_                = std::make_unique<P2PConnectorPrefill>(config, nullptr, nullptr);
+    connector->prefill_->worker_       = worker;
+    connector->prefill_->stream_store_ = std::make_shared<P2PConnectorResourceStore>(nullptr);
+    manager->p2p_connector_            = connector;
+    auto              store            = connector->streamStore();
+    const std::string key              = "failed-prefill-publication";
+    const auto        deadline         = store->requestDeadline(key, 60000);
+    ASSERT_GT(deadline, currentTimeMs());
+    auto pending = std::async(std::launch::async, [&] { return store->waitPrefillPayloadReady(key, deadline); });
+
+    auto input                            = std::make_shared<GenerateInput>();
+    input->request_id                     = 7009;
+    input->request_deadline_ms            = deadline;
+    input->input_ids                      = torch::zeros({1}, torch::kInt32);
+    input->generate_config                = std::make_shared<GenerateConfig>();
+    input->generate_config->unique_key    = key;
+    input->generate_config->pd_separation = true;
+    auto            stream                = std::make_shared<MockGenerateStream>(input);
+    ResourceContext context;
+    context.role_type             = RoleType::PREFILL;
+    context.cache_manager         = manager;
+    auto                 resource = std::make_shared<StreamCacheResource>(stream.get(), context);
+    GenerateStateMachine state(resource);
+    state.reportEvent(StreamEvents::Error, ErrorCode::CACHE_STORE_STORE_FAILED, "injected publication failure");
+    const auto status = pending.wait_for(std::chrono::seconds(1));
+    EXPECT_EQ(status, std::future_status::ready);
+    if (status != std::future_status::ready) {
+        store->markCancelled(key, deadline);
+    }
+    EXPECT_FALSE(pending.get());
+    EXPECT_TRUE(store->isMarkedCancelled(key));
+    auto buffer = worker->getComputedBuffersStore()->getBuffer(7009, deadline);
+    ASSERT_NE(buffer, nullptr);
+    EXPECT_EQ(buffer->error().code(), ErrorCode::CACHE_STORE_STORE_FAILED);
+}
+
+TEST_F(KVCacheManagerTest, WriteP2PLayer_HoldsAllocatorReferenceUntilLayerCleanup) {
+    auto cache_config = makeSimpleMhaCacheConfig(
+        /*layer_num=*/1, /*block_num=*/6, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
+    auto manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
+    ASSERT_TRUE(manager->init());
+
+    // Inject the publication path without starting an RPC server or a transport backend.
+    P2PConnectorConfig connector_config;
+    connector_config.role_type                   = RoleType::PREFILL;
+    connector_config.worker_config.tp_size       = 1;
+    connector_config.worker_config.tp_rank       = 0;
+    connector_config.worker_config.layer_all_num = 1;
+    connector_config.worker_config.topology      = cache_config.topologyPtr();
+    auto worker = std::make_shared<P2PWorkerPrefillRead>(connector_config.worker_config, nullptr, nullptr, nullptr);
+    ASSERT_TRUE(worker->init());
+    auto connector               = std::make_shared<P2PConnector>(connector_config, nullptr, nullptr);
+    connector->prefill_          = std::make_unique<P2PConnectorPrefill>(connector_config, nullptr, nullptr);
+    connector->prefill_->worker_ = worker;
+    manager->p2p_connector_      = connector;
+
+    const auto free_before = manager->freeBlocksNum();
+    auto       resource    = makeDSV4BatchResource(cache_config);
+    auto       tokens = makeDSV4CompleteTokenIds(/*initial_seq_len=*/2, /*max_seq_len=*/2, /*seq_size_per_block=*/2);
+    MallocInfo allocation{resource, tokens};
+    allocation.reuse_cache         = false;
+    allocation.enable_cache_lookup = false;
+    ASSERT_TRUE(manager->malloc(allocation).success);
+    const auto& tag    = cache_config.topology().soleGroupForLayer(0).tag;
+    const auto  blocks = resource->blocks(0, tag);
+    ASSERT_EQ(blocks.size(), 1u);
+    const auto& pool = manager->blockTreeCache()->groupSets().front()->devicePools().front();
+    EXPECT_EQ(pool->refCount(blocks.front()), 1u);
+
+    const int64_t request_id  = 7010;
+    const int64_t deadline_ms = currentTimeMs() + 10000;
+    // Missing blocks must publish a request error without touching pool refs.
+    EXPECT_FALSE(manager->writeP2PLayer(0, 0, tag, {7001}, {NULL_BLOCK_IDX}, request_id + 1, nullptr, deadline_ms, 0));
+    auto rejected = worker->getComputedBuffersStore()->getBuffer(request_id + 1, deadline_ms);
+    ASSERT_NE(rejected, nullptr);
+    EXPECT_EQ(rejected->error().code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED);
+    EXPECT_FALSE(manager->writeP2PLayer(0, 0, tag, {7001}, {}, request_id + 2, nullptr, deadline_ms, 0));
+    auto mismatched = worker->getComputedBuffersStore()->getBuffer(request_id + 2, deadline_ms);
+    ASSERT_NE(mismatched, nullptr);
+    EXPECT_NE(mismatched->error().ToString().find("mismatched key and block counts"), std::string::npos);
+    EXPECT_EQ(pool->refCount(blocks.front()), 1u);
+    ASSERT_TRUE(manager->writeP2PLayer(0, 0, tag, {7001}, blocks, request_id, nullptr, deadline_ms, 0));
+    EXPECT_EQ(pool->refCount(blocks.front()), 2u);
+    EXPECT_NE(worker->getComputedBuffersStore()->getBuffer(request_id, deadline_ms), nullptr);
+
+    manager->free(FreeInfo{resource, tokens});
+    ASSERT_TRUE(pool->isAllocated(blocks.front()));
+    EXPECT_EQ(pool->refCount(blocks.front()), 1u);
+    EXPECT_EQ(manager->freeBlocksNum(), free_before - 1);
+
+    worker->completeNoTransfer(request_id, deadline_ms, deadline_ms);
+    EXPECT_EQ(worker->getComputedBuffersStore()->getBuffer(request_id, deadline_ms), nullptr);
+    EXPECT_FALSE(pool->isAllocated(blocks.front()));
+    EXPECT_EQ(manager->freeBlocksNum(), free_before);
 }
 
 TEST_F(KVCacheManagerTest, BlockCopyAlsoCopiesScaleWhenQuantized) {
@@ -2500,10 +2622,10 @@ TEST_F(KVCacheManagerTest, BackgroundRecoveryReclaimsLocalTargetsAndPublishesCap
     KVCacheConfig config;
     config.enable_memory_cache  = true;
     config.memory_cache_size_mb = 1;
-    auto monitor = std::make_shared<kmonitor::KMonitor>("unfreeze_background_test");
+    auto monitor                = std::make_shared<kmonitor::KMonitor>("unfreeze_background_test");
     monitor->SetServiceName("");
     auto reporter = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
-    auto manager = std::make_shared<KVCacheManager>(cache_config, false, reporter, config);
+    auto manager  = std::make_shared<KVCacheManager>(cache_config, false, reporter, config);
     ASSERT_TRUE(manager->init());
     manager->stopFrozenTaskRecovery();
     const auto& groups       = manager->blockTreeCache()->groupSets();
@@ -2572,7 +2694,7 @@ TEST_F(KVCacheManagerTest, FrozenRecoveryStartsOnlyForAllocatorOwner) {
         parallel.tp_rank = rank;
         parallel.tp_size = rank == 0 ? 1 : 2;
         KVCacheConfig config;
-        auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, config, parallel);
+        auto          manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, config, parallel);
         ASSERT_TRUE(manager->init());
         EXPECT_EQ(manager->frozen_task_recovery_ != nullptr, rank == 0);
         EXPECT_EQ(manager->completion_cleanup_ != nullptr, rank == 0);
@@ -2631,7 +2753,7 @@ TEST_F(KVCacheManagerTest, CompletionCleanupHandlesSuccessAndLateSafeFailure) {
         KVCacheConfig config;
         config.enable_memory_cache  = true;
         config.memory_cache_size_mb = 1;
-        auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, config);
+        auto manager                = std::make_shared<KVCacheManager>(cache_config, false, nullptr, config);
         ASSERT_TRUE(manager->init());
         manager->stopFrozenTaskRecovery();
         const auto& groups  = manager->blockTreeCache()->groupSets();

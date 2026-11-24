@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 
 #include <algorithm>
 #include <chrono>
@@ -105,6 +107,11 @@ ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutputForRpc(int64_t wait
     RTP_LLM_FAIL("consumer is ready without an error, output, or finished state");
 }
 
+bool NormalGenerateStream::hasPendingFrontendMetrics() const {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    return frontend_metrics_pending_steps_ > 0;
+}
+
 bool NormalGenerateStream::hasOutput() {
     std::lock_guard<std::mutex> lock(*mutex_);
     return !generate_outputs_.empty()
@@ -135,6 +142,13 @@ void NormalGenerateStream::endFrontendMetricsStep() {
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_CHECK(frontend_metrics_pending_steps_ > 0);
     --frontend_metrics_pending_steps_;
+    if (frontend_metrics_pending_steps_ == 0 && pending_prefill_publication_) {
+        auto publish                 = std::move(pending_prefill_publication_);
+        pending_prefill_publication_ = {};
+        if (!hasErrorWithoutLock()) {
+            publish();
+        }
+    }
     if (frontend_timing_dirty_ && !hasErrorWithoutLock() && generate_outputs_.empty()
         && !consumerFinishedWithoutLock()) {
         enqueueLatestFrontendMetricOutput(prepareFrontendMetricOutput());
@@ -302,6 +316,27 @@ GenerateOutputs NormalGenerateStream::materializeTerminalOutput(GenerateOutputs 
     return output;
 }
 
+torch::Tensor NormalGenerateStream::selectLogits(const torch::Tensor& logits) const {
+    const auto& select_tokens_id = generate_input_->generate_config->select_tokens_id;
+    if (select_tokens_id.empty()) {
+        return logits;
+    }
+    const auto out_of_bound_token_id =
+        std::find_if_not(select_tokens_id.begin(), select_tokens_id.end(), [this](int select_token_id) {
+            return select_token_id >= 0 && select_token_id < vocabSize();
+        });
+    if (out_of_bound_token_id != select_tokens_id.end()) {
+        RTP_LLM_LOG_WARNING("select_token_id out of bound, expected >= 0 and < vocab size [%d], found [%d]",
+                            vocabSize(),
+                            *out_of_bound_token_id);
+        return torch::empty({0, 0}, logits.options());
+    }
+    const auto select_indices =
+        torch::tensor(std::vector<int64_t>(select_tokens_id.begin(), select_tokens_id.end()), torch::kLong)
+            .to(logits.device());
+    return logits.index_select(1, select_indices);
+}
+
 GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateInfo& update_info) {
     size_t          output_len = seqLength() - last_output_pos_;
     GenerateOutputs generate_results;
@@ -312,37 +347,22 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
     generate_results.frontend_metrics_terminal = consumerFinishedWithoutLock();
     fillFrontendMetricCounters(generate_results);
 
+    torch::Tensor logits_result;
+    if (returnLogits() && update_info.logits.defined()) {
+        logits_result = selectLogits(update_info.logits);
+    }
+
     // CompleteTokenIds has already applied this step, so currentBatchSize is the output row count.
     for (int i = 0; i < currentBatchSize(); i++) {
         GenerateOutput generate_output;
         generate_output.output_ids = torch::empty({1, (int64_t)output_len}, torch::kInt32);
 
         // TODO(xinfei.sxf) optimize this copy : only copy last token
-        complete_token_ids_->copyTokensTo(
-            i, generate_output.output_ids.data_ptr<int32_t>(), last_output_pos_, output_len);
-        if (returnLogits() && update_info.logits.defined()) {
-            torch::Tensor logits_result;
-            const auto&   select_tokens_id = generate_input_->generate_config->select_tokens_id;
-            if (!select_tokens_id.empty()) {
-                auto out_of_bound_token_id =
-                    std::find_if_not(select_tokens_id.begin(), select_tokens_id.end(), [this](int select_token_id) {
-                        return select_token_id >= 0 && select_token_id < vocabSize();
-                    });
-                if (out_of_bound_token_id == select_tokens_id.end()) {
-                    auto select_indices =
-                        torch::tensor(std::vector<int64_t>(select_tokens_id.begin(), select_tokens_id.end()),
-                                      torch::kLong)
-                            .to(update_info.logits.device());
-                    logits_result = update_info.logits.index_select(1, select_indices);
-                } else {
-                    RTP_LLM_LOG_WARNING("select_token_id out of bound, expected >= 0 and < vocab size [%d], found [%d]",
-                                        vocabSize(),
-                                        *out_of_bound_token_id);
-                    logits_result = torch::empty({0, 0}, update_info.logits.options());
-                }
-            } else {
-                logits_result = update_info.logits;
-            }
+        if (output_len > 0) {
+            complete_token_ids_->copyTokensTo(
+                i, generate_output.output_ids.data_ptr<int32_t>(), last_output_pos_, output_len);
+        }
+        if (logits_result.defined()) {
             if (logits_result.size(0) <= 1) {
                 generate_output.logits = logits_result.cpu().clone();
             } else {
@@ -454,7 +474,7 @@ void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs&& generate_resu
     if (generate_outputs_.size() >= kOutputCapacity) {
         /* No matter if the queue is full for any reason,
            the stream will be set to stop directly to prevent the push to queue from getting stuck. */
-        reportEventWithoutLock(StreamEvents::Error, ErrorCode::OUTPUT_QUEUE_FULL, "output queue is full");
+        reportErrorWithoutLock(ErrorCode::OUTPUT_QUEUE_FULL, "output queue is full");
     } else {
         generate_outputs_.push_back(std::move(generate_results));
         consumer_cv_->notify_all();
@@ -522,7 +542,135 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
             update_info.softmax_probs, seqLength() - update_info.num_new_tokens, update_info.src_batch_indices);
     }
 
-    finished_ = needFinish();
+    // PD handoff must happen before finished_ assignment.
+    if (!finished_ && queryPdSep() && update_info.update_remote_generate
+        && resourceContext().role_type == RoleType::PREFILL) {
+        const auto& config = *generate_input_->generate_config;
+        if (config.calculate_loss != 0 && (!loss_.defined() || loss_index_ != inputLength() - 1)) {
+            reportErrorWithoutLock(ErrorCode::EXECUTION_EXCEPTION, "Prefill did not produce the requested prompt loss");
+            return;
+        }
+        auto& rc = resourceContext();
+
+        reportEventWithoutLock(StreamEvents::PrefillHandoffReady);
+
+        // Publish local Prefill output for the StartLoad handler to return to Decode.
+        if (rc.cache_manager && rc.cache_manager->hasP2PConnector()) {
+            PrefillResultStore::SideChannelData side_data;
+#if defined(USING_CUDA)
+            // All sampling calls have reserved their RNG ranges before output publication.
+            // Read the position without reserving any additional random numbers.
+            auto generator = getGenerator();
+            if (generator.defined()) {
+                std::lock_guard<std::mutex> lock(generator.mutex());
+                side_data.rng_offset    = generator.get_offset();
+                side_data.has_rng_state = true;
+            }
+#endif
+            auto tokens = currentExecuteTokens(0);
+            if (!tokens.empty()) {
+                side_data.has_first_token = true;
+                side_data.first_token_id  = tokens.back();
+                side_data.first_token_time_us = complete_token_ids_->firstTokenTimeUs();
+            }
+            side_data.generation_prefill_cuda_graph_status =
+                static_cast<uint32_t>(generation_prefill_cuda_graph_status_);
+            // Match the established PD aux contract: top-level reuse follows
+            // Prefill for single-group caches; multi-group caches may expose
+            // the longer proven Decode reuse phase.
+            side_data.prefill_use_independent_block_pools = rc.cache_manager->cacheConfig().groupNums() > 1;
+            // Chunk advancement changes the execution cursor, not the cache hit.
+            side_data.total_reuse_len  = initialReuseLength();
+            side_data.local_reuse_len  = localReuseLength();
+            side_data.remote_reuse_len = remoteReuseLength();
+            side_data.memory_reuse_len = hostReuseLength();
+            side_data.disk_reuse_len   = diskReuseLength();
+            side_data.multimodal_lengths = generate_input_->multimodalLengths();
+            // Publish owned CPU snapshots. Decode applies these through its normal output path.
+            const auto  save_output = [&](const char* name, const torch::Tensor& tensor, bool requested) {
+                if (requested && tensor.defined()) {
+                    side_data.first_token_tensors.emplace(name, tensor.to(torch::kCPU, false, true).contiguous());
+                }
+            };
+            save_output("first_token_logits", update_info.logits, config.return_logits);
+            save_output("first_token_hidden_states", update_info.hidden_states, config.return_hidden_states);
+            save_output(
+                "first_token_all_hidden_states", update_info.all_hidden_states, config.return_all_hidden_states);
+            save_output("first_token_loss", loss_, config.calculate_loss != 0);
+            save_output(
+                "first_token_softmax_probs", update_info.softmax_probs, config.aux_info && config.return_softmax_probs);
+            save_output("first_token_cum_log_probs", update_info.cum_log_probs, config.aux_info);
+            save_output("first_token_all_probs",
+                        update_info.all_probs,
+                        config.return_all_probs != ReturnAllProbsMode::NONE);
+            if (config.return_prompt_logits && update_info.prompt_logits.has_value()) {
+                const auto& scores      = *update_info.prompt_logits;
+                side_data.prompt_logits = scores;
+                auto& snapshot          = *side_data.prompt_logits;
+                snapshot.topk_logprobs  = scores.topk_logprobs.to(torch::kCPU, false, true).contiguous();
+                snapshot.topk_token_ids = scores.topk_token_ids.to(torch::kCPU, false, true).contiguous();
+                if (scores.target_logprobs.defined())
+                    snapshot.target_logprobs = scores.target_logprobs.to(torch::kCPU, false, true).contiguous();
+            }
+            if (!getProposeToken().empty()) {
+                side_data.propose_tokens = getProposeToken();
+            }
+            auto sp_output_buffer = getSPOutputBuffer();
+            if (sp_output_buffer) {
+                auto propose_probs_cpu =
+                    sp_output_buffer->all_probs.defined() ?
+                        (sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() :
+                                                                 sp_output_buffer->all_probs) :
+                        torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat32));
+                auto propose_hidden_cpu =
+                    sp_output_buffer->hidden_states.defined() ?
+                        (sp_output_buffer->hidden_states.is_cuda() ? sp_output_buffer->hidden_states.cpu() :
+                                                                     sp_output_buffer->hidden_states) :
+                        torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat16));
+                // Keep D2H at publication time; the store must not retain GPU storage.
+                side_data.propose_probs   = propose_probs_cpu.contiguous();
+                side_data.propose_hidden  = propose_hidden_cpu.contiguous();
+                const size_t probs_bytes  = side_data.propose_probs.nbytes();
+                const size_t hidden_bytes = side_data.propose_hidden.nbytes();
+                // Tensor payload only; excludes protobuf metadata and transport framing.
+                RTP_LLM_LOG_INFO("[MTP_PD_TENSOR_BYTES] unique_key=%s propose_hidden_bytes=%zu "
+                                 "propose_probs_bytes=%zu total_bytes=%zu",
+                                 uniqueKey().c_str(),
+                                 hidden_bytes,
+                                 probs_bytes,
+                                 hidden_bytes + probs_bytes);
+            }
+            auto pos_ids = getContextPositionIds();
+            if (pos_ids.defined() && pos_ids.numel() > 0) {
+                auto pos_cpu = pos_ids.to(torch::kCPU).contiguous();
+                side_data.position_ids.assign(pos_cpu.data_ptr<int32_t>(),
+                                              pos_cpu.data_ptr<int32_t>() + pos_cpu.numel());
+            }
+            // Executor timing is published after updateOutput. Keep the CPU
+            // payload until that step settles so StartLoad carries complete
+            // Prefill metrics without waiting under the executor's stream lock.
+            pending_prefill_publication_ = [this, manager = rc.cache_manager, data = std::move(side_data)]() mutable {
+                data.frontend_context_token_num                  = frontend_context_token_num_;
+                data.frontend_context_token_num_with_cache       = frontend_context_token_num_with_cache_;
+                data.frontend_context_execute_time_us            = frontend_context_execute_time_us_;
+                data.frontend_context_execute_time_with_cache_us = frontend_context_execute_time_with_cache_us_;
+                manager->publishPrefillPayload(uniqueKey(), deadlineMs(), std::move(data));
+            };
+            if (frontend_metrics_pending_steps_ == 0) {
+                auto publish                 = std::move(pending_prefill_publication_);
+                pending_prefill_publication_ = {};
+                publish();
+            }
+        }
+        // DP inversion prefill has already produced the only token it is responsible for.
+        // Mark it finished here so the state machine can release resources and persist
+        // local cache for later prefill-side reuse.
+        fillSubGenerateStatus(StreamState::FINISHED);
+        finished_ = true;
+    }
+
+    bool need_finish_result = finished_ || needFinish();
+    finished_               = need_finish_result;
     if (finished_) {
         reportEventWithoutLock(StreamEvents::GenerateDone);
         fillSubGenerateStatus(StreamState::FINISHED);
@@ -544,20 +692,17 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
                       isStreaming(),
                       update_info.update_remote_generate);
 
-    if (queryPdSep() && update_info.update_remote_generate) {
-        // Hold KV cache even when the stream already finished in prefill
-        // (e.g. stop words hit): the decode role still issues RemoteLoad for
-        // these blocks and would hang if they were freed here.
-        RTP_LLM_LOG_DEBUG("stream [%s] hold kv cache for pd-sep", streamLogTag().c_str());
-        holdKVCacheForPDSep();
-        if (!finished_) {
-            RTP_LLM_LOG_DEBUG("stream [%s] set need_remote_generate", streamLogTag().c_str());
-            reportEventWithoutLock(StreamEvents::NeedRemoteGenerate);
-            reportEventWithoutLock(StreamEvents::GenerateDone);
-        }
-    }
-
-    bool pd_sep_first_token     = queryPdSep();
+    // Prefill publishes its handoff output immediately. Decode replays that
+    // first token once. A requested logits step also needs to reach the RPC
+    // collector before it combines the non-streaming response.
+    const auto role = resourceContext().role_type;
+    const bool pd_sep_first_token = queryPdSep()
+        && (role == RoleType::PREFILL
+            || (role == RoleType::DECODE && !update_info.update_remote_generate && iter_count_ == 1));
+    const auto& config               = *generateConfig();
+    const bool  selected_logits_step = role == RoleType::DECODE && queryPdSep() && config.aux_info
+                                      && config.return_logits && config.logits_index
+                                      && seqLength() - inputLength() == *config.logits_index;
     bool frontend_metric_update = generate_input_->generate_config->frontend_metric_streaming && !isStreaming()
                                   && !finished_ && !pd_sep_first_token;
     if (frontend_metric_update && seqLength() > last_frontend_metric_output_pos_) {
@@ -565,13 +710,17 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         last_frontend_metric_output_pos_ = seqLength();
     }
 
-    bool need_update = pd_sep_first_token || isStreaming() || finished_;
+    const bool need_update = pd_sep_first_token || selected_logits_step || isStreaming() || finished_;
     if (!need_update) {
         return;
     }
 
-    if (seqLength() - last_output_pos_ == 0
-        && !(update_info.num_new_tokens == 0 && generate_input_->generate_config->isPrefillOnly())) {
+    // A request at the sequence limit can finish without committing the
+    // handoff token. Publish its terminal frame so batch collection can finish.
+    const bool empty_terminal_output =
+        finished_ && seqLength() == inputLength() && nextStepSeqLengthLimit() <= static_cast<size_t>(inputLength());
+    if (seqLength() - last_output_pos_ == 0 && !empty_terminal_output
+        && !(update_info.num_new_tokens == 0 && generateConfig()->isPrefillOnly())) {
         return;
     }
 

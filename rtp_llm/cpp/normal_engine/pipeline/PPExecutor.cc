@@ -1340,6 +1340,15 @@ absl::Status PPExecutor::processImpl(const ScheduleOutput& schedule_output, int6
                     batch_stream_processor_->submitExecutionResult(plan, model_output, sampling_output, draft_output);
             }
         }
+        if (cache_manager_ && model_input.pd_separation && !model_input.warmup && !model_input.is_fake_stream
+            && !model_input.skip_lm_head) {
+            cache_manager_->finishP2PPublication(model_input.p2p_final_prefill,
+                                                model_input.request_pd_separation,
+                                                model_input.request_id,
+                                                model_input.request_deadline_ms,
+                                                model_input.p2p_deadline_clock_offset_ms);
+        }
+
         last_compute_done_.record(cuda_graph::graphGetCurrentStream());
         if (!isFirstStage() && !isLastStage() && isStageRoot()) {
             reportStageMetrics(executor_collector);

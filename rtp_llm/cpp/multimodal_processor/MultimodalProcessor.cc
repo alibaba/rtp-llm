@@ -239,6 +239,9 @@ MultimodalProcessor::useExpandedTokenLayout(const GenerateInput&                
         }
         verified_hashes.push_back(std::move(hashes));
     }
+    if (hashes_changed && input.generate_config && input.generate_config->pd_separation) {
+        return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, "Prefill ViT feature hashes differ from the PD handoff tokens");
+    }
     // Recomputed embeddings can differ after cache eviction. Preserve all text
     // and offsets, but make actual KV-cache keys describe the fetched values.
     // Validate every segment before making changes. Matching hashes reuse the

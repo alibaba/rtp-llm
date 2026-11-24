@@ -23,6 +23,9 @@ public:
     /// @brief 是否成功（done() == true 时有效）
     virtual bool success() const = 0;
 
+    // Zero means no successful physical completion timestamp is available.
+    virtual int64_t physicalCompletionTimeUs() const { return 0; }
+
     /// @brief 主动取消该任务
     virtual void cancel() = 0;
 

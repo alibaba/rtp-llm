@@ -67,8 +67,16 @@ def pp_suites(gpu_type):
         tests = [
             ":qwen35_pd_mtp_pp2_pp2_test",
             ":qwen35_pd_mtp_pp2_pp1_test",
+            ":qwen35_pd_mtp_pp1_pp2_test",
         ],
         tags = ["manual"],
+    )
+    _pp_test(
+        "qwen35_pd_mtp_pp1_pp2_test",
+        4,
+        ["pp1_pp2_mtp3"],
+        gpu_type,
+        hybrid = True,
     )
 
     # Reuse the main smoke topologies and model, adding long/short chunk requests.

@@ -172,7 +172,10 @@ public:
             callback(code, success ? "" : "mock send failed");
         };
 
-        if (async_callback_) {
+        if (hold_callbacks_) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            held_callbacks_.push_back(std::move(run_cb));
+        } else if (async_callback_) {
             std::thread(run_cb).detach();
         } else {
             run_cb();
@@ -190,6 +193,19 @@ public:
     }
     void setCallbackDelayMs(int ms) {
         callback_delay_ms_ = ms;
+    }
+    void holdCallbacks() {
+        hold_callbacks_ = true;
+    }
+    void releaseCallbacks() {
+        std::vector<std::function<void()>> callbacks;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            callbacks.swap(held_callbacks_);
+        }
+        for (auto& callback : callbacks) {
+            callback();
+        }
     }
     void setThrowOnSend(bool v) {
         throw_on_send_ = v;
@@ -263,6 +279,8 @@ private:
     mutable std::mutex        mutex_;
     std::condition_variable   send_call_cv_;
     std::vector<SendCallInfo> send_calls_;
+    bool                      hold_callbacks_{false};
+    std::vector<std::function<void()>> held_callbacks_;
     std::mutex                block_send_mutex_;
     std::condition_variable   block_send_cv_;
     bool                      block_send_{false};
@@ -352,6 +370,9 @@ public:
             }
         }
         const int recv_call_index = recv_call_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (recv_call_index == throw_recv_call_index_) {
+            throw std::runtime_error("mock recv registration threw");
+        }
         if (fail_recv_call_index_.load(std::memory_order_relaxed) == recv_call_index) {
             return nullptr;
         }
@@ -407,6 +428,9 @@ public:
     void setFailRecvCallIndex(int index) {
         fail_recv_call_index_.store(index, std::memory_order_relaxed);
     }
+    void setThrowRecvCallIndex(int index) {
+        throw_recv_call_index_ = index;
+    }
 
     void blockNextRecv() {
         std::lock_guard<std::mutex> lock(block_mutex_);
@@ -446,6 +470,7 @@ private:
     std::atomic<int>                                                       steal_task_count_{0};
     std::atomic<int>                                                       recv_call_count_{0};
     std::atomic<int>                                                       fail_recv_call_index_{-1};
+    int                                                                    throw_recv_call_index_{-1};
     mutable std::mutex                                                     block_mutex_;
     std::condition_variable                                                block_recv_cv_;
     std::condition_variable                                                recv_entered_cv_;
@@ -1395,6 +1420,62 @@ TEST_F(P2PConnectorWorkerTest, Read_TracksCopiedKeysUntilWindowIsComplete) {
     EXPECT_TRUE(result.get().ok());
 }
 
+TEST_F(P2PConnectorWorkerTest, PipelineWorkersRendezvousUsingGlobalLayer) {
+    auto prefill_config               = worker_config_;
+    prefill_config.global_layer_begin = 3;
+    prefill_config.topology           = makeTestCacheTopology(1, 2, {{0}, {0}});
+    auto decode_config                = prefill_config;
+    decode_config.global_layer_begin  = 4;
+    P2PWorkerPrefillRead prefill(prefill_config, mock_layer_block_converter_, nullptr, mock_sender_);
+    P2PWorkerDecodeRead  decode(decode_config, mock_layer_block_converter_, nullptr, mock_receiver_);
+    ASSERT_TRUE(prefill.init());
+
+    const int64_t     request_id = 3000;
+    const auto        deadline   = currentTimeMs() + 5000;
+    const std::string key        = "pp-layer-rendezvous";
+    auto              computed   = prefill.getComputedBuffersStore();
+    computed->registerRequestHorizon(request_id, deadline, deadline);
+    for (int layer = 0; layer < 2; ++layer) {
+        auto buffer = std::make_shared<LayerCacheBuffer>(layer, "group0");
+        buffer->addBlockId(123, 1);
+        computed->addBuffer(request_id, buffer, deadline);
+    }
+    prefill.finishPublication(request_id, deadline);
+
+    P2PWorkerRoutePlan send_plan;
+    send_plan.plan_digest   = 19;
+    auto& route             = send_plan.routes.emplace_back();
+    route.route_id          = 7;
+    route.cache_tag         = "group0";
+    route.dst_ip            = "127.0.0.1";
+    route.dst_port          = 12345;
+    route.prefill_layer_ids = {1};
+    const auto send         = prefill.sendKVCache(request_id, key, deadline, send_plan, deadline);
+    ASSERT_TRUE(send.ok()) << send.ToString();
+    const auto sends = mock_sender_->getTransferCalls();
+    ASSERT_EQ(sends.size(), 1u);
+    EXPECT_EQ(sends.front().layer_key, P2PKeyUtil::makeRouteLayerKey(key, 4, "group0", 7, 19));
+
+    P2PWorkerRoutePlan read_plan;
+    read_plan.plan_digest = send_plan.plan_digest;
+    auto& receive         = read_plan.routes.emplace_back();
+    receive.route_id      = route.route_id;
+    receive.cache_tag     = route.cache_tag;
+    auto dst_buffer       = std::make_shared<LayerCacheBuffer>(0, "group0");
+    dst_buffer->addBlockId(123, 2);
+    receive.layer_buffers.push_back(dst_buffer);
+    auto result = std::async(std::launch::async, [&] { return decode.read(request_id, key, deadline, read_plan); });
+    const auto wait_until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!mock_receiver_->batchCopiedCallback(sends.front().layer_key)
+           && std::chrono::steady_clock::now() < wait_until) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(mock_receiver_->batchCopiedCallback(sends.front().layer_key));
+    mock_receiver_->setTaskDone(sends.front().layer_key, true);
+    const auto read = result.get();
+    EXPECT_TRUE(read.ok()) << read.ToString();
+}
+
 TEST_F(P2PConnectorWorkerTest, Read_ReturnTrue_AllLayersSuccess) {
     std::string unique_key  = "test_read_success";
     int64_t     request_id  = 3001;
@@ -1844,7 +1925,6 @@ TEST_F(P2PConnectorWorkerTest, Read_InvalidLaterRouteRegistersNoReceiveTasks) {
     EXPECT_EQ(mock_receiver_->taskCount(), 0);
     EXPECT_TRUE(decode_->lease_map_.empty());
     EXPECT_TRUE(decode_->read_tasks_.empty());
-    EXPECT_TRUE(decode_->building_read_keys_.empty());
 }
 
 TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_BuildRecvTasksFailure_RollsBackRegisteredTasks) {
@@ -1864,6 +1944,25 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_BuildRecvTasksFailure_RollsBackR
     EXPECT_EQ(error_info.code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
     EXPECT_EQ(mock_receiver_->stealTaskCount(), 1);
     EXPECT_EQ(mock_receiver_->taskCount(), 0);
+}
+
+TEST_F(P2PConnectorWorkerTest, Read_RegistrationExceptionRollsBackLeaseAndTasks) {
+    const auto plan = makeReadPlan({createLayerCacheBuffer(0, 2), createLayerCacheBuffer(1, 2)});
+    for (const int failing_call : {1, 2}) {
+        SCOPED_TRACE(failing_call);
+        const auto unique_key = "registration-exception-" + std::to_string(failing_call);
+        const int previous_steals = mock_receiver_->stealTaskCount();
+        mock_receiver_->setThrowRecvCallIndex(mock_receiver_->recvCallCount() + failing_call);
+        const auto result = decode_->read(3010 + failing_call, unique_key, currentTimeMs() + 5000, plan);
+        EXPECT_EQ(result.code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
+        EXPECT_NE(result.ToString().find("mock recv registration threw"), std::string::npos);
+        EXPECT_EQ(mock_receiver_->stealTaskCount() - previous_steals, failing_call - 1);
+        EXPECT_EQ(mock_receiver_->taskCount(), 0);
+        bool sealed = false, stopped = false;
+        int started_ops = 0, finished_ops = 0;
+        EXPECT_FALSE(decode_->queryLeaseStatus(unique_key, sealed, started_ops, finished_ops, stopped));
+        EXPECT_TRUE(stopped);
+    }
 }
 
 TEST_F(P2PConnectorWorkerTest, CancelReadBeforeReadCancelsLateRead) {
@@ -2248,44 +2347,22 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_Succeeds_StaggeredAsyncCallbacks) {
 
 // 测试：send callback 超时未回调 -> sendKVCache 应报告失败而非成功
 TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_CallbackWaitTimeout) {
-    int64_t     request_id  = 4001;
-    std::string unique_key  = "test_callback_wait_timeout";
-    int64_t     deadline_ms = currentTimeMs() + 100;
+    const int64_t request_id = 4001;
+    const int64_t request_deadline_ms = currentTimeMs() + 5000;
+    mock_sender_->holdCallbacks();
+    addComputedBuffer(request_id, 0, request_deadline_ms);
+    addComputedBuffer(request_id, 1, request_deadline_ms);
+    prefill_->finishPublication(request_id, request_deadline_ms);
 
-    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
-    decode_transfer_servers.push_back({"127.0.0.1", 12345});
-
-    // callback 永不触发（大 delay），验证超时保护下不会误判成功
-    mock_sender_->setShouldSucceed(true);
-    mock_sender_->setAsyncCallback(true);
-    mock_sender_->setCallbackDelayMs(500);  // 10s delay，远超 load deadline
-
-    // 设置很短的 load deadline
-
-    addComputedBuffer(request_id, 0, deadline_ms);
-    addComputedBuffer(request_id, 1, deadline_ms);
-
-    std::atomic<bool> done{false};
-    ErrorInfo         result;
-    std::thread       write_thread([&]() {
-        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers), deadline_ms);
-        done   = true;
-    });
-
-    int wait_count = 0;
-    while (!done && wait_count < 500) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        wait_count++;
-    }
-
-    if (write_thread.joinable()) {
-        write_thread.join();
-    }
-
-    EXPECT_TRUE(done);
-    // callback 未收齐，必须报告失败（fix: 修复前此处可能误判成功）
-    EXPECT_TRUE(result.hasError());
+    const auto result = prefill_->sendKVCache(request_id,
+                                              "test_callback_wait_timeout",
+                                              currentTimeMs() + 500,
+                                              makeRoutePlan({{"127.0.0.1", 12345}}),
+                                              request_deadline_ms);
+    EXPECT_EQ(mock_sender_->getTransferCallCount(), 2);
+    mock_sender_->releaseCallbacks();
     EXPECT_EQ(result.code(), ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT);
+    EXPECT_NE(result.ToString().find("Prefill send callback deadline exceeded"), std::string::npos);
 }
 
 // ==================== 逐层描述释放验证测试 ====================

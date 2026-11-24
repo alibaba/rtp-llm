@@ -16,7 +16,6 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace rtp_llm {
@@ -38,7 +37,8 @@ public:
     ErrorInfo read(int64_t                   request_id,
                    const std::string&        unique_key,
                    int64_t                   deadline_ms,
-                   const P2PWorkerRoutePlan& worker_plan);
+                   const P2PWorkerRoutePlan& worker_plan,
+                   int64_t* physical_completion_time_us = nullptr);
 
     bool cancelRead(const std::string& unique_key, int64_t request_deadline_ms = 0);
 
@@ -124,7 +124,6 @@ private:
 
     mutable std::mutex                                              read_tasks_mutex_;
     std::unordered_map<std::string, std::shared_ptr<ReadTaskGroup>> read_tasks_;
-    std::unordered_set<std::string>                                 building_read_keys_;
     // Cancellation can overtake READ because they are independent RPCs.
     // Keep a bounded terminal marker so a late READ cannot start transfers.
     std::unordered_map<std::string, int64_t>                         pending_cancel_keys_;

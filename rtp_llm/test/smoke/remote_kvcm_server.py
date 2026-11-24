@@ -181,7 +181,12 @@ class RemoteKVCMServer:
         if self.pace_fixture is None and os.path.isdir(self._block_path):
             shutil.rmtree(self._block_path)
 
-        ports, self._locks = PortManager().get_consecutive_ports(4)
+        debug_offsets = (3002,) if str_to_bool(
+            self._kvcm_config.get("ENABLE_DEBUG_SERVICE", "false")
+        ) else ()
+        ports, self._locks = PortManager().get_consecutive_ports(
+            4, extra_offsets=debug_offsets
+        )
         self._rpc_port, self._admin_rpc_port, self._http_port, self._admin_http_port = (
             ports
         )
@@ -296,7 +301,11 @@ class RemoteKVCMServer:
                 )
             logging.info(f"addStorage and createInstanceGroup success")
 
-            self._fault_trigger = self.check_fault_injection()
+            if self.check_fault_requested():
+                self._fault_trigger = self.check_fault_injection()
+                if not self._fault_trigger:
+                    self.stop_server()
+                    raise RuntimeError("Smoke fault injection was not installed")
             return True
 
         self.stop_server()

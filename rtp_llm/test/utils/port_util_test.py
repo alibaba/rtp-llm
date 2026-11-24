@@ -89,6 +89,23 @@ class TestPortManager(unittest.TestCase):
                 for lock in locks:
                     lock.__exit__(None, None, None)
 
+    def test_debug_port_conflict_skips_entire_candidate(self):
+        with self.occupy_port(15002):
+            ports, locks = self.port_manager.get_consecutive_ports(
+                4, extra_offsets=(3002,)
+            )
+            try:
+                self.assertEqual(ports, [12001, 12002, 12003, 12004])
+                self.assertEqual([lock.port for lock in locks], ports + [15003])
+                self.assertFalse((self.test_dir / "port_12000.lock").exists())
+                with self.assertRaises(PortInUseError):
+                    with ExpiredLockFile(self.test_dir / "port_15003.lock", 15003):
+                        pass
+            finally:
+                for lock in locks:
+                    lock.__exit__(None, None, None)
+            self.assertFalse((self.test_dir / "port_15003.lock").exists())
+
     def test_get_consecutive_ports_reuse(self):
         ports1, locks1 = self.port_manager.get_consecutive_ports(2)
         original_ports = ports1[:]

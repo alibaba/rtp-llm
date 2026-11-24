@@ -355,7 +355,7 @@ TEST_F(PhaseSpanSynthesizerTest, PrefillModeProducesWaitAndPrefillOnly) {
 }
 
 TEST_F(PhaseSpanSynthesizerTest, DecodeModeProducesWaitAndDecodeOnly) {
-    auto parent         = createParentSpan("rtp_llm.decode_remote_generate");
+    auto parent         = createParentSpan("rtp_llm.prefill_start_load");
     auto parent_span_id = parent->GetContext().span_id();
 
     // The remote first token predates the local Decode begin. Decode ignores
@@ -503,7 +503,7 @@ TEST_F(PhaseSpanSynthesizerTest, TruncatedDecodeKeepsEngineIndexAndConsumerRole)
 // but claims no producer/consumer role.
 TEST_F(PhaseSpanSynthesizerTest, KvLoadSpanCarriesEngineIndexWithoutPdRole) {
     restartWithWorldRank(9);
-    auto parent = createParentSpan("rtp_llm.decode_remote_generate");
+    auto parent = createParentSpan("rtp_llm.prefill_start_load");
 
     synthesizeKvLoadSpan(parent, 4000000, 4069000, 42, /*ok=*/true);
     parent->End();
@@ -567,7 +567,7 @@ TEST_F(PhaseSpanSynthesizerTest, NullParentIsSafe) {
 }
 
 TEST_F(PhaseSpanSynthesizerTest, KvLoadSpanCoversLoadWindowOnSuccess) {
-    auto parent         = createParentSpan("rtp_llm.decode_remote_generate");
+    auto parent         = createParentSpan("rtp_llm.prefill_start_load");
     auto parent_span_id = parent->GetContext().span_id();
 
     // load window [4000000, 4069000): 69ms KV-arrival wait
@@ -595,7 +595,7 @@ TEST_F(PhaseSpanSynthesizerTest, KvLoadSpanCoversLoadWindowOnSuccess) {
 }
 
 TEST_F(PhaseSpanSynthesizerTest, KvLoadSpanMarksErrorOnFailure) {
-    auto parent = createParentSpan("rtp_llm.decode_remote_generate");
+    auto parent = createParentSpan("rtp_llm.prefill_start_load");
 
     // Failure exit (e.g. CACHE_STORE_LOAD_BUFFER_TIMEOUT): span still
     // synthesized so the timeout window stays visible, but status = kError.
@@ -623,7 +623,7 @@ TEST_F(PhaseSpanSynthesizerTest, KvLoadSpanMarksErrorOnFailure) {
 }
 
 TEST_F(PhaseSpanSynthesizerTest, KvLoadSpanUsesLowCardinalityCancelledType) {
-    auto parent = createParentSpan("rtp_llm.decode_remote_generate");
+    auto parent = createParentSpan("rtp_llm.prefill_start_load");
 
     synthesizeKvLoadSpan(parent,
                          4000000,
@@ -648,7 +648,7 @@ TEST_F(PhaseSpanSynthesizerTest, KvLoadSpanUsesLowCardinalityCancelledType) {
 }
 
 TEST_F(PhaseSpanSynthesizerTest, KvLoadSpanInvalidWindowIsSkipped) {
-    auto parent = createParentSpan("rtp_llm.decode_remote_generate");
+    auto parent = createParentSpan("rtp_llm.prefill_start_load");
 
     synthesizeKvLoadSpan(parent, 0, 4069000, 42, true);         // begin unset
     synthesizeKvLoadSpan(parent, 4069000, 4000000, 42, true);   // end < begin

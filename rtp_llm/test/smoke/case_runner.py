@@ -877,6 +877,7 @@ class CaseRunner(object):
         smoke_args_str: Optional[str] = None,
         server_manager_callback: Optional[Callable[[MagaServerManager], None]] = None,
         cancel_event: Optional[threading.Event] = None,
+        health_check_path: str = "/health",
     ) -> Optional[MagaServerManager]:
         # If smoke_args_str is not provided, try to get it from self.smoke_args dict based on role_name
         if smoke_args_str is None:
@@ -891,6 +892,7 @@ class CaseRunner(object):
             port=port,
             role_name=role_name,
             smoke_args_str=smoke_args_str,
+            health_check_path=health_check_path,
         )
         if server_manager_callback is not None:
             server_manager_callback(server_manager)

@@ -87,6 +87,7 @@ public:
     void        setTask(const std::shared_ptr<TransferTask>& task);
     std::string getUniqueKey() const;
     bool        isTimeout() const;
+    bool        isCancelled() const;
     uint64_t    getDeadlineMs() const;
 
     /// @brief 委托给底层 TransferTask::startTransfer()。

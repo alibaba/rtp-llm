@@ -1062,7 +1062,7 @@ TEST_F(PPSchedulerTest, PdPrefillFinalChunkIsReapedWithoutEnteringPendingDecode)
     update_info.update_remote_generate = true;
     stream->update(update_info, false);
     stream->clearPPInflight();
-    EXPECT_TRUE(stream->hasEvent(StreamEvents::NeedRemoteGenerate));
+    EXPECT_TRUE(stream->hasEvent(StreamEvents::PrefillHandoffReady));
     EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
 
     auto retired = scheduler->schedule();

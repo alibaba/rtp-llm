@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerDecodeRead.h"
 
+#include "autil/Scope.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PKeyUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
@@ -77,7 +78,6 @@ ErrorInfo P2PWorkerDecodeRead::buildRecvTasks(const P2PWorkerRoutePlan&         
                                                    int&                                  total_block_count) {
     auto fail_registration = [&](const std::string& message,
                                  ErrorCode error_code = ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED) {
-        cleanupRecvTaskStore(task_group, /*cancel_pending_tasks=*/true);
         RTP_LLM_LOG_WARNING("P2P recv registration failed, unique_key=%s error_code=%d error_name=%s error=%s",
                             unique_key.c_str(), static_cast<int>(error_code),
                             ErrorCodeToString(error_code).c_str(), message.c_str());
@@ -94,7 +94,9 @@ ErrorInfo P2PWorkerDecodeRead::buildRecvTasks(const P2PWorkerRoutePlan&         
                                      + " has no layer buffers, unique_key=" + unique_key);
         }
         const size_t payload_bytes =
-            config_.topology ? config_.topology->group(route.cache_tag).spec->k_block_payload_bytes() : 0;
+            route.slice_payload_bytes != 0 ?
+                route.slice_payload_bytes :
+                (config_.topology ? config_.topology->group(route.cache_tag).spec->k_block_payload_bytes() : 0);
 
         for (const auto& layer_cache_buffer : route.layer_buffers) {
             if (!layer_cache_buffer) {
@@ -136,8 +138,11 @@ ErrorInfo P2PWorkerDecodeRead::buildRecvTasks(const P2PWorkerRoutePlan&         
             }
 
             // key 由编排层签发的 route_id + plan digest 命名 —— 两侧不做任何独立推导。
-            const std::string route_layer_key = P2PKeyUtil::makeRouteLayerKey(
-                unique_key, layer_id, layer_cache_buffer->cacheTag(), route.route_id, worker_plan.plan_digest);
+            const std::string route_layer_key = P2PKeyUtil::makeRouteLayerKey(unique_key,
+                                                                              config_.global_layer_begin + layer_id,
+                                                                              layer_cache_buffer->cacheTag(),
+                                                                              route.route_id,
+                                                                              worker_plan.plan_digest);
 
             transfer::RecvRequest recv_req;
             recv_req.unique_key  = route_layer_key;
@@ -259,7 +264,8 @@ void P2PWorkerDecodeRead::reportReadMetrics(P2PConnectorMetricsCollector&       
 ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
                                          const std::string&        unique_key,
                                          int64_t                   deadline_ms,
-                                         const P2PWorkerRoutePlan& worker_plan) {
+                                         const P2PWorkerRoutePlan& worker_plan,
+                                         int64_t* physical_completion_time_us) {
     RTP_LLM_LOG_DEBUG("read start, request_id: %ld, unique_key: %s, deadline_ms: %ld, routes: %zu, plan_digest: %llu",
                       request_id,
                       unique_key.c_str(),
@@ -277,6 +283,21 @@ ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
     task_group->lease                              = std::make_shared<DecodeTargetWriteLease>();
     int                          total_block_count = 0;
     P2PConnectorMetricsCollector collector;
+    bool registration_pending = false;
+    const auto rollback_registration = [&] {
+        if (!registration_pending) {
+            return;
+        }
+        registration_pending = false;
+        try {
+            cleanupRecvTaskStore(task_group, /*cancel_pending_tasks=*/true);
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("P2P recv registration cleanup failed, unique_key=%s", unique_key.c_str());
+        }
+        task_group->lease->seal();
+        onRecvTaskDone(unique_key, task_group);
+    };
+    autil::ScopeGuard registration_guard(rollback_registration);
     {
         std::lock_guard<std::mutex> lock(read_tasks_mutex_);
         auto                        pending_cancel = pending_cancel_keys_.find(unique_key);
@@ -289,13 +310,13 @@ ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
             pending_cancel_keys_.erase(pending_cancel);
             schedulePendingCancelExpiryLocked();
         }
-        // A new registration must not replace the lease of an earlier read.
+        // An unsealed lease fences queries before the first receiver task is created.
         std::lock_guard<std::mutex> lease_lock(lease_map_mutex_);
-        if (read_tasks_.count(unique_key) > 0 || lease_map_.count(unique_key) > 0
-            || !building_read_keys_.insert(unique_key).second) {
+        if (read_tasks_.count(unique_key) > 0 || !lease_map_.emplace(unique_key, LeaseMapEntry{task_group}).second) {
             return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
                              "read already registered for key=" + unique_key);
         }
+        registration_pending = true;
     }
 
     const auto prepare_start_us = currentTimeUs();
@@ -305,27 +326,16 @@ ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
     } catch (const std::exception& error) {
         build_result = ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
                                  std::string("recv registration failed: ") + error.what());
-        cleanupRecvTaskStore(task_group, /*cancel_pending_tasks=*/true);
+    } catch (...) {
+        build_result = ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
+                                 "recv registration failed with an unknown exception");
     }
     collector.decode_worker_prepare_time_us   = currentTimeUs() - prepare_start_us;
     collector.decode_worker_total_block_count = total_block_count;
     if (build_result.hasError()) {
+        rollback_registration();
         reportReadMetrics(collector, false, read_start_time_us, task_group);
-        const bool has_inflight_task = std::any_of(
-            task_group->tasks.begin(), task_group->tasks.end(), [](const auto& task) { return task && !task->done(); });
-        {
-            std::lock_guard<std::mutex> lock(read_tasks_mutex_);
-            building_read_keys_.erase(unique_key);
-            if (has_inflight_task) {
-                task_group->lease->seal();
-                std::lock_guard<std::mutex> lease_lock(lease_map_mutex_);
-                auto& lease_entry      = lease_map_[unique_key] = LeaseMapEntry{task_group};
-                if (lease_entry.task_group->lease->isStopped()) {
-                    lease_map_.erase(unique_key);
-                }
-            }
-        }
-        if (has_inflight_task) {
+        if (!task_group->lease->isStopped()) {
             return ErrorInfo(ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE,
                              build_result.ToString() + "; registered recv task is still stopping");
         }
@@ -335,13 +345,9 @@ ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
     bool pending_cancel = false;
     {
         std::lock_guard<std::mutex> lock(read_tasks_mutex_);
-        building_read_keys_.erase(unique_key);
-        read_tasks_[unique_key] = task_group;
-        pending_cancel          = pending_cancel_keys_.count(unique_key) > 0;
-        // Publish the lease before registration stops being visible. A lease
-        // query after CANCEL_READ acknowledgement must always observe one of them.
-        std::lock_guard<std::mutex> lease_lock(lease_map_mutex_);
-        lease_map_[unique_key] = LeaseMapEntry{task_group};
+        read_tasks_.emplace(unique_key, task_group);
+        pending_cancel = pending_cancel_keys_.count(unique_key) > 0;
+        registration_pending = false;
     }
 
     if (pending_cancel) {
@@ -362,7 +368,6 @@ ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
 
     {
         std::lock_guard<std::mutex> lock(read_tasks_mutex_);
-        building_read_keys_.erase(unique_key);
         read_tasks_.erase(unique_key);
     }
 
@@ -412,6 +417,18 @@ ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
         return ErrorInfo(recv_result.error_code, recv_result.error_msg);
     }
 
+    if (physical_completion_time_us && !task_group->tasks.empty()) {
+        int64_t latest = 0;
+        for (const auto& task : task_group->tasks) {
+            const auto completed = task->physicalCompletionTimeUs();
+            if (completed <= 0) {
+                latest = 0;
+                break;
+            }
+            latest = std::max(latest, completed);
+        }
+        *physical_completion_time_us = latest;
+    }
     RTP_LLM_LOG_DEBUG("read end, request_id: %ld, unique_key: %s, success: true", request_id, unique_key.c_str());
     return ErrorInfo::OkStatus();
 }
@@ -461,9 +478,7 @@ bool P2PWorkerDecodeRead::cancelRead(const std::string& unique_key, int64_t requ
         schedulePendingCancelExpiryLocked();
         auto                        it = read_tasks_.find(unique_key);
         if (it == read_tasks_.end()) {
-            RTP_LLM_LOG_INFO("cancelRead: queued pending cancel, unique_key: %s, during_registration: %d",
-                             unique_key.c_str(),
-                             building_read_keys_.count(unique_key) > 0);
+            RTP_LLM_LOG_INFO("cancelRead: queued pending cancel, unique_key: %s", unique_key.c_str());
             return true;
         }
         task_group = it->second;
@@ -601,17 +616,8 @@ void P2PWorkerDecodeRead::runPendingCancelExpiryLoop() {
 
 bool P2PWorkerDecodeRead::queryLeaseStatus(
     const std::string& unique_key, bool& sealed, int& started_ops, int& finished_ops, bool& stopped) {
-    // Keep the registration state and lease-map transition in one observation.
-    // The read path acquires these locks in the same order when publishing a lease.
+    // Serialize with read admission so a newly published lease is visible.
     std::lock_guard<std::mutex> read_lock(read_tasks_mutex_);
-    if (building_read_keys_.count(unique_key) > 0) {
-        sealed       = false;
-        started_ops  = 0;
-        finished_ops = 0;
-        stopped      = false;
-        return true;
-    }
-
     std::lock_guard<std::mutex> lease_lock(lease_map_mutex_);
     auto                        it = lease_map_.find(unique_key);
     if (it == lease_map_.end()) {

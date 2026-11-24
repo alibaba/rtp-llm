@@ -38,6 +38,33 @@ py_test(
     ],
 )
 
+
+py_test(
+    name = "openai_comparer_test",
+    srcs = glob(
+        ["*.py", "test/openai_comparer_test.py"],
+        exclude = ["entry.py"],
+    ),
+    main = "test/openai_comparer_test.py",
+    imports = [".."],
+    deps = [
+        "//rtp_llm/test/utils:device_resource",
+        "//rtp_llm/test/utils:maga_server_manager",
+        "//rtp_llm/test/utils:test_util",
+        "//rtp_llm:dashscope",
+        "//rtp_llm:fastapi",
+        "//rtp_llm:jieba",
+        "//rtp_llm:json5",
+        "//rtp_llm:openai",
+        "//rtp_llm:partial_json_parser",
+        "//rtp_llm:psutil",
+        "//rtp_llm:pydantic",
+        "//rtp_llm:testlib",
+        "//rtp_llm:tiktoken",
+        "//rtp_llm:uvicorn",
+    ],
+)
+
 py_test(
     name = "remote_cache_cleanup_test",
     srcs = glob(["*.py"], exclude = ["entry.py"]),
@@ -190,9 +217,7 @@ smoke_test(
         "vit_0": ["MM_CACHE_GPU_MAX_BYTES=2147483648", "MM_CACHE_CPU_MAX_BYTES=2147483648"],
         "vit_1": ["MM_CACHE_GPU_MAX_BYTES=2147483648", "MM_CACHE_CPU_MAX_BYTES=2147483648"],
     },
-    data = [
-        ":flexlb_runtime_bundle",
-    ],
+    data = ["//rtp_llm/flexlb:flexlb_jar", "//rtp_llm/flexlb:smoke_java_runtime"],
     gpu_type = ["SM103_CU13"],
     sleep_time_qr = 2,
     test_envs = {

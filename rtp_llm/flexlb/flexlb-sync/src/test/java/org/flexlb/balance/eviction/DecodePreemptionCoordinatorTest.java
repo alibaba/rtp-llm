@@ -91,8 +91,16 @@ class DecodePreemptionCoordinatorTest {
         secondTerminal.complete(new VictimTerminal("12"));
 
         assertTrue(result.get(1, TimeUnit.SECONDS).committed());
-        verify(cancelChannel).cancel(eq(new CancelTarget("10.0.0.1", 9090)), eq("11"), anyLong());
-        verify(cancelChannel).cancel(eq(new CancelTarget("10.0.0.1", 9090)), eq("12"), anyLong());
+        verify(cancelChannel)
+                .cancel(
+                        eq(new CancelTarget("10.0.0.2", 9091, "10.0.0.1:9090")),
+                        eq("11"),
+                        anyLong());
+        verify(cancelChannel)
+                .cancel(
+                        eq(new CancelTarget("10.0.0.2", 9091, "10.0.0.1:9090")),
+                        eq("12"),
+                        anyLong());
         verify(endpoint).finishPreemption(1L, DecodeEndpoint.PreemptionDecision.COMMIT);
         verify(endpoint, never())
                 .finishPreemption(anyLong(), eq(DecodeEndpoint.PreemptionDecision.ABORT));
@@ -396,7 +404,7 @@ class DecodePreemptionCoordinatorTest {
         when(endpoint.finishPreemption(anyLong(), eq(DecodeEndpoint.PreemptionDecision.COMMIT)))
                 .thenReturn(true);
         when(requests.findCancelTarget(anyString(), anyLong()))
-                .thenReturn(Optional.of(new CancelTarget("10.0.0.1", 9090)));
+                .thenReturn(Optional.of(new CancelTarget("10.0.0.2", 9091, "10.0.0.1:9090")));
         return new Fixture(requests, endpoint, mock(RequestSchedulerReporter.class));
     }
 

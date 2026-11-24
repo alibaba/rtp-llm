@@ -16,7 +16,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.flexlb.mock.protocol.*;
 
 /**
- * Sends a request through Master scheduling and streams the result from Prefill.
+ * Sends through Master scheduling and streams from mock Prefill or native Decode.
  * Prepares multimodal inputs through ViT before requesting the Prefill and Decode route.
  */
 public final class BackendRpcTransport implements AutoCloseable {
@@ -32,6 +32,7 @@ public final class BackendRpcTransport implements AutoCloseable {
     private final int prefillCpSize;
 
     private final Map<String, ManagedChannel> channels = new HashMap<>();
+    private final Map<String, Boolean> mockProtocols = new ConcurrentHashMap<>();
     private final Map<Long, Call> active = new HashMap<>();
     private final ScheduledThreadPoolExecutor timers = new ScheduledThreadPoolExecutor(1,
         Thread.ofPlatform().daemon().name("mock-frontend-deadline").factory());
@@ -137,6 +138,19 @@ public final class BackendRpcTransport implements AutoCloseable {
     private synchronized ManagedChannel channel(String target) {
         if (closed) throw new IllegalStateException("Frontend closed");
         return channels.computeIfAbsent(target, t -> ManagedChannelBuilder.forTarget(t).usePlaintext().build());
+    }
+
+    private boolean mockProtocol(String prefillAddress) {
+        return mockProtocols.computeIfAbsent(prefillAddress, target -> {
+            try {
+                return RpcServiceGrpc.newBlockingStub(channel(target)).withDeadlineAfter(1, TimeUnit.SECONDS)
+                    .getPeerInfo(GetPeerInfoRequestPB.getDefaultInstance()).getTpSize() == 0;
+            } catch (StatusRuntimeException error) {
+                // Older mock nodes have no topology RPC. Other failures do not establish a protocol.
+                if (error.getStatus().getCode() == Status.Code.UNIMPLEMENTED) return true;
+                throw error;
+            }
+        });
     }
 
     private List<Long> routingKeys(MultimodalProtocol.Prepared input, long physicalBlockSize) {
@@ -387,7 +401,15 @@ public final class BackendRpcTransport implements AutoCloseable {
                 var prefills = route.getServerStatusList().stream().filter(s -> s.getRole().equals("PREFILL")).toList();
                 if (prefills.size() != 1) throw Status.DATA_LOSS.withDescription("Exactly one Prefill route required").asRuntimeException();
                 var p = prefills.getFirst();
-                var stub = RpcServiceGrpc.newStub(channel(address(p)));
+                String prefillAddress = address(p);
+                boolean mock = mockProtocol(prefillAddress);
+                String servingAddress = prefillAddress;
+                if (!mock) {
+                    var decodes = route.getServerStatusList().stream().filter(s -> s.getRole().equals("DECODE")).toList();
+                    if (decodes.size() != 1) throw Status.DATA_LOSS.withDescription("Exactly one Decode route required").asRuntimeException();
+                    servingAddress = address(decodes.getFirst());
+                }
+                var stub = RpcServiceGrpc.newStub(channel(servingAddress));
                 var responses = new ClientResponseObserver<Object, GenerateOutputsPB>() {
                     private ClientCallStreamObserver<Object> stream;
                     @Override public void beforeStart(ClientCallStreamObserver<Object> stream) {
@@ -431,9 +453,10 @@ public final class BackendRpcTransport implements AutoCloseable {
                         }
                     }
                 };
-                if (route.getEnqueuedByMaster()) stub.fetchResponse(FetchRequestPB.newBuilder().setRequestId(input.getRequestId()).build(), responses);
+                if (mock && route.getEnqueuedByMaster()) stub.fetchResponse(FetchRequestPB.newBuilder().setRequestId(input.getRequestId()).build(), responses);
                 else {
-                    var routed = input.toBuilder(); var config = routed.getGenerateConfigBuilder().clearRoleAddrs();
+                    var routed = input.toBuilder().setEnqueuedByMaster(route.getEnqueuedByMaster());
+                    var config = routed.getGenerateConfigBuilder().clearRoleAddrs();
                     for (var server : route.getServerStatusList()) {
                         var role = switch (server.getRole()) {
                             case "PREFILL" -> RoleAddrPB.RoleType.PREFILL;

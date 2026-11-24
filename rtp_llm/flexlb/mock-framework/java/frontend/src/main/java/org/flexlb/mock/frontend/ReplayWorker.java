@@ -225,7 +225,7 @@ final class ReplayWorker implements AutoCloseable {
         var input = entry.input().toBuilder().setRequestId(item.requestId());
         input.getGenerateConfigBuilder().setReuseCache(Boolean.TRUE.equals(plan.reuse_cache()))
             .setMaxNewTokens(item.outputLimit()).setIgnoreEos(entry.observedOutputTokens() > 0)
-            .setCanUsePdSeparation(true).setReturnIncremental(true).setIsStreaming(true);
+            .setCanUsePdSeparation(item.outputLimit() > 1).setNumBeams(1).setReturnIncremental(true).setIsStreaming(true);
         var generateInput = input.build();
         var request = FlexlbScheduleRequestPB.newBuilder().setRequestId(item.requestId())
             .setCacheKeyBlockSize(physicalBlockSize).setSeqLen(input.getTokenIdsCount())

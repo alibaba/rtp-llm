@@ -8,6 +8,7 @@ from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 from fastapi import Request
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.server.misc import format_exception
 from rtp_llm.config.generate_config import (
     GenerateConfig,
     ReturnAllProbsMode,
@@ -874,6 +875,8 @@ class OpenaiEndpoint(object):
         batch_request,
         frontend_metric_tags=None,
         frontend_metric_observer=None,
+        *,
+        request_ids: Optional[List[int]] = None,
     ) -> list:
         inputs = []
         all_configs = []
@@ -884,7 +887,7 @@ class OpenaiEndpoint(object):
                 )
             chat_request.stream = False
             gen_input, generate_config = self._prepare_chat_input(
-                base_request_id + i, chat_request
+                request_ids[i] if request_ids is not None else base_request_id + i, chat_request
             )
             generate_config.is_streaming = False
             if frontend_metric_observer is not None:
@@ -919,6 +922,9 @@ class OpenaiEndpoint(object):
 
         responses = []
         for i, outputs in enumerate(batch_outputs):
+            if isinstance(outputs, FtRuntimeException):
+                responses.append({"error": format_exception(outputs)})
+                continue
             complete_response = await self._render_single_output(
                 outputs, batch_request.requests[i], all_configs[i]
             )

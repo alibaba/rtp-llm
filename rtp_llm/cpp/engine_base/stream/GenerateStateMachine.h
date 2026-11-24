@@ -9,11 +9,10 @@
 #include <string>
 
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
+#include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
-
-class StreamCacheResource;  // forward declaration
 
 // Stream 生命周期状态机，将原先分散在 FIFOScheduler 中的状态转移逻辑集中管理。
 // 状态转移路径: WAITING -> LOADING_CACHE -> WAITING -> RUNNING -> FINISHED
@@ -22,6 +21,9 @@ class StreamCacheResource;  // forward declaration
 // 线程安全说明：GenerateStateMachine 本身不提供同步机制，外部调用者需保证 reportEvent() 和 moveToNext()
 // 的调用串行化（通常通过 GenerateStream::mutex_ 保护）。
 struct GenerateStateMachine {
+    FirstError first_error;
+    int64_t initial_kv_allocation_rt_us = 0;
+
 public:
     GenerateStateMachine(std::shared_ptr<StreamCacheResource> stream_cache_resource):
         stream_cache_resource_(stream_cache_resource) {}
@@ -34,6 +36,10 @@ public:
                      T&&                     error_msg  = std::decay_t<T>{}) {
         if (error_info.ok() && event == StreamEvents::Error) {
             error_info = ErrorInfo(error_code, std::forward<T>(error_msg));
+            first_error.record(error_info);
+            if (stream_cache_resource_) {
+                stream_cache_resource_->failPrefillPublication(error_info);
+            }
         }
         events_.append(event);
     }

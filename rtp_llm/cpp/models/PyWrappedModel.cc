@@ -8,6 +8,8 @@
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include <algorithm>
 #include <cstdint>
+#include <limits>
+#include <map>
 #include <stdexcept>
 #include <mutex>
 #include <utility>
@@ -754,19 +756,59 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
     }
 
     PyCacheStoreInputs cache_store_inputs;
-    bool               has_d2h = false;
-    const auto&        block_ids = inputs.kv_cache_block_id;
+    bool               has_d2h               = false;
+    const auto&        block_ids             = inputs.kv_cache_block_id;
     cache_store_inputs.host_kv_cache_offset  = block_ids.defined() && block_ids.is_cuda() ? block_ids.cpu() : block_ids;
     cache_store_inputs.input_lengths_host    = toHostAsync(inputs.input_lengths, has_d2h);
     cache_store_inputs.prefix_lengths_host   = toHostAsync(inputs.prefix_lengths, has_d2h);
     cache_store_inputs.publish_start_tokens  = toHostAsync(inputs.cache_store_publish_start_tokens, has_d2h);
     cache_store_inputs.request_id            = inputs.request_id;
     cache_store_inputs.request_pd_separation = inputs.request_pd_separation;
-    cache_store_inputs.cache_keys            = inputs.cache_keys;
-
+    cache_store_inputs.request_deadline_ms   = toHostAsync(inputs.request_deadline_ms, has_d2h);
     if (has_d2h) {
         cache_store_inputs.metadata_ready_event = runtimeCreateEvent();
     }
+    if (cache_manager_->hasP2PConnector()) {
+        // Chunk lookup consumes host metadata before the layer writer's event wait.
+        if (cache_store_inputs.metadata_ready_event) {
+            cache_store_inputs.metadata_ready_event->synchronize();
+        }
+        // Capture the per-request chunk for this forward (or microbatch). The writer
+        // can call back asynchronously with just the request ID and source deadline.
+        using ChunkIds = std::map<std::pair<int64_t, int64_t>, int32_t>;
+        ChunkIds    chunk_ids;
+        const auto& publish_starts = cache_store_inputs.publish_start_tokens;
+        if (publish_starts.defined() && publish_starts.numel() == cache_store_inputs.request_id.numel()
+            && (!cache_store_inputs.request_deadline_ms.defined()
+                || cache_store_inputs.request_deadline_ms.numel() == publish_starts.numel())) {
+            const auto  request_ids   = cache_store_inputs.request_id.accessor<int64_t, 1>();
+            const auto  starts        = publish_starts.accessor<int32_t, 1>();
+            const auto& deadlines     = cache_store_inputs.request_deadline_ms;
+            const auto* deadline_data = deadlines.defined() ? deadlines.data_ptr<int64_t>() : nullptr;
+            for (int64_t row = 0; row < starts.size(0); ++row) {
+                const int64_t deadline = deadline_data ? deadline_data[row] : std::numeric_limits<int64_t>::max();
+                chunk_ids.emplace(std::make_pair(request_ids[row], deadline), starts[row]);
+            }
+        }
+        cache_store_inputs.p2p_layer_write = [manager         = cache_manager_,
+                                              clock_offset_ms = inputs.p2p_deadline_clock_offset_ms,
+                                              chunk_ids       = std::make_shared<const ChunkIds>(std::move(chunk_ids))](
+                                                 size_t                               model_id,
+                                                 int                                  layer_id,
+                                                 const std::string&                   tag,
+                                                 const std::vector<int64_t>&          keys,
+                                                 const std::vector<int32_t>&          blocks,
+                                                 int64_t                              request_id,
+                                                 const std::shared_ptr<torch::Event>& event,
+                                                 int64_t                              deadline_ms) {
+            const auto chunk    = chunk_ids->find({request_id, deadline_ms});
+            const int  chunk_id = chunk == chunk_ids->end() ? -1 : chunk->second;
+            return manager->writeP2PLayer(
+                model_id, layer_id, tag, keys, blocks, request_id, event, deadline_ms, clock_offset_ms, chunk_id);
+        };
+    }
+    cache_store_inputs.cache_keys = inputs.cache_keys;
+
     return cache_store_inputs;
 }
 
@@ -1503,6 +1545,7 @@ void PyWrappedModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
 
     buffer_holder_.hold_host(inputs.request_id);
     buffer_holder_.hold_host(inputs.request_pd_separation);
+    buffer_holder_.hold_host(inputs.request_deadline_ms);
     buffer_holder_.hold_host(inputs.cache_keys);
 }
 

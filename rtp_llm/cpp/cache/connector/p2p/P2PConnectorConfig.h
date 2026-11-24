@@ -24,21 +24,21 @@ struct P2PConnectorSchedulerConfig {
     int64_t load_cache_timeout_ms = 5000;
     std::vector<std::string> worker_grpc_addrs;
     std::vector<std::string> worker_addrs;
-    int64_t                  p2p_lease_query_timeout_ms                   = 20 * 1000;
-    int                      p2p_kv_leak_exit_threshold_percent            = 30;
+    std::string                          pipeline_layout;
+    int64_t                  p2p_lease_query_timeout_ms                   = 500;
     int64_t                  p2p_cancel_broadcast_timeout_ms              = 1000;
     int64_t                     p2p_cancelled_keys_ttl_ms    = 3600 * 1000;
     std::shared_ptr<const CacheTopology> topology;
     bool                                 use_group_cache_transfer_policy = false;
     bool                                 use_mla                         = false;
+    int                                  decode_transfer_layer_end       = std::numeric_limits<int>::max();
     std::map<std::string, size_t>        physical_block_bytes_by_group;
     size_t                               cache_key_tokens_per_block = 1;
     int                                  cp_rank = 0;
     int                                  cp_size = 1;
 
-    // 编排层（KVCacheTransferPlanner）需要完整的并行度与角色来构造本端 ShardLayout，
-    // 并由 ShardLayoutFactory::peerOf 推导对端布局 —— 这是「跨端协议零改动」的前提。
-    // cp_rank / cp_size 是它的投影，保留是为了旧执行路径。
+    // TP-only planning mirrors the peer layout. PP planning uses the actual
+    // stage descriptions carried by GetPeerInfo and StartLoad.
     ParallelismConfig parallelism_config;
     RoleType          role_type = RoleType::PDFUSION;
 
@@ -53,7 +53,6 @@ struct P2PConnectorSchedulerConfig {
         config.worker_grpc_addrs                      = runtime_config.worker_grpc_addrs;
         config.worker_addrs                           = runtime_config.worker_addrs;
         config.p2p_lease_query_timeout_ms = cache_store_config.p2p_lease_query_timeout_ms;
-        config.p2p_kv_leak_exit_threshold_percent = cache_store_config.p2p_kv_leak_exit_threshold_percent;
         config.p2p_cancel_broadcast_timeout_ms = cache_store_config.p2p_cancel_broadcast_timeout_ms;
         config.p2p_cancelled_keys_ttl_ms       = cache_store_config.p2p_cancelled_keys_ttl_ms;
         return config;
@@ -72,6 +71,7 @@ struct P2PConnectorWorkerConfig {
     int64_t  tp_size       = 1;
     int64_t  tp_rank       = 0;
     uint32_t layer_all_num = 0;
+    uint32_t global_layer_begin = 0;
 
     std::shared_ptr<const CacheTopology> topology;
     size_t                               cache_key_tokens_per_block = 1;
