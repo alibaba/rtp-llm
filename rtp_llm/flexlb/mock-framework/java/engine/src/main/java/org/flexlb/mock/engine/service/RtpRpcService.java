@@ -9,9 +9,11 @@ import java.util.List;
 import java.util.Map;
 import org.flexlb.mock.metrics.MetricTags;
 import org.flexlb.mock.metrics.EventMetrics;
-import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
 import java.util.Objects;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 import org.flexlb.engine.grpc.EngineRpcService.*;
@@ -44,14 +46,19 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
 
     private final AtomicLong inflightRequests = new AtomicLong();
     private final AtomicLong statusVersion = new AtomicLong();
+    private ScheduledExecutorService rpcDelays;
 
     private volatile boolean closed;
 
     public RtpRpcService(Config config, KvCacheManager cache, Object executionLock, TaskHistory finished,
-                         EngineLoop engine, boolean groups) {
+                          EngineLoop engine, boolean groups) {
         this.config = config;
         this.groups = groups;
         this.cache = cache; this.finished = finished;
+        if (config.enqueueAckDelayMs() > 0 || config.cancelEffectDelayMs() > 0) {
+            rpcDelays = Executors.newSingleThreadScheduledExecutor(
+                Thread.ofPlatform().daemon(true).name("mock-rpc-delays").factory());
+        }
         var tags = new HashMap<>(MetricTags.fromEnvironment(System.getenv()));
         tags.put("dp_rank", "0");
         metricTags = Map.copyOf(tags);
@@ -65,6 +72,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
     public void close() {
         closed = true;
         cancelForwarder.close();
+        if (rpcDelays != null) rpcDelays.shutdown();
         RuntimeException failure = null;
         for (AutoCloseable component : new AutoCloseable[]{prefill, decode}) {
             if (component == null) continue;
@@ -107,6 +115,12 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
 
     @Override public void enqueueBatch(EnqueueBatchRequestPB request, StreamObserver<EnqueueBatchResponsePB> response) {
         if (prefill == null || !groups) { super.enqueueBatch(request, response); return; }
+        if (config.enqueueAckDelayMs() > 0) {
+            // The admission runs on arrival and starts the fetch-attach retention window;
+            // only the ACK response is delayed.
+            PrefillEnqueueHandler.enqueue(prefill, request, response, config.enqueueAckDelayMs(), rpcDelays);
+            return;
+        }
         PrefillEnqueueHandler.enqueue(prefill, request, response);
     }
 
@@ -118,8 +132,13 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
             if (item.hasInput()) external.setInput(item.getInput());
             slot.addRequests(external);
         }
-        PrefillEnqueueHandler.enqueue(prefill, EnqueueBatchRequestPB.newBuilder().setBatchId(request.getBatchId())
-            .setFetchAttachTimeoutMs(request.getFetchAttachTimeoutMs()).addDpSlots(slot).build(), response);
+        var batch = EnqueueBatchRequestPB.newBuilder().setBatchId(request.getBatchId())
+            .setFetchAttachTimeoutMs(request.getFetchAttachTimeoutMs()).addDpSlots(slot).build();
+        if (config.enqueueAckDelayMs() > 0) {
+            PrefillEnqueueHandler.enqueue(prefill, batch, response, config.enqueueAckDelayMs(), rpcDelays);
+            return;
+        }
+        PrefillEnqueueHandler.enqueue(prefill, batch, response);
     }
 
     @Override public void fetchResponse(FetchRequestPB request, StreamObserver<GenerateOutputsPB> response) {
@@ -130,6 +149,15 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
     @Override public void cancel(CancelRequestPB request, StreamObserver<CancelResponsePB> response) {
         if (closed) { response.onError(Status.UNAVAILABLE.withDescription("Engine closed").asRuntimeException()); return; }
         if (prefill == null) { cancelForwarder.cancel(request, response); return; }
+        if (config.cancelEffectDelayMs() > 0) {
+            // Both the cancel's effect on the request and its ACK arrive after the delay,
+            // which is what Master's preemption timeout waits on.
+            rpcDelays.schedule(
+                () -> reply(response, () -> CancelResponsePB.newBuilder()
+                    .setStatus(prefill.cancel(request.getRequestId())).build()),
+                config.cancelEffectDelayMs(), TimeUnit.MILLISECONDS);
+            return;
+        }
         reply(response, () -> CancelResponsePB.newBuilder().setStatus(prefill.cancel(request.getRequestId())).build());
     }
 
@@ -236,11 +264,12 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
      * Validates the identity, limits, and cache-key layout of an RTP endpoint.
      */
     public record Config(String id, Role role, int physicalBlockSize, int maxSeqLen,
-                         int maxBatchTokens, ComputeModel compute, int imageToken, long cacheKeySeed, int cpSize,
-                         long maxRpcTimeoutMs) {
+                          int maxBatchTokens, ComputeModel compute, int imageToken, long cacheKeySeed, int cpSize,
+                          long maxRpcTimeoutMs, int enqueueAckDelayMs, int cancelEffectDelayMs) {
         public Config {
             if (id == null || id.isBlank() || (role != Role.prefill && role != Role.decode)
-                    || physicalBlockSize < 1 || cpSize < 1 || maxSeqLen < 1 || maxBatchTokens < 0)
+                    || physicalBlockSize < 1 || cpSize < 1 || maxSeqLen < 1 || maxBatchTokens < 0
+                    || enqueueAckDelayMs < 0 || cancelEffectDelayMs < 0)
                 throw new IllegalArgumentException("Invalid RTP endpoint configuration");
             Objects.requireNonNull(compute);
         }
@@ -250,7 +279,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
         public static Config from(RtpConfig config) {
             return new Config(config.id(), config.role(), config.physicalBlockSize(), config.maxSeqLen(),
                 config.maxBatchTokens(), config.compute(), config.imageToken(), config.cacheKeySeed(), config.cpSize(),
-                config.maxRpcTimeoutMs());
+                config.maxRpcTimeoutMs(), config.enqueueAckDelayMs(), config.cancelEffectDelayMs());
         }
     }
 

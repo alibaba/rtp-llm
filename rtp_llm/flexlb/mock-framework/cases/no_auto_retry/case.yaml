@@ -1,0 +1,70 @@
+id: no_auto_retry
+name: 不自动重试
+describe: S5-4：已受理请求执行失败（mock.execute.error.rate=1.0）后 Master 一次性终结，不自动重试。校验：成功率恰好为 0、issued==finished（全部恰好一个终态）、engine 侧执行尝试数与受理数一致（留证）。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: traffic
+    describe: 打流，全部请求受理后执行失败。
+    timeout: 240s
+    steps:
+      - id: start_frontend
+        describe: qps 4 打 15s；每个受理的请求都在执行时被注入失败。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 4
+          total_concurrency: 32
+          queue_capacity: 64
+          request_timeout: 30s
+          drain_timeout: 30s
+        wait_after: 20s
+      - id: stop_frontend
+        describe: 停止打流并收齐终态。
+        interface: frontend/stop/playback
+        within: 90s
+      - id: check_success_rate
+        describe: 全部请求恰好一次终结为执行失败，成功率为 0。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -60s
+            - 0s
+        expect:
+          eq: 0.0
+      - id: observe_prefill_attempts
+        describe: prefill 执行尝试总数应等于受理请求数（无重试放大，留证）。
+        interface: prometheus/query
+        args:
+          promql: sum(increase(rtp_llm_framework_requests_total{role="prefill"}[60s]))

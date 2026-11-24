@@ -40,6 +40,7 @@ class FrontendStartPlaybackArgs:
     fallback_max_output_tokens: (
         Annotated[int, Bounds(minimum=1, maximum=2147483647)] | None
     ) = None
+    duplicate_every: Annotated[int, Bounds(minimum=2)] | None = None
 
     def __post_init__(self):
         if self.masters is not None and (

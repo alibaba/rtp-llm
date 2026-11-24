@@ -43,7 +43,7 @@ class AdmissionTest {
                      created.set(scheduler);
                      return scheduler;
                  }, history, cache, compute, role, "test");
-                 var service = new RtpRpcService(new RtpRpcService.Config("test", role, 2, 4096, 0, compute, -200, 0L, 1, 0),
+                 var service = new RtpRpcService(new RtpRpcService.Config("test", role, 2, 4096, 0, compute, -200, 0L, 1, 0, 0, 0),
                      cache, lock, history, engine, true)) {
                 var builder = io.grpc.netty.NettyServerBuilder.forPort(0).addService(service);
                 if (role == Role.decode) builder.addService(service.mockDecodeService());

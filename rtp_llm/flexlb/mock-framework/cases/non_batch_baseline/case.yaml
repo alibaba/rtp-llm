@@ -1,0 +1,82 @@
+id: non_batch_baseline
+name: NON_BATCH 派发基线
+describe:
+  S2-3：QUEUE+NON_BATCH 组合基线（Master 只做路由决策，前端自己发请求）。prefill 2 台（fifo 模式）inflight 上限 4/台，容量约 10 req/s，qps 6 稳态。校验成功率与 TTFT，采集 inflight_request_count（应不超
+  prefill 数 × 4）留证。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 2
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: traffic
+    describe: 稳态打流并采集在途请求水位。
+    timeout: 180s
+    steps:
+      - id: start_frontend
+        describe: qps 6 稳态打流 30s。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 6
+          total_concurrency: 32
+          queue_capacity: 64
+          request_timeout: 30s
+          drain_timeout: 30s
+        wait_after: 30s
+      - id: check_ttft_p95
+        describe: 稳态 TTFT P95 有上界。
+        interface: frontend/query/ttft
+        args:
+          range:
+            - -10s
+            - 0s
+          statistic: p95
+        expect:
+          lte: 3
+      - id: observe_inflight_request
+        describe: 每 worker 在途请求数，峰值应不超过 4（留证）。
+        interface: prometheus/query
+        args:
+          promql: max_over_time(flexlb_app_flexlb_inflight_request_count[30s])
+      - id: stop_frontend
+        describe: 停止播放并收齐已发请求终态。
+        interface: frontend/stop/playback
+        within: 190s
+      - id: check_total_success_rate
+        describe: 全程成功率不低于 99%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -90s
+            - 0s
+        expect:
+          gte: 0.99

@@ -1,0 +1,107 @@
+id: retire_clears_keys
+name: 退役清 key
+describe: S6-2：缩容一台 prefill 后其缓存键应从 Master 索引清除，命中率出现凹坑后随重建恢复。先预热使命中率升起，记录缩容前水位；缩容后立即测命中率（凹坑），60s 后再测（恢复）。基线记录：命中率凹坑深度与恢复时长。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 2
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: warmup
+    describe: 预热建立缓存。
+    timeout: 240s
+    steps:
+      - id: start_frontend
+        describe: 0.25 倍速预热 60s 建立缓存，再全速播放。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/prefix-shared.mckidx
+          qps: 8
+          total_concurrency: 64
+          queue_capacity: 128
+          request_timeout: 60s
+          drain_timeout: 60s
+          reuse_cache: true
+          warmup:
+            duration: 60s
+            rate_scale: 0.25
+        wait_after: 120s
+      - id: record_hit_rate_before
+        describe: 记录缩容前命中率水位。
+        interface: engine/query/cache_hit_rate
+        args:
+          range:
+            - -20s
+            - 0s
+        expect:
+          gte: 0.35
+  - id: retire
+    describe: 缩容一台 prefill 并观测凹坑。
+    timeout: 300s
+    steps:
+      - id: scale_in_prefill
+        describe: 缩掉一台 prefill（其缓存键应被清除）。
+        interface: engine/scale
+        args:
+          direction: in
+          role: prefill
+          count: 1
+        within: 60s
+      - id: observe_hit_rate_dip
+        describe: 缩容后即刻命中率（应低于缩容前，凹坑深度留证）。
+        interface: engine/query/cache_hit_rate
+        args:
+          range:
+            - -10s
+            - 0s
+        wait_after: 60s
+      - id: check_hit_rate_recovered
+        describe: 60s 后命中率恢复（重建完成）。
+        interface: engine/query/cache_hit_rate
+        args:
+          range:
+            - -20s
+            - 0s
+        expect:
+          gte: 0.3
+      - id: stop_frontend
+        describe: 停止播放并收齐已发请求终态。
+        interface: frontend/stop/playback
+        within: 90s
+      - id: check_total_success_rate
+        describe: 全程成功率不低于 99%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -300s
+            - 0s
+        expect:
+          gte: 0.99

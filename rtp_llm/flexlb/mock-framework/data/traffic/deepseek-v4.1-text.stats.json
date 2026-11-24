@@ -1,0 +1,6 @@
+{
+  "requests": 296127,
+  "capture_duration_seconds": 300,
+  "avg_qps": 987.09,
+  "source": "deepseek-v4.1.mckidx 的纯文本派生版：剔除带图请求 20240 条（6.4%），保留到达时间、优先级分布（39/40/49/50）、前缀链结构与输出上限。BATCH 模式 Master 会拒绝不含 generate_input 的 vitRouteOnly 调度，多模态请求在批量派发下必败，基线 case 统一使用纯文本流量。"
+}

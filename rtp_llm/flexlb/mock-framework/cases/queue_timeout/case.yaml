@@ -1,0 +1,82 @@
+id: queue_timeout
+name: 排队超时
+describe:
+  S5-2：queueTimeoutMs=5000 时，超容量打流的请求应在 5 秒级按 8431 终结而非无限排队。prefill 1 台，qps 30 超过 22/s 排出能力。校验成功率下降且成功请求 TTFT 上界约 5s+单批耗时；采集最老在途记录年龄留证。基线记录：超时判定误差、8431
+  出现时的队列深度。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: traffic
+    describe: 超容量打流触发排队超时。
+    timeout: 240s
+    steps:
+      - id: start_frontend
+        describe: qps 16 使队列持续堆积，排队超 5s 的请求按 8431 失败。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 16
+          total_concurrency: 256
+          queue_capacity: 512
+          request_timeout: 30s
+          drain_timeout: 30s
+        wait_after: 25s
+      - id: check_ttft_p95
+        describe: 成功请求的 TTFT 有界（基线实测上界约 2 倍 queueTimeout，含排队至首 token 全链路）。（在打流中段测量，此时仍有成功请求）
+        interface: frontend/query/ttft
+        args:
+          range:
+            - -10s
+            - 0s
+          statistic: p95
+        expect:
+          lte: 12
+      - id: observe_inflight_max_age
+        describe: 最老在途记录年龄不应显著超过排队超时（留证）。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_flexlb_inflight_max_age_ms
+      - id: stop_frontend
+        describe: 停止播放并收齐已发请求终态。
+        interface: frontend/stop/playback
+        within: 190s
+      - id: check_success_overload
+        describe: 排队超时产生失败，成功率应明显下降。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -90s
+            - 0s
+        expect:
+          lte: 0.9

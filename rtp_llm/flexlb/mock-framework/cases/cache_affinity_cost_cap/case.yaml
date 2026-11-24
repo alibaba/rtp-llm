@@ -1,0 +1,83 @@
+id: cache_affinity_cost_cap
+name: 亲和代价上限
+describe:
+  S3-3：maxExtraTtftMs 收紧到 5ms 时，热点前缀的亲和代价频繁超限，OVER_CAP 决策占比应上升，热点 worker 不无限堆积。采集 cache_affinity_decision 四种 reason 分布留证；附带观测 remoteDiscount
+  与未命中在途的行为边界。基线记录：OVER_CAP 占比、worker 负载差。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 2
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: traffic
+    describe: 预热后观察亲和放弃决策。
+    timeout: 300s
+    steps:
+      - id: start_frontend
+        describe: 0.25 倍速预热 60s，再全速播放 90s 制造热点前缀。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/prefix-shared.mckidx
+          qps: 8
+          total_concurrency: 64
+          queue_capacity: 128
+          request_timeout: 60s
+          drain_timeout: 60s
+          reuse_cache: true
+          warmup:
+            duration: 60s
+            rate_scale: 0.25
+        wait_after: 155s
+      - id: observe_affinity_decision
+        describe: 亲和决策 reason 分布（OVER_CAP 占比应较 S3-2 上升，留证）。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_cache_affinity_decision_qps_total
+      - id: check_cache_hit_rate
+        describe: 命中率留证（代价收紧后应低于 S3-2 开启轮）。
+        interface: engine/query/cache_hit_rate
+        args:
+          range:
+            - -30s
+            - -5s
+      - id: stop_frontend
+        describe: 停止播放并收齐已发请求终态。
+        interface: frontend/stop/playback
+        within: 90s
+      - id: check_total_success_rate
+        describe: 全程成功率不低于 99%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -240s
+            - 0s
+        expect:
+          gte: 0.99

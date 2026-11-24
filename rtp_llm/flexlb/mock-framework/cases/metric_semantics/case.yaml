@@ -1,0 +1,77 @@
+id: metric_semantics
+name: 队列深度口径核对
+describe:
+  S9-2：构造已知队列深度（prefill 1 台 2s/批、批 8，qps 16 压 20s，队列约堆 240 条），核对 flexlb_app_routing_queue_length 读数与构造值量级一致。读数只能采集留证（GAP-M1），误差解释写在基线记录中。收尾排空需约
+  60s。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: load_queue
+    describe: 超容量打流使队列堆积，再采集队列深度。
+    timeout: 240s
+    steps:
+      - id: start_frontend
+        describe: qps 16 压队列；预计 20s 后队列深度约 240。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 16
+          total_concurrency: 512
+          queue_capacity: 1024
+          request_timeout: 120s
+          drain_timeout: 120s
+        wait_after: 22s
+      - id: observe_queue_length
+        describe: 队列深度读数（构造值约 240，允许时序误差）。
+        interface: prometheus/query
+        args:
+          promql: sum(flexlb_app_flexlb_batcher_queue_size)
+      - id: observe_queue_wait
+        describe: 排队等待分布（含 priority 标签）。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_routing_queue_wait_time_ms_seconds_count
+      - id: stop_frontend
+        describe: 停止播放并收齐已发请求终态。
+        interface: frontend/stop/playback
+        within: 150s
+      - id: check_total_success_rate
+        describe: queueTimeoutMs=120s 覆盖最大排队时长，全部请求应成功。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -200s
+            - 0s
+        expect:
+          gte: 0.99

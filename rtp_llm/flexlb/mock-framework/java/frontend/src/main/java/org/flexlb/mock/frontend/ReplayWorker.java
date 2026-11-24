@@ -28,6 +28,9 @@ final class ReplayWorker implements AutoCloseable {
     private final FrontendMetrics metrics;
     private final ArrayBlockingQueue<Item> queue;
     private final Map<Long, BackendRpcTransport.Call> active = new HashMap<>();
+    // Duplicate probes share the primary's request_id, so they live outside the id-keyed map.
+    private final Set<BackendRpcTransport.Call> duplicateActive =
+        java.util.Collections.synchronizedSet(new java.util.HashSet<>());
     // Status readers never need the monitor used for dispatch and RPC registration.
     private final Object stateLock = new Object();
     private final Map<String, Long> outcomes = new TreeMap<>();
@@ -44,7 +47,7 @@ final class ReplayWorker implements AutoCloseable {
 
     private final AtomicLong produced = new AtomicLong();
 
-    private long issued, finished, drainDeadline = Long.MAX_VALUE;
+    private long issued, finished, duplicateIssued, drainDeadline = Long.MAX_VALUE;
 
     ReplayWorker(FrontendReplayPlan plan, FrontendMetrics metrics, Path topology, Path evidence, String id,
                  int imageToken, int physicalBlockSize, long seed, int prefillCpSize) throws Exception {
@@ -66,6 +69,9 @@ final class ReplayWorker implements AutoCloseable {
         List<BackendRpcTransport.Call> calls;
         synchronized (this) { calls = List.copyOf(active.values()); }
         calls.forEach(BackendRpcTransport.Call::cancel);
+        synchronized (duplicateActive) {
+            duplicateActive.forEach(BackendRpcTransport.Call::cancel);
+        }
         try { completion.get(8, TimeUnit.SECONDS); }
         catch (Exception error) { dispatcher.interrupt(); }
     }
@@ -103,7 +109,9 @@ final class ReplayWorker implements AutoCloseable {
                 long left;
                 while ((left = due - System.nanoTime()) > 0) TimeUnit.NANOSECONDS.sleep(left);
                 if (Thread.interrupted()) throw new InterruptedException();
-                submit.accept(new Item(plan.first_request_id() + index, entry, outputLimit));
+                Integer duplicateEvery = plan.duplicate_every();
+                submit.accept(new Item(plan.first_request_id() + index, entry, outputLimit,
+                    duplicateEvery != null && position % duplicateEvery == 0));
             }
         }
     }
@@ -184,7 +192,7 @@ final class ReplayWorker implements AutoCloseable {
                 Item item = null;
                 synchronized (this) {
                     if (!begun && !stopped && System.nanoTime() >= prepareDeadline) fail("Timed out waiting for begin");
-                    if (producerDone && queue.isEmpty() && active.isEmpty()) break;
+                    if (producerDone && queue.isEmpty() && active.isEmpty() && duplicateActive.isEmpty()) break;
                     if (producerDone && System.nanoTime() >= drainDeadline) {
                         fail("Frontend drain timed out");
                         cancel = List.copyOf(active.values());
@@ -239,6 +247,7 @@ final class ReplayWorker implements AutoCloseable {
             active.put(item.requestId(), call);
             synchronized (stateLock) { issued++; }
             metrics.issued();
+            if (item.duplicate()) issueDuplicate(prepared);
         }
         call.completion().whenComplete((result, error) -> {
             synchronized (ReplayWorker.this) {
@@ -254,12 +263,43 @@ final class ReplayWorker implements AutoCloseable {
         });
     }
 
+    /**
+     * Issues one extra concurrent call reusing the item's request_id; the Master must reject it
+     * as a duplicate. Counted like any other call in issued/finished/outcomes so the playback
+     * result stays consistent; tracked outside the primary active map which keys request_id.
+     */
+    private void issueDuplicate(BackendRpcTransport.PreparedCall prepared) {
+        var duplicate = frontend.sendDuplicate(prepared);
+        duplicateActive.add(duplicate);
+        synchronized (stateLock) { issued++; duplicateIssued++; }
+        metrics.issued();
+        duplicate.completion().whenComplete((result, error) -> {
+            synchronized (ReplayWorker.this) {
+                duplicateActive.remove(duplicate);
+                synchronized (stateLock) {
+                    finished++;
+                    if (error == null) outcomes.merge(result.outcome().name(), 1L, Long::sum);
+                }
+                if (error != null) fail("Duplicate request execution failed: " + error);
+                else metrics.finished(result);
+                LockSupport.unpark(dispatcher);
+            }
+        });
+    }
+
     private State snapshot(boolean done) {
         synchronized (stateLock) {
-            return new State(done, stopped, produced.get(), issued, finished, plan.count() - issued,
+            // issued/finished count duplicate probes like any call; unissued excludes them since
+            // they are not planned input entries.
+            return new State(done, stopped, produced.get(), issued, finished,
+                plan.count() - (issued - duplicateIssued),
                 queue.size(), Math.toIntExact(issued - finished), Map.copyOf(outcomes), List.copyOf(errors));
         }
     }
 
-    record Item(long requestId, IndexedTrafficReader.Entry entry, int outputLimit) {}
+    /**
+     * One playback entry; duplicate marks the item for an extra concurrent call reusing its
+     * request_id, which the Master must reject as a duplicate while the original proceeds.
+     */
+    record Item(long requestId, IndexedTrafficReader.Entry entry, int outputLimit, boolean duplicate) {}
 }

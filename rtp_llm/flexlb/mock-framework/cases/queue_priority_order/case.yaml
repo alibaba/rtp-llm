@@ -1,0 +1,77 @@
+id: queue_priority_order
+name: PRIORITY 出队顺序
+describe:
+  S1-2：PRIORITY 模式下高优先级应先出队、同级 FIFO。prefill 1 台调慢（2s/批）造排队，DeepSeek 流量天然携带 priority 39/40/49/50。逐请求顺序断言依赖 GAP-F2，当前按优先级分组对比排队耗时（flexlb_app_routing_queue_wait_time_ms
+  的 priority 标签）留证：高优先级组的平均排队耗时应显著低于低优先级组。基线记录：各优先级组排队均值差。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: traffic
+    describe: 压队列制造优先级分化。
+    timeout: 300s
+    steps:
+      - id: start_frontend
+        describe: qps 8 超过 4/s 排出能力，队列堆积产生优先级等待差。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/deepseek-v4.1-text.mckidx
+          qps: 8
+          total_concurrency: 512
+          queue_capacity: 1024
+          request_timeout: 180s
+          drain_timeout: 120s
+        wait_after: 40s
+      - id: observe_queue_wait_by_priority
+        describe: 各优先级桶的排队样本数（高优先级应快速通过，等待均值低）。
+        interface: prometheus/query
+        args:
+          promql: sum by(priority)(flexlb_app_routing_queue_wait_time_ms_seconds_sum)
+      - id: observe_queue_depth_by_priority
+        describe: 按优先级分桶的队列深度（低优先级桶应更深）。
+        interface: prometheus/query
+        args:
+          promql: sum by(priority)(flexlb_app_routing_queue_length)
+      - id: stop_frontend
+        describe: 停止播放并收齐已发请求终态。
+        interface: frontend/stop/playback
+        within: 150s
+      - id: check_total_success_rate
+        describe: queueTimeoutMs=180s 覆盖最大排队时长，全部请求应成功。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -200s
+            - 0s
+        expect:
+          gte: 0.99

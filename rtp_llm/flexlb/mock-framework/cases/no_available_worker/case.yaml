@@ -1,0 +1,139 @@
+id: no_available_worker
+name: 无可用 worker 错误形态
+describe: S3-5：无可用 prefill worker 时请求应快速失败（错误码 8402/8403），补 worker 后恢复。先正常轮验证基线，再缩容到 0 台 prefill 打流验证快速失败，最后扩容恢复。基线记录：失败响应耗时与恢复时长。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: baseline
+    describe: 正常轮：验证基线收发。
+    timeout: 120s
+    steps:
+      - id: start_baseline
+        describe: qps 2 正常轮。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 2
+          total_concurrency: 8
+          queue_capacity: 16
+          request_timeout: 30s
+          drain_timeout: 30s
+        wait_after: 15s
+      - id: stop_baseline
+        describe: 停止正常轮。
+        interface: frontend/stop/playback
+        within: 190s
+      - id: check_success_baseline
+        describe: 正常轮全部成功。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -60s
+            - 0s
+        expect:
+          eq: 1.0
+  - id: no_worker
+    describe: 缩容到 0 台 prefill 后打流。
+    timeout: 240s
+    steps:
+      - id: scale_in_prefill
+        describe: 缩掉唯一一台 prefill。
+        interface: engine/scale
+        args:
+          direction: in
+          role: prefill
+          count: 1
+        within: 60s
+        wait_after: 5s
+      - id: start_no_worker
+        describe: 无 prefill 时 qps 2 打 20s，请求应快速失败。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 2
+          total_concurrency: 8
+          queue_capacity: 16
+          request_timeout: 15s
+          drain_timeout: 15s
+        wait_after: 20s
+      - id: check_success_no_worker
+        describe: 无可用 prefill，窗口内请求应全部失败（在打流中测量，窗口不覆盖基线轮）。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -15s
+            - 0s
+        expect:
+          lte: 0.05
+      - id: stop_no_worker
+        describe: 停止无 worker 轮。
+        interface: frontend/stop/playback
+        within: 190s
+  - id: recover
+    describe: 扩容恢复后再次验证。
+    timeout: 300s
+    steps:
+      - id: scale_out_prefill
+        describe: 补回一台 prefill。
+        interface: engine/scale
+        args:
+          direction: out
+          role: prefill
+          count: 1
+        within: 120s
+        wait_after: 15s
+      - id: start_recovered
+        describe: qps 2 恢复轮 25s。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 2
+          total_concurrency: 8
+          queue_capacity: 16
+          request_timeout: 30s
+          drain_timeout: 30s
+        wait_after: 25s
+      - id: check_success_recovered
+        describe: 恢复轮窗口内全部成功（在打流中测量，窗口不覆盖失败轮）。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -20s
+            - 0s
+        expect:
+          gte: 0.99
+      - id: stop_recovered
+        describe: 停止恢复轮。
+        interface: frontend/stop/playback
+        within: 190s

@@ -1,0 +1,129 @@
+id: local_fallback_overhead
+name: 非主转发开销
+describe:
+  S7-2：打向非主 Master 的请求经转发或本地兜底被受理，对比直打主节点的 TTFT 差值。能否精确构造转发失败待验证，当前对比两轮（masters 分别指定主/备）的成功率与 TTFT，并采集 forward_to_master_result 留证。基线记录：转发引入的
+  TTFT 增量。
+environment:
+  master:
+    deployment:
+      replicas: 2
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 2
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 记录主 A 与备 B。
+    timeout: 120s
+    steps:
+      - id: get_master_a
+        describe: 记录主 Master 地址。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+      - id: get_master_b
+        describe: 记录备 Master 地址。
+        interface: master/list/addresses
+        args:
+          is_leader: false
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: direct_round
+    describe: 直打主节点轮。
+    timeout: 180s
+    steps:
+      - id: start_leader
+        describe: masters 指定主节点，qps 4 打 25s。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 4
+          total_concurrency: 32
+          queue_capacity: 64
+          request_timeout: 30s
+          drain_timeout: 30s
+          masters:
+            ref: steps.get_master_a
+        wait_after: 25s
+      - id: record_ttft_leader
+        describe: 记录直打主节点的 TTFT P95。
+        interface: frontend/query/ttft
+        args:
+          range:
+            - -15s
+            - 0s
+          statistic: p95
+      - id: stop_leader
+        describe: 停止直打主节点轮。
+        interface: frontend/stop/playback
+        within: 190s
+      - id: check_success_leader
+        describe: 直打主节点全部成功。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -60s
+            - 0s
+        expect:
+          gte: 0.99
+  - id: standby_round
+    describe: 打向备节点轮（转发或本地兜底）。
+    timeout: 180s
+    steps:
+      - id: start_standby
+        describe: masters 指定备节点，qps 4 打 25s。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 4
+          total_concurrency: 32
+          queue_capacity: 64
+          request_timeout: 30s
+          drain_timeout: 30s
+          masters:
+            ref: steps.get_master_b
+        wait_after: 25s
+      - id: record_ttft_standby
+        describe: 记录打向备节点的 TTFT P95（与主节点轮差值即转发开销）。
+        interface: frontend/query/ttft
+        args:
+          range:
+            - -15s
+            - 0s
+          statistic: p95
+        expect:
+          lte: 5
+      - id: observe_forward_result
+        describe: 备节点转发结果计数留证。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_forward_to_master_result_total
+      - id: stop_standby
+        describe: 停止打向备节点轮。
+        interface: frontend/stop/playback
+        within: 190s
+      - id: check_success_standby
+        describe: 打向备节点也应全部成功。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -60s
+            - 0s
+        expect:
+          gte: 0.99

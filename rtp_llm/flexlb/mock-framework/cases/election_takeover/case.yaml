@@ -1,0 +1,123 @@
+id: election_takeover
+name: 选举与接管
+describe: S7-1：双 Master + ZOOKEEPER 选举。打流中杀主，新主接管且不等于旧主；旧主重启后不抢主；全程成功率不低于 95%。接管耗时以事件时间线留证。基线记录：发现时长、接管时长、成功率凹坑。
+environment:
+  master:
+    deployment:
+      replicas: 2
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 2
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 记录实际选举出的主 A 与备 B。
+    timeout: 120s
+    steps:
+      - id: get_master_a
+        describe: 记录当前唯一主 Master 地址作为 A。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+      - id: get_master_b
+        describe: 记录声明自己非主的唯一 Master 作为 B。
+        interface: master/list/addresses
+        args:
+          is_leader: false
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: failover
+    describe: 打流中杀主并验证接管。
+    timeout: 600s
+    steps:
+      - id: start_frontend
+        describe: qps 4 持续打流贯穿杀主与重启。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 4
+          total_concurrency: 32
+          queue_capacity: 64
+          request_timeout: 60s
+          drain_timeout: 60s
+        wait_after: 20s
+      - id: check_success_before
+        describe: 杀主前成功率基线。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -15s
+            - 0s
+        expect:
+          gte: 0.99
+      - id: kill_master_a
+        describe: 强制杀掉主 Master A。
+        interface: master/stop
+        args:
+          targets:
+            ref: steps.get_master_a
+          mode: kill
+        within: 45s
+        wait_after: 30s
+      - id: check_leader_after_kill
+        describe: B 应接管为唯一主节点。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          eq:
+            ref: steps.get_master_b
+      - id: check_success_after_kill
+        describe: 接管窗口内成功率不低于 95%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -30s
+            - 0s
+        expect:
+          gte: 0.95
+      - id: restart_master_a
+        describe: 重启 A，回来后不应抢主。
+        interface: master/restart
+        args:
+          targets:
+            ref: steps.get_master_a
+        within: 180s
+        wait_after: 30s
+      - id: check_leader_after_restart
+        describe: 主节点仍应是 B。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          eq:
+            ref: steps.get_master_b
+      - id: stop_frontend
+        describe: 停止播放并收齐已发请求终态。
+        interface: frontend/stop/playback
+        within: 120s
+      - id: check_total_success_rate
+        describe: 全程成功率不低于 95%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -400s
+            - 0s
+        expect:
+          gte: 0.95

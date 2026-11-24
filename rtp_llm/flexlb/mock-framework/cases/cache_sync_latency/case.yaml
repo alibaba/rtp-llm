@@ -1,0 +1,83 @@
+id: cache_sync_latency
+name: 缓存同步延迟
+describe: S6-1：engine 缓存变更到 Master 索引可见的时延（cacheStatus minRefresh 400ms 配置下）。冷启动后共享前缀流量使 cache_hit_rate 从 0 升起，逐点序列记录上升时延留证。精确测量依赖可控缓存变更时点（GAP-F1），当前以冷启动为锚点。基线记录：命中率升起时延。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 2
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: traffic
+    describe: 冷启动打流观测命中率升起。
+    timeout: 240s
+    steps:
+      - id: start_frontend
+        describe: reuse_cache 冷启动播放，缓存从空开始积累。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/prefix-shared.mckidx
+          qps: 8
+          total_concurrency: 64
+          queue_capacity: 128
+          request_timeout: 60s
+          drain_timeout: 30s
+          reuse_cache: true
+        wait_after: 70s
+      - id: observe_hit_rate_series
+        describe: 命中率逐点序列：从 0 升起的时延即同步+积累延迟（留证）。
+        interface: engine/query/cache_hit_rate
+        args:
+          range:
+            - -60s
+            - 0s
+          mode: series
+      - id: check_hit_rate_final
+        describe: 稳态命中率应升到合理水位（确定性前缀流量理论上限 88.9%）。
+        interface: engine/query/cache_hit_rate
+        args:
+          range:
+            - -15s
+            - 0s
+        expect:
+          gte: 0.6
+      - id: stop_frontend
+        describe: 停止播放并收齐已发请求终态。
+        interface: frontend/stop/playback
+        within: 190s
+      - id: check_total_success_rate
+        describe: 全程成功率不低于 99%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -150s
+            - 0s
+        expect:
+          gte: 0.99

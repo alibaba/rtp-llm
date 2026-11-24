@@ -1,0 +1,77 @@
+id: engine_cancellation_timeout
+name: 抢占取消超时
+describe:
+  S4-3：DECODE_ENGINE_OWNED 抢占的取消时效。decode 1 台限 1 在途、单请求约 10s，prefill 的取消生效延迟 3s（mock.rpc.cancel.effect.delay.ms）超过 preemption.timeoutMs
+  1s——高优先级请求触发抢占但等不到受害者终态，抢占超时后新请求失败或回退。采集抢占/取消计数留证（受害者逐请求核对待 GAP-F2）。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: traffic
+    describe: 优先级混合流量触发 decode 抢占并超时。
+    timeout: 300s
+    steps:
+      - id: start_frontend
+        describe: uniform 优先级混合流量（40/50 交替）qps 2 打 60s，decode 长占用制造抢占。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k-priority-mix.mckidx
+          qps: 2
+          total_concurrency: 64
+          queue_capacity: 128
+          request_timeout: 60s
+          drain_timeout: 60s
+        wait_after: 60s
+      - id: observe_preempt_count
+        describe: 抢占计数（decode_reserved/decode_running 阶段，留证）。
+        interface: prometheus/query
+        args:
+          promql: flexlb_auto_tpm_priority_preempt_count_total
+      - id: observe_cancel_metrics
+        describe: 取消链路计数（含超时失败标记，留证）。
+        interface: prometheus/query
+        args:
+          promql: flexlb_auto_tpm_cancel_execute_total
+      - id: stop_frontend
+        describe: 停止打流并收齐终态。
+        interface: frontend/stop/playback
+        within: 120s
+      - id: check_success_rate
+        describe: 敌意场景（decode 单槽 + 长占用 + 取消超时）下大量请求失败，抢占计数非零由留证步骤确认；成功率应明显受损。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -120s
+            - 0s
+        expect:
+          lte: 0.5

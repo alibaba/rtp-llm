@@ -26,6 +26,7 @@ public final class EngineLoop implements AutoCloseable {
     private final Role role;
     private final String identity;
     private final long prefillOverheadNanos;
+    private final FailureInjection failureInjection;
     private final SimulatedCompute compute = new SimulatedCompute();
     private final ExecutorService notifications = Executors.newVirtualThreadPerTaskExecutor();
 
@@ -49,6 +50,12 @@ public final class EngineLoop implements AutoCloseable {
 
     public EngineLoop(Object lock, EngineScheduler scheduler, TaskHistory finished, KvCacheManager cache,
                       ComputeModel model, Role role, String identity, int prefillOverheadMs) {
+        this(lock, scheduler, finished, cache, model, role, identity, prefillOverheadMs, null);
+    }
+
+    public EngineLoop(Object lock, EngineScheduler scheduler, TaskHistory finished, KvCacheManager cache,
+                      ComputeModel model, Role role, String identity, int prefillOverheadMs,
+                      FailureInjection failureInjection) {
         if (prefillOverheadMs < 0 || prefillOverheadMs > 0 && role != Role.prefill) {
             throw new IllegalArgumentException("Invalid Prefill step overhead");
         }
@@ -60,6 +67,7 @@ public final class EngineLoop implements AutoCloseable {
         this.role = Objects.requireNonNull(role);
         this.identity = Objects.requireNonNull(identity);
         this.prefillOverheadNanos = TimeUnit.MILLISECONDS.toNanos(prefillOverheadMs);
+        this.failureInjection = failureInjection;
         cache.onChange(this::wakeUp);
         Thread.ofVirtual().name("mock-engine-" + identity).start(this::loop);
     }
@@ -203,6 +211,10 @@ public final class EngineLoop implements AutoCloseable {
 
     /** One scheduled batch enters one simulated model Forward, matching the real Engine step flow. */
     private void forward(EngineScheduler.Work work) {
+        if (failureInjection != null && failureInjection.roll()) {
+            scheduler.failForward(work, failureInjection.error());
+            return;
+        }
         var next = new ForwardExecution(work);
         inFlightForward = next;
         try {
@@ -245,5 +257,28 @@ public final class EngineLoop implements AutoCloseable {
         final EngineScheduler.Work work;
         SimulatedCompute.Execution execution;
         ForwardExecution(EngineScheduler.Work work) { this.work = work; }
+    }
+
+    /**
+     * Deterministic injected-failure lottery driven by mock.execute.error.rate/seed:
+     * each scheduled batch fails immediately after admission with the configured probability.
+     */
+    public static final class FailureInjection {
+        private final double rate;
+        private final java.util.Random random;
+
+        public FailureInjection(double rate, long seed) {
+            if (!(rate >= 0.0 && rate <= 1.0))
+                throw new IllegalArgumentException("mock.execute.error.rate must be in [0,1]");
+            this.rate = rate;
+            this.random = new java.util.Random(seed);
+        }
+
+        synchronized boolean roll() { return random.nextDouble() < rate; }
+
+        EngineScheduler.RequestFailure error() {
+            return new EngineScheduler.RequestFailure(
+                EngineScheduler.RequestFailure.Reason.INTERNAL, "Injected by mock.execute.error.rate");
+        }
     }
 }

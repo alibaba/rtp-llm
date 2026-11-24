@@ -1,0 +1,110 @@
+id: direct_baseline
+name: DIRECT 直连基线
+describe:
+  S1-3：DIRECT+NON_BATCH 路径的开销下限与满容直拒。prefill 1 台（fifo 模式）、inflight 上限 4。第一轮 qps 2 应全部成功且 TTFT 显著低于 QUEUE 模式（无凑批等待）；第二轮 qps 12 超过约 5 req/s
+  容量，应出现快速拒绝且不产生排队指标。基线记录：DIRECT 的 ttft p99 与失败拐点 qps。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: low_load
+    describe: 低流量轮：无排队直达。
+    timeout: 120s
+    steps:
+      - id: start_low
+        describe: qps 2 低流量，直连路径应全部成功。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 2
+          total_concurrency: 8
+          queue_capacity: 16
+          request_timeout: 30s
+          drain_timeout: 30s
+        wait_after: 20s
+      - id: check_ttft_p95_low
+        describe: 直连 TTFT P95 低于 QUEUE 基线（S1-1）。
+        interface: frontend/query/ttft
+        args:
+          range:
+            - -10s
+            - 0s
+          statistic: p95
+        expect:
+          lte: 2
+      - id: stop_low
+        describe: 停止低流量轮。
+        interface: frontend/stop/playback
+        within: 190s
+      - id: check_success_low
+        describe: 低流量轮全部成功。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -60s
+            - 0s
+        expect:
+          gte: 0.99
+  - id: overload
+    describe: 超容量轮：满容直接拒绝。
+    timeout: 180s
+    steps:
+      - id: start_overload
+        describe: qps 12 超过约 5 req/s 容量上限，多余请求应快速失败。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 12
+          total_concurrency: 32
+          queue_capacity: 64
+          request_timeout: 10s
+          drain_timeout: 20s
+        wait_after: 20s
+      - id: stop_overload
+        describe: 停止超容量轮。
+        interface: frontend/stop/playback
+        within: 190s
+      - id: check_success_overload
+        describe: 出现失败（成功率明显下降），证明容量红线生效。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -60s
+            - 0s
+        expect:
+          lte: 0.9
+      - id: observe_queue_wait_absent
+        describe: DIRECT 无队列，排队等待指标应无样本（留证）。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_routing_queue_wait_time_ms_seconds_count

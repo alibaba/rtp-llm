@@ -1,0 +1,93 @@
+id: cache_affinity_off
+name: 缓存亲和关闭轮
+describe:
+  S3-2：cacheAffinity 开/关两轮量化命中率收益与 TTFT 代价（真机参考 37.6%→58.5%）。本轮=关闭。engine 开 reuse_cache，回放 warmup 0.25 倍速预热 60s 后正常速播放。基线记录：两轮命中率差值、TTFT
+  差值、亲和决策 reason 分布。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 2
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: traffic
+    describe: 预热后测量命中率。
+    timeout: 300s
+    steps:
+      - id: start_frontend
+        describe: 0.25 倍速预热 60s 建立缓存，再全速播放 90s。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/prefix-shared.mckidx
+          qps: 8
+          total_concurrency: 64
+          queue_capacity: 128
+          request_timeout: 60s
+          drain_timeout: 60s
+          reuse_cache: true
+          warmup:
+            duration: 60s
+            rate_scale: 0.25
+        wait_after: 155s
+      - id: check_cache_hit_rate
+        describe: Prefill token 加权实际命中率（关闭轮基线）。
+        interface: engine/query/cache_hit_rate
+        args:
+          range:
+            - -30s
+            - -5s
+      - id: check_ttft_p95
+        describe: TTFT P95 留证（两轮对比亲和的延迟代价/收益）。
+        interface: frontend/query/ttft
+        args:
+          range:
+            - -30s
+            - -5s
+          statistic: p95
+        expect:
+          lte: 10
+      - id: observe_affinity_decision
+        describe: 亲和决策 reason 分布留证。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_cache_affinity_decision_qps_total
+      - id: stop_frontend
+        describe: 停止播放并收齐已发请求终态。
+        interface: frontend/stop/playback
+        within: 90s
+      - id: check_total_success_rate
+        describe: 全程成功率不低于 99%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -240s
+            - 0s
+        expect:
+          gte: 0.99

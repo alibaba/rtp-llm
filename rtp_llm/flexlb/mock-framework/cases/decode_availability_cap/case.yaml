@@ -1,0 +1,95 @@
+id: decode_availability_cap
+name: Decode 可用性红线
+describe:
+  S3-4：decode 按 KV 占用分层、同层比 cost 公式；超 maxEngineRequests 的 decode 不收新请求。2 台 decode 各限 2 个在途请求（decode 调慢到约 20s/请求），qps 0.5 打 30s 制造约 10
+  路并发，超出 4 路红线的请求应在排队 15s 后按 8431 失败；随后 qps 0.1 低载轮应全部成功。基线记录：decode 间负载分布与红线触发时的失败形态。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 2
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: overload
+    describe: 超红线轮：并发需求超过 decode 请求数上限。
+    timeout: 240s
+    steps:
+      - id: start_overload
+        describe: qps 0.5 打 30s，并发需求约 10 路超过 4 路 decode 红线。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k-small.mckidx
+          qps: 0.5
+          total_concurrency: 64
+          queue_capacity: 128
+          request_timeout: 60s
+          drain_timeout: 60s
+        wait_after: 45s
+      - id: stop_overload
+        describe: 停止超红线轮。
+        interface: frontend/stop/playback
+        within: 90s
+      - id: check_success_overload
+        describe: 红线上排队超时的请求失败，成功率应明显下降。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -120s
+            - 0s
+        expect:
+          lte: 0.9
+  - id: recovery
+    describe: 低载轮：并发需求在红线内。
+    timeout: 240s
+    steps:
+      - id: start_low
+        describe: qps 0.1 打 50s，并发需求约 2 路在红线内，应全部成功。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k-small.mckidx
+          qps: 0.1
+          total_concurrency: 8
+          queue_capacity: 16
+          request_timeout: 60s
+          drain_timeout: 90s
+        wait_after: 50s
+      - id: check_success_low
+        describe: 低载轮窗口内全部成功（在打流中测量，窗口不覆盖上一轮）。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -45s
+            - 0s
+        expect:
+          gte: 0.99
+      - id: stop_low
+        describe: 停止低载轮。
+        interface: frontend/stop/playback
+        within: 120s

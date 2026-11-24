@@ -1,0 +1,12 @@
+{
+  "requests": 5000,
+  "prefix_groups": 50,
+  "prefix_tokens": 4096,
+  "suffix_tokens_per_request": 512,
+  "output_token_cap": 64,
+  "priority": 50,
+  "capture_duration_seconds": 600,
+  "theoretical_prefix_hit_rate": 0.889,
+  "note": "合成缓存亲和流量：请求 i 使用前缀组 i%50（组间轮转），每组 4096 token 共享前缀 + 512 token 独有后缀；预热后理论命中率上限 88.9%（按 128 token 块对齐）。用于 S3-2/S3-3/S6-1/S6-2 缓存类 case。",
+  "generator": "gen_prefix_traffic.py（按 IndexedTrafficReader 格式写出）"
+}

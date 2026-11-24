@@ -1,0 +1,82 @@
+id: deep_queue_planning
+name: 大队列规划吞吐
+describe:
+  S1-5：队列堆积时调度吞吐不随队列深度劣化（scanBudgetMultiplier 2.0 的作用）。prefill 1 台调慢（2s/批），qps 8 压 45s 使队列堆到约 180 条；期间 prefill_tps 逐点序列应保持平稳不随队列变长下降。基线记录：吞吐
+  vs 队列深度曲线。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: traffic
+    describe: 压队列并逐点观测吞吐。
+    timeout: 300s
+    steps:
+      - id: start_frontend
+        describe: qps 8 使队列持续增长，验证调度吞吐与队列深度无关。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 8
+          total_concurrency: 512
+          queue_capacity: 1024
+          request_timeout: 180s
+          drain_timeout: 90s
+        wait_after: 50s
+      - id: check_decode_tps_series
+        describe: 逐点 decode 完成吞吐序列（计数器口径）：队列变长期间每个采样点都不为 0，证明调度吞吐不随队列深度崩落（序列整体平稳留证）。
+        interface: engine/query/decode_tps
+        args:
+          range:
+            - -40s
+            - -5s
+          mode: series
+        expect:
+          gte: 50
+      - id: observe_queue_length
+        describe: 队列深度留证（应与打流时长同步增长）。
+        interface: prometheus/query
+        args:
+          promql: sum(flexlb_app_flexlb_batcher_queue_size)
+      - id: stop_frontend
+        describe: 停止播放并收齐已发请求终态。
+        interface: frontend/stop/playback
+        within: 120s
+      - id: check_total_success_rate
+        describe: 全程成功率不低于 99%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -200s
+            - 0s
+        expect:
+          gte: 0.99

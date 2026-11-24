@@ -150,7 +150,7 @@ class IndexedTrafficReaderTest {
              var one = new FrontendNode("frontend-1", topology, oneDirectory)) {
             json.writeValue(topology.toFile(), List.of(backend.endpoint(),
                 Map.of("role", "frontend", "control", zero.url()), Map.of("role", "frontend", "control", one.url())));
-            zero.startReplay(new Start(List.of(PlaybackTest.master(backend)), source.toString(), null, 2.0, 4, 8, 3000, 1000, false, null, new Warmup(20, 0.25)));
+            zero.startReplay(new Start(List.of(PlaybackTest.master(backend)), source.toString(), null, 2.0, 4, 8, 3000, 1000, false, null, new Warmup(20, 0.25), null));
             PlaybackTest.eventually(() -> zero.state(new Sequence(1)).done() && one.state(new Sequence(1)).done());
             var summary = zero.stopReplay(new Empty());
             assertTrue(summary.errors().isEmpty(), summary.toString());

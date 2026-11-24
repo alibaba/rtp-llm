@@ -1,0 +1,141 @@
+id: graceful_shutdown
+name: 优雅下线
+describe: S7-3：terminate（优雅）与 kill 的差异。静默期 3s 内不收新请求、存量处理完再退。两轮打流中分别 terminate / kill 主 Master，对比受损请求数差异（成功率凹坑）； terminate 轮受损应不多于 kill 轮。基线记录：两种模式受损请求数、静默期实际时长。
+environment:
+  master:
+    deployment:
+      replicas: 2
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 2
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 记录主 A 与备 B。
+    timeout: 120s
+    steps:
+      - id: get_master_a
+        describe: 记录主 Master 地址。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+      - id: get_master_b
+        describe: 记录备 Master 地址。
+        interface: master/list/addresses
+        args:
+          is_leader: false
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: terminate_round
+    describe: 优雅停止主节点轮。
+    timeout: 420s
+    steps:
+      - id: start_terminate_round
+        describe: qps 4 打流中对主节点执行 terminate。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 4
+          total_concurrency: 32
+          queue_capacity: 64
+          request_timeout: 60s
+          drain_timeout: 60s
+        wait_after: 15s
+      - id: terminate_master_a
+        describe: 优雅停止主 Master A（静默期 3s）。
+        interface: master/stop
+        args:
+          targets:
+            ref: steps.get_master_a
+          mode: terminate
+        within: 90s
+        wait_after: 20s
+      - id: check_leader_terminate
+        describe: B 应接管为唯一主节点。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          eq:
+            ref: steps.get_master_b
+      - id: stop_terminate_round
+        describe: 停止 terminate 轮。
+        interface: frontend/stop/playback
+        within: 120s
+      - id: record_success_terminate
+        describe: terminate 轮全程成功率（受损请求应最少，留证）。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -180s
+            - 0s
+        expect:
+          gte: 0.95
+      - id: restart_master_a
+        describe: 重启 A 供下一轮。
+        interface: master/restart
+        args:
+          targets:
+            ref: steps.get_master_a
+        within: 180s
+        wait_after: 20s
+  - id: kill_round
+    describe: 强杀主节点对照轮。
+    timeout: 420s
+    steps:
+      - id: start_kill_round
+        describe: qps 4 打流中对当前主节点执行 kill。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 4
+          total_concurrency: 32
+          queue_capacity: 64
+          request_timeout: 60s
+          drain_timeout: 60s
+        wait_after: 15s
+      - id: get_current_leader
+        describe: 确认当前主节点。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+      - id: kill_current_leader
+        describe: 强杀当前主 Master。
+        interface: master/stop
+        args:
+          targets:
+            ref: steps.get_current_leader
+          mode: kill
+        within: 45s
+        wait_after: 20s
+      - id: stop_kill_round
+        describe: 停止 kill 轮。
+        interface: frontend/stop/playback
+        within: 120s
+      - id: record_success_kill
+        describe: kill 轮全程成功率（与 terminate 轮对比受损差异，留证）。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -180s
+            - 0s
+        expect:
+          gte: 0.9

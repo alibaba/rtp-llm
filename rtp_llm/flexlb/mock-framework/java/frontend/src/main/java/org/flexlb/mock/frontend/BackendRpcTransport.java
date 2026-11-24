@@ -135,6 +135,28 @@ public final class BackendRpcTransport implements AutoCloseable {
         return new PreparedCall(request, input, budget, physicalBlockSize, List.copyOf(expectedImageTokens));
     }
 
+    /**
+     * Sends one extra call reusing an active request_id for Master's duplicate rejection;
+     * the duplicate is not registered in the id-keyed active map that tracks primaries.
+     */
+    Call sendDuplicate(PreparedCall prepared) {
+        var request = prepared.request();
+        Call call;
+        synchronized (this) {
+            if (closed || closing) throw new IllegalStateException("Frontend closed");
+            call = new Call(request, prepared.input(), prepared.budget(), prepared.physicalBlockSize(), prepared.expectedImageTokens());
+            events.accept(call.event("ISSUED").put("epoch_ms", Long.toString(call.sentAt.toEpochMilli())).put("duplicate", "true"));
+        }
+        synchronized (call) {
+            if (call.terminal) return call;
+            call.context.addListener(c -> {
+                if (c.getDeadline().isExpired()) call.finish(Status.DEADLINE_EXCEEDED, 0, Outcome.timeout);
+            }, Runnable::run);
+            if (!call.terminal) call.context.run(() -> call.schedule(0));
+        }
+        return call;
+    }
+
     private synchronized ManagedChannel channel(String target) {
         if (closed) throw new IllegalStateException("Frontend closed");
         return channels.computeIfAbsent(target, t -> ManagedChannelBuilder.forTarget(t).usePlaintext().build());
