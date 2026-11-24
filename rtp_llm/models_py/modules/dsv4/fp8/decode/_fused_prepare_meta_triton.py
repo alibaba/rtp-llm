@@ -286,20 +286,26 @@ def _copy_pool_block_table_body(
     src_stride,
     dst_stride,
     dst_rows,
+    src_col_stride,
+    dst_col_stride,
     r,
     cols,
 ):
     if r < dst_rows:
         if r < n_rows:
             v = tl.load(
-                src_ptr + r * src_stride + cols,
+                src_ptr + r * src_stride + cols * src_col_stride,
                 mask=cols < n_cols,
                 other=0,
             )
-            tl.store(dst_ptr + r * dst_stride + cols, v, mask=cols < max_cols)
+            tl.store(
+                dst_ptr + r * dst_stride + cols * dst_col_stride,
+                v,
+                mask=cols < max_cols,
+            )
         elif r >= bs:
             tl.store(
-                dst_ptr + r * dst_stride + cols,
+                dst_ptr + r * dst_stride + cols * dst_col_stride,
                 0,
                 mask=cols < max_cols,
             )
@@ -310,9 +316,13 @@ def _copy_pool_block_tables_kernel(
     src0, dst0, src1, dst1, src2, dst2, src3, dst3,
     bs,
     n_rows0, n_cols0, max_cols0, src_stride0, dst_stride0, dst_rows0,
+    src_cstride0, dst_cstride0,
     n_rows1, n_cols1, max_cols1, src_stride1, dst_stride1, dst_rows1,
+    src_cstride1, dst_cstride1,
     n_rows2, n_cols2, max_cols2, src_stride2, dst_stride2, dst_rows2,
+    src_cstride2, dst_cstride2,
     n_rows3, n_cols3, max_cols3, src_stride3, dst_stride3, dst_rows3,
+    src_cstride3, dst_cstride3,
     HAS0: tl.constexpr, HAS1: tl.constexpr,
     HAS2: tl.constexpr, HAS3: tl.constexpr,
     BLOCK: tl.constexpr,
@@ -324,25 +334,29 @@ def _copy_pool_block_tables_kernel(
         if HAS0:
             _copy_pool_block_table_body(
                 src0, dst0, bs, n_rows0, n_cols0, max_cols0,
-                src_stride0, dst_stride0, dst_rows0, r, cols,
+                src_stride0, dst_stride0, dst_rows0, src_cstride0, dst_cstride0,
+                r, cols,
             )
     elif tag == 1:
         if HAS1:
             _copy_pool_block_table_body(
                 src1, dst1, bs, n_rows1, n_cols1, max_cols1,
-                src_stride1, dst_stride1, dst_rows1, r, cols,
+                src_stride1, dst_stride1, dst_rows1, src_cstride1, dst_cstride1,
+                r, cols,
             )
     elif tag == 2:
         if HAS2:
             _copy_pool_block_table_body(
                 src2, dst2, bs, n_rows2, n_cols2, max_cols2,
-                src_stride2, dst_stride2, dst_rows2, r, cols,
+                src_stride2, dst_stride2, dst_rows2, src_cstride2, dst_cstride2,
+                r, cols,
             )
     elif tag == 3:
         if HAS3:
             _copy_pool_block_table_body(
                 src3, dst3, bs, n_rows3, n_cols3, max_cols3,
-                src_stride3, dst_stride3, dst_rows3, r, cols,
+                src_stride3, dst_stride3, dst_rows3, src_cstride3, dst_cstride3,
+                r, cols,
             )
 
 
@@ -371,7 +385,8 @@ def fused_copy_pool_block_tables(meta, paged_block_tables, bs: int) -> None:
             continue
         entries.append(
             (src_bt, dst_bt, n_rows, n_cols, max_cols,
-             src_bt.stride(0), dst_bt.stride(0), dst_bt.shape[0])
+             src_bt.stride(0), dst_bt.stride(0), dst_bt.shape[0],
+             src_bt.stride(1), dst_bt.stride(1))
         )
     if not entries:
         return
@@ -389,8 +404,11 @@ def fused_copy_pool_block_tables(meta, paged_block_tables, bs: int) -> None:
         for src, dst, *_ in group:
             args.extend((src, dst))
         args.append(bs)
-        for _, _, n_rows, n_cols, max_cols, src_stride, dst_stride, dst_rows in group:
-            args.extend((n_rows, n_cols, max_cols, src_stride, dst_stride, dst_rows))
+        for _, _, n_rows, n_cols, max_cols, src_stride, dst_stride, dst_rows, src_cstride, dst_cstride in group:
+            args.extend(
+                (n_rows, n_cols, max_cols, src_stride, dst_stride, dst_rows,
+                 src_cstride, dst_cstride)
+            )
         _copy_pool_block_tables_kernel[grid](
             *args,
             HAS0=present > 0,
