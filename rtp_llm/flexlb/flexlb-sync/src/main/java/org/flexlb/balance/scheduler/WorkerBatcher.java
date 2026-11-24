@@ -112,6 +112,7 @@ public final class WorkerBatcher {
             if (decode != null) {
                 details.put("decode", Map.of("endpoint", decode.address(), "version", decode.admissionVersion(),
                         "engineLoad", decode.engineLoad(), "totalLoad", decode.totalLoad(),
+                        "runningStreams", decode.dispatchUsage().runningStreams(),
                         "kvTotal", decode.totalKv(), "kvAvailable", decode.dispatchUsage().hardKvAvailable()));
             }
             cached = Collections.unmodifiableMap(details);

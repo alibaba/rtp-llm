@@ -251,9 +251,9 @@ public class HttpLoadBalanceServer {
         try {
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("scheduler_inflight", requestScheduler.getInflightSize());
-            result.put("decode_max_engine_requests",
-                    configService.loadBalanceConfig().getRouter().getRoles()
-                            .getDecode().getAvailability().getMaxEngineRequests());
+            var decodeAvailability = configService.loadBalanceConfig().getRouter().getRoles().getDecode().getAvailability();
+            result.put("decode_max_engine_requests", decodeAvailability.getMaxEngineRequests());
+            result.put("decode_max_running_stream_size", decodeAvailability.getMaxRunningStreamSize());
 
             List<Map<String, Object>> prefillList = new ArrayList<>();
             for (Map.Entry<String, PrefillEndpoint> entry
@@ -291,6 +291,7 @@ public class HttpLoadBalanceServer {
                         Math.max(0, view.reserved().size() - view.queuedCount()));
                 ep.put("confirmed_accepted", view.acceptedCount());
                 ep.put("confirmed_running", view.runningCount());
+                ep.put("reported_running_streams", view.routing().dispatchUsage().runningStreams());
                 ep.put("total_load", view.routing().totalLoad());
                 ep.put("engine_load", view.routing().engineLoad());
                 ep.put("active_dispatch_permits", view.activeDispatchPermits());

@@ -98,7 +98,7 @@ Executor and event-loop sizes take effect at process startup; changing them requ
 | `scheduler.queueTimeoutMs` | QUEUE only, positive, default 3600000 ms; actual queue TTL. DIRECT has no queue timer and rejects this field. |
 | Removed capacity controls | `scheduler.capacity` and delivered-not-accepted count limits are removed. Per-Prefill concurrency uses the single dispatcher limit; lifetimes bound waiting. The old `maxUncachedTokens` field is rejected. |
 | Removed routing controls | Prefill candidate randomization/LRU and outlier filters, legacy Decode decay controls/outlier filters, and output-estimate truncation are rejected. |
-| `router.roles.decode.costEstimator.expression` | Default `kvcache_used_ratio`; smallest cost wins within the same availability tier. Using `max_running_size` requires a positive `availability.maxEngineRequests`. |
+| `router.roles.decode.costEstimator.expression` | Default `kvcache_used_ratio`; smallest cost wins within the same availability tier. Using `max_running_size` requires a positive engine-request or running-stream limit. |
 | Transport timeout | `flexlb.engine-grpc.enqueue-timeout-ms`, default 5000; outside the scheduling JSON. |
 | KV cache response limit | `engineGrpc.kvCacheMaxInboundMessageBytes` in `FLEXLB_CONFIG`, positive integer, default 134217728 (128 MiB); applies to Engine KV cache status channels. Read at startup; restart Master after changing it. This is a per-message ceiling, not a preallocated buffer; actual large responses and concurrent polls can increase peak direct and heap memory. |
 | Engine channel keepalive | `flexlb.engine-grpc.keep-alive-time-ms`, positive, default 2000 (grpc-java raises anything below 10000 to 10000); `flexlb.engine-grpc.keep-alive-without-calls`, default `true`. Outside the scheduling JSON. rtp-llm's gRPC server tolerates idle pings. An engine whose gRPC server keeps grpc's default keepalive rules (the dashllm worker-status server today) answers the third ping on a connection with no running call with `GOAWAY too_many_pings` and closes it, failing any call still running on that channel; set `keep-alive-without-calls=false` for such engines. |
@@ -450,7 +450,7 @@ Decode formulas do not use `sum`. Available variables are:
 | Variable | Meaning |
 | --- | --- |
 | `running_size` | For queued dispatch, Engine-confirmed requests plus unconfirmed dispatches and active dispatch permits |
-| `max_running_size` | Fixed `router.roles.decode.availability.maxEngineRequests`; must be configured as a positive value when the expression uses this variable |
+| `max_running_size` | Positive `maxEngineRequests` when enabled, otherwise the positive `maxRunningStreamSize` |
 | `kvcache_used` | For queued dispatch, used KV tokens including Engine-facing reservations |
 | `kvcache_capacity` | Total KV token capacity |
 | `kvcache_used_ratio` | `kvcache_used / kvcache_capacity`; zero for unknown capacity of zero, without capping ratios above one |
@@ -458,10 +458,14 @@ Decode formulas do not use `sum`. Available variables are:
 Equal costs rotate. Workers with a non-finite formula result are excluded from the preferred
 availability tier; if that tier has no finite result, routing fails with a formula error.
 Reservation and delivery always recheck current
-inventory under the selected generation's lock. `maxKvUsagePercent` defaults to 90 and must
-be in `[1, 100]`; zero and negative values are rejected during configuration validation.
-`maxEngineRequests`, when configured, covers the ownership scope of the current admission stage,
-including dispatch shadows and permits; it is not the Engine's physical RUNNING concurrency.
+inventory under the selected generation's lock. Decode dispatch requires every enabled
+`router.roles.decode.availability` limit to pass. Set an individual limit to `-1` to disable it.
+
+| Field | Default | Dispatch check |
+|---|---:|---|
+| `maxKvUsagePercent` | 90 | Protects available prompt KV and limits expected KV usage to 1–100% of capacity. |
+| `maxEngineRequests` | 64 | Counts Engine-facing requests, including outstanding dispatch permits. |
+| `maxRunningStreamSize` | -1 | Requires the latest Worker-reported running stream count to be below the configured limit. Dispatches between Worker status polls can use the same observation. |
 
 See [FlexLB scheduling and configuration](docs/priority-scheduler-delivery-modes.md)
 for lifecycle behavior, capacity accounting, configuration defaults, and the mode matrix.

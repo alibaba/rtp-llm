@@ -27,7 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
  *
  * <p>Requirements under test:
  * <ul>
- *   <li>Slot deficit = max(0, engineLoad + 1 − concurrencyLimit). No deficit → no eviction.</li>
+ *   <li>Slot deficit = max(0, runningStreams + 1 − concurrencyLimit). No deficit → no eviction.</li>
  *   <li>Both prompt supply and complete-output usage must fit the same KV budget as admission.</li>
  *   <li>Equal-priority entries are NEVER victims (strict &lt;).</li>
  *   <li>Greedy KV selection takes the largest-bucket release first; covers the
@@ -67,16 +67,28 @@ class EvictionPlannerDecodeContractTest {
                 true, 0L, false, false);
     }
 
+    private static DecodeRequestView running(long id, int priority, long kvTokens) {
+        return new DecodeRequestView(id, priority, kvTokens, kvTokens, DecodeTaskPhase.RUNNING,
+                true, 0L, false, false);
+    }
+
     private static DecodeEndpointSnapshot endpoint(
             long realKvAvailable, long realKvTotal,
-            int engineLoad, long concurrencyLimit,
-            List<DecodeRequestView> accepted) {
+            int engineRequests, long engineLimit,
+            List<DecodeRequestView> candidates) {
+        return endpoint(realKvAvailable, realKvTotal, engineRequests, engineLimit, 0, -1, candidates);
+    }
+
+    private static DecodeEndpointSnapshot endpoint(
+            long realKvAvailable, long realKvTotal, int engineRequests, long engineLimit,
+            int runningStreams, long runningLimit, List<DecodeRequestView> candidates) {
         return new DecodeEndpointSnapshot(
-                null, "decode-a", new DecodeEndpoint.AdmissionCapacity(concurrencyLimit, 100L),
+                null, "decode-a", new DecodeEndpoint.AdmissionCapacity(engineLimit, 100L, runningLimit),
                 new DecodeEndpoint.CapacityUsage(
-                        engineLoad, realKvTotal, realKvAvailable, 0L,
+                        engineRequests, runningStreams, realKvTotal, realKvAvailable, 0L,
                         Math.max(0L, realKvTotal - realKvAvailable)),
-                List.of(), accepted, List.of());
+                List.of(), candidates.stream().filter(v -> v.phase() == DecodeTaskPhase.ACCEPTED_NOT_RUNNING).toList(),
+                candidates.stream().filter(v -> v.phase() == DecodeTaskPhase.RUNNING).toList());
     }
 
     private static DecodeEvictionProposal plan(
@@ -113,23 +125,49 @@ class EvictionPlannerDecodeContractTest {
     class SlotDef {
 
         @Test
-        void oneSlotDeficitEvictsExactlyOneLowerPriorityAccepted() {
+        void oneSlotDeficitEvictsRunningStreamEvenWhenAcceptedVictimCostsLess() {
             // slotDeficit = max(0, 1+1-1) = 1; kvDeficit = 0 (realKvTotal=0).
             Map<String, String> f = new HashMap<>();
             DecodeEvictionProposal p = plan(70, 0L,
-                    endpoint(1000L, 0L, 1, 1L, List.of(accepted(1L, 30, 128L))), f);
+                    endpoint(1000L, 0L, 2, -1L, 1, 1L,
+                            List.of(accepted(2L, 10, 128L), running(1L, 30, 128L))), f);
             assertEquals(List.of(1L), victimIds(p));
             assertEquals(DecodeEvictionProposal.CASE_SLOT, p.evictionCase());
-            // cost = H_SLOT * f(30) * g(ACCEPTED) = 4 * 1 * 16 = 64
-            assertEquals(64L, p.totalCost());
+            // cost = H_SLOT * f(30) * g(RUNNING) = 4 * 1 * 64 = 256
+            assertEquals(256L, p.totalCost());
             assertEquals(128L, p.freedKvTokens());
+        }
+
+        @Test
+        void previouslyRunningOwnerCannotFreeTheSlotOfAnUnattributedStream() {
+            var retained = new DecodeRequestView(2L, 10, 128L, 128L, DecodeTaskPhase.RUNNING,
+                    true, 0L, false, false, false);
+            Map<String, String> failures = new HashMap<>();
+            assertNull(plan(70, 0L, endpoint(1000L, 1000L, 2, -1L, 1, 1L, List.of(retained)), failures));
+            assertEquals("insufficient_lower_priority_candidates", failures.get("decode-a"));
+        }
+
+        @Test
+        void engineRequestLimitCanReclaimAnAcceptedSlotWithoutPreemptingRunningWork() {
+            DecodeEvictionProposal proposal = plan(70, 0L, endpoint(1000L, 1000L, 2, 2L, 1, 2L,
+                    List.of(accepted(2L, 30, 128L), running(1L, 30, 128L))), new HashMap<>());
+            assertEquals(List.of(2L), victimIds(proposal));
+            assertEquals(64L, proposal.totalCost());
+        }
+
+        @Test
+        void simultaneousLimitsReuseTheRunningVictimForBothDeficits() {
+            DecodeEvictionProposal proposal = plan(70, 0L, endpoint(1000L, 1000L, 3, 2L, 1, 1L,
+                    List.of(accepted(1L, 10, 128L), accepted(2L, 20, 128L), running(3L, 30, 128L))),
+                    new HashMap<>());
+            assertEquals(List.of(1L, 3L), victimIds(proposal));
         }
 
         @Test
         void equalPriorityCandidateNeverYields() {
             Map<String, String> f = new HashMap<>();
             assertNull(plan(70, 0L,
-                    endpoint(1000L, 0L, 1, 1L, List.of(accepted(1L, 70, 128L))), f));
+                    endpoint(1000L, 0L, 1, 1L, List.of(running(1L, 70, 128L))), f));
             assertEquals("insufficient_lower_priority_candidates", f.get("decode-a"));
         }
 
@@ -137,7 +175,7 @@ class EvictionPlannerDecodeContractTest {
         void noPriorityCandidateNeverYields() {
             Map<String, String> f = new HashMap<>();
             assertNull(plan(70, 0L,
-                    endpoint(1000L, 0L, 1, 1L, List.of(accepted(1L, 0, 128L))), f));
+                    endpoint(1000L, 0L, 1, 1L, List.of(running(1L, 0, 128L))), f));
             assertEquals("insufficient_lower_priority_candidates", f.get("decode-a"));
         }
     }
@@ -147,6 +185,15 @@ class EvictionPlannerDecodeContractTest {
     @Nested
     @DisplayName("KV deficit recompute")
     class KvDef {
+
+        @Test
+        void freeingKvFromAnAcceptedStreamStillRequiresASeparateRunningSlot() {
+            DecodeEvictionProposal proposal = plan(70, 256L,
+                    endpoint(100L, 1000L, 2, -1L, 1, 1L,
+                            List.of(accepted(2L, 10, 256L), running(1L, 30, 32L))), new HashMap<>());
+            assertEquals(List.of(1L, 2L), victimIds(proposal));
+            assertEquals(DecodeEvictionProposal.CASE_SLOT_AND_KV, proposal.evictionCase());
+        }
 
         @Test
         void greedyKvSelectionTakesTheLargestReleaseFirst() {

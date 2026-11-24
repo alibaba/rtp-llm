@@ -446,7 +446,7 @@ class DecodeSelectorTest {
     void unnormalizedRunningSizeFormulaDoesNotRequireAnEngineRequestCap() {
         var decode = configService.loadBalanceConfig().getRouter().getRoles().getDecode();
         decode.getCostEstimator().setExpression("running_size");
-        Assertions.assertNull(decode.getAvailability().getMaxEngineRequests());
+        decode.getAvailability().setMaxEngineRequests(-1L);
         registerWorker("127.0.0.1", 10_000L, 10_000L);
         registerWorker("127.0.0.2", 10_000L, 10_000L);
         EndpointRegistry registry = decodeRegistry();
@@ -796,7 +796,66 @@ class DecodeSelectorTest {
     }
 
     @ParameterizedTest
-    @ValueSource(longs = {-1L, 0L, 101L})
+    @CsvSource({"-1,64,64", "64,-1,64", "32,64,32"})
+    void normalizedLoadPrefersLessLoadedWorkerForSelectionAndDispatch(
+            long maxEngineRequests, long maxRunningStreamSize, long expectedDenominator) {
+        configureCost("1.0 * running_size / max_running_size ");
+        var availability = configService.loadBalanceConfig().getRouter().getRoles().getDecode().getAvailability();
+        availability.setMaxEngineRequests(maxEngineRequests);
+        availability.setMaxKvUsagePercent(-1L);
+        availability.setMaxRunningStreamSize(maxRunningStreamSize);
+        registerWorker("127.0.0.1", 512L, 512L);
+        registerWorker("127.0.0.2", 512L, 512L);
+        var registry = decodeRegistry();
+        try {
+            reservePinned(decodeEndpoint(registry, "127.0.0.1:8080"), 50L, 0L, 0L, 50);
+            var request = DecodeBinding.capture(context(100L, 51L));
+            Assertions.assertEquals(expectedDenominator, request.capacity().costMaxRunningSize());
+            var selector = availableStrategy(registry);
+            var placement = selector.select(request, null);
+            Assertions.assertEquals(PlacementResult.Status.SUCCESS, placement.status());
+            try (var selected = placement.value()) {
+                Assertions.assertEquals("127.0.0.2", selected.serverStatus().getServerIp());
+            }
+            var attempt = selector.tryDispatch(request, null, false);
+            Assertions.assertTrue(attempt.accepted());
+            var grant = attempt.value();
+            Assertions.assertEquals("127.0.0.2", grant.status().getServerIp());
+            grant.permit().release();
+            grant.endpoint().release(grant.reservation(), DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
+    void runningOnlyDispatchAcceptsDemandBeyondWorkerKvBudget() {
+        var availability = configService.loadBalanceConfig().getRouter().getRoles().getDecode().getAvailability();
+        availability.setMaxEngineRequests(-1L);
+        availability.setMaxKvUsagePercent(-1L);
+        availability.setMaxRunningStreamSize(1L);
+        registerWorker("127.0.0.1", 512L, 0L);
+        EndpointRegistry registry = decodeRegistry();
+        try {
+            var selector = availableStrategy(registry);
+            var request = DecodeBinding.capture(context(1024L, 992L));
+            var placement = selector.select(request, null);
+            Assertions.assertEquals(PlacementResult.Status.SUCCESS, placement.status());
+            placement.value().close();
+
+            var attempt = selector.tryDispatch(request, null, false);
+            Assertions.assertTrue(attempt.accepted());
+            var grant = attempt.value();
+            Assertions.assertTrue(grant.permit().release());
+            Assertions.assertTrue(grant.endpoint().release(grant.reservation(),
+                    DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK).released());
+        } finally {
+            registry.close();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {-2L, 0L, 101L})
     void invalidKvPercentageFailsBeforeWorkerSelection(long percent) {
         configService.loadBalanceConfig().getRouter().getRoles().getDecode()
                 .getAvailability().setMaxKvUsagePercent(percent);

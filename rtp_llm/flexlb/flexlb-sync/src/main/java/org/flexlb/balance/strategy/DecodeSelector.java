@@ -91,7 +91,7 @@ public class DecodeSelector {
                 if (availabilityByWorker[index] == selectedAvailability) {
                     DecodeRoutingView view = snapshots.get(index);
                     double cost = request.costFormula().evaluate(view.totalLoad(),
-                            request.capacity().maxEngineRequests(), view.realKvUsed(), view.totalKv());
+                            request.capacity().costMaxRunningSize(), view.realKvUsed(), view.totalKv());
                     costByWorker[index] = cost;
                     if (Double.isFinite(cost)) {
                         minimumCost = Math.min(minimumCost, cost);
@@ -193,7 +193,7 @@ public class DecodeSelector {
 
     private static double dispatchCost(DecodeBinding request, DecodeRoutingView worker) {
         return request.costFormula().evaluate(worker.engineCapacityUsed(),
-                request.capacity().maxEngineRequests(), worker.engineFacingKvUsed(), worker.totalKv());
+                request.capacity().costMaxRunningSize(), worker.engineFacingKvUsed(), worker.totalKv());
     }
 
     private PlacementResult<SelectedRole, RoleType> classifyCapacityFailure(
@@ -210,6 +210,7 @@ public class DecodeSelector {
                     var snapshot = ((DecodeEndpoint) pin.endpoint()).admissionSummary();
                     evidence.add(Map.of("endpoint", view.address(), "version", snapshot.routing().admissionVersion(),
                             "engineLoad", snapshot.routing().engineLoad(), "totalLoad", snapshot.routing().totalLoad(),
+                            "runningStreams", snapshot.routing().dispatchUsage().runningStreams(),
                             "kvTotal", snapshot.routing().totalKv(), "kvAvailable", snapshot.routing().dispatchUsage().hardKvAvailable()));
                     workerFailure = classifyCapacityFailure(request, snapshot);
                 }
@@ -261,11 +262,13 @@ public class DecodeSelector {
         }
         CapacityRelease attributed = higher.plus(same);
         if (residual.requests() > attributed.requests()
+                || residual.runningStreams() > attributed.runningStreams()
                 || residual.hardKvTokens() > attributed.hardKvTokens()
                 || residual.expectedKvTokens() > attributed.expectedKvTokens()) {
             return Response.error(StrategyErrorType.ADMISSION_UNAVAILABLE);
         }
         boolean higherBlocks = residual.requests() > 0 && higher.requests() > 0
+                || residual.runningStreams() > 0 && higher.runningStreams() > 0
                 || residual.hardKvTokens() > 0 && higher.hardKvTokens() > 0
                 || residual.expectedKvTokens() > 0 && higher.expectedKvTokens() > 0;
         return Response.error(StrategyErrorType.PRIORITY_ADMISSION_REJECTED, higherBlocks

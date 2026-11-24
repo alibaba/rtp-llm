@@ -367,17 +367,23 @@ final class FlexlbConfigValidator {
                 routing.getRoles().getDecode().getAvailability();
         require(decodeAvailability != null,
                 "router.roles.decode.availability", "is required");
-        if (costFormula.requiresMaxRunningSize()) {
-            require(decodeAvailability.getMaxEngineRequests() != null,
-                    "router.roles.decode.availability.maxEngineRequests",
-                    "is required when costEstimator.expression uses max_running_size");
+        Long maxEngineRequests = decodeAvailability.getMaxEngineRequests();
+        if (decodeAvailability.getMaxKvUsagePercent() != -1L) {
+            range(decodeAvailability.getMaxKvUsagePercent(), 1, RoutingConfig.PERCENTAGE_SCALE,
+                    "router.roles.decode.availability.maxKvUsagePercent");
         }
-        range(decodeAvailability.getMaxKvUsagePercent(), 1,
-                RoutingConfig.PERCENTAGE_SCALE,
-                "router.roles.decode.availability.maxKvUsagePercent");
-        if (decodeAvailability.getMaxEngineRequests() != null) {
-            positive(decodeAvailability.getMaxEngineRequests(),
+        if (maxEngineRequests != null && maxEngineRequests != -1L) {
+            positive(maxEngineRequests,
                     "router.roles.decode.availability.maxEngineRequests");
+        }
+        if (decodeAvailability.getMaxRunningStreamSize() != -1L) {
+            positive(decodeAvailability.getMaxRunningStreamSize(), "router.roles.decode.availability.maxRunningStreamSize");
+        }
+        if (costFormula.requiresMaxRunningSize()) {
+            long maxRunningSize = DecodeCostFormula.resolveMaxRunningSize(
+                    maxEngineRequests == null ? 0L : maxEngineRequests, decodeAvailability.getMaxRunningStreamSize());
+            require(maxRunningSize > 0L, "router.roles.decode.availability",
+                    "maxEngineRequests or maxRunningStreamSize must be positive when costEstimator.expression uses max_running_size");
         }
         if (routing.getGroupSelector() != null) {
             TrafficPolicyConfig.validate(routing.getGroupSelector());

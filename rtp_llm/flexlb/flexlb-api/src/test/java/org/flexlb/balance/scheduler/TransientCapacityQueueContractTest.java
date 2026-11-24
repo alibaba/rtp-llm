@@ -58,6 +58,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -70,6 +71,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -1280,6 +1282,46 @@ class TransientCapacityQueueContractTest {
         var reservation = endpoint.reserve(pin, requestId, 128L, 136L, 50);
         assertNotNull(reservation);
         return endpoint.acquireDispatchPermit(reservation, capacity).permit();
+    }
+
+    @ParameterizedTest
+    @CsvSource({"BATCH,-1", "NON_BATCH,-1", "BATCH,1", "NON_BATCH,1"})
+    @Timeout(15)
+    void runningLimitWakesAtObservedReleaseWhileEngineOwnedLimitRemainsIndependent(
+            DispatcherConfig.Type delivery, long engineLimit) throws Exception {
+        FlexlbConfig config = config();
+        config.getDispatcher().setType(delivery);
+        config.queueScheduler().setOrdering(new QueueOrderingConfig());
+        var limits = config.getRouter().getRoles().getDecode().getAvailability();
+        limits.setMaxEngineRequests(engineLimit);
+        limits.setMaxRunningStreamSize(1L);
+        try (Fixture fixture = new Fixture(null, config)) {
+            var busy = decodeRunningStatus(2L, 1);
+            TaskInfo allocated = new TaskInfo();
+            long allocatedId = Fixture.EXTERNAL_REQUEST_ID + 1L;
+            allocated.setRequestId(allocatedId);
+            allocated.setPhase(TaskPhase.KV_ALLOCATED);
+            busy.getRunningTaskInfo().put(Long.toString(allocatedId), allocated);
+            fixture.runtime.applyStatus(fixture.decodeStatus, busy);
+
+            var result = fixture.runtime.scheduler().submit(fixture.context(604L));
+            awaitCondition(() -> fixture.prefillEndpoint.captureRouteProjectionInputs()
+                    .queue().admissionBlock() != null, 2_000L);
+            assertFalse(result.isDone());
+
+            // One stream finished. The other still owns Decode KV and has not started running.
+            var idle = decodeRunningStatus(3L, 0);
+            idle.setRunningTaskInfo(Map.of(Long.toString(allocatedId), allocated));
+            fixture.runtime.applyStatus(fixture.decodeStatus, idle);
+            if (engineLimit > 0) {
+                assertThrows(TimeoutException.class, () -> result.get(100, TimeUnit.MILLISECONDS));
+                fixture.runtime.applyStatus(fixture.decodeStatus, decodeRunningStatus(4L, 0));
+            }
+            assertTrue(result.get(2, TimeUnit.SECONDS).isSuccess());
+            assertEquals(0, fixture.prefillEndpoint.queuedRequestCount());
+            assertEquals(delivery == DispatcherConfig.Type.BATCH ? List.of(604L) : List.of(),
+                    fixture.submission.requestIds());
+        }
     }
 
     @Test

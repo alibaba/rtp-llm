@@ -150,11 +150,14 @@ public final class RoutingConfig {
     @Getter
     @Setter
     public static final class DecodeAvailabilityConfig {
-        /** Maximum Decode KV usage percentage, in [1, 100]. */
+        /** Set to -1 to disable Master-side KV admission, otherwise 1–100 percent. */
         private long maxKvUsagePercent = 90;
 
-        /** Master-side cap for all Engine-facing Decode ownership. */
-        private Long maxEngineRequests;
+        /** Maximum Engine-facing Decode requests, including outstanding dispatch permits. -1 disables this limit. */
+        private Long maxEngineRequests = 64L;
+
+        /** Maximum Worker-reported running Decode streams. -1 disables this limit. */
+        private long maxRunningStreamSize = -1L;
     }
 
 }

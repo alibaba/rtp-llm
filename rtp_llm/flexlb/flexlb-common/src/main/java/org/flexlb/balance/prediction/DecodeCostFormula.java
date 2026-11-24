@@ -37,6 +37,11 @@ public final class DecodeCostFormula {
         return formula.referencesVariable("max_running_size");
     }
 
+    /** Keep the historical cost scale when the engine-request limit is enabled. */
+    public static long resolveMaxRunningSize(long maxEngineRequests, long maxRunningStreamSize) {
+        return maxEngineRequests > 0L ? maxEngineRequests : Math.max(0L, maxRunningStreamSize);
+    }
+
     public double evaluate(long runningSize, long maxRunningSize, long kvUsed, long kvCapacity) {
         double[] vars = EVALUATION_VARIABLES.get();
         vars[0] = runningSize;

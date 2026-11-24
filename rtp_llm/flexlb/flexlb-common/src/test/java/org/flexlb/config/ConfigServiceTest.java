@@ -152,7 +152,8 @@ class ConfigServiceTest {
                 config.getRouter().getRoles().getDecode().getCostEstimator().getExpression());
         var decode = config.getRouter().getRoles().getDecode().getAvailability();
         assertEquals(90, decode.getMaxKvUsagePercent());
-        assertNull(decode.getMaxEngineRequests());
+        assertEquals(64L, decode.getMaxEngineRequests());
+        assertEquals(-1L, decode.getMaxRunningStreamSize());
         var health = config.getWorkerRegistry().getHealth();
         assertEquals(20L, health.getStatusPollIntervalMs());
         assertEquals(5000L, health.getStatusRpcTimeoutMs());
@@ -273,25 +274,26 @@ class ConfigServiceTest {
         FlexlbConfig config = ConfigTestFixtures.parse("""
                 {"router":{"roles":{"decode":{"costEstimator":{"expression":"running_size"}}}}}
                 """);
-        assertNull(config.getRouter().getRoles().getDecode().getAvailability().getMaxEngineRequests());
+        assertEquals(64L, config.getRouter().getRoles().getDecode().getAvailability().getMaxEngineRequests());
     }
 
     @Test
-    void decode_max_running_size_variable_requires_positive_max_engine_requests() {
-        assertInvalid("""
+    void decode_max_running_size_variable_requires_one_positive_request_limit() {
+        ConfigTestFixtures.parse("""
                 {"router":{"roles":{"decode":{"costEstimator":{"expression":"running_size / max_running_size"}}}}}
-                """, "maxEngineRequests");
-        for (int maxRequests : new int[]{0, -1}) {
-            assertInvalid("""
-                    {"router":{"roles":{"decode":{"costEstimator":{"expression":"max_running_size"},
-                      "availability":{"maxEngineRequests":%s}}}}}
-                    """.formatted(maxRequests), "maxEngineRequests");
-        }
-        FlexlbConfig config = ConfigTestFixtures.parse("{}");
-        assertNull(config.getRouter().getRoles().getDecode().getAvailability().getMaxEngineRequests());
-        config.getRouter().getRoles().getDecode().getCostEstimator().setExpression("max_running_size");
+                """);
+        FlexlbConfig config = ConfigTestFixtures.parse("""
+                {"router":{"roles":{"decode":{"costEstimator":{"expression":"1.0 * running_size / max_running_size "},
+                  "availability":{"maxEngineRequests":-1,"maxKvUsagePercent":-1,"maxRunningStreamSize":64}}}}}
+                """);
+        var limits = config.getRouter().getRoles().getDecode().getAvailability();
+        limits.setMaxEngineRequests(null);
+        FlexlbConfigValidator.validate(config);
+        limits.setMaxRunningStreamSize(-1L);
         var error = assertThrows(ConfigValidationException.class, () -> FlexlbConfigValidator.validate(config));
-        assertTrue(error.getMessage().contains("maxEngineRequests"), error.getMessage());
+        assertTrue(error.getMessage().contains("max_running_size"), error.getMessage());
+        config.getRouter().getRoles().getDecode().getCostEstimator().setExpression("running_size");
+        FlexlbConfigValidator.validate(config);
     }
 
     @Test
@@ -506,21 +508,43 @@ class ConfigServiceTest {
     }
 
     @Test
-    void decodeKvUsagePercentageRequiresOneThroughOneHundred() {
+    void decodeKvUsageAcceptsDisabledOrAPercentage() {
         String field = "router.roles.decode.availability.maxKvUsagePercent";
         assertEquals(90L, ConfigTestFixtures.parse("{}").getRouter().getRoles()
                 .getDecode().getAvailability().getMaxKvUsagePercent());
-        for (long percent : new long[]{-1L, 0L, 101L}) {
+        for (long percent : new long[]{-2L, 0L, 101L}) {
             ConfigValidationException error = assertThrows(ConfigValidationException.class,
                     () -> ConfigTestFixtures.parse("{\"router\":{\"roles\":{\"decode\":{\"availability\":{\"maxKvUsagePercent\":"
                             + percent + "}}}}}"));
             assertTrue(error.getMessage().contains(field), error.getMessage());
             assertTrue(error.getMessage().contains("[1.0, 100.0]"), error.getMessage());
         }
-        for (long percent : new long[]{1L, 90L, 100L}) {
+        for (long percent : new long[]{-1L, 1L, 90L, 100L}) {
             var config = ConfigTestFixtures.parse("{\"router\":{\"roles\":{\"decode\":{\"availability\":{\"maxKvUsagePercent\":"
                     + percent + "}}}}}");
             assertEquals(percent, config.getRouter().getRoles().getDecode().getAvailability().getMaxKvUsagePercent());
+        }
+    }
+
+    @Test
+    void independentDecodeLimitsAcceptDisabledOrPositiveRequestCounts() {
+        for (long running : new long[]{-1L, 1L, 64L}) {
+            var config = ConfigTestFixtures.parse("""
+                    {"router":{"roles":{"decode":{"availability":{
+                      "maxEngineRequests":-1,"maxRunningStreamSize":%d,"maxKvUsagePercent":-1}}}}}
+                    """.formatted(running));
+            var availability = config.getRouter().getRoles().getDecode().getAvailability();
+            assertEquals(-1L, availability.getMaxEngineRequests());
+            assertEquals(running, availability.getMaxRunningStreamSize());
+            assertEquals(-1L, availability.getMaxKvUsagePercent());
+        }
+        for (long invalid : new long[]{-2L, 0L}) {
+            assertInvalid("""
+                    {"router":{"roles":{"decode":{"availability":{"maxEngineRequests":%d}}}}}
+                    """.formatted(invalid), "maxEngineRequests");
+            assertInvalid("""
+                    {"router":{"roles":{"decode":{"availability":{"maxRunningStreamSize":%d}}}}}
+                    """.formatted(invalid), "maxRunningStreamSize");
         }
     }
 

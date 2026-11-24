@@ -2,6 +2,7 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
+import org.flexlb.balance.prediction.DecodeCostFormula;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.config.RoutingConfig;
@@ -550,9 +551,17 @@ public class DecodeEndpoint extends WorkerEndpoint {
                                     boolean priorityKnown,
                                     long reservationToken,
                                     boolean queued,
-                                    boolean claimedForPreemption) {
+                                    boolean claimedForPreemption,
+                                    boolean reportedRunning) {
+        public DecodeRequestView(long requestId, int priority, long kvTokens, long expectedKvTokens,
+                                 DecodeTaskPhase phase, boolean priorityKnown, long reservationToken,
+                                 boolean queued, boolean claimedForPreemption) {
+            this(requestId, priority, kvTokens, expectedKvTokens, phase, priorityKnown, reservationToken,
+                    queued, claimedForPreemption, phase == DecodeTaskPhase.RUNNING);
+        }
+
         public CapacityRelease placementRelease() {
-            return new CapacityRelease(1L, kvTokens, expectedKvTokens);
+            return new CapacityRelease(1L, reportedRunning ? 1L : 0L, kvTokens, expectedKvTokens);
         }
     }
 
@@ -576,13 +585,22 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     public record AdmissionCapacity(
             long maxEngineRequests,
-            long maxKvUsagePercent) {
+            long maxKvUsagePercent,
+            long maxRunningStreamSize) {
+
+        public AdmissionCapacity(long maxEngineRequests, long maxKvUsagePercent) {
+            this(maxEngineRequests, maxKvUsagePercent, -1L);
+        }
+
+        public long costMaxRunningSize() {
+            return DecodeCostFormula.resolveMaxRunningSize(maxEngineRequests, maxRunningStreamSize);
+        }
 
         public AdmissionCapacity {
-            if (maxEngineRequests < 0L || maxKvUsagePercent <= 0L
-                    || maxKvUsagePercent > RoutingConfig.PERCENTAGE_SCALE) {
-                throw new IllegalArgumentException(
-                        "Decode admission limits are outside their domain");
+            if (maxEngineRequests < -1L || maxRunningStreamSize < -1L || maxRunningStreamSize == 0L
+                    || (maxKvUsagePercent != -1L && (maxKvUsagePercent <= 0L
+                    || maxKvUsagePercent > RoutingConfig.PERCENTAGE_SCALE))) {
+                throw new IllegalArgumentException("Decode admission limits are outside their domain");
             }
         }
 
@@ -598,17 +616,20 @@ public class DecodeEndpoint extends WorkerEndpoint {
             if (hardKvTokens < 0L || expectedKvTokens < hardKvTokens) {
                 throw new IllegalArgumentException("Decode demand must satisfy expected >= hard >= 0");
             }
-            long requests = maxEngineRequests == 0L ? 0L
-                    : shortfall(Math.max(0L, usage.occupiedRequests - release.requests),
-                            1L, maxEngineRequests, 0L);
-            if (usage.totalKvTokens == 0L) {
-                return new CapacityDeficit(requests, 0L, 0L);
+            long requests = requestShortfall(usage.occupiedRequests, release.requests, maxEngineRequests);
+            long running = requestShortfall(usage.runningStreams, release.runningStreams, maxRunningStreamSize);
+            if (maxKvUsagePercent == -1L || usage.totalKvTokens == 0L) {
+                return new CapacityDeficit(requests, running, 0L, 0L);
             }
-            return new CapacityDeficit(requests,
+            return new CapacityDeficit(requests, running,
                     shortfall(usage.hardReservedKvTokens, hardKvTokens,
                             usage.availableKvTokens, release.hardKvTokens),
                     shortfall(Math.max(0L, usage.expectedKvUsed - release.expectedKvTokens),
                             expectedKvTokens, kvBudget(usage.totalKvTokens), 0L));
+        }
+
+        private static long requestShortfall(long used, long released, long limit) {
+            return limit > 0L ? shortfall(Math.max(0L, used - released), 1L, limit, 0L) : 0L;
         }
 
         /** Integer arithmetic never rounds the configured KV budget up. */
@@ -616,6 +637,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             if (totalKv < 0L) {
                 throw new IllegalArgumentException("negative KV capacity");
             }
+            if (maxKvUsagePercent == -1L) { return Long.MAX_VALUE; }
             return totalKv / 100L * maxKvUsagePercent + totalKv % 100L * maxKvUsagePercent / 100L;
         }
 
@@ -628,10 +650,15 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
-    public record CapacityUsage(long occupiedRequests, long totalKvTokens, long availableKvTokens,
+    public record CapacityUsage(long occupiedRequests, long runningStreams, long totalKvTokens, long availableKvTokens,
                                 long hardReservedKvTokens, long expectedKvUsed) {
+        public CapacityUsage(long occupiedRequests, long totalKvTokens, long availableKvTokens,
+                             long hardReservedKvTokens, long expectedKvUsed) {
+            this(occupiedRequests, 0L, totalKvTokens, availableKvTokens, hardReservedKvTokens, expectedKvUsed);
+        }
+
         public CapacityUsage {
-            if (occupiedRequests < 0L || totalKvTokens < 0L || availableKvTokens < 0L
+            if (occupiedRequests < 0L || runningStreams < 0L || totalKvTokens < 0L || availableKvTokens < 0L
                     || hardReservedKvTokens < 0L || expectedKvUsed < 0L) {
                 throw new IllegalArgumentException("Decode occupancy must be non-negative");
             }
@@ -642,24 +669,33 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
-    public record CapacityRelease(long requests, long hardKvTokens, long expectedKvTokens) {
+    public record CapacityRelease(long requests, long runningStreams, long hardKvTokens, long expectedKvTokens) {
         public static final CapacityRelease NONE = new CapacityRelease(0L, 0L, 0L);
 
+        public CapacityRelease(long requests, long hardKvTokens, long expectedKvTokens) {
+            this(requests, 0L, hardKvTokens, expectedKvTokens);
+        }
+
         public CapacityRelease {
-            if (requests < 0L || hardKvTokens < 0L || expectedKvTokens < hardKvTokens) {
+            if (requests < 0L || runningStreams < 0L || runningStreams > requests || hardKvTokens < 0L || expectedKvTokens < hardKvTokens) {
                 throw new IllegalArgumentException("invalid Decode capacity release");
             }
         }
 
         public CapacityRelease plus(CapacityRelease other) {
             return new CapacityRelease(DecodeState.saturatedAddNonNegative(requests, other.requests),
+                    DecodeState.saturatedAddNonNegative(runningStreams, other.runningStreams),
                     DecodeState.saturatedAddNonNegative(hardKvTokens, other.hardKvTokens),
                     DecodeState.saturatedAddNonNegative(expectedKvTokens, other.expectedKvTokens));
         }
     }
 
-    public record CapacityDeficit(long requests, long hardKvTokens, long expectedKvTokens) {
-        public boolean fits() { return requests == 0L && !needsKv(); }
+    public record CapacityDeficit(long requests, long runningStreams, long hardKvTokens, long expectedKvTokens) {
+        public CapacityDeficit(long requests, long hardKvTokens, long expectedKvTokens) {
+            this(requests, 0L, hardKvTokens, expectedKvTokens);
+        }
+
+        public boolean fits() { return requests == 0L && runningStreams == 0L && !needsKv(); }
         public boolean needsKv() { return hardKvTokens > 0L || expectedKvTokens > 0L; }
         public long kvTokens() { return Math.max(hardKvTokens, expectedKvTokens); }
     }

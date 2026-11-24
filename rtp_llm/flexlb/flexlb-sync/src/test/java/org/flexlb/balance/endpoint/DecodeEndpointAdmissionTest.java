@@ -237,6 +237,65 @@ class DecodeEndpointAdmissionTest {
     }
 
     @Test
+    void enabledDecodeAdmissionLimitsAreCheckedIndependently() {
+        var usage = new DecodeEndpoint.CapacityUsage(20, 2, 1000, 200, 0, 800);
+        assertTrue(new DecodeEndpoint.AdmissionCapacity(-1, -1, -1).evaluate(usage, 300, 400).fits());
+        assertEquals(new DecodeEndpoint.CapacityDeficit(0, 0, 100, 300),
+                new DecodeEndpoint.AdmissionCapacity(-1, 90, -1).evaluate(usage, 300, 400));
+        assertEquals(new DecodeEndpoint.CapacityDeficit(1, 0, 0, 0),
+                new DecodeEndpoint.AdmissionCapacity(20, -1, 3).evaluate(usage, 300, 400));
+        assertEquals(new DecodeEndpoint.CapacityDeficit(0, 1, 0, 0),
+                new DecodeEndpoint.AdmissionCapacity(21, -1, 2).evaluate(usage, 300, 400));
+        assertEquals(new DecodeEndpoint.CapacityDeficit(1, 1, 100, 300),
+                new DecodeEndpoint.AdmissionCapacity(20, 90, 2).evaluate(usage, 300, 400));
+    }
+
+    @Test
+    void dispatchUsesReportedRunningAcrossAllocationAndCompletion() {
+        TaskInfo task = new TaskInfo();
+        task.setRequestId(100L);
+        task.setPhase(TaskPhase.KV_ALLOCATED);
+        updateStatus(Map.of("100", task), Map.of(), 10_000L);
+
+        reserve(101L, 100L, 110L, 30);
+        reserveQueued(1L, 100L, 110L, 50);
+        var capacity = new DecodeEndpoint.AdmissionCapacity(-1L, 100L, 1L);
+        var prepared = endpoint.acquireDispatchPermit(reservations.get(1L), capacity);
+        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, prepared.status());
+        var next = reserveQueued(2L, 100L, 110L, 50);
+        assertTrue(endpoint.shouldRetryDispatch(2L, capacity),
+                "queued, engine-facing, KV-allocated, and pending permit records are not running streams");
+        assertEquals(TRANSFERRED, prepared.permit().dispatch());
+        task.setPhase(TaskPhase.RUNNING);
+        updateStatus(Map.of("100", task), Map.of(), 10_000L);
+        assertFalse(endpoint.shouldRetryDispatch(2L, capacity));
+        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
+                endpoint.acquireDispatchPermit(next, capacity).status());
+
+        updateStatus(Map.of(), Map.of("100", task), 10_000L);
+        assertTrue(endpoint.shouldRetryDispatch(2L, capacity));
+        var retry = endpoint.acquireDispatchPermit(next, capacity);
+        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, retry.status());
+        assertTrue(retry.permit().release());
+    }
+
+    @Test
+    void runningGateHonorsAggregateCountWithoutPerRequestDetails() {
+        WorkerStatusResponse report = new WorkerStatusResponse();
+        report.setRunningQueryLen(3L);
+        report.setWaitingQueryLen(80L);
+        report.setRunningTaskInfo(Map.of());
+        EndpointTestSupport.applyStatus(endpoint, report);
+        var reservation = reserveQueued(1L, 100L, 110L, 50);
+        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
+                endpoint.acquireDispatchPermit(reservation,
+                        new DecodeEndpoint.AdmissionCapacity(-1L, 100L, 3L)).status());
+        var spare = endpoint.acquireDispatchPermit(reservation, new DecodeEndpoint.AdmissionCapacity(-1L, 100L, 4L));
+        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, spare.status());
+        assertTrue(spare.permit().release());
+    }
+
+    @Test
     void engineDispatchPermit_stopsAtConfiguredEngineFacingLimit() {
         // Four non-queued reservations already face the Engine.
         for (long requestId = 100; requestId < 104; requestId++) {
@@ -983,7 +1042,7 @@ class DecodeEndpointAdmissionTest {
 
     @Test
     void invalidKvPercentageCannotReachAdmissionChecks() {
-        for (long percent : new long[]{-1L, 0L, 101L}) {
+        for (long percent : new long[]{-2L, 0L, 101L}) {
             assertThrows(IllegalArgumentException.class,
                     () -> new DecodeEndpoint.AdmissionCapacity(10L, percent));
         }

@@ -272,7 +272,7 @@ public final class ScheduledRequest implements Prioritized {
                     promptTokens, expectedTokens,
                     new DecodeEndpoint.AdmissionCapacity(
                             availability.getMaxEngineRequests() == null ? 0L : availability.getMaxEngineRequests(),
-                            availability.getMaxKvUsagePercent()), DecodeMode.from(config),
+                            availability.getMaxKvUsagePercent(), availability.getMaxRunningStreamSize()), DecodeMode.from(config),
                     decode.getCostEstimator().compiledFormula());
         }
 
