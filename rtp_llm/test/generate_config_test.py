@@ -1527,6 +1527,173 @@ class ResponseFormatProjectionTest(TestCase):
         structural_tag = cfg.structural_tag
         elements = structural_tag["format"]["elements"]
         self.assertEqual(elements[0]["end"], {"type": "token", "token": 123})
+        self.assertEqual(
+            elements[0]["content"], {"type": "any_tokens", "max_tokens": 16}
+        )
+
+    def test_reasoning_uses_token_end_and_any_tokens_for_single_token_tag(self):
+        class _SingleTokenTokenizer:
+            def encode(self, text, add_special_tokens=False):
+                mapping = {"<think>": [128821], "</think>": [128822]}
+                return list(mapping[text])
+
+        env = GenerateEnvConfig()
+        env.think_mode = 1
+        env.think_end_token_id = -1
+        env.think_end_tag = "</think>"
+
+        cfg = GenerateConfig(
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"schema": {"type": "object"}},
+            },
+            max_thinking_tokens=10,
+        )
+        cfg.add_thinking_params(_SingleTokenTokenizer(), env)
+
+        self.assertEqual(cfg.end_think_token_ids, [128822])
+        elements = cfg.structural_tag["format"]["elements"]
+        self.assertEqual(len(elements), 2)
+        self.assertEqual(elements[0]["end"], {"type": "token", "token": 128822})
+        self.assertEqual(
+            elements[0]["content"], {"type": "any_tokens", "max_tokens": 10}
+        )
+        self.assertEqual(elements[1]["type"], "json_schema")
+
+    def test_reasoning_splits_multi_token_end_tag_with_trailing_whitespace(self):
+        class _TrailingNewlineTokenizer:
+            def encode(self, text, add_special_tokens=False):
+                mapping = {
+                    "</think>": [128822],
+                    "</think>\n\n": [128822, 271],
+                    "\n</think>\n\n": [198, 128822, 271],
+                    "\n</think>": [198, 128822],
+                    "END_THINK": [10, 20],
+                }
+                return list(mapping[text])
+
+        tok = _TrailingNewlineTokenizer()
+
+        # "</think>\n\n" -> TokenFormat(128822) + const_string("\n\n") + json_schema
+        env = GenerateEnvConfig()
+        env.think_mode = 1
+        env.think_end_token_id = -1
+        env.think_end_tag = "</think>\\n\\n"
+        cfg = GenerateConfig(
+            response_format={"type": "json_object"},
+            max_thinking_tokens=20,
+        )
+        cfg.add_thinking_params(tok, env)
+        self.assertEqual(cfg.end_think_token_ids, [128822, 271])
+        elements = cfg.structural_tag["format"]["elements"]
+        self.assertEqual(len(elements), 3)
+        self.assertEqual(elements[0]["end"], {"type": "token", "token": 128822})
+        self.assertEqual(
+            elements[0]["content"], {"type": "any_tokens", "max_tokens": 20}
+        )
+        self.assertEqual(elements[1], {"type": "const_string", "value": "\n\n"})
+        self.assertEqual(elements[2]["type"], "json_schema")
+
+        # Leading whitespace "\n</think>\n\n" or plain multi-token "END_THINK"
+        # must stay on string end + any_text fallback so non-delimiter tokens
+        # like "\n" or "END" never prematurely terminate thinking.
+        for raw_tag, expected_tag in (
+            ("\\n</think>\\n\\n", "\n</think>\n\n"),
+            ("END_THINK", "END_THINK"),
+        ):
+            with self.subTest(raw_tag=raw_tag):
+                fallback_env = GenerateEnvConfig()
+                fallback_env.think_mode = 1
+                fallback_env.think_end_token_id = -1
+                fallback_env.think_end_tag = raw_tag
+                fallback_cfg = GenerateConfig(max_thinking_tokens=12)
+                fallback_cfg.add_thinking_params(tok, fallback_env)
+                fb_elements = fallback_cfg.structural_tag["format"]["elements"]
+                self.assertEqual(len(fb_elements), 2)
+                self.assertEqual(fb_elements[0]["end"], expected_tag)
+                self.assertEqual(
+                    fb_elements[0]["content"], {"type": "any_text", "max_tokens": 12}
+                )
+
+    def test_reasoning_zero_budget_and_adaptive_use_any_tokens_with_token_end(self):
+        class _SingleTokenTokenizer:
+            def encode(self, text, add_special_tokens=False):
+                mapping = {"<think>": [128821], "</think>": [128822]}
+                return list(mapping[text])
+
+        tok = _SingleTokenTokenizer()
+        env = GenerateEnvConfig()
+        env.think_mode = 1
+        env.think_start_tag = "<think>"
+        env.think_end_tag = "</think>"
+        env.think_end_token_id = -1
+
+        zero_cfg = GenerateConfig(max_thinking_tokens=0)
+        zero_cfg.add_thinking_params(tok, env)
+        zero_tag = zero_cfg.structural_tag["format"]["elements"][0]
+        self.assertEqual(zero_tag["end"], {"type": "token", "token": 128822})
+        self.assertEqual(zero_tag["content"], {"type": "any_tokens", "max_tokens": 0})
+
+        adaptive_cfg = GenerateConfig(
+            thinking_mode=ThinkingMode.ADAPTIVE,
+            max_thinking_tokens=10,
+        )
+        adaptive_cfg.add_thinking_params(tok, env)
+        think_branch, no_think_branch = adaptive_cfg.structural_tag["format"][
+            "elements"
+        ]
+        self.assertEqual(
+            think_branch["elements"][0]["end"], {"type": "token", "token": 128822}
+        )
+        self.assertEqual(
+            think_branch["elements"][0]["content"],
+            {"type": "any_tokens", "max_tokens": 10},
+        )
+        self.assertEqual(no_think_branch["type"], "any_text")
+        self.assertEqual(no_think_branch["excludes"], ["<think>", "</think>"])
+
+    def test_openai_endpoint_resolves_single_token_think_end_to_token_format(self):
+        test_data_path = os.path.join(
+            os.getcwd(), "rtp_llm/test/model_test/fake_test/testdata"
+        )
+        tokenizer = BaseTokenizer(
+            os.path.join(test_data_path, "deepseek_r1_qwen_14b_tokenizer")
+        )
+        env = GenerateEnvConfig()
+        env.think_mode = 1
+        env.think_end_token_id = -1
+        env.think_end_tag = "</think>"
+
+        model_config = ModelConfig()
+        model_config.generate_env_config = env
+        model_config.render_config = RenderConfig()
+        model_config.special_tokens = SpecialTokens()
+        model_config.max_seq_len = 1024
+        model_config.template_type = None
+        model_config.model_name = ""
+        model_config.ckpt_path = ""
+
+        endpoint = OpenaiEndpoint(
+            model_config=model_config,
+            misc_config=PyMiscellaneousConfig(),
+            vit_config=VitConfig(),
+            tokenizer=tokenizer,
+            backend_rpc_server_visitor=None,
+        )
+        request = ChatCompletionRequest(
+            messages=[],
+            enable_thinking=True,
+            thinking_budget=10,
+            response_format={"type": "json_object"},
+        )
+        config = endpoint._extract_generation_config(request)
+        elements = config.structural_tag["format"]["elements"]
+        self.assertEqual(len(elements), 2)
+        self.assertEqual(elements[0]["end"], {"type": "token", "token": 151649})
+        self.assertEqual(
+            elements[0]["content"], {"type": "any_tokens", "max_tokens": 10}
+        )
+        self.assertEqual(elements[1]["type"], "json_schema")
 
     def test_reasoning_without_grammar_wraps_any_text_structural_tag(self):
         cfg = GenerateConfig(response_format={"type": "text"})

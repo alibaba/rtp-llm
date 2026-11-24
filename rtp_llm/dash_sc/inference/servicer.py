@@ -544,6 +544,8 @@ def _dash_sc_reasoning_format(
     generate_env_config: GenerateEnvConfig,
     *,
     prompt_end_with_think: bool,
+    think_runtime: Optional[_ThinkRuntime] = None,
+    tokenizer: BaseTokenizer | None = None,
 ) -> ReasoningFormat:
     """Build the Dash-SC-local reasoning grammar envelope.
 
@@ -551,7 +553,19 @@ def _dash_sc_reasoning_format(
     grammar must generate the think begin tag. The OpenAI path makes the same
     decision after rendering its prompt.
     """
-    base_format = ReasoningFormat.from_generate_env_config(generate_env_config)
+    base_format = (
+        think_runtime.base_reasoning_format
+        if think_runtime is not None and think_runtime.base_reasoning_format is not None
+        else ReasoningFormat.from_generate_env_config(
+            generate_env_config,
+            end_think_token_ids=(
+                think_runtime.eos_tokens
+                if think_runtime is not None and think_runtime.eos_tokens
+                else None
+            ),
+            tokenizer=_hf_tokenizer(tokenizer),
+        )
+    )
     tag_begin = ""
     if not prompt_end_with_think:
         tag_begin = _decode_env_tag(generate_env_config.think_start_tag)
@@ -596,6 +610,9 @@ class _ThinkRuntime:
                              ``stop_token_id`` response param
       ``max_token_id``       ``len(tokenizer) - 1``; written to dashllm
                              ``max_token_id`` response param
+      ``base_reasoning_format`` pre-resolved ``ReasoningFormat`` end-tag syntax
+                             so per-request grammar construction avoids repeated
+                             ``tokenizer.encode`` lookups.
     """
 
     bos_tokens: tuple[int, ...] = ()
@@ -606,6 +623,7 @@ class _ThinkRuntime:
     phase2_enabled: bool = False
     eos_token_id: Optional[int] = None
     max_token_id: Optional[int] = None
+    base_reasoning_format: Optional[ReasoningFormat] = None
 
 
 def build_think_runtime(
@@ -656,6 +674,16 @@ def build_think_runtime(
     )
     close_token_id = int(eos_tokens[0]) if eos_tokens else None
     phase2_enabled = _uses_dash_sc_empty_think_phase2(model_type) and bool(empty_tokens)
+    base_reasoning_format: Optional[ReasoningFormat] = None
+    if (
+        getattr(generate_env_config, "think_end_token_id", -1) not in (None, -1)
+        or getattr(generate_env_config, "think_end_tag", None) is not None
+    ):
+        base_reasoning_format = ReasoningFormat.from_generate_env_config(
+            generate_env_config,
+            end_think_token_ids=eos_tokens or None,
+            tokenizer=_hf_tokenizer(tokenizer),
+        )
     return _ThinkRuntime(
         bos_tokens=bos_tokens,
         eos_tokens=eos_tokens,
@@ -665,6 +693,7 @@ def build_think_runtime(
         phase2_enabled=phase2_enabled,
         eos_token_id=eos_tid,
         max_token_id=max_tid,
+        base_reasoning_format=base_reasoning_format,
     )
 
 
@@ -1153,6 +1182,8 @@ async def iter_real_model_stream_infer(
             reasoning_format = _dash_sc_reasoning_format(
                 generate_env_config,
                 prompt_end_with_think=bool(matched_think_bos_ids),
+                think_runtime=runtime,
+                tokenizer=tokenizer,
             )
         if extra_stop_word_ids:
             existing = generate_config.stop_words_list

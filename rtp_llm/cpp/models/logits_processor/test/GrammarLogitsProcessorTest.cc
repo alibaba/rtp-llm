@@ -791,4 +791,236 @@ TEST(GrammarLogitsProcessorTest, StructuralTagReasoningBudgetForcesTokenEndAndFi
     EXPECT_EQ(proc.matcher->numAcceptedTokens(), 0);
 }
 
+namespace {
+
+// Minimal vocab mirroring DeepSeek-V4's thinking-tag tokenization: a single
+// special `</think>` token (id 3) coexists with BPE fragments (`<`, `/`, `</`,
+// `think`, `>`, `</think`, `>>`) that previously leaked at budget exhaustion.
+constexpr int kThinkEos        = 0;
+constexpr int kThinkEnd        = 3;
+constexpr int kThinkBodyStart  = 4;
+constexpr int kThinkLt         = 14;
+constexpr int kThinkSlash      = 15;
+constexpr int kThinkLtSlash    = 16;
+constexpr int kThinkPartialEnd = 20;
+constexpr int kThinkLBrace     = 23;
+constexpr int kThinkRBrace     = 24;
+constexpr int kThinkJsonField  = 25;
+constexpr int kThinkVocabSize  = 26;
+
+xgrammar::TokenizerInfo makeThinkingTokenizerInfo() {
+    std::vector<std::string> vocab = {
+        "<eos>",    // 0 (stop)
+        "<term>",   // 1
+        "<think>",  // 2
+        "</think>", // 3
+        "We",       // 4
+        " need",    // 5
+        " answer",  // 6
+        " in",      // 7
+        " detail",  // 8
+        ".",        // 9
+        " User",    // 10
+        " asks",    // 11
+        " about",   // 12
+        " spring",  // 13
+        "<",        // 14
+        "/",        // 15
+        "</",       // 16
+        "think",    // 17
+        ">",        // 18
+        "think>",   // 19
+        "</think",  // 20
+        "\n",       // 21
+        "\n\n",     // 22
+        "{",        // 23
+        "}",        // 24
+        "\"a\":1",  // 25
+    };
+    return xgrammar::TokenizerInfo(vocab,
+                                   xgrammar::VocabType::RAW,
+                                   static_cast<int>(vocab.size()),
+                                   /*stop_token_ids=*/std::vector<int32_t>{kThinkEos});
+}
+
+std::shared_ptr<XGrammarBackend> makeThinkingBackend(bool terminate_without_stop_token = false) {
+    return XGrammarBackend::create(makeThinkingTokenizerInfo().SerializeJSON(),
+                                   grammarConfig(terminate_without_stop_token));
+}
+
+std::string makeAnyTokensReasoningStructuralTag(int budget, const std::string& final_node_json) {
+    return R"({"type":"structural_tag","format":{"type":"sequence","elements":[)"
+           R"({"type":"tag","begin":"","content":{"type":"any_tokens","max_tokens":)"
+           + std::to_string(budget) + R"(},"end":{"type":"token","token":)" + std::to_string(kThinkEnd) + R"(}},)"
+           + final_node_json + R"(]}})";
+}
+
+}  // namespace
+
+// Regression for Bug #1 + #2 + #3 under MTP (GEN_NUM_PER_CIRCLE=3):
+// prepareSpeculative() provisionally advances and rolls back the matcher, which
+// clears XGrammar's budget_enforce_pending_. When updateStatus() subsequently
+// commits a multi-token batch crossing max_tokens=10, GrammarLogitsProcessor
+// must re-run fillBitmask() before each acceptToken() so the thinking budget is
+// strictly enforced rather than relaxed into duplicate `</think>` emissions.
+TEST(GrammarLogitsProcessorTest, MtpSpeculativeRollbackThenMultiTokenCommitEnforcesThinkingBudget) {
+    const std::vector<std::pair<std::string, bool>> cases = {
+        {R"({"type":"json_schema","json_schema":{"type":"object"}})", true},
+        {R"({"type":"any_text"})", false},
+    };
+
+    for (const auto& [final_node_json, is_json] : cases) {
+        SCOPED_TRACE(final_node_json);
+        // Unbounded `any_text` matches the empty string immediately after
+        // `</think>`, so only `terminate_without_stop_token=false` (the
+        // production default) keeps generation open for free-form answer text.
+        auto backend = makeThinkingBackend(/*terminate_without_stop_token=*/is_json);
+        ASSERT_TRUE(backend);
+        auto proc = makeProcessorFromKey(
+            backend, {"structural_tag", makeAnyTokensReasoningStructuralTag(/*budget=*/10, final_node_json)});
+        ASSERT_TRUE(proc.proc);
+
+        const int    propose_step = 2;
+        const size_t words        = SpecLogitsProcessorRequest::bitmaskWordCount(kThinkVocabSize);
+
+        auto run_spec = [&](const std::vector<int32_t>& draft, std::vector<int32_t>& bm) -> int {
+            bm.assign(static_cast<size_t>(propose_step + 1) * words, 0);
+            SpecLogitsProcessorRequest req;
+            req.draft_tokens       = draft.data();
+            req.propose_step       = propose_step;
+            req.bitmask_cpu_out    = bm.data();
+            req.bitmask_size_int32 = words;
+            req.vocab_size         = kThinkVocabSize;
+            return expectCapOk(proc->prepareSpeculative(req));
+        };
+
+        // Rounds 1 & 2: commit 8 thinking tokens via MTP batches (4 + 4).
+        std::vector<int32_t> bm;
+        EXPECT_EQ(run_spec({4, 5}, bm), 2);
+        ASSERT_FALSE(proc->updateStatus(torch::tensor({4, 5, 6, 7}, torch::kInt32).reshape({1, 4}), 4).has_value());
+
+        EXPECT_EQ(run_spec({8, 9}, bm), 2);
+        ASSERT_FALSE(proc->updateStatus(torch::tensor({8, 9, 10, 11}, torch::kInt32).reshape({1, 4}), 4).has_value());
+
+        // Round 3: tokens 9 and 10 exhaust budget=10; row 2 must allow ONLY
+        // the single special `</think>` token (NOT BPE `<`, `</`, `</think`).
+        EXPECT_EQ(run_spec({12, 13}, bm), 2);
+        EXPECT_TRUE(rowAllows(bm, words, 2, kThinkEnd));
+        EXPECT_FALSE(rowAllows(bm, words, 2, kThinkLt));
+        EXPECT_FALSE(rowAllows(bm, words, 2, kThinkSlash));
+        EXPECT_FALSE(rowAllows(bm, words, 2, kThinkLtSlash));
+        EXPECT_FALSE(rowAllows(bm, words, 2, kThinkPartialEnd));
+        EXPECT_FALSE(rowAllows(bm, words, 2, kThinkBodyStart));
+
+        // Commit [12, 13, </think>] in one MTP batch right after rollback.
+        ASSERT_FALSE(
+            proc->updateStatus(torch::tensor({12, 13, kThinkEnd}, torch::kInt32).reshape({1, 3}), 3).has_value());
+
+        // Round 4: matcher must have exited thinking and entered final_node_json
+        // cleanly (never forcing a second `</think>`).
+        if (is_json) {
+            EXPECT_EQ(run_spec({kThinkLBrace, kThinkJsonField}, bm), 2);
+            EXPECT_TRUE(rowAllows(bm, words, 0, kThinkLBrace));
+            EXPECT_FALSE(rowAllows(bm, words, 0, kThinkEnd));
+            EXPECT_FALSE(rowAllows(bm, words, 0, kThinkBodyStart));
+            ASSERT_FALSE(
+                proc->updateStatus(
+                        torch::tensor({kThinkLBrace, kThinkJsonField, kThinkRBrace}, torch::kInt32).reshape({1, 3}), 3)
+                    .has_value());
+            EXPECT_TRUE(matcherTerminated(*proc.matcher));
+        } else {
+            EXPECT_EQ(run_spec({kThinkBodyStart, kThinkBodyStart + 1}, bm), 2);
+            EXPECT_TRUE(rowAllows(bm, words, 0, kThinkBodyStart));
+            EXPECT_TRUE(rowAllows(bm, words, 0, kThinkBodyStart + 1));
+            EXPECT_TRUE(rowAllows(bm, words, 0, kThinkEos));
+        }
+    }
+}
+
+TEST(GrammarLogitsProcessorTest, MtpSpeculativeRollbackThenSingleTokenCommitAtExactBudgetBoundary) {
+    auto backend = makeThinkingBackend(/*terminate_without_stop_token=*/true);
+    ASSERT_TRUE(backend);
+    auto proc = makeProcessorFromKey(
+        backend,
+        {"structural_tag",
+         makeAnyTokensReasoningStructuralTag(/*budget=*/2, R"({"type":"json_schema","json_schema":{"type":"object"}})")});
+    ASSERT_TRUE(proc.proc);
+
+    // Exhaust budget=2 first.
+    ASSERT_FALSE(proc->updateStatus(torch::tensor({4, 5}, torch::kInt32).reshape({1, 2}), 2).has_value());
+
+    // Speculatively verify across the boundary, forcing a rollback right before
+    // a single-token commit of `</think>`.
+    const int            propose_step = 2;
+    const size_t         words        = SpecLogitsProcessorRequest::bitmaskWordCount(kThinkVocabSize);
+    std::vector<int32_t> bm(static_cast<size_t>(propose_step + 1) * words, 0);
+    std::vector<int32_t> draft{kThinkEnd, kThinkLBrace};
+
+    SpecLogitsProcessorRequest req;
+    req.draft_tokens       = draft.data();
+    req.propose_step       = propose_step;
+    req.bitmask_cpu_out    = bm.data();
+    req.bitmask_size_int32 = words;
+    req.vocab_size         = kThinkVocabSize;
+
+    EXPECT_EQ(expectCapOk(proc->prepareSpeculative(req)), 2);
+    EXPECT_TRUE(rowAllows(bm, words, 0, kThinkEnd));
+    EXPECT_FALSE(rowAllows(bm, words, 0, kThinkBodyStart));
+    EXPECT_TRUE(rowAllows(bm, words, 1, kThinkLBrace));
+    EXPECT_FALSE(rowAllows(bm, words, 1, kThinkEnd));
+
+    // Single-token commit after rollback must still enforce the expired budget.
+    ASSERT_FALSE(proc->updateStatus(torch::tensor({kThinkEnd}, torch::kInt32).reshape({1, 1}), 1).has_value());
+
+    auto logits = torch::zeros({1, kThinkVocabSize}, torch::kFloat32);
+    ASSERT_FALSE(proc->process(makeSamplerInputs(logits), 0, 1).has_value());
+    auto values = logitsVec(logits);
+    expectTokenAllowed(values, kThinkLBrace);
+    expectTokenMasked(values, kThinkEnd);
+    expectTokenMasked(values, kThinkBodyStart);
+}
+
+TEST(GrammarLogitsProcessorTest, MtpZeroBudgetAndCommitRollbackPreserveBudgetEnforcement) {
+    auto backend = makeThinkingBackend(/*terminate_without_stop_token=*/true);
+    ASSERT_TRUE(backend);
+    auto proc = makeProcessorFromKey(
+        backend,
+        {"structural_tag",
+         makeAnyTokensReasoningStructuralTag(/*budget=*/0, R"({"type":"json_schema","json_schema":{"type":"object"}})")});
+    ASSERT_TRUE(proc.proc);
+
+    const int            propose_step = 2;
+    const size_t         words        = SpecLogitsProcessorRequest::bitmaskWordCount(kThinkVocabSize);
+    std::vector<int32_t> bm(static_cast<size_t>(propose_step + 1) * words, 0);
+    std::vector<int32_t> draft{kThinkEnd, kThinkLBrace};
+
+    SpecLogitsProcessorRequest req;
+    req.draft_tokens       = draft.data();
+    req.propose_step       = propose_step;
+    req.bitmask_cpu_out    = bm.data();
+    req.bitmask_size_int32 = words;
+    req.vocab_size         = kThinkVocabSize;
+
+    EXPECT_EQ(expectCapOk(proc->prepareSpeculative(req)), 2);
+    EXPECT_TRUE(rowAllows(bm, words, 0, kThinkEnd));
+    EXPECT_FALSE(rowAllows(bm, words, 0, kThinkBodyStart));
+
+    // Rejected multi-token commit rolls back; budget enforcement must remain
+    // active on the next valid commit.
+    auto err = proc->updateStatus(torch::tensor({kThinkEnd, kThinkBodyStart}, torch::kInt32).reshape({1, 2}), 2);
+    ASSERT_TRUE(err.has_value());
+    EXPECT_EQ(err->code(), ErrorCode::GRAMMAR_PARSER_REJECTED_TOKEN);
+    EXPECT_EQ(proc->committedOutputLen().value(), 0);
+
+    // Valid commit after rollback transitions directly to JSON object.
+    ASSERT_FALSE(
+        proc->updateStatus(torch::tensor({kThinkEnd, kThinkLBrace}, torch::kInt32).reshape({1, 2}), 2).has_value());
+    auto logits = torch::zeros({1, kThinkVocabSize}, torch::kFloat32);
+    ASSERT_FALSE(proc->process(makeSamplerInputs(logits), 0, 1).has_value());
+    auto values = logitsVec(logits);
+    expectTokenAllowed(values, kThinkRBrace);
+    expectTokenAllowed(values, kThinkJsonField);
+    expectTokenMasked(values, kThinkEnd);
+}
+
 }  // namespace rtp_llm

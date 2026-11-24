@@ -44,11 +44,14 @@ public:
 private:
     class DecodeMaskBuilder;
 
+    ErrorInfo prepareBudgetBeforeAcceptLocked();
     ErrorInfo acceptCommittedLocked(const int32_t* tokens, size_t n);
 
     std::shared_ptr<RtpGrammarMatcher> matcher_;
-    int64_t                            eos_token_id_         = 0;
-    int64_t                            committed_output_len_ = 0;
+    int64_t                            eos_token_id_                = 0;
+    int64_t                            committed_output_len_        = 0;
+    bool                               commit_needs_budget_prepare_ = true;
+    std::vector<int32_t>               commit_scratch_bitmask_;
     std::unique_ptr<DecodeMaskBuilder> decode_mask_builder_;
 
     mutable std::mutex state_mutex_;

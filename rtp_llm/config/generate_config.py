@@ -776,7 +776,9 @@ class GenerateConfig(BaseModel):
 
             if reasoning_format is None:
                 base_format = ReasoningFormat.from_generate_env_config(
-                    generate_env_config
+                    generate_env_config,
+                    end_think_token_ids=self.end_think_token_ids or None,
+                    tokenizer=tokenizer,
                 )
                 reasoning_format = ReasoningFormat(
                     tag_begin=normalize_think_tag(generate_env_config.think_start_tag),
@@ -817,7 +819,9 @@ class GenerateConfig(BaseModel):
 
         if self.in_think_mode and reasoning_format is None:
             reasoning_format = ReasoningFormat.from_generate_env_config(
-                generate_env_config
+                generate_env_config,
+                end_think_token_ids=self.end_think_token_ids or None,
+                tokenizer=tokenizer,
             )
         return self.finalize_response_format(
             reasoning_format=reasoning_format if self.in_think_mode else None

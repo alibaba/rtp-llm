@@ -1,6 +1,6 @@
 import copy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.grammar_constraint import GRAMMAR_FIELD_NAMES, GrammarConstraint
@@ -8,6 +8,35 @@ from rtp_llm.config.response_format import ResponseFormat, normalize_think_tag
 
 if TYPE_CHECKING:
     from rtp_llm.config.generate_config import ThinkingMode
+
+
+def _is_token_format(node: Any) -> bool:
+    return isinstance(node, dict) and node.get("type") == "token"
+
+
+def _encode_think_tag(tokenizer: Any, text: str) -> List[int]:
+    if tokenizer is None or not text:
+        return []
+    encode = getattr(tokenizer, "encode", None)
+    if not callable(encode):
+        return []
+    try:
+        token_ids = encode(text, add_special_tokens=False)
+    except TypeError:
+        try:
+            token_ids = encode(text)
+        except Exception:
+            return []
+    except (KeyError, ValueError):
+        return []
+    if not isinstance(token_ids, (list, tuple)):
+        return []
+    result: List[int] = []
+    for tid in token_ids:
+        if isinstance(tid, bool) or not isinstance(tid, int):
+            return []
+        result.append(tid)
+    return result
 
 
 @dataclass(frozen=True)
@@ -20,7 +49,13 @@ class ReasoningFormat:
     no_think_excludes: Tuple[str, ...] = ()
 
     @classmethod
-    def from_generate_env_config(cls, generate_env_config: Any) -> "ReasoningFormat":
+    def from_generate_env_config(
+        cls,
+        generate_env_config: Any,
+        *,
+        end_think_token_ids: Optional[Sequence[int]] = None,
+        tokenizer: Any = None,
+    ) -> "ReasoningFormat":
         raw_end_tag = generate_env_config.think_end_tag
         normalized_end_tag = (
             normalize_think_tag(str(raw_end_tag)) if raw_end_tag is not None else ""
@@ -39,14 +74,48 @@ class ReasoningFormat:
                 ExceptionType.ERROR_INPUT_FORMAT_ERROR,
                 "think_end_tag is required when think_end_token_id is not set",
             )
+
+        resolved_ids = (
+            [int(tid) for tid in end_think_token_ids]
+            if end_think_token_ids
+            else _encode_think_tag(tokenizer, normalized_end_tag)
+        )
+        if len(resolved_ids) == 1:
+            return cls(
+                tag_begin="",
+                tag_end={"type": "token", "token": resolved_ids[0]},
+                no_think_excludes=(normalized_end_tag,) if normalized_end_tag else (),
+            )
+
+        # Multi-token end tags with trailing whitespace (e.g. "</think>\n\n" ->
+        # [128822, 271]): emit TokenFormat for the single-token close delimiter
+        # plus a const_string suffix so XGrammar forces the exact end token
+        # instead of matching BPE byte prefixes like "<" or "</".
+        if len(resolved_ids) > 1 and normalized_end_tag:
+            stripped_end_tag = normalized_end_tag.rstrip(" \t\r\n")
+            trailing_suffix = normalized_end_tag[len(stripped_end_tag) :]
+            if stripped_end_tag and trailing_suffix and tokenizer is not None:
+                prefix_ids = _encode_think_tag(tokenizer, stripped_end_tag)
+                if len(prefix_ids) == 1 and prefix_ids[0] == resolved_ids[0]:
+                    return cls(
+                        tag_begin="",
+                        tag_end={"type": "token", "token": prefix_ids[0]},
+                        suffix=trailing_suffix,
+                        no_think_excludes=(normalized_end_tag, stripped_end_tag),
+                    )
+
         return cls(tag_begin="", tag_end=normalized_end_tag)
 
     def prefix_format(self, max_thinking_tokens: int) -> Dict[str, Any]:
+        # XGrammar's any_text only auto-excludes string end markers, not
+        # TokenFormat end ids; any_tokens excludes detected end token ids so
+        # natural early </think> immediately transitions to the final grammar.
+        content_type = "any_tokens" if _is_token_format(self.tag_end) else "any_text"
         think_tag = {
             "type": "tag",
             "begin": self.tag_begin,
             "content": {
-                "type": "any_text",
+                "type": content_type,
                 "max_tokens": max_thinking_tokens,
             },
             "end": self.tag_end,
