@@ -56,7 +56,7 @@ public final class FlexlbConfig {
 
     @JsonIgnore
     public boolean isPrefillCostOrder() {
-        return isQueue() && scheduler.getOrdering().isPrefillCostOrder();
+        return isQueue() && dispatcher.isPrefillCostOrder();
     }
 
     @JsonIgnore

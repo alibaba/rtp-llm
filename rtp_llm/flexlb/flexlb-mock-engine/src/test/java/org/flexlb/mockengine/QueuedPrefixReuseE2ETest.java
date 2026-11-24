@@ -111,7 +111,7 @@ class QueuedPrefixReuseE2ETest {
         var config = cacheAwareConfig();
         var decision = DecisionPolicyConfig.single();
         config.queueScheduler().setDecision(decision);
-        config.setDispatcher(DispatcherConfig.nonBatch());
+        config.getDispatcher().setType(DispatcherConfig.Type.NON_BATCH);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(2L);
 
         try (var h = new AutoTpmE2EHarness(63260, 2, 1, "10", 1.0, false,
@@ -165,7 +165,7 @@ class QueuedPrefixReuseE2ETest {
         var config = cacheAwareConfig();
         var decision = DecisionPolicyConfig.single();
         config.queueScheduler().setDecision(decision);
-        config.setDispatcher(DispatcherConfig.nonBatch());
+        config.getDispatcher().setType(DispatcherConfig.Type.NON_BATCH);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(2L);
         try (var h = new AutoTpmE2EHarness(63280, 2, 1, "10", 1.0, false,
                 true, decision, true, config)) {
@@ -301,7 +301,7 @@ class QueuedPrefixReuseE2ETest {
         var config = cacheAwareConfig();
         var decision = DecisionPolicyConfig.single();
         config.queueScheduler().setDecision(decision);
-        config.setDispatcher(DispatcherConfig.nonBatch());
+        config.getDispatcher().setType(DispatcherConfig.Type.NON_BATCH);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(2L);
 
         try (var h = new AutoTpmE2EHarness(63240, 2, 1, "sum(computeTokens) / 4 + 10", 1.0,
@@ -363,9 +363,8 @@ class QueuedPrefixReuseE2ETest {
 
     private static FlexlbConfig cacheAwareConfig() {
         FlexlbConfig config = new FlexlbConfig();
-        var ordering = QueueOrderingConfig.priority();
-        ordering.setPrefillCostOrder(true);
-        config.queueScheduler().setOrdering(ordering);
+        config.queueScheduler().setOrdering(QueueOrderingConfig.priority());
+        config.getDispatcher().setPrefillCostOrder(true);
         var decision = new DecisionPolicyConfig();
         decision.setMaxRequests(16);
         decision.setMaxCollectionWaitMs(2000);

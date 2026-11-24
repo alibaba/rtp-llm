@@ -87,7 +87,7 @@ class WorkerBatcherQueueTest {
 
     @Test
     void costOrderRanksLocalRequestsAndRouteProbesByHitFractionWithinPriority() throws InterruptedException {
-        config.getScheduler().getOrdering().setPrefillCostOrder(true);
+        config.getDispatcher().setPrefillCostOrder(true);
         WorkerBatcher runtime = runningRuntime();
         // The older request has more cached tokens, but the smaller hit fraction.
         var older = item(1, 50, Long.MAX_VALUE, 1, 1000, 500);

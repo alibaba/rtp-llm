@@ -64,9 +64,8 @@ class PendingPrefillPrefixesTest {
         var affinity = new RoutingConfig.CacheAffinityConfig();
         affinity.setMaxExtraTtftMs(60_000);
         config.getRouter().getRoles().getPrefill().setCacheAffinity(affinity);
-        var ordering = QueueOrderingConfig.priority();
-        ordering.setPrefillCostOrder(true);
-        config.queueScheduler().setOrdering(ordering);
+        config.queueScheduler().setOrdering(QueueOrderingConfig.priority());
+        config.getDispatcher().setPrefillCostOrder(true);
         var context = new BalanceContext(config);
         var request = new Request();
         request.setSeqLen(keys.length);

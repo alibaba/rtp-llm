@@ -130,7 +130,7 @@ worker generation and permit together before handing off the route. The
 frontend calls `GenerateStream` for `NON_BATCH`. Master calls `EnqueueBatch`
 for `BATCH`.
 
-With `ordering.prefillCostOrder` and a positive cache-affinity wait budget, a
+With `dispatcher.prefillCostOrder` and a positive cache-affinity wait budget, a
 request can wait in the global queue for a matching prefix being produced by
 an equal- or higher-priority request. The projected prefix must improve its
 resident hit and meet `minPrefixHitPercent`. Producers and waiters must share
@@ -224,7 +224,7 @@ groups. The policy group is frozen at ingress and reused for route selection. On
 the group but cannot trigger a second route selection.
 
 The global queue uses the configured FIFO or PRIORITY order for placement and
-capacity retries. With `prefillCostOrder` enabled, requests waiting on the same
+capacity retries. With `dispatcher.prefillCostOrder` enabled, requests waiting on the same
 Prefill compete for delivery by business priority (when enabled), then by the
 fraction of input tokens requiring computation on that worker. A smaller fraction
 goes first. Ties prefer fewer compute tokens, then fewer input tokens, then
@@ -327,9 +327,13 @@ short admission critical section. Rejected submissions publish no lifecycle obje
 | JSON path | Applies to | Default | Meaning |
 | --- | --- | ---: | --- |
 | `dispatcher.type` | all | `BATCH` | `BATCH` or `NON_BATCH`; DIRECT requires `NON_BATCH` |
+| `dispatcher.prefillCostOrder` | `QUEUE + SINGLE + NON_BATCH` | `false` | Rank requests waiting on each Prefill by compute cost within business priority |
 | `dispatcher.maxInflightBatchesPerPrefillWorker` | `BATCH` | omitted | Optional positive per-Prefill EnqueueBatch backpressure cap |
 | `dispatcher.enqueueRpcTimeoutMs` | `BATCH` | `5000` ms | EnqueueBatch RPC timeout |
 | `dispatcher.maxInflightRequestsPerPrefillWorker` | `DIRECT/QUEUE + NON_BATCH` | omitted | Optional positive per-Prefill outstanding request cap |
+
+Existing deployments can still supply `scheduler.ordering.prefillCostOrder`.
+When both paths are present, their values must agree.
 
 The two optional inflight limits use omission, not zero, to mean unlimited.
 Decision-group and waiting-queue parameters are rejected under `dispatcher`.

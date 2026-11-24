@@ -16,8 +16,6 @@ public final class QueueOrderingConfig {
     }
 
     private Type type = Type.FIFO;
-    /** Rank requests waiting on the same Prefill by compute cost within business priority. */
-    private boolean prefillCostOrder;
     private int defaultPriority = 50;
     private PreemptionConfig preemption;
 

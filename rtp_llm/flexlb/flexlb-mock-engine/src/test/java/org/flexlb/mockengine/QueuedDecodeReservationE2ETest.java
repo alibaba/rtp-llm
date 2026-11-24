@@ -26,9 +26,8 @@ class QueuedDecodeReservationE2ETest {
         var config = new FlexlbConfig();
         var decision = DecisionPolicyConfig.single();
         config.queueScheduler().setDecision(decision);
-        var ordering = QueueOrderingConfig.priority();
-        ordering.setPrefillCostOrder(true);
-        config.queueScheduler().setOrdering(ordering);
+        config.queueScheduler().setOrdering(QueueOrderingConfig.priority());
+        config.getDispatcher().setPrefillCostOrder(true);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(1L);
         var affinity = new RoutingConfig.CacheAffinityConfig();
         affinity.setMaxExtraTtftMs(1_000_000L);

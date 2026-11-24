@@ -1028,9 +1028,9 @@ class TransientCapacityQueueContractTest {
             throws Exception {
         FlexlbConfig config = config();
         config.queueScheduler().setDecision(org.flexlb.config.DecisionPolicyConfig.single());
-        config.priorityOrdering().setPrefillCostOrder(true);
         config.priorityOrdering().setPreemption(null);
         config.getDispatcher().setType(delivery);
+        config.getDispatcher().setPrefillCostOrder(true);
         try (Fixture fixture = new Fixture(null, config)) {
             var scheduler = fixture.runtime.scheduler();
             var noPrefillKv = statusResponse(RoleType.PREFILL, 2L, false);

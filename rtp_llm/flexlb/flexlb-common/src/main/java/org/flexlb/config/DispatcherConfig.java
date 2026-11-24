@@ -17,6 +17,8 @@ public final class DispatcherConfig {
     }
 
     private Type type = Type.BATCH;
+    /** Order requests waiting on the same Prefill by compute cost within business priority. */
+    private boolean prefillCostOrder;
     private int maxInflightPerPrefillWorker = DEFAULT_MAX_INFLIGHT_PER_PREFILL_WORKER;
     /** BATCH only: engine wait for FetchResponse attachment, not generation duration. */
     private int fetchAttachTimeoutMs = DEFAULT_FETCH_ATTACH_TIMEOUT_MS;

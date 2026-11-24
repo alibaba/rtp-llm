@@ -28,7 +28,7 @@ final class FlexlbConfigValidator {
         JsonNode dispatcher = document.path("dispatcher");
         if (dispatcher.isObject()) {
             rejectFieldsExcept(dispatcher, "dispatcher", "type", "maxInflightPerPrefillWorker",
-                    "fetchAttachTimeoutMs");
+                    "fetchAttachTimeoutMs", "prefillCostOrder");
         }
 
         JsonNode decodeCostEstimator = document.path("router").path("roles")
@@ -64,10 +64,9 @@ final class FlexlbConfigValidator {
         }
         String type = ordering.path("type").asText("FIFO");
         if ("FIFO".equals(type)) {
-            rejectFieldsExcept(ordering, "scheduler.ordering", "type", "prefillCostOrder");
+            rejectFieldsExcept(ordering, "scheduler.ordering", "type");
         } else if ("PRIORITY".equals(type)) {
-            rejectFieldsExcept(ordering, "scheduler.ordering", "type", "prefillCostOrder",
-                    "defaultPriority", "preemption");
+            rejectFieldsExcept(ordering, "scheduler.ordering", "type", "defaultPriority", "preemption");
             validatePreemptionShape(ordering.path("preemption"));
         }
     }
@@ -140,13 +139,11 @@ final class FlexlbConfigValidator {
                         "scheduler.prefillQueueShedding.deadlineBudget",
                         "requires router.roles.prefill.tokenBalance for token accounting");
             }
-            require(!config.isPrefillCostOrder()
-                            || (config.isSingleDecision()
-                                && config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH),
-                    "scheduler.ordering.prefillCostOrder",
-                    "requires QUEUE, SINGLE and NON_BATCH");
             validateQueue(config.queueScheduler());
         }
+        require(!config.getDispatcher().isPrefillCostOrder()
+                        || (config.isSingleDecision() && config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH),
+                "dispatcher.prefillCostOrder", "requires QUEUE, SINGLE and NON_BATCH");
         config.getDispatcher().validateFor(config.getScheduler());
         validateRequestLifecycle(config.getRequestLifecycle());
         validateRouting(config.getRouter());

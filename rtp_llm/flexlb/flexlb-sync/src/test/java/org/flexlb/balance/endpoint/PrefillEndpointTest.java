@@ -131,8 +131,8 @@ class PrefillEndpointTest {
     @Test
     void coldRequestsUseFreeSlotsAndQueuedRequestsCompeteByCostAtDispatch() throws Exception {
         FlexlbConfig config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
-        org.flexlb.balance.scheduler.SchedulingTestConfig.usePrefillCostOrder(config);
         config.setDispatcher(DispatcherConfig.nonBatch());
+        org.flexlb.balance.scheduler.SchedulingTestConfig.usePrefillCostOrder(config);
         config.getDispatcher().setMaxInflightPerPrefillWorker(2);
         var deliveries = new java.util.concurrent.LinkedBlockingQueue<DeliveryResult>();
         var runtime = new EndpointTestSupport.TestRequestRuntime() {

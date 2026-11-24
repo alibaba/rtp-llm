@@ -303,9 +303,8 @@ class PreemptionPhasesE2ETest {
         var config = new FlexlbConfig();
         var decision = DecisionPolicyConfig.single();
         config.queueScheduler().setDecision(decision);
-        var ordering = QueueOrderingConfig.priority();
-        ordering.setPrefillCostOrder(true);
-        config.queueScheduler().setOrdering(ordering);
+        config.queueScheduler().setOrdering(QueueOrderingConfig.priority());
+        config.getDispatcher().setPrefillCostOrder(true);
         config.getDispatcher().setMaxInflightPerPrefillWorker(1);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(1L);
         try (var h = new AutoTpmE2EHarness(BASE_PORT + 80, 1, 1, "20", 10_000.0,

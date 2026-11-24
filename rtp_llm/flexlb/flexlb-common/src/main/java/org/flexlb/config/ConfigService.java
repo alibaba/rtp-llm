@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -58,6 +59,7 @@ public class ConfigService {
         try {
             JsonNode tree = STRICT_MAPPER.readTree(document);
             rejectJsonNull(tree, "$");
+            migrateLegacyPrefillCostOrder(tree);
             FlexlbConfigValidator.validateDocumentShape(tree);
             FlexlbConfig config = STRICT_MAPPER.treeToValue(
                     tree, FlexlbConfig.class);
@@ -69,6 +71,24 @@ public class ConfigService {
             throw new ConfigValidationException(FLEXLB_CONFIG_ENV,
                     "Invalid FLEXLB_CONFIG JSON: " + error.getMessage(), error);
         }
+    }
+
+    /** Normalize the schema-v3 ordering alias before binding to its sole storage in the dispatcher. */
+    private static void migrateLegacyPrefillCostOrder(JsonNode tree) {
+        if (!(tree.path("scheduler").path("ordering") instanceof ObjectNode ordering)) {
+            return;
+        }
+        JsonNode legacy = ordering.remove("prefillCostOrder");
+        if (legacy == null) {
+            return;
+        }
+        ObjectNode dispatcher = ((ObjectNode) tree).with("dispatcher");
+        JsonNode configured = dispatcher.get("prefillCostOrder");
+        if (configured != null && !configured.equals(legacy)) {
+            throw new ConfigValidationException("dispatcher.prefillCostOrder",
+                    "conflicts with scheduler.ordering.prefillCostOrder");
+        }
+        dispatcher.set("prefillCostOrder", legacy);
     }
 
     public FlexlbConfig loadBalanceConfig() {

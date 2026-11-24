@@ -591,11 +591,11 @@ class GlobalQueueProgressTest {
                 SchedulingTestConfig.usePriorityQueue(config);
                 SchedulingTestConfig.allowVictim(config, VictimStage.PREFILL_QUEUED);
             }
+            SchedulingTestConfig.useNonBatchDispatcher(config).setMaxInflightPerPrefillWorker(1);
             if (prefillCostOrder) {
                 SchedulingTestConfig.useSingleDecision(config);
-                config.queueScheduler().getOrdering().setPrefillCostOrder(true);
+                config.getDispatcher().setPrefillCostOrder(true);
             }
-            SchedulingTestConfig.useNonBatchDispatcher(config).setMaxInflightPerPrefillWorker(1);
             ConfigService service = mock(ConfigService.class);
             when(service.loadBalanceConfig()).thenReturn(config);
             DefaultRouter router = mock(DefaultRouter.class);

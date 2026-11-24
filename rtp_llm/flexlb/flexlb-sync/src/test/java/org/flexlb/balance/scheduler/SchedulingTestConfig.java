@@ -39,11 +39,11 @@ public final class SchedulingTestConfig {
         return queue;
     }
 
-    /** FIFO ordering plus cached-input benefit admission; mirrors the validated production combination. */
+    /** FIFO global ordering with cost-ordered Prefill dispatch. */
     public static SchedulerConfig usePrefillCostOrder(FlexlbConfig config) {
         SchedulerConfig queue = useFifoQueue(config);
         useSingleDecision(config);
-        queue.getOrdering().setPrefillCostOrder(true);
+        config.getDispatcher().setPrefillCostOrder(true);
         return queue;
     }
 

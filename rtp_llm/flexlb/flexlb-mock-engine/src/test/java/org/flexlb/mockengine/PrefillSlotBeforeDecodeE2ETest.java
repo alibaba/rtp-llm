@@ -34,10 +34,9 @@ class PrefillSlotBeforeDecodeE2ETest {
         var config = new FlexlbConfig();
         var decision = DecisionPolicyConfig.single();
         config.queueScheduler().setDecision(decision);
-        var ordering = QueueOrderingConfig.priority();
-        ordering.setPrefillCostOrder(true);
-        config.queueScheduler().setOrdering(ordering);
+        config.queueScheduler().setOrdering(QueueOrderingConfig.priority());
         config.setDispatcher(DispatcherConfig.nonBatch());
+        config.getDispatcher().setPrefillCostOrder(true);
         config.getDispatcher().setMaxInflightPerPrefillWorker(1);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(2L);
         var affinity = new RoutingConfig.CacheAffinityConfig();
