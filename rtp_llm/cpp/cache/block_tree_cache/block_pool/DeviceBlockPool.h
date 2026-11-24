@@ -65,6 +65,10 @@ public:
     // Allocation/callback failures still propagate before acquiring a reference.
     RemotePublicationPin tryPinForRemotePublication(BlockIdxType block);
 
+    // Pin a request-owned P/D destination while its stream protects the block table.
+    // The new writer requires exclusive request ownership before acquiring its pin.
+    RemotePublicationPin tryPinForPDLoad(BlockIdxType block);
+
     struct RequestReferenceUpdate {
         BlockIdxType block;
         int          old_count;
@@ -134,8 +138,11 @@ protected:
     bool hasExternalRefNoLock(BlockIdxType block) const override;
 
 private:
-    void releaseRemotePublicationPin(BlockIdxType block, const std::function<void()>& notify) noexcept;
+    template<DeviceBlockRefType RefType>
+    RemotePublicationPin pinForIONoLock(BlockIdxType block);
+    void releaseIOPin(BlockIdxType block, DeviceBlockRefType type, const std::function<void()>& notify) noexcept;
     bool                         hasRequestRefNoLock(BlockIdxType block) const;
+    bool                         isExclusiveRequestBlockNoLock(BlockIdxType block) const;
     const DeviceBlockPoolConfig& config() const;
     // global_layer_id -> {layout_index, local_layer_id}
     std::pair<int, int> mapGlobalLayerIdToLocal(int global_layer_id) const;
@@ -179,7 +186,6 @@ private:
 
 private:
     static constexpr size_t                          kRefTypeCount = static_cast<size_t>(DeviceBlockRefType::COUNT);
-    RemotePublicationPin pinForRemotePublicationNoLock(BlockIdxType block);
     std::vector<uint32_t> refcounts_;
     std::array<std::vector<uint32_t>, kRefTypeCount> refcounts_by_type_;
     std::array<size_t, kRefTypeCount>                referenced_block_counts_{};

@@ -17,6 +17,7 @@
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
@@ -66,6 +67,11 @@ string makeRequestKey(const string& client_id, size_t request_id) {
 namespace rtp_llm {
 
 namespace {
+
+const std::vector<std::string>& layerGroupTags(const CacheConfig& cfg, size_t layer_id) {
+    return cfg.groupNums() > 1 ? cfg.topology().layer(static_cast<int>(layer_id)).group_tags :
+                                 cfg.topology().groupTags();
+}
 
 std::shared_ptr<const MultimodalCacheSpans> parseMultimodalCacheSpans(const GenerateRequestPB& request,
                                                                       int64_t                  token_count) {
@@ -174,8 +180,10 @@ grpc::Status DecodeRpcServer::init(const EngineInitParams&                      
             maga_init_params.parallelism_config.world_rank,
             [this] {
                 std::lock_guard<std::mutex> lock(admission_mutex_);
-                return ShutdownCoordinator::State{
-                    draining_, onflight_requests_.load() + onflight_load_cache_requests_.load() + external_onflight_()};
+                return ShutdownCoordinator::State{draining_,
+                                                  onflight_requests_.load() + onflight_load_cache_requests_.load()
+                                                      + write_leases_->activeWriters() + pending_write_drains_->load()
+                                                      + external_onflight_()};
             },
             [this] { beginShutdown(); });
     } else if (requires_group_drain_) {
@@ -187,6 +195,7 @@ grpc::Status DecodeRpcServer::init(const EngineInitParams&                      
 void DecodeRpcServer::beginShutdown() {
     std::lock_guard<std::mutex> lock(admission_mutex_);
     external_begin_shutdown_();
+    write_leases_->closeAdmission();
     draining_ = true;
 }
 
@@ -197,7 +206,7 @@ bool DecodeRpcServer::waitForDrain(ShutdownCoordinator::Deadline deadline) {
     // Old/standalone configs have no group address list. Never mistake an idle
     // local rank for a drained distributed engine in that case.
     while (requires_group_drain_ || onflight_requests_.load() || onflight_load_cache_requests_.load()
-           || external_onflight_()) {
+           || write_leases_->activeWriters() || pending_write_drains_->load() || external_onflight_()) {
         if (std::chrono::system_clock::now() >= deadline) {
             return false;
         }
@@ -310,6 +319,45 @@ std::vector<CacheStoreBlockPair> DecodeRpcServer::buildGroupLoadPlan(const Cache
     return plan;
 }
 
+std::vector<CacheStoreBlockPair> DecodeRpcServer::buildGroupLoadPlan(
+    const CacheConfig& config, const std::string& tag, size_t block_count, size_t key_count, int64_t reused_blocks) {
+    const auto& group = config.topology().group(tag);
+    return buildGroupLoadPlan(group.policy,
+                              block_count,
+                              key_count,
+                              static_cast<size_t>(std::max<int64_t>(0, reused_blocks)),
+                              config.groupNums() > 1,
+                              group.seqSizePerBlock(),
+                              config.seq_size_per_block);
+}
+
+void DecodeRpcServer::visitLoadDestinations(const GroupBlockIds&                                   rows,
+                                            size_t                                                 key_count,
+                                            int64_t                                                reuse,
+                                            const std::function<void(const std::string&, size_t)>& visit) const {
+    auto visit_model = [&](const CacheConfig& config, size_t layer_count) {
+        std::unordered_set<std::string> visited;
+        for (size_t layer = 0; layer < layer_count; ++layer) {
+            for (const auto& tag : layerGroupTags(config, layer)) {
+                if (visited.insert(tag).second) {
+                    for (const auto& entry :
+                         buildGroupLoadPlan(config, tag, rows.blocks(tag).size(), key_count, reuse)) {
+                        visit(tag, entry.offset_index);
+                    }
+                }
+            }
+        }
+    };
+    const auto& manager = engine_->resourceContext().cache_manager;
+    visit_model(manager->cacheConfig(), maga_init_params_.model_config_.num_layers);
+    if (engine_->isMTPEagle()) {
+        for (const auto& module : makeMTPModuleLoadPlan(propose_maga_init_params_)) {
+            visit_model(manager->getMTPModuleCacheConfig(module.module_index),
+                        module.engine_init_params->model_config_.num_layers);
+        }
+    }
+}
+
 ErrorInfo DecodeRpcServer::validateRemoteLoadTopology(size_t worker_size, size_t peer_size) {
     if (worker_size == 0 || peer_size == 0) {
         return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "worker or peer address list is empty");
@@ -341,6 +389,14 @@ size_t DecodeRpcServer::minLoadedCacheBlockCount(const std::vector<size_t>& rank
         return 0;
     }
     return *std::min_element(rank_loaded_cache_block_counts.begin(), rank_loaded_cache_block_counts.end());
+}
+
+bool DecodeRpcServer::remoteLoadDestinationQuiesced(bool                           finish_ok,
+                                                    const grpc::Status&            status,
+                                                    const BroadcastLoadResponsePB& response,
+                                                    const PDWriteLeasePB&          expected) {
+    return finish_ok && status.ok() && response.destination_writes_quiesced()
+           && samePDWriteLease(expected, response.stopped_lease());
 }
 
 std::vector<size_t> DecodeRpcServer::completionQueueExpectedResponseCounts(size_t worker_size) {
@@ -921,10 +977,7 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
 
 DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
-    auto*       generate_stream = decode_context.getStream().get();
-    auto&       cache_keys      = generate_stream->cacheKeys(0);
-    const auto& cache_resource  = generate_stream->kvCachePtr()->cacheResource(0);
-    auto        group_block_ids = cache_resource.groupBlockIds();
+    auto* generate_stream = decode_context.getStream().get();
 
     const auto topology_error = validateRemoteLoadTopology(resource_.workers.size(), decode_context.peer_addrs.size());
     if (!topology_error.ok()) {
@@ -951,54 +1004,93 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheForAllRank(DecodeGene
         min_timeout_ms = std::min(min_timeout_ms, request_timeout_ms);
     }
 
+    // Pin the union of model and MTP write destinations before publishing any address.
+    CacheKeysType cache_keys;
+    GroupBlockIds group_block_ids;
+    int64_t       reuse_blocks = 0;
+    auto          select       = [this](const GroupBlockIds& rows, size_t key_count, int64_t reuse) {
+        PDLoadDestinationBlocks selected;
+        visitLoadDestinations(rows, key_count, reuse, [&](const std::string& tag, size_t slot) {
+            const auto id = rows.blocks(tag)[slot];
+            if (!isNullBlockIdx(id)) {
+                selected[tag].push_back(id);
+            }
+        });
+        return selected;
+    };
+    auto destination_hold = generate_stream->holdPDLoadDestination(cache_keys, group_block_ids, reuse_blocks, select);
+    if (!destination_hold) {
+        return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "failed to hold Decode destination blocks"), 0};
+    }
+    auto finish = [&](LoadCacheResult result) {
+        if (result.error_info.ok() && decode_context.isRequestCancelled()) {
+            result.error_info = ErrorInfo(ErrorCode::CANCELLED, "Decode KV load cancelled before handoff");
+        }
+        if (result.error_info.ok()) {
+            destination_hold->markLoadSuccessful();
+        }
+        return result;
+    };
     LoadKVCacheContext load_context{decode_context.request_id,
                                     decode_context.request_key,
                                     decode_context.peer_addrs,
-                                    cache_keys,
+                                    std::move(cache_keys),
                                     std::move(group_block_ids),
-                                    generate_stream->reuseBlockSize(),
+                                    reuse_blocks,
                                     min_timeout_ms,
                                     1,
                                     0,
                                     decode_context.server_context,
-                                    decode_context.prefill_cp_size};
-
-    // Prefill: TP = 1 && Decode: TP = 1
+                                    decode_context.prefill_cp_size,
+                                    [&decode_context] { return decode_context.isRequestCancelled(); }};
     if (resource_.workers.size() == 1 && decode_context.peer_addrs.size() == 1) {
-        for (size_t i = 0; i < maga_init_params_.pd_sep_config.rdma_connect_retry_times + 1; i++) {
-            auto load_result = loadCache(load_context);
-            if (load_result.error_info.code() != ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED
-                && load_result.error_info.code() != ErrorCode::CACHE_STORE_LOAD_RDMA_CONNECT_FAILED) {
-                return load_result;
+        for (size_t i = 0; i < maga_init_params_.pd_sep_config.rdma_connect_retry_times + 1; ++i) {
+            auto result = loadCache(load_context, destination_hold);
+            if (!result.destination_writes_quiesced
+                || (result.error_info.code() != ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED
+                    && result.error_info.code() != ErrorCode::CACHE_STORE_LOAD_RDMA_CONNECT_FAILED)) {
+                return finish(std::move(result));
             }
         }
     }
-
-    return loadCacheAsyncForTp(decode_context, load_context);
+    return finish(loadCacheAsyncForTp(decode_context, load_context, destination_hold));
 }
 
-DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_context,
-                                                                      LoadKVCacheContext&    load_context) {
+DecodeRpcServer::LoadCacheResult
+DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext&                        decode_context,
+                                     LoadKVCacheContext&                           load_context,
+                                     const std::shared_ptr<PDLoadDestinationHold>& destination_hold) {
     RTP_LLM_PROFILE_FUNCTION();
     validateGroupTags(load_context, engine_->resourceContext().cache_manager->cacheConfig().topology());
+    if (!destination_hold) {
+        return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "worker load requires a destination hold"), 0};
+    }
     int64_t load_cache_begin_time_us = currentTimeUs();
 
     struct WorkerRpcContext {
         WorkerRpcContext() {
             client_context = make_shared<ClientContext>();
         }
+        PDWriteLeasePB                                                      lease;
         BroadcastLoadResponsePB           response;
         Status                            status;
         std::shared_ptr<RpcService::Stub> stub;
         std::shared_ptr<ClientContext>    client_context;
+        std::unique_ptr<ClientAsyncResponseReader<BroadcastLoadResponsePB>> reader;
+        bool                                                                dispatched      = false;
+        bool                                                                finished        = false;
+        bool                                                                writes_quiesced = false;
+
+        void finish(bool ok) {
+            finished        = true;
+            writes_quiesced = remoteLoadDestinationQuiesced(ok, status, response, lease);
+        }
     };
 
     const size_t             worker_size = resource_.grpc_workers.size();
     vector<WorkerRpcContext> all_context(worker_size);
     const auto               expected_response_counts = completionQueueExpectedResponseCounts(worker_size);
-    vector<CompletionQueue>  completion_queues(expected_response_counts.size());
-    vector<size_t>           each_finished_count(expected_response_counts.size(), 0);
-    const size_t             cq_size = completion_queues.size();
+    const size_t             cq_size                  = expected_response_counts.size();
     if (worker_size == 0 || cq_size == 0) {
         RTP_LLM_LOG_WARNING("request:[%s] cq_size or worker_size is 0, worker size = %zu, cq size = %zu",
                             decode_context.request_key.c_str(),
@@ -1018,18 +1110,110 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheAsyncForTp(DecodeGene
             RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
             return {ErrorInfo(ErrorCode::GET_CONNECTION_FAILED, error_msg), 0};
         }
-        auto& rpc_context = all_context[i];
-        rpc_context.stub  = connect_status.value().stub;
-        BroadcastLoadRequestPB load_request;
+        all_context[i].stub = connect_status.value().stub;
+    }
 
-        if (engine_->resourceContext().cache_manager->cacheConfig().use_mla) {
-            load_request = constructRemoteLoadRequestForMla(load_context, i, decode_context.peer_addrs);
-        } else {
-            load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
+    const auto rpc_deadline =
+        std::chrono::system_clock::now() + std::chrono::milliseconds(load_context.timeout_ms + EXTRA_TIMEOUT_MS);
+    PreparePDWriteLeaseRequestPB prepare;
+    prepare.set_request_id(load_context.request_id);
+    prepare.set_request_key(load_context.request_key);
+    prepare.set_dp_rank(maga_init_params_.parallelism_config.dp_rank);
+    prepare.set_timeout_ms(load_context.timeout_ms + EXTRA_TIMEOUT_MS);
+    // All workers must support one-shot leases before the first target address
+    // is sent. A lost prepare reply leaves only an expiring address-free slot.
+    // Allocate all custody bookkeeping before publishing any addresses.
+    auto&                         recovery = PDWriteLeaseRecovery::instance();
+    std::vector<PDWriteLeasePeer> peers;
+    peers.reserve(worker_size);
+    for (const auto& worker : all_context) {
+        peers.push_back({worker.stub, {}});
+    }
+    const auto prepared =
+        preparePDWriteLeases(peers, prepare, rpc_deadline, [&] { return decode_context.isRequestCancelled(); });
+    if (prepared.error_code() == grpc::StatusCode::CANCELLED && decode_context.isRequestCancelled()) {
+        return {ErrorInfo(ErrorCode::CANCELLED, "P/D load cancelled before publishing any addresses"), 0};
+    }
+    if (!prepared.ok()) {
+        return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                          "failed to prepare P/D write leases: " + prepared.error_message()),
+                0};
+    }
+    // The coordinator may return to its caller before the recovery service
+    // releases the last rank. Graceful shutdown must still see that custody.
+    struct PendingTargets {
+        std::shared_ptr<std::atomic<size_t>>   count;
+        AtomicGuard                            guard;
+        std::shared_ptr<PDLoadDestinationHold> pages;
+        PendingTargets(std::shared_ptr<std::atomic<size_t>> counter, std::shared_ptr<PDLoadDestinationHold> target):
+            count(std::move(counter)), guard(*count), pages(std::move(target)) {}
+    };
+    auto                         custody = std::make_shared<PendingTargets>(pending_write_drains_, destination_hold);
+    std::list<PDWriteLeaseDrain> pending;
+    for (size_t i = 0; i < worker_size; ++i) {
+        all_context[i].lease = peers[i].lease;
+        pending.push_back({std::move(peers[i]), custody, {}});
+    }
+
+    vector<size_t>          each_finished_count(cq_size, 0);
+    vector<CompletionQueue> completion_queues(cq_size);
+    // The worker contexts, output pointers and leases outlive every Finish tag,
+    // including when cancellation or setup failure interrupts a partial fanout.
+    autil::ScopeGuard finish_calls([&] {
+        for (auto& worker : all_context) {
+            if (worker.dispatched && !worker.finished) {
+                worker.client_context->TryCancel();
+            }
         }
-        std::unique_ptr<ClientAsyncResponseReader<BroadcastLoadResponsePB>> reader(rpc_context.stub->AsyncRemoteLoad(
-            rpc_context.client_context.get(), load_request, &completion_queues[i % completion_queues.size()]));
-        reader->Finish(&rpc_context.response, &rpc_context.status, reinterpret_cast<void*>(i));
+        for (auto& queue : completion_queues) {
+            queue.Shutdown();
+            void* tag;
+            bool  ok;
+            while (queue.Next(&tag, &ok)) {
+                all_context[reinterpret_cast<uintptr_t>(tag)].finish(ok);
+            }
+        }
+        auto peer = pending.begin();
+        for (const auto& worker : all_context) {
+            if (!worker.dispatched || worker.writes_quiesced) {
+                peer = pending.erase(peer);
+            } else {
+                ++peer;
+            }
+        }
+        if (!pending.empty()) {
+            recovery.adopt(pending);
+            RTP_LLM_LOG_WARNING("request [%s] retaining Decode destination blocks for worker write-lease settlement",
+                                load_context.request_key.c_str());
+        }
+    });
+    const bool        use_mla = engine_->resourceContext().cache_manager->cacheConfig().use_mla;
+    for (size_t i = 0; i < worker_size; ++i) {
+        if (decode_context.isRequestCancelled()) {
+            return {ErrorInfo(ErrorCode::CANCELLED, "P/D load cancelled before dispatching worker"), 0};
+        }
+        auto& worker  = all_context[i];
+        auto  request = use_mla ? constructRemoteLoadRequestForMla(load_context, i, decode_context.peer_addrs) :
+                                  constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
+        request.set_destination_blocks_held(true);
+        *request.mutable_write_lease() = worker.lease;
+        const auto& masked             = destination_hold->maskedPositions();
+        for (auto& row : *request.mutable_tagged_group_block_ids()) {
+            auto it = masked.find(row.tag());
+            if (it != masked.end()) {
+                for (const auto pos : it->second) {
+                    row.add_masked_positions(pos);
+                }
+            }
+        }
+        worker.client_context->set_deadline(rpc_deadline);
+        worker.dispatched = true;
+        worker.reader     = worker.stub->AsyncRemoteLoad(
+            worker.client_context.get(), request, &completion_queues[i % completion_queues.size()]);
+        if (!worker.reader) {
+            return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "failed to start remote load RPC"), 0};
+        }
+        worker.reader->Finish(&worker.response, &worker.status, reinterpret_cast<void*>(i));
     }
 
     bool                all_success               = true;
@@ -1053,7 +1237,9 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheAsyncForTp(DecodeGene
             RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
             return {ErrorInfo(ErrorCode::LOAD_CACHE_TIMEOUT, error_msg), 0};
         }
-        if (load_context.server_context->IsCancelled()) {
+        if (decode_context.isRequestCancelled()) {
+            // Cancelling the RPC expedites the business response. The independent
+            // seal query retains the target until any already-claimed writer stops.
             string error_msg = "load cache cancelled: request=" + decode_context.request_key
                                + ", finished=" + std::to_string(finished_count) + "/" + std::to_string(worker_size)
                                + ", cost_ms=" + std::to_string(cost_time_ms);
@@ -1072,11 +1258,16 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheAsyncForTp(DecodeGene
             if (each_finished_count[i] == expected_response_counts[i]) {
                 continue;
             }
-            if (completion_queues[i].AsyncNext(&got_tag, &ok, once_deadline)
-                == grpc::CompletionQueue::NextStatus::TIMEOUT) {
+            const auto event = completion_queues[i].AsyncNext(&got_tag, &ok, once_deadline);
+            if (event == grpc::CompletionQueue::NextStatus::TIMEOUT) {
                 RTP_LLM_LOG_DEBUG("request [%s] async next timeout", decode_context.request_key.c_str());
                 continue;
             }
+            if (event == grpc::CompletionQueue::NextStatus::SHUTDOWN) {
+                return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "remote load completion queue shut down"), 0};
+            }
+            const auto rank = reinterpret_cast<uintptr_t>(got_tag);
+            all_context[rank].finish(ok);
             each_finished_count[i]++;
             if (!ok) {
                 string error_msg = "grpc completion queue event failed: request=" + decode_context.request_key
@@ -1085,7 +1276,6 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheAsyncForTp(DecodeGene
                 RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
                 return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, error_msg), 0};
             }
-            auto        rank             = reinterpret_cast<uintptr_t>(got_tag);
             const auto& status           = all_context[rank].status;
             const auto& response         = all_context[rank].response;
             const auto& pb_error_code    = response.error_info().error_code();
@@ -1112,6 +1302,10 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheAsyncForTp(DecodeGene
                 error_msg += "rank=" + std::to_string(rank) + ", worker=" + worker_addr + ", peer=" + peer_addr
                              + ", cq=" + std::to_string(i) + ", remote_code=" + std::to_string(pb_error_code)
                              + ", remote_message=" + pb_error_message + "; ";
+            } else if (!all_context[rank].writes_quiesced) {
+                all_success = false;
+                error_code  = ErrorCode::LOAD_KV_CACHE_FAILED;
+                error_msg += "worker has not confirmed its last destination write; ";
             } else if (response.loaded_cache_block_count() < 0
                        || static_cast<size_t>(response.loaded_cache_block_count()) > load_context.cache_keys.size()) {
                 all_success = false;
@@ -1129,10 +1323,6 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheAsyncForTp(DecodeGene
         if (finished_count == worker_size) {
             break;
         }
-    }
-
-    for (auto& completion_queue : completion_queues) {
-        completion_queue.Shutdown();
     }
 
     if (finished_count != worker_size) {
@@ -1160,7 +1350,11 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheAsyncForTp(DecodeGene
     return {ErrorInfo::OkStatus(), minLoadedCacheBlockCount(rank_loaded_cache_block_counts)};
 }
 
-DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
+DecodeRpcServer::LoadCacheResult
+DecodeRpcServer::loadCache(const LoadKVCacheContext&                         load_context,
+                           const std::shared_ptr<PDLoadDestinationHold>&     destination_hold,
+                           std::shared_ptr<void>                             writer_lifetime,
+                           const std::function<void(std::function<void()>)>& register_recovery) {
     RTP_LLM_PROFILE_FUNCTION();
     AtomicGuard request_guard(onflight_load_cache_requests_);
     const auto& request_key   = load_context.request_key;
@@ -1176,9 +1370,50 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
     const bool use_hybrid          = cache_config.groupNums() > 1;
     const bool use_opaque_kv_store = cache_config.use_opaque_kv_cache_store;
 
-    auto cancel_check_func  = [&load_context]() -> bool { return load_context.server_context->IsCancelled(); };
-    auto start_load_time_us = currentTimeUs();
+    const auto& store = resource_.cache_store;
+    if (!store || !store->getMemoryUtil() || !store->getMemoryUtil()->supportsLoadWriteStop()) {
+        return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "cache store cannot confirm destination writes stopped"),
+                0,
+                true};
+    }
+    struct DestinationCustody {
+        std::shared_ptr<std::atomic<size_t>>   drains;
+        AtomicGuard                            drain_guard;
+        std::shared_ptr<KVCacheManager>        backing;
+        std::shared_ptr<PDLoadDestinationHold> pages;
+        std::shared_ptr<void>                  worker;
+        DestinationCustody(std::shared_ptr<std::atomic<size_t>>   count,
+                           std::shared_ptr<KVCacheManager>        manager,
+                           std::shared_ptr<PDLoadDestinationHold> target,
+                           std::shared_ptr<void>                  writer):
+            drains(std::move(count)),
+            drain_guard(*drains),
+            backing(std::move(manager)),
+            pages(std::move(target)),
+            worker(std::move(writer)) {}
+    };
+    auto custody = std::make_shared<DestinationCustody>(
+        pending_write_drains_, cache_manager, destination_hold, std::move(writer_lifetime));
+    using Clock = std::chrono::steady_clock;
+    const auto deadline =
+        Clock::now() + std::chrono::milliseconds(std::clamp<int64_t>(load_context.timeout_ms, 0, INT32_MAX));
+    auto                                                              start_load_time_us = currentTimeUs();
     std::vector<std::pair<std::string, std::shared_ptr<LoadContext>>> load_contexts;
+    bool                                                              handoff_ready = false;
+    autil::ScopeGuard                                                 recover_abandoned([&] {
+        if (!handoff_ready) {
+            for (const auto& peer : load_contexts) {
+                if (!peer.second->destinationWritesStopped()) {
+                    peer.second->recoverDestinationWritesAfterTimeout(pd_write_recovery_delay_);
+                }
+            }
+        }
+    });
+    auto                                                              destination_safe = [&load_contexts]() {
+        return std::all_of(load_contexts.begin(), load_contexts.end(), [](const auto& peer) {
+            return peer.second->destinationWritesStopped();
+        });
+    };
     std::vector<size_t> required_cache_key_counts(load_context.cache_keys.size(), 0);
     std::vector<size_t> transferred_cache_key_counts(load_context.cache_keys.size(), 0);
     auto                buffersDebugInfos = [](const std::vector<std::shared_ptr<RequestBlockBuffer>>& buffers) {
@@ -1191,23 +1426,6 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
     };
     const bool is_page_level_rr = load_context.prefill_cp_size > 1
                                   && static_cast<int>(load_context.peer_addrs.size()) == load_context.prefill_cp_size;
-    auto layerGroupTags = [](const CacheConfig& cfg, bool use_hybrid, size_t layer_id) {
-        std::vector<std::string> layer_tags;
-        if (use_hybrid) {
-            RTP_LLM_CHECK_WITH_INFO(layer_id < cfg.topology().layers().size(),
-                                    "hybrid cache layer %zu missing layer group membership, layers=%zu",
-                                    layer_id,
-                                    cfg.topology().layers().size());
-            for (const auto& group : cfg.topology().groupsForLayer(static_cast<int>(layer_id))) {
-                layer_tags.push_back(group.get().tag);
-            }
-            RTP_LLM_CHECK_WITH_INFO(
-                !layer_tags.empty(), "hybrid cache layer %zu has empty layer group membership", layer_id);
-        } else {
-            layer_tags.push_back(cfg.topology().groups().front().tag);
-        }
-        return layer_tags;
-    };
     auto groupType = [](const CacheConfig& cfg, bool use_hybrid, const std::string& tag) {
         if (use_hybrid) {
             return cfg.topology().group(tag).policy.group_type;
@@ -1253,18 +1471,11 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
         }
         return cpMapperForGroup(cfg, tag).sliceBlockForPeer(cfg, tag, std::move(parts), static_cast<size_t>(peer_idx));
     };
-    // One projection shared by the main model and MTP, mirroring the producer.
-    auto groupLoadPlan =
-        [&](const CacheConfig& cfg, bool cfg_use_hybrid, const std::string& tag, size_t local_block_num) {
-            const auto& group = cfg.topology().group(tag);
-            return buildGroupLoadPlan(group.policy,
-                                      local_block_num,
-                                      load_context.cache_keys.size(),
-                                      static_cast<size_t>(std::max<int64_t>(load_context.reuse_block_size, 0)),
-                                      cfg_use_hybrid,
-                                      group.seqSizePerBlock(),
-                                      cfg.seq_size_per_block);
-        };
+    // Use the same projection for the allocator hold and both transport paths.
+    auto groupLoadPlan = [&](const CacheConfig& cfg, const std::string& tag, size_t local_block_num) {
+        return buildGroupLoadPlan(
+            cfg, tag, local_block_num, load_context.cache_keys.size(), load_context.reuse_block_size);
+    };
     for (int i = 0; i < load_context.peer_addrs.size(); i++) {
         auto&                                            peer_addr = load_context.peer_addrs[i];
         std::vector<std::shared_ptr<RequestBlockBuffer>> layer_caches;
@@ -1274,7 +1485,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
             // Some typed-region cache layouts let one logical layer own
             // multiple groups. Iterate every group the layer owns; other
             // layouts reduce to the legacy single-group-per-layer behaviour.
-            std::vector<std::string> layer_tags = layerGroupTags(cache_config, use_hybrid, layer_id);
+            const auto& layer_tags = layerGroupTags(cache_config, layer_id);
 
             for (const auto& tag : layer_tags) {
                 auto request_key = makeTaggedRequestKey(load_context.request_id, layer_id, tag);
@@ -1286,7 +1497,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                 size_t      model_id  = maga_init_params_.model_id;
 
                 CacheGroupType group_type                    = groupType(cache_config, use_hybrid, tag);
-                const auto     load_plan                     = groupLoadPlan(cache_config, use_hybrid, tag, block_num);
+                const auto     load_plan                     = groupLoadPlan(cache_config, tag, block_num);
                 const auto     cache_keys_per_physical_block = cacheKeysPerPhysicalBlock(
                     cache_config.topology().group(tag).seqSizePerBlock(), cache_config.seq_size_per_block);
 
@@ -1372,7 +1583,9 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                 && !propose_maga_init_params_->mtp_model_params_->empty()) {
                 const auto mtp_load_plan = makeMTPModuleLoadPlan(propose_maga_init_params_);
                 if (mtp_load_plan.empty()) {
-                    return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "active MTP module0 is missing"), 0};
+                    return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "active MTP module0 is missing"),
+                            0,
+                            destination_safe()};
                 }
 
                 for (const auto& module_plan : mtp_load_plan) {
@@ -1392,8 +1605,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                         const bool mtp_use_opaque_kv_store = mtp_cache_cfg.use_opaque_kv_cache_store;
 
                         // Same multi-group iteration as the main path.
-                        std::vector<std::string> mtp_layer_tags =
-                            layerGroupTags(mtp_cache_cfg, mtp_use_hybrid, layer_id);
+                        const auto& mtp_layer_tags = layerGroupTags(mtp_cache_cfg, layer_id);
 
                         const auto global_layer_id = CacheConfig::mtpGlobalLayerId(
                             static_cast<uint32_t>(maga_init_params_.model_config_.num_layers),
@@ -1418,7 +1630,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                             size_t      model_id  = module_plan.cache_model_id;
 
                             CacheGroupType group_type = groupType(mtp_cache_cfg, mtp_use_hybrid, tag);
-                            const auto     load_plan  = groupLoadPlan(mtp_cache_cfg, mtp_use_hybrid, tag, block_num);
+                            const auto     load_plan  = groupLoadPlan(mtp_cache_cfg, tag, block_num);
                             const auto     cache_keys_per_physical_block =
                                 cacheKeysPerPhysicalBlock(mtp_cache_cfg.topology().group(tag).seqSizePerBlock(),
                                                           mtp_cache_cfg.seq_size_per_block);
@@ -1511,38 +1723,43 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                     }
                 }
             } else {
-                return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "active MTP module0 is missing"), 0};
+                return {
+                    ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "active MTP module0 is missing"), 0, destination_safe()};
             }
         }
 
         auto ip_parts = autil::StringUtil::split(peer_addr, ":");
-        if (ip_parts.size() != 3) {
+        if (ip_parts.size() != 3 || ip_parts.front().empty()) {
             logReadFailures(load_context.request_id,
                             peer_addr,
                             ErrorCode::LOAD_KV_CACHE_FAILED,
                             "invalid_peer",
                             buffersDebugInfos(layer_caches));
-            return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "invalid peer ip"), 0};
+            return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "invalid peer ip"), 0, destination_safe()};
         }
 
-        auto layer_cache_load_context =
-            resource_.cache_store->loadBuffers(layer_caches,
-                                               ip_parts[0],
-                                               autil::StringUtil::strToInt32WithDefault(ip_parts[1].c_str(), 0),
-                                               autil::StringUtil::strToInt32WithDefault(ip_parts[2].c_str(), 0),
-                                               load_context.timeout_ms,
-                                               cancel_check_func,
-                                               load_context.partition_count,
-                                               load_context.partition_id);
-        if (!layer_cache_load_context) {
-            logReadFailures(load_context.request_id,
-                            peer_addr,
-                            ErrorCode::LOAD_KV_CACHE_FAILED,
-                            "null_load_context",
-                            buffersDebugInfos(layer_caches));
-            return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "load kv cache failed"), 0};
+        if (layer_caches.empty()) {
+            return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "no layer caches to load"), 0, destination_safe()};
         }
+        if (load_context.is_cancelled()) {
+            return {ErrorInfo(ErrorCode::CANCELLED, "decode cache load cancelled"), 0, destination_safe()};
+        }
+        // Construct the physical tracker before the first possible transport submission.
+        // It keeps the local backing and both kinds of target ownership through a partial launch or exception.
+        layer_caches.front()->setLoadWriterLifetime(custody);
+        auto layer_cache_load_context = std::make_shared<LoadContext>(store, store->getMemoryUtil()->isRdmaMode());
         load_contexts.emplace_back(peer_addr, layer_cache_load_context);
+        if (register_recovery) {
+            register_recovery(layer_cache_load_context->destinationRecoveryCallback(pd_write_recovery_delay_));
+        }
+        layer_cache_load_context->load(layer_caches,
+                                       ip_parts[0],
+                                       autil::StringUtil::strToInt32WithDefault(ip_parts[1].c_str(), 0),
+                                       autil::StringUtil::strToInt32WithDefault(ip_parts[2].c_str(), 0),
+                                       load_context.timeout_ms,
+                                       load_context.is_cancelled,
+                                       load_context.partition_count,
+                                       load_context.partition_id);
     }
 
     for (auto& [peer_addr, layer_cache_load_context] : load_contexts) {
@@ -1562,31 +1779,142 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                 request_key.c_str(),
                                 layer_cache_load_context->getErrorInfoString().c_str(),
                                 (load_done_time_us - start_load_time_us) / 1000);
-            return {error_info, 0};
+            return {error_info, 0, destination_safe()};
         }
     }
 
+    for (const auto& peer : load_contexts) {
+        while (!peer.second->destinationWritesStopped()) {
+            if (load_context.is_cancelled()) {
+                return {ErrorInfo(ErrorCode::CANCELLED, "decode cache load cancelled before writes stopped"), 0, false};
+            }
+            const auto now = Clock::now();
+            if (now >= deadline) {
+                return {ErrorInfo(ErrorCode::LOAD_CACHE_TIMEOUT,
+                                  "cache store has not confirmed destination writes stopped"),
+                        0,
+                        false};
+            }
+            peer.second->waitForDestinationWritesStopped(std::min(deadline, now + std::chrono::milliseconds(30)));
+        }
+    }
+
+    handoff_ready                      = true;
     const size_t already_reused_blocks = static_cast<size_t>(std::max<int64_t>(load_context.reuse_block_size, 0));
     return {
         ErrorInfo::OkStatus(),
-        completedHandoffPrefixBlocks(already_reused_blocks, required_cache_key_counts, transferred_cache_key_counts)};
+        completedHandoffPrefixBlocks(already_reused_blocks, required_cache_key_counts, transferred_cache_key_counts),
+        true};
+}
+
+grpc::Status DecodeRpcServer::PreparePDWriteLease(grpc::ServerContext*,
+                                                  const PreparePDWriteLeaseRequestPB* request,
+                                                  PDWriteLeasePB*                     response) {
+    if (request->timeout_ms() <= 0) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "P/D write lease requires an admission timeout");
+    }
+    // A worker that runs the new RPC with an older transport also fails this
+    // address-free handshake. Other DP groups acknowledge without writing.
+    if (request->dp_rank() == maga_init_params_.parallelism_config.dp_rank) {
+        const auto& store = resource_.cache_store;
+        if (!store || !store->getMemoryUtil() || !store->getMemoryUtil()->supportsLoadWriteStop()) {
+            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "worker transport cannot prove write stop");
+        }
+    }
+    *response = write_leases_->prepare(*request);
+    if (!response->token())
+        return grpc::Status(grpc::StatusCode::UNAVAILABLE, "Decode worker is draining");
+    return grpc::Status::OK;
+}
+
+grpc::Status DecodeRpcServer::SealPDWriteLease(grpc::ServerContext*,
+                                               const PDWriteLeasePB*       request,
+                                               SealPDWriteLeaseResponsePB* response) {
+    bool stopped = false;
+    if (!write_leases_->seal(*request, stopped)) {
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "P/D write lease belongs to another worker epoch");
+    }
+    *response->mutable_lease() = *request;
+    response->set_stopped(stopped);
+    return grpc::Status::OK;
 }
 
 grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_context,
                                          const BroadcastLoadRequestPB* request,
                                          BroadcastLoadResponsePB*      response) {
     RTP_LLM_PROFILE_FUNCTION();
+    auto writer = write_leases_->claim(*request);
+    if (!writer) {
+        // In particular, a duplicate must not acknowledge another live writer.
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "P/D write lease is absent, expired, or claimed");
+    }
+    *response->mutable_stopped_lease() = request->write_lease();
+    autil::ScopeGuard mark_settled([&] {
+        writer.reset();
+        bool stopped = false;
+        write_leases_->seal(request->write_lease(), stopped);
+        response->set_destination_writes_quiesced(stopped);
+    });
     if (request->dp_rank() != maga_init_params_.parallelism_config.dp_rank) {
         RTP_LLM_LOG_WARNING("only load when in dp group, skip load for dp rank %d", request->dp_rank());
         return grpc::Status::OK;
     }
 
+    auto reject_before_load = [&](const std::string& detail) {
+        response->mutable_error_info()->set_error_code(transErrorCodeToRPC(ErrorCode::LOAD_KV_CACHE_FAILED));
+        response->mutable_error_info()->set_error_message(detail);
+        response->set_done_time_us(currentTimeUs());
+        return grpc::Status::OK;
+    };
+    if (!resource_.cache_store || !resource_.cache_store->getMemoryUtil()) {
+        return reject_before_load("worker cache store transport is unavailable");
+    }
+    if (resource_.cache_store->getMemoryUtil()->isRdmaMode() && !request->destination_blocks_held()) {
+        return reject_before_load("RDMA load requires the allocating rank to hold the destination blocks");
+    }
+
     std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
     const auto&               cache_config    = engine_->resourceContext().cache_manager->cacheConfig();
     const auto&               topology        = cache_config.topology();
-    auto                      group_block_ids = decodeGroupBlockIds(*request, topology);
+    GroupBlockIds             group_block_ids;
+    try {
+        group_block_ids = decodeGroupBlockIds(*request, topology);
+        // A worker with a different main/MTP layout must not silently skip
+        // pages that its own plan would have written.
+        std::unordered_map<std::string, std::unordered_set<size_t>> masked;
+        for (const auto& row : request->tagged_group_block_ids()) {
+            for (int32_t pos : row.masked_positions()) {
+                if (pos < 0 || pos >= row.block_ids_size() || !isNullBlockIdx(row.block_ids(pos))) {
+                    return reject_before_load("invalid masked Decode target position");
+                }
+                masked[row.tag()].insert(static_cast<size_t>(pos));
+            }
+        }
+        if (!masked.empty()) {
+            bool incompatible = false;
+            visitLoadDestinations(group_block_ids,
+                                  cache_keys.size(),
+                                  request->reuse_block_size(),
+                                  [&](const std::string& tag, size_t pos) {
+                                      const auto it = masked.find(tag);
+                                      if (it != masked.end() && it->second.count(pos)) {
+                                          incompatible = true;
+                                      }
+                                  });
+            if (incompatible) {
+                return reject_before_load("worker load plan requires an unheld Decode target block");
+            }
+        }
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_WARNING("remote load destination validation failed: %s", error.what());
+        return reject_before_load("invalid Decode target topology");
+    }
 
     std::vector<std::string> peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
+
+    auto register_recovery = [registry = write_leases_, lease = request->write_lease()](std::function<void()> recover) {
+        registry->registerRecovery(lease, std::move(recover));
+    };
 
     // TODO(xinfei.sxf) add retry
     auto load_result = loadCache({request->request_id(),
@@ -1599,7 +1927,10 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                                   request->partition_count(),
                                   request->partition_id(),
                                   server_context,
-                                  request->prefill_cp_size() > 0 ? request->prefill_cp_size() : 1});
+                                  request->prefill_cp_size() > 0 ? request->prefill_cp_size() : 1},
+                                 nullptr,
+                                 writer,
+                                 register_recovery);
     response->mutable_error_info()->set_error_code(transErrorCodeToRPC(load_result.error_info.code()));
     response->mutable_error_info()->set_error_message(load_result.error_info.ToString());
     response->set_loaded_cache_block_count(static_cast<int64_t>(load_result.loaded_cache_block_count));

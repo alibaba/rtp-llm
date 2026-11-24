@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include "rtp_llm/cpp/disaggregate/cache_store/proto/cache_store_service.pb.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreMetricsCollector.h"
@@ -27,7 +29,16 @@ public:
         response_(response),
         callback_(callback),
         collector_(collector),
-        device_id_(device_id) {}
+        device_id_(device_id) {
+        if (auto stopped = callback_.destinationStopNotifier()) {
+            may_start_copy_ = std::make_shared<std::atomic<bool>>(true);
+            callback_.setDestinationFence([admission = may_start_copy_, stopped = std::move(stopped)] {
+                if (admission->exchange(false)) {
+                    stopped();
+                }
+            });
+        }
+    }
 
     ~TcpCacheStoreLoadServiceClosure();
 
@@ -44,8 +55,10 @@ private:
     CacheLoadRequest*                                     request_{nullptr};
     CacheLoadResponse*                                    response_{nullptr};
     CacheStoreLoadDoneCallback                            callback_{nullptr};
+    std::shared_ptr<std::atomic<bool>>                    may_start_copy_;
     std::shared_ptr<CacheStoreClientLoadMetricsCollector> collector_;
     int                                                   device_id_{-1};
+    bool                                                  ended_{false};
 };
 
 }  // namespace rtp_llm

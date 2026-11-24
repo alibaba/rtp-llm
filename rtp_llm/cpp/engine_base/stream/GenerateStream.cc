@@ -2305,6 +2305,35 @@ void GenerateStream::resizeSubGenerateStatus(size_t new_size) {
     }
 }
 
+std::shared_ptr<PDLoadDestinationHold> GenerateStream::holdPDLoadDestination(CacheKeysType& keys,
+                                                                             GroupBlockIds& groups,
+                                                                             int64_t&       reuse_blocks,
+                                                                             const PDLoadDestinationSelector& select) {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (!stream_cache_resource_ || stream_cache_resource_->isResourceReleased() || hasErrorWithoutLock()
+        || isFinished()) {
+        return nullptr;
+    }
+    const auto& manager  = stream_cache_resource_->resourceContext().cache_manager;
+    const auto& resource = stream_cache_resource_->kvCache();
+    if (!manager || resource.batchSize() == 0) {
+        return nullptr;
+    }
+    const auto& rows = resource.cacheResource(0).groupBlockIds();
+    rows.validate();
+    const auto& cache_keys = cacheKeys(0);
+    const auto  reused     = reuseBlockSize();
+    auto        hold       = manager->holdPDLoadDestination(rows, select(rows, cache_keys.size(), reused));
+    if (!hold) {
+        return nullptr;
+    }
+    stream_cache_resource_->trackPDLoad(hold->publicationStatus());
+    keys         = cache_keys;
+    groups       = hold->remoteBlockIds();
+    reuse_blocks = reused;
+    return hold;
+}
+
 void GenerateStream::holdKVCacheForPDSep() {
     stream_cache_resource_->holdKVCacheForPDSep();
 }

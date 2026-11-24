@@ -79,6 +79,20 @@ public:
         return prefill_server_->Cancel(context, request, response);
     }
 
+    grpc::Status PreparePDWriteLease(grpc::ServerContext*                context,
+                                     const PreparePDWriteLeaseRequestPB* request,
+                                     PDWriteLeasePB*                     response) override {
+        if (!decode_server_)
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "P/D writes require Decode");
+        return decode_server_->PreparePDWriteLease(context, request, response);
+    }
+    grpc::Status SealPDWriteLease(grpc::ServerContext*        context,
+                                  const PDWriteLeasePB*       request,
+                                  SealPDWriteLeaseResponsePB* response) override {
+        if (!decode_server_)
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "P/D writes require Decode");
+        return decode_server_->SealPDWriteLease(context, request, response);
+    }
     grpc::Status RemoteLoad(grpc::ServerContext*          context,
                             const BroadcastLoadRequestPB* request,
                             BroadcastLoadResponsePB*      response) override {

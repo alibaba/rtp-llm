@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -46,6 +47,9 @@ public:
     int                         tryReleaseKVBlock(size_t nums);
     void                        freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
     void                        releaseResource();
+    void                        trackPDLoad(std::shared_ptr<const std::atomic<bool>> status) {
+        std::atomic_store(&pd_load_ready_, std::move(status));
+    }
     bool                        asyncLoadCache();
     bool                        loadCacheDone();
     // Register one scheduler wakeup per allocator load without owning its lifetime.
@@ -137,6 +141,11 @@ public:
     }
 
 private:
+    bool pdLoadReady() const {
+        auto status = std::atomic_load(&pd_load_ready_);
+        return !status || status->load(std::memory_order_acquire);
+    }
+    std::shared_ptr<const std::atomic<bool>> pd_load_ready_;
     bool         publicationKeysFresh() const;
     void         clearCacheReuseState();
     void         recordCacheReuseMallocResult(const MallocResult& result);

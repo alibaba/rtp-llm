@@ -9,6 +9,9 @@
 namespace rtp_llm {
 
 TcpCacheStoreLoadServiceClosure::~TcpCacheStoreLoadServiceClosure() {
+    if (!ended_ && (!may_start_copy_ || may_start_copy_->exchange(false))) {
+        callback_.destinationWritesStopped();
+    }
     if (controller_) {
         delete controller_;
     }
@@ -21,6 +24,15 @@ TcpCacheStoreLoadServiceClosure::~TcpCacheStoreLoadServiceClosure() {
 }
 
 void TcpCacheStoreLoadServiceClosure::Run() {
+    // Once this closure owns admission the recovery timer must wait for the copy.
+    // A timer that closed admission first already acknowledged that no copy can start.
+    if (may_start_copy_ && !may_start_copy_->exchange(false)) {
+        ended_ = true;
+        collector_->markEnd(false);
+        callback_(false, CacheStoreErrorCode::LoadBufferTimeout);
+        delete this;
+        return;
+    }
     collector_->markRequestCallEnd(currentTimeUs() - response_->response_send_start_time_us());
     if (!tryPinThreadDevice(device_id_, "cache load request")) {
         end(false, CacheStoreErrorCode::LoadErrorUnknown);
@@ -46,32 +58,51 @@ void TcpCacheStoreLoadServiceClosure::Run() {
         return;
     }
 
-    for (int i = 0; i < response_->blocks_size(); i++) {
-        const auto& block        = response_->blocks(i);
-        auto        unload_block = request_block_buffer_->getBlock(block.key());
+    bool gpu_copy_in_progress = false;
+    try {
+        for (int i = 0; i < response_->blocks_size(); i++) {
+            const auto& block        = response_->blocks(i);
+            auto        unload_block = request_block_buffer_->getBlock(block.key());
 
-        if (unload_block == nullptr || block.len() != unload_block->len) {
-            RTP_LLM_LOG_WARNING("can not find match block %s from response, request is %s",
-                                block.key().c_str(),
-                                request_block_buffer_->getRequestId().c_str());
-            end(false, CacheStoreErrorCode::LoadBufferTimeout);
+            if (unload_block == nullptr || block.len() != unload_block->len || block.len() != block.content().size()) {
+                RTP_LLM_LOG_WARNING("can not find match block %s from response, request is %s",
+                                    block.key().c_str(),
+                                    request_block_buffer_->getRequestId().c_str());
+                end(false, CacheStoreErrorCode::LoadBufferTimeout);
+                return;
+            }
+
+            auto dst_tensor = torch::from_blob(
+                unload_block->addr.get(),
+                {(int64_t)unload_block->len},
+                torch::TensorOptions().dtype(torch::kUInt8).device(unload_block->gpu_mem ? torch::kCUDA : torch::kCPU));
+            auto src_tensor      = torch::from_blob(const_cast<char*>(block.content().data()),
+                                                    {(int64_t)block.len()},
+                                               torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
+            gpu_copy_in_progress = unload_block->gpu_mem;
+            execNoBlockCopy({dst_tensor, src_tensor});
+            gpu_copy_in_progress = false;
+        }
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING(
+            "tcp cache load copy failed for request %s: %s", request_block_buffer_->getRequestId().c_str(), e.what());
+        if (gpu_copy_in_progress) {
+            ended_ = true;
+            collector_->markEnd(false);
+            callback_(false, CacheStoreErrorCode::LoadErrorUnknown);
+            delete this;
             return;
         }
-
-        auto dst_tensor = torch::from_blob(
-            unload_block->addr.get(),
-            {(int64_t)unload_block->len},
-            torch::TensorOptions().dtype(torch::kUInt8).device(unload_block->gpu_mem ? torch::kCUDA : torch::kCPU));
-        auto src_tensor = torch::from_blob(const_cast<char*>(block.content().data()),
-                                           {(int64_t)block.len()},
-                                           torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
-        execNoBlockCopy({dst_tensor, src_tensor});
+        end(false, CacheStoreErrorCode::LoadErrorUnknown);
+        return;
     }
     end(true, CacheStoreErrorCode::None);
 }
 
 void TcpCacheStoreLoadServiceClosure::end(bool success, CacheStoreErrorCode ec) {
+    ended_ = true;
     collector_->markEnd(success);
+    callback_.destinationWritesStopped();
     callback_(success, ec);
     delete this;
 }

@@ -125,35 +125,79 @@ TEST_F(TcpCacheStoreLoadServiceClosureNoDeviceTest, testRun_SwitchesToRequestedD
 }
 
 TEST_F(TcpCacheStoreLoadServiceClosureTest, testRun_Success) {
-    std::mutex mutex;
-    auto       callback = [&mutex](bool ok, CacheStoreErrorCode ec) {
-        ASSERT_TRUE(ok);
-        ASSERT_EQ(CacheStoreErrorCode::None, ec);
-        mutex.unlock();
-    };
+    const std::string payload     = "cache block";
+    auto              destination = block_buffer_util_->makeBlockBuffer("key", payload.size(), '0', true);
+    ASSERT_NE(destination, nullptr);
+    int                        stops = 0;
+    bool                       done  = false;
+    CacheStoreLoadDoneCallback callback(
+        [&](bool ok, CacheStoreErrorCode ec) {
+            EXPECT_TRUE(ok);
+            EXPECT_EQ(CacheStoreErrorCode::None, ec);
+            EXPECT_EQ(stops, 1);
+            done = true;
+        },
+        [&] {
+            ++stops;
+            EXPECT_TRUE(block_buffer_util_->verifyBlock(destination, "key", payload.size(), true, payload.front()));
+        });
 
     auto closure = makeClosure(arpc::ARPC_ERROR_NONE, KvCacheStoreServiceErrorCode::EC_SUCCESS, callback);
     ASSERT_TRUE(closure != nullptr);
+    closure->request_block_buffer_->addBlock(destination);
+    auto* block = closure->response_->add_blocks();
+    block->set_key("key");
+    block->set_len(payload.size());
+    block->set_content(payload);
     closure->Run();
 
-    mutex.lock();
-    mutex.unlock();
+    EXPECT_TRUE(done);
+    EXPECT_EQ(stops, 1);
 }
 
 TEST_F(TcpCacheStoreLoadServiceClosureTest, testRun_ControllerFailed) {
-    std::mutex mutex;
-    auto       callback = [&mutex](bool ok, CacheStoreErrorCode ec) {
-        ASSERT_FALSE(ok);
-        ASSERT_EQ(CacheStoreErrorCode::LoadSendRequestFailed, ec);
-        mutex.unlock();
-    };
+    int                        stops = 0;
+    bool                       done  = false;
+    CacheStoreLoadDoneCallback callback(
+        [&](bool ok, CacheStoreErrorCode ec) {
+            EXPECT_FALSE(ok);
+            EXPECT_EQ(CacheStoreErrorCode::LoadSendRequestFailed, ec);
+            EXPECT_EQ(stops, 1);
+            done = true;
+        },
+        [&] { ++stops; });
 
     auto closure = makeClosure(arpc::ARPC_ERROR_CONNECTION_CLOSED, KvCacheStoreServiceErrorCode::EC_SUCCESS, callback);
     ASSERT_TRUE(closure != nullptr);
     closure->Run();
 
-    mutex.lock();
-    mutex.unlock();
+    EXPECT_TRUE(done);
+    EXPECT_EQ(stops, 1);
+}
+
+TEST_F(TcpCacheStoreLoadServiceClosureTest, UnusedClosureStopsWithoutDispatchingCopy) {
+    int                        stops = 0;
+    CacheStoreLoadDoneCallback callback(
+        [](bool, CacheStoreErrorCode) { ADD_FAILURE() << "unused closure reported a result"; }, [&] { ++stops; });
+    delete makeClosure(arpc::ARPC_ERROR_NONE, KvCacheStoreServiceErrorCode::EC_SUCCESS, callback);
+    EXPECT_EQ(stops, 1);
+}
+
+TEST_F(TcpCacheStoreLoadServiceClosureTest, RecoveryClosesAdmissionBeforeLocalCopyStarts) {
+    size_t                     stops  = 0;
+    bool                       failed = false;
+    std::function<void()>      close;
+    CacheStoreLoadDoneCallback callback([&](bool ok, CacheStoreErrorCode) { failed = !ok; },
+                                        [&] { ++stops; },
+                                        [&](std::function<void()> action) { close = std::move(action); });
+    auto* closure = makeClosure(arpc::ARPC_ERROR_NONE, KvCacheStoreServiceErrorCode::EC_SUCCESS, callback);
+    ASSERT_TRUE(close);
+    close();
+    close();
+    EXPECT_EQ(stops, 1u);
+    closure->Run();
+    EXPECT_TRUE(failed);
+    EXPECT_EQ(stops, 1u);
 }
 
 TEST_F(TcpCacheStoreLoadServiceClosureTest, testRun_ResponseFailed) {

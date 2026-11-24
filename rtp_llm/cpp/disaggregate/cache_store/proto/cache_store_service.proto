@@ -21,6 +21,7 @@ message RdmaConnectionInfo {
     optional string ip = 1;
     optional uint32 port = 2;
     optional uint64 peer_channel = 3;
+    optional uint64 client_channel = 4;
 }
 
 message RdmaBlockBufferAddrInfo {
@@ -52,6 +53,7 @@ message CacheLoadResponse {
     optional int64 response_send_start_time_us = 2;
     optional bool direct_write_response = 3[default=false]; // true is rdma, false is tcp
     repeated BlockBufferInfo blocks = 4;
+    optional bool exact_rdma_channels = 5;
 };
 
 message CacheTransferInfo {

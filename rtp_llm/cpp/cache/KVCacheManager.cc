@@ -619,6 +619,91 @@ std::function<void()> KVCacheManager::allocationChangeCallback() const {
     };
 }
 
+std::shared_ptr<PDLoadDestinationHold>
+KVCacheManager::holdPDLoadDestination(const GroupBlockIds& rows, const PDLoadDestinationBlocks& targets) const {
+    if (!isAllocatorOwner() || !coordinator_manager_) {
+        return nullptr;
+    }
+    const auto& pools = coordinator_manager_->groupBlockPools();
+    const auto& tags  = config_.groupTags();
+    if (tags.empty() || pools.size() != tags.size() || rows.size() != tags.size()) {
+        return nullptr;
+    }
+
+    auto hold                             = std::make_shared<PDLoadDestinationHold>();
+    hold->remote_block_ids_.tag_to_index_ = rows.tag_to_index_;
+    hold->remote_block_ids_.rows_.resize(rows.size());
+
+    // Main/MTP and multiple ranks may write different regions on the same
+    // physical page. Give remote workers only the IDs actually pinned by TP0.
+    std::unordered_map<DeviceBlockPoolPtr, std::unordered_set<BlockIdxType>> pages;
+    size_t                                                                   matched_tags = 0;
+    for (size_t group = 0; group < tags.size(); ++group) {
+        const auto& tag = tags[group];
+        if (!pools[group] || !rows.tag_to_index_.count(tag)) {
+            return nullptr;
+        }
+        std::unordered_set<BlockIdxType> selected;
+        const auto                       it = targets.find(tag);
+        if (it != targets.end()) {
+            ++matched_tags;
+            selected.insert(it->second.begin(), it->second.end());
+            selected.erase(NULL_BLOCK_IDX);
+        }
+
+        const auto&          original = rows.blockIds(tag);
+        auto                 wire_ids = original.blocks();
+        std::vector<int32_t> masked;
+        if (wire_ids.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+            return nullptr;
+        }
+        std::unordered_set<BlockIdxType> found;
+        for (size_t slot = 0; slot < wire_ids.size(); ++slot) {
+            const auto id = wire_ids[slot];
+            if (isNullBlockIdx(id)) {
+                continue;
+            }
+            if (selected.count(id)) {
+                found.insert(id);
+            } else {
+                wire_ids[slot] = NULL_BLOCK_IDX;
+                masked.push_back(static_cast<int32_t>(slot));
+            }
+        }
+        if (found.size() != selected.size()) {
+            return nullptr;  // The selector named a physical page outside this request's row.
+        }
+        auto& pool_pages = pages[pools[group]];
+        pool_pages.insert(found.begin(), found.end());
+        if (!masked.empty()) {
+            hold->masked_positions_.emplace(tag, std::move(masked));
+        }
+        auto wire_row = std::make_shared<BlockIds>(original.kernelBlocksPerKvBlock());
+        wire_row->assign(std::move(wire_ids));
+        hold->remote_block_ids_.rows_[rows.tag_to_index_.at(tag)] = std::move(wire_row);
+    }
+    if (matched_tags != targets.size()) {
+        return nullptr;
+    }
+    hold->pools_.reserve(pages.size());
+    for (const auto& [pool, ids] : pages) {
+        if (ids.empty()) {
+            continue;
+        }
+        hold->pools_.push_back({pool, {}});
+        auto& pins = hold->pools_.back().pins;
+        pins.reserve(ids.size());
+        for (const auto id : ids) {
+            auto pin = pool->tryPinForPDLoad(id);
+            if (!pin) {
+                return nullptr;
+            }
+            pins.push_back(std::move(pin));
+        }
+    }
+    return hold;
+}
+
 bool KVCacheManager::freezeUnknownDecodeWriter(const BatchKVCacheResource& resource) const noexcept {
     if (!isAllocatorOwner() || !coordinator_manager_) return false;
     DecodeFrozenPages frozen;

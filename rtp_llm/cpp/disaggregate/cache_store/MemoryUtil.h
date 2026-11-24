@@ -15,6 +15,9 @@ public:
     virtual bool isMemoryMr(void* ptr, uint64_t size, bool gpu, bool adopted)                   = 0;
     virtual bool findMemoryMr(void* mem_info, void* buf, uint64_t size, bool gpu, bool adopted) = 0;
     virtual bool isRdmaMode()                                                                   = 0;
+    virtual bool supportsLoadWriteStop() {
+        return !isRdmaMode();
+    }
 };
 
 }  // namespace rtp_llm

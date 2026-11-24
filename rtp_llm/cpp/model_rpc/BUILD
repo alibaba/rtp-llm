@@ -81,6 +81,7 @@ cc_library(
             "MultimodalPbConverter.cc",
             "ResponseBuffer.cc",
             "ShutdownCoordinator.cc",
+            "PDWriteLease.cc",
             "PrefillRequestLogger.cc",
         ],
     ),
@@ -91,6 +92,7 @@ cc_library(
             # Owned by :response_buffer so its public header has a single cc_library.
             "ResponseBuffer.h",
             "ShutdownCoordinator.h",
+            "PDWriteLease.h",
             "PrefillRequestLogger.h",
         ],
     ),
@@ -100,6 +102,7 @@ cc_library(
         ":model_rpc_pool",
         ":response_buffer",
         ":shutdown_coordinator",
+        ":pd_write_lease",
         ":prefill_request_logger",
         ":rpc_error_code",
         ":tensor_pb_convert",
@@ -177,6 +180,19 @@ cc_library(
         "@grpc//:grpc++",
         "@havenask//aios/autil:time",
     ],
+)
+
+cc_library(
+    name = "pd_write_lease",
+    srcs = ["PDWriteLease.cc"],
+    hdrs = ["PDWriteLease.h"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "@grpc//:grpc++",
+        "@havenask//aios/autil:scope",
+    ],
+    visibility = ["//visibility:public"],
 )
 
 cc_library(

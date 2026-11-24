@@ -5,9 +5,11 @@
 #include <chrono>
 #include <condition_variable>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/Types.h"
@@ -31,6 +33,38 @@ class KVCacheAllocationWaitState;
 class KVCacheEventReporter;
 class FrozenTaskRecovery;
 class TransferCompletionCleanup;
+
+using PDLoadDestinationBlocks = std::unordered_map<std::string, BlockIndicesType>;
+using PDLoadDestinationSelector =
+    std::function<PDLoadDestinationBlocks(const GroupBlockIds&, size_t key_count, int64_t reuse_blocks)>;
+
+class PDLoadDestinationHold {
+public:
+    std::shared_ptr<const std::atomic<bool>> publicationStatus() const {
+        return content_ready_;
+    }
+    void markLoadSuccessful() {
+        content_ready_->store(true, std::memory_order_release);
+    }
+    const GroupBlockIds& remoteBlockIds() const {
+        return remote_block_ids_;
+    }
+    // Original non-hole slots masked on the wire because they have no write pin.
+    const std::unordered_map<std::string, std::vector<int32_t>>& maskedPositions() const {
+        return masked_positions_;
+    }
+
+private:
+    friend class KVCacheManager;
+    std::shared_ptr<std::atomic<bool>> content_ready_ = std::make_shared<std::atomic<bool>>(false);
+    struct PoolPins {
+        DeviceBlockPoolPtr                pool;
+        std::vector<RemotePublicationPin> pins;  // Destroy before the strong pool owner.
+    };
+    GroupBlockIds                                         remote_block_ids_;
+    std::unordered_map<std::string, std::vector<int32_t>> masked_positions_;
+    std::vector<PoolPins>                                 pools_;
+};
 
 class KVCacheManager {
 public:
@@ -74,6 +108,9 @@ public:
     // pool guard rather than silently accumulating invisible request holds.
     // False means native custody was unavailable; keep ordinary ownership.
     bool freezeUnknownDecodeWriter(const BatchKVCacheResource& resource) const noexcept;
+    // The caller owns and serializes the request block table through capture.
+    std::shared_ptr<PDLoadDestinationHold> holdPDLoadDestination(const GroupBlockIds&           rows,
+                                                                 const PDLoadDestinationBlocks& targets) const;
     // Speculative capture may defer this wait only while the original stream
     // owns the pages and its final draft-event host wait precedes promotion in
     // specUpdate. Standalone captures retain their synchronous default.

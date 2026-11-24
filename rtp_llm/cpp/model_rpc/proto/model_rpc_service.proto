@@ -41,6 +41,8 @@ message GroupBlockPB {
 message TaggedBlockIdsPB {
     string tag = 1;
     repeated int32 block_ids = 2;
+    // BroadcastLoad: real slots withheld by the allocating rank (encoded as holes).
+    repeated int32 masked_positions = 3;
 }
 
 enum RoleTypePB {
@@ -489,13 +491,34 @@ message BroadcastLoadRequestPB {
     reserved "group_block_ids";
     int32 prefill_cp_size = 13;
     repeated TaggedBlockIdsPB tagged_group_block_ids = 14;
-
+    // The allocating Decode rank holds every advertised target until workers settle.
+    bool destination_blocks_held = 15;
+    PDWriteLeasePB write_lease = 16;
 }
 
 message BroadcastLoadResponsePB {
     RpcErrorPB error_info = 1;
     int64 done_time_us = 2;
     int64 loaded_cache_block_count = 3;
+    // Positive acknowledgement on failure. Older workers leave this unset.
+    bool destination_writes_quiesced = 4;
+    PDWriteLeasePB stopped_lease = 5;
+}
+
+// Address-free admission. Only the issuing worker incarnation may claim/seal its token.
+message PreparePDWriteLeaseRequestPB {
+    int64 request_id = 1;
+    string request_key = 2;
+    int64 dp_rank = 3;
+    int64 timeout_ms = 4;
+}
+message PDWriteLeasePB {
+    string worker_epoch = 1;
+    uint64 token = 2;
+}
+message SealPDWriteLeaseResponsePB {
+    PDWriteLeasePB lease = 1;
+    bool stopped = 2;
 }
 
 message RemoteFinishRequestPB {
@@ -1172,6 +1195,8 @@ service RpcService {
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc GenerateStreamCall(GenerateInputPB) returns (stream GenerateOutputsPB);
     rpc BatchGenerateCall(BatchGenerateInputPB) returns (BatchGenerateOutputsPB);
+    rpc PreparePDWriteLease(PreparePDWriteLeaseRequestPB) returns (PDWriteLeasePB);
+    rpc SealPDWriteLease(PDWriteLeasePB) returns (SealPDWriteLeaseResponsePB);
     rpc RemoteLoad(BroadcastLoadRequestPB) returns (BroadcastLoadResponsePB);
     rpc RemoteGenerate(stream GenerateRequestPB) returns (stream GenerateOutputsPB);
     rpc RemoteFinish(RemoteFinishRequestPB) returns (EmptyPB);

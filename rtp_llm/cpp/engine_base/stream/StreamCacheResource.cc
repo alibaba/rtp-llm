@@ -114,9 +114,10 @@ bool StreamCacheResource::publicationKeysFresh() const {
 }
 
 void StreamCacheResource::publishCompletedDecode(size_t computed_end) {
-    if (!remoteCacheDecodePublicationEnabled() || resource_context_.role_type != RoleType::DECODE
+    if (!pdLoadReady() || !remoteCacheDecodePublicationEnabled() || resource_context_.role_type != RoleType::DECODE
         || !resource_context_.cache_manager || !reuseCache() || stream_->hasErrorWithoutLock() || !computed_end
-        || !stream_->hasEventWithoutLock(StreamEvents::GenerateDone)) return;
+        || !stream_->hasEventWithoutLock(StreamEvents::GenerateDone))
+        return;
     const auto& resource = *batch_kv_cache_resource_;
     if (!resource.mayAttemptDecodePublication()
         && publicationKeysFresh()) return;
@@ -161,7 +162,8 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_CHECK(nums == total_blocks);
 
     if (total_blocks > 0) {
-        if (reuseCache() && !stream_->hasErrorWithoutLock() && stream_->getStatus() == StreamState::FINISHED) {
+        if (pdLoadReady() && reuseCache() && !stream_->hasErrorWithoutLock()
+            && stream_->getStatus() == StreamState::FINISHED) {
             const Tier target_tier = insertTarget();
             RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%ld, inserting cache, curBlocksNum=%d, target_tier=%s",
                               stream_->streamId(),

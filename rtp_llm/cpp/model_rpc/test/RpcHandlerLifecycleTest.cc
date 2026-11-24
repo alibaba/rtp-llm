@@ -160,8 +160,32 @@ public:
         while (rpc->Read(&request)) {}
         return grpc::Status::OK;
     }
-    grpc::Status
-    RemoteLoad(grpc::ServerContext*, const BroadcastLoadRequestPB*, BroadcastLoadResponsePB* response) override {
+    grpc::Status PreparePDWriteLease(grpc::ServerContext*,
+                                     const PreparePDWriteLeaseRequestPB* request,
+                                     PDWriteLeasePB*                     response) override {
+        *response = leases_->prepare(*request);
+        return grpc::Status::OK;
+    }
+    grpc::Status SealPDWriteLease(grpc::ServerContext*,
+                                  const PDWriteLeasePB*       request,
+                                  SealPDWriteLeaseResponsePB* response) override {
+        bool stopped = false;
+        if (!leases_->seal(*request, stopped)) {
+            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "foreign worker epoch");
+        }
+        *response->mutable_lease() = *request;
+        response->set_stopped(stopped);
+        return grpc::Status::OK;
+    }
+    grpc::Status RemoteLoad(grpc::ServerContext*,
+                            const BroadcastLoadRequestPB* request,
+                            BroadcastLoadResponsePB*      response) override {
+        auto writer = leases_->claim(*request);
+        if (!writer)
+            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "test lease not claimable");
+        writer.reset();
+        *response->mutable_stopped_lease() = request->write_lease();
+        response->set_destination_writes_quiesced(true);
         response->set_done_time_us(currentTimeUs());
         return grpc::Status::OK;
     }
@@ -170,6 +194,7 @@ private:
     // An early local failure never consumes LOAD's response. Keep this peer
     // quiescent so Finish tests handler teardown, not unread-message draining.
     bool send_load_response_;
+    std::shared_ptr<PDWriteLeaseRegistry> leases_ = std::make_shared<PDWriteLeaseRegistry>();
 };
 
 class ScopedRpcServer {

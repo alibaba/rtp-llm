@@ -55,22 +55,34 @@ RemotePublicationPin DeviceBlockPool::pinForRemotePublication(BlockIdxType block
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
     checkAllocatedNoLock(block);
-    return pinForRemotePublicationNoLock(block);
+    return pinForIONoLock<DeviceBlockRefType::REMOTE_CONNECTOR>(block);
 }
 
 RemotePublicationPin DeviceBlockPool::tryPinForRemotePublication(BlockIdxType block) {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
     if (!isAllocatedNoLock(block)) return {};
-    return pinForRemotePublicationNoLock(block);
+    return pinForIONoLock<DeviceBlockRefType::REMOTE_CONNECTOR>(block);
 }
 
-RemotePublicationPin DeviceBlockPool::pinForRemotePublicationNoLock(BlockIdxType block) {
+RemotePublicationPin DeviceBlockPool::tryPinForPDLoad(BlockIdxType block) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    // A writer may only address a private target. Even a live REQUEST ref is
+    // insufficient if a prefix-cache reader, another tile, or a connector shares it.
+    if (!isAllocatedNoLock(block) || !isExclusiveRequestBlockNoLock(block)) {
+        return {};
+    }
+    return pinForIONoLock<DeviceBlockRefType::PD_CONNECTOR>(block);
+}
+
+template<DeviceBlockRefType RefType>
+RemotePublicationPin DeviceBlockPool::pinForIONoLock(BlockIdxType block) {
     // Reserve free-list capacity before acquiring storage I/O pins. At most
     // totalBlocksNumNoLock() block IDs can be in the free list at any time.
     reserveAllReleasedBlocksNoLock();
     auto notify = capacityChangeCallbackNoLock();
-    const auto type = static_cast<size_t>(DeviceBlockRefType::REMOTE_CONNECTOR);
+    const auto type          = static_cast<size_t>(RefType);
     const bool was_active = isActiveNoLock(block);
     const bool was_available = isAvailableNoLock(block);
     ++refcounts_[block];
@@ -79,18 +91,24 @@ RemotePublicationPin DeviceBlockPool::pinForRemotePublicationNoLock(BlockIdxType
     }
     updateActiveBlocksNumNoLock(block, was_active);
     updateAvailableBlocksNumNoLock(block, was_available);
-    return RemotePublicationPin(this, RemotePublicationPinDeleter{block, std::move(notify),
-        [](DeviceBlockPool* pool, BlockIdxType id, const std::function<void()>& callback) noexcept {
-            pool->releaseRemotePublicationPin(id, callback);
-        }});
+    return RemotePublicationPin(
+        this,
+        RemotePublicationPinDeleter{
+            block,
+            std::move(notify),
+            [](DeviceBlockPool* pool, BlockIdxType id, const std::function<void()>& callback) noexcept {
+                pool->releaseIOPin(id, RefType, callback);
+            }});
 }
 
-void DeviceBlockPool::releaseRemotePublicationPin(BlockIdxType block, const std::function<void()>& notify) noexcept {
+void DeviceBlockPool::releaseIOPin(BlockIdxType                 block,
+                                   DeviceBlockRefType           ref_type,
+                                   const std::function<void()>& notify) noexcept {
     bool capacity_grew = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         checkAllocatedNoLock(block);
-        const auto type = static_cast<size_t>(DeviceBlockRefType::REMOTE_CONNECTOR);
+        const auto type = static_cast<size_t>(ref_type);
         RTP_LLM_CHECK(refcounts_by_type_[type][block] > 0);
         const auto free_before = availableFreeBlocksNoLock();
         const bool was_active = isActiveNoLock(block);
@@ -273,6 +291,10 @@ bool DeviceBlockPool::isExclusiveRequestBlock(BlockIdxType block) const {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
     checkAllocatedNoLock(block);
+    return isExclusiveRequestBlockNoLock(block);
+}
+
+bool DeviceBlockPool::isExclusiveRequestBlockNoLock(BlockIdxType block) const {
     return refcounts_[block] == 1 && hasRequestRefNoLock(block);
 }
 
