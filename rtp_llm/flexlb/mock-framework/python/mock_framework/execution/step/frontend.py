@@ -13,16 +13,18 @@ from .step_registry import register_step
 
 
 @dataclass(frozen=True)
-class Warmup:
+class InitialRate:
     duration: Annotated[str, "duration"]
     rate_scale: float
 
     def __post_init__(self):
         millis = duration(self.duration, positive=True) * 1000
         if millis != int(millis) or millis > 86_400_000:
-            raise ValueError("Warmup duration must be whole milliseconds up to 24h")
+            raise ValueError(
+                "Initial rate duration must be whole milliseconds up to 24h"
+            )
         if not math.isfinite(self.rate_scale) or not 0 < self.rate_scale < 1:
-            raise ValueError("Warmup rate_scale must be between 0 and 1, exclusive")
+            raise ValueError("Initial rate_scale must be between 0 and 1, exclusive")
 
 
 @dataclass(frozen=True)
@@ -31,7 +33,7 @@ class FrontendStartPlaybackArgs:
     total_concurrency: Annotated[int, Bounds(minimum=1, maximum=2147483647)]
     qps: float | None = None
     replay_speed: float | None = None
-    warmup: Warmup | None = None
+    warmup: InitialRate | None = None
     masters: list[str] | None = None
     queue_capacity: Annotated[int, Bounds(minimum=1, maximum=100000)] = 16
     request_timeout: Annotated[str, "duration"] = "30s"
@@ -40,6 +42,7 @@ class FrontendStartPlaybackArgs:
     fallback_max_output_tokens: (
         Annotated[int, Bounds(minimum=1, maximum=2147483647)] | None
     ) = None
+    initial_rate: InitialRate | None = None
 
     def __post_init__(self):
         if self.masters is not None and (
@@ -51,6 +54,8 @@ class FrontendStartPlaybackArgs:
         rates = [v for v in (self.qps, self.replay_speed) if v is not None]
         if len(rates) != 1 or not math.isfinite(rates[0]) or rates[0] <= 0:
             raise ValueError("Supply exactly one positive finite qps or replay_speed")
+        if self.initial_rate is not None and self.warmup is not None:
+            raise ValueError("Supply only one of initial_rate and warmup")
         if "://" in self.requests_file or Path(self.requests_file).suffix != ".mckidx":
             raise ValueError("requests_file must be a local .mckidx input path")
         for value in (self.request_timeout, self.drain_timeout):
@@ -82,10 +87,12 @@ async def frontend_start_playback(
     body["requests_file"] = str(path)
     body["request_timeout_ms"] = int(duration(body.pop("request_timeout")) * 1000)
     body["drain_timeout_ms"] = int(duration(body.pop("drain_timeout")) * 1000)
-    if args.warmup is not None:
+    initial_rate = args.initial_rate or args.warmup
+    body.pop("initial_rate", None)
+    if initial_rate is not None:
         body["warmup"] = {
-            "duration_ms": int(duration(args.warmup.duration) * 1000),
-            "rate_scale": args.warmup.rate_scale,
+            "duration_ms": int(duration(initial_rate.duration) * 1000),
+            "rate_scale": initial_rate.rate_scale,
         }
     return await ctx.runtime.frontends.start_playback(body, ctx.timeout)
 

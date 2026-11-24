@@ -336,7 +336,10 @@ def test_replay_speed_replaces_qps_and_is_forwarded_without_timestamp_conversion
 
 
 @pytest.mark.parametrize("rate", [{"qps": 10}, {"replay_speed": 2}])
-def test_warmup_is_forwarded_with_either_rate(monkeypatch, rate):
+@pytest.mark.parametrize("parameter", ["initial_rate", "warmup"])
+def test_initial_rate_is_forwarded_with_either_case_parameter(
+    monkeypatch, rate, parameter
+):
     ctx = context()
     calls = []
 
@@ -347,14 +350,23 @@ def test_warmup_is_forwarded_with_either_rate(monkeypatch, rate):
     monkeypatch.setattr(ctx.runtime.frontends, "start_playback", start)
     values = args()
     values.pop("qps")
-    values.update(rate, warmup={"duration": "1.25s", "rate_scale": 0.25})
+    values.update(rate, **{parameter: {"duration": "1.25s", "rate_scale": 0.25}})
     assert asyncio.run(
         StepRegistry.standard()
         .get("frontend/start/playback")
         .run_with_raw_args(ctx, values)
     )
     assert calls[0]["warmup"] == {"duration_ms": 1250, "rate_scale": 0.25}
+    assert "initial_rate" not in calls[0]
     assert all(calls[0][name] == value for name, value in rate.items())
+
+
+def test_initial_rate_and_legacy_warmup_cannot_both_be_set():
+    initial_rate = {"duration": "1s", "rate_scale": 0.5}
+    with pytest.raises(ConfigError, match="Supply only one"):
+        StepRegistry.standard().get("frontend/start/playback").build_arguments(
+            args() | {"initial_rate": initial_rate, "warmup": initial_rate}
+        )
 
 
 @pytest.mark.parametrize(

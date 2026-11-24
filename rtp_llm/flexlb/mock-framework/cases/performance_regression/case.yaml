@@ -41,30 +41,36 @@ phases:
         expect:
           count: 1
         wait_after: 10s
-  - id: playback
-    describe: 同一轮先低速预热，再原速播放剩余请求。
-    timeout: 525s
+  - id: warmup
+    describe: 先低速起跑，再用原速继续积累 KV，到源流量约第 270 秒开始测量。
+    timeout: 395s
     steps:
       - id: start_frontend
-        describe: 四个 Frontend 先以 0.25 倍速预热 120 秒，再以 1.0 倍速播放剩余流量。
+        describe: 启动单遍连续回放，先低速起跑，再切到原速。
         interface: frontend/start/playback
         args:
           requests_file: data/traffic/deepseek-v4.1.mckidx
           reuse_cache: true
           replay_speed: 1.0
-          warmup:
-            duration: 120s
-            rate_scale: 0.25
+          initial_rate:
+            duration: 100s
+            rate_scale: 0.30
           total_concurrency: 32000
           queue_capacity: 48000
           request_timeout: 120s
           drain_timeout: 150s
-        within: 430s
-        wait_after: 395s
+        # 源第 270 秒的墙钟时间 = 270s + 100s × (1 - 0.30)。
+        wait_after: 340s
   - id: performance
-    describe: 检查稳态性能、完整回放和排空后的成功率。
-    timeout: 540s
+    describe: 采集同一轮回放的源流量约第 270–300 秒，并检查性能。
+    timeout: 350s
     steps:
+      - id: collect_performance_window
+        describe: 采集 30 秒稳态流量，并预留 5 秒给 Prometheus 抓取。
+        interface: case/wait
+        args:
+          duration: 35s
+        within: 40s
       - id: check_frontend_qps
         describe: 总已发 QPS。
         interface: frontend/query/qps
@@ -150,6 +156,10 @@ phases:
         expect:
           gte: 0.999
         within: 30s
+  - id: drain
+    describe: 排空并检查全程终态成功率。
+    timeout: 220s
+    steps:
       - id: stop_frontend
         describe: 停止 Frontend 并排空已发请求。
         interface: frontend/stop/playback
@@ -158,7 +168,7 @@ phases:
         describe: 查询含预热和排空的全程终态成功率。
         interface: frontend/query/success_rate
         args:
-          # 覆盖回放启动步骤的 430s 预算和性能阶段的 540s 预算。
+          # 覆盖 warmup、performance、drain 三阶段的总预算（965 秒）。
           range: [-980s, 0s]
         expect:
           gte: 0.999

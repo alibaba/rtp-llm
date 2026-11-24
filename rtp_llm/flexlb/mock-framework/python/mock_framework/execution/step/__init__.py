@@ -19,6 +19,7 @@ def standard_actions():
     )
     from .metrics.frontend import query_qps, query_success_rate, query_tpot, query_ttft
     from .metrics.prometheus import query_promql
+    from .timing import case_wait
 
     return (
         master_list_addresses,
@@ -28,6 +29,7 @@ def standard_actions():
         master_restart,
         engine_scale,
         query_promql,
+        case_wait,
         query_cache_hit_rate,
         query_prefill_tps,
         query_prefill_tps_with_cache,

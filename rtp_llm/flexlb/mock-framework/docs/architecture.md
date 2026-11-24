@@ -66,7 +66,7 @@ Case 的 `frontend/start/playback` 通过 Python 调用 Java frontend0 的 `fron
 | 固定 QPS       | 从共同起点偏移 `k / 总 QPS`。                    |
 | 按采集时间回放 | 从共同起点偏移 `源到达时间偏移 / replay_speed`。 |
 
-第 `i` 个 Frontend 负责 `i, i+N, i+2N, …`，其中 `N` 为 Frontend 数。各 Frontend 共享同一份数据文件。可选的 `warmup` 在开始阶段降低速率，之后恢复正式速率，每条请求发送一次。性能门禁使用预热后的时间范围。
+第 `i` 个 Frontend 负责 `i, i+N, i+2N, …`，其中 `N` 为 Frontend 数。各 Frontend 共享同一份数据文件。Case 的可选 `initial_rate` 设置起步速率，达到设定时长后恢复目标速率，每条请求发送一次。Case 的 `warmup` 阶段可以跨过切速点，性能门禁使用该阶段结束后的时间范围。
 
 本地播放器将到点的请求放入有界队列，调用占用并发槽直至终态。队列满会结束整轮并记录错误。自然结束会发完队列中的请求，主动停止后，已发请求在收尾预算内排空。`unissued` 等于该 Frontend 的计划请求数减去 `issued`，涵盖队列中和还未入队的请求。`frontend/stop/playback` 汇总本轮结果，单请求业务失败由 Case 门禁判断。TTFT 和请求耗时从实际发起 RPC 时计量。
 
