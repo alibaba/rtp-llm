@@ -1,5 +1,14 @@
 --- a/atom/model_ops/qwen4_exp/hyperconnection.py
 +++ b/atom/model_ops/qwen4_exp/hyperconnection.py
+@@ -18,6 +18,8 @@
+ 
+ Parameters are replicated, not TP-sharded: ~13 MB per module.
+ """
++
++import os
+ 
+ import torch
+ from aiter.tuned_gemm import tgemm
 @@ -79,6 +81,14 @@
          prefix: str = "",
      ) -> None:
@@ -15,7 +24,23 @@
          self.hidden_size = hidden_size
          self.hc_count = hc_count
          self.hc_dim = hc_count * hidden_size
-@@ -207,8 +217,15 @@
+@@ -152,6 +162,15 @@
+             self.block_inject_weight.weight.data = fused[rank:]
+         self.fused_w_cat = fused
+         self.fused_rank = rank
++        self._verify_up_weight = None
++        weight = self.input_mix_weight_up.weight
++        if (self._verify_project is not None and self.block_inject_weight is not None
++                and os.getenv("RTP_LLM_ROCM_HC_PTPC_UP") == "1"
++                and weight.shape == (10240, 320) and weight.dtype == torch.bfloat16
++                and weight.is_cuda and torch.cuda.get_device_properties(weight.device).gcnArchName.split(":")[0] == "gfx942"):
++            from atom.model_ops.qwen4_exp.packed_hc_verify import pack_verify_weight
++
++            self._verify_up_weight = pack_verify_weight(weight)
+ 
+     def mix_fused(
+         self,
+@@ -207,8 +226,21 @@
              hyper_input, self.hc_norm.weight, eps, self.hc_count, block_out, raw_prev
          )
          rank = self.fused_rank
@@ -30,16 +55,22 @@
 +            raw = d[:, rank : rank + self.hc_count] if has_inject else None
 +        else:
 +            gate, raw = projected
++        if (self._verify_up_weight is not None and projected is not None
++                and gate.shape[0] in (4, 8) and normed.is_contiguous()):
++            from atom.model_ops.qwen4_exp.packed_hc_verify import verify_gated_mean
++
++            mixed, quantized = verify_gated_mean(normed, gate, self._verify_up_weight, quant_dtype)
++            return mixed, quantized, (h, raw)
          up = tgemm.mm(gate, w_up, otype=gate.dtype)
          quantized = None
          if quant_dtype is None:
-@@ -218,7 +235,6 @@
+@@ -218,7 +250,6 @@
                  normed, up, self.hc_count, quant_dtype
              )
              quantized = (mixed_q, mixed_scale)
 -        raw = d[:, rank : rank + self.hc_count] if has_inject else None
          return mixed, quantized, (h, raw)
-
+ 
      def apply_pending(
 --- /dev/null
 +++ b/atom/model_ops/qwen4_exp/hc_verify.py
@@ -182,3 +213,51 @@
 +    z=(d*0.25).to(tl.bfloat16).to(tl.float32)
 +    tl.store(G+row*320+n,z*tl.sigmoid(z),n<320)
 +    tl.store(R+row*4+(n-320),d,(n>=320)&(n<324))
+--- /dev/null
++++ b/atom/model_ops/qwen4_exp/packed_hc_verify.py
+@@ -0,0 +1,45 @@
++"""Small-batch Qwen4 HC up projection and residual gating for ROCm target verify."""
++import torch
++import triton
++import triton.language as tl
++
++
++def pack_verify_weight(weight):
++    """Interleave the four streams of each hidden channel for one MFMA tile."""
++    from aiter.ops.quant import per_token_quant_hip
++
++    quant, scales = per_token_quant_hip(weight.detach().contiguous(), quant_dtype=torch.float8_e4m3fnuz)
++
++    def interleave(tensor):
++        return tensor.reshape(4, 2560, -1).transpose(0, 1).contiguous().view_as(tensor)
++
++    return interleave(quant), interleave(scales)
++
++
++@triton.jit
++def _packed_hc_up_kernel(Gate, Weight, Scale, Normed, Output, ROWS: tl.constexpr):
++    rows = tl.arange(0, 16)
++    columns = tl.program_id(0) * 64 + tl.arange(0, 64)
++    k = tl.arange(0, 512)
++    gate = tl.load(Gate + rows[:, None] * 320 + k[None, :],
++                   (rows[:, None] < ROWS) & (k[None, :] < 320), 0.).to(tl.float32)
++    weight = tl.load(Weight + columns[:, None] * 320 + k[None, :], k[None, :] < 320, 0.)
++    scale = tl.max(tl.abs(gate), 1) / 240.
++    quant = (gate * tl.where(scale > 0, 1. / scale, 0.)[:, None]).to(tl.float8e4b8)
++    projection = tl.dot(quant, tl.trans(weight)) * scale[:, None] * tl.load(Scale + columns)[None, :]
++    residual_cols = (columns % 4) * 2560 + columns // 4
++    residual = tl.load(Normed + rows[:, None] * 10240 + residual_cols[None, :],
++                       rows[:, None] < ROWS, 0.).to(tl.float32)
++    gated = residual * tl.sigmoid(projection.to(tl.bfloat16).to(tl.float32))
++    mixed = tl.sum(tl.reshape(gated, (16, 16, 4)), 2) * 0.25
++    tl.store(Output + rows[:, None] * 2560 + tl.program_id(0) * 16 + tl.arange(0, 16)[None, :],
++             mixed, rows[:, None] < ROWS)
++
++
++def verify_gated_mean(normed, gate, packed, quant_dtype):
++    from aiter.ops.quant import per_token_quant_hip
++
++    mixed = normed.new_empty((gate.shape[0], 2560))
++    _packed_hc_up_kernel[(160,)](gate, *packed, normed, mixed, gate.shape[0], num_warps=4)
++    quantized = per_token_quant_hip(mixed, quant_dtype=quant_dtype) if quant_dtype is not None else None
++    return mixed, quantized
