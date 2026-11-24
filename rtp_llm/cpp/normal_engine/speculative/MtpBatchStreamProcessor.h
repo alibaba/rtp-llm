@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsVerifyRunner.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpCompute.h"
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
+#include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 
 namespace rtp_llm {
 
@@ -175,5 +176,11 @@ protected:
     // device is required by RTP_LLM_STREAM_ASYNC: no accept-length D2H is
     // introduced on the scheduling thread.
     mtp::DSparkProposeInputBuffers dspark_propose_input_buffers_;
+
+#if defined(USE_PPU) && USE_PPU
+    // Keeps the pinned host proposal-index buffer alive until its non-blocking
+    // H2D copy has been consumed.
+    mutable TensorHolder proposal_index_host_holder_;
+#endif
 };
 }  // namespace rtp_llm

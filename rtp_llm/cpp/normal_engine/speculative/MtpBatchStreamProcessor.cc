@@ -829,6 +829,29 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
                          .contiguous()
                          .view({batch_size, 1, gamma})
                          .expand({batch_size, rows, gamma});
+    torch::Tensor proposal_columns;
+#if defined(USE_PPU) && USE_PPU
+    proposal_index_host_holder_.release();
+    auto base_lengths_host = sampler_inputs.sequence_lengths.view({batch_size, rows})
+                                 .select(1, 0)
+                                 .to(torch::kLong)
+                                 .contiguous();
+    auto proposal_columns_host =
+        torch::empty({batch_size, 1, gamma},
+                     torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU).pinned_memory(true));
+    const auto* base_lengths_ptr     = base_lengths_host.data_ptr<int64_t>();
+    auto*       proposal_columns_ptr = proposal_columns_host.data_ptr<int64_t>();
+    for (int64_t b = 0; b < batch_size; ++b) {
+        for (int64_t j = 0; j < gamma; ++j) {
+            proposal_columns_ptr[b * gamma + j] = base_lengths_ptr[b] + j;
+        }
+    }
+    proposal_index_host_holder_.hold_host(proposal_columns_host);
+    proposal_columns = proposal_columns_host
+                           .to(torch::Device(torch::kCUDA), torch::kLong, /*non_blocking=*/true)
+                           .view({batch_size, 1, gamma})
+                           .expand({batch_size, rows, gamma});
+#else
     auto base_lengths = sampler_inputs.sequence_lengths.view({batch_size, rows})
                             .select(1, 0)
                             .to(torch::Device(torch::kCUDA), torch::kLong, /*non_blocking=*/true)
@@ -836,7 +859,8 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
     auto proposal_offsets =
         torch::arange(gamma, torch::TensorOptions().dtype(torch::kLong).device(torch::Device(torch::kCUDA)))
             .view({1, 1, gamma});
-    auto proposal_columns = (base_lengths + proposal_offsets).expand({batch_size, rows, gamma});
+    proposal_columns = (base_lengths + proposal_offsets).expand({batch_size, rows, gamma});
+#endif
     histories.scatter_(2, proposal_columns, proposals);
     sampler_inputs.token_ids = std::move(token_ids_gpu);
 
