@@ -8,20 +8,16 @@
 #include <unordered_map>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/BlockIndex.h"
+#ifndef RTP_BTC_RANK_STANDALONE
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#endif
 
 namespace rtp_llm {
 
 class CacheTopology;
 
 using CacheKeyType = int64_t;
-using BlockIdxType = int32_t;
-
-constexpr BlockIdxType NULL_BLOCK_IDX = static_cast<BlockIdxType>(-1);
-
-inline bool isNullBlockIdx(BlockIdxType block_idx) {
-    return block_idx == NULL_BLOCK_IDX;
-}
 
 using CacheKeysType    = std::vector<CacheKeyType>;
 using BlockIndicesType = std::vector<BlockIdxType>;

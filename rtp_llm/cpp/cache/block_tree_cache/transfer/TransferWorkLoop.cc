@@ -11,16 +11,19 @@
 #include <stdexcept>
 #include <utility>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DiskTransferUtils.h"
+#ifdef RTP_BTC_RANK_STANDALONE
+#include "rtp_llm/cpp/cache/block_tree_cache/external/StandaloneDiagnostics.h"
+#else
 #include <c10/core/DeviceGuard.h>
 #if defined(USING_ROCM) && USING_ROCM
 #include <c10/core/impl/VirtualGuardImpl.h>
 #endif
-
-#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyGeometry.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DiskTransferUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
+#endif
 
 namespace rtp_llm {
 
@@ -74,17 +77,36 @@ TransferWorkLoop::Queue TransferWorkLoop::Queue::take() {
     return result;
 }
 
-TransferWorkLoop::Entry::Entry(TransferTask task, BeforeCompleteCallback before_complete):
+TransferWorkLoop::Entry::Entry(TransferTask                     task,
+                               BeforeCompleteCallback           before_complete,
+                               std::optional<BorrowedBuffers>   borrowed):
     task(std::move(task)),
     context(std::make_shared<TransferBatchAsyncContext>(
         this->task.descriptors().size(), nullptr, this->task.completionProof())),
     result(TransferResult::emptyAggregate(this->task.descriptors().size())),
-    before_complete(std::move(before_complete)) {}
+    before_complete(std::move(before_complete)),
+    borrowed(std::move(borrowed)) {}
 
 bool TransferWorkLoop::isDeviceCopy(Step step) {
     return step == Step::CRC_LOAD || step == Step::CRC_EVICT || step == Step::PLAIN_DEVICE_COPY;
 }
 
+#ifdef RTP_BTC_RANK_STANDALONE
+TransferWorkLoop::TransferWorkLoop(DiskIOExecutor*                       disk_io_executor,
+                                   TransferOperation                     operation,
+                                   size_t                                batch_limit,
+                                   size_t                                queue_capacity,
+                                   std::shared_ptr<HostStagingBlockPool> staging,
+                                   int64_t                               world_rank):
+    disk_io_executor_(disk_io_executor),
+    operation_(operation),
+    batch_limit_(batch_limit),
+    capacity_(queue_capacity),
+    world_rank_(world_rank),
+    thread_name_(operation == TransferOperation::LOAD ? "btc_load" : "btc_evict") {
+    staging_.pools[0] = std::move(staging);
+}
+#else
 TransferWorkLoop::TransferWorkLoop(std::vector<GroupSetPtr>                       groups,
                                    std::unique_ptr<CrcCopyExecutor>               crc,
                                    DiskIOExecutor*                                disk_io_executor,
@@ -120,6 +142,8 @@ TransferWorkLoop::TransferWorkLoop(std::vector<GroupSetPtr>                     
         }
     });
 }
+
+#endif
 
 TransferWorkLoop::~TransferWorkLoop() {
     shutdown();
@@ -159,7 +183,10 @@ TransferWorkLoop::reject(const TransferTask& task, const char* message, ErrorCod
 }
 
 std::shared_ptr<TransferAsyncContext>
-TransferWorkLoop::execute(TransferTask&& task, BeforeCompleteCallback&& before_complete, bool* retryable) {
+TransferWorkLoop::execute(TransferTask&&                    task,
+                          BeforeCompleteCallback&&         before_complete,
+                          bool*                            retryable,
+                          std::optional<BorrowedBuffers>   borrowed) {
     if (retryable) {
         *retryable = false;
     }
@@ -171,6 +198,10 @@ TransferWorkLoop::execute(TransferTask&& task, BeforeCompleteCallback&& before_c
         const auto count = task.descriptors().size();
         if (!count)
             return reject(task, "empty WorkLoop transfer", ErrorCode::INVALID_PARAMS);
+#ifdef RTP_BTC_RANK_STANDALONE
+        if (!borrowed)
+            return reject(task, "WorkLoop transfer has no borrowed buffers", ErrorCode::INVALID_PARAMS);
+#endif
         if (task.expired())
             return reject(task, "transfer expired before WorkLoop admission", ErrorCode::DEADLINE_EXCEEDED);
         std::unique_lock<std::mutex> lock(mutex_);
@@ -199,8 +230,8 @@ TransferWorkLoop::execute(TransferTask&& task, BeforeCompleteCallback&& before_c
                                              &total_timer.trace(),
                                              total_timer.startSteadyUs());
         Entries incoming;
-        incoming.push_back(std::make_unique<Entry>(std::move(task), std::move(before_complete)));
-        incoming.front()->task_timer              = std::move(total_timer);
+        incoming.push_back(std::make_unique<Entry>(std::move(task), std::move(before_complete), std::move(borrowed)));
+        incoming.front()->task_timer     = std::move(total_timer);
         incoming.front()->queue_or_finalize_timer = std::move(queue_or_finalize_timer);
         auto context                              = incoming.front()->context;
         unsubmitted.dismiss();
@@ -228,8 +259,10 @@ void TransferWorkLoop::shutdown() {
     stopAdmission();
     if (thread_.joinable())
         thread_.join();
+#ifndef RTP_BTC_RANK_STANDALONE
     if (crc_)
         crc_->stopAndWaitForIo();
+#endif
 }
 
 size_t TransferWorkLoop::outstandingBatches() const {
@@ -237,7 +270,19 @@ size_t TransferWorkLoop::outstandingBatches() const {
     return entry_count_;
 }
 
-TransferStageTimer TransferWorkLoop::timer(const TransferTask&     task,
+#ifdef RTP_BTC_RANK_STANDALONE
+WorkLoopStageTimer TransferWorkLoop::timer(const TransferTask&,
+                                           const char*,
+                                           size_t,
+                                           size_t,
+                                           AsyncProfileKind,
+                                           const char*,
+                                           const AsyncProfileSpan*,
+                                           int64_t) const noexcept {
+    return {};
+}
+#else
+WorkLoopStageTimer TransferWorkLoop::timer(const TransferTask&     task,
                                            const char*             stage,
                                            size_t                  begin,
                                            size_t                  end,
@@ -262,6 +307,8 @@ TransferStageTimer TransferWorkLoop::timer(const TransferTask&     task,
         start_us);
 }
 
+#endif
+
 void TransferWorkLoop::startStepTimer(Entry& entry, const char* stage) {
     if (!entry.step_started) {
         entry.step_started = true;
@@ -275,8 +322,21 @@ void TransferWorkLoop::startStepTimer(Entry& entry, const char* stage) {
     }
 }
 
+#ifndef RTP_BTC_RANK_STANDALONE
 const GroupSetPtr& TransferWorkLoop::group(const Entry& entry) const {
     return groups_.at(entry.task.descriptors().front().group_set_id);
+}
+#endif
+
+TransferWorkLoop::Step TransferWorkLoop::deviceStep(const Entry& entry, bool to_device) const {
+#ifdef RTP_BTC_RANK_STANDALONE
+    (void)entry;
+#else
+    if (!entry.borrowed && !group(entry)->crcEnabled())
+        return Step::PLAIN_DEVICE_COPY;
+#endif
+    // Borrowed transfers use their own submit/poll callbacks in both directions.
+    return to_device ? Step::CRC_LOAD : Step::CRC_EVICT;
 }
 
 bool TransferWorkLoop::plan(Entry& entry) {
@@ -299,12 +359,9 @@ bool TransferWorkLoop::plan(Entry& entry) {
     entry.hosts.clear();
     entry.hosts.reserve(descriptors.size());
     entry.step = first.source_tier == Tier::DISK   ? Step::DISK_READ :
-                 first.source_tier == Tier::DEVICE ? Step::CRC_EVICT :
+                 first.source_tier == Tier::DEVICE ? deviceStep(entry, false) :
                  first.target_tier == Tier::DISK   ? Step::DISK_WRITE :
-                                                     Step::CRC_LOAD;
-    if (isDeviceCopy(entry.step) && !group(entry)->crcEnabled()) {
-        entry.step = Step::PLAIN_DEVICE_COPY;
-    }
+                                                     deviceStep(entry, true);
     if (combined) {
         if (!staging_.pools[stagingIndex(entry)])
             throw std::invalid_argument("async disk staging is unavailable");
@@ -325,18 +382,28 @@ bool TransferWorkLoop::plan(Entry& entry) {
                                     entry.batch_timer.startSteadyUs());
         if (entry.staging.empty() && !acquireStaging(entry))
             return false;
+    } else if (entry.borrowed) {
+        entry.hosts = std::move(entry.borrowed->hosts);
+#ifndef RTP_BTC_RANK_STANDALONE
     } else {
         for (const auto& descriptor : descriptors) {
             const auto buffer = group(entry)->hostPool()->blockBuffer(descriptor.singleBlockAt(Tier::HOST));
             entry.hosts.push_back({buffer.addr, buffer.payload_bytes, buffer.stride_bytes});
         }
+#endif
     }
     return true;
 }
 
-size_t TransferWorkLoop::stagingIndex(const Entry& entry) const {
-    return group(entry)->groupType() == CacheGroupType::SWA ? 1 : 0;
+#ifdef RTP_BTC_RANK_STANDALONE
+size_t TransferWorkLoop::stagingIndex(const Entry&) const {
+    return 0;
 }
+#else
+size_t TransferWorkLoop::stagingIndex(const Entry& entry) const {
+    return !entry.borrowed && group(entry)->groupType() == CacheGroupType::SWA ? 1 : 0;
+}
+#endif
 
 bool TransferWorkLoop::acquireStaging(Entry& entry, bool waiting) {
     if (!waiting && entry.task.expired()) {
@@ -358,8 +425,13 @@ bool TransferWorkLoop::acquireStaging(Entry& entry, bool waiting) {
     }
     entry.staging = std::move(*leases);
     entry.staging_timer.finish(true);
+#ifdef RTP_BTC_RANK_STANDALONE
+    const auto payload_bytes = entry.borrowed->row_bytes;
+#else
+    const auto payload_bytes = entry.borrowed ? entry.borrowed->row_bytes : group(entry)->payloadBytes();
+#endif
     for (const auto& lease : entry.staging)
-        entry.hosts.push_back(lease.blockBuffer(group(entry)->payloadBytes()));
+        entry.hosts.push_back(lease.blockBuffer(payload_bytes));
     return true;
 }
 
@@ -412,15 +484,25 @@ void TransferWorkLoop::tryStep(Entry& entry) {
                                     CacheCopyError::NOT_EXECUTED)));
             return;
         }
-        if (entry.step == Step::PLAIN_DEVICE_COPY)
-            submitPlainDeviceCopy(entry);
-        else if (isDeviceCopy(entry.step))
-            submitCrc(entry);
-        else
+        if (!isDeviceCopy(entry.step)) {
             submitDisk(entry);
+        } else if (entry.borrowed) {
+            startStepTimer(entry, entry.step == Step::CRC_LOAD ? "h2d" : "d2h");
+            observeBorrowedStage(entry, "begin", true);
+            entry.borrowed_stage_active = true;
+            entry.borrowed->submit_device(entry.hosts);
+            borrowed_device_pending_.push(entry);
+#ifndef RTP_BTC_RANK_STANDALONE
+        } else if (entry.step == Step::PLAIN_DEVICE_COPY) {
+            submitPlainDeviceCopy(entry);
+        } else {
+            submitCrc(entry);
+#endif
+        }
     });
 }
 
+#ifndef RTP_BTC_RANK_STANDALONE
 void TransferWorkLoop::submitCrc(Entry& entry) {
     startStepTimer(entry, entry.step == Step::CRC_LOAD ? "h2d" : "d2h");
     const auto& owner   = group(entry);
@@ -442,8 +524,9 @@ void TransferWorkLoop::submitCrc(Entry& entry) {
                                                   &entry.task_timer.trace(),
                                                   timing.completed_us);
             if (released_us) {
-                const auto& descriptor = entry.task.descriptors().front();
-                const auto  identity   = CacheStageContext::local(descriptor.source_tier, descriptor.target_tier);
+                const auto  descriptors = entry.task.descriptors();
+                const auto& descriptor  = descriptors.front();
+                const auto  identity    = CacheStageContext::local(descriptor.source_tier, descriptor.target_tier);
                 auto        released   = AsyncProfileSpan::fromSteady("slot_released",
                                                              entry.task.requestId().value_or(-1),
                                                              0,
@@ -566,12 +649,50 @@ void TransferWorkLoop::submitPlainDeviceCopy(Entry& entry) {
     recordResult(entry, std::move(result));
     completed_.push(entry);
 }
+#endif
+
+void TransferWorkLoop::observeBorrowedStage(Entry& entry, const char* phase, bool success) {
+    if (!entry.borrowed || !entry.borrowed->observe_stage)
+        return;
+    const auto source = entry.step == Step::DISK_READ ? Tier::DISK :
+                        entry.step == Step::CRC_EVICT ? Tier::DEVICE :
+                                                        Tier::HOST;
+    const auto target = entry.step == Step::DISK_WRITE ? Tier::DISK :
+                        entry.step == Step::CRC_LOAD  ? Tier::DEVICE :
+                                                        Tier::HOST;
+    entry.borrowed->observe_stage(source, target, phase, success);
+}
+
+void TransferWorkLoop::pollBorrowedDevice() {
+    auto pending = borrowed_device_pending_.take();
+    while (auto* entry = pending.pop()) {
+        withEntry(*entry, [&] {
+            auto result = entry->borrowed->poll_device();
+            if (result) {
+                recordResult(*entry, std::move(*result));
+                completed_.push(*entry);
+            } else {
+                borrowed_device_pending_.push(*entry);
+            }
+        });
+    }
+}
 
 void TransferWorkLoop::submitDisk(Entry& entry) {
     startStepTimer(entry, entry.step == Step::DISK_READ ? "disk_read" : "disk_write");
-    auto*                    pool   = group(entry)->diskPool().get();
-    const bool               write  = entry.step == Step::DISK_WRITE;
-    const auto               stride = pool->strideBytes();
+#ifdef RTP_BTC_RANK_STANDALONE
+    auto*      pool          = entry.borrowed->disk_pool;
+    const auto storage_bytes = entry.borrowed->row_bytes;
+    const auto payload_bytes = entry.borrowed->row_bytes;
+#else
+    auto*      pool          = entry.borrowed ? entry.borrowed->disk_pool : group(entry)->diskPool().get();
+    const auto storage_bytes = entry.borrowed ? entry.borrowed->row_bytes : group(entry)->storageBytes();
+    const auto payload_bytes = entry.borrowed ? entry.borrowed->row_bytes : group(entry)->payloadBytes();
+#endif
+    const bool write         = entry.step == Step::DISK_WRITE;
+    const auto stride        = pool->strideBytes();
+    observeBorrowedStage(entry, "begin", true);
+    entry.borrowed_stage_active = entry.borrowed.has_value();
     BlockIdList              blocks;
     std::vector<void*>       buffers;
     std::vector<const void*> write_buffers;
@@ -581,8 +702,7 @@ void TransferWorkLoop::submitDisk(Entry& entry) {
     write_buffers.reserve(descriptors.size());
     for (size_t i = 0; i < descriptors.size(); ++i) {
         const auto& host  = entry.hosts[i];
-        const auto& owner = *group(entry);
-        if (owner.storageBytes() > stride || !isValidHostBufferView(host, owner.payloadBytes(), stride)) {
+        if (storage_bytes > stride || !isValidHostBufferView(host, payload_bytes, stride)) {
             fail(entry, unsubmittedResult(TransferStatus::DISK_IO_ERROR));
             return;
         }
@@ -623,10 +743,14 @@ void TransferWorkLoop::pollOnce() {
     }
     while (auto* entry = disk_completed.pop())
         completed_.push(*entry);
+#ifndef RTP_BTC_RANK_STANDALONE
     has_crc_pending_ = crc_ && crc_->poll();
+#endif
+    pollBorrowedDevice();
     auto completed   = completed_.take();
     while (auto* entry = completed.pop())
         consumeStage(*entry);
+#ifndef RTP_BTC_RANK_STANDALONE
     if (crc_) {
         // Retry from actual free capacity. A previously woken waiter can expire
         // before submitting, so a completion callback alone is not a wakeup.
@@ -642,6 +766,7 @@ void TransferWorkLoop::pollOnce() {
             }
         }
     }
+#endif
 }
 
 void TransferWorkLoop::recordDiskResult(Entry& entry, BlockIOStatus status) noexcept {
@@ -676,7 +801,11 @@ void TransferWorkLoop::recordResult(Entry& entry, TransferResult result) noexcep
 }
 
 void TransferWorkLoop::consumeStage(Entry& entry) {
-    auto& terminal = entry.result;
+    auto&       terminal    = entry.result;
+    const auto  descriptors = entry.task.descriptors();
+    const auto& descriptor  = descriptors.front();
+    if (std::exchange(entry.borrowed_stage_active, false))
+        observeBorrowedStage(entry, "complete", terminal.ok());
     // End asynchronous stages only after their safe result reaches the owner.
     // Busy retries retain the same timer and do not produce extra samples.
     const auto end_us = entry.task_timer ? AsyncProfileSession::steadyNowUs() : -1;
@@ -686,7 +815,6 @@ void TransferWorkLoop::consumeStage(Entry& entry) {
     if (!terminal.ok()) {
         entry.batch_timer.finishAtSteady(end_us, false);
         entry.task_timer.finishAtSteady(end_us, false);
-        const auto& descriptor = entry.task.descriptors().front();
         if (!isDeviceCopy(entry.step))
             terminal.status = transferStatusToErrorInfo(terminal.copy_error == CacheCopyError::INVALID_REQUEST ?
                                                             TransferStatus::INVALID_ARGS :
@@ -696,7 +824,7 @@ void TransferWorkLoop::consumeStage(Entry& entry) {
             terminal.status =
                 ErrorInfo(terminal.status.code(),
                           std::string("disk-to-device transfer failed, stage=") + stage + ", descriptor_range=[0,"
-                              + std::to_string(entry.task.descriptors().size()) + "): " + terminal.status.ToString());
+                              + std::to_string(descriptors.size()) + "): " + terminal.status.ToString());
         }
     }
     if (!terminal.ok()) {
@@ -704,9 +832,8 @@ void TransferWorkLoop::consumeStage(Entry& entry) {
         finish(entry);
         return;
     }
-    const auto& descriptor = entry.task.descriptors().front();
     if (entry.step == Step::DISK_READ && descriptor.target_tier == Tier::DEVICE) {
-        entry.step = group(entry)->crcEnabled() ? Step::CRC_LOAD : Step::PLAIN_DEVICE_COPY;
+        entry.step = deviceStep(entry, true);
         tryStep(entry);
     } else {
         entry.batch_timer.finishAtSteady(end_us, true);
@@ -718,6 +845,8 @@ void TransferWorkLoop::consumeStage(Entry& entry) {
 
 void TransferWorkLoop::fail(Entry& entry, TransferResult result) {
     removeWaiter(entry);
+    if (std::exchange(entry.borrowed_stage_active, false))
+        observeBorrowedStage(entry, "complete", false);
     recordResult(entry, std::move(result));
     const auto end_us = entry.task_timer ? AsyncProfileSession::steadyNowUs() : -1;
     entry.step_timer.finishAtSteady(end_us, false);
@@ -729,8 +858,10 @@ void TransferWorkLoop::fail(Entry& entry, TransferResult result) {
 }
 
 void TransferWorkLoop::finish(Entry& entry) {
+#ifndef RTP_BTC_RANK_STANDALONE
     auto finalize_timer =
-        entry.crc_timing.completed_us ? std::move(entry.queue_or_finalize_timer) : TransferStageTimer{};
+        entry.crc_timing.completed_us ? std::move(entry.queue_or_finalize_timer) : WorkLoopStageTimer{};
+#endif
     entry.task_timer.finish(entry.result.ok());
     try {
         abortOnOom([&] {
@@ -751,7 +882,9 @@ void TransferWorkLoop::finish(Entry& entry) {
         --entry_count_;
         cv_.notify_all();
     }
+#ifndef RTP_BTC_RANK_STANDALONE
     finalize_timer.finish(true);
+#endif
 }
 
 void TransferWorkLoop::cancelStaging() {
@@ -818,12 +951,12 @@ void TransferWorkLoop::run() {
         }
         if (cancel)
             cancelStaging();
-        Queue cuda_work, disk_work;
+        Queue device_work, disk_work;
         auto  ready = ready_.take();
         while (auto* entry = ready.pop()) {
             withEntry(*entry, [&] {
                 if (plan(*entry))
-                    (isDeviceCopy(entry->step) ? cuda_work : disk_work).push(*entry);
+                    (isDeviceCopy(entry->step) ? device_work : disk_work).push(*entry);
             });
         }
         auto submit = [&](Queue& work) {
@@ -832,9 +965,9 @@ void TransferWorkLoop::run() {
         };
         if (operation_ == TransferOperation::LOAD) {
             submit(disk_work);
-            submit(cuda_work);
+            submit(device_work);
         } else {
-            submit(cuda_work);
+            submit(device_work);
             submit(disk_work);
         }
         pollOnce();
@@ -846,13 +979,17 @@ void TransferWorkLoop::run() {
                 return !incoming_.empty() || !disk_completed_.empty() || cancel_staging_
                        || (!accepting_ && entry_count_ == 0);
             };
-            if (wait_deadlines_.empty()) {
-                // No resource deadline exists. Converting steady_clock::time_point::max()
+            auto wake =
+                wait_deadlines_.empty() ? TransferTask::Clock::time_point::max() : wait_deadlines_.begin()->first;
+            if (!borrowed_device_pending_.empty())
+                wake = std::min(wake, TransferTask::Clock::now() + std::chrono::microseconds(50));
+            if (wake == TransferTask::Clock::time_point::max()) {
+                // No finite deadline exists. Converting steady_clock::time_point::max()
                 // to system_clock in older condition_variable implementations can
                 // overflow and spin without releasing mutex_, blocking shutdown.
                 cv_.wait(lock, wake_up);
             } else {
-                cv_.wait_until(lock, wait_deadlines_.begin()->first, wake_up);
+                cv_.wait_until(lock, wake, wake_up);
             }
             lock.unlock();
             // Give already completed Disk stages and their successors the first

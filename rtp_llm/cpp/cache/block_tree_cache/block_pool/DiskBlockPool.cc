@@ -4,8 +4,15 @@
 #include <sstream>
 #include <utility>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskIOExecutor.h"
+#ifdef RTP_BTC_STANDALONE
+#include "rtp_llm/cpp/cache/block_tree_cache/external/StandaloneDiagnostics.h"
+#else
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#endif
+
+#if !defined(RTP_BTC_STANDALONE) || defined(RTP_BTC_RANK_STANDALONE)
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskIOExecutor.h"
+#endif
 
 namespace rtp_llm {
 
@@ -92,9 +99,13 @@ bool DiskBlockPool::init() {
         !cfg.work_dir.empty(), "disk block pool [%s] work_dir must not be empty", cfg.pool_name.c_str());
 
     std::string effective_dir = cfg.work_dir;
+#ifdef RTP_BTC_STANDALONE
+    RTP_LLM_CHECK(cfg.mount_guard == nullptr);
+#else
     if (cfg.mount_guard != nullptr) {
         effective_dir = cfg.mount_guard->workDir();
     }
+#endif
 
     file_path_ = buildFilePath(effective_dir, cfg);
 
@@ -200,6 +211,7 @@ DiskBlockPool::write(const BlockIdList& blocks, const std::vector<const void*>& 
     return status;
 }
 
+#if !defined(RTP_BTC_STANDALONE) || defined(RTP_BTC_RANK_STANDALONE)
 BlockIOStatus DiskBlockPool::asyncRead(DiskIOExecutor&           executor,
                                        const BlockIdList&        blocks,
                                        const std::vector<void*>& dsts,
@@ -246,6 +258,8 @@ BlockIOStatus DiskBlockPool::asyncWrite(DiskIOExecutor&                 executor
             callback(mapStatus(status));
         }));
 }
+
+#endif  // RTP_BTC_STANDALONE
 
 size_t DiskBlockPool::payloadBytes() const {
     return config().payload_bytes;

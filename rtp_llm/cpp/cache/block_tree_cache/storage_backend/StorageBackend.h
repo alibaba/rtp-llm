@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -150,6 +151,35 @@ private:
 // before derived backend state starts destruction.
 class StorageBackend {
 public:
+    // A scheduler-owned transport consumes these Host writes in batches. Each
+    // entry holds an ordinary StorageWriteTask until the transport reports
+    // durable publication or a buffer-safe failure. Calls are serialized by
+    // the tree's lock with its Host catalog updates.
+    class HostWrites {
+    public:
+        struct Source {
+            uint64_t     ticket;
+            size_t       group;
+            std::string  hash;
+            BlockIdxType slot;  // External Host row; native pool IDs start at one.
+        };
+        explicit HostWrites(IBlockPool& pool): pool_(pool) {}
+        uint64_t write(size_t group, std::string hash, BlockIdxType slot);
+        void dispatch(const std::function<void(const std::vector<const Source*>&)>& submit);
+        bool settle(uint64_t ticket, bool committed, const std::function<void(const Source&, bool)>& done);
+        bool busy() const { return !pending_.empty(); }
+        size_t countIf(const std::function<bool(BlockIdxType)>& include) const;
+    private:
+        struct Entry {
+            Source           source;
+            StorageWriteTask task;
+            bool             sent{false};
+        };
+        IBlockPool&               pool_;
+        uint64_t                  last_ticket_{0};
+        std::map<uint64_t, Entry> pending_;
+    };
+
     using MatchDone      = std::function<void(
         size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success)>;
     using Done           = std::function<void(ErrorInfo error)>;
@@ -231,6 +261,7 @@ protected:
     virtual void onRemoteCacheSkipped(const char*) noexcept {}
 
 private:
+    static StorageWriteTask prepareWrite(IBlockPool& host_pool, BlockIdxType source);
     enum class Lifecycle {
         CREATED,
         ACCEPTING,

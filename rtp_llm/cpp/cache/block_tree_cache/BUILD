@@ -1,5 +1,6 @@
 load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "no_block_copy_link_deps", "torch_deps")
+load(":external/tree_cpu_link.bzl", "cpu_tree_link")
 
 cc_library(
     name = "block_tree_cache_layout",
@@ -55,6 +56,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/cpp/cache:block_info",
+        "//rtp_llm/cpp/cache:block_index",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:memory_layout_strategy",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
@@ -194,6 +196,7 @@ cc_library(
         ":disk_block_io",
         ":disk_io_executor",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/cpp/cache:block_index",
         "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:single_type_cache_manager",
@@ -257,6 +260,7 @@ cc_library(
     ],
     hdrs = [
         "BlockTreeCache.h",
+        "ExternalBlockTreeMatch.h",
         "diagnostic/FullPrefixInvariantScanner.h",
         "BlockTreeCacheFactory.h",
         "evict/EvictionTaskRunner.h",
@@ -312,5 +316,48 @@ cc_library(
             "@local_config_cuda//cuda:cudart",
         ],
         "//conditions:default": [],
+    }),
+)
+
+_TREE_DEPS = [
+    ":block_tree_cache",
+    ":block_tree_task_pool",
+    ":device_block_pool",
+    ":transfer_common",
+]
+
+cpu_tree_link(
+    name = "cpu_tree_link_inputs",
+    deps = _TREE_DEPS,
+)
+
+cc_binary(
+    name = "libbtc_tree.so",
+    srcs = [
+        "external/ExternalBlockTreeDriver.cc",
+        "external/ExternalDiskBindings.inc",
+        "external/ExternalDiskProtocol.h",
+        "external/ExternalDiskTransactions.inc",
+        "external/ExternalHostOps.inc",
+        "external/ExternalHostTypes.inc",
+        "storage_backend/HostStorageWriteback.h",
+    ],
+    copts = copts(),
+    additional_linker_inputs = select({
+        "@//:using_cpu": ["external/btc_tree.exports"],
+        "//conditions:default": [],
+    }),
+    linkopts = select({
+        "@//:using_cpu": [
+            "-Wl,--version-script,$(location :external/btc_tree.exports)",
+            "-Wl,--gc-sections,--as-needed,--no-undefined",
+        ],
+        "//conditions:default": [],
+    }),
+    linkshared = True,
+    visibility = ["//visibility:public"],
+    deps = select({
+        "@//:using_cpu": [":cpu_tree_link_inputs"],
+        "//conditions:default": _TREE_DEPS,
     }),
 )
