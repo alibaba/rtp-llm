@@ -284,6 +284,7 @@ py_library(
 
 py_library(
     name = "multimodal",
+    data = ["//rtp_llm/cpp/media_network:_media_network.so"],
     srcs = glob([
         "multimodal/*.py",
         "multimodal/**/*.py",
