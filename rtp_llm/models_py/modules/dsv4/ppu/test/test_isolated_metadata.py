@@ -37,7 +37,6 @@ class IsolatedMetadataTest(unittest.TestCase):
             prefix + "_fused_prepare_meta_triton": SimpleNamespace(
                 fused_update_decode_meta_pure=Mock(),
                 fused_phase2b_pool_slot_mapping=Mock(),
-                fused_copy_pool_block_tables=Mock(),
             ),
             prefix + "paged_topk_translator": SimpleNamespace(
                 translate_local_to_global_slots=Mock(),
