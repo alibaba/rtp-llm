@@ -349,8 +349,8 @@ def _copy_pool_block_tables_kernel(
 def fused_copy_pool_block_tables(meta, paged_block_tables, bs: int) -> None:
     """Copy each pool's block-table prefix and clear stale rows/tail.
 
-    One launch handles all cache tags. The copy/zero ranges are identical to
-    the former per-tag kernel.
+    Four tags share one launch; wider tables fall back to consecutive launches.
+    The copy/zero ranges are identical to the former per-tag kernel.
     """
     entries = []
     for at, src_bt in paged_block_tables.items():
@@ -375,30 +375,30 @@ def fused_copy_pool_block_tables(meta, paged_block_tables, bs: int) -> None:
         )
     if not entries:
         return
-    if len(entries) > 4:
-        raise ValueError("fused block-table copy supports at most four pools")
-    present = len(entries)
-    while len(entries) < 4:
-        entries.append(entries[0])
-    grid = (
-        max(entry[7] for entry in entries),
-        max(triton.cdiv(entry[4], 128) for entry in entries),
-        4,
-    )
-    args = []
-    for src, dst, *_ in entries:
-        args.extend((src, dst))
-    args.append(bs)
-    for _, _, n_rows, n_cols, max_cols, src_stride, dst_stride, dst_rows in entries:
-        args.extend((n_rows, n_cols, max_cols, src_stride, dst_stride, dst_rows))
-    _copy_pool_block_tables_kernel[grid](
-        *args,
-        HAS0=present > 0,
-        HAS1=present > 1,
-        HAS2=present > 2,
-        HAS3=present > 3,
-        BLOCK=128,
-    )
+    for start in range(0, len(entries), 4):
+        group = list(entries[start : start + 4])
+        present = len(group)
+        while len(group) < 4:
+            group.append(group[0])
+        grid = (
+            max(entry[7] for entry in group),
+            max(triton.cdiv(entry[4], 128) for entry in group),
+            4,
+        )
+        args = []
+        for src, dst, *_ in group:
+            args.extend((src, dst))
+        args.append(bs)
+        for _, _, n_rows, n_cols, max_cols, src_stride, dst_stride, dst_rows in group:
+            args.extend((n_rows, n_cols, max_cols, src_stride, dst_stride, dst_rows))
+        _copy_pool_block_tables_kernel[grid](
+            *args,
+            HAS0=present > 0,
+            HAS1=present > 1,
+            HAS2=present > 2,
+            HAS3=present > 3,
+            BLOCK=128,
+        )
 
 
 @triton.jit
