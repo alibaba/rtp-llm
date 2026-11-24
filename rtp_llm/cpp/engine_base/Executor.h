@@ -17,7 +17,7 @@ namespace rtp_llm {
 
 class Executor {
 public:
-    Executor() {};
+    explicit Executor(bool batch_invariant = false): batch_invariant_(batch_invariant) {}
     virtual absl::Status process(const ScheduleOutput& schedule_output, int64_t schedule_time_us = 0) = 0;
 
     /** Complete pending work on the engine loop thread before executor teardown. */
@@ -31,6 +31,8 @@ public:
     // GenerateStream), so a back-dependency on stream types would close a
     // library cycle. The executor base is the common seam of both consumers.
 protected:
+    const bool batch_invariant_;
+
     // Build the RecordedBatch from the gatherer-frozen CPU length snapshot.
     // Returns nullptr unless the recorder is enabled for this batch
     // (inputs.record_execution_id). Throws when the snapshot is missing or

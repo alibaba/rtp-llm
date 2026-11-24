@@ -75,7 +75,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                bool                                   allow_cuda_graph,
                                bool                                   accuracy_check_mode,
                                bool                                   dynamic_decode_enabled):
-    Executor(),
+    Executor(params.hw_kernel_config.batch_invariant),
     cache_manager_(cache_manager),
     warm_up_(warm_up),
     accuracy_check_mode_(accuracy_check_mode),
@@ -430,18 +430,19 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
                 }
             }
         }
-        // These eager DP/EP ranks enter the same sequence of MoE collectives.
+        // These BI DP/EP ranks enter the same sequence of MoE collectives.
         // Count every forward, including fake-only and unsampled batches, so
         // the recorder's per-rank filtering cannot shift the ordinal.
-        const bool align_dp_forward = execution_recorder.enabled() && !is_propose_ && use_all_gather_
+        const bool align_dp_forward = batch_invariant_ && execution_recorder.enabled() && !is_propose_ && use_all_gather_
                                       && parallelism_config_.tp_size == 1 && parallelism_config_.pp_size == 1
                                       && parallelism_config_.dp_size > 1
                                       && parallelism_config_.dp_size == parallelism_config_.ep_size
                                       && parallelism_config_.local_world_size == parallelism_config_.world_size;
-        const int64_t forward_step     = align_dp_forward ? ++dp_forward_step_ : 0;
-        const int64_t forward_start_us = recorded_batch && forward_step ? monotonicTimeUs() : 0;
-        model_output                        = std::move(model_->forward(model_input));
-        if (forward_start_us) {
+        const int64_t forward_step      = align_dp_forward ? ++dp_forward_step_ : 0;
+        const bool    record_dp_forward = align_dp_forward && recorded_batch;
+        const int64_t forward_start_us  = record_dp_forward ? monotonicTimeUs() : 0;
+        model_output                    = std::move(model_->forward(model_input));
+        if (record_dp_forward) {
             recorded_batch->setDpForward(parallelism_config_.dp_rank, forward_step, forward_start_us, monotonicTimeUs());
         }
         if (recorded_batch && model_output.decode_cuda_graph) {

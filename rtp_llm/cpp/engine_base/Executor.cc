@@ -21,7 +21,9 @@ std::shared_ptr<RecordedBatch> Executor::recordBatchInputs(const GptModelInputs&
                                       {"reuse_len", stream->initialReuseLength()}};
                 if (request) {
                     row["request_id"] = "r" + std::to_string(request->id());
-                    row["rpc_request_id"] = std::to_string(stream->streamId());
+                    if (batch_invariant_) {
+                        row["rpc_request_id"] = std::to_string(stream->streamId());
+                    }
                 }
                 if (i != 0)
                     row["sequence_id"] = i;
