@@ -227,7 +227,10 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
             transRoleAddrType(role_addr), role_addr.ip(), role_addr.http_port(), role_addr.grpc_port());
     }
 
-    generate_config->reuse_cache         = config_proto->reuse_cache();
+    generate_config->reuse_cache = config_proto->reuse_cache();
+    TRANS_OPTIONAL(mock_memory_cache_request);
+    TRANS_OPTIONAL(mock_cache_request);
+    generate_config->mockCacheRequestEnabled();
     generate_config->enable_device_cache = config_proto->enable_device_cache();
     generate_config->enable_memory_cache = config_proto->enable_memory_cache();
     generate_config->enable_remote_cache = config_proto->enable_remote_cache();

@@ -546,6 +546,7 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
     # 解析参数（会自动应用所有配置绑定）
     parsed_args = parser.parse_args(args)
     py_env_configs.server_config.validate_allocator_dump_config()
+    py_env_configs.kv_cache_config.validateMockCacheConfig()
     kv_cache_config = py_env_configs.kv_cache_config
     server_address, vipserver_domain = normalize_kvcm_address(
         kv_cache_config.kvcm_server_address

@@ -18,11 +18,30 @@ public:
 
 public:
     RemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>& request, CheckCancelFunc check_cancel_func):
-        request_(request), check_cancel_func_(check_cancel_func){};
+        request_(request), check_cancel_func_(check_cancel_func) {};
 
 public:
-    virtual void     waitDone()      = 0;
-    virtual bool     success() const = 0;
+    virtual void waitDone()      = 0;
+    virtual bool success() const = 0;
+    using DoneCallback           = std::function<void(const ErrorInfo&)>;
+    using DrainedCallback        = std::function<void()>;
+
+    // Optional one-shot hooks. Late registration is notified immediately; false
+    // means unsupported, empty callback, or a hook that was already registered.
+    virtual bool setDoneCallback(DoneCallback callback) {
+        return false;
+    }
+    // Fires once terminal and every admitted RPC has completed its callback
+    // work, even after early failure. Safe point to release registered buffers.
+    virtual bool setDrainedCallback(DrainedCallback callback) {
+        return false;
+    }
+    // Stops admission immediately; dispatched RPCs must still drain. Idempotent.
+    virtual bool cancel(const ErrorInfo& error) {
+        return false;
+    }
+
+    // Valid after terminal completion (waitDone or the done callback).
     const ErrorInfo& getErrorInfo() const {
         return error_info_;
     }

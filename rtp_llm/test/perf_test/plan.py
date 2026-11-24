@@ -409,6 +409,21 @@ def build_execution_plan(
     if not cases:
         raise PlanningError("execution plan requires at least one case")
 
+    pressure = resolved.resolved_config["workload"].get("pressure")
+    if pressure is not None:
+        from rtp_llm.test.continuous_pressure.adapters.rtp_llm_rpc import validate_cases
+
+        if mode != "prefill" or backend != "local":
+            raise PlanningError("continuous pressure requires local prefill")
+        from types import SimpleNamespace
+
+        try:
+            validate_cases(cases, SimpleNamespace(**pressure))
+        except ValueError as error:
+            raise PlanningError(str(error)) from error
+        cases = [
+            dict(case, measurement_contract="continuous_pressure_v1") for case in cases
+        ]
     planned_cases = []
     seen = set()
     for identity in cases:

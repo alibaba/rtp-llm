@@ -148,6 +148,12 @@ enum GptModelInputIndex : size_t {
     kvCacheCopyTokenLengths,
     recordExecutionId,
     p2pDeadlineSourceTimeMs,
+    pressureStepId,
+    pressureContextBatch,
+    pressureDecodeBatch,
+    pressureTokens,
+    pressureSessionBytes,
+    pressurePhaseBytes,
     gptModelInputLength,
 };
 

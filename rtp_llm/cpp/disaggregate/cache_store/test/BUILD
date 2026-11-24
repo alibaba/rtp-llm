@@ -47,7 +47,7 @@ cc_test(
     name = "cache_store_gtest",
     srcs = glob(
         ["*.cpp"],
-        exclude = test_base_sources,
+        exclude = test_base_sources + ["TcpHostPayloadTest.cpp", "TcpTransportCpuTest.cpp", "RemoteStoreLifecycleTest.cpp"],
     ),
     deps = [
         ":cache_store_test_base",
@@ -66,4 +66,42 @@ cc_test(
         "gpu_count": "2",
     },
     tags = ["H20_CU13"],
+)
+
+cc_test(
+    name = "tcp_host_payload_test",
+    srcs = ["TcpHostPayloadTest.cpp"],
+    deps = [
+        "//rtp_llm/cpp/disaggregate/cache_store:cache_store_base",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "@com_google_googletest//:gtest_main",
+    ] + cuda13_torch_link_deps,
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "tcp_transport_cpu_test",
+    srcs = ["TcpTransportCpuTest.cpp"],
+    deps = [
+        "//rtp_llm/cpp/disaggregate/cache_store:tcp_rpc_transport",
+        "//rtp_llm/cpp/disaggregate/cache_store/proto:cache_store_service_cc_proto",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+# Host-only lifecycle cases; no second device or runtime initialization.
+cc_test(
+    name = "remote_store_lifecycle_test",
+    srcs = ["RemoteStoreLifecycleTest.cpp"],
+    deps = [
+        "//rtp_llm/cpp/disaggregate/cache_store:cache_store_base",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "@com_google_googletest//:gtest_main",
+    ] + cuda13_torch_link_deps,
+    copts = ["-fno-access-control"] + copts(),
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )

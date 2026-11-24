@@ -268,6 +268,29 @@ struct KVCacheConfig {
     int         kvcm_get_broadcast_timeout = 15000;
     int         kvcm_put_broadcast_timeout = 15000;
     std::string kvcm_client_config         = "";
+    bool        mock_memory_cache{false};
+    bool        mock_memory_cache_real_match{false};
+    double      mock_memory_cache_hit_ratio{0.0};
+    uint64_t    mock_memory_cache_seed{1};
+    size_t      mock_memory_cache_source_blocks{64};
+    bool        mock_disk_cache{false};
+    double      mock_disk_cache_hit_ratio{0.0};
+    uint64_t    mock_disk_cache_seed{1};
+    size_t      mock_disk_cache_source_blocks{64};
+    bool        mock_remote_cache{false};
+    std::string mock_remote_cache_address{"127.0.0.1:18080"};
+    double      mock_remote_cache_hit_ratio{0.0};
+    int64_t     mock_remote_cache_source_blocks{64};
+    int64_t     mock_remote_cache_read_delay_ms{0};
+    int64_t     mock_remote_cache_write_delay_ms{0};
+    int64_t     mock_remote_cache_callback_port{19080};
+    int64_t     mock_remote_cache_staging_size_mb{256};
+    int64_t     mock_remote_cache_max_inflight{8};
+    int64_t     mock_remote_cache_timeout_ms{10000};
+    // Pure scalar validation. Throws std::invalid_argument on invalid stored
+    // ratios, enabled-tier sum, remote delays/capacities/endpoint settings.
+    // Engine startup must also check layout, rank ports and negotiated limits.
+    void        validateMockCacheConfig() const;
     void        insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
     std::string to_string() const;
 };

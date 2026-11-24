@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/PPTopologyValidator.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/remote_mock/RemoteMockAdapter.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -191,6 +192,11 @@ int NormalEngine::calculateReserveStep(const EngineInitParams& params) {
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
                            std::unique_ptr<ProposeModelEngineInitParams> propose_params):
+    NormalEngine(params, std::move(propose_params), true) {}
+
+NormalEngine::NormalEngine(const EngineInitParams&                       params,
+                           std::unique_ptr<ProposeModelEngineInitParams> propose_params,
+                           bool                                          start_loop):
     EngineBase(params),
     model_config_(params.model_config_),
     parallelism_config(params.parallelism_config),
@@ -324,7 +330,9 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     releaseHostMemoryCache();
 
     initScheduler();
-    (void)startLoop();
+    if (start_loop) {
+        (void)startLoop();
+    }
     (void)construction_guard.release();
 }
 
@@ -355,6 +363,7 @@ void NormalEngine::initExecutor(const EngineInitParams& params) {
             true,
             false,
             dynamic_decode_gate_enabled_));
+        static_cast<NormalExecutor*>(executor_.get())->setPressureRecorder(pressure_recorder_);
     }
 }
 
@@ -1102,6 +1111,13 @@ absl::Status NormalEngine::initSystemPrompt() {
     return absl::OkStatus();
 }
 
+ErrorResult<CachePressureSnapshot> NormalEngine::getCachePressure() const {
+    if (!resource_context_.cache_manager) {
+        return unsupportedCachePressure();
+    }
+    return resource_context_.cache_manager->getCachePressure();
+}
+
 KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) {
     return resource_context_.cache_manager->getKVCacheInfo(latest_version, need_cache_keys);
 }
@@ -1124,19 +1140,38 @@ absl::Status NormalEngine::stop() {
         return absl::OkStatus();
     }
     RTP_LLM_LOG_INFO("stop normal engine");
+    const auto cache = resource_context_.cache_manager ? resource_context_.cache_manager->blockTreeCache() : nullptr;
+    if (cache) {
+        cache->stopRemoteCompletionAdmission();
+    }
     running_                    = false;
     const auto scheduler_status = scheduler_->stop();
     // Ask rank 0 to stop at a step boundary. Receivers must finish all model
     // collectives for inputs that rank 0 has already published before exiting.
-    CpuTpBroadcaster::instance().requestStop();
-    loop_thread_->join();
-    loop_thread_.reset();
+    if (loop_thread_) {
+        CpuTpBroadcaster::instance().requestStop();
+        loop_thread_->join();
+        loop_thread_.reset();
+    }
     scheduler_->finalizeCancelledStreams();
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
     executor_.reset();
     const auto finalize_status = scheduler_->finalizeStop();
     if (!finalize_status.ok()) {
         RTP_LLM_LOG_ERROR("scheduler stop finalization failed: %s", finalize_status.ToString().c_str());
+    }
+    if (cache && cache->remoteMockAdapter()) {
+        std::promise<void> drained;
+        auto               completed = drained.get_future();
+        cache->drainRemoteCompletions([&drained] { drained.set_value(); });
+        completed.wait();  // Scheduler/stream locks are released; backing remains alive.
+        // Existing request tickets needed the adapter until capture settled.
+        // Now permanently stop physical admission and drain any concurrent RPC.
+        cache->remoteMockAdapter()->stopAccepting();
+        std::promise<void> physical_drained;
+        auto               physical_done = physical_drained.get_future();
+        cache->remoteMockAdapter()->drain([&physical_drained] { physical_drained.set_value(); });
+        physical_done.wait();
     }
     resource_context_.cache_manager->stopMetricsReporter();
     return scheduler_status.ok() ? finalize_status : scheduler_status;
@@ -1152,6 +1187,7 @@ void NormalEngine::loop() {
         try {
             auto status = parallelism_config.pp_size > 1 ? pp_step() : step();
             if (!status.ok()) {
+                step_profiler_.finishOnWorkerExit();
                 RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
                 THROW_IF_STATUS_ERROR(trySaveStepError());
             }
@@ -1162,6 +1198,7 @@ void NormalEngine::loop() {
         }
     }
     running_ = false;
+    step_profiler_.finishOnWorkerExit();
     // Publish only after the last complete step, while sockets remain alive
     // for the receivers and subsequent model teardown collectives.
     THROW_IF_STATUS_ERROR(executor_->finish());
@@ -1315,7 +1352,11 @@ std::vector<GenerateStreamPtr> NormalEngine::batchEnqueue(const std::vector<Gene
 
 absl::Status NormalEngine::step() try {
     RTP_LLM_PROFILE_SCOPE("engine.normal.step_work");
-    while (pause_) {
+    step_profiler_.serviceControl();
+    applyPressureControls();
+    while (pause_ && running_) {
+        step_profiler_.serviceControl();
+        applyPressureControls();
         // wait 50ms if system paused.
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
@@ -1328,6 +1369,8 @@ absl::Status NormalEngine::step() try {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
             CHECK_AND_ASSIGN(schedule_output, scheduler_->schedule());
         }
+        applyPressureControls();
+        step_profiler_.serviceControl();
         if (parallelism_config.dp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
             mayAddFakeStream(streams);
@@ -1372,6 +1415,7 @@ absl::Status NormalEngine::step() try {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
         status = executor_->process(schedule_output, tps_schedule_time_us);
     }
+    step_profiler_.serviceControl();
 
     if (!streams.empty()) {
         previous_execution_release_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -1389,6 +1433,7 @@ absl::Status NormalEngine::step() try {
 
     return status;
 } catch (const std::exception& exception) {
+    step_profiler_.finishOnWorkerExit();
     if (isTorchCudaOom(exception)) {
         dumpFatalTorchCudaOomDiagnostics(parallelism_config.local_rank, exception);
     }
@@ -1457,6 +1502,98 @@ bool NormalEngine::updateEplbConfig(const EPLBConfig& config) {
         return executor_->updateEplbConfig(config);
     }
     return true;
+}
+
+PressureStepPage
+NormalEngine::getPressureSteps(const std::string& session_id, uint64_t after_sequence, size_t limit) const {
+    return pressure_recorder_->read(session_id, after_sequence, limit);
+}
+
+ErrorResult<int64_t> NormalEngine::controlPressureDiagnostics(const PressureSessionControl&         control,
+                                                              std::chrono::system_clock::time_point deadline) {
+    if (parallelism_config.pp_size > 1 || sp_config.type != SP_TYPE_NONE) {
+        return {kPressureDiagnosticsUnsupported, "pressure step recording requires NormalExecutor"};
+    }
+    deadline = resolvePressureControlDeadline(deadline);
+    if (std::chrono::system_clock::now() >= deadline) {
+        return {ErrorCode::DEADLINE_EXCEEDED, "pressure control deadline expired"};
+    }
+    auto pending      = std::make_shared<PendingPressureControl>();
+    pending->control  = control;
+    pending->deadline = deadline;
+    auto result       = pending->result.get_future();
+    {
+        std::lock_guard<std::mutex> lock(pressure_control_mutex_);
+        if (pressure_controls_.size() >= 64) {
+            return {ErrorCode::CONCURRENCY_LIMIT_ERROR, "pressure control queue is full"};
+        }
+        pressure_controls_.push_back(pending);
+        pressure_controls_pending_.store(true, std::memory_order_release);
+    }
+    while (std::chrono::system_clock::now() < deadline) {
+        if (scheduler_) {
+            scheduler_->wakeForControl();
+        }
+        const auto next = std::min(deadline, std::chrono::system_clock::now() + std::chrono::milliseconds(5));
+        if (result.wait_until(next) == std::future_status::ready) {
+            return result.get();
+        }
+    }
+    return {ErrorCode::DEADLINE_EXCEEDED, "pressure control application deadline exceeded"};
+}
+
+void NormalEngine::wakePressureControlProgress() {
+    if (parallelism_config.tp_rank == 0 && scheduler_) {
+        scheduler_->wakeForControl();
+    }
+}
+
+void NormalEngine::applyPressureControls() {
+    if (!pressure_controls_pending_.load(std::memory_order_acquire)) {
+        return;
+    }
+    std::deque<std::shared_ptr<PendingPressureControl>> pending;
+    {
+        std::lock_guard<std::mutex> lock(pressure_control_mutex_);
+        pending.swap(pressure_controls_);
+        pressure_controls_pending_.store(false, std::memory_order_release);
+    }
+    for (auto& item : pending) {
+        if (std::chrono::system_clock::now() >= item->deadline) {
+            item->result.set_value({ErrorCode::DEADLINE_EXCEEDED, "pressure control expired before application"});
+            continue;
+        }
+        try {
+            const auto& control = item->control;
+            switch (control.action) {
+                case PressureControlAction::ENABLE:
+                    pressure_recorder_->enable(control.session_id, control.recorder_capacity);
+                    PressureNvtxScope::setSessionEnabled(true);
+                    break;
+                case PressureControlAction::MARK_PHASE:
+                    pressure_recorder_->markPhase(control.session_id, control.phase);
+                    break;
+                case PressureControlAction::DISABLE:
+                    if (!pressure_recorder_->disable(control.session_id)) {
+                        throw std::invalid_argument("pressure disable session mismatch");
+                    }
+                    PressureNvtxScope::setSessionEnabled(false);
+                    break;
+                default:
+                    throw std::invalid_argument("invalid pressure control action");
+            }
+            item->result.set_value(pressureClockNs(CLOCK_MONOTONIC));
+        } catch (const std::exception& error) {
+            item->result.set_value({ErrorCode::INVALID_PARAMS, error.what()});
+        }
+    }
+}
+
+bool NormalEngine::stopTimelineProfiling(const std::string& trace_name) {
+    const bool accepted = step_profiler_.requestStop(trace_name);
+    if (accepted && scheduler_)
+        scheduler_->wakeForControl();
+    return accepted;
 }
 
 void NormalEngine::startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) {

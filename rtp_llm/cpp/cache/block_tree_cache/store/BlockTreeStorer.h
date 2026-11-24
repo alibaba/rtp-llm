@@ -1,8 +1,10 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <vector>
 
@@ -10,9 +12,13 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/store/StoreTaskRunner.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 
 namespace rtp_llm {
+
+class BlockTransferDispatcher;
+class BlockTreeTaskPool;
 
 class BlockTreeStorer {
 public:
@@ -21,7 +27,12 @@ public:
 
     BlockTreeStorer(BlockTree*                      tree,
                     BlockTreeEvictor&               evictor,
+                    BlockTransferDispatcher*        transfer_dispatcher,
+                    BlockTreeTaskPool*              task_pool,
                     BlockTreeCacheMetricsReporter&  metrics_reporter,
+                    std::mutex&                     mutex,
+                    int                             host_timeout_ms,
+                    int                             disk_timeout_ms,
                     std::shared_ptr<StorageBackend> storage_backend,
                     SettledFn                       settled);
 
@@ -32,9 +43,15 @@ public:
                                  size_t&                                           resident_prefix_length,
                                  std::optional<int64_t>                            request_id         = {},
                                  size_t                                            remote_reuse_begin = 0,
-                                 size_t                                            remote_reuse_end   = 0);
+                                 size_t                                            remote_reuse_end   = 0,
+                                 bool                                              mock_memory_cache  = false,
+                                 bool                                              mock_disk_cache    = false);
+    void             stopAdmissionLocked();
 
 private:
+    using StoreTask    = StoreTaskRunner::Task;
+    using StoreTaskPtr = std::shared_ptr<StoreTask>;
+
     void           publishDeviceLocked(const CacheKeysType&                              cache_keys,
                                        const std::vector<std::vector<GroupSetResource>>& resources,
                                        bool                                              is_resident,
@@ -44,12 +61,28 @@ private:
                                       const std::optional<int64_t>&                     request_id,
                                       size_t                                            remote_reuse_begin,
                                       size_t                                            remote_reuse_end) const;
+    void           submitLowerTierLocked(const CacheKeysType&                              cache_keys,
+                                         const std::vector<std::vector<GroupSetResource>>& resources,
+                                         Tier                                              target_tier,
+                                         bool                                              mock_memory_cache,
+                                         bool                                              mock_disk_cache);
+    void           runStoreTask(const StoreTaskPtr& task);
+    void           scheduleStoreSettlement(const StoreTaskPtr& task, TransferResult result);
+    void           settleTask(const StoreTask& task, bool copy_success);
+    size_t         settleLocked(const StoreTask& task, bool publish);
 
     BlockTree*                      tree_;
     BlockTreeEvictor&               evictor_;
+    BlockTransferDispatcher*        transfer_dispatcher_;
+    BlockTreeTaskPool*              task_pool_;
     BlockTreeCacheMetricsReporter&  metrics_reporter_;
+    StoreTaskRunner                 store_task_runner_;
+    std::mutex&                     mutex_;
+    int                             host_timeout_ms_{0};
+    int                             disk_timeout_ms_{0};
     std::shared_ptr<StorageBackend> storage_backend_;
     SettledFn                       settled_;
+    std::atomic<bool>               stopping_{false};
 };
 
 }  // namespace rtp_llm

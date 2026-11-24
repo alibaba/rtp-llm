@@ -140,7 +140,7 @@ TEST(TransferDescriptorTest, IsExecutableRequiresResolvedEndpointsPerDirection) 
     EXPECT_TRUE(TransferDescriptor::hostToDevice(0, 3, {1, 2}).isExecutable());
     EXPECT_TRUE(TransferDescriptor::hostToDisk(0, 1, 2).isExecutable());
     EXPECT_FALSE(removedDiskToHost(0, 1, 2).isExecutable());
-    EXPECT_FALSE(removedDeviceToDisk(0, {1}, 2).isExecutable());
+    EXPECT_TRUE(TransferDescriptor::deviceToDisk(0, {1}, 2).isExecutable());
     EXPECT_TRUE(TransferDescriptor::diskToDevice(0, 2, {1}).isExecutable());
 
     EXPECT_FALSE(TransferDescriptor{}.isExecutable());
@@ -281,7 +281,6 @@ TEST(BlockTransferRequestConverterTest, DecodesHostToDiskUsingTierSpecificFields
 TEST(BlockTransferRequestConverterTest, RejectsRemovedDirectionsOnEncodeAndDecode) {
     const std::vector<std::pair<TransferDescriptor, MemoryOperationRequestPB::CopyDirection>> removed{
         {removedDiskToHost(4, 71, 81), MemoryOperationRequestPB::DISK2H},
-        {removedDeviceToDisk(3, {51}, 61), MemoryOperationRequestPB::D2DISK},
     };
     for (const auto& [descriptor, direction] : removed) {
         MemoryOperationRequestPB request;
@@ -873,6 +872,24 @@ TEST(BlockTransferRequestConverterTest, EncodeRejectsEmptyTaskAndNullGroupSets) 
         makeTransferTask(
             {TransferDescriptor::deviceToHost(2, {12, 13}, 22), TransferDescriptor::deviceToHost(0, {11}, 21)}),
         groups));
+}
+
+TEST(BlockTransferRequestConverterTest, RemoteWriteUsesIndependentSourceGeometryWithoutHostIndex) {
+    auto desc = TransferDescriptor::deviceToRemote(2, RemoteMockSession{11, 12, 13}, 29, {41, 42});
+    ASSERT_TRUE(desc.isExecutable());
+    EXPECT_TRUE(desc.needsTransfer());
+    MemoryOperationRequestPB request;
+    ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(request, makeTransferTask({desc}), groupSets()));
+    EXPECT_EQ(static_cast<int>(request.copy_direction()), 7);  // additive after legacy REMOTE2D=6
+    ASSERT_EQ(request.copy_items_size(), 1);
+    EXPECT_EQ(wireBlocks(request.copy_items(0)),
+              (std::unordered_map<std::string, BlockIdxType>{{"group3", 41}, {"group4", 42}}));
+    EXPECT_EQ(request.copy_items(0).mem_block(), 0);
+    EXPECT_EQ(request.copy_items(0).disk_block(), 0);
+    EXPECT_FALSE(request.copy_items(0).has_remote_mock_source());
+    std::vector<TransferDescriptor> decoded;
+    EXPECT_FALSE(BlockTransferRequestConverter::decodeTransfer(request, decoded, groupSets()));  // no session authority
+    EXPECT_TRUE(decoded.empty());
 }
 
 }  // namespace

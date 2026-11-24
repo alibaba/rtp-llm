@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <deque>
 #include <functional>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -30,7 +31,10 @@ struct BlockTreeQueueSizes {
 
 class BlockTreeTaskPool {
 public:
-    using Clock = std::chrono::steady_clock;
+    using Clock              = std::chrono::steady_clock;
+    using PreparedCompletion = std::list<std::function<void()>>;
+
+    static PreparedCompletion prepareCompletion(std::function<void()> task);
 
     static constexpr size_t                    kDefaultQueueSize = 10000;
     static constexpr std::chrono::milliseconds kDefaultQueueWaitTimeout{30000};
@@ -52,6 +56,7 @@ public:
                 std::optional<Clock::time_point> deadline   = std::nullopt,
                 std::function<void()>            on_timeout = {});
     bool submitCompletion(std::function<void()> task);
+    bool submitPreparedCompletion(PreparedCompletion& node) noexcept;
     void stopAdmission();
     // Wait only for queued/running task bodies, including submitted completions.
     // External asynchronous transfers must be drained by their owner.
@@ -85,7 +90,7 @@ private:
     std::condition_variable                    queue_cv_;
     std::deque<QueuedTask>                     load_queue_;
     std::deque<QueuedTask>                     background_queue_;
-    std::deque<std::function<void()>>          completion_queue_;
+    std::list<std::function<void()>>           completion_queue_;
     size_t                                     consecutive_load_dispatches_{0};
     bool                                       started_{false};
     bool                                       admission_stopped_{false};

@@ -2,6 +2,14 @@ load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "mock_cache_hit_controller",
+    srcs = ["MockCacheHitController.cc"],
+    hdrs = ["MockCacheHitController.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cache_async_context",
     srcs = ["AsyncContext.cc"],
     hdrs = [
@@ -281,6 +289,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":mock_cache_hit_controller",
         ":pool_metrics",
         ":cache_types",
         ":cp_slot_mapper",
@@ -302,6 +311,8 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        "//rtp_llm/cpp/utils:profiling_scope",
+        ":mock_cache_hit_controller",
         ":pool_metrics",
         ":cp_slot_mapper",
         ":device_block_pool_config_helper",
@@ -324,6 +335,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":mock_cache_hit_controller",
         ":cache_config",
         ":cache_group_type",
         "//rtp_llm/cpp/utils:core_utils",
@@ -408,6 +420,7 @@ cc_library(
     }),
     visibility = ["//visibility:public"],
     deps = [
+        "//rtp_llm/cpp/engine_base:pressure_diagnostics",
         ":pool_metrics",
         "//rtp_llm/cpp/cache/events:kv_cache_event_publisher",
         ":cache_async_context",

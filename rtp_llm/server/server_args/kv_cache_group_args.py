@@ -46,6 +46,18 @@ def _pool_blocks(value):
     return count
 
 
+def _mock_remote_int64(value):
+    # The common binding layer logs setter failures and keeps defaults. Reject
+    # unrepresentable values before binding so CLI/env never silently falls back.
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("expected a signed 64-bit integer") from None
+    if not -(2**63) <= parsed < 2**63:
+        raise argparse.ArgumentTypeError("expected a signed 64-bit integer")
+    return parsed
+
+
 def _positive_finite_ratio(value):
     try:
         ratio = float(value)
@@ -312,6 +324,158 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=str2bool,
         default=False,
         help="磁盘 KV cache（L3）开关。开启时必须启用 L1 和 L2，并设置 DISK_CACHE_SIZE_MB 和 DISK_CACHE_PATHS。",
+    )
+    kv_cache_group.add_argument(
+        "--mock_remote_cache",
+        env_name="MOCK_REMOTE_CACHE",
+        bind_to=(kv_cache_config, "mock_remote_cache"),
+        type=str2bool,
+        default=False,
+        help="Enable diagnostic remote mock cache independently of KVCM; generated output is invalid.",
+    )
+    kv_cache_group.add_argument(
+        "--mock_remote_cache_address",
+        env_name="MOCK_REMOTE_CACHE_ADDRESS",
+        bind_to=(kv_cache_config, "mock_remote_cache_address"),
+        type=str,
+        default="127.0.0.1:18080",
+        help="Remote mock TCP service host:port.",
+    )
+    kv_cache_group.add_argument(
+        "--mock_remote_cache_hit_ratio",
+        env_name="MOCK_REMOTE_CACHE_HIT_RATIO",
+        bind_to=(kv_cache_config, "mock_remote_cache_hit_ratio"),
+        type=float,
+        default=0.0,
+        help="Cumulative diagnostic remote read ratio; zero still permits completion writeback.",
+    )
+    kv_cache_group.add_argument(
+        "--mock_remote_cache_source_blocks",
+        env_name="MOCK_REMOTE_CACHE_SOURCE_BLOCKS",
+        bind_to=(kv_cache_config, "mock_remote_cache_source_blocks"),
+        type=_mock_remote_int64,
+        default=64,
+        help="Immutable remote source records per rank and pool.",
+    )
+    kv_cache_group.add_argument(
+        "--mock_remote_cache_read_delay_ms",
+        env_name="MOCK_REMOTE_CACHE_READ_DELAY_MS",
+        bind_to=(kv_cache_config, "mock_remote_cache_read_delay_ms"),
+        type=_mock_remote_int64,
+        default=0,
+        help="Injected remote read delay after admission in milliseconds.",
+    )
+    kv_cache_group.add_argument(
+        "--mock_remote_cache_write_delay_ms",
+        env_name="MOCK_REMOTE_CACHE_WRITE_DELAY_MS",
+        bind_to=(kv_cache_config, "mock_remote_cache_write_delay_ms"),
+        type=_mock_remote_int64,
+        default=0,
+        help="Injected remote write ACK delay after stored CRC in milliseconds.",
+    )
+    kv_cache_group.add_argument(
+        "--mock_remote_cache_callback_port",
+        env_name="MOCK_REMOTE_CACHE_CALLBACK_PORT",
+        bind_to=(kv_cache_config, "mock_remote_cache_callback_port"),
+        type=_mock_remote_int64,
+        default=19080,
+        help="Base TCP callback listener port; each rank adds its rank index.",
+    )
+    kv_cache_group.add_argument(
+        "--mock_remote_cache_staging_size_mb",
+        env_name="MOCK_REMOTE_CACHE_STAGING_SIZE_MB",
+        bind_to=(kv_cache_config, "mock_remote_cache_staging_size_mb"),
+        type=_mock_remote_int64,
+        default=256,
+        help="Total pinned staging MiB, split into independent read and write halves.",
+    )
+    kv_cache_group.add_argument(
+        "--mock_remote_cache_max_inflight",
+        env_name="MOCK_REMOTE_CACHE_MAX_INFLIGHT",
+        bind_to=(kv_cache_config, "mock_remote_cache_max_inflight"),
+        type=_mock_remote_int64,
+        default=8,
+        help="Local per-direction inflight ceiling, further bounded by server credits.",
+    )
+    kv_cache_group.add_argument(
+        "--mock_remote_cache_timeout_ms",
+        env_name="MOCK_REMOTE_CACHE_TIMEOUT_MS",
+        bind_to=(kv_cache_config, "mock_remote_cache_timeout_ms"),
+        type=_mock_remote_int64,
+        default=10000,
+        help="Remote operation timeout in milliseconds.",
+    )
+    kv_cache_group.add_argument(
+        "--mock_disk_cache",
+        env_name="MOCK_DISK_CACHE",
+        bind_to=(kv_cache_config, "mock_disk_cache"),
+        type=str2bool,
+        default=False,
+        help="Enable real-I/O mock Disk KVCache pressure testing; model outputs are invalid",
+    )
+    kv_cache_group.add_argument(
+        "--mock_disk_cache_hit_ratio",
+        env_name="MOCK_DISK_CACHE_HIT_RATIO",
+        bind_to=(kv_cache_config, "mock_disk_cache_hit_ratio"),
+        type=float,
+        default=0.0,
+        help="Mock Disk KVCache hit fraction in [0.0, 1.0]; active Memory+Disk fractions must sum to <= 1",
+    )
+    kv_cache_group.add_argument(
+        "--mock_disk_cache_seed",
+        env_name="MOCK_DISK_CACHE_SEED",
+        bind_to=(kv_cache_config, "mock_disk_cache_seed"),
+        type=int,
+        default=1,
+        help="Independent deterministic seed for mock Disk KVCache sources",
+    )
+    kv_cache_group.add_argument(
+        "--mock_disk_cache_source_blocks",
+        env_name="MOCK_DISK_CACHE_SOURCE_BLOCKS",
+        bind_to=(kv_cache_config, "mock_disk_cache_source_blocks"),
+        type=int,
+        default=64,
+        help="Positive number of immutable mock source blocks reserved per Disk pool",
+    )
+    kv_cache_group.add_argument(
+        "--mock_memory_cache",
+        env_name="MOCK_MEMORY_CACHE",
+        bind_to=(kv_cache_config, "mock_memory_cache"),
+        type=str2bool,
+        default=False,
+        help="Enable mock Memory KVCache pressure testing; model outputs are invalid",
+    )
+    kv_cache_group.add_argument(
+        "--mock_memory_cache_real_match",
+        env_name="MOCK_MEMORY_CACHE_REAL_MATCH",
+        bind_to=(kv_cache_config, "mock_memory_cache_real_match"),
+        type=str2bool,
+        default=False,
+        help="Compatibility setting. Mock reads always require a real local cache prefix",
+    )
+    kv_cache_group.add_argument(
+        "--mock_memory_cache_hit_ratio",
+        env_name="MOCK_MEMORY_CACHE_HIT_RATIO",
+        bind_to=(kv_cache_config, "mock_memory_cache_hit_ratio"),
+        type=float,
+        default=0.0,
+        help="Mock Memory KVCache hit fraction in [0.0, 1.0]",
+    )
+    kv_cache_group.add_argument(
+        "--mock_memory_cache_seed",
+        env_name="MOCK_MEMORY_CACHE_SEED",
+        bind_to=(kv_cache_config, "mock_memory_cache_seed"),
+        type=int,
+        default=1,
+        help="Deterministic seed for mock Memory KVCache pressure testing",
+    )
+    kv_cache_group.add_argument(
+        "--mock_memory_cache_source_blocks",
+        env_name="MOCK_MEMORY_CACHE_SOURCE_BLOCKS",
+        bind_to=(kv_cache_config, "mock_memory_cache_source_blocks"),
+        type=int,
+        default=64,
+        help="Positive number of immutable mock source blocks reserved per Host pool",
     )
     kv_cache_group.add_argument(
         "--memory_cache_size_mb",

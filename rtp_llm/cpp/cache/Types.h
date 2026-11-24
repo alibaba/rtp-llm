@@ -106,6 +106,10 @@ struct MallocInfo {
     // Initial chunk admission reserves fixed sparse banks for this maximum grant.
     int max_chunk_tokens = 0;
 
+    // Missing inherits service-global mock mode; false selects the real cache tree.
+    std::optional<bool> mock_memory_cache_request;
+    std::optional<bool> mock_cache_request;
+
     int incrSeqLen() const;
 };
 
@@ -173,6 +177,8 @@ struct InsertInfo {
     // Keep FULL insertion while excluding LINEAR blocks for a PD decode
     // handoff whose linear state is supplied by the prefill side.
     bool pd_decode_linear_tail_only = false;
+    bool mock_memory_cache{false};
+    bool mock_disk_cache{false};
 };
 
 }  // namespace rtp_llm

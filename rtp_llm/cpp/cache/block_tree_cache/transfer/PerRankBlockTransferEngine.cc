@@ -16,9 +16,11 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheLayout.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/AlignedHostMemory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/remote_mock/RemoteMockAdapter.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -153,8 +155,7 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
 
     std::vector<GroupSetPtr> crc_groups;
     for (const auto& group : group_sets_) {
-        if (group && group->crcEnabled() && !group->devicePools().empty()
-            && (group->hostPool() || (enable_disk_cache && group->diskPool())))
+        if (group && group->crcEnabled() && !group->devicePools().empty())
             crc_groups.push_back(group);
     }
     if (enable_disk_cache_ && std::any_of(group_sets_.begin(), group_sets_.end(), [](const auto& group) {
@@ -375,9 +376,27 @@ std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::executeBatch(T
             proof->report(true);
     });
     const auto&                            descriptors  = task.descriptors();
-    const Tier                             source       = descriptors.front().source_tier;
-    const Tier                             target       = descriptors.front().target_tier;
-    const auto                             group_set_id = descriptors.front().group_set_id;
+    if (descriptors.front().remote_target) {
+        auto adapter = remote_adapter_.lock();
+        if (!adapter)
+            return invalidTransferContext(task);
+        const auto proof   = task.completionProof();
+        auto       context = std::make_shared<TransferBatchAsyncContext>(descriptors.size(), nullptr, proof);
+        unsubmitted.dismiss();
+        adapter->writeback(std::move(task), [context](ErrorInfo error) {
+            TransferResult result(std::move(error));
+            result.buffer_safe = true;
+            context->complete(std::move(result));
+        });
+        return context;
+    }
+    if (descriptors.front().remote_source || descriptors.front().source_tier == Tier::NONE) {
+        unsubmitted.dismiss();
+        return executeRemote(std::move(task));
+    }
+    const Tier source       = descriptors.front().source_tier;
+    const Tier target       = descriptors.front().target_tier;
+    const auto group_set_id = descriptors.front().group_set_id;
     if (group_set_id >= group_sets_.size() || !group_sets_[group_set_id])
         return invalidTransferContext(task);
     const auto* group_set = group_sets_[group_set_id].get();
@@ -390,6 +409,10 @@ std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::executeBatch(T
     if ((source == Tier::DEVICE || target == Tier::DEVICE) && !group_set->crcEnabled()
         && !isPlainDeviceTransferGroup(*group_set))
         return invalidTransferContext(task);
+    if (source == Tier::DEVICE && target == Tier::DISK) {
+        unsubmitted.dismiss();
+        return executeDeviceToDisk(std::move(task));
+    }
     auto&      loops  = isLoadTransfer(source, target) ? load_loops_ : evict_loops_;
     auto&      next   = isLoadTransfer(source, target) ? next_load_ : next_evict_;
     const auto worker = loops.size() == 1 ? 0 : next.fetch_add(1, std::memory_order_relaxed) % loops.size();
@@ -400,6 +423,239 @@ std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::executeBatch(T
         // The last owner returns the final rejection and records it once.
         context = loops[(worker + offset) % loops.size()]->execute(
             std::move(task), {}, offset + 1 < loops.size() ? &retryable : nullptr);
+        if (!retryable) {
+            break;
+        }
+    }
+    return context;
+}
+
+std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::executeDeviceToDisk(TransferTask task) {
+    const auto                             proof = task.completionProof();
+    block_tree_cache_detail::ScopeRollback unsubmitted([proof] {
+        if (proof)
+            proof->report(true);
+    });
+    const auto& descriptors = task.descriptors();
+    const auto  group_id    = descriptors.front().group_set_id;
+    const auto& group_set   = *group_sets_[group_id];
+    const auto& disk_pool   = *group_set.diskPool();
+    const auto  stride      = disk_pool.strideBytes();
+    const auto  payload     = group_set.payloadBytes();
+    if (group_set.storageBytes() > stride || descriptors.size() > std::numeric_limits<size_t>::max() / stride) {
+        return invalidTransferContext(task);
+    }
+    auto staging = std::make_shared<AlignedHostMemory>(descriptors.size() * stride, 4096, "device_disk_store");
+    std::vector<TransferDescriptor> d2h_descs;
+    std::vector<TransferDescriptor> h2disk_descs;
+    std::vector<HostBufferView>     host_views;
+    d2h_descs.reserve(descriptors.size());
+    h2disk_descs.reserve(descriptors.size());
+    host_views.reserve(descriptors.size());
+    for (size_t i = 0; i < descriptors.size(); ++i) {
+        d2h_descs.push_back(TransferDescriptor::deviceToHost(group_id, descriptors[i].source_blocks, 0));
+        h2disk_descs.push_back(TransferDescriptor::hostToDisk(group_id, 0, descriptors[i].singleBlockAt(Tier::DISK)));
+        host_views.push_back({staging->data() + i * stride, payload, stride});
+    }
+    auto context = std::make_shared<TransferBatchAsyncContext>(descriptors.size(), nullptr, proof);
+    unsubmitted.dismiss();
+    auto stage1_task = task.subtask(std::move(d2h_descs));
+    auto stage2_task = task.subtask(std::move(h2disk_descs));
+    executeHostBuffers(
+        std::move(stage1_task),
+        host_views,
+        staging,
+        [this, context, stage2_task = std::move(stage2_task), host_views = std::move(host_views), staging](
+            TransferResult r1) mutable {
+            if (!r1.ok()) {
+                context->complete(std::move(r1));
+                return;
+            }
+            if (stage2_task.expired()) {
+                TransferResult expired(
+                    ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "device-to-disk transfer expired before disk write"),
+                    CacheCopyError::NOT_EXECUTED);
+                expired.buffer_safe = true;
+                context->complete(std::move(expired));
+                return;
+            }
+            executeHostBuffers(std::move(stage2_task),
+                               std::move(host_views),
+                               std::move(staging),
+                               [context](TransferResult r2) { context->complete(std::move(r2)); });
+        });
+    return context;
+}
+
+void PerRankBlockTransferEngine::setRemoteMockAdapter(const std::shared_ptr<RemoteMockAdapter>& adapter,
+                                                      bool owns_device_allocations) {
+    RTP_LLM_CHECK(remote_adapter_.expired());
+    if (adapter)
+        adapter->initializeWriteback(adapter, owns_device_allocations, max_descriptors_per_batch_);
+    remote_adapter_          = adapter;
+    owns_device_allocations_ = owns_device_allocations;
+}
+
+RemoteMockWritebackStats PerRankBlockTransferEngine::remoteWritebackStats() const {
+    const auto adapter = remote_adapter_.lock();
+    return adapter ? adapter->writebackStats() : RemoteMockWritebackStats{};
+}
+
+std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::executeRemote(TransferTask task) {
+    const auto                             proof = task.completionProof();
+    block_tree_cache_detail::ScopeRollback unsubmitted([proof] {
+        if (proof)
+            proof->report(true);
+    });
+    const auto adapter = remote_adapter_.lock();
+    if (!adapter || task.expired()) {
+        return invalidTransferContext(task);
+    }
+    RemoteMockLoadPlan plan;
+    plan.deadline = task.deadline();
+    try {
+        for (const auto& desc : task.descriptors()) {
+            if (!desc.isExecutable() || !desc.isRemoteMock() || desc.group_set_id >= group_sets_.size()
+                || !group_sets_[desc.group_set_id]) {
+                return invalidTransferContext(task);
+            }
+            const auto& pools = group_sets_[desc.group_set_id]->devicePools();
+            if (desc.target_blocks.size() != pools.size()) {
+                return invalidTransferContext(task);
+            }
+            for (size_t member = 0; member < pools.size(); ++member) {
+                if (!pools[member]->validBlock(desc.target_blocks[member])) {
+                    return invalidTransferContext(task);
+                }
+            }
+            const auto& source = *desc.remote_source;
+            const auto  frozen = adapter->freezeSource(desc.group_set_id, source.admission_offset, source.logical_index);
+            if (!(source.session == frozen.session) || source.layout_hash != frozen.layout_hash
+                || source.rank != frozen.rank || source.group != frozen.group || source.pool != frozen.pool
+                || source.index != frozen.index || source.checksum != frozen.checksum) {
+                return invalidTransferContext(task);
+            }
+            plan.targets.push_back({source, desc.target_blocks});
+        }
+        struct TargetPins {
+            std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> pins;
+            std::vector<GroupSetPtr>                                 groups;
+            ~TargetPins() {
+                for (const auto& pin : pins) {
+                    pin.first->decTreeRef(pin.second, BlockTreeRefType::LOAD);
+                }
+            }
+        };
+        auto owner    = std::make_shared<TargetPins>();
+        owner->groups = group_sets_;
+        size_t count  = 0;
+        for (const auto& desc : task.descriptors())
+            count += desc.target_blocks.size();
+        owner->pins.reserve(count);
+        if (owns_device_allocations_)
+            for (const auto& desc : task.descriptors()) {
+                const auto& pools = group_sets_[desc.group_set_id]->devicePools();
+                for (size_t member = 0; member < pools.size(); ++member) {
+                    pools[member]->incTreeRef(desc.target_blocks[member], BlockTreeRefType::LOAD);
+                    owner->pins.emplace_back(pools[member], desc.target_blocks[member]);
+                }
+            }
+        plan.target_owner = std::move(owner);
+        auto context      = std::make_shared<TransferBatchAsyncContext>(task.descriptors().size(), nullptr, proof);
+        unsubmitted.dismiss();
+        adapter->load(plan, [context](ErrorInfo error) {
+            TransferResult result(std::move(error));
+            result.buffer_safe = true;
+            context->complete(std::move(result));
+        });
+        return context;
+    } catch (const std::exception& error) {
+        TransferResult result(ErrorInfo(ErrorCode::INVALID_PARAMS, error.what()));
+        result.buffer_safe = true;
+        return std::make_shared<CompletedTransferAsyncContext>(
+            std::move(result), task.descriptors().size(), proof);
+    }
+}
+
+std::shared_ptr<TransferAsyncContext>
+PerRankBlockTransferEngine::executeHostBuffers(TransferTask                       task,
+                                               std::vector<HostBufferView>        hosts,
+                                               std::shared_ptr<void>              owner,
+                                               TransferAsyncContext::DoneCallback terminal) {
+    const auto& descriptors = task.descriptors();
+    const auto  invalid     = [&] {
+        auto context = invalidTransferContext(task);
+        if (terminal)
+            terminal(context->result());
+        return context;
+    };
+    if (!owner || descriptors.empty() || hosts.size() != descriptors.size()) {
+        return invalid();
+    }
+    const auto& first   = descriptors.front();
+    const Tier  source  = first.source_tier;
+    const Tier  target  = first.target_tier;
+    const bool  to_dev  = source == Tier::HOST && target == Tier::DEVICE;
+    const bool  from_dev = source == Tier::DEVICE && target == Tier::HOST;
+    const bool  to_disk = source == Tier::HOST && target == Tier::DISK;
+    if (!to_dev && !from_dev && !to_disk) {
+        return invalid();
+    }
+    if (to_disk && !enable_disk_cache_) {
+        return invalid();
+    }
+    const size_t group_id = first.group_set_id;
+    if (group_id >= group_sets_.size() || !group_sets_[group_id]) {
+        return invalid();
+    }
+    const auto& group = *group_sets_[group_id];
+    if ((to_dev || from_dev) && !group.crcEnabled() && !isPlainDeviceTransferGroup(group)) {
+        return invalid();
+    }
+    if (to_disk && !group.diskPool()) {
+        return invalid();
+    }
+    const size_t required_access = to_disk ? group.diskPool()->strideBytes() : group.storageBytes();
+    for (size_t i = 0; i < descriptors.size(); ++i) {
+        const auto& desc = descriptors[i];
+        if (desc.group_set_id != group_id || desc.source_tier != source || desc.target_tier != target) {
+            return invalid();
+        }
+        if (!isValidHostBufferView(hosts[i], group.payloadBytes(), required_access)) {
+            return invalid();
+        }
+        if (to_dev || from_dev) {
+            const auto& blocks = desc.blocksAt(Tier::DEVICE);
+            if (blocks.size() != group.devicePools().size()) {
+                return invalid();
+            }
+            for (size_t member = 0; member < blocks.size(); ++member) {
+                if (!group.devicePools()[member]->validBlock(blocks[member])) {
+                    return invalid();
+                }
+            }
+        } else {
+            if (desc.target_blocks.size() != 1 || !group.diskPool()->validBlock(desc.target_blocks[0])) {
+                return invalid();
+            }
+        }
+    }
+    auto&      loops  = to_dev ? load_loops_ : evict_loops_;
+    auto&      next   = to_dev ? next_load_ : next_evict_;
+    const auto worker = loops.size() == 1 ? 0 : next.fetch_add(1, std::memory_order_relaxed) % loops.size();
+    TransferWorkLoop::BeforeCompleteCallback before_complete;
+    if (terminal) {
+        before_complete = [terminal = std::move(terminal)](const TransferResult& result) mutable { terminal(result); };
+    }
+    std::shared_ptr<TransferAsyncContext> context;
+    for (size_t offset = 0; offset < loops.size(); ++offset) {
+        bool retryable = false;
+        context        = loops[(worker + offset) % loops.size()]->executeHostBuffers(
+            std::move(task),
+            std::move(hosts),
+            std::move(owner),
+            std::move(before_complete),
+            offset + 1 < loops.size() ? &retryable : nullptr);
         if (!retryable) {
             break;
         }

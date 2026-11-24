@@ -169,6 +169,8 @@ def resolve_config(
     workload = normalized["workload"]
     if workload.get("kind") == "cache_grid":
         for child in [workload] + [grid["workload"] for grid in workload["grids"]]:
+            if child.get("pressure") is None:
+                child.pop("pressure", None)
             if child.get("logarithmic_request_batches") is None:
                 child.pop("logarithmic_request_batches", None)
             if child.get("random_request_batches") is None:

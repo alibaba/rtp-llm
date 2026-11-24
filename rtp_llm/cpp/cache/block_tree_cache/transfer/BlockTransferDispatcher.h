@@ -17,19 +17,37 @@ namespace rtp_llm {
 
 class MultiRankBlockTransferEngine;
 class PerRankBlockTransferEngine;
+class TransferBatchAsyncContext;
 class TransferCompletionCleanup;
 struct BlockTreeQueueSizes;
 
 class BlockTransferDispatcher {
 public:
     using TransferDoneCallback = std::function<void(TransferResult)>;
+    using LocalCopyObserver    = std::function<void(const TransferTask&, const TransferResult&)>;
 
     BlockTransferDispatcher(std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine,
-                            std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine = nullptr);
+                            std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine         = nullptr,
+                            size_t                                        max_descriptors_per_batch = 0);
     ~BlockTransferDispatcher();
 
     // The per-rank engine groups and batches the logical request.
     std::shared_ptr<TransferAsyncContext> executePerRank(TransferTask task) const;
+
+    // Installed at cache construction, before transfer producers start.
+    void setLocalCopyObserver(LocalCopyObserver observer) {
+        local_copy_observation_ = std::make_shared<LocalCopyObservation>(std::move(observer));
+    }
+    bool localCopyEvidenceComplete() const {
+        return !local_copy_observation_ || local_copy_observation_->complete.load();
+    }
+    void runTransfer(CacheTransferOperation operation,
+                     TransferTask           task,
+                     TransferDoneCallback   callback,
+                     const char*            completion_operation = nullptr) const {
+        task.operation = operation;
+        runTransfer(std::move(task), std::move(callback), completion_operation);
+    }
 
     // Broadcast one single-direction request; each rank owns physical batching.
     // completion_operation is an optional borrowed literal for new completion
@@ -37,8 +55,9 @@ public:
     void
     runTransfer(TransferTask task, TransferDoneCallback callback, const char* completion_operation = nullptr) const;
 
-    void                cancelPendingStagingTransfers() const;
-    BlockTreeQueueSizes queueSizes() const;
+    void                     cancelPendingStagingTransfers() const;
+    BlockTreeQueueSizes      queueSizes() const;
+    RemoteMockSafetySnapshot remoteMockSafety() const;
 
     // Close per-rank admission, drain local owners, then wait for transfer
     // callback chains. Call after business producers/task bodies stop; keep
@@ -50,6 +69,9 @@ public:
     // synchronously submitted stages. Stop independent producers before destruction;
     // queued business settlement must be drained separately afterwards.
     void waitForTransfers() const;
+    void drainTransfers() const {
+        waitForTransfers();
+    }
 
     // Snapshot retained records, retiring RELEASED owners outside the list lock.
     // FROZEN and RELEASING records remain; enumeration never unfreezes blocks.
@@ -90,12 +112,21 @@ private:
     FrozenTask::ExecutionInfo buildExecutionInfo(const TransferTask& task, const char* completion_operation) const;
     void                      retainFrozenTask(std::list<std::shared_ptr<FrozenTask>>& prepared_slot) const noexcept;
 
+    struct LocalCopyObservation {
+        explicit LocalCopyObservation(LocalCopyObserver callback): observer(std::move(callback)) {}
+        LocalCopyObserver observer;
+        std::atomic<bool> complete{true};
+    };
+
     std::shared_ptr<PerRankBlockTransferEngine>    per_rank_engine_;
     std::shared_ptr<MultiRankBlockTransferEngine>  multi_rank_engine_;
+    size_t                                         max_descriptors_per_batch_{0};
+    std::shared_ptr<LocalCopyObservation>          local_copy_observation_;
     mutable std::mutex                             inflight_mutex_;
     mutable std::condition_variable                inflight_cv_;
     mutable size_t                                 inflight_count_{0};
     std::function<void()>                          drain_observer_for_test_;
+    std::shared_ptr<TransferBatchAsyncContext> (*make_observed_context_)(size_t);
     mutable std::mutex                             frozen_mutex_;
     mutable std::list<std::shared_ptr<FrozenTask>> frozen_tasks_;
     std::shared_ptr<TransferTaskRegistry>          task_registry_{std::make_shared<TransferTaskRegistry>()};

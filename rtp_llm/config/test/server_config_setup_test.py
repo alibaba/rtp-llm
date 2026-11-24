@@ -716,8 +716,8 @@ class GenerateConfigTest(TestCase):
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 81)
-        self.assertEqual(state[:2], ("KVCacheConfig", 25))
+        self.assertEqual(len(state), 100)
+        self.assertEqual(state[:2], ("KVCacheConfig", 27))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)
@@ -758,9 +758,7 @@ class GenerateConfigTest(TestCase):
         # their defaults after a legacy v6 state round-trips.
         event_state = (
             *state[:63],
-            *legacy_defaults.__getstate__()[:79][63:],
-            legacy_defaults.__getstate__()[79],
-            legacy_defaults.__getstate__()[80],
+            *legacy_defaults.__getstate__()[63:],
         )
         # Version 6 carried the retired host-placement flag at index 53.
         state = (state[0], 6, *state[2:53], True, *state[53:63])
@@ -842,6 +840,16 @@ class GenerateConfigTest(TestCase):
 
         expected_fields = {
             "enable_crc": "bool",
+            "mock_remote_cache": "bool",
+            "mock_remote_cache_address": "str",
+            "mock_remote_cache_hit_ratio": "float",
+            "mock_remote_cache_source_blocks": "int",
+            "mock_remote_cache_read_delay_ms": "int",
+            "mock_remote_cache_write_delay_ms": "int",
+            "mock_remote_cache_callback_port": "int",
+            "mock_remote_cache_staging_size_mb": "int",
+            "mock_remote_cache_max_inflight": "int",
+            "mock_remote_cache_timeout_ms": "int",
             "kv_cache_pool_block_weights": "str",
             "enable_linear_cache_reclaim": "bool",
             "block_tree_task_pool_size": "int",

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -19,6 +20,13 @@
 namespace rtp_llm {
 
 class BlockTreeEvictor;
+class CachePressureState;
+
+struct PressurePhysicalPool {
+    std::string       id;
+    Tier              tier;
+    const IBlockPool* pool;
+};
 
 struct ReusableGroupLocation {
     size_t group_set_id{0};
@@ -101,12 +109,41 @@ public:
 
     // All publication operations require the owning BlockTreeCache mutex.
     // Complete, matchable DEVICE components are advertised independently.
-    void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);
+    void            setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);
     KVCacheSnapshot logicalCacheSnapshot() const;
     void            refreshPublishedState(const TreeNode* node);
 
+    // Fixed topology identities, frozen at construction. Mutations require cache mutex.
+    const std::vector<PressurePhysicalPool>& pressurePools() const {
+        return pressure_pools_;
+    }
+    const std::string&  pressurePoolId(const IBlockPool* pool) const;
+    CachePressureState& pressureState() const;
+    void                refreshPressureHostOwner(const TreeNode* node, size_t group_id);
+    void                recordPressurePublication(CacheTransferOperation operation, const TransferDescriptor& descriptor);
+    // Called by copy callbacks without the cache lock; reads immutable topology only.
+    void recordPressureCopy(CacheTransferOperation operation,
+                            DescriptorView         descriptors,
+                            const TransferResult&  result);
+    bool workflowEvidenceComplete() const {
+        return workflow_evidence_complete_.load();
+    }
+    void recordPressureWorkflowFailure(CacheTransferOperation operation,
+                                       DescriptorView         descriptors,
+                                       const TransferResult&  result);
+
 private:
-    void                               removePublishedKey(CacheKeyType key);
+    void                                          recordPressureResult(CacheTransferOperation operation,
+                                                                       DescriptorView         descriptors,
+                                                                       const TransferResult&  result,
+                                                                       bool                   physical);
+    std::atomic<bool>                             workflow_evidence_complete_{true};
+    // Outlives workflow collaborators and their drained callbacks.
+    std::unique_ptr<CachePressureState>           pressure_state_;
+    std::vector<std::vector<size_t>>              pressure_device_payloads_;
+    std::vector<PressurePhysicalPool>             pressure_pools_;
+    std::unordered_map<const IBlockPool*, size_t> pressure_pool_indices_;
+    void                                          removePublishedKey(CacheKeyType key);
     KVCacheEventPublisherPtr           event_publisher_;
     std::vector<ReusableGroupLocation> publication_groups_;
     std::unordered_map<CacheKeyType, std::vector<size_t>> published_groups_;

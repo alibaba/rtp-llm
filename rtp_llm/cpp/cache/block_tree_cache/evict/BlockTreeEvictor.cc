@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/CacheLockGuard.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/CachePressureState.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/CompletionStage.h"
 
 #include <algorithm>
@@ -43,7 +44,7 @@ BlockTreeEvictor::BlockTreeEvictor(BlockTree*                     tree,
     mutex_(&mutex),
     is_tier_enabled_(std::move(is_tier_enabled)),
     settled_(std::move(settled)),
-    task_runner_(std::make_unique<EvictionTaskRunner>(tree->groupSets(), transfer_dispatcher)),
+    task_runner_(std::make_unique<EvictionTaskRunner>(tree->groupSets(), transfer_dispatcher, tree)),
     host_timeout_ms_(host_timeout_ms),
     disk_timeout_ms_(disk_timeout_ms),
     max_descriptors_per_batch_(max_descriptors_per_batch),
@@ -527,6 +528,7 @@ BlockTreeEvictor::batchEvictLocked(size_t group_set_id, Tier source_tier, size_t
         suspendCandidate(desc.node, desc.group_set_id, desc.source_tier);
         resource.eviction_access_seq = resource.candidate_meta.last_access_seq;
         resource.transfer_state      = GroupSetTransferState::EVICTING;
+        tree_->refreshPressureHostOwner(desc.node, desc.group_set_id);
         tree_->refreshPublishedState(desc.node);
         descriptors.push_back(std::move(desc));
     }
@@ -1112,6 +1114,7 @@ void BlockTreeEvictor::completeDrop(const TransferDescriptor& desc) {
     const MultiNodeResource source_holder{desc.group_set_id, desc.source_tier, {{desc.node, desc.source_blocks}}};
     group_set->unreferenceBlocks(source_holder, BlockTreeRefType::CACHE);
     resource.evictFromTier(desc.source_tier);
+    tree_->refreshPressureHostOwner(desc.node, desc.group_set_id);
     tree_->refreshPublishedState(desc.node);
     RTP_LLM_CHECK_WITH_INFO(!resource.hasTier(Tier::DEVICE) || resource.hasCompleteDeviceValue(),
                             "drop settlement produced invalid steady state: group_set_id=%zu node_key=%ld",
@@ -1159,6 +1162,8 @@ void BlockTreeEvictor::completeEvict(DescriptorView descs) {
         resource.evictFromTier(desc.source_tier);
         resource.transfer_state = GroupSetTransferState::IDLE;
         resource.setBlocks(desc.target_tier, desc.target_blocks);
+        tree_->recordPressurePublication(CacheTransferOperation::EVICT, desc);
+        tree_->refreshPressureHostOwner(desc.node, desc.group_set_id);
         tree_->refreshPublishedState(desc.node);
         RTP_LLM_CHECK_WITH_INFO(!resource.hasTier(Tier::DEVICE) || resource.hasCompleteDeviceValue(),
                                 "eviction settlement produced invalid steady state: group_set_id=%zu node_key=%ld",
@@ -1207,6 +1212,7 @@ void BlockTreeEvictor::restoreSource(DescriptorView eviction_descs) {
             continue;
         }
         resource.transfer_state = GroupSetTransferState::IDLE;
+        tree_->refreshPressureHostOwner(desc.node, desc.group_set_id);
         tree_->refreshPublishedState(desc.node);
         RTP_LLM_CHECK_WITH_INFO(!resource.hasTier(Tier::DEVICE) || resource.hasCompleteDeviceValue(),
                                 "eviction rollback produced invalid steady state: group_set_id=%zu node_key=%ld",
@@ -1231,6 +1237,7 @@ void BlockTreeEvictor::discardDetachedTransfer(DescriptorView transfer_descs) {
         resource.evictFromTier(serving_tier);
         resource.transfer_state    = GroupSetTransferState::IDLE;
         resource.transfer_detached = false;
+        tree_->refreshPressureHostOwner(desc.node, desc.group_set_id);
         tree_->refreshPublishedState(desc.node);
     }
     for (const auto& [key, holder] : source_holders) {
@@ -1256,6 +1263,7 @@ void BlockTreeEvictor::invalidateSources(const std::vector<InvalidationSource>& 
         if (resource.transfer_state != GroupSetTransferState::IDLE
             && tree_->groupSets()[source.group_set_id]->groupType() != CacheGroupType::FULL) {
             resource.transfer_detached = true;
+            tree_->refreshPressureHostOwner(node, source.group_set_id);
             tree_->refreshPublishedState(node);
             continue;
         }
@@ -1556,6 +1564,7 @@ EvictionDropTask BlockTreeEvictor::createDropTask(TransferDescriptor    eviction
             metrics_reporter_->reportEvictionDescriptor(desc, timing, group_sets, trigger_type, true);
         }
         resource.transfer_detached = true;
+        tree_->refreshPressureHostOwner(node, group_set_id);
         tree_->refreshPublishedState(node);
     }
     return task;
@@ -1722,9 +1731,18 @@ BlockTreeEvictor::computeWatermarkEvictCount(const GroupSet& group_set, Tier tie
     if (required_count == 0 && !has_pending) {
         triggered = false;
     } else if (high_reached) {
+        if (!triggered && tier == Tier::DEVICE) {
+            tree_->pressureState().recordWatermarkTrigger(group_set.groupSetId());
+        }
         triggered = true;
     }
     return triggered ? required_count : 0;
+}
+
+uint64_t BlockTreeEvictor::pendingReleaseBlocks(const IBlockPool* pool) const {
+    std::lock_guard<std::mutex> lock(pending_release_mutex_);
+    const auto                  it = pending_release_counts_.find(const_cast<IBlockPool*>(pool));
+    return it == pending_release_counts_.end() ? 0 : it->second;
 }
 
 }  // namespace rtp_llm

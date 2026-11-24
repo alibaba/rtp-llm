@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/remote_mock/RemoteMockAdapter.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -68,6 +69,14 @@ GroupSetResolution resolveGroupSet(const MemoryOperationRequestPB::CopyItem& ite
 
 bool BlockTransferRequestConverter::directionFor(const TransferDescriptor&                descriptor,
                                                  MemoryOperationRequestPB::CopyDirection& request_direction) {
+    if (descriptor.isRemoteWrite()) {
+        request_direction = MemoryOperationRequestPB::D2REMOTE;
+        return true;
+    }
+    if (descriptor.isRemoteMock()) {
+        request_direction = MemoryOperationRequestPB::REMOTE2D;
+        return true;
+    }
     if (descriptor.source_tier == Tier::DEVICE && descriptor.target_tier == Tier::HOST) {
         request_direction = MemoryOperationRequestPB::D2H;
         return true;
@@ -78,6 +87,10 @@ bool BlockTransferRequestConverter::directionFor(const TransferDescriptor&      
     }
     if (descriptor.source_tier == Tier::HOST && descriptor.target_tier == Tier::DISK) {
         request_direction = MemoryOperationRequestPB::H2DISK;
+        return true;
+    }
+    if (descriptor.source_tier == Tier::DEVICE && descriptor.target_tier == Tier::DISK) {
+        request_direction = MemoryOperationRequestPB::D2DISK;
         return true;
     }
     if (descriptor.source_tier == Tier::DISK && descriptor.target_tier == Tier::DEVICE) {
@@ -112,6 +125,20 @@ bool BlockTransferRequestConverter::decodeDeviceBlocks(const CopyItem&          
     return true;
 }
 
+std::optional<CacheTransferOperation>
+BlockTransferRequestConverter::decodePressureOperation(const MemoryOperationRequestPB& request) {
+    switch (request.pressure_operation()) {
+        case PRESSURE_LOAD:
+            return CacheTransferOperation::LOAD;
+        case PRESSURE_EVICT:
+            return CacheTransferOperation::EVICT;
+        case PRESSURE_STORE:
+            return CacheTransferOperation::STORE;
+        default:
+            return std::nullopt;  // Legacy/unknown labels do not affect physical transfers.
+    }
+}
+
 bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&       request,
                                                    const TransferTask&             task,
                                                    const std::vector<GroupSetPtr>& group_sets) {
@@ -125,6 +152,21 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
     request.set_transfer_parent_id(task.parentTraceId());
     request.set_has_transfer_request_id(task.requestId().has_value());
     request.set_transfer_request_id(task.requestId().value_or(0));
+    if (task.operation) {
+        switch (*task.operation) {
+            case CacheTransferOperation::LOAD:
+                request.set_pressure_operation(PRESSURE_LOAD);
+                break;
+            case CacheTransferOperation::EVICT:
+                request.set_pressure_operation(PRESSURE_EVICT);
+                break;
+            case CacheTransferOperation::STORE:
+                request.set_pressure_operation(PRESSURE_STORE);
+                break;
+        }
+    } else {
+        request.clear_pressure_operation();
+    }
     const auto& descriptors = task.descriptors();
     if (descriptors.empty()) {
         return false;
@@ -139,7 +181,9 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
     for (const TransferDescriptor& descriptor : descriptors) {
         if (!descriptor.isExecutable() || descriptor.group_set_id >= group_sets.size()
             || !group_sets[descriptor.group_set_id] || descriptor.source_tier != first.source_tier
-            || descriptor.target_tier != first.target_tier) {
+            || descriptor.target_tier != first.target_tier
+            || descriptor.isRemoteMock() != first.isRemoteMock()
+            || descriptor.isRemoteWrite() != first.isRemoteWrite()) {
             return false;
         }
         const GroupSet& group_set = *group_sets[descriptor.group_set_id];
@@ -148,25 +192,49 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
         if (has_device && descriptor.blocksAt(Tier::DEVICE).size() != group_tags.size()) {
             return false;
         }
-        auto* item = request.add_copy_items();
+        CopyItem item;
         for (const auto& tag : group_tags) {
-            item->add_group_tags(tag);
+            item.add_group_tags(tag);
         }
 
         if (descriptor.source_tier == Tier::HOST || descriptor.target_tier == Tier::HOST) {
-            item->set_mem_block(descriptor.singleBlockAt(Tier::HOST));
+            item.set_mem_block(descriptor.singleBlockAt(Tier::HOST));
         }
         if (descriptor.source_tier == Tier::DISK || descriptor.target_tier == Tier::DISK) {
-            item->set_disk_block(descriptor.singleBlockAt(Tier::DISK));
+            item.set_disk_block(descriptor.singleBlockAt(Tier::DISK));
         }
         if (has_device) {
             const auto& blocks = descriptor.blocksAt(Tier::DEVICE);
             for (size_t i = 0; i < blocks.size(); ++i) {
-                auto* group_block = item->add_group_blocks();
+                auto* group_block = item.add_group_blocks();
                 group_block->set_tag(group_tags[i]);
                 group_block->set_block_id(blocks[i]);
             }
         }
+        if (descriptor.isRemoteMock()) {
+            const auto& source = *descriptor.remote_source;
+            if (!source.session.server_epoch || !source.session.session_id || !source.session.generation) {
+                return false;
+            }
+            auto* remote = item.mutable_remote_mock_source();
+            remote->set_server_epoch(source.session.server_epoch);
+            remote->set_session_id(source.session.session_id);
+            remote->set_generation(source.session.generation);
+            remote->set_admission_offset(source.admission_offset);
+            remote->set_logical_index(source.logical_index);
+        }
+        if (descriptor.isRemoteWrite()) {
+            const auto& target = *descriptor.remote_target;
+            if (!target.session.server_epoch || !target.session.session_id || !target.session.generation) {
+                return false;
+            }
+            auto* remote = item.mutable_remote_mock_target();
+            remote->set_server_epoch(target.session.server_epoch);
+            remote->set_session_id(target.session.session_id);
+            remote->set_generation(target.session.generation);
+            remote->set_record_index(target.record_index);
+        }
+        request.add_copy_items()->CopyFrom(item);
     }
     return true;
 }
@@ -175,7 +243,8 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
                                                    std::vector<TransferDescriptor>& descriptors,
                                                    const std::vector<GroupSetPtr>&  group_sets,
                                                    bool                             allow_absent_group_sets,
-                                                   std::vector<size_t>*             wire_item_indices) {
+                                                   std::vector<size_t>*             wire_item_indices,
+                                                   const RemoteMockAdapter*         remote_adapter) {
     // This boundary is shared by the real RPC service and native smoke workers.
     // group_set links in-process ranks to worker_init and dispatcher_init logs.
     const auto log_decode = [&](const char* event, const char* result) noexcept {
@@ -227,7 +296,43 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
         }
         const GroupSet&    group_set = *group_set_ptr;
         TransferDescriptor descriptor;
+        if (item.has_remote_mock_source() != (request.copy_direction() == MemoryOperationRequestPB::REMOTE2D)
+            || item.has_remote_mock_target() != (request.copy_direction() == MemoryOperationRequestPB::D2REMOTE)) {
+            return false;
+        }
         switch (request.copy_direction()) {
+            case MemoryOperationRequestPB::D2REMOTE: {
+                std::vector<BlockIdxType> device_blocks;
+                const auto&               remote = item.remote_mock_target();
+                const RemoteMockSession   session{remote.server_epoch(), remote.session_id(), remote.generation()};
+                if (!remote_adapter || !(session == remote_adapter->session()) || item.mem_block() || item.disk_block()
+                    || !decodeDeviceBlocks(item, group_set, device_blocks)) {
+                    return false;
+                }
+                descriptor = TransferDescriptor::deviceToRemote(
+                    group_set.groupSetId(), session, remote.record_index(), std::move(device_blocks));
+                break;
+            }
+            case MemoryOperationRequestPB::REMOTE2D: {
+                std::vector<BlockIdxType> device_blocks;
+                const auto&               remote = item.remote_mock_source();
+                const RemoteMockSession   session{remote.server_epoch(), remote.session_id(), remote.generation()};
+                if (!remote_adapter || !session.server_epoch || !session.session_id || !session.generation
+                    || !(session == remote_adapter->session()) || item.mem_block() || item.disk_block()
+                    || !decodeDeviceBlocks(item, group_set, device_blocks)) {
+                    return false;
+                }
+                try {
+                    descriptor = TransferDescriptor::remoteToDevice(
+                        group_set.groupSetId(),
+                        remote_adapter->freezeSource(
+                            group_set.groupSetId(), remote.admission_offset(), remote.logical_index()),
+                        std::move(device_blocks));
+                } catch (...) {
+                    return false;
+                }
+                break;
+            }
             case MemoryOperationRequestPB::D2H: {
                 std::vector<BlockIdxType> device_blocks;
                 if (!group_set.hostPool() || !group_set.hostPool()->validBlock(item.mem_block())
@@ -256,6 +361,16 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
                 descriptor =
                     TransferDescriptor::hostToDisk(group_set.groupSetId(), item.mem_block(), item.disk_block());
                 break;
+            case MemoryOperationRequestPB::D2DISK: {
+                std::vector<BlockIdxType> device_blocks;
+                if (!group_set.diskPool() || !group_set.diskPool()->validBlock(item.disk_block())
+                    || !decodeDeviceBlocks(item, group_set, device_blocks)) {
+                    return false;
+                }
+                descriptor = TransferDescriptor::deviceToDisk(
+                    group_set.groupSetId(), std::move(device_blocks), item.disk_block());
+                break;
+            }
             case MemoryOperationRequestPB::DISK2D: {
                 std::vector<BlockIdxType> device_blocks;
                 if (!group_set.diskPool() || !group_set.diskPool()->validBlock(item.disk_block())

@@ -43,6 +43,15 @@ void invokeCompletion(TransferAsyncContext::DoneCallback& callback, TransferResu
 }
 }  // namespace
 
+bool TransferBatchAsyncContext::tryAdoptPendingCallbacks(CallbackList& callbacks) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (done_) {
+        return false;
+    }
+    callbacks_.splice(callbacks_.end(), callbacks);
+    return true;
+}
+
 void TransferBatchAsyncContext::waitDone() {
     std::unique_lock<std::mutex> lock(mutex_);
     done_cv_.wait(lock, [this] { return done_; });
@@ -63,6 +72,8 @@ void TransferBatchAsyncContext::onDone(DoneCallback callback) {
             } catch (...) {
                 result = unknownCompletionWithoutAllocation();
             }
+        } else if (!first_callback_ && callbacks_.empty()) {
+            first_callback_ = std::move(callback);
         } else {
             callbacks_.push_back(std::move(callback));
         }
@@ -97,8 +108,10 @@ void TransferBatchAsyncContext::complete(TransferResult result) {
     if (completion_proof_) {
         completion_proof_->report(result.buffer_safe);
     }
-    std::shared_ptr<void>     completion_guard;
-    std::vector<DoneCallback> callbacks;
+    std::shared_ptr<void> completion_guard;
+    DoneCallback          first_callback;
+    CallbackList          callbacks;
+    size_t                remaining_physical = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (done_) {
@@ -111,20 +124,37 @@ void TransferBatchAsyncContext::complete(TransferResult result) {
             // failure without requiring a second allocation under memory pressure.
             result = unknownCompletionWithoutAllocation();
         }
-        result_          = std::move(result);
-        done_            = true;
-        completion_guard = std::move(completion_guard_);
+        result_            = std::move(result);
+        done_              = true;
+        completion_guard   = std::move(completion_guard_);
+        first_callback     = std::move(first_callback_);
         callbacks.swap(callbacks_);
+        remaining_physical = physical_callback_count_;
     }
     done_cv_.notify_all();
-    for (auto& callback : callbacks) {
+    const auto deliver = [&](DoneCallback& callback) {
         TransferResult delivery;
         try {
             delivery = result_;
         } catch (...) {
             delivery = unknownCompletionWithoutAllocation();
         }
-        invokeCompletion(callback, std::move(delivery), true);
+        if (remaining_physical) {
+            --remaining_physical;
+            try {
+                callback(std::move(delivery));
+            } catch (...) {
+                failCompletionDelivery();
+            }
+        } else {
+            invokeCompletion(callback, std::move(delivery), true);
+        }
+    };
+    if (first_callback) {
+        deliver(first_callback);
+    }
+    for (auto& callback : callbacks) {
+        deliver(callback);
     }
 }
 

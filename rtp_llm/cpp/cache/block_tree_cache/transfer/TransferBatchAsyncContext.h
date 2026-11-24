@@ -19,6 +19,7 @@ public:
         completion_guard_(std::move(completion_guard)),
         completion_proof_(std::move(proof)) {}
 
+    bool           tryAdoptPendingCallbacks(CallbackList& callbacks) noexcept override;
     void           waitDone() override;
     void           onDone(DoneCallback callback) override;
     bool           done() const override;
@@ -28,14 +29,25 @@ public:
     void complete(TransferResult result);
 
 private:
+    friend class BlockTransferDispatcher;
+
+    void protectPhysicalCallbacks() noexcept {
+        physical_callback_count_ = callbacks_.size() + (first_callback_ ? 1 : 0);
+    }
+    void holdUntilCompletion(std::shared_ptr<void> guard) noexcept {
+        completion_guard_ = std::move(guard);
+    }
+
     mutable std::mutex                    mutex_;
     std::condition_variable               done_cv_;
     bool                                  done_{false};
     TransferResult                        result_;
     size_t                                block_count_{0};
+    size_t                                physical_callback_count_{0};
     std::shared_ptr<void>                 completion_guard_;
     std::shared_ptr<TransferBufferSafety> completion_proof_;
-    std::vector<DoneCallback>             callbacks_;
+    DoneCallback                          first_callback_;
+    CallbackList                          callbacks_;
 };
 
 }  // namespace rtp_llm

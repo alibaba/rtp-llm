@@ -58,6 +58,11 @@ public:
     // returns a completed failure and records one rejected observation.
     std::shared_ptr<TransferAsyncContext>
     execute(TransferTask&& task, BeforeCompleteCallback&& before_complete = {}, bool* retryable = nullptr);
+    std::shared_ptr<TransferAsyncContext> executeHostBuffers(TransferTask&&              task,
+                                                             std::vector<HostBufferView> hosts,
+                                                             std::shared_ptr<void>       owner,
+                                                             BeforeCompleteCallback&&    before_complete = {},
+                                                             bool*                       retryable       = nullptr);
     // Fixed limit supplied by PerRank for both operation owners.
     size_t batchLimit() const noexcept {
         return batch_limit_;
@@ -73,7 +78,8 @@ public:
     size_t outstandingBatches() const;
 
 private:
-    std::shared_ptr<TransferAsyncContext> reject(const TransferTask& task, const char* message, ErrorCode code);
+    std::shared_ptr<TransferAsyncContext>
+    reject(const TransferTask& task, const char* message, ErrorCode code, BeforeCompleteCallback* before_complete = nullptr);
     struct Entry;
     using Entries       = std::list<std::unique_ptr<Entry>>;
     using WaitDeadlines = std::multimap<TransferTask::Clock::time_point, Entry*>;
@@ -109,6 +115,8 @@ private:
         BeforeCompleteCallback                      before_complete;
         Step                                        step{Step::DISK_READ};  // Set by the initial plan.
         std::vector<HostBufferView>                 hosts;
+        std::shared_ptr<void>                       external_owner;
+        bool                                        external_hosts{false};
         HostStagingBlockPool::HostStagingBlockBatch staging;
         Entries::iterator                           position;
         Entry*                                      next{nullptr};

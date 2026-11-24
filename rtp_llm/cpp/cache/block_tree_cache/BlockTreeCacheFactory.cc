@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheLayout.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/remote_mock/RemoteMockAdapter.h"
 
 #include <algorithm>
 #include <cctype>
@@ -22,6 +23,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/MockDiskCacheSource.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/MockMemoryCacheSource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyGeometry.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
@@ -365,6 +368,75 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                        std::shared_ptr<BroadcastManager>           broadcast_manager,
                                        std::shared_ptr<kmonitor::MetricsReporter>  metrics_reporter,
                                        std::shared_ptr<const BlockTreeCacheLayout> layout) {
+    if (kv_cache_config.mock_remote_cache) {
+        if (parallelism_config.tp_size > 1 && parallelism_config.tp_rank == 0
+            && (!broadcast_manager
+                || broadcast_manager->workerNum() != static_cast<size_t>(parallelism_config.tp_size))) {
+            RTP_LLM_LOG_ERROR("mock remote TP owner requires all-rank model RPC routing");
+            return nullptr;
+        }
+        try {
+            kv_cache_config.validateMockCacheConfig();
+        } catch (const std::exception& error) {
+            RTP_LLM_LOG_ERROR("%s", error.what());
+            return nullptr;
+        }
+        if (!kv_cache_config.reuse_cache) {
+            RTP_LLM_LOG_ERROR("mock_remote_cache requires reuse_cache=true");
+            return nullptr;
+        }
+    }
+    if (kv_cache_config.mock_disk_cache) {
+        if (!kv_cache_config.reuse_cache || !kv_cache_config.enable_disk_cache || kv_cache_config.disk_cache_buffered_io
+            || kv_cache_config.disk_cache_size_mb <= 0 || kv_cache_config.disk_cache_paths.empty()
+            || kv_cache_config.mock_disk_cache_source_blocks == 0) {
+            RTP_LLM_LOG_ERROR("mock_disk_cache requires reuse_cache, real disk cache with direct I/O, positive "
+                              "capacity, a disk path and positive source blocks");
+            return nullptr;
+        }
+        if (!std::isfinite(kv_cache_config.mock_disk_cache_hit_ratio) || kv_cache_config.mock_disk_cache_hit_ratio < 0
+            || kv_cache_config.mock_disk_cache_hit_ratio > 1) {
+            RTP_LLM_LOG_ERROR("mock_disk_cache_hit_ratio must be finite and in [0,1]");
+            return nullptr;
+        }
+        const double memory_ratio = kv_cache_config.mock_memory_cache ? kv_cache_config.mock_memory_cache_hit_ratio : 0;
+        if (memory_ratio + kv_cache_config.mock_disk_cache_hit_ratio > 1) {
+            RTP_LLM_LOG_ERROR("active mock Memory+Disk hit ratios must sum to <= 1");
+            return nullptr;
+        }
+        RTP_LLM_LOG_WARNING("mock_disk_cache is enabled: model outputs are invalid; use for pressure testing only");
+    }
+    if (kv_cache_config.mock_memory_cache_real_match && !kv_cache_config.mock_memory_cache
+        && !kv_cache_config.mock_disk_cache && !kv_cache_config.mock_remote_cache) {
+        RTP_LLM_LOG_ERROR("mock_memory_cache_real_match requires mock_memory_cache=true");
+        return nullptr;
+    }
+    if (kv_cache_config.mock_memory_cache) {
+        if (!kv_cache_config.reuse_cache) {
+            RTP_LLM_LOG_ERROR("mock_memory_cache requires reuse_cache=true");
+            return nullptr;
+        }
+        if (!kv_cache_config.enable_memory_cache) {
+            RTP_LLM_LOG_ERROR("mock_memory_cache requires enable_memory_cache=true");
+            return nullptr;
+        }
+        if (kv_cache_config.memory_cache_size_mb <= 0) {
+            RTP_LLM_LOG_ERROR("mock_memory_cache requires memory_cache_size_mb > 0, got %ld",
+                              kv_cache_config.memory_cache_size_mb);
+            return nullptr;
+        }
+        if (!std::isfinite(kv_cache_config.mock_memory_cache_hit_ratio)
+            || kv_cache_config.mock_memory_cache_hit_ratio < 0.0 || kv_cache_config.mock_memory_cache_hit_ratio > 1.0) {
+            RTP_LLM_LOG_ERROR("mock_memory_cache_hit_ratio must be finite and in [0.0, 1.0], got %g",
+                              kv_cache_config.mock_memory_cache_hit_ratio);
+            return nullptr;
+        }
+        if (kv_cache_config.mock_memory_cache_source_blocks == 0) {
+            RTP_LLM_LOG_ERROR("mock_memory_cache_source_blocks must be > 0");
+            return nullptr;
+        }
+        RTP_LLM_LOG_WARNING("mock_memory_cache is enabled: model outputs are invalid; use for pressure testing only");
+    }
     const auto device_eviction_policy = parseEvictionPolicy(kv_cache_config.device_eviction_policy);
     const auto host_eviction_policy   = parseEvictionPolicy(kv_cache_config.memory_eviction_policy);
     const auto disk_eviction_policy   = parseEvictionPolicy(kv_cache_config.disk_eviction_policy);
@@ -710,9 +782,74 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     }
     // Only tp_rank 0 drives normal request scheduling, so it is the
     // single rank per DP group that owns a mutable BlockTree worth scanning.
-    const bool owns_mutable_block_tree =
-        parallelism_config.tp_rank == 0;
+    const bool owns_mutable_block_tree  = parallelism_config.tp_rank == 0;
     config.full_prefix_scan_interval_ms = owns_mutable_block_tree ? configured_scan_interval_ms : 0;
+    config.mock_memory_cache            = kv_cache_config.mock_memory_cache;
+    config.mock_memory_cache_real_match =
+        kv_cache_config.mock_memory_cache || kv_cache_config.mock_disk_cache || kv_cache_config.mock_remote_cache;
+    config.mock_memory_cache_hit_ratio   = kv_cache_config.mock_memory_cache_hit_ratio;
+    config.mock_memory_cache_coordinator = owns_mutable_block_tree;
+    config.mock_remote_cache             = kv_cache_config.mock_remote_cache;
+    config.mock_remote_cache_hit_ratio   = kv_cache_config.mock_remote_cache_hit_ratio;
+    config.mock_remote_cache_timeout_ms  = kv_cache_config.mock_remote_cache_timeout_ms;
+    config.mock_disk_cache               = kv_cache_config.mock_disk_cache;
+    config.mock_disk_cache_hit_ratio     = kv_cache_config.mock_disk_cache_hit_ratio;
+    config.mock_disk_cache_seed          = kv_cache_config.mock_disk_cache_seed;
+    config.mock_disk_cache_source_blocks = kv_cache_config.mock_disk_cache_source_blocks;
+
+    CachePressureOwnership ownership;
+    const int              base_rank = parallelism_config.world_rank - parallelism_config.tp_rank;
+    ownership.owner_world_rank       = base_rank;
+    if (parallelism_config.pp_size == 1) {
+        if (parallelism_config.tp_size == 1) {
+            ownership.mode                    = CachePressureOwnership::Mode::INDEPENDENT;
+            ownership.participant_world_ranks = {parallelism_config.world_rank};
+        } else if (parallelism_config.tp_size > 1
+                   && (parallelism_config.tp_rank > 0
+                       || (broadcast_manager
+                           && broadcast_manager->workerNum() == static_cast<size_t>(parallelism_config.tp_size)))) {
+            // Root settlement waits for every worker's result. Peers declare
+            // shared addressing; the consumer must verify the owner's scope too.
+            ownership.mode                        = CachePressureOwnership::Mode::SHARED_TP;
+            ownership.all_participant_publication = true;
+            for (int rank = 0; rank < parallelism_config.tp_size; ++rank) {
+                ownership.participant_world_ranks.push_back(base_rank + rank);
+            }
+        }
+    }
+    config.pressure_ownership = std::move(ownership);
+
+    std::shared_ptr<MockMemoryCacheSource> mock_memory_cache_source;
+    if (kv_cache_config.mock_memory_cache) {
+        auto source = MockMemoryCacheSource::create(
+            group_sets, kv_cache_config.mock_memory_cache_source_blocks, kv_cache_config.mock_memory_cache_seed);
+        if (!source.ok()) {
+            RTP_LLM_LOG_ERROR("mock_memory_cache source initialization failed: %s", source.status().ToString().c_str());
+            return nullptr;
+        }
+        mock_memory_cache_source = std::move(source).value();
+        for (const auto& group : group_sets) {
+            RTP_LLM_LOG_WARNING("mock_memory_cache source group_set[%zu]: blocks=%zu payload_bytes=%zu "
+                                "reserved_bytes=%zu; model outputs are invalid",
+                                group->groupSetId(),
+                                mock_memory_cache_source->sourceBlockCount(group->groupSetId()),
+                                group->payloadBytes(),
+                                kv_cache_config.mock_memory_cache_source_blocks * group->hostPool()->strideBytes());
+        }
+    }
+
+    // Every TP rank reserves the same source indices and initializes its own
+    // file before it can replay coordinator descriptors. No cache mutex exists yet.
+    std::shared_ptr<MockDiskCacheSource> mock_disk_cache_source;
+    if (kv_cache_config.mock_disk_cache) {
+        auto source = MockDiskCacheSource::create(
+            group_sets, kv_cache_config.mock_disk_cache_source_blocks, kv_cache_config.mock_disk_cache_seed);
+        if (!source.ok()) {
+            RTP_LLM_LOG_ERROR("mock_disk_cache source initialization failed: %s", source.status().ToString().c_str());
+            return nullptr;
+        }
+        mock_disk_cache_source = std::move(source).value();
+    }
 
     auto cache_metrics_reporter = std::make_shared<BlockTreeCacheMetricsReporter>(std::move(metrics_reporter));
     auto per_rank_engine        = std::make_shared<PerRankBlockTransferEngine>(group_sets,
@@ -724,10 +861,21 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                                                         cache_metrics_reporter,
                                                                         parallelism_config.world_rank,
                                                                         crc_slots_per_loop);
+    std::shared_ptr<RemoteMockAdapter> remote_adapter;
+    if (kv_cache_config.mock_remote_cache) {
+        try {
+            remote_adapter =
+                RemoteMockAdapter::create(kv_cache_config, parallelism_config, group_sets, per_rank_engine);
+            per_rank_engine->setRemoteMockAdapter(remote_adapter, owns_mutable_block_tree);
+        } catch (const std::exception& error) {
+            RTP_LLM_LOG_ERROR("mock remote startup failed: %s", error.what());
+            return nullptr;
+        }
+    }
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {
         multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(
-            group_sets, std::move(broadcast_manager), cache_metrics_reporter);
+            group_sets, std::move(broadcast_manager), cache_metrics_reporter, remote_adapter);
     }
     auto transfer_dispatcher =
         std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine), std::move(multi_rank_engine));
@@ -744,7 +892,10 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                                    std::move(storage_backend),
                                                    std::move(transfer_dispatcher),
                                                    std::move(task_pool),
-                                                   std::move(cache_metrics_reporter));
+                                                   std::move(cache_metrics_reporter),
+                                                   std::move(mock_memory_cache_source),
+                                                   std::move(mock_disk_cache_source),
+                                                   std::move(remote_adapter));
     if (result->isRemoteCacheEnabled()) {
         const std::shared_ptr<const CacheTopology> storage_topology = cache_topology;
         const CacheConfig                          storage_config   = cache_config;

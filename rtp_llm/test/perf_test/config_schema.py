@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import math
+import os
 import re
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Tuple, Union
@@ -297,6 +298,7 @@ class PrefillWorkloadConfig:
     random_request_batches: Optional[RandomRequestBatchesConfig] = None
     traffic_request_batches: Optional[TrafficRequestBatchesConfig] = None
     logarithmic_request_batches: Optional[LogarithmicRequestBatchesConfig] = None
+    pressure: Optional[Dict[str, Any]] = None
     grids: Tuple[PrefillGridConfig, ...] = ()
     transport: str = DEFAULT_PREFILL_TRANSPORT
     request_timeout_seconds: float = DEFAULT_PREFILL_REQUEST_TIMEOUT_SECONDS
@@ -1128,6 +1130,86 @@ def _parse_workload(value: Any) -> WorkloadConfig:
     raw = _object("workload", value)
     kind = _non_empty_string("workload.kind", _required("workload", raw, "kind"))
     if kind == "cache_grid":
+        if "pressure" in raw:
+            from dataclasses import asdict
+
+            from rtp_llm.test.continuous_pressure.adapters.rtp_llm_rpc import (
+                pressure_settings,
+            )
+
+            settings = dict(_object("workload.pressure", raw["pressure"]))
+            concurrency = _positive_int(
+                "workload.pressure.concurrency", settings.pop("concurrency", 16)
+            )
+            capture = _boolean(
+                "workload.pressure.capture", settings.pop("capture", False)
+            )
+            remote_manifest = settings.pop("remote_launch_manifest", None)
+            if remote_manifest is not None:
+                _non_empty_string(
+                    "workload.pressure.remote_launch_manifest", remote_manifest
+                )
+                if not os.path.isabs(remote_manifest):
+                    raise ConfigError(
+                        "remote_launch_manifest requires an absolute launch manifest path"
+                    )
+            seed_count = settings.pop("seed_count", None)
+            if seed_count is not None:
+                _positive_int("workload.pressure.seed_count", seed_count)
+            rate = settings.pop("request_rate", 0)
+            if type(rate) not in (int, float) or not math.isfinite(rate) or rate < 0:
+                raise ConfigError(
+                    "workload.pressure.request_rate must be finite and nonnegative"
+                )
+            poisson = _boolean(
+                "workload.pressure.poisson", settings.pop("poisson", False)
+            )
+            if "mock_cache_settings" in settings:
+                raise ConfigError(
+                    "configure provider deployment options in engine.args or engine.env"
+                )
+            try:
+                pressure = pressure_settings(settings)
+            except (ValueError, TypeError) as error:
+                raise ConfigError(str(error)) from error
+            if pressure.rate_control == "adaptive_backlog" and (poisson or rate):
+                raise ConfigError(
+                    "adaptive pressure controls its own constant arrivals"
+                )
+            if pressure.family_schedule == "tiered_rolling" and (
+                (pressure.cohort_size or concurrency) % 2 or rate
+            ):
+                raise ConfigError(
+                    "tiered rolling requires an even cohort and its own supply rate"
+                )
+            workload = _parse_prefill_workload(
+                {k: v for k, v in raw.items() if k != "pressure"}
+            )
+            if (
+                workload.grids
+                or workload.request_batches
+                or workload.traffic_request_batches
+                or workload.random_request_batches
+                or workload.logarithmic_request_batches
+            ):
+                raise ConfigError(
+                    "continuous pressure requires an ungrouped generated grid"
+                )
+            if workload.transport != "dashsc_input_ids" or workload.batch_sizes != (1,):
+                raise ConfigError(
+                    "continuous pressure requires dashsc_input_ids and batch_size=1"
+                )
+            frozen = asdict(pressure)
+            frozen.pop("mock_cache_settings")
+            frozen.update(
+                remote_launch_manifest=remote_manifest,
+                concurrency=concurrency,
+                capture=capture,
+                seed_count=seed_count,
+                request_rate=rate,
+                poisson=poisson,
+            )
+            return replace(workload, pressure=frozen)
         return _parse_prefill_workload(raw)
     common = {
         "kind",
@@ -1315,6 +1397,55 @@ def parse_config(
         regression=_parse_regression(_required("", raw, "regression")),
         publish=_parse_publish(_required("", raw, "publish")),
     )
+    if (
+        isinstance(config.workload, PrefillWorkloadConfig)
+        and config.workload.pressure is not None
+    ):
+        if (
+            config.execution.backend != "local"
+            or config.model.topology.dp != 1
+            or config.model.topology.pp != 1
+        ):
+            raise ConfigError("continuous pressure requires local DP=1 and PP=1")
+        options = config.engine.args
+        environment = config.engine.env
+        if (
+            "use_batch_decode_scheduler" in options
+            or "USE_BATCH_DECODE_SCHEDULER" in environment
+        ):
+            raise ConfigError("continuous pressure owns the FIFO scheduler option")
+        if str(
+            options.get(
+                "cp_force_single_prefill", environment.get("CP_FORCE_SINGLE_PREFILL", 0)
+            )
+        ).lower() not in {"0", "false"}:
+            raise ConfigError("continuous pressure requires CP_FORCE_SINGLE_PREFILL=0")
+        pressure = config.workload.pressure
+        from rtp_llm.test.continuous_pressure.adapters.rtp_llm_rpc import (
+            provider_settings,
+        )
+
+        try:
+            provider_settings(options, environment, pressure)
+        except (ValueError, TypeError) as error:
+            raise ConfigError(str(error)) from error
+        for size in (
+            pressure["fill_input_tokens"],
+            max(32768, max(config.workload.cache_lengths, default=0))
+            + config.workload.commit_tail_tokens,
+        ):
+            if size + 1 > min(
+                config.engine.max_seq_len, config.engine.max_batch_tokens
+            ):
+                raise ConfigError(
+                    "pressure seed/fill plus output exceeds engine token limits"
+                )
+        if (
+            pressure["capture"]
+            and config.workload.profiling.backend == "nsys"
+            and not pressure["nsys_duration_s"]
+        ):
+            raise ConfigError("Nsight pressure capture requires nsys_duration_s")
     if config.model.topology.pp != 1:
         raise ConfigError("model.topology.pp: fixed-batch measurement requires PP=1")
     if (

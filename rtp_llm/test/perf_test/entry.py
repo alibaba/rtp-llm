@@ -222,8 +222,23 @@ def _persisted_plan(request: CliRequest) -> tuple[ExecutionPlan, Dict[str, Any]]
         validate_aone_capability if plan.backend == "aone" else validate_capability
     )
     validator(plan.mode, request.action, plan.backend)
-    if plan.mode == "prefill" and request.action in ("resume", "profile"):
+    if (
+        plan.mode == "prefill"
+        and request.action in ("resume", "profile")
+        and not plan.resolved_config["workload"].get("pressure")
+    ):
         require_concurrent_prefill_plan(plan)
+    if request.cases and plan.resolved_config["workload"].get("pressure"):
+        raise ConfigurationError(
+            "continuous pressure profile/resume requires the whole grid"
+        )
+    if (
+        request.action == "profile"
+        and plan.resolved_config["workload"].get("pressure")
+        and plan.resolved_config["workload"]["profiling"]["backend"] == "nsys"
+        and not plan.resolved_config["workload"]["pressure"]["nsys_duration_s"]
+    ):
+        raise ConfigurationError("Nsight pressure capture requires nsys_duration_s")
     if request.cases:
         unknown = sorted(set(request.cases) - {item.case_id for item in plan.cases})
         if unknown:

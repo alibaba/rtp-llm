@@ -73,6 +73,8 @@ public:
     // Outputs the resident key-prefix count; ordinary inserts report zero.
     void reclaimLinearHistory(const BatchKVCacheResourcePtr& resource, int committed_tokens, bool reuse_cache);
     void insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length);
+    void completeRemoteRequest(const std::shared_ptr<BlockTreeCache::RemoteCompletionRequest>& request,
+                               const BatchKVCacheResource&                                     resource);
 
     // Decode-side P/D admission allocates destination blocks before cache handoff.  When pools are
     // temporarily full, waiters use this generation instead of polling malloc in a tight loop.
@@ -158,6 +160,7 @@ public:
     // Returns whether a trustworthy mem_response was formed, not whether the transfer
     // succeeded; the transfer outcome is reported through mem_response.code.
     bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
+    ErrorResult<CachePressureSnapshot> getCachePressure() const;
 
     // Handle a decode-side StartLoad RPC directly through P2PConnector.
     void handleRead(const P2PConnectorStartLoadRequestPB& request,

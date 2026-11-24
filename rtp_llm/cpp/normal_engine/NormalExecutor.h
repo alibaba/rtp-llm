@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/normal_engine/AsyncRunner.h"
+#include "rtp_llm/cpp/normal_engine/PressureStepRecorder.h"
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -52,6 +53,10 @@ public:
         model_ = std::move(model);
     }
 
+    void setPressureRecorder(std::shared_ptr<PressureStepRecorder> recorder) {
+        pressure_recorder_ = std::move(recorder);
+    }
+
     // Test hook: if set, used to create model when py_model is None
     using ModelFactory = std::function<std::unique_ptr<ModelBase>(const GptModelInitParams&)>;
     static ModelFactory test_model_factory;
@@ -92,6 +97,7 @@ protected:
     void checkModelInputsOnCuda(const GptModelInputs& model_input, const char* tag) const;
 
 private:
+    std::shared_ptr<PressureStepRecorder>                                    pressure_recorder_;
     std::unique_ptr<ModelBase>                                               model_;
     std::unique_ptr<Sampler>                                                 sampler_;
     std::unique_ptr<NormalBatchStreamProcessor>                              batch_stream_processor_;

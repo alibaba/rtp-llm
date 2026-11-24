@@ -42,7 +42,10 @@ std::string IBlockPool::debugString() const {
         << ", load_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::LOAD)]
         << ", eviction_ref_blocks="
         << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::EVICT)]
-        << ", frozen_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::FROZEN)] << "}";
+        << ", store_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::STORE)]
+        << ", frozen_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::FROZEN)]
+        << ", mock_source_ref_blocks="
+        << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::MOCK_SOURCE)] << "}";
     return oss.str();
 }
 
@@ -59,12 +62,17 @@ std::optional<BlockIdList> IBlockPool::malloc(size_t n) {
     return mallocNoLock(n);
 }
 
+void IBlockPool::stopAllocation() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    allocation_stopped_ = true;
+}
+
 std::optional<BlockIdList> IBlockPool::mallocNoLock(size_t n) {
     checkInitializedNoLock();
     if (n == 0) {
         return BlockIdList{};
     }
-    if (availableFreeBlocksNoLock() < n) {
+    if (allocation_stopped_ || availableFreeBlocksNoLock() < n) {
         return std::nullopt;
     }
     if (free_blocks_.size() - free_head_ < n) {

@@ -3,20 +3,43 @@
 #include <algorithm>
 #include <exception>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 #include <type_traits>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/remote_mock/RemoteMockAdapter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageTimer.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
 namespace {
+
+struct RemoteDevicePins {
+    std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> pins;
+    std::vector<size_t>                                      descriptor_indices;
+    std::vector<GroupSetPtr>                                 groups;
+    BlockTreeRefType                                         type{BlockTreeRefType::LOAD};
+    bool settled{false};  // Protected by RemoteState::mutex, including submission exceptions.
+    ~RemoteDevicePins() {
+        for (const auto& pin : pins) {
+            if (pin.first)
+                pin.first->decTreeRef(pin.second, type);
+        }
+    }
+};
+
+ErrorInfo remoteFaultError() {
+    return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
+                     "remote mock TP transport outcome unknown; full engine restart required");
+}
 
 using TransferBroadcastResult = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
 
@@ -24,6 +47,8 @@ class MultiRankTransferAsyncContext final:
     public TransferAsyncContext,
     public std::enable_shared_from_this<MultiRankTransferAsyncContext> {
 public:
+    using CompletionHook = std::function<void(TransferResult&)>;
+
     static std::shared_ptr<MultiRankTransferAsyncContext>
     create(const std::vector<std::string>&                worker_addresses,
            size_t                                         block_count,
@@ -32,9 +57,10 @@ public:
            int64_t                                        request_id,
            uint64_t                                       transfer_id,
            CacheStageContext                              identity,
-           const char*                                    completion_operation) {
+           const char*                                    completion_operation,
+           CompletionHook                                 completion_hook = {}) {
         auto context = std::shared_ptr<MultiRankTransferAsyncContext>(
-            new MultiRankTransferAsyncContext(worker_addresses.size(), block_count));
+            new MultiRankTransferAsyncContext(worker_addresses.size(), block_count, std::move(completion_hook)));
         context->wait_timer_          = std::move(wait_timer);
         context->reporter_            = std::move(reporter);
         context->request_id_          = request_id;
@@ -120,6 +146,10 @@ public:
         completion_.waitDone();
     }
 
+    bool tryAdoptPendingCallbacks(CallbackList& callbacks) noexcept override {
+        return completion_.tryAdoptPendingCallbacks(callbacks);
+    }
+
     void onDone(DoneCallback callback) override {
         completion_.onDone(std::move(callback));
     }
@@ -143,8 +173,11 @@ public:
     }
 
 private:
-    MultiRankTransferAsyncContext(size_t worker_count, size_t block_count):
-        worker_count_(worker_count), block_count_(block_count), completion_(block_count) {}
+    MultiRankTransferAsyncContext(size_t worker_count, size_t block_count, CompletionHook completion_hook):
+        worker_count_(worker_count),
+        block_count_(block_count),
+        completion_(block_count),
+        completion_hook_(std::move(completion_hook)) {}
 
     void prepareCallback() {
         std::shared_ptr<MultiRankTransferAsyncContext> self = shared_from_this();
@@ -324,6 +357,16 @@ private:
             }
             finishing_ = true;
         }
+        if (completion_hook_) {
+            completion_hook_(result);
+            try {
+                published_result = result;
+            } catch (...) {
+                published_result.status.setErrorCode(result.status.code());
+                published_result.copy_error = result.copy_error;
+            }
+            completion_hook_ = {};
+        }
         if (auto probe =
                 block_tree_cache_detail::after_transfer_completion_claim_for_test.load(std::memory_order_acquire))
             probe();
@@ -391,17 +434,135 @@ private:
     uint64_t                                       transfer_id_{0};
     CacheStageContext                              identity_;
     CacheStageContext                              completion_identity_;
+    CompletionHook                                 completion_hook_;
 };
 
 }  // namespace
 
+struct MultiRankBlockTransferEngine::RemoteState {
+    struct Pool {
+        DeviceBlockPoolPtr   pool;
+        std::vector<uint8_t> held;
+    };
+    RemoteState(std::vector<GroupSetPtr> groups, const std::shared_ptr<RemoteMockAdapter>& adapter):
+        groups(std::move(groups)), adapter(adapter), max_write_descriptors(adapter->maxWritebackDescriptors()) {
+        for (const auto& group : this->groups)
+            for (const auto& pool : group->devicePools()) {
+                if (std::none_of(pools.begin(), pools.end(), [&](const Pool& item) { return item.pool == pool; }))
+                    pools.push_back({pool, std::vector<uint8_t>(pool->totalBlocksNum() + 1, 0)});
+            }
+    }
+    ~RemoteState() {
+        for (const auto& pool : pools)
+            pool.pool->stopAllocation();
+        for (const auto& pool : pools)
+            for (size_t block = 1; block < pool.held.size(); ++block)
+                if (pool.held[block])
+                    pool.pool->decTreeRef(block, static_cast<BlockTreeRefType>(pool.held[block] - 1));
+    }
+    std::shared_ptr<RemoteDevicePins> capture(const TransferTask& task) {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (safety.faulted)
+            return nullptr;
+        auto owner       = std::make_shared<RemoteDevicePins>();
+        owner->groups    = groups;
+        const bool store = task.descriptors().front().isRemoteWrite();
+        owner->type      = store ? BlockTreeRefType::STORE : BlockTreeRefType::LOAD;
+        size_t count     = 0;
+        for (const auto& desc : task.descriptors()) {
+            const auto& pools  = groups.at(desc.group_set_id)->devicePools();
+            const auto& blocks = store ? desc.source_blocks : desc.target_blocks;
+            if ((store ? !desc.isRemoteWrite() : !desc.isRemoteMock()) || blocks.size() != pools.size())
+                throw std::invalid_argument("invalid Remote GPU source/target shape");
+            for (size_t member = 0; member < pools.size(); ++member)
+                if (!pools[member]->validBlock(blocks[member]) || !pools[member]->isAllocated(blocks[member]))
+                    throw std::invalid_argument("Remote GPU source/target is not allocated");
+            count += blocks.size();
+        }
+        owner->pins.reserve(count);
+        owner->descriptor_indices.reserve(count);
+        for (size_t index = 0; index < task.descriptors().size(); ++index) {
+            const auto& desc   = task.descriptors()[index];
+            const auto& pools  = groups[desc.group_set_id]->devicePools();
+            const auto& blocks = store ? desc.source_blocks : desc.target_blocks;
+            for (size_t member = 0; member < pools.size(); ++member) {
+                const auto pin = std::make_pair(pools[member], blocks[member]);
+                pools[member]->incTreeRef(blocks[member], owner->type);
+                owner->pins.push_back(pin);
+                owner->descriptor_indices.push_back(index);
+            }
+        }
+        return owner;
+    }
+    void finish(const std::shared_ptr<RemoteDevicePins>& owner, TransferResult& result) {
+        bool stop    = false;
+        bool faulted = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (result.status.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN && !owner->settled) {
+                stop           = !safety.faulted;
+                safety.faulted = true;
+                for (size_t i = 0; i < owner->pins.size(); ++i) {
+                    if (!result.completionUnknown(owner->descriptor_indices[i]))
+                        continue;
+                    auto& pin  = owner->pins[i];
+                    auto  pool = std::find_if(
+                        pools.begin(), pools.end(), [&](const Pool& item) { return item.pool == pin.first; });
+                    RTP_LLM_CHECK(pool != pools.end());
+                    if (!pool->held[pin.second]) {
+                        pool->held[pin.second] = static_cast<uint8_t>(owner->type) + 1;
+                        ++safety.quarantined_blocks;
+                        pin.first.reset();
+                    }
+                }
+            }
+            owner->settled = true;
+            faulted        = safety.faulted;
+        }
+        if (stop) {
+            if (auto retained = adapter.lock()) {
+                try {
+                    retained->stopAccepting();
+                } catch (...) {
+                    RTP_LLM_LOG_ERROR("remote mock cancellation failed after quarantine");
+                }
+            }
+        }
+        if (faulted) {
+            TransferResult fault;
+            fault.status.setErrorCode(ErrorCode::EXECUTION_EXCEPTION);
+            fault.copy_error = CacheCopyError::RPC_FAILED;
+            try {
+                fault.status = remoteFaultError();
+            } catch (const std::bad_alloc&) {}
+            result.merge(std::move(fault));
+        }
+    }
+    RemoteMockSafetySnapshot snapshot() const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return safety;
+    }
+    std::vector<GroupSetPtr>         groups;
+    std::weak_ptr<RemoteMockAdapter> adapter;
+    const size_t                     max_write_descriptors;
+    std::vector<Pool>                pools;
+    mutable std::mutex               mutex;
+    RemoteMockSafetySnapshot         safety;
+};
+
 MultiRankBlockTransferEngine::MultiRankBlockTransferEngine(
     std::vector<GroupSetPtr>                       group_sets,
     std::shared_ptr<BroadcastManager>              broadcast_manager,
-    std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter):
+    std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter,
+    std::shared_ptr<RemoteMockAdapter>             remote_adapter):
+    remote_state_(remote_adapter ? std::make_shared<RemoteState>(group_sets, remote_adapter) : nullptr),
     group_sets_(std::move(group_sets)),
     broadcast_manager_(std::move(broadcast_manager)),
     metrics_reporter_(std::move(metrics_reporter)) {}
+
+RemoteMockSafetySnapshot MultiRankBlockTransferEngine::remoteMockSafety() const {
+    return remote_state_ ? remote_state_->snapshot() : RemoteMockSafetySnapshot{};
+}
 
 const std::vector<std::string>& MultiRankBlockTransferEngine::participantAddresses() const {
     static const std::vector<std::string> empty;
@@ -433,6 +594,12 @@ std::shared_ptr<TransferAsyncContext> MultiRankBlockTransferEngine::execute(Tran
                 CacheCopyError::NOT_EXECUTED),
             block_count);
     };
+    if (has_descriptors && task.descriptors().front().remote_target
+        && (!remote_state_ || block_count > remote_state_->max_write_descriptors)) {
+        return std::make_shared<CompletedTransferAsyncContext>(
+            ErrorInfo(ErrorCode::INVALID_PARAMS, "remote write batch exceeds physical/configured descriptor limit"),
+            block_count);
+    }
     FunctionRequestPB function_request;
     auto&             request = *function_request.mutable_mem_request();
     if (!BlockTransferRequestConverter::encodeTransfer(request, task, group_sets_)) {
@@ -447,20 +614,50 @@ std::shared_ptr<TransferAsyncContext> MultiRankBlockTransferEngine::execute(Tran
         return std::make_shared<CompletedTransferAsyncContext>(
             ErrorInfo(ErrorCode::INVALID_PARAMS, "missing transfer broadcast manager"), block_count);
     }
-    const auto                     remaining = task.remainingTimeout();
+    const auto remaining = task.remainingTimeout();
     if (!remaining) {
         return deadline_exceeded();
     }
     const int broadcast_timeout_ms = static_cast<int>(remaining->count());
     request.set_timeout_ms(broadcast_timeout_ms);
-    auto context = MultiRankTransferAsyncContext::create(broadcast_manager_->workerAddresses(),
-                                                         block_count,
-                                                         std::move(wait_timer),
-                                                         metrics_reporter_,
-                                                         task.requestId().value_or(-1),
-                                                         task.traceId(),
-                                                         identity,
-                                                         completion_operation);
+    std::shared_ptr<RemoteDevicePins> remote_owner;
+    if (task.descriptors().front().isRemoteMock() || task.descriptors().front().isRemoteWrite()) {
+        if (!remote_state_)
+            return std::make_shared<CompletedTransferAsyncContext>(
+                ErrorInfo(ErrorCode::INVALID_PARAMS, "Remote TP safety state unavailable"), block_count);
+        try {
+            remote_owner = remote_state_->capture(task);
+        } catch (const std::exception& error) {
+            return std::make_shared<CompletedTransferAsyncContext>(ErrorInfo(ErrorCode::INVALID_PARAMS, error.what()),
+                                                                   block_count);
+        }
+        if (!remote_owner)
+            return std::make_shared<CompletedTransferAsyncContext>(remoteFaultError(), block_count);
+    }
+    MultiRankTransferAsyncContext::CompletionHook hook;
+    if (remote_owner) {
+        hook = [state = remote_state_, owner = remote_owner](TransferResult& result) { state->finish(owner, result); };
+    }
+    std::shared_ptr<MultiRankTransferAsyncContext> context;
+    try {
+        context = MultiRankTransferAsyncContext::create(broadcast_manager_->workerAddresses(),
+                                                        block_count,
+                                                        std::move(wait_timer),
+                                                        metrics_reporter_,
+                                                        task.requestId().value_or(-1),
+                                                        task.traceId(),
+                                                        identity,
+                                                        completion_operation,
+                                                        std::move(hook));
+    } catch (...) {
+        if (!remote_owner)
+            throw;
+        TransferResult result;
+        result.status.setErrorCode(ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+        result.copy_error = CacheCopyError::RPC_FAILED;
+        remote_state_->finish(remote_owner, result);
+        return std::make_shared<CompletedTransferAsyncContext>(std::move(result), block_count);
+    }
     std::shared_ptr<TransferBroadcastResult> broadcast_result;
     try {
         broadcast_result = broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(

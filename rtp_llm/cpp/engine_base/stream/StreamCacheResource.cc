@@ -263,7 +263,26 @@ std::shared_ptr<const CacheTopology> warmupCacheTopology() {
 
 }  // namespace
 
+StreamCacheResource::~StreamCacheResource() {
+    finishLocalStoreRequest(false);
+}
+
+void StreamCacheResource::finishLocalStoreRequest(bool released) {
+    if (local_store_pending_) {
+        resource_context_.cache_manager->blockTreeCache()->finishLocalStoreRequest(released);
+        local_store_pending_ = false;
+    }
+}
+
 void StreamCacheResource::init(int batch_size) {
+    finishLocalStoreRequest(false);
+    batch_kv_cache_resource_->clearMockCachePlan();
+    remote_completion_request_.reset();
+    remote_completion_captured_ = false;
+    mock_remote_writeback_.reset();
+    mock_writeback_frozen_ = false;
+    mock_disk_writeback_   = false;
+    mock_memory_writeback_ = false;
     batch_kv_cache_resource_->resetBatchSize(batch_size);
     // cache manager is null when warmup
     const auto topology = resource_context_.cache_manager ?
@@ -400,6 +419,14 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_CHECK(nums == total_blocks);
 
     if (total_blocks > 0) {
+        // Capture before local insert mutates partial cache keys or request free
+        // returns GPU indices. Remote policy does not depend on local store/reuse.
+        if (remote_completion_request_ && !remote_completion_captured_ && !stream_->hasErrorWithoutLock()
+            && stream_->getStatus() == StreamState::FINISHED) {
+            remote_completion_captured_ = true;
+            resource_context_.cache_manager->completeRemoteRequest(remote_completion_request_,
+                                                                   *batch_kv_cache_resource_);
+        }
         const bool side_channel_only = resource_context_.role_type == RoleType::DECODE && stream_->queryPdSep()
                                        && !stream_->needsDecodeAfterPrefill();
         if (!side_channel_only && reuseCache() && !stream_->hasErrorWithoutLock()
@@ -409,13 +436,25 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                               stream_->streamId(),
                               total_blocks,
                               tierName(target_tier));
-            if (target_tier != Tier::NONE) {
+            const auto store = [&](Tier tier) {
                 InsertInfo insert_info{
-                    batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier, stream_->streamId()};
+                    batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, tier, stream_->streamId()};
                 insert_info.pd_decode_linear_tail_only = pd_decode_linear_tail_only_;
-                size_t resident_prefix_length = 0;
+                insert_info.mock_memory_cache          = tier == Tier::HOST && mock_memory_writeback_;
+                insert_info.mock_disk_cache            = tier == Tier::DISK && mock_disk_writeback_;
+                size_t resident_prefix_length          = 0;
                 resource_context_.cache_manager->insertIntoCache(insert_info, resident_prefix_length);
+            };
+            if (target_tier != Tier::NONE) {
+                store(target_tier);
             }
+            if (mock_memory_writeback_ && target_tier != Tier::HOST) {
+                store(Tier::HOST);
+            }
+            if (mock_disk_writeback_ && target_tier != Tier::DISK) {
+                store(Tier::DISK);
+            }
+            finishLocalStoreRequest(true);
         } else {
             RTP_LLM_LOG_DEBUG(
                 "tryReleaseKVBlock: stream=%ld, NOT inserting cache, reuseCache=%d, hasError=%d, status=%s",
@@ -431,6 +470,8 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
         resource_context_.cache_manager->free(free_info);
     }
 
+    finishLocalStoreRequest(false);
+    remote_completion_request_.reset();
     return total_blocks;
 }
 
@@ -486,11 +527,14 @@ absl::Status StreamCacheResource::initKVBlock() {
         return absl::InternalError("fake inited not allow to incr block");
     }
 
+    freezeMockWritebackPolicy();
     MallocInfo malloc_info;
-    malloc_info.batch_kv_cache_resource = batch_kv_cache_resource_;
-    malloc_info.complete_token_ids      = stream_->completeTokenIdsPtr();
-    malloc_info.request_id              = stream_->streamId();
-    malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
+    malloc_info.batch_kv_cache_resource   = batch_kv_cache_resource_;
+    malloc_info.complete_token_ids        = stream_->completeTokenIdsPtr();
+    malloc_info.request_id                = stream_->streamId();
+    malloc_info.mock_cache_request        = stream_->generateConfig()->mock_cache_request;
+    malloc_info.mock_memory_cache_request = stream_->generateConfig()->mock_memory_cache_request;
+    malloc_info.verbose                   = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
 
     const bool disable_first_malloc_reuse =
         resource_context_.cache_manager->cacheConfig().disable_decode_first_malloc_device_reuse;
@@ -511,6 +555,9 @@ absl::Status StreamCacheResource::initKVBlock() {
         stream_->chunkedPrefillEnabled() && stream_->isContextStream() ? stream_->maxChunkSize() : 0;
 
     MallocResult result = resource_context_.cache_manager->malloc(malloc_info);
+    if (result.success) {
+        freezeRemoteWritebackPolicy();
+    }
     recordCacheReuseMallocResult(result);
     if (!result.success) {
         malloc_failed_times_++;
@@ -743,10 +790,13 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     // allocation/gather, and is independent of a speculative allocation bound.
     drainLinearHistory();
 
+    freezeMockWritebackPolicy();
     MallocInfo malloc_info;
     malloc_info.batch_kv_cache_resource      = batch_kv_cache_resource_;
     malloc_info.complete_token_ids           = stream_->completeTokenIdsPtr();
     malloc_info.request_id                   = stream_->streamId();
+    malloc_info.mock_cache_request           = stream_->generateConfig()->mock_cache_request;
+    malloc_info.mock_memory_cache_request    = stream_->generateConfig()->mock_memory_cache_request;
     malloc_info.verbose                      = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
     malloc_info.reuse_cache                  = reuseCache();
     malloc_info.enable_cache_lookup          = enableCacheLookup();
@@ -758,6 +808,9 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     malloc_info.linear_cache_policy = linearCachePolicy(std::max(1, batch_kv_cache_resource_->batchSize()));
 
     auto result = resource_context_.cache_manager->malloc(malloc_info);
+    if (result.success) {
+        freezeRemoteWritebackPolicy();
+    }
     if (!result.success) {
         malloc_failed_times_++;
         return absl::InternalError("malloc failed");
@@ -1057,6 +1110,36 @@ bool StreamCacheResource::enableCacheLookup() const {
     const bool any_global_tier = resource_context_.enable_device_cache || resource_context_.enable_memory_cache
                                  || resource_context_.enable_disk_cache || resource_context_.enable_remote_cache;
     return reuseCache() && any_global_tier;
+}
+
+void StreamCacheResource::freezeRemoteWritebackPolicy() {
+    if (mock_remote_writeback_.has_value()) {
+        return;
+    }
+    const auto  cache      = resource_context_.cache_manager->blockTreeCache();
+    const auto& request    = *stream_->generateConfig();
+    mock_remote_writeback_ = cache && cache->config().mock_remote_cache
+                             && request.mock_cache_request.value_or(request.mock_memory_cache_request.value_or(true));
+    if (*mock_remote_writeback_) {
+        remote_completion_request_ = cache->enrollRemoteCompletion();
+    }
+}
+
+void StreamCacheResource::freezeMockWritebackPolicy() {
+    if (mock_writeback_frozen_) {
+        return;
+    }
+    mock_writeback_frozen_ = true;
+    const auto  cache      = resource_context_.cache_manager->blockTreeCache();
+    const auto& request    = *stream_->generateConfig();
+    if (cache && request.mock_cache_request.value_or(request.mock_memory_cache_request.value_or(true))) {
+        mock_memory_writeback_ = cache->config().mock_memory_cache && enableMemoryCache();
+        mock_disk_writeback_   = cache->config().mock_disk_cache && enableDiskCache();
+        if ((mock_memory_writeback_ || mock_disk_writeback_) && cache->config().mock_memory_cache_coordinator) {
+            cache->startLocalStoreRequest();
+            local_store_pending_ = true;
+        }
+    }
 }
 
 Tier StreamCacheResource::insertTarget() const {

@@ -109,6 +109,19 @@ cc_test(
 )
 
 cc_test(
+    name = "pressure_control_tp_test",
+    srcs = ["PressureControlTpTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/normal_engine/test:mock_engine",
+        "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
+    ],
+    env = device_test_envs(),
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
     name = "generate_context_lifecycle_test",
     srcs = [
         "GenerateContextLifecycleTest.cc",

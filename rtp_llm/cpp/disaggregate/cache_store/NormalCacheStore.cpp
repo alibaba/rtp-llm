@@ -114,22 +114,7 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
                     continue;
                 }
             }
-            std::unique_lock<std::shared_mutex> lock(store_tasks_mutex_);
-            for (auto it = this->store_tasks_.begin(); it != this->store_tasks_.end();) {
-                auto& [buffer, item]   = *it;
-                auto& [callback, task] = item;
-                auto event             = buffer->getEvent();
-                if ((event && event->query()) || event == nullptr) {
-                    if (this->thread_pool_->pushTask(task) != autil::ThreadPoolBase::ERROR_NONE) {
-                        RTP_LLM_LOG_WARNING("normal cache store push store task to thread pool failed");
-                        callback(false, CacheStoreErrorCode::PushWorkerItemFailed);
-                    }
-
-                    it = store_tasks_.erase(it);
-                } else {
-                    ++it;
-                }
-            }
+            dispatchReadyStoreTasks();
         }
     };
 
@@ -140,6 +125,31 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
 
     RTP_LLM_LOG_INFO("normal cache store init done, thread pool thread count is %d", params.thread_count);
     return true;
+}
+
+void NormalCacheStore::dispatchReadyStoreTasks() {
+    std::vector<CacheStoreStoreDoneCallback> failed_callbacks;
+    std::unique_lock<std::shared_mutex>      lock(store_tasks_mutex_);
+    for (auto it = this->store_tasks_.begin(); it != this->store_tasks_.end();) {
+        auto& [buffer, item]   = *it;
+        auto& [callback, task] = item;
+        auto event             = buffer->getEvent();
+        if ((event && event->query()) || event == nullptr) {
+            if (this->thread_pool_->pushTask(task) != autil::ThreadPoolBase::ERROR_NONE) {
+                RTP_LLM_LOG_WARNING("normal cache store push store task to thread pool failed");
+                failed_callbacks.push_back(callback);
+            }
+
+            it = store_tasks_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    lock.unlock();
+    // A producer failure may cancel a remote task and reenter either registry.
+    for (auto& callback : failed_callbacks) {
+        callback(false, CacheStoreErrorCode::PushWorkerItemFailed);
+    }
 }
 
 void NormalCacheStore::store(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer,
@@ -304,10 +314,22 @@ std::shared_ptr<RemoteStoreTask>
 NormalCacheStore::submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>&                    request,
                                         const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>& collector,
                                         RemoteStoreTask::CheckCancelFunc check_cancel_func) {
-    auto task = std::make_shared<RemoteStoreTaskImpl>(request, collector, check_cancel_func);
-    std::unique_lock<std::shared_mutex> lock(remote_store_tasks_mutex_);
-    auto&                               tasks = remote_store_tasks_[request->request_id];
-    tasks.push_back(task);
+    return submitRemoteStoreTaskWithCallbacks(request, collector, {}, {}, std::move(check_cancel_func));
+}
+std::shared_ptr<RemoteStoreTask> NormalCacheStore::submitRemoteStoreTaskWithCallbacks(
+    const std::shared_ptr<RemoteStoreRequest>&                    request,
+    const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>& collector,
+    RemoteStoreTask::DoneCallback                                 done,
+    RemoteStoreTask::DrainedCallback                              drained,
+    RemoteStoreTask::CheckCancelFunc                              check_cancel_func) {
+    auto task = std::make_shared<RemoteStoreTaskImpl>(request, collector, std::move(check_cancel_func));
+    if (done)
+        task->setDoneCallback(std::move(done));
+    if (drained)
+        task->setDrainedCallback(std::move(drained));
+    if (task->done()) {
+        return task;
+    }
 
     RTP_LLM_LOG_DEBUG("normal cache store submit remote store task, request id is %s, request is %s",
                       request->request_id.c_str(),
@@ -317,18 +339,16 @@ NormalCacheStore::submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest
     std::weak_ptr<RemoteStoreTaskImpl> weak_task  = task;
     RequestBlockBuffer::WatchFunc      watchFunc =
         [this, request_id, weak_task](bool ok, const std::vector<std::shared_ptr<BlockBuffer>>& blocks) {
-            if (!ok) {
-                RTP_LLM_LOG_WARNING("normal cache store run store task watch func failed, request id is %s",
-                                    request_id.c_str());
-                return;
-            }
-
             auto task = weak_task.lock();
             if (!task) {
                 RTP_LLM_LOG_DEBUG("task has been released, request id is %s", request_id.c_str());
                 return;
             }
 
+            if (!ok) {
+                task->cancel(ErrorInfo(ErrorCode::CANCELLED, "remote store producer ended"));
+                return;
+            }
             auto transfer_request = task->makeAvailableRequest(blocks);
 
             if (transfer_request == nullptr) {
@@ -340,18 +360,57 @@ NormalCacheStore::submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest
             this->messager_->transfer(transfer_request);
         };
 
-    this->request_block_buffer_store_->setRequestBlockBufferWatchFunc(request_id, std::move(watchFunc));
+    // Installing a watch can immediately dispatch and complete an RPC. Never
+    // hold the task registry lock while it invokes callbacks.
+    {
+        std::unique_lock<std::shared_mutex> lock(remote_store_tasks_mutex_);
+        auto [entry, inserted] = remote_store_tasks_.try_emplace(request_id);
+        try {
+            entry->second.push_back(task);
+        } catch (...) {
+            if (inserted)
+                remote_store_tasks_.erase(entry);
+            throw;
+        }
+    }
+    // After registration always return the handle. Cancellation preserves any
+    // RPC already admitted by an immediately firing watch.
+    try {
+        if (!request_block_buffer_store_->setRequestBlockBufferWatchFunc(request_id, std::move(watchFunc))) {
+            task->cancel(ErrorInfo(ErrorCode::CANCELLED, "remote store request already expired"));
+        }
+    } catch (...) {
+        task->cancel(ErrorInfo(ErrorCode::CANCELLED, std::string{}));
+    }
     return std::dynamic_pointer_cast<RemoteStoreTask>(task);
 }
 
 void NormalCacheStore::releaseRemoteStoreTask(const std::shared_ptr<RemoteStoreTask>& task) {
     std::unique_lock<std::shared_mutex> lock(remote_store_tasks_mutex_);
-    auto&                               tasks = remote_store_tasks_[task->getRequestId()];
-    tasks.erase(std::remove(tasks.begin(), tasks.end(), task), tasks.end());
+    if (!task) {
+        return;
+    }
+    auto it = remote_store_tasks_.find(task->getRequestId());
+    if (it == remote_store_tasks_.end()) {
+        return;
+    }
+    it->second.remove_if([&](const auto& entry) { return entry == task; });
+    if (it->second.empty()) {
+        remote_store_tasks_.erase(it);
+    }
 }
 
 void NormalCacheStore::markRequestEnd(const std::string& requestid) {
     request_block_buffer_store_->delRequestBlockBuffer(requestid);
+}
+
+bool NormalCacheStore::releaseScopedRequest(const std::string& requestid) {
+    return request_block_buffer_store_->releaseScopedRequest(requestid);
+}
+
+std::shared_ptr<UserBufferRegistration>
+NormalCacheStore::regUserBuffersScoped(const std::vector<std::shared_ptr<BlockBuffer>>& buffers) {
+    return request_block_buffer_store_->regUserBuffersScoped(buffers);
 }
 
 bool NormalCacheStore::regUserBuffers(const std::vector<std::shared_ptr<BlockBuffer>>& buffers) {

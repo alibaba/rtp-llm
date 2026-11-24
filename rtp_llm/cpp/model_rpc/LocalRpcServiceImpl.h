@@ -98,10 +98,46 @@ public:
         return local_server_->StartProfile(context, request, response);
     }
 
+    ::grpc::Status StopProfile(::grpc::ServerContext*      context,
+                               const StopProfileRequestPB* request,
+                               StopProfileResponsePB*      response) override {
+        return local_server_->StopProfile(context, request, response);
+    }
+
+    ::grpc::Status StopProfileInternal(::grpc::ServerContext*              context,
+                                       const StopProfileInternalRequestPB* request,
+                                       StopProfileResponsePB*              response) override {
+        return local_server_->StopProfileInternal(context, request, response);
+    }
+
     ::grpc::Status StartProfileInternal(::grpc::ServerContext*               context,
                                         const StartProfileInternalRequestPB* request,
                                         EmptyPB*                             response) override {
         return local_server_->StartProfileInternal(context, request, response);
+    }
+
+    ::grpc::Status ControlPressureDiagnostics(::grpc::ServerContext*                 context,
+                                              const PressureSessionControlRequestPB* request,
+                                              PressureSessionControlResponsePB*      response) override {
+        return local_server_->ControlPressureDiagnostics(context, request, response);
+    }
+
+    ::grpc::Status ControlPressureDiagnosticsInternal(::grpc::ServerContext*                 context,
+                                                      const PressureSessionControlRequestPB* request,
+                                                      PressureSessionControlResponsePB*      response) override {
+        return local_server_->ControlPressureDiagnosticsInternal(context, request, response);
+    }
+
+    ::grpc::Status GetCachePressure(::grpc::ServerContext*        context,
+                                    const CachePressureRequestPB* request,
+                                    CachePressureResponsePB*      response) override {
+        return local_server_->GetCachePressure(context, request, response);
+    }
+
+    ::grpc::Status GetCachePressureInternal(::grpc::ServerContext*        context,
+                                            const CachePressureRequestPB* request,
+                                            CachePressureResponsePB*      response) override {
+        return local_server_->GetCachePressureInternal(context, request, response);
     }
 
     ::grpc::Status DumpTorchAllocator(::grpc::ServerContext*             context,

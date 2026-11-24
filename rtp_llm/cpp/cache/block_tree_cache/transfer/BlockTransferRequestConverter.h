@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <optional>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
@@ -10,8 +11,12 @@
 
 namespace rtp_llm {
 
+class RemoteMockAdapter;
+
 class BlockTransferRequestConverter {
 public:
+    static std::optional<CacheTransferOperation> decodePressureOperation(const MemoryOperationRequestPB& request);
+
     static bool encodeTransfer(MemoryOperationRequestPB&       request,
                                const TransferTask&             task,
                                const std::vector<GroupSetPtr>& group_sets);
@@ -21,7 +26,8 @@ public:
                                std::vector<TransferDescriptor>& descriptors,
                                const std::vector<GroupSetPtr>&  group_sets,
                                bool                             allow_absent_group_sets = false,
-                               std::vector<size_t>*             wire_item_indices       = nullptr);
+                               std::vector<size_t>*             wire_item_indices       = nullptr,
+                               const RemoteMockAdapter*         remote_adapter          = nullptr);
 
     static MemoryOperationResponsePB::Code encodeCode(CacheCopyError error);
     static CacheCopyError                  decodeCode(MemoryOperationResponsePB::Code error);

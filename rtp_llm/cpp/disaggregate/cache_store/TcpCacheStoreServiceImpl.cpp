@@ -3,6 +3,8 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreDevicePin.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include <torch/torch.h>
+#include <cstdint>
+#include <vector>
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreServiceImplContext.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheTransferServiceImplContext.h"
 
@@ -101,40 +103,51 @@ void TcpCacheStoreServiceImpl::blockReadImpl(::google::protobuf::RpcController* 
         return;
     }
 
-    for (int i = 0; i < request->blocks_size(); i++) {
-        auto& block_info   = request->blocks(i);
-        auto  block_buffer = request_block_buffer_store_->findUserBuffer(block_info.key());
-        if (block_buffer == nullptr) {
-            RTP_LLM_LOG_WARNING("cache store service block read find user buffer failed, block key %s",
-                                request->blocks(i).key().c_str());
-            response->set_error_code(KvCacheStoreServiceErrorCode::EC_FAILED_INTERNAL);
+    // Validate the entire request before reading any source. Keep each registered owner
+    // alive until its bytes have been copied, including when registrations are removed.
+    std::vector<std::shared_ptr<BlockBuffer>> sources;
+    sources.reserve(request->blocks_size());
+    for (const auto& block_info : request->blocks()) {
+        auto block_buffer = request_block_buffer_store_->findUserBuffer(block_info.key());
+        if (block_info.key().empty() || !block_buffer || !block_buffer->addr || block_info.addr() < 0) {
+            response->set_error_code(KvCacheStoreServiceErrorCode::EC_FAILED_INVALID_REQ);
             done->Run();
             return;
         }
-        int64_t block_buffer_start_addr = (int64_t)block_buffer->addr.get();
-        int64_t block_buffer_end_addr   = block_buffer_start_addr + block_buffer->len;
-
-        if (block_buffer_start_addr <= block_info.addr()
-            && block_buffer_end_addr >= block_info.addr() + block_info.len()) {
-            auto resp_block_info = response->add_blocks();
-            resp_block_info->set_key(block_info.key());
-            resp_block_info->set_addr(block_info.addr());
-            resp_block_info->set_len(block_info.len());
-
-            // ROCm PyTorch exposes ordinary GPU tensors through the CUDA device type.
-            auto src_tensor = torch::from_blob((void*)block_info.addr(),
-                                               {(int64_t)block_info.len()},
-                                               torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
-
-            auto tmp_buffer = static_cast<char*>(malloc(block_info.len()));
-            auto dst_tensor = torch::from_blob(tmp_buffer,
-                                               {(int64_t)block_info.len()},
-                                               torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
-
-            execNoBlockCopy({dst_tensor, src_tensor});
-            resp_block_info->set_content(tmp_buffer, block_info.len());
-            free(tmp_buffer);
+        const auto start   = reinterpret_cast<uintptr_t>(block_buffer->addr.get());
+        const auto address = static_cast<uint64_t>(block_info.addr());
+        // Subtract only after ordering checks: neither address + length nor
+        // start + registered length is safe for an untrusted wire address.
+        if (address < start || address - start > block_buffer->len
+            || block_info.len() > block_buffer->len - (address - start)) {
+            response->set_error_code(KvCacheStoreServiceErrorCode::EC_FAILED_INVALID_REQ);
+            done->Run();
+            return;
         }
+        sources.push_back(std::move(block_buffer));
+    }
+
+    for (int i = 0; i < request->blocks_size(); ++i) {
+        const auto& block_info      = request->blocks(i);
+        auto        resp_block_info = response->add_blocks();
+        resp_block_info->set_key(block_info.key());
+        resp_block_info->set_addr(block_info.addr());
+        resp_block_info->set_len(block_info.len());
+        auto source = reinterpret_cast<void*>(static_cast<uintptr_t>(block_info.addr()));
+        if (!sources[i]->gpu_mem) {
+            resp_block_info->set_content(source, block_info.len());
+            continue;
+        }
+
+        // ROCm PyTorch exposes ordinary GPU tensors through the CUDA device type.
+        auto src_tensor = torch::from_blob(
+            source, {(int64_t)block_info.len()}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+        std::string tmp_buffer(block_info.len(), '\0');
+        auto        dst_tensor = torch::from_blob(tmp_buffer.data(),
+                                                  {(int64_t)block_info.len()},
+                                           torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
+        execNoBlockCopy({dst_tensor, src_tensor});
+        resp_block_info->set_content(tmp_buffer.data(), tmp_buffer.size());
     }
 
     response->set_error_code(KvCacheStoreServiceErrorCode::EC_SUCCESS);

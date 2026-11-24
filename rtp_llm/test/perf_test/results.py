@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Dict, Mapping, Optional, Tuple, Union
 
 from rtp_llm.test.perf_test.decode.metrics import (
@@ -163,7 +163,21 @@ class DecodeMetrics:
         }
 
 
-ModeMetrics = Union[PrefillMetrics, DecodeMetrics]
+@dataclass(frozen=True)
+class PressureMetrics:
+    epoch: str
+    session_id: str
+    epoch_valid: bool
+    sent: int
+    completed: int
+    cancelled: int
+    failed: int
+
+    def to_dict(self):
+        return asdict(self)
+
+
+ModeMetrics = Union[PrefillMetrics, DecodeMetrics, PressureMetrics]
 
 
 @dataclass(frozen=True)
@@ -494,14 +508,59 @@ def parse_case_result(index: int, mode: str, value: Any) -> CaseResult:
     if status == CaseState.OK and metrics_value is None:
         raise ResultSchemaError(f"{path}.metrics: required for ok case")
     metrics = None
-    if metrics_value is not None:
+    pressure = (
+        mode == "prefill"
+        and identity.get("measurement_contract") == "continuous_pressure_v1"
+    )
+    if pressure and metrics_value is not None:
+        data = _object(f"{path}.metrics", metrics_value)
+        _exact_fields(
+            path,
+            data,
+            {
+                "epoch",
+                "session_id",
+                "epoch_valid",
+                "sent",
+                "completed",
+                "cancelled",
+                "failed",
+            },
+        )
+        epoch = _string(path, data["epoch"])
+        if not re.fullmatch(r"(?:epochs|profiles)/[0-9a-f]{32}/pressure", epoch):
+            raise ResultSchemaError(f"{path}: invalid pressure epoch path")
+        session_id = _string(path, data["session_id"])
+        if not re.fullmatch(r"[0-9a-f]{32}", session_id):
+            raise ResultSchemaError(f"{path}: invalid native pressure session")
+        metrics = PressureMetrics(
+            epoch,
+            session_id,
+            _boolean(path, data["epoch_valid"]),
+            *(
+                _count(path, data[k])
+                for k in ("sent", "completed", "cancelled", "failed")
+            ),
+        )
+        if (
+            metrics.sent != metrics.completed + metrics.cancelled + metrics.failed
+            or metrics.sent != raw["runs"]
+        ):
+            raise ResultSchemaError(f"{path}: inconsistent measurement request counts")
+        if status == CaseState.OK and (
+            not metrics.completed or metrics.failed or not metrics.epoch_valid
+        ):
+            raise ResultSchemaError(
+                f"{path}: ok requires successful pressure epoch and requests"
+            )
+    elif metrics_value is not None:
         metrics = (
             _parse_prefill_metrics(f"{path}.metrics", metrics_value)
             if mode == "prefill"
             else _parse_decode_metrics(f"{path}.metrics", metrics_value)
         )
     runs = _count(f"{path}.runs", raw["runs"])
-    if mode == "prefill" and status == CaseState.OK:
+    if mode == "prefill" and not pressure and status == CaseState.OK:
         try:
             validate_concurrent_prefill_metrics(identity, metrics_value, runs)
         except ValueError as error:

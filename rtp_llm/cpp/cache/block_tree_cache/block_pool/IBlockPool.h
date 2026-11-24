@@ -27,7 +27,9 @@ enum class BlockTreeRefType : uint8_t {
     CACHE = 0,
     LOAD,
     EVICT,
+    STORE,
     FROZEN,
+    MOCK_SOURCE,
     COUNT,
 };
 
@@ -67,6 +69,7 @@ public:
 
     std::optional<BlockIdxType> malloc();
     std::optional<BlockIdList>  malloc(size_t n);
+    void                        stopAllocation();
 
     void     incTreeRef(BlockIdxType block, BlockTreeRefType ref_type);
     void     incTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type);
@@ -148,6 +151,9 @@ protected:
 
     // Helpers for derived-pool transactions; the caller holds mutex_.
     std::optional<BlockIdList> mallocNoLock(size_t n);
+    bool                       allocationStoppedNoLock() const {
+        return allocation_stopped_;
+    }
     size_t                     availableFreeBlocksNoLock() const;
     TreeReferenceStats         treeReferenceStatsNoLock() const;
     void                       reserveReleasedBlocksNoLock(size_t additional) {
@@ -193,6 +199,7 @@ private:
 private:
     std::shared_ptr<const BlockPoolConfigBase>                config_;
     bool                                                      initialized_{false};
+    bool                                                      allocation_stopped_{false};
     std::function<void()>                                     capacity_change_callback_;
     std::vector<uint8_t>                                      allocated_;
     std::vector<uint32_t>                                     tree_refcounts_;

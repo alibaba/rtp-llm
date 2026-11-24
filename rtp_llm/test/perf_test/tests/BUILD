@@ -57,6 +57,7 @@ _TESTS = {
     "experiments/experiment_test": [],
     "policies/publication_test": ["//rtp_llm/test/perf_test:perf_test_publish_policy_lib"],
     "policies/regression_test": ["//rtp_llm/test/perf_test:perf_test_regression_lib"],
+    "prefill/continuous_pressure_test": ["//rtp_llm/test/perf_test:perf_test_runtime_lib"],
     "prefill/dashsc_transport_test": ["//rtp_llm/test/perf_test:perf_test_runtime_lib"],
     "prefill/fingerprints_test": [],
     "prefill/formula_test": ["//rtp_llm/test/perf_test:perf_test_runtime_lib"],

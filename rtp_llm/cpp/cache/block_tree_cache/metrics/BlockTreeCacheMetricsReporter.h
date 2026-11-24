@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -19,6 +20,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/TransferMetrics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace kmonitor {
@@ -28,8 +30,51 @@ class MetricsReporter;
 namespace rtp_llm {
 
 struct BlockTreeQueueSizes;
+struct MockCacheHitDecision;
 class CacheStageMetrics;
 class RtpLLMCacheEvictionMetricsCollector;
+
+using BlockTreePoolMetricsSnapshot = CachePoolMetrics;
+
+// Owner-only logical admission/reuse. Physical records/bytes stay in their
+// existing counters; neither TP endpoints nor FULL/SWA descriptors are summed.
+struct MockCacheMetricsSnapshot {
+    int64_t eligible_blocks{0};
+    int64_t planned_memory_blocks{0};
+    int64_t planned_disk_blocks{0};
+    int64_t successful_memory_blocks{0};
+    int64_t successful_disk_blocks{0};
+    int64_t failed_blocks{0};
+    int64_t planned_remote_blocks{0};
+    int64_t successful_remote_blocks{0};
+};
+
+struct MockMemoryCacheMetricsSnapshot {
+    int64_t eligible_blocks{0};
+    int64_t planned_host_blocks{0};
+    int64_t successful_h2d_blocks{0};
+    int64_t failed_h2d_blocks{0};
+    int64_t d2h_submitted_blocks{0};
+    int64_t d2h_completed_blocks{0};
+    int64_t d2h_failed_blocks{0};
+};
+
+struct LocalStoreSnapshot {
+    uint64_t released_requests{0};
+    uint64_t pending_requests{0};
+    uint64_t abandoned_requests{0};
+    uint64_t rejected_host_stores{0};
+    uint64_t rejected_disk_stores{0};
+};
+
+// Physical destination records of accepted diagnostic disk stores. Completion
+// means every copy in the task succeeded; it does not imply tree publication.
+// Rejected admission is excluded, like the existing mock-memory D2H counters.
+struct MockDiskWriteMetricsSnapshot {
+    int64_t submitted_records{0};
+    int64_t completed_records{0};
+    int64_t failed_records{0};
+};
 
 class BlockTreeCacheMetricsReporter final {
 public:
@@ -37,6 +82,24 @@ public:
                                            bool                                       enable_stage_metrics = true,
                                            std::chrono::milliseconds stage_interval = std::chrono::seconds(1));
     ~BlockTreeCacheMetricsReporter();
+
+    static CachePoolMetrics snapshotPool(Tier tier, const IBlockPool& pool);
+
+    void                           startLocalStoreRequest();
+    void                           finishLocalStoreRequest(bool released);
+    void                           recordLocalStoreRejection(Tier tier);
+    LocalStoreSnapshot             localStoreSnapshot() const;
+    void                           updateMockMemorySource(const std::vector<GroupSetPtr>& group_sets);
+    void                           recordMockMemoryD2HSubmitted(size_t host_records);
+    void                           recordMockMemoryD2HFinished(size_t host_records, bool success);
+    void                           reportMockMemoryMetrics() const;
+    MockMemoryCacheMetricsSnapshot mockMemoryMetricsSnapshot() const;
+    void                           recordMockDiskWriteSubmitted(size_t records);
+    void                           recordMockDiskWriteFinished(size_t records, bool success);
+    MockDiskWriteMetricsSnapshot   mockDiskWriteMetricsSnapshot() const;
+    void                           updateMockCachePlan(const MockCacheHitDecision& decision);
+    void recordMockCacheLoad(size_t memory_blocks, size_t disk_blocks, bool success, size_t remote_blocks = 0);
+    MockCacheMetricsSnapshot mockCacheMetricsSnapshot() const;
     bool enabled() const noexcept {
         return metrics_reporter_ != nullptr;
     }
@@ -119,8 +182,8 @@ private:
 
     std::unordered_map<const IBlockPool*, PoolIOSample> pool_io_samples_;
 
-    static constexpr size_t kOperationCount = 2;
-    static constexpr size_t kDirectionCount = 4;
+    static constexpr size_t kOperationCount = 3;
+    static constexpr size_t kDirectionCount = 5;
 
     static int transferDirectionIndex(Tier source_tier, Tier target_tier);
     void       reportEvictionMetrics(const TransferDescriptor&            desc,
@@ -137,6 +200,11 @@ private:
                                                                        BlockTreeTransferBytes&         transfer_bytes) const;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter_;
     std::unique_ptr<CacheStageMetrics>         stage_metrics_;
+    mutable std::mutex                         mock_memory_metrics_mutex_;
+    RtpLLMMockMemoryCacheMetricsCollector      mock_memory_metrics_;
+    LocalStoreSnapshot                         local_store_;
+    MockDiskWriteMetricsSnapshot               mock_disk_write_metrics_;
+    MockCacheMetricsSnapshot                   mock_cache_metrics_;
     std::array<std::array<std::atomic<int64_t>, kDirectionCount>, kOperationCount> transfer_in_flight_{};
 };
 

@@ -22,15 +22,18 @@ inline std::atomic<void (*)()> before_transfer_broadcast_subscription_for_test{n
 
 class BroadcastManager;
 class BlockTreeCacheMetricsReporter;
+class RemoteMockAdapter;
 
 class MultiRankBlockTransferEngine {
 public:
     MultiRankBlockTransferEngine(std::vector<GroupSetPtr>                       group_sets,
                                  std::shared_ptr<BroadcastManager>              broadcast_manager,
-                                 std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr);
+                                 std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr,
+                                 std::shared_ptr<RemoteMockAdapter>             remote_adapter   = nullptr);
 
     // One copy direction per request; the receiving PerRank engines own batching.
     std::shared_ptr<TransferAsyncContext> execute(TransferTask task, const char* completion_operation = nullptr) const;
+    RemoteMockSafetySnapshot              remoteMockSafety() const;
 
     const std::vector<std::string>& participantAddresses() const;
     const std::vector<GroupSetPtr>& groupSets() const noexcept {
@@ -38,6 +41,8 @@ public:
     }
 
 private:
+    struct RemoteState;
+    std::shared_ptr<RemoteState>                   remote_state_;
     std::vector<GroupSetPtr>                       group_sets_;
     std::shared_ptr<BroadcastManager>              broadcast_manager_;
     std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter_;

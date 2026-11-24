@@ -18,12 +18,20 @@ LoadAsyncContext::LoadAsyncContext(std::vector<TransferDescriptor>              
                                    uint64_t                                       context_id,
                                    const std::shared_ptr<LoadContextCoordinator>& coordinator,
                                    std::shared_ptr<StorageBackend>                storage_backend,
-                                   StorageRequest                                 storage_request):
+                                   StorageRequest                                 storage_request,
+                                   LoadSourceKind                                 source_kind,
+                                   size_t                                         mock_device_prefix_blocks,
+                                   size_t                                         mock_disk_blocks,
+                                   size_t                                         mock_remote_blocks):
     coordinator_(coordinator),
     context_id_(context_id),
+    source_kind_(source_kind),
     load_descs_(std::move(load_descs)),
     joined_load_(std::move(joined_load)),
     local_matched_blocks_(local_matched_blocks),
+    mock_device_prefix_blocks_(mock_device_prefix_blocks),
+    mock_disk_blocks_(mock_disk_blocks),
+    mock_remote_blocks_(mock_remote_blocks),
     matched_blocks_(local_matched_blocks),
     storage_backend_(std::move(storage_backend)),
     request_id_(storage_request.request_id),
@@ -33,7 +41,7 @@ LoadAsyncContext::LoadAsyncContext(std::vector<TransferDescriptor>              
     backend_pending_(need_backend_match_),
     backend_deadline_state_(need_backend_match_ ? State::PENDING : State::SUCCEEDED),
     remaining_transfer_count_(std::count_if(load_descs_.begin(), load_descs_.end(), [](const auto& desc) {
-        return desc.source_tier == Tier::HOST || desc.source_tier == Tier::DISK;
+        return desc.source_tier == Tier::HOST || desc.source_tier == Tier::DISK || desc.isRemoteMock();
     })) {
     workflow_span_ = AsyncProfileSpan("workflow_total",
                                       request_id_.value_or(-1),
@@ -59,6 +67,17 @@ LoadAsyncContext::~LoadAsyncContext() {
 void LoadAsyncContext::rebuildMatchedBlocksByTier() {
     matched_blocks_by_tier_.fill(0);
     reuse_tier_by_path_.clear();
+    if (isMockLoad()) {
+        RTP_LLM_CHECK(mock_device_prefix_blocks_ <= local_matched_blocks_);
+        RTP_LLM_CHECK(mock_remote_blocks_ <= local_matched_blocks_ - mock_device_prefix_blocks_);
+        RTP_LLM_CHECK(mock_disk_blocks_ <= local_matched_blocks_ - mock_device_prefix_blocks_ - mock_remote_blocks_);
+        matched_blocks_by_tier_[static_cast<size_t>(Tier::DEVICE)] = mock_device_prefix_blocks_;
+        matched_blocks_by_tier_[static_cast<size_t>(Tier::HOST)] =
+            local_matched_blocks_ - mock_device_prefix_blocks_ - mock_disk_blocks_ - mock_remote_blocks_;
+        matched_blocks_by_tier_[static_cast<size_t>(Tier::DISK)]   = mock_disk_blocks_;
+        matched_blocks_by_tier_[static_cast<size_t>(Tier::REMOTE)] = mock_remote_blocks_;
+        return;
+    }
     for (const TransferDescriptor& desc : load_descs_) {
         if (desc.source_tier < Tier::DEVICE || desc.source_tier > Tier::DISK) {
             continue;
@@ -87,11 +106,17 @@ size_t LoadAsyncContext::localMatchedBlocks() const {
 
 size_t LoadAsyncContext::matchedBlocks() const {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (isMockLoad() && !success()) {
+        return 0;
+    }
     return matched_blocks_;
 }
 
 size_t LoadAsyncContext::matchedBlocks(Tier tier) const {
-    return tier >= Tier::DEVICE && tier <= Tier::DISK ? matched_blocks_by_tier_[static_cast<size_t>(tier)] : 0;
+    if (isMockLoad() && !success()) {
+        return 0;
+    }
+    return tier >= Tier::DEVICE && tier <= Tier::REMOTE ? matched_blocks_by_tier_[static_cast<size_t>(tier)] : 0;
 }
 
 size_t LoadAsyncContext::matchedBlocks(Tier tier, size_t prefix) const {
@@ -132,6 +157,23 @@ void LoadAsyncContext::setSettlementReadyCallback(SettlementReadyCallback callba
     std::lock_guard<std::mutex> lock(mutex_);
     RTP_LLM_CHECK(callback && state_.load() == State::PENDING && !settlement_ready_ && !settlement_ready_callback_);
     settlement_ready_callback_ = std::move(callback);
+}
+
+void LoadAsyncContext::setTransferOutcomeCallback(std::function<void(bool)> callback) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    RTP_LLM_CHECK(callback && !transfer_outcome_callback_ && !commit_started_.load() && !done());
+    transfer_outcome_callback_ = std::move(callback);
+}
+
+void LoadAsyncContext::reportTransferOutcome(bool success) {
+    std::function<void(bool)> callback;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        callback = std::move(transfer_outcome_callback_);
+    }
+    if (callback) {
+        callback(success);
+    }
 }
 
 void LoadAsyncContext::startBackendMatch() {
@@ -355,7 +397,7 @@ bool LoadAsyncContext::completeJoinedOne(bool     success,
     return true;
 }
 
-bool LoadAsyncContext::completeTransfers(size_t count, bool success, Tier source_tier) {
+bool LoadAsyncContext::completeTransfers(size_t count, bool success, Tier source_tier, ErrorInfo error) {
     bool                    notify = false;
     SettlementReadyCallback settlement_ready_callback;
     {
@@ -367,7 +409,8 @@ bool LoadAsyncContext::completeTransfers(size_t count, bool success, Tier source
         has_local_failure_ = has_local_failure_ || !success;
         has_host_failure_  = has_host_failure_ || (!success && source_tier != Tier::DISK);
         if (!success && error_info_.ok()) {
-            error_info_ = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load transfer failed");
+            error_info_ = !error.ok() ? std::move(error) :
+                                        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load transfer failed");
         }
         remaining_transfer_count_ -= count;
         finishIfReadyLocked(notify, settlement_ready_callback);
@@ -481,6 +524,9 @@ void LoadAsyncContext::dispatchCompletion(bool notify, SettlementReadyCallback s
         notifyCompletion();
     }
     if (settlement_ready_callback) {
+        if (isMockLoad()) {
+            reportTransferOutcome(aggregateSuccess());
+        }
         settlement_ready_callback(shared_from_this());
     }
 }
@@ -527,6 +573,11 @@ ErrorInfo LoadAsyncContext::completionErrorLocked() const {
 }
 
 void LoadAsyncContext::notifyCompletion() {
+    // Abort and rejected admission have no transfer callback. Moving the
+    // observer makes this fallback and later settlement exactly once.
+    if (isMockLoad()) {
+        reportTransferOutcome(success());
+    }
     block_tree_cache_detail::ScopeRollback finish_trace([this] {
         if (!workflow_trace_finished_.exchange(true))
             workflow_span_.finish();
@@ -606,7 +657,11 @@ std::shared_ptr<LoadAsyncContext> LoadContextCoordinator::create(std::vector<Tra
                                                                  std::vector<bool>               joined_load,
                                                                  size_t                          matched_blocks,
                                                                  std::shared_ptr<StorageBackend> storage_backend,
-                                                                 StorageRequest                  storage_request) {
+                                                                 StorageRequest                  storage_request,
+                                                                 LoadSourceKind                  source_kind,
+                                                                 size_t                          mock_device_prefix_blocks,
+                                                                 size_t                          mock_disk_blocks,
+                                                                 size_t                          mock_remote_blocks) {
     const auto coordinator = shared_from_this();
     uint64_t   context_id  = 0;
     {
@@ -622,7 +677,11 @@ std::shared_ptr<LoadAsyncContext> LoadContextCoordinator::create(std::vector<Tra
                                               context_id,
                                               coordinator,
                                               std::move(storage_backend),
-                                              std::move(storage_request));
+                                              std::move(storage_request),
+                                              source_kind,
+                                              mock_device_prefix_blocks,
+                                              mock_disk_blocks,
+                                              mock_remote_blocks);
 }
 
 bool LoadContextCoordinator::registerContext(const std::shared_ptr<LoadAsyncContext>& context) {

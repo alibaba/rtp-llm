@@ -731,6 +731,27 @@ class HybridAttentionType:
     def value(self) -> int:
         ...
 class KVCacheConfig:
+    mock_memory_cache: bool
+    mock_memory_cache_real_match: bool
+    mock_memory_cache_hit_ratio: float
+    mock_memory_cache_seed: int
+    mock_memory_cache_source_blocks: int
+    mock_disk_cache: bool
+    mock_disk_cache_hit_ratio: float
+    mock_disk_cache_seed: int
+    mock_disk_cache_source_blocks: int
+    mock_remote_cache: bool
+    mock_remote_cache_address: str
+    mock_remote_cache_hit_ratio: float
+    mock_remote_cache_source_blocks: int
+    mock_remote_cache_read_delay_ms: int
+    mock_remote_cache_write_delay_ms: int
+    mock_remote_cache_callback_port: int
+    mock_remote_cache_staging_size_mb: int
+    mock_remote_cache_max_inflight: int
+    mock_remote_cache_timeout_ms: int
+    def validateMockCacheConfig(self) -> None:
+        ...
     enable_crc: bool
     enable_device_cache: bool
     enable_memory_cache: bool

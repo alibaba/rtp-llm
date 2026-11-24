@@ -1,7 +1,9 @@
 #pragma once
 
 #include <atomic>
+#include <deque>
 #include <functional>
+#include <future>
 #include <memory>
 #include "absl/status/status.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -37,21 +39,48 @@ public:
                                              preRunMode                            mode) override;
     absl::Status                      stop() override;
 
-    KVCacheInfo  getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
-    absl::Status step();
-    absl::Status pp_step();
-    absl::Status startLoop();
-    int64_t      getLastScheduleTime() override;
-    void         reportMetrics(RtpLLMEngineMetricsCollector collector) {
+    ErrorResult<CachePressureSnapshot> getCachePressure() const override;
+    std::optional<uint64_t>            getPressureWaitingRequests() const override {
+        return scheduler_ ? scheduler_->pressureWaitingRequests() : std::nullopt;
+    }
+    PressureStepPage
+    getPressureSteps(const std::string& session_id, uint64_t after_sequence, size_t limit) const override;
+    ErrorResult<int64_t> controlPressureDiagnostics(const PressureSessionControl&         control,
+                                                    std::chrono::system_clock::time_point deadline) override;
+    void                 wakePressureControlProgress() override;
+    KVCacheInfo          getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
+    absl::Status         step();
+    absl::Status         pp_step();
+    absl::Status         startLoop();
+    int64_t              getLastScheduleTime() override;
+    void                 reportMetrics(RtpLLMEngineMetricsCollector collector) {
         if (metrics_reporter_) {
             metrics_reporter_->report<RtpLLMEngineMetrics, RtpLLMEngineMetricsCollector>(nullptr, &collector);
         }
     }
-    bool updateEplbConfig(const EPLBConfig& config) override;
-    void startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) override;
+    bool          updateEplbConfig(const EPLBConfig& config) override;
+    void          startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) override;
+    bool          stopTimelineProfiling(const std::string& trace_name) override;
+    ProfileStatus getProfileStatus() const override {
+        return step_profiler_.status();
+    }
 
 private:
-    static int calculateReserveStep(const EngineInitParams& params);
+    // Unit fixtures drive one engine iteration at a time through the same executor.
+    NormalEngine(const EngineInitParams&                       params,
+                 std::unique_ptr<ProposeModelEngineInitParams> propose_params,
+                 bool                                          start_loop);
+    void applyPressureControls();
+    struct PendingPressureControl {
+        PressureSessionControl                control;
+        std::chrono::system_clock::time_point deadline;
+        std::promise<ErrorResult<int64_t>>    result;
+    };
+    std::mutex                                          pressure_control_mutex_;
+    std::atomic<bool>                                   pressure_controls_pending_{false};
+    std::deque<std::shared_ptr<PendingPressureControl>> pressure_controls_;
+    std::shared_ptr<PressureStepRecorder> pressure_recorder_ = std::make_shared<PressureStepRecorder>(4096);
+    static int                            calculateReserveStep(const EngineInitParams& params);
 #if USING_CUDA
     static std::vector<AccuracyScenario> accuracyScenariosForStartup(const ModelConfig& model_config,
                                                                     const RuntimeConfig& runtime_config,

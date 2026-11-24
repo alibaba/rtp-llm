@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/engine_base/PressureDiagnostics.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTaskRecovery.h"
@@ -45,6 +46,25 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
+
+ErrorResult<CachePressureSnapshot> KVCacheManager::getCachePressure() const {
+    if (!block_tree_cache_) {
+        return unsupportedCachePressure();
+    }
+    auto snapshot = block_tree_cache_->pressureSnapshot();
+    coordinator_manager_->appendLocalMockTargets(snapshot);
+    if (!snapshot.complete) {
+        return {ErrorCode::EXECUTION_EXCEPTION, "cache pressure ledger lost a transfer observation"};
+    }
+    if (cp_slot_mapper_) {
+        for (auto& group : snapshot.groups) {
+            if (!group.group_tags.empty()) {
+                group.block_tokens = cp_slot_mapper_->logicalSeqSizePerBlock(config_, group.group_tags.front());
+            }
+        }
+    }
+    return snapshot;
+}
 
 class KVCacheAllocationWaitState {
 public:
@@ -148,8 +168,12 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
     pool_collector.block_cache_ref_blocks        = static_cast<int64_t>(pool_metrics.block_cache_ref_blocks);
     pool_collector.load_ref_blocks               = static_cast<int64_t>(pool_metrics.load_ref_blocks);
     pool_collector.eviction_ref_blocks           = static_cast<int64_t>(pool_metrics.eviction_ref_blocks);
+    pool_collector.store_ref_blocks              = static_cast<int64_t>(pool_metrics.store_ref_blocks);
     pool_collector.frozen_ref_blocks             = static_cast<int64_t>(pool_metrics.frozen_ref_blocks);
     pool_collector.report_frozen_ref_blocks      = report_frozen_ref_blocks;
+    pool_collector.mock_source_ref_blocks        = static_cast<int64_t>(pool_metrics.mock_source_ref_blocks);
+    pool_collector.mock_source_ref_bytes         = static_cast<int64_t>(
+        std::min<size_t>(pool_metrics.mock_source_ref_bytes, std::numeric_limits<int64_t>::max()));
     pool_collector.used_ratio                    = pool_metrics.used_ratio;
     pool_collector.read_bytes                    = pool_metrics.read_bytes;
     pool_collector.write_bytes                   = pool_metrics.write_bytes;
@@ -509,7 +533,8 @@ const CacheConfig& KVCacheManager::getMTPModuleCacheConfig(int mtp_module_id) co
 
 MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     RTP_LLM_PROFILE_FUNCTION();
-    const int64_t malloc_begin_time_us = currentTimeUs();
+    PressureNvtxScope nvtx_scope("cache.malloc");
+    const int64_t     malloc_begin_time_us = currentTimeUs();
     RTP_LLM_CHECK(malloc_info.batch_kv_cache_resource && malloc_info.complete_token_ids);
 
     const int  seq_size_per_block = config_.seq_size_per_block;
@@ -567,7 +592,8 @@ void KVCacheManager::reportPrefillCacheHitMetrics(const MallocInfo& malloc_info,
 
 void KVCacheManager::free(const FreeInfo& free_info) {
     RTP_LLM_PROFILE_FUNCTION();
-    const int64_t begin_time_us = metrics_reporter_ == nullptr ? 0 : currentTimeUs();
+    PressureNvtxScope nvtx_scope("cache.free");
+    const int64_t     begin_time_us = metrics_reporter_ == nullptr ? 0 : currentTimeUs();
     RTP_LLM_CHECK(free_info.batch_kv_cache_resource && free_info.complete_token_ids);
     coordinator_manager_->free(free_info);
     reportCacheOperation(metrics_reporter_, RtpLLMCacheOperationMetricsCollector::OpType::FREE, begin_time_us);
@@ -641,9 +667,29 @@ void KVCacheManager::reclaimLinearHistory(const BatchKVCacheResourcePtr& resourc
     }
 }
 
+void KVCacheManager::completeRemoteRequest(const std::shared_ptr<BlockTreeCache::RemoteCompletionRequest>& request,
+                                           const BatchKVCacheResource&                                     resource) {
+    // This cheap eligibility check allocates no geometry and avoids rejecting a
+    // legitimate partial-only short request even when the intent queue is full.
+    const size_t cp       = cp_slot_mapper_ && cp_slot_mapper_->isSharded() ? cp_slot_mapper_->cpSize() : 1;
+    const int    batches  = config_.groupNums() == 1 ? std::min(1, resource.batchSize()) : resource.batchSize();
+    bool         eligible = false;
+    for (int batch = 0; batch < batches; ++batch) {
+        const auto count   = resource.cacheKeys(batch).size();
+        const auto partial = !resource.lastBlockAligned() && count ? 1u : 0u;
+        eligible |= count - partial >= cp;
+    }
+    if (eligible && block_tree_cache_) {
+        block_tree_cache_->completeRemoteRequest(request, [&](const BlockTreeCache::RemoteGeometryVisitor& visitor) {
+            return coordinator_manager_->visitCompletedResources(resource, visitor);
+        });
+    }
+}
+
 void KVCacheManager::insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length) {
     RTP_LLM_PROFILE_FUNCTION();
-    const int64_t begin_time_us = metrics_reporter_ == nullptr ? 0 : currentTimeUs();
+    PressureNvtxScope nvtx_scope("cache.insert");
+    const int64_t     begin_time_us = metrics_reporter_ == nullptr ? 0 : currentTimeUs();
     dropLastPartialBlock(insert_info.batch_kv_cache_resource);
     coordinator_manager_->insertIntoCache(insert_info, resident_prefix_length);
     reportCacheOperation(metrics_reporter_, RtpLLMCacheOperationMetricsCollector::OpType::INSERT, begin_time_us);
@@ -1289,7 +1335,8 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
                                                        descriptors,
                                                        block_tree_cache_->groupSets(),
                                                        allow_absent_group_sets,
-                                                       allow_absent_group_sets ? &wire_item_indices : nullptr)) {
+                                                       allow_absent_group_sets ? &wire_item_indices : nullptr,
+                                                       block_tree_cache_->remoteMockAdapter().get())) {
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: invalid grouped transfer request");
         return true;
     }
@@ -1315,7 +1362,8 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
                                    std::nullopt);
     transfer_task.setTraceId(request.mem_request().transfer_trace_id());
     transfer_task.setWorkflow(request.mem_request().transfer_workflow_id(), request.mem_request().transfer_parent_id());
-    auto         status          = block_tree_cache_->executeTransfer(std::move(transfer_task));
+    transfer_task.operation = BlockTransferRequestConverter::decodePressureOperation(request.mem_request());
+    auto         status     = block_tree_cache_->executeTransfer(std::move(transfer_task));
     const size_t wire_item_count = static_cast<size_t>(request.mem_request().copy_items_size());
     if (allow_absent_group_sets && wire_item_indices.size() != wire_item_count) {
         // A PP stage can omit whole group sets. Restore the original wire order

@@ -189,6 +189,9 @@ bool DeviceBlockPool::tryReplaceRequestReferences(const std::vector<RequestRefer
     {
         std::lock_guard<std::mutex> lock(mutex_);
         checkInitializedNoLock();
+        if (replacement_count > 0 && allocationStoppedNoLock()) {
+            return false;
+        }
         for (size_t i = 0; i < changes.size(); ++i) {
             const auto& change = changes[i];
             checkAllocatedNoLock(change.block);

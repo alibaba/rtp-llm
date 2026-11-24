@@ -727,6 +727,18 @@ class DashScRequestControls:
     reasoning_effort: str | int | None = None
     request_headers: dict[str, str] = field(default_factory=dict)
     log_input_output: bool = True
+    mock_memory_cache_request: bool | None = None
+    mock_cache_request: bool | None = None
+
+    def __post_init__(self):
+        if (
+            self.mock_cache_request is not None
+            and self.mock_memory_cache_request is not None
+            and self.mock_cache_request != self.mock_memory_cache_request
+        ):
+            raise ValueError(
+                "conflicting mock_cache_request and mock_memory_cache_request"
+            )
 
 
 @dataclass(frozen=True)
@@ -815,6 +827,16 @@ class SamplingParams:
             stop_words_list=self.stop_words_list_py(),
             max_thinking_tokens=max_thinking_tokens,
             return_input_ids=return_input_ids,
+            mock_memory_cache_request=(
+                request_controls.mock_memory_cache_request
+                if request_controls is not None
+                else None
+            ),
+            mock_cache_request=(
+                request_controls.mock_cache_request
+                if request_controls is not None
+                else None
+            ),
             is_streaming=True,
             response_format=response_format,
             structural_tag=structural_tag,
@@ -1120,6 +1142,12 @@ def parse_request_controls(
     return DashScRequestControls(
         return_input_ids=return_input_ids,
         force_sp_accept=force_sp_accept,
+        mock_memory_cache_request=_parse_optional_parameter_bool(
+            request, "mock_memory_cache_request"
+        ),
+        mock_cache_request=_parse_optional_parameter_bool(
+            request, "mock_cache_request"
+        ),
         enable_thinking=enable_thinking,
         max_new_think_tokens=max_new_think_tokens,
         timeout_ms=timeout_ms,

@@ -1,11 +1,13 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/MockCacheHitController.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
@@ -167,6 +169,7 @@ public:
         batch_resource.clear();
         batch_resource.resize(new_batch_size);
         cache_keys_initialized_ = false;
+        clearMockCachePlan();
     }
 
     void moveBatchResource(int batch_idx, KVCacheResource&& resource) {
@@ -177,6 +180,7 @@ public:
     void swap(BatchKVCacheResource& other) noexcept {
         batch_resource.swap(other.batch_resource);
         std::swap(cache_keys_initialized_, other.cache_keys_initialized_);
+        mock_cache_plan_.swap(other.mock_cache_plan_);
     }
 
     std::vector<BlockIndicesType> getAllBatchBlocks(std::string_view tag) const {
@@ -214,6 +218,22 @@ public:
         cache_keys_initialized_ = true;
     }
 
+    // One decision per request, shared by all batch rows and retained across allocation retries
+    // and resetBatchSize() reshapes. Reset for a new request or explicitly clear before replanning.
+    // Includes the frozen remote count and admission source offset; retries must
+    // retain this decision even if the subsequently matched prefix is shorter.
+    const std::optional<MockCacheHitDecision>& mockCachePlan() const {
+        return mock_cache_plan_;
+    }
+
+    void setMockCachePlan(MockCacheHitDecision plan) {
+        mock_cache_plan_ = plan;
+    }
+
+    void clearMockCachePlan() {
+        mock_cache_plan_.reset();
+    }
+
     bool lastBlockAligned() const {
         for (const auto& resource : batch_resource) {
             if (!resource.lastBlockAligned()) {
@@ -234,8 +254,9 @@ public:
     }
 
 private:
-    std::vector<KVCacheResource> batch_resource;  // [batch_size]
-    bool                         cache_keys_initialized_{false};
+    std::vector<KVCacheResource>        batch_resource;  // [batch_size]
+    bool                                cache_keys_initialized_{false};
+    std::optional<MockCacheHitDecision> mock_cache_plan_;
 };
 
 using BatchKVCacheResourcePtr = std::shared_ptr<BatchKVCacheResource>;

@@ -255,6 +255,10 @@ size_t DiskBlockPool::strideBytes() const {
     return config().stride_bytes;
 }
 
+bool DiskBlockPool::bufferedIO() const {
+    return config().buffered_io;
+}
+
 size_t DiskBlockPool::blockSizeBytes() const {
     return payloadBytes();
 }

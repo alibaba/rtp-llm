@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
+from uuid import uuid4
 
 from rtp_llm.test.perf_test.config_schema import EngineConfig
 from rtp_llm.test.perf_test.decode.executor import (
@@ -47,7 +48,7 @@ from rtp_llm.test.perf_test.prefill.profile import PrefillProfiler, ProfiledRunn
 from rtp_llm.test.perf_test.prefill.report import generate_prefill_report
 from rtp_llm.test.perf_test.run_directory import RunDirectoryLock, inspect_run_directory
 from rtp_llm.test.perf_test.state import RunOutcome, RunState
-from rtp_llm.test.perf_test.storage import RunStore
+from rtp_llm.test.perf_test.storage import RunStore, atomic_write_json
 
 
 @dataclass(frozen=True)
@@ -242,9 +243,51 @@ class UnifiedLocalExecutor:
 
         return DecodeAdapter(executor_factory)
 
+    def _pressure_epoch(self, plan, *, profiling):
+        from rtp_llm.test.continuous_pressure.config import validate_profile_steps
+        from rtp_llm.test.perf_test.prefill.continuous_pressure import (
+            run_continuous_pressure,
+        )
+
+        validate_profile_steps(
+            plan.resolved_config["workload"]["pressure"]["profile_steps"]
+        )
+        root = Path(plan.result_directory)
+        epoch = uuid4().hex
+        directory = root / ("profiles" if profiling else "epochs") / epoch
+        capture = profiling or plan.resolved_config["workload"]["pressure"]["capture"]
+        if capture:
+            (directory / "traces").mkdir(parents=True)
+        if not profiling:
+            atomic_write_json(
+                root / "results" / "pressure_epoch.json",
+                {"epoch": f"epochs/{epoch}/pressure"},
+            )
+        options = {}
+        if capture and self._session_factory is _default_session_factory:
+            options.update(
+                profile_directory=(directory / "traces").resolve(), nsys_session=epoch
+            )
+        outcome = LocalExecutor(
+            session_factory=partial(self._session_factory, **options),
+            store_factory=RunStore,
+            adapters={
+                "prefill": partial(
+                    run_continuous_pressure,
+                    tokenizer=self._tokenizer_loader(plan),
+                    directory=directory,
+                    capture=capture,
+                    nsys_session=epoch,
+                )
+            },
+        ).execute(plan)
+        return directory, outcome
+
     def _execute_measurement(
         self, plan: ExecutionPlan, *, resume_selection: Optional[ResumeSelection] = None
     ):
+        if plan.resolved_config["workload"].get("pressure"):
+            return self._pressure_epoch(plan, profiling=False)[1]
         with ExitStack() as stack:
             if plan.mode == "prefill":
                 adapter = self._prefill_adapter(plan)
@@ -264,6 +307,19 @@ class UnifiedLocalExecutor:
         root = Path(plan.result_directory)
         if plan.action == "report":
             return generate_prefill_report(root)
+        pressure = plan.resolved_config["workload"].get("pressure")
+        if plan.action == "profile" and pressure:
+            with RunDirectoryLock(root, action="pressure-profile"):
+                directory, outcome = self._pressure_epoch(plan, profiling=True)
+                result = {
+                    "status": "ok" if outcome.state == RunState.COMPLETED else "failed",
+                    "epoch": str(directory.relative_to(root)),
+                    "cases": list(outcome.case_results),
+                    "error": str(outcome.failure) if outcome.failure else None,
+                    "exit_code": outcome.exit_code,
+                }
+                atomic_write_json(directory / "profile.json", result)
+                return result
         if plan.action == "profile":
             tokenizer = self._tokenizer_loader(plan)
             selected = self._selected_case_ids or tuple(
@@ -298,7 +354,7 @@ class UnifiedLocalExecutor:
             snapshot = inspect_run_directory(root)
             selection = (
                 validate_prefill_resume(plan, RunStore(root))
-                if plan.action == "resume"
+                if plan.action == "resume" and not pressure
                 else None
             )
             _write_manifest_state(root, "running")

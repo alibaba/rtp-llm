@@ -509,9 +509,9 @@ TEST(BlockTransferDispatcherTest, RetainedBatchCallbackDoesNotBlockDrain) {
     auto   dispatcher = std::make_shared<BlockTransferDispatcher>(engine);
     size_t calls      = 0;
     dispatcher->runTransfer(TransferTask({descriptor(0)}, std::chrono::seconds(30)), [&](TransferResult) { ++calls; });
-    ASSERT_EQ(pending->callbacks_.size(), 1u);
+    ASSERT_TRUE(static_cast<bool>(pending->first_callback_));
     // Keep StageState alive after completion without retaining its final callback.
-    const auto retained = pending->callbacks_.front();
+    const auto retained = pending->first_callback_;
     pending->complete(TransferStatus::OK);
     EXPECT_EQ(calls, 1u);
     BoundedThread<void> drain([dispatcher] { dispatcher->waitForTransfers(); });

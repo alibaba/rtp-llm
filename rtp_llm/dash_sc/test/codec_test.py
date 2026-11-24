@@ -942,6 +942,77 @@ class DashScGrpcRequestTest(TestCase):
         op = parse_request_controls(req)
         self.assertEqual(op, DashScRequestControls(return_input_ids=False))
 
+    def test_mock_memory_request_control_preserves_absent_false_and_true(self) -> None:
+        for value in (None, False, True):
+            with self.subTest(value=value):
+                req = predict_v2_pb2.ModelInferRequest()
+                if value is not None:
+                    req.parameters["mock_memory_cache_request"].bool_param = value
+                controls = parse_request_controls(req)
+                config = SamplingParams().to_generate_config(request_controls=controls)
+                self.assertIs(config.mock_memory_cache_request, value)
+
+    def test_client_mock_memory_request_control_preserves_wire_presence(self) -> None:
+        for value in (None, False, True):
+            with self.subTest(value=value):
+                req = build_model_infer_request(
+                    request_id="mock-gate",
+                    model_name="",
+                    input_ids=[1],
+                    sampling=SamplingParams(),
+                    mock_memory_cache_request=value,
+                )
+                self.assertEqual(
+                    "mock_memory_cache_request" in req.parameters, value is not None
+                )
+                config = SamplingParams().to_generate_config(
+                    request_controls=parse_request_controls(req)
+                )
+                self.assertIs(config.mock_memory_cache_request, value)
+
+    def test_original_positional_request_controls_keep_their_meaning(self) -> None:
+        headers = {"trace": "a"}
+        controls = DashScRequestControls(
+            False, False, True, 17, 100, 2, "high", headers, False
+        )
+        self.assertIs(controls.enable_thinking, True)
+        self.assertEqual(controls.max_new_think_tokens, 17)
+        self.assertEqual(controls.timeout_ms, 100)
+        self.assertEqual(controls.traffic_reject_priority, 2)
+        self.assertEqual(controls.reasoning_effort, "high")
+        self.assertEqual(controls.request_headers, headers)
+        self.assertIs(controls.log_input_output, False)
+        self.assertIsNone(controls.mock_cache_request)
+        self.assertIsNone(controls.mock_memory_cache_request)
+
+    def test_generic_mock_control_presence_and_conflicts(self) -> None:
+        for value in (None, False, True):
+            req = build_model_infer_request(
+                request_id="mixed",
+                model_name="",
+                input_ids=[1],
+                sampling=SamplingParams(),
+                mock_cache_request=value,
+            )
+            self.assertEqual("mock_cache_request" in req.parameters, value is not None)
+            config = SamplingParams().to_generate_config(
+                request_controls=parse_request_controls(req)
+            )
+            self.assertIs(config.mock_cache_request, value)
+            if value is not None:
+                req.parameters["mock_memory_cache_request"].bool_param = not value
+                with self.assertRaises(ValueError):
+                    parse_request_controls(req)
+                with self.assertRaises(ValueError):
+                    build_model_infer_request(
+                        request_id="mixed",
+                        model_name="",
+                        input_ids=[1],
+                        sampling=SamplingParams(),
+                        mock_cache_request=value,
+                        mock_memory_cache_request=not value,
+                    )
+
     def test_parse_request_controls_bool(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         _add_tensor(req, "return_input_ids", "BOOL", [1], b"\x01")

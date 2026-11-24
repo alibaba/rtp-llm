@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Iterable
 import grpc
 
 from rtp_llm.config.py_config_modules import DASH_SC_GRPC_SERVER_PORT_OFFSET
-from rtp_llm.dash_sc.codec import SamplingParams
+from rtp_llm.dash_sc.codec import DashScRequestControls, SamplingParams
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.server.server_args.grpc_group_args import default_dash_sc_grpc_config_json
@@ -166,8 +166,14 @@ def build_model_infer_request(
     return_input_ids: bool = False,
     enable_thinking: bool | None = None,
     force_sp_accept: bool = False,
+    mock_memory_cache_request: bool | None = None,
+    mock_cache_request: bool | None = None,
 ) -> predict_v2_pb2.ModelInferRequest:
     """Build ``ModelInferRequest`` for ``ModelStreamInfer`` (sampling tensors + ``input_ids``)."""
+    controls = DashScRequestControls(
+        mock_cache_request=mock_cache_request,
+        mock_memory_cache_request=mock_memory_cache_request,
+    )
     request = predict_v2_pb2.ModelInferRequest()
     request.id = request_id
     request.model_name = model_name
@@ -177,6 +183,10 @@ def build_model_infer_request(
         request.parameters["enable_thinking"].bool_param = bool(enable_thinking)
     if force_sp_accept:
         request.parameters["force_sp_accept"].bool_param = True
+    for name in ("mock_cache_request", "mock_memory_cache_request"):
+        value = getattr(controls, name)
+        if value is not None:
+            request.parameters[name].bool_param = value
     append_input_ids_to_model_infer_request(request, input_ids)
     return request
 

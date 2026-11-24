@@ -1,0 +1,99 @@
+syntax = "proto2";
+package rtp_llm.remote_mock;
+import "arpc/proto/rpc_extensions.proto";
+import "rtp_llm/cpp/disaggregate/cache_store/proto/cache_store_service.proto";
+option cc_generic_services = true;
+
+// Control only. No KV payload; existing data service and method IDs are unchanged.
+message Session {
+    optional uint64 server_epoch = 1;
+    optional uint64 session_id = 2;
+    optional uint64 generation = 3;
+}
+message Limits {
+    optional uint64 total_bytes = 1;
+    optional uint64 source_bytes = 2;
+    optional uint64 write_slot_bytes = 3;
+    optional uint64 read_staging_bytes = 4;
+    optional uint64 write_staging_bytes = 5;
+    optional uint32 write_slots = 6;
+    optional uint32 max_rpc_bytes = 7;
+    optional uint32 max_blocks_per_rpc = 8;
+    optional uint32 max_read_operations = 9;
+    optional uint32 max_ranks = 10;
+    optional uint32 max_groups_per_rank = 11;
+    optional uint32 max_sources_per_group = 12;
+    optional uint32 max_members_per_group = 13;
+    optional uint32 replay_window = 14;
+    optional uint32 max_delay_ms = 15;
+}
+message Layout {
+    optional uint32 group = 1;
+    optional uint32 pool = 2;
+    optional uint64 payload_bytes = 3;
+    optional uint64 storage_bytes = 4;
+    optional uint64 stride_bytes = 5;
+    optional bool crc_enabled = 6;
+    optional uint32 crc_format_version = 7 [default = 1];
+    optional uint64 crc_footer_offset = 8;
+    optional uint32 source_count = 9 [default = 64];
+    optional uint32 alignment = 10 [default = 16];
+    optional string dtype = 11;
+    repeated uint64 member_offsets = 12;
+    optional uint32 tokens_per_block = 13;
+    optional uint32 cp_world_size = 14;
+    optional uint32 cp_rank = 15;
+    optional uint64 attention_window = 16;
+}
+message InitRankRequest {
+    optional Session session = 1;
+    optional uint32 rank = 2;
+    optional uint32 expected_ranks = 3;
+    optional uint64 layout_hash = 4;
+    repeated Layout groups = 5;
+    optional uint32 read_delay_ms = 6;
+    optional uint32 write_delay_ms = 7;
+}
+message SessionRequest { optional Session session = 1; }
+message HealthRequest {}
+message SourceDescriptor {
+    optional uint32 rank = 1;
+    optional uint32 group = 2;
+    optional uint32 pool = 3;
+    optional uint32 source_count = 4; // All records share the checksum below; no payload cache.
+    optional uint64 layout_hash = 5;
+    optional uint32 record_crc32c = 6;
+}
+message ControlResponse {
+    optional KvCacheStoreServiceErrorCode error_code = 1;
+    optional string error_message = 2;
+    optional Session session = 3;
+    optional bool ready = 4;
+    optional uint64 server_epoch = 5;
+    optional uint64 last_generation = 6;
+    optional Limits limits = 7;
+    optional uint32 read_delay_ms = 8;
+    optional uint32 write_delay_ms = 9;
+    optional uint64 allocated_bytes = 10;
+    repeated SourceDescriptor sources = 11; // Only the requested rank, one descriptor per group.
+    optional uint32 expected_ranks = 12;
+    optional uint32 registered_ranks = 13;
+    // Cumulative application payload, not TCP wire/delivery-acknowledged bytes.
+    optional uint64 read_payload_bytes = 14; // Response content handed to ARPC.
+    optional uint64 write_payload_bytes = 15; // Decoded reverse content, including rejected replies.
+    optional uint64 reverse_rpcs = 16;
+    optional uint64 failed_operations = 17; // Admitted operations with unsuccessful terminal status.
+    optional uint32 reads_per_connection = 18;
+    optional uint32 writes_per_connection = 19;
+    optional uint32 max_callback_endpoints = 20;
+    optional uint32 max_timeout_ms = 21;
+    // Timer/work continuations are bounded by max_read_operations + write_slots.
+
+}
+service RemoteMockControlService {
+    option (arpc.global_service_id) = 10014;
+    rpc initRank(InitRankRequest) returns (ControlResponse) { option (arpc.local_method_id) = 1; }
+    rpc ready(SessionRequest) returns (ControlResponse) { option (arpc.local_method_id) = 2; }
+    rpc close(SessionRequest) returns (ControlResponse) { option (arpc.local_method_id) = 3; }
+    rpc health(HealthRequest) returns (ControlResponse) { option (arpc.local_method_id) = 4; }
+}

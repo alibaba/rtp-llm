@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <list>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
@@ -10,6 +11,11 @@ namespace rtp_llm {
 class TransferAsyncContext {
 public:
     using DoneCallback = std::function<void(TransferResult)>;
+    using CallbackList = std::list<DoneCallback>;
+
+    virtual bool tryAdoptPendingCallbacks(CallbackList&) noexcept {
+        return false;
+    }
 
     virtual ~TransferAsyncContext()                      = default;
     virtual void           waitDone()                    = 0;
@@ -41,6 +47,9 @@ public:
         result_.expandBlockErrors(block_count);
     }
 
+    bool tryAdoptPendingCallbacks(CallbackList&) noexcept override {
+        return false;
+    }
     void waitDone() override {}
     void onDone(DoneCallback callback) override {
         if (callback) {

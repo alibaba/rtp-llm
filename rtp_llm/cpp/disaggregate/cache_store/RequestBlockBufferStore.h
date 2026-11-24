@@ -5,6 +5,7 @@
 #include <atomic>
 #include <mutex>
 #include <functional>
+#include "rtp_llm/cpp/disaggregate/cache_store/UserBufferRegistration.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 
@@ -35,6 +36,10 @@ public:
     bool                         regUserBuffers(const std::vector<std::shared_ptr<BlockBuffer>>& buffers);
     std::shared_ptr<BlockBuffer> findUserBuffer(const std::string& buffer_key);
 
+    std::shared_ptr<UserBufferRegistration>
+         regUserBuffersScoped(const std::vector<std::shared_ptr<BlockBuffer>>& buffers);
+    bool releaseScopedRequest(const std::string& requestid);
+
     // Test hook only: shrink the tombstone TTL so reclamation can be exercised
     // without sleeping for the production default (one hour).
     void setExpiredRequestCacheTtlUsForTest(int64_t ttl_us) {
@@ -57,8 +62,11 @@ private:
     // currentTimeUs() is microseconds: 1e6 us/s * 3600 s = one hour.
     int64_t expired_request_cache_ttl_us_ = 1000LL * 1000LL * 60LL * 60LL;
 
-    std::shared_mutex                                             buffer_map_mutex_;
-    std::unordered_map<std::string, std::shared_ptr<BlockBuffer>> buffer_map_;
+    struct UserBuffers {
+        std::shared_mutex                                             mutex;
+        std::unordered_map<std::string, std::shared_ptr<BlockBuffer>> buffers;
+    };
+    std::shared_ptr<UserBuffers> user_buffers_ = std::make_shared<UserBuffers>();
 };
 
 }  // namespace rtp_llm

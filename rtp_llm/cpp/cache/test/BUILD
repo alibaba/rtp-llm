@@ -3,6 +3,29 @@ load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
+cc_test(
+    name = "mock_cache_hit_controller_test",
+    srcs = ["MockCacheHitControllerTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache:mock_cache_hit_controller",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "batch_kv_cache_resource_test",
+    srcs = ["BatchKVCacheResourceTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/cpp/cache:mock_cache_hit_controller",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 cc_import(
     name = "cuda13_torch_nvshmem",
     shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",

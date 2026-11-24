@@ -2,6 +2,20 @@ load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
 
+# Pressure diagnostics header
+cc_library(
+    name = "pressure_diagnostics",
+    hdrs = [
+        "PressureDiagnostics.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/normal_engine:pressure_step_recorder",
+        "//rtp_llm/cpp/utils:error_code",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 # Weights converter for model weight conversion
 cc_library(
     name = "weights_converter",
@@ -37,6 +51,7 @@ cc_library(
     name = "profiler",
     hdrs = [
         "TorchProfiler.h",
+        "ProfileStatus.h",
     ],
     srcs = [
         "TorchProfiler.cc",
@@ -84,6 +99,7 @@ cc_library(
     ],
     deps = [
         ":executor",
+        ":pressure_diagnostics",
         ":profiler",
         ":worker_status_info",
         "//rtp_llm/cpp/engine_base/stream:stream",

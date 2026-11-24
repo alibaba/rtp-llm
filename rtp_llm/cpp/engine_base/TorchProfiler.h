@@ -7,6 +7,7 @@
 #include <queue>
 #include <string>
 #include <thread>
+#include "rtp_llm/cpp/engine_base/ProfileStatus.h"
 #include "torch/csrc/autograd/profiler_kineto.h"
 #include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
 
@@ -45,7 +46,7 @@ class TorchProfile {
 public:
     TorchProfile(const std::string& prefix, std::string output_dir = "");
     ~TorchProfile();
-    void start();
+    void start(std::function<void()> before_enable = {});
 
     // Stops profiling and returns the result + filename for async saving.
     // Returns {nullptr, ""} if already stopped.
@@ -60,13 +61,14 @@ public:
 private:
     friend struct TorchProfileTestPeer;
 
-    std::string                 prefix_;
-    std::string                 output_dir_;
-    static std::atomic<size_t>  count_;
-    tpi::ProfilerConfig         config_ = tpi::ProfilerConfig(tpi::ProfilerState::KINETO, /*report_input_shapes=*/true);
-    std::set<tpi::ActivityType> activities_{tpi::ActivityType::CPU, tpi::ActivityType::CUDA};
-    bool                        stopped_        = true;
-    int                         profile_device_ = -1;
+    std::string                          prefix_;
+    std::string                          output_dir_;
+    static std::atomic<size_t>           count_;
+    tpi::ProfilerConfig                  config_ = tpi::ProfilerConfig(tpi::ProfilerState::KINETO, /*report_input_shapes=*/true);
+    std::set<tpi::ActivityType>          activities_{tpi::ActivityType::CPU, tpi::ActivityType::CUDA};
+    std::thread::id                      owner_thread_;
+    bool                                 stopped_        = true;
+    int                                  profile_device_ = -1;
     std::shared_ptr<AsyncProfileSession> async_profile_;
 };
 
@@ -77,7 +79,9 @@ public:
     ~ProfilerSaveWorker();
 
     // Enqueue a save task. Non-blocking, returns immediately.
-    void enqueue(std::unique_ptr<CollectedProfile> result, std::string file_name);
+    void enqueue(std::unique_ptr<CollectedProfile>       result,
+                 std::string                             file_name,
+                 std::function<void(const std::string&)> completed = {});
 
     ProfilerSaveWorker(const ProfilerSaveWorker&)            = delete;
     ProfilerSaveWorker& operator=(const ProfilerSaveWorker&) = delete;
@@ -86,8 +90,9 @@ private:
     void run();
 
     struct SaveTask {
-        std::unique_ptr<CollectedProfile> result;
-        std::string                       file_name;
+        std::unique_ptr<CollectedProfile>       result;
+        std::string                             file_name;
+        std::function<void(const std::string&)> completed;
     };
 
     std::mutex              mu_;
@@ -98,8 +103,8 @@ private:
 };
 
 // Step-window profiler controlled via API (sglang-style).
-// Thread-safe: configure() is called from gRPC thread, stepScope() from engine loop thread.
-// The actual TorchProfile start/stop happens only inside engine step callbacks, satisfying Kineto thread-affinity.
+// Collection starts in engine step callbacks and stops on that same thread,
+// including idle/shutdown serviceControl boundaries.
 // Trace export is done asynchronously on a background thread to avoid blocking inference.
 class StepWindowProfiler {
 public:
@@ -127,6 +132,13 @@ public:
     // thread), satisfying Kineto thread-affinity. If a session is already active, this is
     // a no-op (first-come-first-served).
     void configure(bool enable, const std::string& trace_name, int start_step, int num_steps);
+    // Request only; never disables Kineto on the caller's thread.
+    bool requestStop(const std::string& trace_name);
+    // Owner-thread only. Does not advance the actual execution-step window.
+    void          serviceControl();
+    ProfileStatus status() const;
+    // Drain Kineto on its owner. Preserve an untouched startup-configured window.
+    void finishOnWorkerExit();
 
     // Convenience overload: enable service-wide timeline profiling from config.
     // No-op if cfg.gen_timeline_sync is false.
@@ -148,7 +160,10 @@ public:
 
 private:
     friend class StepScope;
+    friend struct TorchProfileTestPeer;
 
+    void arm(const std::string& trace_name, int start_step, int num_steps, bool from_config);
+    void startStep(const std::function<void()>& before_prepare);
     void beginStep();
     void endStep();
     void stopProfiler(const char* reason);
@@ -157,14 +172,18 @@ private:
 
     // Atomic state set by configure(), read by beginStep()/endStep()
     std::atomic<bool> enabled_{false};
-    std::atomic<bool> reconfigure_{false};
     std::atomic<bool> has_profiler_{false};
     std::atomic<int>  start_step_{0};
     std::atomic<int>  num_steps_{0};
 
-    // State managed exclusively on the engine loop thread (inside begin/end/shutdown)
-    std::mutex                    mu_;
+    // Session/status state is mutex-protected; Kineto operations remain owner-thread only.
+    mutable std::mutex            mu_;
     std::string                   trace_name_;
+    std::string                   last_finished_trace_;
+    std::string                   last_cancelled_trace_;
+    ProfileStatus                 status_;
+    bool                          from_config_ = false;
+    std::thread::id               owner_thread_;
     std::shared_ptr<TorchProfile> profiler_;
     int64_t                       waited_steps_   = 0;
     int64_t                       profiled_steps_ = 0;

@@ -10,6 +10,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <tuple>
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/models/ModelInputsLogger.h"
@@ -264,6 +265,11 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
 }
 
 absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int64_t schedule_time_us) {
+    const bool                        pressure_enabled = pressure_recorder_ && pressure_recorder_->enabled();
+    std::optional<PressureStepRecord> pressure_record;
+    if (pressure_enabled) {
+        pressure_record.emplace().begin_ns = pressureClockNs(CLOCK_MONOTONIC);
+    }
     const auto&   streams               = schedule_output.streams;
     const int64_t process_start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     if (schedule_time_us <= 0) {
@@ -351,6 +357,22 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
         RTP_LLM_PROFILE_SCOPE("executor.tp_sync_input");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.skip_run  = streams.empty();
+        if (pressure_enabled && tp_rank_ == 0 && has_request_stream && stream_groups.modelExecuteTokenSize()
+            && !stream_groups.empty()) {
+            std::tie(model_input.pressure_session_id, model_input.pressure_phase) =
+                pressure_recorder_->controlIdentity();
+            model_input.pressure_step_id       = pressure_recorder_->candidateId();
+            model_input.pressure_context_batch = stream_groups.totalContextBatchSize();
+            model_input.pressure_decode_batch  = stream_groups.totalDecodeBatchSize();
+            model_input.pressure_tokens        = stream_groups.modelExecuteTokenSize();
+            for (const auto& stream : stream_groups.allStreams()) {
+                if (stream->isFakeStream())
+                    continue;
+                pressure_record->request_ids.push_back(stream->traceId().empty() ? std::to_string(stream->streamId()) :
+                                                                                   stream->traceId());
+                pressure_record->stream_ids.push_back(stream->streamId());
+            }
+        }
 
         // Move metadata to CUDA before tpSyncModelInputs so broadcasts use the
         // GPU packed-buffer path instead of CPU execBroadcastCpu/unpack loops.
@@ -424,7 +446,50 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
                 }
             }
         }
-        model_output                        = std::move(model_->forward(model_input));
+        const bool record_forward =
+            pressure_enabled && model_input.pressure_step_id && model_input.pressure_tokens
+            && (model_input.pressure_context_batch + model_input.pressure_decode_batch)
+            && (tp_rank_ == 0
+                || pressure_recorder_->matchesControl(model_input.pressure_session_id, model_input.pressure_phase));
+        std::string                        pressure_step_name;
+        std::unique_ptr<ProfilingScope>    pressure_step_scope;
+        std::unique_ptr<PressureNvtxScope> pressure_nvtx_scope;
+        if (record_forward && (at::hasCallbacks() || PressureNvtxScope::enabled())) {
+            pressure_step_name = "pressure.step/" + std::to_string(model_input.pressure_step_id);
+            if (PressureNvtxScope::enabled()) {
+                pressure_nvtx_scope =
+                    std::make_unique<PressureNvtxScope>(pressure_step_name.c_str(), parallelism_config_.world_rank);
+            }
+            if (at::hasCallbacks()) {
+                pressure_step_scope = std::make_unique<ProfilingScope>(pressure_step_name.c_str(), false);
+            }
+        }
+        if (record_forward) {
+            pressure_record->step_id              = model_input.pressure_step_id;
+            pressure_record->context_batch        = model_input.pressure_context_batch;
+            pressure_record->decode_batch         = model_input.pressure_decode_batch;
+            pressure_record->tokens               = model_input.pressure_tokens;
+            pressure_record->forward_enter_ns     = pressureClockNs(CLOCK_MONOTONIC);
+            pressure_record->forward_enter_cpu_ns = pressureClockNs(CLOCK_THREAD_CPUTIME_ID);
+            pressure_recorder_->begin(*pressure_record);
+        }
+        try {
+            model_output = std::move(model_->forward(model_input));
+            pressure_step_scope.reset();
+            pressure_nvtx_scope.reset();
+        } catch (...) {
+            if (record_forward) {
+                pressure_recorder_->abort();
+            }
+            throw;
+        }
+        if (record_forward) {
+            pressure_record->forward_return_cpu_ns = pressureClockNs(CLOCK_THREAD_CPUTIME_ID);
+            pressure_record->forward_return_ns     = pressureClockNs(CLOCK_MONOTONIC);
+            pressure_record->end_ns                = pressure_record->forward_return_ns;
+            pressure_record->complete              = true;
+            pressure_recorder_->append(std::move(*pressure_record));
+        }
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     if (expert_balancer_) {

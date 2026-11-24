@@ -31,6 +31,7 @@ public:
     enqueueGroup(const std::vector<GenerateStreamPtr>& streams) override;
 
     absl::StatusOr<ScheduleOutput> schedule() override;
+    std::optional<uint64_t>        pressureWaitingRequests() override;
 
 public:
     // for test. Group-aware shadow of the FIFOSchedulerBase helper so that

@@ -15,7 +15,9 @@ public:
     using DoneCallback = std::function<void(TransferResult)>;
 
     explicit TransferStageState(DoneCallback callback, size_t block_count = 0):
-        callback_(std::move(callback)), result_(TransferResult::emptyAggregate(block_count)) {}
+        callback_(std::move(callback)), result_(TransferResult::emptyAggregate(block_count)) {
+        result_.unconfirmed_blocks.resize(block_count);
+    }
 
     void addBatch() {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -34,7 +36,8 @@ public:
                 return;
             }
             for (size_t i = 0; i < block_indices.size(); ++i) {
-                result_.block_errors[block_indices[i]] = batch_result.blockError(i);
+                result_.block_errors[block_indices[i]]       = batch_result.blockError(i);
+                result_.unconfirmed_blocks[block_indices[i]] = batch_result.completionUnknown(i);
             }
             result_.merge(std::move(batch_result));
             --remaining_;
