@@ -19,6 +19,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheEventDropMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheOperationMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCachePoolMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMMockMemoryCacheMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheTransferMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheEvictionMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheInsertMetrics);
@@ -692,6 +693,7 @@ bool RtpLLMCachePoolMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(block_cache_ref_blocks_metric, "rtp_llm_kv_cache_block_cache_ref_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(load_ref_blocks_metric, "rtp_llm_kv_cache_load_ref_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(eviction_ref_blocks_metric, "rtp_llm_kv_cache_eviction_ref_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(store_ref_blocks_metric, "rtp_llm_kv_cache_store_ref_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(frozen_ref_blocks_metric, "rtp_llm_kv_cache_frozen_ref_blocks");
     REGISTER_QPS_MUTABLE_METRIC(unfreeze_blocks_qps_metric, "rtp_llm_kv_cache_unfreeze_blocks_qps");
     REGISTER_GAUGE_MUTABLE_METRIC(used_ratio_metric, "rtp_llm_kv_cache_used_ratio");
@@ -701,6 +703,8 @@ bool RtpLLMCachePoolMetrics::init(kmonitor::MetricsGroupManager* manager) {
                                   "rtp_llm_kv_cache_disk_cache_read_bandwidth_bytes_per_sec");
     REGISTER_GAUGE_MUTABLE_METRIC(write_bandwidth_bytes_per_sec_metric,
                                   "rtp_llm_kv_cache_disk_cache_write_bandwidth_bytes_per_sec");
+    REGISTER_GAUGE_MUTABLE_METRIC(mock_source_ref_blocks_metric, "rtp_llm_kv_cache_pool_mock_source_ref_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(mock_source_ref_bytes_metric, "rtp_llm_kv_cache_pool_mock_source_ref_bytes");
     return true;
 }
 
@@ -722,9 +726,12 @@ void RtpLLMCachePoolMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCac
     RTP_REPORT_MUTABLE_METRIC(block_cache_ref_blocks_metric, collector->block_cache_ref_blocks);
     RTP_REPORT_MUTABLE_METRIC(load_ref_blocks_metric, collector->load_ref_blocks);
     RTP_REPORT_MUTABLE_METRIC(eviction_ref_blocks_metric, collector->eviction_ref_blocks);
+    RTP_REPORT_MUTABLE_METRIC(store_ref_blocks_metric, collector->store_ref_blocks);
     if (collector->report_frozen_ref_blocks) {
         RTP_REPORT_MUTABLE_METRIC(frozen_ref_blocks_metric, collector->frozen_ref_blocks);
     }
+    RTP_REPORT_MUTABLE_METRIC(mock_source_ref_blocks_metric, collector->mock_source_ref_blocks);
+    RTP_REPORT_MUTABLE_METRIC(mock_source_ref_bytes_metric, collector->mock_source_ref_bytes);
     RTP_REPORT_MUTABLE_METRIC(used_ratio_metric, collector->used_ratio);
     if (collector->read_bytes.has_value()) {
         RTP_REPORT_MUTABLE_METRIC(read_bytes_metric, *collector->read_bytes);
@@ -738,6 +745,36 @@ void RtpLLMCachePoolMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCac
     if (collector->write_bandwidth_bytes_per_sec.has_value()) {
         RTP_REPORT_MUTABLE_METRIC(write_bandwidth_bytes_per_sec_metric, *collector->write_bandwidth_bytes_per_sec);
     }
+}
+
+bool RtpLLMMockMemoryCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(eligible_blocks_metric, "rtp_llm_mock_memory_cache_eligible_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(planned_host_blocks_metric, "rtp_llm_mock_memory_cache_planned_host_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(successful_h2d_blocks_metric, "rtp_llm_mock_memory_cache_successful_h2d_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(failed_h2d_blocks_metric, "rtp_llm_mock_memory_cache_failed_h2d_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(d2h_submitted_blocks_metric, "rtp_llm_mock_memory_cache_d2h_submitted_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(d2h_completed_blocks_metric, "rtp_llm_mock_memory_cache_d2h_completed_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(d2h_failed_blocks_metric, "rtp_llm_mock_memory_cache_d2h_failed_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(planned_ratio_ppm_metric, "rtp_llm_mock_memory_cache_planned_ratio_ppm");
+    REGISTER_GAUGE_MUTABLE_METRIC(success_ratio_ppm_metric, "rtp_llm_mock_memory_cache_success_ratio_ppm");
+    REGISTER_GAUGE_MUTABLE_METRIC(source_blocks_metric, "rtp_llm_mock_memory_cache_source_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(source_bytes_metric, "rtp_llm_mock_memory_cache_source_bytes");
+    return true;
+}
+
+void RtpLLMMockMemoryCacheMetrics::report(const kmonitor::MetricsTags*           tags,
+                                          RtpLLMMockMemoryCacheMetricsCollector* collector) {
+    RTP_REPORT_MUTABLE_METRIC(eligible_blocks_metric, collector->eligible_blocks);
+    RTP_REPORT_MUTABLE_METRIC(planned_host_blocks_metric, collector->planned_host_blocks);
+    RTP_REPORT_MUTABLE_METRIC(successful_h2d_blocks_metric, collector->successful_h2d_blocks);
+    RTP_REPORT_MUTABLE_METRIC(failed_h2d_blocks_metric, collector->failed_h2d_blocks);
+    RTP_REPORT_MUTABLE_METRIC(d2h_submitted_blocks_metric, collector->d2h_submitted_blocks);
+    RTP_REPORT_MUTABLE_METRIC(d2h_completed_blocks_metric, collector->d2h_completed_blocks);
+    RTP_REPORT_MUTABLE_METRIC(d2h_failed_blocks_metric, collector->d2h_failed_blocks);
+    RTP_REPORT_MUTABLE_METRIC(planned_ratio_ppm_metric, collector->planned_ratio_ppm);
+    RTP_REPORT_MUTABLE_METRIC(success_ratio_ppm_metric, collector->success_ratio_ppm);
+    RTP_REPORT_MUTABLE_METRIC(source_blocks_metric, collector->source_blocks);
+    RTP_REPORT_MUTABLE_METRIC(source_bytes_metric, collector->source_bytes);
 }
 
 bool RtpLLMCacheTransferMetrics::init(kmonitor::MetricsGroupManager* manager) {

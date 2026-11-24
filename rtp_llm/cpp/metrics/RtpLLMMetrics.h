@@ -1117,7 +1117,10 @@ public:
     int64_t block_cache_ref_blocks            = 0;
     int64_t load_ref_blocks                   = 0;
     int64_t eviction_ref_blocks               = 0;
+    int64_t store_ref_blocks                  = 0;
     int64_t frozen_ref_blocks                 = 0;
+    int64_t mock_source_ref_blocks            = 0;
+    int64_t mock_source_ref_bytes             = 0;
     float   used_ratio                        = 0;
     bool    report_frozen_ref_blocks          = false;
 
@@ -1152,14 +1155,54 @@ public:
     kmonitor::MutableMetric* block_cache_ref_blocks_metric      = nullptr;
     kmonitor::MutableMetric* load_ref_blocks_metric             = nullptr;
     kmonitor::MutableMetric* eviction_ref_blocks_metric         = nullptr;
-    kmonitor::MutableMetric* frozen_ref_blocks_metric          = nullptr;
+    kmonitor::MutableMetric* store_ref_blocks_metric            = nullptr;
+    kmonitor::MutableMetric* frozen_ref_blocks_metric           = nullptr;
+    kmonitor::MutableMetric* mock_source_ref_blocks_metric      = nullptr;
+    kmonitor::MutableMetric* mock_source_ref_bytes_metric       = nullptr;
     kmonitor::MutableMetric* unfreeze_blocks_qps_metric         = nullptr;
-    kmonitor::MutableMetric* used_ratio_metric                 = nullptr;
+    kmonitor::MutableMetric* used_ratio_metric                  = nullptr;
 
     kmonitor::MutableMetric* read_bytes_metric                    = nullptr;
     kmonitor::MutableMetric* write_bytes_metric                   = nullptr;
     kmonitor::MutableMetric* read_bandwidth_bytes_per_sec_metric  = nullptr;
     kmonitor::MutableMetric* write_bandwidth_bytes_per_sec_metric = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+// Cumulative, cache-owned mock-mode gauges. No per-request labels.
+class RtpLLMMockMemoryCacheMetricsCollector final {
+public:
+    int64_t eligible_blocks       = 0;
+    int64_t planned_host_blocks   = 0;
+    int64_t successful_h2d_blocks = 0;
+    int64_t failed_h2d_blocks     = 0;
+    int64_t d2h_submitted_blocks  = 0;
+    int64_t d2h_completed_blocks  = 0;
+    int64_t d2h_failed_blocks     = 0;
+    int64_t planned_ratio_ppm     = 0;
+    int64_t success_ratio_ppm     = 0;
+    int64_t source_blocks         = 0;
+    int64_t source_bytes          = 0;
+};
+
+class RtpLLMMockMemoryCacheMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMMockMemoryCacheMetricsCollector* collector);
+
+    kmonitor::MutableMetric* eligible_blocks_metric       = nullptr;
+    kmonitor::MutableMetric* planned_host_blocks_metric   = nullptr;
+    kmonitor::MutableMetric* successful_h2d_blocks_metric = nullptr;
+    kmonitor::MutableMetric* failed_h2d_blocks_metric     = nullptr;
+    kmonitor::MutableMetric* d2h_submitted_blocks_metric  = nullptr;
+    kmonitor::MutableMetric* d2h_completed_blocks_metric  = nullptr;
+    kmonitor::MutableMetric* d2h_failed_blocks_metric     = nullptr;
+    kmonitor::MutableMetric* planned_ratio_ppm_metric     = nullptr;
+    kmonitor::MutableMetric* success_ratio_ppm_metric     = nullptr;
+    kmonitor::MutableMetric* source_blocks_metric         = nullptr;
+    kmonitor::MutableMetric* source_bytes_metric          = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

@@ -171,6 +171,10 @@ message GenerateConfigPB {
     google.protobuf.Int32Value logits_index = 78;
     uint32 top_logprobs = 79;
     bool return_logprobs = 80;
+    // Missing inherits service-global mock mode; false uses the real cache tree.
+    google.protobuf.BoolValue mock_memory_cache_request = 81;
+    // Generic activation for Memory/Disk mocks. Conflicting explicit legacy values are rejected.
+    google.protobuf.BoolValue mock_cache_request = 82;
 }
 
 message MMPreprocessConfigPB {
@@ -556,6 +560,34 @@ message StartProfileInternalRequestPB {
     int32 num_steps = 3;
 }
 
+message ProfileStatusPB {
+    bool supported = 1;
+    string state = 2; // armed, active, stopping, finished
+    string trace_name = 3;
+    bool stop_requested = 4;
+    bool collection_complete = 5;
+    bool export_complete = 6;
+    string collection_error = 7;
+    string export_error = 8;
+    string file_name = 9;
+    int64 capture_begin_ns = 10; // CLOCK_MONOTONIC, collector enable boundary.
+    int64 capture_end_ns = 11; // Collector disable/flush boundary, excludes export.
+}
+message StopProfileRequestPB {
+    string trace_name = 1;
+    bool enable_all_rank = 2;
+    repeated int32 target_ranks = 3; // Optional TP subset; requires enable_all_rank.
+}
+message StopProfileInternalRequestPB { string trace_name = 1; }
+message StopProfileRankPB {
+    int32 world_rank = 1;
+    string service_instance = 2;
+    bool accepted = 3; // Request acceptance does not mean collection/export completed.
+    ProfileStatusPB profile = 4;
+    string error = 5;
+}
+message StopProfileResponsePB { repeated StopProfileRankPB ranks = 1; }
+
 message TorchAllocatorDumpRequestPB {
     string auth_token = 1;
     string dump_id = 2;
@@ -750,6 +782,20 @@ service EmbeddingRpcService {
 }
 
 message MemoryOperationRequestPB {
+    // Rank-neutral identity; each worker resolves its own immutable source layout.
+    message RemoteMockSource {
+        uint64 server_epoch = 1;
+        uint64 session_id = 2;
+        uint64 generation = 3;
+        uint64 admission_offset = 4;
+        uint64 logical_index = 5;
+    }
+    message RemoteMockTarget {
+        uint64 server_epoch = 1;
+        uint64 session_id = 2;
+        uint64 generation = 3;
+        uint64 record_index = 4;
+    }
     message CopyItem {
         int32 mem_block = 1;
         int32 disk_block = 2;
@@ -757,6 +803,8 @@ message MemoryOperationRequestPB {
         // Legacy numeric identity. T8 decoders intentionally reject numeric-only payloads.
         uint64 deprecated_group_set_id = 4;
         repeated string group_tags = 5;
+        RemoteMockSource remote_mock_source = 6;
+        RemoteMockTarget remote_mock_target = 7;
     }
     enum CopyDirection {
         H2D = 0;
@@ -765,6 +813,8 @@ message MemoryOperationRequestPB {
         DISK2H = 3;
         D2DISK = 4;
         DISK2D = 5;
+        REMOTE2D = 6;
+        D2REMOTE = 7;
     }
     repeated CopyItem copy_items = 1;
     CopyDirection copy_direction = 2;
@@ -777,6 +827,8 @@ message MemoryOperationRequestPB {
     // Optional diagnostics. Older peers omit these and retain task-local grouping.
     uint64 transfer_workflow_id = 7;
     uint64 transfer_parent_id = 8;
+    // Unspecified on legacy physical RPCs. Classifies local copy receipts only.
+    PressureOperationPB pressure_operation = 9;
 }
 
 message MemoryOperationResponsePB {
@@ -1327,6 +1379,12 @@ service RpcService {
     rpc SetLogLevel(SetLogLevelRequestPB) returns (EmptyPB);
     rpc StartProfile(StartProfileRequestPB) returns (EmptyPB);
     rpc StartProfileInternal(StartProfileInternalRequestPB) returns (EmptyPB);
+    rpc StopProfile(StopProfileRequestPB) returns (StopProfileResponsePB);
+    rpc StopProfileInternal(StopProfileInternalRequestPB) returns (StopProfileResponsePB);
+    rpc GetCachePressure(CachePressureRequestPB) returns (CachePressureResponsePB);
+    rpc GetCachePressureInternal(CachePressureRequestPB) returns (CachePressureResponsePB);
+    rpc ControlPressureDiagnostics(PressureSessionControlRequestPB) returns (PressureSessionControlResponsePB);
+    rpc ControlPressureDiagnosticsInternal(PressureSessionControlRequestPB) returns (PressureSessionControlResponsePB);
     rpc DumpTorchAllocator(TorchAllocatorDumpRequestPB) returns (TorchAllocatorDumpResponsePB);
     rpc DumpTorchAllocatorInternal(TorchAllocatorDumpRequestPB) returns (TorchAllocatorDumpResultPB);
     rpc UpdateSchedulerInfo(UpdateSchedulerInfoRequestPB) returns (EmptyPB);
@@ -1384,4 +1442,287 @@ service MultimodalRpcService {
     rpc GetMultimodalHashes(MultimodalHashRequestPB) returns (MultimodalHashResponsePB);
     rpc AsyncSubmitEmbedding(MultimodalInputsPB) returns (EmptyPB);
     rpc WaitGreenNetVerdict(MultimodalInputsPB) returns (EmptyPB);
+}
+
+// Opt-in diagnostics, schema 1. All process clock timestamps are nanoseconds.
+enum PressureTierPB {
+    PRESSURE_TIER_UNSPECIFIED = 0;
+    PRESSURE_DEVICE = 1;
+    PRESSURE_HOST = 2;
+    PRESSURE_DISK = 3;
+    PRESSURE_REMOTE = 4;
+    PRESSURE_NONE = 5;
+}
+enum PressureGroupTypePB {
+    PRESSURE_GROUP_UNSPECIFIED = 0;
+    PRESSURE_FULL = 1;
+    PRESSURE_SWA = 2;
+    PRESSURE_LINEAR = 3;
+}
+enum PressureOperationPB {
+    PRESSURE_OPERATION_UNSPECIFIED = 0;
+    PRESSURE_LOAD = 1;
+    PRESSURE_EVICT = 2;
+    PRESSURE_STORE = 3;
+}
+message PressurePoolPB {
+    string pool_id = 1;
+    PressureTierPB tier = 2;
+    string pool_name = 3;
+    uint64 block_size_bytes = 4;
+    uint64 total_blocks = 5;
+    uint64 free_blocks = 6;
+    uint64 used_blocks = 7;
+    uint64 available_blocks = 8;
+    uint64 active_blocks = 9;
+    google.protobuf.UInt64Value request_ref_blocks = 10;
+    uint64 block_cache_ref_blocks = 11;
+    uint64 load_ref_blocks = 12;
+    uint64 eviction_target_ref_blocks = 13;
+    uint64 store_ref_blocks = 14;
+    uint64 pending_release_blocks = 15;
+    uint64 published_host_blocks = 16;
+    uint64 mock_source_ref_blocks = 17;
+    uint64 mock_source_ref_bytes = 18;
+    uint64 disk_read_bytes = 19;
+    uint64 disk_write_bytes = 20;
+}
+message PressureWatermarkPB {
+    double low_ratio = 1;
+    double high_ratio = 2;
+}
+message PressureGroupPB {
+    uint64 group_id = 1;
+    PressureGroupTypePB group_type = 2;
+    repeated string device_pool_ids = 3;
+    google.protobuf.StringValue host_pool_id = 4;
+    google.protobuf.StringValue disk_pool_id = 5;
+    PressureWatermarkPB device_watermark = 6;
+    PressureWatermarkPB host_watermark = 7;
+    PressureWatermarkPB disk_watermark = 8;
+    // Cumulative DEVICE high-watermark transitions; excludes HOST and DISK.
+    uint64 watermark_trigger_count = 9;
+    repeated string group_tags = 10;
+    // Global request-token span per physical owner block, including CP policy.
+    // Pool capacity/occupancy remain physical block counts.
+    uint64 block_tokens = 11;
+    uint64 payload_bytes = 12;
+    uint64 storage_bytes = 13;
+    bool crc_enabled = 14;
+}
+message PressureOwnershipPB {
+    enum Mode { UNSUPPORTED = 0; INDEPENDENT = 1; SHARED_TP = 2; }
+    enum PublicationScope { UNKNOWN = 0; LOCAL = 1; ALL_PARTICIPANTS = 2; }
+    Mode mode = 1;
+    google.protobuf.Int32Value owner_world_rank = 2;
+    repeated int32 participant_world_ranks = 3;
+    PublicationScope publication_scope = 4;
+}
+// Each record describes one physical endpoint. Never sum source/target endpoints.
+message PressureTransferPB {
+    uint64 group_id = 1;
+    string pool_id = 2;
+    PressureTierPB pool_tier = 3;
+    PressureOperationPB operation = 4;
+    PressureTierPB source_tier = 5;
+    PressureTierPB target_tier = 6;
+    uint64 copied_blocks = 7;
+    uint64 copied_bytes = 8;
+    uint64 published_blocks = 9;
+    uint64 published_bytes = 10;
+    uint64 failed_operations = 11; // Owner workflow failures, including remote/transport errors.
+    uint64 physical_failed_operations = 12; // Failed local physical submissions for this endpoint.
+}
+message PressureActivityPB {
+    google.protobuf.UInt64Value waiting_requests = 1;
+    google.protobuf.UInt64Value running_requests = 2;
+}
+message PressureMockMemoryPB {
+    enum TerminalOutcomeVersion {
+        TERMINAL_OUTCOME_UNSPECIFIED = 0;
+        // Counters change at physical terminal notification before deferred
+        // settlement; failed pre-transfer attempts change at terminal rejection.
+        TRANSFER_TERMINAL_V1 = 1;
+    }
+    uint64 eligible_blocks = 1;
+    uint64 planned_host_blocks = 2;
+    uint64 successful_h2d_blocks = 3;
+    uint64 failed_h2d_blocks = 4;
+    uint64 d2h_submitted_blocks = 5;
+    uint64 d2h_completed_blocks = 6;
+    uint64 d2h_failed_blocks = 7;
+    TerminalOutcomeVersion terminal_outcome_version = 8;
+}
+message PressureMockCachePB {
+    // Logical owner admission counts and aggregate terminal outcomes, never
+    // summed over FULL/SWA or TP endpoints. Version 1 is terminal accounting.
+    uint32 terminal_outcome_version = 1;
+    uint64 eligible_blocks = 2;
+    uint64 planned_memory_blocks = 3;
+    uint64 planned_disk_blocks = 4;
+    uint64 successful_memory_blocks = 5;
+    uint64 successful_disk_blocks = 6;
+    uint64 failed_blocks = 7;
+    // Physical accepted destination records, independent of publication.
+    uint64 disk_write_submitted_records = 8;
+    uint64 disk_write_completed_records = 9;
+    uint64 disk_write_failed_records = 10;
+    uint64 planned_remote_blocks = 11;
+    uint64 successful_remote_blocks = 12;
+}
+message PressureStepPB {
+    string session_id = 1;
+    uint64 step_id = 2;
+    uint64 sequence = 3;
+    int64 wall_start_ns = 4;
+    int64 wall_end_ns = 5;
+    int64 cpu_start_ns = 6;
+    int64 cpu_end_ns = 7;
+    uint64 context_count = 8;
+    uint64 decode_count = 9;
+    uint64 context_tokens = 10;
+    uint64 decode_tokens = 11;
+    repeated int64 request_ids = 12;
+    bool completed = 13;
+    string phase = 14;
+    int64 preparation_begin_ns = 15;
+    int64 forward_enter_ns = 16;
+    int64 forward_return_ns = 17;
+    int64 end_ns = 18;
+    uint64 executed_tokens = 19;
+    repeated string source_request_ids = 20;
+}
+message PressureSessionControlRequestPB {
+    enum Action {
+        ACTION_UNSPECIFIED = 0;
+        ENABLE = 1;
+        MARK_PHASE = 2;
+        DISABLE = 3;
+    }
+    string session_id = 1;
+    Action action = 2;
+    string phase = 3;
+    uint32 recorder_capacity = 4;
+    repeated int32 target_ranks = 5;
+}
+message PressureSessionControlRankPB {
+    int32 world_rank = 1;
+    string service_instance = 2;
+    int64 applied_monotonic_ns = 3;
+    string error = 4;
+}
+message PressureSessionControlResponsePB {
+    uint32 schema_version = 1;
+    repeated PressureSessionControlRankPB ranks = 2;
+}
+message CachePressureRequestPB {
+    string session_id = 1;
+    repeated int32 target_ranks = 2;
+    map<int32, uint64> after_step_sequence = 3;
+    uint32 max_step_records = 4;
+    // Reusable final-window barrier; caller has stopped request ingress.
+    // Includes opted-in requests awaiting resource release after HTTP completion.
+    bool drain_remote_completions = 5;
+}
+message PressureRemoteWritePB {
+    // Logical owner requests only. Worker physical batches never increment these.
+    uint64 submitted = 1;
+    uint64 completed = 2;
+    uint64 failed = 3;
+    uint64 rejected = 4;
+    uint64 pending_requests = 5;
+    uint64 pending_intents = 6;
+    uint64 retained_descriptors = 7;
+    // Owner authoritative. Unknown peer GPU work requires full engine restart;
+    // physical adapter drain does not make quarantined blocks safe for reuse.
+    bool faulted = 8;
+    uint64 quarantined_blocks = 9;
+}
+message PressureRemoteLayoutPB {
+    uint32 group = 1;
+    uint32 pool = 2;
+    uint64 payload_bytes = 3;
+    uint64 storage_bytes = 4;
+    uint64 stride_bytes = 5;
+    uint32 source_count = 6;
+    uint32 alignment = 7;
+    string dtype = 8;
+    bool crc_enabled = 9;
+    uint32 crc_format_version = 10;
+    uint64 crc_footer_offset = 11;
+    uint32 tokens_per_block = 12;
+    uint32 cp_world_size = 13;
+    uint32 cp_rank = 14;
+    uint64 attention_window = 15;
+}
+message PressureRemoteRuntimePB {
+    // Presence and version certify the actual enabled adapter, never default zeros.
+    uint32 version = 1;
+    map<string, string> options = 2;
+    string callback_endpoint = 3;
+    uint64 server_epoch = 4;
+    uint64 session_id = 5;
+    uint64 generation = 6;
+    uint64 layout_hash = 7;
+    uint32 rank = 8;
+    uint32 expected_ranks = 9;
+    map<string, uint64> limits = 10;
+    map<string, uint64> credits = 11;
+    repeated PressureRemoteLayoutPB layouts = 12;
+}
+// Applied on the tree owner. Disabled providers have zero active targets.
+message PressureLocalMockTargetsPB {
+    bool memory_enabled = 1;
+    bool disk_enabled = 2;
+    double memory_ratio = 3;
+    double disk_ratio = 4;
+    uint32 memory_ppm = 5;
+    uint32 disk_ppm = 6;
+}
+message PressureLocalStorePB {
+    // Successful opted-in streams after all local insertions, including reuse-only stores.
+    uint64 released_requests = 1;
+    // Failed admissions never enter the accepted physical record counters.
+    uint64 rejected_host_stores = 2;
+    uint64 rejected_disk_stores = 3;
+    uint64 pending_requests = 4;
+    uint64 abandoned_requests = 5;
+}
+message CachePressureRankPB {
+    int32 world_rank = 1;
+    string service_instance = 2;
+    uint64 sequence = 3;
+    int64 sampled_monotonic_ns = 4;
+    int64 collect_duration_ns = 5;
+    string error = 6;
+    repeated PressurePoolPB pools = 7;
+    repeated PressureGroupPB groups = 8;
+    repeated PressureTransferPB transfers = 9;
+    repeated PressureStepPB steps = 10;
+    uint64 next_step_sequence = 11;
+    bool step_records_lost = 12;
+    int64 coordinator_send_ns = 13;
+    int64 coordinator_receive_ns = 14;
+    PressureActivityPB activity = 15;
+    bool step_history_available = 16;
+    ProfileStatusPB profile = 17;
+    PressureOwnershipPB ownership = 18;
+    PressureMockMemoryPB mock_memory = 19;
+    PressureMockCachePB mock_cache = 20;
+    // Actual application payload bytes on this rank; never inferred from TP size.
+    uint64 remote_read_payload_bytes = 21;
+    PressureRemoteWritePB mock_remote_write = 22;
+    // Actual successful slice-ACK application bytes on this rank. Server-received
+    // bytes can be larger on ACK loss; do not multiply this field by TP size.
+    uint64 remote_write_acknowledged_payload_bytes = 23;
+    PressureRemoteRuntimePB remote_runtime = 24;
+    PressureLocalMockTargetsPB local_mock_targets = 25;
+    PressureLocalStorePB local_store = 26;
+}
+message CachePressureResponsePB {
+    uint32 schema_version = 1;
+    repeated int32 requested_ranks = 2;
+    repeated CachePressureRankPB ranks = 3;
+    int64 coordinator_received_ns = 4;
+    int64 coordinator_sent_ns = 5;
 }

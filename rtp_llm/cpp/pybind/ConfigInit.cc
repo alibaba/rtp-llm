@@ -584,10 +584,30 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("kv_cache_event_instance_id", &KVCacheConfig::kv_cache_event_instance_id)
         .def_readwrite("kv_cache_event_host_ip_port", &KVCacheConfig::kv_cache_event_host_ip_port)
         .def_readwrite("kv_cache_event_snapshot_interval_ms", &KVCacheConfig::kv_cache_event_snapshot_interval_ms)
+        .def_readwrite("mock_memory_cache", &KVCacheConfig::mock_memory_cache)
+        .def_readwrite("mock_memory_cache_hit_ratio", &KVCacheConfig::mock_memory_cache_hit_ratio)
+        .def_readwrite("mock_memory_cache_seed", &KVCacheConfig::mock_memory_cache_seed)
+        .def_readwrite("mock_memory_cache_source_blocks", &KVCacheConfig::mock_memory_cache_source_blocks)
+        .def_readwrite("mock_memory_cache_real_match", &KVCacheConfig::mock_memory_cache_real_match)
+        .def_readwrite("mock_disk_cache", &KVCacheConfig::mock_disk_cache)
+        .def_readwrite("mock_disk_cache_hit_ratio", &KVCacheConfig::mock_disk_cache_hit_ratio)
+        .def_readwrite("mock_disk_cache_seed", &KVCacheConfig::mock_disk_cache_seed)
+        .def_readwrite("mock_disk_cache_source_blocks", &KVCacheConfig::mock_disk_cache_source_blocks)
+        .def_readwrite("mock_remote_cache", &KVCacheConfig::mock_remote_cache)
+        .def_readwrite("mock_remote_cache_address", &KVCacheConfig::mock_remote_cache_address)
+        .def_readwrite("mock_remote_cache_hit_ratio", &KVCacheConfig::mock_remote_cache_hit_ratio)
+        .def_readwrite("mock_remote_cache_source_blocks", &KVCacheConfig::mock_remote_cache_source_blocks)
+        .def_readwrite("mock_remote_cache_read_delay_ms", &KVCacheConfig::mock_remote_cache_read_delay_ms)
+        .def_readwrite("mock_remote_cache_write_delay_ms", &KVCacheConfig::mock_remote_cache_write_delay_ms)
+        .def_readwrite("mock_remote_cache_callback_port", &KVCacheConfig::mock_remote_cache_callback_port)
+        .def_readwrite("mock_remote_cache_staging_size_mb", &KVCacheConfig::mock_remote_cache_staging_size_mb)
+        .def_readwrite("mock_remote_cache_max_inflight", &KVCacheConfig::mock_remote_cache_max_inflight)
+        .def_readwrite("mock_remote_cache_timeout_ms", &KVCacheConfig::mock_remote_cache_timeout_ms)
+        .def("validateMockCacheConfig", &KVCacheConfig::validateMockCacheConfig)
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      25,
+                                      27,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -669,7 +689,28 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       // the per-pool block weights at the tail so indices 0-78
                                       // stay identical to main's v23.
                                       self.enable_linear_cache_reclaim,
-                                      self.kv_cache_pool_block_weights);
+                                      self.kv_cache_pool_block_weights,
+                                      // v26 appends memory/disk mock cache fields (indices 81-89);
+                                      // v27 appends remote mock cache fields (indices 90-99).
+                                      self.mock_memory_cache,
+                                      self.mock_memory_cache_hit_ratio,
+                                      self.mock_memory_cache_seed,
+                                      self.mock_memory_cache_source_blocks,
+                                      self.mock_memory_cache_real_match,
+                                      self.mock_disk_cache,
+                                      self.mock_disk_cache_hit_ratio,
+                                      self.mock_disk_cache_seed,
+                                      self.mock_disk_cache_source_blocks,
+                                      self.mock_remote_cache,
+                                      self.mock_remote_cache_address,
+                                      self.mock_remote_cache_hit_ratio,
+                                      self.mock_remote_cache_source_blocks,
+                                      self.mock_remote_cache_read_delay_ms,
+                                      self.mock_remote_cache_write_delay_ms,
+                                      self.mock_remote_cache_callback_port,
+                                      self.mock_remote_cache_staging_size_mb,
+                                      self.mock_remote_cache_max_inflight,
+                                      self.mock_remote_cache_timeout_ms);
             },
             [](py::tuple t) {
                 // Pickle version ladder after merging main #1643 (dsv41 btc):
@@ -680,9 +721,25 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 // v24 = main's v23 (79 fields) + enable_linear_cache_reclaim appended
                 //       at the tail (size 80), keeping main's indices untouched;
                 // v25 = v24 + kv_cache_pool_block_weights appended at the tail
-                //       (size 81).
+                //       (size 81);
+                // v26 = v25 + 9 memory/disk mock fields (size 90);
+                // v27 = v26 + 10 remote mock fields (size 100).
                 // Each step strips its tail fields and steps the version down so
                 // both families' older states keep decoding through main's ladder.
+                const py::tuple remote_state = t;
+                const bool      has_remote_fields =
+                    t.size() == 100 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 27;
+                if (has_remote_fields) {
+                    t    = t[py::slice(0, 90, 1)].cast<py::tuple>();
+                    t[1] = py::int_(26);
+                }
+                const py::tuple mock_state = t;
+                const bool      has_mock_fields =
+                    t.size() == 90 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 26;
+                if (has_mock_fields) {
+                    t    = t[py::slice(0, 81, 1)].cast<py::tuple>();
+                    t[1] = py::int_(25);
+                }
                 const py::tuple pool_weights_v25_state = t;
                 const bool      has_v25_pool_weights_field =
                     t.size() == 81 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 25;
@@ -926,6 +983,29 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         || c.swa_pool_blocks > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
                         throw std::runtime_error("invalid KVCacheConfig tail or pool blocks");
                     }
+                }
+                if (has_mock_fields) {
+                    c.mock_memory_cache               = mock_state[81].cast<bool>();
+                    c.mock_memory_cache_hit_ratio     = mock_state[82].cast<double>();
+                    c.mock_memory_cache_seed          = mock_state[83].cast<uint64_t>();
+                    c.mock_memory_cache_source_blocks = mock_state[84].cast<size_t>();
+                    c.mock_memory_cache_real_match    = mock_state[85].cast<bool>();
+                    c.mock_disk_cache                 = mock_state[86].cast<bool>();
+                    c.mock_disk_cache_hit_ratio       = mock_state[87].cast<double>();
+                    c.mock_disk_cache_seed            = mock_state[88].cast<uint64_t>();
+                    c.mock_disk_cache_source_blocks   = mock_state[89].cast<size_t>();
+                }
+                if (has_remote_fields) {
+                    c.mock_remote_cache                 = remote_state[90].cast<bool>();
+                    c.mock_remote_cache_address         = remote_state[91].cast<std::string>();
+                    c.mock_remote_cache_hit_ratio       = remote_state[92].cast<double>();
+                    c.mock_remote_cache_source_blocks   = remote_state[93].cast<int64_t>();
+                    c.mock_remote_cache_read_delay_ms   = remote_state[94].cast<int64_t>();
+                    c.mock_remote_cache_write_delay_ms  = remote_state[95].cast<int64_t>();
+                    c.mock_remote_cache_callback_port   = remote_state[96].cast<int64_t>();
+                    c.mock_remote_cache_staging_size_mb = remote_state[97].cast<int64_t>();
+                    c.mock_remote_cache_max_inflight    = remote_state[98].cast<int64_t>();
+                    c.mock_remote_cache_timeout_ms      = remote_state[99].cast<int64_t>();
                 }
                 return c;
             }));

@@ -724,6 +724,61 @@ class ModelRpcClientTest(TestCase):
             "max_new_tokens", {field.name for field, _ in config_pb.ListFields()}
         )
 
+    def test_generic_mock_request_survives_wire_round_trip(self):
+        for value in (None, False, True):
+            with self.subTest(value=value):
+                config = GenerateConfig(mock_cache_request=value)
+                message = self._round_trip_generate_config(config)
+                fields = {
+                    field.name: field_value
+                    for field, field_value in message.ListFields()
+                }
+                self.assertEqual("mock_cache_request" in fields, value is not None)
+                if value is not None:
+                    self.assertIs(fields["mock_cache_request"].value, value)
+
+    def test_generic_mock_request_presence_and_conflicts(self):
+        for value in (None, False, True):
+            config = GenerateConfig(mock_cache_request=value)
+            config_pb = self._round_trip_generate_config(config)
+            self.assertEqual(
+                config_pb.HasField("mock_cache_request"), value is not None
+            )
+            if value is not None:
+                self.assertIs(config_pb.mock_cache_request.value, value)
+                with self.assertRaises(ValueError):
+                    GenerateConfig(
+                        mock_cache_request=value, mock_memory_cache_request=not value
+                    )
+                matching = GenerateConfig(
+                    mock_cache_request=value, mock_memory_cache_request=value
+                )
+                self.assertIs(
+                    self._round_trip_generate_config(matching).mock_cache_request.value,
+                    value,
+                )
+        config = GenerateConfig()
+        config.mock_cache_request = True
+        config.mock_memory_cache_request = False
+        with self.assertRaises(FtRuntimeException):
+            self._round_trip_generate_config(config)
+        config = GenerateConfig(mock_cache_request=False)
+        with self.assertRaises(FtRuntimeException):
+            config.update({"mock_memory_cache_request": True})
+        self.assertIsNone(config.mock_memory_cache_request)
+        self.assertFalse(config.mock_cache_request)
+
+    def test_trans_input_preserves_mock_memory_request_presence(self):
+        for value in (None, False, True):
+            with self.subTest(value=value):
+                config = GenerateConfig(mock_memory_cache_request=value)
+                config_pb = self._round_trip_generate_config(config)
+                self.assertEqual(
+                    config_pb.HasField("mock_memory_cache_request"), value is not None
+                )
+                if value is not None:
+                    self.assertIs(config_pb.mock_memory_cache_request.value, value)
+
     def test_trans_input_round_trips_zero_max_new_tokens_with_prefill_flag(self):
         config_pb = self._round_trip_generate_config(GenerateConfig(max_new_tokens=0))
 

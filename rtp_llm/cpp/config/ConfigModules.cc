@@ -2,6 +2,8 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "autil/EnvUtil.h"
 #include <limits>
+#include <cmath>
+#include <stdexcept>
 #include <map>
 #include <sstream>
 #include <algorithm>
@@ -118,6 +120,59 @@ void KVCacheConfig::insertMultiTaskPromptTokens(std::string task_id, std::vector
     multi_task_prompt_tokens[task_id] = new_tokens_id;
 }
 
+void KVCacheConfig::validateMockCacheConfig() const {
+    const auto valid_ratio = [](double ratio) { return std::isfinite(ratio) && ratio >= 0 && ratio <= 1; };
+    if (!valid_ratio(mock_memory_cache_hit_ratio) || !valid_ratio(mock_disk_cache_hit_ratio)
+        || !valid_ratio(mock_remote_cache_hit_ratio)) {
+        throw std::invalid_argument("mock cache ratios must be finite in [0,1]");
+    }
+    const double sum = (mock_memory_cache ? mock_memory_cache_hit_ratio : 0)
+                       + (mock_disk_cache ? mock_disk_cache_hit_ratio : 0)
+                       + (mock_remote_cache ? mock_remote_cache_hit_ratio : 0);
+    if (sum > 1) {
+        throw std::invalid_argument("mock cache enabled ratios must have sum <= 1");
+    }
+    // Bound conversion from milliseconds to steady-clock nanoseconds, and
+    // from total MiB to size_t bytes before any allocation or network startup.
+    constexpr int64_t  max_wire = std::numeric_limits<uint32_t>::max();
+    constexpr uint64_t mib      = 1024 * 1024;
+    constexpr uint64_t max_staging_bytes =
+        std::min<uint64_t>(std::numeric_limits<size_t>::max(), std::numeric_limits<int64_t>::max());
+    if (mock_remote_cache_read_delay_ms < 0 || mock_remote_cache_read_delay_ms > max_wire
+        || mock_remote_cache_write_delay_ms < 0 || mock_remote_cache_write_delay_ms > max_wire
+        || mock_remote_cache_timeout_ms <= 0 || mock_remote_cache_timeout_ms > max_wire) {
+        throw std::invalid_argument(
+            "mock remote delays must be nonnegative and timeout positive, within uint32 wire bounds");
+    }
+    if (mock_remote_cache_source_blocks <= 0 || mock_remote_cache_source_blocks > max_wire
+        || mock_remote_cache_max_inflight <= 0 || mock_remote_cache_max_inflight > max_wire
+        || mock_remote_cache_staging_size_mb < 1
+        || static_cast<uint64_t>(mock_remote_cache_staging_size_mb) > max_staging_bytes / mib) {
+        throw std::invalid_argument(
+            "mock remote source/inflight capacities must be positive and staging at least 1 MiB without overflow");
+    }
+    // Accept hostname/IPv4 or bracketed IPv6 syntax, with a decimal TCP port.
+    const auto colon      = mock_remote_cache_address.rfind(':');
+    const auto host       = mock_remote_cache_address.substr(0, colon);
+    const bool valid_host = std::regex_match(host, std::regex(R"([A-Za-z0-9_.-]+|\[[0-9A-Fa-f:.%]+\])"));
+    uint32_t   port       = 0;
+    bool       valid_port = colon != std::string::npos && colon + 1 < mock_remote_cache_address.size();
+    if (valid_port) {
+        for (size_t i = colon + 1; i < mock_remote_cache_address.size(); ++i) {
+            const char digit = mock_remote_cache_address[i];
+            if (digit < '0' || digit > '9' || port > 6553) {
+                valid_port = false;
+                break;
+            }
+            port = port * 10 + static_cast<uint32_t>(digit - '0');
+        }
+    }
+    if (!valid_host || !valid_port || port == 0 || port > 65535 || mock_remote_cache_callback_port <= 0
+        || mock_remote_cache_callback_port > 65535) {
+        throw std::invalid_argument("mock remote address must be HOST:PORT and callback base port in [1,65535]");
+    }
+}
+
 std::string KVCacheConfig::to_string() const {
     std::ostringstream oss;
     oss << "reuse_cache: " << reuse_cache << "\n"
@@ -179,7 +234,26 @@ std::string KVCacheConfig::to_string() const {
         << "kv_cache_event_snapshot_interval_ms: " << kv_cache_event_snapshot_interval_ms << "\n"
         << "kvcm_asyncwrapper_thread_num: " << kvcm_asyncwrapper_thread_num << "\n"
         << "kvcm_asyncwrapper_queue_size: " << kvcm_asyncwrapper_queue_size << "\n"
-        << "block_tree_full_prefix_scan_interval_ms: " << block_tree_full_prefix_scan_interval_ms << "\n";
+        << "block_tree_full_prefix_scan_interval_ms: " << block_tree_full_prefix_scan_interval_ms << "\n"
+        << "mock_memory_cache: " << mock_memory_cache << "\n"
+        << "mock_memory_cache_real_match: " << mock_memory_cache_real_match << "\n"
+        << "mock_memory_cache_hit_ratio: " << mock_memory_cache_hit_ratio << "\n"
+        << "mock_memory_cache_seed: " << mock_memory_cache_seed << "\n"
+        << "mock_memory_cache_source_blocks: " << mock_memory_cache_source_blocks << "\n"
+        << "mock_disk_cache: " << mock_disk_cache << "\n"
+        << "mock_disk_cache_hit_ratio: " << mock_disk_cache_hit_ratio << "\n"
+        << "mock_disk_cache_seed: " << mock_disk_cache_seed << "\n"
+        << "mock_disk_cache_source_blocks: " << mock_disk_cache_source_blocks << "\n"
+        << "mock_remote_cache: " << mock_remote_cache << "\n"
+        << "mock_remote_cache_address: " << mock_remote_cache_address << "\n"
+        << "mock_remote_cache_hit_ratio: " << mock_remote_cache_hit_ratio << "\n"
+        << "mock_remote_cache_source_blocks: " << mock_remote_cache_source_blocks << "\n"
+        << "mock_remote_cache_read_delay_ms: " << mock_remote_cache_read_delay_ms << "\n"
+        << "mock_remote_cache_write_delay_ms: " << mock_remote_cache_write_delay_ms << "\n"
+        << "mock_remote_cache_callback_port: " << mock_remote_cache_callback_port << "\n"
+        << "mock_remote_cache_staging_size_mb: " << mock_remote_cache_staging_size_mb << "\n"
+        << "mock_remote_cache_max_inflight: " << mock_remote_cache_max_inflight << "\n"
+        << "mock_remote_cache_timeout_ms: " << mock_remote_cache_timeout_ms << "\n";
     return oss.str();
 }
 

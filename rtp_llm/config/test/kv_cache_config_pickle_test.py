@@ -70,6 +70,135 @@ class LinearAttentionConfigBindingsTest(TestCase):
 
 
 class KVCacheConfigPickleTest(TestCase):
+    REMOTE_DEFAULTS = {
+        "mock_remote_cache": False,
+        "mock_remote_cache_address": "127.0.0.1:18080",
+        "mock_remote_cache_hit_ratio": 0.0,
+        "mock_remote_cache_source_blocks": 64,
+        "mock_remote_cache_read_delay_ms": 0,
+        "mock_remote_cache_write_delay_ms": 0,
+        "mock_remote_cache_callback_port": 19080,
+        "mock_remote_cache_staging_size_mb": 256,
+        "mock_remote_cache_max_inflight": 8,
+        "mock_remote_cache_timeout_ms": 10000,
+    }
+
+    def test_remote_defaults_and_values_round_trip(self):
+        config = KVCacheConfig()
+        self.assertEqual(config.__getstate__()[:2], ("KVCacheConfig", 27))
+        self.assertEqual(len(config.__getstate__()), 100)
+        for name, value in self.REMOTE_DEFAULTS.items():
+            self.assertEqual(getattr(config, name), value)
+        samples = dict(
+            zip(
+                self.REMOTE_DEFAULTS,
+                (True, "127.0.0.1:18081", 0.5, 17, 5, 20, 19081, 128, 4, 2000),
+            )
+        )
+        for name, value in samples.items():
+            setattr(config, name, value)
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertEqual(restored.__getstate__()[90:], tuple(samples.values()))
+        for name, value in samples.items():
+            self.assertEqual(getattr(restored, name), value)
+            self.assertIn(name + ":", restored.to_string())
+        self.assertFalse(restored.enable_remote_cache)
+
+    def test_old_pickle_defaults_remote_off(self):
+        config = KVCacheConfig()
+        config.reuse_cache = True
+        config.mock_disk_cache = True
+        config.mock_disk_cache_source_blocks = 31
+        config.mock_remote_cache = True
+        current = config.__getstate__()
+        for version, count in ((26, 90), (25, 81), (24, 80)):
+            with self.subTest(version=version):
+                restored = KVCacheConfig.__new__(KVCacheConfig)
+                restored.__setstate__((current[0], version, *current[2:count]))
+                self.assertTrue(restored.reuse_cache)
+                self.assertEqual(restored.mock_disk_cache, version >= 26)
+                if version >= 26:
+                    self.assertEqual(restored.mock_disk_cache_source_blocks, 31)
+                for name, value in self.REMOTE_DEFAULTS.items():
+                    self.assertEqual(getattr(restored, name), value)
+
+    def test_remote_scalar_boundaries(self):
+        config = KVCacheConfig()
+        config.mock_remote_cache = True
+        config.mock_remote_cache_staging_size_mb = 1
+        for name in (
+            "mock_remote_cache_source_blocks",
+            "mock_remote_cache_max_inflight",
+            "mock_remote_cache_read_delay_ms",
+            "mock_remote_cache_write_delay_ms",
+            "mock_remote_cache_timeout_ms",
+        ):
+            setattr(config, name, 2**32 - 1)
+        config.mock_remote_cache_callback_port = 65535
+        for address in ("localhost:1", "127.0.0.1:65535", "[::1]:18080"):
+            config.mock_remote_cache_address = address
+            config.validateMockCacheConfig()
+
+    def test_remote_config_validation(self):
+        config = KVCacheConfig()
+        config.validateMockCacheConfig()
+        config.mock_memory_cache_hit_ratio = 0.75
+        config.mock_disk_cache_hit_ratio = 0.75
+        config.mock_remote_cache_hit_ratio = 0.75
+        config.validateMockCacheConfig()  # Disabled tiers do not contribute.
+        config.mock_memory_cache = True
+        config.mock_remote_cache = True
+        with self.assertRaises(ValueError):
+            config.validateMockCacheConfig()
+        for name, invalid in {
+            "mock_remote_cache_hit_ratio": [-0.1, float("nan"), float("inf"), 1.1],
+            "mock_remote_cache_read_delay_ms": [-1, 2**32],
+            "mock_remote_cache_write_delay_ms": [-1, 2**32],
+            "mock_remote_cache_source_blocks": [0, -1, 2**32],
+            "mock_remote_cache_callback_port": [0, -1, 65536],
+            "mock_remote_cache_staging_size_mb": [0, -1, 2**43],
+            "mock_remote_cache_max_inflight": [0, -1, 2**32],
+            "mock_remote_cache_timeout_ms": [0, -1, 2**32],
+            "mock_remote_cache_address": [
+                "",
+                "localhost",
+                "host:0",
+                "host:65536",
+                ":80",
+                "host:abc",
+                "host:1:2",
+                "host name:80",
+            ],
+        }.items():
+            for value in invalid:
+                with self.subTest(name=name, value=value), self.assertRaises(
+                    (ValueError, TypeError)
+                ):
+                    config = KVCacheConfig()
+                    config.mock_remote_cache = True
+                    setattr(config, name, value)
+                    config.validateMockCacheConfig()
+
+    def test_mock_worker_roundtrip_and_version_twenty_five_defaults(self):
+        config = KVCacheConfig()
+        previous = config.__getstate__()
+        config.mock_memory_cache = True
+        config.mock_memory_cache_hit_ratio = 0.25
+        config.mock_memory_cache_seed = 37
+        config.mock_memory_cache_source_blocks = 3
+        config.mock_memory_cache_real_match = True
+        config.mock_disk_cache = True
+        config.mock_disk_cache_hit_ratio = 0.5
+        config.mock_disk_cache_seed = 43
+        config.mock_disk_cache_source_blocks = 5
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertEqual(
+            restored.__getstate__()[81:90], (True, 0.25, 37, 3, True, True, 0.5, 43, 5)
+        )
+        old = KVCacheConfig.__new__(KVCacheConfig)
+        old.__setstate__((previous[0], 25, *previous[2:81]))
+        self.assertEqual(old.__getstate__()[81:], previous[81:])
+
     def test_pool_block_weights_binding_defaults_empty_and_preserves_raw_json(self):
         config = KVCacheConfig()
         self.assertEqual(config.kv_cache_pool_block_weights, "")
@@ -85,8 +214,8 @@ class KVCacheConfigPickleTest(TestCase):
         config.reserve_block_ratio = 9
         config.kv_cache_event_instance_group = "weighted-pools"
         state = config.__getstate__()
-        self.assertEqual(state[:2], ("KVCacheConfig", 25))
-        self.assertEqual(len(state), 81)
+        self.assertEqual(state[:2], ("KVCacheConfig", 27))
+        self.assertEqual(len(state), 100)
         self.assertEqual(state[80], config.kv_cache_pool_block_weights)
         self.assertTrue(state[79])
 
@@ -149,8 +278,8 @@ class KVCacheConfigPickleTest(TestCase):
                 config.kv_cache_pool_block_weights = '{"full":7,"linear":2}'
                 state = config.__getstate__()
                 v22_state = _version_twenty_two_state(config)
-                self.assertEqual(len(state), 81)
-                self.assertEqual(state[:2], ("KVCacheConfig", 25))
+                self.assertEqual(len(state), 100)
+                self.assertEqual(state[:2], ("KVCacheConfig", 27))
                 self.assertEqual(state[63:68], tuple(BASE_EVENT_FIELD_VALUES.values()))
                 self.assertIs(state[68], enable_crc)
                 self.assertEqual(state[77], 6)
@@ -421,7 +550,7 @@ class KVCacheConfigPickleTest(TestCase):
             ):
                 state = KVCacheConfig().__getstate__()
                 restored = KVCacheConfig.__new__(KVCacheConfig)
-                restored.__setstate__((*state[:78], timeout, state[79], state[80]))
+                restored.__setstate__((*state[:78], timeout, *state[79:]))
 
     def test_previous_versions_use_default_frozen_force_release_timeout(self):
         source = KVCacheConfig()

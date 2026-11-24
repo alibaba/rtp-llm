@@ -21,6 +21,62 @@ namespace rtp_llm {
 
 class QueryConverterTest: public DeviceTestBase {};
 
+TEST_F(QueryConverterTest, GenericMockRequestPreservesPresenceAndRejectsConflictingLegacyFlag) {
+    for (const auto value : {std::optional<bool>{}, std::optional<bool>{false}, std::optional<bool>{true}}) {
+        GenerateInputPB input;
+        input.add_token_ids(0);
+        auto* pb = input.mutable_generate_config();
+        pb->set_max_new_tokens(1);
+        if (value) {
+            pb->mutable_mock_cache_request()->set_value(*value);
+        }
+        const auto config = QueryConverter::transQuery(&input)->generate_config;
+        EXPECT_EQ(config->mock_cache_request, value);
+        EXPECT_EQ(config->mockCacheRequestEnabled(), value.value_or(true));
+        if (value) {
+            pb->mutable_mock_memory_cache_request()->set_value(*value);
+            EXPECT_NO_THROW(QueryConverter::transQuery(&input));
+            pb->mutable_mock_memory_cache_request()->set_value(!*value);
+            EXPECT_THROW(QueryConverter::transQuery(&input), std::invalid_argument);
+        }
+    }
+}
+
+TEST_F(QueryConverterTest, GenericMockRequestJsonValidatesActivationBeforeScheduling) {
+    GenerateConfig config;
+    autil::legacy::FromJsonString(config, R"({"mock_cache_request": false})");
+    EXPECT_FALSE(config.mockCacheRequestEnabled());
+    EXPECT_THROW(
+        autil::legacy::FromJsonString(config, R"({"mock_cache_request": false, "mock_memory_cache_request": true})"),
+        std::invalid_argument);
+    GenerateConfig legacy;
+    autil::legacy::FromJsonString(legacy, R"({"mock_memory_cache_request": false})");
+    EXPECT_FALSE(legacy.mockCacheRequestEnabled());
+}
+
+TEST_F(QueryConverterTest, MockMemoryRequestPreservesAbsentFalseAndTrue) {
+    for (const auto value : {std::optional<bool>{}, std::optional<bool>{false}, std::optional<bool>{true}}) {
+        GenerateInputPB input;
+        input.add_token_ids(0);
+        auto* config_pb = input.mutable_generate_config();
+        config_pb->set_max_new_tokens(1);
+        if (value.has_value()) {
+            config_pb->mutable_mock_memory_cache_request()->set_value(*value);
+        }
+        EXPECT_EQ(QueryConverter::transQuery(&input)->generate_config->mock_memory_cache_request, value);
+    }
+}
+
+TEST_F(QueryConverterTest, MockMemoryRequestJsonPreservesAbsentFalseAndTrue) {
+    GenerateConfig config;
+    EXPECT_FALSE(config.mock_memory_cache_request.has_value());
+    autil::legacy::FromJsonString(config, R"({"mock_memory_cache_request": false})");
+    ASSERT_TRUE(config.mock_memory_cache_request.has_value());
+    EXPECT_FALSE(*config.mock_memory_cache_request);
+    autil::legacy::FromJsonString(config, R"({"mock_memory_cache_request": true})");
+    EXPECT_EQ(config.mock_memory_cache_request, std::optional<bool>{true});
+}
+
 TEST_F(QueryConverterTest, RejectInvalidCompactLogprobsBeforeStreamCreation) {
     for (const int invalid_case : {0, 1, 2, 3}) {
         GenerateInputPB input;

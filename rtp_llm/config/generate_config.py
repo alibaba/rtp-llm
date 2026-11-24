@@ -278,6 +278,10 @@ class GenerateConfig(BaseModel):
     # 只有开启环境变量 REUSE_CACHE 时才生效
     reuse_cache: bool = True
 
+    # None preserves legacy service-global mock behavior; False opts into real cache reuse.
+    mock_memory_cache_request: Optional[bool] = None
+    mock_cache_request: Optional[bool] = None
+
     enable_device_cache: bool = True
 
     enable_memory_cache: bool = True
@@ -523,6 +527,21 @@ class GenerateConfig(BaseModel):
             if enabled:
                 raise ValueError(f"max_new_tokens == 0 does not support {field}")
 
+    def _validate_mock_cache_request(self):
+        if (
+            self.mock_cache_request is not None
+            and self.mock_memory_cache_request is not None
+            and self.mock_cache_request != self.mock_memory_cache_request
+        ):
+            raise ValueError(
+                "conflicting mock_cache_request and mock_memory_cache_request"
+            )
+
+    @model_validator(mode="after")
+    def _validate_mock_cache_activation(self):
+        self._validate_mock_cache_request()
+        return self
+
     @model_validator(mode="after")
     def _normalize_legacy_json_format(self):
         self._consume_legacy_json_format()
@@ -616,6 +635,7 @@ class GenerateConfig(BaseModel):
         self._consume_legacy_json_format()
         # 4) prefill-only 仅支持基础 target prefill/capture，并且必须执行完整 prompt
         try:
+            self._validate_mock_cache_request()
             self._validate_prefill_only()
         except ValueError as e:
             raise FtRuntimeException(
@@ -853,6 +873,7 @@ class GenerateConfig(BaseModel):
         ``can_use_pd_separation`` in place.
         """
         try:
+            self._validate_mock_cache_request()
             self._validate_prefill_only()
             check_with_info(
                 is_union_positive_integer(self.top_k),

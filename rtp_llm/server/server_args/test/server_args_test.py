@@ -762,6 +762,200 @@ class CacheConfigArgumentsTest(TestCase):
                 with self.subTest(name=name):
                     self.assertEqual(getattr(config, name), value)
 
+    def test_cli_env_snapshot_remote_defaults(self):
+        defaults = {
+            "mock_remote_cache": False,
+            "mock_remote_cache_address": "127.0.0.1:18080",
+            "mock_remote_cache_hit_ratio": 0.0,
+            "mock_remote_cache_source_blocks": 64,
+            "mock_remote_cache_read_delay_ms": 0,
+            "mock_remote_cache_write_delay_ms": 0,
+            "mock_remote_cache_callback_port": 19080,
+            "mock_remote_cache_staging_size_mb": 256,
+            "mock_remote_cache_max_inflight": 8,
+            "mock_remote_cache_timeout_ms": 10000,
+        }
+        for config in (
+            self.parse_cache_config([], {}),
+            self.parse_cache_config(None, {}),
+        ):
+            for name, value in defaults.items():
+                self.assertEqual(getattr(config, name), value)
+        samples = dict(
+            zip(
+                defaults, (True, "127.0.0.1:18081", 0.5, 17, 5, 20, 19081, 128, 4, 2000)
+            )
+        )
+        env = {name.upper(): str(value) for name, value in samples.items()}
+        args = [
+            part
+            for name, value in samples.items()
+            for part in (f"--{name}", str(value))
+        ]
+        for config in (
+            self.parse_cache_config(args, {}),
+            self.parse_cache_config([], env),
+            self.parse_cache_config(None, env),
+        ):
+            restored = pickle.loads(pickle.dumps(config))
+            for name, value in samples.items():
+                self.assertEqual(getattr(config, name), value)
+                self.assertEqual(getattr(restored, name), value)
+                self.assertIn(name + ":", config.to_string())
+            self.assertFalse(config.enable_remote_cache)
+        for ratio in (0, 0.5, 1):
+            config = self.parse_cache_config(
+                [
+                    "--mock_remote_cache",
+                    "0",
+                    "--mock_remote_cache_hit_ratio",
+                    str(ratio),
+                    "--mock_remote_cache_read_delay_ms",
+                    "0",
+                    "--mock_remote_cache_write_delay_ms",
+                    "0",
+                ],
+                env,
+            )
+            self.assertFalse(config.mock_remote_cache)
+            self.assertEqual(config.mock_remote_cache_hit_ratio, ratio)
+            self.assertEqual(config.mock_remote_cache_read_delay_ms, 0)
+            self.assertEqual(config.mock_remote_cache_write_delay_ms, 0)
+
+    def test_remote_cli_env_integer_overflow_is_rejected_before_binding(self):
+        for name in (
+            "mock_remote_cache_source_blocks",
+            "mock_remote_cache_read_delay_ms",
+            "mock_remote_cache_write_delay_ms",
+            "mock_remote_cache_callback_port",
+            "mock_remote_cache_staging_size_mb",
+            "mock_remote_cache_max_inflight",
+            "mock_remote_cache_timeout_ms",
+        ):
+            for value in (str(2**63), str(-(2**63) - 1)):
+                for args, env in (
+                    ([f"--{name}", value], {}),
+                    ([], {name.upper(): value}),
+                ):
+                    with (
+                        self.subTest(name=name, value=value, env=bool(env)),
+                        patch.object(sys, "stderr", io.StringIO()),
+                        self.assertRaises(SystemExit),
+                    ):
+                        self.parse_cache_config(args, env)
+
+    def test_startup_rejects_invalid_remote_config(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        for name, value in (
+            ("mock_remote_cache_source_blocks", "0"),
+            ("mock_remote_cache_read_delay_ms", "-1"),
+            ("mock_remote_cache_hit_ratio", "nan"),
+        ):
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                self.subTest(name=name),
+                self.assertRaises(ValueError),
+            ):
+                setup_args(["--mock_remote_cache", "1", f"--{name}", value])
+
+    def test_mock_disk_cache_defaults_and_cli_environment(self):
+        defaults = {
+            "mock_disk_cache": False,
+            "mock_disk_cache_hit_ratio": 0.0,
+            "mock_disk_cache_seed": 1,
+            "mock_disk_cache_source_blocks": 64,
+        }
+        config = self.parse_cache_config([], {})
+        for name, value in defaults.items():
+            self.assertEqual(getattr(config, name), value)
+        samples = {
+            "mock_disk_cache": True,
+            "mock_disk_cache_hit_ratio": 0.5,
+            "mock_disk_cache_seed": 18446744073709551615,
+            "mock_disk_cache_source_blocks": 19,
+        }
+        args = [
+            part
+            for name, value in samples.items()
+            for part in (f"--{name}", str(value))
+        ]
+        env = {name.upper(): str(value) for name, value in samples.items()}
+        for config in (
+            self.parse_cache_config(args, {}),
+            self.parse_cache_config([], env),
+        ):
+            for name, value in samples.items():
+                self.assertEqual(getattr(config, name), value)
+        config = self.parse_cache_config(
+            [
+                "--mock_disk_cache",
+                "0",
+                "--mock_disk_cache_hit_ratio",
+                "0",
+                "--mock_disk_cache_seed",
+                "0",
+                "--mock_disk_cache_source_blocks",
+                "0",
+            ],
+            env,
+        )
+        self.assertFalse(config.mock_disk_cache)
+        self.assertEqual(config.mock_disk_cache_hit_ratio, 0)
+        self.assertEqual(config.mock_disk_cache_seed, 0)
+        self.assertEqual(config.mock_disk_cache_source_blocks, 0)
+
+    def test_mock_memory_cache_defaults(self):
+        config = self.parse_cache_config([], {})
+        self.assertFalse(config.mock_memory_cache)
+        self.assertFalse(config.mock_memory_cache_real_match)
+        self.assertEqual(config.mock_memory_cache_hit_ratio, 0.0)
+        self.assertEqual(config.mock_memory_cache_seed, 1)
+        self.assertEqual(config.mock_memory_cache_source_blocks, 64)
+
+    def test_mock_memory_cache_cli_and_environment(self):
+        samples = {
+            "mock_memory_cache": True,
+            "mock_memory_cache_real_match": True,
+            "mock_memory_cache_hit_ratio": 0.625,
+            "mock_memory_cache_seed": 18446744073709551615,
+            "mock_memory_cache_source_blocks": 17,
+        }
+        args = [
+            part
+            for name, value in samples.items()
+            for part in (f"--{name}", str(value))
+        ]
+        env = {name.upper(): str(value) for name, value in samples.items()}
+        for config in (
+            self.parse_cache_config(args, {}),
+            self.parse_cache_config([], env),
+        ):
+            for name, value in samples.items():
+                with self.subTest(name=name):
+                    self.assertEqual(getattr(config, name), value)
+
+        config = self.parse_cache_config(
+            [
+                "--mock_memory_cache",
+                "0",
+                "--mock_memory_cache_real_match",
+                "0",
+                "--mock_memory_cache_hit_ratio",
+                "0.0",
+                "--mock_memory_cache_seed",
+                "0",
+                "--mock_memory_cache_source_blocks",
+                "0",
+            ],
+            env,
+        )
+        self.assertFalse(config.mock_memory_cache)
+        self.assertFalse(config.mock_memory_cache_real_match)
+        self.assertEqual(config.mock_memory_cache_hit_ratio, 0.0)
+        self.assertEqual(config.mock_memory_cache_seed, 0)
+        self.assertEqual(config.mock_memory_cache_source_blocks, 0)
+
     def test_canonical_env_preserves_false_zero_and_empty(self):
         samples = self.startup_samples()
         empty_samples = {name: type(value)() for name, value in samples.items()}

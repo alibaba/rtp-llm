@@ -42,6 +42,7 @@ py_test(
 py_test(
     name = "rpc_wire_test",
     srcs = ["rpc_wire_test.py"],
+    data = ["//rtp_llm/libs:libth_transformer_config_so"],
     deps = ["//rtp_llm/test/continuous_pressure:rtp_sdk"],
 )
 
