@@ -1,5 +1,6 @@
 #pragma once
 
+#include <mutex>
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
@@ -38,9 +39,8 @@ private:
 private:
     std::unique_ptr<RpcServiceImpl> model_rpc_service_;
     std::unique_ptr<grpc::Server>   grpc_server_;
-    std::thread                     grpc_server_thread_;
-    std::atomic<bool>               is_server_ready_{false};
     std::atomic<bool>               is_server_shutdown_{false};
+    std::mutex                      stop_mutex_;
     size_t                          model_id_ = 0;
 };
 

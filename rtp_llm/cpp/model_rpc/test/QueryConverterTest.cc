@@ -509,6 +509,8 @@ TEST_F(QueryConverterTest, testTransOutput) {
     res.aux_info.iter_count                             = 9;
     res.aux_info.input_len                              = 8;
     res.aux_info.output_len                             = 7;
+    res.aux_info.xgrammar_update_timeout                = true;
+    res.aux_info.speculative_verified_draft_tokens      = 11;
     res.aux_info.speculative_draft_rounds               = 4;
     res.aux_info.speculative_accepted_tokens_per_pos    = {3, 2, 1};
     res.aux_info.generation_prefill_cuda_graph_status   = "replayed";
@@ -541,6 +543,9 @@ TEST_F(QueryConverterTest, testTransOutput) {
     EXPECT_EQ(aux_info_pb.iter_count(), 9);
     EXPECT_EQ(aux_info_pb.input_len(), 8);
     EXPECT_EQ(aux_info_pb.output_len(), 7);
+    EXPECT_TRUE(aux_info_pb.xgrammar_update_timeout());
+    ASSERT_TRUE(aux_info_pb.has_speculative_verified_draft_tokens());
+    EXPECT_EQ(aux_info_pb.speculative_verified_draft_tokens(), 11);
     EXPECT_EQ(aux_info_pb.speculative_draft_rounds(), 4);
     EXPECT_EQ(aux_info_pb.speculative_accepted_tokens_per_pos_size(), 3);
     EXPECT_EQ(aux_info_pb.speculative_accepted_tokens_per_pos(0), 3);
@@ -880,6 +885,8 @@ TEST_F(QueryConverterTest, CompactTerminalMatchesLegacyProtocolIncludingAuxAndSc
             a.decode_remote_reuse_len  = 19;
             a.decode_memory_reuse_len  = 20;
             a.multimodal_lengths       = {{1, 21}};
+            a.xgrammar_update_timeout           = true;
+            a.speculative_verified_draft_tokens = 22;
             GenerateOutputs direct, legacy;
             direct.request_id = legacy.request_id = 789;
             direct.batched_output                 = compact;
@@ -896,6 +903,12 @@ TEST_F(QueryConverterTest, CompactTerminalMatchesLegacyProtocolIncludingAuxAndSc
                 QueryConverter::transResponse(&actual, &direct, dump_aux, "aux-string", 9999);
                 QueryConverter::transResponse(&expected, &legacy, dump_aux, "aux-string", 9999);
                 EXPECT_EQ(actual.SerializeAsString(), expected.SerializeAsString());
+                if (dump_aux) {
+                    const auto& info = actual.flatten_output().aux_info(0);
+                    EXPECT_TRUE(info.xgrammar_update_timeout());
+                    ASSERT_TRUE(info.has_speculative_verified_draft_tokens());
+                    EXPECT_EQ(info.speculative_verified_draft_tokens(), 22);
+                }
             }
             compact->cum_log_probs = torch::Tensor();
             for (auto& row : legacy.generate_outputs)

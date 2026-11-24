@@ -142,6 +142,20 @@ cc_test(
 )
 
 cc_test(
+    name = "query_converter_logprobs_test",
+    srcs = [
+        "QueryConverterLogprobsTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {"gpu": "H20_CU13"},
+    tags = ["H20_CU13"],
+)
+
+cc_test(
     name = "broadcast_manager_test",
     srcs = [
         "BroadcastManagerTest.cc",
@@ -316,4 +330,15 @@ cc_test(
     env = {},
     tags = ["L20_CU13"],
     exec_properties = {"gpu": "L20_CU13"},
+)
+
+cc_test(
+    name = "shutdown_coordinator_test",
+    srcs = ["ShutdownCoordinatorTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/model_rpc:shutdown_coordinator",
+        "@com_google_googletest//:gtest_main",
+    ],
+    timeout = "short",
 )

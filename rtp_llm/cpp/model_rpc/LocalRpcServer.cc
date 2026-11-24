@@ -228,6 +228,13 @@ private:
 grpc::Status LocalRpcServer::init(const EngineInitParams&                       maga_init_params,
                                   std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                                   py::object                                    mm_process_engine) {
+    return initWithEngineLoop(maga_init_params, std::move(propose_params), std::move(mm_process_engine), true);
+}
+
+grpc::Status LocalRpcServer::initWithEngineLoop(const EngineInitParams&                       maga_init_params,
+                                                std::unique_ptr<ProposeModelEngineInitParams> propose_params,
+                                                py::object                                    mm_process_engine,
+                                                bool                                          start_engine_loop) {
     meta_.reset(new RpcServerRuntimeMeta());
     maga_init_params_                      = maga_init_params;
     weight_manager_                        = maga_init_params.weight_manager;
@@ -296,7 +303,7 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
         pybind11::gil_scoped_release release;
         RTP_LLM_CHECK_WITH_INFO(!PyGILState_Check(),
                                 "running engine init with gil held may cause program hang, please check");
-        engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params)));
+        engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params), start_engine_loop));
     }
     if (mm_kind == MMProcessorKind::LOCAL) {
         mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,
@@ -1272,27 +1279,44 @@ LocalRpcServer::StartProfile(grpc::ServerContext* context, const StartProfileReq
                      request->num_steps(),
                      int(request->enable_all_rank()));
     if (!request->enable_all_rank()) {
-        engine_->startTimelineProfiling(request->trace_name(), request->start_step(), request->num_steps());
+        engine_->startTimelineProfiling(
+            request->trace_name(), request->start_step(), request->num_steps(), request->profile_light());
         return grpc::Status::OK;
     }
     if (maga_init_params_.parallelism_config.tp_rank != 0) {
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
                             "enable_all_rank start_profile must be sent to tp_rank 0");
     }
-    if (!tp_broadcaster_) {
-        if (maga_init_params_.parallelism_config.tp_size <= 1) {
-            RTP_LLM_LOG_INFO("start_profile enable_all_rank with tp_size=1, fallback to local start");
-            engine_->startTimelineProfiling(request->trace_name(), request->start_step(), request->num_steps());
-            return grpc::Status::OK;
-        }
-        return grpc::Status(grpc::StatusCode::INTERNAL, "tp broadcaster unavailable for enable_all_rank start_profile");
+    const auto& worker_addrs = maga_init_params_.runtime_config.shutdown_worker_grpc_addrs;
+    const auto  world_size   = maga_init_params_.parallelism_config.world_size;
+    if (worker_addrs.empty() && world_size == 1) {
+        engine_->startTimelineProfiling(
+            request->trace_name(), request->start_step(), request->num_steps(), request->profile_light());
+        return grpc::Status::OK;
+    }
+    if (worker_addrs.size() != size_t(world_size)) {
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                            "enable_all_rank start_profile requires all world worker addresses: expected "
+                                + std::to_string(world_size) + ", got " + std::to_string(worker_addrs.size()));
     }
 
-    std::vector<StartProfileInternalRequestPB> requests(tp_broadcaster_->workerNum());
+    // Reuse the RPC pool and completion thread across profiling requests.
+    std::call_once(world_broadcaster_init_, [this] {
+        auto broadcaster = std::make_unique<BroadcastManager>(maga_init_params_.runtime_config.shutdown_worker_grpc_addrs);
+        if (broadcaster->init()) {
+            world_broadcaster_ = std::move(broadcaster);
+        }
+    });
+    if (!world_broadcaster_) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "failed to initialize world profiler broadcaster");
+    }
+
+    std::vector<StartProfileInternalRequestPB> requests(world_broadcaster_->workerNum());
     for (auto& internal_request : requests) {
         internal_request.set_trace_name(request->trace_name());
         internal_request.set_start_step(request->start_step());
         internal_request.set_num_steps(request->num_steps());
+        internal_request.set_profile_light(request->profile_light());
     }
     auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
                        const std::shared_ptr<grpc::ClientContext>& context,
@@ -1300,14 +1324,16 @@ LocalRpcServer::StartProfile(grpc::ServerContext* context, const StartProfileReq
                        grpc::CompletionQueue*                      completion_queue) {
         return stub->AsyncStartProfileInternal(context.get(), internal_request, completion_queue);
     };
-    auto broadcast_result =
-        tp_broadcaster_->broadcast<StartProfileInternalRequestPB, EmptyPB>(requests, /*timeout_ms=*/3000, rpc_call);
+    auto broadcast_result = world_broadcaster_->broadcast<StartProfileInternalRequestPB, EmptyPB>(
+        requests, /*timeout_ms=*/3000, rpc_call, std::nullopt, "profiling", /*fatal_on_error=*/false);
     if (!broadcast_result) {
-        return grpc::Status(grpc::StatusCode::INTERNAL, "failed to broadcast start_profile_internal to tp group");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "failed to broadcast start_profile_internal to world group");
     }
-    broadcast_result->waitDone();
+    broadcast_result->waitDone(/*timeout_ms=*/0, /*fatal_on_error=*/false);
     if (!broadcast_result->success()) {
-        return grpc::Status(grpc::StatusCode::INTERNAL, "broadcast start_profile_internal to tp group failed");
+        return grpc::Status(
+            broadcast_result->deadlineExceeded() ? grpc::StatusCode::DEADLINE_EXCEEDED : grpc::StatusCode::INTERNAL,
+            "broadcast start_profile_internal to world group failed: " + broadcast_result->failureSummary());
     }
     return grpc::Status::OK;
 }
@@ -1320,7 +1346,8 @@ grpc::Status LocalRpcServer::StartProfileInternal(grpc::ServerContext*          
                      context->peer().c_str(),
                      request->start_step(),
                      request->num_steps());
-    engine_->startTimelineProfiling(request->trace_name(), request->start_step(), request->num_steps());
+    engine_->startTimelineProfiling(
+        request->trace_name(), request->start_step(), request->num_steps(), request->profile_light());
     return grpc::Status::OK;
 }
 
@@ -1552,29 +1579,6 @@ grpc::Status
 LocalRpcServer::CheckHealth(grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response) {
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
     response->set_health("OK");
-    return grpc::Status::OK;
-}
-
-grpc::Status LocalRpcServer::UpdateEplbConfig(grpc::ServerContext*             context,
-                                              const UpdateEplbConfigRequestPB* request,
-                                              EmptyPB*                         response) {
-    RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
-    const string mode_str = request->mode();
-    EPLBConfig   config;
-    if (mode_str == "EPLB" || mode_str == "eplb") {
-        config.eplb_mode = EplbMode::EPLB;
-    } else if (mode_str == "STATS" || mode_str == "stats") {
-        config.eplb_mode = EplbMode::STATS;
-    } else if (mode_str == "NONE" || mode_str == "none") {
-        config.eplb_mode = EplbMode::NONE;
-    } else if (mode_str == "ALL" || mode_str == "all") {
-        config.eplb_mode = EplbMode::ALL;
-    } else {
-        RTP_LLM_LOG_WARNING("set eplb mode failed, unknown mode : %s", mode_str.c_str());
-        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Invalid eplb mode");
-    }
-    config.eplb_update_time = request->update_time();
-    engine_->updateEplbConfig(config);
     return grpc::Status::OK;
 }
 

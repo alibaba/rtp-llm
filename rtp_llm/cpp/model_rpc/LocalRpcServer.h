@@ -59,15 +59,14 @@ public:
 
     grpc::Status UpdateWeights(grpc::ServerContext* context, const UpdateWeightsRequestPB* request, EmptyPB* response);
 
-    grpc::Status
-    UpdateEplbConfig(grpc::ServerContext* context, const UpdateEplbConfigRequestPB* request, EmptyPB* response);
-
     grpc::Status SetPause(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response);
 
     grpc::Status SetRestart(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response);
 
     grpc::Status SetLogLevel(grpc::ServerContext* context, const SetLogLevelRequestPB* request, EmptyPB* response);
 
+    // enable_all_rank fans out from any TP leader to every worker in the world.
+    // Workers count steps locally; RPC completion is not a step barrier.
     grpc::Status StartProfile(grpc::ServerContext* context, const StartProfileRequestPB* request, EmptyPB* response);
 
     grpc::Status
@@ -95,7 +94,9 @@ public:
     virtual size_t onflightRequestNum();
 
     virtual void stop() {
-        (void)engine_->stop();
+        if (engine_) {
+            (void)engine_->stop();
+        }
     }
 
     virtual EngineScheduleInfo getEngineScheduleInfo(int64_t latest_finised_version);
@@ -120,6 +121,10 @@ protected:
                                      const GenerateInputPB* request,
                                      WriterInterface*       writer,
                                      PDCancelRegistry*      cancel_registry);
+    grpc::Status initWithEngineLoop(const EngineInitParams&                       maga_init_params,
+                                    std::unique_ptr<ProposeModelEngineInitParams> propose_params,
+                                    py::object                                    mm_process_engine,
+                                    bool                                          start_engine_loop);
 
     virtual bool isCancelled(grpc::ServerContext* context) const {
         return context && context->IsCancelled();
@@ -174,6 +179,8 @@ protected:
     std::shared_ptr<RpcServerRuntimeMeta> meta_;
     py::object                            weight_manager_;
     std::shared_ptr<BroadcastManager>     tp_broadcaster_;
+    std::once_flag                        world_broadcaster_init_;
+    std::unique_ptr<BroadcastManager>     world_broadcaster_;
     bool                                  torch_allocator_dump_enabled_{false};
     std::string                           torch_allocator_dump_auth_token_;
     double                                torch_allocator_dump_cooldown_seconds_{60.0};

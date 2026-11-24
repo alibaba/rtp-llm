@@ -883,6 +883,7 @@ def trans_input(input_py: GenerateInput):
         input_py.generate_config.can_use_pd_separation
     )
     generate_config_pb.gen_timeline = input_py.generate_config.gen_timeline
+    generate_config_pb.profile_light = input_py.generate_config.profile_light
     generate_config_pb.profile_step = input_py.generate_config.profile_step
     generate_config_pb.profile_trace_name = input_py.generate_config.profile_trace_name
     generate_config_pb.global_request_id = input_py.generate_config.global_request_id
@@ -1292,6 +1293,7 @@ def trans_output(
                 output_len=aux_info_pb.output_len,
                 step_output_len=aux_info_pb.step_output_len,
                 pd_sep=aux_info_pb.pd_sep,
+                xgrammar_update_timeout=aux_info_pb.xgrammar_update_timeout,
                 reuse_len=aux_info_pb.total_reuse_len,
                 local_reuse_len=aux_info_pb.local_reuse_len,
                 remote_reuse_len=aux_info_pb.remote_reuse_len,
@@ -1308,6 +1310,11 @@ def trans_output(
                 decode_memory_reuse_len=aux_info_pb.decode_memory_reuse_len,
                 decode_disk_reuse_len=aux_info_pb.decode_disk_reuse_len,
                 speculative_draft_rounds=aux_info_pb.speculative_draft_rounds,
+                speculative_verified_draft_tokens=(
+                    aux_info_pb.speculative_verified_draft_tokens
+                    if aux_info_pb.HasField("speculative_verified_draft_tokens")
+                    else -1
+                ),
                 speculative_accepted_tokens_per_pos=list(
                     aux_info_pb.speculative_accepted_tokens_per_pos
                 ),
@@ -1365,6 +1372,39 @@ def trans_output(
 
         if all_custom_output is not None:
             output_py.custom_output = all_custom_output[i]
+        if has_logprobs_placement:
+            logprobs_offset = int(logprobs_offsets[i])
+            logprobs_count = int(logprobs_counts[i])
+            if logprobs_offset < 0 or logprobs_count < 0:
+                raise ValueError("logprobs offset/count must be non-negative")
+            if all_output_ids is not None:
+                padded_output_token_count = int(all_output_ids[i].numel())
+                if logprobs_offset + logprobs_count > padded_output_token_count:
+                    raise ValueError(
+                        "compact logprobs placement exceeds the output_ids token span"
+                    )
+            output_py.logprobs_offset = logprobs_offset
+            output_py.logprobs_count = logprobs_count
+            output_py.token_logprobs = compact_logprob_slice(
+                all_token_logprobs, i, logprobs_count, "token_logprobs"
+            )
+            output_py.top_logprob_token_ids = compact_logprob_slice(
+                all_top_logprob_token_ids,
+                i,
+                logprobs_count,
+                "top_logprob_token_ids",
+            )
+            output_py.top_logprobs = compact_logprob_slice(
+                all_top_logprobs, i, logprobs_count, "top_logprobs"
+            )
+        else:
+            # Legacy RPC responses carried one probability row per output id.
+            if all_token_logprobs is not None:
+                output_py.token_logprobs = all_token_logprobs[i]
+            if all_top_logprob_token_ids is not None:
+                output_py.top_logprob_token_ids = all_top_logprob_token_ids[i]
+            if all_top_logprobs is not None:
+                output_py.top_logprobs = all_top_logprobs[i]
 
         if has_logprobs_placement:
             logprobs_offset = int(logprobs_offsets[i])
