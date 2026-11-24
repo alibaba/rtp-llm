@@ -133,14 +133,14 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         try {
             logger.debug("GrpcCacheStatusCheckRunner run for {}", ipPort);
             long startTime = System.nanoTime() / 1000;
-            long currentCacheVersion = getCurrentCacheVersion();
+            long requestedCacheVersion = getCurrentCacheVersion();
 
             engineGrpcService
                     .getCacheStatusAsync(
                             ip,
                             grpcPort,
                             workerStatus,
-                            currentCacheVersion,
+                            requestedCacheVersion,
                             requestTimeoutMs,
                             roleType)
                     .handleAsync(
@@ -150,7 +150,8 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                                     if (cause != null) {
                                         handleException(cause);
                                     } else {
-                                        handleCacheStatusResponse(cacheStatus, startTime);
+                                        handleCacheStatusResponse(
+                                                cacheStatus, requestedCacheVersion, startTime);
                                     }
                                 } catch (Throwable callbackFailure) {
                                     logger.error(
@@ -186,7 +187,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     }
 
     private void handleCacheStatusResponse(
-            EngineRpcService.CacheStatusPB response, long startTime) {
+            EngineRpcService.CacheStatusPB response, long requestedCacheVersion, long startTime) {
 
         try {
             logger.debug("gRPC Cache Status - handled for {}, role:{}", ipPort, roleType.name());
@@ -205,22 +206,43 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 }
                 WorkerStatus.CacheIndexSnapshot snapshot = workerStatus.cacheIndexSnapshot();
                 CacheStatus previous = snapshot.cacheStatus();
-                boolean currentVersion =
-                        previous == null || response.getVersion() >= previous.getVersion();
-                if (debug || currentVersion) {
+                long responseVersion = response.getVersion();
+                boolean needsCacheKeys = roleType.requiresCacheKeys();
+                boolean versionRegressed =
+                        needsCacheKeys
+                                && previous != null
+                                && responseVersion < previous.getVersion();
+                if (versionRegressed) {
+                    workerStatus.invalidateCacheIndexedVersion();
+                    logger.debug(
+                            "Cache version regressed for {}#{}, previous={}, response={}",
+                            ipPort,
+                            generationId,
+                            previous.getVersion(),
+                            responseVersion);
+                }
+                // Engine sends keys when its version differs from the request. If the
+                // regressed version equals an older acknowledged version, the next poll
+                // must request a full snapshot before applying any keys.
+                boolean needsFullRetry =
+                        versionRegressed
+                                && requestedCacheVersion != -1L
+                                && responseVersion == requestedCacheVersion;
+                if (!needsFullRetry) {
                     boolean reuseKeys =
                             !debug
                                     && previous != null
-                                    && response.getVersion() == previous.getVersion()
+                                    && responseVersion == requestedCacheVersion
+                                    && responseVersion == previous.getVersion()
                                     && snapshot.indexInitialized()
-                                    && response.getVersion() == snapshot.indexedVersion();
+                                    && responseVersion == snapshot.indexedVersion();
                     CacheStatus newCacheStatus =
                             reuseKeys
                                     ? EngineStatusConverter.convertToCacheStatus(
                                             response, previous.getCachedKeys())
                                     : EngineStatusConverter.convertToCacheStatus(response);
                     workerStatus.publishCacheStatus(newCacheStatus);
-                    if (roleType.requiresCacheKeys() && !reuseKeys) {
+                    if (needsCacheKeys && !reuseKeys) {
                         // CacheAwareService is keyed by address, not generation.
                         // Keep the generation lock through this in-memory index
                         // update so retirement cannot publish a replacement or
