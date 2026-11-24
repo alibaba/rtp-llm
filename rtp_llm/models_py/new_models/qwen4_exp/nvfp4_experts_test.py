@@ -175,7 +175,7 @@ class Qwen4Nvfp4ExpertTest(unittest.TestCase):
 
     @unittest.skipUnless(
         os.environ.get("RUN_Q4_NEWLOADER_MARLIN") == "1",
-        "manual, requires supported Marlin device/runtime",
+        "requires the H20 CUDA 13 Marlin test target",
     )
     def test_gpu_marlin_output_against_dequantized_reference(self):
         # Nonuniform raw E2M1 nibbles and distinct gate/up prevent accidentally

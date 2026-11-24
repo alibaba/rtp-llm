@@ -1,6 +1,7 @@
 """Disk-backed tests for public FT artifact index publication (no native model)."""
 
 import json
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -48,12 +49,42 @@ class FTExportIndexTest(unittest.TestCase):
                 key = rank + ".layers.0.ffn_weights.intermediate_weight13.kernel"
                 save_file({key: torch.tensor([[1, 2]], dtype=torch.int8)}, str(path))
                 wanted[key] = path.name
-            env = {"TP_SIZE": "2", "EP_SIZE": "0"}
-            generate_ft_index(tmp, env, expected_ranks=ranks)
+            env = {"TP_SIZE": "2", "DP_SIZE": 1, "EP_SIZE": "0", "PP_SIZE": "1"}
+            generate_ft_index(
+                tmp, {**env, "EXTRA_OPTION": "private"}, expected_ranks=ranks
+            )
             index = json.loads((dest / "model.safetensors.index.json").read_text())
             self.assertEqual(index["weight_map"], wanted)
             self.assertEqual(index["__env__params__"], env)
             self.assertNotIn("module_export_metadata", index)
+
+    def test_failed_publication_never_exposes_a_partial_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp)
+            save_file(
+                {"rank_00_00_00.global.embedding": torch.ones(1)},
+                str(dest / "shard.safetensors"),
+            )
+            index = dest / "model.safetensors.index.json"
+            for existing in (False, True):
+                with self.subTest(existing=existing):
+                    if existing:
+                        generate_ft_index(tmp, {"TP_SIZE": "1"})
+                    before = index.read_bytes() if existing else None
+                    entries = set(dest.iterdir())
+                    with self.assertRaises(TypeError):
+                        generate_ft_index(tmp, {}, {"not_json": object()})
+                    self.assertEqual(set(dest.iterdir()), entries)
+                    if existing:
+                        self.assertEqual(index.read_bytes(), before)
+                    else:
+                        self.assertFalse(index.exists())
+            index.chmod(0o600)
+            generate_ft_index(tmp, {"PP_SIZE": 2})
+            self.assertEqual(stat.S_IMODE(index.stat().st_mode), 0o600)
+            self.assertEqual(
+                json.loads(index.read_text())["__env__params__"], {"PP_SIZE": 2}
+            )
 
     def test_bad_shards_or_missing_rank_cannot_publish_an_index(self):
         for problem in ("empty", "corrupt", "duplicate", "missing", "duplicate_rank"):

@@ -184,7 +184,6 @@ models_py_test(
     gpu = "H20_CU13",
     args = ["Qwen4Nvfp4ExpertTest.test_gpu_marlin_output_against_dequantized_reference"],
     env = {"RUN_Q4_NEWLOADER_MARLIN": "1"},
-    tags = ["manual"],
     deps = [":new_weight_loader"],
 )
 

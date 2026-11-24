@@ -187,7 +187,7 @@ custom_smoke_test(
     # Two serial cold starts (1800s each), generation, and process shutdown.
     test_envs = {"RTP_TEST_WATCHDOG_SECONDS": "5400"},
     smoke_args = "--tp_size 8 --ep_size 8 --world_size 8 --act_type BF16 --load_method fastsafetensors --max_seq_len 2048 --seq_size_per_block 128 --enable_cuda_graph 0 --reuse_cache 0",
-    gpu_type = ["H20"],
+    gpu_type = ["H20_CU13"],
     data = ["//rtp_llm:sdk", ":smoke_framework_srcs"],
 )
 
