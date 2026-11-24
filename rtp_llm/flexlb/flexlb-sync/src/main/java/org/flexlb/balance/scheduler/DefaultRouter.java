@@ -100,6 +100,9 @@ public class DefaultRouter {
         if (invalid != null) {
             return invalid;
         }
+        if (vitCacheSelector != null) {
+            vitCacheSelector.recordVitOnlyInputs(context.getRequest().getCacheAffinityKeys());
+        }
         if (!requiredRoles.contains(RoleType.VIT) || vitCacheSelector == null) {
             return Response.error(StrategyErrorType.NO_VIT_WORKER);
         }
@@ -269,7 +272,12 @@ public class DefaultRouter {
         return switch (role) {
             case PREFILL, PDFUSION -> prefillSelector.select(context, role, group);
             case DECODE -> decodeSelector.select(context, decodeAdmission, group);
-            case VIT -> selectedOrBlocked(vitSelector.select(context, role, group), role);
+            case VIT ->
+                    selectedOrBlocked(
+                            vitCacheSelector != null
+                                    ? vitCacheSelector.selectPinned(context, group)
+                                    : vitSelector.select(context, role, group),
+                            role);
             case ENCODER -> selectedOrBlocked(encoderSelector.select(context, group), role);
             case FRONTEND ->
                     throw new IllegalArgumentException(

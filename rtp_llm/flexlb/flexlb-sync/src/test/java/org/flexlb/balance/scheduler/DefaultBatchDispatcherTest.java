@@ -226,6 +226,47 @@ class DefaultBatchDispatcherTest {
     }
 
     @Test
+    void dispatchPreservesImageInputsAndRequestScopedInspectionMetadata() throws Exception {
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
+
+        var media =
+                EngineRpcService.MultimodalInputPB.newBuilder()
+                        .setMultimodalUrl("https://example.org/image")
+                        .build();
+        var metadata =
+                EngineRpcService.MultimodalInputsPB.newBuilder()
+                        .setRequestId(1L)
+                        .setRegion("cn-beijing")
+                        .setInputInspectionEnabled(com.google.protobuf.BoolValue.of(false))
+                        .build();
+        item.ctx()
+                .setGenerateInputPb(
+                        EngineRpcService.GenerateInputPB.parseFrom(item.ctx().getGenerateInputPb())
+                                .toBuilder()
+                                .addMultimodalInputs(media)
+                                .setMultimodalRequest(metadata)
+                                .build()
+                                .toByteString());
+        EngineRpcService.EnqueueBatchResponsePB response = ackResponse(1L, List.of(1L));
+        when(grpcClient.batchEnqueueAsync(
+                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                .thenReturn(CompletableFuture.completedFuture(response));
+
+        submit(List.of(item), 1L, 100, "test_reason", callback);
+
+        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS), "onSuccess should be called");
+        assertEquals(1, callback.successCount.get());
+        assertEquals(0, callback.failureCount.get());
+        ArgumentCaptor<EngineRpcService.EnqueueBatchRequestPB> request =
+                ArgumentCaptor.forClass(EngineRpcService.EnqueueBatchRequestPB.class);
+        verify(grpcClient).batchEnqueueAsync(anyString(), anyInt(), request.capture());
+        var forwarded = request.getValue().getDpSlots(0).getRequests(0).getInput();
+        assertEquals(List.of(media), forwarded.getMultimodalInputsList());
+        assertEquals(metadata, forwarded.getMultimodalRequest());
+    }
+
+    @Test
     void dispatchPassesConfiguredFetchAttachTimeoutToEngine() throws Exception {
         config.getDispatcher().setFetchAttachTimeoutMs(1500);
         ScheduledRequest item = createScheduledRequest(1L, 500, 200, createPrefillEndpoint());

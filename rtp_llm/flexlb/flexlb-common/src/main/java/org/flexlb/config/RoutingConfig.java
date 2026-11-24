@@ -27,6 +27,24 @@ public final class RoutingConfig {
     public static final class RolesConfig {
         private PrefillConfig prefill = new PrefillConfig();
         private DecodeConfig decode = new DecodeConfig();
+        private VitConfig vit = new VitConfig();
+    }
+
+    /**
+     * Configures how long a ViT load sample is usable and how much extra inflight work a cache
+     * hit may justify when cache affinity is enabled.
+     */
+    @Getter
+    @Setter
+    public static final class VitConfig {
+        /** Prefer cache within the configured load gap. Disabled by default. */
+        private boolean cacheAffinityEnabled;
+
+        /** Maximum extra inflight media inputs accepted for the cache leader. */
+        private long maxExtraInflightInputs = 32;
+
+        /** Unknown/expired load must never be interpreted as an idle worker. */
+        private long loadMaxAgeMs = 5000;
     }
 
     /**
