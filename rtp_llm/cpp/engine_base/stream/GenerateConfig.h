@@ -98,6 +98,8 @@ public:
     bool                          force_disable_sp_run      = false;
     bool                          force_sp_accept           = false;
     ReturnAllProbsMode            return_all_probs          = ReturnAllProbsMode::NONE;
+    bool                          return_logprobs           = false;
+    int                           top_logprobs              = 0;
     bool                          return_softmax_probs      = false;
     bool                          aux_info                  = true;
     std::vector<std::vector<int>> stop_words_list;
@@ -152,6 +154,24 @@ public:
         is_streaming          = false;
         reuse_cache           = false;
         can_use_pd_separation = false;
+    }
+
+    void validateLogprobs() {
+        if (top_logprobs < 0 || top_logprobs > 20) {
+            throw std::invalid_argument("top_logprobs must be between 0 and 20");
+        }
+        if (!return_logprobs && top_logprobs > 0) {
+            throw std::invalid_argument("top_logprobs requires return_logprobs=true");
+        }
+        if (return_logprobs && (hasNumBeams() || num_return_sequences < 0 || num_return_sequences > 1)) {
+            throw std::invalid_argument("compact logprobs requires single-sequence generation");
+        }
+        if (return_logprobs && thinking_mode == ThinkingMode::ADAPTIVE) {
+            throw std::invalid_argument("compact logprobs requires a fixed thinking mode");
+        }
+        if (return_logprobs && isPrefillOnly()) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support return_logprobs");
+        }
     }
 
     void validatePrefillOnly() {

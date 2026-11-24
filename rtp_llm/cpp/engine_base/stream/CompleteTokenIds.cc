@@ -207,7 +207,10 @@ bool CompleteTokenIds::update(const torch::Tensor& new_tokens,
     if (seq_length_ + num_new_tokens > max_token_num) {
         num_new_tokens = max_token_num - seq_length_;
     }
-    const bool commits_first_token = seq_length_ == input_length && num_new_tokens > 0;
+    if (num_new_tokens <= 0) {
+        return true;
+    }
+    const bool commits_first_token = seq_length_ == input_length;
 
     // # NOTE: new tokens indicate num of newly genearted tokens
     // # typically 1 but can be > 1 under speculative decoding
@@ -221,7 +224,7 @@ bool CompleteTokenIds::update(const torch::Tensor& new_tokens,
         if (is_beam_search) {
             return (new_tokens_ptr + max_num_new_tokens * batch_idx)[seq_length_ + token_idx];
         } else {
-            return (new_tokens_ptr + num_new_tokens * batch_idx)[token_idx];
+            return (new_tokens_ptr + max_num_new_tokens * batch_idx)[token_idx];
         }
     };
 
@@ -239,7 +242,7 @@ bool CompleteTokenIds::update(const torch::Tensor& new_tokens,
             if (batch_size_ != new_batch_size && i > 0) {
                 memcpy(data(i), data(0), sizeof(int) * seq_length_);
             }
-            memcpy(data(i) + seq_length_, new_tokens_ptr + i * num_new_tokens, sizeof(int) * num_new_tokens);
+            memcpy(data(i) + seq_length_, new_tokens_ptr + i * max_num_new_tokens, sizeof(int) * num_new_tokens);
         }
     }
     batch_size_ = new_batch_size;

@@ -10,8 +10,14 @@ from unittest import IsolatedAsyncioTestCase, main
 import torch
 from typing_extensions import override
 
-from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode, RoleAddr, RoleType
 from rtp_llm.config.exceptions import FtRuntimeException
+from rtp_llm.config.generate_config import (
+    GenerateConfig,
+    ReturnAllProbsMode,
+    RoleAddr,
+    RoleType,
+    ThinkingMode,
+)
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
     GenerateEnvConfig,
@@ -526,6 +532,37 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         endpoint.stop_words_id_list = []
         endpoint.stop_words_str_list = []
         return tokenizer, renderer, endpoint
+
+    def test_logprobs_selects_compact_or_legacy_backend_contract(self):
+        _, renderer, endpoint = self._create_base_thinking_endpoint("disabled")
+        cases = [
+            ({}, True, ReturnAllProbsMode.NONE),
+            ({"logprobs_mode": "default"}, False, ReturnAllProbsMode.DEFAULT),
+            ({"n": 2}, False, ReturnAllProbsMode.DEFAULT),
+            (
+                {
+                    "extra_configs": GenerateConfig(
+                        return_all_probs=ReturnAllProbsMode.ORIGINAL
+                    )
+                },
+                False,
+                ReturnAllProbsMode.ORIGINAL,
+            ),
+        ]
+        for overrides, compact, legacy in cases:
+            with self.subTest(overrides=overrides):
+                request = ChatCompletionRequest(
+                    messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+                    logprobs=True,
+                    top_logprobs=3,
+                    **overrides,
+                )
+                config = endpoint._extract_generation_config(
+                    request, input_ids=[1], renderer=renderer
+                )
+                self.assertEqual(config.return_logprobs, compact)
+                self.assertEqual(config.top_logprobs, 3 if compact else 0)
+                self.assertEqual(config.return_all_probs, legacy)
 
     async def _run_without_aux_info(
         self, stream: bool, num_choices: int, termination: str = "eos"

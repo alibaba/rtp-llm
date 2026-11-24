@@ -234,6 +234,8 @@ class GenerateConfig(BaseModel):
     force_sp_accept: bool = False
     return_cum_log_probs: bool = False
     return_all_probs: int = ReturnAllProbsMode.NONE
+    return_logprobs: bool = False
+    top_logprobs: int = Field(default=0, strict=True)
     return_softmax_probs: bool = False
     aux_info: bool = True
     can_use_pd_separation: bool = True
@@ -512,6 +514,7 @@ class GenerateConfig(BaseModel):
             "calculate_loss": self.calculate_loss != 0,
             "return_softmax_probs": self.return_softmax_probs,
             "return_all_probs": self.return_all_probs != ReturnAllProbsMode.NONE,
+            "return_logprobs": self.return_logprobs,
             "return_cum_log_probs": self.return_cum_log_probs,
             "return_hidden_states": self.return_hidden_states,
             "return_all_hidden_states": self.return_all_hidden_states,
@@ -891,6 +894,26 @@ class GenerateConfig(BaseModel):
                 is_positive_integer(self.num_return_sequences),
                 f"num_return_sequences {self.num_return_sequences} is wrong data type",
             )
+            check_with_info(
+                isinstance(self.return_logprobs, bool),
+                f"return_logprobs {self.return_logprobs} is wrong data type",
+            )
+            check_with_info(
+                isinstance(self.top_logprobs, int)
+                and not isinstance(self.top_logprobs, bool)
+                and 0 <= self.top_logprobs <= 20,
+                f"top_logprobs {self.top_logprobs} must be an integer between 0 and 20",
+            )
+            if not self.return_logprobs and self.top_logprobs > 0:
+                raise ValueError("top_logprobs requires return_logprobs=true")
+            if self.return_logprobs and self.thinking_mode == ThinkingMode.ADAPTIVE:
+                raise ValueError("compact logprobs requires a fixed thinking mode")
+            if self.return_logprobs and (
+                self.has_num_beams() or self.num_return_sequences > 1
+            ):
+                raise ValueError(
+                    "logprobs does not support beam search or num_return_sequences > 1"
+                )
             check_with_info(
                 is_union_positive_number(self.temperature),
                 f"temperature {self.temperature} is wrong data type",

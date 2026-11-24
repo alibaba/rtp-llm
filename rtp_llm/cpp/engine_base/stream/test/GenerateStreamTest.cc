@@ -256,6 +256,125 @@ public:
     std::vector<int32_t> committed_tokens;
 };
 
+TEST_F(GenerateStreamTest, CompactLogprobsAcceptDefaultAndExplicitSingleSequence) {
+    ModelConfig model_config;
+    model_config.max_seq_len = 8;
+    model_config.vocab_size  = 10;
+    RuntimeConfig   runtime_config;
+    ResourceContext resource_context;
+    resource_context.cache_manager = std::make_shared<KVCacheManager>(GenerateStreamBuilder().init_config());
+    resource_context.cache_manager->init();
+    for (const int sequences : {0, 1}) {
+        auto input                                   = std::make_shared<GenerateInput>();
+        input->input_ids                             = torch::tensor({2}, torch::kInt32);
+        input->generate_config                       = std::make_shared<GenerateConfig>();
+        input->generate_config->num_return_sequences = sequences;
+        input->generate_config->return_logprobs      = true;
+        input->generate_config->max_new_tokens       = 1;
+        auto stream =
+            std::make_shared<NormalGenerateStream>(input, model_config, runtime_config, resource_context, nullptr);
+        EXPECT_EQ(stream->maxBatchSize(), 1);
+        stream->generate_status_->status = StreamState::RUNNING;
+        stream->update({.new_tokens            = torch::tensor({{3}}, torch::kInt32),
+                        .num_new_tokens        = 1,
+                        .token_logprobs        = torch::tensor({{-0.25f}}),
+                        .top_logprob_token_ids = torch::empty({1, 1, 0}, torch::kInt32),
+                        .top_logprobs          = torch::empty({1, 1, 0}, torch::kFloat32)});
+        auto result = stream->nextOutput(100);
+        ASSERT_TRUE(result.ok());
+        const auto& output = result.value().generate_outputs.at(0);
+        ASSERT_TRUE(output.token_logprobs.has_value());
+        EXPECT_TRUE(torch::equal(output.token_logprobs.value(), torch::tensor({-0.25f})));
+    }
+}
+
+TEST_F(GenerateStreamTest, CompactLogprobsFollowAcceptedBatchTermination) {
+    for (const bool speculative : {false, true}) {
+        for (const bool thinking_prefix : {false, true}) {
+            for (const bool streaming : {false, true}) {
+                for (const std::string termination : {"eos", "stop", "max_tokens"}) {
+                    SCOPED_TRACE(::testing::Message()
+                                 << "speculative=" << speculative << " thinking_prefix=" << thinking_prefix
+                                 << " streaming=" << streaming << " termination=" << termination);
+                    ModelConfig model_config;
+                    model_config.max_seq_len                 = 32;
+                    model_config.vocab_size                  = 10;
+                    model_config.special_tokens.eos_token_id = termination == "eos" ? 6 : 9;
+                    RuntimeConfig   runtime_config;
+                    ResourceContext resource_context;
+                    resource_context.cache_manager =
+                        std::make_shared<KVCacheManager>(GenerateStreamBuilder().init_config());
+                    resource_context.cache_manager->init();
+                    auto input                 = std::make_shared<GenerateInput>();
+                    input->input_ids           = torch::tensor({2}, torch::kInt32);
+                    input->generate_config     = std::make_shared<GenerateConfig>();
+                    auto& config               = *input->generate_config;
+                    config.return_logprobs     = true;
+                    config.top_logprobs        = 1;
+                    config.is_streaming        = streaming;
+                    config.max_new_tokens      = termination == "max_tokens" ? 2 + int(thinking_prefix) : 12;
+                    config.in_think_mode       = thinking_prefix;
+                    config.end_think_token_ids = {4};
+                    if (termination == "stop") {
+                        config.stop_words_list = {{5, 6}};
+                    }
+                    auto stream = std::make_shared<NormalGenerateStream>(
+                        input, model_config, runtime_config, resource_context, nullptr);
+                    stream->generate_status_->status = StreamState::RUNNING;
+                    const auto tokens                = thinking_prefix ? torch::tensor({{4, 5, 6, 7}}, torch::kInt32) :
+                                                                         torch::tensor({{5, 6, 7}}, torch::kInt32);
+                    const auto logprobs              = torch::tensor({{-0.1f, -0.2f, -0.3f}}, torch::kFloat32);
+                    const auto top_ids               = torch::tensor({5, 6, 7}, torch::kInt32).reshape({1, 3, 1});
+                    if (speculative) {
+                        auto buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
+                        buffer->tokens = torch::zeros({1, 2}, torch::kInt32);
+                        stream->setSPOutputBuffer(buffer);
+                        StreamSpecUpdateInfo update_info{
+                            .new_tokens          = tokens,
+                            .num_new_tokens      = static_cast<int>(tokens.size(1)),
+                            .draft_tokens        = torch::Tensor(),
+                            .draft_hidden_states = torch::Tensor(),
+                            .draft_token_probs   = torch::Tensor(),
+                        };
+                        update_info.token_logprobs        = logprobs;
+                        update_info.top_logprob_token_ids = top_ids;
+                        update_info.top_logprobs          = logprobs.unsqueeze(2);
+                        update_info.logprobs_offset       = int(thinking_prefix);
+                        stream->specUpdate(update_info);
+                    } else {
+                        StreamUpdateInfo update_info{
+                            .new_tokens            = tokens,
+                            .num_new_tokens        = static_cast<int>(tokens.size(1)),
+                            .token_logprobs        = logprobs,
+                            .top_logprob_token_ids = top_ids,
+                            .top_logprobs          = logprobs.unsqueeze(2),
+                            .logprobs_offset       = int(thinking_prefix),
+                        };
+                        stream->update(update_info);
+                    }
+                    ASSERT_FALSE(stream->hasError());
+                    auto result = stream->nextOutput(100);
+                    ASSERT_TRUE(result.ok());
+                    const auto& output = result.value().generate_outputs.at(0);
+                    EXPECT_TRUE(output.finished);
+                    const auto expected_tokens = thinking_prefix ? torch::tensor({{4, 5, 6}}, torch::kInt32) :
+                                                                   torch::tensor({{5, 6}}, torch::kInt32);
+                    EXPECT_TRUE(torch::equal(output.output_ids, expected_tokens));
+                    EXPECT_EQ(stream->seqLength(), input->inputLength() + expected_tokens.size(1));
+                    EXPECT_EQ(output.logprobs_offset, int(thinking_prefix));
+                    ASSERT_EQ(output.logprobs_count, 2);
+                    ASSERT_TRUE(output.token_logprobs.has_value());
+                    ASSERT_TRUE(output.top_logprob_token_ids.has_value());
+                    ASSERT_TRUE(output.top_logprobs.has_value());
+                    EXPECT_TRUE(torch::equal(output.token_logprobs.value(), logprobs[0].narrow(0, 0, 2)));
+                    EXPECT_TRUE(torch::equal(output.top_logprob_token_ids.value(), top_ids[0].narrow(0, 0, 2)));
+                    EXPECT_TRUE(torch::equal(output.top_logprobs.value(), logprobs[0].narrow(0, 0, 2).unsqueeze(1)));
+                }
+            }
+        }
+    }
+}
+
 template<typename T>
 void waitForConsumer(std::future<T>& future, const std::shared_ptr<NormalGenerateStream>& stream) {
     const auto status = future.wait_for(std::chrono::seconds(5));

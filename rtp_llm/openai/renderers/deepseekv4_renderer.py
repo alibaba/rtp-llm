@@ -655,7 +655,11 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
                 tool_calls=tool_calls,
                 reasoning_content=reasoning_content or None,
             ),
-            logprobs=await self._generate_log_probs(status, output),
+            logprobs=(
+                None
+                if status.compact_logprobs
+                else await self._generate_log_probs(status, output)
+            ),
             input_length=output.aux_info.input_len,
             output_length=output.aux_info.output_len,
             reuse_length=output.aux_info.reuse_len,

@@ -59,6 +59,10 @@ struct StreamUpdateInfo {
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
     // Appended to preserve existing aggregate initializers. CPU context rows.
     const torch::Tensor custom_output{};
+    const torch::Tensor token_logprobs{};
+    const torch::Tensor top_logprob_token_ids{};
+    const torch::Tensor top_logprobs{};
+    int32_t             logprobs_offset = 0;
 };
 
 struct StreamSpecUpdateInfo {
@@ -81,8 +85,12 @@ struct StreamSpecUpdateInfo {
 
     // Rejection-sampling result for this speculative decode round. Prefill
     // updates leave speculative_propose_step at zero and are not counted.
-    int speculative_propose_step = 0;
-    int accepted_draft_tokens    = 0;
+    int           speculative_propose_step = 0;
+    int           accepted_draft_tokens    = 0;
+    torch::Tensor token_logprobs;
+    torch::Tensor top_logprob_token_ids;
+    torch::Tensor top_logprobs;
+    int32_t       logprobs_offset = 0;
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -479,12 +487,22 @@ public:
         return speculative_accepted_tokens_per_pos_;
     }
 
-    const ResourceContext&      resourceContext() const;
-    void                        setKVCache(const BatchKVCacheResource& kv_cache_resource);
-    void                        setLoss(const torch::Tensor& loss);
-    void                        setSoftmaxProbs(const torch::Tensor& softmax_probs,
-                                                int                  start_pos,
-                                                const torch::Tensor& src_batch_indices = torch::Tensor());
+    void setLogProbs(const torch::Tensor& token_logprobs,
+                     const torch::Tensor& top_logprob_token_ids,
+                     const torch::Tensor& top_logprobs,
+                     const torch::Tensor& src_batch_indices,
+                     int                  start_pos);
+    bool hasLogprobsContentStarted() const;
+    bool shouldComputeLogprobs() const {
+        return generate_input_->generate_config->return_logprobs && hasLogprobsContentStarted();
+    }
+    int32_t                logprobsContentOffset(const torch::Tensor& candidate_tokens, int32_t num_new_tokens) const;
+    const ResourceContext& resourceContext() const;
+    void                   setKVCache(const BatchKVCacheResource& kv_cache_resource);
+    void                   setLoss(const torch::Tensor& loss);
+    void                   setSoftmaxProbs(const torch::Tensor& softmax_probs,
+                                           int                  start_pos,
+                                           const torch::Tensor& src_batch_indices = torch::Tensor());
     const BatchKVCacheResource& kvCache() const;
     BatchKVCacheResource&       kvCacheMutable();
     BatchKVCacheResourcePtr     kvCachePtr();
@@ -1130,6 +1148,12 @@ protected:
     // shared_ptr; neither resource nor state machine points back here, so no
     // ownership cycle is created.
 
+    torch::Tensor                            token_logprobs_;
+    torch::Tensor                            top_logprob_token_ids_;
+    torch::Tensor                            top_logprobs_;
+    int64_t                                  logprobs_history_size_    = 0;
+    std::shared_ptr<std::atomic<bool>>       logprobs_content_started_ = std::make_shared<std::atomic<bool>>(false);
+    void                                     updateLogprobsContentStarted(int old_seq_length);
     torch::Tensor                            loss_;
     torch::Tensor                            last_hidden_states_;
     torch::Tensor                            custom_output_;
