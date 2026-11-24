@@ -557,7 +557,14 @@ class _GroupedScores:
             ("mqa_schedule", self.q.device, stream.cuda_stream), {}
         )
 
-    def groups(self, *, mask_tail=True, return_bf16=False, balance_kv_tiles=False):
+    def groups(
+        self,
+        *,
+        mask_tail=True,
+        return_bf16=False,
+        balance_kv_tiles=False,
+        cache_schedule_capability=False,
+    ):
         """Yield (packed row slice, logits, visible, (None, visible)).
 
         The conservative FP32 budget (default 256 MiB) also bounds BF16 output.
@@ -570,6 +577,8 @@ class _GroupedScores:
         from ._indexer_score import fp8_fp4_mqa_indexer_score
 
         score_options = {"balance_kv_tiles": True} if balance_kv_tiles else {}
+        if cache_schedule_capability:
+            score_options["cache_schedule_capability"] = True
         # Ratio-2 source layers share bounds. L20 is the only ratio-1 source
         # using balanced scheduling and has no later consumer of its schedule.
         if (

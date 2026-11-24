@@ -371,6 +371,34 @@ def select_candidates(
         token_ends=token_ends,
     ):
         return None
+    return _select_candidates_prechecked(
+        logits,
+        visible,
+        block_size,
+        topk_blocks,
+        out=out,
+        flags=flags,
+        build_bitmap=build_bitmap,
+        mask_tail=mask_tail,
+        token_indices=token_indices,
+        token_ends=token_ends,
+    )
+
+
+def _select_candidates_prechecked(
+    logits,
+    visible,
+    block_size,
+    topk_blocks,
+    *,
+    out,
+    flags,
+    build_bitmap,
+    mask_tail,
+    token_indices,
+    token_ends,
+):
+    """Launch after can_select_candidates checked these exact tensor views."""
     rows, width = logits.shape
     nblocks = triton.cdiv(width, block_size)
     count = min(topk_blocks, nblocks)
