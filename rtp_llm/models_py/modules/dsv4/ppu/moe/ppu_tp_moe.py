@@ -6,7 +6,10 @@ from functools import partial
 
 import torch
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
-from rtp_llm.models_py.kernels.ppu.moe.ppu_moe_combine import combine_tp_partials
+from rtp_llm.models_py.kernels.ppu.moe.ppu_moe_combine import (
+    add_pair_to_bf16,
+    combine_tp_partials,
+)
 from rtp_llm.models_py.kernels.ppu.moe.ppu_shared_swiglu import silu_mul_merged_bf16
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.ppu.moe.gate import PpuGate as Gate
@@ -218,7 +221,7 @@ class PpuTPMoE(nn.Module):
         with record_function_range("dsv4.moe.tp_all_reduce"):
             result = self._reduce(local) if self._reduce is not None else local
             if self._fp32_reduce:
-                result = (result[0] + result[1]).bfloat16()
+                result = add_pair_to_bf16(result[0], result[1])
         return result
 
     def _forward_serial(self, x, weights, indices):

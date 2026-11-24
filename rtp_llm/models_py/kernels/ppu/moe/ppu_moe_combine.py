@@ -53,3 +53,32 @@ def combine_tp_partials(routed, shared, route_scale):
             enable_fp_fusion=False,
         )
     return out
+
+
+@triton.jit
+def _add_cast_bf16(a, b, output, N: tl.constexpr, BLOCK: tl.constexpr):
+    offsets = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < N
+    x = tl.load(a + offsets, mask, 0)
+    y = tl.load(b + offsets, mask, 0)
+    tl.store(output + offsets, (x + y).to(tl.bfloat16), mask)
+
+
+def add_pair_to_bf16(a, b):
+    """Fused FP32 add + RNE BF16 cast matching (a + b).bfloat16()."""
+    if not a.is_cuda:
+        # CPU oracle path (contract tests); GPU always takes the fused kernel.
+        return (a + b).bfloat16()
+    if (
+        a.dtype != torch.float32
+        or b.dtype != torch.float32
+        or a.shape != b.shape
+        or not a.is_contiguous()
+        or not b.is_contiguous()
+    ):
+        raise ValueError("fused add/cast requires same-shape contiguous FP32 inputs")
+    out = torch.empty(a.shape, dtype=torch.bfloat16, device=a.device)
+    n = a.numel()
+    BLOCK = 2048
+    _add_cast_bf16[(triton.cdiv(n, BLOCK),)](a, b, out, n, BLOCK=BLOCK)
+    return out
