@@ -226,24 +226,29 @@ bool safe_on_redirect(const std::string& name) {
     auto n = lower(name);
     return n == "user-agent" || n == "accept" || n == "accept-encoding" || n == "accept-language";
 }
-// Apply the internal policy's local IPv4 hostname check before opening either
-// a direct or proxied connection. libcurl still chooses the transfer address.
-void validate_media_host(const Endpoint& dest, Job& job) {
+// A forward proxy resolves the origin itself. Preserve the internal policy's
+// local hostname check, accepting the first successful A or AAAA answer.
+void validate_proxied_media_host(const Endpoint& dest, Job& job) {
     in_addr literal{};
     if (dest.host.front() == '[' || inet_aton(dest.host.c_str(), &literal))
         return;
     ares_channel raw;
     if (ares_init(&raw) != ARES_SUCCESS)
         throw Failure("dns");
-    int                                                        status = -1;
+    struct Lookup {
+        int  pending = 2;
+        bool found   = false;
+    } lookup;
+    // Destroy the channel before lookup. Destruction completes pending callbacks.
     std::unique_ptr<ares_channeldata, decltype(&ares_destroy)> channel(raw, ares_destroy);
-    ares_gethostbyname(
-        raw,
-        dest.host.c_str(),
-        AF_INET,
-        [](void* data, int result, int, struct hostent*) { *static_cast<int*>(data) = result; },
-        &status);
-    while (status == -1) {
+    auto completed = [](void* data, int status, int, struct hostent*) {
+        auto& lookup = *static_cast<Lookup*>(data);
+        lookup.found |= status == ARES_SUCCESS;
+        --lookup.pending;
+    };
+    ares_gethostbyname(raw, dest.host.c_str(), AF_INET6, completed, &lookup);
+    ares_gethostbyname(raw, dest.host.c_str(), AF_INET, completed, &lookup);
+    while (!lookup.found && lookup.pending) {
         if (job.canceled.load())
             throw Failure("cancelled");
         auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(job.deadline - Clock::now()).count();
@@ -269,7 +274,7 @@ void validate_media_host(const Endpoint& dest, Job& job) {
             throw Failure("dns");
         if (!ready)
             ares_process_fd(raw, ARES_SOCKET_BAD, ARES_SOCKET_BAD);
-        for (int i = 0; i < count && status == -1; ++i) {
+        for (int i = 0; i < count && !lookup.found && lookup.pending; ++i) {
             const auto& fd = descriptors[i];
             if (fd.revents)
                 ares_process_fd(raw,
@@ -277,7 +282,7 @@ void validate_media_host(const Endpoint& dest, Job& job) {
                                 fd.revents & POLLOUT ? fd.fd : ARES_SOCKET_BAD);
         }
     }
-    if (status != ARES_SUCCESS)
+    if (!lookup.found)
         throw Failure("dns");
 }
 void exchange(CURL* curl, Job& job, const Policy& policy, const std::string& proxy) {
@@ -288,8 +293,8 @@ void exchange(CURL* curl, Job& job, const Policy& policy, const std::string& pro
     for (int hop = 0; hop <= 30; ++hop) {
         auto dest = endpoint(url, policy, req.media);
         strip     = strip || dest.origin != first.origin;
-        if (req.media && policy.internal)
-            validate_media_host(dest, job);
+        if (req.media && policy.internal && !proxy.empty())
+            validate_proxied_media_host(dest, job);
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(job.deadline - Clock::now()).count();
         if (job.canceled.load())
             throw Failure("cancelled");
@@ -307,11 +312,15 @@ void exchange(CURL* curl, Job& job, const Policy& policy, const std::string& pro
                 headers.append(name + ": " + value);
         }
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_PROTOCOLS, long(CURLPROTO_HTTP | CURLPROTO_HTTPS));
+        curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
         curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-        // Some resolvers delay AAAA replies beyond the media connect timeout.
-        if (req.media)
-            curl_easy_setopt(curl, CURLOPT_IPRESOLVE, static_cast<long>(CURL_IPRESOLVE_V4));
+        if (req.media) {
+            curl_easy_setopt(curl, CURLOPT_HAPPY_EYEBALLS_TIMEOUT_MS, 150L);
+            // Let curl finish a redirect at the headers. Authorize every next hop here.
+            if (curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 0L) != CURLE_OK
+                || curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L) != CURLE_OK)
+                throw Failure("transport");
+        }
         curl_easy_setopt(curl, CURLOPT_PROXY, proxy.c_str());
         if (!proxy.empty())
             curl_easy_setopt(curl, CURLOPT_NOPROXY, "");
@@ -338,7 +347,7 @@ void exchange(CURL* curl, Job& job, const Policy& policy, const std::string& pro
             throw Failure("cancelled");
         if (transfer.large)
             throw Failure("too_large");
-        if (rc != CURLE_OK) {
+        if (rc != CURLE_OK && !(req.media && rc == CURLE_TOO_MANY_REDIRECTS)) {
             auto stopped = transfer.failure();
             if (!stopped.empty())
                 throw Failure(stopped);

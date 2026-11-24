@@ -12,12 +12,16 @@ binding_headers(
 cc_binary(
     name = "_media_network.so",
     srcs = ["MediaNetwork.cc"],
+    additional_linker_inputs = [":exports.map"],
     copts = ["-std=c++17"],
+    # Keep private curl, c-ares and TLS symbols local when loaded alongside gRPC.
+    linkopts = ["-Wl,--version-script,$(location :exports.map)"],
     linkshared = True,
+    linkstatic = True,
     deps = [
         ":pybind_headers",
-        "@curl//:curl",
-        "@cares//:ares",
+        "@media_curl//:curl",
+        "@media_cares//:ares",
         "@local_config_python//:python_headers",
     ],
 )

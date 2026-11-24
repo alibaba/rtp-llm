@@ -1,3 +1,4 @@
+import socket
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,6 +29,12 @@ class Handler(BaseHTTPRequestHandler):
                 pass
         elif self.path == "/redirect":
             self.reply(302, b"", "/binary")
+        elif self.path == "/short-redirect":
+            self.send_response(302)
+            self.send_header("Location", "/binary")
+            self.send_header("Content-Length", "100")
+            self.send_header("Connection", "close")
+            self.end_headers()
         elif self.path == "/redirect-v6":
             self.reply(302, b"", "http://[::1]/image")
         elif self.path == "/policy":
@@ -113,7 +120,7 @@ class MediaNetworkTest(unittest.TestCase):
         self.assertIs(self.net.next(), pending)
         self.assertEqual(pending.result()[1], "cancelled")
 
-    def test_media_uses_ipv4(self):
+    def test_media_literal_policy_and_proxy(self):
         self.assertEqual(
             self.fetch("/unused", url="http://[::1]/image")[1], "invalid_url"
         )
@@ -122,6 +129,44 @@ class MediaNetworkTest(unittest.TestCase):
         target = "http://127.0.0.1:1/binary"
         self.assertEqual(self.fetch("/unused", url=target, proxy=proxy)[0], 200)
         self.assertIn(target, self.server.visits)
+
+    def test_ipv6_connection_for_origin_redirect_and_proxy(self):
+        class IPv6Server(ThreadingHTTPServer):
+            address_family = socket.AF_INET6
+
+        try:
+            server = IPv6Server(("::1", 0), Handler)
+        except OSError as error:
+            self.skipTest(f"IPv6 loopback unavailable: {error}")
+        server.visits = []
+        self.addCleanup(server.server_close)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+
+        origin = f"http://localhost:{server.server_port}"
+        self.assertEqual(self.fetch("/unused", url=origin + "/redirect")[0], 200)
+        target = "http://127.0.0.1:1/binary"
+        self.assertEqual(self.fetch("/unused", url=target, proxy=origin)[0], 200)
+        self.assertEqual(server.visits, ["/redirect", "/binary", target])
+
+    def test_ipv4_wins_while_ipv6_connect_is_pending(self):
+        port = self.server.server_port
+        try:
+            listener = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+            self.addCleanup(listener.close)
+            listener.bind(("::1", port))
+        except OSError as error:
+            self.skipTest(f"IPv6 loopback unavailable: {error}")
+        # Fill the IPv6 accept queue so the next handshake stays pending.
+        listener.listen(0)
+        with socket.create_connection(("::1", port), timeout=1):
+            result = self.fetch("/unused", url=f"http://localhost:{port}/binary")
+        self.assertEqual(result[:2], (200, ""))
+        self.assertEqual(self.server.visits, ["/binary"])
+
+    def test_redirect_ignores_truncated_redirect_body(self):
+        self.assertEqual(self.fetch("/short-redirect")[:2], (200, ""))
+        self.assertEqual(self.server.visits, ["/short-redirect", "/binary"])
 
     def test_service_body(self):
         for method in ("PUT", "POST"):
