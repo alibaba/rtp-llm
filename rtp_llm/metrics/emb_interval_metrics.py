@@ -4,6 +4,7 @@ import time
 from bisect import bisect_left
 from collections import defaultdict
 from threading import Lock
+from weakref import WeakSet
 
 from rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.metric_base import (
     MetricBase,
@@ -49,7 +50,24 @@ QUEUE_RT = PREFIX + "queue_wait_ms"
 GDR_LOCK_HOLD_RT = PREFIX + "gdr_lock_hold_ms"
 OPERATION_QPS = PREFIX + "operation_qps"
 LOCAL_HIT_RT = "py_rtp_vit_embedding_cache_hit_rt_ms"
-LOCAL_HIT_BOUNDS_MS = (0.025, 0.05, 0.075, 0.1, 0.125, 0.25, 0.5, 1, 2, 5, 10, 25, 50, 100, 500, 1000)
+LOCAL_HIT_BOUNDS_MS = (
+    0.025,
+    0.05,
+    0.075,
+    0.1,
+    0.125,
+    0.25,
+    0.5,
+    1,
+    2,
+    5,
+    10,
+    25,
+    50,
+    100,
+    500,
+    1000,
+)
 LOCAL_HIT_BUCKET_LABELS = tuple(map(str, LOCAL_HIT_BOUNDS_MS)) + ("+Inf",)
 OBJECT_RT_BOUNDS_MS = (10, 25, 50, 75, 100, 150, 250, 500, 1000, 3000)
 OBJECT_RT_BUCKET_LABELS = tuple(map(str, OBJECT_RT_BOUNDS_MS)) + ("+Inf",)
@@ -106,6 +124,31 @@ class EmbOutcomeMetric(MetricBase):
                 statuses, dict(self.tags, operation=operation, stage=stage), interval
             )
         ]
+
+
+class EmbCacheTokensMetric(MetricBase):
+    """Sample total resident tokens across live shards on every KMonitor flush."""
+
+    def __init__(self, name, tags):
+        super().__init__(name, tags)
+        self._shards = WeakSet()
+        self._lock = Lock()
+
+    def track(self, shard):
+        with self._lock:
+            self._shards.add(shard)
+
+    def untrack(self, shard):
+        with self._lock:
+            self._shards.discard(shard)
+
+    def fetch_reported_data(self):
+        with self._lock:
+            shards = tuple(self._shards)
+        if not shards:
+            return []
+        tokens = sum(shard.resident_tokens() for shard in shards)
+        return [MetricDataPoint(tokens, self.tags)]
 
 
 class EmbInflightMetric(MetricBase):
@@ -300,9 +343,7 @@ class EmbLatencyMetric(MetricBase):
             outcome = status if status in ("success", "skipped") else "error"
             stage_counts[operation, stage][outcome] += count
             tags = dict(self.tags, operation=operation, stage=stage, status=status)
-            points.append(
-                MetricDataPoint(count / interval, tags, PREFIX + "stage_qps")
-            )
+            points.append(MetricDataPoint(count / interval, tags, PREFIX + "stage_qps"))
 
         # Existing dashboards consume these views of the same observations.
         for (operation, stage), counts in stage_counts.items():

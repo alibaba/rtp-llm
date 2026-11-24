@@ -654,9 +654,7 @@ class MMEmbeddingCacheEntry:
         cancellation_event: Optional[threading.Event] = None,
     ) -> None:
         """Wait for completion without promoting an offloaded embedding."""
-        if not _wait_event(
-            self._waiter_event("_event"), timeout, cancellation_event
-        ):
+        if not _wait_event(self._waiter_event("_event"), timeout, cancellation_event):
             raise TimeoutError("Waiting for embedding result timed out")
         if self.error is not None:
             raise self.error
@@ -1346,6 +1344,8 @@ class MMEmbeddingCache:
         self._publish_cond = threading.Condition()
         if async_publication:
             self._start_publication_thread(publish_queue_size)
+        if report_metrics:
+            kmonitor.embedding_cache_tokens.track(self)
 
     def _start_publication_thread(self, publish_queue_size: int) -> None:
         self._publish_queue = queue.Queue(maxsize=max(1, publish_queue_size))
@@ -1795,6 +1795,8 @@ class MMEmbeddingCache:
 
     def close(self) -> None:
         """Stop the publication thread after draining queued work."""
+        if self._report_metrics_enabled:
+            kmonitor.embedding_cache_tokens.untrack(self)
         with self._publish_cond:
             publication_queue = self._publish_queue
             if publication_queue is None or self._publication_closing:
@@ -2109,12 +2111,15 @@ class MMEmbeddingCache:
         stats.update({f"cpu_pool_{key}": value for key, value in cpu_pool.items()})
         return stats
 
+    def resident_tokens(self) -> int:
+        with self._lock:
+            return self._resident_tokens
+
     def _report_current_residency(self) -> None:
         with self._lock:
-            tokens = self._resident_tokens
             size_bytes = self._gpu_bytes + self._cpu_bytes
             entries = len(self._gpu_lru) + len(self._cpu_lru)
-        self._report_resident_metrics(tokens, size_bytes, entries)
+        self._report_resident_metrics(size_bytes, entries)
 
     def _report_admission(self, size_bytes: int) -> None:
         if not self._report_metrics_enabled or self._lifetime_metrics is None:
@@ -2134,10 +2139,9 @@ class MMEmbeddingCache:
         }[state]
         kmonitor.report(metric, 1)
 
-    def _report_resident_metrics(self, tokens: int, size_bytes: int, entries: int) -> None:
+    def _report_resident_metrics(self, size_bytes: int, entries: int) -> None:
         if not self._report_metrics_enabled:
             return
-        kmonitor.report(GaugeMetrics.VIT_EMBEDDING_CACHE_TOKENS_METRIC, tokens)
         kmonitor.report(GaugeMetrics.VIT_EMBEDDING_CACHE_BYTES_METRIC, size_bytes)
         if self._residency_tags is not None:
             kmonitor.report(

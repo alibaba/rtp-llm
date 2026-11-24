@@ -3,6 +3,7 @@ from enum import Enum
 from typing import Any, Dict, Iterable, Optional, Union
 
 from .emb_interval_metrics import (
+    EmbCacheTokensMetric,
     EmbInflightMetric,
     EmbLatencyMetric,
     EmbOutcomeMetric,
@@ -339,8 +340,12 @@ class GaugeMetrics(Enum):
     VIT_EMBEDDING_CACHE_HIT_RT_METRIC = "py_rtp_vit_embedding_cache_hit_rt_ms"
     VIT_EMBEDDING_CACHE_TOKENS_METRIC = "py_rtp_vit_embedding_cache_tokens"
     VIT_EMBEDDING_CACHE_BYTES_METRIC = "py_rtp_vit_embedding_cache_bytes"
-    VIT_EMBEDDING_CACHE_RESIDENT_BYTES_METRIC = "py_rtp_vit_embedding_cache_resident_bytes"
-    VIT_EMBEDDING_CACHE_RESIDENT_ENTRIES_METRIC = "py_rtp_vit_embedding_cache_resident_entries"
+    VIT_EMBEDDING_CACHE_RESIDENT_BYTES_METRIC = (
+        "py_rtp_vit_embedding_cache_resident_bytes"
+    )
+    VIT_EMBEDDING_CACHE_RESIDENT_ENTRIES_METRIC = (
+        "py_rtp_vit_embedding_cache_resident_entries"
+    )
     # Configured GPU + CPU capacity / successful new admission bytes per second.
     # All shards share one activity-driven window of at least 60s. Idle periods
     # emit no samples. This is an estimated turnover time, not a per-entry TTL.
@@ -354,6 +359,9 @@ class MetricReporter(object):
         self._kmon = kmonitor
         self._matic_map: Dict[str, Any] = {}
         self._inited = False
+        self.embedding_cache_tokens = EmbCacheTokensMetric(
+            GaugeMetrics.VIT_EMBEDDING_CACHE_TOKENS_METRIC.value, {}
+        )
 
     def report(
         self,
@@ -396,7 +404,12 @@ class MetricReporter(object):
                 self._matic_map[metric.value] = backend
 
             for metric in GaugeMetrics if gauge_metrics is None else gauge_metrics:
-                if metric in (
+                if metric is GaugeMetrics.VIT_EMBEDDING_CACHE_TOKENS_METRIC:
+                    self.embedding_cache_tokens.tags = dict(tags or {})
+                    backend = self._kmon.register_custom_metric(
+                        self.embedding_cache_tokens
+                    )
+                elif metric in (
                     GaugeMetrics.VIT_REMOTE_EMB_INFLIGHT_TASKS_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_INFLIGHT_BYTES_METRIC,
                 ):
@@ -426,7 +439,8 @@ class MetricReporter(object):
                             metric.value,
                             tags or {},
                             arena=(
-                                metric is GaugeMetrics.VIT_REMOTE_EMB_GDR_ARENA_BYTES_METRIC
+                                metric
+                                is GaugeMetrics.VIT_REMOTE_EMB_GDR_ARENA_BYTES_METRIC
                             ),
                         )
                     )

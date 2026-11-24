@@ -10,15 +10,15 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
+from .greennet_hook import GreenNetVerdict
 from .mm_embedding_cache import (
+    _SIGNALED_EVENT,
     MMEmbeddingCache,
     MMEmbeddingCacheEntry,
     MMHashKeyCache,
     _current_cuda_streams,
     _embedding_output_tokens,
-    _SIGNALED_EVENT,
 )
-from .greennet_hook import GreenNetVerdict
 
 
 class NativeMMHashKeyCache(MMHashKeyCache):
@@ -168,6 +168,15 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
         from librtp_compute_ops import EmbLocalCacheShard, record_emb_local_ready
 
         self._validate_limits(gpu_max_bytes, cpu_max_bytes)
+        self._native_device = (
+            torch.cuda.current_device()
+            if gpu_max_bytes or torch.cuda.is_available()
+            else -1
+        )
+        with cuda_graph_gate.operation():
+            self._core = EmbLocalCacheShard(
+                gpu_max_bytes, cpu_max_bytes, self._native_device
+            )
         # Share the existing request/publish coordinator. Zero capacities here
         # leave the legacy pools unallocated.
         super().__init__(
@@ -180,15 +189,6 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
         self._cpu_max_bytes = cpu_max_bytes
         self._native_closed = False
         self._pending_entries = {}
-        self._native_device = (
-            torch.cuda.current_device()
-            if gpu_max_bytes or torch.cuda.is_available()
-            else -1
-        )
-        with cuda_graph_gate.operation():
-            self._core = EmbLocalCacheShard(
-                gpu_max_bytes, cpu_max_bytes, self._native_device
-            )
         self._record_native_ready = record_emb_local_ready
         if async_publication:
             self._start_publication_thread(publish_queue_size)
@@ -259,11 +259,15 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
 
     def complete(self, cache_key, entry, result, *, before_publish=None):
         if not hasattr(entry, "_native_cell"):
-            return super().complete(cache_key, entry, result, before_publish=before_publish)
+            return super().complete(
+                cache_key, entry, result, before_publish=before_publish
+            )
         with cuda_graph_gate.operation():
             # Deferred inspection can publish from a different thread.
             producers = entry.producer_streams or _current_cuda_streams(result)
-            streams = [(stream.cuda_stream, stream.device.index) for stream in producers]
+            streams = [
+                (stream.cuda_stream, stream.device.index) for stream in producers
+            ]
             ready = self._record_native_ready(streams) if streams else []
         return entry.complete(
             result,
@@ -289,8 +293,12 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
             ready = entry.ready_events
             with cuda_graph_gate.operation():
                 published, charged, evictions, demoted = self._core.publish(
-                    cache_key, cell, result, _embedding_output_tokens(result), ready,
-                    *self._stream()
+                    cache_key,
+                    cell,
+                    result,
+                    _embedding_output_tokens(result),
+                    ready,
+                    *self._stream(),
                 )
             if published:
                 with entry.storage_lock:
@@ -300,7 +308,9 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
         except Exception:
             with self._lock:
                 self._stats["transfer_error"] += 1
-            logging.warning("ViT native cache insertion failed for %s", cache_key, exc_info=True)
+            logging.warning(
+                "ViT native cache insertion failed for %s", cache_key, exc_info=True
+            )
         with self._lock:
             if not published:
                 self._core.erase(cache_key, cell)
@@ -435,7 +445,10 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
         stats.update(self._core.stats())
         return stats
 
+    def resident_tokens(self) -> int:
+        return self._core.resident_charge()[0]
+
     def _report_current_residency(self):
         if self._report_metrics_enabled:
-            tokens, nbytes, entries = self._core.resident_charge()
-            self._report_resident_metrics(tokens, nbytes, entries)
+            _, nbytes, entries = self._core.resident_charge()
+            self._report_resident_metrics(nbytes, entries)
