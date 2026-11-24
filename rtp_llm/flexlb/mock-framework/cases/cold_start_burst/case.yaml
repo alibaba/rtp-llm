@@ -1,0 +1,87 @@
+id: cold_start_burst
+name: 冷启动突发不许全拒
+describe: F3.1 降级版：冷启动立即 qps 24 突发，验证拒绝率快速收敛（窗口成功率 ≥85%）、错误码分布留证（不乱报 INVALID_REQUEST）。突发与拒绝率可观，逐请求归因待 GAP-F2。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 2
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 3s
+  - id: burst
+    describe: 冷启动突发。
+    timeout: 300s
+    steps:
+      - id: start_frontend
+        describe: 集群刚就绪即 qps 24 突发打 30s（冷启动突发）。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 24
+          total_concurrency: 96
+          queue_capacity: 192
+          request_timeout: 60s
+          drain_timeout: 60s
+        wait_after: 30s
+      - id: check_burst_not_rejected
+        describe: 突发不许全拒：30s 窗口成功率 ≥85%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -30s
+            - 0s
+        expect:
+          gte: 0.85
+      - id: stop_frontend
+        describe: 停止播放并收齐已发请求终态。
+        interface: frontend/stop/playback
+        within: 240s
+      - id: evidence_error_codes
+        describe: 按 error_code 分类的拒绝数（归因 AutoTPM 留证）。
+        interface: frontend/query/playback_requests
+        args:
+          kind: TERMINAL
+          field: error_code
+      - id: evidence_error_outcomes
+        describe: 错误终态总数（拒绝规模留证）。
+        interface: frontend/query/playback_requests
+        args:
+          kind: TERMINAL
+          field: outcome
+          equals: error
+      - id: check_total_success_rate
+        describe: 全程成功率 ≥85%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -120s
+            - 0s
+        expect:
+          gte: 0.85

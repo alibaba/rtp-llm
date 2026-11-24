@@ -1,0 +1,95 @@
+id: cache_first_hotspot
+name: cache-first 倾斜兜底
+describe: F2.2 降级版：prefix-hotspot 数据集 + cacheAffinity，验证命中率收益（≥0.5）与热点倾斜（单 worker 执行占比 ≥36%）同时成立；外溢 spillover 留证。真机基线：命中率 37.6%→58.5%。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 3
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: traffic
+    describe: 热点流量打流。
+    timeout: 420s
+    steps:
+      - id: start_frontend
+        describe: prefix-hotspot 流量（2/20 热组承载 70%）0.25 倍速预热 60s 后全速。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/prefix-hotspot.mckidx
+          qps: 8
+          total_concurrency: 64
+          queue_capacity: 128
+          request_timeout: 30s
+          drain_timeout: 60s
+          reuse_cache: true
+          warmup:
+            duration: 60s
+            rate_scale: 0.25
+        wait_after: 150s
+      - id: check_hit_rate
+        describe: 命中率升起（热前缀红利，≥0.5）。
+        interface: engine/query/cache_hit_rate
+        args:
+          range:
+            - -20s
+            - 0s
+        expect:
+          gte: 0.5
+      - id: check_skew_share
+        describe: 热点倾斜存在：单 worker 执行数占比 ≥36%（均匀分布为 33%）。
+        interface: prometheus/query_scalar
+        args:
+          promql: max(sum by(instance)(increase(rtp_llm_framework_requests_total{role="prefill"}[120s]))) / sum(increase(rtp_llm_framework_requests_total{role="prefill"}[120s]))
+        expect:
+          gte: 0.36
+      - id: evidence_queue_per_worker
+        describe: 分 worker 排队深度（热点队列留证）。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_flexlb_batcher_queue_size
+      - id: evidence_affinity_decisions
+        describe: 亲和决策原因分布留证。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_cache_affinity_decision_qps_total
+      - id: stop_frontend
+        describe: 停止播放并收齐已发请求终态。
+        interface: frontend/stop/playback
+        within: 190s
+      - id: check_total_success_rate
+        describe: 全程成功率 ≥99%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -240s
+            - 0s
+        expect:
+          gte: 0.99

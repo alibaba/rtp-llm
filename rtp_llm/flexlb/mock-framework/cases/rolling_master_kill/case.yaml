@@ -1,0 +1,215 @@
+id: rolling_master_kill
+name: 持续杀加高并发
+describe: E2.2 降级版：高命中流量下连续三轮 杀主→接管→重启，全程请求成功率 ≥95%、缓存命中率 ≥0.3、零重试放大。真机基线：64 并发 349/349 成功、命中率 94.12% 不降。
+environment:
+  master:
+    deployment:
+      replicas: 2
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 2
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: rolling
+    describe: 三轮滚动杀主。
+    timeout: 600s
+    steps:
+      - id: start_frontend
+        describe: prefix-shared 流量 0.25 倍速预热 45s 后全速，qps 8 贯穿三轮滚动杀。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/prefix-shared.mckidx
+          qps: 8
+          total_concurrency: 64
+          queue_capacity: 128
+          request_timeout: 30s
+          drain_timeout: 60s
+          reuse_cache: true
+          warmup:
+            duration: 45s
+            rate_scale: 0.25
+        wait_after: 65s
+      - id: get_leader_r1
+        describe: 记录当前主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+      - id: kill_leader_r1
+        describe: 杀掉当前主 Master。
+        interface: master/stop
+        args:
+          targets:
+            ref: steps.get_leader_r1
+          mode: kill
+        within: 45s
+        wait_after: 20s
+      - id: check_single_survivor_r1
+        describe: 杀后仅剩一个活跃 Master。
+        interface: master/list/addresses
+        expect:
+          count: 1
+      - id: check_success_r1
+        describe: 杀主后 20s 窗口成功率 ≥90%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -20s
+            - 0s
+        expect:
+          gte: 0.9
+      - id: restart_r1
+        describe: 重启被杀的 Master。
+        interface: master/restart
+        args:
+          targets:
+            ref: steps.kill_leader_r1
+        within: 120s
+        wait_after: 20s
+      - id: check_pair_restored_r1
+        describe: 重启后恢复双 Master。
+        interface: master/list/addresses
+        expect:
+          count: 2
+      - id: get_leader_r2
+        describe: 记录当前主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+      - id: kill_leader_r2
+        describe: 杀掉当前主 Master。
+        interface: master/stop
+        args:
+          targets:
+            ref: steps.get_leader_r2
+          mode: kill
+        within: 45s
+        wait_after: 20s
+      - id: check_single_survivor_r2
+        describe: 杀后仅剩一个活跃 Master。
+        interface: master/list/addresses
+        expect:
+          count: 1
+      - id: check_success_r2
+        describe: 杀主后 20s 窗口成功率 ≥90%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -20s
+            - 0s
+        expect:
+          gte: 0.9
+      - id: restart_r2
+        describe: 重启被杀的 Master。
+        interface: master/restart
+        args:
+          targets:
+            ref: steps.kill_leader_r2
+        within: 120s
+        wait_after: 20s
+      - id: check_pair_restored_r2
+        describe: 重启后恢复双 Master。
+        interface: master/list/addresses
+        expect:
+          count: 2
+      - id: get_leader_r3
+        describe: 记录当前主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+      - id: kill_leader_r3
+        describe: 杀掉当前主 Master。
+        interface: master/stop
+        args:
+          targets:
+            ref: steps.get_leader_r3
+          mode: kill
+        within: 45s
+        wait_after: 20s
+      - id: check_single_survivor_r3
+        describe: 杀后仅剩一个活跃 Master。
+        interface: master/list/addresses
+        expect:
+          count: 1
+      - id: check_success_r3
+        describe: 杀主后 20s 窗口成功率 ≥90%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -20s
+            - 0s
+        expect:
+          gte: 0.9
+      - id: restart_r3
+        describe: 重启被杀的 Master。
+        interface: master/restart
+        args:
+          targets:
+            ref: steps.kill_leader_r3
+        within: 120s
+        wait_after: 20s
+      - id: check_pair_restored_r3
+        describe: 重启后恢复双 Master。
+        interface: master/list/addresses
+        expect:
+          count: 2
+      - id: check_hit_rate
+        describe: 滚动杀全程命中率不掉（≥0.3）。
+        interface: engine/query/cache_hit_rate
+        args:
+          range:
+            - -20s
+            - 0s
+        expect:
+          gte: 0.3
+      - id: stop_frontend
+        describe: 停止播放并收齐已发请求终态。
+        interface: frontend/stop/playback
+        within: 190s
+      - id: check_total_success_rate
+        describe: 全程成功率不低于 95%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -300s
+            - 0s
+        expect:
+          gte: 0.95
+      - id: check_no_retry_duplicates
+        describe: 滚动杀全程零重试放大（无 duplicate ISSUED）。
+        interface: frontend/query/playback_requests
+        args:
+          kind: ISSUED
+          field: duplicate
+        expect:
+          lte: 0

@@ -157,11 +157,6 @@ public final class BackendRpcTransport implements AutoCloseable {
         return call;
     }
 
-    private synchronized ManagedChannel channel(String target) {
-        if (closed) throw new IllegalStateException("Frontend closed");
-        return channels.computeIfAbsent(target, t -> ManagedChannelBuilder.forTarget(t).usePlaintext().build());
-    }
-
     private boolean mockProtocol(String prefillAddress) {
         return mockProtocols.computeIfAbsent(prefillAddress, target -> {
             try {
@@ -173,6 +168,11 @@ public final class BackendRpcTransport implements AutoCloseable {
                 throw error;
             }
         });
+    }
+
+    private synchronized ManagedChannel channel(String target) {
+        if (closed) throw new IllegalStateException("Frontend closed");
+        return channels.computeIfAbsent(target, t -> ManagedChannelBuilder.forTarget(t).usePlaintext().build());
     }
 
     private List<Long> routingKeys(MultimodalProtocol.Prepared input, long physicalBlockSize) {

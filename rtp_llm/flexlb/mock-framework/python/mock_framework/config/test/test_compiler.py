@@ -414,3 +414,42 @@ def test_action_registration_rejects_classes_sync_functions_and_wrong_signatures
             register_step("extension/invalid", effect="read")(invalid)
     with pytest.raises(ConfigError):
         StepRegistry((synchronous,))
+
+
+def test_instance_config_overrides_expand_per_instance(case_data, compile_data):
+    case_data["environment"]["prefill"]["instance_configs"] = {
+        "prefill-1": {"mock.rpc.status.no.respond": True, "a_b_c": 64}
+    }
+    case = compile_data(case_data)
+    prefill = case.environment["prefill"]
+    assert prefill["config"] == {"a_b_c": 128, "cache": {"sync": {"delay_ms": 10}}}
+    assert prefill["instance_configs"] == {
+        "prefill-1": {
+            "mock": {"rpc": {"status": {"no": {"respond": True}}}},
+            "a_b_c": 64,
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda d: d["environment"].update(
+            master={
+                "config": {"FLEXLB_CONFIG": "{}"},
+                "instance_configs": {"master-0": {}},
+            }
+        ),
+        lambda d: d["environment"]["prefill"].update(instance_configs={}),
+        lambda d: d["environment"]["prefill"].update(
+            instance_configs={"decode-0": {"a_b_c": 1}}
+        ),
+        lambda d: d["environment"]["prefill"].update(
+            instance_configs={"prefill-x": {"a_b_c": 1}}
+        ),
+    ],
+)
+def test_instance_config_overrides_are_validated(case_data, compile_data, change):
+    change(case_data)
+    with pytest.raises(ConfigError):
+        compile_data(case_data)

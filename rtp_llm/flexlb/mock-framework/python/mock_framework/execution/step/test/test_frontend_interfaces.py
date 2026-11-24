@@ -1,4 +1,5 @@
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -7,6 +8,10 @@ from mock_framework.config import ConfigError
 from mock_framework.execution import ExecutionError, metrics
 from mock_framework.execution.roles import frontend as frontend_runtime
 from mock_framework.execution.roles.frontend import FrontendRole
+from mock_framework.execution.step.frontend import (
+    PlaybackRequestsArgs,
+    frontend_playback_requests,
+)
 from mock_framework.execution.step.metrics.frontend import query_qps
 from mock_framework.execution.step.step_registry import StepRegistry
 from mock_framework.execution.test.helpers import FRAMEWORK
@@ -413,3 +418,129 @@ def test_shared_requests_resolve_independently_of_case_directory(monkeypatch, tm
         .get("frontend/start/playback")
         .run_with_raw_args(ctx, values)
     )
+
+
+def write_journal(component, round_name, events, tmp_path):
+    playback = tmp_path / "components" / component / "playback" / round_name
+    playback.mkdir(parents=True)
+    journal = playback / "requests.jsonl"
+    lines = (
+        [{"version": 1, "frontend": component}]
+        + events
+        + [{"seal": {"issued": "3", "finished": "3"}}]
+    )
+    journal.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+    return journal
+
+
+def playback_context(tmp_path):
+    events = []
+    return SimpleNamespace(
+        records=SimpleNamespace(directory=tmp_path, emit=lambda **v: events.append(v)),
+        events=events,
+    )
+
+
+def test_playback_requests_count_filters_by_kind_field_and_value(tmp_path):
+    write_journal(
+        "frontend-0",
+        "1",
+        [
+            {"kind": "ISSUED", "request_id": "1"},
+            {"kind": "TERMINAL", "request_id": "1", "outcome": "success"},
+            {
+                "kind": "TERMINAL",
+                "request_id": "2",
+                "outcome": "error",
+                "error_code": "8406",
+            },
+            {
+                "kind": "TERMINAL",
+                "request_id": "3",
+                "outcome": "error",
+                "error_code": "8431",
+            },
+        ],
+        tmp_path,
+    )
+    ctx = playback_context(tmp_path)
+    assert asyncio.run(frontend_playback_requests(ctx, PlaybackRequestsArgs())) == 3.0
+    assert (
+        asyncio.run(
+            frontend_playback_requests(
+                ctx, PlaybackRequestsArgs(kind="TERMINAL", field="error_code")
+            )
+        )
+        == 2.0
+    )
+    assert (
+        asyncio.run(
+            frontend_playback_requests(
+                ctx, PlaybackRequestsArgs(field="error_code", equals="8406")
+            )
+        )
+        == 1.0
+    )
+    assert (
+        asyncio.run(
+            frontend_playback_requests(ctx, PlaybackRequestsArgs(kind="ISSUED"))
+        )
+        == 1.0
+    )
+    assert ctx.events[-1]["matched"] == 1
+
+
+def test_playback_requests_reads_latest_round_and_aggregates_frontends(tmp_path):
+    write_journal(
+        "frontend-0",
+        "1",
+        [{"kind": "TERMINAL", "request_id": "1", "outcome": "success"}],
+        tmp_path,
+    )
+    write_journal(
+        "frontend-0",
+        "10",
+        [
+            {"kind": "TERMINAL", "request_id": "1", "outcome": "error"},
+            {"kind": "TERMINAL", "request_id": "2", "outcome": "error"},
+        ],
+        tmp_path,
+    )
+    write_journal(
+        "frontend-1",
+        "2",
+        [{"kind": "TERMINAL", "request_id": "7", "outcome": "success"}],
+        tmp_path,
+    )
+    ctx = playback_context(tmp_path)
+    assert asyncio.run(frontend_playback_requests(ctx, PlaybackRequestsArgs())) == 3.0
+    assert (
+        asyncio.run(
+            frontend_playback_requests(
+                ctx, PlaybackRequestsArgs(field="outcome", equals="error")
+            )
+        )
+        == 2.0
+    )
+
+
+def test_playback_requests_requires_a_recorded_playback(tmp_path):
+    (tmp_path / "components" / "frontend-0").mkdir(parents=True)
+    ctx = playback_context(tmp_path)
+    with pytest.raises(ExecutionError):
+        asyncio.run(frontend_playback_requests(ctx, PlaybackRequestsArgs()))
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"kind": " "},
+        {"field": " "},
+        {"equals": "8406"},
+    ],
+)
+def test_playback_requests_args_are_validated(values):
+    with pytest.raises((ValueError, ConfigError)):
+        StepRegistry.standard().get("frontend/query/playback_requests").build_arguments(
+            values
+        )

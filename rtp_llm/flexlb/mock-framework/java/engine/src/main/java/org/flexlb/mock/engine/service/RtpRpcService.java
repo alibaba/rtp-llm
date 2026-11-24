@@ -55,7 +55,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
         this.config = config;
         this.groups = groups;
         this.cache = cache; this.finished = finished;
-        if (config.enqueueAckDelayMs() > 0 || config.cancelEffectDelayMs() > 0) {
+        if (config.enqueueAckDelayMs() > 0 || config.cancelEffectDelayMs() > 0 || config.enqueueAdmissionDelayMs() > 0) {
             rpcDelays = Executors.newSingleThreadScheduledExecutor(
                 Thread.ofPlatform().daemon(true).name("mock-rpc-delays").factory());
         }
@@ -115,10 +115,9 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
 
     @Override public void enqueueBatch(EnqueueBatchRequestPB request, StreamObserver<EnqueueBatchResponsePB> response) {
         if (prefill == null || !groups) { super.enqueueBatch(request, response); return; }
-        if (config.enqueueAckDelayMs() > 0) {
-            // The admission runs on arrival and starts the fetch-attach retention window;
-            // only the ACK response is delayed.
-            PrefillEnqueueHandler.enqueue(prefill, request, response, config.enqueueAckDelayMs(), rpcDelays);
+        if (config.enqueueAckDelayMs() > 0 || config.enqueueAdmissionDelayMs() > 0) {
+            PrefillEnqueueHandler.enqueue(prefill, request, response,
+                config.enqueueAdmissionDelayMs(), config.enqueueAckDelayMs(), rpcDelays);
             return;
         }
         PrefillEnqueueHandler.enqueue(prefill, request, response);
@@ -134,8 +133,9 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
         }
         var batch = EnqueueBatchRequestPB.newBuilder().setBatchId(request.getBatchId())
             .setFetchAttachTimeoutMs(request.getFetchAttachTimeoutMs()).addDpSlots(slot).build();
-        if (config.enqueueAckDelayMs() > 0) {
-            PrefillEnqueueHandler.enqueue(prefill, batch, response, config.enqueueAckDelayMs(), rpcDelays);
+        if (config.enqueueAckDelayMs() > 0 || config.enqueueAdmissionDelayMs() > 0) {
+            PrefillEnqueueHandler.enqueue(prefill, batch, response,
+                config.enqueueAdmissionDelayMs(), config.enqueueAckDelayMs(), rpcDelays);
             return;
         }
         PrefillEnqueueHandler.enqueue(prefill, batch, response);
@@ -181,6 +181,11 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
     }
 
     @Override public void getWorkerStatus(StatusVersionPB request, StreamObserver<WorkerStatusPB> response) {
+        if (config.statusNoRespond()) {
+            // Injected outage: the call is accepted but never answered, so Master's
+            // health poll hangs until its own deadline, exactly like a stuck Engine.
+            return;
+        }
         statusReply("worker_status", response, () -> {
             var snapshot = cache.snapshot(request.getLatestCacheVersion(), false);
             String role = config.role().name().toUpperCase(java.util.Locale.ROOT);
@@ -202,6 +207,11 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
     }
 
     @Override public void getCacheStatus(CacheVersionPB request, StreamObserver<CacheStatusPB> response) {
+        if (config.statusNoRespond()) {
+            // Injected outage: the call is accepted but never answered, so Master's
+            // health poll hangs until its own deadline, exactly like a stuck Engine.
+            return;
+        }
         statusReply("cache_status", response, () -> {
             var snapshot = cache.snapshot(request.getLatestCacheVersion(), request.getNeedCacheKeys());
             // Real measures cache collection only, before protobuf construction.
@@ -265,11 +275,12 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
      */
     public record Config(String id, Role role, int physicalBlockSize, int maxSeqLen,
                           int maxBatchTokens, ComputeModel compute, int imageToken, long cacheKeySeed, int cpSize,
-                          long maxRpcTimeoutMs, int enqueueAckDelayMs, int cancelEffectDelayMs) {
+                          long maxRpcTimeoutMs, int enqueueAckDelayMs, int cancelEffectDelayMs,
+                          int enqueueAdmissionDelayMs, boolean statusNoRespond) {
         public Config {
             if (id == null || id.isBlank() || (role != Role.prefill && role != Role.decode)
                     || physicalBlockSize < 1 || cpSize < 1 || maxSeqLen < 1 || maxBatchTokens < 0
-                    || enqueueAckDelayMs < 0 || cancelEffectDelayMs < 0)
+                    || enqueueAckDelayMs < 0 || cancelEffectDelayMs < 0 || enqueueAdmissionDelayMs < 0)
                 throw new IllegalArgumentException("Invalid RTP endpoint configuration");
             Objects.requireNonNull(compute);
         }
@@ -279,7 +290,8 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
         public static Config from(RtpConfig config) {
             return new Config(config.id(), config.role(), config.physicalBlockSize(), config.maxSeqLen(),
                 config.maxBatchTokens(), config.compute(), config.imageToken(), config.cacheKeySeed(), config.cpSize(),
-                config.maxRpcTimeoutMs(), config.enqueueAckDelayMs(), config.cancelEffectDelayMs());
+                config.maxRpcTimeoutMs(), config.enqueueAckDelayMs(), config.cancelEffectDelayMs(),
+                config.enqueueAdmissionDelayMs(), config.statusNoRespond());
         }
     }
 

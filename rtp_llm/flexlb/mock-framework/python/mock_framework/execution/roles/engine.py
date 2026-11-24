@@ -41,10 +41,14 @@ class EngineRole:
     async def _start_instance(self, role, index):
         identity = ProcessIdentity(role, index)
         rpc_port, control_port = self._port(), self._port()
+        role_config = self.role_configs[role]
+        override = role_config.get("instance_configs", {}).get(identity.instance_id)
+        if override is not None:
+            role_config = {**role_config, "config": override}
         child, control, endpoint = await start_instance(
             self.supervisor,
             self.records,
-            self.role_configs[role],
+            role_config,
             identity,
             self.launch_by_role[role],
             configure=lambda _: {
@@ -84,6 +88,51 @@ class EngineRole:
 
     async def scale_out(self, role, count):
         return await self._start_instances({role: count}, concurrency=1)
+
+    async def stop(self, role, targets, count, mode):
+        """Kill Engines without retiring them from discovery: FlexLB notices via its own health checks."""
+        async with self.lock:
+            if role not in ENGINE_ROLES:
+                raise ExecutionError("engine/stop requires an Engine role")
+            known = {
+                item["rpc"]: item for item in self.topology.list_active_endpoints(role)
+            }
+            if targets is None:
+                if count is None or not 1 <= count <= len(known):
+                    raise ExecutionError(
+                        "engine/stop count must cover 1..all active instances of the role"
+                    )
+                targets = [
+                    item["rpc"] for item in self.topology.list_active_endpoints(role)
+                ][:count]
+            if (
+                not targets
+                or len(set(targets)) != len(targets)
+                or set(targets) - known.keys()
+            ):
+                raise ExecutionError(
+                    "engine/stop targets must be nonempty, unique, active addresses of the selected role"
+                )
+            if mode not in ("terminate", "kill"):
+                raise ExecutionError("engine/stop mode must be terminate or kill")
+            nodes = [known[address]["id"] for address in targets]
+            if self.monitoring:
+                # Capture the final samples before the kill; a dead target can never be scraped.
+                await self.monitoring.wait_for_final_scrape(nodes)
+            for address, node_id in zip(targets, nodes):
+                errors = await self.supervisor.stop_intentionally(node_id, mode=mode)
+                if errors:
+                    raise ExecutionError("; ".join(errors))
+                if self.monitoring:
+                    self.monitoring.retire(node_id)
+                self.records.emit(
+                    event="engine_stopped",
+                    node=node_id,
+                    rpc=address,
+                    role=role,
+                    mode=mode,
+                )
+            return sorted(targets)
 
     async def scale_in(self, role, targets, count):
         async with self.lock:

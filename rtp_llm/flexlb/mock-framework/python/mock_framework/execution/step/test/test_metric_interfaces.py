@@ -16,6 +16,7 @@ from mock_framework.execution.step.metrics.frontend import query_success_rate
 from mock_framework.execution.step.metrics.prometheus import (
     PrometheusQueryArgs,
     query_promql,
+    query_promql_scalar,
 )
 
 
@@ -72,6 +73,42 @@ def test_raw_promql_is_sent_unchanged_at_fixed_time_and_empty_vector_stays_empty
     assert asyncio.run(prometheus["monitor"].query("4", 123.25, 2)) == [
         QuerySample({}, 4.0, 123.25)
     ]
+
+
+def test_scalar_query_returns_a_single_finite_value(prometheus):
+    prometheus["body"]["data"] = {
+        "resultType": "vector",
+        "result": [{"metric": {}, "value": [123.25, "2.5"]}],
+    }
+    ctx = context()
+    ctx.query_time = "1970-01-01T00:02:03.250Z"
+    ctx.timeout = 2
+    ctx.runtime.monitoring = prometheus["monitor"]
+    assert (
+        asyncio.run(query_promql_scalar(ctx, PrometheusQueryArgs("max(queue_size)")))
+        == 2.5
+    )
+    assert prometheus["requests"] == [
+        {"query": ["max(queue_size)"], "time": ["123.25"], "timeout": ["2000ms"]}
+    ]
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        [],
+        [{"metric": {}, "value": [1, "1"]}, {"metric": {"i": "b"}, "value": [1, "2"]}],
+        [{"metric": {}, "value": [1, "NaN"]}],
+    ],
+)
+def test_scalar_query_rejects_non_scalar_or_nonfinite_results(prometheus, result):
+    prometheus["body"]["data"] = {"resultType": "vector", "result": result}
+    ctx = context()
+    ctx.query_time = "1970-01-01T00:02:03.250Z"
+    ctx.timeout = 2
+    ctx.runtime.monitoring = prometheus["monitor"]
+    with pytest.raises(ExecutionError):
+        asyncio.run(query_promql_scalar(ctx, PrometheusQueryArgs("sum(x)")))
 
 
 @pytest.mark.parametrize(

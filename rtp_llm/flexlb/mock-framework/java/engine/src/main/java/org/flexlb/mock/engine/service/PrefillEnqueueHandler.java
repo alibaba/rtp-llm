@@ -11,16 +11,27 @@ import org.flexlb.engine.grpc.EngineRpcService.*;
  */
 final class PrefillEnqueueHandler {
     static void enqueue(PrefillRpcServer generation, EnqueueBatchRequestPB request, StreamObserver<EnqueueBatchResponsePB> observer) {
-        enqueue(generation, request, observer, 0, null);
+        enqueue(generation, request, observer, 0, 0, null);
     }
 
     /**
-     * ackDelayMs delays only the ACK response; admission (and its fetch-attach retention
-     * window) already started when the batch arrived.
+     * admissionDelayMs postpones the admission itself (and with it the fetch-attach retention
+     * window); ackDelayMs delays only the ACK response after admission completed.
      */
     static void enqueue(PrefillRpcServer generation, EnqueueBatchRequestPB request,
-                        StreamObserver<EnqueueBatchResponsePB> observer, long ackDelayMs,
-                        java.util.concurrent.ScheduledExecutorService delayScheduler) {
+                        StreamObserver<EnqueueBatchResponsePB> observer, long admissionDelayMs,
+                        long ackDelayMs, java.util.concurrent.ScheduledExecutorService delayScheduler) {
+        if (admissionDelayMs > 0) {
+            delayScheduler.schedule(() -> admit(generation, request, observer, ackDelayMs, delayScheduler),
+                admissionDelayMs, TimeUnit.MILLISECONDS);
+            return;
+        }
+        admit(generation, request, observer, ackDelayMs, delayScheduler);
+    }
+
+    private static void admit(PrefillRpcServer generation, EnqueueBatchRequestPB request,
+                              StreamObserver<EnqueueBatchResponsePB> observer, long ackDelayMs,
+                              java.util.concurrent.ScheduledExecutorService delayScheduler) {
         var seen = new HashSet<Long>();
         boolean duplicate = false;
         int size = 0;

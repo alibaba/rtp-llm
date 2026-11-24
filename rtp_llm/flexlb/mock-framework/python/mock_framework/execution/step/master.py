@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Annotated, Literal
 
 from ...config.validation import Bounds
+from .. import ExecutionError
 from .step import StepContext
 from .step_registry import RequiredTargets, Targets, register_step
 
@@ -36,6 +37,25 @@ async def master_list_engines(
     return await ctx.runtime.masters.list_engine_addresses(
         args.targets, args.role, remaining=lambda: ctx.timeout
     )
+
+
+@dataclass(frozen=True)
+class MasterEngineCountArgs(Targets):
+    role: Literal["prefill", "decode", "vit"] = "prefill"
+
+
+@register_step("master/query/engine_count", effect="read", unit="engines")
+async def master_engine_count(ctx: StepContext, args: MasterEngineCountArgs) -> float:
+    """Catalog size of one Engine role; all Masters must agree on it."""
+    observed = await ctx.runtime.masters.list_engine_addresses(
+        args.targets, args.role, remaining=lambda: ctx.timeout
+    )
+    counts = {len(addresses) for addresses in observed.values()}
+    if len(counts) != 1:
+        raise ExecutionError(
+            f"Masters disagree on the {args.role} catalog size: {observed}"
+        )
+    return float(counts.pop())
 
 
 @dataclass(frozen=True)

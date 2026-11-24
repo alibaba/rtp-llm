@@ -35,3 +35,23 @@ async def engine_scale(ctx: StepContext, args: EngineScaleArgs) -> list[str]:
     if args.direction == "in":
         return await engines.scale_in(args.role, args.targets, args.count)
     return await engines.scale_out(args.role, 1 if args.count is None else args.count)
+
+
+@dataclass(frozen=True)
+class EngineStopArgs(Targets):
+    role: Literal["prefill", "decode"] = "prefill"
+    mode: Literal["terminate", "kill"] = "kill"
+    count: Annotated[int, Bounds(minimum=1)] | None = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        if (self.targets is None) == (self.count is None):
+            raise ValueError("engine/stop requires exactly one of targets or count")
+
+
+@register_step("engine/stop", effect="write")
+async def engine_stop(ctx: StepContext, args: EngineStopArgs) -> list[str]:
+    """Stop Engine JVMs without touching discovery; Master must detect the loss itself."""
+    return await ctx.runtime.engines.stop(
+        args.role, args.targets, args.count, args.mode
+    )

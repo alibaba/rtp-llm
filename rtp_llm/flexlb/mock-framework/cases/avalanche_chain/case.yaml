@@ -1,0 +1,135 @@
+id: avalanche_chain
+name: 雪崩链条复现
+describe:
+  G1.1 降级版：高命中流量 2P 临界运行时缩容一半（2→1），容量跌破负载——验证 排队涨→TTFT 上行→成功率受损 链条（硬断言），mock 规模下工作集全驻留单机缓存、命中率环节不跌（留证），循环停在降级稳态而非雪崩到死——与真机 16 分钟雪崩（70→65
+  台）的对照差异本身即发现。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 2
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: avalanche
+    describe: 缩容触发容量缺口链条。
+    timeout: 600s
+    steps:
+      - id: start_frontend
+        describe: prefix-shared 0.25 倍速预热 45s 后 qps 55 全速（2P 深队列容量约 96/s 可承载，1P 约 48/s 明确不足）。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/prefix-shared.mckidx
+          qps: 55
+          total_concurrency: 512
+          queue_capacity: 1024
+          request_timeout: 60s
+          drain_timeout: 60s
+          reuse_cache: true
+          warmup:
+            duration: 45s
+            rate_scale: 0.25
+        wait_after: 75s
+      - id: record_hit_before
+        describe: 缩容前命中率水位（暖机，≥0.8）。
+        interface: engine/query/cache_hit_rate
+        args:
+          range:
+            - -20s
+            - 0s
+        expect:
+          gte: 0.8
+      - id: record_ttft_before
+        describe: 缩容前 TTFT p95（对照锚点）。
+        interface: frontend/query/ttft
+        args:
+          range:
+            - -20s
+            - 0s
+          statistic: p95
+      - id: scale_in_prefill
+        describe: 缩掉一半 prefill（2→1，容量 96→48/s 跌破负载 55/s）。
+        interface: engine/scale
+        args:
+          direction: in
+          role: prefill
+          count: 1
+        within: 60s
+      - id: check_queue_growth
+        describe: 链条第一环：全局排队明显堆积（≥30；缩容前近 0）。
+        interface: prometheus/query_scalar
+        args:
+          promql: sum(max_over_time(flexlb_app_routing_queue_length[30s])) or vector(0)
+        expect:
+          gte: 30
+        wait_after: 25s
+      - id: check_ttft_growth
+        describe: 链条第二环：TTFT p95 上行（≥缩容前，排队等待注入）。
+        interface: frontend/query/ttft
+        args:
+          range:
+            - -20s
+            - 0s
+          statistic: p95
+        expect:
+          gte:
+            ref: steps.record_ttft_before
+      - id: check_success_degraded
+        describe: 链条第三环：成功率受损但有界（queueTimeout 15s 兜底，落在 [50%, 99.5%)）。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -30s
+            - 0s
+        expect:
+          gte: 0.5
+          lte: 0.995
+      - id: evidence_hit_tokens
+        describe: 缩容后命中/查找 token 量（mock 规模下工作集全驻留，命中率环节不跌——留证）。
+        interface: prometheus/query
+        args:
+          promql: sum(increase(rtp_llm_cache_hit_tokens_total{role="prefill"}[15s]))
+      - id: evidence_lookup_tokens
+        describe: 同期缓存查找 token 量。
+        interface: prometheus/query
+        args:
+          promql: sum(increase(rtp_llm_cache_lookup_tokens_total{role="prefill"}[15s]))
+      - id: stop_frontend
+        describe: 停止播放并收齐已发请求终态。
+        interface: frontend/stop/playback
+        within: 240s
+      - id: check_total_success_rate
+        describe: 全程成功率 ≥70%（降级受损有界）。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -240s
+            - 0s
+        expect:
+          gte: 0.7

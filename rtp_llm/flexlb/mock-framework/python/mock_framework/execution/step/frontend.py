@@ -1,5 +1,6 @@
 """Case steps for Frontend playback."""
 
+import json
 import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -110,3 +111,79 @@ async def frontend_stop_playback(
         ]
         await frontends.monitoring.wait_for_final_scrape(frontend_ids)
     return result
+
+
+@dataclass(frozen=True)
+class PlaybackRequestsArgs:
+    kind: str = "TERMINAL"
+    field: str | None = None
+    equals: str | None = None
+
+    def __post_init__(self):
+        if not self.kind.strip():
+            raise ValueError("kind must not be blank")
+        if self.field is not None and not self.field.strip():
+            raise ValueError("field must not be blank when supplied")
+        if self.equals is not None and self.field is None:
+            raise ValueError("equals requires field")
+
+
+def _latest_journal(frontend_dir: Path) -> Path | None:
+    playback = frontend_dir / "playback"
+    if not playback.is_dir():
+        return None
+
+    def round_number(entry: Path) -> tuple[int, str]:
+        return (int(entry.name) if entry.name.isdigit() else -1, entry.name)
+
+    journals = [
+        entry / "requests.jsonl"
+        for entry in sorted(playback.iterdir(), key=round_number)
+        if entry.is_dir() and (entry / "requests.jsonl").is_file()
+    ]
+    return journals[-1] if journals else None
+
+
+def count_journal_events(journal: Path, args: PlaybackRequestsArgs) -> int:
+    """Count evidence events; header and seal lines never carry a request kind."""
+    matched = 0
+    with journal.open("r", encoding="utf-8") as stream:
+        for line in stream:
+            line = line.strip()
+            if not line:
+                continue
+            event = json.loads(line)
+            if event.get("kind") != args.kind:
+                continue
+            if args.field is not None:
+                value = event.get(args.field)
+                if value is None or (args.equals is not None and value != args.equals):
+                    continue
+            matched += 1
+    return matched
+
+
+@register_step("frontend/query/playback_requests", effect="read", unit="events")
+async def frontend_playback_requests(
+    ctx: StepContext, args: PlaybackRequestsArgs
+) -> float:
+    """Count per-request evidence events across every Frontend's latest playback round."""
+    components = ctx.records.directory / "components"
+    total = 0
+    found = False
+    for frontend_dir in sorted(components.glob("frontend-*")):
+        journal = _latest_journal(frontend_dir)
+        if journal is None:
+            continue
+        found = True
+        total += count_journal_events(journal, args)
+    if not found:
+        raise ExecutionError("No recorded Frontend playback to inspect")
+    ctx.records.emit(
+        event="playback_requests_count",
+        kind=args.kind,
+        field=args.field,
+        equals=args.equals,
+        matched=total,
+    )
+    return float(total)

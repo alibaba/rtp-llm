@@ -26,6 +26,10 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
     static final String EXECUTE_ERROR_RATE = "mock.execute.error.rate";
     /** Seed for the injected-failure lottery so runs are reproducible. */
     static final String EXECUTE_ERROR_SEED = "mock.execute.error.seed";
+    /** When true, worker/cache status polls are accepted but never answered; exercises Master's expiry and retirement path. */
+    static final String STATUS_NO_RESPOND = "mock.rpc.status.no.respond";
+    /** Delay before the EnqueueBatch admission itself starts; exercises Master's backpressure before the fetch-attach window opens. */
+    static final String ENQUEUE_ADMISSION_DELAY_MS = "mock.rpc.enqueue.admission.delay.ms";
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Map<String, String> KVCM_ENV_BINDINGS = Map.of(
         "RECO_ENABLE_VIPSERVER", "kvcm_enable_vipserver",
@@ -82,6 +86,8 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
         }
         nativeInt(config, ENQUEUE_ACK_DELAY_MS, 0, 0, 3_600_000);
         nativeInt(config, CANCEL_EFFECT_DELAY_MS, 0, 0, 3_600_000);
+        nativeInt(config, ENQUEUE_ADMISSION_DELAY_MS, 0, 0, 3_600_000);
+        nativeBool(config, STATUS_NO_RESPOND, false);
         double errorRate = config.has(EXECUTE_ERROR_RATE) ? config.path(EXECUTE_ERROR_RATE).asDouble(-1) : 0.0;
         if (!(errorRate >= 0.0 && errorRate <= 1.0))
             throw new IllegalArgumentException(EXECUTE_ERROR_RATE + " must be in [0,1]");
@@ -176,6 +182,8 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
         }
         if (enqueueAckDelayMs() > 0) result.put(ENQUEUE_ACK_DELAY_MS, enqueueAckDelayMs());
         if (cancelEffectDelayMs() > 0) result.put(CANCEL_EFFECT_DELAY_MS, cancelEffectDelayMs());
+        if (enqueueAdmissionDelayMs() > 0) result.put(ENQUEUE_ADMISSION_DELAY_MS, enqueueAdmissionDelayMs());
+        if (statusNoRespond()) result.put(STATUS_NO_RESPOND, true);
         if (executeErrorRate() > 0)
             result.put(EXECUTE_ERROR_RATE, executeErrorRate()).put(EXECUTE_ERROR_SEED, executeErrorSeed());
         result.setAll((ObjectNode) compute.effectiveSettings());
@@ -198,6 +206,14 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
 
     public int cancelEffectDelayMs() {
         return nativeInt(business, CANCEL_EFFECT_DELAY_MS, 0, 0, Integer.MAX_VALUE);
+    }
+
+    public int enqueueAdmissionDelayMs() {
+        return nativeInt(business, ENQUEUE_ADMISSION_DELAY_MS, 0, 0, Integer.MAX_VALUE);
+    }
+
+    public boolean statusNoRespond() {
+        return nativeBool(business, STATUS_NO_RESPOND, false);
     }
 
     public double executeErrorRate() {
@@ -236,7 +252,8 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
     static Set<String> mockNames() {
         var names = new HashSet<>(ComputeModel.settingNames());
         names.addAll(Set.of("mock.scheduler.mode", "mock.cache.total.blocks", PREFILL_OVERHEAD_MS,
-            ENQUEUE_ACK_DELAY_MS, CANCEL_EFFECT_DELAY_MS, EXECUTE_ERROR_RATE, EXECUTE_ERROR_SEED));
+            ENQUEUE_ACK_DELAY_MS, CANCEL_EFFECT_DELAY_MS, EXECUTE_ERROR_RATE, EXECUTE_ERROR_SEED,
+            STATUS_NO_RESPOND, ENQUEUE_ADMISSION_DELAY_MS));
         return Set.copyOf(names);
     }
 

@@ -1,0 +1,110 @@
+id: scaleout_cold_cache
+name: 新机器冷缓存猛灌
+describe: G3.1 降级版：高命中稳态下扩容 1 台冷缓存 prefill，断言新节点 30s 内即参与服务（无预热/限速机制的暴露证据），成功率不恶化。新节点预热限速属产品能力缺口。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 2
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: scaleout
+    describe: 扩容冷节点观测。
+    timeout: 420s
+    steps:
+      - id: start_frontend
+        describe: prefix-shared 0.25 倍速预热 60s 后 qps 16 全速。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/prefix-shared.mckidx
+          qps: 16
+          total_concurrency: 64
+          queue_capacity: 128
+          request_timeout: 30s
+          drain_timeout: 60s
+          reuse_cache: true
+          warmup:
+            duration: 60s
+            rate_scale: 0.25
+        wait_after: 90s
+      - id: record_hit_before
+        describe: 扩容前命中率水位。
+        interface: engine/query/cache_hit_rate
+        args:
+          range:
+            - -20s
+            - 0s
+        expect:
+          gte: 0.35
+      - id: scale_out_prefill
+        describe: 扩容 1 台冷缓存 prefill。
+        interface: engine/scale
+        args:
+          direction: out
+          role: prefill
+          count: 1
+        within: 120s
+        wait_after: 30s
+      - id: check_new_node_flooded
+        describe: 新节点无预热保护：30s 内三台 prefill 全部在接活（扩容即满灌，暴露产品缺口）。
+        interface: prometheus/query_scalar
+        args:
+          promql: count(sum by(instance)(increase(rtp_llm_framework_requests_total{role="prefill"}[30s])) > 0)
+        expect:
+          eq: 3
+      - id: evidence_hit_after
+        describe: 扩容后命中率（冷缓存摊薄留证）。
+        interface: engine/query/cache_hit_rate
+        args:
+          range:
+            - -20s
+            - 0s
+      - id: check_success_rate
+        describe: 扩容窗口成功率 ≥99%（集群不恶化）。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -40s
+            - 0s
+        expect:
+          gte: 0.99
+      - id: stop_frontend
+        describe: 停止播放并收齐已发请求终态。
+        interface: frontend/stop/playback
+        within: 190s
+      - id: check_total_success_rate
+        describe: 全程成功率 ≥99%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -240s
+            - 0s
+        expect:
+          gte: 0.99

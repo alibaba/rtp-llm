@@ -1,0 +1,119 @@
+id: fallback_hit_rate
+name: 兜底期间命中率不掉
+describe: E3.1 降级版：高命中（共享前缀）流量下 kill 主触发 LOCAL_FALLBACK，命中率持续采样不明显下降（≥0.3），成功率 ≥95%。路径级归因待 GAP-F2。
+environment:
+  master:
+    deployment:
+      replicas: 2
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 2
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: failover
+    describe: 兜底期间命中率观测。
+    timeout: 420s
+    steps:
+      - id: start_frontend
+        describe: prefix-shared 0.25 倍速预热 60s 建立缓存后全速打流。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/prefix-shared.mckidx
+          qps: 8
+          total_concurrency: 64
+          queue_capacity: 128
+          request_timeout: 30s
+          drain_timeout: 60s
+          reuse_cache: true
+          warmup:
+            duration: 60s
+            rate_scale: 0.25
+        wait_after: 90s
+      - id: record_hit_before
+        describe: 杀主前命中率水位（应已升起）。
+        interface: engine/query/cache_hit_rate
+        args:
+          range:
+            - -20s
+            - 0s
+        expect:
+          gte: 0.35
+      - id: get_master_a
+        describe: 记录当前主 Master 地址。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+      - id: kill_master_a
+        describe: 杀掉主 Master，触发 LOCAL_FALLBACK。
+        interface: master/stop
+        args:
+          targets:
+            ref: steps.get_master_a
+          mode: kill
+        within: 45s
+        wait_after: 25s
+      - id: check_leader_after_kill
+        describe: 新主唯一。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+      - id: check_hit_during_fallback
+        describe: 兜底窗口命中率不明显下降（≥0.3）。
+        interface: engine/query/cache_hit_rate
+        args:
+          range:
+            - -20s
+            - 0s
+        expect:
+          gte: 0.3
+      - id: check_success_window
+        describe: 兜底窗口成功率 ≥90%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -25s
+            - 0s
+        expect:
+          gte: 0.9
+      - id: stop_frontend
+        describe: 停止播放并收齐已发请求终态。
+        interface: frontend/stop/playback
+        within: 190s
+      - id: check_total_success_rate
+        describe: 全程成功率不低于 95%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -180s
+            - 0s
+        expect:
+          gte: 0.95
