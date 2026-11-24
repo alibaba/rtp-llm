@@ -1093,7 +1093,7 @@ public:
                                                      keys,
                                                      /*tokens=*/{},
                                                      location_spec_group_names,
-                                                     /*write_timeout_seconds=*/request.decode_completion ? 40 : 300,
+                                                     /*write_timeout_seconds=*/300,
                                                      kv_cache_config_.kvcm_min_replica_count);
         }();
         RTP_LLM_CHECK_WITH_INFO(success, "KVCM StartWrite failed");

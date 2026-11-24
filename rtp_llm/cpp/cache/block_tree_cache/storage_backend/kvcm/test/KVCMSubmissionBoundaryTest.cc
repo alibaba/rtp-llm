@@ -144,7 +144,7 @@ protected:
                 size_t workers = 1, size_t queue_size = 8): is_decode(decode) {
             EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
             EXPECT_CALL(*client, shutdown()).Times(1);
-            EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, _)).WillRepeatedly(Invoke(
+            EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, 300, _)).WillRepeatedly(Invoke(
                 [this](const auto&, const auto&, const auto& keys, const auto&, const auto&, auto, auto) {
                     ++starts;
                     kv_cache_manager::WriteLocation location;
