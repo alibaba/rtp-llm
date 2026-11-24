@@ -559,15 +559,16 @@ std::shared_ptr<KVCacheManager> NormalEngine::createWarmupCacheManager() {
     // Use the same cache geometry as real inference, including independent
     // pools and kernel page overrides. The warmup helper assigns the small
     // temporary capacity needed by fake streams.
+    int warmup_slots = 1;
+#if USING_ROCM
+    if (kv_cache_config.linear_ssm_double_buffer || kv_cache_config.linear_ssm_replay) {
+        const auto banks = kv_cache_config.linear_ssm_replay ? 1 : 2;
+        warmup_slots = std::min<int64_t>(runtime_config.max_generate_batch_size,
+                                         (kv_cache_config.linear_pool_blocks - 1) / banks);
+    }
+#endif
     auto cache_config = CacheConfigCreator::createWarmupConfig(
-        model_config_,
-        parallelism_config,
-        kv_cache_config,
-        cache_gen_num_per_cycle,
-        (kv_cache_config.linear_ssm_double_buffer || kv_cache_config.linear_ssm_replay) ?
-            std::min<int64_t>(runtime_config.max_generate_batch_size,
-                              (kv_cache_config.linear_pool_blocks - 1) / (kv_cache_config.linear_ssm_replay ? 1 : 2)) :
-            1);
+        model_config_, parallelism_config, kv_cache_config, cache_gen_num_per_cycle, warmup_slots);
     ParallelismConfig temp_parallelism_config;
     RuntimeConfig     temp_runtime_config;
     auto              cache_manager = make_shared<KVCacheManager>(
@@ -781,11 +782,13 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
 #else
     auto fake_input                                   = makeFakeInput(getWarmUpInputLength());
     fake_input->generate_config->num_return_sequences = runtime_config.max_generate_batch_size;
+#if USING_ROCM
     if (kv_cache_config.linear_ssm_double_buffer || kv_cache_config.linear_ssm_replay) {
         fake_input->generate_config->num_return_sequences =
             std::min<int64_t>(runtime_config.max_generate_batch_size,
                               (kv_cache_config.linear_pool_blocks - 1) / (kv_cache_config.linear_ssm_replay ? 1 : 2));
     }
+#endif
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
 
     auto cache_manager = createWarmupCacheManager();
@@ -1171,6 +1174,7 @@ void NormalEngine::loop() {
             running_ = false;
             RTP_LLM_LOG_INFO("normal engine TP loop stopped: %s", e.what());
             break;
+#if USING_ROCM
         } catch (const std::exception& e) {
             RTP_LLM_LOG_ERROR("normal engine step exception: %s", e.what());
             // A peer may close its TP broadcast socket after stop() clears
@@ -1182,6 +1186,7 @@ void NormalEngine::loop() {
             }
             RTP_LLM_LOG_WARNING("normal engine loop stopped during shutdown: %s", e.what());
             break;
+#endif
         }
     }
     running_ = false;
