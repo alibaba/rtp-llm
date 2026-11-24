@@ -151,13 +151,15 @@ public:
                     RtpGrammarMatcher&   matcher,
                     int64_t              accepted_token_len,
                     int64_t              eos_token_id,
-                    int32_t              grammar_vocab_size) {
+                    int32_t              grammar_vocab_size,
+                    bool&                did_fill_bitmask) {
+        did_fill_bitmask = false;
         try {
             if (device_mask_state_.token_len == accepted_token_len) {
                 return applyState(logits, device_mask_state_, eos_token_id);
             }
 
-            auto state_or = build(matcher, accepted_token_len, grammar_vocab_size);
+            auto state_or = build(matcher, accepted_token_len, grammar_vocab_size, did_fill_bitmask);
             if (!state_or.ok()) {
                 device_mask_state_ = finished(accepted_token_len);
                 return state_or.status();
@@ -196,8 +198,10 @@ private:
         return state;
     }
 
-    ErrorResult<DeviceMaskState>
-    build(RtpGrammarMatcher& matcher, int64_t accepted_token_len, int32_t grammar_vocab_size) {
+    ErrorResult<DeviceMaskState> build(RtpGrammarMatcher& matcher,
+                                       int64_t            accepted_token_len,
+                                       int32_t            grammar_vocab_size,
+                                       bool&              did_fill_bitmask) {
         DeviceMaskState state;
         state.token_len = accepted_token_len;
 
@@ -222,6 +226,7 @@ private:
         if (!filled.ok()) {
             return filled.status();
         }
+        did_fill_bitmask = true;
 
         state.mode                  = DeviceMaskMode::MASK;
         state.mask_required         = filled.value();
@@ -332,8 +337,16 @@ GrammarLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, s
         matcher_->markFinished();
         return grammar_vocab_size_or.status();
     }
-    auto error = decode_mask_builder_->apply(
-        logits_row, *matcher_, committed_output_len_, eos_token_id_, grammar_vocab_size_or.value());
+    bool did_fill_bitmask = false;
+    auto error            = decode_mask_builder_->apply(logits_row,
+                                                        *matcher_,
+                                                        committed_output_len_,
+                                                        eos_token_id_,
+                                                        grammar_vocab_size_or.value(),
+                                                        did_fill_bitmask);
+    if (did_fill_bitmask) {
+        commit_needs_budget_prepare_ = false;
+    }
     if (error.hasError()) {
         return error;
     }
@@ -374,13 +387,46 @@ ErrorResult<int> GrammarLogitsProcessor::prepareSpeculative(const SpecLogitsProc
     int cap_out = 0;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        auto                        cap_or = prepareSpecMask(*matcher_, eos_token_id_, request);
+        // prepareSpecMask advances and rolls back the matcher; rollback clears
+        // xgrammar's pending budget-enforcement flag, so the next commit must
+        // re-run fillBitmask() before acceptToken().
+        commit_needs_budget_prepare_ = true;
+        auto cap_or                  = prepareSpecMask(*matcher_, eos_token_id_, request);
         if (!cap_or.ok()) {
             return cap_or.status();
         }
         cap_out = cap_or.value();
     }
     return ErrorResult<int>(std::move(cap_out));
+}
+
+ErrorInfo GrammarLogitsProcessor::prepareBudgetBeforeAcceptLocked() {
+    auto grammar_vocab_size_or = matcher_->vocabSize();
+    if (!grammar_vocab_size_or.ok()) {
+        return grammar_vocab_size_or.status();
+    }
+    const int32_t grammar_vocab_size = grammar_vocab_size_or.value();
+    if (grammar_vocab_size <= 0) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS,
+                         "grammar commit: invalid grammar vocab size " + std::to_string(grammar_vocab_size));
+    }
+    const size_t words = SpecLogitsProcessorRequest::bitmaskWordCount(static_cast<size_t>(grammar_vocab_size));
+    try {
+        if (commit_scratch_bitmask_.size() < words) {
+            commit_scratch_bitmask_.resize(words);
+        }
+    } catch (const std::bad_alloc& e) {
+        return detail::grammarMaskBuildError("commit", e);
+    }
+    std::fill_n(commit_scratch_bitmask_.data(), words, SpecLogitsProcessorRequest::kBitmaskAllowAll);
+    int64_t  dl_shape[2];
+    DLTensor dl = makeSingleRowBitmaskView(commit_scratch_bitmask_.data(), static_cast<int32_t>(words), dl_shape);
+    auto     filled = matcher_->fillBitmask(&dl, 0);
+    if (!filled.ok()) {
+        return filled.status();
+    }
+    commit_needs_budget_prepare_ = false;
+    return ErrorInfo::OkStatus();
 }
 
 ErrorInfo GrammarLogitsProcessor::acceptCommittedLocked(const int32_t* tokens, size_t n) {
@@ -402,8 +448,9 @@ ErrorInfo GrammarLogitsProcessor::acceptCommittedLocked(const int32_t* tokens, s
                              "grammar commit rollback range is invalid after error: " + cause.ToString());
         }
 
-        auto rollback_error   = matcher_->rollback(static_cast<int>(accepted_delta));
-        committed_output_len_ = old_output_len;
+        auto rollback_error          = matcher_->rollback(static_cast<int>(accepted_delta));
+        committed_output_len_        = old_output_len;
+        commit_needs_budget_prepare_ = true;
         if (rollback_error.hasError()) {
             matcher_->markFinished();
             return ErrorInfo(rollback_error.code(),
@@ -435,6 +482,12 @@ ErrorInfo GrammarLogitsProcessor::acceptCommittedLocked(const int32_t* tokens, s
             }
             break;
         }
+        if (commit_needs_budget_prepare_ || i > 0) {
+            auto prep_error = prepareBudgetBeforeAcceptLocked();
+            if (prep_error.hasError()) {
+                return rollback_commit(prep_error);
+            }
+        }
         auto accepted = matcher_->acceptToken(tok);
         if (!accepted.ok()) {
             return rollback_commit(accepted.status());
@@ -443,6 +496,9 @@ ErrorInfo GrammarLogitsProcessor::acceptCommittedLocked(const int32_t* tokens, s
             return rollback_commit(ErrorInfo(ErrorCode::GRAMMAR_PARSER_REJECTED_TOKEN,
                                              "grammar commit error: parser rejected token " + std::to_string(tok)));
         }
+        // XGrammar clears budget_enforce_pending_ inside AcceptToken(), so the
+        // next acceptToken() needs a fresh fillBitmask() unless process() runs first.
+        commit_needs_budget_prepare_ = true;
     }
 
     // Matcher token count excludes EOS emitted after TERMINATED. Advance the

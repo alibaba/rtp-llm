@@ -800,5 +800,203 @@ TEST(RtpGrammarMatcherTest, RollbackRestoresAcceptedCount) {
     EXPECT_EQ(matcher->numAcceptedTokens(), 0);
 }
 
+// ---- Thinking budget + TokenFormat + any_tokens regressions ------------
+
+xgrammar::TokenizerInfo makeThinkingVocabTokenizerInfo() {
+    std::vector<std::string> vocab = {
+        "<eos>",    // 0 (stop)
+        "<term>",   // 1
+        "<think>",  // 2
+        "</think>", // 3
+        "We",       // 4
+        " need",    // 5
+        " answer",  // 6
+        " in",      // 7
+        " detail",  // 8
+        ".",        // 9
+        " User",    // 10
+        " asks",    // 11
+        " about",   // 12
+        " spring",  // 13
+        "<",        // 14
+        "/",        // 15
+        "</",       // 16
+        "think",    // 17
+        ">",        // 18
+        "think>",   // 19
+        "</think",  // 20
+        "\n",       // 21
+        "\n\n",     // 22
+        "{",        // 23
+        "}",        // 24
+        "\"a\":1",  // 25
+    };
+    return xgrammar::TokenizerInfo(vocab,
+                                   xgrammar::VocabType::RAW,
+                                   static_cast<int>(vocab.size()),
+                                   /*stop_token_ids=*/std::vector<int32_t>{0});
+}
+
+std::vector<int32_t> fillMatcherBitmask(RtpGrammarMatcher& matcher, int32_t vocab_size) {
+    const int32_t        words = (vocab_size + 31) / 32;
+    std::vector<int32_t> bitmask(static_cast<size_t>(words), -1);
+    int64_t              shape[2] = {1, static_cast<int64_t>(words)};
+    DLTensor             dl{};
+    dl.data             = bitmask.data();
+    dl.device           = DLDevice{kDLCPU, 0};
+    dl.ndim             = 2;
+    dl.dtype            = DLDataType{kDLInt, 32, 1};
+    dl.shape            = shape;
+    dl.strides          = nullptr;
+    dl.byte_offset      = 0;
+    auto filled         = matcher.fillBitmask(&dl, 0);
+    EXPECT_TRUE(filled.ok()) << filled.status().ToString();
+    return bitmask;
+}
+
+bool bitmaskAllows(const std::vector<int32_t>& bitmask, int token_id) {
+    const int32_t word = bitmask[static_cast<size_t>(token_id / 32)];
+    return (static_cast<uint32_t>(word) & (1u << (token_id % 32))) != 0u;
+}
+
+// Regression for Bug #1: when the reasoning end tag is a TokenFormat (id 3 =
+// `</think>`) with `any_tokens`, exhausting max_tokens=10 allows ONLY token 3
+// and rejects BPE byte prefixes (`<`, `/`, `</`, `</think`, `>`).
+TEST(XGrammarBackendTest, TokenEndWithAnyTokensForcesOnlyThinkEndTokenAtBudget) {
+    auto backend = XGrammarBackend::create(makeThinkingVocabTokenizerInfo().SerializeJSON(), grammarConfig());
+    ASSERT_TRUE(backend);
+
+    constexpr int kThinkEnd        = 3;
+    constexpr int kLt              = 14;
+    constexpr int kSlash           = 15;
+    constexpr int kLtSlash         = 16;
+    constexpr int kGt              = 18;
+    constexpr int kPartialEnd      = 20;
+    constexpr int kThinkVocabSize  = 26;
+
+    const std::string tag = R"({"type":"structural_tag","format":{"type":"sequence","elements":[)"
+                            R"({"type":"tag","begin":"","content":{"type":"any_tokens","max_tokens":10},)"
+                            R"("end":{"type":"token","token":3}},{"type":"any_text"}]}})";
+    auto matcher_or = backend->createMatcherFromKey({"structural_tag", tag});
+    ASSERT_TRUE(matcher_or.ok()) << matcher_or.status().ToString();
+    auto matcher = matcher_or.value();
+
+    for (int tok = 4; tok < 14; ++tok) {
+        (void)fillMatcherBitmask(*matcher, kThinkVocabSize);
+        auto accepted = matcher->acceptToken(tok);
+        ASSERT_TRUE(accepted.ok() && accepted.value()) << "failed at token " << tok;
+    }
+
+    auto mask_at_budget = fillMatcherBitmask(*matcher, kThinkVocabSize);
+    EXPECT_TRUE(bitmaskAllows(mask_at_budget, kThinkEnd));
+    EXPECT_FALSE(bitmaskAllows(mask_at_budget, kLt));
+    EXPECT_FALSE(bitmaskAllows(mask_at_budget, kSlash));
+    EXPECT_FALSE(bitmaskAllows(mask_at_budget, kLtSlash));
+    EXPECT_FALSE(bitmaskAllows(mask_at_budget, kGt));
+    EXPECT_FALSE(bitmaskAllows(mask_at_budget, kPartialEnd));
+    EXPECT_FALSE(bitmaskAllows(mask_at_budget, 4));
+
+    auto accepted_end = matcher->acceptToken(kThinkEnd);
+    ASSERT_TRUE(accepted_end.ok() && accepted_end.value());
+    auto mask_after_end = fillMatcherBitmask(*matcher, kThinkVocabSize);
+    EXPECT_TRUE(bitmaskAllows(mask_after_end, 4));
+    EXPECT_TRUE(bitmaskAllows(mask_after_end, 0));
+}
+
+// Regression for Bug #3: with `any_tokens` + TokenFormat end, a natural early
+// `</think>` at step 2 exits the thinking tag and immediately enforces the
+// downstream `json_schema` (whereas `any_text` ignores TokenFormat end ids and
+// leaves `json_schema` unenforced).
+TEST(XGrammarBackendTest, AnyTokensWithTokenEndEnforcesFinalJsonSchemaOnNaturalThinkEnd) {
+    auto backend = XGrammarBackend::create(makeThinkingVocabTokenizerInfo().SerializeJSON(), grammarConfig());
+    ASSERT_TRUE(backend);
+
+    constexpr int kThinkEnd       = 3;
+    constexpr int kNl             = 21;
+    constexpr int kNlNl           = 22;
+    constexpr int kLBrace         = 23;
+    constexpr int kRBrace         = 24;
+    constexpr int kThinkVocabSize = 26;
+
+    // Single-token end ("</think>" -> token 3) + json_schema.
+    {
+        const std::string tag =
+            R"({"type":"structural_tag","format":{"type":"sequence","elements":[)"
+            R"({"type":"tag","begin":"","content":{"type":"any_tokens","max_tokens":10},)"
+            R"("end":{"type":"token","token":3}},{"type":"json_schema","json_schema":{"type":"object"}}]}})";
+        auto matcher_or = backend->createMatcherFromKey({"structural_tag", tag});
+        ASSERT_TRUE(matcher_or.ok()) << matcher_or.status().ToString();
+        auto matcher = matcher_or.value();
+
+        for (int tok : {4, 5, kThinkEnd}) {
+            (void)fillMatcherBitmask(*matcher, kThinkVocabSize);
+            auto accepted = matcher->acceptToken(tok);
+            ASSERT_TRUE(accepted.ok() && accepted.value());
+        }
+
+        auto mask = fillMatcherBitmask(*matcher, kThinkVocabSize);
+        EXPECT_TRUE(bitmaskAllows(mask, kLBrace));
+        EXPECT_FALSE(bitmaskAllows(mask, 4));
+        EXPECT_FALSE(bitmaskAllows(mask, kThinkEnd));
+        EXPECT_FALSE(bitmaskAllows(mask, kRBrace));
+    }
+
+    // Multi-token trailing-whitespace end ("</think>\n\n" -> token 3 + const_string "\n\n") + json_schema.
+    {
+        const std::string tag =
+            R"({"type":"structural_tag","format":{"type":"sequence","elements":[)"
+            R"({"type":"tag","begin":"","content":{"type":"any_tokens","max_tokens":10},)"
+            R"("end":{"type":"token","token":3}},{"type":"const_string","value":"\n\n"},)"
+            R"({"type":"json_schema","json_schema":{"type":"object"}}]}})";
+        auto matcher_or = backend->createMatcherFromKey({"structural_tag", tag});
+        ASSERT_TRUE(matcher_or.ok()) << matcher_or.status().ToString();
+        auto matcher = matcher_or.value();
+
+        for (int tok : {4, kThinkEnd}) {
+            (void)fillMatcherBitmask(*matcher, kThinkVocabSize);
+            auto accepted = matcher->acceptToken(tok);
+            ASSERT_TRUE(accepted.ok() && accepted.value());
+        }
+        auto suffix_mask = fillMatcherBitmask(*matcher, kThinkVocabSize);
+        EXPECT_TRUE(bitmaskAllows(suffix_mask, kNl));
+        EXPECT_TRUE(bitmaskAllows(suffix_mask, kNlNl));
+        EXPECT_FALSE(bitmaskAllows(suffix_mask, kLBrace));
+
+        auto accepted_nl = matcher->acceptToken(kNlNl);
+        ASSERT_TRUE(accepted_nl.ok() && accepted_nl.value());
+        auto json_mask = fillMatcherBitmask(*matcher, kThinkVocabSize);
+        EXPECT_TRUE(bitmaskAllows(json_mask, kLBrace));
+        EXPECT_FALSE(bitmaskAllows(json_mask, 4));
+    }
+}
+
+TEST(XGrammarBackendTest, AnyTokensZeroBudgetImmediatelyForcesTokenEnd) {
+    auto backend = XGrammarBackend::create(makeThinkingVocabTokenizerInfo().SerializeJSON(), grammarConfig());
+    ASSERT_TRUE(backend);
+
+    constexpr int kThinkEnd       = 3;
+    constexpr int kLBrace         = 23;
+    constexpr int kThinkVocabSize = 26;
+
+    const std::string tag =
+        R"({"type":"structural_tag","format":{"type":"sequence","elements":[)"
+        R"({"type":"tag","begin":"","content":{"type":"any_tokens","max_tokens":0},)"
+        R"("end":{"type":"token","token":3}},{"type":"json_schema","json_schema":{"type":"object"}}]}})";
+    auto matcher_or = backend->createMatcherFromKey({"structural_tag", tag});
+    ASSERT_TRUE(matcher_or.ok()) << matcher_or.status().ToString();
+    auto matcher = matcher_or.value();
+
+    auto step0_mask = fillMatcherBitmask(*matcher, kThinkVocabSize);
+    EXPECT_TRUE(bitmaskAllows(step0_mask, kThinkEnd));
+    EXPECT_FALSE(bitmaskAllows(step0_mask, 4));
+    EXPECT_FALSE(bitmaskAllows(step0_mask, kLBrace));
+
+    auto accepted_end = matcher->acceptToken(kThinkEnd);
+    ASSERT_TRUE(accepted_end.ok() && accepted_end.value());
+    auto step1_mask = fillMatcherBitmask(*matcher, kThinkVocabSize);
+    EXPECT_TRUE(bitmaskAllows(step1_mask, kLBrace));
+    EXPECT_FALSE(bitmaskAllows(step1_mask, kThinkEnd));
+}
+
 }  // namespace
 }  // namespace rtp_llm

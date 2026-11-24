@@ -3885,8 +3885,10 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         structural_tag = config.structural_tag
         elements = structural_tag["format"]["elements"]
         self.assertEqual(elements[0]["begin"], "<think>\n")
-        self.assertEqual(elements[0]["end"], "</think>\n\n")
-        self.assertEqual(elements[1]["type"], "json_schema")
+        self.assertEqual(elements[0]["end"], {"type": "token", "token": 128822})
+        self.assertEqual(elements[0]["content"]["type"], "any_tokens")
+        self.assertEqual(elements[1], {"type": "const_string", "value": "\n\n"})
+        self.assertEqual(elements[2]["type"], "json_schema")
 
     async def test_dash_generation_omits_think_begin_when_input_already_has_it(
         self,
@@ -3914,9 +3916,12 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(visitor.enqueue_called, 1)
         config = visitor.last_generate_input.generate_config
         structural_tag = config.structural_tag
-        reasoning_tag = structural_tag["format"]["elements"][0]
+        elements = structural_tag["format"]["elements"]
+        reasoning_tag = elements[0]
         self.assertEqual(reasoning_tag["begin"], "")
-        self.assertEqual(reasoning_tag["end"], "</think>\n\n")
+        self.assertEqual(reasoning_tag["end"], {"type": "token", "token": 128822})
+        self.assertEqual(reasoning_tag["content"]["type"], "any_tokens")
+        self.assertEqual(elements[1], {"type": "const_string", "value": "\n\n"})
 
     async def test_dash_grammar_request_rejects_its_own_multi_sequence(self) -> None:
         visitor = _FakeVisitor(_FakeAsyncStream([]))
@@ -4059,8 +4064,10 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         canonical_tag = config.structural_tag
         elements = canonical_tag["format"]["elements"]
         self.assertEqual(elements[0]["begin"], "<think>\n")
-        self.assertEqual(elements[0]["end"], "</think>\n\n")
-        self.assertEqual(elements[1], tag["format"])
+        self.assertEqual(elements[0]["end"], {"type": "token", "token": 128822})
+        self.assertEqual(elements[0]["content"]["type"], "any_tokens")
+        self.assertEqual(elements[1], {"type": "const_string", "value": "\n\n"})
+        self.assertEqual(elements[2], tag["format"])
 
     async def test_dash_generation_budget_aliases_without_enable_thinking_are_enabled(
         self,
@@ -4093,9 +4100,97 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(fixed["type"], "sequence")
                 think_branch = fixed
                 self.assertEqual(
-                    think_branch["elements"][0]["content"]["max_tokens"], 10
+                    think_branch["elements"][0]["content"],
+                    {"type": "any_tokens", "max_tokens": 10},
                 )
-                self.assertEqual(think_branch["elements"][1]["type"], "json_schema")
+                self.assertEqual(
+                    think_branch["elements"][0]["end"],
+                    {"type": "token", "token": 128822},
+                )
+                self.assertEqual(
+                    think_branch["elements"][1],
+                    {"type": "const_string", "value": "\n\n"},
+                )
+                self.assertEqual(think_branch["elements"][2]["type"], "json_schema")
+
+    async def test_dash_generation_single_token_think_end_tag_uses_token_format_and_any_tokens(
+        self,
+    ) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        tok = _FakeTokenizer(
+            {
+                "<think>": [128821],
+                "</think>": [128822],
+                "<think>\n</think>": [128821, 198, 128822],
+            }
+        )
+        env_cfg = _GenerateEnvCfg()
+        env_cfg.think_start_tag = "<think>"
+        env_cfg.think_end_tag = "</think>"
+        env_cfg.think_end_token_id = -1
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            echo_prefix_ids=[128821],
+            think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+        )
+        req = self._valid_infer_request()
+        req.inputs[0].shape[:] = [2]
+        req.raw_input_contents[0] = struct.pack("<2i", 7, 128821)
+        req.parameters["enable_thinking"].bool_param = True
+        req.parameters["thinking_budget"].int64_param = 10
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        config = visitor.last_generate_input.generate_config
+        self.assertEqual(config.end_think_token_ids, [128822])
+        elements = config.structural_tag["format"]["elements"]
+        self.assertEqual(len(elements), 2)
+        self.assertEqual(elements[0]["begin"], "")
+        self.assertEqual(elements[0]["end"], {"type": "token", "token": 128822})
+        self.assertEqual(
+            elements[0]["content"], {"type": "any_tokens", "max_tokens": 10}
+        )
+        self.assertEqual(elements[1], {"type": "any_text"})
+
+    async def test_dash_generation_plain_multi_token_end_tag_keeps_string_fallback(
+        self,
+    ) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        tok = _FakeTokenizer(
+            {
+                "<think>": [128821],
+                "END_THINK": [10, 20],
+                "<think>\nEND_THINK": [128821, 198, 10, 20],
+            }
+        )
+        env_cfg = _GenerateEnvCfg()
+        env_cfg.think_start_tag = "<think>"
+        env_cfg.think_end_tag = "END_THINK"
+        env_cfg.think_end_token_id = -1
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            echo_prefix_ids=[128821],
+            think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+        )
+        req = self._valid_infer_request()
+        req.inputs[0].shape[:] = [2]
+        req.raw_input_contents[0] = struct.pack("<2i", 7, 128821)
+        req.parameters["enable_thinking"].bool_param = True
+        req.parameters["thinking_budget"].int64_param = 10
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        config = visitor.last_generate_input.generate_config
+        elements = config.structural_tag["format"]["elements"]
+        self.assertEqual(len(elements), 2)
+        self.assertEqual(elements[0]["end"], "END_THINK")
+        self.assertEqual(elements[0]["content"], {"type": "any_text", "max_tokens": 10})
 
     async def test_max_completion_tokens_thinking_budget_keeps_backend_limit_repro(
         self,
