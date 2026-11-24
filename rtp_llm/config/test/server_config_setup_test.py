@@ -209,7 +209,7 @@ class W8A8OnlineQuantConfigTest(TestCase):
 
 
 class AtomQwen4ExpModelRoutingTest(TestCase):
-    def _resolve(self, model_type, packages, draft_type="qwen4_exp_mtp"):
+    def _resolve(self, model_type, packages, draft_type="qwen4_exp_mtp", hip="7.2"):
         configs = PyEnvConfigs()
         configs.model_args.model_type = model_type
         configs.model_args.ckpt_path = "/unused/qwen4_exp"
@@ -218,6 +218,7 @@ class AtomQwen4ExpModelRoutingTest(TestCase):
         with (
             patch("rtp_llm.config.server_config_setup.set_parallelism_config"),
             patch("rtp_llm.config.server_config_setup.load_external_model_packages"),
+            patch("torch.version.hip", hip),
             patch(
                 "rtp_llm.config.server_config_setup._infer_model_type",
                 return_value="qwen4_exp",
@@ -240,6 +241,12 @@ class AtomQwen4ExpModelRoutingTest(TestCase):
         self.assertEqual(
             self._resolve("qwen4_exp", ["other.models", "atom.plugin.rtpllm.models"]),
             ("atom_qwen4_exp", "atom_qwen4_exp_mtp"),
+        )
+
+    def test_non_rocm_keeps_native_target_and_draft(self):
+        self.assertEqual(
+            self._resolve("qwen4_exp", ["atom.plugin.rtpllm.models"], hip=None),
+            ("qwen4_exp", "qwen4_exp_mtp"),
         )
 
     def test_without_plugin_keeps_native_target_and_draft(self):

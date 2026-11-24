@@ -32,6 +32,11 @@ def load_external_model_packages(
 
     loaded_packages = []
     for package_name in package_names:
+        if package_name == "atom.plugin.rtpllm.models":
+            import torch
+
+            if not torch.version.hip:
+                raise ValueError(f"{package_name} requires a ROCm build of PyTorch")
         logging.info("Loading external model package: %s", package_name)
         try:
             importlib.import_module(package_name)

@@ -2120,7 +2120,7 @@ class MMProcessEngineGreenNetTest(TestCase):
             greennet_hook.get_greennet_provider()
         self.assertEqual(error.exception.name, missing)
 
-    def test_partial_internal_namespace_uses_noop_provider(self):
+    def test_partial_internal_namespace_respects_device(self):
         from rtp_llm.multimodal import greennet_hook
 
         with (
@@ -2128,8 +2128,11 @@ class MMProcessEngineGreenNetTest(TestCase):
             patch("rtp_llm.utils.import_util.has_internal_source", return_value=True),
             patch.dict(sys.modules, {"internal_source.rtp_llm.multimodal": None}),
         ):
-            provider = greennet_hook.get_greennet_provider()
-            self.assertIsInstance(provider, greennet_hook.NoopGreenNetProvider)
+            with patch("torch.version.hip", None), self.assertRaises(ModuleNotFoundError):
+                greennet_hook.get_greennet_provider()
+            with patch("torch.version.hip", "7.2"):
+                provider = greennet_hook.get_greennet_provider()
+                self.assertIsInstance(provider, greennet_hook.NoopGreenNetProvider)
 
     def test_cache_free_rejection_never_publishes_hashes(self):
         engine = self._make_engine(FakeEmbeddingLengthInterface())

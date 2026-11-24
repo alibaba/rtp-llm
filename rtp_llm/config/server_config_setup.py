@@ -402,7 +402,9 @@ def _infer_model_type(ckpt_path: str) -> Optional[str]:
 def _route_atom_qwen4_exp_model_types(py_env_configs: PyEnvConfigs) -> None:
     """Select ATOM's Qwen4Exp only when its RTP plugin is explicitly enabled."""
     model_args = py_env_configs.model_args
-    if "atom.plugin.rtpllm.models" not in (model_args.external_model_packages or []):
+    if not torch.version.hip or "atom.plugin.rtpllm.models" not in (
+        model_args.external_model_packages or []
+    ):
         return
     if model_args.model_type not in ("qwen4_exp", "atom_qwen4_exp"):
         return

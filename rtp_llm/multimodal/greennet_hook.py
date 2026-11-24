@@ -124,7 +124,9 @@ def get_greennet_provider() -> GreenNetProvider:
             # without shipping the optional GreenNet integration. Do not make
             # multimodal serving depend on that unrelated namespace fragment.
             provider_module = "internal_source.rtp_llm.multimodal.greennet.provider"
-            if not exc.name or (
+            import torch
+
+            if not torch.version.hip or not exc.name or (
                 exc.name != provider_module and not provider_module.startswith(exc.name + ".")
             ):
                 raise
