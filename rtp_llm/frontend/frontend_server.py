@@ -5,7 +5,17 @@ import logging
 import threading
 import time
 from contextlib import aclosing
-from typing import Any, Awaitable, Callable, Coroutine, Dict, TypeVar, Union
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Dict,
+    List,
+    Optional,
+    TypeVar,
+    Union,
+)
 
 import anyio
 from fastapi import Request
@@ -14,6 +24,18 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
+from rtp_llm.anthropic.api_datatype import (
+    AnthropicCountTokensRequest,
+    AnthropicCountTokensResponse,
+    AnthropicMessagesRequest,
+)
+from rtp_llm.anthropic.errors import exception_to_anthropic_http
+from rtp_llm.anthropic.translator import (
+    AnthropicStreamTranslator,
+    anthropic_stream_error_event,
+    translate_anthropic_request,
+    translate_openai_response,
+)
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.model_config import (
     update_stop_words_from_env,
@@ -90,6 +112,10 @@ class _ClosingStreamingResponse(StreamingResponse):
     def __init__(self, content, *, close: Callable[[], Awaitable[None]], **kwargs):
         super().__init__(content, **kwargs)
         self._close = close
+        self._close_callbacks: List[Callable[[], None]] = []
+
+    def add_close_callback(self, callback: Callable[[], None]) -> None:
+        self._close_callbacks.append(callback)
 
     async def __call__(self, scope, receive, send):
         try:
@@ -101,7 +127,11 @@ class _ClosingStreamingResponse(StreamingResponse):
                 try:
                     await self.body_iterator.aclose()
                 finally:
-                    await self._close()
+                    try:
+                        await self._close()
+                    finally:
+                        for callback in self._close_callbacks:
+                            callback()
 
 
 def _field(value: Any, name: str) -> Any:
@@ -523,8 +553,10 @@ class FrontendServer(object):
             format_e = format_exception(e)
             logging.warning(
                 "Frontend streaming failure: request_id=%s http_status=200 error_code=%s error_name=%s message=%s",
-                request.get(request_id_field_name), format_e.get("error_code"),
-                format_e.get("error_code_str"), format_e.get("message"),
+                request.get(request_id_field_name),
+                format_e.get("error_code"),
+                format_e.get("error_code_str"),
+                format_e.get("message"),
             )
             self._access_logger.log_exception_access(request, e, format_e)
             kmonitor.report(
@@ -651,17 +683,7 @@ class FrontendServer(object):
             else ""
         ) or self.py_env_configs.model_args.model_type
         request_model = request.model or loaded_model
-        initial_trace_attributes = {
-            trace_attrs.GEN_AI_SPAN_KIND: "LLM",
-            trace_attrs.GEN_AI_OPERATION_NAME: "chat",
-            trace_attrs.GEN_AI_SYSTEM: "rtp_llm",
-            trace_attrs.LINGJI_FLAG: True,
-            trace_attrs.ACS_ARMS_TENANT_SPAN_POLICY: "mask",
-        }
-        if request_model:
-            initial_trace_attributes[trace_attrs.GEN_AI_REQUEST_MODEL] = str(
-                request_model
-            )
+        initial_trace_attributes = self._build_llm_trace_attributes(request_model)
         trace_state = start_server_span(
             "POST /v1/chat/completions",
             raw_request.headers,
@@ -740,6 +762,386 @@ class FrontendServer(object):
             self._global_controller.decrement()
 
         return rep
+
+    def _build_llm_trace_attributes(
+        self, request_model: str, *, operation_name: str = "chat"
+    ) -> Dict[str, Any]:
+        attrs: Dict[str, Any] = {
+            trace_attrs.GEN_AI_SPAN_KIND: "LLM",
+            trace_attrs.GEN_AI_OPERATION_NAME: operation_name,
+            trace_attrs.GEN_AI_SYSTEM: "rtp_llm",
+            trace_attrs.LINGJI_FLAG: True,
+            trace_attrs.ACS_ARMS_TENANT_SPAN_POLICY: "mask",
+        }
+        if request_model:
+            attrs[trace_attrs.GEN_AI_REQUEST_MODEL] = str(request_model)
+        return attrs
+
+    def _start_anthropic_trace_span(
+        self,
+        span_name: str,
+        raw_request: RawRequest,
+        request_id: int,
+        request_model: str,
+        *,
+        operation_name: str = "chat",
+    ):
+        trace_state = start_server_span(
+            span_name,
+            getattr(raw_request, "headers", None),
+            initial_attributes=self._build_llm_trace_attributes(
+                request_model, operation_name=operation_name
+            ),
+        )
+        if trace_state is not None:
+            trace_state.set_attribute("request_id", str(request_id))
+            trace_state.set_attribute(trace_attrs.HTTP_REQUEST_METHOD, "POST")
+            trace_state.set_attribute(trace_attrs.HTTP_METHOD, "POST")
+        return trace_state
+
+    @staticmethod
+    def _finish_error_trace_span(
+        trace_state: Any, status_code: int, exc: BaseException
+    ) -> None:
+        if trace_state is None:
+            return
+        _record_http_status(trace_state, status_code)
+        if isinstance(exc, asyncio.CancelledError):
+            trace_state.finish(error=exc, error_type="Cancelled")
+        else:
+            trace_state.finish(error=exc)
+
+    def _handle_anthropic_exception(
+        self,
+        request: Dict[str, Any],
+        e: BaseException,
+        metric_tags: Dict[str, str] | None = None,
+    ) -> ORJSONResponse:
+        request = request if isinstance(request, dict) else {}
+        if request_id_field_name not in request:
+            request = {**request, request_id_field_name: -1}
+        metric_tags = dict(metric_tags or self._request_metric_tags(request))
+        status_code, payload = exception_to_anthropic_http(e)
+        exception_json = format_exception(e)
+        error_code_str = exception_json.get("error_code_str", "")
+        logging.warning(
+            "Anthropic frontend failure: request_id=%s http_status=%s error_code=%s error_name=%s message=%s",
+            request.get(request_id_field_name),
+            status_code,
+            exception_json.get("error_code"),
+            error_code_str,
+            payload.get("error", {}).get("message"),
+        )
+        if isinstance(e, ConcurrencyException):
+            kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC, 1, metric_tags)
+        elif isinstance(e, asyncio.CancelledError):
+            kmonitor.report(AccMetrics.CANCEL_QPS_METRIC, 1, metric_tags)
+            self._access_logger.log_exception_access(request, e)
+        else:
+            kmonitor.report(
+                AccMetrics.ERROR_QPS_METRIC,
+                1,
+                {**metric_tags, "error_code": error_code_str},
+            )
+            self._access_logger.log_exception_access(request, e, exception_json)
+        return ORJSONResponse(content=payload, status_code=status_code)
+
+    async def anthropic_stream_response(
+        self,
+        request: Dict[str, Any],
+        response: CompleteResponseAsyncGenerator,
+        *,
+        model: str,
+        stop_sequences: Optional[List[str]] = None,
+        metric_tags: Dict[str, str] | None = None,
+        trace_state: Any = None,
+        finish: Callable[[], None] | None = None,
+    ):
+        metric_tags = dict(metric_tags or self._request_metric_tags(request))
+        if trace_state is None:
+            trace_state = CURRENT_TRACE_STATE.get()
+        translator = AnthropicStreamTranslator(
+            model=model, stop_sequences=stop_sequences
+        )
+        stream_finalized = False
+        try:
+            async for chunk in response:
+                chunk_events = translator.process_chunk(chunk)
+                if chunk_events:
+                    yield "".join(chunk_events).encode("utf-8")
+                await asyncio.sleep(0)
+            await self._collect_complete_response_and_record_access_log(
+                request, response
+            )
+            final_events = translator.finalize()
+            if final_events:
+                stream_finalized = True
+                yield "".join(final_events).encode("utf-8")
+            if trace_state is not None:
+                _record_http_status(trace_state, 200)
+                trace_state.finish()
+        except (asyncio.CancelledError, GeneratorExit) as e:
+            try:
+                await response.aclose()
+            except Exception as close_error:
+                logging.warning(
+                    "close anthropic streaming response after cancellation failed: %s",
+                    close_error,
+                )
+            if trace_state is not None:
+                _record_http_status(trace_state, 200)
+                trace_state.finish(error=e, error_type="Cancelled")
+            self._access_logger.log_exception_access(request, e)
+            kmonitor.report(AccMetrics.CANCEL_QPS_METRIC, 1, metric_tags)
+            raise
+        except BaseException as e:
+            if trace_state is not None:
+                _record_http_status(trace_state, 200)
+                trace_state.finish(error=e)
+            format_e = format_exception(e)
+            logging.warning(
+                "Anthropic streaming failure: request_id=%s http_status=200 error_code=%s error_name=%s message=%s",
+                request.get(request_id_field_name),
+                format_e.get("error_code"),
+                format_e.get("error_code_str"),
+                format_e.get("message"),
+            )
+            self._access_logger.log_exception_access(request, e, format_e)
+            kmonitor.report(
+                AccMetrics.ERROR_QPS_METRIC,
+                1,
+                {**metric_tags, "error_code": str(format_e.get("error_code_str", -1))},
+            )
+            if not stream_finalized:
+                yield anthropic_stream_error_event(e).encode("utf-8")
+        finally:
+            try:
+                await response.aclose()
+            finally:
+                if trace_state is not None:
+                    trace_state.finish()
+                if finish is not None:
+                    finish()
+                else:
+                    self._global_controller.decrement()
+
+    async def anthropic_messages(
+        self, request: AnthropicMessagesRequest, raw_request: RawRequest
+    ):
+        acquired = False
+        request_id = -1
+        headers = getattr(raw_request, "headers", None)
+        request_dict: Dict[str, Any] = {request_id_field_name: -1}
+        trace_state = None
+        request_metrics = None
+        metric_tags: Dict[str, str] = self._request_metric_tags(request_dict, headers)
+        try:
+            sequence = self._global_controller.increment()
+            acquired = True
+            request_id = self._request_id_for_slot(sequence)
+
+            loaded_model = (
+                self._openai_endpoint.model_name
+                if self._openai_endpoint is not None
+                else ""
+            ) or self.py_env_configs.model_args.model_type
+            request_model = request.model or loaded_model
+
+            trace_state = self._start_anthropic_trace_span(
+                "POST /v1/messages", raw_request, request_id, request_model
+            )
+
+            openai_request = translate_anthropic_request(request)
+            internal_request = (
+                openai_request.model_copy(update={"aux_info": True})
+                if self._request_metrics.enabled
+                else openai_request
+            )
+            request_dict = openai_request.model_dump(exclude_none=True)
+            request_dict["aux_info"] = openai_request.aux_info and (
+                openai_request.extra_configs is None
+                or openai_request.extra_configs.aux_info
+            )
+            request_dict[request_id_field_name] = request_id
+
+            metric_tags = self._request_metric_tags(request_dict, headers)
+            kmonitor.report(AccMetrics.QPS_METRIC, 1, metric_tags)
+            self._access_logger.log_query_access(request_dict)
+
+            is_streaming = bool(request.stream)
+            request_metrics = self._request_metrics.begin(
+                rank_id=self.rank_id,
+                server_id=self.server_id,
+                source=metric_tags["source"],
+                streaming=is_streaming,
+                priority=metric_tags["priority"],
+            )
+
+            async def generate_call(metrics_state: FrontendRequestMetricState):
+                assert self._openai_endpoint is not None
+                response = await self._openai_endpoint.chat_completion_async(
+                    request_id,
+                    internal_request,
+                    raw_request,
+                    frontend_metric_tags=(
+                        metric_tags if self._request_metrics.enabled else {}
+                    ),
+                    frontend_metric_observer=(
+                        metrics_state.observe_tps
+                        if self._request_metrics.enabled
+                        else None
+                    ),
+                )
+                assert isinstance(
+                    response, CompleteResponseAsyncGenerator
+                ), f"error type: {type(response)}"
+                return response
+
+            if await raw_request.is_disconnected():
+                raise asyncio.CancelledError("client disconnects")
+
+            res = await self._call_generate_with_report(
+                generate_call,
+                is_streaming,
+                request_metrics=request_metrics,
+                expose_aux_info=self._request_aux_info_enabled(request_dict),
+                metric_tags=metric_tags,
+            )
+
+            if is_streaming:
+                finished = False
+                stream_trace_state = trace_state
+                stream_request_metrics = request_metrics
+
+                def finish_stream():
+                    nonlocal finished
+                    if finished:
+                        return
+                    finished = True
+                    try:
+                        if stream_request_metrics is not None:
+                            stream_request_metrics.finish()
+                        if stream_trace_state is not None:
+                            stream_trace_state.finish()
+                    finally:
+                        self._global_controller.decrement()
+
+                async def close_stream():
+                    try:
+                        await res.aclose()
+                    finally:
+                        finish_stream()
+
+                # Ownership of controller slot, request_metrics, and trace_state transfers to the stream.
+                acquired = False
+                request_metrics = None
+                trace_state = None
+                return _ClosingStreamingResponse(
+                    self.anthropic_stream_response(
+                        request_dict,
+                        res,
+                        model=request_model,
+                        stop_sequences=request.stop_sequences,
+                        metric_tags=metric_tags,
+                        trace_state=stream_trace_state,
+                        finish=finish_stream,
+                    ),
+                    close=close_stream,
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache"},
+                )
+
+            async def consume_response() -> None:
+                async with aclosing(res):
+                    async for _ in res:
+                        pass
+
+            await _run_until_disconnect(raw_request, consume_response())
+            complete_response = (
+                await self._collect_complete_response_and_record_access_log(
+                    request_dict, res, return_model=True
+                )
+            )
+            anthropic_msg = translate_openai_response(
+                complete_response,
+                model=request_model,
+                stop_sequences=request.stop_sequences,
+            )
+            if trace_state is not None:
+                _record_http_status(trace_state, 200)
+                trace_state.finish()
+                trace_state = None
+            return ORJSONResponse(content=anthropic_msg.to_wire_dict())
+        except BaseException as e:
+            rep = self._handle_anthropic_exception(request_dict, e, metric_tags)
+            self._finish_error_trace_span(
+                trace_state, getattr(rep, "status_code", 500), e
+            )
+            trace_state = None
+            return rep
+        finally:
+            if request_metrics is not None:
+                request_metrics.finish()
+            if acquired:
+                self._global_controller.decrement()
+
+    async def anthropic_count_tokens(
+        self, request: AnthropicCountTokensRequest, raw_request: RawRequest
+    ):
+        acquired = False
+        headers = getattr(raw_request, "headers", None)
+        request_dict: Dict[str, Any] = {request_id_field_name: -1}
+        trace_state = None
+        metric_tags: Dict[str, str] = self._request_metric_tags(request_dict, headers)
+        try:
+            sequence = self._global_controller.increment()
+            acquired = True
+            request_id = self._request_id_for_slot(sequence)
+            loaded_model = (
+                self._openai_endpoint.model_name
+                if self._openai_endpoint is not None
+                else ""
+            ) or self.py_env_configs.model_args.model_type
+            request_model = request.model or loaded_model
+
+            trace_state = self._start_anthropic_trace_span(
+                "POST /v1/messages/count_tokens",
+                raw_request,
+                request_id,
+                request_model,
+                operation_name="count_tokens",
+            )
+
+            request_dict = {
+                request_id_field_name: request_id,
+                "model": request_model,
+            }
+            metric_tags = self._request_metric_tags(request_dict, headers)
+            kmonitor.report(AccMetrics.QPS_METRIC, 1, metric_tags)
+
+            openai_request = translate_anthropic_request(request)
+            assert self._openai_endpoint is not None
+            rendered = await self._openai_endpoint.render_chat_async(openai_request)
+            kmonitor.report(AccMetrics.SUCCESS_QPS_METRIC, 1, metric_tags)
+            if trace_state is not None:
+                _record_http_status(trace_state, 200)
+                trace_state.finish()
+                trace_state = None
+            return ORJSONResponse(
+                content=AnthropicCountTokensResponse(
+                    input_tokens=len(rendered.input_ids)
+                ).model_dump()
+            )
+        except BaseException as e:
+            rep = self._handle_anthropic_exception(request_dict, e, metric_tags)
+            self._finish_error_trace_span(
+                trace_state, getattr(rep, "status_code", 500), e
+            )
+            trace_state = None
+            return rep
+        finally:
+            if acquired:
+                self._global_controller.decrement()
 
     async def batch_chat_completion(self, request, raw_request: Request):
         from rtp_llm.openai.api_datatype import BatchChatCompletionResponse
@@ -919,8 +1321,10 @@ class FrontendServer(object):
         error_code_str = exception_json.get("error_code_str", "")
         logging.warning(
             "Frontend failure: request_id=%s http_status=500 error_code=%s error_name=%s message=%s",
-            request.get(request_id_field_name), exception_json.get("error_code"),
-            error_code_str, exception_json.get("message"),
+            request.get(request_id_field_name),
+            exception_json.get("error_code"),
+            error_code_str,
+            exception_json.get("message"),
         )
         if isinstance(e, ConcurrencyException):
             kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC, 1, metric_tags)
@@ -1082,13 +1486,13 @@ class FrontendServer(object):
         )
 
     async def _collect_complete_response_and_record_access_log(
-        self, req: Dict[Any, Any], res: Any
+        self, req: Dict[Any, Any], res: Any, *, return_model: bool = False
     ):
-        complete_response = await res.gen_complete_response_once()
+        complete_model = await res.gen_complete_response_once()
         complete_response = (
-            complete_response.model_dump(exclude_none=True)
-            if isinstance(complete_response, BaseModel)
-            else complete_response
+            complete_model.model_dump(exclude_none=True)
+            if isinstance(complete_model, BaseModel)
+            else complete_model
         )
         # Single point covering streaming + non-streaming: write request-level
         # gen_ai.* business attributes onto the HTTP SERVER span from the fully
@@ -1097,7 +1501,7 @@ class FrontendServer(object):
         record_response_attributes(complete_response)
         self._access_logger.log_success_access(req, complete_response)
 
-        return complete_response
+        return complete_model if return_model else complete_response
 
     async def _infer_impl(
         self,

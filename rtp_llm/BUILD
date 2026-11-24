@@ -478,6 +478,20 @@ py_library(
 )
 
 py_library(
+    name = "anthropic_api",
+    srcs = glob([
+        "anthropic/*.py",
+    ]),
+    deps = [
+        ":config",
+        ":openai_api",
+        ":orjson",
+        ":pydantic",
+        ":utils",
+    ],
+)
+
+py_library(
     name = "telemetry",
     srcs = glob([
         "telemetry/*.py",
@@ -499,6 +513,7 @@ py_library(
         "frontend/**/*.py",
     ], exclude = ["frontend/request_id_generator.py"]),
     deps = [
+        ":anthropic_api",
         ":openai_api",
         ":request_id_generator",
         ":telemetry",
@@ -605,6 +620,7 @@ py_library(
         "//rtp_llm/cpp/model_rpc:model_rpc_client",
         "//rtp_llm/dash_sc:dash_sc_grpc_server",
         ":openai_api",
+        ":anthropic_api",
         ":lora",
         ":sdk",
         ":frontend",
@@ -979,6 +995,7 @@ py_library(
         ":utils",
         ":ops",
         ":openai_api",
+        ":anthropic_api",
         ":pydantic",
         "//rtp_llm/test/utils:test_util",
         "@rtp_deps//:extension_lib",

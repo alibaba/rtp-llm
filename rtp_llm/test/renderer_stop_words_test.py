@@ -1,9 +1,9 @@
+from types import SimpleNamespace
 from typing import List
 from unittest import IsolatedAsyncioTestCase, TestCase, main
 from unittest.mock import MagicMock, Mock
 
 import torch
-
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.py_config_modules import GenerateEnvConfig
 from rtp_llm.openai.api_datatype import (
@@ -16,6 +16,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
     CustomChatRenderer,
     RendererParams,
     StreamStatus,
+    StreamStatusSync,
 )
 from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
     ReasoningToolBaseRenderer,
@@ -643,6 +644,48 @@ class TestStopWordTruncation(_RendererTestBase):
             is_streaming=True,
         )
         self.assertEqual(delta2.output_str, "")
+
+
+class MatchedStopSequenceTest(TestCase):
+    """Verify CustomChatRenderer tracks user stop sequences separately from internal EOS/stop words."""
+
+    def test_process_stop_words_tracks_user_stop_sequence(self):
+        req = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hi")],
+            stop=["END", "<STOP>"],
+        )
+        status = StreamStatus(req)
+        self.assertIsNone(status.matched_stop_sequence)
+        self.assertIsNone(StreamStatusSync(req).matched_stop_sequence)
+
+        truncated, should_buffer = CustomChatRenderer._process_stop_words(
+            SimpleNamespace(
+                _match_user_stop_sequence=CustomChatRenderer._match_user_stop_sequence
+            ),
+            "hello<STOP>world",
+            ["<|endoftext|>", "END", "<STOP>"],
+            [],
+            True,
+            status,
+        )
+        self.assertEqual(truncated, "hello")
+        self.assertFalse(should_buffer)
+        self.assertEqual(status.finish_reason, FinisheReason.stop)
+        self.assertEqual(status.matched_stop_sequence, "<STOP>")
+
+        status_model_stop = StreamStatus(req)
+        truncated_m, _ = CustomChatRenderer._process_stop_words(
+            SimpleNamespace(
+                _match_user_stop_sequence=CustomChatRenderer._match_user_stop_sequence
+            ),
+            "hello<|endoftext|>",
+            ["<|endoftext|>", "END", "<STOP>"],
+            [],
+            False,
+            status_model_stop,
+        )
+        self.assertEqual(truncated_m, "hello")
+        self.assertIsNone(status_model_stop.matched_stop_sequence)
 
 
 if __name__ == "__main__":

@@ -20,6 +20,8 @@ from fastapi import Body, FastAPI, HTTPException
 from fastapi import Request
 from fastapi import Request as RawRequest
 from fastapi import status
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse, StreamingResponse
@@ -27,6 +29,14 @@ from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
 
+from rtp_llm.anthropic.api_datatype import (
+    AnthropicCountTokensRequest,
+    AnthropicMessagesRequest,
+)
+from rtp_llm.anthropic.errors import (
+    anthropic_error_payload,
+    format_validation_error_message,
+)
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
 from rtp_llm.distribute.distributed_server import (
@@ -547,6 +557,21 @@ class FrontendApp(object):
             )
         ]
         app = FastAPI(middleware=middleware)
+
+        @app.exception_handler(RequestValidationError)
+        async def validation_exception_handler(
+            request: Request, exc: RequestValidationError
+        ):
+            if request.url.path.startswith("/v1/messages"):
+                return ORJSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content=anthropic_error_payload(
+                        "invalid_request_error",
+                        format_validation_error_message(list(exc.errors())),
+                    ),
+                )
+            return await request_validation_exception_handler(request, exc)
+
         allocator_dump_enabled = bool(
             getattr(self.server_config, "enable_torch_allocator_dump", False)
         )
@@ -586,12 +611,18 @@ class FrontendApp(object):
             )
             kmonitor.start_serving_when_ready()
 
-        def draining_response():
+        def draining_response(is_anthropic: bool = False):
             reason = (
                 "frontend is draining"
                 if self.shutdown_manager.is_draining()
                 else "frontend is unavailable"
             )
+            if is_anthropic:
+                return ORJSONResponse(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    content=anthropic_error_payload("overloaded_error", reason),
+                    headers={"Retry-After": "1"},
+                )
             return ORJSONResponse(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 content={
@@ -602,20 +633,40 @@ class FrontendApp(object):
                 headers={"Retry-After": "1"},
             )
 
-        async def track_business_request(call):
+        async def track_business_request(call, *, is_anthropic: bool = False):
             if not self.shutdown_manager.try_begin_request():
-                return draining_response()
+                return draining_response(is_anthropic=is_anthropic)
             should_finish = True
             try:
                 response = await call()
                 if isinstance(response, StreamingResponse):
+                    tracking_finished = False
+
+                    def finish_tracking() -> None:
+                        nonlocal tracking_finished
+                        if tracking_finished:
+                            return
+                        tracking_finished = True
+                        self.shutdown_manager.finish_request()
+
                     response.body_iterator = self._track_streaming_response(
-                        response.body_iterator
+                        response.body_iterator, finish_tracking
                     )
+                    add_close_callback = getattr(response, "add_close_callback", None)
+                    if callable(add_close_callback):
+                        add_close_callback(finish_tracking)
                     should_finish = False
                 return response
             except ConcurrencyException as e:
                 # Safety net: never let concurrency-limit overflow surface as 500.
+                if is_anthropic:
+                    return ORJSONResponse(
+                        anthropic_error_payload(
+                            "overloaded_error",
+                            "Concurrency limit exceeded",
+                        ),
+                        status_code=429,
+                    )
                 return ORJSONResponse(format_exception(e), status_code=429)
             finally:
                 if should_finish:
@@ -902,6 +953,28 @@ class FrontendApp(object):
 
             return await track_business_request(call)
 
+        @app.post("/v1/messages")
+        async def anthropic_messages(
+            request: AnthropicMessagesRequest, raw_request: RawRequest
+        ):
+            async def call():
+                return await self.frontend_server.anthropic_messages(
+                    request, raw_request
+                )
+
+            return await track_business_request(call, is_anthropic=True)
+
+        @app.post("/v1/messages/count_tokens")
+        async def anthropic_count_tokens(
+            request: AnthropicCountTokensRequest, raw_request: RawRequest
+        ):
+            async def call():
+                return await self.frontend_server.anthropic_count_tokens(
+                    request, raw_request
+                )
+
+            return await track_business_request(call, is_anthropic=True)
+
         @app.post("/v1/batch/chat/completions")
         async def batch_chat_completion(
             request: BatchChatCompletionRequest, raw_request: RawRequest
@@ -991,9 +1064,10 @@ class FrontendApp(object):
 
         return app
 
-    async def _track_streaming_response(self, body_iterator):
+    async def _track_streaming_response(self, body_iterator, finish_callback=None):
+        finish = finish_callback or self.shutdown_manager.finish_request
         try:
             async for chunk in body_iterator:
                 yield chunk
         finally:
-            self.shutdown_manager.finish_request()
+            finish()

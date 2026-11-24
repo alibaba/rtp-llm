@@ -138,6 +138,7 @@ class StreamStatus:
     responded_string = ""
     delta_output_string = ""
     has_real_aux_info: bool = True
+    matched_stop_sequence: Optional[str] = None
 
     def __init__(self, request: ChatCompletionRequest):
         self.request = request
@@ -151,6 +152,7 @@ class StreamStatus:
         self.reasoning_logprob_ready_text: str = ""
         self.reasoning_logprob_context_ids: List[int] = []
         self.reasoning_logprob_stopped: bool = False
+        self.matched_stop_sequence: Optional[str] = None
 
     def update_output(
         self,
@@ -233,9 +235,11 @@ class StreamStatusSync:
     tokenizer = None
     responded_string = ""
     delta_output_string = ""
+    matched_stop_sequence: Optional[str] = None
 
     def __init__(self, request: ChatCompletionRequest):
         self.request = request
+        self.matched_stop_sequence: Optional[str] = None
 
     def update_output_sync(
         self,
@@ -1076,6 +1080,24 @@ class CustomChatRenderer:
 
         return final_result
 
+    @staticmethod
+    def _match_user_stop_sequence(
+        request: ChatCompletionRequest, text: str, truncated_len: int
+    ) -> Optional[str]:
+        if truncated_len >= len(text):
+            return None
+        raw_stop = getattr(request, "stop", None)
+        if isinstance(raw_stop, str):
+            user_stops = [raw_stop] if raw_stop else []
+        elif isinstance(raw_stop, list):
+            user_stops = [seq for seq in raw_stop if isinstance(seq, str) and seq]
+        else:
+            user_stops = []
+        for seq in user_stops:
+            if text.startswith(seq, truncated_len):
+                return seq
+        return None
+
     def _process_stop_words(
         self,
         delta_string: str,
@@ -1128,6 +1150,10 @@ class CustomChatRenderer:
             )
             if len(truncated) < len(delta_string):
                 status.finish_reason = FinisheReason.stop
+                if status.matched_stop_sequence is None:
+                    status.matched_stop_sequence = self._match_user_stop_sequence(
+                        status.request, delta_string, len(truncated)
+                    )
 
         # Check if should buffer (only if didn't truncate at complete stop word)
         # In non-streaming mode, never buffer since all tokens arrive at once
@@ -1458,6 +1484,16 @@ class CustomChatRenderer:
                 pending_output, stop_words_str, is_streaming
             )
             self._trim_compact_logprobs(buffer, trunc_string)
+            if (
+                len(trunc_string) < len(pending_output)
+                and buffer.matched_stop_sequence is None
+            ):
+                buffer.matched_stop_sequence = self._match_user_stop_sequence(
+                    buffer.request, pending_output, len(trunc_string)
+                )
+            # Attach the last token's logprob only when pending text is being
+            # flushed; with empty pending text the entry would duplicate the
+            # last one already emitted (empty-delta chunk with a stale logprob).
             output_items.append(
                 OutputDelta(
                     trunc_string,
@@ -1525,6 +1561,7 @@ class CustomChatRenderer:
                         content="",
                     ),
                     finish_reason=buffer.finish_reason,
+                    matched_stop_sequence=buffer.matched_stop_sequence,
                 )
                 for i, buffer in enumerate(buffer_list)
             ],
@@ -1853,6 +1890,13 @@ class CustomChatRenderer:
             trunc_string = truncate_response_with_stop_words(
                 buffer.delta_output_string, stop_words_str, is_streaming
             )
+            if (
+                len(trunc_string) < len(buffer.delta_output_string)
+                and buffer.matched_stop_sequence is None
+            ):
+                buffer.matched_stop_sequence = self._match_user_stop_sequence(
+                    buffer.request, buffer.delta_output_string, len(trunc_string)
+                )
             output_items.append(
                 OutputDelta(
                     trunc_string,
@@ -1898,6 +1942,7 @@ class CustomChatRenderer:
                         content="",
                     ),
                     finish_reason=buffer.finish_reason,
+                    matched_stop_sequence=buffer.matched_stop_sequence,
                 )
                 for i, buffer in enumerate(buffer_list)
             ],

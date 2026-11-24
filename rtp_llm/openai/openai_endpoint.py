@@ -8,7 +8,6 @@ from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 from fastapi import Request
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.server.misc import format_exception
 from rtp_llm.config.generate_config import (
     GenerateConfig,
     ReturnAllProbsMode,
@@ -52,6 +51,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
 )
 from rtp_llm.ops import SpecialTokens
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.server.misc import format_exception
 from rtp_llm.server.request_headers import extract_request_headers
 from rtp_llm.utils.base_model_datatypes import FrontendMetricFrame
 from rtp_llm.utils.complete_response_async_generator import (
@@ -492,6 +492,7 @@ class OpenaiEndpoint(object):
                             ),
                             finish_reason=choice.finish_reason,
                             logprobs=choice.logprobs,
+                            matched_stop_sequence=choice.matched_stop_sequence,
                         )
                         for i, choice in enumerate(response.choices)
                     ]
@@ -534,6 +535,10 @@ class OpenaiEndpoint(object):
                     all_choices[i].finish_reason = (
                         response.choices[i].finish_reason
                         or all_choices[i].finish_reason
+                    )
+                    all_choices[i].matched_stop_sequence = (
+                        response.choices[i].matched_stop_sequence
+                        or all_choices[i].matched_stop_sequence
                     )
                     if all_choices[i].logprobs != None:
                         if response.choices[i].logprobs != None:
@@ -899,7 +904,8 @@ class OpenaiEndpoint(object):
                 )
             chat_request.stream = False
             gen_input, generate_config = self._prepare_chat_input(
-                request_ids[i] if request_ids is not None else base_request_id + i, chat_request
+                request_ids[i] if request_ids is not None else base_request_id + i,
+                chat_request,
             )
             generate_config.is_streaming = False
             if frontend_metric_observer is not None:

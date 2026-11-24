@@ -20,22 +20,7 @@ py_test(
     ),
     main = "disk_path_preparation_test.py",
     imports = [".."],
-    deps = [
-        "//rtp_llm/test/utils:device_resource",
-        "//rtp_llm/test/utils:maga_server_manager",
-        "//rtp_llm/test/utils:test_util",
-        "//rtp_llm:dashscope",
-        "//rtp_llm:fastapi",
-        "//rtp_llm:jieba",
-        "//rtp_llm:json5",
-        "//rtp_llm:openai",
-        "//rtp_llm:partial_json_parser",
-        "//rtp_llm:psutil",
-        "//rtp_llm:pydantic",
-        "//rtp_llm:testlib",
-        "//rtp_llm:tiktoken",
-        "//rtp_llm:uvicorn",
-    ],
+    deps = SMOKE_FRAMEWORK_DEPS,
 )
 
 
@@ -47,22 +32,19 @@ py_test(
     ),
     main = "test/openai_comparer_test.py",
     imports = [".."],
-    deps = [
-        "//rtp_llm/test/utils:device_resource",
-        "//rtp_llm/test/utils:maga_server_manager",
-        "//rtp_llm/test/utils:test_util",
-        "//rtp_llm:dashscope",
-        "//rtp_llm:fastapi",
-        "//rtp_llm:jieba",
-        "//rtp_llm:json5",
-        "//rtp_llm:openai",
-        "//rtp_llm:partial_json_parser",
-        "//rtp_llm:psutil",
-        "//rtp_llm:pydantic",
-        "//rtp_llm:testlib",
-        "//rtp_llm:tiktoken",
-        "//rtp_llm:uvicorn",
-    ],
+    deps = SMOKE_FRAMEWORK_DEPS,
+)
+
+py_test(
+    name = "anthropic_comparer_test",
+    srcs = glob(
+        ["*.py", "test/anthropic_comparer_test.py"],
+        exclude = ["entry.py"],
+    ),
+    main = "test/anthropic_comparer_test.py",
+    imports = [".."],
+    env = {"GPU_COUNT": "0"},
+    deps = SMOKE_FRAMEWORK_DEPS,
 )
 
 py_test(

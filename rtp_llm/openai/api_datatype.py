@@ -174,6 +174,7 @@ class ChatCompletionRequest(BaseModel):
     functions: Optional[List[GPTFunctionDefinition]] = None
     tools: Optional[List[GPTToolDefinition]] = None
     tool_choice: Optional[ToolChoice] = None
+    parallel_tool_calls: Optional[bool] = None
     reasoning_effort: Optional[Union[StrictInt, StrictStr]] = None
     thinking: Optional[ThinkingConfig] = None
     temperature: Optional[float] = 0.7
@@ -434,6 +435,7 @@ class ChatCompletionResponseChoice(BaseModel):
     message: ChatMessage
     finish_reason: Optional[FinisheReason] = None
     logprobs: Optional[ChoiceLogprobs] = None
+    matched_stop_sequence: Optional[str] = Field(default=None, exclude=True)
 
 
 class ChatCompletionExtraOutputs(BaseModel):
@@ -472,6 +474,7 @@ class ChatCompletionResponseStreamChoice(BaseModel):
     delta: DeltaMessage
     finish_reason: Optional[FinisheReason] = None
     logprobs: Optional[ChoiceLogprobs] = None
+    matched_stop_sequence: Optional[str] = Field(default=None, exclude=True)
 
 
 class ChatCompletionStreamResponse(BaseModel):

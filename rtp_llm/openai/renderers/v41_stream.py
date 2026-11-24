@@ -35,6 +35,7 @@ class V41StreamParser:
         self.tool_name = ""
         self.tool_index = -1
         self.stopped = False
+        self.matched_stop: str | None = None
         self.closed = False
         self.last_space = False
         self._configure()
@@ -109,6 +110,7 @@ class V41StreamParser:
             return
         if action == "stop":
             self.stopped = True
+            self.matched_stop = text
         elif action == "begin":
             self.tool_name = ""
         elif action == "name":

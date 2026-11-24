@@ -164,6 +164,9 @@ class BaseComparer(object):
             f"failed to set concurrency after {max_retries} retries, batch_size={concurrecy_batch}"
         )
 
+    def _dump_result_for_save(self, actual_result: BaseModel) -> Dict[str, Any]:
+        return actual_result.model_dump(exclude_defaults=True)
+
     def run(self):
         query_info: BaseModel = self.format_query(self.qr_info["query"])
         self.tracer.query = query_info
@@ -214,7 +217,7 @@ class BaseComparer(object):
         self._maybe_rewrite_expect_result(actual_result, expect_result, query_info)
         self._dump_actual_to_artifact(actual_result)
         if save_response():
-            self.qr_info["result"] = actual_result.model_dump(exclude_defaults=True)
+            self.qr_info["result"] = self._dump_result_for_save(actual_result)
         if no_compare():
             return
         self.compare_result(expect_result, actual_result)

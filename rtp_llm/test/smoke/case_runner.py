@@ -26,6 +26,7 @@ class _TensorEncoder(json.JSONEncoder):
 from collections import defaultdict
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
+from smoke.anthropic_comparer import AnthropicComparer
 from smoke.cache_status_comparer import CacheStatusComparer
 from smoke.classifier_comparer import ClassifierComparer
 from smoke.common_def import QueryStatus, SmokeException, Tracer
@@ -582,6 +583,9 @@ class CaseRunner(object):
             return DashScGrpcComparer
         if q_r.get("tau2_bench", False):
             return Tau2BenchComparer
+        endpoint_path = request_endpoint.split("?", 1)[0]
+        if endpoint_path == "/v1/messages" or endpoint_path.startswith("/v1/messages/"):
+            return AnthropicComparer
         if "messages" in q_r["query"]:
             return OpenaiComparer
         elif request_endpoint in [

@@ -27,6 +27,12 @@ def sm8x_suites():
                 gpu_type = ["L20_CU13"],
             ),
             smoke_test(
+                name = "anthropic_api",
+                task_info = "data/model/qwen25/q_r_anthropic.json",
+                smoke_args = "--act_type FP16 --warm_up 0",
+                gpu_type = ["L20_CU13"],
+            ),
+            smoke_test(
                 name = "bf16",
                 task_info = "data/model/qwen25/q_r_s_bf16.json",
                 smoke_args = "--act_type BF16 --warm_up 0",

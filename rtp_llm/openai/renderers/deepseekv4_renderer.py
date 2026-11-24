@@ -318,7 +318,10 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
         detector = DeepSeekV4Detector()
         return detector.tool_call_structural_tag(
             rtp_tools_to_sglang_tools(active_tools),
-            stop_after_first=self._tool_choice_name(request) is not None,
+            stop_after_first=(
+                self._tool_choice_name(request) is not None
+                or request.parallel_tool_calls is False
+            ),
         )
 
     def apply_chat_completion_constraints(

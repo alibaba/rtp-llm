@@ -1,0 +1,256 @@
+{
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a concise assistant."
+                    },
+                    {
+                        "role": "user",
+                        "content": "What is the capital of France? Answer with only the city name."
+                    }
+                ],
+                "max_tokens": 16,
+                "temperature": 0.0,
+                "extra_configs": {
+                    "top_k": 1
+                }
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1795498711,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "Paris",
+                            "partial": false
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 33,
+                    "total_tokens": 35,
+                    "completion_tokens": 2
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/messages",
+            "query": {
+                "model": "qwen2.5-0.5b",
+                "system": [
+                    {
+                        "type": "text",
+                        "text": "You are a concise assistant.",
+                        "cache_control": {
+                            "type": "ephemeral"
+                        }
+                    }
+                ],
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "What is the capital of France? Answer with only the city name."
+                    }
+                ],
+                "max_tokens": 16,
+                "top_k": 1
+            },
+            "result": {
+                "id": "msg_smoke",
+                "type": "message",
+                "role": "assistant",
+                "model": "qwen2.5-0.5b",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Paris"
+                    }
+                ],
+                "stop_reason": "end_turn",
+                "stop_sequence": null,
+                "usage": {
+                    "input_tokens": 33,
+                    "output_tokens": 2,
+                    "cache_read_input_tokens": 0
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/messages",
+            "query": {
+                "model": "qwen2.5-0.5b",
+                "system": "You are a concise assistant.",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "What is 2 + 2? Answer with only the number."
+                            }
+                        ]
+                    }
+                ],
+                "max_tokens": 16,
+                "top_k": 1,
+                "stream": true
+            },
+            "result": {
+                "id": "msg_smoke",
+                "type": "message",
+                "role": "assistant",
+                "model": "qwen2.5-0.5b",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "4"
+                    }
+                ],
+                "stop_reason": "end_turn",
+                "stop_sequence": null,
+                "usage": {
+                    "input_tokens": 33,
+                    "output_tokens": 2,
+                    "cache_read_input_tokens": 0
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/messages/count_tokens",
+            "query": {
+                "model": "qwen2.5-0.5b",
+                "system": "You are a concise assistant.",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "What is the capital of France? Answer with only the city name."
+                    }
+                ]
+            },
+            "result": {
+                "input_tokens": 33
+            }
+        },
+        {
+            "endpoint": "/v1/messages",
+            "query": {
+                "model": "qwen2.5-0.5b",
+                "system": "You are a concise assistant.",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "What is the capital of France? Answer with only the city name."
+                    }
+                ],
+                "max_tokens": 1,
+                "top_k": 1
+            },
+            "result": {
+                "id": "msg_smoke",
+                "type": "message",
+                "role": "assistant",
+                "model": "qwen2.5-0.5b",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Paris"
+                    }
+                ],
+                "stop_reason": "max_tokens",
+                "stop_sequence": null,
+                "usage": {
+                    "input_tokens": 33,
+                    "output_tokens": 1,
+                    "cache_read_input_tokens": 0
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/messages",
+            "query": {
+                "model": "qwen2.5-0.5b",
+                "system": "You are a concise assistant.",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Count from 1 to 5 separated by commas: 1, 2, 3, 4, 5."
+                    }
+                ],
+                "max_tokens": 32,
+                "top_k": 1,
+                "stop_sequences": [
+                    ","
+                ],
+                "stream": true
+            },
+            "result": {
+                "id": "msg_smoke",
+                "type": "message",
+                "role": "assistant",
+                "model": "qwen2.5-0.5b",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "1"
+                    }
+                ],
+                "stop_reason": "stop_sequence",
+                "stop_sequence": ",",
+                "usage": {
+                    "input_tokens": 45,
+                    "output_tokens": 2,
+                    "cache_read_input_tokens": 0
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/messages",
+            "expected_status_code": 400,
+            "query": {
+                "model": "qwen2.5-0.5b",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Weather?"
+                    }
+                ],
+                "tools": [
+                    {
+                        "name": "get_weather",
+                        "description": "Get weather",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {
+                                "city": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    }
+                ],
+                "tool_choice": {
+                    "type": "any"
+                },
+                "max_tokens": 16
+            },
+            "result": {
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "tool_choice='required' is not supported by QwenRenderer"
+                }
+            }
+        }
+    ]
+}

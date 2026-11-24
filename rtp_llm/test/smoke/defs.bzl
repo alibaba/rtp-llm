@@ -103,6 +103,7 @@ def get_aiter_envs(name, envs):
 SMOKE_FRAMEWORK_DEPS = [
     "//rtp_llm/test/utils:maga_server_manager",
     "//rtp_llm/test/utils:test_util",  # smoke srcs import port_util/coredump_util
+    "//rtp_llm:anthropic_api",
     "//rtp_llm:uvicorn",
     "//rtp_llm:fastapi",
     "//rtp_llm:psutil",

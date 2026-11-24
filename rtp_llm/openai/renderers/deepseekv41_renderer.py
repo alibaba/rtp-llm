@@ -257,6 +257,8 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
         events = status.parser.feed(text)
         if status.parser.stopped:
             status.finish_reason = FinisheReason.stop
+            if status.matched_stop_sequence is None:
+                status.matched_stop_sequence = status.parser.matched_stop
         if not events:
             return None
         if status.compact_logprobs:
@@ -283,6 +285,8 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
             status.delta_output_string = ""
             if status.parser.stopped:
                 status.finish_reason = FinisheReason.stop
+                if status.matched_stop_sequence is None:
+                    status.matched_stop_sequence = status.parser.matched_stop
             aux = status.output.aux_info
             items.append(
                 OutputDelta(
