@@ -258,7 +258,7 @@ protected:
                 std::this_thread::sleep_until(deadline + std::chrono::milliseconds(1));
             };
             ASSERT_TRUE(s.submit(std::move(request)));
-            ASSERT_NO_FATAL_FAILURE(s.expectSettled(false, partial));
+            ASSERT_NO_FATAL_FAILURE(s.expectSettled(partial, partial));
             ASSERT_NE(broadcast->observed, nullptr);
             EXPECT_TRUE(broadcast->observed->done());
             EXPECT_FALSE(broadcast->observed->success());

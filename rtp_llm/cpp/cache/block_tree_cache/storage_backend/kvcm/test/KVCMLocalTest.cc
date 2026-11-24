@@ -1756,15 +1756,9 @@ TEST(KVCMLocalTest, PrefillRpcPreservesExceptionalUnknownFromRawSdkAndStillAccep
                     allocation.write_session_id = "exception-boundary-session";
                     allocation.block_mask = kv_cache_manager::BlockMaskOffset{0};
                     allocation.locations = locations;
-                    EXPECT_CALL(*controller_client, getWriteLocation(_, _, _, _, _, 40, 0))
+                    EXPECT_CALL(*controller_client, getWriteLocation(_, _, _, _, _, 300, 0))
                         .WillOnce(Return(std::make_pair(true, allocation)));
-                    if (throws) {
-                        EXPECT_CALL(*controller_client, finishWrite(_, _, _, _, _)).Times(0);
-                    } else {
-                        EXPECT_CALL(*controller_client, finishWrite(_, _, "exception-boundary-session",
-                            ::testing::Eq(kv_cache_manager::BlockMask{kv_cache_manager::BlockMaskOffset{0}}),
-                            ::testing::IsEmpty())).WillOnce(Return(true));
-                    }
+                    EXPECT_CALL(*controller_client, finishWrite(_, _, _, _, _)).Times(0);
                     EXPECT_TRUE(controller.backend->write(controller.backend->prepareWrite(request)));
                 } else {
                     auto result = readResult(*controller.backend, request, matched.match_meta);
@@ -1794,24 +1788,27 @@ TEST(KVCMLocalTest, PrefillRpcPreservesExceptionalUnknownFromRawSdkAndStillAccep
     }
 }
 
-TEST(KVCMLocalTest, PrefillFailedPayloadClosesOnceWithoutFreezingLocalSources) {
+TEST(KVCMLocalTest, PrefillFailedWriteClosesOnlyWithBufferSafeProof) {
     autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
     using EC = kv_cache_manager::ClientErrorCode;
     for (const bool enabled : {false, true}) {
         for (const auto& [ec, safe] : failedCompletionCases<EC>(/*write=*/true)) {
             autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
             const auto code = ec;
+            const bool buffer_safe = safe;
             ::rtp_llm::test::withDecodePublicationStartup([&] {
             PrefillIoFixture f("kvcm_write_completion_proof");
             ASSERT_TRUE(initSingleRank(*f.backend.backend, f.environment));
             auto allocation = writeAllocation("pending-session", "tp0_Fdefault", "pace://write_uri");
             EXPECT_CALL(*f.client, getWriteLocation(_, _, _, _, _, _, 0))
                 .WillOnce(Return(std::make_pair(true, allocation)));
-            // Original P policy: best-effort zero-mask close, even on timeout.
-            // The mock performs no DMA; this does not establish SDK quiescence.
-            EXPECT_CALL(*f.client, finishWrite(_, _, "pending-session",
-                ::testing::Eq(kv_cache_manager::BlockMask{kv_cache_manager::BlockMaskOffset{0}}),
-                ::testing::IsEmpty())).WillOnce(Return(true));
+            if (buffer_safe) {
+                EXPECT_CALL(*f.client, finishWrite(_, _, "pending-session",
+                    ::testing::Eq(kv_cache_manager::BlockMask{kv_cache_manager::BlockMaskOffset{0}}),
+                    ::testing::IsEmpty())).WillOnce(Return(true));
+            } else {
+                EXPECT_CALL(*f.client, finishWrite(_, _, _, _, _)).Times(0);
+            }
             const auto ref_count_before = f.environment.device_pool->refCount(f.environment.block_id);
             f.client->save_status = code;
             auto task           = f.backend->prepareWrite(makeStorageRequest(f.environment));
@@ -2049,7 +2046,7 @@ TEST(KVCMLocalTest, PrefillQueueRejectAndExpiryNeverStartSessionOrRetainUnknown)
                     unblock.run(); unblock_worker.run(); backend.backend->shutdown();
                 });
                 std::atomic<int> starts{0}, saves{0}, commits{0}, closes{0};
-                EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, 40, 0))
+                EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, 300, 0))
                     .WillRepeatedly(Invoke([&](const auto&, const auto&, const auto&, const auto&, const auto&, auto, auto) {
                         auto value = writeAllocation("prefill-" + std::to_string(++starts), "tp0_Fdefault", "pace://write");
                         return std::make_pair(true, value);

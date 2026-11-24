@@ -1093,7 +1093,7 @@ public:
                                                      keys,
                                                      /*tokens=*/{},
                                                      location_spec_group_names,
-                                                     /*write_timeout_seconds=*/40,
+                                                     /*write_timeout_seconds=*/request.decode_completion ? 40 : 300,
                                                      kv_cache_config_.kvcm_min_replica_count);
         }();
         RTP_LLM_CHECK_WITH_INFO(success, "KVCM StartWrite failed");
@@ -1246,7 +1246,7 @@ public:
         } catch (...) {
             std::lock_guard<std::mutex> settlement_lock(publication.settlement_mutex);
             if (!publication.settlement_started) {
-                settleWriteFailure(request, publication);
+                settleWriteFailure(request, publication, !request.decode_completion && !source_may_be_touched);
             }
             throw;
         }
@@ -1254,7 +1254,7 @@ public:
     }
 
     void settleWriteFailure(const StorageRequest& request, WritePublication& write,
-                            bool payload_settled_safe = false) {
+                            bool payload_settled_safe) {
         // PACE's explicit SAFE failures retain no destination writer; raw
         // errors, incomplete replies and exceptions never supply this proof.
         const bool settled_safe = request.decode_completion && pace_backend_ && payload_settled_safe;
@@ -1272,12 +1272,8 @@ public:
                 }
                 return;
             }
-        } else {
-            // Preserve Prefill's legacy best-effort failure close, except for
-            // explicit UNKNOWN exceptions. This policy is not a quiescence proof.
-            try { throw; }
-            catch (const StorageOperationPayloadExceptionUnknown&) { return; }
-            catch (...) {}
+        } else if (!payload_settled_safe) {
+            return;
         }
         // One original zero-mask close/Finish path. No abort after an attempted
         // Finish; Decode requires either no start or strict terminal proof.
