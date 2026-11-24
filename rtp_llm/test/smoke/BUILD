@@ -249,3 +249,57 @@ custom_smoke_test(
     tags = ["dsv41_cuda13", "model_contract", "dspark_contract"],
     data = ["//rtp_llm:sdk", "deepseek_v41_contract_test.py"],
 )
+
+custom_smoke_test(
+    name = "qwen4_5_pd_8layer_smoke_sm103",
+    main = "qwen4_5_pd_smoke_test.py",
+    smoke_args = "--tp_size 1 --dp_size 1 --world_size 2 --act_type BF16 --seq_size_per_block 16 --max_seq_len 256 --max_context_batch_size 8 --concurrency_limit 16 --reuse_cache 1 --enable_device_cache 1 --enable_memory_cache 1 --enable_cuda_graph 0 --cache_store_rdma_mode 1 --use_local 1",
+    gpu_type = ["SM103_CU13"],
+    tags = ["qwen4_5", "qwen4_5_pd", "pd_contract"],
+    test_envs = {
+        "QWEN4_5_PD_SMOKE_MODE": "synthetic_8layer",
+        "QWEN4_5_MEMORY_CACHE_SIZE_MB": "1024",
+        "RTP_TEST_WATCHDOG_SECONDS": "1200",
+    },
+    data = ["//rtp_llm:sdk", "qwen4_5_pd_server.py"],
+)
+
+custom_smoke_test(
+    name = "qwen4_5_pd_8layer_host_cache_smoke_sm103",
+    main = "qwen4_5_pd_smoke_test.py",
+    smoke_args = "--tp_size 1 --dp_size 1 --world_size 2 --act_type BF16 --seq_size_per_block 16 --max_seq_len 256 --max_context_batch_size 8 --concurrency_limit 16 --reuse_cache 1 --enable_device_cache 1 --enable_memory_cache 1 --enable_cuda_graph 0 --cache_store_rdma_mode 1 --use_local 1",
+    gpu_type = ["SM103_CU13"],
+    tags = ["qwen4_5", "qwen4_5_pd", "pd_contract", "host_cache"],
+    test_envs = {
+        "QWEN4_5_PD_SMOKE_MODE": "synthetic_8layer",
+        "QWEN4_5_FORCE_HOST_DEMOTION": "1",
+        "QWEN4_5_MEMORY_CACHE_SIZE_MB": "1024",
+        "RTP_TEST_WATCHDOG_SECONDS": "1200",
+    },
+    data = ["//rtp_llm:sdk", "qwen4_5_pd_server.py"],
+)
+
+custom_smoke_test(
+    name = "qwen4_5_pd_3fs_ep4x2_smoke_sm103",
+    main = "qwen4_5_pd_smoke_test.py",
+    smoke_args = "--tp_size 4 --ep_size 4 --dp_size 1 --world_size 8 --act_type BF16 --seq_size_per_block 64 --max_seq_len 2048 --max_context_batch_size 8 --concurrency_limit 16 --reuse_cache 1 --enable_device_cache 1 --enable_memory_cache 1 --enable_cuda_graph 0 --cache_store_rdma_mode 1 --use_local 1",
+    gpu_type = ["SM103_CU13"],
+    tags = ["qwen4_5", "qwen4_5_pd", "pd_contract"],
+    test_envs = {
+        "QWEN4_5_PD_SMOKE_MODE": "real_3fs_40layer",
+        "QWEN4_5_CKPT_PATH": "/mnt/hf3fs/3fs/models/Qwen4.5-Flash-1109-bf16-re-mxfp4-ple-fp8",
+        "QWEN4_5_MEMORY_CACHE_SIZE_MB": "32768",
+        "RTP_TEST_WATCHDOG_SECONDS": "3600",
+    },
+    data = ["//rtp_llm:sdk", "qwen4_5_pd_server.py"],
+)
+
+py_binary(
+    name = "qwen4_5_pd_server",
+    main = "qwen4_5_pd_server.py",
+    srcs = ["qwen4_5_pd_server.py"],
+    deps = SMOKE_FRAMEWORK_DEPS,
+    data = ["//rtp_llm:sdk"],
+    legacy_create_init = 0,
+    visibility = ["//visibility:public"],
+)

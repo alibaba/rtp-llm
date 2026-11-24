@@ -187,7 +187,7 @@ py_library(
     srcs = glob([
         "modules/*.py",
         "modules/**/*.py",
-    ], exclude = _DSV4_PPU_MODULES + ["modules/qwen4_exp/test/**"]) + select({
+    ], exclude = _DSV4_PPU_MODULES + ["modules/qwen4_exp/test/**", "modules/qwen4_5/test/**"]) + select({
         "@//:using_ppu": glob(_DSV4_PPU_MODULES),
         "//conditions:default": [],
     }),

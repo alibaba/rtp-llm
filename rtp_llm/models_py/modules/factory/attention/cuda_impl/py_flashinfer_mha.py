@@ -1,3 +1,4 @@
+import re
 from typing import Any, Optional
 
 import torch
@@ -35,6 +36,10 @@ from rtp_llm.ops.compute_ops import (
 DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB = 128
 _FLASHINFER_WORKSPACE_ALIGNMENT = 256
 _FLASHINFER_ACCUMULATOR_BYTES = 4
+_FLASHINFER_WORKSPACE_GROW_GRANULARITY_BYTES = 16 * 1024 * 1024
+_FLASHINFER_WORKSPACE_GROW_HEADROOM_BYTES = 32 * 1024 * 1024
+MAX_PY_FLASHINFER_WORKSPACE_SIZE_BYTES = 2 * 1024 * 1024 * 1024
+_FLASHINFER_OVERFLOW_SIZE_RE = re.compile(r"with size (\d+)")
 
 # FP8 KV cache uses a unit quantization scale: K/V are cast
 # directly to float8_e4m3fn and FA3 FP8 kernels run with scale_q/k/v = 1.0.
@@ -124,6 +129,29 @@ def release_py_flashinfer_workspace_buffer(buffer: torch.Tensor) -> None:
     key = (buffer.device, buffer.numel() * buffer.element_size())
     with _g_py_flashinfer_pool_lock:
         _g_py_flashinfer_workspace_pool.setdefault(key, []).append(buffer)
+
+
+def _next_flashinfer_workspace_size(current_bytes: int, error_msg: str) -> Optional[int]:
+    """Compute next workspace byte size on FlashInfer plan overflow, or None."""
+    if current_bytes >= MAX_PY_FLASHINFER_WORKSPACE_SIZE_BYTES or not any(
+        f"Buffer overflow when allocating memory for {name}_tmp_" in error_msg
+        for name in ("batch_prefill", "batch_decode")
+    ):
+        return None
+    match = _FLASHINFER_OVERFLOW_SIZE_RE.search(error_msg)
+    if match is not None:
+        requested = int(match.group(1))
+        raw_target = (
+            requested + _FLASHINFER_WORKSPACE_GROW_HEADROOM_BYTES
+            if requested > current_bytes
+            else current_bytes + requested + _FLASHINFER_WORKSPACE_GROW_HEADROOM_BYTES
+        )
+    else:
+        raw_target = current_bytes * 2
+    granularity = _FLASHINFER_WORKSPACE_GROW_GRANULARITY_BYTES
+    rounded = ((raw_target + granularity - 1) // granularity) * granularity
+    target = min(rounded, MAX_PY_FLASHINFER_WORKSPACE_SIZE_BYTES)
+    return target if target > current_bytes else None
 
 
 def _planned_flashinfer_workspace_size(
@@ -1341,19 +1369,48 @@ class PyFlashinferDecodeAttnOp(object):
             last_page_len = self.fmha_params.paged_kv_last_page_len_d
             plan_kwargs = {}
 
-        self.decode_wrapper.plan(
-            page_indptr,
-            page_indice,
-            last_page_len,
-            self.local_head_num,
-            self.local_kv_head_num,
-            self.head_dim_qk,
-            self.seq_size_per_block,
-            q_data_type=self.q_dtype,
-            kv_data_type=self.kv_dtype,
-            o_data_type=self.dtype,
-            **plan_kwargs,
-        )
+        while True:
+            try:
+                self.decode_wrapper.plan(
+                    page_indptr,
+                    page_indice,
+                    last_page_len,
+                    self.local_head_num,
+                    self.local_kv_head_num,
+                    self.head_dim_qk,
+                    self.seq_size_per_block,
+                    q_data_type=self.q_dtype,
+                    kv_data_type=self.kv_dtype,
+                    o_data_type=self.dtype,
+                    **plan_kwargs,
+                )
+                break
+            except RuntimeError as error:
+                if self._workspace_compacted:
+                    raise
+                current_bytes = (
+                    self.g_workspace_buffer.numel()
+                    * self.g_workspace_buffer.element_size()
+                )
+                next_bytes = _next_flashinfer_workspace_size(
+                    current_bytes, str(error)
+                )
+                if next_bytes is None:
+                    raise
+                if self.g_workspace_buffer.is_cuda:
+                    torch.cuda.current_stream(
+                        self.g_workspace_buffer.device
+                    ).synchronize()
+                workspace = get_py_flashinfer_workspace_buffer(
+                    self.g_workspace_buffer.device, next_bytes
+                )
+                workspace.zero_()
+                self.decode_wrapper.reset_workspace_buffer(
+                    workspace, self.decode_wrapper._int_workspace_buffer
+                )
+                if current_bytes == DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB * 1024 * 1024:
+                    release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
+                self.g_workspace_buffer = workspace
         if use_cuda_core_graph_plan_cache:
             self._cuda_core_plan_page_indptr_h = (
                 self.fmha_params.decode_page_indptr_h.clone()

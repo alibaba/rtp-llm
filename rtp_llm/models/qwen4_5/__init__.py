@@ -1,0 +1,58 @@
+"""Qwen 4.5-Flash (Qwen4_5ForCausalLM) model package."""
+
+from rtp_llm.models.qwen4_5.qwen4_5 import Qwen4_5, register_qwen4_5_model
+from rtp_llm.models.qwen4_5.qwen4_5_kv_cache import (
+    FFN_OUTPUT_SCONV_TAG,
+    FULL_ATTN_KV_SCONV_TAG,
+    FULL_ATTN_KV_TAG,
+    FULL_ATTN_OUTPUT_SCONV_TAG,
+    GDN_CONSUMER_Q_CONV_TAG,
+    GDN_CONV_STATE_TAG,
+    GDN_SSM_STATE_TAG,
+    LINEAR_ATTN_OUTPUT_SCONV_TAG,
+    LINEAR_ATTN_TAG,
+    PLE_NGRAM_CTX_TAG,
+    PLE_STATE_TAG,
+    OpaqueStateRegionPlan,
+    Qwen4_5KVCachePlan,
+    Qwen4_5LayerCachePlan,
+    build_qwen4_5_kv_cache_plan,
+    build_qwen4_5_kv_cache_spec_descs,
+)
+from rtp_llm.models.qwen4_5.qwen4_5_weight import (
+    DTYPE_NUM_BYTES,
+    QWEN4_5_W,
+    Qwen4_5Weight,
+    Qwen4_5WeightDescriptor,
+    expected_checkpoint_tensor_specs,
+    summarize_checkpoint_specs,
+    validate_qwen4_5_weight_map,
+)
+
+__all__ = [
+    "DTYPE_NUM_BYTES",
+    "FFN_OUTPUT_SCONV_TAG",
+    "FULL_ATTN_KV_SCONV_TAG",
+    "FULL_ATTN_KV_TAG",
+    "FULL_ATTN_OUTPUT_SCONV_TAG",
+    "GDN_CONSUMER_Q_CONV_TAG",
+    "GDN_CONV_STATE_TAG",
+    "GDN_SSM_STATE_TAG",
+    "LINEAR_ATTN_OUTPUT_SCONV_TAG",
+    "LINEAR_ATTN_TAG",
+    "OpaqueStateRegionPlan",
+    "PLE_NGRAM_CTX_TAG",
+    "PLE_STATE_TAG",
+    "QWEN4_5_W",
+    "Qwen4_5",
+    "Qwen4_5KVCachePlan",
+    "Qwen4_5LayerCachePlan",
+    "Qwen4_5Weight",
+    "Qwen4_5WeightDescriptor",
+    "build_qwen4_5_kv_cache_plan",
+    "build_qwen4_5_kv_cache_spec_descs",
+    "expected_checkpoint_tensor_specs",
+    "register_qwen4_5_model",
+    "summarize_checkpoint_specs",
+    "validate_qwen4_5_weight_map",
+]

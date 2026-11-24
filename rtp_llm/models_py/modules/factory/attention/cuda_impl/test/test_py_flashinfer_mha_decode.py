@@ -114,6 +114,98 @@ class TestPyFlashinferWorkspacePlanning(unittest.TestCase):
                 )
             )
 
+    def test_next_flashinfer_workspace_size(self) -> None:
+        mib = 1024 * 1024
+        self.assertEqual(
+            py_flashinfer_mha._next_flashinfer_workspace_size(
+                128 * mib,
+                "Buffer overflow when allocating memory for batch_prefill_tmp_v with size 620756992 and alignment 16",
+            ),
+            624 * mib,
+        )
+        self.assertEqual(
+            py_flashinfer_mha._next_flashinfer_workspace_size(
+                608 * mib,
+                "Buffer overflow when allocating memory for batch_prefill_tmp_s with size 1212416 and alignment 16",
+            ),
+            656 * mib,
+        )
+        self.assertIsNone(
+            py_flashinfer_mha._next_flashinfer_workspace_size(
+                128 * mib,
+                "Some unrelated CUDA runtime failure with size 999999999",
+            )
+        )
+        self.assertIsNone(
+            py_flashinfer_mha._next_flashinfer_workspace_size(
+                py_flashinfer_mha.MAX_PY_FLASHINFER_WORKSPACE_SIZE_BYTES,
+                "Buffer overflow when allocating memory for batch_decode_tmp_v with size 9999999999",
+            )
+        )
+
+    def test_plan_decode_wrapper_retries_on_workspace_overflow(self) -> None:
+        mib = 1024 * 1024
+        op = object.__new__(PyFlashinferDecodeAttnOp)
+        op.enable_cuda_graph = False
+        op.use_tensor_core = False
+        op._workspace_compacted = False
+        op.local_head_num = 32
+        op.local_kv_head_num = 1
+        op.head_dim_qk = 512
+        op.seq_size_per_block = 64
+        op.q_dtype = torch.bfloat16
+        op.kv_dtype = torch.bfloat16
+        op.dtype = torch.bfloat16
+        op.fmha_params = SimpleNamespace(
+            decode_page_indptr_d=torch.tensor([0, 1], dtype=torch.int32),
+            page_indice_d=torch.tensor([0], dtype=torch.int32),
+            paged_kv_last_page_len_d=torch.tensor([1], dtype=torch.int32),
+        )
+        initial_ws = torch.zeros(128 * mib, dtype=torch.uint8)
+        op.g_workspace_buffer = initial_ws
+
+        reset_calls = []
+
+        class MockWrapper:
+            _int_workspace_buffer = torch.zeros(16, dtype=torch.uint8)
+
+            def __init__(self) -> None:
+                self.plan_calls = 0
+
+            def plan(self, *args, **kwargs) -> None:
+                self.plan_calls += 1
+                if self.plan_calls == 1:
+                    raise RuntimeError(
+                        "Buffer overflow when allocating memory for batch_prefill_tmp_v "
+                        "with size 620756992 and alignment 16, but only 134217728 bytes available"
+                    )
+
+            def reset_workspace_buffer(self, float_ws, int_ws) -> None:
+                reset_calls.append((float_ws.numel(), int_ws))
+
+        op.decode_wrapper = MockWrapper()
+        try:
+            op._plan_decode_wrapper(SimpleNamespace())
+            self.assertEqual(op.decode_wrapper.plan_calls, 2)
+            self.assertEqual(len(reset_calls), 1)
+            self.assertEqual(reset_calls[0][0], 624 * mib)
+            self.assertEqual(op.g_workspace_buffer.numel(), 624 * mib)
+
+            op._workspace_compacted = True
+
+            class AlwaysOverflowWrapper(MockWrapper):
+                def plan(self, *args, **kwargs) -> None:
+                    raise RuntimeError(
+                        "Buffer overflow when allocating memory for batch_prefill_tmp_v "
+                        "with size 999999999 and alignment 16"
+                    )
+
+            op.decode_wrapper = AlwaysOverflowWrapper()
+            with self.assertRaises(RuntimeError):
+                op._plan_decode_wrapper(SimpleNamespace())
+        finally:
+            py_flashinfer_mha._g_py_flashinfer_workspace_pool.clear()
+
 
 class PageMetadata(NamedTuple):
     page_indptr: List[int]
