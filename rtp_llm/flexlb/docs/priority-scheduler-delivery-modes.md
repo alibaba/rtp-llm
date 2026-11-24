@@ -157,8 +157,11 @@ times the median for the same role and routing group. `setpointFloor` defaults
 to 10 outstanding requests and `computeTokenFloor` to 1,000 tokens.
 `sustainedPressureMs` defaults to 0.
 A positive duration requires continuous pressure. The first sample showing
-relief or pool saturation closes the gate. A hotspot can redirect requests of
-any cache hit rate when balanced ranking picks an alternative.
+relief or pool saturation closes the gate. In TTFT ranking, Master checks
+the selected endpoint for a hotspot even when it has both the lowest TTFT
+and the best cache match. If a healthy alternative can accept the request
+within the extra compute budget, Master redirects the new placement.
+Requests already in the endpoint's local queue keep their assignment.
 
 All Prefill groups on a Master share a trailing one-second extra compute budget.
 When a request first has ranked candidates, its baseline work is its input length

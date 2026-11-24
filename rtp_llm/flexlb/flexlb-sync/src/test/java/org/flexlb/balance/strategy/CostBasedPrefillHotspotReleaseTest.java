@@ -39,6 +39,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -228,6 +229,66 @@ class CostBasedPrefillHotspotReleaseTest {
         assertEquals(1, ranking.select(
                 survivors, RoleType.PREFILL, null, request));
         verify(reporter).reportCacheAffinityDecision(RoleType.PREFILL, "10.1.0.2", "HOTSPOT_RATE_LIMIT");
+    }
+
+    @Test
+    void redirectsHotMinimumTtftBaselineAtZeroCostWhenCacheHitsTie() {
+        FlexlbConfig config = affinityConfig();
+        config.getRouter().getRoles().getPrefill().getHotspotRelease().setMaxExtraComputePermille(0);
+        var reporter = mock(EngineHealthReporter.class);
+        var ranking = new PrefillCandidateRanking(reporter, budget);
+        var survivors = candidates(100, 200, 500, 500);
+        survivors.setHotspots(Set.of(survivors.endpoint(0)));
+
+        assertEquals(1, ranking.select(survivors, RoleType.PREFILL, "g", tokenContext(config)));
+        verify(reporter).reportCacheAffinityDecision(RoleType.PREFILL, "10.1.0.2", "HOTSPOT_RELEASE");
+    }
+
+    @Test
+    void redirectFromFastestBestHitBaselineRequiresEnoughExtraCompute() {
+        FlexlbConfig config = affinityConfig();
+        config.getRouter().getRoles().getPrefill().getHotspotRelease().setMaxExtraComputePermille(10);
+        var reporter = mock(EngineHealthReporter.class);
+        var ranking = new PrefillCandidateRanking(reporter, budget);
+        var survivors = candidates(100, 200, 900, 500);
+        survivors.setHotspots(Set.of(survivors.endpoint(0)));
+        var request = tokenContext(config);
+
+        assertEquals(0, ranking.select(survivors, RoleType.PREFILL, "g", request));
+        verify(reporter).reportCacheAffinityDecision(RoleType.PREFILL, "10.1.0.1", "HOTSPOT_RATE_LIMIT");
+
+        recordColdArrival(40_000);
+        assertEquals(1, ranking.select(survivors, RoleType.PREFILL, "g", request));
+        verify(reporter).reportCacheAffinityDecision(RoleType.PREFILL, "10.1.0.2", "HOTSPOT_RELEASE");
+    }
+
+    @Test
+    void retainsBaselineWithoutAHealthyAlternativeOrWhenReleaseIsDisabled() {
+        FlexlbConfig config = affinityConfig();
+        var reporter = mock(EngineHealthReporter.class);
+        var ranking = new PrefillCandidateRanking(reporter, budget);
+        var request = tokenContext(config);
+        var survivors = candidates(100, 200, 500, 500);
+
+        assertEquals(0, ranking.select(survivors, RoleType.PREFILL, "g", request), "healthy baseline");
+        survivors.setHotspots(Set.of(survivors.endpoint(0), survivors.endpoint(1)));
+        assertEquals(0, ranking.select(survivors, RoleType.PREFILL, "g", request), "all candidates hot");
+
+        var single = new PrefillCandidateSet();
+        single.reset(1);
+        addCandidate(single, 1, "10.1.0.1", 100, 100, 500);
+        single.setHotspots(Set.of(single.endpoint(0)));
+        assertEquals(0, ranking.select(single, RoleType.PREFILL, "g", request), "one candidate");
+
+        survivors.setHotspots(Set.of(survivors.endpoint(0)));
+        when(survivors.endpoint(1).engineQueueAdmissionBlocked()).thenReturn(true);
+        assertEquals(0, ranking.select(survivors, RoleType.PREFILL, "g", request), "peer cannot admit");
+        when(survivors.endpoint(1).engineQueueAdmissionBlocked()).thenReturn(false);
+
+        config.getRouter().getRoles().getPrefill().getHotspotRelease().setEnabled(false);
+        assertEquals(0, ranking.select(survivors, RoleType.PREFILL, "g", request), "release disabled");
+        verify(reporter, times(5))
+                .reportCacheAffinityDecision(RoleType.PREFILL, "10.1.0.1", "NO_CACHE_LEAD");
     }
 
     @Test

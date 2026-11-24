@@ -32,7 +32,7 @@ final class PrefillCandidateRanking {
             redirectLimiter.recordPlacement(request, candidates.maximumCacheHit);
         }
         return prefill.getTokenBalance() == null
-                ? selectByTtft(candidates, role, group, inputTokens, prefill.getCacheAffinity(), release)
+                ? selectByTtft(candidates, role, group, inputTokens, prefill.getCacheAffinity(), release, request.getConfig().isDirect())
                 : selectTokenBalancedCandidate(candidates, role, group, inputTokens, prefill.getTokenBalance(), release);
     }
 
@@ -112,105 +112,97 @@ final class PrefillCandidateRanking {
         return rotation.next(role, group, survivors.size(), i -> scores[i] == score, survivors::endpointAddress);
     }
 
-    /** Rank by cache affinity, then consider a paced redirect from a congested cache leader. */
-    private int selectByTtft(PrefillCandidateSet survivors, RoleType roleType, String group, long seqLen,
-                             RoutingConfig.CacheAffinityConfig cacheAffinity, RoutingConfig.HotspotReleaseConfig release) {
-        boolean hotspotRelease = release.isEnabled();
-        long minProjectedTtftMs = survivors.minimumProjectedTtftMs;
-        BitSet preferredCandidates = new BitSet(survivors.size());
-        BitSet releasedCandidates = new BitSet();
-        long affinityCutoffMs = 0L;
-        String affinityReason = null;
-        int baselineCacheLeader = -1;
-        if (cacheAffinity != null) {
-            affinityCutoffMs = saturatingAdd(
-                    minProjectedTtftMs,
-                    Math.max(0L, cacheAffinity.getMaxExtraTtftMs()));
-            affinityReason = "NO_CACHE_LEAD";
+    private record TtftChoice(int index, String reason) { }
+
+    /** Apply the ordinary ranking first, then release its winner if that endpoint is hot. */
+    private int selectByTtft(PrefillCandidateSet survivors, RoleType role, String group, long seqLen,
+                             RoutingConfig.CacheAffinityConfig affinity, RoutingConfig.HotspotReleaseConfig release,
+                             boolean direct) {
+        BitSet eligible = new BitSet(survivors.size());
+        eligible.set(0, survivors.size());
+        TtftChoice choice = rankByTtft(survivors, eligible, role, group, seqLen, affinity,
+                release.isEnabled(), tieRotation);
+        int selected = choice.index();
+        String reason = choice.reason();
+        if (release.isEnabled() && survivors.isHotspot(selected)) {
             for (int i = 0; i < survivors.size(); i++) {
-                if (survivors.projectedTtftMs(i) == minProjectedTtftMs
-                        && (baselineCacheLeader < 0 || survivors.compareCacheMatch(i, baselineCacheLeader) > 0)) {
-                    baselineCacheLeader = i;
+                if (survivors.isHotspot(i) || survivors.admissionBlock(i) != null
+                        || survivors.endpoint(i).engineQueueAdmissionBlocked()
+                        || direct && !survivors.endpoint(i).canAcceptRequest()) {
+                    eligible.clear(i);
                 }
             }
+            if (!eligible.isEmpty()) {
+                int alternate = rankByTtft(survivors, eligible, role, group, seqLen, affinity,
+                        true, redirectRotation).index();
+                if (permitsRedirect(survivors, selected, alternate, release)) {
+                    selected = alternate;
+                    reason = "HOTSPOT_RELEASE";
+                } else {
+                    reason = "HOTSPOT_RATE_LIMIT";
+                }
+            }
+        }
+        if (reason != null) {
+            reporter.reportCacheAffinityDecision(role, survivors.endpoint(selected).getIp(), reason);
+            if (Logger.isDebugEnabled()) {
+                Logger.debug("CostBasedPrefill cache-affinity decision - role: {}, group: {}, selected: {}, "
+                                + "minProjectedTtftMs: {}, selectedProjectedTtftMs: {}, hitTokens: {}, reason: {}",
+                        role, group, survivors.endpointAddress(selected), survivors.minimumProjectedTtftMs,
+                        survivors.projectedTtftMs(selected), survivors.cacheHit(selected), reason);
+            }
+        }
+        return selected;
+    }
+
+    private static TtftChoice rankByTtft(PrefillCandidateSet survivors, BitSet eligible, RoleType role, String group,
+                                         long seqLen, RoutingConfig.CacheAffinityConfig affinity,
+                                         boolean hotspotRelease, EndpointRoundRobin rotation) {
+        int baseline = eligible.nextSetBit(0);
+        for (int i = eligible.nextSetBit(baseline + 1); i >= 0; i = eligible.nextSetBit(i + 1)) {
+            long time = survivors.projectedTtftMs(i);
+            long bestTime = survivors.projectedTtftMs(baseline);
+            if (time < bestTime || time == bestTime && affinity != null && survivors.compareCacheMatch(i, baseline) > 0) {
+                baseline = i;
+            }
+        }
+        String reason = null;
+        if (affinity != null) {
+            BitSet preferred = new BitSet(survivors.size());
+            long cutoff = saturatingAdd(survivors.projectedTtftMs(baseline), Math.max(0L, affinity.getMaxExtraTtftMs()));
+            double minimumHitRate = normalizedHitRate(affinity.getMinPrefixHitPercent());
             boolean strongerCache = false;
             boolean minimumHitRateMet = false;
-            double minimumHitRate = normalizedHitRate(cacheAffinity.getMinPrefixHitPercent());
-            for (int i = 0; i < survivors.size(); i++) {
-                if (survivors.compareCacheMatch(i, baselineCacheLeader) <= 0) {
+            for (int i = eligible.nextSetBit(0); i >= 0; i = eligible.nextSetBit(i + 1)) {
+                if (survivors.compareCacheMatch(i, baseline) <= 0) {
                     continue;
                 }
                 strongerCache = true;
-                long hitTokens = survivors.cacheHit(i);
                 if (minimumHitRate > 0.0 && (seqLen <= 0L
-                        || hitTokens * RoutingConfig.PERCENTAGE_SCALE / seqLen < minimumHitRate)) {
+                        || survivors.cacheHit(i) * RoutingConfig.PERCENTAGE_SCALE / seqLen < minimumHitRate)) {
                     continue;
                 }
                 minimumHitRateMet = true;
-                if (hotspotRelease || survivors.projectedTtftMs(i) <= affinityCutoffMs) {
-                    preferredCandidates.set(i);
-                    if (hotspotRelease && survivors.isHotspot(i)) {
-                        releasedCandidates.set(i);
-                    }
+                if (hotspotRelease || survivors.projectedTtftMs(i) <= cutoff) {
+                    preferred.set(i);
                 }
             }
-            if (!preferredCandidates.isEmpty()) {
-                affinityReason = "CACHE_LEADER";
-            } else if (minimumHitRateMet) {
-                affinityReason = "OVER_CAP";
+            if (!preferred.isEmpty()) {
+                return new TtftChoice(selectCacheLeader(survivors, preferred, role, group, rotation), "CACHE_LEADER");
+            }
+            reason = "NO_CACHE_LEAD";
+            if (minimumHitRateMet) {
+                reason = "OVER_CAP";
             } else if (strongerCache) {
-                affinityReason = "LOW_CACHE_HIT";
+                reason = "LOW_CACHE_HIT";
             }
         }
-
-        int selectedIndex;
-        if (preferredCandidates.isEmpty()) {
-            selectedIndex = selectBaseline(survivors, roleType, group, baselineCacheLeader, tieRotation);
-        } else {
-            int source = selectCacheLeader(survivors, preferredCandidates, roleType, group, tieRotation);
-            selectedIndex = source;
-            if (releasedCandidates.get(source)) {
-                preferredCandidates.andNot(releasedCandidates);
-                selectedIndex = preferredCandidates.isEmpty()
-                        ? selectBaseline(survivors, roleType, group, baselineCacheLeader, redirectRotation)
-                        : selectCacheLeader(survivors, preferredCandidates, roleType, group, redirectRotation);
-                affinityReason = "HOTSPOT_RELEASE";
-            }
-            if (!permitsRedirect(survivors, source, selectedIndex, release)) {
-                selectedIndex = source;
-                affinityReason = "HOTSPOT_RATE_LIMIT";
-            }
-        }
-
-        if (selectedIndex >= 0 && affinityReason != null) {
-            reporter.reportCacheAffinityDecision(
-                    roleType, survivors.endpoint(selectedIndex).getIp(),
-                    affinityReason);
-            if (Logger.isDebugEnabled()) {
-                Logger.debug(
-                        "CostBasedPrefill cache-affinity decision - role: {}, group: {}, "
-                                + "selected: {}, minProjectedTtftMs: {}, "
-                                + "selectedProjectedTtftMs: {}, ttftCutoffMs: {}, "
-                                + "hitTokens: {}, reason: {}",
-                        roleType,
-                        group,
-                        survivors.endpointAddress(selectedIndex),
-                        minProjectedTtftMs,
-                        survivors.projectedTtftMs(selectedIndex),
-                        affinityCutoffMs,
-                        survivors.cacheHit(selectedIndex),
-                        affinityReason);
-            }
-        }
-        return selectedIndex;
-    }
-
-    private static int selectBaseline(PrefillCandidateSet survivors, RoleType role, String group,
-                                      int reference, EndpointRoundRobin rotation) {
-        return rotation.next(role, group, survivors.size(),
-                i -> survivors.projectedTtftMs(i) == survivors.minimumProjectedTtftMs
-                        && (reference < 0 || survivors.compareCacheMatch(i, reference) == 0),
+        int reference = baseline;
+        int selected = rotation.next(role, group, survivors.size(),
+                i -> eligible.get(i) && survivors.projectedTtftMs(i) == survivors.projectedTtftMs(reference)
+                        && (affinity == null || survivors.compareCacheMatch(i, reference) == 0),
                 survivors::endpointAddress);
+        return new TtftChoice(selected, reason);
     }
 
     private static double normalizedHitRate(double configuredRate) {
