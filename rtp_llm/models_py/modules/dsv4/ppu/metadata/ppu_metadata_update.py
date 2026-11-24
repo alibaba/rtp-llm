@@ -147,22 +147,12 @@ def update_decode_metadata_in_place_ppu(
         # Snapshot block_table content into the metadata's stable buffer
         # (forbid_realloc-friendly: just `.copy_` the prefix). Skip pools
         # without a metadata buffer (e.g. SWA-only layers don't carry CSA).
-        for at, src_bt in paged_block_tables.items():
-            dst_bt = meta.pool_block_tables.get(at)
-            if dst_bt is None:
-                continue
-            n_rows = min(src_bt.shape[0], dst_bt.shape[0])
-            n_cols = min(src_bt.shape[1], dst_bt.shape[1])
-            # Zero stale rows beyond current bs to avoid carrying old block
-            # ids (defensive — graph reads only [:bs] anyway).
-            dst_bt[bs:].zero_()
-            dst_bt[:n_rows, :n_cols].copy_(src_bt[:n_rows, :n_cols])
-            if n_cols < dst_bt.shape[1]:
-                dst_bt[:n_rows, n_cols:].zero_()
-
         from rtp_llm.models_py.modules.dsv4.fp8.decode._fused_prepare_meta_triton import (
+            fused_copy_pool_block_tables,
             fused_phase2b_pool_slot_mapping,
         )
+
+        fused_copy_pool_block_tables(meta, paged_block_tables, bs)
 
         fused_phase2b_pool_slot_mapping(
             meta,

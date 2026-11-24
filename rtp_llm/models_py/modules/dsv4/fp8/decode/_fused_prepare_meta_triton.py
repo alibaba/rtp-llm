@@ -276,7 +276,68 @@ def fused_update_decode_meta_pure(
 
 
 @triton.jit
-def _fused_phase2b_pool_slot_mapping_kernel(
+def _copy_pool_block_table_kernel(
+    src_ptr,
+    dst_ptr,
+    bs,
+    n_rows,
+    n_cols,
+    max_cols,
+    src_stride,
+    dst_stride,
+    BLOCK: tl.constexpr,
+):
+    r = tl.program_id(0)
+    cols = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    if r < n_rows:
+        v = tl.load(
+            src_ptr + r * src_stride + cols,
+            mask=cols < n_cols,
+            other=0,
+        )
+        tl.store(dst_ptr + r * dst_stride + cols, v, mask=cols < max_cols)
+    elif r >= bs:
+        tl.store(
+            dst_ptr + r * dst_stride + cols,
+            0,
+            mask=cols < max_cols,
+        )
+
+
+def fused_copy_pool_block_tables(meta, paged_block_tables, bs: int) -> None:
+    """Copy each pool's block-table prefix and clear stale rows/tail.
+
+    One kernel per cache tag replaces the previous three tiny
+    copy/zero kernels per tag. The copy/zero ranges are identical.
+    """
+    for at, src_bt in paged_block_tables.items():
+        dst_bt = meta.pool_block_tables.get(at)
+        if dst_bt is None:
+            continue
+        n_rows = min(src_bt.shape[0], dst_bt.shape[0])
+        n_cols = min(src_bt.shape[1], dst_bt.shape[1])
+        max_cols = dst_bt.shape[1]
+        if dst_bt.shape[0] == 0 or max_cols == 0:
+            continue
+        if not (src_bt.is_cuda and dst_bt.is_cuda):
+            # CPU path (unit tests): keep the reference semantics.
+            dst_bt[bs:].zero_()
+            dst_bt[:n_rows, :n_cols].copy_(src_bt[:n_rows, :n_cols])
+            if n_cols < max_cols:
+                dst_bt[:n_rows, n_cols:].zero_()
+            continue
+        grid = (dst_bt.shape[0], triton.cdiv(max_cols, 128))
+        _copy_pool_block_table_kernel[grid](
+            src_bt,
+            dst_bt,
+            bs,
+            n_rows,
+            n_cols,
+            max_cols,
+            src_bt.stride(0),
+            dst_bt.stride(0),
+            BLOCK=128,
+        )
     # start_pos
     start_pos_ptr,  # [bs] i32
     # per-pool block tables (i32, [B_max, BT_STRIDE_*])
