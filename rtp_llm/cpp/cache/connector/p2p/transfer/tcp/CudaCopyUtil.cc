@@ -2,9 +2,12 @@
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include <c10/core/DeviceGuard.h>
 #include <torch/torch.h>
 #include <cstring>
+#include <exception>
 #include <limits>
+#include <utility>
 
 namespace rtp_llm {
 namespace transfer {
@@ -18,10 +21,15 @@ static torch::Tensor wrapRawPtr(void* ptr, size_t size, torch::Device device) {
 static TransferErrorCode copyBlocks(const std::vector<CopyTask>& tasks,
                                     bool to_host,
                                     int64_t deadline_ms,
-                                    const std::function<bool()>& is_cancelled = {}) {
+                                    const std::function<bool()>& is_cancelled = {}) try {
     MultiCopyParams params;
     params.multi_src.reserve(tasks.size());
     params.multi_dst.reserve(tasks.size());
+#if USE_PPU
+    // Protobuf owns pageable strings. Keep DMA off those addresses; publish
+    // D2H payloads only after the entire batch has finished on its stream.
+    std::vector<std::pair<void*, torch::Tensor>> pending_host_writes;
+#endif
 
     for (const auto& task : tasks) {
         if (!task.src_ptr || !task.dst_ptr) {
@@ -37,8 +45,22 @@ static TransferErrorCode copyBlocks(const std::vector<CopyTask>& tasks,
         }
         const torch::Device gpu(torch::kCUDA, static_cast<c10::DeviceIndex>(task.device_index));
         const torch::Device cpu(torch::kCPU);
-        params.multi_src.push_back(wrapRawPtr(task.src_ptr, task.size, to_host ? gpu : cpu));
-        params.multi_dst.push_back(wrapRawPtr(task.dst_ptr, task.size, to_host ? cpu : gpu));
+        auto device_view = wrapRawPtr(to_host ? task.src_ptr : task.dst_ptr, task.size, gpu);
+#if USE_PPU
+        // Allocate under the KV owner's device, not the TCP worker's default.
+        const c10::DeviceGuard guard(device_view.device());
+        auto host_view = torch::empty(
+            {device_view.numel()}, torch::TensorOptions().dtype(torch::kUInt8).device(cpu).pinned_memory(true));
+        if (to_host) {
+            pending_host_writes.emplace_back(task.dst_ptr, host_view);
+        } else if (task.size) {
+            std::memcpy(host_view.data_ptr(), task.src_ptr, task.size);
+        }
+#else
+        auto host_view = wrapRawPtr(to_host ? task.dst_ptr : task.src_ptr, task.size, cpu);
+#endif
+        params.multi_src.push_back(to_host ? device_view : host_view);
+        params.multi_dst.push_back(to_host ? host_view : device_view);
     }
 
     if (is_cancelled && is_cancelled()) {
@@ -50,12 +72,24 @@ static TransferErrorCode copyBlocks(const std::vector<CopyTask>& tasks,
     if (!params.multi_src.empty()) {
         execNoBlockCopy(params);
     }
+#if USE_PPU
+    for (const auto& [destination, buffer] : pending_host_writes) {
+        if (buffer.nbytes()) {
+            std::memcpy(destination, buffer.data_ptr(), buffer.nbytes());
+        }
+    }
+#endif
     for (const auto& task : tasks) {
         if (!task.is_cuda) {
             std::memcpy(task.dst_ptr, task.src_ptr, task.size);
         }
     }
     return TransferErrorCode::OK;
+} catch (const std::exception& e) {
+    // Complete the transport request through its error callback. Letting a
+    // copy exception escape the Decode worker leaves its peer waiting.
+    RTP_LLM_LOG_WARNING("TCP %s copy failed: %s", to_host ? "D2H" : "H2D", e.what());
+    return TransferErrorCode::COPY_FAILED;
 }
 
 bool CudaCopyUtil::batchCopyToHost(std::vector<CopyTask>& tasks) {

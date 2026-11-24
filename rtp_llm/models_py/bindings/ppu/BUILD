@@ -56,11 +56,12 @@ cc_library(
 cc_test(
     name = "no_block_copy_test",
     visibility = ["//rtp_llm/test/smoke:__pkg__"],
-    srcs = ["NoBlockCopyTest.cc"],
+    srcs = ["NoBlockCopyTest.cc", "TcpPageableCopyTest.cc"],
     args = ["--gtest_filter=-PpuNoBlockCopyTest.CopiesBeyondFourGiBAllocationOffset"],
     copts = copts(),
     deps = [
         ":no_block_copy",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:cuda_copy_util",
         "//rtp_llm/models_py/bindings:no_block_copy_hdr",
         "@com_google_googletest//:gtest_main",
         "@local_config_cuda//cuda:cuda_headers",
