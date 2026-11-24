@@ -147,10 +147,19 @@ index f45d811..38efd79 100644
              state_indices_out.stride(0),
              num_accepted_tokens is not None,
 diff --git a/atom/model_ops/qwen4_exp/ops/qsa.py b/atom/model_ops/qwen4_exp/ops/qsa.py
-index 663171a..2a49752 100644
+index 663171a..652137e 100644
 --- a/atom/model_ops/qwen4_exp/ops/qsa.py
 +++ b/atom/model_ops/qwen4_exp/ops/qsa.py
-@@ -132,10 +132,13 @@ def _qsa_store_rows_fp8_kernel(
+@@ -23,6 +23,8 @@ Source provenance:
+   without changing the other model's implementation.
+ """
+ 
++import os
++
+ import torch
+ import triton
+ import triton.language as tl
+@@ -132,10 +134,13 @@ def _qsa_store_rows_fp8_kernel(
      scale_ptr,
      slots_ptr,
      values_ptr,
@@ -164,7 +173,7 @@ index 663171a..2a49752 100644
      stride_value_row,
      stride_value_head,
      second_cache_ptr,
-@@ -160,8 +163,10 @@ def _qsa_store_rows_fp8_kernel(
+@@ -160,8 +165,10 @@ def _qsa_store_rows_fp8_kernel(
      if not valid:
          return
      slot = slot.to(tl.int64)
@@ -177,7 +186,7 @@ index 663171a..2a49752 100644
      x = tl.load(
          values_ptr + row * stride_value_row + head * stride_value_head + dims,
          mask=dims < HEAD_DIM,
-@@ -274,8 +279,6 @@ def qsa_store_quantized_rows(
+@@ -274,8 +281,6 @@ def qsa_store_quantized_rows(
          raise ValueError("slots or heads disagree with the cache")
      if values.stride(-1) != 1 or cache.stride(-1) != 1:
          raise ValueError("quantized QSA rows must be contiguous in the head dim")
@@ -186,7 +195,7 @@ index 663171a..2a49752 100644
      if fmt == _FMT_FP8:
          if cache.shape[3] != head_dim:
              raise ValueError("values and FP8 cache disagree on head_dim")
-@@ -288,23 +291,26 @@ def qsa_store_quantized_rows(
+@@ -288,23 +293,26 @@ def qsa_store_quantized_rows(
          ):
              raise ValueError("the second FP8 tensor must mirror the first")
          _qsa_store_rows_fp8_kernel[(rows, heads)](
@@ -222,7 +231,7 @@ index 663171a..2a49752 100644
              HEAD_DIM=head_dim,
              BLOCK_D=triton.next_power_of_2(head_dim),
              FP8_MAX_C=FP8_MAX,
-@@ -312,6 +318,8 @@ def qsa_store_quantized_rows(
+@@ -312,6 +320,8 @@ def qsa_store_quantized_rows(
              num_warps=4,
          )
          return
@@ -231,7 +240,7 @@ index 663171a..2a49752 100644
      if second_cache is not None:
          raise ValueError("only the FP8 writer takes a second tensor")
      if cache.shape[3] * 2 != head_dim or head_dim % FP4_GROUP:
-@@ -661,7 +669,8 @@ def _qsa_store_rows_kernel(
+@@ -661,7 +671,8 @@ def _qsa_store_rows_kernel(
      cache_ptr,
      slots_ptr,
      values_ptr,
@@ -241,7 +250,7 @@ index 663171a..2a49752 100644
      stride_cache_head,
      stride_cache_dim,
      stride_value_row,
-@@ -669,6 +678,7 @@ def _qsa_store_rows_kernel(
+@@ -669,6 +680,7 @@ def _qsa_store_rows_kernel(
      stride_value_dim,
      num_rows,
      num_slots,
@@ -249,7 +258,7 @@ index 663171a..2a49752 100644
      NUM_HEADS: tl.constexpr,
      HEAD_DIM: tl.constexpr,
      BLOCK_D: tl.constexpr,
-@@ -694,7 +704,8 @@ def _qsa_store_rows_kernel(
+@@ -694,7 +706,8 @@ def _qsa_store_rows_kernel(
          cache_ptr
          # A physical slot times the per-slot stride overflows int32 well
          # inside a normal pool size, so widen before multiplying.
@@ -259,7 +268,7 @@ index 663171a..2a49752 100644
          + head * stride_cache_head
          + dims * stride_cache_dim,
          values,
-@@ -725,20 +736,21 @@ def qsa_store_rows(
+@@ -725,20 +738,21 @@ def qsa_store_rows(
      if slots.shape[0] < rows:
          raise ValueError("slot mapping is shorter than the value rows")
  
@@ -287,7 +296,7 @@ index 663171a..2a49752 100644
          NUM_HEADS=values.shape[1],
          HEAD_DIM=head_dim,
          BLOCK_D=triton.next_power_of_2(head_dim),
-@@ -945,6 +957,326 @@ def qsa_compress_groups(
+@@ -945,6 +959,391 @@ def qsa_compress_groups(
      return pooled, first_positions
  
  
@@ -505,6 +514,64 @@ index 663171a..2a49752 100644
 +    )
 +
 +
++
++def _enable_paired_verify_commit():
++    if not torch.version.hip or os.getenv("RTP_LLM_ROCM_QSA_PAIRED_COMMIT") != "1":
++        return False
++    from atom.plugin.prepare import is_rtpllm
++    return is_rtpllm()
++
++
++@triton.jit
++def _copy_verify_ring(Cache, Pages, Snapshot, PAGE_STRIDE: tl.constexpr,
++                      PAGE_ID_STRIDE: tl.constexpr, SIZE: tl.constexpr, PAGES: tl.constexpr):
++    request = tl.program_id(0)
++    offsets = tl.program_id(1) * 256 + tl.arange(0, 256)
++    page = tl.load(Pages + request * PAGE_ID_STRIDE).to(tl.int64)
++    if (page < 0) | (page >= PAGES):
++        tl.inline_asm_elementwise("s_trap 2 ; v_mov_b32 $0, 0", constraints="=v,v", args=[page.to(tl.int32)], dtype=tl.int32, is_pure=False, pack=1)
++    values = tl.load(Cache + page * PAGE_STRIDE + offsets, offsets < SIZE, 0)
++    tl.store(Snapshot + request * SIZE + offsets, values, offsets < SIZE)
++
++
++@triton.jit
++def _snapshot_verify_rings(A, AP, AS, B, BP, BS,
++                           SA: tl.constexpr, PA: tl.constexpr, NA: tl.constexpr,
++                           SB: tl.constexpr, PB: tl.constexpr, NB: tl.constexpr, AC: tl.constexpr, BC: tl.constexpr):
++    if tl.program_id(2) == 0:
++        _copy_verify_ring(A, AP, AS, SA, PA, NA, AC)
++    else:
++        _copy_verify_ring(B, BP, BS, SB, PB, NB, BC)
++
++
++@triton.jit
++def _commit_verify_rings(A, AS, AP, AV, B, BS, BP, BV, POS,
++                         a: tl.constexpr, b: tl.constexpr, Q: tl.constexpr, R: tl.constexpr):
++    if tl.program_id(2) == 0:
++        _qsa_commit_spec_state_ring_kernel(A, AS, AP, AV, POS, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], Q, R, a[8], a[9])
++    else:
++        _qsa_commit_spec_state_ring_kernel(B, BS, BP, BV, POS, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], Q, R, b[8], b[9])
++
++
++def _commit_paired_rings(keys, kp, kc, kv, coords, cp, cc, cv, positions):
++    requests, query = kc.shape
++    ring = keys.shape[1]
++    def snapshot(cache):
++        return cache.new_empty((requests, *cache.shape[1:]))
++    ks, cs = snapshot(keys), snapshot(coords)
++    kn, cn = ks.stride(0), cs.stride(0)
++    _snapshot_verify_rings[(requests, triton.cdiv(max(kn, cn), 256), 2)](
++        keys, kp, ks, coords, cp, cs, keys.stride(0), kp.stride(0), kn,
++        coords.stride(0), cp.stride(0), cn, keys.shape[0], coords.shape[0])
++    def strides(cache, source, candidate, values):
++        width = values.shape[-1]
++        return (cache.stride(0), cache.stride(1), *candidate.stride(),
++                source.stride(0), source.stride(1), values.stride(0),
++                values.stride(2), width, triton.next_power_of_2(width))
++    _commit_verify_rings[(requests, query, 2)](keys, ks, kc, kv, coords, cs, cc, cv,
++        positions, strides(keys, ks, kc, kv), strides(coords, cs, cc, cv), query, ring)
++
++
 +def qsa_compress_state_ring(
 +    raw_keys: torch.Tensor,
 +    state_cache: torch.Tensor,
@@ -605,6 +672,13 @@ index 663171a..2a49752 100644
 +                    BLOCK_D=triton.next_power_of_2(width), num_warps=4,
 +                )
 +
++        if (speculative and has_coordinates and state_cache.is_contiguous()
++                and position_cache.is_contiguous() and state_read_pages.ndim == position_read_pages.ndim == 1
++                and _enable_paired_verify_commit()):
++            _commit_paired_rings(state_cache, state_read_pages, state_candidate_pages, raw_keys,
++                                 position_cache, position_read_pages, position_candidate_pages, positions,
++                                 logical_positions)
++            return pooled, first_positions
 +        commit(raw_keys, state_cache, state_slots, state_read_pages, state_candidate_pages)
 +        if has_coordinates:
 +            commit(positions, position_cache, position_slots, position_read_pages, position_candidate_pages)
