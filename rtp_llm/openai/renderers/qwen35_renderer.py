@@ -53,6 +53,7 @@ class Qwen35Renderer(Qwen3CoderRenderer, Qwen2VLRenderer):
                 and hasattr(hf.backend_tokenizer, "encode_batch_fast")
             ):
                 self._prompt_backend = hf.backend_tokenizer
+                self.render_chat_in_thread = True
         self.extra_stop_word_ids_list = [
             stop_word_ids
             for stop_word_ids in self.extra_stop_word_ids_list
