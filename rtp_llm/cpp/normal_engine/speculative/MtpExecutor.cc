@@ -3462,7 +3462,12 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
             if (gpu_val.defined() && gpu_val.is_cuda()) {
                 prev_slices.push_back(gpu_val.reshape({1}));
             } else {
+#if defined(USE_PPU) && USE_PPU
+                // PPU: a pageable host-to-device scalar copy synchronizes the stream.
+                prev_slices.push_back(torch::full({1}, static_cast<int32_t>(stream->seqLength()), cuda_i32));
+#else
                 prev_slices.push_back(torch::tensor({static_cast<int32_t>(stream->seqLength())}, cuda_i32));
+#endif
             }
         }
         prev_seq_len_all = torch::cat(prev_slices, 0);
