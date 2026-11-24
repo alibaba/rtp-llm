@@ -82,6 +82,7 @@ def _layout_owner(
         head_dim=512,
         index_head_dim=128,
         index_n_heads=32,
+        _indexer_mode="fp4",  # The fixture owns the original 68-byte FP4 pages.
         rope_head_dim=64,
         eps=1e-6,
         layer_id=2 if ratio == 2 else 20,
