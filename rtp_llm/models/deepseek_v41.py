@@ -108,9 +108,6 @@ class DeepSeekV41(DeepSeekV4):
         config.mm_model_config.is_multimodal = True
         image_token_id = int(raw["image_token_id"])
         config.mm_model_config.mm_sep_tokens = [[image_token_id]]
-        # The generic multimodal path keeps feature hashes for KV-cache identity.
-        # Model/history readers must still see the checkpoint's image token.
-        config.mm_model_config.semantic_mm_token_id = image_token_id
         config.mm_related_params.special_tokens["default_mm_token"] = (
             "<\uff5cdeepseek_image\uff5c>"
         )

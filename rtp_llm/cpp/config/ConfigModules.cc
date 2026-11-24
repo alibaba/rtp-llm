@@ -457,7 +457,6 @@ std::string GrammarConfig::to_string() const {
 std::string RuntimeConfig::to_string() const {
     std::ostringstream oss;
     oss << "max_generate_batch_size: " << max_generate_batch_size << "\n"
-        << "max_block_size_per_item: " << max_block_size_per_item << "\n"
         << "reserve_runtime_mem_mb: " << reserve_runtime_mem_mb << "\n"
         << "warm_up: " << warm_up << "\n"
         << "warm_up_with_loss: " << warm_up_with_loss << "\n"

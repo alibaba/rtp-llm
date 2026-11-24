@@ -455,9 +455,6 @@ class VitConfig:
 
     def __init__(self):
         self.vit_separation: VitSeparation = VitSeparation.VIT_SEPARATION_LOCAL
-        self.vit_trt: int = 0
-        self.trt_cache_enabled: int = 0
-        self.trt_cache_path: Optional[str] = None
         self.download_headers: str = ""
         self.enable_oss_internal_endpoint_rewrite: bool = True
         self.mm_image_max_file_size_kb: int = (
@@ -487,7 +484,6 @@ class VitConfig:
         self.vit_concurrency: int = 64
         self.vit_max_queue_size: int = 64
         self.biencoder_preprocess: bool = False
-        self.extra_input_in_mm_embedding = ""
         self.mm_timeout_ms: int = VitConfig.DEFAULT_MM_TIMEOUT_MS
         self.extra_data_path: str = ""
         self.local_extra_data_path: str = ""
@@ -549,9 +545,6 @@ class VitConfig:
         rdma = transport.rdma
         return (
             f"vit_separation: {self.vit_separation}\n"
-            f"vit_trt: {self.vit_trt}\n"
-            f"trt_cache_enabled: {self.trt_cache_enabled}\n"
-            f"trt_cache_path: {self.trt_cache_path}\n"
             f"download_headers: {self.download_headers}\n"
             "enable_oss_internal_endpoint_rewrite: "
             f"{self.enable_oss_internal_endpoint_rewrite}\n"
@@ -576,7 +569,6 @@ class VitConfig:
             f"vit_concurrency: {self.vit_concurrency}\n"
             f"vit_max_queue_size: {self.vit_max_queue_size}\n"
             f"biencoder_preprocess: {self.biencoder_preprocess}\n"
-            f"extra_input_in_mm_embedding: {self.extra_input_in_mm_embedding}\n"
             f"mm_timeout_ms: {self.mm_timeout_ms}\n"
             f"extra_data_path: {self.extra_data_path}\n"
             f"local_extra_data_path: {self.local_extra_data_path}\n"

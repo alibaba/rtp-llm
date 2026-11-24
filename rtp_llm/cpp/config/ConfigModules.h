@@ -542,7 +542,6 @@ struct GrammarConfig {
 struct RuntimeConfig {
     int64_t max_generate_batch_size = 1;
 
-    int64_t max_block_size_per_item = 16;
 
     int64_t reserve_runtime_mem_mb = 0;
     bool    warm_up                = false;

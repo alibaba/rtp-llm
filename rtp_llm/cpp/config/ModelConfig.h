@@ -38,9 +38,6 @@ public:
     bool                              is_multimodal      = false;
     std::vector<std::vector<int64_t>> mm_sep_tokens      = {};
     bool                              include_sep_tokens = false;
-    // Model-only ID for non-text prompt rows; raw feature hashes remain KV-cache keys.
-    // Disabled for all existing models unless explicitly configured.
-    int64_t semantic_mm_token_id  = -1;
     int64_t mm_padding_size       = 0;
     int64_t mm_position_ids_style = 0;  // 0 for default; 1 for chatglm4v; 2 for qwen2 vl
 };
