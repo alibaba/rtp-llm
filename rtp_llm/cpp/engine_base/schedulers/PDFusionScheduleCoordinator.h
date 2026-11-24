@@ -1,9 +1,14 @@
 #pragma once
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <string>
 namespace rtp_llm {
+inline constexpr int kPDFusionMaxRanks = 32;
+bool                 isPDFusionCadenceRankCount(int64_t rank_count);
+
 struct PDFusionPreparedState {
     int64_t ready_prefill = 0, ready_decode = 0, input_tokens = 0;
     int64_t oldest_ready_us = 0, decode_unserved_us = 0;
@@ -11,6 +16,8 @@ struct PDFusionPreparedState {
     int64_t last_model_us = 0;
     int64_t draining      = 0;
 };
+using PDFusionRankStates = std::array<PDFusionPreparedState, kPDFusionMaxRanks>;
+
 enum class PDFusionPlan : int64_t {
     IDLE    = 0,
     PREFILL = 1,
@@ -27,7 +34,7 @@ struct PDFusionCadenceConfig {
     bool    operator==(const PDFusionCadenceConfig& other) const;
 };
 struct PDFusionCadenceDecision {
-    std::array<int64_t, 4> decode_peak{};
+    std::array<int64_t, kPDFusionMaxRanks> decode_peak{};
     int64_t                low_decode_mask = 0, drain_mask = 0;
     int64_t                decode_debt_us = 0, last_model_us = 0;
     int64_t                debt_before_scaled = 0, debt_after_scaled = 0, charged_plan = 0, admit_before = 1;
@@ -37,9 +44,9 @@ struct PDFusionCadenceDecision {
 class PDFusionGlobalCadence {
 public:
     explicit PDFusionGlobalCadence(int64_t decode_steps, int rank_count = 4, PDFusionCadenceConfig config = {});
-    PDFusionPlan                   choose(const std::array<PDFusionPreparedState, 4>& states);
+    PDFusionPlan                   choose(const PDFusionRankStates& states);
     void                           finish(PDFusionPlan plan, int64_t committed_real_count);
-    void                           finish(PDFusionPlan plan, const std::array<PDFusionPreparedState, 4>& committed);
+    void                           finish(PDFusionPlan plan, const PDFusionRankStates& committed);
     const PDFusionCadenceDecision& decision() const {
         return decision_;
     }
@@ -57,16 +64,18 @@ private:
     int                                rank_count_;
     PDFusionCadenceConfig              config_;
     PDFusionCadenceDecision            decision_;
-    std::deque<std::array<int64_t, 4>> decode_history_;
+    std::deque<std::array<int64_t, kPDFusionMaxRanks>> decode_history_;
     int64_t                            decode_debt_scaled_      = 0;
     int64_t                            admission_credit_scaled_ = 0;
     PDFusionPlan                       completed_plan_          = PDFusionPlan::IDLE;
     bool                               awaiting_model_cost_ = false, admit_prefill_ = true;
 };
-// Single-host two/four-rank dedicated control channel. Never call under a scheduler lock.
+// Dedicated control channel. Never call under a scheduler lock.
 // Any exception requires whole-run failure, never fallback to local scheduling.
 class PDFusionScheduleCoordinator {
 public:
+    using AllGather = std::function<void(void* input, void* output, size_t bytes_per_rank, int timeout_ms)>;
+
     enum class Phase : int64_t {
         PREPARE = 1,
         COMMIT  = 2
@@ -78,23 +87,24 @@ public:
                                 int                   startup_timeout_ms = 300000,
                                 int                   rank_count         = 4,
                                 int                   mtp_tokens         = 0,
-                                PDFusionCadenceConfig cadence_config     = {});
+                                PDFusionCadenceConfig cadence_config     = {},
+                                AllGather             all_gather         = {});
     ~PDFusionScheduleCoordinator();
     PDFusionScheduleCoordinator(const PDFusionScheduleCoordinator&)                    = delete;
     PDFusionScheduleCoordinator&         operator=(const PDFusionScheduleCoordinator&) = delete;
-    std::array<PDFusionPreparedState, 4> exchange(int64_t epoch, Phase phase, const PDFusionPreparedState& state);
+    PDFusionRankStates                   exchange(int64_t epoch, Phase phase, const PDFusionPreparedState& state);
     void                                 abort() noexcept;
 
 private:
     struct Packet {
-        uint64_t              magic = 0x455044434f4f5237ULL;
+        uint64_t              magic = 0x455044434f4f5238ULL;
         int64_t               rank = 0, epoch = 0, phase = 0, decode_steps = 0;
         int64_t               rank_count = 4, mtp_tokens = 0;
         PDFusionCadenceConfig cadence_config;
         char                  group_id[64] = {};
         PDFusionPreparedState state;
     };
-    using Packets  = std::array<Packet, 4>;
+    using Packets  = std::array<Packet, kPDFusionMaxRanks>;
     using Deadline = int64_t;
     void                  connectGroup(int startup_timeout_ms);
     Packet                packet(int64_t epoch, int64_t phase, const PDFusionPreparedState& state) const;
@@ -110,8 +120,9 @@ private:
     int64_t               decode_steps_;
     PDFusionCadenceConfig cadence_config_;
     int                   timeout_ms_;
+    AllGather                          all_gather_;
     int                   listener_ = -1;
-    std::array<int, 4>    sockets_{{-1, -1, -1, -1}};
+    std::array<int, kPDFusionMaxRanks> sockets_;
     int64_t               last_epoch_ = 0;
     Phase                 next_phase_ = Phase::PREPARE;
     bool                  failed_     = false;

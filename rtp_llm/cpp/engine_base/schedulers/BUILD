@@ -1,4 +1,5 @@
 load("//:def.bzl", "copts")
+load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
     name = "pdfusion_schedule_coordinator",
@@ -22,6 +23,6 @@ cc_library(
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/models:context_parallel_layout",
         "//rtp_llm/cpp/utils:profiling_scope",
-    ],
+    ] + torch_deps(),
     visibility = ["//visibility:public"],
 )

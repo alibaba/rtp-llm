@@ -346,15 +346,14 @@ void NormalEngine::initScheduler() {
     if (cadence_config.usesCoordinator(fifo.pdfusion_coord_mode, fifo.pdfusion_scheduler_mode)) {
         RTP_LLM_CHECK_WITH_INFO(
             pd_sep_config.role_type == RoleType::PDFUSION && parallelism_config.tp_size == 1
-                && (parallelism_config.dp_size == 2 || parallelism_config.dp_size == 4)
+                && isPDFusionCadenceRankCount(parallelism_config.dp_size)
                 && parallelism_config.ep_size == parallelism_config.dp_size && parallelism_config.pp_size == 1
                 && parallelism_config.world_size == parallelism_config.dp_size
-                && parallelism_config.local_world_size == parallelism_config.dp_size
                 && !parallelism_config.prefill_cp_config.is_enabled()
                 && (!propose_params_ || (isMTPEagle() && !isDSpark()))
                 && !runtime_config.use_batch_decode_scheduler && fifo.prefill_chunk_size == 0
                 && !deviceInputEnabled(),
-            "global cadence requires single-host synchronous TP1/DP2/EP2 or TP1/DP4/EP4 PDFUSION without chunked prefill");
+            "global cadence requires synchronous TP1/PP1 PDFUSION with DP=EP in {2,4,8,16,32} and no chunked prefill");
         auto* normal = dynamic_cast<NormalExecutor*>(executor_.get());
         auto* mtp    = dynamic_cast<MtpExecutor*>(executor_.get());
         RTP_LLM_CHECK_WITH_INFO(

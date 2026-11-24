@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Optional
 from rtp_llm.access_logger.access_logger import AccessLogger
 from rtp_llm.config.engine_config import EngineConfig, update_worker_addrs
 from rtp_llm.config.log_config import get_log_path
+from rtp_llm.config.pdfusion_coordination import initialize_pdfusion_control_group
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.distribute.distributed_server import DistributedServer, get_world_info
 from rtp_llm.metrics import kmonitor
@@ -60,6 +61,7 @@ class BackendManager(object):
                 collective_config=engine_config.collective_config,
                 timeout=self.py_env_configs.distribute_config.dist_comm_timeout,
             )
+            initialize_pdfusion_control_group(self.py_env_configs)
         world_info = get_world_info(
             self.py_env_configs.server_config,
             self.py_env_configs.distribute_config,

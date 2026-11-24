@@ -459,7 +459,7 @@ def main():
     parser.add_argument("log", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--ranks", type=int, choices=(2, 4), default=4)
+    parser.add_argument("--ranks", type=int, choices=(2, 4, 8, 16, 32), default=4)
     parser.add_argument("--steady-summary", type=Path)
     parser.add_argument("--allow-drain-tail", action="store_true")
     parser.add_argument(

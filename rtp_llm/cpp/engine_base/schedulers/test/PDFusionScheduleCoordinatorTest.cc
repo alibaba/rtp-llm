@@ -58,8 +58,8 @@ uint64_t runRank(int rank, const std::string& id, const std::string& scenario, i
         rank,
         scenario == "adaptive_legacy_ratio_ignored" ? rank - 1 :
                                                       (scenario == "mismatch" && rank == rank_count - 1 ? 3 : 2),
-        150,
-        600,
+        rank_count > 4 ? 2000 : 150,
+        rank_count > 4 ? 3000 : 600,
         scenario == "rank_count_mismatch" && rank == rank_count - 1 ? (rank_count == 2 ? 4 : 2) : rank_count,
         scenario == "mtp_mismatch" && rank == rank_count - 1 ? (mtp_tokens + 1) % 5 : mtp_tokens,
         peer_config);
@@ -108,7 +108,7 @@ uint64_t runRank(int rank, const std::string& id, const std::string& scenario, i
                                        state);
         auto plan = cadence.choose(states);
         if (scenario == "adaptive_drain" && epoch >= 51) {
-            if (cadence.decision().drain_mask != (1 << (rank_count - 1))
+            if (cadence.decision().drain_mask != (int64_t{1} << (rank_count - 1))
                 || (epoch % 5 == 1 && plan != PDFusionPlan::PREFILL)) {
                 throw std::runtime_error("drain signal failed cross-rank propagation");
             }
@@ -210,6 +210,13 @@ void exercise(const std::string& scenario, bool success, int rank_count = 4, int
 TEST(PDFusionScheduleCoordinatorTest, FourRankPlanAndCancellationAgreement) {
     exercise("normal", true);
 }
+TEST(PDFusionScheduleCoordinatorTest, LargeGroupsAgreeOnLegacyAndAdaptivePlans) {
+    for (int ranks : {8, 16, 32}) {
+        SCOPED_TRACE(ranks);
+        exercise("normal", true, ranks, 4);
+        exercise("adaptive_drain", true, ranks, 4);
+    }
+}
 TEST(PDFusionScheduleCoordinatorTest, AdaptiveUnevenBatchesAndPartialCancellationAgreement) {
     for (int ranks : {2, 4}) {
         for (int width = 0; width <= 4; ++width) {
@@ -243,7 +250,7 @@ TEST(PDFusionScheduleCoordinatorTest, FailuresCloseTheGroup) {
 }
 TEST(PDFusionScheduleCoordinatorTest, GlobalCadenceDoesNotStarveReadyWhenNoDecode) {
     PDFusionGlobalCadence                cadence(16);
-    std::array<PDFusionPreparedState, 4> states{};
+    PDFusionRankStates                   states{};
     EXPECT_EQ(cadence.choose(states), PDFusionPlan::IDLE);
     states[0].waiting = 1;
     states[0].loading = 1;
@@ -295,14 +302,14 @@ TEST(PDFusionScheduleCoordinatorTest, InvalidRankCountAndMtpWidthFailBeforeConne
 PDFusionCadenceConfig adaptiveConfig(int64_t window = 64) {
     return {1, window, 50, 1000};
 }
-std::array<PDFusionPreparedState, 4> decodeStates(int64_t count) {
-    std::array<PDFusionPreparedState, 4> states{};
+PDFusionRankStates decodeStates(int64_t count) {
+    PDFusionRankStates states{};
     for (auto& state : states)
         state.ready_decode = count;
     return states;
 }
 TEST(PDFusionScheduleCoordinatorTest, AdaptiveAllReadyBypassesRatioAndUsesActiveRanks) {
-    for (int ranks : {2, 4}) {
+    for (int ranks : {2, 4, 8, 16, 32}) {
         PDFusionGlobalCadence cadence(1000000, ranks, adaptiveConfig());
         cadence.finish(PDFusionPlan::PREFILL, 1);
         auto states = decodeStates(128);
@@ -313,6 +320,27 @@ TEST(PDFusionScheduleCoordinatorTest, AdaptiveAllReadyBypassesRatioAndUsesActive
         EXPECT_EQ(cadence.decision().low_decode_mask, 0);
         EXPECT_EQ(cadence.choose(states), PDFusionPlan::PREFILL);
     }
+}
+TEST(PDFusionScheduleCoordinatorTest, AdaptiveTracksDecodeHistoryAndDrainOnRank31) {
+    PDFusionGlobalCadence cadence(7, 32, adaptiveConfig());
+    auto                  states = decodeStates(128);
+    EXPECT_EQ(cadence.choose(states), PDFusionPlan::DECODE);
+    auto committed             = states;
+    committed[31].ready_decode = 64;
+    cadence.finish(PDFusionPlan::DECODE, committed);
+
+    states[0].ready_prefill = 1;
+    states[31].ready_decode = 32;
+    EXPECT_EQ(cadence.choose(states), PDFusionPlan::PREFILL);
+    EXPECT_STREQ(cadence.decision().reason, "decode_low");
+    EXPECT_EQ(cadence.decision().decode_peak[31], 64);
+    EXPECT_EQ(cadence.decision().low_decode_mask, int64_t{1} << 31);
+
+    states[31].ready_decode = 33;
+    states[31].draining     = 1;
+    EXPECT_EQ(cadence.choose(states), PDFusionPlan::PREFILL);
+    EXPECT_STREQ(cadence.decision().reason, "drain");
+    EXPECT_EQ(cadence.decision().drain_mask, int64_t{1} << 31);
 }
 TEST(PDFusionScheduleCoordinatorTest, AdaptivePartialPrefillAccumulatesBeyondRatio) {
     PDFusionGlobalCadence cadence(7, 4, adaptiveConfig());
@@ -422,7 +450,7 @@ TEST(PDFusionScheduleCoordinatorTest, AdaptiveWindowCountsCompletedRealDecodeAnd
     low[0].ready_prefill = 1;
     EXPECT_EQ(cadence.choose(low), PDFusionPlan::PREFILL);
     EXPECT_EQ(cadence.decision().decode_peak[0], 128);
-    std::array<PDFusionPreparedState, 4> cancelled{};
+    PDFusionRankStates cancelled{};
     cadence.finish(PDFusionPlan::DECODE, cancelled);
     cancelled[0].ready_prefill = 1;
     cadence.finish(PDFusionPlan::PREFILL, cancelled);
@@ -510,7 +538,7 @@ TEST(PDFusionScheduleCoordinatorTest, AdaptiveRankAgreementMtpAndConfigurationMi
 
 TEST(PDFusionScheduleCoordinatorTest, AdaptiveMultipleRequestsChargeOneGlobalModelDuration) {
     PDFusionGlobalCadence                cadence(1, 4, adaptiveConfig());
-    std::array<PDFusionPreparedState, 4> committed{};
+    PDFusionRankStates                   committed{};
     committed[0].ready_prefill = 3;
     committed[1].ready_prefill = 2;
     committed[3].ready_prefill = 4;
@@ -530,7 +558,7 @@ TEST(PDFusionScheduleCoordinatorTest, AdaptiveAdmissionPacingRepaysActualGlobalC
     for (int ranks : {2, 4}) {
         PDFusionGlobalCadence cadence(1000000, ranks, adaptiveConfig());
         auto                  states  = decodeStates(128);
-        auto                  prefill = std::array<PDFusionPreparedState, 4>{};
+        auto                  prefill = PDFusionRankStates{};
         for (int i = 0; i < ranks; ++i)
             prefill[i].ready_prefill = 1;
         cadence.finish(PDFusionPlan::PREFILL, prefill);
@@ -566,7 +594,7 @@ TEST(PDFusionScheduleCoordinatorTest, AdmissionLookaheadIsOneGlobalDecodeQuantum
     for (int ranks : {2, 4}) {
         PDFusionGlobalCadence                cadence(7, ranks, adaptiveConfig());
         auto                                 states = decodeStates(128);
-        std::array<PDFusionPreparedState, 4> prefill{};
+        PDFusionRankStates                   prefill{};
         for (int i = 0; i < ranks; ++i)
             prefill[i].ready_prefill = 1;
         cadence.finish(PDFusionPlan::PREFILL, prefill);
@@ -615,7 +643,7 @@ TEST(PDFusionScheduleCoordinatorTest, AdaptiveAdmissionBudgetDoesNotBankIdleOrCo
         cadence.finish(PDFusionPlan::DECODE, states);
         cadence.choose(states);
     }
-    auto prefill             = std::array<PDFusionPreparedState, 4>{};
+    auto prefill             = PDFusionRankStates{};
     prefill[0].ready_prefill = 1;  // Matching fakes still execute the same global round.
     cadence.finish(PDFusionPlan::PREFILL, prefill);
     for (auto& s : states)
