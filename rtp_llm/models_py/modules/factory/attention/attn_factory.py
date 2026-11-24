@@ -245,6 +245,22 @@ def get_fmha_impl(
     # Set is_cuda_graph as dynamic attribute on attn_inputs for base class to read
     attn_inputs.is_cuda_graph = is_cuda_graph
 
+    if (
+        get_device_type() == DeviceType.ROCm
+        and fmha_config is not None
+        and fmha_config.use_asm_pa
+        and not fmha_config.use_triton_pa
+    ):
+        # The ASM decode kernel corrupts softmax at block-boundary KV lengths in
+        # both eager and CUDA-graph replay. The seq-driven Triton decode kernel
+        # reads the same ASM KV layout and is correct in both modes, so route all
+        # decode to it whenever ASM PA is configured (mirrors USE_TRITON_PA=1).
+        # Eager prefill selection is unchanged; only the decode backend differs.
+        effective_fmha_config = FMHAConfig()
+        effective_fmha_config.__setstate__(fmha_config.__getstate__())
+        effective_fmha_config.use_triton_pa = True
+        fmha_config = effective_fmha_config
+
     mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
     strict_impl_selection = False
     if get_device_type() == DeviceType.ROCm:
