@@ -702,7 +702,8 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
 
 absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&     model_input,
                                                              const StreamGroups& stream_groups,
-                                                             TensorHolder&       host_holder) const {
+                                                             TensorHolder&       host_holder,
+                                                             bool                device_input) const {
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_context_streams");
     std::vector<torch::Tensor> gathered_mm_features;
     std::vector<torch::Tensor> gathered_mm_extra_input;
@@ -835,7 +836,7 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
         model_input.mm_features_locs  = model_input.mm_features_locs.slice(0, 0, ctx.mm_feature_index);
         model_input.mm_features_spans = model_input.mm_features_spans.slice(0, 0, ctx.mm_feature_index);
     }
-    model_input.prefix_lengths = deviceInputEnabled() && !stream_groups.normalDecodeLookahead() ?
+    model_input.prefix_lengths = device_input && !stream_groups.normalDecodeLookahead() ?
                                      publishInt32ToCuda(prefix_lengths_host, host_holder) :
                                      prefix_lengths_host;
     if (model_input.custom_output_indexes.defined()) {
@@ -998,11 +999,16 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     }
     initializeKvCacheMetadata(model_input);
     RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups));
-    RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups, host_holder));
+    // Qwen4 eager prefill uses the host lengths and page tables to plan QSA.
+    // PyWrappedModel stages their device views in its existing fused copy.
+    const bool device_input =
+        deviceInputEnabled()
+        && !(config_.keep_prefill_metadata_on_host && !context_streams.empty() && decode_streams.empty());
+    RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups, host_holder, device_input));
     // No host mirrors are kept for ModelInputsLogger: it snapshots every tensor
     // in place (device-side clone + per-device c10::Event) and only pays the D2H
     // on its own worker thread, so it reads post-publish CUDA members directly.
-    if (deviceInputEnabled()) {
+    if (device_input) {
         if (!stream_groups.normalDecodeLookahead()) {
             publishModelInputCoreTensorsToCuda(model_input, host_holder);
         }

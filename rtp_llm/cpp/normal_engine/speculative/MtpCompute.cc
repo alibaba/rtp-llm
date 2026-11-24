@@ -352,7 +352,8 @@ void prepareDraftPrefillAfterTargetPrefill(GptModelInputs&      draft_input,
                                            const torch::Tensor& sampled_token_ids,
                                            const torch::Tensor& next_position_ids,
                                            size_t               position_id_len_factor,
-                                           TensorHolder&        host_holder) {
+                                           TensorHolder&        host_holder,
+                                           bool                 keep_host_metadata) {
     draft_input.last_hidden_states = target_hidden_states;
     const auto& new_all_token_ids  = sampled_token_ids;
 
@@ -400,10 +401,11 @@ void prepareDraftPrefillAfterTargetPrefill(GptModelInputs&      draft_input,
         offset += input_length;
     }
 
-    /** Keep draft-prefill lengths on the same device even when RTP_LLM_DEVICE_INPUT is disabled. */
-    draft_input.input_lengths  = toCudaInt32(input_lengths_cpu, host_holder);
-    draft_input.prefix_lengths = toCudaInt32(draft_input.prefix_lengths, host_holder);
-    draft_input.combo_tokens   = toCudaInt32(combo_tokens_cpu, host_holder);
+    if (!keep_host_metadata) {
+        draft_input.input_lengths  = toCudaInt32(input_lengths_cpu, host_holder);
+        draft_input.prefix_lengths = toCudaInt32(draft_input.prefix_lengths, host_holder);
+    }
+    draft_input.combo_tokens = toCudaInt32(combo_tokens_cpu, host_holder);
 }
 
 void prepareDraftPrefillAfterVerify(GptModelInputs&                              model_input,

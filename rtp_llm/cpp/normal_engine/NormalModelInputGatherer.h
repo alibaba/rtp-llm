@@ -23,6 +23,7 @@ struct NormalModelInputGathererConfig {
     bool                        has_positional_encoding{};
     bool                        is_multimodal{};
     bool                        has_engram{};
+    bool                        keep_prefill_metadata_on_host{};
     PositionIdsStyle            mm_position_ids_style{};
     size_t                      position_id_len_factor{};
     RoleType                    role_type{};
@@ -65,7 +66,8 @@ private:
     absl::Status   processDecodeStreams(GptModelInputs& model_input, const StreamGroups& stream_groups) const;
     absl::Status   processContextStreams(GptModelInputs&     model_input,
                                          const StreamGroups& stream_groups,
-                                         TensorHolder&       host_holder) const;
+                                         TensorHolder&       host_holder,
+                                         bool                device_input) const;
 
     NormalModelInputGathererConfig config_;
 };

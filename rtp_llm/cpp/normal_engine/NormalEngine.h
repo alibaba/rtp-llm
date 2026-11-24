@@ -108,6 +108,7 @@ private:
     int                                           reserve_step_ = 0;
     int64_t                                       trace_control_epoch_ = 0;
     int64_t                                       trace_model_step_id_ = 0;
+    bool                                          mtp_profile_prefill_started_ = false;
 };
 
 }  // namespace rtp_llm

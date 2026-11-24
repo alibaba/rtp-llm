@@ -54,7 +54,8 @@ void prepareDraftPrefillAfterTargetPrefill(GptModelInputs&      draft_input,
                                            const torch::Tensor& sampled_token_ids,
                                            const torch::Tensor& next_position_ids,
                                            size_t               position_id_len_factor,
-                                           TensorHolder&        host_holder);
+                                           TensorHolder&        host_holder,
+                                           bool                 keep_host_metadata = false);
 
 /** Prepare draft KV prefill for tokens accepted by target verification.
  * accept_tokens: [batch_size, propose_step + 1]; accept_len includes any retained correction/bonus token.
