@@ -338,6 +338,8 @@ def fused_copy_pool_block_tables(meta, paged_block_tables, bs: int) -> None:
             dst_bt.stride(0),
             BLOCK=128,
         )
+@triton.jit
+def _fused_phase2b_pool_slot_mapping_kernel(
     # start_pos
     start_pos_ptr,  # [bs] i32
     # per-pool block tables (i32, [B_max, BT_STRIDE_*])
