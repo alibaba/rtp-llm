@@ -206,6 +206,24 @@ class Qwen4ExpAttention(Qwen3NextAttention):
         )
 
         batch_invariant = getattr(self.qsa_indexer, "batch_invariant", False)
+        raw_query = raw_query or (
+            not batch_invariant
+            and use_fused_indexer_prep()
+            and type(qsa_runtime) is Qwen4ExpQSARuntimeContext
+            and type(self.qsa_indexer) is Qwen4ExpQSAIndexer
+            and qsa_runtime.main_inputs.is_cuda_graph
+            and qsa_runtime.main_inputs.is_target_verify
+            and qsa_runtime.main_inputs.prefix_lengths_device.numel() == 1
+            and (self.qsa_indexer.n_heads, self.qsa_indexer.head_dim) == (8, 128)
+            and hidden_states.is_cuda
+            and torch.version.hip is None
+            and hidden_states.dtype == torch.bfloat16
+            and torch.cuda.get_device_capability(hidden_states.device) == (10, 3)
+            and not any(
+                name in self.qsa_indexer.__dict__
+                for name in ("project", "project_raw", "split_projected")
+            )
+        )
         fused_query = (
             not batch_invariant
             and use_fused_indexer_prep()

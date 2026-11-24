@@ -7,11 +7,17 @@ from typing import Any
 
 import torch
 
+from rtp_llm.models_py.modules.qwen4_exp.qsa.flashinfer_indexer import (
+    prepare_flashinfer_decode_selection,
+    try_flashinfer_decode_selection,
+    use_flashinfer_indexer,
+)
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     apply_partial_rope,
     build_qsa_rope_from_logical_positions,
 )
 
+from .qsa_position_state import _TargetPositionGeometry
 from .qsa_selection import select_qsa_paged_tokens
 
 
@@ -65,14 +71,15 @@ def select_target_verify_tokens(
             "qwen4_exp QSA target-verify paged scoring requires CUDA tensors"
         )
 
-    flat_query_positions = plan.query_positions
-    block_starts = plan.block_starts
-    if flat_query_positions is None or block_starts is None:
-        query_positions = plan.visible_lengths - 1
-        flat_query_positions = query_positions.reshape(-1).to(torch.int64)
-        block_starts = flat_query_positions - flat_query_positions.remainder(ratio)
     get_frequency = getattr(indexer, "rope_inv_freq", None)
-    frequency = get_frequency(rope_config) if callable(get_frequency) else None
+    fused_rope = raw_query and torch.cuda.get_device_capability(q.device) == (10, 3)
+    frequency = None
+    if callable(get_frequency):
+        frequency = (
+            get_frequency(rope_config, fused_prep=True)
+            if fused_rope
+            else get_frequency(rope_config)
+        )
     target_writer = True
     target_writer = target_writer and (
         1 <= query_len <= ratio == 4
@@ -85,6 +92,67 @@ def select_target_verify_tokens(
     rotated_q = None
     prepared = None
     position_state = self.positions(ratio)
+    if (
+        fused_rope
+        and target_writer
+        and batch_size == 1
+        and token_budget == 2048
+        and position_state is not None
+        and isinstance(position_state.geometry, _TargetPositionGeometry)
+        and use_flashinfer_indexer()
+    ):
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode import (
+            try_prepare_fused_target_decode,
+        )
+
+        geom = position_state.geometry
+        recipe = prepare_flashinfer_decode_selection(
+            q, plan.kv_pool, plan.kv_table, query_len=query_len
+        )
+        if recipe is not None:
+            if self._side_cache_undo is not None or position_state.staged:
+                raise RuntimeError(
+                    "qwen4_exp QSA side-cache transaction is already active"
+                )
+            fused = try_prepare_fused_target_decode(
+                q,
+                raw_keys,
+                plan.prefixes,
+                geom.positions,
+                indexer.q_norm_gamma,
+                indexer.k_norm_gamma,
+                frequency,
+                plan.state_pool,
+                plan.state_table,
+                plan.kv_pool,
+                plan.kv_table,
+                position_state.pool,
+                plan.visible_lengths,
+                geom.undo_slots,
+                geom.history_slots,
+                geom.current_rows,
+                norm_eps=float(indexer.norm_eps),
+                rope_config=rope_config,
+            )
+            if fused is not None:
+                rotated, kv_lengths, undo, old_positions = fused
+                object.__setattr__(self, "_side_cache_undo", undo)
+                position_state.record_fused_target_write(old_positions)
+                return try_flashinfer_decode_selection(
+                    rotated,
+                    plan.kv_pool,
+                    plan.kv_table,
+                    plan.visible_lengths,
+                    recipe=recipe,
+                    kv_lengths=kv_lengths,
+                )
+
+    flat_query_positions = plan.query_positions
+    block_starts = plan.block_starts
+    if flat_query_positions is None or block_starts is None:
+        query_positions = plan.visible_lengths - 1
+        flat_query_positions = query_positions.reshape(-1).to(torch.int64)
+        block_starts = flat_query_positions - flat_query_positions.remainder(ratio)
     if raw_query and target_writer and position_state is None:
         from rtp_llm.models_py.modules.qwen4_exp.qsa.target_prepare import (
             try_prepare_target_window,

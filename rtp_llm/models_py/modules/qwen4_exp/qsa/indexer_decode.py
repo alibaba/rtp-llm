@@ -151,6 +151,165 @@ def try_prepare_fused_decode(
     return rotated, visible
 
 
+def try_prepare_fused_target_decode(
+    q,
+    raw_keys,
+    prefixes,
+    positions,
+    q_gamma,
+    k_gamma,
+    inv_freq,
+    state_pool,
+    state_table,
+    kv_pool,
+    kv_table,
+    position_pool,
+    visible_lengths,
+    position_slots,
+    history_slots,
+    current_rows,
+    *,
+    norm_eps,
+    rope_config,
+    num_warps=None,
+):
+    """Prepare a single request's verify window with transactional cache writes."""
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import is_qsa_rope_style
+
+    if (
+        q.ndim != 3
+        or not q.is_cuda
+        or torch.version.hip is not None
+        or torch.cuda.get_device_capability(q.device) != (10, 3)
+        or inv_freq is None
+        or not is_qsa_rope_style(rope_config, "Mrope")
+        or int(rope_config.dim) != 64
+        or int(rope_config.index_factor) != 3
+        or not rope_config.mrope_interleaved
+        or not getattr(rope_config, "indexer_is_neox_style", True)
+    ):
+        return None
+    sections = (
+        int(rope_config.mrope_dim1),
+        int(rope_config.mrope_dim2),
+        int(rope_config.mrope_dim3),
+    )
+    scale = float(getattr(rope_config, "scale", 1.0))
+    if (
+        min(sections) < 0
+        or sum(sections) != 32
+        or sections[1] > 11
+        or sections[2] > 10
+        or not math.isfinite(scale)
+        or scale <= 0
+    ):
+        return None
+    tokens = q.shape[0]
+    tables = (state_table, kv_table)
+    pools = (state_pool, kv_pool, position_pool)
+    slots = (position_slots, history_slots, current_rows)
+    packed = (prefixes, positions, q_gamma, k_gamma, inv_freq, visible_lengths)
+    if not (
+        prefixes.shape == (1,)
+        and q.shape == (tokens, 8, 128)
+        and 1 <= tokens <= 4
+        and q.stride(1) == 128
+        and q.stride(2) == 1
+        and raw_keys.shape == (tokens, 128)
+        and raw_keys.stride(1) == 1
+        and raw_keys.device == q.device
+        and q.dtype == raw_keys.dtype == torch.bfloat16
+        and positions.shape == (tokens, 3)
+        and visible_lengths.shape == (1, tokens)
+        and prefixes.dtype == positions.dtype == visible_lengths.dtype == torch.int32
+        and q_gamma.shape == k_gamma.shape == (128,)
+        and q_gamma.dtype in (torch.bfloat16, torch.float32)
+        and k_gamma.dtype == torch.bfloat16
+        and inv_freq.shape == (32,)
+        and inv_freq.dtype == torch.float32
+        and all(
+            t.device == q.device and t.is_contiguous()
+            for t in (*packed, *slots, *tables, *pools)
+        )
+        and all(t.shape == (tokens,) and t.dtype == torch.int64 for t in slots)
+        and all(
+            t.ndim == 2
+            and t.shape[0] == 1
+            and t.shape[1] > 0
+            and t.dtype == torch.int32
+            for t in tables
+        )
+        and all(t.ndim == 3 and t.shape[0] > 0 for t in pools)
+        and state_pool.shape[1:] == (8, 128)
+        and state_pool.dtype == torch.float32
+        and kv_pool.shape[1:] == (32, 128)
+        and kv_pool.dtype == torch.bfloat16
+        and position_pool.shape[1:] == (8, 3)
+        and position_pool.dtype == torch.int32
+    ):
+        return None
+
+    rotated = torch.empty(q.shape, dtype=q.dtype, device=q.device)
+    score_lengths = torch.empty_like(prefixes)
+    state_slots = torch.empty_like(position_slots)
+    old_state = torch.empty(raw_keys.shape, dtype=state_pool.dtype, device=q.device)
+    kv_slots = torch.empty(1, dtype=torch.int64, device=q.device)
+    old_kv = torch.empty((1, 128), dtype=kv_pool.dtype, device=q.device)
+    old_positions = torch.empty_like(positions)
+    _prepare_fused_decode[(1, tokens * 8 + 1)](
+        q,
+        raw_keys,
+        prefixes,
+        positions,
+        q_gamma,
+        k_gamma,
+        inv_freq,
+        state_pool,
+        state_table,
+        kv_pool,
+        kv_table,
+        position_pool,
+        None,
+        rotated,
+        score_lengths,
+        Q_STRIDE=q.stride(0),
+        RAW_STRIDE=raw_keys.stride(0),
+        STATE_WIDTH=state_table.shape[1],
+        KV_WIDTH=kv_table.shape[1],
+        POSITION_WIDTH=0,
+        STATE_BLOCKS=state_pool.shape[0],
+        KV_BLOCKS=kv_pool.shape[0],
+        POSITION_BLOCKS=position_pool.shape[0],
+        H_SECTION=sections[1],
+        W_SECTION=sections[2],
+        INV_SCALE=1.0 / scale,
+        EPS=norm_eps,
+        PADDED=True,
+        VERIFY_Q=tokens,
+        VERIFY_VISIBLE=visible_lengths,
+        VERIFY_STATE_SLOTS=state_slots,
+        VERIFY_OLD_STATE=old_state,
+        VERIFY_KV_SLOTS=kv_slots,
+        VERIFY_OLD_KV=old_kv,
+        VERIFY_POS_SLOTS=position_slots,
+        VERIFY_OLD_POS=old_positions,
+        VERIFY_POS_HISTORY=history_slots,
+        VERIFY_POS_CURRENT=current_rows,
+        num_warps=num_warps if num_warps is not None else (1 if tokens == 1 else 4),
+        enable_fp_fusion=False,
+    )
+    undo = IndexerCacheUndo(
+        state_pool=state_pool,
+        state_slots=state_slots,
+        original_state=old_state,
+        kv_pool=kv_pool,
+        kv_slots=kv_slots,
+        original_kv=old_kv,
+        padded_slots=True,
+    )
+    return rotated, score_lengths, undo, old_positions
+
+
 def is_supported(
     raw_keys: torch.Tensor,
     positions: torch.Tensor,

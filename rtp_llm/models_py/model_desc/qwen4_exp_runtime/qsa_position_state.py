@@ -5,6 +5,9 @@ from dataclasses import dataclass, field
 import torch
 
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import INDEXER_ROPE_POS_TAG
+from rtp_llm.models_py.modules.qwen4_exp.qsa.flashinfer_indexer import (
+    use_fused_indexer_prep,
+)
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import build_qsa_rope
 from rtp_llm.models_py.modules.qwen4_exp.qsa.validation import DeviceChecks
 
@@ -38,6 +41,15 @@ class _PositionGeometry:
     checked_by: DeviceChecks | None = None
     group_lookup: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
     undo_slots: torch.Tensor | None = None
+    rope_cache: dict = field(default_factory=dict)
+
+
+@dataclass
+class _TargetPositionGeometry:
+    positions: torch.Tensor
+    undo_slots: torch.Tensor
+    history_slots: torch.Tensor
+    current_rows: torch.Tensor
     rope_cache: dict = field(default_factory=dict)
 
 
@@ -90,6 +102,7 @@ class QSAPositionState:
             ratio,
             self.pool.shape[0],
             self.is_graph,
+            bool(inputs.is_target_verify),
             prefill,
             _tensor_key(inputs.combo_position_ids),
             _tensor_key(prefix_source),
@@ -104,6 +117,38 @@ class QSAPositionState:
             device=device, dtype=torch.int32, non_blocking=True
         ).reshape(-1, 3)
         count = positions.shape[0]
+        if (
+            inputs.is_target_verify
+            and self.is_graph
+            and self.page_size == 128
+            and ratio == 4
+            and device.type == "cuda"
+            and torch.version.hip is None
+            and torch.cuda.get_device_capability(device) == (10, 3)
+            and use_fused_indexer_prep()
+            and batch == 1
+            and 1 <= count <= 4
+            and positions.is_contiguous()
+            and table.stride(1) == 1
+            and self.pool.shape[0] > 0
+            and prefix_source.shape == (batch,)
+            and cu_source.shape == (batch + 1,)
+            and all(
+                t.dtype == torch.int32 and t.device == device and t.is_contiguous()
+                for t in (prefix_source, cu_source)
+            )
+        ):
+            from rtp_llm.models_py.kernels.cuda.qsa.position_state import (
+                target_position_slots,
+            )
+
+            slots = target_position_slots(
+                prefix_source, cu_source, table, count, self.pool.shape[0]
+            )
+            self.geometry = _TargetPositionGeometry(positions, *slots)
+            if metadata is not None:
+                metadata[key] = self.geometry
+            return
         prefixes = prefix_source.to(device=device, dtype=torch.long, non_blocking=True)
         if not prefill and self.is_graph:
             prefixes = prefixes - 1
@@ -165,6 +210,10 @@ class QSAPositionState:
 
     def group_positions(self):
         g = self.geometry
+        if isinstance(g, _TargetPositionGeometry):
+            saved = self.pool.flatten(0, 1)[g.history_slots]
+            current = g.positions[g.current_rows.clamp_min(0)]
+            return torch.where(g.current_rows[:, None] >= 0, current, saved)
         if g.group_lookup is None:
             starts = g.logical - g.logical.remainder(self.ratio)
             source = g.cu[g.requests] + starts - g.prefixes[g.requests]
@@ -227,8 +276,12 @@ class QSAPositionState:
             write = g.valid & (g.logical + self.ring_size > page_ends)
             g.undo_slots = torch.where(write, g.slots, -1)
         self.undo_slots = g.undo_slots
-        # Advanced indexing already returns independent storage for undo.
-        self.original = self.pool.flatten(0, 1)[g.slots]
+        slots = (
+            g.undo_slots.clamp_min(0)
+            if isinstance(g, _TargetPositionGeometry)
+            else g.slots
+        )
+        self.original = self.pool.flatten(0, 1)[slots]
         self._store(g.positions)
         self.staged = True
 
@@ -244,6 +297,12 @@ class QSAPositionState:
             self.pool.flatten(0, 1).index_copy_(
                 0, self.undo_slots[valid], values[valid]
             )
+
+    def record_fused_target_write(self, original):
+        """Keep the position snapshot from the fused writer for rollback."""
+        self.undo_slots = self.geometry.undo_slots
+        self.original = original
+        self.staged = True
 
     def rollback(self):
         if self.staged:
