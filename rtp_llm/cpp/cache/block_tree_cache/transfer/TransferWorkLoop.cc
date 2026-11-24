@@ -524,8 +524,9 @@ void TransferWorkLoop::submitCrc(Entry& entry) {
                                                   &entry.task_timer.trace(),
                                                   timing.completed_us);
             if (released_us) {
-                const auto& descriptor = entry.task.descriptors().front();
-                const auto  identity   = CacheStageContext::local(descriptor.source_tier, descriptor.target_tier);
+                const auto  descriptors = entry.task.descriptors();
+                const auto& descriptor  = descriptors.front();
+                const auto  identity    = CacheStageContext::local(descriptor.source_tier, descriptor.target_tier);
                 auto        released   = AsyncProfileSpan::fromSteady("slot_released",
                                                              entry.task.requestId().value_or(-1),
                                                              0,
@@ -800,7 +801,9 @@ void TransferWorkLoop::recordResult(Entry& entry, TransferResult result) noexcep
 }
 
 void TransferWorkLoop::consumeStage(Entry& entry) {
-    auto& terminal = entry.result;
+    auto&       terminal    = entry.result;
+    const auto  descriptors = entry.task.descriptors();
+    const auto& descriptor  = descriptors.front();
     if (std::exchange(entry.borrowed_stage_active, false))
         observeBorrowedStage(entry, "complete", terminal.ok());
     // End asynchronous stages only after their safe result reaches the owner.
@@ -812,7 +815,6 @@ void TransferWorkLoop::consumeStage(Entry& entry) {
     if (!terminal.ok()) {
         entry.batch_timer.finishAtSteady(end_us, false);
         entry.task_timer.finishAtSteady(end_us, false);
-        const auto& descriptor = entry.task.descriptors().front();
         if (!isDeviceCopy(entry.step))
             terminal.status = transferStatusToErrorInfo(terminal.copy_error == CacheCopyError::INVALID_REQUEST ?
                                                             TransferStatus::INVALID_ARGS :
@@ -822,7 +824,7 @@ void TransferWorkLoop::consumeStage(Entry& entry) {
             terminal.status =
                 ErrorInfo(terminal.status.code(),
                           std::string("disk-to-device transfer failed, stage=") + stage + ", descriptor_range=[0,"
-                              + std::to_string(entry.task.descriptors().size()) + "): " + terminal.status.ToString());
+                              + std::to_string(descriptors.size()) + "): " + terminal.status.ToString());
         }
     }
     if (!terminal.ok()) {
@@ -830,7 +832,6 @@ void TransferWorkLoop::consumeStage(Entry& entry) {
         finish(entry);
         return;
     }
-    const auto& descriptor = entry.task.descriptors().front();
     if (entry.step == Step::DISK_READ && descriptor.target_tier == Tier::DEVICE) {
         entry.step = deviceStep(entry, true);
         tryStep(entry);
