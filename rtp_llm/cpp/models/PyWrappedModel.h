@@ -169,6 +169,9 @@ private:
     bool          shouldCaptureHiddenStates(const GptModelInputs& inputs);
 
     // Methods absorbed from GptModel
+#if USING_ROCM
+    torch::Tensor verify_head_packed_;
+#endif
     torch::Tensor   computeLogits(const torch::Tensor& hidden);
     torch::Tensor   tpSyncEmbeddingOrLogits(const torch::Tensor& input);
     GptModelOutputs forwardPostLayers(torch::Tensor         hidden,
@@ -602,6 +605,22 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         auto graph_runner =
             std::make_unique<CudaGraphRunner>(graph_params, py_instance, forward_method, params.metrics_reporter);
 #if USING_ROCM
+        const char* verify_env = std::getenv("RTP_LLM_ROCM_BF16_VERIFY_HEAD");
+        if (!verify_head_packed_.defined() && verify_env && std::string(verify_env) == "1" && is_target_verify_decode
+            && params.sp_config.type == SP_TYPE_MTP && params.parallelism_config.role_type == RoleType::DECODE && params.parallelism_config.tp_size == 2
+            && weights_.lm_head && weights_.lm_head->kernel.defined()
+            && py::str(py_instance.attr("__class__").attr("__module__")).cast<std::string>().rfind("atom.", 0) == 0) {
+            const auto& w = weights_.lm_head->kernel;
+            if (w.scalar_type() == torch::kBFloat16 && w.dim() == 2 && w.size(0) == 124160 && w.size(1) == 2560) {
+                py::gil_scoped_acquire gil;
+                auto packed = py::module_::import("rtp_llm.models_py.kernels.rocm.bf16_verify_head")
+                                  .attr("pack_bf16_verify_head")(w);
+                if (!packed.is_none()) {
+                    verify_head_packed_ = packed.cast<torch::Tensor>();
+                    RTP_LLM_LOG_INFO("ROCm BF16 packed target LM head prepared");
+                }
+            }
+        }
         const char* mtp_loop_env = std::getenv("RTP_LLM_MTP_DRAFT_LOOP_GRAPH");
         if ((!mtp_loop_env || std::string(mtp_loop_env) == "1") && params.model_id == 1
             && graph_params.role == CudaGraphRole::DECODE && params.sp_config.gen_num_per_cycle > 1 && !check_nan_

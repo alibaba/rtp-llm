@@ -1312,7 +1312,17 @@ torch::Tensor PyWrappedModel::computeLogits(const torch::Tensor& hidden) {
             } else
 #endif
             {
-                logits = torch::mm(hidden.to(kernel.dtype()), kernel.t());
+#if USING_ROCM
+                if (verify_head_packed_.defined() && hidden.dim() == 2 && hidden.is_contiguous()
+                    && hidden.scalar_type() == torch::kBFloat16 && (hidden.size(0) == 4 || hidden.size(0) == 8)) {
+                    py::gil_scoped_acquire gil;
+                    logits = py::module_::import("rtp_llm.models_py.kernels.rocm.bf16_verify_head")
+                                 .attr("project_bf16_verify_head")(hidden, verify_head_packed_).cast<torch::Tensor>();
+                } else
+#endif
+                {
+                    logits = torch::mm(hidden.to(kernel.dtype()), kernel.t());
+                }
 #if USING_ROCM
                 // TP all-gather only copies logits. Keep native BF16 values until
                 // after the collective to halve communication for a BF16 LM head.
