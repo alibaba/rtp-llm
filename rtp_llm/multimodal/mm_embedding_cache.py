@@ -1,21 +1,35 @@
 from __future__ import annotations
 
 import logging
+import os
+import queue
+import random
+import socket
 import sys
 import threading
 import time
 import uuid
+from bisect import bisect_left
 from collections import OrderedDict
-from concurrent.futures import CancelledError
+from concurrent.futures import CancelledError, Future
 from itertools import chain, islice
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 
+from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
+
+_PROFILE_LOCAL_HITS = os.environ.get("MM_EMB_LOCAL_HIT_PROFILE") == "1"
+
+
+# Terminal entries share a permanently signaled event. A pending entry only
+# needs its own wait queue if a caller actually waits.
+_SIGNALED_EVENT = threading.Event()
+_SIGNALED_EVENT.set()
 
 
 class _PoolCapacityError(RuntimeError):
@@ -24,7 +38,7 @@ class _PoolCapacityError(RuntimeError):
 
 def _wait_event(event, timeout, cancellation_event):
     if cancellation_event is None:
-        return event.wait(timeout=timeout)
+        return event is _SIGNALED_EVENT or event.wait(timeout=timeout)
     deadline = None if timeout is None else time.monotonic() + timeout
     while True:
         if cancellation_event.is_set():
@@ -64,24 +78,33 @@ class _TensorMemoryPool:
         )
         self._pending: List[Tuple[_PoolBlock, List[Any]]] = []
         self._used_bytes = 0
+        # Bytes dropped because they are smaller than the allocation alignment
+        # and can never satisfy an aligned request.
+        self._wasted_bytes = 0
 
     @staticmethod
     def _align(value: int, alignment: int) -> int:
         return (value + alignment - 1) // alignment * alignment
 
     def _insert_free_locked(self, offset: int, size: int) -> None:
-        if size == 0:
+        if size < self._alignment:
+            # A sub-alignment fragment can never satisfy an aligned
+            # allocation. Keeping it in the free list only makes every
+            # first-fit scan longer, so account it as wasted instead.
+            self._wasted_bytes += size
             return
-        self._free.append((offset, size))
-        self._free.sort()
-        merged = []
-        for current_offset, current_size in self._free:
-            if merged and merged[-1][0] + merged[-1][1] == current_offset:
-                previous_offset, previous_size = merged[-1]
-                merged[-1] = (previous_offset, previous_size + current_size)
-            else:
-                merged.append((current_offset, current_size))
-        self._free = merged
+        # The list stays address-ordered and fully coalesced. Only the two
+        # neighbors can touch a newly freed block; list insertion is still O(n).
+        index = bisect_left(self._free, (offset,))
+        end = index
+        if index and sum(self._free[index - 1]) == offset:
+            index -= 1
+            offset, previous_size = self._free[index]
+            size += previous_size
+        if end < len(self._free) and offset + size == self._free[end][0]:
+            size += self._free[end][1]
+            end += 1
+        self._free[index:end] = [(offset, size)]
 
     def _reclaim_ready_locked(self) -> None:
         waiting = []
@@ -97,7 +120,16 @@ class _TensorMemoryPool:
     def reserve(self, requested_bytes: int) -> Optional[_PoolBlock]:
         if requested_bytes == 0:
             return None
-        size = requested_bytes
+        # Align the allocation size as well as the offset. Aligning only the
+        # offset leaves a misaligned suffix that the next allocation must
+        # re-align, producing an ever-growing population of unusable
+        # sub-alignment fragments (observed as ~128k free-list entries).
+        size = self._align(requested_bytes, self._alignment)
+        if size > self.capacity_bytes:
+            # Tiny pools can be smaller than one aligned allocation. Fall back
+            # to the exact request so they remain usable; the block end may be
+            # unaligned, but there is no room for another allocation anyway.
+            size = requested_bytes
         if size > self.capacity_bytes:
             raise _PoolCapacityError(
                 f"{self.device.type} pool request {size} exceeds capacity "
@@ -113,11 +145,24 @@ class _TensorMemoryPool:
                     if free_size - prefix_size < size:
                         continue
                     block = _PoolBlock(aligned_offset, size)
-                    self._free.pop(index)
-                    self._insert_free_locked(offset, prefix_size)
                     suffix_offset = aligned_offset + size
                     suffix_size = offset + free_size - suffix_offset
-                    self._insert_free_locked(suffix_offset, suffix_size)
+                    # Splitting one free block preserves order and cannot
+                    # introduce adjacent free blocks outside this slice.
+                    parts = (
+                        (offset, prefix_size),
+                        (suffix_offset, suffix_size),
+                    )
+                    self._free[index : index + 1] = [
+                        (part_offset, part_size)
+                        for part_offset, part_size in parts
+                        if part_size >= self._alignment
+                    ]
+                    self._wasted_bytes += sum(
+                        part_size
+                        for _, part_size in parts
+                        if 0 < part_size < self._alignment
+                    )
                     self._used_bytes += size
                     return block
                 if self._pending:
@@ -166,7 +211,10 @@ class _TensorMemoryPool:
                 "capacity_bytes": self.capacity_bytes,
                 "used_bytes": self._used_bytes,
                 "pending_bytes": pending_bytes,
-                "free_bytes": self.capacity_bytes - self._used_bytes,
+                "wasted_bytes": self._wasted_bytes,
+                "free_bytes": (
+                    self.capacity_bytes - self._used_bytes - self._wasted_bytes
+                ),
                 "largest_free_block_bytes": max(
                     (
                         max(
@@ -284,7 +332,10 @@ def _pool_result(
     copied: Dict[Tuple[int, torch.device], torch.Tensor] = {}
     gpu_bytes = cpu_bytes = 0
     try:
-        collect(result, devices)
+        try:
+            collect(result, devices)
+        finally:
+            del collect
         for pool, identities in grouped.items():
             total = 0
             for identity in identities:
@@ -328,7 +379,10 @@ def _pool_result(
                 return {key: rebuild(item, target[key]) for key, item in value.items()}
             return value
 
-        pooled = rebuild(result, devices)
+        try:
+            pooled = rebuild(result, devices)
+        finally:
+            del rebuild
         events = _record_cuda_events(pooled)
         owners = list(reservations.values())
         for owner in owners:
@@ -339,8 +393,7 @@ def _pool_result(
             reservation.release()
         raise
     finally:
-        # Recursive collectors/rebuilders form closure cycles. Neither producer
-        # tensors nor pool views should wait for cyclic GC to release ownership.
+        # An error can retain this frame through its traceback.
         specs.clear()
         copied.clear()
 
@@ -362,8 +415,12 @@ def _copy_pooled_result_to_devices(result: Any, devices: Any) -> Any:
                 )
             return copied[identity]
         if isinstance(value, tuple):
+            if target is None:
+                return tuple(visit(item, None) for item in value)
             return tuple(visit(item, target[i]) for i, item in enumerate(value))
         if isinstance(value, list):
+            if target is None:
+                return [visit(item, None) for item in value]
             return [visit(item, target[i]) for i, item in enumerate(value)]
         if isinstance(value, dict):
             return {key: visit(item, target[key]) for key, item in value.items()}
@@ -372,8 +429,7 @@ def _copy_pooled_result_to_devices(result: Any, devices: Any) -> Any:
     try:
         return visit(result, devices)
     finally:
-        # The recursive visitor forms a closure cycle. Drop its tensor owners
-        # immediately, including when copying one of the later leaves fails.
+        del visit
         copied.clear()
 
 
@@ -415,7 +471,10 @@ def _compact_tensor_tier_bytes(result: Any, devices: Any) -> Tuple[int, int]:
             for key, item in value.items():
                 visit(item, target[key])
 
-    visit(result, devices)
+    try:
+        visit(result, devices)
+    finally:
+        del visit
     return tuple(sizes)
 
 
@@ -437,8 +496,12 @@ def _copy_result_to_devices(result: Any, devices: Any) -> Any:
                 )
             return copied[identity]
         if isinstance(value, tuple):
+            if target is None:
+                return tuple(visit(item, None) for item in value)
             return tuple(visit(item, target[i]) for i, item in enumerate(value))
         if isinstance(value, list):
+            if target is None:
+                return [visit(item, None) for item in value]
             return [visit(item, target[i]) for i, item in enumerate(value)]
         if isinstance(value, dict):
             return {key: visit(item, target[key]) for key, item in value.items()}
@@ -447,32 +510,29 @@ def _copy_result_to_devices(result: Any, devices: Any) -> Any:
     try:
         return visit(result, devices)
     finally:
-        # The recursive visitor forms a closure cycle. Drop its tensor owners
-        # immediately, including when copying one of the later leaves fails.
+        del visit
         copied.clear()
+
+
+def _tree_output_tokens(value: Any) -> int:
+    if isinstance(value, torch.Tensor):
+        if value.numel() == 0:
+            return 0
+        if value.ndim >= 2 and value.shape[-1] > 0:
+            return value.numel() // value.shape[-1]
+        # A one-dimensional embedding represents a single token vector.
+        return 1
+    if isinstance(value, (list, tuple)):
+        return sum(_tree_output_tokens(item) for item in value)
+    if isinstance(value, dict):
+        return sum(_tree_output_tokens(item) for item in value.values())
+    return 0
 
 
 def _embedding_output_tokens(result: Any) -> int:
     """Count tokens in the primary embedding, excluding position metadata."""
-
-    def output_tokens(value: Any) -> int:
-        if isinstance(value, torch.Tensor):
-            if value.numel() == 0:
-                return 0
-            if value.ndim >= 2 and value.shape[-1] > 0:
-                return value.numel() // value.shape[-1]
-            # A one-dimensional embedding is one token vector, not a sequence
-            # of scalar tokens. Keep this consistent with the request-level
-            # embedding length metric.
-            return 1
-        if isinstance(value, (list, tuple)):
-            return sum(output_tokens(item) for item in value)
-        if isinstance(value, dict):
-            return sum(output_tokens(item) for item in value.values())
-        return 0
-
     primary = result[0] if isinstance(result, tuple) and result else result
-    return output_tokens(primary)
+    return _tree_output_tokens(primary)
 
 
 class MMEmbeddingCacheEntry:
@@ -489,8 +549,12 @@ class MMEmbeddingCacheEntry:
         on_read: Optional[
             Callable[["MMEmbeddingCacheEntry", Optional[float]], Any]
         ] = None,
+        *,
+        generation=None,
     ):
-        self._event = threading.Event()
+        self._event: Optional[threading.Event] = None
+        # Inspection future callbacks may enter a wait while _state_lock is held.
+        self._wait_lock = threading.Lock()
         self._state_lock = threading.Lock()
         # Claim completion once; _event publishes it after callbacks finish.
         self._terminal = False
@@ -498,8 +562,10 @@ class MMEmbeddingCacheEntry:
         self._on_fail = on_fail
         self._on_read = on_read
         self.result: Optional[Any] = None
+        self._cache_hit_implementation = None
         self.error: Optional[Exception] = None
-        self.generation = uuid.uuid4().hex
+        self._pending_before_publish: Optional[Callable[[], None]] = None
+        self.generation = generation if generation is not None else uuid.uuid4().hex
         # Error telemetry may be observed from several places (the producer
         # callback, a cache waiter, and an RPC handler). Keep one atomic claim
         # on the entry so a failed result contributes one error-QPS sample.
@@ -515,9 +581,15 @@ class MMEmbeddingCacheEntry:
         self.producer_streams: List[Any] = []
         self.pool_owners: List[_PoolReservation] = []
         self.storage_lock = threading.Lock()
-        self._greennet_event = threading.Event()
+        # A follower can wait for the async producer's verdict, including a
+        # KVCM approval, instead of auditing the same in-flight URL again.
+        self.expects_greennet = False
+        self.capture_compute_streams = False
+        self._greennet_event: Optional[threading.Event] = None
         self._greennet_verdict: Optional[GreenNetVerdict] = None
+        self._greennet_error: Optional[Exception] = None
         self._greennet_checked = False
+        self._inspection_decision = None
 
     @property
     def has_read_callback(self) -> bool:
@@ -545,6 +617,21 @@ class MMEmbeddingCacheEntry:
             remaining = (
                 None if deadline is None else max(0.0, deadline - time.monotonic())
             )
+            if (
+                _PROFILE_LOCAL_HITS
+                and self._cache_hit_implementation
+                and self.tier
+                and random.getrandbits(4) == 0
+            ):
+                tier = self.tier
+                started = time.perf_counter()
+                result = self._on_read(self, remaining)
+                kmonitor.report(
+                    GaugeMetrics.VIT_EMBEDDING_CACHE_HIT_RT_METRIC,
+                    (time.perf_counter() - started) * 1000,
+                    {"tier": tier, "implementation": self._cache_hit_implementation},
+                )
+                return result
             return self._on_read(self, remaining)
         # Cache-free async entries publish GPU work without synchronizing the
         # scheduler. The consumer waits on the producer's streams before using
@@ -567,20 +654,59 @@ class MMEmbeddingCacheEntry:
         cancellation_event: Optional[threading.Event] = None,
     ) -> None:
         """Wait for completion without promoting an offloaded embedding."""
-        if not _wait_event(self._event, timeout, cancellation_event):
+        if not _wait_event(self._waiter_event("_event"), timeout, cancellation_event):
             raise TimeoutError("Waiting for embedding result timed out")
         if self.error is not None:
             raise self.error
 
-    def complete(self, result: Any) -> bool:
+    def complete(
+        self,
+        result: Any,
+        *,
+        before_publish: Optional[Callable[[], None]] = None,
+        defer: bool = False,
+        prepared_storage: Optional[Tuple[Any, List[Any]]] = None,
+    ) -> bool:
         with self._state_lock:
             if self._terminal:
                 return False
             self._terminal = True
             self.result = result
+            if prepared_storage is not None:
+                self.original_devices, self.ready_events = prepared_storage
+            if defer:
+                self._pending_before_publish = before_publish
+            # Each terminal transition consumes these one-shot callbacks.
+            on_complete, self._on_complete = self._on_complete, None
+            on_fail, self._on_fail = self._on_fail, None
+        if defer:
+            # Publish the result to waiters immediately; the cache insertion is
+            # best-effort and runs on the cache's publication thread. A failed
+            # insertion must never turn a successful computation into an error.
+            self._signal_event("_event")
+            try:
+                if on_complete is not None:
+                    on_complete(self, result)
+            except Exception as error:
+                logging.warning("ViT cache publication enqueue failed: %s", error)
+                try:
+                    if on_fail is not None:
+                        on_fail(self, error)
+                except Exception:
+                    logging.exception("Failed to remove unqueued ViT cache entry")
+            finally:
+                # The queue owns the callback after handoff. A bound method on
+                # the work item would otherwise keep that whole request alive.
+                self._pending_before_publish = None
+            return True
         try:
-            if self._on_complete is not None:
-                self._on_complete(self, result)
+            if on_complete is not None:
+                on_complete(self, result)
+            # Publish dependent metadata only after storage succeeds, but
+            # before any waiter can observe ready. Duplicate completion never
+            # executes this hook. Exceptions use the same rollback as storage.
+            if before_publish is not None:
+                before_publish()
         except Exception as error:
             # fail() cannot take over this already-claimed transition. Roll it
             # back here so waiters never see a failed insertion as a cache hit.
@@ -592,14 +718,14 @@ class MMEmbeddingCacheEntry:
                 self.producer_streams = []
                 owners, self.pool_owners = self.pool_owners, []
             try:
-                if self._on_fail is not None:
-                    self._on_fail(self, error)
+                if on_fail is not None:
+                    on_fail(self, error)
             finally:
                 for owner in owners:
                     owner.release()
             raise
         finally:
-            self._event.set()
+            self._signal_event("_event")
         return True
 
     def fail(self, error: Exception) -> bool:
@@ -608,32 +734,105 @@ class MMEmbeddingCacheEntry:
                 return False
             self._terminal = True
             self.error = error
+            self._on_complete = None
+            on_fail, self._on_fail = self._on_fail, None
         try:
-            if self._on_fail is not None:
-                self._on_fail(self, error)
+            if on_fail is not None:
+                on_fail(self, error)
         finally:
-            self._event.set()
+            self._signal_event("_event")
         return True
+
+    def _waiter_event(self, attribute: str) -> threading.Event:
+        event = getattr(self, attribute)
+        if event is None:
+            with self._wait_lock:
+                event = getattr(self, attribute)
+                if event is None:
+                    event = threading.Event()
+                    setattr(self, attribute, event)
+        return event
+
+    def _signal_event(self, attribute: str) -> None:
+        # A waiter that already holds the private event must still be woken.
+        with self._wait_lock:
+            event = getattr(self, attribute)
+            if event is not _SIGNALED_EVENT:
+                setattr(self, attribute, _SIGNALED_EVENT)
+                if event is not None:
+                    event.set()
 
     @property
     def is_done(self) -> bool:
-        return self._event.is_set()
+        return self._event is _SIGNALED_EVENT
+
+    def inspection_decision(self):
+        """A small future which a frontend ticket may retain after eviction."""
+        with self._state_lock:
+            if self._inspection_decision is None:
+                self._inspection_decision = Future()
+                self._resolve_inspection_decision()
+            return self._inspection_decision
+
+    def _resolve_inspection_decision(self):
+        future = self._inspection_decision
+        if future is None or future.done():
+            return
+        if self._greennet_error is not None:
+            # Never retain the producer traceback (which may own GPU tensors).
+            error = self._greennet_error
+            if isinstance(error, FtRuntimeException):
+                error = FtRuntimeException(error.exception_type, error.message)
+            else:
+                error = RuntimeError(str(error))
+            future.set_exception(error)
+        elif self._greennet_checked:
+            future.set_result(self._greennet_verdict)
 
     def set_greennet_verdict(
         self, verdict: GreenNetVerdict, *, checked: bool = True
     ) -> None:
-        self._greennet_verdict = verdict
-        self._greennet_checked = checked
-        self._greennet_event.set()
+        with self._state_lock:
+            # A request that skips GreenNet may publish an unchecked embedding
+            # while another request independently inspects the same URL. Do not
+            # let the unchecked publisher downgrade that approved cache entry.
+            if self._greennet_checked and not checked:
+                return
+            self._greennet_verdict = verdict
+            self._greennet_checked = checked
+            self._resolve_inspection_decision()
+            self._signal_event("_greennet_event")
+
+    def greennet_snapshot(self) -> Tuple[Optional[GreenNetVerdict], bool]:
+        with self._state_lock:
+            if self._greennet_error is not None:
+                return None, False
+            return self._greennet_verdict, self._greennet_checked
+
+    def set_greennet_error(self, error: Exception) -> None:
+        """Wake inspection waiters without losing a typed preprocessing error."""
+        with self._state_lock:
+            if self._greennet_error is not None or (
+                self._greennet_checked
+                and self._greennet_verdict is not None
+                and (self._greennet_verdict.passed or self._greennet_verdict.code == 2)
+            ):
+                # A later compute failure cannot change an actual inspection decision.
+                return
+            self._greennet_error = error
+            self._resolve_inspection_decision()
+            self._signal_event("_greennet_event")
 
     @property
     def greennet_passed(self) -> bool:
-        return (
-            self.is_greennet_decided
-            and self._greennet_checked
-            and self._greennet_verdict is not None
-            and self._greennet_verdict.passed
-        )
+        with self._state_lock:
+            return (
+                self._greennet_event is _SIGNALED_EVENT
+                and self._greennet_error is None
+                and self._greennet_checked
+                and self._greennet_verdict is not None
+                and self._greennet_verdict.passed
+            )
 
     def wait_greennet(
         self,
@@ -641,17 +840,45 @@ class MMEmbeddingCacheEntry:
         *,
         cancellation_event: Optional[threading.Event] = None,
     ) -> GreenNetVerdict:
-        if not _wait_event(self._greennet_event, timeout, cancellation_event):
+        if not _wait_event(
+            self._waiter_event("_greennet_event"), timeout, cancellation_event
+        ):
             raise TimeoutError("Waiting for greennet verdict timed out")
-        return self._greennet_verdict
+        with self._state_lock:
+            if self._greennet_error is not None:
+                raise self._greennet_error
+            return self._greennet_verdict
 
     @property
     def is_greennet_decided(self) -> bool:
-        return self._greennet_event.is_set()
+        return self._greennet_event is _SIGNALED_EVENT
+
+
+class _HashCacheValue:
+    # All lifecycle fields use the owning hash cache's index lock. A reader
+    # lease keeps a retired value alive until its clone completes.
+    __slots__ = (
+        "hashes",
+        "generation",
+        "charge_bytes",
+        "owners",
+        "greennet_passed",
+        "readers",
+        "retired",
+    )
+
+    def __init__(self, generation, charge_bytes, greennet_passed):
+        self.hashes = []
+        self.generation = generation
+        self.charge_bytes = charge_bytes
+        self.owners = []
+        self.greennet_passed = bool(greennet_passed)
+        self.readers = 0
+        self.retired = False
 
 
 class MMHashKeyCache:
-    """Byte-bounded CPU-pool cache for multimodal feature-hash token ids.
+    """Byte-bounded CPU tensor cache for multimodal feature-hash token ids.
 
     Charge tensor storage plus Python key/value metadata. The latter is an
     estimate (not process RSS), but bounds even entries with very few hashes.
@@ -666,10 +893,13 @@ class MMHashKeyCache:
         if max_bytes < 0:
             raise ValueError("hash cache max_bytes must be non-negative")
         self._lock = threading.Lock()
+        self._drained = threading.Condition(self._lock)
         self._entries = OrderedDict()
+        self._pending = {}
         self._max_bytes = max_bytes
         self._resident_bytes = 0
-        self._pool = _TensorMemoryPool(max_bytes, torch.device("cpu"))
+        self._building_bytes = 0
+        self._retired_bytes = 0
         self.instance_id = uuid.uuid4().hex
 
     @property
@@ -683,86 +913,212 @@ class MMHashKeyCache:
         generation: Optional[str] = None,
         greennet_passed: bool = False,
     ) -> None:
+        self._put(cache_key, feature_hashes, generation, greennet_passed)
+
+    def put_for_entry(
+        self,
+        cache_key: str,
+        feature_hashes: List[torch.Tensor],
+        entry: MMEmbeddingCacheEntry,
+        embedding_cache: "MMEmbeddingCache",
+    ) -> None:
+        """Publish once per live generation; never replace it with a stale writer."""
+        self._put(
+            cache_key,
+            feature_hashes,
+            entry.generation,
+            entry.greennet_passed,
+            entry=entry,
+            embedding_cache=embedding_cache,
+        )
+
+    def _used_bytes_locked(self) -> int:
+        return self._resident_bytes + self._building_bytes + self._retired_bytes
+
+    def _put(
+        self,
+        cache_key: str,
+        feature_hashes: List[torch.Tensor],
+        generation: Optional[str],
+        greennet_passed: bool,
+        *,
+        entry: Optional[MMEmbeddingCacheEntry] = None,
+        embedding_cache: Optional["MMEmbeddingCache"] = None,
+    ) -> None:
         if not cache_key or not self.enabled:
             return
-        # Reject oversized values before making CPU copies. Replacing a key
-        # must also discard its previous generation, even when the new value
-        # cannot fit. Do not evict unrelated entries for such a value.
-        tensor_bytes = sum(h.numel() * 4 for h in feature_hashes)
-        pool_bytes = tensor_bytes
-        if pool_bytes > self._max_bytes:
-            with self._lock:
-                self._remove_locked(cache_key)
-            return
-        # Hashes are small CPU int32 token-id tensors. Store an owned CPU copy
-        # so the sidecar does not retain embedding storage or a GPU tensor.
-        with cuda_graph_gate.operation():
-            hashes = [
-                hash_tensor.detach().to(device="cpu", dtype=torch.int32).clone()
-                for hash_tensor in feature_hashes
-            ]
         generation = generation or ""
+        # Estimate the final owned int32 value before allocating/copying it.
+        # Staging is bounded by the in-flight charge.
         charge_bytes = (
-            pool_bytes
+            sum(h.numel() * 4 for h in feature_hashes)
             + sys.getsizeof(cache_key)
             + sys.getsizeof(generation)
-            + sys.getsizeof(hashes)
-            + sum(sys.getsizeof(h) for h in hashes)
-            + sys.getsizeof((hashes, generation, 0, [], False))
+            + sys.getsizeof([None for _ in feature_hashes])
+            + sum(sys.getsizeof(h) for h in feature_hashes)
+            + sys.getsizeof(_HashCacheValue(generation, 0, False))
             + sys.getsizeof(0)
             + self._ENTRY_OVERHEAD
         )
-        with self._lock:
-            self._remove_locked(cache_key)
-            if charge_bytes > self._max_bytes:
-                return
-            # Evict before insertion so resident accounting never exceeds the
-            # budget, including when a key is replaced by a larger value.
-            while self._resident_bytes + charge_bytes > self._max_bytes:
-                self._remove_locked(next(iter(self._entries)))
-            devices = _map_tensors(hashes, lambda _: torch.device("cpu"))
-            try:
-                pooled, owners, _, _, _ = _pool_result(
-                    hashes, devices, None, self._pool
-                )
-            except _PoolCapacityError:
-                logging.warning(
-                    "Hash-key cache CPU pool is full; bypassing key %s", cache_key
-                )
-                return
-            self._entries[cache_key] = (
-                pooled,
-                generation,
-                charge_bytes,
-                owners,
-                bool(greennet_passed),
-            )
-            self._resident_bytes += charge_bytes
 
-    def _remove_locked(self, cache_key: str) -> None:
+        def current(action):
+            # The only nested index order is embedding -> hash, and these
+            # callbacks only update metadata: no tensor work or waits.
+            if entry is None:
+                return action()
+            return embedding_cache._with_current_entry(cache_key, entry, action)
+
+        retired = []
+        value = _HashCacheValue(generation, charge_bytes, greennet_passed)
+
+        def begin():
+            with self._lock:
+                if not self.enabled:
+                    return False
+                if entry is not None:
+                    existing = self._pending.get(cache_key) or self._entries.get(
+                        cache_key
+                    )
+                    if existing is not None and existing.generation == generation:
+                        existing.greennet_passed |= bool(greennet_passed)
+                        return False
+                # A replacement supersedes even a still-building older value.
+                self._pending.pop(cache_key, None)
+                self._remove_locked(cache_key, retired)
+                if charge_bytes > self._max_bytes:
+                    return False  # Oversized writes do not evict other keys.
+                reclaimable = sum(item.charge_bytes for item in retired)
+                while (
+                    self._used_bytes_locked() + charge_bytes - reclaimable
+                    > self._max_bytes
+                    and self._entries
+                ):
+                    reclaimable += self._remove_locked(
+                        next(iter(self._entries)), retired
+                    )
+                self._pending[cache_key] = value
+                return True
+
+        started = current(begin)
+        self._release_retired(retired)
+        if not started:
+            return
+
+        def reserve():
+            with self._lock:
+                if self._pending.get(cache_key) is not value:
+                    return False
+                if self._used_bytes_locked() + charge_bytes > self._max_bytes:
+                    return False  # Pinned readers/builders still own this budget.
+                self._building_bytes += charge_bytes
+                return True
+
+        reserved = False
+        published = False
+        try:
+            # A rejected reservation or a stale embedding still owns the
+            # pending marker installed by begin, but has no byte charge.
+            reserved = bool(current(reserve))
+            if not reserved:
+                return
+            # Hash tensors are a few KB. A fixed first-fit pool only adds a
+            # linear free-list scan to every publication; store the CPU tensors
+            # directly and let the byte-bounded LRU own eviction.
+            with cuda_graph_gate.operation():
+                value.hashes = [
+                    h.detach().to(device="cpu", dtype=torch.int32).clone()
+                    for h in feature_hashes
+                ]
+            value.owners = []
+
+            def publish():
+                with self._lock:
+                    if (
+                        self._pending.get(cache_key) is not value
+                        or self._used_bytes_locked() > self._max_bytes
+                    ):
+                        return False
+                    self._pending.pop(cache_key)
+                    self._entries[cache_key] = value
+                    self._building_bytes -= charge_bytes
+                    self._resident_bytes += charge_bytes
+                    return True
+
+            published = bool(current(publish))
+        finally:
+            if not published:
+                with self._lock:
+                    if self._pending.get(cache_key) is value:
+                        self._pending.pop(cache_key)
+                    if reserved:
+                        self._building_bytes -= charge_bytes
+                        self._drained.notify_all()
+
+    def _remove_locked(self, cache_key: str, retired: List[_HashCacheValue]) -> int:
         value = self._entries.pop(cache_key, None)
         if value is not None:
-            self._resident_bytes -= value[2]
-            for owner in value[3]:
+            self._resident_bytes -= value.charge_bytes
+            self._retired_bytes += value.charge_bytes
+            value.retired = True
+            if not value.readers:
+                retired.append(value)
+                return value.charge_bytes
+        return 0
+
+    def _release_retired(self, values: List[_HashCacheValue]) -> None:
+        for value in values:
+            for owner in value.owners:
                 owner.release()
+            with self._lock:
+                self._retired_bytes -= value.charge_bytes
+                self._drained.notify_all()
+
+    def _snapshot(self, cache_key, generation=None, *, touch=False):
+        with self._lock:
+            value = self._entries.get(cache_key)
+            if value is None or (
+                generation is not None and value.generation != generation
+            ):
+                return None
+            if touch:
+                self._entries.move_to_end(cache_key)
+            value.readers += 1
+            approval = value.greennet_passed
+        try:
+            # Same copy as before, now protected by a lease rather than holding
+            # the global index lock. Pool views still never escape this cache.
+            return (
+                [tensor.clone() for tensor in value.hashes],
+                value.generation,
+                approval,
+            )
+        finally:
+            with self._lock:
+                value.readers -= 1
+                retired = value.retired and value.readers == 0
+            if retired:
+                self._release_retired([value])
 
     def get(
         self, cache_key: str, generation: Optional[str] = None
     ) -> Optional[List[torch.Tensor]]:
-        with self._lock:
-            value = self._entries.get(cache_key)
-            if value is None or (generation is not None and value[1] != generation):
-                return None
-            self._entries.move_to_end(cache_key)
-            # Pool views never escape the cache; otherwise eviction could reuse
-            # their storage while an active request is still reading it.
-            return [tensor.clone() for tensor in value[0]]
+        value = self._snapshot(cache_key, generation, touch=True)
+        return None if value is None else value[0]
 
     def greennet_passed(self, cache_key: str) -> bool:
         """An approval survives embedding eviction, but never hash eviction."""
         with self._lock:
             value = self._entries.get(cache_key)
-            return value is not None and value[4]
+            return value is not None and value.greennet_passed
+
+    def mark_greennet_passed(self, cache_key: str, generation: str) -> bool:
+        """Attach a fresh GreenNet approval to the matching hash-cache entry."""
+        with self._lock:
+            value = self._entries.get(cache_key)
+            if value is None or value.generation != generation:
+                return False
+            value.greennet_passed = True
+            return True
 
     def contains(self, cache_key: str) -> bool:
         with self._lock:
@@ -781,32 +1137,41 @@ class MMHashKeyCache:
         return self.keys()
 
     def clear(self) -> None:
+        retired = []
         with self._lock:
+            self._pending.clear()
             for key in list(self._entries):
-                self._remove_locked(key)
+                self._remove_locked(key, retired)
+        self._release_retired(retired)
 
     def resize(self, max_bytes: int) -> None:
         if max_bytes < 0:
             raise ValueError("hash cache max_bytes must be non-negative")
-        with self._lock:
-            if max_bytes > self._pool.capacity_bytes:
-                for key in list(self._entries):
-                    self._remove_locked(key)
-                self._pool = _TensorMemoryPool(max_bytes, torch.device("cpu"))
+        retired = []
+        with self._drained:
+            self._pending.clear()
             self._max_bytes = max_bytes
-            while self._resident_bytes > max_bytes:
-                self._remove_locked(next(iter(self._entries)))
+            reclaimable = 0
+            while self._entries and (
+                self._used_bytes_locked() - reclaimable > max_bytes
+            ):
+                reclaimable += self._remove_locked(next(iter(self._entries)), retired)
+        self._release_retired(retired)
 
     def stats(self) -> Dict[str, int]:
         with self._lock:
-            stats = {
+            return {
                 "resident_entries": len(self._entries),
                 "resident_bytes": self._resident_bytes,
+                "building_bytes": self._building_bytes,
+                "retired_bytes": self._retired_bytes,
                 "max_bytes": self._max_bytes,
             }
-            pool_stats = self._pool.stats()
-            stats.update({f"pool_{key}": value for key, value in pool_stats.items()})
-            return stats
+
+    _MAX_METADATA_ROWS = 1048576
+
+    def _metadata_snapshots(self, keys):
+        return ((key, self._snapshot(key)) for key in keys)
 
     def metadata(
         self,
@@ -818,17 +1183,7 @@ class MMHashKeyCache:
         results = []
         total_rows = 0
         tiers = embedding_cache.resident_tiers(keys)
-        for key in keys:
-            with self._lock:
-                value = self._entries.get(key)
-                if value is not None:
-                    value = (
-                        [tensor.clone() for tensor in value[0]],
-                        value[1],
-                        value[2],
-                        [],
-                        value[4],
-                    )
+        for key, value in self._metadata_snapshots(keys):
             hash_hit = (
                 value is not None
                 and bool(value[0])
@@ -838,7 +1193,7 @@ class MMHashKeyCache:
                 "key": key,
                 "hit": hash_hit,
                 "hash_hit": hash_hit,
-                "greennet_passed": bool(hash_hit and value[4]),
+                "greennet_passed": bool(hash_hit and value[2]),
                 "embedding_hit": key in tiers,
                 "embedding_tier": tiers.get(key),
             }
@@ -848,7 +1203,7 @@ class MMHashKeyCache:
             hashes = value[0]
             split_size = [hash_tensor.numel() for hash_tensor in hashes]
             total_rows += sum(split_size)
-            if total_rows > 1048576:
+            if total_rows > self._MAX_METADATA_ROWS:
                 raise ValueError("multimodal metadata response exceeds row limit")
             result.update(
                 {
@@ -874,6 +1229,49 @@ class MMHashKeyCache:
         }
 
 
+class _CacheLifetimeMetrics:
+    """Estimate cache turnover from admissions, with O(1) shared state.
+
+    Start at the first admission, then emit on the first admission at least
+    60s after the window start. Use the actual elapsed time, including idle
+    gaps; no timer or per-entry history is needed. No ingress means no sample.
+    """
+
+    def __init__(self, capacity_bytes: int):
+        self._lock = threading.Lock()
+        self._capacity_bytes = capacity_bytes
+        self._window_start: Optional[float] = None
+        self._admitted_bytes = 0
+
+    def resize(self, capacity_bytes: int) -> None:
+        with self._lock:
+            self._capacity_bytes = capacity_bytes
+            self._window_start = None
+            self._admitted_bytes = 0
+
+    def record_admission(self, size_bytes: int) -> None:
+        if size_bytes <= 0:
+            return
+        with self._lock:
+            if self._capacity_bytes <= 0:
+                return
+            now = time.monotonic()
+            self._admitted_bytes += size_bytes
+            if self._window_start is None:
+                self._window_start = now
+                return
+            elapsed = now - self._window_start
+            if elapsed < 60.0:
+                return
+            lifetime_seconds = self._capacity_bytes * elapsed / self._admitted_bytes
+            self._window_start = now
+            self._admitted_bytes = 0
+        kmonitor.report(
+            GaugeMetrics.VIT_EMBEDDING_CACHE_ESTIMATED_LIFETIME_SECONDS_METRIC,
+            lifetime_seconds,
+        )
+
+
 class MMEmbeddingCache:
     """Two-tier fixed-pool LRU shared by sync and async embedding paths.
 
@@ -889,8 +1287,13 @@ class MMEmbeddingCache:
         cpu_max_bytes: int,
         report_metrics: bool = False,
         on_cpu_evict: Optional[Callable[[str, MMEmbeddingCacheEntry], None]] = None,
+        async_publication: bool = False,
+        publish_queue_size: int = 1024,
+        lifetime_metrics: Optional[_CacheLifetimeMetrics] = None,
+        on_gpu_evict: Optional[Callable[[str, MMEmbeddingCacheEntry], None]] = None,
     ):
         self._on_cpu_evict = on_cpu_evict
+        self._on_gpu_evict = on_gpu_evict
         self._validate_limits(gpu_max_bytes, cpu_max_bytes)
         self._lock = threading.Lock()
         # All residency mutations take this lock before _lock. Copies never
@@ -909,6 +1312,15 @@ class MMEmbeddingCache:
         self._gpu_pool = _TensorMemoryPool(gpu_max_bytes, gpu_device)
         self._cpu_pool = _TensorMemoryPool(cpu_max_bytes, torch.device("cpu"))
         self._report_metrics_enabled = report_metrics
+        self._residency_tags = (
+            {"cache_shard": "0"} if report_metrics and _PROFILE_LOCAL_HITS else None
+        )
+        self._owns_lifetime_metrics = lifetime_metrics is None
+        self._lifetime_metrics = lifetime_metrics or (
+            _CacheLifetimeMetrics(gpu_max_bytes + cpu_max_bytes)
+            if report_metrics
+            else None
+        )
         self._resident_tokens = 0
         self._gpu_bytes = 0
         self._cpu_bytes = 0
@@ -923,7 +1335,26 @@ class MMEmbeddingCache:
             "demotion": 0,
             "promotion": 0,
             "transfer_error": 0,
+            "publish_drop": 0,
         }
+        self._publish_queue: Optional["queue.Queue"] = None
+        self._publish_thread: Optional[threading.Thread] = None
+        self._publish_pending = 0
+        self._publication_closing = False
+        self._publish_cond = threading.Condition()
+        if async_publication:
+            self._start_publication_thread(publish_queue_size)
+        if report_metrics:
+            kmonitor.embedding_cache_tokens.track(self)
+
+    def _start_publication_thread(self, publish_queue_size: int) -> None:
+        self._publish_queue = queue.Queue(maxsize=max(1, publish_queue_size))
+        self._publish_thread = threading.Thread(
+            target=self._publish_worker,
+            name="mm-cache-publish",
+            daemon=True,
+        )
+        self._publish_thread.start()
 
     @staticmethod
     def _validate_limits(gpu_max_bytes: int, cpu_max_bytes: int) -> None:
@@ -935,13 +1366,16 @@ class MMEmbeddingCache:
         return self._gpu_max_bytes > 0 or self._cpu_max_bytes > 0
 
     def _new_entry(self, cache_key: str) -> MMEmbeddingCacheEntry:
-        return MMEmbeddingCacheEntry(
+        entry = MMEmbeddingCacheEntry(
             on_complete=lambda entry, result: self._on_complete(
                 cache_key, entry, result
             ),
             on_fail=lambda entry, error: self._on_fail(cache_key, entry, error),
             on_read=lambda entry, timeout: self._read_entry(cache_key, entry, timeout),
         )
+        if self._report_metrics_enabled:
+            entry._cache_hit_implementation = "python"
+        return entry
 
     def try_acquire(self, cache_key: str) -> Tuple[str, MMEmbeddingCacheEntry]:
         with self._lock:
@@ -968,6 +1402,30 @@ class MMEmbeddingCache:
                 state = "miss"
         self._report_access_metric(state)
         return state, entry
+
+    def try_acquire_lazy(
+        self, key_factory: Callable[[], str]
+    ) -> Tuple[str, str, MMEmbeddingCacheEntry]:
+        """Avoid constructing an unused input key when residency is disabled.
+
+        The disabled branch still creates a distinct, unregistered entry and
+        reports the same miss as try_acquire. Its empty key is never published
+        into the index, including if a concurrent resize enables the cache.
+        Async request identity must continue to use an eagerly computed key.
+        """
+        with self._lock:
+            disabled = not self.enabled
+            if disabled:
+                self._stats["miss"] += 1
+                entry = MMEmbeddingCacheEntry()
+        if disabled:
+            self._report_access_metric("miss")
+            return "", "miss", entry
+        # Do not serialize a potentially large URL hash under the cache lock.
+        # try_acquire rechecks capacity, preserving concurrent resize semantics.
+        key = key_factory()
+        state, entry = self.try_acquire(key)
+        return key, state, entry
 
     @staticmethod
     def _record_ready_events(result: Any) -> List[Any]:
@@ -998,7 +1456,9 @@ class MMEmbeddingCache:
         entry.charge_tokens = 0
         entry.tier = None
 
-    def _detach_pool_storage(self, entry: MMEmbeddingCacheEntry) -> None:
+    def _detach_pool_storage(
+        self, entry: MMEmbeddingCacheEntry, *, to_cpu: bool = False
+    ) -> None:
         """Move an evicted entry out of the pool for an outstanding waiter."""
 
         with entry.storage_lock:
@@ -1007,10 +1467,12 @@ class MMEmbeddingCache:
                 return
             try:
                 self._ready_result(entry.result, entry.ready_events)
-                current_devices = _map_tensors(
-                    entry.result, lambda tensor: tensor.device
+                # Stage GPU-only writeback directly out of the retiring pool.
+                # Outstanding readers still restore entry.original_devices.
+                devices = _map_tensors(
+                    entry.result, lambda t: torch.device("cpu") if to_cpu else t.device
                 )
-                detached = _copy_pooled_result_to_devices(entry.result, current_devices)
+                detached = _copy_pooled_result_to_devices(entry.result, devices)
                 events = self._record_ready_events(detached)
                 for owner in owners:
                     owner.add_events(events)
@@ -1028,46 +1490,55 @@ class MMEmbeddingCache:
         for owner in owners:
             owner.release()
 
-    def _remove_entry_locked(self, cache_key: str, eviction: bool = False) -> None:
+    def _unlink_entry_locked(self, cache_key: str, eviction: bool = False):
+        """Index-only removal. Caller owns transfer lock through finalization."""
         entry = self._entries.pop(cache_key)
-        was_cpu = entry.tier == "cpu"
+        tier = entry.tier
         self._uncharge_locked(cache_key, entry)
-        self._detach_pool_storage(entry)
-        if eviction and was_cpu and self._on_cpu_evict is not None and entry.is_done:
+        if eviction:
+            self._stats["eviction"] += 1
+        return cache_key, entry, tier, eviction
+
+    def _finish_removal(self, removal) -> None:
+        cache_key, entry, tier, eviction = removal
+        callback = None
+        if eviction and entry.is_done:
+            if tier == "cpu":
+                callback = self._on_cpu_evict
+            elif tier == "gpu" and self._cpu_max_bytes == 0:
+                callback = self._on_gpu_evict
+        # Copies, event waits, pool releases and remote admission must not
+        # block unrelated index probes or embedding -> hash publication.
+        self._detach_pool_storage(entry, to_cpu=tier == "gpu" and callback is not None)
+        if callback is not None:
             try:
-                self._on_cpu_evict(cache_key, entry)
+                callback(cache_key, entry)
             except Exception:
                 logging.warning(
                     "Skipping failed remote cache eviction admission", exc_info=True
                 )
         if eviction:
-            self._stats["eviction"] += 1
             if self._report_metrics_enabled:
                 kmonitor.report(AccMetrics.VIT_EMBEDDING_CACHE_EVICTION_QPS_METRIC, 1)
+
+    def _remove_entry(self, cache_key, expected=None, *, eviction=False) -> bool:
+        """Caller owns _transfer_lock, never the index lock."""
+        with self._lock:
+            entry = self._entries.get(cache_key)
+            if entry is None or (expected is not None and entry is not expected):
+                return False
+            removal = self._unlink_entry_locked(cache_key, eviction)
+        self._finish_removal(removal)
+        return True
 
     def _admit_locked(
         self,
         cache_key: str,
         entry: MMEmbeddingCacheEntry,
-        result: Any,
-        offloaded: bool,
-        events: List[Any],
-        owners: List[_PoolReservation],
         gpu_bytes: int,
         cpu_bytes: int,
         charge_tokens: int,
     ) -> None:
-        with entry.storage_lock:
-            old_owners = entry.pool_owners
-            # New pool copies may still be reading the old pool blocks.
-            for owner in old_owners:
-                owner.add_events(events)
-            entry.result = result
-            entry.offloaded = offloaded
-            entry.ready_events = events
-            entry.pool_owners = owners
-        for owner in old_owners:
-            owner.release()
         entry.charge_tokens = charge_tokens
         entry.charge_gpu_bytes = gpu_bytes
         entry.charge_cpu_bytes = cpu_bytes
@@ -1081,12 +1552,15 @@ class MMEmbeddingCache:
         self._entries.move_to_end(cache_key)
 
     def _make_cpu_room(self, required_bytes: int) -> None:
-        with self._lock:
-            while self._cpu_bytes + required_bytes > self._cpu_max_bytes:
+        while True:
+            with self._lock:
+                if self._cpu_bytes + required_bytes <= self._cpu_max_bytes:
+                    return
                 # CPU tensors attached to hot GPU entries also count toward the
                 # CPU budget. Drop a hot entry only after all cold victims.
                 lru = self._cpu_lru or self._gpu_lru
-                self._remove_entry_locked(next(iter(lru)), eviction=True)
+                removal = self._unlink_entry_locked(next(iter(lru)), eviction=True)
+            self._finish_removal(removal)
 
     def _make_cpu_pool_room(self, required_bytes: int) -> None:
         while required_bytes:
@@ -1100,7 +1574,8 @@ class MMEmbeddingCache:
                 lru = self._cpu_lru or self._gpu_lru
                 if not lru:
                     return
-                self._remove_entry_locked(next(iter(lru)), eviction=True)
+                removal = self._unlink_entry_locked(next(iter(lru)), eviction=True)
+            self._finish_removal(removal)
 
     def _make_gpu_pool_room(self, required_bytes: int) -> None:
         while required_bytes:
@@ -1110,13 +1585,8 @@ class MMEmbeddingCache:
                 or stats["pending_bytes"] > 0
             ):
                 return
-            with self._lock:
-                if not self._gpu_lru:
-                    return
-                cache_key, entry = next(iter(self._gpu_lru.items()))
-                result, events = entry.result, entry.ready_events
-                self._uncharge_locked(cache_key, entry)
-            self._store_cpu(cache_key, entry, result, events)
+            if not self._evict_gpu_lru():
+                return
 
     def _store_pooled(
         self,
@@ -1134,9 +1604,7 @@ class MMEmbeddingCache:
             or required_cpu > self._cpu_max_bytes
             or (required_gpu == 0 and required_cpu == 0)
         ):
-            with self._lock:
-                if self._entries.get(cache_key) is entry:
-                    self._remove_entry_locked(cache_key, eviction=True)
+            self._remove_entry(cache_key, entry, eviction=True)
             return False
         if required_gpu:
             self._make_gpu_room(required_gpu)
@@ -1176,7 +1644,7 @@ class MMEmbeddingCache:
             with self._lock:
                 if self._entries.get(cache_key) is entry:
                     self._stats["transfer_error"] += 1
-                    self._remove_entry_locked(cache_key, eviction=True)
+            self._remove_entry(cache_key, entry, eviction=True)
             return False
         except Exception:
             # Cache insertion is optional. Preserve the successful computation
@@ -1187,20 +1655,30 @@ class MMEmbeddingCache:
             with self._lock:
                 if self._entries.get(cache_key) is entry:
                     self._stats["transfer_error"] += 1
-                    self._remove_entry_locked(cache_key, eviction=True)
+            self._remove_entry(cache_key, entry, eviction=True)
             return False
         with self._lock:
-            if self._entries.get(cache_key) is not entry:
-                for owner in owners:
-                    owner.release()
-                return False
+            indexed = self._entries.get(cache_key) is entry
+        if not indexed:
+            for owner in owners:
+                owner.release()
+            return False
+        # Residency mutation is serialized by _transfer_lock. A request may
+        # hold storage_lock while cloning; do not wait for it under _lock.
+        with entry.storage_lock:
+            old_owners = entry.pool_owners
+            for owner in old_owners:
+                owner.add_events(events)
+            entry.result = pooled_result
+            entry.offloaded = offloaded
+            entry.ready_events = events
+            entry.pool_owners = owners
+        for owner in old_owners:
+            owner.release()
+        with self._lock:
             self._admit_locked(
                 cache_key,
                 entry,
-                pooled_result,
-                offloaded,
-                events,
-                owners,
                 gpu_bytes,
                 cpu_bytes,
                 _embedding_output_tokens(result),
@@ -1220,19 +1698,118 @@ class MMEmbeddingCache:
                 self._stats["demotion"] += 1
 
     def _make_gpu_room(self, required_bytes: int) -> None:
-        while True:
-            with self._lock:
-                if self._gpu_bytes + required_bytes <= self._gpu_max_bytes:
-                    return
-                cache_key, entry = next(iter(self._gpu_lru.items()))
-                result, events = entry.result, entry.ready_events
-                self._uncharge_locked(cache_key, entry)
-            self._store_cpu(cache_key, entry, result, events)
-            # Do not retain the previous victim's GPU allocation during the
-            # next transfer (unless a caller independently holds that value).
-            del result
+        # The caller holds _transfer_lock across all changes to residency.
+        while self._gpu_bytes + required_bytes > self._gpu_max_bytes:
+            self._evict_gpu_lru()
+
+    def _evict_gpu_lru(self) -> bool:
+        with self._lock:
+            if not self._gpu_lru:
+                return False
+            key, entry = next(iter(self._gpu_lru.items()))
+            if self._cpu_max_bytes == 0:
+                removal = self._unlink_entry_locked(key, eviction=True)
+            else:
+                self._uncharge_locked(key, entry)
+                removal = None
+        if removal is not None:
+            self._finish_removal(removal)
+        else:
+            self._store_cpu(key, entry, entry.result, entry.ready_events)
+        return True
 
     def _on_complete(
+        self, cache_key: str, entry: MMEmbeddingCacheEntry, result: Any
+    ) -> None:
+        if self._publish_queue is not None:
+            self._enqueue_publication(
+                cache_key, entry, result, entry._pending_before_publish
+            )
+            return
+        self._on_complete_sync(cache_key, entry, result)
+
+    def _drop_pending_entry(self, cache_key: str, entry: MMEmbeddingCacheEntry) -> None:
+        """Remove an unqueued PENDING entry without taking the transfer lock."""
+        with self._lock:
+            if self._entries.get(cache_key) is entry:
+                self._entries.pop(cache_key, None)
+
+    def _enqueue_publication(
+        self,
+        cache_key: str,
+        entry: MMEmbeddingCacheEntry,
+        result: Any,
+        before_publish: Optional[Callable[[], None]],
+    ) -> None:
+        with self._publish_cond:
+            publication_queue = self._publish_queue
+            if (
+                publication_queue is not None
+                and not self._publication_closing
+                and self._publish_pending < publication_queue.maxsize
+            ):
+                try:
+                    publication_queue.put_nowait(
+                        (cache_key, entry, result, before_publish)
+                    )
+                except queue.Full:
+                    pass
+                else:
+                    self._publish_pending += 1
+                    return
+        with self._lock:
+            self._stats["publish_drop"] += 1
+        logging.warning("ViT cache publication unavailable; dropping %s", cache_key)
+        self._drop_pending_entry(cache_key, entry)
+
+    def _publish_worker(self) -> None:
+        publication_queue = self._publish_queue
+        while True:
+            item = publication_queue.get()
+            if item is None:
+                break
+            cache_key, entry, result, before_publish = item
+            try:
+                self._on_complete_sync(cache_key, entry, result)
+                if before_publish is not None:
+                    before_publish()
+            except Exception:
+                logging.warning(
+                    "ViT cache publication failed for %s", cache_key, exc_info=True
+                )
+                self._remove_if_same(cache_key, entry)
+            finally:
+                # The blocking get below must not retain the previous work item.
+                del item, entry, result, before_publish
+                with self._publish_cond:
+                    self._publish_pending -= 1
+                    self._publish_cond.notify_all()
+
+    def flush(self) -> None:
+        """Wait for queued cache publications to finish (tests/shutdown)."""
+        if self._publish_queue is None:
+            return
+        with self._publish_cond:
+            while self._publish_pending:
+                self._publish_cond.wait()
+
+    def close(self) -> None:
+        """Stop the publication thread after draining queued work."""
+        if self._report_metrics_enabled:
+            kmonitor.embedding_cache_tokens.untrack(self)
+        with self._publish_cond:
+            publication_queue = self._publish_queue
+            if publication_queue is None or self._publication_closing:
+                return
+            self._publication_closing = True
+        publication_queue.put(None)
+        if self._publish_thread is not None:
+            self._publish_thread.join(timeout=10)
+        with self._publish_cond:
+            self._publish_queue = None
+            self._publish_thread = None
+
+    def _on_complete_sync(
         self, cache_key: str, entry: MMEmbeddingCacheEntry, result: Any
     ) -> None:
         entry.original_devices = _map_tensors(result, lambda tensor: tensor.device)
@@ -1244,16 +1821,15 @@ class MMEmbeddingCache:
             with self._lock:
                 if self._entries.get(cache_key) is not entry:
                     return
-                if not self.enabled:
-                    self._remove_entry_locked(cache_key)
-                    return
+            if not self.enabled:
+                self._remove_entry(cache_key, entry)
+                return
             if gpu_bytes > self._gpu_max_bytes:
                 self._store_cpu(cache_key, entry, result, entry.ready_events)
             elif cpu_bytes > self._cpu_max_bytes or (
                 gpu_bytes == 0 and self._cpu_max_bytes == 0
             ):
-                with self._lock:
-                    self._remove_entry_locked(cache_key)
+                self._remove_entry(cache_key, entry)
             else:
                 self._store_pooled(
                     cache_key,
@@ -1263,6 +1839,11 @@ class MMEmbeddingCache:
                     False,
                     entry.ready_events,
                 )
+            # Completion runs once per generation, unlike _store_pooled which
+            # also handles tier moves. Snapshot before releasing the transfer
+            # lock: a concurrent eviction must not erase this admission.
+            admitted_bytes = entry.charge_bytes
+        self._report_admission(admitted_bytes)
         self._report_current_residency()
 
     def _materialize_entry(self, entry: MMEmbeddingCacheEntry, devices: Any) -> Any:
@@ -1270,6 +1851,8 @@ class MMEmbeddingCache:
             result = entry.result
             events = entry.ready_events
             owners = list(entry.pool_owners)
+            if devices is None:
+                devices = _map_tensors(result, lambda tensor: tensor.device)
             if not owners:
                 self._ready_result(result, events)
                 entry.ready_events = []
@@ -1366,10 +1949,9 @@ class MMEmbeddingCache:
         self._remove_if_same(cache_key, entry)
 
     def _remove_if_same(self, cache_key: str, expected: MMEmbeddingCacheEntry) -> bool:
-        with self._transfer_lock, self._lock:
-            if self._entries.get(cache_key) is not expected:
+        with self._transfer_lock:
+            if not self._remove_entry(cache_key, expected):
                 return False
-            self._remove_entry_locked(cache_key)
         self._report_current_residency()
         return True
 
@@ -1378,8 +1960,19 @@ class MMEmbeddingCache:
         cache_key: str,
         entry: MMEmbeddingCacheEntry,
         result: Any,
+        *,
+        before_publish: Optional[Callable[[], None]] = None,
     ) -> bool:
-        return entry.complete(result)
+        # Deferred readers may wake before the publication thread runs. The
+        # winning completion publishes its device tree and events with the result.
+        devices = _map_tensors(result, lambda tensor: tensor.device)
+        ready_events = self._record_ready_events(result)
+        return entry.complete(
+            result,
+            before_publish=before_publish,
+            defer=self._publish_queue is not None,
+            prepared_storage=(devices, ready_events),
+        )
 
     def fail(
         self, cache_key: str, entry: MMEmbeddingCacheEntry, error: Exception
@@ -1395,6 +1988,20 @@ class MMEmbeddingCache:
     def peek(self, cache_key: str) -> Optional[MMEmbeddingCacheEntry]:
         with self._lock:
             return self._entries.get(cache_key)
+
+    def is_current(self, cache_key, entry):
+        return self.peek(cache_key) is entry
+
+    def _with_current_entry(self, cache_key, expected, action):
+        """Validate and publish sidecar metadata atomically with index removal.
+
+        action may take the hash index lock, but must not copy tensors, touch
+        pools, or call back into this cache. Never acquire these in reverse.
+        """
+        with self._lock:
+            if self._entries.get(cache_key) is expected and expected.error is None:
+                return action()
+        return None
 
     def resident_tiers(
         self, keys: Optional[List[str]] = None, limit: Optional[int] = None
@@ -1413,7 +2020,7 @@ class MMEmbeddingCache:
                 entry = self._entries.get(key)
                 if (
                     entry is not None
-                    and entry._event.is_set()
+                    and entry.is_done
                     and entry.error is None
                     and entry.tier in ("gpu", "cpu")
                 ):
@@ -1431,8 +2038,12 @@ class MMEmbeddingCache:
                 # Pool sizes are fixed. Runtime growth is rare and cannot move
                 # live pool views safely, so discard indexed values first.
                 with self._lock:
-                    for key in list(self._entries):
-                        self._remove_entry_locked(key, eviction=True)
+                    removals = [
+                        self._unlink_entry_locked(key, eviction=True)
+                        for key in list(self._entries)
+                    ]
+                for removal in removals:
+                    self._finish_removal(removal)
                 if grow_gpu:
                     self._gpu_pool = _TensorMemoryPool(
                         gpu_max_bytes,
@@ -1448,16 +2059,29 @@ class MMEmbeddingCache:
             self._make_gpu_room(0)
             self._make_cpu_room(0)
             with self._lock:
-                if cpu_max_bytes == 0:
-                    for key in list(self._cpu_lru):
-                        self._remove_entry_locked(key, eviction=True)
+                removals = (
+                    [
+                        self._unlink_entry_locked(key, eviction=True)
+                        for key in list(self._cpu_lru)
+                    ]
+                    if cpu_max_bytes == 0
+                    else []
+                )
+            for removal in removals:
+                self._finish_removal(removal)
+        if self._owns_lifetime_metrics and self._lifetime_metrics is not None:
+            self._lifetime_metrics.resize(gpu_max_bytes + cpu_max_bytes)
         self._report_current_residency()
 
     def clear(self, error: Optional[Exception] = None) -> None:
-        with self._transfer_lock, self._lock:
-            entries = list(self._entries.values())
-            for key in list(self._entries):
-                self._remove_entry_locked(key)
+        with self._transfer_lock:
+            with self._lock:
+                entries = list(self._entries.values())
+                removals = [
+                    self._unlink_entry_locked(key) for key in list(self._entries)
+                ]
+            for removal in removals:
+                self._finish_removal(removal)
         if error is not None:
             for entry in entries:
                 if not entry.is_done:
@@ -1487,11 +2111,23 @@ class MMEmbeddingCache:
         stats.update({f"cpu_pool_{key}": value for key, value in cpu_pool.items()})
         return stats
 
+    def resident_tokens(self) -> int:
+        with self._lock:
+            return self._resident_tokens
+
     def _report_current_residency(self) -> None:
         with self._lock:
-            tokens = self._resident_tokens
             size_bytes = self._gpu_bytes + self._cpu_bytes
-        self._report_resident_metrics(tokens, size_bytes)
+            entries = len(self._gpu_lru) + len(self._cpu_lru)
+        self._report_resident_metrics(size_bytes, entries)
+
+    def _report_admission(self, size_bytes: int) -> None:
+        if not self._report_metrics_enabled or self._lifetime_metrics is None:
+            return
+        try:
+            self._lifetime_metrics.record_admission(size_bytes)
+        except Exception:
+            logging.exception("Failed to report ViT cache estimated lifetime")
 
     def _report_access_metric(self, state: str) -> None:
         if not self._report_metrics_enabled:
@@ -1503,11 +2139,219 @@ class MMEmbeddingCache:
         }[state]
         kmonitor.report(metric, 1)
 
-    def _report_resident_metrics(self, tokens: int, size_bytes: int) -> None:
+    def _report_resident_metrics(self, size_bytes: int, entries: int) -> None:
         if not self._report_metrics_enabled:
             return
-        kmonitor.report(GaugeMetrics.VIT_EMBEDDING_CACHE_TOKENS_METRIC, tokens)
         kmonitor.report(GaugeMetrics.VIT_EMBEDDING_CACHE_BYTES_METRIC, size_bytes)
+        if self._residency_tags is not None:
+            kmonitor.report(
+                GaugeMetrics.VIT_EMBEDDING_CACHE_RESIDENT_ENTRIES_METRIC,
+                entries,
+                self._residency_tags,
+            )
+            kmonitor.report(
+                GaugeMetrics.VIT_EMBEDDING_CACHE_RESIDENT_BYTES_METRIC,
+                size_bytes,
+                self._residency_tags,
+            )
+
+
+def is_current_cache_entry(cache, key, entry):
+    check = getattr(type(cache), "is_current", None)
+    return check(cache, key, entry) if check is not None else cache.peek(key) is entry
+
+
+def _split_budget(total: int, shards: int) -> List[int]:
+    """Split a byte budget into `shards` parts whose sum is exactly `total`."""
+    base, remainder = divmod(total, shards)
+    return [base + (1 if index < remainder else 0) for index in range(shards)]
+
+
+def emb_host_feature_enabled(name: str) -> bool:
+    if os.environ.get(name) != "1":
+        return False
+    hosts = os.environ.get(f"{name}_HOSTS")
+    # An explicitly empty list disables the feature on every host.
+    return hosts is None or socket.gethostname() in (
+        host.strip() for host in hosts.split(",")
+    )
+
+
+def _native_local_cache_enabled() -> bool:
+    return emb_host_feature_enabled("MM_EMB_NATIVE_LOCAL_CACHE")
+
+
+class ShardedMMEmbeddingCache:
+    """Route embedding-cache keys across independent cache shards.
+
+    Each shard owns its own index lock, transfer lock, LRU and fixed pools.
+    Sharding bounds both the critical section and the first-fit free-list scan
+    by the shard's entry count instead of the whole cache.
+    """
+
+    def __init__(
+        self,
+        gpu_max_bytes: int,
+        cpu_max_bytes: int,
+        *,
+        shards: int = 8,
+        report_metrics: bool = False,
+        on_cpu_evict: Optional[Callable[[str, MMEmbeddingCacheEntry], None]] = None,
+        async_publication: bool = False,
+        on_gpu_evict: Optional[Callable[[str, MMEmbeddingCacheEntry], None]] = None,
+    ):
+        if shards < 1:
+            raise ValueError("embedding cache shards must be positive")
+        self._lifetime_metrics = (
+            _CacheLifetimeMetrics(gpu_max_bytes + cpu_max_bytes)
+            if report_metrics
+            else None
+        )
+        cache_class = MMEmbeddingCache
+        eviction_policy = dict(on_cpu_evict=on_cpu_evict, on_gpu_evict=on_gpu_evict)
+        if (
+            _native_local_cache_enabled()
+            and on_cpu_evict is None
+            and on_gpu_evict is None
+        ):
+            import librtp_compute_ops
+
+            if hasattr(librtp_compute_ops, "EmbLocalCacheShard"):
+                from .mm_embedding_native_cache import NativeMMEmbeddingCache
+
+                cache_class = NativeMMEmbeddingCache
+                eviction_policy = {}
+        self.uses_native_index = cache_class is not MMEmbeddingCache
+        self._shards = [
+            cache_class(
+                gpu_bytes,
+                cpu_bytes,
+                report_metrics=report_metrics,
+                async_publication=async_publication,
+                lifetime_metrics=self._lifetime_metrics,
+                **eviction_policy,
+            )
+            for gpu_bytes, cpu_bytes in zip(
+                _split_budget(gpu_max_bytes, shards),
+                _split_budget(cpu_max_bytes, shards),
+            )
+        ]
+        if report_metrics and _PROFILE_LOCAL_HITS:
+            for index, shard in enumerate(self._shards):
+                shard._residency_tags = {"cache_shard": str(index)}
+        if report_metrics and "MM_EMB_NATIVE_LOCAL_CACHE_HOSTS" in os.environ:
+            logging.info("MM_EMB_LOCAL_CACHE_IMPLEMENTATION %s", cache_class.__name__)
+        self.instance_id = uuid.uuid4().hex
+
+    @property
+    def enabled(self) -> bool:
+        return any(shard.enabled for shard in self._shards)
+
+    @property
+    def shard_count(self) -> int:
+        return len(self._shards)
+
+    def _shard(self, cache_key: str) -> MMEmbeddingCache:
+        return self._shards[hash(cache_key) % len(self._shards)]
+
+    def try_acquire(self, cache_key: str) -> Tuple[str, MMEmbeddingCacheEntry]:
+        return self._shard(cache_key).try_acquire(cache_key)
+
+    def try_acquire_lazy(
+        self, key_factory: Callable[[], str]
+    ) -> Tuple[str, str, MMEmbeddingCacheEntry]:
+        if not self.enabled:
+            return "", "miss", MMEmbeddingCacheEntry()
+        key = key_factory()
+        state, entry = self._shard(key).try_acquire(key)
+        return key, state, entry
+
+    def complete(
+        self,
+        cache_key: str,
+        entry: MMEmbeddingCacheEntry,
+        result: Any,
+        *,
+        before_publish: Optional[Callable[[], None]] = None,
+    ) -> bool:
+        return self._shard(cache_key).complete(
+            cache_key, entry, result, before_publish=before_publish
+        )
+
+    def fail(
+        self, cache_key: str, entry: MMEmbeddingCacheEntry, error: Exception
+    ) -> bool:
+        return self._shard(cache_key).fail(cache_key, entry, error)
+
+    def remove(self, cache_key: str) -> None:
+        self._shard(cache_key).remove(cache_key)
+
+    def peek(self, cache_key: str) -> Optional[MMEmbeddingCacheEntry]:
+        return self._shard(cache_key).peek(cache_key)
+
+    def is_current(self, cache_key, entry):
+        return self._shard(cache_key).is_current(cache_key, entry)
+
+    def _with_current_entry(self, cache_key, expected, action):
+        return self._shard(cache_key)._with_current_entry(cache_key, expected, action)
+
+    def resident_tiers(
+        self, keys: Optional[List[str]] = None, limit: Optional[int] = None
+    ) -> Dict[str, str]:
+        if limit is not None and limit <= 0:
+            return {}
+        if keys is not None:
+            tiers: Dict[str, str] = {}
+            for key in keys:
+                tier = self._shard(key).resident_tiers([key]).get(key)
+                if tier is not None:
+                    tiers[key] = tier
+                    if limit is not None and len(tiers) >= limit:
+                        break
+            return tiers
+        tiers = {}
+        for shard in self._shards:
+            tiers.update(shard.resident_tiers(limit=limit))
+            if limit is not None and len(tiers) >= limit:
+                break
+        return tiers
+
+    def clear(self, error: Optional[Exception] = None) -> None:
+        for shard in self._shards:
+            shard.clear(error)
+
+    def flush(self) -> None:
+        for shard in self._shards:
+            shard.flush()
+
+    def close(self) -> None:
+        for shard in self._shards:
+            shard.close()
+
+    def resize(self, gpu_max_bytes: int, cpu_max_bytes: int) -> None:
+        MMEmbeddingCache._validate_limits(gpu_max_bytes, cpu_max_bytes)
+        for shard, gpu_bytes, cpu_bytes in zip(
+            self._shards,
+            _split_budget(gpu_max_bytes, len(self._shards)),
+            _split_budget(cpu_max_bytes, len(self._shards)),
+        ):
+            shard.resize(gpu_bytes, cpu_bytes)
+        if self._lifetime_metrics is not None:
+            self._lifetime_metrics.resize(gpu_max_bytes + cpu_max_bytes)
+
+    def stats(self) -> Dict[str, int]:
+        per_shard = [shard.stats() for shard in self._shards]
+        stats: Dict[str, int] = {}
+        for shard_stats in per_shard:
+            for key, value in shard_stats.items():
+                if key.endswith("largest_free_block_bytes"):
+                    stats[key] = max(stats.get(key, 0), value)
+                elif isinstance(value, (int, float)):
+                    stats[key] = stats.get(key, 0) + value
+                else:
+                    stats.setdefault(key, value)
+        stats["shards"] = len(self._shards)
+        return stats
 
 
 # Compatibility alias for internal callers that imported the previous class.

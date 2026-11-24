@@ -1092,36 +1092,38 @@ class MMEmbeddingAsyncCacheTest(TestCase):
         self.assertEqual(stats["resident_tokens"], 4)
         self.assertEqual(stats["eviction"], 1)
 
-    @patch("rtp_llm.multimodal.mm_embedding_cache.kmonitor.report")
-    def test_cache_token_metric_tracks_eviction_and_one_dimensional_embedding(
-        self, report
-    ):
-        from rtp_llm.multimodal.mm_embedding_cache import _embedding_output_tokens
+    def test_cache_token_metric_sums_shards_through_idle_flushes_and_eviction(self):
+        from rtp_llm.metrics.emb_interval_metrics import EmbCacheTokensMetric
+        from rtp_llm.multimodal import mm_embedding_cache as cache_module
 
-        # The cache stores embedding vectors; a [hidden] tensor represents one
-        # token rather than hidden scalar tokens.
-        self.assertEqual(
-            _embedding_output_tokens((torch.zeros(4), None)),
-            1,
+        metric = EmbCacheTokensMetric(
+            GaugeMetrics.VIT_EMBEDDING_CACHE_TOKENS_METRIC.value, {}
         )
-
-        cache = MMEmbeddingAsyncCache(
-            gpu_max_bytes=0, cpu_max_bytes=32, report_metrics=True
-        )
-        _, first = cache.try_acquire("first")
-        first.complete((torch.zeros((2, 4)), None))
-
-        # Disabling the cache drops the resident gauge immediately. A pending
-        # entry is still allowed to finish for existing waiters.
-        cache.try_acquire("second")
-        cache.resize(0, 0)
-        token_values = [
-            call.args[1]
-            for call in report.call_args_list
-            if call.args
-            and call.args[0] == GaugeMetrics.VIT_EMBEDDING_CACHE_TOKENS_METRIC
-        ]
-        self.assertEqual(token_values, [2, 0])
+        with patch.object(
+            cache_module.kmonitor, "embedding_cache_tokens", metric
+        ), patch.object(
+            cache_module, "_native_local_cache_enabled", return_value=False
+        ):
+            cache = cache_module.ShardedMMEmbeddingCache(
+                0, 64, shards=2, report_metrics=True
+            )
+            try:
+                self.assertEqual(metric.fetch_reported_data()[0].value, 0)
+                # Put the entries on distinct shards; a [hidden] vector contributes one token.
+                tensors = (torch.zeros((2, 4)), torch.zeros(4))
+                for shard, tensor in zip(cache._shards, tensors):
+                    _, entry = shard.try_acquire("key")
+                    entry.complete((tensor, None))
+                for _ in range(2):
+                    self.assertEqual(
+                        [p.value for p in metric.fetch_reported_data()], [3]
+                    )
+                cache.try_acquire("pending")
+                cache.resize(0, 0)
+                self.assertEqual([p.value for p in metric.fetch_reported_data()], [0])
+            finally:
+                cache.close()
+            self.assertEqual(metric.fetch_reported_data(), [])
 
 
 class VitErrorReportingTest(TestCase):

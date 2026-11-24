@@ -1,18 +1,181 @@
 import concurrent.futures
 import gc
+import random
+import subprocess
+import sys
 import threading
+import time
 import unittest
 import weakref
+from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 
+from rtp_llm.metrics import GaugeMetrics
+from rtp_llm.multimodal import mm_embedding_cache as cache_module
 from rtp_llm.multimodal.mm_embedding_cache import (
     MMEmbeddingCache,
     MMEmbeddingCacheEntry,
     MMHashKeyCache,
     _current_cuda_streams,
+    _PoolCapacityError,
+    _TensorMemoryPool,
 )
+
+
+class TensorMemoryPoolFreeListTest(unittest.TestCase):
+    def test_alignment_and_two_sided_coalescing(self):
+        pool = _TensorMemoryPool(64, torch.device("cpu"))
+        first, middle, last = [pool.reserve(9) for _ in range(3)]
+        self.assertEqual([b.offset for b in (first, middle, last)], [0, 16, 32])
+        pool.release(first, [])
+        pool.release(last, [])
+        self.assertEqual(pool._free, [(0, 16), (32, 32)])
+        pool.release(middle, [])
+        self.assertEqual(pool._free, [(0, 64)])
+        self.assertEqual(pool.reserve(64).offset, 0)
+        self.assertEqual(pool._free, [])
+
+    def test_random_operations_match_full_sort_and_coalesce(self):
+        # Differential check against a reference allocator that aligns the
+        # allocation size and drops sub-alignment fragments. Every free block
+        # must stay usable and coalesced; wasted bytes are accounted separately.
+        for seed in (11, 29, 47):
+            rng = random.Random(seed)
+            capacity = 4096
+            pool = _TensorMemoryPool(capacity, torch.device("cpu"))
+            reference = [(0, capacity)]
+            live = []
+            wasted = [0]
+
+            def insert(offset, size):
+                if size < 8:
+                    wasted[0] += size
+                    return
+                reference.append((offset, size))
+                reference.sort()
+                merged = []
+                for start, count in reference:
+                    if merged and sum(merged[-1]) == start:
+                        merged[-1] = (merged[-1][0], merged[-1][1] + count)
+                    else:
+                        merged.append((start, count))
+                reference[:] = merged
+
+            def reserve(size):
+                if size == 0:
+                    return None
+                aligned_size = (size + 7) // 8 * 8
+                for index, (offset, count) in enumerate(reference):
+                    aligned = (offset + 7) // 8 * 8
+                    prefix = aligned - offset
+                    if count - prefix >= aligned_size:
+                        reference.pop(index)
+                        insert(offset, prefix)
+                        insert(
+                            aligned + aligned_size,
+                            offset + count - aligned - aligned_size,
+                        )
+                        return aligned, aligned_size
+                raise _PoolCapacityError("reference full")
+
+            for _ in range(3000):
+                if live and rng.random() < 0.47:
+                    block = live.pop(rng.randrange(len(live)))
+                    insert(block.offset, block.size)
+                    pool.release(block, [])
+                else:
+                    size = rng.randrange(0, 600)
+                    try:
+                        expected = reserve(size)
+                    except _PoolCapacityError:
+                        with self.assertRaises(_PoolCapacityError):
+                            pool.reserve(size)
+                    else:
+                        actual = pool.reserve(size)
+                        if expected is None:
+                            self.assertIsNone(actual)
+                        else:
+                            self.assertEqual(actual.offset, expected[0])
+                            self.assertEqual(actual.offset % 8, 0)
+                            self.assertEqual(actual.size, expected[1])
+                            live.append(actual)
+                self.assertEqual(pool._free, reference)
+                self.assertTrue(
+                    all(offset % 8 == 0 and size >= 8 for offset, size in pool._free)
+                )
+                used = sum(block.size for block in live)
+                self.assertEqual(pool.stats()["used_bytes"], used)
+                self.assertEqual(pool.stats()["wasted_bytes"], wasted[0])
+                self.assertEqual(
+                    used + sum(n for _, n in pool._free) + wasted[0], capacity
+                )
+            rng.shuffle(live)
+            for block in live:
+                pool.release(block, [])
+            self.assertEqual(sum(n for _, n in pool._free) + wasted[0], capacity)
+            self.assertTrue(
+                all(offset % 8 == 0 and size >= 8 for offset, size in pool._free)
+            )
+            for left, right in zip(pool._free, pool._free[1:]):
+                self.assertLess(sum(left), right[0])
+
+    def test_pending_event_delays_reuse_and_coalesces_after_wait(self):
+        class Event:
+            ready = False
+            waits = 0
+
+            def query(self):
+                return self.ready
+
+            def synchronize(self):
+                self.waits += 1
+                self.ready = True
+
+        pool = _TensorMemoryPool(64, torch.device("cpu"))
+        left, right = pool.reserve(32), pool.reserve(32)
+        event = Event()
+        pool.release(left, [event])
+        pool.release(right, [])
+        self.assertEqual(pool._free, [(32, 32)])
+        self.assertEqual(pool.stats()["pending_bytes"], 32)
+        whole = pool.reserve(64)
+        self.assertEqual((whole.offset, whole.size), (0, 64))
+        self.assertEqual(event.waits, 1)
+        self.assertEqual(pool.stats()["pending_bytes"], 0)
+        pool.release(whole, [])
+        self.assertEqual(pool._free, [(0, 64)])
+
+    def test_variable_size_churn_keeps_free_list_bounded(self):
+        # Regression: aligning only the offset produced sub-alignment
+        # fragments under churn, making every reserve() an O(n) scan. Align the
+        # allocation size and drop sub-alignment fragments instead.
+        pool = _TensorMemoryPool(1024 * 1024, torch.device("cpu"))
+        live = []
+        rng = random.Random(7)
+        for _ in range(12000):
+            if live and (len(live) > 64 or rng.random() < 0.35):
+                block = live.pop(rng.randrange(len(live)))
+                pool.release(block, [])
+            else:
+                try:
+                    live.append(pool.reserve(rng.randrange(1, 4096)))
+                except _PoolCapacityError:
+                    block = live.pop(rng.randrange(len(live)))
+                    pool.release(block, [])
+            self.assertLessEqual(len(pool._free), len(live) + 1)
+            self.assertTrue(
+                all(offset % 8 == 0 and size >= 8 for offset, size in pool._free)
+            )
+        stats = pool.stats()
+        # Aligned sizes keep every free block usable, so no bytes are wasted.
+        self.assertEqual(stats["wasted_bytes"], 0)
+        self.assertEqual(
+            stats["used_bytes"] + stats["free_bytes"] + stats["wasted_bytes"],
+            stats["capacity_bytes"],
+        )
 
 
 def _assert_read_copies_are_released(testcase, entry, device_type):
@@ -34,6 +197,39 @@ def _assert_read_copies_are_released(testcase, entry, device_type):
 
 
 class UncachedEntryReadinessTest(unittest.TestCase):
+    def test_completed_inspection_survives_later_compute_failure(self):
+        from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+        from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
+
+        for verdict in (GreenNetVerdict(True), GreenNetVerdict(False, 2)):
+            with self.subTest(verdict=verdict):
+                entry = MMEmbeddingCacheEntry()
+                entry.set_greennet_verdict(verdict)
+                entry.set_greennet_error(
+                    FtRuntimeException(
+                        ExceptionType.GENERATE_TIMEOUT, "embedding timed out"
+                    )
+                )
+                self.assertIs(entry.wait_greennet(timeout=0), verdict)
+
+    def test_inspection_error_survives_late_verdict(self):
+        from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+        from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
+
+        entry = MMEmbeddingCacheEntry()
+        error = FtRuntimeException(
+            ExceptionType.MM_WRONG_FORMAT_ERROR, "url ssrf check failed"
+        )
+        entry.set_greennet_error(error)
+        for verdict in (None, GreenNetVerdict(False, 11), GreenNetVerdict(True)):
+            with self.subTest(verdict=verdict):
+                if verdict is not None:
+                    entry.set_greennet_verdict(verdict)
+                with self.assertRaises(FtRuntimeException) as raised:
+                    entry.wait_greennet(timeout=0)
+                self.assertIs(raised.exception, error)
+                self.assertFalse(entry.greennet_passed)
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
     def test_wait_observes_output_from_another_stream(self):
         for stream_ordered in (False, True):
@@ -55,7 +251,413 @@ class UncachedEntryReadinessTest(unittest.TestCase):
                     )
 
 
+class EmbeddingCacheTurnoverMetricsTest(unittest.TestCase):
+    metric = GaugeMetrics.VIT_EMBEDDING_CACHE_ESTIMATED_LIFETIME_SECONDS_METRIC
+
+    def setUp(self):
+        self.now = 100.0
+        clock_patch = patch.object(
+            cache_module, "time", SimpleNamespace(monotonic=lambda: self.now)
+        )
+        clock_patch.start()
+        self.addCleanup(clock_patch.stop)
+        report_patch = patch.object(cache_module.kmonitor, "report")
+        self.report = report_patch.start()
+        self.addCleanup(report_patch.stop)
+
+    def cache(self, gpu_bytes=0, cpu_bytes=16, **kwargs):
+        kwargs.setdefault("report_metrics", True)
+        cache = MMEmbeddingCache(gpu_bytes, cpu_bytes, **kwargs)
+        self.addCleanup(cache.close)
+        return cache
+
+    def put(self, cache, key, *, device="cpu", count=4):
+        state, entry = cache.try_acquire(key)
+        self.assertEqual(state, "miss")
+        self.assertTrue(cache.complete(key, entry, torch.ones(count, device=device)))
+        return entry
+
+    def samples(self):
+        return [
+            call.args[1]
+            for call in self.report.call_args_list
+            if call.args[0] == self.metric
+        ]
+
+    def test_admission_once_per_generation_not_lookup(self):
+        cache = self.cache()
+        _, entry = cache.try_acquire("a")
+        self.assertEqual(cache.try_acquire("a")[0], "in_progress")
+        self.assertEqual(cache._lifetime_metrics._admitted_bytes, 0)
+        cache.complete("a", entry, torch.ones(4))
+        self.assertFalse(cache.complete("a", entry, torch.ones(4)))
+        self.assertEqual(cache.try_acquire("a")[0], "complete")
+        self.assertTrue(torch.equal(entry.wait(), torch.ones(4)))
+        self.assertIs(cache.peek("a"), entry)
+        self.assertEqual(cache.resident_tiers(["a"]), {"a": "cpu"})
+        self.assertEqual(cache._lifetime_metrics._admitted_bytes, 16)
+        self.put(cache, "b")
+        self.put(cache, "a")  # Refill after eviction is new ingress.
+        cache.clear()
+        self.assertEqual(cache._lifetime_metrics._admitted_bytes, 48)
+        self.assertEqual(self.samples(), [])
+        self.now = 160.0
+        self.put(cache, "c")
+        self.assertEqual(self.samples(), [16 * 60 / 64])
+
+    def test_nonresident_entries_do_not_contribute(self):
+        for operation in (
+            "disabled",
+            "pending",
+            "failed",
+            "oversized",
+            "removed",
+            "copy",
+        ):
+            with self.subTest(operation=operation):
+                cache = self.cache(cpu_bytes=0 if operation == "disabled" else 16)
+                _, entry = cache.try_acquire("a")
+                if operation == "failed":
+                    cache.fail("a", entry, ValueError("failed"))
+                elif operation == "pending":
+                    cache.clear()
+                elif operation == "removed":
+                    cache.remove("a")
+                    cache.complete("a", entry, torch.ones(4))
+                elif operation == "copy":
+                    with patch.object(
+                        cache_module, "_pool_result", side_effect=RuntimeError("copy")
+                    ):
+                        cache.complete("a", entry, torch.ones(4))
+                    self.assertTrue(torch.equal(entry.wait(), torch.ones(4)))
+                else:
+                    cache.complete("a", entry, torch.ones(8))
+                self.assertEqual(cache._lifetime_metrics._admitted_bytes, 0)
+                self.assertIsNone(cache._lifetime_metrics._window_start)
+                self.assertEqual(self.samples(), [])
+
+    def test_uses_capacity_not_usage_and_resets_window_on_resize(self):
+        cache = self.cache(cpu_bytes=64)
+        self.put(cache, "a")
+        self.now = 160.0
+        self.put(cache, "b")
+        self.assertEqual(cache.stats()["resident_bytes"], 32)
+        self.assertEqual(self.samples(), [64 * 60 / 32])
+        cache.resize(0, 32)
+        self.assertIsNone(cache._lifetime_metrics._window_start)
+        self.now = 170.0
+        self.put(cache, "c")
+        self.now = 230.0
+        self.put(cache, "d")
+        self.assertEqual(self.samples(), [120.0, 60.0])
+        cache.resize(0, 0)
+        self.assertEqual(cache._lifetime_metrics._capacity_bytes, 0)
+        self.assertEqual(cache._lifetime_metrics._admitted_bytes, 0)
+
+    def test_shards_share_capacity_counter_and_one_metric_sample(self):
+        cache = cache_module.ShardedMMEmbeddingCache(
+            0, 129, shards=4, report_metrics=True
+        )
+        self.addCleanup(cache.close)
+        self.assertTrue(
+            all(s._lifetime_metrics is cache._lifetime_metrics for s in cache._shards)
+        )
+        keys = {}
+        for index in range(1000):
+            key = str(index)
+            keys.setdefault(id(cache._shard(key)), key)
+            if len(keys) == 4:
+                break
+        self.assertEqual(len(keys), 4)
+        keys = list(keys.values())
+        for key in keys:
+            self.put(cache, key)
+        self.assertEqual(cache._lifetime_metrics._admitted_bytes, 64)
+        self.now = 160.0
+        cache.remove(keys[0])
+        self.put(cache, keys[0])
+        self.assertEqual(self.samples(), [129 * 60 / 80])
+        with self.assertRaises(ValueError):
+            cache.resize(0, -1)
+        self.assertEqual(cache._lifetime_metrics._capacity_bytes, 129)
+        cache.resize(0, 257)
+        self.assertIsNone(cache._lifetime_metrics._window_start)
+        self.now = 170.0
+        self.put(cache, keys[0])
+        self.now = 230.0
+        self.put(cache, keys[1])
+        self.assertEqual(self.samples(), [129 * 60 / 80, 257 * 60 / 32])
+
+    def test_window_uses_actual_elapsed_time_and_resets_byte_count(self):
+        cache = self.cache(cpu_bytes=64)
+        self.put(cache, "a")
+        self.now = 159.0
+        self.put(cache, "b", count=8)
+        self.assertEqual(self.samples(), [])
+        self.now = 160.0
+        self.put(cache, "c")
+        self.assertEqual(self.samples(), [60.0])
+        self.now = 220.0
+        self.put(cache, "d")
+        self.assertEqual(self.samples(), [60.0, 240.0])
+        self.now = 820.0
+        self.put(cache, "e")
+        self.assertEqual(self.samples(), [60.0, 240.0, 2400.0])
+
+    def test_zero_ingress_emits_no_sample(self):
+        metrics = cache_module._CacheLifetimeMetrics(64)
+        metrics.record_admission(0)
+        self.now = 1000.0
+        metrics.record_admission(0)
+        self.assertIsNone(metrics._window_start)
+        self.assertEqual(self.samples(), [])
+
+    def test_concurrent_admissions_are_accumulated_once(self):
+        metrics = cache_module._CacheLifetimeMetrics(256)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(metrics.record_admission, [1] * 128))
+        self.assertEqual(metrics._admitted_bytes, 128)
+        self.now = 160.0
+        metrics.record_admission(128)
+        self.assertEqual(self.samples(), [60.0])
+
+    def test_async_publication_counts_only_successful_storage(self):
+        cache = self.cache(async_publication=True, publish_queue_size=1)
+        started, release = threading.Event(), threading.Event()
+        publish = cache._on_complete_sync
+
+        def blocked(*args):
+            started.set()
+            if not release.wait(5):
+                raise TimeoutError("test publication did not resume")
+            return publish(*args)
+
+        try:
+            with patch.object(cache, "_on_complete_sync", side_effect=blocked):
+                self.put(cache, "a")
+                self.assertTrue(started.wait(5))
+                self.put(cache, "b")  # Full publication queue: result not cached.
+                self.assertEqual(cache.try_acquire("a")[0], "complete")
+                self.assertIsNone(cache._lifetime_metrics._window_start)
+                self.now = 150.0
+                release.set()
+                cache.flush()
+            self.assertIsNone(cache.peek("b"))
+            self.assertEqual(cache._lifetime_metrics._admitted_bytes, 16)
+            self.assertEqual(cache._lifetime_metrics._window_start, 150.0)
+            self.now = 210.0
+            self.put(cache, "c")
+            cache.flush()
+            self.assertEqual(self.samples(), [30.0])
+        finally:
+            release.set()
+            cache.flush()
+
+    def test_storage_readmission_does_not_count_as_new_ingress(self):
+        cache = self.cache(cpu_bytes=64)
+        entry = self.put(cache, "a")
+        # Exercise the shared tier-storage path on CPU, not an actual GPU copy.
+        with cache._transfer_lock:
+            with cache._lock:
+                cache._uncharge_locked("a", entry)
+            cache._store_cpu("a", entry, entry.result, entry.ready_events)
+        self.assertIs(cache.peek("a"), entry)
+        self.assertEqual(entry.charge_bytes, 16)
+        self.assertEqual(cache._lifetime_metrics._admitted_bytes, 16)
+        self.assertTrue(torch.equal(entry.wait(), torch.ones(4)))
+        self.now = 160.0
+        self.put(cache, "b")
+        self.assertEqual(self.samples(), [120.0])
+
+    def test_reporting_is_unlocked_and_failure_does_not_change_results(self):
+        cache = self.cache()
+        self.put(cache, "a")
+        locks_available = []
+
+        def report(metric, *_args, **_kwargs):
+            if metric == self.metric:
+                for lock in (
+                    cache._lock,
+                    cache._transfer_lock,
+                    cache._lifetime_metrics._lock,
+                ):
+                    acquired = lock.acquire(blocking=False)
+                    locks_available.append(acquired)
+                    if acquired:
+                        lock.release()
+                raise RuntimeError("metrics unavailable")
+
+        self.report.side_effect = report
+        self.now = 160.0
+        with self.assertLogs(level="ERROR"):
+            entry = self.put(cache, "b")
+        self.assertEqual(locks_available, [True] * 3)
+        self.assertTrue(torch.equal(entry.wait(), torch.ones(4)))
+        self.assertEqual(cache.stats()["resident_entries"], 1)
+
+    def test_no_clock_or_reports_when_disabled(self):
+        cache = self.cache(report_metrics=False)
+        self.assertIsNone(cache._lifetime_metrics)
+        with patch.object(
+            cache_module.time, "monotonic", side_effect=AssertionError("clock")
+        ):
+            self.put(cache, "a")
+            self.assertEqual(cache.try_acquire("a")[0], "complete")
+            self.put(cache, "b")
+        self.report.assert_not_called()
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires actual tier transfers")
+    def test_tier_transfers_do_not_count_as_new_ingress(self):
+        cache = self.cache(gpu_bytes=32, cpu_bytes=64)
+        self.put(cache, "a", device="cuda", count=8)
+        self.put(cache, "b", device="cuda", count=8)
+        self.assertEqual(cache.peek("a").tier, "cpu")
+        self.assertEqual(cache._lifetime_metrics._admitted_bytes, 64)
+        _, entry = cache.try_acquire("a")
+        self.assertTrue(torch.equal(entry.wait().cpu(), torch.ones(8)))
+        self.assertEqual(entry.tier, "gpu")
+        self.assertEqual(cache._lifetime_metrics._admitted_bytes, 64)
+        self.now = 160.0
+        self.put(cache, "c", device="cuda", count=8)
+        self.assertEqual(self.samples(), [60.0])
+
+
 class EmbeddingCapacityTest(unittest.TestCase):
+    def test_entry_without_pending_waiters_uses_only_shared_ready_events(self):
+        entry = MMEmbeddingCacheEntry()
+        self.assertIsNone(entry._event)
+        self.assertIsNone(entry._greennet_event)
+        verdict = cache_module.GreenNetVerdict(True, 0, "")
+        entry.set_greennet_verdict(verdict)
+        self.assertTrue(entry.complete("result"))
+        self.assertIs(entry._event, cache_module._SIGNALED_EVENT)
+        self.assertIs(entry._greennet_event, cache_module._SIGNALED_EVENT)
+        self.assertIs(entry.wait_greennet(0), verdict)
+        self.assertEqual(entry.wait(0), "result")
+
+    def test_terminal_entries_release_private_wait_events_and_callbacks(self):
+        events = []
+
+        def complete(_entry, value):
+            events.append(value)
+
+        def fail(_entry, error):
+            events.append(type(error))
+
+        entry = MMEmbeddingCacheEntry(on_complete=complete, on_fail=fail)
+        with self.assertRaises(TimeoutError):
+            entry.wait_ready(0)
+        with self.assertRaises(TimeoutError):
+            entry.wait_greennet(0)
+        ready_event = weakref.ref(entry._event)
+        inspection_event = weakref.ref(entry._greennet_event)
+        complete_callback = weakref.ref(complete)
+        fail_callback = weakref.ref(fail)
+        del complete, fail
+        verdict = cache_module.GreenNetVerdict(True, 0, "")
+        with concurrent.futures.ThreadPoolExecutor(2) as executor:
+            ready = executor.submit(entry.wait_ready, 2)
+            inspection = executor.submit(entry.wait_greennet, 2)
+            entry.set_greennet_verdict(verdict)
+            self.assertTrue(entry.complete("result"))
+            ready.result(timeout=3)
+            self.assertIs(inspection.result(timeout=3), verdict)
+        self.assertEqual(events, ["result"])
+        self.assertIsNone(ready_event())
+        self.assertIsNone(inspection_event())
+        self.assertIsNone(complete_callback())
+        self.assertIsNone(fail_callback())
+        self.assertEqual(entry.wait(timeout=0), "result")
+
+    def test_completed_entry_does_not_retain_its_publication_callback(self):
+        class Publisher:
+            def __init__(self, entry, calls):
+                self.entry = entry
+                self.calls = calls
+
+            def publish(self):
+                self.calls.append(self.entry.generation)
+
+        for deferred in (False, True):
+            with self.subTest(deferred=deferred):
+                cache = MMEmbeddingCache(
+                    gpu_max_bytes=0,
+                    cpu_max_bytes=256,
+                    async_publication=deferred,
+                )
+                try:
+                    _, entry = cache.try_acquire("image")
+                    calls = []
+                    publisher = Publisher(entry, calls)
+                    owner = weakref.ref(publisher)
+                    self.assertTrue(
+                        cache.complete(
+                            "image",
+                            entry,
+                            torch.ones(4),
+                            before_publish=publisher.publish,
+                        )
+                    )
+                    del publisher
+                    cache.flush()
+                    self.assertEqual(calls, [entry.generation])
+                    self.assertIs(cache.peek("image"), entry)
+                    self.assertIsNone(owner())
+                finally:
+                    cache.close()
+
+    def test_before_publish_runs_once_after_storage_before_ready(self):
+        cache = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=64)
+        _, entry = cache.try_acquire("a")
+        called = []
+
+        def publish():
+            self.assertEqual(entry.tier, "cpu")
+            self.assertFalse(entry.is_done)
+            self.assertEqual(cache.try_acquire("a")[0], "in_progress")
+            with self.assertRaises(TimeoutError):
+                entry.wait_ready(timeout=0)
+            called.append(True)
+
+        self.assertTrue(
+            cache.complete("a", entry, torch.ones(4), before_publish=publish)
+        )
+        self.assertFalse(
+            cache.complete("a", entry, torch.zeros(4), before_publish=publish)
+        )
+        self.assertEqual(called, [True])
+        self.assertTrue(torch.equal(entry.wait(timeout=0), torch.ones(4)))
+
+    def test_duplicate_completion_preserves_winning_storage_layout(self):
+        cache = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=64)
+        _, entry = cache.try_acquire("image")
+        payload = torch.ones(4)
+        candidate = (torch.zeros(4), torch.ones(2))
+
+        def duplicate():
+            self.assertFalse(cache.complete("image", entry, candidate))
+            self.assertEqual(entry.original_devices, torch.device("cpu"))
+
+        self.assertTrue(
+            cache.complete("image", entry, payload, before_publish=duplicate)
+        )
+        torch.testing.assert_close(entry.wait(timeout=0), payload)
+
+    def test_before_publish_error_rolls_back_and_wakes_waiters(self):
+        cache = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=64)
+        _, entry = cache.try_acquire("a")
+
+        def publish():
+            raise RuntimeError("hash publication failed")
+
+        with self.assertRaisesRegex(RuntimeError, "hash publication failed"):
+            cache.complete("a", entry, torch.ones(4), before_publish=publish)
+        with self.assertRaisesRegex(RuntimeError, "hash publication failed"):
+            entry.wait(timeout=0)
+        self.assertIsNone(cache.peek("a"))
+        self.assertEqual(entry.pool_owners, [])
+        self.assertEqual(cache.stats()["cpu_pool_used_bytes"], 0)
+
     def test_cache_reads_release_outputs_without_cyclic_gc(self):
         cache = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=65536)
         _, entry = cache.try_acquire("image")
@@ -563,6 +1165,113 @@ class EmbeddingGpuCpuTest(unittest.TestCase):
 
 
 class HashCapacityTest(unittest.TestCase):
+    def test_live_generation_publication_is_idempotent_without_tensor_copies(self):
+        hashes = MMHashKeyCache(max_bytes=8192)
+        embeddings = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=64)
+        _, entry = embeddings.try_acquire("a")
+        entry.complete(torch.ones(4))
+        value = [torch.tensor([1, 2], dtype=torch.int32)]
+        hashes.put_for_entry("a", value, entry, embeddings)
+        stored = hashes._entries["a"]
+        before = hashes.stats()
+        with patch.object(
+            torch.Tensor, "clone", side_effect=AssertionError("duplicate copy")
+        ):
+            for _ in range(20):
+                hashes.put_for_entry("a", value, entry, embeddings)
+        self.assertIs(hashes._entries["a"], stored)
+        self.assertEqual(hashes.stats(), before)
+
+    def test_live_generation_approval_never_downgrades_or_crosses_generation(self):
+        from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
+
+        hashes = MMHashKeyCache(max_bytes=8192)
+        embeddings = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=64)
+        _, old = embeddings.try_acquire("a")
+        old.complete(torch.ones(4))
+        value = [torch.tensor([1], dtype=torch.int32)]
+        hashes.put_for_entry("a", value, old, embeddings)
+        self.assertFalse(hashes.greennet_passed("a"))
+        old.set_greennet_verdict(GreenNetVerdict(passed=True))
+        hashes.put_for_entry("a", value, old, embeddings)
+        old.set_greennet_verdict(GreenNetVerdict(passed=True), checked=False)
+        hashes.put_for_entry("a", value, old, embeddings)
+        self.assertTrue(hashes.greennet_passed("a"))
+        embeddings.remove("a")
+        _, new = embeddings.try_acquire("a")
+        new.complete(torch.ones(4))
+        hashes.put_for_entry("a", [torch.tensor([2])], new, embeddings)
+        old.set_greennet_verdict(GreenNetVerdict(passed=True))
+        hashes.put_for_entry("a", value, old, embeddings)
+        hashes.put_for_entry("a", [torch.ones(8192)], old, embeddings)
+        self.assertFalse(hashes.greennet_passed("a"))
+        self.assertEqual(hashes.get("a", new.generation)[0].tolist(), [2])
+
+    def test_stale_writer_during_cpu_copy_cannot_replace_new_generation(self):
+        hashes = MMHashKeyCache(max_bytes=8192)
+        embeddings = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=64)
+        _, old = embeddings.try_acquire("a")
+        old.complete(torch.ones(4))
+        cloning, release = threading.Event(), threading.Event()
+        original_clone = torch.Tensor.clone
+
+        def clone(tensor, *args, **kwargs):
+            if threading.current_thread().name.startswith("old-publisher"):
+                cloning.set()
+                if not release.wait(timeout=5):
+                    raise TimeoutError("publisher not released")
+            return original_clone(tensor, *args, **kwargs)
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="old-publisher"
+        ) as pool:
+            with patch.object(torch.Tensor, "clone", new=clone):
+                future = pool.submit(
+                    hashes.put_for_entry, "a", [torch.tensor([1])], old, embeddings
+                )
+                try:
+                    self.assertTrue(cloning.wait(timeout=5))
+                    embeddings.remove("a")
+                    _, new = embeddings.try_acquire("a")
+                    new.complete(torch.ones(4))
+                    hashes.put_for_entry("a", [torch.tensor([2])], new, embeddings)
+                finally:
+                    release.set()
+                future.result(timeout=5)
+        self.assertIsNone(hashes.get("a", old.generation))
+        self.assertEqual(hashes.get("a", new.generation)[0].tolist(), [2])
+
+    def test_concurrent_publications_allocate_only_once(self):
+        hashes = MMHashKeyCache(max_bytes=8192)
+        embeddings = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=64)
+        _, entry = embeddings.try_acquire("a")
+        entry.complete(torch.ones(4))
+        cloning, release = threading.Event(), threading.Event()
+        original_clone = torch.Tensor.clone
+
+        def clone(tensor, *args, **kwargs):
+            cloning.set()
+            if not release.wait(timeout=5):
+                raise TimeoutError("publisher not released")
+            return original_clone(tensor, *args, **kwargs)
+
+        with patch.object(torch.Tensor, "clone", new=clone):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+                args = ("a", [torch.tensor([1, 2])], entry, embeddings)
+                first = pool.submit(hashes.put_for_entry, *args)
+                try:
+                    self.assertTrue(cloning.wait(timeout=5))
+                    futures = [
+                        pool.submit(hashes.put_for_entry, *args) for _ in range(7)
+                    ]
+                    for future in futures:
+                        future.result(timeout=5)
+                    self.assertGreater(hashes.stats()["building_bytes"], 0)
+                finally:
+                    release.set()
+                first.result(timeout=5)
+        self.assertEqual(hashes.get("a", entry.generation)[0].tolist(), [1, 2])
+
     def test_approval_follows_hash_lifetime_and_replacement(self):
         hashes = MMHashKeyCache(max_bytes=8192)
         embeddings = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=32)
@@ -638,19 +1347,26 @@ class HashCapacityTest(unittest.TestCase):
         self.assertEqual(hashes[0].device.type, "cpu")
         self.assertIsNone(cache.get("a", "g2"))
 
-    def test_hash_pool_reuse_cannot_overwrite_a_returned_hash(self):
+    def test_hash_cache_has_no_custom_pool(self):
         cache = MMHashKeyCache(max_bytes=8192)
-        arena_ptr = cache._pool._storage.data_ptr()
+        self.assertFalse(hasattr(cache, "_pool"))
+        cache.put("a", [torch.arange(128, dtype=torch.int32)], "g")
+        self.assertEqual(cache.get("a", "g")[0].tolist(), list(range(128)))
+        stats = cache.stats()
+        self.assertNotIn("pool_free_bytes", stats)
+        self.assertGreater(stats["resident_bytes"], 0)
+        cache.resize(0)
+        self.assertEqual(cache.keys(), [])
+        self.assertEqual(cache.stats()["resident_bytes"], 0)
+
+    def test_returned_hash_survives_cache_clear_and_reuse(self):
+        cache = MMHashKeyCache(max_bytes=8192)
         cache.put("a", [torch.tensor([1, 2, 3])], "g1")
         held = cache.get("a", "g1")[0]
         cache.clear()
         cache.put("b", [torch.tensor([7, 8, 9])], "g2")
-        self.assertEqual(cache._pool._storage.data_ptr(), arena_ptr)
         self.assertEqual(held.tolist(), [1, 2, 3])
         self.assertEqual(cache.get("b", "g2")[0].tolist(), [7, 8, 9])
-        self.assertLessEqual(
-            cache.stats()["pool_used_bytes"], cache.stats()["pool_capacity_bytes"]
-        )
 
     def test_oversized_update_drops_stale_generation_only(self):
         cache = MMHashKeyCache(max_bytes=4096)
@@ -744,6 +1460,628 @@ class HashCapacityTest(unittest.TestCase):
         self.assertFalse(cache.enabled)
         with self.assertRaises(ValueError):
             cache.resize(0, -1)
+
+
+class NativeHashIndexTest(unittest.TestCase):
+    def setUp(self):
+        try:
+            import librtp_compute_ops
+        except ImportError:
+            self.skipTest("native EMB extension is unavailable")
+        if not hasattr(librtp_compute_ops, "EmbLocalHashCache"):
+            self.skipTest("native EMB hash index is unavailable")
+        from rtp_llm.multimodal.mm_embedding_native_cache import NativeMMHashKeyCache
+
+        with patch.dict(
+            "os.environ",
+            {
+                "MM_EMB_NATIVE_LOCAL_CACHE": "1",
+                "MM_EMB_NATIVE_LOCAL_CACHE_HOSTS": cache_module.socket.gethostname(),
+            },
+        ):
+            self.embeddings = cache_module.ShardedMMEmbeddingCache(0, 4096, shards=1)
+        self.addCleanup(self.embeddings.close)
+        self.hashes = NativeMMHashKeyCache(8192)
+
+    def test_generation_bound_publish_ignores_stale_writer(self):
+        key = "key"
+        original = torch.arange(5)
+        replacement = torch.ones(5, dtype=torch.int32)
+        _, first = self.embeddings.try_acquire(key)
+        self.hashes.put_for_entry(key, [original], first, self.embeddings)
+        self.assertTrue(self.hashes.mark_greennet_passed(key, first.generation))
+
+        self.embeddings.remove(key)
+        self.assertTrue(self.hashes.greennet_passed(key))
+        _, second = self.embeddings.try_acquire(key)
+        self.hashes.put_for_entry(key, [replacement], second, self.embeddings)
+        self.hashes.put_for_entry(key, [original], first, self.embeddings)
+        self.hashes.put_for_entry(key, [original], second, self.embeddings)
+        self.assertIsNone(self.hashes.get(key, first.generation))
+        self.assertFalse(self.hashes.greennet_passed(key))
+        copy = self.hashes.get(key, second.generation)[0]
+        copy.zero_()
+        self.assertTrue(torch.equal(self.hashes.get(key)[0], replacement))
+        self.hashes.clear()
+        self.assertEqual(self.hashes.stats()["resident_entries"], 0)
+
+    def test_metadata_batch_keeps_order_and_bounds_rows_without_touching_lru(self):
+        self.hashes.put("first", [torch.arange(5)])
+        self.hashes.put("second", [torch.arange(9)])
+        self.hashes.put("empty", [torch.arange(20), torch.empty(0)])
+        self.hashes._MAX_METADATA_ROWS = 9
+        response = self.hashes.metadata(
+            ["empty", "missing", "second"], self.embeddings, binary_hashes=True
+        )
+        self.assertEqual(
+            [(item["key"], item["hash_hit"]) for item in response["entries"]],
+            [("empty", False), ("missing", False), ("second", True)],
+        )
+        self.assertEqual(response["entries"][-1]["split_size"], [9])
+        self.assertEqual(self.hashes.keys(), ["first", "second", "empty"])
+        with self.assertRaisesRegex(ValueError, "exceeds row limit"):
+            self.hashes.metadata(["first", "second"], self.embeddings)
+        self.assertEqual(self.hashes.stats()["retired_bytes"], 0)
+
+
+class CacheLockIsolationTest(unittest.TestCase):
+    @contextmanager
+    def paused(self, target, method):
+        entered, release = threading.Event(), threading.Event()
+        original = getattr(target, method)
+
+        def slow(*args, **kwargs):
+            if threading.current_thread().name.startswith("cache-slow"):
+                entered.set()
+                if not release.wait(10):
+                    raise TimeoutError("test did not release slow operation")
+            return original(*args, **kwargs)
+
+        with (
+            patch.object(target, method, new=slow),
+            concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="cache-slow"
+            ) as pool,
+        ):
+            try:
+                yield pool, entered
+            finally:
+                release.set()
+
+    def quick(self, function, *args):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(function, *args).result(timeout=2)
+
+    def test_read_and_metadata_leases_survive_clear_and_pool_reuse(self):
+        for metadata in (False, True):
+            with self.subTest(metadata=metadata):
+                hashes = MMHashKeyCache(8192)
+                embeddings = MMEmbeddingCache(0, 64)
+                hashes.put("a", [torch.tensor([1, 2, 3])], "old", True)
+                hashes.put("b", [torch.tensor([4])], "other")
+                with self.paused(torch.Tensor, "clone") as (pool, entered):
+                    read = (
+                        pool.submit(hashes.metadata, ["a"], embeddings)
+                        if metadata
+                        else pool.submit(hashes.get, "a")
+                    )
+                    self.assertTrue(entered.wait(5))
+                    self.assertEqual(self.quick(hashes.get, "b")[0].tolist(), [4])
+                    self.quick(hashes.clear)
+                    self.assertGreater(hashes.stats()["retired_bytes"], 0)
+                    self.quick(hashes.put, "a", [torch.tensor([9, 8, 7])], "new")
+                    self.assertEqual(self.quick(hashes.get, "a")[0].tolist(), [9, 8, 7])
+                result = read.result(5)
+                if metadata:
+                    row = result["entries"][0]
+                    self.assertEqual(row["feature_hashes"], [1, 2, 3])
+                    self.assertEqual(row["entry_generation"], "old")
+                    self.assertTrue(row["greennet_passed"])
+                else:
+                    self.assertEqual(result[0].tolist(), [1, 2, 3])
+                self.assertEqual(hashes.stats()["retired_bytes"], 0)
+
+    def test_pinned_bytes_are_not_reallocated_after_shrink(self):
+        hashes = MMHashKeyCache(8192)
+        hashes.put("a", [torch.arange(256)], "g")
+        limit = hashes.stats()["resident_bytes"]
+        hashes.resize(limit)
+        with self.paused(torch.Tensor, "clone") as (pool, entered):
+            read = pool.submit(hashes.get, "a")
+            self.assertTrue(entered.wait(5))
+            self.quick(hashes.resize, 0)
+            self.quick(hashes.resize, limit)
+            blocked = [torch.ones(256)]
+            for key in ("b", "c", "d"):
+                self.quick(hashes.put, key, blocked, "g")
+                self.assertFalse(hashes.contains(key))
+            self.assertFalse(hashes._pending)
+            self.assertEqual(hashes.stats()["building_bytes"], 0)
+            self.assertEqual(hashes.stats()["retired_bytes"], limit)
+        self.assertEqual(read.result(5)[0].tolist(), list(range(256)))
+        hashes.put("b", [torch.ones(256)], "g")
+        self.assertTrue(hashes.contains("b"))
+
+    def test_resize_does_not_block_on_reader(self):
+        hashes = MMHashKeyCache(4096)
+        hashes.put("a", [torch.tensor([17])])
+        with self.paused(torch.Tensor, "clone") as (pool, entered):
+            read = pool.submit(hashes.get, "a")
+            self.assertTrue(entered.wait(5))
+            self.quick(hashes.resize, 16384)
+        self.assertEqual(read.result(5)[0].tolist(), [17])
+        self.quick(hashes.put, "b", [torch.tensor([18])])
+        self.assertTrue(hashes.contains("b"))
+        self.assertEqual(hashes.stats()["max_bytes"], 16384)
+        self.assertEqual(hashes.stats()["retired_bytes"], 0)
+
+    def test_hash_copy_is_unlocked_and_clear_invalidates_builder(self):
+        hashes = MMHashKeyCache(8192)
+        hashes.put("b", [torch.tensor([4])])
+        original_clone = torch.Tensor.clone
+        entered, release = threading.Event(), threading.Event()
+        writer = [None]
+
+        def clone(tensor, *args, **kwargs):
+            if threading.current_thread() is writer[0]:
+                entered.set()
+                if not release.wait(5):
+                    raise TimeoutError("publisher not released")
+            return original_clone(tensor, *args, **kwargs)
+
+        with patch.object(torch.Tensor, "clone", new=clone):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+
+                def put():
+                    writer[0] = threading.current_thread()
+                    hashes.put("a", [torch.tensor([1])], "old")
+
+                write = pool.submit(put)
+                self.assertTrue(entered.wait(5))
+                self.assertEqual(self.quick(hashes.get, "b")[0].tolist(), [4])
+                self.assertGreater(hashes.stats()["building_bytes"], 0)
+                self.quick(hashes.clear)
+                self.quick(hashes.put, "a", [torch.tensor([2])], "new")
+                release.set()
+                write.result(5)
+        self.assertEqual(hashes.get("a", "new")[0].tolist(), [2])
+        self.assertEqual(hashes.stats()["building_bytes"], 0)
+        self.assertEqual(hashes.stats()["retired_bytes"], 0)
+
+    def test_resize_invalidates_builder(self):
+        hashes = MMHashKeyCache(8192)
+        with self.paused(torch.Tensor, "clone") as (pool, entered):
+            write = pool.submit(hashes.put, "a", [torch.arange(256)])
+            self.assertTrue(entered.wait(5))
+            self.quick(hashes.resize, 0)
+        write.result(5)
+        stats = hashes.stats()
+        self.assertEqual(stats["building_bytes"], 0)
+        self.assertEqual(hashes.keys(), [])
+
+    def test_copy_exceptions_release_leases_and_builder_budget(self):
+        hashes = MMHashKeyCache(8192)
+        hashes.put("a", [torch.tensor([1])])
+        with patch.object(
+            torch.Tensor, "clone", side_effect=RuntimeError("copy failed")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "copy failed"):
+                hashes.get("a")
+        hashes.clear()
+        with patch.object(
+            torch.Tensor, "clone", side_effect=RuntimeError("copy failed")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "copy failed"):
+                hashes.put("a", [torch.tensor([1])])
+        stats = hashes.stats()
+        for key in (
+            "building_bytes",
+            "retired_bytes",
+            "resident_bytes",
+        ):
+            self.assertEqual(stats[key], 0, key)
+        self.assertFalse(hashes._pending)
+
+    def test_stale_embedding_before_reserve_releases_pending_hash(self):
+        hashes = MMHashKeyCache(8192)
+        embeddings = MMEmbeddingCache(0, 64)
+        _, entry = embeddings.try_acquire("a")
+        entry.complete(torch.ones(2))
+        with_current_entry = embeddings._with_current_entry
+
+        def evict_after_begin(key, candidate, action):
+            result = with_current_entry(key, candidate, action)
+            if action.__name__ == "begin":
+                embeddings.remove(key)
+            return result
+
+        with patch.object(
+            embeddings, "_with_current_entry", side_effect=evict_after_begin
+        ):
+            hashes.put_for_entry("a", [torch.tensor([1])], entry, embeddings)
+        self.assertFalse(hashes._pending)
+        self.assertEqual(hashes.stats()["building_bytes"], 0)
+
+        _, replacement = embeddings.try_acquire("a")
+        replacement.complete(torch.ones(2))
+        hashes.put_for_entry("a", [torch.tensor([2])], replacement, embeddings)
+        self.assertEqual(hashes.get("a")[0].tolist(), [2])
+
+    def test_waiting_for_embedding_index_does_not_own_hash_index(self):
+        hashes = MMHashKeyCache(8192)
+        embeddings = MMEmbeddingCache(0, 64)
+        _, entry = embeddings.try_acquire("a")
+        entry.complete(torch.ones(2))
+        hashes.put("b", [torch.tensor([4])])
+        attempting = threading.Event()
+        original = embeddings._with_current_entry
+
+        def publish(*args):
+            attempting.set()
+            return original(*args)
+
+        with (
+            patch.object(embeddings, "_with_current_entry", side_effect=publish),
+            concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool,
+        ):
+            with embeddings._lock:
+                write = pool.submit(
+                    hashes.put_for_entry, "a", [torch.tensor([1])], entry, embeddings
+                )
+                self.assertTrue(attempting.wait(5))
+                self.assertEqual(self.quick(hashes.get, "b")[0].tolist(), [4])
+            write.result(5)
+        self.assertEqual(hashes.get("a")[0].tolist(), [1])
+
+    def test_detach_does_not_hold_embedding_or_hash_index(self):
+        hashes = MMHashKeyCache(8192)
+        embeddings = MMEmbeddingCache(0, 64)
+        _, old = embeddings.try_acquire("a")
+        old.complete(torch.tensor([7.0, 8.0]))
+        _, other = embeddings.try_acquire("b")
+        other.complete(torch.ones(2))
+        with self.paused(embeddings, "_detach_pool_storage") as (pool, entered):
+            remove = pool.submit(embeddings.remove, "a")
+            self.assertTrue(entered.wait(5))
+            self.assertIsNone(self.quick(embeddings.peek, "a"))
+            self.assertIs(self.quick(embeddings.peek, "b"), other)
+            self.quick(
+                hashes.put_for_entry, "b", [torch.tensor([9])], other, embeddings
+            )
+            self.assertEqual(self.quick(hashes.get, "b")[0].tolist(), [9])
+            self.quick(hashes.put_for_entry, "a", [torch.tensor([7])], old, embeddings)
+            self.assertFalse(hashes.contains("a"))
+        remove.result(5)
+        _, replacement = embeddings.try_acquire("a")
+        replacement.complete(torch.zeros(2))
+        self.assertEqual(old.wait(2).tolist(), [7.0, 8.0])
+
+    def test_remote_eviction_callback_can_probe_index(self):
+        seen = []
+        cache = MMEmbeddingCache(
+            0,
+            16,
+            on_cpu_evict=lambda key, entry: seen.append(
+                (key, cache.peek(key), entry.result.tolist())
+            ),
+        )
+        _, entry = cache.try_acquire("a")
+        entry.complete(torch.tensor([3.0, 4.0]))
+        self.quick(cache.resize, 0, 0)
+        self.assertEqual(seen, [("a", None, [3.0, 4.0])])
+
+
+class ShardedEmbeddingCacheTest(unittest.TestCase):
+    def test_native_host_scope_matches_exactly_and_respects_disable(self):
+        host = "node-17"
+        with (
+            patch.object(cache_module.socket, "gethostname", return_value=host),
+            patch.dict(cache_module.os.environ, {}, clear=True),
+        ):
+            env = cache_module.os.environ
+            self.assertFalse(cache_module._native_local_cache_enabled())
+            env["MM_EMB_NATIVE_LOCAL_CACHE"] = "1"
+            self.assertTrue(cache_module._native_local_cache_enabled())
+            for hosts, expected in (
+                ("", False),
+                ("node-170", False),
+                ("node-16, node-17 ", True),
+            ):
+                with self.subTest(hosts=hosts):
+                    env["MM_EMB_NATIVE_LOCAL_CACHE_HOSTS"] = hosts
+                    self.assertEqual(
+                        cache_module._native_local_cache_enabled(), expected
+                    )
+            env["MM_EMB_NATIVE_LOCAL_CACHE"] = "0"
+            self.assertFalse(cache_module._native_local_cache_enabled())
+
+    def test_routes_keys_and_aggregates_stats(self):
+        from rtp_llm.multimodal.mm_embedding_cache import ShardedMMEmbeddingCache
+
+        cache = ShardedMMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=4096, shards=4)
+        self.assertEqual(cache.shard_count, 4)
+        keys = ["k%d" % i for i in range(32)]
+        for key in keys:
+            state, entry = cache.try_acquire(key)
+            self.assertEqual(state, "miss")
+            entry.complete(torch.tensor([float(len(key))]))
+        stats = cache.stats()
+        self.assertEqual(stats["resident_entries"], len(keys))
+        self.assertEqual(stats["shards"], 4)
+        self.assertEqual(stats["cpu_max_bytes"], 4096)
+        tiers = cache.resident_tiers(keys)
+        self.assertEqual(set(tiers), set(keys))
+        for key in keys:
+            entry = cache._shard(key).peek(key)
+            self.assertTrue(cache.is_current(key, entry))
+        cache.clear()
+        self.assertEqual(cache.stats()["resident_entries"], 0)
+
+    def test_residency_profile_counts_only_published_entries_per_shard(self):
+        from rtp_llm.multimodal.mm_embedding_cache import ShardedMMEmbeddingCache
+
+        with (
+            patch("rtp_llm.multimodal.mm_embedding_cache._PROFILE_LOCAL_HITS", True),
+            patch("rtp_llm.multimodal.mm_embedding_cache.kmonitor.report") as report,
+        ):
+            cache = ShardedMMEmbeddingCache(0, 8192, shards=2, report_metrics=True)
+            self.addCleanup(cache.close)
+            source = torch.arange(64, dtype=torch.bfloat16)
+            keys = {}
+            for number in range(100):
+                key = str(number)
+                keys.setdefault(hash(key) % 2, key)
+                if len(keys) == 2:
+                    break
+            self.assertEqual(len(keys), 2)
+
+            for index, key in keys.items():
+                state, entry = cache.try_acquire(key)
+                self.assertEqual(state, "miss")
+                self.assertTrue(cache.complete(key, entry, source))
+                report.assert_any_call(
+                    GaugeMetrics.VIT_EMBEDDING_CACHE_RESIDENT_ENTRIES_METRIC,
+                    1,
+                    {"cache_shard": str(index)},
+                )
+                report.assert_any_call(
+                    GaugeMetrics.VIT_EMBEDDING_CACHE_RESIDENT_BYTES_METRIC,
+                    source.nbytes,
+                    {"cache_shard": str(index)},
+                )
+            cache.clear()
+            for index in keys:
+                report.assert_any_call(
+                    GaugeMetrics.VIT_EMBEDDING_CACHE_RESIDENT_ENTRIES_METRIC,
+                    0,
+                    {"cache_shard": str(index)},
+                )
+
+    def test_native_hash_commit_does_not_invert_gil_order(self):
+        try:
+            from librtp_compute_ops import EmbLocalCacheShard
+        except ImportError:
+            self.skipTest("native local cache extension unavailable")
+
+        # An isolated process keeps a regression from wedging the test runner.
+        script = """
+import threading
+import time
+import torch
+from librtp_compute_ops import EmbLocalCacheShard
+
+operations = (
+    lambda core, cell: core.claim("other"),
+    lambda core, cell: core.peek("other"),
+    lambda core, cell: core.is_current("live", cell),
+    lambda core, cell: core.resident_tiers(["live"], 1),
+    lambda core, cell: core.resident_tiers(None, 1),
+    lambda core, cell: core.resident_charge(),
+    lambda core, cell: core.stats(),
+    lambda core, cell: core.erase("live", cell),
+    lambda core, cell: core.clear(),
+)
+for operation in operations:
+    core = EmbLocalCacheShard(0, 4096, -1)
+    cell = core.claim("live")[0]
+    entered = threading.Event()
+    committed = []
+    def commit():
+        entered.set()
+        time.sleep(.03)  # Schedule the other Python thread while the index is locked.
+        committed.append(True)
+    thread = threading.Thread(target=lambda: core.with_current("live", cell, commit))
+    thread.start()
+    assert entered.wait(1)
+    operation(core, cell)
+    thread.join(1)
+    assert committed == [True] and not thread.is_alive()
+    core.clear()
+    core.with_current("live", cell, lambda: committed.append(False))
+    assert committed == [True]
+"""
+        subprocess.run([sys.executable, "-c", script], check=True, timeout=20)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_native_deferred_publish_fences_compute_stream(self):
+        try:
+            from librtp_compute_ops import EmbLocalCacheShard  # noqa: F401
+        except ImportError:
+            self.skipTest("native local cache extension unavailable")
+        from rtp_llm.multimodal.mm_embedding_native_cache import NativeMMEmbeddingCache
+
+        cache = NativeMMEmbeddingCache(4096, 0, async_publication=True)
+        self.addCleanup(cache.close)
+        _, entry = cache.try_acquire("key")
+        self.assertTrue(entry.capture_compute_streams)
+        producer = torch.cuda.Stream()
+        with torch.cuda.stream(producer):
+            source = torch.full((64,), 3.25, dtype=torch.bfloat16, device="cuda")
+            entry.producer_streams = _current_cuda_streams(source)
+        self.assertNotEqual(torch.cuda.current_stream(), producer)
+        with patch.object(
+            cache, "_record_native_ready", wraps=cache._record_native_ready
+        ) as record:
+            self.assertTrue(cache.complete("key", entry, source))
+            record.assert_called_once_with(
+                [(producer.cuda_stream, producer.device.index)]
+            )
+        cache.flush()
+        state, reader = cache.try_acquire("key")
+        self.assertEqual(state, "complete")
+        expected = torch.full((64,), 3.25, dtype=torch.bfloat16)
+        self.assertTrue(torch.equal(reader.wait().cpu(), expected))
+
+    def test_native_retired_extent_does_not_evict_unrelated_entries(self):
+        try:
+            from librtp_compute_ops import EmbLocalCacheShard  # noqa: F401
+        except ImportError:
+            self.skipTest("native local cache extension unavailable")
+        from rtp_llm.multimodal.mm_embedding_native_cache import NativeMMEmbeddingCache
+
+        cache = NativeMMEmbeddingCache(0, 1536)
+        self.addCleanup(cache.close)
+
+        def publish(key, elements):
+            state, entry = cache.try_acquire(key)
+            self.assertEqual(state, "miss")
+            value = torch.arange(elements, dtype=torch.bfloat16)
+            self.assertTrue(cache.complete(key, entry, value))
+            return entry, value
+
+        held, held_value = publish("held", 256)
+        publish("a", 256)
+        publish("b", 256)
+        cache.remove("held")
+        self.assertEqual(cache.stats()["cpu_pool_pending_bytes"], 512)
+        bypassed, bypassed_value = publish("too-large-while-held", 600)
+        self.assertEqual(cache.resident_tiers(), {"a": "cpu", "b": "cpu"})
+        self.assertTrue(torch.equal(bypassed.wait(), bypassed_value))
+        self.assertTrue(torch.equal(held.wait(), held_value))
+        del held
+        self.assertEqual(cache.stats()["cpu_pool_pending_bytes"], 0)
+        publish("fits-after-release", 600)
+        self.assertEqual(cache.resident_tiers(), {"fits-after-release": "cpu"})
+
+    def test_native_publication_releases_python_owners(self):
+        try:
+            import librtp_compute_ops
+        except ImportError:
+            self.skipTest("native local cache extension unavailable")
+        if not hasattr(librtp_compute_ops, "EmbLocalCacheShard"):
+            self.skipTest("native local cache extension unavailable")
+        from rtp_llm.multimodal.mm_embedding_cache import ShardedMMEmbeddingCache
+
+        with patch.dict("os.environ", {"MM_EMB_NATIVE_LOCAL_CACHE": "1"}):
+            cache = ShardedMMEmbeddingCache(0, 8192, shards=1, async_publication=True)
+        self.addCleanup(cache.close)
+
+        def put():
+            state, producer = cache.try_acquire("key")
+            self.assertEqual(state, "miss")
+            self.assertIs(cache.try_acquire("key")[1], producer)
+            source = torch.arange(64, dtype=torch.bfloat16)
+
+            def before_publish():
+                source.numel()
+
+            self.assertTrue(
+                cache.complete(
+                    "key",
+                    producer,
+                    (source, {"alias": source}),
+                    before_publish=before_publish,
+                )
+            )
+            return (
+                weakref.ref(producer),
+                weakref.ref(source),
+                weakref.ref(before_publish),
+            )
+
+        owners = put()
+        cache.flush()
+        gc.collect()
+        self.assertTrue(all(owner() is None for owner in owners))
+        self.assertEqual(cache.stats()["resident_entries"], 1)
+        state, reader = cache.try_acquire("key")
+        self.assertEqual(state, "complete")
+        result = reader.wait()
+        self.assertIs(result[0], result[1]["alias"])
+        cache.remove("key")
+        self.assertFalse(cache.is_current("key", reader))
+        self.assertEqual(cache.stats()["cpu_pool_pending_bytes"], 128)
+        self.assertTrue(torch.equal(result[0], torch.arange(64, dtype=torch.bfloat16)))
+        del reader
+        self.assertEqual(cache.stats()["cpu_pool_pending_bytes"], 0)
+
+    def test_budget_split_is_exact(self):
+        from rtp_llm.multimodal.mm_embedding_cache import (
+            ShardedMMEmbeddingCache,
+            _split_budget,
+        )
+
+        self.assertEqual(_split_budget(10, 3), [4, 3, 3])
+        self.assertEqual(sum(_split_budget(10, 3)), 10)
+        cache = ShardedMMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=10, shards=3)
+        self.assertEqual(cache.stats()["cpu_max_bytes"], 10)
+
+
+class AsyncPublicationTest(unittest.TestCase):
+    def test_complete_publishes_result_before_insertion(self):
+        cache = MMEmbeddingCache(0, 64, async_publication=True)
+        try:
+            state, entry = cache.try_acquire("a")
+            self.assertEqual(state, "miss")
+            self.assertTrue(entry.complete(torch.tensor([1.0])))
+            # The result is visible immediately; insertion is deferred.
+            self.assertEqual(entry.wait().tolist(), [1.0])
+            cache.flush()
+            self.assertIs(cache.peek("a"), entry)
+            self.assertEqual(cache.stats()["resident_entries"], 1)
+        finally:
+            cache.close()
+
+    def test_failed_publication_does_not_poison_result(self):
+        cache = MMEmbeddingCache(0, 64, async_publication=True)
+        try:
+            _, entry = cache.try_acquire("a")
+            with patch.object(
+                cache, "_on_complete_sync", side_effect=RuntimeError("boom")
+            ):
+                self.assertTrue(entry.complete(torch.tensor([2.0])))
+                cache.flush()
+            self.assertEqual(entry.wait().tolist(), [2.0])
+            self.assertIsNone(cache.peek("a"))
+            self.assertIsNone(entry.error)
+        finally:
+            cache.close()
+
+    def test_full_queue_drops_without_blocking(self):
+        cache = MMEmbeddingCache(0, 64, async_publication=True, publish_queue_size=1)
+        release = threading.Event()
+        original = cache._on_complete_sync
+
+        def blocked(*args):
+            release.wait(5)
+            return original(*args)
+
+        try:
+            with patch.object(cache, "_on_complete_sync", side_effect=blocked):
+                _, first = cache.try_acquire("a")
+                first.complete(torch.tensor([1.0]))
+                deadline = time.monotonic() + 5
+                while cache._publish_pending == 0 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                _, second = cache.try_acquire("b")
+                second.complete(torch.tensor([2.0]))
+                self.assertEqual(second.wait().tolist(), [2.0])
+                self.assertGreaterEqual(cache.stats()["publish_drop"], 1)
+                release.set()
+                cache.flush()
+        finally:
+            release.set()
+            cache.close()
 
 
 if __name__ == "__main__":

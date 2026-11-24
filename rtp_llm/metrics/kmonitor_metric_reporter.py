@@ -6,6 +6,7 @@ from enum import Enum
 from typing import Any, Dict, Iterable, Optional, Union
 
 from .emb_interval_metrics import (
+    EmbCacheTokensMetric,
     EmbInflightMetric,
     EmbLatencyMetric,
     EmbOutcomeMetric,
@@ -413,6 +414,9 @@ class MetricReporter(object):
         self._kmon = kmonitor
         self._matic_map: Dict[str, Any] = {}
         self._inited = False
+        self.embedding_cache_tokens = EmbCacheTokensMetric(
+            GaugeMetrics.VIT_EMBEDDING_CACHE_TOKENS_METRIC.value, {}
+        )
         self._state_lock = threading.RLock()
         self._state = ServiceState.STARTING
         self._startup_client_counts = {}
@@ -484,7 +488,12 @@ class MetricReporter(object):
                 self._matic_map[metric.value] = backend
 
             for metric in GaugeMetrics if gauge_metrics is None else gauge_metrics:
-                if metric in (
+                if metric is GaugeMetrics.VIT_EMBEDDING_CACHE_TOKENS_METRIC:
+                    self.embedding_cache_tokens.tags = dict(tags or {})
+                    backend = self._kmon.register_custom_metric(
+                        self.embedding_cache_tokens
+                    )
+                elif metric in (
                     GaugeMetrics.VIT_REMOTE_EMB_INFLIGHT_TASKS_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_INFLIGHT_BYTES_METRIC,
                 ):

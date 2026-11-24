@@ -4,6 +4,7 @@ import time
 from bisect import bisect_left
 from collections import defaultdict
 from threading import Lock
+from weakref import WeakSet
 
 from rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.metric_base import (
     MetricBase,
@@ -123,6 +124,31 @@ class EmbOutcomeMetric(MetricBase):
                 statuses, dict(self.tags, operation=operation, stage=stage), interval
             )
         ]
+
+
+class EmbCacheTokensMetric(MetricBase):
+    """Sample total resident tokens across live shards on every KMonitor flush."""
+
+    def __init__(self, name, tags):
+        super().__init__(name, tags)
+        self._shards = WeakSet()
+        self._lock = Lock()
+
+    def track(self, shard):
+        with self._lock:
+            self._shards.add(shard)
+
+    def untrack(self, shard):
+        with self._lock:
+            self._shards.discard(shard)
+
+    def fetch_reported_data(self):
+        with self._lock:
+            shards = tuple(self._shards)
+        if not shards:
+            return []
+        tokens = sum(shard.resident_tokens() for shard in shards)
+        return [MetricDataPoint(tokens, self.tags)]
 
 
 class EmbInflightMetric(MetricBase):

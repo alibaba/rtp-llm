@@ -52,6 +52,7 @@ class MetricReporterTest(unittest.TestCase):
                 for metric in GaugeMetrics
                 if metric
                 not in (
+                    GaugeMetrics.VIT_EMBEDDING_CACHE_TOKENS_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC,
                     GaugeMetrics.VIT_EMBEDDING_CACHE_HIT_RT_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_GDR_LOCK_HOLD_RT_METRIC,
@@ -68,6 +69,22 @@ class MetricReporterTest(unittest.TestCase):
                 )
             ],
         )
+
+    def test_cache_tokens_tracked_before_reporter_init(self):
+        reporter, backend = self.make_reporter()
+        metric = reporter.embedding_cache_tokens
+        self.assertEqual(metric.fetch_reported_data(), [])
+        shard = mock.Mock()
+        shard.resident_tokens.return_value = 7
+        metric.track(shard)
+        reporter.init(
+            gauge_metrics=(GaugeMetrics.VIT_EMBEDDING_CACHE_TOKENS_METRIC,),
+            acc_metrics=(),
+            tags={"role": "vit"},
+        )
+        backend.register_custom_metric.assert_called_once_with(metric)
+        (point,) = metric.fetch_reported_data()
+        self.assertEqual((point.value, point.tags), (7, {"role": "vit"}))
 
     def test_workers_have_distinct_inspection_series_and_no_vit_counters(self):
         success = AccMetrics.GREENNET_SUCCESS_QPS_METRIC
