@@ -4,6 +4,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 
+_TEXT_COPY_CHUNK_SIZE = 8192
+
 
 def multimodal_routing_tokens(
     token_ids: List[int],
@@ -40,17 +42,27 @@ def multimodal_routing_tokens(
         ) from error
     if not spans:
         return [], None
-    safe_prefix = token_ids[: spans[0][0]]
     if not keys or not metadata:
-        return safe_prefix, None
+        return token_ids[: spans[0][0]], None
     entries = {entry["key"]: entry for entry in metadata["entries"]}
     output, cursor, segment = array("i") if compact else [], 0, 0
+    append_text_chunk = output.fromlist if isinstance(output, array) else output.extend
+
+    def append_text(begin: int, end: int) -> None:
+        if type(token_ids) is not list:
+            output.extend(token_ids[i] for i in range(begin, end))
+            return
+        # Bound the temporary slice even for a long text prefix or suffix.
+        for offset in range(begin, end, _TEXT_COPY_CHUNK_SIZE):
+            chunk_end = min(offset + _TEXT_COPY_CHUNK_SIZE, end)
+            append_text_chunk(token_ids[offset:chunk_end])
+
     for key in keys:
         entry = entries.get(key)
         if not entry or not entry.get("hash_hit", entry.get("hit", False)):
             if segment >= len(spans):
-                return safe_prefix, None
-            output.extend(token_ids[i] for i in range(cursor, spans[segment][0]))
+                return token_ids[: spans[0][0]], None
+            append_text(cursor, spans[segment][0])
             return output, None
         sizes, hashes = entry["split_size"], entry["feature_hashes"]
         if not sizes or any(type(n) is not int or n <= 0 for n in sizes):
@@ -75,7 +87,7 @@ def multimodal_routing_tokens(
                     f"input after multimodal process is at least {expanded_length} "
                     f">= max_seq_len({max_seq_len})",
                 )
-            output.extend(token_ids[i] for i in range(cursor, begin))
+            append_text(cursor, begin)
             output_offset = len(output)
             if expanded_spans is not None:
                 expanded_spans.append((output_offset, size))
@@ -89,7 +101,7 @@ def multimodal_routing_tokens(
             cursor, segment = end, segment + 1
     if segment != len(spans):
         raise ValueError("multimodal metadata does not match tag count")
-    output.extend(token_ids[i] for i in range(cursor, len(token_ids)))
+    append_text(cursor, len(token_ids))
     if len(output) >= max_seq_len:
         if expanded_spans is not None:
             expanded_spans.clear()
