@@ -210,7 +210,16 @@ class PPSmokeTest(unittest.TestCase):
                 }
             )
 
-    def generate(self, port, prompt, tokens, label, role_addrs=None, dp_rank=0):
+    def generate(
+        self,
+        port,
+        prompt,
+        tokens,
+        label,
+        role_addrs=None,
+        dp_rank=0,
+        expect_invalid_params=False,
+    ):
         started = time.monotonic()
         output = {
             "label": label,
@@ -236,9 +245,18 @@ class PPSmokeTest(unittest.TestCase):
             json={"prompt": prompt, "generate_config": config},
             timeout=REQUEST_TIMEOUT,
         )
-        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            response.status_code, 500 if expect_invalid_params else 200, response.text
+        )
         result = response.json()
         output.update(elapsed_seconds=time.monotonic() - started, result=result)
+        if expect_invalid_params:
+            self.assertEqual(result["error_code"], 605, result)
+            self.assertEqual(result["error_code_str"], "605_INVALID_PARAMS", result)
+            self.assertEqual(result["aux_info"]["output_len"], 0, result)
+            self.assertEqual(result["aux_info"]["step_output_len"], 0, result)
+            self.assertFalse(result.get("output_ids"), result)
+            return result
         self.assertEqual(result.get("error_code", 0), 0, result)
         self.assertIs(result["finished"], True, result)
         self.assertEqual(len(result["output_ids"][0]), tokens, result)
@@ -703,13 +721,17 @@ class PPSmokeTest(unittest.TestCase):
             results = []
             for index, (prompt, tokens) in enumerate(cases):
                 result = self.generate(
-                    prefill.port, prompt, tokens, f"pd_handoff_{index}"
+                    prefill.port,
+                    prompt,
+                    tokens,
+                    f"pd_handoff_{index}",
+                    expect_invalid_params=tokens == 0,
                 )
-                # Prefill-only requests complete without handing off to decode.
+                # PD rejects prefill-only requests; PDFUSION still covers zero-token success.
                 if tokens > 0:
                     self.assertTrue(result["aux_info"]["pd_sep"], result)
+                    self.assert_mtp_executed([result])
                 results.append(result)
-            self.assert_mtp_executed(results)
             if self.chunk_size:
                 self.assert_chunk_lengths(results)
         finally:

@@ -1770,7 +1770,7 @@ class FrontendServerTest(TestCase):
         reasons = spans["server"].attributes[trace_attrs.GEN_AI_RESPONSE_FINISH_REASONS]
         self.assertEqual(tuple(reasons), ("length",))
 
-    def test_selected_pd_separation_matches_prefill_fallback_contract(self):
+    def test_selected_pd_separation_rejects_local_decode_fallback(self):
         pd_config = GenerateConfig(
             max_new_tokens=2,
             num_beams=1,
@@ -1778,7 +1778,7 @@ class FrontendServerTest(TestCase):
             num_return_sequences=1,
             can_use_pd_separation=True,
         )
-        self.assertIs(_selected_pd_separation(RoleType.PREFILL, pd_config, False), False)
+        self.assertIs(_selected_pd_separation(RoleType.PREFILL, pd_config, False), True)
         self.assertIs(_selected_pd_separation(RoleType.PDFUSION, pd_config, False), False)
         self.assertIs(
             _selected_pd_separation(RoleType.DECODE, pd_config, False), True
@@ -1795,10 +1795,12 @@ class FrontendServerTest(TestCase):
         for update in fallback_updates:
             with self.subTest(update=update):
                 fallback_config = pd_config.model_copy(update=update)
-                self.assertIs(
-                    _selected_pd_separation(RoleType.PREFILL, fallback_config, False),
-                    False,
-                )
+                for role in (RoleType.PREFILL, RoleType.DECODE):
+                    with self.assertRaises(FtRuntimeException) as raised:
+                        _selected_pd_separation(role, fallback_config, False)
+                    self.assertEqual(
+                        raised.exception.exception_type, ExceptionType.INVALID_PARAMS
+                    )
 
     def test_enqueue_writes_selected_route_attributes_before_dial_failure(self):
         try:

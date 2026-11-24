@@ -847,6 +847,31 @@ class GenerateConfig(BaseModel):
             if item not in self.stop_words_list:
                 self.stop_words_list.append(item)
 
+    def validate_pd_separation(self) -> None:
+        if self.num_beams > 1 or self.variable_num_beams:
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
+                "PD separation does not support beam search or variable_num_beams",
+            )
+        if self.num_return_sequences > 1:
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
+                "PD separation does not support num_return_sequences > 1",
+            )
+        if self.return_prompt_logits:
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS, "PD separation does not support prompt scoring"
+            )
+        if self.max_new_tokens <= 1:
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS, "PD separation requires max_new_tokens > 1"
+            )
+        if not self.can_use_pd_separation:
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
+                "PD separation requires can_use_pd_separation=true; local decode is unsupported",
+            )
+
     def validate(self) -> None:
         """Validate regular fields without preparing grammar.
 

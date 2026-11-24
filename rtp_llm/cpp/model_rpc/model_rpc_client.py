@@ -88,20 +88,12 @@ def _selected_pd_separation(
     generate_config: GenerateConfig,
     enqueued_by_master: bool,
 ) -> Optional[bool]:
-    if selected_role in (RoleType.PDFUSION, RoleType.PREFILL):
-        return False
-    if selected_role != RoleType.DECODE:
-        return None
-    if enqueued_by_master:
+    if selected_role in (RoleType.PREFILL, RoleType.DECODE):
+        generate_config.validate_pd_separation()
         return True
-    # Match Decode's request-level PD eligibility checks.
-    return (
-        generate_config.max_new_tokens > 1
-        and generate_config.num_beams <= 1
-        and not generate_config.variable_num_beams
-        and generate_config.num_return_sequences <= 1
-        and generate_config.can_use_pd_separation
-    )
+    if selected_role == RoleType.PDFUSION:
+        return False
+    return None
 
 
 def _engine_reported_finished(outputs: Optional[GenerateOutputs]) -> bool:
@@ -1493,17 +1485,9 @@ class ModelRpcClient(object):
         await self._channel_pool.close()
 
     def _get_explicit_target(self, input_py: GenerateInput) -> RoleAddr | None:
-        prefill = None
         for role_addr in input_py.generate_config.role_addrs:
             if role_addr.role in (RoleType.DECODE, RoleType.PDFUSION) and role_addr.ip:
                 return role_addr
-            if role_addr.role == RoleType.PREFILL and role_addr.ip and prefill is None:
-                prefill = role_addr
-        if self._role_type in (RoleType.FRONTEND, RoleType.PDFUSION):
-            if not _selected_pd_separation(
-                RoleType.DECODE, input_py.generate_config, input_py.enqueued_by_master
-            ):
-                return prefill
         return None
 
     def _get_explicit_target_address(self, input_py: GenerateInput) -> str | None:
@@ -1754,9 +1738,10 @@ class ModelRpcClient(object):
         if explicit_target is not None:
             selected_role = explicit_target.role
         if selected_role == RoleType.PREFILL:
-            # A directly submitted request has no Decode peer to attach to a handoff.
-            # Keep any business unique_key, but prevent it from enabling a handoff.
-            input_pb.generate_config.can_use_pd_separation = False
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
+                "PD requests must enter Decode; Prefill local decode is unsupported",
+            )
         logging.debug(
             f"request: [{input_py.request_id}] send to address: {target_address}"
         )
@@ -2048,6 +2033,16 @@ class ModelRpcClient(object):
                 "batch route is incompatible with its Prefill admission",
             )
 
+        for role, inp in zip(selected_roles, inputs):
+            effective_role = role if role is not None else self._role_type
+            if effective_role == RoleType.PREFILL:
+                raise FtRuntimeException(
+                    ExceptionType.INVALID_PARAMS,
+                    "PD batches must enter Decode; Prefill local decode is unsupported",
+                )
+            if effective_role == RoleType.DECODE:
+                inp.generate_config.validate_pd_separation()
+
         # Keep validation/normalization inside trans_input off caller-owned configs.
         # Each item retains its own positive request timeout; non-positive values
         # use the same max_rpc_timeout_ms fallback as enqueue().
@@ -2123,8 +2118,6 @@ class ModelRpcClient(object):
                 input_pb = trans_input(inp)
                 if input_pb.multimodal_inputs:
                     await self._wait_greennet_verdict(inp, input_pb)
-                if selected_roles[i] == RoleType.PREFILL:
-                    input_pb.generate_config.can_use_pd_separation = False
                 carrier = dict(item_metadata)
                 if carrier.get("traceparent"):
                     input_pb.request_info.trace_context.traceparent = carrier[

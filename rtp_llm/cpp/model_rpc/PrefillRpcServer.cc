@@ -364,7 +364,11 @@ void PrefillRpcServer::finishBatchStream(const std::string& key, uint64_t genera
 grpc::Status PrefillRpcServer::BatchGenerateCall(grpc::ServerContext*        context,
                                                  const BatchGenerateInputPB* request,
                                                  BatchGenerateOutputsPB*     response) {
-    return generateLocalBatch(context, request, response, cancel_registry_.get());
+    (void)context;
+    (void)request;
+    (void)response;
+    return serializeErrorMsg("batch", {ErrorCode::INVALID_PARAMS,
+                                      "PD batches must enter Decode; Prefill local decode is unsupported"});
 }
 
 grpc::Status PrefillRpcServer::init(const EngineInitParams&                                maga_init_params,
@@ -420,13 +424,11 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     if (request_logger_) {
         request_logger_->log(*request);
     }
-    const bool pd_separation = checkPDSupport(*request).supported;
-    if (!pd_separation) {
-        RTP_LLM_LOG_INFO("pd separation is disabled, call local rpc server");
-        if (!cancel_registry_) {
-            return grpc::Status(grpc::StatusCode::UNAVAILABLE, "Prefill is not initialized");
-        }
-        return generateLocalStream(server_context, request, response_writer, cancel_registry_.get());
+    const auto support = checkPDSupport(*request);
+    if (!support.supported) {
+        return serializeErrorMsg(std::to_string(request->request_id()),
+                                 QueryConverter::transRequestInfo(request->request_info()),
+                                 {ErrorCode::INVALID_PARAMS, support.reason});
     }
     PDCancelRegistry::Handle cancel_handle;
     // Activated only after successful admission; destruction still follows

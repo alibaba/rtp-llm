@@ -1244,6 +1244,20 @@ protected:
         context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(timeouts_.request_ms + 2000));
         BatchGenerateOutputsPB response;
         const auto             status = stub->BatchGenerateCall(&context, batch, &response);
+        if (prompt_scores) {
+            ASSERT_FALSE(status.ok());
+            ErrorDetailsPB details;
+            ASSERT_TRUE(details.ParseFromString(status.error_details())) << status.error_message();
+            EXPECT_EQ(details.error_code(), static_cast<int64_t>(ErrorCode::INVALID_PARAMS));
+            EXPECT_NE(status.error_message().find("PD requires more than one generated token"), std::string::npos);
+            EXPECT_EQ(response.results_size(), 0);
+            EXPECT_EQ(decode_engine_->checked_requests.load(), 0);
+            const auto prefill = prefill_process_->snapshot();
+            EXPECT_EQ(prefill.generate_calls, 0);
+            EXPECT_EQ(prefill.load_calls, 0);
+            ASSERT_NO_FATAL_FAILURE(expectReleased());
+            return;
+        }
         ASSERT_TRUE(status.ok()) << status.error_message();
         ASSERT_EQ(response.results_size(), 2);
         for (int i = 0; i < 2; ++i) {
@@ -1252,31 +1266,17 @@ protected:
             ASSERT_EQ(result.flatten_output().finished_size(), 1);
             EXPECT_TRUE(result.flatten_output().finished(0));
             const auto&  bytes       = result.flatten_output().output_ids().int32_data();
-            const size_t token_count = prompt_scores ? 1 : 3;
+            const size_t token_count = 3;
             ASSERT_EQ(bytes.size(), token_count * sizeof(int32_t));
             std::vector<int32_t> ids(token_count);
             std::memcpy(ids.data(), bytes.data(), bytes.size());
-            EXPECT_EQ(ids, prompt_scores ? std::vector<int32_t>{100} : (std::vector<int32_t>{100, 101, 102}));
-            ASSERT_EQ(result.flatten_output().has_prompt_logits(), prompt_scores);
-            if (!prompt_scores)
-                continue;
-            const auto& scores = result.flatten_output().prompt_logits();
-            EXPECT_EQ(scores.start_pos(), 1);
-            EXPECT_EQ(scores.end_pos(), 3);
-            ASSERT_EQ(scores.topk_logprobs().shape_size(), 2);
-            EXPECT_EQ(scores.topk_logprobs().shape(0), 2);
-            EXPECT_EQ(scores.topk_logprobs().shape(1), 2);
-            EXPECT_EQ(scores.topk_token_ids().data_type(), TensorPB::INT32);
-            ASSERT_EQ(scores.topk_logprobs().fp32_data().size(), 4 * sizeof(float));
-            float marker = 0;
-            std::memcpy(&marker, scores.topk_logprobs().fp32_data().data(), sizeof(marker));
-            EXPECT_FLOAT_EQ(marker, -static_cast<float>(701 + i));
-            EXPECT_EQ(scores.has_target_logprobs(), i == 0);
+            EXPECT_EQ(ids, (std::vector<int32_t>{100, 101, 102}));
+            EXPECT_FALSE(result.flatten_output().has_prompt_logits());
         }
-        EXPECT_EQ(decode_engine_->checked_requests.load(), prompt_scores ? 0 : 2);
+        EXPECT_EQ(decode_engine_->checked_requests.load(), 2);
         const auto prefill = prefill_process_->snapshot();
-        EXPECT_EQ(prefill.peer_calls, prompt_scores ? 0 : 1);
-        EXPECT_EQ(prefill.load_calls, prompt_scores ? 0 : 2);
+        EXPECT_EQ(prefill.peer_calls, 1);
+        EXPECT_EQ(prefill.load_calls, 2);
         EXPECT_EQ(prefill.generate_calls, 0);
         ASSERT_NO_FATAL_FAILURE(expectReleased());
     }
@@ -1435,11 +1435,11 @@ INSTANTIATE_TEST_SUITE_P(Admission,
                              return info.param ? "Master" : "Decode";
                          });
 
-TEST_F(P2PGenerateStreamSmokeTest, PromptScoringBatchFallsBackAndReturnsSingleTokenWithScores) {
+TEST_F(P2PGenerateStreamSmokeTest, PromptScoringBatchIsRejectedWithoutPrefillExecution) {
     batchRoundTrips(true);
 }
 
-TEST_F(P2PGenerateStreamSmokeTest, MultiDpPrefillFallsBackWithoutFailingTheFrontendBatch) {
+TEST_F(P2PGenerateStreamSmokeTest, MultiDpPrefillBatchRejectsUnsupportedLocalFallback) {
     initialize(DataType::TYPE_FP16, Fault::MultiDpPrefill);
     BatchGenerateInputPB batch;
     batch.add_inputs()->CopyFrom(request(1791, 8));
@@ -1451,9 +1451,16 @@ TEST_F(P2PGenerateStreamSmokeTest, MultiDpPrefillFallsBackWithoutFailingTheFront
     const auto             status = stub->BatchGenerateCall(&context, batch, &response);
     ASSERT_TRUE(status.ok()) << status.error_message();
     ASSERT_EQ(response.results_size(), 2);
-    for (const auto& result : response.results())
-        EXPECT_FALSE(result.has_error_info()) << result.error_info().error_message();
+    for (const auto& result : response.results()) {
+        ASSERT_TRUE(result.has_error_info());
+        EXPECT_EQ(result.error_info().error_code(), ErrorCodePB::INVALID_PARAMS);
+        EXPECT_NE(result.error_info().error_message().find("Prefill local decode fallback is unsupported"),
+                  std::string::npos);
+        EXPECT_FALSE(result.has_final_output());
+    }
     EXPECT_EQ(decode_engine_->checked_requests.load(), 0);
+    EXPECT_EQ(prefill_process_->snapshot().generate_calls, 0);
+    EXPECT_EQ(prefill_process_->snapshot().load_calls, 0);
     ASSERT_NO_FATAL_FAILURE(expectReleased());
 }
 
@@ -1558,7 +1565,7 @@ TEST_F(P2PGenerateStreamSmokeTest, BatchLostAdmissionAckStillCancelsPrefillResou
     healthyAfterCancel(2203);
 }
 
-TEST_F(P2PGenerateStreamSmokeTest, BatchNonPDFallbackKeepsPrefillBatchResults) {
+TEST_F(P2PGenerateStreamSmokeTest, BatchNonPDRequestsAreRejectedWithoutPrefillExecution) {
     initialize(DataType::TYPE_FP16);
     BatchGenerateInputPB batch;
     for (int i = 0; i < 2; ++i) {
@@ -1572,14 +1579,12 @@ TEST_F(P2PGenerateStreamSmokeTest, BatchNonPDFallbackKeepsPrefillBatchResults) {
     context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(15));
     BatchGenerateOutputsPB response;
     const auto             status = stub->BatchGenerateCall(&context, batch, &response);
-    ASSERT_TRUE(status.ok()) << status.error_message();
-    ASSERT_EQ(response.results_size(), 2);
-    for (const auto& result : response.results()) {
-        ASSERT_FALSE(result.has_error_info());
-        ASSERT_EQ(result.final_output().flatten_output().finished_size(), 1);
-        EXPECT_TRUE(result.final_output().flatten_output().finished(0));
-        EXPECT_EQ(result.final_output().flatten_output().output_ids().int32_data().size(), sizeof(int32_t));
-    }
+    ASSERT_FALSE(status.ok());
+    ErrorDetailsPB details;
+    ASSERT_TRUE(details.ParseFromString(status.error_details())) << status.error_message();
+    EXPECT_EQ(details.error_code(), static_cast<int64_t>(ErrorCode::INVALID_PARAMS));
+    EXPECT_EQ(response.results_size(), 0);
+    EXPECT_EQ(prefill_process_->snapshot().generate_calls, 0);
     EXPECT_EQ(prefill_process_->snapshot().load_calls, 0);
     EXPECT_EQ(decode_engine_->checked_requests.load(), 0);
     ASSERT_NO_FATAL_FAILURE(expectReleased());
@@ -1600,7 +1605,7 @@ TEST_F(P2PGenerateStreamSmokeTest, CancelAtEachPDStageDrainsBothSides) {
     }
 }
 
-TEST_F(P2PGenerateStreamSmokeTest, NonPDQueriesFinishOnPrefillWithoutP2PTransfer) {
+TEST_F(P2PGenerateStreamSmokeTest, NonPDQueriesAreRejectedWithoutPrefillExecution) {
     initialize(DataType::TYPE_FP16);
     int requests = 0;
     for (int mode = 0; mode < 5; ++mode) {
@@ -1625,13 +1630,13 @@ TEST_F(P2PGenerateStreamSmokeTest, NonPDQueriesFinishOnPrefillWithoutP2PTransfer
             std::vector<GenerateOutputsPB> outputs;
             const auto                     status  = generate(input, outputs);
             const auto                     prefill = prefill_process_->snapshot();
-            ASSERT_TRUE(status.ok()) << status.error_message() << " P=" << prefill.failure;
-            ASSERT_FALSE(outputs.empty());
-            ASSERT_GT(outputs.back().flatten_output().finished_size(), 0);
-            for (bool finished : outputs.back().flatten_output().finished())
-                EXPECT_TRUE(finished);
+            ASSERT_FALSE(status.ok());
+            ErrorDetailsPB details;
+            ASSERT_TRUE(details.ParseFromString(status.error_details())) << status.error_message();
+            EXPECT_EQ(details.error_code(), static_cast<int64_t>(ErrorCode::INVALID_PARAMS));
+            EXPECT_TRUE(outputs.empty());
             ++requests;
-            EXPECT_EQ(prefill.generate_calls, requests);
+            EXPECT_EQ(prefill.generate_calls, 0);
             EXPECT_EQ(prefill.peer_calls, 0);
             EXPECT_EQ(prefill.load_calls, 0);
             EXPECT_EQ(prefill.published_bytes, 0u);

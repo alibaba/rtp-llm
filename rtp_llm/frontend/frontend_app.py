@@ -59,7 +59,6 @@ MAX_INCOMPLETE_EVENT_SIZE = 1024 * 1024
 STARTUP_WARMUP_HEALTH_GATE_FILE_ENV = "RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE"
 
 
-
 def _pre_stop_drain_seconds(
     configured_seconds: float = DEFAULT_PRE_STOP_DRAIN_SECONDS,
 ) -> float:

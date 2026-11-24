@@ -527,7 +527,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
             "master+domain_fallback",
         )
 
-    async def test_pd_expansion_skips_out_of_contract_vit_hash_requests(self):
+    async def test_pd_expansion_rejects_out_of_contract_vit_hash_requests(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor._mm_cache_routing = True
         visitor.master_client = SimpleNamespace(get_vit_cache_metadata=AsyncMock())
@@ -547,9 +547,16 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
                     "rtp_llm.server.backend_rpc_server_visitor.multimodal_cache_keys",
                     return_value=keys,
                 ):
-                    await visitor._expand_pd_multimodal_tokens(request)
+                    with self.assertRaisesRegex(
+                        FtRuntimeException,
+                        "Prefill local decode fallback is unsupported",
+                    ) as raised:
+                        await visitor._expand_pd_multimodal_tokens(request)
+                    self.assertEqual(
+                        raised.exception.exception_type, ExceptionType.MM_PROCESS_ERROR
+                    )
 
-                self.assertFalse(request.generate_config.can_use_pd_separation)
+                self.assertTrue(request.generate_config.can_use_pd_separation)
                 self.assertIsNone(request.mm_token_expansion)
         visitor.master_client.get_vit_cache_metadata.assert_not_awaited()
 

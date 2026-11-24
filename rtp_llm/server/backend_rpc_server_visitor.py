@@ -394,8 +394,8 @@ class BackendRPCServerVisitor:
                         selected_vit, keys, input=input
                     )
                     if metadata is None:
-                        # A proxy without the hash RPC uses the normal embedding
-                        # route, which preserves inference without ViT cache affinity.
+                        # Legacy endpoints may lack hash acquisition. Drop cache
+                        # affinity; PD admission below still requires row hashes.
                         selected_vit = None
                         route_args.pop("selected_vit")
                 elif not vit_result.connection_failed and vit_result.error_code not in (
@@ -808,15 +808,10 @@ class BackendRPCServerVisitor:
                 vit_addrs[0], keys, input=input
             )
         if metadata is None:
-            if input.enqueued_by_master:
-                raise FtRuntimeException(
-                    ExceptionType.MM_PROCESS_ERROR,
-                    "ViT routing hashes are unavailable for the admitted request",
-                )
-            # Decode forwards non-PD requests to Prefill, which can compute the
-            # embeddings and expand the original tokens using the regular RPC.
-            input.generate_config.can_use_pd_separation = False
-            return
+            raise FtRuntimeException(
+                ExceptionType.MM_PROCESS_ERROR,
+                "ViT routing hashes are unavailable for the PD request; Prefill local decode fallback is unsupported",
+            )
         spans = []
         try:
             token_ids, full_length = multimodal_routing_tokens(

@@ -48,8 +48,8 @@ def get_mm_cache_metadata(
     cancellation_event=None,
     binary_hashes=False,
 ):
-    if engine is None or engine.is_proxy_mode:
-        # Routing metadata belongs to the exact worker selected by FlexLB.
+    if engine is None:
+        # Proxy-mode engines are real child workers with their own hash cache.
         raise NotImplementedError("worker-local cache required")
     if len(keys) > MAX_METADATA_KEYS:
         raise ValueError("too many multimodal cache keys")

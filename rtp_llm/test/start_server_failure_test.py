@@ -99,7 +99,7 @@ class StartServerFailureTest(unittest.TestCase):
         exit_parent.assert_called_once_with(1)
         self.assertEqual(exit_context.exception.code, 1)
 
-    def test_warmup_failure_drains_all_children_without_opening_gate(self):
+    def test_readiness_failure_drains_all_children_without_opening_gate(self):
         configs = PyEnvConfigs()
         configs.role_config.role_type = RoleType.FRONTEND
         with (
@@ -112,13 +112,13 @@ class StartServerFailureTest(unittest.TestCase):
                 return_value="/test/gate",
             ),
             patch(
-                "rtp_llm.start_server._maybe_run_startup_real_warmup",
-                side_effect=RuntimeError("warmup failed"),
-            ),
-            patch(
                 "rtp_llm.start_server._mark_startup_warmup_health_gate_ready"
             ) as mark_ready,
-            patch.object(ProcessManager, "run_health_checks", return_value=True),
+            patch.object(
+                ProcessManager,
+                "run_health_checks",
+                side_effect=RuntimeError("readiness failed"),
+            ),
             patch.object(ProcessManager, "monitor_and_release_processes"),
         ):
             start_server(configs)
@@ -392,7 +392,6 @@ def run_server(mode="none", limit=0, exits_cleanly=True, env=None):
         patch("rtp_llm.start_server.start_backend_server_impl"),
         patch("rtp_llm.start_server.start_frontend_server_impl"),
         patch("rtp_llm.start_server.start_dash_sc_server_impl"),
-        patch("rtp_llm.start_server._maybe_run_startup_real_warmup"),
         patch.object(ProcessManager, "run_health_checks", return_value=True),
         patch.object(
             ProcessManager,

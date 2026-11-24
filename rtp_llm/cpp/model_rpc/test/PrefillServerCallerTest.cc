@@ -319,7 +319,7 @@ private:
 
 class PrefillServerCallerTest: public ::testing::Test {
 protected:
-    GenerateInputPB makeSyncRequest(FakePrefillRpcServer& server, int64_t request_id, int32_t timeout_ms) {
+    GenerateInputPB makeRequest(FakePrefillRpcServer& server, int64_t request_id, int32_t timeout_ms) {
         GenerateInputPB request;
         request.set_request_id(request_id);
         request.add_token_ids(1);
@@ -375,7 +375,7 @@ TEST_F(PrefillServerCallerTest, AsyncClientTracePropagatesAndWaitsForRpcTerminal
                       FakePrefillRpcService::Mode::kErrorChunkThenWaitForCancel}) {
         FakePrefillRpcServer server(std::make_unique<FakePrefillRpcService>(mode));
         ASSERT_TRUE(server.start());
-        auto request = makeSyncRequest(server, 1020, 5000);
+        auto request = makeRequest(server, 1020, 5000);
         auto request_span = telemetry::TelemetryRuntime::tracer()->StartSpan("decode-client-trace-test");
         auto result = caller_.callPrefill(&request, "127.0.0.1", server.port(), "trace-test",
                                           currentTimeMs() + 5000, request_span);
@@ -663,91 +663,6 @@ TEST_F(PrefillServerCallerTest, RpcFailureWithoutAnyChunkStaysUnsuccessful) {
     EXPECT_TRUE(context->failed());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::UNKNOWN_ERROR);
     EXPECT_NE(context->errorInfo().ToString().find("prefill failed before any response"), std::string::npos);
-}
-
-TEST_F(PrefillServerCallerTest, SyncFallbackTimeoutCancelsPrefillRpc) {
-    FakePrefillRpcServer server(std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kWaitForCancel));
-    ASSERT_TRUE(server.start());
-
-    grpc::ServerContext server_context;
-    auto                request = makeSyncRequest(server, 1005, 50);
-
-    auto status = caller_.callPrefill(&server_context, &request, nullptr);
-
-    EXPECT_EQ(status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
-    EXPECT_TRUE(server.service()->waitCancelled(std::chrono::seconds(1)));
-}
-
-TEST_F(PrefillServerCallerTest, ConcurrentSyncCancellationKeepsOtherRequestAndRetiresCallback) {
-    FakePrefillRpcServer first(std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kWaitForCancel));
-    FakePrefillRpcServer second(std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kWaitForCancel));
-    ASSERT_TRUE(first.start());
-    ASSERT_TRUE(second.start());
-    auto first_request = makeSyncRequest(first, 1030, 5000);
-    auto second_request = makeSyncRequest(second, 1031, 5000);
-    std::atomic<bool> cancel_first{false};
-    std::atomic<bool> cancel_second{false};
-    std::atomic<int> first_callback_count{0};
-    auto first_call = std::async(std::launch::async, [&] {
-        return caller_.callPrefill(nullptr, &first_request, nullptr, [&] {
-            first_callback_count.fetch_add(1);
-            return cancel_first.load();
-        });
-    });
-    auto second_call = std::async(std::launch::async, [&] {
-        return caller_.callPrefill(nullptr, &second_request, nullptr, [&] { return cancel_second.load(); });
-    });
-    EXPECT_TRUE(first.service()->waitStarted(std::chrono::seconds(1)));
-    EXPECT_TRUE(second.service()->waitStarted(std::chrono::seconds(1)));
-    cancel_first.store(true);
-    EXPECT_EQ(first_call.get().error_code(), grpc::StatusCode::CANCELLED);
-    const auto retired_count = first_callback_count.load();
-    EXPECT_EQ(second_call.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
-    EXPECT_FALSE(second.service()->waitCancelled(std::chrono::milliseconds(0)));
-    cancel_second.store(true);
-    EXPECT_EQ(second_call.get().error_code(), grpc::StatusCode::CANCELLED);
-    EXPECT_EQ(first_callback_count.load(), retired_count);
-}
-
-TEST_F(PrefillServerCallerTest, ThrowingSyncCancellationCheckFailsOnlyItsRpc) {
-    FakePrefillRpcServer server(std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kWaitForCancel));
-    ASSERT_TRUE(server.start());
-    auto              request = makeSyncRequest(server, 1041, 5000);
-    std::atomic<bool> throw_from_check{false};
-    auto              call = std::async(std::launch::async, [&] {
-        return caller_.callPrefill(nullptr, &request, nullptr, [&] {
-            if (throw_from_check.load()) {
-                throw std::runtime_error("cancellation check failure");
-            }
-            return false;
-        });
-    });
-    EXPECT_TRUE(server.service()->waitStarted(std::chrono::seconds(1)));
-    throw_from_check.store(true);
-    EXPECT_EQ(call.wait_for(std::chrono::seconds(1)), std::future_status::ready);
-    EXPECT_EQ(errorInfoFromGrpcStatus(call.get()).code(), ErrorCode::EXECUTION_EXCEPTION);
-    EXPECT_TRUE(server.service()->waitCancelled(std::chrono::seconds(1)));
-}
-
-TEST_F(PrefillServerCallerTest, SyncFallbackClientCancelCancelsPrefillRpc) {
-    FakePrefillRpcServer server(std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kWaitForCancel));
-    ASSERT_TRUE(server.start());
-
-    auto              request = makeSyncRequest(server, 1006, 5000);
-    std::atomic<bool> started{false};
-    std::atomic<bool> cancelled{false};
-
-    std::thread cancel_thread([&]() {
-        started.store(server.service()->waitStarted(std::chrono::seconds(1)));
-        cancelled.store(true);
-    });
-
-    auto status = caller_.callPrefill(nullptr, &request, nullptr, [&cancelled]() { return cancelled.load(); });
-    cancel_thread.join();
-
-    EXPECT_TRUE(started.load());
-    EXPECT_EQ(status.error_code(), grpc::StatusCode::CANCELLED);
-    EXPECT_TRUE(server.service()->waitCancelled(std::chrono::seconds(1)));
 }
 
 }  // namespace rtp_llm::test

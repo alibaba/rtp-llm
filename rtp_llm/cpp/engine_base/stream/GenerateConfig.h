@@ -146,6 +146,24 @@ public:
     // 从第 N+1 个商品开始对非主序列施加 top-K 遮蔽制造分叉。默认 0（立即分叉）。
     int cross_seq_diverge_start_combo = 0;
 
+    void validatePdSeparation() const {
+        if (num_beams > 1 || !variable_num_beams.empty()) {
+            throw std::invalid_argument("PD separation does not support beam search or variable_num_beams");
+        }
+        if (num_return_sequences > 1) {
+            throw std::invalid_argument("PD separation does not support num_return_sequences > 1");
+        }
+        if (return_prompt_logits) {
+            throw std::invalid_argument("PD separation does not support prompt scoring");
+        }
+        if (max_new_tokens <= 1) {
+            throw std::invalid_argument("PD separation requires max_new_tokens > 1");
+        }
+        if (!can_use_pd_separation) {
+            throw std::invalid_argument("a Prefill node requires can_use_pd_separation=true; local decode is unsupported");
+        }
+    }
+
     bool isPrefillOnly() const {
         return max_new_tokens == 0;
     }
