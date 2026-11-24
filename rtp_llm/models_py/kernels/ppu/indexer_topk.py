@@ -62,6 +62,192 @@ def _ordered_uint(score):
 
 
 @triton.jit
+def _tile_histogram(
+    SCORES,
+    STARTS,
+    ENDS,
+    PREFIX,
+    HIST,
+    OFFSETS,
+    N: tl.constexpr,
+    S0: tl.constexpr,
+    S1: tl.constexpr,
+    TILES: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK: tl.constexpr,
+    SHIFT: tl.constexpr,
+):
+    tile, row = tl.program_id(0), tl.program_id(1)
+    start = tl.maximum(tl.load(STARTS + row), 0)
+    end = tl.minimum(tl.load(ENDS + row), N)
+    if end - start > K:
+        col = tile * BLOCK + tl.arange(0, BLOCK)
+        valid = (col >= start) & (col < end)
+        keys = _ordered_uint(tl.load(SCORES + row * S0 + col * S1, valid, 0.0))
+        in_prefix = valid
+        if SHIFT < 24:
+            prefix = tl.load(PREFIX + row * 2).to(tl.uint32)
+            high = keys >> (SHIFT + 8)
+            prefix_high = prefix >> (SHIFT + 8)
+            in_prefix = valid & (high == prefix_high)
+            if SHIFT == 0:
+                greater = tl.sum((valid & (high > prefix_high)).to(tl.int32), 0)
+                tl.store(OFFSETS + row * 2 * TILES + tile, greater)
+        digit = ((keys >> SHIFT) & 255).to(tl.int32)
+        # Put masked lanes in a real bin and remove them explicitly. The PPU
+        # histogram can fold an out-of-range sentinel into bin zero.
+        counts = tl.histogram(tl.where(in_prefix, digit, 0), 256)
+        counts -= tl.where(
+            tl.arange(0, 256) == 0, tl.sum((~in_prefix).to(tl.int32), 0), 0
+        )
+        tl.store(HIST + (row * TILES + tile) * 256 + tl.arange(0, 256), counts)
+
+
+@triton.jit
+def _select_radix_byte(
+    HIST,
+    PREFIX,
+    OFFSETS,
+    STARTS,
+    ENDS,
+    N: tl.constexpr,
+    TILES: tl.constexpr,
+    TILE_LANES: tl.constexpr,
+    K: tl.constexpr,
+    SHIFT: tl.constexpr,
+):
+    row = tl.program_id(0)
+    start = tl.maximum(tl.load(STARTS + row), 0)
+    end = tl.minimum(tl.load(ENDS + row), N)
+    if end - start > K:
+        tile, digit = tl.arange(0, TILE_LANES), tl.arange(0, 256)
+        counts = tl.load(
+            HIST + (row * TILES + tile[:, None]) * 256 + digit[None, :],
+            tile[:, None] < TILES,
+            0,
+        )
+        hist = tl.sum(counts, 0)
+        if SHIFT == 24:
+            rank = K
+            prefix = tl.full((), 0, tl.uint32)
+        else:
+            rank = tl.load(PREFIX + row * 2 + 1)
+            prefix = tl.load(PREFIX + row * 2).to(tl.uint32)
+        above = tl.sum(hist, 0) - tl.cumsum(hist, 0)
+        match = (above < rank) & (rank <= above + hist)
+        selected = tl.sum(tl.where(match, digit, 0), 0)
+        rank -= tl.sum(tl.where(match, above, 0), 0)
+        tl.store(
+            PREFIX + row * 2, (prefix | (selected.to(tl.uint32) << SHIFT)).to(tl.int32)
+        )
+        if SHIFT:
+            tl.store(PREFIX + row * 2 + 1, rank)
+        else:
+            # For each tile, reserve positions for all larger keys and the
+            # earliest ties. The final scatter can now write in token order.
+            offsets = OFFSETS + row * 2 * TILES + tile
+            greater = tl.load(offsets, tile < TILES, 0)
+            greater += tl.sum(tl.where(digit[None, :] > selected, counts, 0), 1)
+            equal = tl.sum(tl.where(digit[None, :] == selected, counts, 0), 1)
+            equal_before = tl.cumsum(equal, 0) - equal
+            out_start = tl.cumsum(greater, 0) - greater + tl.minimum(equal_before, rank)
+            tl.store(offsets, out_start, tile < TILES)
+            tl.store(offsets + TILES, tl.maximum(rank - equal_before, 0), tile < TILES)
+
+
+@triton.jit
+def _scatter_selected(
+    SCORES,
+    STARTS,
+    ENDS,
+    PREFIX,
+    OFFSETS,
+    OUTPUT,
+    N: tl.constexpr,
+    S0: tl.constexpr,
+    S1: tl.constexpr,
+    TILES: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    tile, row = tl.program_id(0), tl.program_id(1)
+    start = tl.load(STARTS + row)
+    begin = tl.maximum(start, 0)
+    end = tl.minimum(tl.load(ENDS + row), N)
+    if end - begin <= K:
+        if tile == 0:
+            i = tl.arange(0, K)
+            tl.store(
+                OUTPUT + row * K + i, tl.where(i < end - begin, begin + i - start, -1)
+            )
+    else:
+        col = tile * BLOCK + tl.arange(0, BLOCK)
+        valid = (col >= begin) & (col < end)
+        keys = _ordered_uint(tl.load(SCORES + row * S0 + col * S1, valid, 0.0))
+        threshold = tl.load(PREFIX + row * 2).to(tl.uint32)
+        offsets = OFFSETS + row * 2 * TILES + tile
+        equal = valid & (keys == threshold)
+        keep = (valid & (keys > threshold)) | (
+            equal & (tl.cumsum(equal.to(tl.int32), 0) <= tl.load(offsets + TILES))
+        )
+        position = tl.load(offsets) + tl.cumsum(keep.to(tl.int32), 0) - 1
+        tl.store(OUTPUT + row * K + position, col - start, keep)
+
+
+def _stable_topk_wide(logits, starts, ends, output):
+    rows, columns = logits.shape
+    k, block = output.shape[1], 4096
+    tiles = triton.cdiv(columns, block)
+    args = dict(dtype=torch.int32, device=logits.device)
+    prefix = torch.empty((rows, 2), **args)
+    hist = torch.empty((rows, tiles, 256), **args)
+    offsets = torch.empty((rows, 2, tiles), **args)
+    for shift in (24, 16, 8, 0):
+        _tile_histogram[(tiles, rows)](
+            logits,
+            starts,
+            ends,
+            prefix,
+            hist,
+            offsets,
+            columns,
+            *logits.stride(),
+            tiles,
+            k,
+            block,
+            shift,
+            num_warps=8,
+        )
+        _select_radix_byte[(rows,)](
+            hist,
+            prefix,
+            offsets,
+            starts,
+            ends,
+            columns,
+            tiles,
+            triton.next_power_of_2(tiles),
+            k,
+            shift,
+            num_warps=8,
+        )
+    _scatter_selected[(tiles, rows)](
+        logits,
+        starts,
+        ends,
+        prefix,
+        offsets,
+        output,
+        columns,
+        *logits.stride(),
+        tiles,
+        k,
+        block,
+        num_warps=8,
+    )
+
+
+@triton.jit
 def _stable_topk_small_kernel(
     SCORES,
     STARTS,
@@ -199,8 +385,12 @@ def stable_topk(logits, row_starts, row_ends, output, max_seq_len=None):
         # Per-row device bounds skip score selection for short decode rows,
         # including when one Graph bucket also serves longer rows. The exact
         # threshold and token-order tie break stay on device for long rows.
-        # Wider contexts and larger row chunks keep the original 64-bit path.
         _stable_topk_small(logits, row_starts, row_ends, output)
+        return
+    # Split a wide row over CTAs. Bound the per-row histogram reduction to
+    # 32 tiles and its workspace to small decode batches.
+    if rows <= 32 and 34816 < columns <= 131072 and output.shape[1] == 2048:
+        _stable_topk_wide(logits, row_starts, row_ends, output)
         return
     keys = torch.empty((rows, columns), dtype=torch.int64, device=logits.device)
     _encode_keys[(rows, triton.cdiv(columns, 256))](

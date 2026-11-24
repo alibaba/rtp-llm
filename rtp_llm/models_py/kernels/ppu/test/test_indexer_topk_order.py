@@ -93,8 +93,8 @@ class IndexerTopkOrderTest(TestCase):
                     op = indexer_op.IndexerOp(1, 128, 2048, 0, stable_topk=stable)
                     self.assertEqual(op._ppu_stable_topk, ppu and stable)
 
-    def test_wide_context_keeps_the_64_bit_path(self):
-        for columns in (34817, 65537):
+    def test_wide_context_selects_exact_indices_across_tile_boundaries(self):
+        for columns in (34817, 65537, 131073):
             with self.subTest(columns=columns):
                 logits = torch.arange(columns, dtype=torch.float32, device="cuda")[None]
                 starts = torch.zeros(1, dtype=torch.int32, device="cuda")
@@ -103,14 +103,18 @@ class IndexerTopkOrderTest(TestCase):
                 with patch(
                     "rtp_llm.models_py.kernels.ppu.indexer_topk._stable_topk_small",
                     side_effect=AssertionError(
-                        "wide context must retain legacy selection"
+                        "wide context exceeded single-CTA bound"
                     ),
                 ):
                     stable_topk(logits, starts, ends, output)
                 self.assert_selection(output, [0], [columns])
 
     def test_production_width_graph_switches_mixed_row_bounds_and_score_bits(self):
-        columns = 34816
+        for columns in (34816, 90113):
+            with self.subTest(columns=columns):
+                self.check_graph_bounds_and_scores(columns)
+
+    def check_graph_bounds_and_scores(self, columns):
         scores = torch.randn(8, columns * 2, device="cuda")[:, ::2]
         starts = torch.zeros(8, dtype=torch.int32, device="cuda")
         ends = torch.full_like(starts, columns)
@@ -126,9 +130,11 @@ class IndexerTopkOrderTest(TestCase):
             scores[1].zero_()
             scores[1, ::2] = -0.0
             scores[4, :2000] = 100
+            # The boundary score has a zero low byte and ties in many tiles.
+            scores[5] = torch.arange(columns, device=scores.device) % 257
             scores.view(torch.int32)[6, ::7] = -1
             begin = [0, 1, 7, 0, 100, 0, -7, columns]
-            end = [0, 18, 2055, 2049, 8293, 32833, columns, columns]
+            end = [0, 18, 2055, 2049, 8293, columns - 7, columns, columns]
             if repeat % 2:
                 begin, end = list(reversed(begin)), list(reversed(end))
             starts.copy_(torch.tensor(begin, dtype=torch.int32, device="cuda"))

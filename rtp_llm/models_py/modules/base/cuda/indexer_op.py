@@ -1,6 +1,8 @@
 """CUDA-specific indexer operations for DeepSeek-V3.2 DSA mechanism."""
 
+import inspect
 import os
+from functools import lru_cache
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -40,6 +42,15 @@ def _fp8_mqa_logits_compat(*args, **kwargs):
 
 
 _paged_mqa_context_lens_dim: Optional[int] = None
+
+
+@lru_cache(maxsize=None)
+def _accepts_ppu_mqa_geometry(metadata_op) -> bool:
+    # Older wheels and native bindings expose only the three-argument planner.
+    try:
+        return "metadata_extra" in inspect.signature(metadata_op).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 def _get_paged_mqa_logits_metadata_compat(
@@ -102,11 +113,20 @@ def _fp8_paged_mqa_logits_compat(
         try:
             metadata = schedule_metadata
             if metadata is None:
-                metadata = deep_gemm.get_paged_mqa_logits_metadata(
-                    adapted_context_lens,
-                    block_kv,
-                    deep_gemm.get_num_sms(),
-                )
+                plan = deep_gemm.get_paged_mqa_logits_metadata
+                plan_args = (adapted_context_lens, block_kv, deep_gemm.get_num_sms())
+                if (
+                    context_lens_dim == 2
+                    and is_ppu()
+                    and _accepts_ppu_mqa_geometry(plan)
+                ):
+                    # Match the paged kernel's KV split and blocks per compute unit.
+                    # Without Q geometry the PPU planner uses a conservative schedule.
+                    metadata = plan(
+                        *plan_args, metadata_extra=(*q.shape[1:], q.element_size())
+                    )
+                else:
+                    metadata = plan(*plan_args)
             logits = deep_gemm.fp8_paged_mqa_logits(
                 q,
                 kv_cache,

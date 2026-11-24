@@ -10,6 +10,50 @@ from rtp_llm.models_py.modules.hybrid.indexer import Indexer
 
 
 class IndexerPagedContractTest(unittest.TestCase):
+    def test_ppu_fp8_schedule_receives_kernel_geometry_when_supported(self):
+        q = torch.empty(9, 1, 32, 128, dtype=torch.float8_e4m3fn)
+        lengths = torch.arange(81920, 81929, dtype=torch.int32)
+        schedule = torch.empty(0)
+        shapes = []
+
+        def planner(context, block, sms, *, metadata_extra=None):
+            self.assertEqual(tuple(context.shape), (9, 1))
+            self.assertEqual((block, sms), (64, 120))
+            shapes.append(metadata_extra)
+            return schedule
+
+        def old_planner(context, block, sms):
+            return planner(context, block, sms)
+
+        for ppu, metadata_op, geometry in (
+            (True, planner, (1, 32, 128, 1)),
+            (True, old_planner, None),
+            (False, planner, None),
+        ):
+            logits = Mock(return_value=torch.empty(0))
+            vendor = SimpleNamespace(
+                get_paged_mqa_logits_metadata=metadata_op,
+                get_num_sms=lambda: 120,
+                fp8_paged_mqa_logits=logits,
+            )
+            with (
+                self.subTest(ppu=ppu, geometry=geometry),
+                patch.object(indexer_op, "is_ppu", return_value=ppu),
+                patch.object(indexer_op, "deep_gemm", vendor),
+                patch.object(indexer_op, "_paged_mqa_context_lens_dim", None),
+            ):
+                indexer_op._fp8_paged_mqa_logits_compat(
+                    q,
+                    torch.empty(0),
+                    torch.empty(0),
+                    lengths,
+                    torch.empty(0),
+                    64,
+                    90112,
+                )
+            self.assertIs(logits.call_args.args[5], schedule)
+            self.assertEqual(shapes.pop(), geometry)
+
     def test_schedule_refresh_adapts_legacy_abi_and_preserves_capture_storage(self):
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
             flashmla_sparse_impl as sparse,
