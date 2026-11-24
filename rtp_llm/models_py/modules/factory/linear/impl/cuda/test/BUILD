@@ -46,6 +46,14 @@ py_test(
     exec_properties = {'gpu':'SM100_ARM'},
 )
 
+py_test(
+    name = "fp4_prefill_autotune_test",
+    srcs = ["fp4_prefill_autotune_test.py"],
+    deps = py_test_deps,
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM"},
+)
+
 # REBASE CONFLICT CONTEXT(e2e00e570): source branch added this external-scale
 # DeepGEMM test while the new base already had the SM100/ARM fp4 test above.
 # Keep both test targets.

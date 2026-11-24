@@ -63,6 +63,12 @@ class CudaFp4GEMMLinear(LinearBase):
         self.input_scale = input_scales
         self.bias = bias
         self.backend = os.getenv("RTP_LLM_FP4_GEMM_BACKEND", "cute-dsl")
+        # Large Prefill shapes can first appear under live load. FlashInfer's
+        # untuned path uses an analytical tactic without profiling every candidate.
+        self._autotune_enabled = not (
+            os.getenv("ROLE_TYPE") == "PREFILL"
+            and os.getenv("RTP_LLM_FP4_PREFILL_AUTOTUNE") == "0"
+        )
         if self.backend == "sgl_cutlass":
             from rtp_llm.models_py.kernels.cuda.fp4_kernel import (
                 cutlass_scaled_fp4_mm_wrapper,
@@ -112,7 +118,7 @@ class CudaFp4GEMMLinear(LinearBase):
                 output_dtype,
             ).view(*output_shape)
         else:
-            with autotune():
+            with autotune(tune_mode=self._autotune_enabled):
                 output = mm_fp4(
                     input_fp4,
                     self.weight.T,
