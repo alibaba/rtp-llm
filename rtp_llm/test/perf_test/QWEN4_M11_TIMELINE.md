@@ -60,6 +60,9 @@ cycle, and captures decode batch size 1. It checks for CUDA Graph launches,
 cross-layer GR fusion on every rank, and the tiled PLE prefill kernel on rank 0.
 MTP target verification uses its own PLE cache transaction path. The fused
 single-token PLE decode kernels can be inspected in the default decode case.
+Set `QWEN4_PROFILE_VERIFY_GRAPH_EVENT=1` (Bazel `--test_env`) with `--mtp` to
+capture per-kernel timelines with an external event after the first 12 target
+verify layers. The driver records the setting in `launch.json`.
 
 For either invocation, set `QWEN4_PLE_SHARED_TABLE` (Bazel `--test_env`) to reuse
 a matching shared PLE manifest whose backing remains readable throughout the

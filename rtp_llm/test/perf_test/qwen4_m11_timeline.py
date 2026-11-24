@@ -460,6 +460,8 @@ def main() -> None:
                 RTP_LLM_DEVICE_INPUT="1",
                 RTP_LLM_DROP_BROAD_SYNC="1",
             )
+        if args.mtp and os.environ.get("QWEN4_PROFILE_VERIFY_GRAPH_EVENT") == "1":
+            server_env["QWEN4_PROFILE_VERIFY_GRAPH_EVENT"] = "1"
         (output / "launch.json").write_text(
             json.dumps(
                 {"server_args": shlex.split(server_args), "server_env": server_env},
