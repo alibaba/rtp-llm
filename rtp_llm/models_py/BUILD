@@ -6,6 +6,9 @@ exports_files(
     visibility = ["//rtp_llm/models_py/modules/factory/linear/test:__pkg__"],
 )
 
+# Import-only dependency checks reuse the production Python 3.10 adapter.
+exports_files(["modules/dsv41/vision_swiglu.py"])
+
 py_library(
     name = "utils",
     srcs = glob([

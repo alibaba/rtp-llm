@@ -1,7 +1,12 @@
 import argparse
+import json
 import logging
 import os
 
+from rtp_llm.config.oss_download import (
+    OSS_INTERNAL_REGION_ALLOWLIST_ENV,
+    parse_oss_internal_region_allowlist,
+)
 from rtp_llm.config.py_config_modules import (
     MM_TRANSPORT_MODE_GRPC,
     MM_TRANSPORT_MODES,
@@ -99,11 +104,100 @@ def _rdma_port(value):
     return parsed
 
 
+# One public JSON entry point; runtime code keeps the existing VitConfig fields.
+_EMBEDDING_CACHE_FIELDS = {
+    "local": {
+        "gpu_max_bytes": ("mm_cache_gpu_max_bytes", int, 0),
+        "cpu_max_bytes": ("mm_cache_cpu_max_bytes", int, 0),
+        "hash_max_bytes": ("mm_hash_key_cache_max_bytes", int, 0),
+        "async_publish": ("mm_cache_async_publish", bool, None),
+    },
+    "remote": {
+        "enable": ("mm_remote_cache_enable", bool, None),
+        "namespace": ("mm_remote_cache_namespace", str, None),
+        "gdr_enable": ("mm_remote_cache_gdr_enable", bool, None),
+        "gdr_num": ("mm_remote_cache_gdr_num", int, 1),
+        "gdr_arena_bytes": ("mm_remote_cache_gdr_arena_bytes", int, 1),
+        "gdr_min_block_bytes": ("mm_remote_cache_gdr_min_block_bytes", int, 64),
+        "metadata_workers": ("mm_remote_cache_metadata_workers", int, 1),
+        "read_transfer_workers": ("mm_remote_cache_read_transfer_workers", int, 1),
+        "write_transfer_workers": ("mm_remote_cache_write_transfer_workers", int, 1),
+        "audit": ("mm_remote_cache_audit", bool, None),
+        "read_timeout_ms": ("mm_remote_cache_read_timeout_ms", int, 1),
+        "write_timeout_ms": ("mm_remote_cache_write_timeout_ms", int, 1),
+        "max_object_bytes": ("mm_remote_cache_max_object_bytes", int, 1),
+        "max_inflight_bytes": ("mm_remote_cache_max_inflight_bytes", int, 1),
+        "max_pending": ("mm_remote_cache_max_pending", int, 1),
+        "quarantine_ttl_seconds": ("mm_remote_cache_quarantine_ttl_seconds", int, 1),
+    },
+}
+
+
+def parse_embedding_cache_config(value):
+    """Validate before binding; reject typos and bool-as-int silently disabling caches."""
+
+    def unique_object(pairs):
+        result = {}
+        for key, item in pairs:
+            if key in result:
+                raise ValueError(f"duplicate key: {key}")
+            result[key] = item
+        return result
+
+    try:
+        config = json.loads(value, object_pairs_hook=unique_object)
+        if not isinstance(config, dict):
+            raise ValueError("expected an object with local/remote sections")
+        fields = {}
+        for section, values in config.items():
+            if section not in _EMBEDDING_CACHE_FIELDS or not isinstance(values, dict):
+                raise ValueError(f"unknown or invalid section: {section}")
+            for key, item in values.items():
+                if key not in _EMBEDDING_CACHE_FIELDS[section]:
+                    raise ValueError(f"unknown option: {section}.{key}")
+                field, kind, minimum = _EMBEDDING_CACHE_FIELDS[section][key]
+                if type(item) is not kind:
+                    raise ValueError(f"{section}.{key} must be {kind.__name__}")
+                if minimum is not None and item < minimum:
+                    raise ValueError(f"{section}.{key} must be >= {minimum}")
+                if kind is str and not item.strip():
+                    raise ValueError(f"{section}.{key} must not be blank")
+                fields[field] = item
+        return fields
+    except (ValueError, TypeError) as error:
+        raise argparse.ArgumentTypeError(
+            f"invalid embedding cache JSON: {error}"
+        ) from error
+
+
+def apply_embedding_cache_config(vit_config, fields):
+    # Called after legacy bindings. JSON is authoritative for supplied keys;
+    # omitted keys retain the existing defaults/legacy settings.
+    values = dict(vars(vit_config))
+    values.update(fields or {})
+    if (
+        values.get("mm_remote_cache_enable")
+        and not values.get("mm_remote_cache_namespace", "").strip()
+    ):
+        raise ValueError(
+            "remote.namespace must identify immutable model/preprocess revisions"
+        )
+    for key, value in (fields or {}).items():
+        setattr(vit_config, key, value)
+
+
 def init_vit_group_args(parser, vit_config):
     ##############################################################################################################
     # Vit Configuration
     ##############################################################################################################
     vit_group = parser.add_argument_group("Vit Configuration")
+    vit_group.add_argument(
+        "--mm_embedding_cache_config",
+        env_name="MM_EMBEDDING_CACHE_CONFIG",
+        type=parse_embedding_cache_config,
+        default=None,
+        help="Embedding cache JSON with local/remote sections; supplied keys override legacy options",
+    )
     vit_group.add_argument(
         "--vit_separation",
         env_name="VIT_SEPARATION",
@@ -119,6 +213,18 @@ def init_vit_group_args(parser, vit_config):
         type=str,
         default="",
         help="是否需要下载headers",
+    )
+    vit_group.add_argument(
+        "--oss_internal_region_allowlist",
+        env_name=OSS_INTERNAL_REGION_ALLOWLIST_ENV,
+        bind_to=(vit_config, "oss_internal_region_allowlist"),
+        type=parse_oss_internal_region_allowlist,
+        default=None,
+        help=(
+            '允许保留 OSS 内网地址的地域，格式为 JSON 数组，例如 ["ap-southeast-1"]。'
+            "按完整地域 ID 匹配，名单外移除域名中的 -internal。"
+            "空数组表示所有地域都移除该后缀，未配置时沿用原有改写规则。"
+        ),
     )
     vit_group.add_argument(
         "--mm_image_max_file_size_kb",
@@ -145,12 +251,28 @@ def init_vit_group_args(parser, vit_config):
         help="多模态开启的Cache的大小",
     )
     vit_group.add_argument(
+        "--mm_remote_cache_namespace",
+        env_name="MM_REMOTE_CACHE_NAMESPACE",
+        bind_to=(vit_config, "mm_remote_cache_namespace"),
+        type=str,
+        default="",
+        help="Required immutable model-weight and preprocessing revision namespace",
+    )
+    vit_group.add_argument(
+        "--mm_remote_cache_write_timeout_ms",
+        env_name="MM_REMOTE_CACHE_WRITE_TIMEOUT_MS",
+        bind_to=(vit_config, "mm_remote_cache_write_timeout_ms"),
+        type=int,
+        default=1000,
+        help="Native write timeout; failed cache writes do not fail inference",
+    )
+    vit_group.add_argument(
         "--url_cache_item_num",
         env_name="URL_CACHE_ITEM_NUM",
         bind_to=(vit_config, "url_cache_item_num"),
         type=int,
         default=100,
-        help="多模态开启的用于URL的Cache的大小",
+        help="同一 ViT 服务的所有预处理进程共享的原始 URL 内容缓存条数，0 表示关闭",
     )
     vit_group.add_argument(
         "--use_igraph_cache",
@@ -198,7 +320,16 @@ def init_vit_group_args(parser, vit_config):
         bind_to=(vit_config, "mm_preprocess_max_workers"),
         type=int,
         default=4,
-        help="多模态预处理时最大线程数量",
+        help="多模态 CPU 预处理进程池的进程数量（不是 GPU forward 并发）",
+    )
+    vit_group.add_argument(
+        "--gpu_prefetch_batches",
+        env_name="GPU_PREFETCH_BATCHES",
+        bind_to=(vit_config, "gpu_prefetch_batches"),
+        type=int,
+        choices=[0, 1],
+        default=vit_config.gpu_prefetch_batches,
+        help="提前收集/上传至多 1 个 batch；默认 1，设 0 关闭，不增加 GPU forward 并发",
     )
     vit_group.add_argument(
         "--biencoder_preprocess",
@@ -271,6 +402,14 @@ def init_vit_group_args(parser, vit_config):
         help="多模态输出传输模式：grpc 使用内联传输，rdma 强制使用 RDMA 且失败时直接报错",
     )
     vit_group.add_argument(
+        "--mm_rdma_allow_inline_clients",
+        env_name="MM_RDMA_ALLOW_INLINE_CLIENTS",
+        bind_to=(transport_config, "allow_inline_clients"),
+        type=str2bool,
+        default=False,
+        help="ViT RDMA 模式下，对未声明 RDMA 能力的调用方使用 gRPC 内联输出",
+    )
+    vit_group.add_argument(
         "--mm_rdma_bind_ip",
         env_name="MM_RDMA_BIND_IP",
         bind_to=(rdma_config, "bind_ip"),
@@ -311,12 +450,20 @@ def init_vit_group_args(parser, vit_config):
         help="LLM 侧每个 ViT endpoint 的并行 RDMA QP 数，必须为正整数",
     )
     vit_group.add_argument(
+        "--mm_rdma_read_provider_count",
+        env_name="MM_RDMA_READ_PROVIDER_COUNT",
+        bind_to=(rdma_config, "read_provider_count"),
+        type=_positive_int,
+        default=4,
+        help="LLM 侧独立 RDMA READ provider 数量；每个 provider 同时处理一个读取，等待与读取共享超时预算。必须为正整数",
+    )
+    vit_group.add_argument(
         "--mm_rdma_release_timeout_ms",
         env_name="MM_RDMA_RELEASE_TIMEOUT_MS",
         bind_to=(control_config, "release_timeout_ms"),
         type=_positive_int,
         default=1000,
-        help="读取侧 ReleaseRdmaLease RPC 的 deadline（毫秒），位于推理路径上需保持较短，超时由导出侧 slot GC 兜底",
+        help="读取侧每次 ReleaseRdmaLease RPC 的超时（毫秒）",
     )
     vit_group.add_argument(
         "--mm_rdma_slot_gc_timeout_ms",
@@ -324,7 +471,7 @@ def init_vit_group_args(parser, vit_config):
         bind_to=(rdma_config, "slot_gc_timeout_ms"),
         type=_positive_int,
         default=60 * 1000,
-        help="encoder 侧 slot 在无 Release 时强制回收的超时（毫秒）",
+        help="ViT 回收尚未被读取方认领的 RDMA slot 的超时（毫秒）；已认领的 slot 等待读取方释放",
     )
     vit_group.add_argument(
         "--mm_rdma_max_slot_bytes",
@@ -340,8 +487,8 @@ def init_vit_group_args(parser, vit_config):
         env_name="MM_RDMA_MAX_RECEIPT_BYTES",
         bind_to=(rdma_config, "max_receipt_bytes"),
         type=_positive_int,
-        default=8 * 1024 * 1024 * 1024,
-        help="LLM 侧单个 RDMA receipt 的总载荷上限，默认 8GiB，与 RDMA 总显存池大小一致",
+        default=rdma_config.max_receipt_bytes,
+        help="ViT 单个 exporter 未释放缓冲区的总字节上限，同时限制 LLM 单个 RDMA receipt 的载荷，默认 16 GiB",
     )
     vit_group.add_argument(
         "--gpu_batch_wait_ms",
@@ -356,25 +503,32 @@ def init_vit_group_args(parser, vit_config):
         env_name="VIT_GPU_MAX_BATCH_SIZE",
         bind_to=(vit_config, "gpu_max_batch_size"),
         type=int,
-        default=1,
-        help="GPU batch调度最大batch大小(请求数)；=1 为串行(每forward一个请求，不合批)，>1 开启跨请求合批",
+        default=vit_config.gpu_max_batch_size,
+        help="=1 保留逐请求串行模式；>1 开启合批，同一上限约束工作块数和原始媒体总数；模型工作量预算可进一步限制",
     )
-    vit_group.add_argument(
-        "--gpu_max_batch_images",
-        env_name="VIT_GPU_MAX_BATCH_IMAGES",
-        bind_to=(vit_config, "gpu_max_batch_images"),
-        type=int,
-        default=200,
-        help="防止单次forward OOM。单个batch内的最大原始图片/媒体数；同时限制单个请求的最大图片数，",
-    )
-    vit_group.add_argument(
-        "--mm_max_queue_size",
-        env_name="MM_MAX_QUEUE_SIZE",
-        bind_to=(vit_config, "mm_max_queue_size"),
-        type=int,
-        default=1024,
-        help="mm embedding调度器等待队列容量上限；超出时提交快速失败并返回过载错误，防止forward卡住时内存无界增长",
-    )
+
+    for field, help_text in (
+        (
+            "gpu_batch_max_bytes",
+            "模型工作量/临时显存预算(bytes)，0在权重加载后自动分配，非无限制",
+        ),
+        (
+            "gpu_graph_cache_max_entries",
+            "每个ViT模型的多shape graph缓存及待构建队列上限，0关闭",
+        ),
+        (
+            "gpu_graph_cache_max_bytes",
+            "每个ViT模型的graph显存预算(bytes)，0自动分配；仅独立ViT支持后台capture",
+        ),
+    ):
+        vit_group.add_argument(
+            "--" + field,
+            env_name="VIT_" + field.upper(),
+            bind_to=(vit_config, field),
+            type=int,
+            default=getattr(vit_config, field),
+            help=help_text,
+        )
 
     vit_group.add_argument(
         "--mm_cache_gpu_max_bytes",
@@ -408,7 +562,7 @@ def init_vit_group_args(parser, vit_config):
         env_name="VIT_CONCURRENCY",
         bind_to=(vit_config, "vit_concurrency"),
         type=int,
-        default=64,
+        default=vit_config.vit_concurrency,
         help="ViT 异步计算的最大并发数",
     )
 
@@ -417,8 +571,21 @@ def init_vit_group_args(parser, vit_config):
         env_name="VIT_MAX_QUEUE_SIZE",
         bind_to=(vit_config, "vit_max_queue_size"),
         type=int,
-        default=64,
-        help="ViT 异步计算等待队列的最大任务数",
+        default=vit_config.vit_max_queue_size,
+        help="ViT 异步计算的额外等待任务数；GPU 就绪队列容量由 VIT_CONCURRENCY 加此值派生，满时拒绝新任务",
+    )
+
+    vit_group.add_argument(
+        "--vit_source_download_concurrency",
+        env_name="VIT_SOURCE_DOWNLOAD_CONCURRENCY",
+        bind_to=(vit_config, "vit_source_download_concurrency"),
+        type=int,
+        default=0,
+        help=(
+            "Source download concurrency per ViT engine. On the native network path this also "
+            "sizes the shared connection cache; 0 uses the preprocessing worker count. "
+            "On the Python path 0 shares the default I/O pool."
+        ),
     )
 
     for name, parser, default, description in (
@@ -440,7 +607,7 @@ def init_vit_group_args(parser, vit_config):
             1024**3,
             "远端缓存读写暂存内存预算bytes",
         ),
-        ("mm_remote_cache_max_pending", int, 8, "远端缓存最大未完成任务数"),
+        ("mm_remote_cache_max_pending", int, 128, "远端缓存最大未完成任务数"),
         (
             "mm_remote_cache_read_timeout_ms",
             int,

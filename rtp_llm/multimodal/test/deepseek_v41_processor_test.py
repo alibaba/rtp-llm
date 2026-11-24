@@ -1,116 +1,88 @@
+"""Official-revision parity for backend-owned V4.1 geometry and pixels."""
+
 import base64
-import binascii
 import hashlib
 import importlib.util
 import io
-import json
 import os
 import sys
-from dataclasses import replace
-from pathlib import Path
+import threading
 import unittest
-from unittest import TestCase, main
-from unittest.mock import Mock, patch
+from concurrent.futures import CancelledError
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import numpy as np
+import requests
 import torch
-from PIL import Image
-from tokenizers import Tokenizer
+from PIL import Image, ImageOps
+from urllib3.exceptions import ReadTimeoutError
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
+from rtp_llm.multimodal.mm_error_messages import MMErr
+from rtp_llm.multimodal.mm_preprocess import LocalPreprocessExecutor
+from rtp_llm.multimodal.mm_work_item import MMWorkItem
+from rtp_llm.multimodal.multimodal_mixins.deepseek_v41 import (
+    deepseek_v41_vision as vision_module,
+)
 from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
-    IMAGE,
-    IMAGE_END,
-    IMAGE_NEW_LINE,
-    IMAGE_PLACEHOLDER,
-    IMAGE_START,
-    TEXT,
     V41ImageProcessorConfig,
-    image_token_types,
-    load_image_bytes,
+    num_image_tokens,
     plan_image_grid,
-    prepare_vl_inputs,
-    prepare_vl_inputs_from_token_ids,
     preprocess_image,
 )
+from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
+from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 PROCESSOR_SHA256 = "482759e3bcc4e9bb5ee582b244cc563f5d0e163d8b48dda91ebb7106e62f9272"
-ENCODING_SHA256 = "f64a67e5680a5621b9320585a9684967cd5c75a9b82e19d914cbc02845d72cab"
 
 
-def load_reference(name, path, expected_sha256):
-    if hashlib.sha256(path.read_bytes()).hexdigest() != expected_sha256:
-        raise ValueError(
-            f"reference source does not match the fixed HF revision: {path.name}"
-        )
-    spec = importlib.util.spec_from_file_location(name, path)
+def load_reference(path):
+    if hashlib.sha256(path.read_bytes()).hexdigest() != PROCESSOR_SHA256:
+        raise ValueError(f"reference source does not match fixed HF revision: {path}")
+    spec = importlib.util.spec_from_file_location(
+        "dsv41_official_image_processor", path
+    )
     module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
 
 def image_data(width, height, mode="RGB", offset=0):
     values = (
-        (
-            np.arange(width * height * 3, dtype=np.uint32).reshape(height, width, 3)
-            + offset
-        )
-        % 256
-    ).astype(np.uint8)
-    image = Image.fromarray(values, "RGB").convert(mode)
+        np.arange(width * height * 3, dtype=np.uint32).reshape(height, width, 3)
+        + offset
+    ) % 256
+    image = Image.fromarray(values.astype(np.uint8), "RGB").convert(mode)
     data = io.BytesIO()
     image.save(data, format="PNG")
     return data.getvalue()
 
 
-class V41ProcessorTest(TestCase):
+class V41BackendProcessorParityTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        model = os.environ.get("DSV41_MODEL_PATH")
-        if not model:
-            raise unittest.SkipTest(
-                "DSV41_MODEL_PATH not set; real-weight tests run where the "
-                "checkpoint is available (GB200 lanes / local runs)"
-            )
-        model = Path(model)
+        model_path = os.environ.get("DSV41_MODEL_PATH")
+        if not model_path:
+            raise unittest.SkipTest("DSV41_MODEL_PATH is required for official parity")
         cls.reference = load_reference(
-            "dsv41_official_image_processor",
-            model / "inference/image_processor.py",
-            PROCESSOR_SHA256,
+            Path(model_path) / "inference/image_processor.py"
         )
-        cls.encoding = load_reference(
-            "dsv41_processor_official_encoding",
-            model / "encoding/encoding.py",
-            ENCODING_SHA256,
-        )
-        backend = Tokenizer.from_file(str(model / "tokenizer.json"))
-
-        class Adapter:
-            unk_token_id = None
-
-            def encode(self, text):
-                return backend.encode(text, add_special_tokens=False).ids
-
-            def convert_tokens_to_ids(self, text):
-                return backend.token_to_id(text)
-
-        cls.tokenizer = Adapter()
         cls.config = V41ImageProcessorConfig()
         cls.reference_args = type(
-            "Args", (), {**cls.config.__dict__, "vision_enabled": True}
+            "Args",
+            (),
+            {
+                **cls.config.__dict__,
+                "vision_enabled": True,
+                "vision_max_wh_ratio": None,
+            },
         )()
-        print(
-            json.dumps(
-                {
-                    "processor_source_sha256": PROCESSOR_SHA256,
-                    "encoding_source_sha256": ENCODING_SHA256,
-                    "model_path": str(model),
-                }
-            ),
-            flush=True,
-        )
 
-    def test_geometry_and_types_match_official(self):
+    def test_geometry_and_complete_span_length_match_official(self):
         for width, height in (
             (1, 1),
             (1, 8192),
@@ -128,28 +100,13 @@ class V41ProcessorTest(TestCase):
                     width, height, self.reference_args
                 )
                 self.assertEqual(actual, expected)
-                types = image_token_types(*actual[:2])
-                self.assertTrue(
-                    torch.equal(types, self.reference.image_token_types(*expected[:2]))
+                self.assertEqual(
+                    num_image_tokens(*actual[:2]),
+                    self.reference.image_token_types(*expected[:2]).numel(),
                 )
-                self.assertLessEqual(types.numel(), 1024)
-        self.assertEqual(
-            image_token_types(2, 3).tolist(),
-            [
-                IMAGE_START,
-                IMAGE,
-                IMAGE,
-                IMAGE,
-                IMAGE_NEW_LINE,
-                IMAGE,
-                IMAGE,
-                IMAGE,
-                IMAGE_NEW_LINE,
-                IMAGE_END,
-            ],
-        )
+                self.assertLessEqual(num_image_tokens(*actual[:2]), 1024)
 
-    def test_pixels_and_patch_order_match_official(self):
+    def test_pixels_and_patch_order_match_official_byte_for_byte(self):
         for width, height, mode in (
             (1, 1, "RGB"),
             (17, 31, "RGBA"),
@@ -167,269 +124,582 @@ class V41ProcessorTest(TestCase):
                 )
                 self.assertEqual(actual[1:], expected[1:])
                 self.assertEqual(actual[0].dtype, torch.bfloat16)
-                self.assertTrue(torch.equal(actual[0], expected[0]))
-
-    def test_interleaved_images_keep_ids_mask_and_order(self):
-        records = [
-            {"data": image_data(41, 83)},
-            {"data": image_data(73, 39, offset=13)},
-        ]
-        prompt = f"first {IMAGE_PLACEHOLDER} middle {IMAGE_PLACEHOLDER} final"
-        actual = prepare_vl_inputs(
-            prompt, records, self.tokenizer, self.config, output_budget=256
-        )
-        with patch.dict(sys.modules, {"encoding": self.encoding}):
-            expected = self.reference.prepare_vl_inputs(
-                prompt, records, self.tokenizer, self.reference_args
-            )
-        self.assertEqual(actual.token_ids, tuple(expected[0]))
-        self.assertEqual(actual.token_types, tuple(expected[1]))
-        self.assertTrue(
-            torch.equal(actual.image_mask, torch.tensor(expected[1]) != TEXT)
-        )
-        self.assertEqual(
-            actual.image_content_hashes,
-            tuple(hashlib.sha256(record["data"]).hexdigest() for record in records),
-        )
-        for image, other in zip(actual.images, expected[2]):
-            self.assertEqual(
-                (image.start, image.n_vit_h, image.n_vit_w),
-                (other.start, other.n_vit_h, other.n_vit_w),
-            )
-            self.assertTrue(torch.equal(image.patches, other.patches))
-            self.assertTrue(torch.equal(image.types, other.types))
-            self.assertEqual(image.processor_identity, self.config.identity)
-            self.assertEqual(
-                set(actual.token_ids[image.start : image.start + image.length]),
-                {129264},
-            )
-        changed = prepare_vl_inputs(
-            prompt, list(reversed(records)), self.tokenizer, self.config
-        )
-        self.assertEqual(
-            actual.image_content_hashes, tuple(reversed(changed.image_content_hashes))
-        )
-        different_pixels = prepare_vl_inputs(
-            prompt,
-            [{"data": image_data(41, 83, offset=37)}, records[1]],
-            self.tokenizer,
-            self.config,
-        )
-        self.assertEqual(actual.token_ids, different_pixels.token_ids)
-        self.assertEqual(actual.token_types, different_pixels.token_types)
-        self.assertNotEqual(
-            actual.image_content_hashes, different_pixels.image_content_hashes
-        )
-
-    def test_append_text_preserves_image_spans_and_identity(self):
-        prompt = f"prefix {IMAGE_PLACEHOLDER} suffix"
-        records = [{"data": image_data(41, 83)}]
-        prepared = prepare_vl_inputs(prompt, records, self.tokenizer, self.config)
-        suffix = " added text"
-        suffix_tokens = tuple(self.tokenizer.encode(suffix))
-        appended = prepared.append_text(suffix, iter(suffix_tokens))
-        self.assertEqual(appended.prompt, prompt + suffix)
-        self.assertEqual(appended.token_ids, prepared.token_ids + suffix_tokens)
-        self.assertEqual(
-            appended.token_types, prepared.token_types + (TEXT,) * len(suffix_tokens)
-        )
-        self.assertIs(appended.images, prepared.images)
-        self.assertEqual(appended.image_content_hashes, prepared.image_content_hashes)
-        self.assertTrue(
-            torch.equal(
-                appended.image_mask[: len(prepared.token_ids)], prepared.image_mask
-            )
-        )
-        self.assertFalse(appended.image_mask[len(prepared.token_ids) :].any())
-        self.assertEqual(prepared.prompt, prompt)
-
-    def test_preparation_leaves_context_budget_to_generation(self):
-        config = replace(self.config, max_seq_len=1)
-        for prompt, records in (
-            ("text request", []),
-            (f"prefix {IMAGE_PLACEHOLDER} suffix", [{"data": image_data(41, 83)}]),
-        ):
-            with self.subTest(prompt=prompt):
-                expected = prepare_vl_inputs(prompt, records, self.tokenizer, config)
-                actual = prepare_vl_inputs(
-                    prompt,
-                    records,
-                    self.tokenizer,
-                    config,
-                    output_budget=1048576,
-                )
-                self.assertGreater(len(actual.token_ids), config.max_seq_len)
-                self.assertEqual(actual.token_ids, expected.token_ids)
-                self.assertEqual(actual.token_types, expected.token_types)
-                self.assertEqual(
-                    actual.image_content_hashes, expected.image_content_hashes
-                )
-                self.assertEqual(
-                    tuple(image.processor_identity for image in actual.images),
-                    tuple(image.processor_identity for image in expected.images),
+                self.assertTrue(
+                    torch.equal(
+                        actual[0].contiguous().view(torch.uint8),
+                        expected[0].contiguous().view(torch.uint8),
+                    )
                 )
 
-    def test_invalid_image_records_still_report_parse_errors(self):
-        prompt = f"prefix {IMAGE_PLACEHOLDER} suffix"
-        record = {"data": image_data(3, 5)}
-        for text, records in (
-            (prompt, []),
-            (prompt, [record, record]),
-            ("no image placeholder", [record]),
-        ):
-            with self.subTest(text=text, count=len(records)):
-                with self.assertRaisesRegex(ValueError, "placeholder count"):
-                    prepare_vl_inputs(text, records, self.tokenizer, self.config)
-        with self.assertRaisesRegex(ValueError, "invalid or damaged"):
-            prepare_vl_inputs(
-                prompt, [{"data": b"not an image"}], self.tokenizer, self.config
-            )
-        with self.assertRaisesRegex(ValueError, "no supported data or URL"):
-            load_image_bytes({})
-        with self.assertRaisesRegex(ValueError, "require base64"):
-            load_image_bytes({"url": "data:image/png,plain-text"})
-        with self.assertRaises(binascii.Error):
-            load_image_bytes({"data": "!invalid-base64!"})
 
-    def test_data_records_are_equivalent(self):
-        data = image_data(3, 5)
-        encoded = base64.b64encode(data).decode()
-        for record in (
-            {"data": data},
-            {"data": encoded},
-            {"source": {"data": encoded}},
-            {"url": "data:image/png;base64," + encoded},
-        ):
-            self.assertEqual(load_image_bytes(record), data)
+class V41ImageDownloadTimingTest(unittest.TestCase):
+    def setUp(self):
+        from rtp_llm.multimodal import multimodal_util
 
+        self.cache = multimodal_util.URLDataCache(cache_size=2)
+        cache_patch = patch.object(multimodal_util, "url_data_cache_", self.cache)
+        cache_patch.start()
+        self.addCleanup(cache_patch.stop)
 
-class V41TokenIdsProcessorTest(TestCase):
-    def test_image_byte_limit_checks_each_source_before_decode(self):
-        data = image_data(3, 5)
-        encoded = base64.b64encode(data).decode()
-        config = V41ImageProcessorConfig(vision_min_pixels=0)
-        for record in (
-            {"data": data},
-            {"data": encoded},
-            {"source": {"data": encoded}},
-            {"url": "data:image/png;base64," + encoded},
-            {"url": "https://example.test/image.png"},
-        ):
-            with self.subTest(record_type=next(iter(record))):
-                with patch.object(Image, "open", wraps=Image.open) as decode:
-                    with self.assertRaisesRegex(
-                        ValueError, "^Multimodal file size is too large$"
-                    ):
-                        prepare_vl_inputs_from_token_ids(
-                            [config.image_token_id],
-                            [record],
-                            config,
-                            url_loader=lambda url: data,
-                            max_image_bytes=len(data) - 1,
+    def test_http_attempts_share_the_download_deadline(self):
+        from rtp_llm.multimodal import multimodal_util as util
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41 import (
+            deepseek_v41_processor as processor,
+        )
+
+        for caller_deadline, budget in ((None, 30), (190.0, 30), (102.0, 2)):
+            with self.subTest(caller_deadline=caller_deadline):
+                clock = [100.0]
+                timeouts = []
+
+                def advance(seconds):
+                    clock[0] += seconds
+
+                def stalled_get(url, headers, timeout):
+                    connect, read = timeout
+                    timeouts.append(timeout)
+                    if len(timeouts) == 1:
+                        advance(connect)
+                        raise requests.ConnectTimeout()
+                    advance(read)
+                    raise requests.ReadTimeout()
+
+                fake_time = SimpleNamespace(monotonic=lambda: clock[0], sleep=advance)
+                with patch.object(processor, "time", fake_time), patch.object(
+                    util, "time", fake_time
+                ), patch.object(util, "REQUEST_GET", stalled_get):
+                    with self.assertRaises(FtRuntimeException) as raised:
+                        processor.load_image_source(
+                            "https://example.invalid/image.png",
+                            deadline=caller_deadline,
                         )
-                    decode.assert_not_called()
-                prepared = prepare_vl_inputs_from_token_ids(
-                    [config.image_token_id],
-                    [record],
-                    config,
-                    url_loader=lambda url: data,
-                    max_image_bytes=len(data),
+                self.assertEqual(
+                    raised.exception.exception_type, ExceptionType.MM_DOWNLOAD_FAILED
                 )
-                self.assertEqual(len(prepared.images), 1)
+                self.assertAlmostEqual(clock[0] - 100.0, budget)
+                if budget == 2:
+                    self.assertEqual(timeouts, [(2, 2)])
+                else:
+                    # The first connect retry and the next outer GET both spend
+                    # the original budget (including 0.2 s of retry backoff).
+                    self.assertEqual(timeouts[:2], [(3, 20), (3, 20)])
+                    self.assertEqual(len(timeouts), 3)
+                    self.assertEqual(timeouts[2][0], 3)
+                    self.assertAlmostEqual(timeouts[2][1], 6.8)
 
-    def test_native_processor_has_no_default_image_byte_limit(self):
-        data = image_data(3, 5).ljust(10 * 1024 * 1024 + 1, b"\0")
-        config = V41ImageProcessorConfig(vision_min_pixels=0)
-        ids = [config.image_token_id]
-        prepared = prepare_vl_inputs_from_token_ids(ids, [{"data": data}], config)
-        self.assertEqual(len(prepared.images), 1)
-        tokenizer = Mock()
-        tokenizer.encode.return_value = ids
-        native = prepare_vl_inputs("prompt", [{"data": data}], tokenizer, config)
-        self.assertEqual(native.image_content_hashes, prepared.image_content_hashes)
+    def run_loader(
+        self,
+        statuses,
+        *,
+        repeats=1,
+        deadline=None,
+        cancellation_event=None,
+        chunk_error=None,
+    ):
+        from rtp_llm.multimodal.multimodal_util import collect_download_timing
+
+        processor = (
+            "rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor"
+        )
+        clock = [100.0]
+        status_iter = iter(statuses)
+
+        def get_response(*args, **kwargs):
+            clock[0] += 0.125
+            status = next(status_iter)
+            if isinstance(status, Exception):
+                raise status
+            response = MagicMock(status_code=status)
+            response.__enter__.return_value = response
+            return response
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        if cancellation_event is not None:
+            cancellation_event.wait.side_effect = sleep
+
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
+            load_image_source,
+        )
+
+        # Replace module bindings, not the shared time module: metric/scheduler
+        # background threads must not advance this deterministic retry clock.
+        fake_time = SimpleNamespace(monotonic=lambda: clock[0], sleep=sleep)
+        with patch(processor + ".time", fake_time), patch(
+            "rtp_llm.multimodal.multimodal_util.time", fake_time
+        ), patch(
+            "rtp_llm.multimodal.multimodal_util.request_get", side_effect=get_response
+        ) as get, patch(
+            processor + "._image_download_chunks",
+            return_value=[b"image"],
+            side_effect=chunk_error,
+        ), collect_download_timing() as timing:
+            try:
+                result = []
+                for _ in range(repeats):
+                    with load_image_source(
+                        "https://example.invalid/image.png",
+                        deadline=deadline,
+                        cancellation_event=cancellation_event,
+                    ) as image:
+                        result.append(image.read())
+            except FtRuntimeException as error:
+                result = error
+        return result, timing.elapsed_ms, get.call_count
+
+    def test_http_cache_hit_skips_download_and_backoff_is_not_timed(self):
+        result, elapsed_ms, requests = self.run_loader([503, 200], repeats=3)
+        self.assertEqual(result, [b"image"] * 3)
+        self.assertEqual(requests, 2)
+        self.assertEqual(elapsed_ms, 250.0)
+
+    def test_http_phase_metrics_cover_v41_retry_and_cache_hit(self):
+        from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
+        from rtp_llm.multimodal import vit_metrics
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41 import (
+            deepseek_v41_processor as processor,
+        )
+
+        with patch.object(processor, "VIT_PHASE_METRICS", True), patch.object(
+            vit_metrics, "VIT_PHASE_METRICS", True
+        ), vit_metrics.collect_vit_preprocess_metrics() as metrics:
+            result, elapsed_ms, requests = self.run_loader([503, 200], repeats=2)
+
+        self.assertEqual(result, [b"image"] * 2)
+        self.assertEqual((elapsed_ms, requests), (250.0, 2))
+        phases = [
+            sample.tags["phase"]
+            for sample in metrics.samples
+            if sample.metric == GaugeMetrics.VIT_HTTP_PHASE_RT_US_METRIC
+        ]
+        self.assertEqual(phases, ["headers", "backoff", "headers", "body"])
+        values = [
+            (sample.metric, sample.value, sample.tags)
+            for sample in metrics.samples
+            if sample.metric != GaugeMetrics.VIT_HTTP_PHASE_RT_US_METRIC
+        ]
+        self.assertEqual(
+            values,
+            [
+                (AccMetrics.VIT_HTTP_SOURCE_RETRY_QPS_METRIC, 1, {}),
+                (GaugeMetrics.VIT_HTTP_BODY_BYTES_METRIC, 5, {}),
+                (AccMetrics.VIT_URL_SOURCE_QPS_METRIC, 1, {"source": "load"}),
+                (AccMetrics.VIT_URL_SOURCE_QPS_METRIC, 1, {"source": "cache"}),
+            ],
+        )
+
+    def test_http_phase_metrics_off_preserves_download(self):
+        from rtp_llm.multimodal import vit_metrics
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41 import (
+            deepseek_v41_processor as processor,
+        )
+
+        with patch.object(processor, "VIT_PHASE_METRICS", False), patch.object(
+            vit_metrics, "VIT_PHASE_METRICS", False
+        ), vit_metrics.collect_vit_preprocess_metrics() as metrics:
+            result, elapsed_ms, requests = self.run_loader([503, 200], repeats=2)
+
+        self.assertEqual(result, [b"image"] * 2)
+        self.assertEqual((elapsed_ms, requests), (250.0, 2))
+        self.assertFalse(metrics.samples)
+
+    def test_disabled_url_cache_downloads_each_time(self):
+        self.cache.resize_cache(0)
+        result, elapsed_ms, requests = self.run_loader([200, 200], repeats=2)
+        self.assertEqual(result, [b"image", b"image"])
+        self.assertEqual(requests, 2)
+        self.assertEqual(elapsed_ms, 250.0)
+
+    def test_cached_bytes_respect_current_size_limit_deadline_and_cancellation(self):
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
+            load_image_source,
+        )
+
+        url = "https://example.invalid/image.png"
+        self.cache.get_or_load(url, "", lambda: io.BytesIO(b"x" * 1025))
+        cancelled = threading.Event()
+        cancelled.set()
+        with patch("rtp_llm.multimodal.multimodal_util.request_get") as get:
+            with self.assertRaises(FtRuntimeException) as size_error:
+                load_image_source(url, max_file_size_kb=1)
+            self.assertEqual(
+                size_error.exception.exception_type, ExceptionType.INVALID_PARAMS
+            )
+            with self.assertRaises(FtRuntimeException) as timeout:
+                load_image_source(url, deadline=0)
+            self.assertEqual(
+                timeout.exception.exception_type, ExceptionType.MM_DOWNLOAD_FAILED
+            )
+            with self.assertRaises(CancelledError):
+                load_image_source(url, cancellation_event=cancelled)
+            get.assert_not_called()
+
+    def test_exhausted_attempts_are_timed_and_preserve_download_error(self):
+        result, elapsed_ms, requests = self.run_loader([503, 503, 503])
+        self.assertIsInstance(result, FtRuntimeException)
+        self.assertEqual(result.exception_type, ExceptionType.MM_DOWNLOAD_FAILED)
+        self.assertEqual(
+            result.message, "Temporary multimodal download failure: HTTP 503"
+        )
+        self.assertEqual(requests, 3)
+        self.assertEqual(elapsed_ms, 375.0)
+
+    def test_nonretryable_attempt_is_timed_and_preserves_invalid_params(self):
+        result, elapsed_ms, requests = self.run_loader([404])
+        self.assertIsInstance(result, FtRuntimeException)
+        self.assertEqual(result.exception_type, ExceptionType.INVALID_PARAMS)
+        self.assertEqual(
+            result.message, "Failed to download multimodal content: HTTP 404"
+        )
+        self.assertEqual(requests, 1)
+        self.assertEqual(elapsed_ms, 125.0)
+
+    def test_denied_url_rejects_before_source_cache_lookup(self):
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
+            load_image_source,
+        )
+        from rtp_llm.multimodal.multimodal_util import url_data_cache_
+
+        with patch.dict(
+            os.environ, {"MM_DOWNLOAD_DOMAIN_DENYLIST": '["web.archive.org"]'}
+        ), patch.object(
+            url_data_cache_, "check_cache", return_value=io.BytesIO(b"cached source")
+        ) as lookup:
+            with self.assertRaises(FtRuntimeException) as error:
+                load_image_source("https://web.archive.org/cached.png")
+        self.assertEqual(
+            error.exception.exception_type, ExceptionType.MM_WRONG_FORMAT_ERROR
+        )
+        lookup.assert_not_called()
+
+    def test_ssrf_client_error_is_preserved_without_retry(self):
+        error = FtRuntimeException(
+            ExceptionType.MM_WRONG_FORMAT_ERROR, "url ssrf check failed"
+        )
+        result, elapsed_ms, attempts = self.run_loader([error])
+        self.assertIs(result, error)
+        self.assertEqual(attempts, 1)
+        self.assertEqual(elapsed_ms, 125.0)
+
+    def test_network_timeouts_are_download_errors_and_exclude_retry_backoff(self):
+        for error in (
+            requests.ConnectTimeout("connect timeout"),
+            requests.ReadTimeout("read timeout"),
+            ReadTimeoutError(None, "/image.png", "read timeout"),
+            TimeoutError("download deadline exceeded"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                result, elapsed_ms, attempts = self.run_loader([error] * 3)
+                self.assertIsInstance(result, FtRuntimeException)
+                self.assertEqual(
+                    result.exception_type, ExceptionType.MM_DOWNLOAD_FAILED
+                )
+                self.assertEqual(
+                    result.message,
+                    f"Temporary multimodal download failure: {type(error).__name__}",
+                )
+                self.assertIs(result.__cause__, error)
+                self.assertEqual(attempts, 3)
+                self.assertEqual(elapsed_ms, 375.0)
+
+    def test_streaming_read_timeout_is_a_download_error(self):
+        error = ReadTimeoutError(None, "/image.png", "stream timeout")
+        result, elapsed_ms, attempts = self.run_loader([200] * 3, chunk_error=error)
+        self.assertEqual(result.exception_type, ExceptionType.MM_DOWNLOAD_FAILED)
+        self.assertIs(result.__cause__, error)
+        self.assertEqual(attempts, 3)
+        self.assertEqual(elapsed_ms, 375.0)
+
+    def test_download_deadline_expiring_during_backoff_is_a_download_error(self):
+        for cancellable in (False, True):
+            with self.subTest(cancellable=cancellable):
+                event = MagicMock() if cancellable else None
+                if event is not None:
+                    event.is_set.return_value = False
+                result, elapsed_ms, attempts = self.run_loader(
+                    [503], deadline=100.2, cancellation_event=event
+                )
+                self.assertEqual(
+                    result.exception_type, ExceptionType.MM_DOWNLOAD_FAILED
+                )
+                self.assertIsInstance(result.__cause__, TimeoutError)
+                self.assertEqual(attempts, 1)
+                self.assertEqual(elapsed_ms, 125.0)
+
+    def test_cancellation_during_backoff_is_not_a_download_error(self):
+        event = MagicMock()
+        event.is_set.side_effect = lambda: event.wait.called
+        with self.assertRaises(CancelledError):
+            self.run_loader([503], cancellation_event=event)
+
+
+class V41BackendPreprocessContractTest(unittest.TestCase):
+    def setUp(self):
+        self.config = V41ImageProcessorConfig(vision_min_pixels=0)
+        self.vit_config = SimpleNamespace(
+            download_headers="", mm_image_max_file_size_kb=10240
+        )
+
+    def media(self, data):
+        return MultimodalInput(
+            "data:image/png;base64," + base64.b64encode(data).decode(),
+            MMUrlType.IMAGE,
+            torch.empty(0),
+            MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 0),
+        )
+
+    def prepare(self, data, **kwargs):
+        # This helper tests the CPU patch contract; production defaults to RGB
+        # decoding for GPU preprocessing. Tests below cover that mode explicitly.
+        kwargs.setdefault("gpu_preprocess", False)
+        return vision_module.DeepSeekV41VisionEmbedding.preprocess_input(
+            [self.media(data)], self.vit_config, processor_config=self.config, **kwargs
+        )
+
+    def prepare_through_executor_boundary(self, data):
+        executor = LocalPreprocessExecutor(
+            vision_module.DeepSeekV41VisionEmbedding.preprocess_input,
+            self.vit_config,
+            {"processor_config": self.config, "gpu_preprocess": False},
+        )
+        work_item = MMWorkItem([self.media(data)])
+        executor.submit(work_item)
+        executor.get_result(work_item)
+        return work_item.preprocess_result
+
+    def test_oversized_image_is_a_typed_input_error_before_resize(self):
+        data = image_data(8, 8)
+        with patch.object(Image, "MAX_IMAGE_PIXELS", 16), self.assertRaises(
+            FtRuntimeException
+        ) as raised:
+            self.prepare_through_executor_boundary(data)
+        self.assertEqual(
+            raised.exception.exception_type, ExceptionType.MM_IMAGE_PIXEL_LIMIT_EXCEEDED
+        )
+        self.assertIn("64 pixels", raised.exception.message)
+        self.assertIn("32 pixels", raised.exception.message)
+
+    def test_cpu_pixels_and_rgb_decode_keep_order_and_owned_storage(self):
+        sources = [
+            image_data(31, 42),
+            image_data(42, 31, offset=17),
+            image_data(31, 42),
+        ]
+        for gpu in (False, True):
+            actual = vision_module.DeepSeekV41VisionEmbedding.preprocess_input(
+                [self.media(data) for data in sources],
+                self.vit_config,
+                processor_config=self.config,
+                gpu_preprocess=gpu,
+            )
+            for item, data in zip(actual, sources):
+                with Image.open(io.BytesIO(data)) as image:
+                    if gpu:
+                        expected = torch.from_numpy(
+                            np.array(image.convert("RGB"), copy=True)
+                        )
+                        self.assertTrue(torch.equal(item.rgb, expected))
+                        self.assertEqual(item.rgb.device.type, "cpu")
+                    else:
+                        expected = preprocess_image(image, self.config)
+                        self.assertTrue(torch.equal(item.patches, expected[0]))
+                        self.assertEqual((item.n_vit_h, item.n_vit_w), expected[1:3])
+            first = actual[0].rgb if gpu else actual[0].patches
+            last = actual[2].rgb if gpu else actual[2].patches
+            self.assertTrue(torch.equal(first, last))
+            self.assertNotEqual(first.data_ptr(), last.data_ptr())
+
+    def test_preprocessing_reports_stage_samples(self):
+        with patch("rtp_llm.metrics.kmonitor.report") as report:
+            self.prepare_through_executor_boundary(image_data(3, 5))
+        metrics = [call.args[0] for call in report.call_args_list]
+        for metric in (
+            GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC,
+            GaugeMetrics.VIT_IMAGE_DECODE_RT_US_METRIC,
+            GaugeMetrics.VIT_IMAGE_RESIZE_RT_US_METRIC,
+            GaugeMetrics.VIT_IMAGE_PROCESSOR_RT_US_METRIC,
+            GaugeMetrics.VIT_RESIZED_PIXEL_COUNT_METRIC,
+        ):
+            self.assertEqual(metrics.count(metric), 1)
+        for call in report.call_args_list:
+            self.assertGreaterEqual(call.args[1], 0)
+
+    def test_metric_failure_preserves_pixels_and_public_parse_error(self):
+        data = image_data(3, 5)
+        expected = self.prepare(data)
+        with patch(
+            "rtp_llm.metrics.kmonitor.report",
+            side_effect=RuntimeError("metrics unavailable"),
+        ):
+            with self.assertLogs(level="ERROR"):
+                actual = self.prepare_through_executor_boundary(data)
+            with self.assertRaisesRegex(FtRuntimeException, MMErr.IMG_OPEN):
+                self.prepare_through_executor_boundary(b"not an image")
+        torch.testing.assert_close(actual.patches, expected.patches, rtol=0, atol=0)
+
+    def test_bad_images_preserve_public_error_and_never_report_resize(self):
+        for data in (b"not an image", image_data(3, 5)[:24]):
+            with self.subTest(length=len(data)), patch(
+                "rtp_llm.metrics.kmonitor.report"
+            ) as report:
+                with self.assertRaisesRegex(
+                    FtRuntimeException, MMErr.IMG_OPEN
+                ) as raised:
+                    self.prepare(data)
+                self.assertEqual(
+                    raised.exception.exception_type, ExceptionType.MM_WRONG_FORMAT_ERROR
+                )
+                self.assertIsInstance(raised.exception.__cause__, OSError)
+                self.assertNotIn(
+                    GaugeMetrics.VIT_IMAGE_RESIZE_RT_US_METRIC,
+                    [call.args[0] for call in report.call_args_list],
+                )
+
+    def test_lazy_decode_failure_preserves_public_error_in_both_modes(self):
+        data = image_data(3, 5)
+        for gpu_preprocess in (False, True):
+            with self.subTest(gpu_preprocess=gpu_preprocess), patch.object(
+                Image.Image, "load", side_effect=OSError("image decode failed")
+            ):
+                with self.assertRaisesRegex(
+                    FtRuntimeException, MMErr.IMG_OPEN
+                ) as raised:
+                    self.prepare(data, gpu_preprocess=gpu_preprocess)
+                self.assertEqual(
+                    raised.exception.exception_type, ExceptionType.MM_WRONG_FORMAT_ERROR
+                )
+                self.assertIsInstance(raised.exception.__cause__, OSError)
+
+    def test_byte_limit_rejects_before_image_decode(self):
+        self.vit_config.mm_image_max_file_size_kb = 1
+        with patch.object(Image, "open", wraps=Image.open) as decode:
+            with self.assertRaisesRegex(Exception, "Multimodal file size is too large"):
+                self.prepare(image_data(3, 5).ljust(1025, b"0"))
+            decode.assert_not_called()
+        self.prepare(image_data(3, 5).ljust(1024, b"0"))
 
     def test_heic_image_payload(self):
         from pillow_heif import from_pillow
 
         data = io.BytesIO()
         from_pillow(Image.new("RGB", (64, 64), (255, 0, 0))).save(data, quality=100)
-        config = V41ImageProcessorConfig(vision_min_pixels=42 * 42)
-        prepared = prepare_vl_inputs_from_token_ids(
-            [config.image_token_id], [{"data": data.getvalue()}], config
-        )
-        self.assertEqual(len(prepared.images), 1)
-        patches = prepared.images[0].patches.float()
+        patches = self.prepare(data.getvalue()).patches.float()
         self.assertTrue(torch.isfinite(patches).all())
         self.assertGreater(patches[:, 0].mean().item(), 0.9)
         self.assertLess(patches[:, 1:].mean().item(), -0.9)
 
-    def test_shared_expansion_preserves_special_ids_and_duplicate_order(self):
-        config = V41ImageProcessorConfig(
-            vision_patch_size=2,
-            vision_downsample_ratio=1,
-            vision_min_pixels=0,
-            vision_max_n_token=32,
-        )
-        marker = config.image_token_id
-        ids = [0, 129260, marker, 1, marker, marker, 129261]
-        a, b = image_data(3, 5), image_data(5, 3, offset=9)
-        records = [{"data": data} for data in (a, b, a)]
-        tokenizer = Mock()
-        tokenizer.encode.return_value = ids
-        expected = prepare_vl_inputs("prompt", records, tokenizer, config)
-        actual = prepare_vl_inputs_from_token_ids(ids, records, config)
-        self.assertEqual(actual.prompt, "")
-        self.assertEqual(actual.token_ids, expected.token_ids)
-        self.assertEqual(actual.token_types, expected.token_types)
-        self.assertEqual(actual.image_content_hashes, expected.image_content_hashes)
-        self.assertEqual(
-            actual.images[0].content_sha256, actual.images[2].content_sha256
-        )
-        self.assertNotEqual(
-            actual.images[0].content_sha256, actual.images[1].content_sha256
-        )
-        self.assertEqual(
-            [
-                token
-                for token, kind in zip(actual.token_ids, actual.token_types)
-                if kind == TEXT
-            ],
-            [0, 129260, 1, 129261],
-        )
-        self.assertEqual(
-            len(actual.token_ids), len(ids) - 3 + sum(i.length for i in actual.images)
-        )
-        for image, reference in zip(actual.images, expected.images):
-            self.assertEqual(image.start, reference.start)
-            self.assertTrue(torch.equal(image.patches, reference.patches))
-            self.assertTrue(torch.equal(image.types, reference.types))
-            self.assertEqual(image.patches.device.type, "cpu")
-            self.assertEqual(image.patches.dtype, torch.bfloat16)
-            self.assertEqual(image.processor_identity, config.identity)
-        self.assertEqual(ids, [0, 129260, marker, 1, marker, marker, 129261])
-        tokenizer.encode.assert_called_once_with("prompt")
+    def test_inspection_retains_original_bytes_and_canonical_patches(self):
+        import time
 
-    def test_empty_ids_do_not_fall_back_to_tokenization(self):
-        config = V41ImageProcessorConfig()
-        prepared = prepare_vl_inputs_from_token_ids([], [], config, prompt="ignored")
-        self.assertEqual(prepared.token_ids, ())
-        self.assertEqual(prepared.images, ())
+        data = image_data(31, 42, "RGBA")
+        adapter = object.__new__(vision_module.DeepSeekV41VisionEmbedding)
+        torch.nn.Module.__init__(adapter)
+        media = self.media(data)
+        inspected = adapter.preprocess_input(
+            [media, media],
+            self.vit_config,
+            processor_config=self.config,
+            gpu_preprocess=False,
+            capture_inspection_sources=True,
+            deadline=time.monotonic() + 30,
+        )
+        self.assertEqual(inspected.inspection_sources, [data, data])
+        original = self.prepare(data)
+        for item in inspected.data:
+            torch.testing.assert_close(item.patches, original.patches, rtol=0, atol=0)
+        self.assertFalse(hasattr(original, "inspection_sources"))
 
-    def test_count_mismatch_fails_before_download(self):
-        config = V41ImageProcessorConfig()
-        loader = Mock(side_effect=AssertionError("must not download"))
-        for ids, images in (
-            ([], [{"url": "https://example.test/image"}]),
-            ([config.image_token_id], []),
-            ([config.image_token_id] * 2, [{"url": "https://example.test/image"}]),
-        ):
-            with self.subTest(ids=ids):
-                with self.assertRaisesRegex(ValueError, "placeholder count"):
-                    prepare_vl_inputs_from_token_ids(
-                        ids, images, config, url_loader=loader
+    def test_low_detail_uses_the_model_resize_grid_for_each_image(self):
+        self.config = V41ImageProcessorConfig()
+        source = image_data(900, 630)
+        media = [self.media(source), self.media(source)]
+        media[1].mm_preprocess_config.width = media[1].mm_preprocess_config.height = 512
+        adapter = object.__new__(vision_module.DeepSeekV41VisionEmbedding)
+        adapter.processor_config = self.config
+        for gpu in (False, True):
+            result = adapter.preprocess_input(
+                media,
+                self.vit_config,
+                processor_config=self.config,
+                gpu_preprocess=gpu,
+                capture_inspection_sources=True,
+            )
+            self.assertEqual(result.inspection_sources, [source, source])
+            for item, grid_size in zip(result.data, [(900, 630), (512, 512)]):
+                _, _, height, width = plan_image_grid(*grid_size, self.config)
+                with Image.open(io.BytesIO(source)) as image:
+                    if gpu:
+                        self.assertTrue(
+                            torch.equal(item.rgb, torch.from_numpy(np.array(image)))
+                        )
+                        self.assertEqual(item.resize_tables.target_hw, (height, width))
+                    else:
+                        expected = ImageOps.pad(
+                            image, (width, height), color=(127, 127, 127)
+                        )
+                        reference = preprocess_image(expected, self.config)[0]
+                        self.assertTrue(torch.equal(item.patches, reference))
+                self.assertEqual(adapter._vit_grid(item), (height // 14, width // 14))
+
+    def test_low_detail_keeps_a_one_pixel_strip_and_handles_gpu_size_limit(self):
+        for width in (8192, 65537):
+            with self.subTest(width=width):
+                payload = io.BytesIO()
+                Image.new("RGB", (width, 1), "white").save(payload, "PNG")
+                media = self.media(payload.getvalue())
+                media.mm_preprocess_config.width = media.mm_preprocess_config.height = (
+                    512
+                )
+                options = dict(processor_config=V41ImageProcessorConfig())
+                prepare = vision_module.DeepSeekV41VisionEmbedding.preprocess_input
+                cpu = prepare([media], self.vit_config, gpu_preprocess=False, **options)
+                self.assertEqual((cpu.patches[:, 0] == 1).sum().item(), 546)
+                item = prepare([media], self.vit_config, gpu_preprocess=True, **options)
+                if width == 8192:
+                    self.assertEqual(item.resize_tables.target_hw, (546, 546))
+                else:
+                    self.assertTrue(torch.equal(item.patches, cpu.patches))
+
+    def test_media_hints_leave_model_preprocessing_unchanged(self):
+        data = [image_data(3, 5), image_data(5, 3)]
+        media = [self.media(item) for item in data]
+        media[1].mm_preprocess_config.width = 123
+        media[1].mm_preprocess_config.min_pixels = 0
+        media[1].mm_preprocess_config.max_pixels = 28901376
+        adapter = object.__new__(vision_module.DeepSeekV41VisionEmbedding)
+        adapter.validate_inputs(media)
+        for gpu_preprocess in (False, True):
+            with self.subTest(gpu_preprocess=gpu_preprocess):
+                actual = adapter.preprocess_input(
+                    media,
+                    self.vit_config,
+                    processor_config=self.config,
+                    gpu_preprocess=gpu_preprocess,
+                )
+                expected = [
+                    self.prepare(item, gpu_preprocess=gpu_preprocess) for item in data
+                ]
+                self.assertEqual(len(actual), len(expected))
+                for result, reference in zip(actual, expected):
+                    field = "rgb" if gpu_preprocess else "patches"
+                    torch.testing.assert_close(
+                        getattr(result, field),
+                        getattr(reference, field),
+                        rtol=0,
+                        atol=0,
                     )
-        loader.assert_not_called()
+
+    def test_invalid_later_media_type_rejects_whole_group_before_io(self):
+        media = [self.media(image_data(3, 5)), self.media(image_data(5, 3))]
+        media[1].mm_type = MMUrlType.VIDEO
+        with patch.object(vision_module, "load_image_source") as loader:
+            with self.assertRaisesRegex(ValueError, "non-empty IMAGE inputs"):
+                vision_module.DeepSeekV41VisionEmbedding.preprocess_input(
+                    media, self.vit_config, processor_config=self.config
+                )
+            loader.assert_not_called()
 
 
 if __name__ == "__main__":
-    main()
+    unittest.main()

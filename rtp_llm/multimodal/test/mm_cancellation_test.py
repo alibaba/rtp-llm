@@ -135,7 +135,7 @@ class MMCancellationTest(TestCase):
         for method in ("get_embedding_result", "wait_greennet_verdict"):
             with self.subTest(method=method):
                 engine = self._make_engine()
-                engine._greennet_provider = helpers._StubGreenNetProvider(
+                engine._inspection._greennet_provider = helpers._StubGreenNetProvider(
                     GreenNetVerdict(passed=True)
                 )
                 inp = self._make_input("fake://shared")
@@ -205,7 +205,9 @@ class MMCancellationTest(TestCase):
                             stopped.set()
                             raise
 
-                engine._greennet_provider = Provider(GreenNetVerdict(passed=True))
+                engine._inspection._greennet_provider = Provider(
+                    GreenNetVerdict(passed=True)
+                )
                 with self.assertRaises(concurrent.futures.TimeoutError):
                     engine._begin_greennet([self._make_input("fake://slow")])
                 self.assertTrue(stopped.wait(1))
@@ -221,10 +223,10 @@ class MMCancellationTest(TestCase):
                     inputs, GreenNetVerdict(passed=True), delay=0.2
                 )
 
-        engine._greennet_provider = Provider(GreenNetVerdict(passed=True))
+        engine._inspection._greennet_provider = Provider(GreenNetVerdict(passed=True))
         _, verdict, handle = engine._begin_greennet([self._make_input("fake://budget")])
         try:
-            with self.assertRaises(asyncio.TimeoutError):
+            with self.assertRaises(concurrent.futures.TimeoutError):
                 verdict.result(timeout=2)
         finally:
             engine._cancel_greennet(handle)
@@ -240,7 +242,7 @@ class MMCancellationTest(TestCase):
         for queued, outcome in cases:
             with self.subTest(queued=queued, outcome=outcome):
                 engine = self._make_engine(vit_concurrency=1, vit_max_queue_size=4)
-                engine._greennet_provider = helpers._StubGreenNetProvider(
+                engine._inspection._greennet_provider = helpers._StubGreenNetProvider(
                     GreenNetVerdict(passed=True)
                 )
                 blocker = self._make_input("fake://blocker")

@@ -1,15 +1,27 @@
 import contextlib
 import contextvars
+import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Dict, Iterator, List, Optional, Union
 
-from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
+from rtp_llm.metrics import kmonitor
+from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
+
+VIT_PHASE_METRICS = os.environ.get("MM_VIT_PHASE_METRICS") == "1"
+
+
+def report_vit_phase(metric, value, tags):
+    try:
+        kmonitor.report(metric, value, tags)
+    except Exception:
+        logging.exception("Failed to report ViT phase metric")
 
 
 @dataclass
 class VitMetricSample:
-    metric: GaugeMetrics
+    metric: Union[AccMetrics, GaugeMetrics]
     value: float
     tags: Dict[str, str] = field(default_factory=dict)
 
@@ -20,7 +32,7 @@ class VitPreprocessMetrics:
 
     def report(
         self,
-        metric: GaugeMetrics,
+        metric: Union[AccMetrics, GaugeMetrics],
         value: float,
         tags: Optional[Dict[str, str]] = None,
     ) -> None:
@@ -56,14 +68,25 @@ def vit_preprocess_timer(
             metrics.report(metric, (time.monotonic_ns() - start_ns) / 1000.0, tags)
 
 
+def vit_http_phase_timer(phase):
+    if not VIT_PHASE_METRICS:
+        return contextlib.nullcontext()
+    return vit_preprocess_timer(
+        GaugeMetrics.VIT_HTTP_PHASE_RT_US_METRIC, {"phase": phase}
+    )
+
+
 def record_vit_preprocess_value(
-    metric: GaugeMetrics,
+    metric: Union[AccMetrics, GaugeMetrics],
     value: Union[int, float],
     tags: Optional[Dict[str, str]] = None,
-) -> None:
+) -> bool:
+    """Return whether the sample was captured for parent-side reporting."""
     metrics = _current_metrics.get()
     if metrics is not None:
         metrics.report(metric, float(value), tags)
+        return True
+    return False
 
 
 def video_resized_pixel_count(

@@ -423,9 +423,10 @@ class MMRdmaConfig:
         self.connect_timeout_ms: int = 250
         self.read_timeout_ms: int = 3000
         self.qp_count: int = 8
+        self.read_provider_count: int = 4
         self.slot_gc_timeout_ms: int = 60 * 1000
         self.max_slot_bytes: int = 1024 * 1024 * 1024
-        self.max_receipt_bytes: int = 8 * 1024 * 1024 * 1024
+        self.max_receipt_bytes: int = 16 * 1024 * 1024 * 1024
 
 
 class MMControlConfig:
@@ -436,6 +437,7 @@ class MMControlConfig:
 class MMTransportConfig:
     def __init__(self):
         self.mode: str = MM_TRANSPORT_MODE_GRPC
+        self.allow_inline_clients: bool = False
         self.control = MMControlConfig()
         self.rdma = MMRdmaConfig()
 
@@ -459,6 +461,7 @@ class VitConfig:
         self.trt_cache_enabled: int = 0
         self.trt_cache_path: Optional[str] = None
         self.download_headers: str = ""
+        self.oss_internal_region_allowlist: Optional[list[str]] = None
         self.mm_image_max_file_size_kb: int = (
             VitConfig.DEFAULT_MM_IMAGE_MAX_FILE_SIZE_KB
         )
@@ -471,11 +474,26 @@ class VitConfig:
         self.mm_hash_key_cache_max_bytes: int = (
             VitConfig.DEFAULT_MM_HASH_KEY_CACHE_MAX_BYTES
         )
+        # Publish cache insertions on a background thread so a slow pool
+        # eviction/copy never blocks the request that produced the embedding.
+        self.mm_cache_async_publish: bool = True
         self.mm_remote_cache_enable: bool = False
+        # None retains legacy env compatibility when JSON omits these switches.
+        self.mm_remote_cache_gdr_enable: Optional[bool] = None
+        self.mm_remote_cache_gdr_num: int = 1
+        self.mm_remote_cache_gdr_arena_bytes: Optional[int] = None
+        self.mm_remote_cache_gdr_min_block_bytes: Optional[int] = None
+        self.mm_remote_cache_metadata_workers: int = 32
+        self.mm_remote_cache_read_transfer_workers: Optional[int] = None
+        self.mm_remote_cache_write_transfer_workers: Optional[int] = None
+        self.mm_remote_cache_audit: Optional[bool] = None
+        self.mm_remote_cache_namespace: str = ""
+        self.mm_remote_cache_write_timeout_ms: int = 1000
         self.mm_remote_cache_max_object_bytes: int = 256 * 1024**2
         self.mm_remote_cache_max_inflight_bytes: int = 1024**3
-        self.mm_remote_cache_max_pending: int = 8
+        self.mm_remote_cache_max_pending: int = 128
         self.mm_remote_cache_read_timeout_ms: int = 200
+        self.mm_remote_cache_quarantine_ttl_seconds: int = 300
         self.url_cache_item_num: int = 100
         self.use_igraph_cache: bool = True
         self.igraph_search_dom: str = "com.taobao.search.igraph.common"
@@ -485,6 +503,7 @@ class VitConfig:
         self.mm_preprocess_max_workers: int = 4
         self.vit_concurrency: int = 64
         self.vit_max_queue_size: int = 64
+        self.vit_source_download_concurrency: int = 0
         self.biencoder_preprocess: bool = False
         self.extra_input_in_mm_embedding = ""
         self.mm_timeout_ms: int = VitConfig.DEFAULT_MM_TIMEOUT_MS
@@ -495,24 +514,43 @@ class VitConfig:
         self.vit_proxy_load_balance_strategy: str = "round_robin"
         self.vit_proxy_min_healthy_workers: int = 0
         self.output_transport = MMTransportConfig()
-        # Cross-request GPU batching is inferred from gpu_max_batch_size alone:
-        # == 1 -> serial (one request per forward, no wait window); > 1 -> merge
-        # compatible requests within gpu_batch_wait_ms. Default 1 keeps the old
-        # serial behavior (there is no separate on/off switch).
+        # One public batch limit: >1 caps both collected chunks and media.
+        # ==1 preserves the legacy serial, whole-request execution policy.
+        # Model-specific patch/workspace budgets may lower the effective batch.
         self.gpu_batch_wait_ms: int = 10
         self.gpu_max_batch_size: int = 1
-        self.gpu_max_batch_images: int = 200
-        # Bound on the mm embedding scheduler's waiting queue. Caps memory when a
-        # forward stalls and requests pile up; over capacity, submit fails fast
-        # with an overload error instead of growing unbounded. Scheduler-level
-        # (like mm_timeout_ms): applies to serial and batch alike.
-        self.mm_max_queue_size: int = 1024
+        # Bounded one-batch collect/upload lookahead; never a second forward lane.
+        self.gpu_prefetch_batches: int = 1
+        # Model-aware workspace admission, independent of image count. Zero
+        # resolves once after weight loading from free device memory, retaining
+        # graph/prefetch/cache space and headroom; it never means unlimited.
+        self.gpu_batch_max_bytes: int = 0
+        self.gpu_graph_cache_max_entries: int = 4
+        self.gpu_graph_cache_max_bytes: int = 0  # automatic; entries=0 disables
+
+    def async_compute_executor_args(self) -> Dict[str, int]:
+        """Resolve the existing async admission policy in one place."""
+        return {
+            "max_workers": max(1, int(self.vit_concurrency)),
+            "max_queue_size": max(0, int(self.vit_max_queue_size)),
+        }
+
+    def embedding_queue_capacity(self) -> int:
+        """Bound ready GPU work by the same total async admission budget.
+
+        Active async tasks can all wait for GPU execution, so the ready queue
+        needs workers + waiting slots, not just the extra waiting slots.
+        Sync callers bypass async admission but still use this bounded queue.
+        This is a derived per-stage capacity, not a shared global semaphore.
+        """
+        limits = self.async_compute_executor_args()
+        return limits["max_workers"] + limits["max_queue_size"]
 
     def embedding_scheduler_args(self) -> Dict[str, int]:
         """Resolved MMScheduler kwargs, inferred from gpu_max_batch_size alone.
 
         gpu_max_batch_size > 1 -> cross-request GPU batching with the gpu_* limits;
-        gpu_max_batch_images caps each forward. Models with work estimates may
+        the same limit caps chunks and media. Models with work estimates may
         split a request across bounded forwards; other models keep the whole-request
         image cap. gpu_batch_wait_ms is the collect window.
         gpu_max_batch_size == 1 -> serial: one request per forward, no wait window
@@ -525,33 +563,48 @@ class VitConfig:
             raise ValueError(
                 f"gpu_max_batch_size must be > 0, got {self.gpu_max_batch_size}"
             )
+        for name in (
+            "gpu_batch_max_bytes",
+            "gpu_graph_cache_max_entries",
+            "gpu_graph_cache_max_bytes",
+        ):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must be >= 0")
         if self.gpu_batch_wait_ms < 0:
             raise ValueError(
                 f"gpu_batch_wait_ms must be >= 0, got {self.gpu_batch_wait_ms}"
             )
+        if self.gpu_prefetch_batches not in (0, 1):
+            raise ValueError("gpu_prefetch_batches must be 0 or 1")
 
         is_serial = self.gpu_max_batch_size == 1
-        return {
+        result = {
             # Serial ignores the collect window: a single-request forward never
             # waits, so the configured gpu_batch_wait_ms has no effect.
             "batch_wait_ms": 0 if is_serial else self.gpu_batch_wait_ms,
             "max_batch_size": self.gpu_max_batch_size,
-            "max_batch_images": (
-                sys.maxsize if is_serial else self.gpu_max_batch_images
-            ),
-            "max_queue_size": self.mm_max_queue_size,
+            "max_batch_images": (sys.maxsize if is_serial else self.gpu_max_batch_size),
+            "max_queue_size": self.embedding_queue_capacity(),
         }
+        if self.gpu_prefetch_batches:
+            result["prefetch_batches"] = self.gpu_prefetch_batches
+        return result
 
     def to_string(self):
         transport = self.output_transport
         control = transport.control
         rdma = transport.rdma
         return (
+            f"gpu_prefetch_batches: {self.gpu_prefetch_batches}\n"
+            f"gpu_batch_max_bytes: {self.gpu_batch_max_bytes}\n"
+            f"gpu_graph_cache_max_entries: {self.gpu_graph_cache_max_entries}\n"
+            f"gpu_graph_cache_max_bytes: {self.gpu_graph_cache_max_bytes}\n"
             f"vit_separation: {self.vit_separation}\n"
             f"vit_trt: {self.vit_trt}\n"
             f"trt_cache_enabled: {self.trt_cache_enabled}\n"
             f"trt_cache_path: {self.trt_cache_path}\n"
             f"download_headers: {self.download_headers}\n"
+            f"oss_internal_region_allowlist: {self.oss_internal_region_allowlist}\n"
             f"mm_image_max_file_size_kb: {self.mm_image_max_file_size_kb}\n"
             f"mm_video_max_file_size_kb: {self.mm_video_max_file_size_kb}\n"
             f"mm_cache_item_num: {self.mm_cache_item_num}\n"
@@ -559,10 +612,19 @@ class VitConfig:
             f"mm_cache_cpu_max_bytes: {self.mm_cache_cpu_max_bytes}\n"
             f"mm_hash_key_cache_max_bytes: {self.mm_hash_key_cache_max_bytes}\n"
             f"mm_remote_cache_enable: {self.mm_remote_cache_enable}\n"
+            f"mm_remote_cache_namespace: {self.mm_remote_cache_namespace}\n"
+            f"mm_remote_cache_write_timeout_ms: {self.mm_remote_cache_write_timeout_ms}\n"
             f"mm_remote_cache_max_object_bytes: {self.mm_remote_cache_max_object_bytes}\n"
             f"mm_remote_cache_max_inflight_bytes: {self.mm_remote_cache_max_inflight_bytes}\n"
+            f"mm_remote_cache_gdr_num: {self.mm_remote_cache_gdr_num}\n"
+            f"mm_remote_cache_gdr_arena_bytes: {self.mm_remote_cache_gdr_arena_bytes}\n"
+            f"mm_remote_cache_gdr_min_block_bytes: {self.mm_remote_cache_gdr_min_block_bytes}\n"
+            f"mm_remote_cache_metadata_workers: {self.mm_remote_cache_metadata_workers}\n"
+            f"mm_remote_cache_read_transfer_workers: {self.mm_remote_cache_read_transfer_workers}\n"
+            f"mm_remote_cache_write_transfer_workers: {self.mm_remote_cache_write_transfer_workers}\n"
             f"mm_remote_cache_max_pending: {self.mm_remote_cache_max_pending}\n"
             f"mm_remote_cache_read_timeout_ms: {self.mm_remote_cache_read_timeout_ms}\n"
+            f"mm_remote_cache_quarantine_ttl_seconds: {self.mm_remote_cache_quarantine_ttl_seconds}\n"
             f"url_cache_item_num: {self.url_cache_item_num}\n"
             f"use_igraph_cache: {self.use_igraph_cache}\n"
             f"igraph_search_dom: {self.igraph_search_dom}\n"
@@ -572,6 +634,7 @@ class VitConfig:
             f"mm_preprocess_max_workers: {self.mm_preprocess_max_workers}\n"
             f"vit_concurrency: {self.vit_concurrency}\n"
             f"vit_max_queue_size: {self.vit_max_queue_size}\n"
+            f"vit_source_download_concurrency: {self.vit_source_download_concurrency}\n"
             f"biencoder_preprocess: {self.biencoder_preprocess}\n"
             f"extra_input_in_mm_embedding: {self.extra_input_in_mm_embedding}\n"
             f"mm_timeout_ms: {self.mm_timeout_ms}\n"
@@ -587,14 +650,13 @@ class VitConfig:
             f"mm_rdma_connect_timeout_ms: {rdma.connect_timeout_ms}\n"
             f"mm_rdma_read_timeout_ms: {rdma.read_timeout_ms}\n"
             f"mm_rdma_qp_count: {rdma.qp_count}\n"
+            f"mm_rdma_read_provider_count: {rdma.read_provider_count}\n"
             f"mm_rdma_release_timeout_ms: {control.release_timeout_ms}\n"
             f"mm_rdma_slot_gc_timeout_ms: {rdma.slot_gc_timeout_ms}\n"
             f"mm_rdma_max_slot_bytes: {rdma.max_slot_bytes}\n"
             f"mm_rdma_max_receipt_bytes: {rdma.max_receipt_bytes}\n"
             f"gpu_batch_wait_ms: {self.gpu_batch_wait_ms}\n"
-            f"gpu_max_batch_size: {self.gpu_max_batch_size}\n"
-            f"gpu_max_batch_images: {self.gpu_max_batch_images}\n"
-            f"mm_max_queue_size: {self.mm_max_queue_size}"
+            f"gpu_max_batch_size: {self.gpu_max_batch_size}"
         )
 
 
@@ -960,7 +1022,9 @@ class PyEnvConfigs:
             + "[hot_hook_config]\n"
             + self.hot_hook_config.to_string()
             + "\n\n"
-            + "[kernel_tuning_config]\n" + self.kernel_tuning_config.to_string() + "\n\n"
+            + "[kernel_tuning_config]\n"
+            + self.kernel_tuning_config.to_string()
+            + "\n\n"
             "[py_hw_kernel_config]\n" + self.py_hw_kernel_config.to_string() + "\n\n"
             "[sp_config]\n" + self.sp_config.to_string() + "\n\n"
             "[sampler_config]\n" + self.sampler_config.to_string() + "\n\n"

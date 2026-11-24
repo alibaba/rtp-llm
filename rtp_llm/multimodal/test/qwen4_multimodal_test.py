@@ -194,7 +194,7 @@ class Qwen4MultimodalTest(unittest.TestCase):
                 [MMEmbeddingRes([embedding], [positions], [ids])] * 2
             )
         )
-        self.assertNotIn(8, output.DESCRIPTOR.fields_by_number)
+        self.assertFalse(output.rdma_claim_required)
         self.assertEqual(list(output.split_size), [embedding.shape[0]] * 2)
         self.assertEqual(list(output.multimodal_extra_input[0].shape), [ids.numel()])
         self.assertEqual(
@@ -231,7 +231,9 @@ class Qwen4MultimodalTest(unittest.TestCase):
     def test_shared_embedding_cache_round_trip_keeps_complete_tensor_result(self):
         from rtp_llm.multimodal.mm_embedding_cache import MMEmbeddingCache
         from rtp_llm.multimodal.mm_remote_embedding_cache import MMRemoteEmbeddingCache
-        from rtp_llm.multimodal.test.mm_cache_test_store import Store
+        from rtp_llm.multimodal.mm_work_item import MMWorkItem
+        from rtp_llm.multimodal.test.remote_embedding_test_helpers import Store
+        from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 
         store = Store()
         remote = MMRemoteEmbeddingCache(
@@ -241,18 +243,22 @@ class Qwen4MultimodalTest(unittest.TestCase):
             read_timeout_ms=500,
         )
         self.addCleanup(remote.close)
-        cache = MMEmbeddingCache(0, 64, on_cpu_evict=remote.submit_eviction)
+        cache = MMEmbeddingCache(0, 4096)
         self.addCleanup(cache.clear)
         result = (
             [torch.ones(2, 4)],
             [torch.zeros(2, 3, dtype=torch.int32)],
             [torch.tensor([10, 20], dtype=torch.int32)],
         )
-        for key in ("image_a", "image_b"):
-            _, entry = cache.try_acquire(key)
-            cache.complete(key, entry, result)
+        media = MultimodalInput(
+            "https://media.example/image.png", 1, torch.empty(0), MMPreprocessConfig()
+        )
+        item = MMWorkItem([media], embedding_cache=cache)
+        item.remote_cache = remote
+        item.remote_cache_key = remote.key([media], local_key=item.cache_key)
+        item.complete_cache(result)
         self.assertTrue(store.saved.wait(2))
-        loaded = remote.load("image_a")
+        loaded = remote.load(item.remote_cache_key)
         self.assertIsNotNone(loaded)
         self.assertEqual(len(loaded), 3)
         for actual, expected in zip(loaded, result):

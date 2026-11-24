@@ -1,4 +1,15 @@
 #define PYBIND11_DETAILED_ERROR_MESSAGES
+#include <cerrno>
+#include <cmath>
+#include <cstring>
+#include <fcntl.h>
+#include <limits>
+#include <system_error>
+#include <unistd.h>
+#include <ATen/MapAllocator.h>
+#include <ATen/StorageUtils.h>
+#include <ATen/ops/empty.h>
+#include <c10/util/ScopeExit.h>
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputClass.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTokenUtils.h"
 #include "rtp_llm/cpp/pybind/common/blockUtil.h"
@@ -21,7 +32,59 @@
 namespace py = pybind11;
 using namespace rtp_llm;
 
+// Match PyTorch's shared-fd storage ownership while allowing other Python
+// threads to run if mmap waits on the GPU driver's memory migration.
+static at::Storage mapPreprocessStorage(int borrowed_fd, size_t nbytes) {
+    const int fd = fcntl(borrowed_fd, F_DUPFD_CLOEXEC, 0);
+    if (fd < 0) {
+        throw std::system_error(errno, std::generic_category(), "dup preprocess storage fd");
+    }
+    auto          close_fd = c10::make_scope_exit([fd] { close(fd); });
+    constexpr int flags = at::ALLOCATOR_MAPPED_SHAREDMEM | at::ALLOCATOR_MAPPED_NOCREATE | at::ALLOCATOR_MAPPED_KEEPFD
+                          | at::ALLOCATOR_MAPPED_FROMFD;
+    auto data = at::MapAllocator::makeDataPtr(at::WITH_FD, "", fd, flags, nbytes, nullptr);
+    close_fd.release();  // MapAllocator now owns the duplicate.
+    return at::Storage(at::Storage::use_byte_size_t(), nbytes, std::move(data));
+}
+
+// The ordinary Torch reducers preserve each view's dtype and offset and send
+// the single shared storage once per pickled result.
+static std::vector<at::Tensor> packPreprocessCpuTensors(const std::vector<at::Tensor>& tensors) {
+    constexpr size_t alignment = 64;
+    constexpr auto   max_bytes = static_cast<size_t>(std::numeric_limits<int64_t>::max());
+    TORCH_CHECK(!tensors.empty(), "preprocess tensor group is empty");
+    std::vector<size_t> offsets;
+    offsets.reserve(tensors.size());
+    size_t total_bytes = 0;
+    for (const auto& tensor : tensors) {
+        TORCH_CHECK(tensor.defined() && tensor.device().is_cpu() && tensor.layout() == at::kStrided
+                        && tensor.is_contiguous() && !tensor.requires_grad() && !tensor.is_conj() && !tensor.is_neg()
+                        && !tensor.is_quantized() && tensor.numel() > 0,
+                    "preprocess tensor group requires nonempty contiguous CPU tensors");
+        TORCH_CHECK(total_bytes <= max_bytes - (alignment - 1), "preprocess tensor group is too large");
+        total_bytes = (total_bytes + alignment - 1) & ~(alignment - 1);
+        TORCH_CHECK(tensor.nbytes() <= max_bytes - total_bytes, "preprocess tensor group is too large");
+        offsets.push_back(total_bytes);
+        total_bytes += tensor.nbytes();
+    }
+
+    at::Storage             storage(at::new_shm_fd_storage(total_bytes));
+    auto*                   destination = static_cast<char*>(storage.mutable_data());
+    std::vector<at::Tensor> views;
+    views.reserve(tensors.size());
+    for (size_t index = 0; index < tensors.size(); ++index) {
+        const auto& tensor = tensors[index];
+        const auto  offset = offsets[index];
+        std::memcpy(destination + offset, tensor.const_data_ptr(), tensor.nbytes());
+        views.push_back(at::empty({0}, tensor.options())
+                            .set_(storage, offset / tensor.element_size(), tensor.sizes(), tensor.strides()));
+    }
+    return views;
+}
+
 void registerMultimodal(py::module& m) {
+    m.def("map_preprocess_storage", &mapPreprocessStorage, py::call_guard<py::gil_scoped_release>());
+    m.def("pack_preprocess_cpu_tensors", &packPreprocessCpuTensors, py::call_guard<py::gil_scoped_release>());
     m.def("get_multimodal_token_spans",
           &getMultimodalTokenSpans,
           py::arg("token_ids"),
@@ -38,6 +101,7 @@ void registerMultimodal(py::module& m) {
         .def_readwrite("tensor", &MultimodalInput::tensor)
         .def_readwrite("mm_preprocess_config", &MultimodalInput::mm_preprocess_config)
         .def("to_string", &MultimodalInput::to_string)
+        .def("has_url", &MultimodalInput::has_url)
         .def("cache_key", &MultimodalInput::cache_key)
         .def(pybind11::pickle(
             [](const MultimodalInput& m) {  // __getstate__
@@ -1319,19 +1383,19 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 if (t.size() == 18) {
                     CacheStoreConfig c;
                     try {
-                        c.cache_store_rdma_mode                        = t[0].cast<bool>();
-                        c.thread_count                                 = t[1].cast<int>();
-                        c.rdma_connect_timeout_ms                      = t[2].cast<int>();
-                        c.rdma_qp_count_per_connection                 = t[3].cast<int>();
-                        c.rdma_io_thread_count                         = t[4].cast<int>();
-                        c.rdma_worker_thread_count                     = t[5].cast<int>();
-                        c.messager_io_thread_count                     = t[6].cast<int>();
-                        c.messager_worker_thread_count                 = t[7].cast<int>();
-                        c.rdma_max_block_pairs_per_connection          = t[9].cast<int>();
-                        c.p2p_transfer_not_done_resource_hold_ms       = t[12].cast<int64_t>();
-                        c.p2p_cancel_broadcast_timeout_ms              = t[15].cast<int64_t>();
-                        c.cache_store_tcp_anet_rpc_thread_num          = t[16].cast<int>();
-                        c.cache_store_tcp_anet_rpc_queue_num           = t[17].cast<int>();
+                        c.cache_store_rdma_mode                  = t[0].cast<bool>();
+                        c.thread_count                           = t[1].cast<int>();
+                        c.rdma_connect_timeout_ms                = t[2].cast<int>();
+                        c.rdma_qp_count_per_connection           = t[3].cast<int>();
+                        c.rdma_io_thread_count                   = t[4].cast<int>();
+                        c.rdma_worker_thread_count               = t[5].cast<int>();
+                        c.messager_io_thread_count               = t[6].cast<int>();
+                        c.messager_worker_thread_count           = t[7].cast<int>();
+                        c.rdma_max_block_pairs_per_connection    = t[9].cast<int>();
+                        c.p2p_transfer_not_done_resource_hold_ms = t[12].cast<int64_t>();
+                        c.p2p_cancel_broadcast_timeout_ms        = t[15].cast<int64_t>();
+                        c.cache_store_tcp_anet_rpc_thread_num    = t[16].cast<int>();
+                        c.cache_store_tcp_anet_rpc_queue_num     = t[17].cast<int>();
                     } catch (const std::exception& e) {
                         throw std::runtime_error(std::string("CacheStoreConfig unpickle error: ") + e.what());
                     }
@@ -1342,28 +1406,28 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error("Invalid CacheStoreConfig state");
                 }
                 CacheStoreConfig c;
-                c.cache_store_rdma_mode = t[0].cast<bool>();
-                c.thread_count = t[1].cast<int>();
-                c.rdma_connect_timeout_ms = t[2].cast<int>();
-                c.rdma_qp_count_per_connection = t[3].cast<int>();
-                c.rdma_io_thread_count = t[4].cast<int>();
-                c.rdma_worker_thread_count = t[5].cast<int>();
-                c.messager_io_thread_count = t[6].cast<int>();
-                c.messager_worker_thread_count = t[7].cast<int>();
-                c.rdma_max_block_pairs_per_connection = t[8].cast<int>();
+                c.cache_store_rdma_mode                  = t[0].cast<bool>();
+                c.thread_count                           = t[1].cast<int>();
+                c.rdma_connect_timeout_ms                = t[2].cast<int>();
+                c.rdma_qp_count_per_connection           = t[3].cast<int>();
+                c.rdma_io_thread_count                   = t[4].cast<int>();
+                c.rdma_worker_thread_count               = t[5].cast<int>();
+                c.messager_io_thread_count               = t[6].cast<int>();
+                c.messager_worker_thread_count           = t[7].cast<int>();
+                c.rdma_max_block_pairs_per_connection    = t[8].cast<int>();
                 c.p2p_transfer_not_done_resource_hold_ms = t[9].cast<int64_t>();
-                c.p2p_lease_query_timeout_ms = t[10].cast<int64_t>();
-                c.p2p_cancel_broadcast_timeout_ms = t[11].cast<int64_t>();
-                c.p2p_cancelled_keys_ttl_ms = t[12].cast<int64_t>();
-                c.cache_store_tcp_anet_rpc_thread_num = t[13].cast<int>();
-                c.cache_store_tcp_anet_rpc_queue_num = t[14].cast<int>();
-                c.cache_store_tcp_worker_queue_size = t[15].cast<int>();
-                c.rdma_transfer_worker_thread_count = t[16].cast<int>();
-                c.rdma_transfer_worker_queue_size = t[17].cast<int>();
-                c.p2p_rdma_enable_h2d_copy = t[18].cast<bool>();
-                c.p2p_rdma_staging_total_bytes = t[19].cast<int64_t>();
-                c.p2p_prefill_sender_thread_count = t[20].cast<int>();
-                c.p2p_prefill_sender_queue_size = t[21].cast<int>();
+                c.p2p_lease_query_timeout_ms             = t[10].cast<int64_t>();
+                c.p2p_cancel_broadcast_timeout_ms        = t[11].cast<int64_t>();
+                c.p2p_cancelled_keys_ttl_ms              = t[12].cast<int64_t>();
+                c.cache_store_tcp_anet_rpc_thread_num    = t[13].cast<int>();
+                c.cache_store_tcp_anet_rpc_queue_num     = t[14].cast<int>();
+                c.cache_store_tcp_worker_queue_size      = t[15].cast<int>();
+                c.rdma_transfer_worker_thread_count      = t[16].cast<int>();
+                c.rdma_transfer_worker_queue_size        = t[17].cast<int>();
+                c.p2p_rdma_enable_h2d_copy               = t[18].cast<bool>();
+                c.p2p_rdma_staging_total_bytes           = t[19].cast<int64_t>();
+                c.p2p_prefill_sender_thread_count        = t[20].cast<int>();
+                c.p2p_prefill_sender_queue_size          = t[21].cast<int>();
                 return c;
             }));
 
@@ -1613,8 +1677,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             [](py::tuple t) {
                 // Main's nine-slot state ends in force_single_prefill (bool);
                 // older KV-budget states end in max_batch_kv_len (int).
-                if (t.size() != 2 && t.size() != 4 && t.size() != 6 && t.size() != 7 && t.size() != 8
-                    && t.size() != 9 && t.size() != 10)
+                if (t.size() != 2 && t.size() != 4 && t.size() != 6 && t.size() != 7 && t.size() != 8 && t.size() != 9
+                    && t.size() != 10)
                     throw std::runtime_error("Invalid state!");
                 FIFOSchedulerConfig c;
                 try {
@@ -2051,6 +2115,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("is_multimodal", &MMModelConfig::is_multimodal)
         .def_readwrite("mm_sep_tokens", &MMModelConfig::mm_sep_tokens)
         .def_readwrite("include_sep_tokens", &MMModelConfig::include_sep_tokens)
+        .def_readwrite("semantic_mm_token_id", &MMModelConfig::semantic_mm_token_id)
         .def_readwrite("mm_position_ids_style", &MMModelConfig::mm_position_ids_style);
 
     py::class_<CacheReusePolicyDesc>(m, "CacheReusePolicyDesc")
@@ -2385,18 +2450,18 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     const auto  timeout_index = t.size() >= 19 ? 13 : 9;
                     PDSepConfig c;
                     try {
-                        c.role_type                           = t[0].cast<RoleType>();
-                        c.cache_store_rdma_mode               = t[1].cast<bool>();
-                        c.cache_store_listen_port             = t[2].cast<int64_t>();
-                        c.cache_store_connect_port            = t[3].cast<int64_t>();
-                        c.cache_store_rdma_listen_port        = t[4].cast<int64_t>();
-                        c.cache_store_rdma_connect_port       = t[5].cast<int64_t>();
-                        c.remote_rpc_server_port              = t[6].cast<int64_t>();
-                        c.prefill_retry_times                 = t[7].cast<int64_t>();
-                        c.prefill_retry_timeout_ms            = t[8].cast<int64_t>();
-                        c.load_cache_timeout_ms               = t[timeout_index].cast<int64_t>();
-                        c.max_rpc_timeout_ms                  = t[timeout_index + 1].cast<int64_t>();
-                        c.worker_port_offset                  = t[timeout_index + 2].cast<int64_t>();
+                        c.role_type                     = t[0].cast<RoleType>();
+                        c.cache_store_rdma_mode         = t[1].cast<bool>();
+                        c.cache_store_listen_port       = t[2].cast<int64_t>();
+                        c.cache_store_connect_port      = t[3].cast<int64_t>();
+                        c.cache_store_rdma_listen_port  = t[4].cast<int64_t>();
+                        c.cache_store_rdma_connect_port = t[5].cast<int64_t>();
+                        c.remote_rpc_server_port        = t[6].cast<int64_t>();
+                        c.prefill_retry_times           = t[7].cast<int64_t>();
+                        c.prefill_retry_timeout_ms      = t[8].cast<int64_t>();
+                        c.load_cache_timeout_ms         = t[timeout_index].cast<int64_t>();
+                        c.max_rpc_timeout_ms            = t[timeout_index + 1].cast<int64_t>();
+                        c.worker_port_offset            = t[timeout_index + 2].cast<int64_t>();
                         if (t.size() == 13 || t.size() == 20)
                             c.decode_linear_tail_only = t[t.size() == 13 ? 12 : 19].cast<bool>();
                     } catch (const std::exception& e) {

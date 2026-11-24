@@ -7,6 +7,7 @@ from transformers.models.whisper.feature_extraction_whisper import (
     WhisperFeatureExtractor,
 )
 
+from rtp_llm.multimodal.media_network import uses_url_loader
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     AudioEmbeddingInterface,
     VitConfig,
@@ -49,6 +50,7 @@ class Processor(AudioEmbeddingInterface):
         return self.audio_tower.device
 
     @staticmethod
+    @uses_url_loader
     def preprocess_input(
         mm_inputs: List[MultimodalInput],
         vit_config: VitConfig,

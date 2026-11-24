@@ -8,7 +8,6 @@ import queue
 import threading
 import time
 from collections import defaultdict
-from concurrent import futures
 from typing import NamedTuple, Optional
 
 import grpc
@@ -32,9 +31,11 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.mm_profiler import MMProfiler
+from rtp_llm.multimodal.transport.base import RDMA_CLAIM_HEADER
 from rtp_llm.multimodal.transport.proxy_router import MMOutputProxyRouter
 from rtp_llm.server.request_headers import dashscope_greennet_metadata
 from rtp_llm.server.vit_rpc_constants import VIT_ERROR_REPORTED_METADATA_KEY
+from rtp_llm.server.vit_rpc_control import create_vit_rpc_server
 
 # Proxy forwarding includes transport and serialization after the worker's
 # preprocessing budget. The margin lets the worker return its own timeout error;
@@ -44,12 +45,13 @@ VIT_WORKER_RPC_TIMEOUT_MARGIN_SECONDS = 5.0
 DEFAULT_PROXY_RPC_TIMEOUT_SECONDS = (
     VitConfig.DEFAULT_MM_TIMEOUT_MS / 1000.0 + VIT_WORKER_RPC_TIMEOUT_MARGIN_SECONDS
 )
-# The proxy owns fast health decisions for its concrete child workers. FlexLB
-# tracks this proxy as one aggregate VIT endpoint and intentionally tolerates a
-# transient proxy status timeout until its VIT expiration window elapses.
-# These two layers therefore use different health deadlines by design.
+# CPU scheduling delays are not evidence that a previously healthy child died.
+# Retain only a bounded last-success grace on probe deadlines; explicit failures
+# still invalidate the child. Load has a shorter lifetime than liveness.
 STATUS_CHECK_TIMEOUT_SEC = 1.0
 WORKER_RECOVERY_INTERVAL_SEC = 1.0
+STATUS_TIMEOUT_GRACE_SEC = 5.0
+LOAD_SNAPSHOT_MAX_AGE_SEC = 1.0
 # Only UNAVAILABLE triggers worker failover (and marking the worker unhealthy).
 # RESOURCE_EXHAUSTED (scheduler queue backpressure) is deliberately NOT here: by
 # design it is returned directly to the client (no failover to another worker),
@@ -265,6 +267,8 @@ def _worker_already_reported_vit_error(error: Optional[BaseException]) -> bool:
 
 def _forward_worker_error_metadata(context, error: BaseException) -> None:
     """Forward public worker error details without exposing the dedupe marker."""
+    if context is None:
+        return
     try:
         metadata = error.trailing_metadata()
     except Exception:
@@ -346,9 +350,7 @@ class LoadBalancer:
         expected_version: Optional[int] = None,
     ) -> bool:
         """Apply a current observation and return the resulting alive state."""
-        return self.apply_worker_observation(
-            worker_address, alive, expected_version
-        )[1]
+        return self.apply_worker_observation(worker_address, alive, expected_version)[1]
 
     def get_alive_worker_addresses(self) -> list[str]:
         with self.lock:
@@ -431,6 +433,11 @@ class WorkerConnectionPool:
                         ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
                     ],
                 )
+                from rtp_llm.telemetry.vit_rpc import VitClientTraceInterceptor
+
+                channel = grpc.intercept_channel(
+                    channel, VitClientTraceInterceptor(worker_address)
+                )
                 stub = MultimodalRpcServiceStub(channel)
                 self.channels[worker_address] = channel
                 self.stubs[worker_address] = stub
@@ -468,11 +475,14 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         self.connection_pool = connection_pool
         self.default_rpc_timeout_seconds = default_rpc_timeout_seconds
         self.profiler = MMProfiler()
-        self._transport_router = MMOutputProxyRouter(connection_pool, transport_config)
+        self._transport_router = MMOutputProxyRouter(
+            connection_pool, transport_config, load_balancer.worker_addresses
+        )
         kmonitor.init()
         self._status_probes: dict[str, _WorkerStatusProbe] = {}
         self._status_probes_lock = threading.Lock()
         self._status_probes_stopped = False
+        self._last_worker_status: dict[str, tuple[float, WorkerStatusPB]] = {}
         self._worker_count_metric_lock = threading.Lock()
 
     @staticmethod
@@ -503,6 +513,7 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         so both real and test contexts carry the exact code/details."""
         code = error.code()
         details = error.details()
+        _forward_worker_error_metadata(context, error)
         abort = getattr(context, "abort", None) if context is not None else None
         if abort is not None:
             abort(code, details)
@@ -595,12 +606,14 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
                         f"timeout: {attempt_timeout_s}s"
                     )
                     worker_rpc_start_us = _now_us()
+                    metadata = dict(context.invocation_metadata() or ())
+                    worker_metadata = list(dashscope_greennet_metadata(metadata))
+                    if metadata.get(RDMA_CLAIM_HEADER) == "1":
+                        worker_metadata.append((RDMA_CLAIM_HEADER, "1"))
                     worker_call = stub.RemoteMultimodalEmbedding.future(
                         request,
                         timeout=attempt_timeout_s,
-                        metadata=dashscope_greennet_metadata(
-                            dict(context.invocation_metadata() or ())
-                        ),
+                        metadata=tuple(worker_metadata),
                     )
                     if not context.add_callback(worker_call.cancel):
                         worker_call.cancel()
@@ -674,6 +687,8 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
                 )
 
             exhausted_workers = True
+            if isinstance(last_error, grpc.RpcError):
+                self._abort_with_worker_status(context, last_error)
             details = "No healthy VIT worker behind proxy"
             if last_error:
                 details += f": {last_error}"
@@ -711,6 +726,20 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
             tags,
         )
 
+    def _remember_worker_status_locked(self, worker_address, worker_status, timed_out):
+        # Caller owns _status_probes_lock. Only an actual successful probe may
+        # refresh a sample; transport errors invalidate it immediately.
+        now = time.monotonic()
+        if worker_status is not None:
+            self._last_worker_status[worker_address] = (now, worker_status)
+        elif timed_out:
+            previous = self._last_worker_status.get(worker_address)
+            if previous and now - previous[0] <= STATUS_TIMEOUT_GRACE_SEC:
+                worker_status = previous[1]
+        else:
+            self._last_worker_status.pop(worker_address, None)
+        return worker_status
+
     def _complete_status_probe(
         self,
         worker_address: str,
@@ -727,11 +756,16 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
             )
             current_alive = False
             if active:
+                worker_status = self._remember_worker_status_locked(
+                    worker_address, worker_status, worker_timed_out
+                )
                 _, current_alive = self.load_balancer.apply_worker_observation(
                     worker_address,
                     worker_status is not None,
                     expected_version=probe.health_version,
                 )
+                if not current_alive:
+                    self._last_worker_status.pop(worker_address, None)
                 self._status_probes.pop(worker_address, None)
         # A probe result only reaches subscribers when it agrees with the load
         # balancer's state. Voiding on a lost version CAS alone is wrong: every
@@ -754,6 +788,35 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         )
         self._report_worker_counts()
 
+    def _aggregate_worker_status(self, first_alive: WorkerStatusPB) -> WorkerStatusPB:
+        """Do not mistake the first live child's load for the whole node's load.
+
+        Probes for the other children complete in the background. Until every
+        child has a fresh load report, publish unknown (field absent), not zero
+        or a misleading partial sum. A deadline grace never refreshes load age.
+        """
+        result = WorkerStatusPB()
+        result.CopyFrom(first_alive)
+        result.ClearField("mm_inflight_inputs")
+        now = time.monotonic()
+        with self._status_probes_lock:
+            samples = [
+                self._last_worker_status.get(address)
+                for address in self.load_balancer.worker_addresses
+            ]
+            if samples and all(
+                sample is not None
+                and now - sample[0] <= LOAD_SNAPSHOT_MAX_AGE_SEC
+                and sample[1].alive
+                and sample[1].HasField("mm_inflight_inputs")
+                and sample[1].mm_inflight_inputs.value >= 0
+                for sample in samples
+            ):
+                result.mm_inflight_inputs.value = sum(
+                    sample[1].mm_inflight_inputs.value for sample in samples
+                )
+        return result
+
     def _fail_status_probe_subscription(
         self,
         worker_address: str,
@@ -762,8 +825,24 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         subscribed: bool,
         completed_status_calls: queue.Queue,
         worker_timed_out: bool,
+        health_version: int,
     ):
-        result = StatusProbeResult(worker_address, None, worker_timed_out)
+        with self._status_probes_lock:
+            worker_status = self._remember_worker_status_locked(
+                worker_address, None, worker_timed_out
+            )
+            current_alive = (
+                not self._status_probes_stopped
+                and self.load_balancer.set_worker_alive(
+                    worker_address,
+                    worker_status is not None,
+                    expected_version=health_version,
+                )
+            )
+            if not current_alive:
+                self._last_worker_status.pop(worker_address, None)
+                worker_status = None
+        result = StatusProbeResult(worker_address, worker_status, worker_timed_out)
         if new_probe and probe is not None:
             with self._status_probes_lock:
                 if self._status_probes.get(worker_address) is probe:
@@ -830,11 +909,6 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
                     )
                 )
         except grpc.RpcError as e:
-            with self._status_probes_lock:
-                if not self._status_probes_stopped:
-                    self.load_balancer.set_worker_alive(
-                        worker_address, False, expected_version=health_version
-                    )
             _log_worker_status_rpc_error(worker_address, e)
             try:
                 worker_timed_out = e.code() == grpc.StatusCode.DEADLINE_EXCEEDED
@@ -847,14 +921,10 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
                 subscribed,
                 completed_status_calls,
                 worker_timed_out,
+                health_version,
             )
             self._report_worker_counts()
         except Exception as e:
-            with self._status_probes_lock:
-                if not self._status_probes_stopped:
-                    self.load_balancer.set_worker_alive(
-                        worker_address, False, expected_version=health_version
-                    )
             _log_worker_status_error(worker_address, e)
             self._fail_status_probe_subscription(
                 worker_address,
@@ -863,6 +933,7 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
                 subscribed,
                 completed_status_calls,
                 False,
+                health_version,
             )
             self._report_worker_counts()
 
@@ -1015,6 +1086,10 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
                 else None
             )
 
+    def ClaimRdmaLease(self, request: ReleaseLeasePB, context) -> EmptyPB:
+        self._transport_router.claim(request, context)
+        return EmptyPB()
+
     def ReleaseRdmaLease(self, request: ReleaseLeasePB, context) -> EmptyPB:
         self._transport_router.release(request, context)
         return EmptyPB()
@@ -1096,8 +1171,21 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         worker_status, status_check_timed_out = self._get_alive_worker_status(
             request, context
         )
+        if worker_status is None and status_check_timed_out:
+            # The caller's deadline may win the race with the probe callback.
+            # Only a bounded, real prior success can bridge that scheduling gap.
+            now = time.monotonic()
+            with self._status_probes_lock:
+                worker_status = next(
+                    (
+                        status
+                        for received, status in self._last_worker_status.values()
+                        if now - received <= STATUS_TIMEOUT_GRACE_SEC
+                    ),
+                    None,
+                )
         if worker_status:
-            return worker_status
+            return self._aggregate_worker_status(worker_status)
         if status_check_timed_out:
             self._set_status_check_timeout(context)
         else:
@@ -1158,16 +1246,10 @@ class VitProxyServer:
 
     def start(self):
         """启动代理服务器"""
-        self.rpc_server = grpc.server(
-            futures.ThreadPoolExecutor(max_workers=200),
-            options=[
-                ("grpc.max_send_message_length", 1024 * 1024 * 1024),
-                ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
-                ("grpc.max_concurrent_streams", -1),
-                ("grpc.http2.min_ping_interval_without_data_ms", 1000),
-                ("grpc.http2.max_ping_strikes", 1000),
-            ],
-        )
+        from rtp_llm.telemetry import init_telemetry
+
+        init_telemetry(role="vit_proxy")
+        self.rpc_server = create_vit_rpc_server()
 
         self.proxy_servicer = VitProxyRpcServer(
             self.load_balancer,
@@ -1214,9 +1296,12 @@ class VitProxyServer:
         if self._recovery_thread and self._recovery_thread.ident is not None:
             self._recovery_thread.join(timeout=STATUS_CHECK_TIMEOUT_SEC + 1.0)
         if self.rpc_server:
-            self.rpc_server.stop(grace=None)
+            self.rpc_server.stop(grace=None).wait(timeout=2.0)
             logging.info("VIT Proxy Server stopped")
         self.connection_pool.close_all()
+        from rtp_llm.telemetry import shutdown_telemetry
+
+        shutdown_telemetry()
 
     def wait_for_termination(self):
         """等待服务器终止"""

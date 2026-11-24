@@ -11,14 +11,15 @@ namespace rtp_llm {
 
 inline RdmaConfig extractRdmaConfig(const py::object& rdma_config) {
     RdmaConfig cfg;
-    cfg.bind_ip            = rdma_config.attr("bind_ip").cast<std::string>();
-    cfg.port               = rdma_config.attr("port").cast<int>();
-    cfg.connect_timeout_ms = rdma_config.attr("connect_timeout_ms").cast<int>();
-    cfg.read_timeout_ms    = rdma_config.attr("read_timeout_ms").cast<int64_t>();
-    cfg.qp_count           = rdma_config.attr("qp_count").cast<uint32_t>();
-    cfg.slot_gc_timeout_ms = rdma_config.attr("slot_gc_timeout_ms").cast<int64_t>();
-    cfg.max_slot_bytes     = rdma_config.attr("max_slot_bytes").cast<int64_t>();
-    cfg.max_receipt_bytes  = rdma_config.attr("max_receipt_bytes").cast<int64_t>();
+    cfg.bind_ip             = rdma_config.attr("bind_ip").cast<std::string>();
+    cfg.port                = rdma_config.attr("port").cast<int>();
+    cfg.connect_timeout_ms  = rdma_config.attr("connect_timeout_ms").cast<int>();
+    cfg.read_timeout_ms     = rdma_config.attr("read_timeout_ms").cast<int64_t>();
+    cfg.qp_count            = rdma_config.attr("qp_count").cast<uint32_t>();
+    cfg.read_provider_count = rdma_config.attr("read_provider_count").cast<uint32_t>();
+    cfg.slot_gc_timeout_ms  = rdma_config.attr("slot_gc_timeout_ms").cast<int64_t>();
+    cfg.max_slot_bytes      = rdma_config.attr("max_slot_bytes").cast<int64_t>();
+    cfg.max_receipt_bytes   = rdma_config.attr("max_receipt_bytes").cast<int64_t>();
     return cfg;
 }
 

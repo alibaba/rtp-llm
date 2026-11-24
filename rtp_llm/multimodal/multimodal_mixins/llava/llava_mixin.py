@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 
+from rtp_llm.multimodal.media_network import uses_url_loader
 from rtp_llm.multimodal.multimodal_mixin_register import register_multimodal_mixin
 from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
     BaseMultiModalMixin,
@@ -288,6 +289,7 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
         return new_images, image_sizes
 
     @staticmethod
+    @uses_url_loader
     def preprocess_input(
         mm_inputs: List[MultimodalInput],
         vit_config: VitConfig,

@@ -18,6 +18,25 @@ from rtp_llm.utils.cuda_graph_gate import CudaGraphGate, cuda_graph_gate
 
 
 class CudaGraphGateTest(unittest.TestCase):
+    def test_idle_capture_never_queues_a_writer_behind_foreground(self):
+        gate = CudaGraphGate()
+        with concurrent.futures.ThreadPoolExecutor(1) as pool:
+            with gate.operation():
+
+                def attempt():
+                    with gate.try_capture() as acquired:
+                        return acquired
+
+                self.assertFalse(pool.submit(attempt).result(timeout=5))
+                self.assertEqual(gate._waiting_captures, 0)
+            with gate.try_capture() as acquired:
+                self.assertTrue(acquired)
+                self.assertFalse(pool.submit(attempt).result(timeout=5))
+        with gate.operation():
+            with self.assertRaisesRegex(RuntimeError, "upgrade"):
+                with gate.try_capture():
+                    pass
+
     def test_pool_waits_for_capture_before_taking_its_mutex(self):
         pool = _TensorMemoryPool(64, torch.device("cpu"))
         block = pool.reserve(8)

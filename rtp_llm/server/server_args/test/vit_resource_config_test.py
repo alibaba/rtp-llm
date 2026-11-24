@@ -1,0 +1,313 @@
+"""CPU contracts for the reduced ViT resource configuration."""
+
+import argparse
+import io
+import json
+import os
+import subprocess
+import sys
+import unittest
+from unittest.mock import Mock, patch
+
+from rtp_llm.config.oss_download import (
+    OSS_INTERNAL_REGION_ALLOWLIST_ENV,
+    export_oss_internal_region_allowlist,
+)
+from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.server.server_args.server_args import EnvArgumentParser
+from rtp_llm.server.server_args.vit_group_args import (
+    apply_embedding_cache_config,
+    init_vit_group_args,
+    parse_embedding_cache_config,
+)
+
+
+class VitResourceConfigTest(unittest.TestCase):
+    REMOVED = {
+        "mm_preprocess_num_threads": "MM_PREPROCESS_NUM_THREADS",
+        "gpu_max_batch_images": "VIT_GPU_MAX_BATCH_IMAGES",
+        "mm_max_queue_size": "MM_MAX_QUEUE_SIZE",
+    }
+
+    def parse(self, args=(), env=None):
+        config = VitConfig()
+        parser = EnvArgumentParser()
+        parser.set_root_config(config)
+        init_vit_group_args(parser, config)
+        with patch.dict(os.environ, env or {}, clear=True):
+            parsed = parser.parse_args(list(args))
+            apply_embedding_cache_config(config, parsed.mm_embedding_cache_config)
+        return config, parser
+
+    def test_remote_quarantine_ttl_is_configurable(self):
+        config, _ = self.parse(
+            env={
+                "MM_EMBEDDING_CACHE_CONFIG": '{"remote":{"quarantine_ttl_seconds":17}}'
+            }
+        )
+        self.assertEqual(config.mm_remote_cache_quarantine_ttl_seconds, 17)
+
+    def test_embedding_json_expands_existing_fields_with_zero_local_cache(self):
+        document = json.dumps(
+            {
+                "local": {
+                    "cpu_max_bytes": 0,
+                    "gpu_max_bytes": 0,
+                    "async_publish": False,
+                },
+                "remote": {
+                    "enable": True,
+                    "namespace": "model@revision/processor@revision",
+                    "gdr_enable": False,
+                    "gdr_num": 4,
+                    "gdr_arena_bytes": 6 * 1024**3,
+                    "gdr_min_block_bytes": 1024**2,
+                    "audit": True,
+                    "read_timeout_ms": 1000,
+                    "metadata_workers": 48,
+                    "read_transfer_workers": 4,
+                    "write_transfer_workers": 6,
+                    "max_pending": 256,
+                },
+            }
+        )
+        config, _ = self.parse(
+            ["--mm_cache_cpu_max_bytes", "8192"],
+            {"MM_EMBEDDING_CACHE_CONFIG": document},
+        )
+        self.assertEqual(config.mm_cache_cpu_max_bytes, 0)
+        self.assertEqual(config.mm_cache_gpu_max_bytes, 0)
+        self.assertFalse(config.mm_cache_async_publish)
+        self.assertTrue(config.mm_remote_cache_enable)
+        self.assertTrue(config.mm_remote_cache_audit)
+        self.assertFalse(config.mm_remote_cache_gdr_enable)
+        self.assertEqual(config.mm_remote_cache_gdr_num, 4)
+        self.assertEqual(config.mm_remote_cache_gdr_arena_bytes, 6 * 1024**3)
+        self.assertEqual(config.mm_remote_cache_gdr_min_block_bytes, 1024**2)
+        self.assertEqual(config.mm_remote_cache_read_timeout_ms, 1000)
+        self.assertEqual(config.mm_remote_cache_max_pending, 256)
+        self.assertEqual(config.mm_remote_cache_metadata_workers, 48)
+        self.assertEqual(config.mm_remote_cache_read_transfer_workers, 4)
+        self.assertEqual(config.mm_remote_cache_write_transfer_workers, 6)
+        defaults, _ = self.parse()
+        self.assertIsNone(defaults.mm_remote_cache_gdr_arena_bytes)
+        self.assertIsNone(defaults.mm_remote_cache_gdr_min_block_bytes)
+        self.assertEqual(defaults.mm_remote_cache_max_pending, 128)
+        self.assertEqual(defaults.mm_remote_cache_metadata_workers, 32)
+        self.assertIsNone(defaults.mm_remote_cache_read_transfer_workers)
+        self.assertIsNone(defaults.mm_remote_cache_write_transfer_workers)
+
+    def test_embedding_json_cli_overrides_json_env(self):
+        config, _ = self.parse(
+            ["--mm_embedding_cache_config", '{"local":{"cpu_max_bytes":0}}'],
+            {"MM_EMBEDDING_CACHE_CONFIG": '{"local":{"cpu_max_bytes":123}}'},
+        )
+        self.assertEqual(config.mm_cache_cpu_max_bytes, 0)
+        self.assertEqual(config.mm_remote_cache_gdr_num, 1)
+
+    def test_embedding_json_rejects_bad_types_typos_and_duplicate_keys(self):
+        for value in (
+            "[]",
+            "null",
+            "{",
+            '{"other":{}}',
+            '{"remote":{"enbale":true}}',
+            '{"local":{"cpu_max_bytes":false}}',
+            '{"remote":{"enable":1}}',
+            '{"remote":{"max_pending":0}}',
+            '{"remote":{"metadata_workers":0}}',
+            '{"remote":{"read_transfer_workers":false}}',
+            '{"remote":{"write_transfer_workers":0}}',
+            '{"remote":{"gdr_num":0}}',
+            '{"remote":{"gdr_num":-1}}',
+            '{"remote":{"gdr_num":true}}',
+            '{"remote":{"gdr_num":1.5}}',
+            '{"local":{"cpu_max_bytes":-1}}',
+            '{"remote":{"namespace":" "}}',
+            '{"remote":{},"remote":{}}',
+        ):
+            with self.subTest(value=value), self.assertRaises(
+                argparse.ArgumentTypeError
+            ):
+                parse_embedding_cache_config(value)
+        with self.assertRaises(SystemExit):
+            self.parse(
+                env={"MM_EMBEDDING_CACHE_CONFIG": '{"local":{"cpu_max_bytes":false}}'}
+            )
+        with self.assertRaises(ValueError):
+            self.parse(env={"MM_EMBEDDING_CACHE_CONFIG": '{"remote":{"enable":true}}'})
+
+    def test_removed_fields_and_arguments_are_absent(self):
+        config, parser = self.parse()
+        option_names = parser._option_string_actions
+        for name in self.REMOVED:
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(config, name))
+                self.assertNotIn("--" + name, option_names)
+                self.assertNotIn(name + ":", config.to_string())
+
+    def test_oss_regions_from_env_and_cli(self):
+        env = {OSS_INTERNAL_REGION_ALLOWLIST_ENV: '["cn-beijing","ap-southeast-1"]'}
+        self.assertIsNone(self.parse()[0].oss_internal_region_allowlist)
+        self.assertEqual(
+            self.parse(env=env)[0].oss_internal_region_allowlist,
+            ["cn-beijing", "ap-southeast-1"],
+        )
+        config, _ = self.parse(["--oss_internal_region_allowlist", "[]"], env)
+        self.assertEqual(config.oss_internal_region_allowlist, [])
+        with patch.dict(os.environ, env):
+            export_oss_internal_region_allowlist(config.oss_internal_region_allowlist)
+            inherited = subprocess.check_output(
+                [
+                    sys.executable,
+                    "-c",
+                    "import os; print(os.environ['OSS_INTERNAL_REGION_ALLOWLIST'])",
+                ],
+                text=True,
+            )
+        self.assertEqual(inherited.strip(), "[]")
+
+    def test_invalid_oss_region_list_fails_at_startup(self):
+        for raw in ('"cn-shanghai"', "[42]", '[""]', "not-json"):
+            for args, env in (
+                (["--oss_internal_region_allowlist", raw], {}),
+                ([], {OSS_INTERNAL_REGION_ALLOWLIST_ENV: raw}),
+            ):
+                with self.subTest(raw=raw, args=args), patch(
+                    "sys.stderr", new_callable=io.StringIO
+                ):
+                    with self.assertRaises(SystemExit):
+                        self.parse(args, env)
+
+    def test_removed_cli_flags_are_rejected(self):
+        for name in self.REMOVED:
+            with self.subTest(name=name), patch("sys.stderr", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as raised:
+                    self.parse(["--" + name, "2"])
+                self.assertEqual(raised.exception.code, 2)
+
+    def test_removed_environment_cannot_create_hidden_limits(self):
+        defaults, _ = self.parse()
+        config, _ = self.parse(env={name: "2" for name in self.REMOVED.values()})
+        self.assertEqual(
+            config.embedding_scheduler_args(), defaults.embedding_scheduler_args()
+        )
+        self.assertEqual(
+            config.async_compute_executor_args(), defaults.async_compute_executor_args()
+        )
+        for name in self.REMOVED:
+            self.assertFalse(hasattr(config, name))
+
+    def test_default_prefetch_is_on_and_serial_policy_is_preserved(self):
+        config, _ = self.parse()
+        self.assertEqual(config.gpu_prefetch_batches, 1)
+        self.assertEqual(config.gpu_prefetch_batches, VitConfig().gpu_prefetch_batches)
+        self.assertEqual(
+            config.embedding_scheduler_args(),
+            {
+                "max_batch_size": 1,
+                "max_batch_images": sys.maxsize,
+                "batch_wait_ms": 0,
+                "max_queue_size": 128,
+                "prefetch_batches": 1,
+            },
+        )
+
+    def test_one_batch_limit_and_derived_queue_via_environment(self):
+        config, _ = self.parse(
+            env={
+                "VIT_GPU_MAX_BATCH_SIZE": "126",
+                "VIT_CONCURRENCY": "256",
+                "VIT_MAX_QUEUE_SIZE": "64",
+                "VIT_GPU_BATCH_WAIT_MS": "1",
+            }
+        )
+        args = config.embedding_scheduler_args()
+        self.assertEqual(args["max_batch_size"], 126)
+        self.assertEqual(args["max_batch_images"], 126)
+        self.assertEqual(args["max_queue_size"], 320)
+        self.assertEqual(args["batch_wait_ms"], 1)
+
+    def test_cli_overrides_env_without_independent_gpu_queue_or_image_caps(self):
+        config, _ = self.parse(
+            [
+                "--gpu_max_batch_size",
+                "8",
+                "--vit_concurrency",
+                "4",
+                "--vit_max_queue_size",
+                "0",
+            ],
+            {
+                "VIT_GPU_MAX_BATCH_SIZE": "126",
+                "VIT_CONCURRENCY": "256",
+                "VIT_MAX_QUEUE_SIZE": "64",
+            },
+        )
+        args = config.embedding_scheduler_args()
+        self.assertEqual(args["max_batch_size"], 8)
+        self.assertEqual(args["max_batch_images"], 8)
+        self.assertEqual(args["max_queue_size"], 4)
+        self.assertEqual(config.async_compute_executor_args()["max_queue_size"], 0)
+
+    def test_zero_extra_async_queue_still_admits_active_tasks_to_gpu(self):
+        config = VitConfig()
+        config.vit_concurrency = 1
+        config.vit_max_queue_size = 0
+        self.assertEqual(config.embedding_queue_capacity(), 1)
+        # Preserve the engine's established clamping semantics.
+        config.vit_concurrency = 0
+        config.vit_max_queue_size = -3
+        self.assertEqual(config.embedding_queue_capacity(), 1)
+
+    def test_prefetch_can_be_explicitly_disabled(self):
+        for args, env in (
+            (["--gpu_prefetch_batches", "0"], {}),
+            ([], {"GPU_PREFETCH_BATCHES": "0"}),
+        ):
+            config, _ = self.parse(args, env)
+            self.assertEqual(config.gpu_prefetch_batches, 0)
+            self.assertNotIn("prefetch_batches", config.embedding_scheduler_args())
+        with patch("sys.stderr", new_callable=io.StringIO):
+            with self.assertRaises(SystemExit):
+                self.parse(["--gpu_prefetch_batches", "2"])
+
+    def test_mixin_uses_the_same_resolved_media_budget(self):
+        from rtp_llm.config.dsv41_config import V41Config
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41 import (
+            deepseek_v41_mixin as mixin,
+        )
+
+        related = Mock(config={"v41_config": V41Config.__new__(V41Config)})
+        for batch_size, expected in ((1, sys.maxsize), (8, 8), (128, 128)):
+            config = VitConfig()
+            config.gpu_max_batch_size = batch_size
+            with self.subTest(batch_size=batch_size), patch.object(
+                mixin, "DeepSeekV41VisionEmbedding"
+            ) as embedding:
+                mixin.DeepSeekV41Mixin._get_mm_module(related, config)
+                self.assertEqual(
+                    embedding.call_args.kwargs["max_batch_images"], expected
+                )
+
+    def test_worker_does_not_override_runtime_threads(self):
+        from rtp_llm.multimodal import mm_preprocess as engine
+
+        config = VitConfig()
+        with patch.object(engine.signal, "signal"), patch(
+            "torch.set_num_threads"
+        ) as threads, patch.object(
+            engine.url_data_cache_, "resize_cache"
+        ), patch.object(
+            engine, "_worker_vit_config"
+        ), patch.object(
+            engine, "_worker_preprocess_params"
+        ), patch.object(
+            engine, "_worker_preprocess_func"
+        ):
+            engine._worker_initializer(config, {}, Mock())
+        threads.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

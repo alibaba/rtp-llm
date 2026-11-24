@@ -15,6 +15,7 @@ from transformers import (
 
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
+from rtp_llm.multimodal.media_network import uses_url_loader
 from rtp_llm.multimodal.multimodal_mixin_register import register_multimodal_mixin
 from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
     BaseVitWeights,
@@ -73,6 +74,7 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         return self.visual.device
 
     @staticmethod
+    @uses_url_loader
     def preprocess_input(
         mm_inputs: List[MultimodalInput],
         vit_config: VitConfig,

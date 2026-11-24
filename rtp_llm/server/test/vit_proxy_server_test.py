@@ -12,6 +12,7 @@ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     CacheStatusPB,
     CacheVersionPB,
+    ErrorDetailsPB,
     MMRdmaSlotPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
@@ -24,6 +25,8 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     MultimodalRpcServiceStub,
     add_MultimodalRpcServiceServicer_to_server,
 )
+from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
+from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.multimodal.mm_scheduler import (
     MMSchedulerOverloadError,
     MMSchedulerRequestTooLargeError,
@@ -43,6 +46,8 @@ from rtp_llm.server.vit_proxy_server import (
     resolve_default_rpc_timeout_seconds,
     resolve_min_healthy_workers,
 )
+from rtp_llm.server.vit_rpc_constants import VIT_ERROR_REPORTED_METADATA_KEY
+from rtp_llm.server.vit_rpc_control import create_vit_rpc_server
 from rtp_llm.server.vit_rpc_server import MultimodalRpcServer
 
 
@@ -151,6 +156,9 @@ class AbortCalled(Exception):
 
 
 class RpcBoundaryFakeContext:
+    def set_trailing_metadata(self, metadata):
+        self.trailing_metadata = metadata
+
     def time_remaining(self):
         return None
 
@@ -451,6 +459,134 @@ class WorkerCountMetricsTest(TestCase):
 
 
 class VitProxyRpcServerStatusTest(TestCase):
+    def test_worker_status_exposes_admission_count_including_zero(self):
+        engine = MagicMock()
+        engine.get_inflight_input_count.return_value = 13
+        server = MultimodalRpcServer(engine)
+        result = server.GetWorkerStatus(StatusVersionPB(), FakeContext())
+        self.assertTrue(result.HasField("mm_inflight_inputs"))
+        self.assertEqual(result.mm_inflight_inputs.value, 13)
+        engine.get_inflight_input_count.return_value = 0
+        result = server.GetWorkerStatus(StatusVersionPB(), FakeContext())
+        self.assertTrue(result.HasField("mm_inflight_inputs"))
+        self.assertEqual(result.mm_inflight_inputs.value, 0)
+
+    def test_load_sums_all_children_and_does_not_turn_missing_sample_into_zero(self):
+        first = WorkerStatusPB(role="VIT", alive=True, status_version=1)
+        second = WorkerStatusPB(role="VIT", alive=True, status_version=1)
+        first.mm_inflight_inputs.value = 5
+        second.mm_inflight_inputs.value = 7
+        server = self._make_server(
+            {
+                "a": self._make_status_stub(first),
+                "b": self._make_status_stub(second),
+            }
+        )
+        result = server.GetWorkerStatus(StatusVersionPB(), FakeContext())
+        self.assertEqual(result.mm_inflight_inputs.value, 12)
+        server._last_worker_status.pop("b")
+        self.assertFalse(
+            server._aggregate_worker_status(first).HasField("mm_inflight_inputs")
+        )
+        server._last_worker_status["b"] = (time.monotonic() - 2, second)
+        self.assertFalse(
+            server._aggregate_worker_status(first).HasField("mm_inflight_inputs")
+        )
+
+    def test_transient_deadline_keeps_recent_health_but_not_stale_load(self):
+        status = WorkerStatusPB(role="VIT", alive=True, status_version=1)
+        status.mm_inflight_inputs.value = 5
+        stub = self._make_status_stub(status)
+        server = self._make_server({"a": stub})
+        server.GetWorkerStatus(StatusVersionPB(), FakeContext())
+        server._last_worker_status["a"] = (time.monotonic() - 2, status)
+        stub.GetWorkerStatus.future.return_value = FakeGrpcFuture(
+            error=RpcDeadlineExceeded()
+        )
+        result = server.GetWorkerStatus(StatusVersionPB(), FakeContext())
+        self.assertTrue(result.alive)
+        self.assertEqual(server.load_balancer.get_alive_worker_addresses(), ["a"])
+        self.assertFalse(result.HasField("mm_inflight_inputs"))
+        server._last_worker_status["a"] = (time.monotonic() - 6, status)
+        result = server.GetWorkerStatus(StatusVersionPB(), FakeContext())
+        self.assertFalse(result.alive)
+        self.assertEqual(server.load_balancer.get_alive_worker_addresses(), [])
+
+    def test_explicit_not_alive_is_not_masked_by_timeout_grace(self):
+        status = WorkerStatusPB(role="VIT", alive=True, status_version=1)
+        stub = self._make_status_stub(status)
+        server = self._make_server({"a": stub})
+        server.GetWorkerStatus(StatusVersionPB(), FakeContext())
+        stub.GetWorkerStatus.future.return_value = FakeGrpcFuture(
+            response=WorkerStatusPB(role="VIT", alive=False, status_version=1)
+        )
+        self.assertFalse(server.GetWorkerStatus(StatusVersionPB(), FakeContext()).alive)
+        self.assertNotIn("a", server._last_worker_status)
+
+    def test_probe_start_failure_invalidates_prior_success(self):
+        for error in (RpcUnavailable(), RuntimeError("probe setup failed")):
+            with self.subTest(error=type(error).__name__):
+                status = WorkerStatusPB(role="VIT", alive=True, status_version=1)
+                stub = self._make_status_stub(status)
+                server = self._make_server({"a": stub})
+                server.GetWorkerStatus(StatusVersionPB(), FakeContext())
+                stub.GetWorkerStatus.future.side_effect = error
+                self.assertFalse(
+                    server.GetWorkerStatus(StatusVersionPB(), FakeContext()).alive
+                )
+                self.assertNotIn("a", server._last_worker_status)
+                self.assertEqual(server.load_balancer.get_alive_worker_addresses(), [])
+                # A following timeout must not resurrect the invalidated sample.
+                stub.GetWorkerStatus.future.side_effect = RpcDeadlineExceeded()
+                self.assertFalse(
+                    server.GetWorkerStatus(StatusVersionPB(), FakeContext()).alive
+                )
+
+    def test_probe_start_deadline_uses_same_bounded_health_grace(self):
+        status = WorkerStatusPB(role="VIT", alive=True, status_version=1)
+        status.mm_inflight_inputs.value = 5
+        stub = self._make_status_stub(status)
+        server = self._make_server({"a": stub})
+        server.GetWorkerStatus(StatusVersionPB(), FakeContext())
+        server._last_worker_status["a"] = (time.monotonic() - 2, status)
+        stub.GetWorkerStatus.future.side_effect = RpcDeadlineExceeded()
+        result = server.GetWorkerStatus(StatusVersionPB(), FakeContext())
+        self.assertTrue(result.alive)
+        self.assertFalse(result.HasField("mm_inflight_inputs"))
+        self.assertEqual(server.load_balancer.get_alive_worker_addresses(), ["a"])
+
+    def test_health_rpc_runs_while_data_executor_is_saturated(self):
+        entered, release = threading.Event(), threading.Event()
+
+        class BlockingWorker(MultimodalRpcServiceServicer):
+            def RemoteMultimodalEmbedding(self, request, context):
+                entered.set()
+                release.wait(5)
+                return MultimodalOutputPB()
+
+            def GetWorkerStatus(self, request, context):
+                return WorkerStatusPB(role="VIT", alive=True, status_version=1)
+
+        server = create_vit_rpc_server(max_workers=1)
+        add_MultimodalRpcServiceServicer_to_server(BlockingWorker(), server)
+        port = server.add_insecure_port("127.0.0.1:0")
+        server.start()
+        channel = grpc.insecure_channel(f"127.0.0.1:{port}")
+        stub = MultimodalRpcServiceStub(channel)
+        try:
+            work = stub.RemoteMultimodalEmbedding.future(
+                MultimodalInputsPB(), timeout=5
+            )
+            self.assertTrue(entered.wait(2))
+            self.assertTrue(stub.GetWorkerStatus(StatusVersionPB(), timeout=1).alive)
+            self.assertFalse(work.done())
+            release.set()
+            work.result(timeout=2)
+        finally:
+            release.set()
+            channel.close()
+            server.stop(0).wait()
+
     def _make_status_stub(self, worker_status=None, error=None, done=True):
         stub = MagicMock()
         stub.GetWorkerStatus.future.return_value = FakeGrpcFuture(
@@ -476,8 +612,9 @@ class VitProxyRpcServerStatusTest(TestCase):
                 error=RpcUnavailable()
             )
         server = self._make_server(stubs)
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(grpc.RpcError) as raised:
             server.RemoteMultimodalEmbedding(MultimodalInputsPB(), FakeContext())
+        self.assertEqual(raised.exception.code(), grpc.StatusCode.UNAVAILABLE)
         self.assertEqual(server.load_balancer.get_alive_worker_addresses(), [])
         for stub in stubs.values():
             stub.RemoteMultimodalEmbedding.future.return_value = FakeGrpcFuture(
@@ -549,8 +686,9 @@ class VitProxyRpcServerStatusTest(TestCase):
         stub.RemoteMultimodalEmbedding.future.return_value = FakeGrpcFuture(
             error=RpcUnavailable()
         )
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(grpc.RpcError) as raised:
             server.RemoteMultimodalEmbedding(MultimodalInputsPB(), FakeContext())
+        self.assertEqual(raised.exception.code(), grpc.StatusCode.UNAVAILABLE)
         future.complete(response=WorkerStatusPB(role="VIT", alive=True))
         self.assertEqual(server.load_balancer.get_alive_worker_addresses(), [])
         self.assertIsNone(results.get_nowait().worker_status)
@@ -570,6 +708,7 @@ class VitProxyRpcServerStatusTest(TestCase):
         # The stale dead probe result must not leak to subscribers either: the
         # newer forwarding success supersedes it.
         self.assertIsNone(results.get_nowait().worker_status)
+
         # Health reporting follows the load balancer's versioned verdict
         # instead of under-reporting from the stale probe result. A fresh
         # status probe observes the healthy worker again.
@@ -1209,10 +1348,11 @@ class VitProxyRecoveryIntegrationTest(TestCase):
                 proxy.start()
                 wait_until_ready()
                 available.clear()
-                with self.assertRaises(RuntimeError):
+                with self.assertRaises(grpc.RpcError) as raised:
                     proxy.proxy_servicer.RemoteMultimodalEmbedding(
                         MultimodalInputsPB(), FakeContext()
                     )
+                self.assertEqual(raised.exception.code(), grpc.StatusCode.UNAVAILABLE)
                 self.assertEqual(proxy.load_balancer.get_alive_worker_addresses(), [])
                 available.set()
                 # No HTTP or aggregate gRPC status request triggers this recovery.
@@ -1417,6 +1557,30 @@ class VitProxyRpcServerForwardingTest(TestCase):
             server.load_balancer.get_alive_worker_addresses(), ["failed", "live"]
         )
 
+    def test_exhausted_failover_preserves_last_worker_error(self):
+        error = RpcUnavailable()
+        wire = ErrorDetailsPB(
+            error_code=907, error_message="worker unavailable"
+        ).SerializeToString()
+        error.trailing_metadata = lambda: (
+            ("grpc-status-details-bin", wire),
+            (VIT_ERROR_REPORTED_METADATA_KEY, "1"),
+        )
+        worker = MagicMock()
+        worker.RemoteMultimodalEmbedding.future.return_value = FakeGrpcFuture(
+            error=error
+        )
+        server = self._make_server({"worker": worker})
+        context = RpcBoundaryFakeContext()
+        with self.assertRaises(AbortCalled):
+            server.RemoteMultimodalEmbedding(MultimodalInputsPB(), context)
+        self.assertEqual(context.code, grpc.StatusCode.UNAVAILABLE)
+        self.assertEqual(context.details, error.details())
+        self.assertEqual(
+            context.trailing_metadata, (("grpc-status-details-bin", wire),)
+        )
+        worker.RemoteMultimodalEmbedding.future.assert_called_once()
+
     def test_forwarding_deadline_does_not_retry_or_mark_unhealthy(self):
         timeout_stub = MagicMock()
         timeout_stub.RemoteMultimodalEmbedding.future.return_value = FakeGrpcFuture(
@@ -1472,6 +1636,160 @@ class VitProxyRpcServerForwardingTest(TestCase):
 
 
 class RuntimeExceptionStatusTest(TestCase):
+    def test_normal_worker_errors_are_reported_once_through_real_grpc_proxy(self):
+        class NormalFailingEngine:
+            report_vit_error = MMProcessEngine.report_vit_error
+
+            def get_embedding_result(self, *args, **kwargs):
+                error = (
+                    FtRuntimeException(self.error_type, "embedding failed")
+                    if isinstance(self.error_type, ExceptionType)
+                    else self.error_type("embedding failed")
+                )
+                if self.report_before_raise:
+                    self.report_vit_error(error)
+                raise error
+
+        engine = NormalFailingEngine()
+        worker_server = grpc.server(futures.ThreadPoolExecutor(max_workers=1))
+        add_MultimodalRpcServiceServicer_to_server(
+            MultimodalRpcServer(engine), worker_server
+        )
+        worker_port = worker_server.add_insecure_port("127.0.0.1:0")
+        worker_server.start()
+        worker_address = f"127.0.0.1:{worker_port}"
+        worker_channel = grpc.insecure_channel(worker_address)
+        worker_stub = MultimodalRpcServiceStub(worker_channel)
+        connection_pool = MagicMock()
+        connection_pool.get_stub.return_value = worker_stub
+        proxy = VitProxyRpcServer(LoadBalancer([worker_address]), connection_pool)
+        proxy_server = grpc.server(futures.ThreadPoolExecutor(max_workers=1))
+        add_MultimodalRpcServiceServicer_to_server(proxy, proxy_server)
+        proxy_port = proxy_server.add_insecure_port("127.0.0.1:0")
+        proxy_server.start()
+        proxy_channel = grpc.insecure_channel(f"127.0.0.1:{proxy_port}")
+        proxy_stub = MultimodalRpcServiceStub(proxy_channel)
+        request = MultimodalInputsPB()
+        request.multimodal_inputs.add(
+            multimodal_url="data:image/png;base64,iVBORwD/", multimodal_type=1
+        )
+        cases = (
+            (
+                MMSchedulerOverloadError,
+                grpc.StatusCode.RESOURCE_EXHAUSTED,
+                "[CONCURRENCY_LIMIT_ERROR] embedding failed",
+            ),
+            (
+                MMSchedulerTimeoutError,
+                grpc.StatusCode.DEADLINE_EXCEEDED,
+                "[GENERATE_TIMEOUT] embedding failed",
+            ),
+            (
+                MMSchedulerRequestTooLargeError,
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "[MM_WRONG_FORMAT_ERROR] embedding failed",
+            ),
+            (
+                TimeoutError,
+                grpc.StatusCode.DEADLINE_EXCEEDED,
+                "[GENERATE_TIMEOUT] embedding failed",
+            ),
+            (
+                RuntimeError,
+                grpc.StatusCode.INTERNAL,
+                "[MM_PROCESS_ERROR] RuntimeError: embedding failed",
+            ),
+        ) + tuple(
+            (code, status, f"[{code.name}] embedding failed")
+            for code, status in (
+                (ExceptionType.INVALID_PARAMS, grpc.StatusCode.INVALID_ARGUMENT),
+                (ExceptionType.TRAFFIC_LIMIT_ERROR, grpc.StatusCode.RESOURCE_EXHAUSTED),
+                (ExceptionType.MM_LONG_PROMPT_ERROR, grpc.StatusCode.INVALID_ARGUMENT),
+                (
+                    ExceptionType.MM_IMAGE_PIXEL_LIMIT_EXCEEDED,
+                    grpc.StatusCode.INVALID_ARGUMENT,
+                ),
+                (ExceptionType.MM_DOWNLOAD_FAILED, grpc.StatusCode.INTERNAL),
+                (ExceptionType.UNSAFE_INPUT_CONTENT, grpc.StatusCode.PERMISSION_DENIED),
+                (ExceptionType.CANCELLED_ERROR, grpc.StatusCode.CANCELLED),
+            )
+        )
+        try:
+            for error_type, status, details in cases:
+                for report_before_raise in (False, True):
+                    with self.subTest(
+                        error_type=getattr(error_type, "__name__", str(error_type)),
+                        report_before_raise=report_before_raise,
+                    ):
+                        engine.error_type = error_type
+                        engine.report_before_raise = report_before_raise
+                        with patch("rtp_llm.metrics.kmonitor.report") as report:
+                            with self.assertRaises(grpc.RpcError) as direct_error:
+                                worker_stub.RemoteMultimodalEmbedding(
+                                    request, timeout=5
+                                )
+                            self.assertEqual(direct_error.exception.code(), status)
+                            self.assertEqual(direct_error.exception.details(), details)
+                            self.assertIn(
+                                (VIT_ERROR_REPORTED_METADATA_KEY, "1"),
+                                direct_error.exception.trailing_metadata(),
+                            )
+                            self.assertEqual(
+                                [
+                                    call.args[1]
+                                    for call in report.call_args_list
+                                    if call.args[0] == AccMetrics.VIT_ERROR_QPS_METRIC
+                                ],
+                                [1],
+                            )
+                            report.reset_mock()
+                            with self.assertRaises(grpc.RpcError) as proxy_error:
+                                proxy_stub.RemoteMultimodalEmbedding(request, timeout=5)
+                            self.assertEqual(proxy_error.exception.code(), status)
+                            self.assertEqual(proxy_error.exception.details(), details)
+                            typed_codes = {
+                                MMSchedulerOverloadError: ExceptionType.CONCURRENCY_LIMIT_ERROR,
+                                MMSchedulerTimeoutError: ExceptionType.GENERATE_TIMEOUT,
+                                MMSchedulerRequestTooLargeError: ExceptionType.MM_WRONG_FORMAT_ERROR,
+                                TimeoutError: ExceptionType.GENERATE_TIMEOUT,
+                                RuntimeError: ExceptionType.MM_PROCESS_ERROR,
+                            }
+                            expected_type = (
+                                error_type
+                                if isinstance(error_type, ExceptionType)
+                                else typed_codes.get(error_type)
+                            )
+                            if expected_type is not None:
+                                for received in (
+                                    direct_error.exception,
+                                    proxy_error.exception,
+                                ):
+                                    wire = dict(received.trailing_metadata())
+                                    parsed = ErrorDetailsPB.FromString(
+                                        wire["grpc-status-details-bin"]
+                                    )
+                                    self.assertEqual(parsed.error_code, expected_type)
+                                    self.assertEqual(
+                                        parsed.error_message, details.split("] ", 1)[1]
+                                    )
+                            self.assertEqual(
+                                [
+                                    call.args[1]
+                                    for call in report.call_args_list
+                                    if call.args[0] == AccMetrics.VIT_ERROR_QPS_METRIC
+                                ],
+                                [1],
+                            )
+                            self.assertNotIn(
+                                (VIT_ERROR_REPORTED_METADATA_KEY, "1"),
+                                proxy_error.exception.trailing_metadata(),
+                            )
+        finally:
+            proxy_channel.close()
+            proxy_server.stop(0).wait()
+            worker_channel.close()
+            worker_server.stop(0).wait()
+
     def test_runtime_exception_mapping_is_applied_at_rpc_boundary(self):
         cases = (
             (ExceptionType.MM_WRONG_FORMAT_ERROR, grpc.StatusCode.INVALID_ARGUMENT),
@@ -1506,12 +1824,12 @@ class RuntimeExceptionStatusTest(TestCase):
             (
                 MMSchedulerOverloadError("overloaded"),
                 grpc.StatusCode.RESOURCE_EXHAUSTED,
-                ExceptionType.MM_PROCESS_ERROR,
+                ExceptionType.CONCURRENCY_LIMIT_ERROR,
             ),
             (
                 MMSchedulerTimeoutError("timed out"),
                 grpc.StatusCode.DEADLINE_EXCEEDED,
-                ExceptionType.MM_PROCESS_ERROR,
+                ExceptionType.GENERATE_TIMEOUT,
             ),
             (
                 MMSchedulerRequestTooLargeError("too large"),
@@ -1530,6 +1848,11 @@ class RuntimeExceptionStatusTest(TestCase):
 
                 self.assertEqual(context.code, expected_status)
                 self.assertTrue(context.details.startswith(f"[{expected_type.name}]"))
+                wire = dict(context.trailing_metadata)
+                parsed = ErrorDetailsPB.FromString(wire["grpc-status-details-bin"])
+                self.assertEqual(parsed.error_code, expected_type)
+                self.assertEqual(parsed.error_message, str(error))
+                self.assertEqual(wire[VIT_ERROR_REPORTED_METADATA_KEY], "1")
 
 
 def _rdma_slot(lease_id: str) -> MMRdmaSlotPB:
@@ -1586,7 +1909,8 @@ class MMOutputProxyRouterTest(TestCase):
 
         router.record_receipt("worker-a", response)
         router.record_receipt("worker-b", response)
-        router.release(ReleaseLeasePB(lease_id=["same"]), FakeContext([1.0]))
+        with self.assertRaisesRegex(ValueError, "conflicting owners"):
+            router.release(ReleaseLeasePB(lease_id=["same"]), FakeContext([1.0]))
 
         connection_pool.get_stub.assert_not_called()
         reasons = [
@@ -1605,7 +1929,8 @@ class MMOutputProxyRouterTest(TestCase):
             "worker", MultimodalOutputPB(output_rdma_slots=[_rdma_slot("handle")])
         )
 
-        router.release(ReleaseLeasePB(lease_id=["handle"]), FakeContext([0.0]))
+        with self.assertRaises(TimeoutError):
+            router.release(ReleaseLeasePB(lease_id=["handle"]), FakeContext([0.0]))
 
         connection_pool.get_stub.assert_not_called()
         reasons = [
@@ -1651,7 +1976,10 @@ class MMOutputProxyRouterTest(TestCase):
             MultimodalOutputPB(output_rdma_slots=[_rdma_slot("handle-b")]),
         )
 
-        router.release(ReleaseLeasePB(lease_id=["handle-a", "handle-b"]), MagicMock())
+        with self.assertRaisesRegex(RuntimeError, "not acknowledged"):
+            router.release(
+                ReleaseLeasePB(lease_id=["handle-a", "handle-b"]), MagicMock()
+            )
 
         forwarded = stub_b.ReleaseRdmaLease.call_args.args[0]
         self.assertEqual(list(forwarded.lease_id), ["handle-b"])
@@ -1677,40 +2005,53 @@ class MMOutputProxyRouterTest(TestCase):
         self.assertEqual(list(request.lease_id), ["handle"])
         self.assertEqual(stub.ReleaseRdmaLease.call_count, 1)
 
-    def test_concurrent_release_atomically_claims_route(self):
-        entered = threading.Event()
-        unblock = threading.Event()
+    def test_failed_concurrent_release_does_not_restore_an_acknowledged_route(self):
+        entered, resume = threading.Event(), threading.Event()
+        pool = MagicMock()
 
-        class BlockingStub:
-            def __init__(self):
-                self.calls = 0
-
-            def ReleaseRdmaLease(self, request, timeout):
-                self.calls += 1
+        def fail_first(request, timeout):
+            if not entered.is_set():
                 entered.set()
-                unblock.wait(timeout=1.0)
+                resume.wait(2)
+                raise RuntimeError("lost acknowledgement")
 
-        stub = BlockingStub()
-        connection_pool = MagicMock()
-        connection_pool.get_stub.return_value = stub
-        router = MMOutputProxyRouter(connection_pool)
+        pool.get_stub.return_value.ReleaseRdmaLease.side_effect = fail_first
+        router = MMOutputProxyRouter(pool)
         router.record_receipt(
-            "worker",
-            MultimodalOutputPB(output_rdma_slots=[_rdma_slot("handle")]),
+            "a", MultimodalOutputPB(output_rdma_slots=[_rdma_slot("one")])
         )
-        request = ReleaseLeasePB(lease_id=["handle"])
-        first = threading.Thread(
-            target=router.release, args=(request, FakeContext([1.0]))
+        request = ReleaseLeasePB(lease_id=["one"])
+        with futures.ThreadPoolExecutor(max_workers=1) as executor:
+            first = executor.submit(router.release, request, FakeContext([1.0]))
+            try:
+                self.assertTrue(entered.wait(1))
+                router.release(request, FakeContext([1.0]))
+            finally:
+                resume.set()
+            with self.assertRaises(RuntimeError):
+                first.result()
+        self.assertNotIn("one", router._handle_routes)
+
+    def test_late_release_after_route_cleanup_reaches_original_worker(self):
+        pool = MagicMock()
+        router = MMOutputProxyRouter(pool, worker_addresses=["a", "b"])
+        router.release(ReleaseLeasePB(lease_id=["old"]), FakeContext([1.0]))
+        self.assertEqual([c.args[0] for c in pool.get_stub.call_args_list], ["a", "b"])
+
+    def test_claim_is_forwarded_only_to_the_owner(self):
+        pool = MagicMock()
+        router = MMOutputProxyRouter(pool)
+        router.record_receipt(
+            "a", MultimodalOutputPB(output_rdma_slots=[_rdma_slot("one")])
         )
-        first.start()
-        self.assertTrue(entered.wait(timeout=1.0))
-
-        router.release(request, FakeContext([1.0]))
-        unblock.set()
-        first.join(timeout=1.0)
-
-        self.assertFalse(first.is_alive())
-        self.assertEqual(stub.calls, 1)
+        request = ReleaseLeasePB(lease_id=["one"])
+        router.claim(request, FakeContext([1.0]))
+        pool.get_stub.assert_called_once_with("a")
+        self.assertEqual(
+            pool.get_stub.return_value.ClaimRdmaLease.call_args.args, (request,)
+        )
+        with self.assertRaises(ValueError):
+            router.claim(ReleaseLeasePB(lease_id=["unknown"]), FakeContext([1.0]))
 
 
 class VitHealthThresholdTest(TestCase):

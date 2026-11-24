@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import gc
+import json
 import logging
+import os
 import queue
 import sys
 import threading
 import time
 import traceback
-from concurrent.futures import Future, InvalidStateError
+from collections import Counter
+from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from contextlib import AbstractContextManager, nullcontext
+from concurrent.futures import wait
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from typing import TYPE_CHECKING, Callable, List, Optional
 
 import torch
@@ -18,10 +22,14 @@ import torch.profiler
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
+from rtp_llm.multimodal.mm_batch_pipeline import PrefetchedMMBatch
+from rtp_llm.multimodal.mm_work_item import prepare_batch_feature_hashes
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MMWorkEstimate,
     MultiModalEmbeddingInterface,
 )
+from rtp_llm.multimodal.vit_metrics import VIT_PHASE_METRICS, report_vit_phase
+from rtp_llm.telemetry import vit_media
 from rtp_llm.utils.time_util import Timer, current_time_ms
 
 if TYPE_CHECKING:
@@ -79,21 +87,109 @@ class MMSchedulerRequestTooLargeError(MMSchedulerError, ValueError):
     """
 
 
+@contextmanager
+def _benchmark_encoder_timing(mm_part, items):
+    """Opt-in synchronized batch timing; default execution is unchanged.
+
+    The measured embedding stage includes device preprocessing, vision layers
+    and projection. CUDA events measure the current stream; the wall interval
+    also includes host dispatch and waiting for completion. Synchronization is
+    intentional for diagnostic runs, never enabled by the remote-cache switch.
+    """
+    if os.environ.get("MM_EMB_BENCHMARK_TIMING") != "1":
+        yield
+        return
+    events = None
+    try:
+        device = getattr(mm_part, "_device", None)
+        if device is not None and torch.device(device).type == "cuda":
+            with torch.cuda.device(device):
+                stream = torch.cuda.current_stream(device)
+                events = (
+                    torch.cuda.Event(enable_timing=True),
+                    torch.cuda.Event(enable_timing=True),
+                    stream,
+                )
+                events[0].record(stream)
+    except Exception:
+        try:
+            logging.exception("Unable to start diagnostic embedding CUDA timer")
+        except Exception:
+            pass
+        events = None
+    started = time.perf_counter_ns()
+    status = "error"
+    try:
+        yield
+        status = "success"
+    finally:
+        gpu_ms = None
+        if events is not None:
+            try:
+                events[1].record(events[2])
+                events[1].synchronize()
+                gpu_ms = events[0].elapsed_time(events[1])
+            except Exception:
+                try:
+                    logging.exception(
+                        "Unable to finish diagnostic embedding CUDA timer"
+                    )
+                except Exception:
+                    pass
+        wall_ms = (time.perf_counter_ns() - started) / 1e6
+        for wi in items:
+            try:
+                logging.info(
+                    "MM_EMB_BENCHMARK_JSON %s",
+                    json.dumps(
+                        dict(
+                            event="encoder_timing",
+                            trace_id=getattr(wi, "benchmark_trace_id", None),
+                            pid=os.getpid(),
+                            timestamp_ns=time.time_ns(),
+                            batch_items=len(items),
+                            status=status,
+                            gpu_ms=gpu_ms,
+                            wall_ms=wall_ms,
+                            scope="batched_embedding_including_device_preprocess",
+                            synchronized=gpu_ms is not None,
+                        ),
+                        sort_keys=True,
+                    ),
+                )
+            except Exception:
+                pass  # Diagnostics must preserve forward results and errors.
+
+
+@vit_media.embedding_batch
 def _run_embedding(
     mm_part: MultiModalEmbeddingInterface,
     items: List[MMWorkItem],
+    data_list=None,
 ) -> None:
     """Run one GPU forward over `items` and write results back.
 
     Does the batched forward, guards the output count, writes embedding_result
     onto each work item, and caches cacheable results. Errors propagate.
     """
-    data_list = [wi.preprocess_result for wi in items]
+    if data_list is None:
+        data_list = [wi.preprocess_result for wi in items]
     type_list = [wi.mm_type for wi in items]
+
+    for wi in items:
+        observer = getattr(wi, "remote_cache_observer", None)
+        if observer is not None:
+            observer(
+                "encoder_forward",
+                key=wi.remote_cache_key,
+                trace_id=wi.remote_trace_id,
+                batch_items=len(items),
+            )
 
     with Timer() as route_timer:
         with torch.profiler.record_function("batched_embedding"):
-            batch_outputs = mm_part.batched_embedding(data_list, type_list)
+            with _benchmark_encoder_timing(mm_part, items):
+                batch_outputs = mm_part.batched_embedding(data_list, type_list)
     # Forward-only latency, sampled per merged batch -> its own metric. The
     # historical per-request (wait + forward) latency stays on
     # VIT_EMBEDDING_RT_METRIC, reported in submit_and_wait.
@@ -106,6 +202,7 @@ def _run_embedding(
             f"for {len(items)} work items"
         )
 
+    prepare_batch_feature_hashes(items, batch_outputs)
     for wi, result in zip(items, batch_outputs):
         wi.embedding_result = result
         wi.complete_cache(result)
@@ -142,6 +239,9 @@ class _EmbeddingRequest:
         "next_chunk_index",
         "remaining_chunks",
         "cancelled",
+        "submit_ms",
+        "completed_ms",
+        "deadline",
     )
 
     def __init__(self, work_items: List[MMWorkItem]):
@@ -152,6 +252,7 @@ class _EmbeddingRequest:
         self.next_chunk_index = 0
         self.remaining_chunks = 0
         self.cancelled = threading.Event()
+        self.completed_ms = 0
 
 
 class _EmbeddingChunk:
@@ -223,6 +324,9 @@ class MMScheduler:
         max_queue_size: int = 1024,
         device: Optional[str] = None,
         forward_profiler: Optional[Callable[[], AbstractContextManager]] = None,
+        prefetch_batches: int = 0,
+        prefetch_fill_batch: bool = False,
+        allow_idle_work: bool = False,
     ):
         if batch_wait_ms < 0:
             raise ValueError(f"batch_wait_ms must be >= 0, got {batch_wait_ms}")
@@ -234,6 +338,17 @@ class MMScheduler:
             raise ValueError(f"max_queue_size must be > 0, got {max_queue_size}")
 
         self._mm_part = mm_part
+        self._allow_idle_work = allow_idle_work
+        self._collector_idle = threading.Event()
+        if prefetch_batches not in (0, 1):
+            raise ValueError("prefetch_batches must be 0 or 1")
+        self._prefetch_batches = prefetch_batches
+        if prefetch_fill_batch and not prefetch_batches:
+            raise ValueError("prefetch_fill_batch requires prefetch_batches=1")
+        self._prefetch_fill_batch = prefetch_fill_batch
+        self._collect_wakeup = threading.Event()
+        self._batch_stats = Counter()
+        self._batch_stats_lock = threading.Lock()
         self._batch_wait_ms = batch_wait_ms
         self._max_batch_size = max_batch_size
         self._max_batch_images = max_batch_images
@@ -310,9 +425,21 @@ class MMScheduler:
     def _enqueue_chunk(self, chunk: _EmbeddingChunk) -> None:
         """Put a chunk into the waiting queue and stamp its queue-entry time."""
         chunk.enqueued_at = time.monotonic()
+        vit_media.enqueue(chunk.work_items)
         chunk.queue_wait_reported = False
         self._waiting.put(chunk)
+        if self._prefetch_fill_batch:
+            self._collect_wakeup.set()
         self._report_queue_depth()
+
+    def batching_stats(self):
+        """Cumulative batch-level diagnostics; no request payloads are retained."""
+        with self._batch_stats_lock:
+            return dict(self._batch_stats)
+
+    def _record_batch_stats(self, **values):
+        with self._batch_stats_lock:
+            self._batch_stats.update(values)
 
     def _report_queue_wait(self, batch: List[_EmbeddingChunk]) -> List[float]:
         """Report each active chunk's wait before its first forward attempt."""
@@ -382,7 +509,7 @@ class MMScheduler:
             if n_images > self._max_batch_images:
                 raise MMSchedulerRequestTooLargeError(
                     f"single work item image count {n_images} exceeds "
-                    f"gpu_max_batch_images {self._max_batch_images}; "
+                    f"batch media limit {self._max_batch_images}; "
                     "the model preprocess batch is not splittable"
                 )
             work_estimate = getattr(work_item, "work_estimate", None)
@@ -398,6 +525,7 @@ class MMScheduler:
                         f"MMWorkEstimate, got {type(work_estimate).__name__}"
                     )
                 if not work_estimate.fits_within(self._work_budget):
+                    self._check_hard_work_budget(work_estimate)
                     logging.warning(
                         "MMScheduler: one work item exceeds the model work "
                         "budget; running it alone (estimate=%s, budget=%s)",
@@ -421,7 +549,7 @@ class MMScheduler:
             if n_images > self._max_batch_images:
                 raise MMSchedulerRequestTooLargeError(
                     f"request image count {n_images} exceeds "
-                    f"gpu_max_batch_images {self._max_batch_images}, "
+                    f"batch media limit {self._max_batch_images}, "
                     "request rejected"
                 )
             request.chunks = [
@@ -462,7 +590,7 @@ class MMScheduler:
             if item_images > self._max_batch_images:
                 raise MMSchedulerRequestTooLargeError(
                     f"single work item image count {item_images} exceeds "
-                    f"gpu_max_batch_images {self._max_batch_images}; "
+                    f"batch media limit {self._max_batch_images}; "
                     "the model preprocess batch is not splittable"
                 )
 
@@ -503,6 +631,7 @@ class MMScheduler:
             chunk_work = chunk_work + item_work
 
             if len(chunk_items) == 1 and not item_work.fits_within(self._work_budget):
+                self._check_hard_work_budget(item_work)
                 # A model work item is not generically splittable (for example,
                 # one long video). Run it alone rather than reintroduce the old
                 # whole-request rejection; a true OOM still reaches the caller.
@@ -521,6 +650,13 @@ class MMScheduler:
     def submit_and_wait(
         self, work_items: List[MMWorkItem], deadline: Optional[float] = None
     ) -> None:
+        request = self.submit(work_items, deadline=deadline)
+        # A re-raised worker failure must not retain tensors via this wrapper.
+        work_items = None
+        self.wait(request)
+
+    def submit(self, work_items, deadline=None):
+        """Enqueue already-preprocessed work; caller retains cancellation ownership."""
         req = _EmbeddingRequest(work_items)
         self._build_chunks(req)
 
@@ -538,9 +674,15 @@ class MMScheduler:
         if deadline is not None:
             timeout_s = min(timeout_s, deadline - time.monotonic())
             if timeout_s <= 0:
-                raise MMSchedulerTimeoutError("ViT request deadline exceeded")
+                error = MMSchedulerTimeoutError("ViT request deadline exceeded")
+                vit_media.failure(
+                    "embedding.queue", error, vit_media.item_media(work_items)
+                )
+                raise error
 
         submit_ms = current_time_ms()
+        req.submit_ms = submit_ms
+        req.deadline = time.monotonic() + timeout_s
 
         # Lock only the stopped-check + enqueue so it is atomic w.r.t. close();
         # the blocking wait below stays outside the lock.
@@ -549,10 +691,24 @@ class MMScheduler:
                 raise RuntimeError("MMScheduler is closed, request rejected")
             if self._waiting.qsize() >= self._max_queue_size:
                 kmonitor.report(AccMetrics.VIT_EMBEDDING_OVERLOAD_QPS_METRIC, 1)
-                raise MMSchedulerOverloadError(
+                error = MMSchedulerOverloadError(
                     f"MMScheduler queue full (max_queue_size={self._max_queue_size}), request rejected"
                 )
+                vit_media.failure(
+                    "embedding.queue", error, vit_media.item_media(work_items)
+                )
+                raise error
             self._enqueue_chunk(req.chunks[0])
+        return req
+
+    @staticmethod
+    def cancel(req):
+        req.cancelled.set()
+        req.future.cancel()
+
+    def wait(self, req):
+        timeout_s = max(0.0, req.deadline - time.monotonic())
+        submit_ms = req.submit_ms
 
         try:
             # Blocks until the executor resolves the future; re-raises the
@@ -564,9 +720,11 @@ class MMScheduler:
             # the failed request's preprocessed tensors through this frame/Future.
             req.work_items = []
             req.chunks = []
-            work_items = []
             raise
-        except FutureTimeoutError:
+        except FutureTimeoutError as error:
+            vit_media.failure(
+                "embedding.wait", error, vit_media.item_media(req.work_items)
+            )
             # PENDING -> CANCELLED so the executor skips it; if it is already
             # RUNNING, cancel() is a no-op and the forward's result is discarded.
             req.cancelled.set()
@@ -584,12 +742,11 @@ class MMScheduler:
                 f"MMScheduler: embedding wait timeout after {timeout_s * 1000:.0f}ms"
             ) from None
 
-        # Per-request latency = wait + forward (queue wait + batch-collect wait +
-        # forward), preserving VIT_EMBEDDING_RT_METRIC's historical per-request
-        # meaning and sampling. Reported only on success; failures are tracked by
-        # VIT_ERROR_QPS_METRIC.
+        # Queue + batch collection + forward, ending at actual completion.
+        # A caller collecting other CPU results may enter wait() much later.
+        # That caller-side delay is not GPU scheduler latency.
         kmonitor.report(
-            GaugeMetrics.VIT_EMBEDDING_RT_METRIC, current_time_ms() - submit_ms
+            GaugeMetrics.VIT_EMBEDDING_RT_METRIC, req.completed_ms - submit_ms
         )
 
     @staticmethod
@@ -651,12 +808,15 @@ class MMScheduler:
         """
         source_type = "RuntimeError"
         source_message = "MMScheduler closed before request completed"
+        self._fail_batch(batch, source_type, source_message)
+
+    def _fail_batch(self, batch, source_type, source_message, is_oom=False):
         for req in (chunk.request for chunk in batch):
             # done() skips already-resolved/cancelled requests; the try guards the
             # TOCTOU where a caller cancels a still-PENDING request concurrently.
             if not req.future.done():
                 try:
-                    self._fail(req, source_type, source_message)
+                    self._fail(req, source_type, source_message, is_oom)
                 except InvalidStateError:
                     pass
 
@@ -681,10 +841,13 @@ class MMScheduler:
         self._ready.set()
 
         try:
+            if self._prefetch_batches:
+                self._prefetched_loop()
+                return
             while not self._stopped.is_set():
                 batch = None
                 try:
-                    batch = self._collect_batch()
+                    batch = self._collect_batch(idle_work=True)
                     if batch is None:
                         break
                     # Stop-check and Future claim are one atomic transition against
@@ -731,6 +894,107 @@ class MMScheduler:
             # timed out on a long forward and close() already returned.
             self._fail_all_queued()
 
+    def _collect_and_prepare_batch(self, batch, demanded=None):
+        # Sole queue consumer in prefetch mode. Exactly ONE outstanding Future:
+        # no unbounded executor task queue or a second GPU forward lane.
+        chunks = self._collect_batch(demanded, batch=batch.chunks)
+        if chunks is None:
+            return None
+        batch.collected_at = time.monotonic()
+        try:
+            if not self._stopped.is_set():
+                with torch.inference_mode(), torch.profiler.record_function(
+                    "mm_batch_upload"
+                ):
+                    batch.prepare(self._mm_part)
+        except Exception as error:
+            batch.failure = self._failure_details(error)
+            logging.exception("MMScheduler: batch input staging failed")
+            self._clear_exception_references(error)
+        return batch
+
+    def _prefetched_loop(self):
+        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mm-upload")
+        pending = None
+        lookahead = None
+        current = None
+        try:
+            while not self._stopped.is_set():
+                if pending is None:
+                    lookahead = PrefetchedMMBatch([])
+                    demanded = threading.Event() if self._prefetch_fill_batch else None
+                    pending = pool.submit(
+                        self._collect_and_prepare_batch, lookahead, demanded
+                    )
+                # Flush a partial lookahead when the sole GPU consumer needs it.
+                # While the consumer is busy, collection may continue up to the
+                # unchanged media/work caps instead of sealing a small batch early.
+                if demanded is not None:
+                    demanded.set()
+                    self._collect_wakeup.set()
+                # Waiting and reading the outcome are separate: a polling timeout
+                # is not a producer TimeoutError, even if it finishes just after
+                # the wait. Only result() on a completed Future can report failure.
+                while not wait((pending,), timeout=_STOP_POLL_INTERVAL_S).done:
+                    if self._collector_idle.is_set():
+                        self._run_idle_work()
+                current, lookahead = lookahead, None
+                completed, pending = pending, None
+                try:
+                    if completed.result() is None:
+                        break
+                    self._record_batch_stats(
+                        consumed_batches=1,
+                        seal_to_consume_ms=1000
+                        * (time.monotonic() - current.collected_at),
+                        queued_chunks_at_consume=self._queue_depth(),
+                        underfull_with_backlog=int(
+                            sum(chunk.n_images for chunk in current.chunks)
+                            < self._max_batch_images
+                            and self._queue_depth() > 0
+                        ),
+                    )
+                    claimed = self._claim_batch(current.chunks)
+                    if claimed is None:
+                        self._reject_batch(current.chunks)
+                        break
+                    # Collection/H2D of B may overlap GPU compute/completion of A.
+                    # Keep its envelope even if the producer fails after dequeue.
+                    lookahead = PrefetchedMMBatch([])
+                    demanded = threading.Event() if self._prefetch_fill_batch else None
+                    pending = pool.submit(
+                        self._collect_and_prepare_batch, lookahead, demanded
+                    )
+                    if current.failure is not None:
+                        self._fail_batch(claimed, *current.failure)
+                    else:
+                        self._execute_batch(claimed, current)
+                except Exception as error:
+                    failure = self._failure_details(error)
+                    logging.exception("MMScheduler: prefetched batch failed")
+                    self._clear_exception_references(error)
+                    self._fail_batch(current.chunks, *failure)
+                finally:
+                    # Do not retain the producer's traceback or staged inputs
+                    # while waiting for the next request.
+                    completed = None
+                    current.close()
+                    current = None
+                    claimed = None
+        finally:
+            # Shutdown joins the sole collector before _fail_all_queued touches
+            # _pending. close(timeout) can return False while this drains, but
+            # must never free pinned memory still read by an in-flight copy.
+            self._stopped.set()
+            self._collect_wakeup.set()
+            pool.shutdown(wait=True)
+            if current is not None:
+                self._reject_batch(current.chunks)
+                current.close()
+            if lookahead is not None:
+                self._reject_batch(lookahead.chunks)
+                lookahead.close()
+
     def _fail_all_queued(self) -> None:
         """Fail every request still queued (not yet started) with the close cause.
 
@@ -750,7 +1014,40 @@ class MMScheduler:
             except InvalidStateError:
                 pass
 
-    def _collect_batch(self) -> Optional[List[_EmbeddingChunk]]:
+    def _check_hard_work_budget(self, estimate):
+        if getattr(self._mm_part, "strict_work_budget", False):
+            raise MMSchedulerRequestTooLargeError(
+                f"single work item exceeds model resource budget: {estimate}; "
+                f"budget={self._work_budget}"
+            )
+
+    def _run_idle_work(self):
+        hook = getattr(self._mm_part, "run_embedding_idle_work", None)
+        if (
+            not self._allow_idle_work
+            or not callable(hook)
+            or self._stopped.is_set()
+            or not self._waiting.empty()
+        ):
+            return
+        try:
+            with torch.inference_mode():
+                hook()
+        except Exception:
+            # A failed capture can invalidate CUDA/allocator state. Do not
+            # silently retry eager on this owner or accept more requests.
+            logging.exception("MMScheduler: idle GPU maintenance failed; stopping")
+            self._stopped.set()
+            self._collect_wakeup.set()
+            raise
+
+    def _collect_batch(
+        self, demanded=None, idle_work=False, batch=None
+    ) -> Optional[List[_EmbeddingChunk]]:
+        # Preserve ownership of dequeued chunks if collection raises. Prefetch
+        # supplies this list so the consumer can fail the affected requests.
+        if batch is None:
+            batch = []
         # Pick the first chunk, skipping any whose caller already timed out
         # (cancelled) so dead work neither anchors a batch nor spends its budget.
         # _pending (carried over from last round) goes first.
@@ -768,35 +1065,64 @@ class MMScheduler:
             if self._pending is not None:
                 first = self._pending
                 self._pending = None
-                self._report_queue_depth()
             else:
                 try:
+                    self._collector_idle.set()
                     first = self._waiting.get(timeout=_STOP_POLL_INTERVAL_S)
                 except queue.Empty:
+                    if idle_work:
+                        self._run_idle_work()
                     continue
-                self._report_queue_depth()
+                finally:
+                    self._collector_idle.clear()
+            batch.append(first)
+            self._report_queue_depth()
             if not first.request.cancelled.is_set():
                 break
+            batch.pop()
             first.request.chunks = []
             first.request.work_items = []
-        batch = [first]
         n_images = first.n_images
         batch_work = first.work_estimate
 
         deadline = time.monotonic() + self._batch_wait_ms / 1000.0
+        reason = "capacity"
 
         while len(batch) < self._max_batch_size and n_images < self._max_batch_images:
             if self._stopped.is_set():
+                reason = "stopped"
                 break
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            try:
-                chunk = self._waiting.get(timeout=min(remaining, _STOP_POLL_INTERVAL_S))
-            except queue.Empty:
-                continue
+            if demanded is not None:
+                # Clear BEFORE checking the queue: arrivals and consumer demand
+                # after this point set the event, so no wakeup can be lost.
+                self._collect_wakeup.clear()
+                try:
+                    chunk = self._waiting.get_nowait()
+                except queue.Empty:
+                    remaining = deadline - time.monotonic()
+                    if demanded.is_set() and remaining <= 0:
+                        reason = "consumer_demand"
+                        break
+                    timeout = _STOP_POLL_INTERVAL_S
+                    if demanded.is_set():
+                        timeout = min(timeout, max(0, remaining))
+                    self._collect_wakeup.wait(timeout)
+                    continue
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    reason = "deadline"
+                    break
+                try:
+                    chunk = self._waiting.get(
+                        timeout=min(remaining, _STOP_POLL_INTERVAL_S)
+                    )
+                except queue.Empty:
+                    continue
+            batch.append(chunk)
             self._report_queue_depth()
             if chunk.request.cancelled.is_set():
+                batch.pop()
                 chunk.request.chunks = []
                 chunk.request.work_items = []
                 continue  # caller already timed out; don't spend budget on it
@@ -806,16 +1132,27 @@ class MMScheduler:
                 batch_work, chunk.work_estimate
             )
             if image_overflow or work_overflow:
+                reason = "budget"
                 self._pending = chunk
+                batch.pop()
                 self._report_queue_depth()
                 break
-            batch.append(chunk)
             n_images += chunk.n_images
             if batch_work is None or chunk.work_estimate is None:
                 batch_work = None
             else:
                 batch_work = batch_work + chunk.work_estimate
 
+        self._record_batch_stats(
+            collected_batches=1,
+            collected_images=n_images,
+            queued_chunks_at_seal=self._queue_depth(),
+            **{"seal_" + reason: 1},
+        )
+        if VIT_PHASE_METRICS:
+            report_vit_phase(
+                AccMetrics.VIT_BATCH_SEAL_QPS_METRIC, 1, {"reason": reason}
+            )
         return batch
 
     def _claim_batch(
@@ -836,7 +1173,7 @@ class MMScheduler:
                     claimed.append(chunk)
             return claimed
 
-    def _execute_batch(self, batch: List[_EmbeddingChunk]) -> None:
+    def _execute_batch(self, batch: List[_EmbeddingChunk], prepared=None) -> None:
         """Run the batched forward and write results back.
 
         All-or-nothing: if the forward raises, the whole batch is discarded and
@@ -872,7 +1209,10 @@ class MMScheduler:
                 with torch.profiler.record_function(
                     f"mm_forward(batch_size={batch_size})"
                 ):
-                    _run_embedding(self._mm_part, items)
+                    inputs = (
+                        prepared.inputs_for(items) if prepared is not None else None
+                    )
+                    _run_embedding(self._mm_part, items, inputs)
         except Exception as e:
             source_type, source_message, is_oom = self._failure_details(e)
             logging.error(
@@ -906,6 +1246,7 @@ class MMScheduler:
             return
         req.remaining_chunks -= 1
         if req.remaining_chunks == 0 or req.cancelled.is_set():
+            req.completed_ms = current_time_ms()
             req.future.set_result(None)
             req.chunks = []
             return
@@ -933,6 +1274,7 @@ class MMScheduler:
         # so close must not touch _pending / _waiting while it is alive.
         with self._lock:
             self._stopped.set()
+        self._collect_wakeup.set()
         self._executor.join(timeout=timeout)
         if self._executor.is_alive():
             # A forward is still stuck past the join timeout. The executor's finally
