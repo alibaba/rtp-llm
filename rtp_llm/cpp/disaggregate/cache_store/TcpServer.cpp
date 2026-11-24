@@ -52,7 +52,11 @@ bool TcpServer::init(uint32_t io_thread_count,
 }
 
 bool TcpServer::start(uint32_t listen_port) {
-    std::string listen_spec = "tcp:0.0.0.0:" + std::to_string(listen_port);
+    return start(listen_port, "0.0.0.0");
+}
+
+bool TcpServer::start(uint32_t listen_port, const std::string& listen_address) {
+    std::string listen_spec = "tcp:" + listen_address + ":" + std::to_string(listen_port);
     if (!rpc_server_->Listen(listen_spec)) {
         RTP_LLM_LOG_WARNING("tcp server init failed, listen %s failed", listen_spec.c_str());
         return false;

@@ -279,23 +279,85 @@ void RequestBlockBufferStore::delRequestBlockBuffer(const std::string& requestid
     }
 }
 
-bool RequestBlockBufferStore::regUserBuffers(const std::vector<std::shared_ptr<BlockBuffer>>& buffers) {
-    std::unique_lock<std::shared_mutex> lock(buffer_map_mutex_);
-    for (auto& buffer : buffers) {
-        buffer_map_[buffer->key] = buffer;
+bool RequestBlockBufferStore::releaseScopedRequest(const std::string& requestid) {
+    std::shared_ptr<RequestBlockBuffer> released;
+    {
+        std::unique_lock<std::shared_mutex> lock(request_cache_map_mutex_);
+        auto                                it = request_cache_map_.find(requestid);
+        if (it != request_cache_map_.end()) {
+            // Never remove a legacy tombstone through the scoped cleanup API.
+            if (!it->second) {
+                return false;
+            }
+            released = std::move(it->second);
+            request_cache_map_.erase(it);
+        }
     }
-    RTP_LLM_LOG_INFO("reg user buffer count %d", buffers.size());
+    // The caller guarantees producer and RPC drain. Destruction releases all
+    // watchers outside the registry lock, without notifying or adding tombstones.
     return true;
 }
 
-std::shared_ptr<BlockBuffer> RequestBlockBufferStore::findUserBuffer(const std::string& key) {
-    std::shared_lock<std::shared_mutex> lock(buffer_map_mutex_);
-    auto                                it = buffer_map_.find(key);
-    if (it == buffer_map_.end()) {
-        RTP_LLM_LOG_INFO("find user buffer failed, key %s, current count %d", key.c_str(), buffer_map_.size());
-        return nullptr;
+bool RequestBlockBufferStore::regUserBuffers(const std::vector<std::shared_ptr<BlockBuffer>>& buffers) {
+    std::vector<std::shared_ptr<BlockBuffer>> replaced;
+    {
+        std::unique_lock<std::shared_mutex> lock(user_buffers_->mutex);
+        for (auto& buffer : buffers) {
+            auto& entry = user_buffers_->buffers[buffer->key];
+            replaced.push_back(std::move(entry));
+            entry = buffer;
+        }
     }
-    return it->second;
+    RTP_LLM_LOG_INFO("reg user buffer count %zu", buffers.size());
+    return true;
+}
+
+std::shared_ptr<UserBufferRegistration>
+RequestBlockBufferStore::regUserBuffersScoped(const std::vector<std::shared_ptr<BlockBuffer>>& buffers) {
+    // Freeze keys as well as owners: unregister must not follow mutable keys.
+    std::unordered_map<std::string, std::shared_ptr<BlockBuffer>> entries;
+    for (const auto& buffer : buffers) {
+        if (!buffer || buffer->key.empty() || !entries.emplace(buffer->key, buffer).second) {
+            return nullptr;
+        }
+    }
+    auto armed = std::make_shared<std::atomic<bool>>(false);
+    auto registration =
+        std::make_shared<UserBufferRegistration>([weak = std::weak_ptr<UserBuffers>(user_buffers_), entries, armed]() {
+            if (!armed->load()) {
+                return;
+            }
+            auto state = weak.lock();
+            if (!state) {
+                return;
+            }
+            std::unique_lock<std::shared_mutex> lock(state->mutex);
+            for (const auto& [key, owner] : entries) {
+                auto it = state->buffers.find(key);
+                if (it != state->buffers.end() && it->second == owner) {
+                    state->buffers.erase(it);
+                }
+            }
+            // entries retains removed owners until after the lock is released.
+        });
+    {
+        std::unique_lock<std::shared_mutex> lock(user_buffers_->mutex);
+        for (const auto& [key, owner] : entries) {
+            if (user_buffers_->buffers.count(key)) {
+                return nullptr;
+            }
+        }
+        user_buffers_->buffers.reserve(user_buffers_->buffers.size() + entries.size());
+        user_buffers_->buffers.merge(entries);
+        armed->store(true);
+    }
+    return registration;
+}
+
+std::shared_ptr<BlockBuffer> RequestBlockBufferStore::findUserBuffer(const std::string& key) {
+    std::shared_lock<std::shared_mutex> lock(user_buffers_->mutex);
+    auto                                it = user_buffers_->buffers.find(key);
+    return it == user_buffers_->buffers.end() ? nullptr : it->second;
 }
 
 }  // namespace rtp_llm

@@ -11,12 +11,11 @@ public:
     ~TcpServer();
 
 public:
-    bool init(uint32_t io_thread_count,
-              uint32_t worker_thread_count,
-              bool     enable_metric,
-              uint32_t worker_queue_size = 100);
+    bool
+    init(uint32_t io_thread_count, uint32_t worker_thread_count, bool enable_metric, uint32_t worker_queue_size = 100);
     bool registerService(RPCService* rpc_service);
     bool start(uint32_t listen_port);
+    bool start(uint32_t listen_port, const std::string& listen_address);
 
 private:
     void stop();

@@ -825,7 +825,7 @@ struct CrcCopyWorkspace::Impl {
     // One walk validates and builds the descriptors; the single packed upload
     // is separate from this pure CPU plan. Partial writes stay in private pinned
     // scratch; no rejected request has submitted asynchronous CUDA accesses.
-    std::optional<PreparedBatch> prepareBatch(const std::vector<CrcCopyItem>& batch) {
+    std::optional<PreparedBatch> prepareBatch(const std::vector<CrcCopyItem>& batch, bool store) {
         if (batch.empty() || batch.size() > max_items)
             return std::nullopt;
         PreparedBatch prepared;
@@ -842,7 +842,7 @@ struct CrcCopyWorkspace::Impl {
             if (item.capacity_bytes < encoded || address > std::numeric_limits<uintptr_t>::max() - encoded)
                 return std::nullopt;
             // Overlapping destinations can invalidate an earlier item's footer.
-            for (size_t previous = 0; previous < index; ++previous) {
+            for (size_t previous = 0; store && previous < index; ++previous) {
                 const uintptr_t other       = reinterpret_cast<uintptr_t>(batch[previous].host);
                 const size_t    other_bytes = CrcCopyWorkspace::encodedBytes(batch[previous].payload_bytes);
                 if (address < other + other_bytes && other < address + encoded)
@@ -1028,8 +1028,10 @@ struct CrcCopyWorkspace::Impl {
             return CrcCopyState::BUSY;
         std::optional<PreparedBatch> prepared;
         try {
-            prepared = prepareBatch(items);
-            if (!prepared || (operation != CrcCopyDirection::EVICT && operation != CrcCopyDirection::LOAD))
+            if (operation != CrcCopyDirection::EVICT && operation != CrcCopyDirection::LOAD)
+                return CrcCopyState::INVALID_ARGS;
+            prepared = prepareBatch(items, operation == CrcCopyDirection::EVICT);
+            if (!prepared)
                 return CrcCopyState::INVALID_ARGS;
             checkCuda(cudaSetDevice(device));
             if (!prepareHostAliases(items, require_pinned))

@@ -90,9 +90,13 @@ cc_library(
 cc_library(
     name = "profiling_scope",
     hdrs = [
+        "BackgroundProfilingScope.h",
         "ProfilingScope.h",
     ],
-    deps = torch_deps(),
+    deps = torch_deps() + select({
+        "//:using_cuda": ["@local_config_cuda//cuda:cuda_headers"],
+        "//conditions:default": [],
+    }),
     copts = copts(),
     visibility = ["//visibility:public"],
 )
@@ -289,5 +293,11 @@ cc_library(
         "//conditions:default": [],
     }),
     copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "crc32c",
+    hdrs = ["Crc32c.h"],
     visibility = ["//visibility:public"],
 )

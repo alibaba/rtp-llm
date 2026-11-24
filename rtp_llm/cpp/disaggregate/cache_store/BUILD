@@ -33,6 +33,7 @@ cc_library(
 interface_includes = [
     "CommonDefine.h",
     "CacheStore.h",
+    "UserBufferRegistration.h",
     "CacheStoreMetricsCollector.h",
     "MemoryUtil.h",
     "RequestBlockBuffer.h",
@@ -66,10 +67,11 @@ cc_library(
 
 cc_library(
     name = "cache_store_base",
-    srcs = glob(["*.cpp"], exclude = ["Impl.cpp"] + interface_sources),
-    hdrs = glob(["*.h"], exclude = interface_includes),
+    srcs = glob(["*.cpp"], exclude = ["Impl.cpp", "TcpClient.cpp", "TcpServer.cpp"] + interface_sources),
+    hdrs = glob(["*.h"], exclude = ["TcpClient.h", "TcpServer.h"] + interface_includes),
     deps = [
         ":cache_store_interface",
+        ":tcp_rpc_transport",
         "//rtp_llm/cpp/disaggregate/cache_store/proto:cache_store_service_cc_proto",
         "//rtp_llm/cpp/utils:device_pin",
         "//rtp_llm/models_py/bindings:no_block_copy_hdr",
@@ -80,4 +82,16 @@ cc_library(
     ] + no_block_copy_link_deps(),
     visibility=['//visibility:public'],
     alwayslink = True,
+)
+
+# The existing channel/server implementation is also usable by a CPU-only service.
+cc_library(
+    name = "tcp_rpc_transport",
+    srcs = ["TcpClient.cpp", "TcpServer.cpp"],
+    hdrs = ["TcpClient.h", "TcpServer.h"],
+    deps = [
+        ":arpc_dep",
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+    visibility = ["//visibility:public"],
 )

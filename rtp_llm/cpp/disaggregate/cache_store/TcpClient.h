@@ -2,9 +2,14 @@
 
 #include "aios/network/anet/transport.h"
 #include "aios/network/arpc/arpc/ANetRPCChannelManager.h"
-#include "rtp_llm/cpp/disaggregate/cache_store/TcpTransferConnection.h"
+#include <memory>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 
 namespace rtp_llm {
+
+class TransferConnection;
 
 class TcpClient {
 public:

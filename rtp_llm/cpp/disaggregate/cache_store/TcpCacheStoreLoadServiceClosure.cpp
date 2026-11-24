@@ -3,6 +3,8 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreDevicePin.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include <torch/torch.h>
+#include <cstring>
+#include <unordered_set>
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -46,16 +48,25 @@ void TcpCacheStoreLoadServiceClosure::Run() {
         return;
     }
 
-    for (int i = 0; i < response_->blocks_size(); i++) {
-        const auto& block        = response_->blocks(i);
-        auto        unload_block = request_block_buffer_->getBlock(block.key());
-
-        if (unload_block == nullptr || block.len() != unload_block->len) {
-            RTP_LLM_LOG_WARNING("can not find match block %s from response, request is %s",
+    // A malformed later block must not leave earlier destinations partly updated.
+    std::unordered_set<std::string> seen_keys;
+    for (const auto& block : response_->blocks()) {
+        auto unload_block = request_block_buffer_->getBlock(block.key());
+        if (block.key().empty() || !seen_keys.insert(block.key()).second || !unload_block
+            || block.len() != unload_block->len || block.content().size() != block.len()) {
+            RTP_LLM_LOG_WARNING("invalid block %s from response, request is %s",
                                 block.key().c_str(),
                                 request_block_buffer_->getRequestId().c_str());
             end(false, CacheStoreErrorCode::LoadBufferTimeout);
             return;
+        }
+    }
+
+    for (const auto& block : response_->blocks()) {
+        auto unload_block = request_block_buffer_->getBlock(block.key());
+        if (!unload_block->gpu_mem) {
+            std::memcpy(unload_block->addr.get(), block.content().data(), block.len());
+            continue;
         }
 
         auto dst_tensor = torch::from_blob(

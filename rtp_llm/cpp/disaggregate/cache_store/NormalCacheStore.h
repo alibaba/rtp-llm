@@ -46,13 +46,24 @@ public:
     storeBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
                  int64_t                                                 timeout_ms) override;
 
-    std::shared_ptr<RemoteStoreTask> submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>& request,
-                                                           const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>& collector,
-                                                           RemoteStoreTask::CheckCancelFunc check_cancel_func) override;
-    void                             releaseRemoteStoreTask(const std::shared_ptr<RemoteStoreTask>& task) override;
+    std::shared_ptr<RemoteStoreTask>
+    submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>&                    request,
+                          const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>& collector,
+                          RemoteStoreTask::CheckCancelFunc                              check_cancel_func) override;
+    std::shared_ptr<RemoteStoreTask>
+         submitRemoteStoreTaskWithCallbacks(const std::shared_ptr<RemoteStoreRequest>&                    request,
+                                            const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>& collector,
+                                            RemoteStoreTask::DoneCallback                                 done,
+                                            RemoteStoreTask::DrainedCallback                              drained,
+                                            RemoteStoreTask::CheckCancelFunc check_cancel_func = {});
+    void releaseRemoteStoreTask(const std::shared_ptr<RemoteStoreTask>& task) override;
 
     bool                         regUserBuffers(const std::vector<std::shared_ptr<BlockBuffer>>& buffers) override;
     std::shared_ptr<BlockBuffer> findUserBuffer(const std::string& buffer_key) override;
+
+    std::shared_ptr<UserBufferRegistration>
+         regUserBuffersScoped(const std::vector<std::shared_ptr<BlockBuffer>>& buffers) override;
+    bool releaseScopedRequest(const std::string& requestid) override;
 
     void markRequestEnd(const std::string& requestid);
 
@@ -62,6 +73,7 @@ public:
 
 private:
     bool init(const CacheStoreInitParams& params);
+    void dispatchReadyStoreTasks();
     void runStoreTask(const std::shared_ptr<RequestBlockBuffer>&              value,
                       CacheStoreStoreDoneCallback                             callback,
                       const std::shared_ptr<CacheStoreStoreMetricsCollector>& collector);
@@ -90,7 +102,9 @@ private:
     std::shared_mutex                                                                remote_store_tasks_mutex_;
     std::unordered_map<std::string, std::list<std::shared_ptr<RemoteStoreTaskImpl>>> remote_store_tasks_;
     std::shared_mutex                                                                store_tasks_mutex_;
-    std::unordered_map<std::shared_ptr<RequestBlockBuffer>, std::pair<CacheStoreStoreDoneCallback, std::function<void()>>> store_tasks_;
+    std::unordered_map<std::shared_ptr<RequestBlockBuffer>,
+                       std::pair<CacheStoreStoreDoneCallback, std::function<void()>>>
+        store_tasks_;
 };
 
 }  // namespace rtp_llm
