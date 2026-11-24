@@ -1,5 +1,5 @@
 #pragma once
-// Single-host prepare/commit scheduler for the opt-in global cadence mode.
+// Prepare/commit scheduler for the opt-in global cadence mode.
 #include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/PDFusionScheduleCoordinator.h"
 #include <unordered_map>
@@ -72,10 +72,11 @@ private:
     int                                          rank_, rank_count_, mtp_tokens_, timeout_ms_;
     int64_t                                      decode_steps_;
     std::unique_ptr<PDFusionScheduleCoordinator> coordinator_;
+    PDFusionScheduleCoordinator::AllGather       all_gather_;
     PDFusionCadenceConfig                        cadence_config_;
     PDFusionGlobalCadence                        cadence_;
     const int64_t                                max_context_batch_size_;
-    std::array<PDFusionPreparedState, 4>         final_commits_{};
+    PDFusionRankStates                           final_commits_{};
     int64_t                                      epoch_ = 0, prepared_epoch_ = 0, committed_epoch_ = 0;
     bool                                         model_completed_  = true;
     PDFusionPlan                                 plan_             = PDFusionPlan::IDLE;

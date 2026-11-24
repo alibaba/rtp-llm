@@ -83,7 +83,7 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         bind_to=[(fifo_scheduler_config, "pdfusion_coord_mode")],
         choices=["off", "cadence"],
         default="off",
-        help="Opt-in single-host TP1/DP2/EP2 or TP1/DP4/EP4 global cadence; unsupported modes are rejected.",
+        help="Opt-in global cadence with TP1, PP1 and DP=EP in {2,4,8,16,32}. Supports multiple hosts.",
     )
     fifo_scheduler_group.add_argument(
         "--pdfusion_coord_timeout_ms",

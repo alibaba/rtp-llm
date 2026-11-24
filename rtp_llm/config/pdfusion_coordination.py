@@ -1,6 +1,7 @@
 import logging
 import os
 import uuid
+from datetime import timedelta
 
 
 def initialize_pdfusion_coordination(py_env_configs) -> None:
@@ -19,4 +20,37 @@ def initialize_pdfusion_coordination(py_env_configs) -> None:
     # Even if the same config is reused, a new launch must not join an old group.
     # Pass this field through the existing config pickle, never per-rank env/PIDs.
     config.pdfusion_coord_group_id = uuid.uuid4().hex
-    logging.info("PDFUSION_COORD_BOOTSTRAP group=%s", config.pdfusion_coord_group_id)
+    parallel = py_env_configs.parallelism_config
+    if parallel.local_world_size >= parallel.world_size:
+        logging.info(
+            "PDFUSION_COORD_BOOTSTRAP group=%s", config.pdfusion_coord_group_id
+        )
+
+
+def initialize_pdfusion_control_group(py_env_configs) -> None:
+    """Share the launch identity over a dedicated CPU group on multi-host runs."""
+    config = py_env_configs.runtime_config.fifo_scheduler_config
+    parallel = py_env_configs.parallelism_config
+    if (
+        not config.pdfusion_coord_group_id
+        or parallel.local_world_size >= parallel.world_size
+    ):
+        return
+
+    import torch
+    import torch.distributed as dist
+
+    group = dist.new_group(backend="gloo", timeout=timedelta(minutes=5))
+    identity = torch.empty(16, dtype=torch.uint8, device="cpu")
+    if parallel.world_rank == 0:
+        identity[:] = torch.tensor(
+            list(bytes.fromhex(config.pdfusion_coord_group_id)),
+            dtype=torch.uint8,
+            device="cpu",
+        )
+    dist.broadcast(identity, src=0, group=group)
+    group_id = bytes(identity.tolist()).hex()
+    config.pdfusion_coord_group_id = group_id
+    torch._C._distributed_c10d._register_process_group(group_id, group)
+    if parallel.world_rank == 0:
+        logging.info("PDFUSION_COORD_BOOTSTRAP group=%s", group_id)

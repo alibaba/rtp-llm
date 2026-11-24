@@ -1,10 +1,15 @@
 import multiprocessing
 import os
+import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from rtp_llm.config.pdfusion_coordination import initialize_pdfusion_coordination
+from rtp_llm.config.pdfusion_coordination import (
+    initialize_pdfusion_control_group,
+    initialize_pdfusion_coordination,
+)
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 
 
@@ -20,6 +25,26 @@ def report_identity(config, writer):
         )
     finally:
         writer.close()
+
+
+def report_distributed_identity(path, rank, writer):
+    import torch.distributed as dist
+
+    config = PyEnvConfigs()
+    config.parallelism_config.world_size = 2
+    config.parallelism_config.local_world_size = 1
+    config.parallelism_config.world_rank = rank
+    fifo = config.runtime_config.fifo_scheduler_config
+    fifo.pdfusion_coord_mode = "cadence"
+    initialize_pdfusion_coordination(config)
+    before = fifo.pdfusion_coord_group_id
+    dist.init_process_group("gloo", init_method=path, rank=rank, world_size=2)
+    try:
+        initialize_pdfusion_control_group(config)
+        writer.send((before, fifo.pdfusion_coord_group_id))
+    finally:
+        writer.close()
+        dist.destroy_process_group()
 
 
 class PDFusionCoordinationStartupTest(unittest.TestCase):
@@ -103,6 +128,41 @@ class PDFusionCoordinationStartupTest(unittest.TestCase):
                             if process.is_alive():
                                 process.kill()
                             process.join()
+
+    def test_multihost_ranks_adopt_leaders_identity(self):
+        import torch.distributed as dist
+
+        if not dist.is_gloo_available():
+            self.skipTest("PyTorch Gloo is unavailable")
+        ctx = multiprocessing.get_context("spawn")
+        children = []
+        with tempfile.TemporaryDirectory() as directory:
+            uri = (Path(directory) / "store").as_uri()
+            try:
+                for rank in range(2):
+                    reader, writer = ctx.Pipe(duplex=False)
+                    proc = ctx.Process(
+                        target=report_distributed_identity, args=(uri, rank, writer)
+                    )
+                    proc.start()
+                    writer.close()
+                    children.append((proc, reader))
+                identities = []
+                for proc, reader in children:
+                    self.assertTrue(reader.poll(60))
+                    identities.append(reader.recv())
+                    proc.join(10)
+                    self.assertEqual(proc.exitcode, 0)
+                (leader, shared_leader), (peer, shared_peer) = identities
+                self.assertNotEqual(leader, peer)
+                self.assertEqual(leader, shared_leader)
+                self.assertEqual(leader, shared_peer)
+            finally:
+                for proc, reader in children:
+                    reader.close()
+                    if proc.is_alive():
+                        proc.kill()
+                    proc.join()
 
 
 if __name__ == "__main__":

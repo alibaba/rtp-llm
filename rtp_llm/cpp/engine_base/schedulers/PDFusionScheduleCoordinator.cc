@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <thread>
+#include <utility>
 #include <unistd.h>
 namespace rtp_llm {
 namespace {
@@ -21,6 +22,10 @@ int64_t monotonicMs() {
     throw std::runtime_error("PDFUSION_COORD group failure: " + reason);
 }
 }  // namespace
+bool isPDFusionCadenceRankCount(int64_t rank_count) {
+    return rank_count >= 2 && rank_count <= kPDFusionMaxRanks && (rank_count & (rank_count - 1)) == 0;
+}
+
 PDFusionCadenceConfig PDFusionCadenceConfig::fromEnv() {
     auto read = [](const char* name, int64_t fallback) {
         const auto* value = std::getenv(name);
@@ -91,14 +96,14 @@ PDFusionGlobalCadence::PDFusionGlobalCadence(int64_t decode_steps, int rank_coun
     rank_count_(rank_count),
     config_(config) {
     config_.validate();
-    if (rank_count < 1 || rank_count > 4) {
+    if (rank_count < 1 || rank_count > kPDFusionMaxRanks) {
         fail("invalid cadence rank count");
     }
     if (decode_steps_ < 1 || decode_steps_ > 1000000) {
         fail("cadence must be in [1,1000000]");
     }
 }
-PDFusionPlan PDFusionGlobalCadence::choose(const std::array<PDFusionPreparedState, 4>& states) {
+PDFusionPlan PDFusionGlobalCadence::choose(const PDFusionRankStates& states) {
     decision_                            = {};
     decision_.debt_before_scaled         = decode_debt_scaled_;
     decision_.admit_before               = prefillAdmissionAllowed();
@@ -114,7 +119,7 @@ PDFusionPlan PDFusionGlobalCadence::choose(const std::array<PDFusionPreparedStat
             fail("invalid draining state");
         }
         if (state.draining) {
-            decision_.drain_mask |= 1 << rank;
+            decision_.drain_mask |= int64_t{1} << rank;
         }
         if (state.last_model_us < 0 || state.last_model_us > 600000000) {
             fail("invalid completed model duration");
@@ -123,7 +128,7 @@ PDFusionPlan PDFusionGlobalCadence::choose(const std::array<PDFusionPreparedStat
         prefill |= state.ready_prefill > 0;
         decode |= state.ready_decode > 0;
         if (state.ready_prefill > 0) {
-            ready_mask |= 1 << rank;
+            ready_mask |= int64_t{1} << rank;
             oldest_ready_us = std::max(oldest_ready_us, state.oldest_ready_us);
         }
         if (config_.adaptive) {
@@ -138,7 +143,7 @@ PDFusionPlan PDFusionGlobalCadence::choose(const std::array<PDFusionPreparedStat
             // Exact floor(peak * pct / 100), without overflowing the product.
             const auto low_water = (peak / 100) * config_.low_water_pct + (peak % 100) * config_.low_water_pct / 100;
             if (state.ready_decode == 0 || state.ready_decode <= low_water) {
-                decision_.low_decode_mask |= 1 << rank;
+                decision_.low_decode_mask |= int64_t{1} << rank;
             }
         }
     }
@@ -171,7 +176,7 @@ PDFusionPlan PDFusionGlobalCadence::choose(const std::array<PDFusionPreparedStat
         decision_.debt_after_scaled         = decode_debt_scaled_;
         decision_.admit_credit_after_scaled = admission_credit_scaled_;
         decision_.decode_debt_us = std::max<int64_t>(0, decode_debt_scaled_) / (100 - config_.min_decode_share_pct);
-        if (ready_mask == (1 << rank_count_) - 1) {
+        if (ready_mask == (int64_t{1} << rank_count_) - 1) {
             decision_.reason = "all_ready";
             return PDFusionPlan::PREFILL;
         }
@@ -197,9 +202,9 @@ PDFusionPlan PDFusionGlobalCadence::choose(const std::array<PDFusionPreparedStat
     decision_.reason = decode ? "ratio" : "idle";
     return decode ? PDFusionPlan::DECODE : PDFusionPlan::IDLE;
 }
-void PDFusionGlobalCadence::finish(PDFusionPlan plan, const std::array<PDFusionPreparedState, 4>& committed) {
+void PDFusionGlobalCadence::finish(PDFusionPlan plan, const PDFusionRankStates& committed) {
     int64_t                total = 0;
-    std::array<int64_t, 4> sample{};
+    std::array<int64_t, kPDFusionMaxRanks> sample{};
     for (int rank = 0; rank < rank_count_; ++rank) {
         const auto& state = committed[rank];
         if (state.ready_prefill < 0 || state.ready_decode < 0 || (plan != PDFusionPlan::PREFILL && state.ready_prefill)
@@ -338,16 +343,19 @@ PDFusionScheduleCoordinator::PDFusionScheduleCoordinator(std::string           g
                                                          int                   startup_timeout_ms,
                                                          int                   rank_count,
                                                          int                   mtp_tokens,
-                                                         PDFusionCadenceConfig cadence_config):
+                                                         PDFusionCadenceConfig cadence_config,
+                                                         AllGather             all_gather):
     group_id_(std::move(group_id)),
     rank_(rank),
     rank_count_(rank_count),
     mtp_tokens_(mtp_tokens),
     decode_steps_(cadence_config.adaptive ? 1 : decode_steps),
     cadence_config_(cadence_config),
-    timeout_ms_(timeout_ms) {
+    timeout_ms_(timeout_ms),
+    all_gather_(std::move(all_gather)) {
+    sockets_.fill(-1);
     cadence_config_.validate();
-    if ((rank_count != 2 && rank_count != 4) || rank < 0 || rank >= rank_count || mtp_tokens < 0 || mtp_tokens > 4
+    if (!isPDFusionCadenceRankCount(rank_count) || rank < 0 || rank >= rank_count || mtp_tokens < 0 || mtp_tokens > 4
         || group_id_.empty() || group_id_.size() > 63
         || group_id_.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.")
                != std::string::npos
@@ -356,7 +364,16 @@ PDFusionScheduleCoordinator::PDFusionScheduleCoordinator(std::string           g
         fail("invalid channel configuration");
     }
     try {
-        connectGroup(startup_timeout_ms);
+        if (all_gather_) {
+            auto    hello = packet(0, 0, {});
+            Packets peers{};
+            all_gather_(&hello, peers.data(), sizeof(Packet), startup_timeout_ms);
+            for (int rank = 0; rank < rank_count_; ++rank) {
+                validate(peers[rank], rank, 0, 0);
+            }
+        } else {
+            connectGroup(startup_timeout_ms);
+        }
     } catch (...) {
         abort();
         throw;
@@ -447,7 +464,7 @@ void PDFusionScheduleCoordinator::connectGroup(int startup_timeout_ms) {
         validate(ack, 0, 0, 0);
     }
 }
-std::array<PDFusionPreparedState, 4>
+PDFusionRankStates
 PDFusionScheduleCoordinator::exchange(int64_t epoch, Phase phase, const PDFusionPreparedState& state) {
     try {
         const int64_t expected_epoch = next_phase_ == Phase::PREPARE ? last_epoch_ + 1 : last_epoch_;
@@ -455,22 +472,26 @@ PDFusionScheduleCoordinator::exchange(int64_t epoch, Phase phase, const PDFusion
             fail("local control sequence mismatch");
         }
         const auto deadline = deadlineAfter(timeout_ms_);
+        const auto bytes    = sizeof(Packet) * rank_count_;
+        auto       local    = packet(epoch, static_cast<int64_t>(phase), state);
         Packets    messages{};
-        messages[rank_] = packet(epoch, static_cast<int64_t>(phase), state);
-        validate(messages[rank_], rank_, epoch, static_cast<int64_t>(phase));
-        if (rank_ == 0) {
+        validate(local, rank_, epoch, static_cast<int64_t>(phase));
+        if (all_gather_) {
+            all_gather_(&local, messages.data(), sizeof(Packet), timeout_ms_);
+        } else if (rank_ == 0) {
+            messages[0] = local;
             for (int rank = 1; rank < rank_count_; ++rank) {
                 receivePacket(sockets_[rank], &messages[rank], sizeof(Packet), deadline);
                 validate(messages[rank], rank, epoch, static_cast<int64_t>(phase));
             }
             for (int rank = 1; rank < rank_count_; ++rank) {
-                sendPacket(sockets_[rank], &messages, sizeof(messages), deadline);
+                sendPacket(sockets_[rank], messages.data(), bytes, deadline);
             }
         } else {
-            sendPacket(sockets_[0], &messages[rank_], sizeof(Packet), deadline);
-            receivePacket(sockets_[0], &messages, sizeof(messages), deadline);
+            sendPacket(sockets_[0], &local, sizeof(Packet), deadline);
+            receivePacket(sockets_[0], messages.data(), bytes, deadline);
         }
-        std::array<PDFusionPreparedState, 4> result{};
+        PDFusionRankStates result{};
         for (int rank = 0; rank < rank_count_; ++rank) {
             validate(messages[rank], rank, epoch, static_cast<int64_t>(phase));
             if (messages[rank].state.stopped) {

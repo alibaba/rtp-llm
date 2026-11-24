@@ -9,7 +9,13 @@
 #include <stdexcept>
 #include <thread>
 #include <unordered_set>
+#include <utility>
 #include <unistd.h>
+#if __has_include(<torch/csrc/distributed/c10d/GroupRegistry.hpp>)
+#include <ATen/ops/from_blob.h>
+#include <torch/csrc/distributed/c10d/GroupRegistry.hpp>
+#include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
+#endif
 namespace rtp_llm {
 namespace {
 int64_t nowUs() {
@@ -24,6 +30,23 @@ RuntimeConfig schedulerRuntime(const RuntimeConfig& runtime, const PDFusionCaden
     }
     return effective;
 }
+#if __has_include(<torch/csrc/distributed/c10d/GroupRegistry.hpp>)
+PDFusionScheduleCoordinator::AllGather cadenceAllGather(const std::string& group_id, int rank, int rank_count) {
+    auto group = c10d::resolve_process_group(group_id);
+    if (group->getRank() != rank || group->getSize() != rank_count) {
+        throw std::invalid_argument("cadence control group does not match DP ranks");
+    }
+    return [group = std::move(group), rank_count](void* input, void* output, size_t bytes, int timeout_ms) {
+        const auto             count   = static_cast<int64_t>(bytes);
+        const auto             options = at::TensorOptions().dtype(at::kByte).device(at::kCPU);
+        auto                   send    = at::from_blob(input, {count}, options);
+        auto                   recv    = at::from_blob(output, {rank_count * count}, options);
+        c10d::AllgatherOptions gather_options;
+        gather_options.timeout = std::chrono::milliseconds(timeout_ms);
+        group->_allgather_base(recv, send, gather_options)->wait();
+    };
+}
+#endif
 }  // namespace
 PDFusionCoordinatedScheduler::PDFusionCoordinatedScheduler(const RuntimeConfig&                   runtime,
                                                            const ModelConfig&                     model,
@@ -49,6 +72,13 @@ PDFusionCoordinatedScheduler::PDFusionCoordinatedScheduler(const RuntimeConfig& 
     }
     if (group_id_.empty()) {
         throw std::invalid_argument("global cadence requires an initialized control group");
+    }
+    if (parallel.local_world_size < parallel.world_size) {
+#if __has_include(<torch/csrc/distributed/c10d/GroupRegistry.hpp>)
+        all_gather_ = cadenceAllGather(group_id_, rank_, rank_count_);
+#else
+        throw std::invalid_argument("multi-host cadence requires PyTorch process group registration support");
+#endif
     }
     if (max_context_batch_size_ < 1 || (!cadence_config_.adaptive && max_context_batch_size_ != 1)) {
         throw std::invalid_argument("adaptive cadence requires context batch limit >=1; legacy cadence requires 1");
@@ -313,8 +343,15 @@ absl::StatusOr<ScheduleOutput> PDFusionCoordinatedScheduler::schedule() {
     try {
         // First connection happens on the engine loop, after normal warmup/capture.
         if (!coordinator_) {
-            coordinator_ = std::make_unique<PDFusionScheduleCoordinator>(
-                group_id_, rank_, decode_steps_, timeout_ms_, 300000, rank_count_, mtp_tokens_, cadence_config_);
+            coordinator_ = std::make_unique<PDFusionScheduleCoordinator>(group_id_,
+                                                                         rank_,
+                                                                         decode_steps_,
+                                                                         timeout_ms_,
+                                                                         300000,
+                                                                         rank_count_,
+                                                                         mtp_tokens_,
+                                                                         cadence_config_,
+                                                                         std::move(all_gather_));
         }
         ++epoch_;
         const auto begin    = nowUs();
@@ -341,7 +378,7 @@ absl::StatusOr<ScheduleOutput> PDFusionCoordinatedScheduler::schedule() {
         commit_mask_          = 0;
         for (int rank = 0; rank < rank_count_; ++rank) {
             if (states[rank].ready_prefill) {
-                ready_mask_ |= 1 << rank;
+                ready_mask_ |= int64_t{1} << rank;
             }
             const auto count = commits[rank].ready_prefill + commits[rank].ready_decode;
             if (commits[rank].ready_prefill > states[rank].ready_prefill
@@ -351,7 +388,7 @@ absl::StatusOr<ScheduleOutput> PDFusionCoordinatedScheduler::schedule() {
                 throw std::logic_error("commit exceeds prepared plan");
             }
             if (count) {
-                commit_mask_ |= 1 << rank;
+                commit_mask_ |= int64_t{1} << rank;
             }
             final_real_count_ += count;
         }
