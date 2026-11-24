@@ -939,7 +939,7 @@ grpc::Status LocalRpcServer::generateLocalBatch(grpc::ServerContext*        cont
                 const auto i         = active_indices[j];
                 enqueue_successes[i] = enqueue_result.first[j];
                 streams[i]           = enqueue_result.second[j];
-                if (cancel_handles[i] && streams[i]) {
+                if (enqueue_successes[i] && cancel_handles[i] && streams[i]) {
                     meta_->enqueue(cancel_handles[i]->identity, streams[i]);
                     cancel_registry->attach(cancel_handles[i], streams[i]);
                 }
