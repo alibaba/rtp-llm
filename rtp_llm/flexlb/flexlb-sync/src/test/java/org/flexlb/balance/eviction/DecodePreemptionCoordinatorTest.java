@@ -11,6 +11,7 @@ import org.flexlb.enums.DecodeTaskPhase;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Optional;
@@ -110,6 +111,68 @@ class DecodePreemptionCoordinatorTest {
         terminal.complete(new VictimTerminal(11L));
         assertSame(timedOut, outcome.join());
         verify(fixture.endpoint(), never()).finishPreemption(anyLong(), eq(DecodeEndpoint.PreemptionDecision.COMMIT));
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {0L, 102L})
+    void dispatchRetriesWhenVictimFinishesOrRequestIdIsReusedBeforeCancel(long replacementToken) {
+        Fixture fixture = fixture();
+        when(fixture.requests().findCancelTarget(11L, 101L)).thenReturn(Optional.empty());
+        if (replacementToken != 0L) {
+            when(fixture.endpoint().reservationHandle(11L)).thenReturn(
+                    new DecodeEndpoint.ReservationHandle(9L, 11L, replacementToken));
+        }
+        EngineCancelChannel channel = mock(EngineCancelChannel.class);
+        var result = new DecodePreemptionCoordinator(channel, fixture.requests())
+                .preemptForDispatch(singleVictim(fixture)).join();
+
+        assertFalse(result.committed());
+        assertFalse(result.controlFailure());
+        verify(channel, never()).cancel(any(), anyLong(), anyLong());
+        verify(fixture.requests(), never()).tryClaim(anyLong(), anyLong(), anyLong(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void missingControlTargetFailsDispatchWhenTheExactVictimStillExists(boolean engineConfirmed) {
+        Fixture fixture = fixture();
+        var reservation = new DecodeEndpoint.ReservationHandle(9L, 11L, 101L);
+        when(fixture.requests().findCancelTarget(11L, 101L)).thenReturn(Optional.empty());
+        if (engineConfirmed) {
+            when(fixture.endpoint().isAcceptedByEngine(reservation)).thenReturn(true);
+        } else {
+            when(fixture.endpoint().reservationHandle(11L)).thenReturn(reservation);
+        }
+        EngineCancelChannel channel = mock(EngineCancelChannel.class);
+        var result = new DecodePreemptionCoordinator(channel, fixture.requests())
+                .preemptForDispatch(singleVictim(fixture)).join();
+
+        assertTrue(result.controlFailure());
+        assertEquals("cancel_owner_missing:11", result.detail());
+        verify(channel, never()).cancel(any(), anyLong(), anyLong());
+    }
+
+    @Test
+    void dispatchReleasesVictimClaimAndRetriesIfGenerationRetiresBeforeCancel() {
+        Fixture fixture = fixture();
+        PreemptionRegistration victimClaim = claim(11L, new CompletableFuture<>());
+        when(fixture.requests().tryClaim(anyLong(), anyLong(), anyLong(), any())).thenReturn(Optional.of(victimClaim));
+        when(fixture.endpoint().beginPreemption(anyLong(), anyList(), anyLong(), anyLong(), anyLong(),
+                anyInt(), any())).thenReturn(DecodeEndpoint.PreemptionBeginResult.ENDPOINT_RETIRED);
+        EngineCancelChannel channel = mock(EngineCancelChannel.class);
+        var result = new DecodePreemptionCoordinator(channel, fixture.requests())
+                .preemptForDispatch(singleVictim(fixture)).join();
+
+        assertFalse(result.committed());
+        assertFalse(result.controlFailure());
+        verify(victimClaim).release();
+        verify(channel, never()).cancel(any(), anyLong(), anyLong());
+    }
+
+    private static DecodePreemptionCoordinator.PreemptionCommand singleVictim(Fixture fixture) {
+        return new DecodePreemptionCoordinator.PreemptionCommand(
+                fixture.endpoint(), 20L, 64L, 64L, 70, new DecodeEndpoint.AdmissionCapacity(1L, 100L),
+                List.of(victim(11L, 101L)), 1_000L, 1_000L, () -> true, "test");
     }
 
     private static Fixture fixture() {

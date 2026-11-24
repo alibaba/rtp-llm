@@ -1,6 +1,7 @@
 package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityRelease;
 import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRoutingView;
@@ -19,6 +20,8 @@ import org.flexlb.util.PriorityNormalizer;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 
@@ -32,6 +35,22 @@ public class DecodeSelector {
 
     public DecodeSelector(WorkerDirectory workerDirectory) {
         this.workerDirectory = workerDirectory;
+    }
+
+    /** At queue placement only permanent per-request incompatibility can reject a request. */
+    public Response validateDemand(DecodeBinding request, String group) {
+        return validateDemand(request, workerDirectory.decodeRoutingSnapshot(group));
+    }
+
+    private static Response validateDemand(DecodeBinding request, List<DecodeRoutingView> workers) {
+        long largestBudget = 0L;
+        for (DecodeRoutingView worker : workers) {
+            if (worker.totalKv() <= 0L) { return null; }
+            long budget = request.capacity().kvBudget(worker.totalKv());
+            if (request.expectedKvTokens() <= budget) { return null; }
+            largestBudget = Math.max(largestBudget, budget);
+        }
+        return workers.isEmpty() ? null : oversizedRequestFailure(request.expectedKvTokens(), largestBudget);
     }
 
     public PlacementResult<SelectedRole, RoleType> select(
@@ -98,6 +117,85 @@ public class DecodeSelector {
         return PlacementResult.blocked(RoleType.DECODE);
     }
 
+    /** A decision-time claim. Both the reservation and permit belong to the accepting transaction. */
+    public record Dispatch(ServerStatus status, DecodeEndpoint endpoint,
+                           DecodeEndpoint.ReservationHandle reservation, DecodeEndpoint.EngineDispatchPermit permit) { }
+
+    /** Try every eligible candidate at most once; a lost race on one worker cannot strand an idle peer. */
+    public CapacityBoundary.Attempt<Dispatch> tryDispatch(DecodeBinding request, String group, boolean allowsEnginePreemption) {
+        // Capture before the snapshot. Capacity may return between the failed attempt and listener installation.
+        int preemptionPriority = allowsEnginePreemption ? request.priority() : PriorityNormalizer.NO_PRIORITY;
+        var changes = workerDirectory.observeDecodeCapacity(group, preemptionPriority);
+        List<DecodeRoutingView> workers = workerDirectory.decodeRoutingSnapshot(group);
+        Response incompatible = validateDemand(request, workers);
+        if (incompatible != null) {
+            return CapacityBoundary.Attempt.rejected(CapacityBoundary.failed(
+                    new IllegalStateException(incompatible.getErrorMessage())));
+        }
+        double[] costs = new double[workers.size()];
+        Arrays.fill(costs, Double.POSITIVE_INFINITY);
+        boolean hasReady = false;
+        for (int i = 0; i < workers.size(); i++) {
+            DecodeRoutingView worker = workers.get(i);
+            if (availability(request, worker) == Availability.READY) {
+                hasReady = true;
+                double cost = dispatchCost(request, worker);
+                if (Double.isFinite(cost)) { costs[i] = cost; }
+            }
+        }
+        double minimum = Arrays.stream(costs).min().orElse(Double.POSITIVE_INFINITY);
+        if (hasReady && !Double.isFinite(minimum)) {
+            throw new IllegalStateException("Decode cost formula produced no finite score: "
+                    + request.costFormula().expression());
+        }
+        while (Double.isFinite(minimum)) {
+            double candidateCost = minimum;
+            int index = rotation.next(RoleType.DECODE, group, workers.size(), i -> costs[i] == candidateCost,
+                    i -> workers.get(i).address());
+            DecodeRoutingView selected = workers.get(index);
+            try (var pin = workerDirectory.captureDecodeGeneration(selected)) {
+                if (pin != null) {
+                    DecodeEndpoint endpoint = (DecodeEndpoint) pin.endpoint();
+                    ServerStatus status = serverStatus(selected, request.requestId());
+                    var permit = endpoint.reserveForDispatch(pin, request.requestId(), request.hardKvTokens(),
+                            request.expectedKvTokens(), request.priority(), request.capacity());
+                    if (permit != null) {
+                        return CapacityBoundary.Attempt.accepted(new Dispatch(status, endpoint, permit.reservation(), permit));
+                    }
+                }
+            }
+            costs[index] = Double.POSITIVE_INFINITY;
+            minimum = Arrays.stream(costs).min().orElse(Double.POSITIVE_INFINITY);
+        }
+        return CapacityBoundary.Attempt.rejected(CapacityBoundary.deliveryUnavailable(changes));
+    }
+
+    public boolean hasDispatchCapacity(DecodeBinding request, String group) {
+        return workerDirectory.decodeRoutingSnapshot(group).stream()
+                .anyMatch(worker -> availability(request, worker) == Availability.READY);
+    }
+
+    /** The eviction transaction revalidates the exact returned generation before touching victims. */
+    public List<DecodeEndpoint> preemptionCandidates(DecodeBinding request, String group) {
+        var busy = workerDirectory.decodeRoutingSnapshot(group).stream()
+                .filter(worker -> availability(request, worker) == Availability.BUSY)
+                .sorted(Comparator.comparingDouble((DecodeRoutingView worker) -> dispatchCost(request, worker))
+                        .thenComparing(DecodeRoutingView::address))
+                .toList();
+        List<DecodeEndpoint> candidates = new ArrayList<>(busy.size());
+        for (var worker : busy) {
+            try (var pin = workerDirectory.captureDecodeGeneration(worker)) {
+                if (pin != null) { candidates.add((DecodeEndpoint) pin.endpoint()); }
+            }
+        }
+        return candidates;
+    }
+
+    private static double dispatchCost(DecodeBinding request, DecodeRoutingView worker) {
+        return request.costFormula().evaluate(worker.engineCapacityUsed(),
+                request.capacity().maxEngineRequests(), worker.engineFacingKvUsed(), worker.totalKv());
+    }
+
     private PlacementResult<SelectedRole, RoleType> classifyCapacityFailure(
             DecodeBinding request, List<DecodeRoutingView> views) {
         Response failure = null;
@@ -112,7 +210,7 @@ public class DecodeSelector {
                     var snapshot = ((DecodeEndpoint) pin.endpoint()).admissionSummary();
                     evidence.add(Map.of("endpoint", view.address(), "version", snapshot.routing().admissionVersion(),
                             "engineLoad", snapshot.routing().engineLoad(), "totalLoad", snapshot.routing().totalLoad(),
-                            "kvTotal", snapshot.routing().totalKv(), "kvAvailable", snapshot.routing().placementUsage().hardKvAvailable()));
+                            "kvTotal", snapshot.routing().totalKv(), "kvAvailable", snapshot.routing().dispatchUsage().hardKvAvailable()));
                     workerFailure = classifyCapacityFailure(request, snapshot);
                 }
             }
@@ -135,9 +233,8 @@ public class DecodeSelector {
 
     /** Classify only the dimensions that prevent this request from fitting. */
     static Response classifyCapacityFailure(DecodeBinding request, DecodeEndpoint.AdmissionSummary snapshot) {
-        boolean dispatch = request.mode() == DecodeMode.IMMEDIATE;
         var routing = snapshot.routing();
-        var usage = dispatch ? routing.dispatchUsage() : routing.placementUsage();
+        var usage = routing.dispatchUsage();
         if (usage.totalKvTokens() > 0
                 && request.expectedKvTokens() > request.capacity().kvBudget(usage.totalKvTokens())) {
             return Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
@@ -146,7 +243,7 @@ public class DecodeSelector {
         CapacityRelease higher = CapacityRelease.NONE;
         CapacityRelease same = CapacityRelease.NONE;
         for (int priority = 1; priority <= PriorityNormalizer.MAX_PRIORITY; priority++) {
-            CapacityRelease occupied = dispatch ? snapshot.engineOccupancy(priority) : snapshot.placementOccupancy(priority);
+            CapacityRelease occupied = snapshot.engineOccupancy(priority);
             if (occupied == CapacityRelease.NONE) { continue; }
             if (priority < request.priority()) {
                 lower = lower.plus(occupied);
@@ -179,11 +276,7 @@ public class DecodeSelector {
         if (view.totalKv() > 0L && request.expectedKvTokens() > request.capacity().kvBudget(view.totalKv())) {
             return Availability.IMPOSSIBLE;
         }
-        var usage = switch (request.mode()) {
-            case IMMEDIATE -> view.dispatchUsage();
-            case WAIT_AT_PLACEMENT, PREEMPT_AT_PLACEMENT -> view.placementUsage();
-        };
-        return request.capacity().evaluate(usage, request.hardKvTokens(), request.expectedKvTokens()).fits()
+        return request.capacity().evaluate(view.dispatchUsage(), request.hardKvTokens(), request.expectedKvTokens()).fits()
                 ? Availability.READY : Availability.BUSY;
     }
 
@@ -204,19 +297,7 @@ public class DecodeSelector {
                 throw new IllegalStateException(
                         "Decode snapshot pin changed before selection handoff");
             }
-            WorkerStatus.TopologySnapshot topology = selected.topology();
-            WorkerStatus.EngineObservation status =
-                    selected.workerStatus().fields();
-            ServerStatus result = new ServerStatus();
-            result.setSuccess(true);
-            result.setRole(RoleType.DECODE);
-            result.setServerIp(topology.ip());
-            result.setHttpPort(topology.port());
-            result.setGrpcPort(CommonUtils.toGrpcPort(topology.port()));
-            result.setDpRank(status.dpRank());
-            result.setGroup(topology.group());
-            result.setRequestId(requestId);
-
+            ServerStatus result = serverStatus(selected, requestId);
             // SelectedRole consumes the pin even if its validation rejects.
             WorkerEndpoint.GenerationPin factoryPin = selectedPin;
             selectedPin = null;
@@ -229,4 +310,19 @@ public class DecodeSelector {
         }
     }
 
+    private static ServerStatus serverStatus(DecodeRoutingView selected, long requestId) {
+        WorkerStatus.TopologySnapshot topology = selected.topology();
+        WorkerStatus.EngineObservation status =
+                selected.workerStatus().fields();
+        ServerStatus result = new ServerStatus();
+        result.setSuccess(true);
+        result.setRole(RoleType.DECODE);
+        result.setServerIp(topology.ip());
+        result.setHttpPort(topology.port());
+        result.setGrpcPort(CommonUtils.toGrpcPort(topology.port()));
+        result.setDpRank(status.dpRank());
+        result.setGroup(topology.group());
+        result.setRequestId(requestId);
+        return result;
+    }
 }

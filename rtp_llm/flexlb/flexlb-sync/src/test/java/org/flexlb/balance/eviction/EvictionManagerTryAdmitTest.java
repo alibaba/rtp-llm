@@ -100,7 +100,7 @@ class EvictionManagerTryAdmitTest {
         when(view.routing()).thenReturn(routing);
         when(view.reserved()).thenReturn(Map.of());
         when(view.confirmed()).thenReturn(List.of(victim));
-        when(routing.placementUsage()).thenReturn(
+        when(routing.dispatchUsage()).thenReturn(
                 new DecodeEndpoint.CapacityUsage(1L, 20_000L, 10_000L, 0L, 10_000L));
 
         when(cancelChannel.isSupported(endpoint)).thenReturn(true);

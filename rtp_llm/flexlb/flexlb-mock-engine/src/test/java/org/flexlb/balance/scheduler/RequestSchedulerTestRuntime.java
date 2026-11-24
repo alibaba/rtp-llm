@@ -244,6 +244,11 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             return requireBound().select(context, policyGroup);
         }
 
+        @Override
+        boolean hasBetterResidentPrefix(ScheduledRequest item, String policyGroup) {
+            return requireBound().hasBetterResidentPrefix(item, policyGroup);
+        }
+
         private synchronized DefaultRouter requireBound() {
             if (delegate == null) {
                 throw new IllegalStateException("test router is not bound");

@@ -187,7 +187,8 @@ final class DecodeState {
 
     private boolean queuedPlacementIsFullLocked(
             long hardKvTokens, long expectedKvTokens, AdmissionCapacity capacity) {
-        return !capacity.evaluate(routingViewLocked().placementUsage(), hardKvTokens, expectedKvTokens).fits();
+        return !capacity.evaluate(dispatchCapacityUsage(status.committedWorkerStatus().fields()),
+                hardKvTokens, expectedKvTokens).fits();
     }
 
     boolean isAcceptedByEngine(ReservationHandle handle) {
@@ -542,6 +543,24 @@ final class DecodeState {
         return true;
     }
 
+    /** Create the first local owner and charge its dispatch permit under the same capacity check. */
+    DispatchLease reserveForDispatch(long requestId, long hardKv, long expectedKv, int priority,
+                                     AdmissionCapacity capacity) {
+        admissionLock.lock();
+        try {
+            if (!requestIdAvailableForReservationLocked(requestId)
+                    || queuedPlacementIsFullLocked(hardKv, expectedKv, capacity)) {
+                return null;
+            }
+            reserveLocked(requestId, hardKv, expectedKv, priority);
+            DecodeRequestState reservation = shadowReservation(requestId);
+            addQueuedPhaseLocked(requestId, reservation);
+            return installEngineDispatchPermitLocked(requestId, reservation);
+        } finally {
+            admissionLock.unlock();
+        }
+    }
+
     DispatchAcquisition acquireDispatchPermit(
             ReservationHandle handle,
             AdmissionCapacity capacity) {
@@ -752,6 +771,10 @@ final class DecodeState {
         private final DecodeRequestState reservation;
         private boolean retiredByEndpoint;
 
+        ReservationHandle handle(long generationId) {
+            return new ReservationHandle(generationId, requestId, reservation.reservationToken());
+        }
+
         private DispatchLease(long requestId, DecodeRequestState reservation) {
             this.requestId = requestId;
             this.reservation = reservation;
@@ -769,7 +792,8 @@ final class DecodeState {
         try {
             if (victims == null || victims.isEmpty()
                     || !requestIdAvailableForReservationLocked(
-                            incomingRequestId)) {
+                            incomingRequestId)
+                    || queuedPlacementIsFullLocked(kvTokens, expectedKvTokens, capacity)) {
                 return false;
             }
             Set<Long> uniqueVictims = new HashSet<>(victims.size());
@@ -893,13 +917,11 @@ final class DecodeState {
                 }
                 released = released.plus(request.capacityRelease());
             }
-            if (projectedEvictionCapacityFitsLocked(
-                    capacity, incomingKvTokens, incomingExpectedKvTokens,
-                    CapacityRelease.NONE)) {
+            CapacityUsage usage = dispatchCapacityUsage(status.committedWorkerStatus().fields());
+            if (capacity.evaluate(usage, incomingKvTokens, incomingExpectedKvTokens).fits()) {
                 return PreemptionBeginResult.INFEASIBLE;
             }
-            if (!projectedEvictionCapacityFitsLocked(
-                    capacity, incomingKvTokens, incomingExpectedKvTokens, released)) {
+            if (!capacity.evaluate(usage, incomingKvTokens, incomingExpectedKvTokens, released).fits()) {
                 return PreemptionBeginResult.INFEASIBLE;
             }
 
@@ -1097,10 +1119,13 @@ final class DecodeState {
         try {
             EndpointPreemptionAttempt attempt = preemptionAttempts.get(attemptToken);
             if (attempt == null) { return false; }
-            if (decision == PreemptionDecision.COMMIT) {
+            if (decision != PreemptionDecision.ABORT) {
                 DecodeRequestState incoming = shadowReservation(attempt.incomingRequestId);
                 if (incoming == null || incoming.reservationToken() != attempt.incomingReservationToken
                         || !attempt.remainingVictims.isEmpty()) { return false; }
+                if (decision == PreemptionDecision.RELEASE_CAPACITY) {
+                    releaseLocked(attempt.incomingRequestId);
+                }
             } else {
                 releaseLocked(attempt.incomingRequestId);
                 for (ReservationHandle victim : attempt.remainingVictims.values()) {
@@ -1512,9 +1537,12 @@ final class DecodeState {
     private static boolean placementCapacityImproved(
             DecodeRoutingView before,
             DecodeRoutingView after) {
-        return after.engineLoad() < before.engineLoad()
-                || after.realKvAvailable() > before.realKvAvailable()
-                || after.realKvUsed() < before.realKvUsed();
+        CapacityUsage previous = before.dispatchUsage();
+        CapacityUsage current = after.dispatchUsage();
+        return current.occupiedRequests() < previous.occupiedRequests()
+                || current.hardKvAvailable() > previous.hardKvAvailable()
+                || current.expectedKvUsed() < previous.expectedKvUsed()
+                || current.totalKvTokens() > previous.totalKvTokens();
     }
 
     record CalibrationResult(List<WorkerStatusFact> facts, boolean capacityImproved) { }

@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
@@ -287,6 +288,10 @@ public class EndpointRegistry {
             snapshot.add(entry.getValue().routingViewSnapshot(entry.getKey()));
         }
         return List.copyOf(snapshot);
+    }
+
+    public CapacityBoundary.Availability observeDecodeCapacity(String group, int preemptionPriority) {
+        return placementAvailability.observeGroup(RoleType.DECODE, group, preemptionPriority);
     }
 
     /**

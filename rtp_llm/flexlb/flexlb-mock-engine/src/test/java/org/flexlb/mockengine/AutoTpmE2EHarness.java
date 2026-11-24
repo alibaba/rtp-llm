@@ -26,6 +26,7 @@ import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.QueueOrderingConfig;
 import org.flexlb.config.VictimStage;
+import org.flexlb.constant.CommonConstants;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
@@ -96,6 +97,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     private final java.util.concurrent.atomic.AtomicReference<Throwable> pumpFailure =
             new java.util.concurrent.atomic.AtomicReference<>();
     final DefaultRouter router = mock(DefaultRouter.class);
+    final CacheAwareService cache = mock(CacheAwareService.class);
     final EngineGrpcClient grpcClient = mock(EngineGrpcClient.class);
     final BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
     final RequestSchedulerReporter requestReporter = mock(RequestSchedulerReporter.class);
@@ -323,7 +325,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     }
 
     private static int httpPort(int grpcPort) {
-        return grpcPort + 2000;
+        return grpcPort - CommonConstants.GRPC_PORT_OFFSET;
     }
 
     private WorkerStatus publishEndpoint(
@@ -452,7 +454,6 @@ final class AutoTpmE2EHarness implements AutoCloseable {
 
     private DefaultRouter productionRouter() {
         WorkerDirectory workers = new WorkerDirectory(endpointRegistry);
-        CacheAwareService cache = mock(CacheAwareService.class);
         when(cache.findMatchingEngines(any(), any(), any()))
                 .thenReturn(Map.of());
         EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);

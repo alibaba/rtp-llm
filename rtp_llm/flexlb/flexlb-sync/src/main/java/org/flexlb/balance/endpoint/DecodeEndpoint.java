@@ -127,6 +127,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return changed;
     }
 
+    public EngineDispatchPermit reserveForDispatch(GenerationPin pin, long requestId, long hardKv,
+                                                   long expectedKv, int priority, AdmissionCapacity capacity) {
+        requirePinnedGeneration(pin);
+        if (!hasAvailableSchedulingStatus()) { return null; }
+        DecodeState.DispatchLease lease = state.reserveForDispatch(requestId, hardKv, expectedKv, priority, capacity);
+        return lease == null ? null : new EngineDispatchPermit(this, lease.handle(pin.generationId()), lease);
+    }
+
     public EngineDispatchPermitAcquisition acquireDispatchPermit(
             ReservationHandle reservation, AdmissionCapacity capacity) {
         java.util.Objects.requireNonNull(reservation, "reservation");
@@ -142,7 +150,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         try (pin) {
             DecodeState.DispatchAcquisition acquired = state.acquireDispatchPermit(reservation, capacity);
             return new EngineDispatchPermitAcquisition(acquired.status(), acquired.permit() == null ? null
-                    : new EngineDispatchPermit(this, reservation.requestId(), acquired.permit()));
+                    : new EngineDispatchPermit(this, reservation, acquired.permit()));
         }
     }
 
@@ -168,6 +176,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
+    /** The Slot has published the engine-facing owner and released its lock. */
+    public void signalEngineOwnerAvailable(int ownerPriority) {
+        placementAvailability.decodeVictimAvailable(getStatus().topologySnapshot().group(), ownerPriority);
+    }
+
     /** Retry available capacity, or finish waiting after retirement or lost ownership. */
     public boolean shouldRetryDispatch(long requestId, AdmissionCapacity capacity) {
         return isRetired() || state.shouldRetryDispatch(requestId, capacity, hasAvailableSchedulingStatus());
@@ -184,21 +197,21 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
 
         private final DecodeEndpoint endpoint;
-        private final long requestId;
+        private final ReservationHandle reservation;
         private final DecodeState.DispatchLease lease;
         private Resolution resolution = Resolution.ACQUIRED;
 
         private EngineDispatchPermit(DecodeEndpoint endpoint,
-                                     long requestId,
+                                     ReservationHandle reservation,
                                      DecodeState.DispatchLease lease) {
             this.endpoint = endpoint;
-            this.requestId = requestId;
+            this.reservation = reservation;
             this.lease = lease;
         }
 
-        public long requestId() {
-            return requestId;
-        }
+        public long requestId() { return reservation.requestId(); }
+
+        public ReservationHandle reservation() { return reservation; }
 
         /**
          * Transfer this acquired slot without a second capacity check.
@@ -326,7 +339,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     public boolean finishPreemption(long attemptToken, PreemptionDecision decision) {
         boolean changed = state.finishPreemption(attemptToken, decision);
-        if (changed && decision == PreemptionDecision.ABORT) { publishCapacityRelease(); }
+        if (changed && decision != PreemptionDecision.COMMIT) { publishCapacityRelease(); }
         return changed;
     }
 
@@ -341,7 +354,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         ATTEMPT_ALREADY_EXISTS
     }
 
-    public enum PreemptionDecision { COMMIT, ABORT }
+    public enum PreemptionDecision { COMMIT, RELEASE_CAPACITY, ABORT }
 
     public record PreemptionUpdate(Kind kind, long requestId, ReservationHandle reservation,
                                    PreemptionCancelPhase phase) {

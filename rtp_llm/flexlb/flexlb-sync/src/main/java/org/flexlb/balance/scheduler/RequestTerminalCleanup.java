@@ -39,6 +39,8 @@ final class RequestTerminalCleanup {
                 action.preemption() == null
                         ? null : () -> action.preemption().signalTerminal(new VictimTerminal(entry.requestId())));
 
+        cleanupFailure = runStep(cleanupFailure, () -> entry.prefillEnded(action.item(),
+                action.transition().phase() == RequestState.Phase.COMPLETED));
         TerminationResult result = entry.commitTerminalRecord(action);
         Throwable terminalFailure = result.transitionFailure() == null
                 ? cleanupFailure

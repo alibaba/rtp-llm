@@ -64,8 +64,11 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.LongStream;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -81,7 +84,7 @@ class TransientCapacityQueueContractTest {
             "true,true,50,false", "false,false,80,false", "true,true,80,false",
             "false,false,40,false", "true,true,40,false", "false,false,50,true", "true,true,50,true"})
     @Timeout(15)
-    void decodeBlockedHeadAllowsOnlyEqualOrHigherPriorityToPass(
+    void newDecodeOnlyRunsTheRankedHeadWhenItFits(
             boolean priorityOrdering, boolean single, int priority, boolean decodeRecovers) throws Exception {
         FlexlbConfig config = config();
         config.queueScheduler().setOrdering(priorityOrdering
@@ -89,47 +92,42 @@ class TransientCapacityQueueContractTest {
         if (single) {
             config.queueScheduler().setDecision(org.flexlb.config.DecisionPolicyConfig.single());
         }
-        try (Fixture fixture = new Fixture(null, config)) {
-            fixture.submission.blockPreparation();
-            var a = fixture.runtime.scheduler().submit(fixture.context(996_001L, 50));
-            assertTrue(fixture.submission.awaitPreparation(2, TimeUnit.SECONDS));
-            fixture.runtime.applyStatus(fixture.decodeStatus, statusResponse(RoleType.DECODE, 2L, true));
-            fixture.submission.unblockPreparation();
+        try (Fixture fixture = new Fixture(RoleType.DECODE, config)) {
+            var a = fixture.runtime.scheduler().submit(fixture.context(996_001L, 50, 512L));
             awaitCondition(() -> fixture.prefillEndpoint.captureRouteProjectionInputs()
                     .queue().admissionBlock() != null, 2_000L);
-            var d2 = (DecodeEndpoint) publishEndpoint(fixture.runtime.endpointRegistry(), RoleType.DECODE,
-                    "127.0.0.2:18081", initializedStatus(RoleType.DECODE, "127.0.0.2", 18081));
-            if (decodeRecovers) { fixture.submission.blockPreparation(); }
+            var d2 = publishDecode(fixture, "127.0.0.2", 256L, decodeRecovers);
             var b = fixture.runtime.scheduler().submit(fixture.context(996_002L, priority));
-            if (priority < 50) {
-                awaitCapacityWaiters(fixture.runtime.scheduler(), 1);
-                assertFalse(b.isDone(), "lower priority must not bypass A");
-                assertEquals(0, d2.routingView().totalLoad());
-                fixture.runtime.scheduler().cancelRequest(996_001L, 0L, CancelReason.CLIENT_CANCELLED);
-                assertFalse(a.get(2, TimeUnit.SECONDS).isSuccess());
-                assertTrue(b.get(2, TimeUnit.SECONDS).isSuccess());
-                return;
-            }
             if (decodeRecovers) {
-                assertTrue(fixture.submission.awaitPreparation(2, TimeUnit.SECONDS));
-                fixture.runtime.applyStatus(d2.getStatus(), statusResponse(RoleType.DECODE, 2L, true));
-                fixture.submission.unblockPreparation();
-                awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 2, 2_000L);
-                assertFalse(b.isDone());
-                // D1 remains full: only D2's event can wake the runnable successor.
-                fixture.runtime.applyStatus(d2.getStatus(), statusResponse(RoleType.DECODE, 3L, false));
+                var recovered = statusResponse(RoleType.DECODE, 2L, false);
+                recovered.setAvailableKvCacheTokens(256L);
+                fixture.runtime.applyStatus(d2.getStatus(), recovered);
             }
-            Response response = b.get(2, TimeUnit.SECONDS);
-            assertTrue(response.isSuccess());
-            assertEquals(Fixture.PREFILL_ADDRESS, prefillAddress(response));
-            assertEquals("127.0.0.2:18081", decodeAddress(response));
-            assertEquals(List.of(996_002L), fixture.submission.requestIds());
-            assertFalse(a.isDone());
-            assertEquals(1, fixture.prefillEndpoint.queuedRequestCount());
-            fixture.runtime.applyStatus(fixture.decodeStatus, statusResponse(RoleType.DECODE, 3L, false));
-
-            assertTrue(a.get(2, TimeUnit.SECONDS).isSuccess());
-            assertEquals(List.of(996_002L, 996_001L), fixture.submission.requestIds());
+            if (priorityOrdering && priority > 50) {
+                Response response = b.get(2, TimeUnit.SECONDS);
+                assertTrue(response.isSuccess());
+                assertEquals("127.0.0.2:18081", decodeAddress(response));
+                assertFalse(a.isDone());
+                fixture.releaseCapacity();
+                assertTrue(a.get(2, TimeUnit.SECONDS).isSuccess());
+                assertEquals(List.of(996_002L, 996_001L), fixture.submission.requestIds());
+            } else {
+                assertFalse(fixture.submission.awaitCommands(1, 100, TimeUnit.MILLISECONDS),
+                        "the spare Decode fits B but may not reorder the Prefill queue");
+                assertEquals(0, d2.routingView().engineCapacityUsed());
+                if (priority < 50) {
+                    fixture.runtime.scheduler().cancelRequest(996_001L, 0L, CancelReason.CLIENT_CANCELLED);
+                    assertFalse(a.get(2, TimeUnit.SECONDS).isSuccess());
+                } else {
+                    fixture.releaseCapacity();
+                    assertTrue(a.get(2, TimeUnit.SECONDS).isSuccess());
+                }
+                Response response = b.get(2, TimeUnit.SECONDS);
+                assertTrue(response.isSuccess());
+                assertEquals("127.0.0.2:18081", decodeAddress(response));
+                assertEquals(priority < 50 ? List.of(996_002L) : List.of(996_001L, 996_002L),
+                        fixture.submission.requestIds());
+            }
             assertEquals(0, fixture.prefillEndpoint.queuedRequestCount());
         }
     }
@@ -137,42 +135,35 @@ class TransientCapacityQueueContractTest {
     @ParameterizedTest
     @CsvSource({"false,false", "false,true", "true,false", "true,true"})
     @Timeout(15)
-    void lowerPriorityMiddleDoesNotHideEligibleSuccessor(
+    void fifoRetainsMiddleRequestWhenOnlySuccessorFitsTheNewDecode(
             boolean middleDecodeFull, boolean single) throws Exception {
         FlexlbConfig config = config();
         config.queueScheduler().setOrdering(new QueueOrderingConfig());
         if (single) {
             config.queueScheduler().setDecision(org.flexlb.config.DecisionPolicyConfig.single());
         }
-        try (Fixture fixture = new Fixture(null, config)) {
-            fixture.submission.blockPreparation();
-            var a = fixture.runtime.scheduler().submit(fixture.context(999_001L, 50));
-            assertTrue(fixture.submission.awaitPreparation(2, TimeUnit.SECONDS));
-            fixture.runtime.applyStatus(fixture.decodeStatus, statusResponse(RoleType.DECODE, 2L, true));
-            var d2 = (DecodeEndpoint) publishEndpoint(fixture.runtime.endpointRegistry(), RoleType.DECODE,
-                    "127.0.0.2:18081", initializedStatus(RoleType.DECODE, "127.0.0.2", 18081));
-            // A has not published its block yet: B can already be in the local queue.
-            var b = fixture.runtime.scheduler().submit(fixture.context(999_002L, 40));
-            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 2, 2_000L);
-            if (middleDecodeFull) {
-                fixture.runtime.applyStatus(d2.getStatus(), statusResponse(RoleType.DECODE, 2L, true));
-            }
-            fixture.submission.unblockPreparation();
-            awaitCondition(() -> fixture.prefillEndpoint.captureRouteProjectionInputs()
-                    .queue().admissionBlock() != null, 2_000L);
-            publishEndpoint(fixture.runtime.endpointRegistry(), RoleType.DECODE,
-                    "127.0.0.3:18081", initializedStatus(RoleType.DECODE, "127.0.0.3", 18081));
-            var c = fixture.runtime.scheduler().submit(fixture.context(999_003L, 80));
-            assertTrue(c.get(2, TimeUnit.SECONDS).isSuccess());
-            assertEquals(List.of(999_003L), fixture.submission.requestIds());
-            assertFalse(a.isDone());
-            assertFalse(b.isDone());
-            fixture.runtime.scheduler().cancelRequest(999_002L, 0L, CancelReason.CLIENT_CANCELLED);
+        try (Fixture fixture = new Fixture(RoleType.DECODE, config)) {
+            var a = fixture.runtime.scheduler().submit(fixture.context(999_001L, 50, 512L));
+            var b = fixture.runtime.scheduler().submit(fixture.context(999_002L, 40, 512L));
+            var c = fixture.runtime.scheduler().submit(fixture.context(999_003L, 80, 128L));
+            awaitCondition(() -> fixture.runtime.scheduler().getQueuedRequestCount() == 3
+                    && fixture.prefillEndpoint.captureRouteProjectionInputs().queue().admissionBlock() != null, 2_000L);
+            var d2 = publishDecode(fixture, "127.0.0.2", 256L, middleDecodeFull);
+            assertFalse(fixture.submission.awaitCommands(1, 100, TimeUnit.MILLISECONDS));
             fixture.runtime.scheduler().cancelRequest(999_001L, 0L, CancelReason.CLIENT_CANCELLED);
             assertFalse(a.get(2, TimeUnit.SECONDS).isSuccess());
+            assertFalse(fixture.submission.awaitCommands(1, 100, TimeUnit.MILLISECONDS));
+            fixture.runtime.scheduler().cancelRequest(999_002L, 0L, CancelReason.CLIENT_CANCELLED);
             assertFalse(b.get(2, TimeUnit.SECONDS).isSuccess());
+            if (middleDecodeFull) {
+                assertFalse(c.isDone());
+                fixture.runtime.applyStatus(d2.getStatus(), statusResponse(RoleType.DECODE, 2L, false));
+            }
+            Response response = c.get(2, TimeUnit.SECONDS);
+            assertTrue(response.isSuccess());
+            assertEquals("127.0.0.2:18081", decodeAddress(response));
+            assertEquals(List.of(999_003L), fixture.submission.requestIds());
             assertEquals(0, fixture.prefillEndpoint.queuedRequestCount());
-            assertEquals(0, d2.resourceSnapshot().reserved().size());
         }
     }
 
@@ -180,7 +171,7 @@ class TransientCapacityQueueContractTest {
     @CsvSource({"false,recover", "true,recover", "false,cancel_waiter", "true,cancel_waiter",
             "false,stop", "true,stop"})
     @Timeout(15)
-    void decodeRecoveryRechecksBypassedKvWait(boolean single, String recovery) throws Exception {
+    void waitingForPrefillKvRemainsIndependentOfDecodeUpdates(boolean single, String recovery) throws Exception {
         FlexlbConfig config = config();
         config.queueScheduler().setOrdering(new QueueOrderingConfig());
         if (single) {
@@ -210,28 +201,28 @@ class TransientCapacityQueueContractTest {
             org.junit.jupiter.api.Assertions.assertSame(before,
                     fixture.prefillEndpoint.captureRouteProjectionInputs(),
                     "unchanged Decode heartbeats must not invalidate Prefill work prediction");
-            assertFalse(a.isDone());
+            Response first = a.get(2, TimeUnit.SECONDS);
+            assertTrue(first.isSuccess());
+            assertEquals("127.0.0.2:18081", decodeAddress(first));
             assertFalse(b.isDone());
-            assertEquals(List.of(), fixture.submission.requestIds());
+            assertEquals(List.of(993_101L), fixture.submission.requestIds());
 
             if (recovery.equals("stop")) {
                 fixture.runtime.close();
-                assertFalse(a.get(2, TimeUnit.SECONDS).isSuccess());
                 assertFalse(b.get(2, TimeUnit.SECONDS).isSuccess());
                 assertEquals(0, fixture.prefillEndpoint.queuedRequestCount());
                 assertEquals(0, fixture.decodeEndpoint.resourceSnapshot().reserved().size());
-                assertEquals(0, d2.resourceSnapshot().reserved().size());
+                assertNull(d2.reservationHandle(993_102L));
                 return;
             }
             if (recovery.equals("cancel_waiter")) {
                 fixture.runtime.scheduler().cancelRequest(993_102L, 0L, CancelReason.CLIENT_CANCELLED);
                 assertFalse(b.get(2, TimeUnit.SECONDS).isSuccess());
-                assertEquals(0, d2.resourceSnapshot().reserved().size());
+                assertNull(d2.reservationHandle(993_102L));
             }
             fixture.runtime.applyStatus(fixture.decodeStatus,
                     statusResponse(RoleType.DECODE, 13L, false));
-            assertTrue(a.get(2, TimeUnit.SECONDS).isSuccess(),
-                    "D1 recovery must run A without waiting for B's KV or another P event");
+            assertEquals("127.0.0.2:18081", decodeAddress(first));
             assertEquals(List.of(993_101L), fixture.submission.requestIds());
             if (recovery.equals("recover")) {
                 assertFalse(b.isDone());
@@ -275,7 +266,7 @@ class TransientCapacityQueueContractTest {
 
     @Test
     @Timeout(15)
-    void recoveredHeadWinsBeforeBypassCommit() throws Exception {
+    void simultaneousDecodeRecoveryPreservesPrefillHeadOrder() throws Exception {
         try (Fixture fixture = new Fixture(null, config())) {
             fixture.submission.blockPreparation();
             var a = fixture.runtime.scheduler().submit(fixture.context(998_001L, 50));
@@ -284,9 +275,8 @@ class TransientCapacityQueueContractTest {
             fixture.submission.unblockPreparation();
             awaitCondition(() -> fixture.prefillEndpoint.captureRouteProjectionInputs()
                     .queue().admissionBlock() != null, 2_000L);
-            var d2 = (DecodeEndpoint) publishEndpoint(fixture.runtime.endpointRegistry(), RoleType.DECODE,
-                    "127.0.0.2:18081", initializedStatus(RoleType.DECODE, "127.0.0.2", 18081));
             fixture.submission.blockPreparation();
+            var d2 = publishDecode(fixture, "127.0.0.2", 1_000L, false);
             var b = fixture.runtime.scheduler().submit(fixture.context(998_002L, 50));
             assertTrue(fixture.submission.awaitPreparation(2, TimeUnit.SECONDS));
             fixture.runtime.applyStatus(fixture.decodeStatus, statusResponse(RoleType.DECODE, 3L, false));
@@ -303,67 +293,47 @@ class TransientCapacityQueueContractTest {
     @ParameterizedTest
     @CsvSource({"50,false", "80,false", "80,true"})
     @Timeout(15)
-    void bypassHonorsEverySkippedPriorityAndCancellation(int middlePriority, boolean cancelMiddle) throws Exception {
+    void fifoCancellationAndDecodeWakePreserveAllLivePositions(int middlePriority, boolean cancelMiddle) throws Exception {
         FlexlbConfig config = config();
         config.queueScheduler().setOrdering(new QueueOrderingConfig());
-        try (Fixture fixture = new Fixture(null, config)) {
-            fixture.submission.blockPreparation();
+        try (Fixture fixture = new Fixture(RoleType.DECODE, config)) {
+            var noPrefillKv = statusResponse(RoleType.PREFILL, 2L, false);
+            noPrefillKv.setAvailableKvCacheTokens(0L);
+            fixture.runtime.applyStatus(fixture.prefillStatus, noPrefillKv);
             var a = fixture.runtime.scheduler().submit(fixture.context(997_001L, 50));
-            assertTrue(fixture.submission.awaitPreparation(2, TimeUnit.SECONDS));
-            fixture.runtime.applyStatus(fixture.decodeStatus, statusResponse(RoleType.DECODE, 2L, true));
-            fixture.submission.unblockPreparation();
-            awaitCondition(() -> fixture.prefillEndpoint.captureRouteProjectionInputs()
-                    .queue().admissionBlock() != null, 2_000L);
-            var d2 = (DecodeEndpoint) publishEndpoint(fixture.runtime.endpointRegistry(), RoleType.DECODE,
-                    "127.0.0.2:18081", initializedStatus(RoleType.DECODE, "127.0.0.2", 18081));
-            fixture.submission.blockPreparation();
             var b = fixture.runtime.scheduler().submit(fixture.context(997_002L, middlePriority));
-            assertTrue(fixture.submission.awaitPreparation(2, TimeUnit.SECONDS));
-            fixture.runtime.applyStatus(d2.getStatus(), statusResponse(RoleType.DECODE, 2L, true));
-            fixture.submission.unblockPreparation();
-            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 2, 2_000L);
-            publishEndpoint(fixture.runtime.endpointRegistry(), RoleType.DECODE,
-                    "127.0.0.3:18081", initializedStatus(RoleType.DECODE, "127.0.0.3", 18081));
             var c = fixture.runtime.scheduler().submit(fixture.context(997_003L, 60));
-            if (middlePriority > 60) {
-                assertFalse(fixture.submission.awaitCommands(1, 100, TimeUnit.MILLISECONDS));
-                assertFalse(c.isDone(), "C must not pass a higher-priority intermediate blocker");
-                if (cancelMiddle) {
-                    fixture.runtime.scheduler().cancelRequest(997_002L, 0L, CancelReason.CLIENT_CANCELLED);
-                    assertFalse(b.get(2, TimeUnit.SECONDS).isSuccess());
-                } else {
-                    fixture.runtime.applyStatus(d2.getStatus(), statusResponse(RoleType.DECODE, 3L, false));
-                    assertTrue(b.get(2, TimeUnit.SECONDS).isSuccess());
-                }
-            }
-            assertTrue(c.get(2, TimeUnit.SECONDS).isSuccess());
-            assertFalse(a.isDone());
-            if (middlePriority == 50) {
-                assertFalse(b.isDone());
+            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 3, 2_000L);
+            if (cancelMiddle) {
                 fixture.runtime.scheduler().cancelRequest(997_002L, 0L, CancelReason.CLIENT_CANCELLED);
                 assertFalse(b.get(2, TimeUnit.SECONDS).isSuccess());
             }
-            fixture.runtime.applyStatus(fixture.decodeStatus, statusResponse(RoleType.DECODE, 3L, false));
-            if (middlePriority > 60 && !cancelMiddle) {
-                // B and C still own both Prefill batch slots. D1 recovery alone
-                // must not let A exceed shared P capacity.
-                assertFalse(a.isDone());
-                WorkerStatusResponse finished =
-                        prefillStatusWithFinishedAndUnknownRunning(2L, List.of(997_002L), 0);
-                finished.getFinishedTaskInfo().get("997002").setBatchId(
-                        fixture.submission.batchIds.get(997_002L));
+            fixture.runtime.applyStatus(fixture.prefillStatus, statusResponse(RoleType.PREFILL, 3L, false));
+            awaitCondition(() -> fixture.prefillEndpoint.captureRouteProjectionInputs().queue().admissionBlock() != null,
+                    2_000L);
+            publishDecode(fixture, "127.0.0.2", 1_000L, false);
+            assertTrue(a.get(2, TimeUnit.SECONDS).isSuccess());
+            assertEquals(List.of(997_001L), fixture.submission.requestIds());
+            fixture.releaseCapacity();
+            if (!cancelMiddle) {
+                assertTrue(b.get(2, TimeUnit.SECONDS).isSuccess());
+                assertFalse(c.isDone());
+                // A and B occupy both Prefill batch slots. A third Decode cannot start C yet.
+                publishDecode(fixture, "127.0.0.3", 1_000L, false);
+                assertFalse(fixture.submission.awaitCommands(3, 100, TimeUnit.MILLISECONDS));
+                var finished = prefillStatusWithFinishedAndUnknownRunning(4L, List.of(997_001L), 0);
+                finished.getFinishedTaskInfo().get("997001").setBatchId(fixture.submission.batchIds.get(997_001L));
                 fixture.runtime.applyStatus(fixture.prefillStatus, finished);
             }
-            assertTrue(a.get(2, TimeUnit.SECONDS).isSuccess());
-            assertEquals(middlePriority > 60 && !cancelMiddle
-                    ? List.of(997_002L, 997_003L, 997_001L)
-                    : List.of(997_003L, 997_001L), fixture.submission.requestIds());
+            assertTrue(c.get(2, TimeUnit.SECONDS).isSuccess());
+            assertEquals(cancelMiddle ? List.of(997_001L, 997_003L) : List.of(997_001L, 997_002L, 997_003L),
+                    fixture.submission.requestIds());
         }
     }
 
     @Test
     @Timeout(20)
-    void higherPriorityTakesQueuedReservationAndVictimReplansWithoutCompletingItsFuture() throws Exception {
+    void bothPrioritiesWaitForCollectionWithoutTakingDecodeCapacity() throws Exception {
         FlexlbConfig config = config();
         config.queueScheduler().setOrdering(QueueOrderingConfig.priority());
         PreemptionConfig preemption = new PreemptionConfig();
@@ -376,22 +346,20 @@ class TransientCapacityQueueContractTest {
         try (Fixture fixture = new Fixture(null, config)) {
             var low = fixture.runtime.scheduler().submit(fixture.context(990_001L, 20));
             awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 1, 2_000L);
-            var oldReservation = fixture.decodeEndpoint.reservationHandle(990_001L);
+            assertNull(fixture.decodeEndpoint.reservationHandle(990_001L));
             var high = fixture.runtime.scheduler().submit(fixture.context(990_002L, 80));
-            awaitCondition(() -> fixture.decodeEndpoint.reservationHandle(990_002L) != null
-                    && fixture.decodeEndpoint.reservationHandle(990_001L) == null, 2_000L);
-            awaitCapacityWaiters(fixture.runtime.scheduler(), 1);
-            assertFalse(low.isDone(), "local preemption must not return NO_AVAILABLE_WORKER");
+            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 2, 2_000L);
+            assertNull(fixture.decodeEndpoint.reservationHandle(990_002L));
+            assertNull(fixture.decodeEndpoint.reservationHandle(990_001L));
+            assertFalse(low.isDone());
             assertFalse(high.isDone());
-            assertEquals(1, fixture.prefillEndpoint.queuedRequestCount());
-            assertEquals(1, fixture.decodeEndpoint.routingView().totalLoad());
+            assertEquals(0, fixture.decodeEndpoint.routingView().totalLoad());
+            assertEquals(0, fixture.decodeEndpoint.routingView().engineCapacityUsed());
             fixture.runtime.scheduler().cancelRequest(990_002L, 0L, CancelReason.CLIENT_CANCELLED);
             assertFalse(high.get(2, TimeUnit.SECONDS).isSuccess());
-            awaitCondition(() -> fixture.decodeEndpoint.reservationHandle(990_001L) != null
-                    && fixture.prefillEndpoint.queuedRequestCount() == 1, 2_000L);
+            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 1, 2_000L);
             assertFalse(low.isDone());
-            assertTrue(fixture.decodeEndpoint.reservationHandle(990_001L).reservationToken()
-                    != oldReservation.reservationToken());
+            assertNull(fixture.decodeEndpoint.reservationHandle(990_001L));
             assertEquals(List.of(), fixture.submission.requestIds(), "neither queued route was sent to the engine");
             fixture.runtime.scheduler().cancelRequest(990_001L, 0L, CancelReason.CLIENT_CANCELLED);
             assertFalse(low.get(2, TimeUnit.SECONDS).isSuccess());
@@ -472,7 +440,7 @@ class TransientCapacityQueueContractTest {
         config.getRouter().getRoles().getPrefill().setCacheAffinity(affinity);
         try (Fixture fixture = new Fixture(null, config)) {
             fixture.submission.blockPreparation();
-            var a = fixture.runtime.scheduler().submit(fixture.context(995_001L, 20, 1_000L));
+            var a = fixture.runtime.scheduler().submit(fixture.context(995_001L, 20, 4_000L));
             assertTrue(fixture.submission.awaitPreparation(2, TimeUnit.SECONDS));
             fixture.runtime.applyStatus(fixture.decodeStatus, statusResponse(RoleType.DECODE, 2L, true));
             fixture.submission.unblockPreparation();
@@ -481,8 +449,7 @@ class TransientCapacityQueueContractTest {
 
             var p2 = (PrefillEndpoint) publishEndpoint(fixture.runtime.endpointRegistry(), RoleType.PREFILL,
                     "127.0.0.2:18080", initializedStatus(RoleType.PREFILL, "127.0.0.2", 18080));
-            var d2 = (DecodeEndpoint) publishEndpoint(fixture.runtime.endpointRegistry(), RoleType.DECODE,
-                    "127.0.0.2:18081", initializedStatus(RoleType.DECODE, "127.0.0.2", 18081));
+            var d2 = publishDecode(fixture, "127.0.0.2", 3_000L, false);
             when(fixture.cache.findMatchingEngines(any(), any(), any()))
                     .thenReturn(Map.of(Fixture.PREFILL_ADDRESS, 9, "127.0.0.2:18080", 1));
             var bContext = fixture.context(995_002L, priorityOrdering ? 80 : 10, 1_000L);
@@ -521,7 +488,7 @@ class TransientCapacityQueueContractTest {
                             ? Map.of("127.0.0.2:18080", 9) : Map.of(Fixture.PREFILL_ADDRESS, 9);
                 });
                 fixture.submission.blockPreparation();
-                var cContext = fixture.context(995_003L, 20, 1_000L);
+                var cContext = fixture.context(995_003L, 20, 2_000L);
                 cContext.getRequest().setCacheKeyBlockSize(100L);
                 cContext.getRequest().setBlockCacheKeys(List.of(2L));
                 var c = fixture.runtime.scheduler().submit(cContext);
@@ -529,13 +496,14 @@ class TransientCapacityQueueContractTest {
                 fixture.runtime.applyStatus(d2.getStatus(), statusResponse(RoleType.DECODE, 2L, true));
                 fixture.submission.unblockPreparation();
                 awaitCondition(() -> p2.captureRouteProjectionInputs().queue().admissionBlock() != null, 2_000L);
-                publishEndpoint(fixture.runtime.endpointRegistry(), RoleType.DECODE,
-                        "127.0.0.3:18081", initializedStatus(RoleType.DECODE, "127.0.0.3", 18081));
+                publishDecode(fixture, "127.0.0.3", 1_500L, false);
                 var eContext = fixture.context(995_004L, 10, 1_000L);
                 eContext.getRequest().setCacheKeyBlockSize(100L);
                 eContext.getRequest().setBlockCacheKeys(List.of(2L));
                 var e = fixture.runtime.scheduler().submit(eContext);
-                awaitCapacityWaiters(fixture.runtime.scheduler(), 2);
+                awaitCondition(() -> fixture.metrics.context(995_004L) != null
+                        && fixture.runtime.scheduler().getQueuedRequestCount() == 4, 2_000L);
+                assertFalse(e.isDone());
                 fixture.runtime.scheduler().cancelRequest(995_003L, 0L, CancelReason.CLIENT_CANCELLED);
                 assertFalse(c.get(2, TimeUnit.SECONDS).isSuccess());
                 Response response = e.get(2, TimeUnit.SECONDS);
@@ -720,8 +688,8 @@ class TransientCapacityQueueContractTest {
             assertTrue(initialPlacementAttempts > 0);
             assertEquals(INCIDENT_PENDING_REQUESTS, initialPlacementAttempts,
                     "each request receives one independent initial route");
-            assertEquals(0, fixture.totalPrefillQueuedRequests(),
-                    "P-success/D-failure must not retain a Prefill queue seat");
+            assertEquals(INCIDENT_PENDING_REQUESTS, fixture.totalPrefillQueuedRequests(),
+                    "each ranked request waits on its selected Prefill");
             assertEquals(0,
                     fixture.totalPrefillOwnedRequests(),
                     "P-success/D-failure must not retain Prefill ownership");
@@ -762,29 +730,13 @@ class TransientCapacityQueueContractTest {
                     1, 5, TimeUnit.SECONDS));
             assertFalse(fixture.submission.awaitCommands(
                     1, 200, TimeUnit.MILLISECONDS));
-            assertTrue(awaitPlacementAttempts(
-                    fixture.metrics, attemptsBeforeStatus + 1, 5_000));
             assertTrue(awaitPlacementQuiescence(
                     fixture.metrics, 100L, 5_000L));
-            List<Long> capacityRetryOrder =
-                    fixture.metrics.requestIdsFrom(attemptsBeforeStatus);
-            assertFalse(capacityRetryOrder.isEmpty());
             assertEquals(1, fixture.submission.requestIds().size(),
                     "one Decode slot must not be oversold across Prefill batchers");
-            assertTrue(capacityRetryOrder.contains(
-                            fixture.submission.requestIds().getFirst()),
-                    "the dispatched request must come from this capacity round");
-            int capacityTriggeredPlacements =
-                    fixture.metrics.totalPlacementAttempts()
-                            - attemptsBeforeStatus;
-            assertTrue(capacityTriggeredPlacements <= 2,
-                    "one Decode slot retried beyond its ordered capacity boundary: "
-                            + capacityTriggeredPlacements
-                            + ", capacity edges="
-                            + fixture.metrics.placementWakeups()
-                            + ", retry order=" + capacityRetryOrder);
-            assertTrue(fixture.metrics.maxAttemptsForAnyRequest() <= 2,
-                    "one capacity opportunity retried one request more than once");
+            assertEquals(attemptsBeforeStatus, fixture.metrics.totalPlacementAttempts(),
+                    "the one available Decode slot wakes Prefill decisions without replaying global placements");
+            assertEquals(1, fixture.metrics.maxAttemptsForAnyRequest());
             assertEquals(1L, fixture.metrics.placementWakeups(),
                     "one real capacity release must publish one placement edge");
             assertCanonicalWaitState(
@@ -900,25 +852,35 @@ class TransientCapacityQueueContractTest {
 
     @Test
     @Timeout(20)
-    void globalWaitersPreserveFifoAtTheSamePriority() throws Exception {
-        // BATCH can accept a route behind a busy Prefill. Saturate Decode to keep
-        // both requests in the global wait queue before testing its retry order.
+    void decodeWaitersPreserveFifoAtTheSamePriority() throws Exception {
         try (Fixture fixture = new Fixture(RoleType.DECODE)) {
             fixture.config.fixedWindowDecision().setMaxRequests(2);
             fixture.config.fixedWindowDecision().setMaxCollectionWaitMs(50L);
             fixture.submission.holdCompletions();
-            CompletableFuture<Response> older =
-                    fixture.runtime.scheduler().submit(
-                            fixture.context(251L, 50));
-            CompletableFuture<Response> later =
-                    fixture.runtime.scheduler().submit(
-                            fixture.context(252L, 50));
-
-            awaitCondition(() -> fixture.runtime.scheduler()
-                    .getQueuedRequestCount() >= 2, 2_000L);
+            var firstPlanning = new CompletableFuture<Void>();
+            var finishFirstPlan = new CompletableFuture<Void>();
+            var olderContext = fixture.context(251L, 50);
+            olderContext.getRequest().setCacheKeyBlockSize(128L);
+            olderContext.getRequest().setBlockCacheKeys(List.of(251L));
+            when(fixture.cache.findMatchingEngines(any(), any(), any())).thenAnswer(call -> {
+                if (List.of(251L).equals(call.getArgument(0))) {
+                    firstPlanning.complete(null);
+                    finishFirstPlan.get(2, TimeUnit.SECONDS);
+                }
+                return Map.of();
+            });
+            var older = fixture.runtime.scheduler().submit(olderContext);
+            firstPlanning.get(2, TimeUnit.SECONDS);
+            var later = fixture.runtime.scheduler().submit(fixture.context(252L, 50));
+            try {
+                awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 1, 2_000L);
+                assertFalse(older.isDone());
+            } finally {
+                finishFirstPlan.complete(null);
+            }
             assertFalse(older.isDone());
             assertFalse(later.isDone());
-            awaitCapacityWaiters(fixture.runtime.scheduler(), 2);
+            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 2, 2_000L);
             fixture.releaseCapacity();
 
             assertTrue(fixture.submission.awaitCommands(
@@ -931,10 +893,8 @@ class TransientCapacityQueueContractTest {
 
     @Test
     @Timeout(20)
-    void globalWaitersUsePriorityOrderingBeforeArrivalOrder()
+    void decodeWaitersUsePriorityOrderingBeforeArrivalOrder()
             throws Exception {
-        // BATCH can accept a route behind a busy Prefill. Saturate Decode to keep
-        // both requests in the global wait queue before testing its retry order.
         try (Fixture fixture = new Fixture(RoleType.DECODE)) {
             fixture.config.fixedWindowDecision().setMaxRequests(2);
             fixture.config.fixedWindowDecision().setMaxCollectionWaitMs(50L);
@@ -944,7 +904,7 @@ class TransientCapacityQueueContractTest {
 
             awaitCondition(() -> fixture.runtime.scheduler()
                     .getQueuedRequestCount() >= 2, 2_000L);
-            awaitCapacityWaiters(fixture.runtime.scheduler(), 2);
+            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 2, 2_000L);
             fixture.releaseCapacity();
 
             assertTrue(fixture.submission.awaitCommands(
@@ -963,7 +923,7 @@ class TransientCapacityQueueContractTest {
             fixture.runtime.scheduler().submit(fixture.context(271L, 50));
             fixture.runtime.scheduler().submit(fixture.context(272L, 50));
 
-            awaitCapacityWaiters(fixture.runtime.scheduler(), 2);
+            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 2, 2_000L);
             fixture.releaseCapacity();
 
             assertTrue(fixture.submission.awaitCommands(
@@ -983,7 +943,7 @@ class TransientCapacityQueueContractTest {
             fixture.runtime.scheduler().submit(fixture.context(281L, 50));
             fixture.runtime.scheduler().submit(fixture.context(282L, 50));
 
-            awaitCapacityWaiters(fixture.runtime.scheduler(), 2);
+            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 2, 2_000L);
             fixture.releaseCapacity();
             fixture.runtime.applyStatus(
                     fixture.decodeStatus,
@@ -1000,7 +960,7 @@ class TransientCapacityQueueContractTest {
     @ParameterizedTest
     @CsvSource({"FIFO,BATCH", "FIFO,NON_BATCH", "PRIORITY,BATCH", "PRIORITY,NON_BATCH"})
     @Timeout(20)
-    void nonPreemptiveQueueWaitsForDecodeBeforePrefillPublication(String ordering, DispatcherConfig.Type delivery)
+    void nonPreemptiveQueueChecksDecodeWhenPrefillCanDispatch(String ordering, DispatcherConfig.Type delivery)
             throws Exception {
         FlexlbConfig config = config();
         config.queueScheduler().setOrdering("FIFO".equals(ordering)
@@ -1012,10 +972,9 @@ class TransientCapacityQueueContractTest {
         try (Fixture fixture = new Fixture(RoleType.DECODE, config)) {
             CompletableFuture<Response> waiting = fixture.runtime.scheduler().submit(
                     fixture.context(301L, 50, 128_000L));
-            awaitCapacityWaiters(fixture.runtime.scheduler(), 1);
+            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 1, 2_000L);
             assertFalse(waiting.isDone());
-            assertEquals(0, fixture.prefillEndpoint.queuedRequestCount(),
-                    "Decode capacity must be reserved before entering the Prefill queue");
+            assertEquals(1, fixture.prefillEndpoint.queuedRequestCount());
             assertEquals(0, fixture.decodeEndpoint.resourceSnapshot().queuedCount(),
                     "a blocked placement must not create an unfunded reservation");
             assertEquals(List.of(), fixture.submission.requestIds());
@@ -1033,7 +992,7 @@ class TransientCapacityQueueContractTest {
     @ParameterizedTest
     @CsvSource({"BATCH", "NON_BATCH"})
     @Timeout(20)
-    void preemptiveQueueChecksDecodeBeforePrefillPublication(DispatcherConfig.Type delivery) throws Exception {
+    void preemptiveQueueChecksDecodeWhenPrefillCanDispatch(DispatcherConfig.Type delivery) throws Exception {
         FlexlbConfig config = config();
         config.getDispatcher().setType(delivery);
         PreemptionConfig preemption = new PreemptionConfig();
@@ -1042,10 +1001,10 @@ class TransientCapacityQueueContractTest {
         try (Fixture fixture = new Fixture(RoleType.DECODE, config)) {
             CompletableFuture<Response> waiting = fixture.runtime.scheduler().submit(
                     fixture.context(302L, 50, 128_000L));
-            awaitCondition(() -> fixture.metrics.totalPlacementAttempts() > 0, 2_000L);
+            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 1, 2_000L);
             assertTrue(fixture.metrics.totalPlacementAttempts() > 0);
             assertFalse(waiting.isDone());
-            assertEquals(0, fixture.prefillEndpoint.queuedRequestCount());
+            assertEquals(1, fixture.prefillEndpoint.queuedRequestCount());
             assertEquals(0, fixture.decodeEndpoint.resourceSnapshot().queuedCount());
             assertEquals(List.of(), fixture.submission.requestIds());
             fixture.releaseCapacity();
@@ -1055,6 +1014,68 @@ class TransientCapacityQueueContractTest {
             assertEquals(1, fixture.decodeEndpoint.routingView().engineCapacityUsed());
             assertEquals(delivery == DispatcherConfig.Type.BATCH ? List.of(302L) : List.of(),
                     fixture.submission.requestIds());
+        }
+    }
+
+    @ParameterizedTest(name = "{0}: earlier priority {1}, cancel later {2}, next dispatch {3}")
+    @CsvSource({"NON_BATCH,50,false,702", "NON_BATCH,70,false,701", "NON_BATCH,50,true,701",
+            "BATCH,50,false,702", "BATCH,70,false,701", "BATCH,50,true,701"})
+    @Timeout(15)
+    void decodeWakeDispatchesTheHighestRankedLiveWaiterOnTheSamePrefill(
+            DispatcherConfig.Type delivery, int earlierPriority, boolean cancelLater, long expectedFirst)
+            throws Exception {
+        FlexlbConfig config = config();
+        config.queueScheduler().setDecision(org.flexlb.config.DecisionPolicyConfig.single());
+        config.priorityOrdering().setPrefillCostOrder(true);
+        config.priorityOrdering().setPreemption(null);
+        config.getDispatcher().setType(delivery);
+        try (Fixture fixture = new Fixture(null, config)) {
+            var scheduler = fixture.runtime.scheduler();
+            var noPrefillKv = statusResponse(RoleType.PREFILL, 2L, false);
+            noPrefillKv.setAvailableKvCacheTokens(0L);
+            fixture.runtime.applyStatus(fixture.prefillStatus, noPrefillKv);
+
+            var earlier = fixture.context(701L, earlierPriority, 400L);
+            var later = fixture.context(702L, 50, 400L);
+            earlier.getRequest().setBlockCacheKeys(List.of(1L, 2L, 3L, 4L));
+            later.getRequest().setBlockCacheKeys(List.of(5L, 6L, 7L, 8L));
+            earlier.getRequest().setCacheKeyBlockSize(100L);
+            later.getRequest().setCacheKeyBlockSize(100L);
+            when(fixture.cache.findMatchingEngines(any(), any(), any())).thenAnswer(call -> {
+                List<Long> keys = call.getArgument(0);
+                return Map.of(Fixture.PREFILL_ADDRESS, earlier.getRequest().getBlockCacheKeys().equals(keys) ? 1 : 3);
+            });
+            var first = scheduler.submit(earlier);
+            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 1, 2_000L);
+            var second = scheduler.submit(later);
+            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 2, 2_000L);
+
+            // P can now serve either request, but D's only slot is occupied by an external stream.
+            fixture.runtime.applyStatus(fixture.decodeStatus, statusResponse(RoleType.DECODE, 2L, true));
+            fixture.runtime.applyStatus(fixture.prefillStatus, statusResponse(RoleType.PREFILL, 3L, false));
+            awaitCondition(() -> fixture.prefillEndpoint.captureRouteProjectionInputs()
+                    .queue().admissionBlock() != null, 2_000L);
+            assertFalse(first.isDone());
+            assertFalse(second.isDone());
+            assertTrue(fixture.submission.requestIds().isEmpty());
+
+            if (cancelLater) {
+                scheduler.cancelRequest(702L, 0L, CancelReason.CLIENT_CANCELLED);
+                assertFalse(second.get(2, TimeUnit.SECONDS).isSuccess());
+            }
+            fixture.runtime.applyStatus(fixture.decodeStatus, statusResponse(RoleType.DECODE, 3L, false));
+            var nextDispatch = cancelLater ? first : CompletableFuture.anyOf(first, second);
+            nextDispatch.get(2, TimeUnit.SECONDS);
+            var winner = expectedFirst == 701L ? first : second;
+            var other = expectedFirst == 701L ? second : first;
+            assertTrue(winner.isDone(),
+                    "the one released Decode slot must go to the highest priority, then highest reuse fraction");
+            assertTrue(winner.join().isSuccess());
+            assertEquals(cancelLater, other.isDone());
+            assertEquals(1L, fixture.decodeEndpoint.routingView().engineCapacityUsed());
+            if (delivery == DispatcherConfig.Type.BATCH) {
+                assertEquals(List.of(expectedFirst), fixture.submission.requestIds());
+            }
         }
     }
 
@@ -1121,12 +1142,9 @@ class TransientCapacityQueueContractTest {
 
             assertTrue(waiting.stream().noneMatch(CompletableFuture::isDone));
             int capacityRequests = waiting.size();
-            awaitCondition(() -> fixture.decodeEndpoint.resourceSnapshot()
-                    .reserved().size() == capacityRequests
-                    && fixture.prefillEndpoint.observedRequestCount() == capacityRequests, 2_000L);
-            assertEquals(capacityRequests,
-                    fixture.decodeEndpoint.resourceSnapshot().reserved().size(),
-                    () -> "batch credits must not become an extra worker request-count limit: prefill="
+            awaitCondition(() -> fixture.prefillEndpoint.observedRequestCount() == capacityRequests, 2_000L);
+            assertEquals(4, fixture.decodeEndpoint.resourceSnapshot().reserved().size(),
+                    () -> "only the two dispatched pairs may own Decode capacity. prefill="
                             + fixture.prefillEndpoint.observedRequestCount()
                             + ", queued=" + fixture.runtime.scheduler().getQueuedRequestCount()
                             + ", done=" + waiting.stream().filter(CompletableFuture::isDone).count()
@@ -1144,55 +1162,124 @@ class TransientCapacityQueueContractTest {
         }
     }
 
-    @Test
-    @Timeout(20)
-    void queuedRequestKeepsItsCommittedDecodeWhenStatusChangesBeforeDispatch()
-            throws Exception {
+    @ParameterizedTest
+    @CsvSource({"true", "false"})
+    @Timeout(15)
+    void losingTheLastDecodeSlotCanUseAnotherDecodeBeforeTheWinnerReleases(
+            boolean spareIsReadyOnRetry) throws Exception {
         FlexlbConfig config = config();
-        config.queueScheduler().setOrdering(new QueueOrderingConfig());
-        assertEquals(DecodeMode.WAIT_AT_PLACEMENT, DecodeMode.from(config));
+        config.queueScheduler().setDecision(org.flexlb.config.DecisionPolicyConfig.single());
+        try (Fixture fixture = new Fixture(null, config, true)) {
+            var spare = initializedStatus(RoleType.DECODE, "127.0.0.2", 18082);
+            var spareEndpoint = (DecodeEndpoint) publishEndpoint(fixture.runtime.endpointRegistry(),
+                    RoleType.DECODE, spare.getIpPort(), spare);
+            fixture.runtime.applyStatus(spare, statusResponse(RoleType.DECODE, 2L, true));
 
-        try (Fixture fixture = new Fixture(null, config)) {
+            // D0 is the only eligible candidate. Pause before final submission admission,
+            // then let an independent caller claim its last real slot.
             fixture.submission.blockPreparation();
-            CompletableFuture<Response> waiting =
-                    fixture.runtime.scheduler().submit(
-                            fixture.context(501L, 50, 128_000L));
-            assertTrue(fixture.submission.awaitPreparation(
-                    2, TimeUnit.SECONDS));
+            long requestId = 501L;
+            var response = fixture.runtime.scheduler().submit(fixture.context(requestId, 50, 128_000L));
+            assertTrue(fixture.submission.awaitPreparation(2, TimeUnit.SECONDS));
+            var capacity = new DecodeEndpoint.AdmissionCapacity(1L, 100L);
+            try (var pin = fixture.decodeEndpoint.tryPinGeneration()) {
+                var competitor = takeDecodeSlot(fixture.decodeEndpoint, pin, 502L, capacity);
+                assertNotNull(competitor, "D0's last slot must actually belong to the competing request");
+                try {
+                    if (spareIsReadyOnRetry) {
+                        fixture.runtime.applyStatus(spare, statusResponse(RoleType.DECODE, 3L, false));
+                    }
+                    fixture.submission.unblockPreparation();
 
-            fixture.runtime.applyStatus(
-                    fixture.decodeStatus,
-                    statusResponse(RoleType.DECODE, 2L, true));
-            WorkerStatus spareStatus = initializedStatus(
-                    RoleType.DECODE, "127.0.0.2", 18_082);
-            DecodeEndpoint spareEndpoint = (DecodeEndpoint)
-                    publishEndpoint(
-                            fixture.runtime.endpointRegistry(),
-                            RoleType.DECODE,
-                            "127.0.0.2:18082",
-                            spareStatus);
-
-            fixture.submission.unblockPreparation();
-
-            assertFalse(fixture.submission.awaitCommands(
-                    1, 200, TimeUnit.MILLISECONDS));
-            assertFalse(waiting.isDone(),
-                    "the committed route waits for its exact Decode capacity");
-            assertEquals(0, spareEndpoint.routingView().engineLoad(),
-                    "a committed route must not switch to a newly idle Decode");
-
-            fixture.runtime.applyStatus(
-                    fixture.decodeStatus,
-                    statusResponse(RoleType.DECODE, 3L, false));
-
-            Response response = waiting.get(2, TimeUnit.SECONDS);
-            assertTrue(response.isSuccess());
-            assertEquals("127.0.0.1:18081", decodeAddress(response));
-            assertEquals(List.of("127.0.0.1:18081"),
-                    fixture.submission.decodeAddresses());
-            assertEquals(0, spareEndpoint.routingView().engineLoad(),
-                    "a committed route must not switch to a newly idle Decode");
+                    if (!spareIsReadyOnRetry) {
+                        assertFalse(fixture.submission.awaitCommands(1, 200, TimeUnit.MILLISECONDS));
+                        assertFalse(response.isDone(), "temporary Decode exhaustion must leave A pending");
+                        assertEquals(0, fixture.prefillEndpoint.getInflightBatchCount(),
+                                "A cannot hold Prefill execution capacity while every Decode is full");
+                        assertEquals(0, spareEndpoint.resourceSnapshot().activeDispatchPermits());
+                        fixture.runtime.applyStatus(spare, statusResponse(RoleType.DECODE, 3L, false));
+                    }
+                    assertTrue(fixture.submission.awaitCommands(1, 2, TimeUnit.SECONDS),
+                            "the spare Decode must handle A without any release or heartbeat from D0");
+                    Response delivered = response.get(2, TimeUnit.SECONDS);
+                    assertTrue(delivered.isSuccess(), delivered.getErrorMessage());
+                    assertEquals(Fixture.PREFILL_ADDRESS, prefillAddress(delivered));
+                    assertEquals(spare.getIpPort(), decodeAddress(delivered));
+                    assertEquals(List.of(requestId), fixture.submission.requestIds());
+                    assertEquals(List.of(spare.getIpPort()), fixture.submission.decodeAddresses());
+                    assertEquals(1L, fixture.decodeEndpoint.routingView().dispatchUsage().occupiedRequests());
+                    assertNull(fixture.decodeEndpoint.reservationHandle(requestId),
+                            "the losing candidate must retain no reservation for A");
+                } finally {
+                    competitor.release();
+                }
+            }
         }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"unavailable,false", "insufficientKv,false", "onlyPromptFits,false",
+            "exactKvFit,true", "noSlot,false", "shadowOnly,true"})
+    @Timeout(10)
+    void singleNonBatchSelectsLowestRunningEligibleDecode(String firstWorkerState, boolean chooseFirst) throws Exception {
+        FlexlbConfig config = config();
+        config.queueScheduler().setDecision(org.flexlb.config.DecisionPolicyConfig.single());
+        config.setDispatcher(DispatcherConfig.nonBatch());
+        var decode = config.getRouter().getRoles().getDecode();
+        decode.getAvailability().setMaxEngineRequests(3L);
+        decode.getCostEstimator().setExpression("running_size");
+        try (Fixture fixture = new Fixture(null, config, true)) {
+            fixture.expandFleet(1, 2, 1);
+            var first = fixture.decodeEndpoint;
+            var idleStatus = decodeRunningStatus(3L, 0);
+            // Prompt = 128, output budget = 8. Exercise the hard and expected KV checks separately.
+            switch (firstWorkerState) {
+                case "insufficientKv" -> idleStatus.setAvailableKvCacheTokens(127L);
+                case "onlyPromptFits" -> idleStatus.setAvailableKvCacheTokens(128L);
+                case "exactKvFit" -> idleStatus.setAvailableKvCacheTokens(136L);
+            }
+            fixture.runtime.applyStatus(fixture.decodeStatus, idleStatus);
+            if (firstWorkerState.equals("unavailable")) {
+                fixture.decodeStatus.markRemovedFromDiscovery();
+            }
+            // Actual running load on the second worker is one in every case.
+            // The idle worker can have queued placements or issued permits despite zero running.
+            try (var pin = first.tryPinGeneration()) {
+                List<DecodeEndpoint.EngineDispatchPermit> permits = new ArrayList<>();
+                List<DecodeEndpoint.ReservationHandle> shadows = new ArrayList<>();
+                try {
+                    for (int i = 0; i < 3; i++) {
+                        if (firstWorkerState.equals("noSlot")) {
+                            var permit = takeDecodeSlot(first, pin, 7000L + i,
+                                    new DecodeEndpoint.AdmissionCapacity(3L, 100L));
+                            assertNotNull(permit);
+                            permits.add(permit);
+                        } else if (firstWorkerState.equals("shadowOnly")) {
+                            var shadow = first.reserve(pin, 7000L + i, 128L, 136L, 50);
+                            assertNotNull(shadow);
+                            shadows.add(shadow);
+                        }
+                    }
+                    var request = fixture.runtime.scheduler().submit(fixture.context(503L));
+                    Response result = assertDoesNotThrow(() -> request.get(2, TimeUnit.SECONDS),
+                            "a healthy Decode with sufficient capacity is available: " + firstWorkerState);
+                    assertTrue(result.isSuccess(), result.getErrorMessage());
+                    String expected = chooseFirst ? first.ipPort() : fixture.decodeEndpoints.get(1).ipPort();
+                    assertEquals(expected, decodeAddress(result), firstWorkerState);
+                } finally {
+                    permits.forEach(DecodeEndpoint.EngineDispatchPermit::release);
+                    shadows.forEach(handle -> first.release(handle, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK));
+                }
+            }
+        }
+    }
+
+    private static DecodeEndpoint.EngineDispatchPermit takeDecodeSlot(
+            DecodeEndpoint endpoint, WorkerEndpoint.GenerationPin pin, long requestId,
+            DecodeEndpoint.AdmissionCapacity capacity) {
+        var reservation = endpoint.reserve(pin, requestId, 128L, 136L, 50);
+        assertNotNull(reservation);
+        return endpoint.acquireDispatchPermit(reservation, capacity).permit();
     }
 
     @Test
@@ -1377,9 +1464,8 @@ class TransientCapacityQueueContractTest {
             CompletableFuture<Response> waiting =
                     fixture.runtime.scheduler().submit(
                             fixture.context(requestId, 50, 128_000L));
-            awaitCapacityWaiters(fixture.runtime.scheduler(), 1);
+            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 1, 2_000L);
             assertFalse(waiting.isDone());
-            assertEquals(0, fixture.prefillEndpoint.queuedRequestCount());
             assertEquals(0, fixture.decodeEndpoint
                     .resourceSnapshot().reserved().size());
             assertEquals(0, spareEndpoint
@@ -1660,6 +1746,11 @@ class TransientCapacityQueueContractTest {
         }
 
         @Override
+        boolean hasBetterResidentPrefix(ScheduledRequest item, String group) {
+            return delegate.hasBetterResidentPrefix(item, group);
+        }
+
+        @Override
         public PlacementResult<RouteAdmission, PlacementKey> select(BalanceContext context) {
             long startedAt = metrics.placementStarted(context);
             try {
@@ -1692,13 +1783,10 @@ class TransientCapacityQueueContractTest {
         private final Map<Long, Long> deadlines = new ConcurrentHashMap<>();
         private final List<Long> placementLatenciesNanos =
                 new CopyOnWriteArrayList<>();
-        private final List<Long> placementRequestIds =
-                new CopyOnWriteArrayList<>();
 
         private long placementStarted(BalanceContext context) {
             long requestId = context.getRequestId();
             totalAttempts.incrementAndGet();
-            placementRequestIds.add(requestId);
             attemptsByRequest.computeIfAbsent(
                     requestId, ignored -> new AtomicInteger())
                     .incrementAndGet();
@@ -1758,12 +1846,6 @@ class TransientCapacityQueueContractTest {
                     .mapToInt(AtomicInteger::get)
                     .max()
                     .orElse(0);
-        }
-
-        private List<Long> requestIdsFrom(int attemptIndex) {
-            return List.copyOf(placementRequestIds.subList(
-                    Math.min(attemptIndex, placementRequestIds.size()),
-                    placementRequestIds.size()));
         }
 
         private void print(
@@ -1871,7 +1953,11 @@ class TransientCapacityQueueContractTest {
             RoleType role,
             String address,
             WorkerStatus status) {
-        WorkerStatusResponse response = statusResponse(role, 1L, false);
+        return publishEndpoint(registry, address, status, statusResponse(role, 1L, false));
+    }
+
+    private static WorkerEndpoint publishEndpoint(
+            EndpointRegistry registry, String address, WorkerStatus status, WorkerStatusResponse response) {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared = WorkerStatusTestFixtures.prepare(status, WorkerStatusTestFixtures.observation(status, response));
@@ -1882,6 +1968,13 @@ class TransientCapacityQueueContractTest {
         } finally {
             status.lock.unlock();
         }
+    }
+
+    private static DecodeEndpoint publishDecode(Fixture fixture, String ip, long availableKv, boolean busy) {
+        WorkerStatusResponse response = statusResponse(RoleType.DECODE, 1L, busy);
+        response.setAvailableKvCacheTokens(availableKv);
+        return (DecodeEndpoint) publishEndpoint(fixture.runtime.endpointRegistry(), ip + ":18081",
+                initializedStatus(RoleType.DECODE, ip, 18081), response);
     }
 
     private static WorkerStatusResponse statusResponse(

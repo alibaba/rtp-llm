@@ -7,7 +7,7 @@ import org.flexlb.enums.DecodeTaskPhase;
 import java.util.ArrayList;
 import java.util.List;
 
-/** Victims and placement occupancy captured under one endpoint admission lock. */
+/** Reclaimable engine-facing owners and their admission scope captured under one lock. */
 public record DecodeEndpointSnapshot(
         DecodeEndpoint endpoint,
         String endpointId,
@@ -22,7 +22,7 @@ public record DecodeEndpointSnapshot(
         DecodeEndpoint.DecodeRoutingView routing = view.routing();
         List<DecodeRequestView> reserved = new ArrayList<>();
         view.reserved().forEach((requestId, entry) -> {
-            if (entry.claimedForPreemption()) {
+            if (entry.queued() || entry.claimedForPreemption()) {
                 return;
             }
             reserved.add(entry);
@@ -45,7 +45,7 @@ public record DecodeEndpointSnapshot(
                 endpoint,
                 endpoint.ipPort(),
                 policy,
-                routing.placementUsage(),
+                routing.dispatchUsage(),
                 List.copyOf(reserved),
                 List.copyOf(accepted),
                 List.copyOf(running));

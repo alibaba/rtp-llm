@@ -361,6 +361,22 @@ class RequestRegistryTest {
     }
 
     @Test
+    void dispatchSignalsPotentialPreemptionAfterTheSlotPublishesOwnership() {
+        Registered registered = registerItem(706L);
+        assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
+        ScheduledRequest item = registered.item();
+        RequestSlot slot = lifecycle.requestSlot(item.requestId());
+        org.mockito.Mockito.doAnswer(call -> {
+            assertFalse(Thread.holdsLock(slot), "waking a different Prefill must run outside the slot lock");
+            assertEquals(RequestState.Phase.DISPATCHING, slot.snapshot().state());
+            return null;
+        }).when(item.decodeEp()).signalEngineOwnerAvailable(item.priority());
+
+        assertNotNull(RequestLifecycleTestSupport.claimRouteWithoutPrediction(lifecycle, item, () -> true));
+        verify(item.decodeEp()).signalEngineOwnerAvailable(item.priority());
+    }
+
+    @Test
     void invalidBatchIdentityCannotTransferEndpointOwnership() {
         Registered registered = registerItem(704L);
         assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));

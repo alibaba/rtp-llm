@@ -58,6 +58,7 @@ public final class RouteAdmission implements AutoCloseable {
         ServerStatus prefillStatus = null;
         long prefillPlacementVersion = 0L;
         long prefillWorkMs = 0L;
+        long residentPrefixTokens = 0L;
         DecodeEndpoint decodeEndpoint = null;
         WorkerEndpoint.GenerationPin decodePin = null;
         ServerStatus decodeStatus = null;
@@ -94,6 +95,7 @@ public final class RouteAdmission implements AutoCloseable {
                     prefillStatus = status;
                     prefillPlacementVersion = placementVersion;
                     prefillWorkMs = selected.prefillWorkMs();
+                    residentPrefixTokens = selected.residentPrefixTokens();
                     continue;
                 }
                 if (tokenReservation != null) {
@@ -130,6 +132,7 @@ public final class RouteAdmission implements AutoCloseable {
                             prefillStatus,
                             prefillPlacementVersion,
                             prefillWorkMs,
+                            residentPrefixTokens,
                             decodePin,
                             decodePlacementVersion,
                             prefillTokenReservation),
@@ -201,7 +204,8 @@ public final class RouteAdmission implements AutoCloseable {
     public DecodeEndpoint decodeEndpoint() { return decodeBinding.endpoint(); }
     private WorkerEndpoint.GenerationPin prefillPin() { return selection.prefillPin(); }
     private WorkerEndpoint.GenerationPin decodePin() { return selection.decodePin(); }
-    private ServerStatus prefillStatus() { return selection.prefillStatus(); }
+    long residentPrefixTokens() { return selection.residentPrefixTokens(); }
+    ServerStatus prefillStatus() { return selection.prefillStatus(); }
     private ServerStatus decodeStatus() { return decodeBinding.status(); }
     private long prefillPlacementVersion() { return selection.prefillPlacementVersion(); }
     private long decodePlacementVersion() { return selection.decodePlacementVersion(); }
@@ -396,7 +400,7 @@ public final class RouteAdmission implements AutoCloseable {
     }
 
     private record Selection(PrefillEndpoint prefillEndpoint, WorkerEndpoint.GenerationPin prefillPin,
-                             ServerStatus prefillStatus, long prefillPlacementVersion, long prefillWorkMs,
+                             ServerStatus prefillStatus, long prefillPlacementVersion, long prefillWorkMs, long residentPrefixTokens,
                              WorkerEndpoint.GenerationPin decodePin, long decodePlacementVersion,
                              PrefillTokenWorkload.Reservation prefillTokenReservation) { }
 }

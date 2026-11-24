@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.BooleanSupplier;
 
 /**
  * Eviction-only admission component. It neither selects the scheduler mode nor
@@ -112,6 +113,39 @@ public class EvictionManager {
             admission.close();
             throw failure;
         }
+    }
+
+    /**
+     * Reclaim engine-facing capacity for an already placed request. No Prefill slot or
+     * Decode permit is held across Cancel. Null means there is no plan; completion
+     * with null wakes ordinary fleet selection; a response is a terminal control failure.
+     */
+    public CompletableFuture<Response> preemptForDispatch(ScheduledRequest item, DecodeEndpoint endpoint) {
+        DecodeBinding request = item.decodeBinding();
+        if (shutdown || request.mode() != DecodeMode.PREEMPT_AT_PLACEMENT
+                || !PriorityNormalizer.hasPriority(request.priority()) || !requests.isDispatchPending(item)) {
+            return null;
+        }
+        PreemptionConfig policy = item.ctx().getConfig().queueScheduler().getOrdering().preemptionPolicy().orElse(null);
+        if (policy == null || !policy.allows(VictimStage.DECODE_ENGINE_OWNED)) { return null; }
+        PlannedDecodeEviction planned = planDecodeEviction(request, policy, endpoint);
+        // Master-queued owners consume no dispatch budget and cannot unblock this request.
+        if (planned == null || !planned.proposal().requiresEngineCancel()) { return null; }
+        var proposal = planned.proposal();
+        BalanceContext ctx = item.ctx();
+        var command = preemptionCommand(request, endpoint, proposal, policy, () -> requests.isDispatchPending(item));
+        reportCancelRequests(ctx, proposal);
+        return preemptionCoordinator.preemptForDispatch(command).handle((result, error) -> {
+            if (result != null && result.committed()) {
+                reportCommittedEnginePreemption(ctx, proposal);
+                recordDecodePlanObservability(ctx, proposal);
+                return null;
+            }
+            if (error == null && result != null && !result.controlFailure()) { return null; }
+            reportCancelTimeout(ctx, proposal.endpointId());
+            return admissionError(StrategyErrorType.RESOURCE_EXHAUSTED, AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                    result != null ? result.detail() : "Decode eviction control failed before dispatch");
+        });
     }
 
     /** Eviction metrics are observers; they never own a committed transaction. */
@@ -383,17 +417,8 @@ public class EvictionManager {
                                              DecodeEndpoint decodeEp,
                                              DecodeBinding request,
                                              RouteAdmission admission) {
-        String detail = "preempted by higher-priority request " + ctx.getRequestId();
-        DecodePreemptionCoordinator.PreemptionCommand command =
-                new DecodePreemptionCoordinator.PreemptionCommand(
-                        decodeEp,
-                        request.requestId(), request.hardKvTokens(),
-                        request.expectedKvTokens(), request.priority(),
-                        request.capacity(),
-                        proposal.victims(), 50L,
-                        preemption.getTimeoutMs(),
-                        () -> requests.isAdmissionOpen(
-                                request.requestId(), future), detail);
+        var command = preemptionCommand(request, decodeEp, proposal, preemption,
+                () -> requests.isAdmissionOpen(request.requestId(), future));
 
         CompletableFuture<DecodePreemptionCoordinator.PreemptionResult>
                 execution;
@@ -440,6 +465,15 @@ public class EvictionManager {
                         }
                     }
                 });
+    }
+
+    private static DecodePreemptionCoordinator.PreemptionCommand preemptionCommand(
+            DecodeBinding request, DecodeEndpoint endpoint, DecodeEvictionProposal proposal,
+            PreemptionConfig policy, BooleanSupplier requestOpen) {
+        return new DecodePreemptionCoordinator.PreemptionCommand(endpoint,
+                request.requestId(), request.hardKvTokens(), request.expectedKvTokens(), request.priority(),
+                request.capacity(), proposal.victims(), 50L, policy.getTimeoutMs(), requestOpen,
+                "preempted by higher-priority request " + request.requestId());
     }
 
     /** Convert one typed coordinator result into commit or one terminal response. */

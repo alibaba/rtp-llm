@@ -38,6 +38,7 @@ public class DefaultRouter {
     private final RandomStrategy vitSelector;
     private final ConfigService configService;
     private final List<RoleType> requiredRoles;
+    private final List<RoleType> queuePlacementRoles;
     @Autowired
     private VitCacheSelector vitCacheSelector;
 
@@ -59,6 +60,9 @@ public class DefaultRouter {
         this.requiredRoles = List.copyOf(
                 Objects.requireNonNull(
                         modelMetaConfig, "modelMetaConfig").requiredRoles());
+        this.queuePlacementRoles = requiredRoles.contains(RoleType.DECODE) && prefillRole() != null
+                ? requiredRoles.stream().filter(role -> role != RoleType.DECODE).toList()
+                : requiredRoles;
     }
 
     public PlacementResult<RouteAdmission, PlacementKey> select(BalanceContext context) {
@@ -90,6 +94,10 @@ public class DefaultRouter {
                 : prefillSelector.estimateQueuedTokens(context, role, policyGroup);
     }
 
+    boolean hasBetterResidentPrefix(ScheduledRequest item, String policyGroup) {
+        return prefillSelector.hasBetterResidentPrefix(item.ctx(), item.prefill().getRole(), policyGroup, item.prefillEp());
+    }
+
     /** Sustained pool-wide Engine queue pressure evidence for global shedding. */
     public boolean isPrefillClusterOverloaded(String policyGroup, long nowMs) {
         RoleType role = prefillRole();
@@ -106,12 +114,19 @@ public class DefaultRouter {
         Response validationFailure = validateRequest(context);
         if (validationFailure != null) { return PlacementResult.rejected(validationFailure); }
         DecodeBinding decodeAdmission = DecodeBinding.capture(context);
-        try (PinnedRouting routing = selectAll(context, requiredRoles, policyGroup, decodeAdmission)) {
+        List<RoleType> roles = context.getConfig().isQueue() ? queuePlacementRoles : requiredRoles;
+        try (PinnedRouting routing = selectAll(context, roles, policyGroup, decodeAdmission)) {
             if (routing.blocker() != null) {
                 return PlacementResult.blocked(routing.blocker(), routing.failure(), routing.diagnostics);
             }
             if (routing.failure() != null) {
                 return PlacementResult.rejected(routing.failure(), routing.diagnostics);
+            }
+            if (roles.size() != requiredRoles.size()) {
+                String decodeGroup = StringUtils.isNotBlank(policyGroup) ? policyGroup : routing.prefillGroup();
+                Response impossible = decodeSelector.validateDemand(decodeAdmission, decodeGroup);
+                if (impossible != null) { return PlacementResult.rejected(impossible); }
+                decodeAdmission = decodeAdmission.defer(decodeSelector, decodeGroup);
             }
             return PlacementResult.success(RouteAdmission.prepare(context, routing.selections(),
                     buildSuccessResponse(routing.serverStatuses()), decodeAdmission));
@@ -337,6 +352,12 @@ public class DefaultRouter {
 
         private List<SelectedRole> selections() {
             return selections;
+        }
+
+        private String prefillGroup() {
+            return selections.stream().map(SelectedRole::serverStatus)
+                    .filter(status -> status.getRole().supportsPrefill())
+                    .findFirst().orElseThrow().getGroup();
         }
 
         private List<ServerStatus> serverStatuses() {

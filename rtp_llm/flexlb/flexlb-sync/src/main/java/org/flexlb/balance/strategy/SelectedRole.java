@@ -24,13 +24,14 @@ public final class SelectedRole implements AutoCloseable {
     private final ServerStatus serverStatus;
     private final long prefillWorkMs;
     private final long placementVersion;
+    private final long residentPrefixTokens;
     private PrefillTokenWorkload.Reservation tokenReservation;
 
     private SelectedRole(
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus,
             long prefillWorkMs,
-            long placementVersion,
+            long placementVersion, long residentPrefixTokens,
             PrefillTokenWorkload.Reservation tokenReservation) {
         this.generationPin = generationPin;
         this.serverStatus = serverStatus;
@@ -67,6 +68,8 @@ public final class SelectedRole implements AutoCloseable {
                     "placementVersion must be non-negative");
         }
         this.placementVersion = placementVersion;
+        this.residentPrefixTokens = residentPrefixTokens;
+        this.tokenReservation = tokenReservation;
     }
 
     public static SelectedRole prefill(
@@ -95,6 +98,12 @@ public final class SelectedRole implements AutoCloseable {
             long prefillWorkMs,
             long placementVersion,
             PrefillTokenWorkload.Reservation tokenReservation) {
+        return prefill(generationPin, serverStatus, prefillWorkMs, placementVersion, 0L, tokenReservation);
+    }
+
+    static SelectedRole prefill(WorkerEndpoint.GenerationPin generationPin, ServerStatus serverStatus,
+            long prefillWorkMs, long placementVersion, long residentPrefixTokens,
+            PrefillTokenWorkload.Reservation tokenReservation) {
         if (prefillWorkMs < 0L) {
             if (generationPin != null) {
                 generationPin.close();
@@ -107,7 +116,7 @@ public final class SelectedRole implements AutoCloseable {
         }
         return createOwned(
                 generationPin, serverStatus, prefillWorkMs,
-                placementVersion, tokenReservation);
+                placementVersion, residentPrefixTokens, tokenReservation);
     }
 
     public static SelectedRole decode(
@@ -128,36 +137,26 @@ public final class SelectedRole implements AutoCloseable {
             }
             throw new IllegalArgumentException("Decode selection requires Decode metadata");
         }
-        return createOwned(generationPin, serverStatus, -1L, placementVersion, null);
+        return createOwned(generationPin, serverStatus, -1L, placementVersion, 0L, null);
     }
 
     public static SelectedRole stateless(
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus) {
         return createOwned(
-                generationPin, serverStatus, -1L, 0L, null);
-    }
-
-    /** Calling a factory consumes the pin, including every validation failure. */
-    private static SelectedRole createOwned(
-            WorkerEndpoint.GenerationPin generationPin,
-            ServerStatus serverStatus,
-            long prefillWorkMs,
-            long placementVersion) {
-        return createOwned(generationPin, serverStatus, prefillWorkMs,
-                placementVersion, null);
+                generationPin, serverStatus, -1L, 0L, 0L, null);
     }
 
     private static SelectedRole createOwned(
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus,
             long prefillWorkMs,
-            long placementVersion,
+            long placementVersion, long residentPrefixTokens,
             PrefillTokenWorkload.Reservation tokenReservation) {
         try {
             return new SelectedRole(
                     generationPin, serverStatus, prefillWorkMs,
-                    placementVersion, tokenReservation);
+                    placementVersion, residentPrefixTokens, tokenReservation);
         } catch (RuntimeException | Error failure) {
             if (generationPin != null) {
                 generationPin.close();
@@ -180,6 +179,9 @@ public final class SelectedRole implements AutoCloseable {
         }
         return prefillWorkMs;
     }
+
+    /** Resident KV match before accounting for work on the last prompt block. */
+    public long residentPrefixTokens() { return residentPrefixTokens; }
 
     public long placementVersion() {
         return placementVersion;

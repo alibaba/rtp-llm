@@ -2,9 +2,12 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.prediction.DecodeCostFormula;
+import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -33,6 +36,46 @@ public final class ScheduledRequest implements Prioritized {
     private final BalanceContext ctx;
     private final CompletableFuture<Response> future;
     private final RequestExecution execution;
+    private volatile DecodePreemptionWait pendingDecodePreemption;
+
+    /** One victim-control RPC is in progress. Dispatch may resume only after it settles. */
+    static final class DecodePreemptionWait implements CapacityBoundary.Availability {
+        private volatile boolean finished;
+        private volatile Runnable listener;
+        @Override public boolean isAvailable() { return finished; }
+        @Override public void addListener(Runnable listener) { this.listener = listener; }
+        @Override public void removeListener(Runnable listener) { this.listener = null; }
+        private void finish() {
+            finished = true;
+            Runnable subscribed = listener;
+            if (subscribed != null) { subscribed.run(); }
+        }
+    }
+
+    boolean allowsDecodeEnginePreemption() {
+        return decodeBinding().mode() == DecodeMode.PREEMPT_AT_PLACEMENT
+                && ctx.getConfig().allowsPreemption(VictimStage.DECODE_ENGINE_OWNED);
+    }
+
+    DecodePreemptionWait pendingDecodePreemption() { return pendingDecodePreemption; }
+
+    // Only the owning Prefill worker starts an attempt. The RPC callback finishes it.
+    DecodePreemptionWait beginDecodePreemption() {
+        DecodePreemptionWait wait = new DecodePreemptionWait();
+        pendingDecodePreemption = wait;
+        return wait;
+    }
+
+    void finishDecodePreemption(DecodePreemptionWait wait) {
+        pendingDecodePreemption = null;
+        wait.finish();
+    }
+
+    static void assignQueueSequence(BalanceContext ctx) {
+        if (ctx.getWorkerEnqueueSequence() == 0L) {
+            ctx.setWorkerEnqueueSequence(ENQUEUE_SEQUENCE.incrementAndGet());
+        }
+    }
 
     public ScheduledRequest(BalanceContext ctx,
                      CompletableFuture<Response> future,
@@ -59,9 +102,9 @@ public final class ScheduledRequest implements Prioritized {
                      DecodeBinding frozenDecode) {
         this.ctx = Objects.requireNonNull(ctx, "ctx");
         this.future = future;
-        if (ctx.getWorkerEnqueueSequence() == 0L) {
+        assignQueueSequence(ctx);
+        if (ctx.getFirstWorkerEnqueueTime() == 0L) {
             ctx.setFirstWorkerEnqueueTime(enqueuedAtMs);
-            ctx.setWorkerEnqueueSequence(ENQUEUE_SEQUENCE.incrementAndGet());
         }
         FlexlbConfig schedulingConfig = Objects.requireNonNull(
                 ctx.getConfig(), "request scheduling config");
@@ -84,11 +127,15 @@ public final class ScheduledRequest implements Prioritized {
     /** O(1) wire-size bound; grouping must not parse or copy GenerateInput payloads. */
     public long batchPayloadSizeUpperBound() {
         var input = ctx().getGenerateInputPb();
+        // A queued PD request can be grouped before its Decode address is known.
+        // Reserve space for a full-length DNS host (also covers IP literals).
+        long decodeAddressBytes = decodeBinding().isDeferred()
+                ? 64L + 255L : roleAddressSizeUpperBound(decode());
         // Input/external-input/DP-slot envelopes, priority and config length growth.
         // Charge a separate DP envelope per item, which also bounds mixed-DP batches.
         return (input == null ? 0L : input.size()) + 64L
                 + roleAddressSizeUpperBound(prefill())
-                + roleAddressSizeUpperBound(decode());
+                + decodeAddressBytes;
     }
 
     private static long roleAddressSizeUpperBound(ServerStatus status) {
@@ -192,7 +239,17 @@ public final class ScheduledRequest implements Prioritized {
             long expectedKvTokens,
             DecodeEndpoint.AdmissionCapacity capacity,
             DecodeMode mode,
-            DecodeCostFormula costFormula) {
+            DecodeCostFormula costFormula,
+            DecodeSelector decodeSelector,
+            String decodeGroup) {
+        public DecodeBinding(ServerStatus status, DecodeEndpoint endpoint,
+                             DecodeEndpoint.ReservationHandle reservation,
+                             long requestId, int priority, long hardKvTokens, long expectedKvTokens,
+                             DecodeEndpoint.AdmissionCapacity capacity, DecodeMode mode,
+                             DecodeCostFormula costFormula) {
+            this(status, endpoint, reservation, requestId, priority, hardKvTokens,
+                    expectedKvTokens, capacity, mode, costFormula, null, null);
+        }
         public DecodeBinding {
             Objects.requireNonNull(capacity, "capacity");
             Objects.requireNonNull(mode, "mode");
@@ -219,16 +276,26 @@ public final class ScheduledRequest implements Prioritized {
                     decode.getCostEstimator().compiledFormula());
         }
 
-        DecodeBinding bind(ServerStatus selectedStatus, DecodeEndpoint selectedEndpoint,
-                           DecodeEndpoint.ReservationHandle selectedReservation) {
+        DecodeBinding defer(DecodeSelector selector, String group) {
+            return new DecodeBinding(null, null, null, requestId, priority, hardKvTokens,
+                    expectedKvTokens, capacity, mode, costFormula,
+                    Objects.requireNonNull(selector, "Decode selector"), group);
+        }
+
+        public DecodeBinding bind(ServerStatus selectedStatus, DecodeEndpoint selectedEndpoint,
+                                  DecodeEndpoint.ReservationHandle selectedReservation) {
             return new DecodeBinding(selectedStatus, selectedEndpoint, selectedReservation,
                     requestId, priority, hardKvTokens, expectedKvTokens, capacity, mode,
-                    costFormula);
+                    costFormula, decodeSelector, decodeGroup);
+        }
+
+        boolean isDeferred() {
+            return decodeSelector != null && endpoint == null;
         }
 
         /** Absence is a topology choice; a partial binding is still an error. */
         boolean isAbsent() {
-            return status == null && endpoint == null && reservation == null;
+            return decodeSelector == null && status == null && endpoint == null && reservation == null;
         }
     }
 }

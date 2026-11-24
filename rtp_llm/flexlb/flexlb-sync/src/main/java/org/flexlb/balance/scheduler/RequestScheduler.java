@@ -154,6 +154,7 @@ public final class RequestScheduler {
         return requestRegistry.liveRequestCount();
     }
 
+    /** Diagnostic sum across independently sampled queues. A route can move to Prefill between reads. */
     public int getQueuedRequestCount() {
         long queued = globalQueue == null ? 0L : globalQueue.size();
         for (PrefillEndpoint endpoint

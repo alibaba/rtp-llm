@@ -112,7 +112,7 @@ public class RequestRegistry {
             for (WithdrawnRoute withdrawal : claimed) {
                 try {
                     if (replaced) {
-                        withdrawal.slot().detachWithdrawnRoute(withdrawal.claim(), withdrawal.item());
+                        withdrawal.slot().detachWithdrawnRoute(withdrawal.claim(), withdrawal.item(), "DECODE_RESERVATION_YIELDED");
                     }
                 } catch (Throwable detachFailure) {
                     failure = RequestTerminalCleanup.appendFailure(failure, detachFailure);
@@ -148,6 +148,46 @@ public class RequestRegistry {
                 }
                 RequestTerminalCleanup.rethrowCleanup(failure);
             }
+        }
+    }
+
+    void cachePollCompleted(PrefillEndpoint endpoint) {
+        var queue = globalQueue;
+        if (queue != null) { queue.cachePollCompleted(endpoint); }
+    }
+
+    void replanIfCacheImproved(ScheduledRequest item) {
+        GlobalQueueCoordinator queue = globalQueue;
+        var binding = item.decodeBinding();
+        if (queue == null || item.future().isDone() || item.pendingDecodePreemption() != null || !binding.isDeferred()) {
+            return;
+        }
+        try {
+            if (!binding.decodeSelector().hasDispatchCapacity(binding, binding.decodeGroup())
+                    || !queue.hasBetterResidentPrefix(item)) { return; }
+        } catch (RuntimeException failure) {
+            // A failed advisory lookup must not strand the registered request or stop this Prefill runtime.
+            Logger.warn("Could not refresh Prefill cache after Decode wait for request " + item.requestId(), failure);
+            return;
+        }
+        if (!enterAdmissionHandleGate()) { return; }
+        RequestSlot slot = requestSlots.get(item.requestId());
+        AdmissionHandle claim = slot == null ? null : slot.tryBeginRouteWithdrawal(item);
+        if (claim == null) {
+            exitAdmissionHandleGate();
+            return;
+        }
+        try (claim) {
+            try {
+                slot.detachWithdrawnRoute(claim, item, "DECODE_WAKE_CACHE_IMPROVED");
+            } catch (Throwable failure) {
+                claim.terminate(buildErrorResponse(StrategyErrorType.DISPATCH_FAILED, "cache replan withdrawal failed"));
+                Logger.warn("Failed to withdraw route after Decode wait for request " + item.requestId(), failure);
+                return;
+            }
+        }
+        if (slot.isOpen() && !queue.requeue(item)) {
+            completeError(item.future(), StrategyErrorType.DISPATCH_FAILED, "scheduler closed during cache replan");
         }
     }
 
@@ -352,6 +392,16 @@ public class RequestRegistry {
         RequestSlot slot = requestSlots.get(item.requestId());
         return slot == null || !slot.ownsFuture(item.future())
                 ? PlacementResult.Status.CLOSED : slot.commitRoute(item, publication);
+    }
+
+    /** Exact queued item and generation are still eligible for a delivery attempt. */
+    public boolean isDispatchPending(ScheduledRequest item) {
+        if (shuttingDown.get() || item.requestExpired(System.currentTimeMillis())) { return false; }
+        RequestSlot slot = requestSlots.get(item.requestId());
+        if (slot == null) { return false; }
+        synchronized (slot) {
+            return isCurrentSlot(slot) && slot.ownsPreparedDeliveryLocked(item);
+        }
     }
 
     public boolean isAdmissionOpen(long requestId, CompletableFuture<?> future) {
@@ -563,6 +613,27 @@ public class RequestRegistry {
         if (slot != null) { slot.cancelRequest(0L, CancelReason.DEADLINE_EXCEEDED); }
     }
 
+    void tryPreemptForDispatch(ScheduledRequest item) {
+        var queue = globalQueue;
+        var slot = entryFor(item);
+        if (queue == null || slot == null || !isDispatchPending(item)) { return; }
+        try {
+            var control = queue.preemptForDispatch(item);
+            if (control == null) { return; }
+            var wait = item.beginDecodePreemption();
+            control.whenComplete((response, failure) -> {
+                try {
+                    if (failure != null) { slot.failDeliveryPreparation(item, failure); }
+                    else if (response != null) { slot.rejectDeliveryPreparation(item, response); }
+                } finally {
+                    item.finishDecodePreemption(wait);
+                }
+            });
+        } catch (RuntimeException failure) {
+            slot.failDeliveryPreparation(item, failure);
+        }
+    }
+
     public void onQueueOfferFailure(ScheduledRequest exact, Throwable error) {
         RequestSlot slot = entryFor(exact);
         if (slot != null) { slot.recordSchedulingFailure(StrategyErrorType.DISPATCH_FAILED,
@@ -593,15 +664,24 @@ public class RequestRegistry {
     }
 
     public DeliveryClaim claimBatchDelivery(ScheduledRequest item, BatchDeliveryStrategy.BatchTransaction transaction) {
-        RequestSlot slot = entryFor(item);
-        return slot == null ? null : slot.claimDelivery(item, DeliveryClaimKind.BATCH_ENQUEUE,
-                transaction.batchId(), () -> transaction.transferToEndpoint(item));
+        return claimDelivery(item, DeliveryClaimKind.BATCH_ENQUEUE, transaction.batchId(),
+                () -> transaction.transferToEndpoint(item));
     }
 
     public DeliveryClaim claimRouteDelivery(ScheduledRequest item, PrefillAdmissionResources.CommittedAdmissionOwner admission) {
+        return claimDelivery(item, DeliveryClaimKind.ROUTE_DECISION, 0L, () -> admission.transferToEndpoint(item));
+    }
+
+    private DeliveryClaim claimDelivery(ScheduledRequest item, DeliveryClaimKind kind,
+                                        long correlationId, BooleanSupplier transfer) {
         RequestSlot slot = entryFor(item);
-        return slot == null ? null : slot.claimDelivery(item, DeliveryClaimKind.ROUTE_DECISION,
-                0L, () -> admission.transferToEndpoint(item));
+        if (slot == null) { return null; }
+        DeliveryClaim claim = slot.claimDelivery(item, kind, correlationId, transfer);
+        if (claim != null && item.decodeEp() != null) {
+            // Candidate ownership and its Cancel target must both be visible before waking other Prefills.
+            item.decodeEp().signalEngineOwnerAvailable(item.priority());
+        }
+        return claim;
     }
 
     public void setDeliveryPrediction(DeliveryClaim claim, WorkSnapshot precedingWork, long predictedMs) {

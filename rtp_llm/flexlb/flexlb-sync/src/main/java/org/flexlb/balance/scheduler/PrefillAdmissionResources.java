@@ -20,7 +20,7 @@ import java.util.Objects;
  */
 final class PrefillAdmissionResources {
 
-    private static final RouteProjection.AdmissionBlockSemantics
+    static final RouteProjection.AdmissionBlockSemantics
             DECODE_BLOCK = new RouteProjection.AdmissionBlockSemantics(
                     "DELIVERY_CAPACITY_DECODE_ENGINE",
                     RouteProjection.AfterProbeAdmission.INDEPENDENT,
@@ -37,11 +37,18 @@ final class PrefillAdmissionResources {
     static final class Member {
         final ScheduledRequest item;
         final DecodeEndpoint.EngineDispatchPermit decode;
+        final ScheduledRequest.DecodeBinding selectedDecode;
         MemberOwnership ownership = MemberOwnership.ADMISSION_OWNED;
 
         Member(
                 ScheduledRequest item,
                 DecodeEndpoint.EngineDispatchPermit permit) {
+            this(item, permit, null);
+        }
+
+        Member(ScheduledRequest item, DecodeEndpoint.EngineDispatchPermit permit,
+               ScheduledRequest.DecodeBinding selectedDecode) {
+            this.selectedDecode = selectedDecode;
             this.item = Objects.requireNonNull(item, "item");
             this.decode = permit;
         }
@@ -50,6 +57,25 @@ final class PrefillAdmissionResources {
     static CapacityBoundary.Attempt<Member> prepareMember(
             ScheduledRequest item) {
         ScheduledRequest.DecodeBinding binding = item.decodeBinding();
+        if (binding.isDeferred()) {
+            var control = item.pendingDecodePreemption();
+            if (control != null) {
+                return rejected(CapacityBoundary.unavailable(control, DECODE_BLOCK));
+            }
+            var attempt = binding.decodeSelector().tryDispatch(binding, binding.decodeGroup(), item.allowsDecodeEnginePreemption());
+            if (!attempt.accepted()) {
+                CapacityBoundary boundary = attempt.boundary();
+                return rejected(boundary.unavailable()
+                        ? CapacityBoundary.unavailable(boundary.availability(), DECODE_BLOCK) : boundary);
+            }
+            var dispatch = attempt.value();
+            try {
+                var selected = binding.bind(dispatch.status(), dispatch.endpoint(), dispatch.reservation());
+                return accepted(new Member(item, dispatch.permit(), selected));
+            } catch (Throwable failure) {
+                return failed(rollbackDispatch(dispatch.permit(), dispatch.endpoint(), dispatch.reservation(), failure));
+            }
+        }
         if (binding.isAbsent()) {
             // The committed topology has no independent Decode resource.
             // Its Prefill/PDFUSION reservation still follows the same handoff.
@@ -186,8 +212,21 @@ final class PrefillAdmissionResources {
                 || member.ownership != MemberOwnership.ADMISSION_OWNED) {
             return priorFailure;
         }
-        Throwable failure = rollbackPermit(member.decode, priorFailure);
+        ScheduledRequest.DecodeBinding selected = member.selectedDecode;
+        Throwable failure = selected == null ? rollbackPermit(member.decode, priorFailure)
+                : rollbackDispatch(member.decode, selected.endpoint(), selected.reservation(), priorFailure);
         member.ownership = MemberOwnership.OWNERSHIP_LOST;
+        return failure;
+    }
+
+    private static Throwable rollbackDispatch(DecodeEndpoint.EngineDispatchPermit permit, DecodeEndpoint endpoint,
+                                              DecodeEndpoint.ReservationHandle reservation, Throwable priorFailure) {
+        Throwable failure = rollbackPermit(permit, priorFailure);
+        try {
+            endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+        } catch (Throwable releaseFailure) {
+            failure = combine(failure, releaseFailure);
+        }
         return failure;
     }
 
@@ -318,6 +357,9 @@ final class PrefillAdmissionResources {
                     member.decode.dispatch();
             return switch (transfer) {
                 case TRANSFERRED -> {
+                    if (member.selectedDecode != null) {
+                        exactItem.execution().commitDecodeBinding(member.selectedDecode);
+                    }
                     member.ownership = MemberOwnership.ENDPOINT_OWNED;
                     yield true;
                 }

@@ -28,6 +28,15 @@ public final class EndpointEventProjector {
         this.failureReporter = Objects.requireNonNull(failureReporter, "failureReporter");
     }
 
+    public void onCachePollCompleted(PrefillEndpoint source) {
+        try {
+            scheduler.cachePollCompleted(source);
+        } catch (Throwable failure) {
+            // The cache mutation already committed. Keep scheduler callbacks outside poll health.
+            logErrorNoFail("Cache poll projection failed: engine={}", source.ipPort(), failure);
+        }
+    }
+
     public void onPrefillStatus(
             PrefillEndpoint source,
             RoleType role,
@@ -71,6 +80,14 @@ public final class EndpointEventProjector {
 
     public void onQueuedItemExpired(ScheduledRequest exactItem) {
         scheduler.onQueuedItemExpired(exactItem);
+    }
+
+    void replanIfCacheImproved(ScheduledRequest item) {
+        scheduler.replanIfCacheImproved(item);
+    }
+
+    void tryPreemptForDispatch(ScheduledRequest item) {
+        scheduler.tryPreemptForDispatch(item);
     }
 
     public void onQueueOfferFailure(

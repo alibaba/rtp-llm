@@ -85,6 +85,27 @@ class PrefillEndpointTest {
         endpoint.close();
     }
 
+    @Test
+    void cachePollProgressIsMonotonicForOneEndpointGeneration() {
+        assertEquals(Long.MIN_VALUE, endpoint.lastIndexedCachePollStartNanos());
+        assertFalse(endpoint.awaitingCachePollAfter(10L));
+        try (var poll = endpoint.getStatus().tryBeginCachePoll(1L)) {
+            assertTrue(endpoint.awaitingCachePollAfter(10L));
+        }
+        endpoint.cachePollCompleted(20L);
+        endpoint.cachePollCompleted(10L);
+        endpoint.cachePollCompleted(20L);
+        assertEquals(20L, endpoint.lastIndexedCachePollStartNanos());
+        endpoint.cachePollCompleted(30L);
+        assertEquals(30L, endpoint.lastIndexedCachePollStartNanos());
+        assertFalse(endpoint.awaitingCachePollAfter(30L));
+        assertTrue(endpoint.awaitingCachePollAfter(31L));
+        verify(requestRuntime.events(), org.mockito.Mockito.times(2)).onCachePollCompleted(endpoint);
+        endpoint.close();
+        assertFalse(endpoint.awaitingCachePollAfter(31L));
+        verify(requestRuntime.events(), org.mockito.Mockito.times(3)).onCachePollCompleted(endpoint);
+    }
+
     // ---- batch commit / release ----
 
     @Test

@@ -13,6 +13,8 @@ import org.flexlb.testfixture.TaskInfo;
 import org.flexlb.testfixture.WorkerStatusResponse;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 import java.util.HashMap;
 import java.util.List;
@@ -206,8 +208,9 @@ class DecodeEndpointLayeredViewTest {
                 "the cancel fence follows the configured terminal retention TTL");
     }
 
-    @Test
-    void priorityTerminalRecordIsAuthoritativeWithoutAcceptedOrWorkerCanceled() {
+    @ParameterizedTest
+    @EnumSource(value = DecodeEndpoint.PreemptionDecision.class, names = {"COMMIT", "RELEASE_CAPACITY"})
+    void priorityTerminalRecordIsAuthoritativeWithoutAcceptedOrWorkerCanceled(DecodeEndpoint.PreemptionDecision decision) {
         reserve(1L, 500, 508, 30);
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)), null, 10_000);
         long version = endpoint.routingView().admissionVersion();
@@ -217,11 +220,12 @@ class DecodeEndpointLayeredViewTest {
         assertTrue(endpoint.updatePreemption(102L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
 
         assertTrue(endpoint.updatePreemption(102L, DecodeEndpoint.PreemptionUpdate.fenced(reservations.get(1L))));
-        assertTrue(endpoint.finishPreemption(102L, DecodeEndpoint.PreemptionDecision.COMMIT));
+        assertTrue(endpoint.finishPreemption(102L, decision));
 
         assertFalse(isConfirmed(1L));
-        assertTrue(endpoint.resourceSnapshot().reserved().containsKey(9L));
-        assertEquals(1, endpoint.routingView().totalLoad());
+        boolean keepIncoming = decision == DecodeEndpoint.PreemptionDecision.COMMIT;
+        assertEquals(keepIncoming, endpoint.resourceSnapshot().reserved().containsKey(9L));
+        assertEquals(keepIncoming ? 1 : 0, endpoint.routingView().totalLoad());
         // The same late Decode sample rejected by typed-CANCELED fencing must
         // also be rejected after the stronger absent+terminal record proof.
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)), null, 10_000);

@@ -2,6 +2,7 @@ package org.flexlb.balance.eviction;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRequestView;
+import org.flexlb.balance.endpoint.DecodeEndpoint.PreemptionDecision;
 import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.preemption.VictimTerminal;
@@ -104,6 +105,15 @@ public final class DecodePreemptionCoordinator {
 
     CompletableFuture<PreemptionResult> preempt(
             PreemptionCommand command) {
+        return preempt(command, PreemptionDecision.COMMIT);
+    }
+
+    CompletableFuture<PreemptionResult> preemptForDispatch(PreemptionCommand command) {
+        return preempt(command, PreemptionDecision.RELEASE_CAPACITY);
+    }
+
+    private CompletableFuture<PreemptionResult> preempt(
+            PreemptionCommand command, PreemptionDecision settlement) {
         long token = nextToken();
         List<CancelTarget> targets =
                 new ArrayList<>(command.victims().size());
@@ -112,22 +122,25 @@ public final class DecodePreemptionCoordinator {
         long endpointGenerationId =
                 command.endpoint().getStatus().getGenerationId();
         for (DecodeRequestView victim : command.victims()) {
+            var reservation = new DecodeEndpoint.ReservationHandle(
+                    endpointGenerationId, victim.requestId(), victim.reservationToken());
             Optional<CancelTarget> target = requests.findCancelTarget(
                     victim.requestId(), victim.reservationToken());
             if (target.isEmpty()) {
+                // Check shadow first: this exact token may become engine-confirmed between the two reads.
+                boolean victimGone = settlement == PreemptionDecision.RELEASE_CAPACITY
+                        && !reservation.equals(command.endpoint().reservationHandle(victim.requestId()))
+                        && !command.endpoint().isAcceptedByEngine(reservation);
                 return CompletableFuture.completedFuture(new PreemptionResult(
-                        false, true,
-                        "cancel_owner_missing:" + victim.requestId()));
+                        false, !victimGone,
+                        (victimGone ? "victim_inflight_gone:" : "cancel_owner_missing:") + victim.requestId()));
             }
             targets.add(target.get());
-            victimReservations.add(new DecodeEndpoint.ReservationHandle(
-                    endpointGenerationId,
-                    victim.requestId(),
-                    victim.reservationToken()));
+            victimReservations.add(reservation);
         }
 
         AttemptCapability capability = new AttemptCapability(
-                command, requests, token);
+                command, requests, token, settlement);
         try {
             for (int index = 0; index < command.victims().size(); index++) {
                 DecodeRequestView victim = command.victims().get(index);
@@ -160,10 +173,14 @@ public final class DecodePreemptionCoordinator {
                             command.capacity());
             if (begin != DecodeEndpoint.PreemptionBeginResult.SUCCESS) {
                 return CompletableFuture.completedFuture(capability.abort(
-                        begin == DecodeEndpoint.PreemptionBeginResult.ENDPOINT_RETIRED,
+                        begin == DecodeEndpoint.PreemptionBeginResult.ENDPOINT_RETIRED
+                                && settlement != PreemptionDecision.RELEASE_CAPACITY,
                         "begin_" + begin.name().toLowerCase()));
             }
             capability.endpointBegun();
+            if (settlement == PreemptionDecision.RELEASE_CAPACITY && !command.admissionOpen().getAsBoolean()) {
+                return CompletableFuture.completedFuture(capability.abort(false, "incoming_no_longer_pending"));
+            }
             if (!command.endpoint().updatePreemption(token, DecodeEndpoint.PreemptionUpdate.cancelSending())) {
                 return CompletableFuture.completedFuture(capability.abort(
                         true,
@@ -448,6 +465,7 @@ public final class DecodePreemptionCoordinator {
         private final PreemptionCommand command;
         private final RequestRegistry requests;
         private final long token;
+        private final PreemptionDecision settlement;
         private final List<ClaimedVictim> claims = new ArrayList<>();
         /** Historical outbound boundary retained after an abort. */
         private boolean cancelStarted;
@@ -459,13 +477,14 @@ public final class DecodePreemptionCoordinator {
         private AttemptCapability(
                 PreemptionCommand command,
                 RequestRegistry requests,
-                long token) {
+                long token, PreemptionDecision settlement) {
             if (token <= 0) {
                 throw new IllegalArgumentException("token is required");
             }
             this.command = command;
             this.requests = requests;
             this.token = token;
+            this.settlement = settlement;
         }
 
         private ClaimedVictim add(
@@ -564,7 +583,7 @@ public final class DecodePreemptionCoordinator {
         private PreemptionResult finish(boolean hasNotFound) {
             if (allVictimsTerminal()
                     && command.admissionOpen().getAsBoolean()
-                    && command.endpoint().finishPreemption(token, DecodeEndpoint.PreemptionDecision.COMMIT)) {
+                    && command.endpoint().finishPreemption(token, settlement)) {
                 markCommitted();
                 return new PreemptionResult(
                         true, false, "committed");

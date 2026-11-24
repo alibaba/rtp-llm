@@ -1,5 +1,6 @@
 package org.flexlb.sync.status;
 
+import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
@@ -355,6 +356,10 @@ public final class WorkerDirectory {
             }
         }
         return List.copyOf(matching);
+    }
+
+    public CapacityBoundary.Availability observeDecodeCapacity(String group, int preemptionPriority) {
+        return endpointRegistry.observeDecodeCapacity(group, preemptionPriority);
     }
 
     /** Pin the exact generation represented by a Decode routing snapshot. */

@@ -46,13 +46,13 @@ class DecodeSelectionAdmissionContractTest {
             var queuedUsage = fixture.queued.routingView().placementUsage();
             var freeUsage = fixture.free.routingView().placementUsage();
 
+            Map<String, Integer> selectedCounts = new HashMap<>();
             for (long requestId = 100L; requestId < 106L; requestId++) {
                 DecodeBinding request = fixture.request(requestId);
                 PlacementResult<SelectedRole, RoleType> result = fixture.strategy.select(request, null);
                 assertEquals(PlacementResult.Status.SUCCESS, result.status());
                 try (SelectedRole selected = result.value()) {
-                    assertEquals(FREE_IP, selected.serverStatus().getServerIp(),
-                            "free placement capacity must win over a queued endpoint with only dispatch capacity");
+                    selectedCounts.merge(selected.serverStatus().getServerIp(), 1, Integer::sum);
                     fixture.assertSelectionHasNoReservation(requestId, queuedUsage, freeUsage);
                     try (WorkerEndpoint.GenerationPin pin = selected.takeGenerationPin()) {
                         DecodeEndpoint endpoint = (DecodeEndpoint) pin.endpoint();
@@ -79,12 +79,13 @@ class DecodeSelectionAdmissionContractTest {
                 assertEquals(queuedUsage, fixture.queued.routingView().placementUsage());
                 assertEquals(freeUsage, fixture.free.routingView().placementUsage());
             }
+            assertEquals(Map.of(QUEUED_IP, 3, FREE_IP, 3), selectedCounts);
         }
     }
 
     @ParameterizedTest(name = "{0}: {1}")
     @MethodSource("dispatchAdmissionCases")
-    void selectionDoesNotReserveAndUsesTheModesCapacityScope(
+    void allModesSelectWithDispatchCapacityAndKeepQueuedLoadForScoring(
             Policy policy, CapacityDimension dimension) {
         try (Fixture fixture = new Fixture(policy, dimension)) {
             fixture.assertPlacementAndDispatchDisagree();
@@ -101,8 +102,7 @@ class DecodeSelectionAdmissionContractTest {
                 }
             }
 
-            assertEquals(policy == Policy.DIRECT ? Map.of(QUEUED_IP, 3, FREE_IP, 3) : Map.of(FREE_IP, 6), selectedCounts,
-                    "QUEUE includes queued reservations; DIRECT retains dispatch admission");
+            assertEquals(Map.of(QUEUED_IP, 3, FREE_IP, 3), selectedCounts);
         }
     }
 

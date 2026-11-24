@@ -413,10 +413,8 @@ class DefaultRouterTest {
         when(prefillSelector.select(
                 context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
-        when(decodeSelector.select(
-                DecodeBinding.capture(context), "g1"))
-                .thenReturn(PlacementResult.rejected(
-                        Response.error(StrategyErrorType.RESOURCE_EXHAUSTED)));
+        when(decodeSelector.validateDemand(DecodeBinding.capture(context), "g1"))
+                .thenReturn(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED));
 
         PlacementResult<RouteAdmission, PlacementKey> rejected = router.select(context);
         assertEquals(PlacementResult.Status.REJECTED, rejected.status());
@@ -569,27 +567,24 @@ class DefaultRouterTest {
     }
 
     @Test
-    void decodeMissAfterPrefillSuccessReleasesThePrefillPinOwner() {
-        when(modelMeta.requiredRoles()).thenReturn(
-                List.of(RoleType.PREFILL, RoleType.DECODE));
+    void queuePlacementFreezesPrefillGroupAndOnlyValidatesDecodeDemand() {
+        when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.DECODE, RoleType.PREFILL));
         DefaultRouter router = router();
         BalanceContext context = context(52L);
-        SelectionFixture prefill = selection(
-                RoleType.PREFILL, 52L, "p", 8001, "g1");
-        when(prefillSelector.select(
-                context, RoleType.PREFILL, null))
+        SelectionFixture prefill = selection(RoleType.PREFILL, 52L, "p", 8001, "g1");
+        when(prefillSelector.select(context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
-        when(decodeSelector.select(
-                DecodeBinding.capture(context), "g1"))
-                .thenReturn(PlacementResult.blocked(RoleType.DECODE));
 
-        PlacementResult<RouteAdmission, PlacementKey> blocked = router.select(context);
-        assertEquals(PlacementResult.Status.BLOCKED, blocked.status());
-
-        assertEquals(new PlacementKey(RoleType.DECODE, "g1"),
-                blocked.blocker());
-        verify(prefill.selection).close();
-        verify(prefill.selection, never()).takeGenerationPin();
+        var placement = router.select(context);
+        assertEquals(PlacementResult.Status.SUCCESS, placement.status());
+        try (var admission = placement.value()) {
+            assertTrue(admission.decodeBinding().isDeferred());
+            assertEquals("g1", admission.decodeBinding().decodeGroup());
+            assertEquals(List.of(prefill.status), admission.response().getServerStatus());
+            verify(decodeSelector).validateDemand(DecodeBinding.capture(context), "g1");
+            verify(decodeSelector, never()).select(any(), any());
+        }
+        verify(prefill.pin).close();
     }
 
     @Test

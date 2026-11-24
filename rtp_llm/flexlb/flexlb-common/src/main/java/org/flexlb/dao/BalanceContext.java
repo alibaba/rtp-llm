@@ -66,8 +66,9 @@ public class BalanceContext {
 
     private long enqueueTime;
 
-    /** Stable worker-queue age and tie-breaker across local route withdrawals. */
+    /** First publication on a Prefill, retained across route withdrawals. */
     private long firstWorkerEnqueueTime;
+    /** FIFO tie-break assigned on entry to the global queue, before concurrent planning. */
     private long workerEnqueueSequence;
 
     /**

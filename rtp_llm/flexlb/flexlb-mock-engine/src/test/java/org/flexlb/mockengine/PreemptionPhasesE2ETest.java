@@ -1,6 +1,10 @@
 package org.flexlb.mockengine;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.scheduler.CancelReason;
+import org.flexlb.config.DecisionPolicyConfig;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.QueueOrderingConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
@@ -8,6 +12,8 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -28,7 +34,7 @@ import static org.mockito.Mockito.verify;
  *
  * <ul>
  *   <li>A1 Prefill 优先级插队 — 保留低优请求，不再为 token 配额驱逐；</li>
- *   <li>A2 Decode queued reservation 撤回 — 低优请求重新排队，容量先交给高优请求；</li>
+ *   <li>A2 Decode 排队预留共存，派发时高优请求优先取得额度；</li>
  *   <li>A3 accepted 让位 — 真实 MockEngineCancelChannel，victim 8429，
  *       cancel→确认→派发顺序 + cancel 超时不泄漏（铁律4）；</li>
  *   <li>A5 同优不抢占 — 同优请求满载时绝不驱逐同优 victim。</li>
@@ -75,7 +81,7 @@ class PreemptionPhasesE2ETest {
 
     @Test
     @Timeout(30)
-    void a2_queued_decode_withdrawal_preserves_request_and_transfers_capacity() throws Exception {
+    void a2_queued_decode_routes_share_capacity_and_dispatch_in_priority_order() throws Exception {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 10, 1, 1, "50", 1.0, false)) {
             h.allowPreemption(VictimStage.DECODE_RESERVED);
             h.config.getRouter().getRoles().getDecode().getAvailability()
@@ -94,7 +100,6 @@ class PreemptionPhasesE2ETest {
                     "low-priority request must publish its Decode reservation");
             assertFalse(low.isDone());
             assertTrue(decodeEp.resourceSnapshot().reserved().containsKey(201L));
-            // victim 仍由 Master 排队持有，因此走本地 queued eviction，无需 Engine Cancel。
             long hardKvBefore = decodeEp.routingView().inflightHardKv();
             assertTrue(hardKvBefore > 0);
 
@@ -102,19 +107,17 @@ class PreemptionPhasesE2ETest {
 
             AutoTpmE2EHarness.await(
                     () -> decodeEp.resourceSnapshot().reserved().containsKey(202L),
-                    5_000, "the higher-priority request must acquire the withdrawn capacity");
-            // Schema v3 withdraws the queued route, not the request: no terminal error or Engine Cancel.
+                    5_000, "both routes can queue before either acquires the single dispatch slot");
             assertFalse(low.isDone(), "the original low-priority future must remain pending");
             assertTrue(h.engineArrivalOrder.isEmpty());
             assertEquals(0, h.decodeEngines.get(0).getCancelledCount());
 
-            // 账目正确：victim 影子预留释放，高优恰好占据一份
-            assertFalse(high.isDone(), "high-priority request should sit in the queue after eviction");
-            assertFalse(decodeEp.resourceSnapshot().reserved().containsKey(201L));
+            assertFalse(high.isDone());
+            assertTrue(decodeEp.resourceSnapshot().reserved().containsKey(201L));
             assertTrue(decodeEp.resourceSnapshot().reserved().containsKey(202L));
-            assertEquals(1, decodeEp.getInflightCount());
-            assertEquals(hardKvBefore, decodeEp.routingView().inflightHardKv(),
-                    "hard KV must transfer 1:1 from victim to incoming");
+            assertEquals(2, decodeEp.getInflightCount());
+            assertEquals(2 * hardKvBefore, decodeEp.routingView().inflightHardKv());
+            assertEquals(0L, decodeEp.routingView().dispatchUsage().hardReservedKvTokens());
 
             h.setDecodeKvCapacity(0, 1_000_000, 1_000_000);
             h.fixedWindowDecision().setMaxCollectionWaitMs(1);
@@ -290,6 +293,67 @@ class PreemptionPhasesE2ETest {
                 assertEquals(0, prefillEngine.getDownstreamOwnershipCount());
                 assertEquals(0, decodeEngine.getUpstreamOwnershipCount());
             }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    @Timeout(25)
+    void dispatchTimePreemptionRequiresPrefillCapacityAndFencesCanceledIncoming(boolean cancelHigh) throws Exception {
+        var config = new FlexlbConfig();
+        var decision = DecisionPolicyConfig.single();
+        config.queueScheduler().setDecision(decision);
+        var ordering = QueueOrderingConfig.priority();
+        ordering.setPrefillCostOrder(true);
+        config.queueScheduler().setOrdering(ordering);
+        config.getDispatcher().setMaxInflightPerPrefillWorker(1);
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(1L);
+        try (var h = new AutoTpmE2EHarness(BASE_PORT + 80, 1, 1, "20", 10_000.0,
+                true, true, decision, true, config);
+             var lowAck = h.holdBatchAck(321L)) {
+            h.allowPreemption(VictimStage.DECODE_RESERVED, VictimStage.DECODE_ENGINE_OWNED);
+            h.config.priorityOrdering().getPreemption().setTimeoutMs(5_000L);
+            var prefill = h.prefillEndpoint(0);
+            var decode = h.decodeEndpoint(0);
+            var engine = h.decodeEngines.get(0);
+            var low = h.scheduler.submit(h.context(321L, 30));
+            AutoTpmE2EHarness.await(() -> engine.getRunningCount() == 1, 3_000, "low priority running");
+            h.pumpDecodeOnce(0);
+            h.pumpDecodeOnce(0);
+            assertEquals(1, decode.resourceSnapshot().runningCount());
+            assertFalse(prefill.batchAdmissionAvailability(1).isAvailable());
+
+            var high = h.scheduler.submit(h.context(322L, 70));
+            AutoTpmE2EHarness.await(() -> prefill.queuedRequestCount() == 1, 3_000, "high priority waiting on Prefill");
+            assertEquals(0, engine.getCancelledCount());
+            assertFalse(decode.resourceSnapshot().reserved().containsKey(322L));
+
+            // Publish the successful P handoff and its terminal P status. D keeps
+            // generating until the ready P head explicitly reclaims its capacity.
+            lowAck.close();
+            AutoTpmE2EHarness.await(() -> {
+                h.pumpPrefillOnce(0);
+                return prefill.batchAdmissionAvailability(1).isAvailable();
+            }, 3_000, "Prefill becomes available");
+            AutoTpmE2EHarness.await(() -> engine.getCancelledCount() == 1, 3_000, "one real Decode victim canceled");
+            if (cancelHigh) {
+                h.scheduler.cancelRequest(322L, 0L, CancelReason.CLIENT_CANCELLED);
+                assertEquals(8504, high.get(3, TimeUnit.SECONDS).getCode());
+            }
+            h.startAutoPump(5L);
+            AutoTpmE2EHarness.await(() -> !decode.resourceSnapshot().confirmed().stream()
+                    .anyMatch(request -> request.requestId() == 321L), 3_000, "victim terminal reconciled");
+            if (cancelHigh) {
+                AutoTpmE2EHarness.await(() -> decode.getInflightCount() == 0, 3_000, "orphan-free cancellation");
+                assertFalse(h.engineArrivalOrder.contains(322L));
+            } else {
+                Response delivered = high.get(5, TimeUnit.SECONDS);
+                assertTrue(delivered.isSuccess(), delivered::getErrorMessage);
+                assertEquals(List.of(321L, 322L), List.copyOf(h.engineArrivalOrder));
+            }
+            assertEquals(1, engine.getCancelledCount());
+            assertTrue(low.isDone());
+            h.assertAutoPumpHealthy();
         }
     }
 

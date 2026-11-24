@@ -114,7 +114,7 @@ placement, the selected
 Prefill endpoint is the sole decision-group owner. `SINGLE` forms a one-request
 group. `FIXED_WINDOW` collects up to
 `scheduler.decision.maxRequests` locally selected requests and waits at most
-`scheduler.decision.maxCollectionWaitMs`; it never reselects a machine. The
+`scheduler.decision.maxCollectionWaitMs`; the collection window keeps the requests on their selected Prefill. The
 decision optionally refuses to add another
 request when the resulting group's prediction would exceed the strict
 `scheduler.decision.maxPredictedExecutionMs` growth cap. A request is
@@ -122,14 +122,32 @@ indivisible, so a singleton whose own prediction exceeds the cap is still a
 valid candidate. Reaching the prediction cap stops collection immediately
 instead of waiting for the collection window.
 
-For `BATCH`, every request independently selects its Prefill
-and Decode generations from the complete live candidate fleet before the
-ordered commit. The endpoint runtime then groups committed requests by their
-already-selected Prefill endpoint and performs the final exact queue/capacity
-check, so one planning frontier may produce several `EnqueueBatch` calls. The
-delivery strategy then chooses who sends those endpoint-local groups:
-the frontend calls `GenerateStream` for `NON_BATCH`, while the Master calls
-`EnqueueBatch` for `BATCH`.
+Each request first selects a Prefill endpoint using the configured cache and
+cost policy. The endpoint groups waiting requests in local decision order.
+After its Prefill resource checks pass, each group member chooses a Decode
+worker with execution capacity in its permitted group. Master captures the
+worker generation and permit together before handing off the route. The
+frontend calls `GenerateStream` for `NON_BATCH`. Master calls `EnqueueBatch`
+for `BATCH`.
+
+With `ordering.prefillCostOrder` and a positive cache-affinity wait budget, a
+request can wait in the global queue for a matching prefix being produced by
+an equal- or higher-priority request. The projected prefix must improve its
+resident hit and meet `minPrefixHitPercent`. Producers and waiters must share
+the model, Prefill role and group, cache block size and cache affinity keys.
+The request competes for placement again when the producer leaves Prefill.
+If the producer completed successfully and the expected blocks are still missing
+from the cache index, the request can wait for one successful cache poll started
+after completion on that Prefill generation. An eligible full resident match can
+serve immediately. Cancellation, retirement and the remaining `maxExtraTtftMs`
+budget also end the wait.
+
+A ranked request waiting on Decode keeps its place on Prefill. When Decode
+capacity returns, Master checks whether a different eligible Prefill has
+a longer resident prefix. If it does, Master returns the request to its
+original global ordering position and runs placement again. Otherwise the
+current Prefill retries the ranked request. The worker keeps its FIFO
+tie-break across concurrent placement and retries.
 
 Waiting is event driven. Group policies return the exact resource event,
 queue/status/model generation, or absolute collection/expiration deadline that
@@ -145,10 +163,16 @@ backpressure remains QUEUE-owned. There is no SLO-budget batching policy.
 `router.roles.decode.availability.maxKvUsagePercent` defaults to `90` and must
 be in `[1, 100]`; zero and negative values are invalid.
 
-PRIORITY preemption consumes the same exact Prefill and Decode route selected
-by ordinary placement. It may replace lower-priority owners on those endpoints,
-but it never calls the router or a selector again and never falls back to a
-different endpoint.
+PRIORITY can preempt eligible lower-priority owners under the configured
+victim-stage policy. For separate Prefill and Decode, a request becomes
+eligible to reclaim Decode capacity after Prefill can dispatch it and the
+Decode group has no available permit. On a worker supporting engine Cancel,
+the `DECODE_ENGINE_OWNED` policy permits cancellation only if strictly
+lower-priority owners can free enough slots, physical prompt KV and projected
+KV budget on that worker. If a feasible victim set is unavailable, the
+request waits for a capacity change. The victim cancellation transaction
+targets one exact Decode generation and releases its temporary claim before
+the incoming request competes for dispatch again.
 
 The current online `LEARNING` estimator updates from completed `EnqueueBatch`
 groups. NON_BATCH decisions can read its published model, but route-request
@@ -444,20 +468,16 @@ any of these valid modes. Role algorithms themselves are fixed.
    status or cancellation proof. Cleanup paths are idempotent.
 7. The absolute request expiration remains unchanged through queueing,
    preemption, delivery, and reconciliation.
-8. Placement does not produce a capacity-free intermediate state. Publication
-   reserves the ordered frontier independently for each
-   exact Prefill endpoint and records the selected Decode generation. When
-   placement-time capacity is unavailable, the request remains queued with its
-   original FIFO/priority key and parks on that endpoint; a suffix member may
-   bypass only when its route does not use the parked endpoint.
-9. NON_BATCH deliberately acquires the exact Decode engine-facing permit at
-   delivery, after Prefill queueing, so a long Prefill backlog cannot consume
-   idle Decode execution capacity. The shared acceptance cap is acquired at the
-   same delivery boundary and wakes waiters on release. Permit failure waits on that same Decode
-   endpoint and never reselects a route. Once transferred to delivery, a Decode
-   permit never returns to queued ownership. Preemptive Decode admission instead
-   reserves its exact capacity in the placement transaction because a typed
-   capacity miss is required to plan victims on that same endpoint.
+8. QUEUE placement on a Prefill endpoint records the original request
+   priority, deadline, Decode demand and allowed group. The queued request
+   consumes zero Decode slots and zero Decode KV tokens.
+9. For separate Prefill and Decode, both delivery modes choose a Decode worker
+   when a Prefill decision can run. A lost permit race on one worker permits
+   another candidate in the same group. If the group is full, the request
+   remains in Master and the admission transaction rolls back its temporary
+   Prefill resources. A Decode capacity change wakes the local decision, which
+   rechecks queue order, Prefill capacity and current Decode inventory.
+
 10. For `QUEUE + BATCH`, admission atomically owns both one captured
     `maxInflightBatchesPerPrefillWorker` slot and one task already accepted by
     the bounded local dispatcher. Before the admitted members leave `ACTIVE`,

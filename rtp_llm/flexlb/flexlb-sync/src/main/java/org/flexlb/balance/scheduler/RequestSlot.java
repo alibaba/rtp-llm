@@ -32,7 +32,6 @@ import static org.flexlb.balance.scheduler.RequestTerminalCleanup.appendFailure;
 import static org.flexlb.balance.scheduler.RequestTerminalCleanup.rethrowCleanup;
 import static org.flexlb.balance.scheduler.RequestTerminalCleanup.runStep;
 import static org.flexlb.dao.loadbalance.Response.buildErrorResponse;
-import static org.flexlb.dao.loadbalance.Response.buildSuccessResponse;
 
 /**
  * One request's response decision and resource-tracking lifetime.
@@ -411,9 +410,15 @@ public final class RequestSlot {
 
     synchronized AdmissionHandle tryBeginRouteWithdrawal(
             DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
-        if (item == null || item.decodeEp() != endpoint
-                || !Objects.equals(item.decodeReservation(), reservation)
-                || !ownsPreparedDeliveryLocked(pendingItem) || admissionHandle != null
+        if (item == null || item.decodeEp() != endpoint || !Objects.equals(item.decodeReservation(), reservation)) {
+            return null;
+        }
+        return tryBeginRouteWithdrawal(pendingItem);
+    }
+
+    synchronized AdmissionHandle tryBeginRouteWithdrawal(ScheduledRequest exact) {
+        if (exact == null || exact != pendingItem || !ownsPreparedDeliveryLocked(exact) || admissionHandle != null
+                || exact.pendingDecodePreemption() != null
                 || item.requestExpired(System.currentTimeMillis())) {
             return null;
         }
@@ -422,10 +427,9 @@ public final class RequestSlot {
         return admissionHandle;
     }
 
-    /** Called only after the exact Decode reservation has been atomically replaced. */
-    void detachWithdrawnRoute(AdmissionHandle claim, ScheduledRequest exact) {
+    void detachWithdrawnRoute(AdmissionHandle claim, ScheduledRequest exact, String reason) {
         // Never acquire the Prefill queue lock under the request monitor.
-        if (!exact.prefillEp().removeQueued(exact, "DECODE_RESERVATION_YIELDED")) {
+        if (!exact.prefillEp().removeQueued(exact, reason)) {
             throw new IllegalStateException("withdrawn route is no longer queued: " + requestId);
         }
         synchronized (this) {
@@ -434,7 +438,7 @@ public final class RequestSlot {
             }
             item = null;
             pendingItem = null;
-            detail = "queued after Decode reservation withdrawal";
+            detail = "requeued: " + reason;
             updatedAtMs = System.currentTimeMillis();
         }
     }
@@ -643,7 +647,7 @@ public final class RequestSlot {
     }
 
     /** Queue publication makes an exact item claimable even while admission still pins its resources. */
-    private boolean ownsPreparedDeliveryLocked(ScheduledRequest exact) {
+    boolean ownsPreparedDeliveryLocked(ScheduledRequest exact) {
         requireSlotLock("delivery eligibility");
         return ownsActiveItem(exact) && isOpen() && preemption == null && withdrawingRoute == null
                 && state == RequestState.Phase.QUEUED && deliveryClaimKind == DeliveryClaimKind.NONE;
@@ -748,7 +752,7 @@ public final class RequestSlot {
         if (state != RequestState.Phase.DISPATCHING) { return RequestEffect.STALE; }
         PublicationPermit permit = requirePublicationPermitLocked(PublicationKind.DELIVERY);
         try {
-            Response response = buildSuccessResponse(item.routeResponse(), deliveryClaimKind == DeliveryClaimKind.BATCH_ENQUEUE);
+            Response response = item.deliveryResponse(deliveryClaimKind == DeliveryClaimKind.BATCH_ENQUEUE);
             transitionLocked(RequestState.Phase.ACKNOWLEDGED, deliveryClaimKind == DeliveryClaimKind.BATCH_ENQUEUE
                     ? "batch enqueue acknowledged" : "route decision delivered");
             DeliveryPublication publication = new DeliveryPublication(pendingItem, response, permit,
@@ -765,11 +769,16 @@ public final class RequestSlot {
     }
 
     void failDeliveryPreparation(ScheduledRequest exact, Throwable cause) {
+        rejectDeliveryPreparation(exact, buildErrorResponse(StrategyErrorType.DISPATCH_FAILED,
+                "Delivery preparation failed: " + detailOf(cause)));
+    }
+
+    void rejectDeliveryPreparation(ScheduledRequest exact, Response rejected) {
         SelectedPublication response;
         synchronized (this) {
             if (!ownsPreparedDeliveryLocked(exact)) { return; }
             response = selectDeliveryFailureLocked(exact.execution(), DeliveryResult.Status.NOT_SENT,
-                    "Delivery preparation failed: " + detailOf(cause));
+                    rejected.getErrorMessage(), rejected);
         }
         Throwable failure = runStep(null,
                 response == null ? null : () -> completionPublisher.submit(response));
@@ -791,14 +800,19 @@ public final class RequestSlot {
 
     /** Select the failure now; endpoint cleanup and protocol completion may follow later. */
     private SelectedPublication selectDeliveryFailureLocked(RequestExecution exact, DeliveryResult.Status source, String detail) {
+        return selectDeliveryFailureLocked(exact, source, detail, null);
+    }
+
+    private SelectedPublication selectDeliveryFailureLocked(RequestExecution exact, DeliveryResult.Status source,
+                                                            String detail, Response rejection) {
         requireSlotLock("request failure");
         if (!ownsActiveExecution(exact) || cleanupProgress != null) { return null; }
         CancelReason cancellation = cancellationReason != null ? cancellationReason : pendingAdmissionCancelReason;
         String message = cancellation == null ? detail : cancellation.getMessage() + "; " + detail;
         TerminalOutcome outcome = cancellation == null ? TerminalOutcome.fail(message)
                 : TerminalOutcome.cancellation(cancellation, message);
-        Response response = cancellation == null ? buildErrorResponse(StrategyErrorType.DISPATCH_FAILED, message)
-                : Response.copyOf(cancellationResponse);
+        Response response = cancellation != null ? Response.copyOf(cancellationResponse)
+                : rejection != null ? rejection : buildErrorResponse(StrategyErrorType.DISPATCH_FAILED, message);
         PublicationPermit permit = publicationWinner == null && !future.isDone()
                 ? requirePublicationPermitLocked(PublicationKind.TERMINAL) : null;
         cleanupProgress = new CleanupProgress(exact, source);
@@ -907,6 +921,10 @@ public final class RequestSlot {
 
     // ── Worker 事实与 Endpoint 退出：接收、核验、推进 ──
 
+    void prefillEnded(RequestExecution execution, boolean completed) {
+        if (globalQueue != null) { globalQueue.prefillEnded(execution, completed); }
+    }
+
     void processPrefillStatus(PrefillEndpoint source, RoleType role, PrefillState.WorkerStatusFact fact) {
         EngineObservation observation;
         RequestEffect work;
@@ -919,6 +937,9 @@ public final class RequestSlot {
             // A selected close action already owns cleanup; only a released protocol needs resuming.
             cleanupUnblocked = previous != null && preemption == null && cleanupProgress != null
                     && work.terminal() == null && work.delivery() == null;
+        }
+        if (observation != EngineObservation.STALE && fact.kind() != PrefillState.WorkerStatusFact.Kind.ACTIVE) {
+            prefillEnded(fact.item(), fact.kind() == PrefillState.WorkerStatusFact.Kind.COMPLETED);
         }
         if (cleanupUnblocked) {
             resumeCleanup();
@@ -1847,7 +1868,7 @@ public final class RequestSlot {
                     error = StrategyErrorType.DISPATCH_FAILED;
                 } else if (event.workerSuccessful()) {
                     return claimTerminalActionLocked(event, TerminalOutcome.complete("decode completed"),
-                            buildSuccessResponse(item.routeResponse(),
+                            item.deliveryResponse(
                                     deliveryClaimKind == DeliveryClaimKind.BATCH_ENQUEUE), true);
                 } else {
                     message = "worker error code " + event.workerErrorCode();

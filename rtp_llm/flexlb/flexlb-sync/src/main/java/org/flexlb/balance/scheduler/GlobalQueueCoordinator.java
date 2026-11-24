@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import io.opentelemetry.api.common.Attributes;
 import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
@@ -76,6 +77,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     private final ReentrantLock lock = new ReentrantLock();
     private final Condition changed = lock.newCondition();
     private final OrderedRequestQueue orderedQueue;
+    private final PendingPrefillPrefixes prefixes;
     private final PlacementWaitQueue waitingRequests;
     /** Retained until response completion so withdrawal reuses the original FIFO identity. */
     private final Map<CompletableFuture<Response>, GlobalQueueEntry> registered = new ConcurrentHashMap<>();
@@ -122,6 +124,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         this.shedding = sheddingConfig == null ? null : new PrefillSheddingMonitor(
                 sheddingConfig, router, priorityOrdering, this::evictPoolVictim);
         this.orderedQueue = new OrderedRequestQueue(priorityOrdering);
+        this.prefixes = new PendingPrefillPrefixes(orderedQueue::markRequestReadyForRetry);
         this.waitingRequests = new PlacementWaitQueue(priorityOrdering, availability);
         this.scanBudgetMultiplier = checkedConfig.loadBalanceConfig().queueScheduler().getScanBudgetMultiplier();
         this.prefillCostOrder = checkedConfig.loadBalanceConfig().isPrefillCostOrder();
@@ -178,6 +181,8 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             if (closed.get()) {
                 return false;
             }
+            // A slower planner can publish after its successor on the same Prefill.
+            ScheduledRequest.assignQueueSequence(context);
             orderedQueue.add(entry);
             registered.put(future, entry);
             FlexlbTrace.event(context.getTraceContext(), "flexlb.queue.enqueued",
@@ -206,10 +211,24 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
     }
 
+    boolean hasBetterResidentPrefix(ScheduledRequest item) {
+        GlobalQueueEntry entry;
+        lock.lock();
+        try {
+            entry = registered.get(item.future());
+            if (closed.get() || entry == null || !entry.removed || entry.future.isDone()) { return false; }
+        } finally {
+            lock.unlock();
+        }
+        // Cache-index lookup and endpoint snapshots must not hold either scheduling queue lock.
+        return router.hasBetterResidentPrefix(item, entry.routingGroup);
+    }
+
     /** A withdrawal is not a new request: keep its sequence, context, Future and absolute deadline. */
     boolean requeue(ScheduledRequest previous) {
         lock.lock();
         try {
+            if (prefixes.finished(previous.execution(), false)) { changed.signal(); }
             if (previous.future().isDone()) { return true; }
             GlobalQueueEntry entry = registered.get(previous.future());
             if (closed.get() || entry == null) { return false; }
@@ -296,12 +315,14 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         try {
             // Check under the same lock as arrivals and result publication: a signal
             // between processing and this check must not leave completed work asleep.
+            long nextPrefixWakeMs = prefixes.resumeExpired(System.currentTimeMillis());
             if (closed.get() || !completedPlans.isEmpty()) { return; }
             if (inFlight.size() < plannerCount && (orderedQueue.hasUnscannedRequests()
                     || waitingRequests.hasReadyRequests() || !costOrderPending.isEmpty())) { return; }
             if (prefillCostOrder && costOrderPending.size() < calculateScanBudget(plannerCount)
                     && orderedQueue.hasUnscannedRequests()) { return; }
-            changed.await();
+            if (nextPrefixWakeMs == Long.MAX_VALUE) { changed.await(); }
+            else { changed.await(nextPrefixWakeMs, TimeUnit.MILLISECONDS); }
         } catch (InterruptedException interruption) {
             if (closed.get()) { Thread.currentThread().interrupt(); }
         } finally {
@@ -405,7 +426,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                         return false;
                     }
                     return !entry.removed && !inFlight.contains(entry)
-                            && !waitingRequests.isWaiting(entry);
+                            && !waitingRequests.isWaiting(entry) && !prefixes.isWaiting(entry);
                 });
     }
 
@@ -563,9 +584,28 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
         RouteAdmission admission = plan.admission();
         try {
+            if (!entry.cacheableBlocks.isEmpty()) {
+                lock.lock();
+                try {
+                    if (!entry.removed && prefixes.awaitBetterPrefix(entry, admission.prefillStatus(),
+                            admission.residentPrefixTokens(), System.currentTimeMillis())) {
+                        return Outcome.DONE;
+                    }
+                } finally {
+                    lock.unlock();
+                }
+            }
             PlacementResult<ScheduledRequest, PlacementKey> publication =
                     admission.tryEnqueue(entry.context, entry.future, lifecycle);
             if (publication.status() == PlacementResult.Status.SUCCESS) {
+                if (!entry.cacheableBlocks.isEmpty()) {
+                    lock.lock();
+                    try {
+                        prefixes.published(entry, publication.value().execution(), admission.residentPrefixTokens());
+                    } finally {
+                        lock.unlock();
+                    }
+                }
                 removeRequest(entry);
                 reportRouteSubmitted(entry.context, publication.value());
                 return Outcome.DONE;
@@ -585,6 +625,15 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         } finally {
             plan.close();
         }
+    }
+
+    CompletableFuture<Response> preemptForDispatch(ScheduledRequest item) {
+        var binding = item.decodeBinding();
+        for (var endpoint : binding.decodeSelector().preemptionCandidates(binding, binding.decodeGroup())) {
+            var result = evictionManager.preemptForDispatch(item, endpoint);
+            if (result != null) { return result; }
+        }
+        return null;
     }
 
     private boolean tryPriorityRescue(Plan plan, WorkerEndpoint blockedEndpoint) {
@@ -647,6 +696,26 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         return parked;
     }
 
+    void cachePollCompleted(PrefillEndpoint endpoint) {
+        if (!prefixes.observingCache(endpoint)) { return; }
+        lock.lock();
+        try {
+            if (prefixes.cachePollCompleted(endpoint)) { changed.signal(); }
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    void prefillEnded(RequestExecution item, boolean completed) {
+        if (item == null || !prefillCostOrder) { return; }
+        lock.lock();
+        try {
+            if (prefixes.finished(item, completed)) { changed.signal(); }
+        } finally {
+            lock.unlock();
+        }
+    }
+
     private void removeRequest(GlobalQueueEntry entry) {
         if (entry.removed) {
             return;
@@ -665,6 +734,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
      * Caller holds {@link #lock}.
      */
     private void removeRequestUnderLock(GlobalQueueEntry entry) {
+        prefixes.removeWait(entry);
         if (shedding != null) { shedding.remove(entry); }
         costOrderPending.remove(entry);
         costOrderEstimates.remove(entry);
@@ -777,6 +847,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             abandoned = orderedQueue.drain();
             waitingRequests.clear();
             registered.clear();
+            prefixes.clear();
             costOrderPending.clear();
             costOrderEstimates.clear();
             costRefreshQueue.clear();

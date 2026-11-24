@@ -423,26 +423,38 @@ The prefix percentage uses predictor-effective reusable tokens; the final cache 
 remains compute work. Omit `cacheAffinity` to disable that preference.
 The projection uses a frozen snapshot of current work and cannot predict future arrivals.
 
-Decode freezes each route attempt's request identity, priority, complete prompt-plus-output
-demand, capacity limits and admission mode before selecting workers. DIRECT requires
-immediately available dispatch capacity. QUEUE without reclamation can retain a physically
-feasible route while Decode is busy and wait for a permit at delivery. With Decode reclamation
-enabled, placement also counts queued reservations and can reclaim allowed lower-priority owners.
-Selection prefers workers with current dispatch capacity over feasible workers that must wait.
-Within that availability tier, Decode minimizes `router.roles.decode.costEstimator.expression`,
+DIRECT requires an immediately available Decode worker. With separate Prefill and
+Decode under QUEUE, Master places each request on its chosen Prefill queue and
+records the permitted Decode group and KV demand. Collection and Prefill
+capacity waits consume zero Decode requests and zero Decode KV. When Prefill
+can dispatch the ranked request, Master checks available Decode workers in
+that group and claims a permit on one worker. If another request wins the
+claim, Master tries the remaining eligible workers. When the group is full,
+Master releases temporary Prefill resources and waits for a change in Decode
+capacity. With `DECODE_ENGINE_OWNED` preemption enabled, Master may issue
+Cancel on a Decode worker when its eligible, strictly lower-priority victims
+can release enough request slots and KV for the waiting request.
+
+Queued Decode admission counts Engine-confirmed requests, dispatched requests
+awaiting confirmation, and active dispatch permits. For KV, Master checks both
+physical prompt capacity and the configured prompt-plus-output budget. It
+includes unconfirmed dispatches, active permits and KV held during victim
+cancellation. Requests awaiting a Prefill decision contribute zero to these
+checks.
+
+Among eligible workers Decode minimizes `router.roles.decode.costEstimator.expression`,
 which defaults to `kvcache_used_ratio`. Formulas support `+`, `-`, `*`, `/`, `^`,
 parentheses and `sqrt`, `log`, `exp`, `abs`, `max`, `min`, `pow`, and `param(name, initialValue)` functions.
 Decode formulas do not use `sum`. Available variables are:
 
 | Variable | Meaning |
 | --- | --- |
-| `running_size` | Engine-owned requests, including accepted and running requests, plus local request reservations |
+| `running_size` | For queued dispatch, Engine-confirmed requests plus unconfirmed dispatches and active dispatch permits |
 | `max_running_size` | Fixed `router.roles.decode.availability.maxEngineRequests`; must be configured as a positive value when the expression uses this variable |
-| `kvcache_used` | Used KV tokens plus local predicted KV reservations |
+| `kvcache_used` | For queued dispatch, used KV tokens including Engine-facing reservations |
 | `kvcache_capacity` | Total KV token capacity |
 | `kvcache_used_ratio` | `kvcache_used / kvcache_capacity`; zero for unknown capacity of zero, without capping ratios above one |
 
-Request and KV measurements include queued reservations and ownership retained during preemption.
 Equal costs rotate. Workers with a non-finite formula result are excluded from the preferred
 availability tier; if that tier has no finite result, routing fails with a formula error.
 Reservation and delivery always recheck current

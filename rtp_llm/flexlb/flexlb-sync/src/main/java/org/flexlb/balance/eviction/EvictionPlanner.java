@@ -260,8 +260,8 @@ public final class EvictionPlanner {
      * the same strict priority boundary. The stage comparator/cost makes
      * {@code ACCEPTED_NOT_RUNNING} cheaper than {@code RUNNING}.
      * Priority-neutral entries (priority 0) never qualify.
-     * Placement counts queued reservations as well as Engine-facing owners;
-     * either ownership class releases its placement request charge.
+     * The endpoint snapshot excludes queued reservations because withdrawing
+     * one would free no dispatch capacity.
      */
     private static List<DecodeRequestView> lowerPriorityCandidates(int incomingPriority,
                                                                        DecodeEndpointSnapshot ep,

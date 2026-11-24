@@ -92,6 +92,111 @@ class DecodeSelectorTest {
     }
 
     @Test
+    void lateDispatchTriesNextReadyWorkerWhenTheBestSnapshotLosesItsLastSlot() {
+        configureCost("running_size");
+        configService.loadBalanceConfig().getRouter().getRoles().getDecode()
+                .getAvailability().setMaxEngineRequests(1L);
+        registerWorker("127.0.0.1", 10_000, 10_000);
+        registerWorker("127.0.0.2", 10_000, 10_000);
+        EndpointRegistry registry = decodeRegistry();
+        try {
+            WorkerDirectory actual = new WorkerDirectory(registry);
+            List<DecodeEndpoint.DecodeRoutingView> stale = actual.decodeRoutingSnapshot(null);
+            var first = decodeEndpoint(registry, "127.0.0.1:8080");
+            reservePinned(first, 123L, 100, 100, 50);
+            WorkerDirectory racing = Mockito.mock(WorkerDirectory.class);
+            Mockito.when(racing.decodeRoutingSnapshot(null)).thenReturn(stale);
+            Mockito.when(racing.observeDecodeCapacity(null, 0)).thenReturn(actual.observeDecodeCapacity(null, 0));
+            Mockito.when(racing.captureDecodeGeneration(Mockito.any()))
+                    .thenAnswer(invocation -> actual.captureDecodeGeneration(invocation.getArgument(0)));
+            DecodeBinding request = DecodeBinding.capture(context(100, 456L));
+            var result = new DecodeSelector(racing).tryDispatch(request, null, false);
+            Assertions.assertTrue(result.accepted());
+            var granted = result.value();
+            Assertions.assertEquals("127.0.0.2", granted.status().getServerIp());
+            Assertions.assertNull(first.reservationHandle(request.requestId()));
+            Assertions.assertEquals(1, granted.endpoint().routingView().engineCapacityUsed());
+            Assertions.assertTrue(granted.permit().release());
+            Assertions.assertTrue(granted.endpoint().release(granted.reservation(),
+                    DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK).released());
+            Assertions.assertEquals(0, granted.endpoint().routingView().engineCapacityUsed());
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
+    void lateDispatchWaitsForCompatibleGroupAndRemembersAnEdgeBeforeSubscription() {
+        configureCost("running_size");
+        configService.loadBalanceConfig().getRouter().getRoles().getDecode()
+                .getAvailability().setMaxEngineRequests(1L);
+        WorkerStatus target = createWorkerStatus("127.0.0.1", "target");
+        WorkerStatus other = createWorkerStatus("127.0.0.2", "other");
+        setKv(target, 10_000, 10_000);
+        setKv(other, 10_000, 10_000);
+        EndpointRegistry registry = createDecodeRegistry(Map.of(target.getIpPort(), target, other.getIpPort(), other));
+        try {
+            DecodeSelector selector = availableStrategy(registry);
+            var occupied = selector.tryDispatch(DecodeBinding.capture(context(100, 10L)), "target", false).value();
+            var unrelated = selector.tryDispatch(DecodeBinding.capture(context(100, 20L)), "other", false).value();
+            var blocked = selector.tryDispatch(DecodeBinding.capture(context(100, 30L)), "target", false);
+            Assertions.assertTrue(blocked.boundary().unavailable());
+            var edge = blocked.boundary().availability();
+            Runnable listener = Mockito.mock(Runnable.class);
+            edge.addListener(listener);
+            unrelated.permit().release();
+            unrelated.endpoint().release(unrelated.reservation(), DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+            Assertions.assertFalse(edge.isAvailable());
+            Mockito.verifyNoInteractions(listener);
+            var beforeRelease = selector.tryDispatch(DecodeBinding.capture(context(100, 31L)), "target", false)
+                    .boundary().availability();
+            occupied.permit().release();
+            occupied.endpoint().release(occupied.reservation(), DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+            Mockito.verify(listener, Mockito.atLeastOnce()).run();
+            edge.removeListener(listener);
+            beforeRelease.addListener(listener);
+            Assertions.assertTrue(beforeRelease.isAvailable(), "release between search and listener install must wake retry");
+            beforeRelease.removeListener(listener);
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
+    void lowPriorityPermitHandoffWakesPreemptionWhileFleetRemainsFull() {
+        configureCost("running_size");
+        configService.loadBalanceConfig().getRouter().getRoles().getDecode()
+                .getAvailability().setMaxEngineRequests(1L);
+        registerWorker("127.0.0.1", 10_000, 10_000);
+        EndpointRegistry registry = decodeRegistry();
+        try {
+            var selector = availableStrategy(registry);
+            var low = context(100, 31L);
+            low.getRequest().setPriority(20);
+            var granted = selector.tryDispatch(DecodeBinding.capture(low), null, false).value();
+
+            var high = context(100, 32L);
+            high.getRequest().setPriority(90);
+            var ordinary = selector.tryDispatch(DecodeBinding.capture(high), null, false).boundary().availability();
+            var preemptive = selector.tryDispatch(DecodeBinding.capture(high), null, true).boundary().availability();
+            var equal = selector.tryDispatch(DecodeBinding.capture(low), null, true).boundary().availability();
+            Runnable wake = Mockito.mock(Runnable.class);
+            preemptive.addListener(wake);
+            Assertions.assertFalse(preemptive.isAvailable());
+
+            Assertions.assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED, granted.permit().dispatch());
+            granted.endpoint().signalEngineOwnerAvailable(low.getPriority());
+            Assertions.assertFalse(equal.isAvailable(), "equal priority cannot evict this owner");
+            Assertions.assertFalse(ordinary.isAvailable(), "no slot was released by handoff");
+            Assertions.assertTrue(preemptive.isAvailable(), "the busy worker now has an engine-owned victim");
+            Mockito.verify(wake).run();
+            preemptive.removeListener(wake);
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
     void admissionSummaryIsReusedAndTracksEngineOwnershipSeparatelyFromQueuedKv() {
         registerWorker("127.0.0.1", 10_000L, 10_000L);
         EndpointRegistry registry = decodeRegistry();
@@ -403,7 +508,7 @@ class DecodeSelectorTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void availabilityUsesDispatchForDirectAndAllReservationsForQueue(boolean direct) {
+    void availabilityPrefersDispatchCapacityEvenWhenQueuedCostIsHigher(boolean direct) {
         configureCost("running_size / max_running_size");
         if (direct) {
             configService.loadBalanceConfig().setScheduler(SchedulerConfig.direct());
@@ -420,8 +525,7 @@ class DecodeSelectorTest {
         ServerStatus selected = selectStatus(availableStrategy(registry), context(100L, 1_001L),
                 RoleType.DECODE, null);
 
-        Assertions.assertEquals(direct ? "127.0.0.2" : "127.0.0.1", selected.getServerIp(),
-                "DIRECT can use dispatch capacity; QUEUE sees both workers full and selects a blocked placement candidate");
+        Assertions.assertEquals("127.0.0.2", selected.getServerIp());
     }
 
     @ParameterizedTest

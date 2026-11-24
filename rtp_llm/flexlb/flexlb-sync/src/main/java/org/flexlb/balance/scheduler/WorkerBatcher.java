@@ -112,7 +112,7 @@ public final class WorkerBatcher {
             if (decode != null) {
                 details.put("decode", Map.of("endpoint", decode.address(), "version", decode.admissionVersion(),
                         "engineLoad", decode.engineLoad(), "totalLoad", decode.totalLoad(),
-                        "kvTotal", decode.totalKv(), "kvAvailable", decode.placementUsage().hardKvAvailable()));
+                        "kvTotal", decode.totalKv(), "kvAvailable", decode.dispatchUsage().hardKvAvailable()));
             }
             cached = Collections.unmodifiableMap(details);
             diagnostics = cached;
@@ -1703,6 +1703,11 @@ public final class WorkerBatcher {
         }
         if (result.capacityBlocked()) {
             awaitBlockedHeadCapacity(result);
+            var blocked = result.unavailable();
+            if (!stopped && blocked.projectionSemantics() == PrefillAdmissionResources.DECODE_BLOCK
+                    && result.request().decodeBinding().isDeferred() && blocked.availability().isAvailable()) {
+                endpointEvents.replanIfCacheImproved(result.request());
+            }
         } else if (result.awaitingSchedulingChange()) {
             awaitSchedulingChange(result);
         }
@@ -1730,6 +1735,16 @@ public final class WorkerBatcher {
     private void awaitBlockedHeadCapacity(
             BatcherCycleResult blocked)
             throws InterruptedException {
+        ScheduledRequest item = blocked.request();
+        if (blocked.unavailable().projectionSemantics() == PrefillAdmissionResources.DECODE_BLOCK
+                && item.decodeBinding().isDeferred()
+                && item.allowsDecodeEnginePreemption()
+                && item.pendingDecodePreemption() == null
+                && !blocked.unavailable().availability().isAvailable()) {
+            // Cross-endpoint victim control runs only after the failed transaction
+            // surrendered every Prefill lease and outside the endpoint queue lock.
+            endpointEvents.tryPreemptForDispatch(item);
+        }
         queueLock.lockInterruptibly();
         try {
             if (stopped) {

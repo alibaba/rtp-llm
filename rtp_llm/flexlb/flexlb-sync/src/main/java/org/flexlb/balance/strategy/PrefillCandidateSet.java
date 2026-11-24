@@ -65,6 +65,11 @@ final class PrefillCandidateSet {
     PrefillEndpoint endpoint(int index) { return endpoints[index]; }
     String endpointAddress(int index) { return endpointAddresses[index]; }
     long cacheHit(int index) { return cacheHitTokens[index]; }
+    /** A full prefix can save the same modeled work as a partial prefix because the last block is recomputed. */
+    int compareCacheMatch(int left, int right) {
+        int effective = Long.compare(cacheHitTokens[left], cacheHitTokens[right]);
+        return effective != 0 ? effective : Long.compare(routingCacheMatchTokens[left], routingCacheMatchTokens[right]);
+    }
     long projectedTtftMs(int index) { return projectedTtftMs[index]; }
     /** Predicted time before a SINGLE / NON_BATCH request starts service. */
     long projectedWaitMs(int index) { return projectedTtftMs[index] - incomingPrefillMs[index]; }

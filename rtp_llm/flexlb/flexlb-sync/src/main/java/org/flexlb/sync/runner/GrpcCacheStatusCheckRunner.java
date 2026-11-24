@@ -1,5 +1,6 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.cache.service.DynamicCacheIntervalService;
@@ -88,7 +89,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         try {
             pollTrace.record(Stage.RUNNER_STARTED);
             logger.debug("GrpcCacheStatusCheckRunner run for {}", ipPort);
-            long startTime = System.nanoTime() / 1000;
+            long pollStartNanos = System.nanoTime();
             long currentCacheVersion = getCurrentCacheVersion();
 
             pollTrace.recordRpcStarted(requestTimeoutMs);
@@ -117,7 +118,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                                     || !workerStatus.isActiveGeneration()) {
                                 pollTrace.record(Stage.RESPONSE_DISCARDED, "GENERATION_CHANGED_OR_RETIRING");
                             } else {
-                                handleCacheStatusResponse(convertCacheStatusResponse(response), startTime);
+                                handleCacheStatusResponse(convertCacheStatusResponse(response), pollStartNanos);
                             }
                         } catch (Throwable callbackFailure) {
                             pollTrace.record(Stage.CALLBACK_FAILED, callbackFailure);
@@ -176,12 +177,13 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         }
     }
 
-    private void handleCacheStatusResponse(CacheStatus newCacheStatus, long startTime) {
-
+    private void handleCacheStatusResponse(CacheStatus newCacheStatus, long pollStartNanos) {
+        long startTime = pollStartNanos / 1000;
         try {
             logger.debug("gRPC Cache Status - handled for {}, role:{}", ipPort, roleType.name());
 
             long successfulIntervalUs;
+            boolean indexedResponse = false;
             pollLease.pollTrace().record(Stage.CACHE_MUTATION_LOCK_ATTEMPT);
             workerStatus.cacheMutationLock.lock();
             try {
@@ -202,6 +204,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                             && current.indexedVersion() == newCacheStatus.getVersion()
                             && current.cacheStatus().getVersion() == newCacheStatus.getVersion()) {
                         workerStatus.publishCacheStatus(newCacheStatus);
+                        indexedResponse = true;
                     }
                 }
 
@@ -213,6 +216,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 }
                 if (result != null && result.isSuccess()) {
                     workerStatus.publishCacheIndexedVersion(newCacheStatus.getVersion());
+                    indexedResponse = true;
                 }
                 successfulIntervalUs = workerStatus.recordSuccessfulCachePoll();
                 if (updateRequired) {
@@ -225,6 +229,10 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 pollLease.pollTrace().record(Stage.CACHE_MUTATION_LOCK_RELEASED);
             }
 
+            if (indexedResponse && roleType.supportsPrefill()
+                    && workerDirectory.exactEndpoint(roleType, ipPort, workerStatus) instanceof PrefillEndpoint endpoint) {
+                endpoint.cachePollCompleted(pollStartNanos);
+            }
             engineHealthReporter.reportCacheStatusCheckRemoteInfo(
                     modelName, roleType.name(), startTime);
             engineHealthReporter.reportCacheStatusCheckerSuccess(
@@ -237,9 +245,6 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     }
 
     private boolean validateCacheStatusResponse(WorkerStatus workerStatus, CacheStatus newCacheStatus) {
-        if (debug) {
-            return true;
-        }
         WorkerStatus.CacheIndexSnapshot current =
                 workerStatus.cacheIndexSnapshot();
         CacheStatus currentCacheStatus = current.cacheStatus();
@@ -251,7 +256,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         boolean responseAlreadyIndexed = current.indexInitialized()
                 && current.indexedVersion() == responseVersion;
         if (responseVersion < currentVersion
-                || responseVersion == currentVersion && responseAlreadyIndexed) {
+                || responseVersion == currentVersion && responseAlreadyIndexed && !debug) {
             logger.debug("gRPC Cache Status - {}, role:{}, version not updated, current: {}, response: {}",
                     ipPort, roleType.name(), currentVersion, responseVersion);
             return false;

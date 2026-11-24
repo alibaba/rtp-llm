@@ -1,5 +1,6 @@
 package org.flexlb.mockengine;
 
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.dao.loadbalance.Response;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -8,6 +9,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -62,12 +64,16 @@ class PriorityLatencyE2ETest {
             }
             int total = PER_PRIORITY * PRIORITIES.length;
             assertEquals(total, futures.size());
+            var prefill = h.prefillEndpoint(0);
             AutoTpmE2EHarness.await(
-                    () -> h.scheduler.getQueuedRequestCount() == total,
+                    () -> prefill.queuedRequestCount() == total,
                     10_000,
-                    "all requests must be committed into the scheduler queue");
-            assertEquals(total, h.scheduler.getQueuedRequestCount(),
-                    "all requests must be committed into the global priority queue before release");
+                    "the single Prefill must hold the full cohort before its priority decision");
+            var queuedIds = prefill.captureQueueSnapshot().items().stream()
+                    .map(ScheduledRequest::requestId).toList();
+            assertEquals(total, queuedIds.size());
+            assertEquals(priorityByRid.keySet(), Set.copyOf(queuedIds));
+            assertTrue(h.engineArrivalOrder.isEmpty());
 
             // flip：小批次 + 短 fixedWait 放行派发，持续饱和下由优先级序主导
             h.fixedWindowDecision().setMaxRequests(2);
@@ -91,8 +97,9 @@ class PriorityLatencyE2ETest {
                                 + ", prefillWork=" + h.prefillEndpoint(0).captureRouteProjectionInputs().work()
                                 + ", decode=" + h.decodeEndpoint(0).resourceSnapshot());
             }
-            assertEquals(total, h.engineArrivalOrder.size(),
-                    "every request must have reached the engine exactly once");
+            assertEquals(total, h.engineArrivalOrder.size());
+            assertEquals(priorityByRid.keySet(), Set.copyOf(h.engineArrivalOrder),
+                    "every submitted request must have reached the engine exactly once");
 
             // 量化：平均到达位次 + 平均调度延迟（ms）
             Map<Integer, Double> avgRank = new HashMap<>();
