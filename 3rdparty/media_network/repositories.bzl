@@ -24,3 +24,16 @@ def media_network_deps():
         strip_prefix = "boringssl-0.20260616.0",
         urls = ["https://github.com/google/boringssl/releases/download/0.20260616.0/boringssl-0.20260616.0.tar.gz"],
     )
+    http_archive(
+        name = "media_brotli",
+        sha256 = "816c96e8e8f193b40151dad7e8ff37b1221d019dbcb9c35cd3fadbfe6477dfec",
+        strip_prefix = "brotli-1.2.0",
+        urls = ["https://github.com/google/brotli/archive/refs/tags/v1.2.0.tar.gz"],
+    )
+    http_archive(
+        name = "media_zstd",
+        build_file = "//3rdparty/media_network:zstd.BUILD",
+        sha256 = "eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3",
+        strip_prefix = "zstd-1.5.7",
+        urls = ["https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz"],
+    )

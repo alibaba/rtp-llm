@@ -1,3 +1,5 @@
+#include "rtp_llm/cpp/media_network/ContentDecoder.h"
+
 #include <arpa/inet.h>
 #include <ares.h>
 #include <cerrno>
@@ -150,13 +152,27 @@ struct Job {
     int               retries = 0, connect_retries = 0, proxy_attempts = 0, fallbacks = 0;
 };
 struct Transfer {
-    Job&              job;
-    std::string       body;
-    Clock::time_point last_io           = Clock::now();
-    bool              large             = false;
-    bool              received_response = false;
-    long              status            = 0;
-    std::string       failure() const {
+    Job&                                            job;
+    std::string                                     body;
+    Clock::time_point                               last_io           = Clock::now();
+    bool                                            large             = false;
+    bool                                            received_response = false;
+    long                                            status            = 0;
+    std::string                                     content_encoding;
+    bool                                            has_encoding_header = false;
+    bool                                            headers_complete    = false;
+    size_t                                          content_length      = 0;
+    std::unique_ptr<rtp_llm::media::ContentDecoder> decoder;
+
+    void append(std::string_view bytes) {
+        if (job.req.limit && bytes.size() > job.req.limit - body.size()) {
+            large = true;
+            throw Failure("too_large");
+        }
+        body.append(bytes);
+    }
+
+    std::string failure() const {
         if (job.canceled.load())
             return "cancelled";
         auto now = Clock::now();
@@ -171,12 +187,11 @@ size_t write_body(char* data, size_t sz, size_t n, void* ptr) noexcept {
     t.last_io    = Clock::now();
     if (t.job.req.media && t.status >= 300)
         return count;
-    if (t.job.req.limit && count > t.job.req.limit - t.body.size()) {
-        t.large = true;
-        return 0;
-    }
     try {
-        t.body.append(data, count);
+        if (t.decoder)
+            t.decoder->write({data, count});
+        else
+            t.append({data, count});
     } catch (...) {
         return 0;
     }
@@ -185,23 +200,56 @@ size_t write_body(char* data, size_t sz, size_t n, void* ptr) noexcept {
 size_t read_header(char* bytes, size_t size, size_t count, void* ptr) noexcept {
     auto& transfer          = *static_cast<Transfer*>(ptr);
     transfer.last_io        = Clock::now();
-    auto             length = size * count;
+    const size_t     length = size * count;
     std::string_view line(bytes, length);
-    if (line.substr(0, 5) == "HTTP/") {
-        auto index = line.find(' ');
-        if (index != line.npos) {
-            std::from_chars(bytes + index + 1, bytes + length, transfer.status);
-            transfer.received_response = transfer.status >= 200;
+    while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+        line.remove_suffix(1);
+    try {
+        if (line.substr(0, 5) == "HTTP/") {
+            auto index = line.find(' ');
+            if (index != line.npos) {
+                std::from_chars(bytes + index + 1, bytes + line.size(), transfer.status);
+                transfer.received_response = transfer.status >= 200;
+            }
+            transfer.content_encoding.clear();
+            transfer.has_encoding_header = false;
+            transfer.headers_complete    = false;
+            transfer.content_length      = 0;
+            transfer.decoder.reset();
+        } else if (transfer.job.req.media && transfer.status == 200 && !transfer.headers_complete) {
+            if (line.empty()) {
+                transfer.headers_complete = true;
+                if (transfer.has_encoding_header) {
+                    transfer.decoder = rtp_llm::media::ContentDecoder::create(
+                        lower(transfer.content_encoding),
+                        [&transfer](std::string_view decoded) { transfer.append(decoded); },
+                        [&transfer] {
+                            if (transfer.job.canceled.load() || Clock::now() >= transfer.job.deadline)
+                                throw Failure("download stopped");
+                        },
+                        transfer.job.req.limit);
+                }
+                // A compressed Content-Length describes wire bytes. The media
+                // limit is enforced on the output, including for chunked bodies.
+                if (!transfer.decoder && transfer.job.req.limit && transfer.content_length > transfer.job.req.limit) {
+                    transfer.large = true;
+                    return 0;
+                }
+            } else if (line.size() >= 17 && !strncasecmp(bytes, "Content-Encoding:", 17)) {
+                if (transfer.has_encoding_header)
+                    transfer.content_encoding += ", ";
+                transfer.has_encoding_header = true;
+                auto value                   = line.find_first_not_of(" \t", 17);
+                if (value != line.npos)
+                    transfer.content_encoding.append(line.substr(value));
+            } else if (transfer.job.req.limit && line.size() >= 15 && !strncasecmp(bytes, "Content-Length:", 15)) {
+                auto pos = line.find_first_not_of(" \t", 15);
+                if (pos != line.npos)
+                    std::from_chars(bytes + pos, bytes + line.size(), transfer.content_length);
+            }
         }
-    } else if (transfer.job.req.media && transfer.status == 200 && transfer.job.req.limit && length >= 15
-               && !strncasecmp(bytes, "Content-Length:", 15)) {
-        auto   pos   = line.find_first_not_of(" \t", 15);
-        size_t value = 0;
-        if (pos != line.npos && std::from_chars(bytes + pos, bytes + length, value).ec == std::errc{}
-            && value > transfer.job.req.limit) {
-            transfer.large = true;
-            return 0;
-        }
+    } catch (...) {
+        return 0;
     }
     return length;
 }
@@ -328,7 +376,9 @@ void exchange(CURL* curl, Job& job, const Policy& policy, const std::string& pro
             curl_easy_setopt(curl, CURLOPT_CAINFO, policy.ca.c_str());
         curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, std::min<long>(ms, req.connect_ms));
         curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(ms));
-        curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
+        curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, req.media ? "gzip, deflate, br, zstd" : "");
+        if (req.media)
+            curl_easy_setopt(curl, CURLOPT_HTTP_CONTENT_DECODING, 0L);
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers.head);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_body);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &transfer);
@@ -373,6 +423,13 @@ void exchange(CURL* curl, Job& job, const Policy& policy, const std::string& pro
             if (redirect) {
                 url = redirect;
                 continue;
+            }
+        }
+        if (transfer.decoder) {
+            try {
+                transfer.decoder->finish();
+            } catch (const std::exception&) {
+                throw Failure("body_transport");
             }
         }
         job.body = std::make_shared<const std::string>(std::move(transfer.body));

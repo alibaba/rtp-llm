@@ -11,7 +11,7 @@ binding_headers(
 
 cc_binary(
     name = "_media_network.so",
-    srcs = ["MediaNetwork.cc"],
+    srcs = ["ContentDecoder.cc", "ContentDecoder.h", "MediaNetwork.cc"],
     additional_linker_inputs = [":exports.map"],
     copts = ["-std=c++17"],
     # Keep private curl, c-ares and TLS symbols local when loaded alongside gRPC.
@@ -20,7 +20,10 @@ cc_binary(
     linkstatic = True,
     deps = [
         ":pybind_headers",
+        "@media_brotli//:brotlidec",
         "@media_curl//:curl",
+        "@media_zstd//:zstddec",
+        "@zlib_archive//:zlib",
         "@media_cares//:ares",
         "@local_config_python//:python_headers",
     ],
@@ -30,4 +33,5 @@ py_test(
     name = "media_network_test",
     srcs = ["media_network_test.py"],
     data = [":_media_network.so"],
+    deps = ["//rtp_llm:requests"],
 )
