@@ -2703,12 +2703,8 @@ TEST_F(BlockTreeCacheTest, CapacityReleaseRetriesWatermarkWithoutDroppingHeldOrF
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     EXPECT_FALSE(cache->tree()->findNode({100}).empty());
 
-    const std::weak_ptr<BlockTreeCache> weak_cache = cache;
-    pool->setCapacityChangeCallback([weak_cache] {
-        if (const auto current = weak_cache.lock()) {
-            current->onCapacityChanged();
-        }
-    });
+    const auto capacity_changed = cache->capacityChangeCallback();
+    pool->setCapacityChangeCallback(capacity_changed);
     pool->decRef(42, DeviceBlockRefType::REQUEST);
     BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_FALSE(cache->tree()->findNode({100}).empty());
@@ -2722,7 +2718,10 @@ TEST_F(BlockTreeCacheTest, CapacityReleaseRetriesWatermarkWithoutDroppingHeldOrF
     EXPECT_FALSE(cache->tree()->findNode({200}).empty());
     EXPECT_TRUE(pool->isAllocated(43));
     EXPECT_TRUE(pool->isFrozen(43));
-    pool->setCapacityChangeCallback({});
+    const std::weak_ptr<BlockTreeCache> cache_lifetime = cache;
+    cache.reset();
+    ASSERT_TRUE(cache_lifetime.expired());
+    EXPECT_NO_THROW(capacity_changed());
 }
 
 TEST_F(BlockTreeCacheTest, WatermarkDirectDropPreservesDeviceBlockWithTreeOperationReference) {

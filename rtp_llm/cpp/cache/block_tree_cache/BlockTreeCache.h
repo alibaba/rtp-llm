@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -132,6 +133,7 @@ public:
     bool init();
     // Retry deferred watermarks after external pins release. Safe inside a pool callback.
     void onCapacityChanged();
+    std::function<void()> capacityChangeCallback() const;
     BlockTreeReclaimer& reclaimer() const { return *reclaimer_; }
     void stopBackgroundTasks();
     // Reject pending loads and wait for allocator callbacks before its members are destroyed.
@@ -207,6 +209,8 @@ public:
     }
 
 private:
+    struct CapacityCallbackState;
+
     void checkWatermark();
     // Caller holds mutex_.
     void onWorkflowSettledLocked(bool check_watermark);
@@ -226,7 +230,7 @@ private:
     BlockTreeStorer                                storer_;
     std::unique_ptr<FullPrefixInvariantScanner>    full_prefix_scanner_;
     std::shared_ptr<BlockTreeReclaimer> reclaimer_;
-
+    std::shared_ptr<CapacityCallbackState> capacity_callback_state_;
 };
 
 using BlockTreeCachePtr = std::shared_ptr<BlockTreeCache>;

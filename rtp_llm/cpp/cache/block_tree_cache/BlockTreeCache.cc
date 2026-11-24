@@ -19,6 +19,13 @@
 
 namespace rtp_llm {
 
+struct BlockTreeCache::CapacityCallbackState {
+    explicit CapacityCallbackState(BlockTreeCache* cache): owner(cache) {}
+
+    std::mutex      mutex;
+    BlockTreeCache* owner;
+};
+
 BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tree,
                                BlockTreeCacheConfig                           config,
                                std::shared_ptr<StorageBackend>                storage_backend,
@@ -61,7 +68,8 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tr
     storer_(tree_.get(), evictor_, *metrics_reporter_, storage_backend_, [this](bool check_watermark) {
         onWorkflowSettledLocked(check_watermark);
     }),
-    reclaimer_(std::move(reclaimer)) {
+    reclaimer_(std::move(reclaimer)),
+    capacity_callback_state_(std::make_shared<CapacityCallbackState>(this)) {
     metrics_reporter_->initEvictionMetricGroupTypes(tree_->groupSets());
     if (storage_backend_) {
         storage_backend_->setStageMetricsReporter(metrics_reporter_);
@@ -116,6 +124,10 @@ void BlockTreeCache::stopBackgroundTasks() {
 
 BlockTreeCache::~BlockTreeCache() {
     stopping_.store(true);
+    {
+        std::lock_guard<std::mutex> lock(capacity_callback_state_->mutex);
+        capacity_callback_state_->owner = nullptr;
+    }
     stopBackgroundTasks();
     full_prefix_scanner_.reset();
     RTP_LLM_LOG_INFO("destroying, closing load tickets...");
@@ -139,6 +151,15 @@ BlockTreeCache::~BlockTreeCache() {
 
 void BlockTreeCache::shutdownLoads() {
     loader_.shutdown();
+}
+
+std::function<void()> BlockTreeCache::capacityChangeCallback() const {
+    return [state = capacity_callback_state_] {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        if (state->owner) {
+            state->owner->onCapacityChanged();
+        }
+    };
 }
 
 void BlockTreeCache::onCapacityChanged() {

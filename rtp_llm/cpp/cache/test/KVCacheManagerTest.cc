@@ -1145,6 +1145,7 @@ TEST_F(KVCacheManagerTest, TeardownKeepsBlockTreeCacheAliveWithSurvivingAllocato
     EXPECT_EQ(surviving_allocator->blockTreeCache(), cache_lifetime.lock());
     EXPECT_FALSE(cache_lifetime.expired());
     EXPECT_FALSE(surviving_allocator->cacheGroups().empty());
+    EXPECT_FALSE(surviving_allocator->blockTreeCache()->reclaimer().stopped_.load());
 
     surviving_allocator.reset();
     EXPECT_TRUE(cache_lifetime.expired());

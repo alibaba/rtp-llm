@@ -276,10 +276,6 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
 }
 
 KVCacheManager::~KVCacheManager() {
-    // Queries, cleanup and capacity notifications must finish while the cache, RPC
-    // manager and allocation wait state are still alive. Never join under a lock.
-    if (block_tree_cache_)
-        block_tree_cache_->stopBackgroundTasks();
     {
         std::lock_guard<std::mutex> lock(allocation_wait_state_->mutex);
         allocation_wait_state_->stopped.store(true, std::memory_order_release);
@@ -386,13 +382,11 @@ bool KVCacheManager::init() {
         return false;
     }
     coordinator_manager_->attachBlockTreeCache(block_tree_cache_);
-    const std::weak_ptr<BlockTreeCache> weak_cache = block_tree_cache_;
+    const auto notify_cache = block_tree_cache_->capacityChangeCallback();
     for (const auto& pool : coordinator_manager_->groupBlockPools()) {
-        pool->setCapacityChangeCallback([capacity_changed, weak_cache] {
+        pool->setCapacityChangeCallback([capacity_changed, notify_cache] {
             capacity_changed();
-            if (const auto cache = weak_cache.lock()) {
-                cache->onCapacityChanged();
-            }
+            notify_cache();
         });
     }
     initCacheEventPublisher();
