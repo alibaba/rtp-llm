@@ -2,7 +2,10 @@ package org.flexlb.dao;
 
 import com.google.protobuf.ByteString;
 import io.opentelemetry.context.Context;
+import lombok.AccessLevel;
 import lombok.Data;
+import lombok.Getter;
+import lombok.Setter;
 import lombok.ToString;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Request;
@@ -110,10 +113,23 @@ public class BalanceContext {
     /** Victims preempted to place this request; 0 for normal placement. */
     private int victimCount;
 
+    @Getter(AccessLevel.NONE)
+    @Setter(AccessLevel.NONE)
+    private boolean prefillComputeCounted;
+
     //===================== Method ===================//
 
     public BalanceContext(FlexlbConfig config) {
         this.config = Objects.requireNonNull(config, "config");
+    }
+
+    /** Only the first placement with usable cache estimates contributes baseline compute. */
+    public synchronized boolean claimPrefillComputeSample() {
+        if (prefillComputeCounted) {
+            return false;
+        }
+        prefillComputeCounted = true;
+        return true;
     }
 
     public long getRequestId() {

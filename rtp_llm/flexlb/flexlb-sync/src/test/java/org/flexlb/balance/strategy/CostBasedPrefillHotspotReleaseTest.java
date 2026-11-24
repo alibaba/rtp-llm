@@ -11,7 +11,6 @@ import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
 import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
@@ -27,12 +26,15 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
+
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -40,20 +42,70 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/**
- * Hotspot release switch contracts: with the switch enabled, a cache leader
- * whose integral release line climbed past a request's hit rate stops
- * pinning it in both the token-balance and the cache-affinity ranking;
- * with the switch off both rankings behave exactly as before.
- */
+/** Shared redirect budget and hotspot selection for both Prefill ranking policies. */
 class CostBasedPrefillHotspotReleaseTest {
+
+    private final AtomicLong nowNanos = new AtomicLong();
+    private final HotspotRedirectLimiter budget = new HotspotRedirectLimiter(nowNanos::get);
+
+    private void recordColdArrival(long inputTokens) {
+        var context = tokenContext(new FlexlbConfig());
+        context.getRequest().setSeqLen(inputTokens);
+        budget.recordPlacement(context, 0L);
+    }
+
+    @Test
+    void bestHitBaselineIsPublishedOncePerRequestEvenAfterItsSampleExpires() {
+        var request = tokenContext(new FlexlbConfig());
+        java.util.stream.IntStream.range(0, 32).parallel()
+                .forEach(i -> budget.recordPlacement(request, 900));
+        assertFalse(budget.tryAcquire(101, 1000));
+        assertTrue(budget.tryAcquire(100, 1000));
+
+        nowNanos.set(MILLISECONDS.toNanos(1000));
+        budget.recordPlacement(request, 0L);
+        assertFalse(budget.tryAcquire(1, 1000), "a new cache estimate on retry cannot refill the window");
+    }
+
+    @Test
+    void chargeOnlyAdditionalComputeTokensEvenWhenTheBudgetIsZero() {
+        assertTrue(budget.tryAcquire(0, 0));
+        assertFalse(budget.tryAcquire(1, 10));
+        recordColdArrival(100_099);
+        assertFalse(budget.tryAcquire(1001, 10));
+        assertTrue(budget.tryAcquire(600, 10));
+        assertTrue(budget.tryAcquire(0, 0));
+        assertFalse(budget.tryAcquire(400, 10), "600 of 1000 tokens consumed 600 ms of pacing");
+        nowNanos.set(MILLISECONDS.toNanos(600));
+        assertFalse(budget.tryAcquire(401, 10));
+        assertTrue(budget.tryAcquire(400, 10));
+        assertTrue(budget.tryAcquire(0, 10));
+    }
+
+    @Test
+    void baselineAndChargedTokensExpireOnTheirOwnSlidingTimestamps() {
+        nowNanos.set(MILLISECONDS.toNanos(900));
+        recordColdArrival(200_000);
+        nowNanos.set(MILLISECONDS.toNanos(1050));
+        assertTrue(budget.tryAcquire(1000, 10));
+        nowNanos.set(MILLISECONDS.toNanos(1750));
+        recordColdArrival(100_000);
+        nowNanos.set(MILLISECONDS.toNanos(1900));
+        assertFalse(budget.tryAcquire(1, 10), "remaining 1000-token allowance was already spent");
+        nowNanos.set(MILLISECONDS.toNanos(2050));
+        assertTrue(budget.tryAcquire(1000, 10));
+        nowNanos.set(MILLISECONDS.toNanos(3000));
+        assertFalse(budget.tryAcquire(1, 10));
+    }
 
     @Test
     void releasedTokenBalanceLeaderDriftsToLowerUncachedWork() {
         FlexlbConfig config = configWithHotspotRelease();
+        config.getRouter().getRoles().getPrefill().getHotspotRelease().setMaxExtraComputePermille(1000);
+        recordColdArrival(1000);
         PrefillEndpoint leader = tokenEndpoint("leader");
         PrefillEndpoint other = tokenEndpoint("other");
-        when(leader.hotspotReleaseLine()).thenReturn(95.0);
+        when(leader.observedRequestCount()).thenReturn(30L);
         when(leader.tokenWorkloadScore()).thenReturn(800.0);
         CostBasedPrefillStrategy strategy = tokenStrategy(
                 config, List.of(
@@ -64,6 +116,38 @@ class CostBasedPrefillHotspotReleaseTest {
                 tokenContext(config), RoleType.PREFILL, "g").value()) {
             assertEquals("other", selected.serverStatus().getServerIp(),
                     "a released leader must lose to lower uncached work");
+        }
+
+        config.getRouter().getRoles().getPrefill().getHotspotRelease().setMaxExtraComputePermille(0);
+        try (SelectedRole selected = strategy.select(tokenContext(config), RoleType.PREFILL, "g").value()) {
+            assertEquals("leader", selected.serverStatus().getServerIp(), "exhausted redirect quota keeps the pin");
+        }
+    }
+
+    @Test
+    void placementRetriesDoNotIncreaseTheBestHitComputeBudget() {
+        var config = configWithHotspotRelease();
+        config.getRouter().getRoles().getPrefill().getHotspotRelease().setMaxExtraComputePermille(1000);
+        PrefillEndpoint leader = tokenEndpoint("leader");
+        PrefillEndpoint other = tokenEndpoint("other");
+        when(leader.observedRequestCount()).thenReturn(30L);
+        when(leader.tokenWorkloadScore()).thenReturn(800.0);
+        var strategy = tokenStrategy(config, List.of(
+                new EndpointRegistry.PrefillRoutingEntry("leader:8080", leader),
+                new EndpointRegistry.PrefillRoutingEntry("other:8080", other)));
+        var request = tokenContext(config);
+        // Each 1000-token request has 900 effective hits at the leader and 500 at the peer.
+        for (int attempt = 0; attempt < 5; attempt++) {
+            try (var selected = strategy.select(request, RoleType.PREFILL, "g").value()) {
+                assertEquals("leader", selected.serverStatus().getServerIp());
+            }
+        }
+        for (int id = 2; id <= 4; id++) {
+            var next = tokenContext(config);
+            next.getRequest().setRequestId(id);
+            try (var selected = strategy.select(next, RoleType.PREFILL, "g").value()) {
+                assertEquals(id == 4 ? "other" : "leader", selected.serverStatus().getServerIp());
+            }
         }
     }
 
@@ -81,7 +165,7 @@ class CostBasedPrefillHotspotReleaseTest {
         try (SelectedRole selected = strategy.select(
                 tokenContext(config), RoleType.PREFILL, "g").value()) {
             assertEquals("leader", selected.serverStatus().getServerIp(),
-                    "a closed line must keep pinning despite leader backlog");
+                    "a non-hotspot leader keeps its cache affinity");
         }
     }
 
@@ -100,48 +184,26 @@ class CostBasedPrefillHotspotReleaseTest {
                 tokenContext(config), RoleType.PREFILL, "g").value()) {
             assertEquals("leader", selected.serverStatus().getServerIp());
         }
-        verify(leader, never()).governHotspotRelease(anyLong(), anyLong(), anyBoolean(), anyLong());
-    }
-
-    @Test
-    void hotspotSetpointIncludesRequestsStillQueuedAtTheRouter() {
-        FlexlbConfig config = configWithHotspotRelease();
-        config.getRouter().getRoles().getPrefill().getHotspotRelease().setOutlierFactor(2.0);
-        PrefillEndpoint leader = tokenEndpoint("leader");
-        PrefillEndpoint other = tokenEndpoint("other");
-        PrefillEndpoint idle = tokenEndpoint("idle");
-        when(leader.queuedRequestCount()).thenReturn(80);
-        when(other.queuedRequestCount()).thenReturn(20);
-        var status = other.getStatus();
-        var observation = StrategyTestSupport.response(RoleType.PREFILL, true, 1000L, 1000L, 1L);
-        observation.setWaitingQueryLen(3);
-        StrategyTestSupport.publish(status, observation);
-        var strategy = tokenStrategy(config, List.of(
-                new EndpointRegistry.PrefillRoutingEntry("leader:8080", leader),
-                new EndpointRegistry.PrefillRoutingEntry("other:8080", other),
-                new EndpointRegistry.PrefillRoutingEntry("idle:8080", idle)));
-
-        try (var selected = strategy.select(tokenContext(config), RoleType.PREFILL, "g").value()) {
-            // Depths are 80, 20 + 3 and 0. Every worker uses the same median-based setpoint.
-            verify(leader).governHotspotRelease(eq(80L), eq(46L), eq(true), anyLong());
-            verify(other).governHotspotRelease(eq(23L), eq(46L), eq(true), anyLong());
-            verify(idle).governHotspotRelease(eq(0L), eq(46L), eq(true), anyLong());
-        }
+        verify(leader, never()).observedRequestCount();
     }
 
     @Test
     void enabledSwitchReplacesTheAffinityTtftCap() {
         FlexlbConfig config = affinityConfig();
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
-        CostBasedPrefillStrategy strategy = new CostBasedPrefillStrategy(
-                mock(WorkerDirectory.class), mock(CacheAwareService.class), reporter);
+        var ranking = new PrefillCandidateRanking(reporter, budget);
+        var request = tokenContext(config);
 
-        assertEquals(0, strategy.selectBestCandidate(
-                candidates(100L, 1000L, 500L, 600L), RoleType.PREFILL, null, 1_000L, config, false, Long.MAX_VALUE),
+        config.getRouter().getRoles().getPrefill().getHotspotRelease().setEnabled(false);
+        assertEquals(0, ranking.select(
+                candidates(100L, 1000L, 500L, 600L), RoleType.PREFILL, null, request),
                 "gate off: the TTFT cap must keep rejecting the leader");
-        assertEquals(1, strategy.selectBestCandidate(
-                candidates(100L, 1000L, 500L, 600L), RoleType.PREFILL, null, 1_000L, config, true, Long.MAX_VALUE),
-                "gate on: the closed line replaces the TTFT cap");
+        assertFalse(budget.tryAcquire(1, 1000), "disabled placements must not fund redirects");
+        config.getRouter().getRoles().getPrefill().getHotspotRelease().setEnabled(true);
+        assertEquals(1, ranking.select(
+                candidates(100L, 1000L, 500L, 600L), RoleType.PREFILL, null, request),
+                "gate on: the healthy leader retains affinity");
+        assertTrue(budget.tryAcquire(1, 1000), "the same request can contribute once enabled");
         verify(reporter).reportCacheAffinityDecision(
                 RoleType.PREFILL, "10.1.0.2", "CACHE_LEADER");
     }
@@ -149,48 +211,46 @@ class CostBasedPrefillHotspotReleaseTest {
     @Test
     void releasedAffinityLeaderFallsBackToBaseline() {
         FlexlbConfig config = affinityConfig();
+        config.getRouter().getRoles().getPrefill().getHotspotRelease().setMaxExtraComputePermille(1000);
+        recordColdArrival(1000);
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
-        CostBasedPrefillStrategy strategy = new CostBasedPrefillStrategy(
-                mock(WorkerDirectory.class), mock(CacheAwareService.class), reporter);
+        var ranking = new PrefillCandidateRanking(reporter, budget);
+        var request = tokenContext(config);
         PrefillCandidateSet survivors = candidates(100L, 1000L, 500L, 600L);
-        when(survivors.endpoint(1).hotspotReleaseLine()).thenReturn(80.0);
+        survivors.setHotspots(Set.of(survivors.endpoint(1)));
 
-        assertEquals(0, strategy.selectBestCandidate(
-                survivors, RoleType.PREFILL, null, 1_000L, config, true, Long.MAX_VALUE),
+        assertEquals(0, ranking.select(
+                survivors, RoleType.PREFILL, null, request),
                 "a released leader must lose to the minimum-TTFT baseline");
         verify(reporter).reportCacheAffinityDecision(
                 RoleType.PREFILL, "10.1.0.1", "HOTSPOT_RELEASE");
+        config.getRouter().getRoles().getPrefill().getHotspotRelease().setMaxExtraComputePermille(0);
+        assertEquals(1, ranking.select(
+                survivors, RoleType.PREFILL, null, request));
+        verify(reporter).reportCacheAffinityDecision(RoleType.PREFILL, "10.1.0.2", "HOTSPOT_RATE_LIMIT");
     }
 
     @Test
-    void shortBurstUsesAnIdleWorkerWhenThePinnedQueueWouldMissTheDeadline() {
-        FlexlbConfig config = affinityConfig();
-        config.getScheduler().setDecision(DecisionPolicyConfig.single());
-        config.setDispatcher(DispatcherConfig.nonBatch());
-        var strategy = new CostBasedPrefillStrategy(mock(WorkerDirectory.class), mock(CacheAwareService.class),
-                mock(EngineHealthReporter.class));
-        PrefillCandidateSet candidates = new PrefillCandidateSet();
-        candidates.reset(2);
-        addCandidate(candidates, 1, "cold", 45_000L, 45_000L, 0L);
-        addCandidate(candidates, 2, "hot", 60_000L, 1_000L, 950L);
-        PrefillEndpoint hot = candidates.endpoint(1);
-        when(hot.queuedRequestCount()).thenReturn(80);
-        assertEquals(0, strategy.selectBestCandidate(candidates, RoleType.PREFILL, null, 1_000L,
-                config, true, 30_000L), "the cold worker can dispatch now even though execution takes 45s");
-        assertEquals(1, strategy.selectBestCandidate(candidates, RoleType.PREFILL, null, 1_000L,
-                config, true, 65_000L), "the hot queue can still dispatch within the longer deadline");
-        when(candidates.endpoint(0).observedRequestCount()).thenReturn(1L);
-        assertEquals(1, strategy.selectBestCandidate(candidates, RoleType.PREFILL, null, 1_000L,
-                config, true, 30_000L), "a busy peer must not trigger the short-burst escape");
-    }
-
-    /** Release is strict: a hit rate exactly on the line is still pinned. */
-    @Test
-    void releasePredicateIsStrictOnTheLine() {
-        assertTrue(PrefillTokenBalance.hotspotReleases(50.0, 499L, 1_000L));
-        assertFalse(PrefillTokenBalance.hotspotReleases(50.0, 500L, 1_000L));
-        assertFalse(PrefillTokenBalance.hotspotReleases(0.0, 499L, 1_000L));
-        assertFalse(PrefillTokenBalance.hotspotReleases(50.0, 499L, 0L));
+    void twoHotGroupsCompeteForOnePacedStreamOfRedirects() {
+        var config = affinityConfig();
+        config.getRouter().getRoles().getPrefill().getHotspotRelease().setMaxExtraComputePermille(10);
+        var ranking = new PrefillCandidateRanking(mock(EngineHealthReporter.class), budget);
+        var request = tokenContext(config);
+        request.getRequest().setSeqLen(2000L);
+        var a = candidates(100, 1000, 0, 1000);
+        var b = candidates(100, 1000, 100, 1100);
+        a.setHotspots(Set.of(a.endpoint(1)));
+        b.setHotspots(Set.of(b.endpoint(1)));
+        recordColdArrival(500_000);
+        for (int ms : new int[] {0, 199, 200, 399, 400, 600, 800, 999}) {
+            nowNanos.set(MILLISECONDS.toNanos(ms));
+            long grants = java.util.stream.IntStream.range(0, 32).parallel().filter(i -> {
+                boolean first = i % 2 == 0;
+                return ranking.select(first ? a : b, RoleType.PREFILL,
+                        first ? "a" : "b", request) == 0;
+            }).count();
+            assertEquals(ms % 200 == 0 ? 1 : 0, grants, "redirects at " + ms + "ms");
+        }
     }
 
     private static FlexlbConfig tokenBalanceConfig(boolean hotspotRelease) {
@@ -208,7 +268,7 @@ class CostBasedPrefillHotspotReleaseTest {
         return tokenBalanceConfig(true);
     }
 
-    private static CostBasedPrefillStrategy tokenStrategy(
+    private CostBasedPrefillStrategy tokenStrategy(
             FlexlbConfig config, List<EndpointRegistry.PrefillRoutingEntry> fleet) {
         WorkerDirectory directory = mock(WorkerDirectory.class);
         when(directory.prefillRoutingSnapshot(RoleType.PREFILL)).thenReturn(fleet);
@@ -224,7 +284,7 @@ class CostBasedPrefillHotspotReleaseTest {
         when(cache.findMatchingEngines(any(), eq(RoleType.PREFILL), any())).thenReturn(
                 Map.of("leader:8080", 9, "other:8080", 5));
         return new CostBasedPrefillStrategy(
-                directory, cache, mock(EngineHealthReporter.class));
+                directory, cache, mock(EngineHealthReporter.class), budget, new PrefillHotspots(nowNanos::get));
     }
 
     private static BalanceContext tokenContext(FlexlbConfig config) {

@@ -102,21 +102,22 @@ class PrefillRequestCapacityTest {
     }
 
     @Test
-    void workerDetailsDeduplicateLocalRequestsAndForeignRequestIds() {
+    void countUnionsUnsentInflightAndEngineRequestsAcrossHandoff() {
+        assertTrue(enqueue(item(3), 0L));
         ScheduledRequest local = item(1);
         var registration = reserve(local, 4L).reservation();
         var localObservation = observed(1);
         var foreign = observed(2);
         heartbeat(Map.of("local", localObservation, "foreign", foreign, "duplicate", foreign), 2L);
-        assertEquals(2L, state.observedRequestCount(), "early Engine observation and prepared local ownership are one request");
+        assertEquals(3L, state.observedRequestCount(), "unsent, locally prepared, and foreign Engine work");
         try (var handoff = commit(local, registration)) { }
         registration.close();
         heartbeat(Map.of("local", localObservation, "foreign", foreign), 2L);
-        assertEquals(2L, state.observedRequestCount());
-        assertFalse(state.canAcceptRequest(2L));
+        assertEquals(3L, state.observedRequestCount(), "handoff and matching Engine observation retain one identity");
+        assertFalse(state.canAcceptRequest(3L));
         heartbeat(Map.of("local", localObservation), 1L);
-        assertEquals(1L, state.observedRequestCount());
-        assertTrue(state.canAcceptRequest(2L));
+        assertEquals(2L, state.observedRequestCount());
+        assertTrue(state.canAcceptRequest(3L));
     }
 
     @Test

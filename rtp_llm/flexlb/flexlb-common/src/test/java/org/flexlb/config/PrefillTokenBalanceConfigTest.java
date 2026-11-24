@@ -44,8 +44,16 @@ class PrefillTokenBalanceConfigTest {
                 .getRouter().getRoles().getPrefill().getHotspotRelease();
         assertEquals(true, defaults.isEnabled());
         assertEquals(1.5, defaults.getOutlierFactor());
-        assertEquals(5_000L, defaults.getSustainedPressureMs());
+        assertEquals(0L, defaults.getSustainedPressureMs());
+        assertEquals(10, defaults.getMaxExtraComputePermille());
+        assertEquals(5, hotspotParse("{\"maxExtraComputePermille\":5}").getMaxExtraComputePermille());
+        assertEquals(0, hotspotParse("{\"maxExtraComputePermille\":0}").getMaxExtraComputePermille());
+        assertThrows(ConfigValidationException.class, () -> hotspotParse("{\"maxExtraComputePermille\":-1}"));
+        assertThrows(ConfigValidationException.class, () -> hotspotParse("{\"maxExtraComputePermille\":1001}"));
         assertEquals(10L, defaults.getSetpointFloor());
+        assertEquals(1000L, defaults.getComputeTokenFloor());
+        assertEquals(4096L, hotspotParse("{\"computeTokenFloor\":4096}").getComputeTokenFloor());
+        assertThrows(ConfigValidationException.class, () -> hotspotParse("{\"computeTokenFloor\":-1}"));
         assertEquals(false, hotspotParse("{\"enabled\":false}").isEnabled());
         assertThrows(ConfigValidationException.class,
                 () -> hotspotParse("{\"outlierFactor\":0.5}"));

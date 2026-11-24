@@ -142,6 +142,39 @@ after completion on that Prefill generation. An eligible full resident match can
 serve immediately. Cancellation, retirement and the remaining `maxExtraTtftMs`
 budget also end the wait.
 
+Under `router.roles.prefill.hotspotRelease`, a cache leader becomes a hotspot
+when either of two independently measured loads exceeds its pool threshold
+and the pool has an idle peer. Outstanding requests come from the Prefill
+ownership ledger. It includes locally queued requests, requests in transit and
+active requests reported by the engine. Matching request and batch identities
+count once. When only aggregate engine counts are available, the ledger adds
+the unmatched reported occupancy conservatively. Requests still waiting for
+their first Prefill assignment have no endpoint owner.
+Compute tokens are the outstanding uncached tokens of locally accepted requests
+on this Prefill, including queued work and excluding speculative reservations.
+Both thresholds use the greater of the configured floor and `outlierFactor`
+times the median for the same role and routing group. `setpointFloor` defaults
+to 10 outstanding requests and `computeTokenFloor` to 1,000 tokens.
+`sustainedPressureMs` defaults to 0.
+A positive duration requires continuous pressure. The first sample showing
+relief or pool saturation closes the gate. A hotspot can redirect requests of
+any cache hit rate when balanced ranking picks an alternative.
+
+All Prefill groups on a Master share a trailing one-second extra compute budget.
+When a request first has ranked candidates, its baseline work is its input length
+minus the best effective cache hit among those candidates. Its baseline enters
+the window once, including the final block required for recomputation on a full
+cache match. This estimates offered Prefill compute from placements.
+A hotspot redirect charges the difference between the best effective hit and
+the target's effective hit. The limit is
+`floor(baseline compute tokens in the window × maxExtraComputePermille / 1000)`.
+The default is 10‰ and the accepted integer range is 0–1000. At 100,000 baseline
+tokens, 10‰ allows 1,000 additional tokens. A grant spending 600 of them spaces
+the next positive-cost grant by at least 600 ms. Equal-cost destinations can
+redirect immediately, including at 0‰. Each positive-cost redirect decision
+consumes budget, even if placement later fails. Replanning can consume a fresh
+grant and never replenishes baseline work.
+
 A ranked request waiting on Decode keeps its place on Prefill. When Decode
 capacity returns, Master checks whether a different eligible Prefill has
 a longer resident prefix. If it does, Master returns the request to its

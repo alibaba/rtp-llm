@@ -88,8 +88,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /** Engine waiting-queue admission gate; null when tokenBalance disables the gate. */
     private final EngineQueueAdmission engineQueueAdmission;
-    /** Integral hotspot release line; null when hotspot release is disabled. */
-    private final HotspotReleaseGate hotspotReleaseGate;
     private final WorkerBatcher runtime;
     private final PrefillState prefillState;
     private final EndpointEventProjector endpointEvents;
@@ -138,13 +136,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
         if (engineQueueAdmission != null) {
             prefillState.configureEngineQueueAdmission(engineQueueAdmission);
         }
-        if (tokenBalance != null) {
-            this.prefillState.enableTokenWorkload();
-        }
         RoutingConfig.HotspotReleaseConfig hotspotRelease =
                 prefillRouting == null ? null : prefillRouting.getHotspotRelease();
-        this.hotspotReleaseGate = hotspotRelease != null && hotspotRelease.isEnabled()
-                ? new HotspotReleaseGate(hotspotRelease.getSustainedPressureMs()) : null;
+        if (tokenBalance != null || hotspotRelease != null && hotspotRelease.isEnabled()) {
+            this.prefillState.enableTokenWorkload();
+        }
     }
 
     /** Start of the most recent poll whose returned cache version is visible in routing. */
@@ -169,21 +165,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
         EngineQueueAdmission admission = engineQueueAdmission;
         return admission == null
                 ? EngineQueueAdmission.State.UNKNOWN : admission.state();
-    }
-
-    /** Current hotspot release line in hit-rate percent; 0 while the gate is disabled. */
-    public double hotspotReleaseLine() {
-        HotspotReleaseGate gate = hotspotReleaseGate;
-        return gate == null ? 0.0 : gate.line();
-    }
-
-    /** One governor round over this endpoint's release line; no-op while disabled. */
-    public void governHotspotRelease(long waitingDepth, long setpoint, boolean poolSpare, long nowMs) {
-        HotspotReleaseGate gate = hotspotReleaseGate;
-        if (gate == null) {
-            return;
-        }
-        gate.govern(waitingDepth, setpoint, poolSpare, nowMs);
     }
 
     /** Whether the Engine waiting-queue gate blocks new work on this endpoint. */
@@ -562,7 +543,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     // ==================== Ownership diagnostics ====================
 
-    /** Diagnostic snapshot of canonical local plus worker-reported ownership. */
+    /** Queued and in-flight local requests plus worker load not matched to those owners. */
     public long observedRequestCount() {
         return prefillState.observedRequestCount();
     }

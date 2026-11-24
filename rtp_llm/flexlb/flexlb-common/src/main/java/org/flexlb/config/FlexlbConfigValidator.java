@@ -342,8 +342,12 @@ final class FlexlbConfigValidator {
                     "must be at least 1.0");
             nonNegative(hotspotRelease.getSustainedPressureMs(),
                     "router.roles.prefill.hotspotRelease.sustainedPressureMs");
+            range(hotspotRelease.getMaxExtraComputePermille(), 0, 1000,
+                    "router.roles.prefill.hotspotRelease.maxExtraComputePermille");
             nonNegative(hotspotRelease.getSetpointFloor(),
                     "router.roles.prefill.hotspotRelease.setpointFloor");
+            nonNegative(hotspotRelease.getComputeTokenFloor(),
+                    "router.roles.prefill.hotspotRelease.computeTokenFloor");
         }
 
         require(routing.getRoles().getDecode() != null,

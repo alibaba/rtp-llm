@@ -17,6 +17,7 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -25,19 +26,15 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/**
- * End-to-end hotspot release scenarios over real endpoints and committed
- * status reports: a sustained HOTSPOT opens the line against the
- * fleet-relative setpoint, drifts the request to balanced ranking, and
- * re-pins after relief; a transient RAMP burst below the sustained window,
- * and a deep-queue but balanced large-batch fleet, must never open the line.
- */
+/** Hotspot selection and recovery with real endpoints and committed status reports. */
 class HotspotReleaseScenarioTest {
 
     private static final String LEADER_IP = "10.0.0.2";
@@ -47,20 +44,22 @@ class HotspotReleaseScenarioTest {
     private EndpointRegistry registry;
     private PrefillEndpoint leader;
     private PrefillEndpoint idle;
+    private final HotspotRedirectLimiter budget = new HotspotRedirectLimiter(() -> 0L);
     private CostBasedPrefillStrategy strategy;
     private CacheAwareService cache;
     private long requestId;
     private long governorTimeMs;
+    private final PrefillHotspots hotspots = new PrefillHotspots(() -> MILLISECONDS.toNanos(governorTimeMs));
 
     @BeforeEach
     void setUp() {
         config = StrategyTestSupport.config();
         config.setDispatcher(DispatcherConfig.nonBatch());
         config.getScheduler().setType(SchedulerConfig.Type.DIRECT);
-        // The hotspot's 30 waiting queries count as unknown Engine work and
+        // The hotspot's 30 running streams count as unknown Engine work and
         // would trip both the queue-admission gate (threshold 10) and the
         // per-worker route-slot limit (2); relax both so the scenario
-        // exercises the release line itself, not the admission gates.
+        // exercises hotspot detection, not the admission gates.
         RoutingConfig.TokenBalanceConfig tokenBalance =
                 new RoutingConfig.TokenBalanceConfig();
         tokenBalance.setEngineQueueAdmissionThreshold(null);
@@ -68,11 +67,13 @@ class HotspotReleaseScenarioTest {
         config.getDispatcher().setMaxInflightPerPrefillWorker(100);
         config.getRouter().getRoles().getPrefill()
                 .getHotspotRelease().setEnabled(true);
+        config.getRouter().getRoles().getPrefill().getHotspotRelease().setSustainedPressureMs(5_000L);
+        config.getRouter().getRoles().getPrefill().getHotspotRelease().setMaxExtraComputePermille(1000);
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
         registry = StrategyTestSupport.endpointRegistry(configService);
 
-        // The hot leader reports a sustained waiting queue of 30; the idle
+        // The hot leader reports 30 running streams; the idle
         // worker reports none. Only the leader holds the session prefix.
         WorkerStatus leaderSource = worker(LEADER_IP, 30L);
         publish(RoleType.PREFILL, LEADER_IP + ":8080", leaderSource);
@@ -85,7 +86,7 @@ class HotspotReleaseScenarioTest {
         when(cache.findMatchingEngines(any(), eq(RoleType.PREFILL), any())).thenReturn(
                 Map.of(LEADER_IP + ":8080", 5));
         strategy = new CostBasedPrefillStrategy(
-                new WorkerDirectory(registry), cache, mock(EngineHealthReporter.class));
+                new WorkerDirectory(registry), cache, mock(EngineHealthReporter.class), budget, hotspots);
         requestId = 1_000L;
     }
 
@@ -94,75 +95,38 @@ class HotspotReleaseScenarioTest {
         registry.close();
     }
 
-    /**
-     * HOTSPOT: the line only climbs after the sustained window, the released
-     * request drifts off the congested leader, and relief re-pins it once
-     * the leader drains.
-     */
     @Test
-    void sustainedHotspotDriftsThenRePinsAfterRelief() {
-        PrefillTokenWorkload.Reservation backlog = leader.planTokenWork(1_500L);
-        try {
-            assertEquals(LEADER_IP, selectedIp(), "closed line must pin the cache leader");
+    void sustainedHotspotDriftsThenRePinsOnFirstSampleAfterRelief() {
+        try (var backlog = leader.planTokenWork(1_500L)) {
+            assertEquals(LEADER_IP, selectedIp());
+            driveGovernor(6L);
+            assertTrue(sampledHotspots().contains(leader));
+            assertEquals(IDLE_IP, selectedIp());
 
-            // 12s of sustained waiting-queue pressure: 5s gate, then climbing
-            // against the fleet-relative setpoint (median 15 -> setpoint 22,
-            // so 1.2*(30-22) = 9.6pp/s for the remaining 7s).
-            driveGovernor(12L);
-            assertTrue(leader.hotspotReleaseLine() > 50.0,
-                    "sustained pressure with an idle worker must open the line");
-            assertEquals(IDLE_IP, selectedIp(),
-                    "a released leader must lose to lower uncached work");
-
-            // The leader drains: relief decays the line back to closed.
-            republishWaiting(leader, 0L);
-            driveGovernor(30L);
-            assertEquals(0.0, leader.hotspotReleaseLine(), 1e-9);
-            assertEquals(LEADER_IP, selectedIp(),
-                    "a drained leader must win the pin again");
-        } finally {
-            backlog.close();
+            republishRunning(leader, 0L);
+            governorTimeMs += 100L;
+            assertFalse(sampledHotspots().contains(leader));
+            assertEquals(LEADER_IP, selectedIp());
         }
     }
 
-    /**
-     * RAMP: balanced-fleet transient queue bumps below the sustained window
-     * must never open the line, so pinning is preserved exactly.
-     */
     @Test
-    void transientRampPressureNeverOpensTheLine() {
-        PrefillTokenWorkload.Reservation backlog = leader.planTokenWork(1_500L);
-        try {
-            // 4s of pressure: below the 5s sustained window.
+    void transientPressureBelowConfiguredDurationKeepsAffinity() {
+        try (var backlog = leader.planTokenWork(1_500L)) {
             driveGovernor(4L);
-            assertEquals(0.0, leader.hotspotReleaseLine(), 1e-9,
-                    "a transient burst must not climb the line");
-            assertEquals(LEADER_IP, selectedIp(),
-                    "without a real hotspot the pin must stay untouched");
-        } finally {
-            backlog.close();
+            assertFalse(sampledHotspots().contains(leader));
+            assertEquals(LEADER_IP, selectedIp());
         }
     }
 
-    /**
-     * Large-batch fleet: every worker runs a deep, healthy queue (leader 40,
-     * peer 30). The fleet-relative setpoint (median 35 -> 52) sits above the
-     * leader's own depth, so sustained pressure must not open the line —
-     * congestion is judged against the fleet, not the absolute floor.
-     */
     @Test
-    void healthyBusyFleetNeverOpensTheLine() {
-        republishWaiting(leader, 40L);
-        republishWaiting(idle, 30L);
-        PrefillTokenWorkload.Reservation backlog = leader.planTokenWork(1_500L);
-        try {
+    void healthyBusyFleetKeepsAffinity() {
+        republishRunning(leader, 40L);
+        republishRunning(idle, 30L);
+        try (var backlog = leader.planTokenWork(1_500L)) {
             driveGovernor(12L);
-            assertEquals(0.0, leader.hotspotReleaseLine(), 1e-9,
-                    "a busy-but-balanced fleet must stay pinned");
-            assertEquals(LEADER_IP, selectedIp(),
-                    "the cache leader must keep the pin under healthy depth");
-        } finally {
-            backlog.close();
+            assertFalse(sampledHotspots().contains(leader));
+            assertEquals(LEADER_IP, selectedIp());
         }
     }
 
@@ -188,35 +152,46 @@ class HotspotReleaseScenarioTest {
 
     /** Drive production governor rounds with a monotonic test clock. */
     private void driveGovernor(long seconds) {
-        var pool = registry.prefillRoutingSnapshot(RoleType.PREFILL);
-        governorTimeMs = Math.max(governorTimeMs, System.currentTimeMillis());
         for (long round = 0; round < seconds * 10L; round++) {
             governorTimeMs += 100L;
-            strategy.governHotspotRelease(pool, config, governorTimeMs);
+            sampledHotspots();
         }
     }
 
-    /** Republish one endpoint's waiting-queue depth at a fresh status version. */
-    private static void republishWaiting(PrefillEndpoint endpoint, long waitingQueryLen) {
+    private java.util.Set<PrefillEndpoint> sampledHotspots() {
+        return hotspots.sample(RoleType.PREFILL, null, registry.prefillRoutingSnapshot(RoleType.PREFILL),
+                config.getRouter().getRoles().getPrefill().getHotspotRelease());
+    }
+
+    /** Republish one endpoint's running-stream count at a fresh status version. */
+    private static void republishRunning(PrefillEndpoint endpoint, long runningStreams) {
         WorkerStatus status = endpoint.getStatus();
         WorkerStatusResponse response = StrategyTestSupport.response(
                 RoleType.PREFILL, true, 1_000_000L, 1_000_000L,
                 status.appliedStatusCursor().statusVersion() + 1L);
-        response.setWaitingQueryLen(waitingQueryLen);
-        StrategyTestSupport.publish(status, response);
+        response.setRunningQueryLen(runningStreams);
+        Runnable publishEvents;
+        status.lock.lock();
+        try {
+            var observation = WorkerStatusTestFixtures.observation(status, response);
+            publishEvents = endpoint.applyPreparedStatus(status, WorkerStatusTestFixtures.prepare(status, observation));
+        } finally {
+            status.lock.unlock();
+        }
+        publishEvents.run();
     }
 
     private void publish(RoleType role, String address, WorkerStatus source) {
         StrategyTestSupport.publishEndpoint(registry, role, address, source);
     }
 
-    private static WorkerStatus worker(String ip, long waitingQueryLen) {
+    private static WorkerStatus worker(String ip, long runningStreams) {
         WorkerStatus status = StrategyTestSupport.workerStatus(
                 RoleType.PREFILL, null, ip, 8080, 8081, true, 1_000_000L, 1_000_000L);
         WorkerStatusResponse response = StrategyTestSupport.response(
                 RoleType.PREFILL, true, 1_000_000L, 1_000_000L,
                 status.appliedStatusCursor().statusVersion() + 1L);
-        response.setWaitingQueryLen(waitingQueryLen);
+        response.setRunningQueryLen(runningStreams);
         StrategyTestSupport.publish(status, response);
         return status;
     }

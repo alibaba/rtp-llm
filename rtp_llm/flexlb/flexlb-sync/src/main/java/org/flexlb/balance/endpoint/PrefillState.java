@@ -617,7 +617,7 @@ public final class PrefillState {
     /** Engine waiting-queue admission gate; null when tokenBalance disables the gate. */
     private volatile EngineQueueAdmission engineQueueAdmission;
 
-    /** Enable outstanding-token accounting used by token-balanced Prefill selection. */
+    /** Enable accepted-token accounting for hotspot detection and token-balanced selection. */
     public void enableTokenWorkload() {
         tokenWorkload = new PrefillTokenWorkload();
     }
@@ -1917,9 +1917,7 @@ public final class PrefillState {
     public long observedRequestCount() {
         lock.lock();
         try {
-            return saturatedAdd(
-                    requests.size(),
-                    unknownEngineRequestCount);
+            return outstandingRequestCount;
         } finally {
             lock.unlock();
         }

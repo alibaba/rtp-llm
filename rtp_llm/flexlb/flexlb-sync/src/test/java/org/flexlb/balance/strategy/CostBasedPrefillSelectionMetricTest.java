@@ -58,6 +58,7 @@ class CostBasedPrefillSelectionMetricTest {
     private CacheAwareService cache;
     private EngineHealthReporter reporter;
     private CostBasedPrefillStrategy strategy;
+    private PrefillCandidateRanking ranking;
     private BalanceContext context;
 
     @BeforeEach
@@ -74,6 +75,7 @@ class CostBasedPrefillSelectionMetricTest {
         cache = mock(CacheAwareService.class);
         when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of());
         reporter = mock(EngineHealthReporter.class);
+        ranking = new PrefillCandidateRanking(reporter, new HotspotRedirectLimiter());
         strategy = new CostBasedPrefillStrategy(
                 new WorkerDirectory(registry), cache, reporter);
 
@@ -222,6 +224,7 @@ class CostBasedPrefillSelectionMetricTest {
             }
             try (var commit = endpoint.tryBeginRouteCommitAdmission();
                  var handoff = commit.commit(occupants, reservations)) { }
+            assertEquals(20L, endpoint.pendingTokenWork(), "hotspot detection tracks accepted tokens in TTFT mode");
             org.junit.jupiter.api.Assertions.assertFalse(endpoint.routeAdmissionAvailability().isAvailable());
             try (SelectedRole selected = select()) {
                 assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
@@ -230,6 +233,7 @@ class CostBasedPrefillSelectionMetricTest {
             occupants.forEach(item -> endpoint.releaseCommittedItem(item.execution()));
             reservations.forEach(org.flexlb.balance.endpoint.PrefillState.RouteReservation::close);
         }
+        assertEquals(0L, endpoint.pendingTokenWork());
     }
 
     @ParameterizedTest
@@ -414,8 +418,8 @@ class CostBasedPrefillSelectionMetricTest {
                 new long[] {100L, 105L, 1_000L},
                 new long[] {500L, 500L, 0L});
 
-        int selectedIndex = strategy.selectBestCandidate(
-                candidates, RoleType.PREFILL, null, 1_000L, config, false, Long.MAX_VALUE);
+        int selectedIndex = ranking.select(
+                candidates, RoleType.PREFILL, null, context);
 
         assertEquals(0, selectedIndex,
                 "equal cache hit must preserve the minimum-TTFT baseline");
@@ -432,8 +436,8 @@ class CostBasedPrefillSelectionMetricTest {
                 new long[] {100L, 105L, 1_000L},
                 new long[] {500L, 600L, 0L});
 
-        int selectedIndex = strategy.selectBestCandidate(
-                candidates, RoleType.PREFILL, null, 1_000L, config, false, Long.MAX_VALUE);
+        int selectedIndex = ranking.select(
+                candidates, RoleType.PREFILL, null, context);
 
         assertEquals(1, selectedIndex);
         verify(reporter).reportCacheAffinityDecision(
@@ -454,8 +458,8 @@ class CostBasedPrefillSelectionMetricTest {
 
         Set<Integer> selected = new HashSet<>();
         for (int attempt = 0; attempt < 6; attempt++) {
-            selected.add(strategy.selectBestCandidate(
-                    candidates, RoleType.PREFILL, null, 1_000L, config, false, Long.MAX_VALUE));
+            selected.add(ranking.select(
+                    candidates, RoleType.PREFILL, null, context));
         }
 
         assertEquals(affinityEnabled ? Set.of(1) : Set.of(0, 1), selected);
@@ -470,8 +474,8 @@ class CostBasedPrefillSelectionMetricTest {
 
         Set<Integer> selected = new HashSet<>();
         for (int attempt = 0; attempt < 6; attempt++) {
-            selected.add(strategy.selectBestCandidate(
-                    candidates, RoleType.PREFILL, null, 1_000L, config, false, Long.MAX_VALUE));
+            selected.add(ranking.select(
+                    candidates, RoleType.PREFILL, null, context));
         }
 
         assertEquals(Set.of(0, 2), selected);
@@ -537,6 +541,7 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     private void configureFocusedAffinity() {
+        config.getRouter().getRoles().getPrefill().getHotspotRelease().setEnabled(false);
         RoutingConfig.CacheAffinityConfig affinity =
                 new RoutingConfig.CacheAffinityConfig();
         affinity.setMaxExtraTtftMs(10L);

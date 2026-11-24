@@ -4,6 +4,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.projection.RouteProjection;
 
 import java.util.Arrays;
+import java.util.Set;
 
 /** Reusable columns for modeled Prefill candidates from one fleet snapshot. */
 final class PrefillCandidateSet {
@@ -17,6 +18,7 @@ final class PrefillCandidateSet {
     private long[] routingCacheMatchTokens = new long[0];
     private long[] ownershipVersions = new long[0];
     private String[] admissionBlocks = new String[0];
+    private Set<PrefillEndpoint> hotspots = Set.of();
     private int size;
     long minimumProjectedTtftMs;
     long maximumCacheHit;
@@ -28,6 +30,7 @@ final class PrefillCandidateSet {
         Arrays.fill(admissionBlocks, 0, size, null);
         ensureCapacity(expectedCapacity);
         size = 0;
+        hotspots = Set.of();
         minimumProjectedTtftMs = Long.MAX_VALUE;
         maximumCacheHit = 0L;
         maximumRoutingCacheMatchTokens = 0L;
@@ -62,6 +65,8 @@ final class PrefillCandidateSet {
         size++;
     }
 
+    void setHotspots(Set<PrefillEndpoint> hotspots) { this.hotspots = hotspots; }
+    boolean isHotspot(int index) { return hotspots.contains(endpoints[index]); }
     PrefillEndpoint endpoint(int index) { return endpoints[index]; }
     String endpointAddress(int index) { return endpointAddresses[index]; }
     long cacheHit(int index) { return cacheHitTokens[index]; }
@@ -71,8 +76,7 @@ final class PrefillCandidateSet {
         return effective != 0 ? effective : Long.compare(routingCacheMatchTokens[left], routingCacheMatchTokens[right]);
     }
     long projectedTtftMs(int index) { return projectedTtftMs[index]; }
-    /** Predicted time before a SINGLE / NON_BATCH request starts service. */
-    long projectedWaitMs(int index) { return projectedTtftMs[index] - incomingPrefillMs[index]; }
+    /** Estimated Prefill execution time for the incoming request on this candidate. */
     long prefillMs(int index) { return incomingPrefillMs[index]; }
     long routingCacheMatchTokens(int index) { return routingCacheMatchTokens[index]; }
     long ownershipVersion(int index) { return ownershipVersions[index]; }

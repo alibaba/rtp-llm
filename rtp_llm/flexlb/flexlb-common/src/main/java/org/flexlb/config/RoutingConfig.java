@@ -45,34 +45,26 @@ public final class RoutingConfig {
         private CacheAffinityConfig cacheAffinity;
         /** Select Prefill workers by outstanding uncached token work. */
         private TokenBalanceConfig tokenBalance;
-        /**
-         * Release pinned cache affinity to balanced ranking once a leader's
-         * sustained-congestion line climbs. Applies to both the cache-affinity
-         * and the token-balance ranking; disabled leaves both unchanged.
-         */
+        /** Detect congested cache leaders and pace redirects across this Master's Prefill pools. */
         private HotspotReleaseConfig hotspotRelease = new HotspotReleaseConfig();
     }
 
-    /**
-     * Integral hotspot release line tuning. The line's zero point is
-     * fleet-relative: a worker only counts as congested once its waiting
-     * depth exceeds max(setpointFloor, outlierFactor × fleet median depth)
-     * for sustainedPressureMs, so large-batch engines with a deep healthy
-     * queue stay pinned while small engines surface a shallow-queue
-     * hotspot. Climb/decay slopes stay fixed: their 4:1 asymmetry is the
-     * anti-oscillation contract and has no business meaning to tune.
-     */
+    /** Fleet-relative congestion detection and Master-wide hotspot redirect rate. */
     @Getter
     @Setter
     public static final class HotspotReleaseConfig {
-        /** Master switch; balanced fleets keep the line closed on their own. */
+        /** Enable redirects from a congested cache leader. */
         private boolean enabled = true;
         /** Fleet-median multiple above which a worker counts as congested; at least 1.0. */
         private double outlierFactor = 1.5;
-        /** Sustained-above-setpoint window before the line may climb, in milliseconds. */
-        private long sustainedPressureMs = 5_000L;
-        /** Absolute floor of the dynamic setpoint; mirror the fleet's queue-admission baseline. */
+        /** Time above the setpoint with spare pool capacity before declaring a hotspot. */
+        private long sustainedPressureMs = 0L;
+        /** Additional uncached Prefill tokens allowed per thousand baseline compute tokens. */
+        private int maxExtraComputePermille = 10;
+        /** Minimum outstanding-request threshold for the fleet-relative comparison. */
         private long setpointFloor = 10L;
+        /** Minimum compute-token threshold, in tokens, independent of the outstanding-request floor. */
+        private long computeTokenFloor = 1000L;
     }
 
     /** Prefill selection by outstanding uncached tokens with hot/cold cache affinity. */
