@@ -13,6 +13,7 @@
 #include <mutex>
 #include <sstream>
 #include <thread>
+#include <vector>
 #include <pybind11/embed.h>
 #include <torch/extension.h>
 #include <unistd.h>
@@ -4276,6 +4277,21 @@ TEST_F(MtpExecutorTest, testErroredSpecLogitsStreamDoesNotAbortExecutor) {
     auto status = components.executor->process(ScheduleOutput{{stream}});
     EXPECT_TRUE(status.ok());
     EXPECT_TRUE(stream->hasError());
+}
+
+TEST_F(MtpExecutorTest, PrevSeqLenFullMatchesDeviceTensor) {
+    auto opts = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    for (int32_t value : {0, 1, 5, 4096, (1 << 24) + 1, std::numeric_limits<int32_t>::max()}) {
+        auto expected = torch::tensor({value}, opts);
+        auto actual   = torch::full({1}, value, opts);
+        ASSERT_EQ(actual.scalar_type(), expected.scalar_type());
+        ASSERT_TRUE(actual.sizes().equals(expected.sizes()));
+        ASSERT_TRUE(actual.device() == expected.device());
+        auto expected_cpu = expected.cpu().contiguous();
+        auto actual_cpu   = actual.cpu().contiguous();
+        ASSERT_EQ(expected_cpu.numel(), actual_cpu.numel());
+        ASSERT_EQ(std::memcmp(expected_cpu.data_ptr(), actual_cpu.data_ptr(), sizeof(int32_t)), 0);
+    }
 }
 
 }  // namespace rtp_llm
