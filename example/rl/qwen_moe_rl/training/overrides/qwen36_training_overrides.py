@@ -182,13 +182,38 @@ def install_export_dtype_hook():
         return
     source = textwrap.dedent(inspect.getsource(original))
     pattern = '.full_tensor().to(torch.bfloat16, non_blocking=True)'
-    if source.count(pattern) != 1:
+    if source.count(pattern) == 1:
+        source = source.replace(pattern, '.full_tensor().to(_qwen36_export_dtype(name), non_blocking=True)')
+        namespace = dict(original.__globals__)
+        namespace['_qwen36_export_dtype'] = export_dtype
+        exec(compile(source, '<qwen36-verl-fp32-export-overlay>', 'exec'), namespace)
+        patched = namespace[original.__name__]
+    elif 'unfuse_moe_params' in source:
+        # Upstream verl (e.g. verl@lll) calls unfuse_moe_params() and omits bf16 casting.
+        # Keep packed 3D MoE keys matching HF model.safetensors.index.json while preserving FP32 GDN tensors.
+        def patched(self, layered_summon=False, base_sync_done=False, **kwargs):
+            peft_model = getattr(self.module, '_fsdp_wrapped_module', self.module)
+            if hasattr(peft_model, 'peft_config'):
+                return original(self, layered_summon=layered_summon, base_sync_done=base_sync_done, **kwargs)
+            _skip_staging = engine.fsdp_version(self.module) == 2
+            if not getattr(self, '_uses_fsdp2_cpu_offload_policy', False) and not _skip_staging:
+                engine.load_fsdp_model_to_gpu(self.module)
+            params = self.module.state_dict()
+            params = engine.convert_weight_keys(params, peft_model)
+            if getattr(self, '_is_offload_param', False) and not _skip_staging:
+                engine.offload_fsdp_model_to_cpu(self.module)
+            device = engine.get_device_id()
+
+            def _stream():
+                for name, param in params.items():
+                    full = param.to(device, non_blocking=True).full_tensor() if isinstance(param, engine.DTensor) else param
+                    if full.is_floating_point():
+                        full = full.to(export_dtype(name), non_blocking=True)
+                    yield name, full
+
+            return _stream(), None
+    else:
         raise RuntimeError('Unexpected verl export implementation; review the GDN FP32 export hook')
-    source = source.replace(pattern, '.full_tensor().to(_qwen36_export_dtype(name), non_blocking=True)')
-    namespace = dict(original.__globals__)
-    namespace['_qwen36_export_dtype'] = export_dtype
-    exec(compile(source, '<qwen36-verl-fp32-export-overlay>', 'exec'), namespace)
-    patched = namespace[original.__name__]
 
     def export(self, *args, **kwargs):
         config = getattr(self.model_config, 'hf_config', None)
@@ -198,6 +223,28 @@ def install_export_dtype_hook():
 
     export._qwen36_preserves_gdn_fp32 = True
     engine.FSDPEngine.get_per_tensor_param = export
+
+    from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
+
+    orig_preserved = FSDPCheckpointManager._get_dtype_preserved_names
+    if not getattr(orig_preserved, '_qwen36_preserves_gdn_fp32', False):
+        def _patched_preserved(self, unwrap_model):
+            import torch
+
+            preserved = orig_preserved(self, unwrap_model)
+            config = getattr(unwrap_model, 'config', None)
+            if getattr(config, 'model_type', None) in MODEL_TYPES:
+                extra = [
+                    name
+                    for name, _ in unwrap_model.named_parameters()
+                    if export_dtype(name) == torch.float32
+                ]
+                if extra:
+                    preserved = set(preserved) | set(self._to_export_names(unwrap_model, extra))
+            return preserved
+
+        _patched_preserved._qwen36_preserves_gdn_fp32 = True
+        FSDPCheckpointManager._get_dtype_preserved_names = _patched_preserved
 
 
 def configure_text_only(config):
@@ -296,8 +343,11 @@ def install():
                     return prepare_text_only(meta_checkpoint_model(base, hf_config, *args, **kwargs),
                                              'meta_sharded_checkpoint_slice_world32')
                 text = hf_config.get_text_config()
-                is_target = (hf_config.model_type == 'qwen3_5_moe' and text.num_hidden_layers == 48
-                             and text.hidden_size == 3072 and text.num_experts == 256)
+                is_target = (
+                    hf_config.model_type == 'qwen3_5_moe'
+                    and text.num_experts == 256
+                    and (text.num_hidden_layers, text.hidden_size) in ((48, 3072), (40, 2048))
+                )
                 if not (is_target and dist.is_initialized() and dist.get_world_size() == 8):
                     return prepare_text_only(base.from_pretrained(*args, **kwargs))
                 if dist.get_rank() == 0:

@@ -150,11 +150,14 @@ class RTPServerAdapter(BaseRollout):
         if probe is not None:
             signature=dict(replica_rank=self.replica_rank,tp_rank=self.tp_rank,tp_size=self.tp_size,
                 global_step=probe['global_step'],source_sha256=probe['full_source_sha256'],
+                digest_mode=probe.get('digest_mode','full_sha256'),
                 model_version=probe['model_version'],raw_log_probs=probe['raw_log_probs'])
             signatures=[None]*(torch.distributed.get_world_size() if self.distributed else 1)
             if self.distributed:torch.distributed.all_gather_object(signatures,signature)
             else:signatures=[signature]
-            if len({x['source_sha256'] for x in signatures})!=1 or len({x['global_step'] for x in signatures})!=1:
+            if (len({x['digest_mode'] for x in signatures})!=1
+                    or len({x['source_sha256'] for x in signatures})!=1
+                    or len({x['global_step'] for x in signatures})!=1):
                 await self._terminate_owned_replica();raise RuntimeError('RTP replicas received different source policies')
             reference=signatures[0]['raw_log_probs']
             if any(len(x['raw_log_probs'])!=len(reference) for x in signatures):
@@ -231,17 +234,32 @@ class RTPServerAdapter(BaseRollout):
         restart=self._broadcast(restart)
         if restart['error'] is not None:
             failure='Native readiness before refit failed: '+restart['error']
+        step_int=int(global_steps or 0)
+        full_sha_every=int(os.environ.get('RLLM_RTP_FULL_SHA_EVERY','5'))
+        total_steps_env=int(os.environ.get('RLLM_RTP_TOTAL_STEPS','0'))
+        force_full=(
+            os.environ.get('RLLM_RTP_FAST_REFIT','0')!='1'
+            or os.environ.get('RLLM_RTP_FORCE_FULL_SHA','0')=='1'
+            or step_int==0
+            or bool(restart.get('restarted'))
+            or (full_sha_every>0 and step_int%full_sha_every==0)
+            or (total_steps_env>0 and step_int==total_steps_env)
+        )
+        fast_no_host_sha=not force_full
+        digest_mode='fast_no_host_sha' if fast_no_host_sha else 'full_sha256'
         self._unacknowledged_ipc=[]
         binding=None
         try:
             if failure is not None:
                 raise RuntimeError(failure)
             self.hf_sources=self._required_sources()
-            binding=self._local_ipc_binding(int(global_steps or 0))
+            binding=self._local_ipc_binding(step_int)
         except BaseException as exc:failure=repr(exc)
-        manifest_checks=self._gather({'error':failure,'binding':binding})
+        manifest_checks=self._gather({'error':failure,'binding':binding,'digest_mode':digest_mode})
         if any(x['error'] is not None for x in manifest_checks):
             failure=str([x['error'] for x in manifest_checks if x['error'] is not None])
+        elif len({x.get('digest_mode') for x in manifest_checks})!=1:
+            failure='TP ranks disagree on refit digest_mode'
         setup=None
         if self.is_leader:
             try:
@@ -249,7 +267,7 @@ class RTPServerAdapter(BaseRollout):
                 with stage('rpc_setup_status_pause_begin'):
                     control=await _new_control(self.replica_rank);before=(await control.status())[0]
                     if before.phase=='running':await control.pause()
-                    await control.begin_update(global_step=int(global_steps or 0),
+                    await control.begin_update(global_step=step_int,
                         max_buffer_bytes=int(os.environ.get('RLLM_RTP_UPDATE_BUFFER_BYTES',str(16*1024**3))))
                 setup={'error':None,'before_version':before.model_version}
             except BaseException as exc:setup={'error':repr(exc)}
@@ -270,7 +288,11 @@ class RTPServerAdapter(BaseRollout):
             try:
                 if name not in self.hf_sources:
                     if name=='lm_head.weight' and self.tied_embeddings:
-                        aliases[name]=hashlib.sha256(tensor.detach().to(torch.bfloat16).cpu().view(torch.uint8).numpy().tobytes()).hexdigest();continue
+                        if fast_no_host_sha:
+                            aliases[name]=None
+                        else:
+                            aliases[name]=hashlib.sha256(tensor.detach().to(torch.bfloat16).cpu().view(torch.uint8).numpy().tobytes()).hexdigest()
+                        continue
                     raise RuntimeError('trainer exported key outside native source manifest: '+name)
                 dtype=torch.float32 if preserve_fp32_source(name) else torch.bfloat16
                 if preserve_fp32_source(name) and tensor.dtype!=torch.float32:
@@ -283,9 +305,10 @@ class RTPServerAdapter(BaseRollout):
                 with stage('device_stage_cast_contiguous'):
                     value=tensor.detach().to(device=local_device, dtype=dtype).contiguous()
                 self._unacknowledged_ipc=[value]
-                # Keep the packed expert in one host buffer for both SHA
-                # passes. Updating with prefix and bytes separately preserves the digest.
-                if os.environ.get('Q36_REFIT_BOUNDED_DIGEST','0')=='1':
+                if fast_no_host_sha:
+                    checksum=None
+                    source_bytes=int(value.numel()*value.element_size())
+                elif os.environ.get('Q36_REFIT_BOUNDED_DIGEST','0')=='1':
                     from q36_source_binding import verify_source
                     verify_source('q36_refit_bounded_digest_candidate')
                     from q36_refit_bounded_digest_candidate import CudaDigestWorkspace
@@ -301,7 +324,7 @@ class RTPServerAdapter(BaseRollout):
                 with stage('ipc_export_and_device_fence'):
                     metadata=CudaIpcV2.export_tensor(value)
                 item.update(shape=list(value.shape),dtype=str(value.dtype),sha256=checksum,metadata=metadata)
-                if os.environ.get('Q36_REFIT_BOUNDED_DIGEST','0')!='1':
+                if not fast_no_host_sha and os.environ.get('Q36_REFIT_BOUNDED_DIGEST','0')!='1':
                     with stage('host_sha256'):
                         source_digest.update(name.encode()+b'\0'+str(tuple(value.shape)).encode()+b'\0'+str(value.dtype).encode()+b'\0')
                         source_digest.update(payload)
@@ -315,8 +338,9 @@ class RTPServerAdapter(BaseRollout):
                 try:
                     errors=[x['error'] for x in rank_items if x['error'] is not None]
                     if errors:raise RuntimeError(str(errors))
+                    check_fields=('name','shape','dtype') if fast_no_host_sha else ('name','shape','dtype','sha256')
                     for peer in rank_items:
-                        if any(peer[k]!=rank_items[0][k] for k in ['name','shape','dtype','sha256']):
+                        if any(peer[k]!=rank_items[0][k] for k in check_fields):
                             raise RuntimeError('TP source tensor identity differs across training ranks')
                     with stage('rpc_push_through_native_ack'):
                         await control.push_weight(name,[x['metadata'] for x in rank_items])
@@ -332,12 +356,12 @@ class RTPServerAdapter(BaseRollout):
             if profile is not None:profile.record_bytes(source_bytes)
             now = time.monotonic()
             if self.is_leader and (last_progress is None or now-last_progress >= 30 or len(tensors) == len(self.hf_sources)):
-                progress = dict(step=int(global_steps or 0), acked_sources=len(tensors),
+                progress = dict(step=step_int, acked_sources=len(tensors),
                     required_sources=len(self.hf_sources), acked_bytes=ack_bytes,
-                    last_source=name, updated_unix=time.time())
+                    last_source=name, digest_mode=digest_mode, updated_unix=time.time())
                 print('RTP_REFIT_PROGRESS '+json.dumps(progress), flush=True)
                 try:
-                    _write_json(_audit_root()/f'rtp_refit_progress_{self.replica_rank}_step{int(global_steps or 0)}.json',progress)
+                    _write_json(_audit_root()/f'rtp_refit_progress_{self.replica_rank}_step{step_int}.json',progress)
                 except OSError as error:
                     print(f'RTP refit progress file unavailable: {error}', flush=True)
                 last_progress = now
@@ -346,13 +370,13 @@ class RTPServerAdapter(BaseRollout):
             try:
                 if failure is not None:raise RuntimeError(failure)
                 if {x['name'] for x in tensors}!=self.hf_sources:raise RuntimeError('incomplete native HF source coverage')
-                if aliases:
+                if aliases and not fast_no_host_sha:
                     embedding=next(x for x in tensors if x['name'].endswith('embed_tokens.weight'))
                     if aliases['lm_head.weight']!=embedding['sha256']:raise RuntimeError('tied head and embedding differ')
                 with stage('rpc_commit_through_native_ack'):
                     replies=await control.commit_update()
                 committed=replies[0]
-                if committed.model_version==setup['before_version'] or committed.global_step!=int(global_steps or 0):
+                if committed.model_version==setup['before_version'] or committed.global_step!=step_int:
                     raise RuntimeError('RTP did not publish the expected new policy version')
                 if committed.received_weights!=len(tensors) or committed.applied_weights<=0:
                     raise RuntimeError('RTP did not acknowledge complete internal parameter application')
@@ -378,7 +402,9 @@ class RTPServerAdapter(BaseRollout):
             previous_committed_version=finish['previous_committed_version'],
             restarted_since_previous_commit=finish['restarted_since_previous_commit'],
             native_received_weights=finish['received_weights'],native_applied_weights=finish['applied_weights'],
-            full_source_sha256=source_digest.hexdigest(),hf_tensor_count=len(tensors),tensors=tensors,
+            digest_mode=digest_mode,
+            full_source_sha256=None if fast_no_host_sha else source_digest.hexdigest(),
+            hf_tensor_count=len(tensors),tensors=tensors,
             fp32_sources=[x['name'] for x in tensors if x['dtype']=='torch.float32'],rank_status=finish['rank_status'],
             ipc_bindings=[item['binding'] for item in manifest_checks],
             transport='native_rl_cuda_ipc_v2_per_tp_rank',source_release='per-tensor all-TP ACK',
@@ -386,15 +412,15 @@ class RTPServerAdapter(BaseRollout):
             kv_pool_retained_across_training=os.environ.get('RLLM_RTP_KEEP_KV_CACHE','1')=='1',
             native_lifecycle='resident_native_pause_training_refit_resume',finished_unix=time.time())
         if self.is_leader:
-            _write_json(_audit_root()/f'rtp_sync_rank{self.replica_rank}_step{int(global_steps or 0)}.json',record)
+            _write_json(_audit_root()/f'rtp_sync_rank{self.replica_rank}_step{step_int}.json',record)
             print(json.dumps({k:v for k,v in record.items() if k!='tensors'}),flush=True)
         if profile is not None:
             timing=profile.snapshot()
             timing.update(global_rank=self.global_rank,tp_rank=self.tp_rank,replica_rank=self.replica_rank,
-                          global_step=int(global_steps or 0),leader=self.is_leader,
+                          global_step=step_int,leader=self.is_leader,digest_mode=digest_mode,
                           status='committed',native_applied_weights=finish['applied_weights'])
             try:
-                _write_json(_audit_root()/f'rtp_refit_timing_rank{self.global_rank}_step{int(global_steps or 0)}.json',timing)
+                _write_json(_audit_root()/f'rtp_refit_timing_rank{self.global_rank}_step{step_int}.json',timing)
             except OSError as error:
                 print(f'RTP refit timing file unavailable: {error}', flush=True)
             print('Q36_RTP_REFIT_TIMING '+json.dumps(timing,sort_keys=True),flush=True)

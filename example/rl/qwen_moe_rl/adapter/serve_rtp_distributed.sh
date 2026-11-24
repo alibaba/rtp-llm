@@ -25,9 +25,10 @@ export OMP_NUM_THREADS=${RTP_OMP_NUM_THREADS:-4}
 export PYTHONDONTWRITEBYTECODE=1
 export CUDA_HOME=${CUDA_HOME:-/usr/local/cuda-13.2}
 export PATH="$(dirname "$RTP_PYTHON"):$CUDA_HOME/bin:$PATH"
-export PYTHONPATH="$ROOT/rtp:$ROOT/adapter:$RTP_SOURCE:$RTP_SOURCE/bazel-bin${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$ROOT/rtp:$ROOT/adapter:$RTP_SOURCE:$RTP_SOURCE/bazel-bin:$RTP_NATIVE_LIBRARY_DIR${PYTHONPATH:+:$PYTHONPATH}"
 RTP_NVIDIA_LIB_DIRS="$("$RTP_PYTHON" -c 'import pathlib,sysconfig; p=pathlib.Path(sysconfig.get_paths()["purelib"])/"nvidia"; print(":".join(str(x) for x in sorted(p.glob("*/lib"))))')"
-export LD_LIBRARY_PATH="$RTP_NATIVE_LIBRARY_DIR:$RTP_SOURCE/rtp_llm/libs:$RTP_SOURCE/bazel-bin:$RTP_SOURCE/bazel-bin/external/flashinfer_cpp_cu13:$LEGACY/.rtp/lib/python3.10/site-packages/torch/lib:$RTP_NVIDIA_LIB_DIRS:/opt/conda310/lib:$CUDA_HOME/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+RTP_TORCH_LIB_DIR="$("$RTP_PYTHON" -c 'import pathlib,torch; print(pathlib.Path(torch.__file__).parent / "lib")' 2>/dev/null || echo "$LEGACY/.rtp/lib/python3.10/site-packages/torch/lib")"
+export LD_LIBRARY_PATH="$RTP_NATIVE_LIBRARY_DIR:$RTP_SOURCE/rtp_llm/libs:$RTP_SOURCE/bazel-bin:$RTP_SOURCE/bazel-bin/external/flashinfer_cpp_cu13:$RTP_TORCH_LIB_DIR:$RTP_NVIDIA_LIB_DIRS:/opt/conda310/lib:$CUDA_HOME/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export XDG_CACHE_HOME="$ROOT/cache/rtp"
 export TRITON_CACHE_DIR="$ROOT/cache/triton"
 export TORCH_EXTENSIONS_DIR="$ROOT/cache/torch_extensions/rtp-py310"
@@ -45,18 +46,31 @@ if [[ "$RLLM_RTP_RANK_PORT_STRIDE" != 9 ]]; then
   exit 2
 fi
 mkdir -p "$LOG_PATH" "$TORCH_EXTENSIONS_DIR"
-# Select one pinned project-local NCCL, including Torch's absolute-path lookup.
-# scope_config validates the official ARM64 bytes before any native GPU launch.
-RTP_NCCL_EXPORTS=$("$RTP_PYTHON" - "$ROOT" <<'PY_NCCL_SCOPE'
+if [[ "$(uname -m)" != "aarch64" && "${RTP_SKIP_ARM_NCCL_SCOPE:-0}" == "1" ]]; then
+  echo "Skipping ARM64 pinned NCCL scope on $(uname -m) (RTP_SKIP_ARM_NCCL_SCOPE=1)." >&2
+else
+  # Select one pinned project-local NCCL, including Torch's absolute-path lookup.
+  # scope_config validates the official ARM64 bytes before any native GPU launch.
+  RTP_NCCL_EXPORTS=$("$RTP_PYTHON" - "$ROOT" <<'PY_NCCL_SCOPE'
 import shlex, sys
 from q397_nccl_scope import scope_config
 for key, value in scope_config(sys.argv[1])["environment"].items():
     print("export " + key + "=" + shlex.quote(value))
 PY_NCCL_SCOPE
 )
-eval "$RTP_NCCL_EXPORTS"
-unset RTP_NCCL_EXPORTS
+  eval "$RTP_NCCL_EXPORTS"
+  unset RTP_NCCL_EXPORTS
+fi
 cd "$RTP_SOURCE"
+EXTRA_ARGS=()
+if [[ "${RTP_GEN_TIMELINE_SYNC:-0}" == "1" ]]; then
+  EXTRA_ARGS+=(
+    --gen_timeline_sync true
+    --gen_timeline_start_step "${RTP_GEN_TIMELINE_START_STEP:-0}"
+    --gen_timeline_num_steps "${RTP_GEN_TIMELINE_NUM_STEPS:-2}"
+    --gen_timeline_trace_name "${RTP_GEN_TIMELINE_TRACE_NAME:-profiler}"
+  )
+fi
 exec "$RTP_PYTHON" "${RTP_ENTRYPOINT:-$ROOT/rtp/entrypoint.py}" \
   --model_type "${RTP_MODEL_TYPE:-qwen35_moe_text}" --checkpoint_path "$RTP_MODEL_PATH" \
   --start_port "$RTP_START_PORT" --act_type BF16 \
@@ -71,5 +85,6 @@ exec "$RTP_PYTHON" "${RTP_ENTRYPOINT:-$ROOT/rtp/entrypoint.py}" \
   --max_context_batch_size "$MAX_CONTEXT_BATCH_SIZE" --max_batch_tokens_size "$MAX_BATCH_TOKENS_SIZE" \
   --concurrency_limit "$CONCURRENCY_LIMIT" \
   --reuse_cache false --enable_device_cache false --enable_remote_cache false \
-  --warm_up false --enable_cuda_graph false --enable_native_cuda_graph false \
+  --warm_up false --enable_cuda_graph "${RTP_ENABLE_CUDA_GRAPH:-false}" --enable_native_cuda_graph false \
+  "${EXTRA_ARGS[@]}" \
   "$@"

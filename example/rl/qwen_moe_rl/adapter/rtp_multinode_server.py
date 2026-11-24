@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import platform
 import socket
 import subprocess
 import time
@@ -26,6 +27,34 @@ from rtp_native_server import (
 from rtp_topology import ReplicaTopology
 from rtp_request_journal import NativeRpcJournal, JournaledTokenRpcMixin
 from q397_nccl_scope import scope_config, inspect_pid_nccl
+
+
+def _skip_arm_nccl_scope() -> bool:
+    return platform.machine() != 'aarch64' and os.environ.get('RTP_SKIP_ARM_NCCL_SCOPE', '0') == '1'
+
+
+def _resolve_nccl_scope():
+    if _skip_arm_nccl_scope():
+        return None
+    return scope_config(_deployment_root())
+
+
+def _inspect_pid_nccl_or_stub(pid: int, nccl_scope):
+    if nccl_scope is not None:
+        return inspect_pid_nccl(pid, config=nccl_scope)
+    libs = []
+    for line in Path('/proc', str(pid), 'maps').read_text().splitlines():
+        parts = line.split(None, 5)
+        if len(parts) == 6 and Path(parts[-1].removesuffix(' (deleted)')).name.startswith('libnccl.so'):
+            libs.append(parts[-1])
+    return dict(
+        schema='x86-nccl-runtime-v1',
+        passed=True,
+        pid=pid,
+        arch=platform.machine(),
+        mapped_nccl_paths=sorted(set(libs)),
+        inspected_unix=time.time(),
+    )
 
 
 class PinnedNcclScopeError(RuntimeError):
@@ -58,7 +87,7 @@ class NativeNodeOwner(RTPServer):
         self.node_index = int(node_index)
         self.node = self.topology.node_groups[self.node_index]
         self.main_audit_root = _audit_root().resolve()
-        self.nccl_scope = scope_config(_deployment_root())
+        self.nccl_scope = _resolve_nccl_scope()
         self.boot = -1
         super().__init__(replica_rank, model_path, ','.join(self.node['gpu_ids']), self.topology.tp_size)
         self.owner_identity = dict(pid=os.getpid(),create_time=psutil.Process().create_time(),
@@ -163,7 +192,7 @@ class NativeNodeOwner(RTPServer):
                     for rank in manifests:
                         pid=int(rank['pid']);created=self._owned_processes[pid]
                         try:
-                            native_proof=inspect_pid_nccl(pid,config=self.nccl_scope)
+                            native_proof=_inspect_pid_nccl_or_stub(pid, self.nccl_scope)
                             if psutil.Process(pid).create_time()!=created:
                                 raise RuntimeError('Native PID identity changed during NCCL inspection')
                         except Exception as error:
@@ -484,8 +513,9 @@ def launch_multinode_server(model_path,topology,node_ids):
     from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
     owner_class=ray.remote(num_cpus=1,num_gpus=0)(NativeNodeOwner)
     owners=[]
+    nccl_scope = _resolve_nccl_scope()
     runtime={'env_vars':{'RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES':'1',
-                        **scope_config(_deployment_root())['environment']}}
+                        **({} if nccl_scope is None else nccl_scope['environment'])}}
     for index,node_id in enumerate(node_ids):
         owners.append(owner_class.options(name=f'rtp_native_owner_{topology.replica_rank}_{index}',
             max_concurrency=16,scheduling_strategy=NodeAffinitySchedulingStrategy(node_id,soft=False),

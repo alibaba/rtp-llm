@@ -478,7 +478,13 @@ class RTPServer:
             stream.write(json.dumps(receipt) + "\n")
         return TokenOutput(
             token_ids=result.token_ids, log_probs=result.log_probs,
-            stop_reason=result.finish_reason, extra_fields=receipt,
+            stop_reason=result.finish_reason,
+            extra_fields={
+                **receipt,
+                "global_steps": result.global_step,
+                "min_global_steps": result.global_step,
+                "max_global_steps": result.global_step,
+            },
         )
 
     async def wake_up(self, **kwargs):
@@ -522,13 +528,15 @@ class RTPServer:
             raise RuntimeError("post-sync probe version does not match the committed HF weight stream")
         values = scored["log_probs"]
         bits = struct.pack(f"<{len(values)}f", *values)
+        digest_mode = sync.get("digest_mode", "full_sha256")
         record = {
             "engine": "rtp-llm", "replica_rank": self.replica_rank,
             "global_step": expected_step, "model_version": scored["model_version"],
             "prompt_ids": prompt_ids, "response_ids": response_ids,
             "raw_log_probs": values, "raw_fp32_bits_hex": bits.hex(),
             "score_sha256": hashlib.sha256(bits).hexdigest(),
-            "full_source_sha256": sync["full_source_sha256"],
+            "digest_mode": digest_mode,
+            "full_source_sha256": sync.get("full_source_sha256"),
             "tp_size": self.tp_size,
             "transport": "native_GenerateStreamCall_prompt_target_scores",
         }
@@ -538,10 +546,13 @@ class RTPServer:
                 raise RuntimeError("post-sync probe tokenization differs from baseline")
             if record["model_version"] == baseline["model_version"]:
                 raise RuntimeError("post-sync probe still uses the initial engine version")
-            weights_changed = record["full_source_sha256"] != baseline["full_source_sha256"]
+            if digest_mode == "full_sha256" and record["full_source_sha256"] is not None and baseline.get("full_source_sha256") is not None:
+                weights_changed = record["full_source_sha256"] != baseline["full_source_sha256"]
+            else:
+                weights_changed = None
             scores_changed = record["score_sha256"] != baseline["score_sha256"]
             require_real_update = _require_real_update_for_probe(self.model_path)
-            if require_real_update and not weights_changed:
+            if require_real_update and weights_changed is False:
                 raise RuntimeError("the trained policy weights did not change before RTP sync")
             if require_real_update and not scores_changed:
                 raise RuntimeError("RTP inference scores did not change after the real parameter update")
