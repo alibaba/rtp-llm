@@ -40,6 +40,7 @@
 #include <memory>
 #include <thread>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace rtp_llm {
@@ -598,6 +599,13 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
     tp_rank_            = params.parallelism_config.tp_rank;
     parallelism_config_ = params.parallelism_config;
+#if USING_CUDA
+    qwen4_mtp_page_reservation_ = params.model_config_.model_type == "qwen4_exp"
+                                  && propose_params->sp_type == SP_TYPE_MTP && parallelism_config_.tp_size == 1
+                                  && parallelism_config_.pp_size == 1
+                                  && !parallelism_config_.prefill_cp_config.is_enabled();
+    qwen4_mtp_verify_overlap_ = qwen4_mtp_page_reservation_ && params.hw_kernel_config.enable_cuda_graph;
+#endif
     if (is_dspark_ && parallelism_config_.tp_size > 1) {
         dspark_cache_store_status_ =
             torch::empty({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
@@ -1358,12 +1366,13 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     // Stream-async events are recorded on the main stream as soon as tensors
     // become valid. rejection_event guards accept_len/tokens D2H; draft_event
-    // guards all_probs cloning. They stay null when stream-async is off.
+    // guards the worker's reads of the draft output. Both are null in sync mode.
     std::shared_ptr<torch::Event> rejection_event;
     std::shared_ptr<torch::Event> draft_event;
     bool                          prev_bookkeeping_synced_for_spec_logits = false;
     bool                          spec_logits_async_launched              = false;
     bool                          spec_logits_processor_present           = false;
+    bool                          target_verify_prepare_forked            = false;
     const int64_t                 step_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
     // StreamGroups snapshots scheduling metadata. Wait for any mutable
@@ -1505,7 +1514,15 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         launchTargetVerifyPrepareAsync(model_input, batch_size);
         if (propose_step_ > 1) {
             RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode start");
-            draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t, model_forward_us);
+            target_verify_prepare_forked = qwen4_mtp_verify_overlap_ && speculativeTargetTransactionsEnabled()
+                                           && useStreamAsync() && useDeviceInput() && useDropBroadSync()
+                                           && !model_input.is_fake_stream && !model_input.pd_separation;
+            draftModelDecode(model_input,
+                             stream_groups,
+                             draft_probs_list,
+                             draft_token_ids_t,
+                             model_forward_us,
+                             target_verify_prepare_forked);
             RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode end");
         }
     }
@@ -1596,7 +1613,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         if (speculativeTargetTransactionsEnabled()) {
             std::string target_forward_error;
             try {
-                model_output = runTargetVerifyForward(model_input, stream_groups);
+                model_output = runTargetVerifyForward(model_input, stream_groups, target_verify_prepare_forked);
             } catch (const std::exception& e) {
                 target_forward_error = std::string("target verify forward threw: ") + e.what();
             } catch (...) {
@@ -1973,8 +1990,10 @@ bool MtpExecutor::mustWaitBeforeStreamPreparation(bool stream_async,
     return stream_async && (!drop_broad_sync || (linear_attention && !cache_snapshot_ready));
 }
 
-void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size) {
-    if (!useAsyncPrepare()) {
+void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_input,
+                                                 size_t                batch_size,
+                                                 bool                  exact_verify_geometry) {
+    if (!exact_verify_geometry && !useAsyncPrepare()) {
         return;
     }
     const auto& cache_cfg = cache_manager_->cacheConfig();
@@ -2101,7 +2120,9 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
     }
 }
 
-GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups) {
+GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs&     model_input,
+                                                    const StreamGroups& stream_groups,
+                                                    bool                target_prepare_forked) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_model_verify)");
     // Verify rows contain generated text, while the gathered decode mask still
     // has only one entry per request rather than gamma+1 entries.
@@ -2114,7 +2135,8 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
         model_input.prefix_lengths.size(0),
         model_input.sequence_lengths.size(0));
     const bool target_transactions_enabled = speculativeTargetTransactionsEnabled();
-    if (!target_transactions_enabled) {
+    if (!target_transactions_enabled || target_prepare_forked) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(wait_target_verify_prepare)");
         target_verify_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
     }
 
@@ -2137,7 +2159,7 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
     }
 
     ensureModelInputsOnCuda(model_input, "decode.target_verify_forward");
-    if (target_transactions_enabled) {
+    if (target_transactions_enabled && !target_prepare_forked) {
         // Transactional target side state must observe the final verify
         // geometry. Preparing here avoids stale metadata predicted before the
         // draft forward and makes prepare failures part of the target-forward
@@ -2149,7 +2171,6 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
     model_input.is_target_verify = false;
     return model_output;
 }
-
 
 bool MtpExecutor::asyncPrepareAllowed(bool requested, bool target_commit_hooks) {
     return requested && !target_commit_hooks;
@@ -2957,7 +2978,8 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                                    const StreamGroups&         stream_groups,
                                    std::vector<torch::Tensor>& draft_probs_list,
                                    torch::Tensor&              draft_token_ids_t,
-                                   int64_t&                    model_forward_us) {
+                                   int64_t&                    model_forward_us,
+                                   bool                        fork_target_verify_prepare) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(batch_size=%zu)", model_input.combo_tokens.size(0));
 
     const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
@@ -2995,6 +3017,19 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         stream_groups, batch_size, useStreamAsync() || useAsyncDeviceState(), pre_target_from_device_state);
     draft_token_columns.push_back(to_cuda_i32_flat(pre_target_token_t));
     draft_token_columns.push_back(pre_propose_token_t_raw);
+
+    torch::Tensor target_position_ids;
+    if (fork_target_verify_prepare) {
+        // The target has a fixed verify width. Its prefix and positions are
+        // final before draft execution; only its token IDs depend on the draft.
+        auto target_input           = model_input;
+        target_input.prefix_lengths = spec_prefix_lengths;
+        batch_stream_processor_->expandTargetVerifyPositionIds(
+            stream_groups, target_input, pre_target_from_device_state ? spec_prefix_lengths : torch::Tensor());
+        target_position_ids             = toCudaInt32WithHostHold(target_input.combo_position_ids, buffer_holder_);
+        target_input.combo_position_ids = target_position_ids;
+        launchTargetVerifyPrepareAsync(target_input, batch_size, /*exact_verify_geometry=*/true);
+    }
 
     // n-1 steps draft model decode
     const size_t decode_steps = propose_step_ - 1;
@@ -3085,10 +3120,15 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         // and device. Keep that receiver on CUDA before the mixed-rank broadcast.
         const bool device_position_receiver =
             stream_groups.empty() && model_input.prefix_lengths.defined() && model_input.prefix_lengths.is_cuda();
-        batch_stream_processor_->expandTargetVerifyPositionIds(
-            stream_groups,
-            model_input,
-            (pre_target_from_device_state || device_position_receiver) ? model_input.prefix_lengths : torch::Tensor());
+        if (fork_target_verify_prepare) {
+            model_input.combo_position_ids = std::move(target_position_ids);
+        } else {
+            batch_stream_processor_->expandTargetVerifyPositionIds(
+                stream_groups,
+                model_input,
+                (pre_target_from_device_state || device_position_receiver) ? model_input.prefix_lengths :
+                                                                             torch::Tensor());
+        }
         model_input.sequence_lengths =
             torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
         model_input.last_hidden_states = torch::Tensor();
@@ -3307,7 +3347,11 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
             if (gpu_val.defined() && gpu_val.is_cuda()) {
                 prev_slices.push_back(gpu_val.reshape({1}));
             } else {
-                prev_slices.push_back(torch::tensor({static_cast<int32_t>(stream->seqLength())}, cuda_i32));
+                // The first decode round has no previous device snapshot. Keep
+                // its host length alive without synchronizing the draft stream.
+                auto host_len = torch::full(
+                    {1}, stream->seqLength(), torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+                prev_slices.push_back(toCudaInt32WithHostHold(host_len, buffer_holder_));
             }
         }
         prev_seq_len_all = torch::cat(prev_slices, 0);
@@ -3339,11 +3383,6 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         last_hidden_all         = hidden_3d.gather(1, idx_expanded).squeeze(1);
     }
 
-    // 3. One clone for all probs
-    torch::Tensor draft_probs_all;
-    if (draft_all_probs_full.defined()) {
-        draft_probs_all = draft_all_probs_full.clone();
-    }
     auto next_position_ids_all =
         is_dspark_ ? advanceDSparkPositionIds(
                          verify_position_ids, accept_len_gpu_all, batch_size, static_cast<int64_t>(propose_step_ + 1)) :
@@ -3351,6 +3390,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
 
     torch::Tensor next_kv_cache_block_id;
     torch::Tensor next_kv_cache_kernel_block_id;
+    std::vector<std::shared_ptr<void>> previous_decode_pages;
     if (is_linear_attention_model_ && useDeviceInput() && kv_cache_block_id.defined() && kv_cache_block_id.is_cuda()
         && kv_cache_kernel_block_id.defined() && kv_cache_kernel_block_id.is_cuda()) {
         RTP_LLM_CHECK_WITH_INFO(kv_cache_block_id.dim() == 3 && kv_cache_block_id.size(1) == batch_size,
@@ -3361,18 +3401,54 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
                                 batch_size);
         std::vector<CacheGroupType> group_types;
         const auto&                 cache_config = cache_manager_->cacheConfig();
+        const int                   block_size   = cache_config.seq_size_per_block;
+        const int                   max_accept   = static_cast<int>(propose_step_ + 1);
+        bool can_reserve = qwen4_mtp_page_reservation_ && useDropBroadSync() && draft_event && max_accept <= block_size;
         group_types.reserve(cache_config.topology().groups().size());
         for (const auto& group : cache_config.topology().groups()) {
-            group_types.push_back(group.policy.group_type);
+            const auto type = group.policy.group_type;
+            group_types.push_back(type);
+            can_reserve = can_reserve && group.seqSizePerBlock() == static_cast<size_t>(block_size)
+                          && (type == CacheGroupType::FULL || type == CacheGroupType::LINEAR);
         }
-        const auto block_size  = static_cast<int>(cache_config.seq_size_per_block);
-        const auto table_width = std::min(kv_cache_block_id.size(2), kv_cache_kernel_block_id.size(2));
-        if (hasLinearCacheSnapshotCapacity(all_streams, table_width, static_cast<int>(propose_step_ + 1), block_size)) {
+
+        auto physical       = kv_cache_block_id;
+        auto kernel         = kv_cache_kernel_block_id;
+        bool snapshot_ready = true;
+        if (can_reserve && std::all_of(all_streams.begin(), all_streams.end(), [max_accept](const auto& stream) {
+                return !stream->hasPendingAsyncBookkeeping() && stream->getStatus() == StreamState::RUNNING
+                       && !stream->isContextStream() && !stream->isFakeStream() && stream->maxBatchSize() == 1
+                       && stream->reserveStep() == static_cast<size_t>(max_accept);
+            })) {
+            bool grew = false;
+            for (const auto& stream : all_streams) {
+                const auto next_length = stream->seqLength() + max_accept;
+                if (stream->streamCacheResource().singleBatchNeedBlocks(next_length, stream->reserveStep()) == 0) {
+                    continue;
+                }
+                // Growth is bounded by one page, so LINEAR cleanup still keeps
+                // the current page and the preceding checkpoint used by the swaps.
+                if (!stream->reserveMtpDecodeBlocks(max_accept, previous_decode_pages)) {
+                    snapshot_ready = false;
+                    break;
+                }
+                grew = true;
+            }
+            if (snapshot_ready && grew) {
+                // Host bookkeeping for the previous round has joined. Stage
+                // the enlarged physical/kernel pair before this round's swaps.
+                std::tie(physical, kernel) =
+                    batch_stream_processor_->gatherSingleSequenceCacheTables(all_streams, buffer_holder_);
+            }
+        }
+
+        const auto table_width = std::min(physical.size(2), kernel.size(2));
+        if (snapshot_ready && hasLinearCacheSnapshotCapacity(all_streams, table_width, max_accept, block_size)) {
             auto accept_i32        = accept_len_gpu_all.to(torch::kInt32);
             next_kv_cache_block_id = MtpBatchStreamProcessor::advanceLinearCacheBlockTable(
-                kv_cache_block_id, prev_seq_len_all, accept_i32, group_types, block_size);
+                physical, prev_seq_len_all, accept_i32, group_types, block_size);
             next_kv_cache_kernel_block_id = MtpBatchStreamProcessor::advanceLinearCacheBlockTable(
-                kv_cache_kernel_block_id, prev_seq_len_all, accept_i32, group_types, block_size);
+                kernel, prev_seq_len_all, accept_i32, group_types, block_size);
         } else {
             // This should coincide with an allocator boundary. Publishing no
             // snapshot makes the next scheduler iteration join bookkeeping and
@@ -3405,8 +3481,10 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         state.last_hidden_states_gpu = last_hidden_all.defined() ? last_hidden_all.narrow(0, idx, 1) : torch::Tensor();
 
         const auto next_batch_size = stream->nextBatchSize();
-        if (draft_probs_all.defined() && next_batch_size > 0) {
-            state.draft_all_probs_gpu = draft_probs_all.narrow(0, probs_batch_off, next_batch_size);
+        if (draft_all_probs_full.defined() && next_batch_size > 0) {
+            // FastTopKSampler returns fresh storage. The next round and the
+            // bookkeeping worker read it independently.
+            state.draft_all_probs_gpu = draft_all_probs_full.narrow(0, probs_batch_off, next_batch_size);
         }
 
         const auto previous_state = stream->getMtpAsyncDeviceState();
@@ -3423,7 +3501,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         ++idx;
     }
 
-    // --- Launch async worker (unchanged) ---
+    // Launch the async worker after publishing the next round's cache state.
     auto* processor          = batch_stream_processor_.get();
     auto  spec_decode_copy   = spec_decode_output;
     auto  draft_prefill_copy = std::move(draft_prefill_output);
@@ -3435,9 +3513,10 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     }
 
     spec_bookkeeping_runner_.launch([processor,
-                                     stream_groups_copy = std::move(stream_groups_copy),
-                                     spec_decode_copy   = std::move(spec_decode_copy),
-                                     draft_prefill_copy = std::move(draft_prefill_copy),
+                                     stream_groups_copy    = std::move(stream_groups_copy),
+                                     spec_decode_copy      = std::move(spec_decode_copy),
+                                     draft_prefill_copy    = std::move(draft_prefill_copy),
+                                     previous_decode_pages = std::move(previous_decode_pages),
                                      rejection_event,
                                      draft_event]() mutable {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(spec_bookkeeping_worker)");
@@ -3450,6 +3529,10 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
             }
         });
 
+        if (!previous_decode_pages.empty()) {
+            draft_event->synchronize();
+            previous_decode_pages.clear();
+        }
         if (rejection_event) {
             rejection_event->block(cuda_graph::graphGetCurrentStream());
         }

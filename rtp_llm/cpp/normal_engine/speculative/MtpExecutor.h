@@ -152,12 +152,16 @@ protected:
     // owns a single phase (prepare, forward, broadcast, dispatch) and
     // preserves the original PROFILE_SCOPE labels.
     void waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams);
-    void launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
+    void launchTargetVerifyPrepareAsync(const GptModelInputs& model_input,
+                                        size_t                batch_size,
+                                        bool                  exact_verify_geometry = false);
     // post_rejection=true forks with the final post-commit input, which is
     // safe under speculative target hooks; the default pre-rejection fork
     // keeps its historical useAsyncPrepare() gate.
     void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input, bool post_rejection = false);
-    GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
+    GptModelOutputs runTargetVerifyForward(GptModelInputs&     model_input,
+                                           const StreamGroups& stream_groups,
+                                           bool                target_prepare_forked = false);
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
                                                          const StreamGroups&   stream_groups) const;
     void            broadcastPostRejectionInputs(GptModelInputs& model_input);
@@ -201,7 +205,8 @@ protected:
                           const StreamGroups&         stream_groups,
                           std::vector<torch::Tensor>& draft_probs_list,
                           torch::Tensor&              draft_token_ids_t,
-                          int64_t&                    model_forward_us);
+                          int64_t&                    model_forward_us,
+                          bool                        fork_target_verify_prepare = false);
 
     bool useDeviceInput() const;
     bool checkDeviceInput() const;
@@ -323,6 +328,8 @@ private:
     // hybrid linear+full). Per-step state advances every token, so the page
     // table must be re-gathered between draft propose and target verify.
     bool is_linear_attention_model_ = false;
+    bool qwen4_mtp_page_reservation_ = false;
+    bool qwen4_mtp_verify_overlap_   = false;
 
     torch::Tensor d2t_map_;
 

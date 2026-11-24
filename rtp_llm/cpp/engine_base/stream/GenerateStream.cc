@@ -1190,6 +1190,21 @@ void GenerateStream::reserveNormalDecodeBlocks(std::vector<std::shared_ptr<void>
     }
 }
 
+bool GenerateStream::reserveMtpDecodeBlocks(int                                 max_accept_length,
+                                            std::vector<std::shared_ptr<void>>& previous_decode_pages) {
+    RTP_LLM_PROFILE_SCOPE("stream.reserve_mtp_decode_kv");
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (hasPendingAsyncBookkeeping() || getStatus() != StreamState::RUNNING || hasErrorWithoutLock()
+        || isContextStream() || stream_cache_resource_->isResourceReleased()) {
+        return false;
+    }
+    const int next_length = seqLength() + max_accept_length;
+    if (static_cast<size_t>(next_length) > maxSeqLen()) {
+        return false;
+    }
+    return stream_cache_resource_->incrKVBlock(next_length, &previous_decode_pages).ok();
+}
+
 void GenerateStream::setPPInflight() {
     pp_inflight_.store(true, std::memory_order_release);
 }

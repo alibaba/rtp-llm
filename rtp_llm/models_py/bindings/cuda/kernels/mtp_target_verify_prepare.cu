@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 #include <algorithm>
+#include <c10/macros/Macros.h>
 
 namespace rtp_llm {
 
@@ -246,6 +247,67 @@ void invokeMtpDispatchStatePrepare(const torch::Tensor& accept_len,
                                                                         next_seq_len.data_ptr<int32_t>(),
                                                                         hidden_idx.data_ptr<int64_t>(),
                                                                         static_cast<int32_t>(batch_size));
+}
+
+__device__ int64_t swapBlockIndex(int64_t index, int64_t first, int64_t second) {
+    return index == first ? second : index == second ? first : index;
+}
+
+__global__ void mtpAdvanceLinearCacheBlockTableKernel(const int32_t* current_table,
+                                                      const int32_t* previous_seq_lengths,
+                                                      const int32_t* accept_lengths,
+                                                      int32_t*       next_table,
+                                                      uint64_t       linear_groups,
+                                                      int64_t        seq_size_per_block,
+                                                      int64_t        batch_size,
+                                                      int64_t        block_count,
+                                                      int64_t        table_size) {
+    const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= table_size) {
+        return;
+    }
+    const int64_t row    = index / block_count;
+    const int64_t group  = row / batch_size;
+    const int64_t col    = index % block_count;
+    const int64_t batch  = row % batch_size;
+    const int64_t accept = accept_lengths[batch];
+    int64_t       source = col;
+    if ((linear_groups & (uint64_t{1} << group)) != 0 && accept > 1) {
+        const int64_t current_cached = static_cast<int64_t>(previous_seq_lengths[batch]) - 1;
+        const int64_t next_cached    = current_cached + accept;
+        const int64_t base           = current_cached / seq_size_per_block;
+        // Trace the output slot back through the final swap and then the
+        // cached-token swap, the reverse order of LinearBlocksUtil's writes.
+        source = swapBlockIndex(source, base + accept - 1, (next_cached - 1) / seq_size_per_block);
+        if ((current_cached + 1) % seq_size_per_block > (next_cached - 1) % seq_size_per_block) {
+            source = swapBlockIndex(source,
+                                    base + seq_size_per_block - current_cached % seq_size_per_block - 1,
+                                    next_cached / seq_size_per_block - 1);
+        }
+        CUDA_KERNEL_ASSERT(source >= 0 && source < block_count);
+    }
+    next_table[index] = current_table[row * block_count + source];
+}
+
+void invokeMtpAdvanceLinearCacheBlockTable(const torch::Tensor& current_table,
+                                           const torch::Tensor& previous_seq_lengths,
+                                           const torch::Tensor& accept_lengths,
+                                           torch::Tensor&       next_table,
+                                           uint64_t             linear_groups,
+                                           int64_t              seq_size_per_block,
+                                           cudaStream_t         stream) {
+    constexpr int threads    = 256;
+    const int64_t table_size = current_table.numel();
+    const int     blocks     = static_cast<int>((table_size + threads - 1) / threads);
+    mtpAdvanceLinearCacheBlockTableKernel<<<blocks, threads, 0, stream>>>(current_table.data_ptr<int32_t>(),
+                                                                          previous_seq_lengths.data_ptr<int32_t>(),
+                                                                          accept_lengths.data_ptr<int32_t>(),
+                                                                          next_table.data_ptr<int32_t>(),
+                                                                          linear_groups,
+                                                                          seq_size_per_block,
+                                                                          current_table.size(1),
+                                                                          current_table.size(2),
+                                                                          table_size);
 }
 
 }  // namespace rtp_llm

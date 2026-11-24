@@ -15,6 +15,10 @@
 #include <string>
 #include <vector>
 #include <cstring>
+#if USING_CUDA
+#include <ATen/cuda/CUDAContext.h>
+#include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
+#endif
 
 namespace rtp_llm {
 namespace {
@@ -77,6 +81,27 @@ torch::Tensor MtpBatchStreamProcessor::advanceLinearCacheBlockTable(const torch:
     if (batch_size == 0 || block_count == 0) {
         return current_table.clone();
     }
+
+#if USING_CUDA
+    if (group_count > 0 && group_count <= 64 && current_table.is_contiguous() && previous_seq_lengths.is_contiguous()
+        && accept_lengths.is_contiguous()) {
+        uint64_t linear_groups = 0;
+        for (int64_t group_id = 0; group_id < group_count; ++group_id) {
+            if (group_types[static_cast<size_t>(group_id)] == CacheGroupType::LINEAR) {
+                linear_groups |= uint64_t{1} << group_id;
+            }
+        }
+        auto next_table = torch::empty_like(current_table);
+        invokeMtpAdvanceLinearCacheBlockTable(current_table,
+                                              previous_seq_lengths,
+                                              accept_lengths,
+                                              next_table,
+                                              linear_groups,
+                                              seq_size_per_block,
+                                              at::cuda::getCurrentCUDAStream().stream());
+        return next_table;
+    }
+#endif
 
     // Build one permutation per request, then apply it to every LINEAR group.
     // This is the vectorized form of LinearBlocksUtil.h's two sequential

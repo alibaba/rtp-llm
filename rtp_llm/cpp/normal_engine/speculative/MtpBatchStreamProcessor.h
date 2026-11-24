@@ -50,6 +50,11 @@ public:
     absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups,
                                                           TensorHolder&       host_holder) const;
 
+    std::pair<torch::Tensor, torch::Tensor> gatherSingleSequenceCacheTables(const std::list<GenerateStreamPtr>& streams,
+                                                                            TensorHolder& host_holder) const {
+        return model_input_gatherer_->gatherSingleSequenceCacheTables(streams, host_holder);
+    }
+
     // Produce the next round's immutable page table by applying the exact
     // linear-cache permutation used by GenerateStream::specUpdate.  FULL/SWA
     // groups are copied unchanged.  Keeping this operation tensor-native lets

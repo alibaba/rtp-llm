@@ -37,4 +37,12 @@ void invokeMtpDispatchStatePrepare(const torch::Tensor& accept_len,
                                    int64_t              batch_size,
                                    cudaStream_t         stream);
 
+void invokeMtpAdvanceLinearCacheBlockTable(const torch::Tensor& current_table,
+                                           const torch::Tensor& previous_seq_lengths,
+                                           const torch::Tensor& accept_lengths,
+                                           torch::Tensor&       next_table,
+                                           uint64_t             linear_groups,
+                                           int64_t              seq_size_per_block,
+                                           cudaStream_t         stream);
+
 }  // namespace rtp_llm

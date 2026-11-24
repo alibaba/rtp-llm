@@ -55,6 +55,10 @@ public:
                                                              const std::vector<std::string>& group_tags,
                                                              TensorHolder&                   host_holder) const;
 
+    // The caller owns the host rows until this pair has been staged for upload.
+    std::pair<torch::Tensor, torch::Tensor> gatherSingleSequenceCacheTables(const std::list<GenerateStreamPtr>& streams,
+                                                                            TensorHolder& host_holder) const;
+
 private:
     GptModelInputs allocateModelInputBuffers(const StreamGroups& stream_groups) const;
     void           initializeKvCacheMetadata(GptModelInputs& model_input) const;
