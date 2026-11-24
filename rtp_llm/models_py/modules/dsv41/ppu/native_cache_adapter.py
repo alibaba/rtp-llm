@@ -2026,15 +2026,16 @@ class SharedNativeCache(NativeCacheBridge):
                     self._fresh_swa[key] = (fresh_pos_and_tail, fresh_and_tail)
                 else:
                     self._fresh_swa[key] = (fresh_pos, fresh)
-            written = None
+            write = None
             if local_write is not None:
                 from rtp_llm.models_py.modules.dsv41.ppu.prefill_swa import write_prefill_range
 
                 geometry, table = local_write
-                written = write_prefill_range(
+                write = write_prefill_range(
                     pool, geometry, table, rid, start, self.lengths[rid], self.geometry.window, fresh,
                 )
-                if written is not None:
+                if write is not None:
+                    written = write.positions
                     self._local_swa_native_write_stats["requests"] += 1
                     self._local_swa_native_write_stats["launches"] += bool(written)
                     self.writes.append(dict(layer=layer, tag=pool.framework_tag, request=rid,
@@ -2042,11 +2043,11 @@ class SharedNativeCache(NativeCacheBridge):
                     continue
                 self._local_swa_native_write_stats["fallbacks"] += 1
             if host_table is not None:
-                written = write_prefill_range(
+                write = write_prefill_range(
                     pool, placement, host_table, rid, int(fresh_starts[rid]),
                     self.lengths[rid], self.geometry.window, fresh,
                 )
-            if written is None:
+            if write is None:
                 # One write per ring slot; retain each allocated block's checkpoint.
                 column_end = ((fresh_pos // pool.span + 1) * pool.span).clamp_max(self.lengths[rid])
                 keep = fresh_pos >= column_end - pool.entries
@@ -2064,14 +2065,15 @@ class SharedNativeCache(NativeCacheBridge):
                 retained = fresh_pos[keep]
                 write_rows(pool, placement, rid, retained, fresh[keep])
                 written = retained.tolist()
-
-            owned_start = placement.rank * placement.slice_elements
-            owned_end = owned_start + placement.slice_elements
-            width = _WIDTH["swa_kv"]
-            byte_starts = (pos % placement.full_entries * width for pos in written)
-            owned_count = sum(
-                start < owned_end and start + width > owned_start for start in byte_starts
-            )
+                owned_start = placement.rank * placement.slice_elements
+                owned_end = owned_start + placement.slice_elements
+                width = _WIDTH["swa_kv"]
+                byte_starts = (pos % placement.full_entries * width for pos in written)
+                owned_count = sum(
+                    start < owned_end and start + width > owned_start for start in byte_starts
+                )
+            else:
+                written, owned_count = write.positions, write.owned_rows
             self.writes.append(
                 {
                     "layer": layer,

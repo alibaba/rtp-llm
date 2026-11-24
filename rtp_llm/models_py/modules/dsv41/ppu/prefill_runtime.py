@@ -216,6 +216,13 @@ class SharedForwardState:
         self._local_compact_row_proof = None
         self._l20_query_projection_proof = None
         self._cp_l20_projection_proof = None
+        self._cp_compact_host_native_birth = None
+        self._cp_compact_host_birth = None
+        self._cp_compact_host_output_birth = None
+        self._cp_compact_host_geometry_evidence = {
+            "plan_constructs": 0, "output_coverage": 0, "workspace_bounds": 0,
+            "workspace_checks": 0, "fallbacks": 0,
+        }
         self._local_compact_full_rows = None
         self.original_context = self.context = None
         self._entry_plan_stamp = None
@@ -225,6 +232,7 @@ class SharedForwardState:
         self.compacted = False
         self.compact_ids = None
         self.shared = {"layers": {i: layer.attn for i, layer in enumerate(runtime.model.v4.layers)}, "topk": {}, "candidates": None}
+        self.shared["cp_compact_host_geometry"] = self._cp_compact_host_geometry_evidence
         self.append_starts = None
         self.restoring_aux = False
         self.plan_reason = "public_exact_executor" if runtime.policy.mode == "exact" else "ordinary_full_prefill"
@@ -428,6 +436,12 @@ class SharedForwardState:
             return
         self._cp_full_rows_birth = descriptor
         cp = self.original_context
+        from rtp_llm.models_py.modules.dsv41.ppu.local_prefill_qkv import (
+            CP8_COMPACT_HOST_GEOMETRY_ENV, cp8_native_host_metadata,
+        )
+
+        if optimization_env_value(CP8_COMPACT_HOST_GEOMETRY_ENV, "0") == "1":
+            self._cp_compact_host_native_birth = cp8_native_host_metadata(cp)
         # Bind the native source stream at the original context boundary.
         # A later consumer cannot certify an unknown source stream for itself.
         if cp.global_positions.is_cuda:
@@ -451,6 +465,105 @@ class SharedForwardState:
             self._cp_full_rows_invalid = True
             return False
         return True
+
+    def _remember_cp_compact_host_geometry(self):
+        """Bind the factory's host result only at this forward's plan birth."""
+        from rtp_llm.models_py.modules.dsv41.ppu.local_prefill_qkv import (
+            CP8_COMPACT_HOST_GEOMETRY_ENV, CP8L20ProjectionProof,
+        )
+
+        if (optimization_env_value(CP8_COMPACT_HOST_GEOMETRY_ENV, "0") != "1"
+                or self._cp_compact_host_birth is not None):
+            return
+        proof = self._cp_l20_projection_proof
+        native = self._cp_compact_host_native_birth
+        geometry = getattr(getattr(proof, "birth", None), "host_geometry", None)
+        if (not isinstance(proof, CP8L20ProjectionProof) or not proof.current(self)
+                or not self._cp_full_rows_valid() or native is None or geometry is None
+                or geometry.native[1] != native[1] or not geometry.current(proof.birth)
+                or not permits_ced(self.inputs) or self.append_starts is not None or self._cp_metadata_stream is None
+                or geometry.stream_key != self._cp_metadata_stream[0]):
+            return
+        # No state/runtime reference is added: the existing L20 proof already
+        # has that lifetime; this record only binds its exact creation identity.
+        self._cp_compact_host_birth = (proof, geometry, self._cp_full_rows_birth)
+        self._cp_compact_host_geometry_evidence["plan_constructs"] += 1
+
+    def _cp_compact_host_current(self, *, require_output=True, positions=None):
+        from rtp_llm.models_py.modules.dsv41.ppu.local_prefill_qkv import (
+            CP8_COMPACT_HOST_GEOMETRY_ENV, cp8_native_host_metadata,
+        )
+
+        saved = self._cp_compact_host_birth
+        if (optimization_env_value(CP8_COMPACT_HOST_GEOMETRY_ENV, "0") != "1"
+                or saved is None or not self.compacted):
+            return None
+        proof, geometry, _ = saved
+        birth = proof.birth
+        source = birth.compact.global_positions
+        if (type(source) is not torch.Tensor or not is_plain_tensor(source)
+                or not source.is_cuda or self._cp_metadata_stream is None):
+            return None
+        stream = torch.cuda.current_stream(source.device)
+        stream_key = stream.device, int(stream.cuda_stream)
+        if stream_key != geometry.stream_key or stream_key != self._cp_metadata_stream[0]:
+            return None
+        # Read the actual stream BEFORE the phase, owner and metadata checks.
+        # Even a same-stream hook may mutate a source or replace the plan.
+        if (self._cp_l20_projection_proof is not proof or self.plan is not birth.plan
+                or getattr(self.plan, "_ppu_cp8_query_birth", None) is not birth
+                or self.context is not birth.compact or self.original_context is not birth.original
+                or self.plan.exchange is not birth.exchange or self.plan_reason != "compact140"
+                or not self.compacted or self._cp_full_rows_birth is not saved[2]
+                or self.append_starts is not None or not permits_ced(self.inputs)
+                or not self._cp_rows_phase()):
+            return None
+        native = cp8_native_host_metadata(self.original_context)
+        if (not self._cp_full_rows_valid() or native is None or self._cp_compact_host_native_birth is None
+                or native[1] != self._cp_compact_host_native_birth[1]
+                or birth.host_geometry is not geometry or not geometry.current(birth)
+                or not birth.current()):
+            return None
+        if positions is not None:
+            source = self.context.global_positions
+            if (type(positions) is not torch.Tensor or not is_plain_tensor(positions)
+                    or positions.requires_grad or positions.shape != source.shape
+                    or positions.stride() != source.stride() or positions.dtype != source.dtype
+                    or positions.device != source.device or positions.storage_offset() != source.storage_offset()
+                    or positions.data_ptr() != source.data_ptr()
+                    or not torch._C._is_alias_of(positions, source)):
+                return None
+        if require_output:
+            output = self._cp_compact_host_output_birth
+            if (output is None or self.valid_output_rows is not output[0]
+                    or _row_tensor_key(self.valid_output_rows) != output[1]
+                    or self.compact_ids is not output[2]
+                    or _row_tensor_key(self.compact_ids) != output[3]):
+                return None
+        return geometry
+
+    def cp_compact_workspace_bounds(self, context, positions):
+        """Exact public-upload bounds, or None before the unchanged fallback."""
+        if not self.compacted or context is not self.context:
+            return None
+        geometry = self._cp_compact_host_current(positions=positions)
+        if geometry is None:
+            if self._cp_compact_host_birth is not None:
+                self._cp_compact_host_geometry_evidence["fallbacks"] += 1
+            return None
+        self._cp_compact_host_geometry_evidence["workspace_bounds"] += 1
+        return geometry.bounds
+
+    def cp_compact_workspace_bounds_current(self, context, positions):
+        """Recheck a workspace's admitted birth before every cached use.
+
+        Callers which already sized a workspace from these bounds must fail
+        before refresh/index work when False, rather than re-minting a birth.
+        """
+        current = context is self.context and self._cp_compact_host_current(positions=positions) is not None
+        if current:
+            self._cp_compact_host_geometry_evidence["workspace_checks"] += 1
+        return current
 
     def _cp_compact_rows_descriptor(self):
         if not self.compacted or not self._cp_full_rows_valid():
@@ -2090,6 +2203,7 @@ class SharedForwardState:
                 self._cp_l20_projection_proof = CP8L20ProjectionProof(
                     self, self.plan._ppu_cp8_query_birth,
                 )
+                self._remember_cp_compact_host_geometry()
 
     def before_block(self, block, hidden, ids, positions, cu):
         layer = block.layer_id
@@ -2172,11 +2286,20 @@ class SharedForwardState:
         self.compacted = True
         exchange = self.plan.exchange
         host_geometry = self._compact_host_geometry()
+        cp_host_geometry = self._cp_compact_host_current(require_output=False)
         # The local source indices already encode every restored real row.
-        with torch.inference_mode(False) if host_geometry is not None else nullcontext():
+        with torch.inference_mode(False) if host_geometry is not None or cp_host_geometry is not None else nullcontext():
             self.valid_output_rows = hidden.new_zeros(exchange.original_rows, dtype=torch.bool)
             self.valid_output_rows.index_fill_(0, exchange.send_indices, True)
-        if host_geometry is not None:
+        if cp_host_geometry is not None:
+            if not cp_host_geometry.output_covered:
+                raise RuntimeError("YOCO removed a framework first-token output row")
+            self._cp_compact_host_output_birth = (
+                self.valid_output_rows, _row_tensor_key(self.valid_output_rows),
+                self.compact_ids, _row_tensor_key(self.compact_ids),
+            )
+            self._cp_compact_host_geometry_evidence["output_coverage"] += 1
+        elif host_geometry is not None:
             if not host_geometry[2]:
                 raise RuntimeError("YOCO removed a framework first-token output row")
             self._compact_validation_output = self.valid_output_rows, _row_tensor_key(self.valid_output_rows)

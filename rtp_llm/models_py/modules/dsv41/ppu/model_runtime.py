@@ -177,7 +177,10 @@ class SharedNativeRuntime:
         self.dp_prefill_capacity_enabled = optimization_env_value(DP_PREFILL_FORWARD_MEGA_CAPACITY_ENV, "0") == "1"
         from rtp_llm.models_py.modules.dsv41.ppu.engram import LOCAL_PREFILL_ENGRAM_ROUNDS_ENV
 
-        engram_flag = optimization_env_value(LOCAL_PREFILL_ENGRAM_ROUNDS_ENV, "0")
+        if getattr(model, "_prefill_cp_size", None) == 8:
+            engram_flag = os.environ.get(LOCAL_PREFILL_ENGRAM_ROUNDS_ENV, "0")
+        else:
+            engram_flag = optimization_env_value(LOCAL_PREFILL_ENGRAM_ROUNDS_ENV, "0")
         self._engram_requested = engram_flag == "1"
         self._engram_flag_valid = engram_flag in ("0", "1")
         from rtp_llm.models_py.modules.dsv41.ppu.cp_prefill_engram_rounds import CP8_ENGRAM_ROUNDS_ENV

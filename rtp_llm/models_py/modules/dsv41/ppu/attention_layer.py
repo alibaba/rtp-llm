@@ -91,6 +91,7 @@ PREFILL_DENSE_FP4_SCORE_ENV = "RTP_V41_PPU_PREFILL_DENSE_FP4_SCORE"
 PREFILL_SPARSE_FP4_SCORE_ENV = "RTP_V41_PPU_PREFILL_SPARSE_FP4_SCORE"
 CP8_WO_A_BMM_ENV = "RTP_V41_PPU_CP8_WO_A_BMM"
 CP8_GROUPED_QO_ROPE_ENV = "RTP_V41_PPU_CP8_GROUPED_QO_ROPE"
+CP8_DEFER_MEGA_ROPE_ENV = "RTP_V41_PPU_CP8_DEFER_MEGA_ROPE"
 CP8_REUSE_ATTENTION_METADATA_ENV = "RTP_V41_PPU_CP8_REUSE_ATTENTION_METADATA"
 CP8_INDEXER_REQUEST_SLICES_ENV = "RTP_V41_PPU_CP8_INDEXER_REQUEST_SLICES"
 CP8_INDEXER_TILE_PREP_ENV = "RTP_V41_PPU_CP8_INDEXER_TILE_PREP"
@@ -466,6 +467,36 @@ def _attention_rows_and_context(attn, state, cp):
                 return cached
     rows = tuple(state.rows(cp))
     return rows, _local_step_context(attn, state, cp, rows)
+
+
+def _cp8_defer_mega_rope(attn, state, cp, context, positions, table, mega):
+    """Use the context authenticated by the preceding CP metadata lookup."""
+    from rtp_llm.models_py.modules.dsv41.ppu.prefill_runtime import (
+        SharedForwardState,
+        _row_tensor_key,
+    )
+
+    if (
+        not enabled(CP8_DEFER_MEGA_ROPE_ENV)
+        or type(state) is not SharedForwardState
+        or state._cp_metadata_invalid
+        or cp is not state.context
+        or not readonly_prefill_positions(mega)
+        or mega.owner is not attn
+        or mega.freqs_cis is not table
+        or max(state.cache.lengths, default=0) > table.shape[0]
+    ):
+        return False
+    entry = state._cp_metadata_entries.get(bool(state.compacted))
+    if entry is None:
+        return False
+    step = entry.values.get("step")
+    return (
+        step is not None
+        and step[0] is context
+        and entry.record.rows[0] is positions
+        and entry.record.keys[0] == _row_tensor_key(positions)
+    )
 
 
 def _optimized_focus_layers(rank):
@@ -1485,7 +1516,13 @@ class SharedPPUAttention(PPUAttentionProjections):
             _local_sg_rope_positions(state, cp, (positions, requests, cu, valid), frequency_table)
             if diagnostic is None and plan is None else None
         )
-        freqs = frequency_table[positions] if sg_rope_positions is None else None
+        defer_freqs = (
+            (full_cp8 or compact_cp8)
+            and deferred_kv_norm
+            and mega is not None
+            and _cp8_defer_mega_rope(self, state, cp, context, positions, frequency_table, mega)
+        )
+        freqs = frequency_table[positions] if sg_rope_positions is None and not defer_freqs else None
         dense_projections = _local_prefill_dense_projections_enabled(
             state, cp, x, g, diagnostic=diagnostic, packed_plan=plan, parallel=parallel,
         )
@@ -1555,9 +1592,16 @@ class SharedPPUAttention(PPUAttentionProjections):
         from rtp_llm.models_py.modules.dsv41.ppu.rope import (
             joint_supported as fusion_supported, rotate_qk as qk_rope,
         )
-        fused = (deferred_query is None and sg_rope_positions is None and enabled(FUSION_ENV) and bool(x.shape[0]) and ordinary_eager_reason(state) is None
-                 and not torch.cuda.is_current_stream_capturing()
-                 and fusion_supported(q, kv, freqs))
+        fused = (
+            not defer_freqs
+            and deferred_query is None
+            and sg_rope_positions is None
+            and enabled(FUSION_ENV)
+            and bool(x.shape[0])
+            and ordinary_eager_reason(state) is None
+            and not torch.cuda.is_current_stream_capturing()
+            and fusion_supported(q, kv, freqs)
+        )
         if diagnostic is not None:
             diagnostic_q_before, diagnostic_kv_before = q, kv
         rope_backend = "serial_rope"
@@ -1788,7 +1832,13 @@ class SharedPPUAttention(PPUAttentionProjections):
                 _local_sg_rope_positions(state, cp, (positions, requests, cu, valid), frequency_table)
                 if diagnostic is None and plan is None else None
             )
-            freqs = frequency_table[positions] if sg_rope_positions is None else None
+            defer_freqs = (
+                use_cp_workspace
+                and deferred_kv_norm
+                and mega is not None
+                and _cp8_defer_mega_rope(self, state, cp, context, positions, frequency_table, mega)
+            )
+            freqs = frequency_table[positions] if sg_rope_positions is None and not defer_freqs else None
             compact_cp8 = True
             shape = x.shape
             route.update(rows=x.shape[0], producer_rows=route["rows"])
@@ -1917,7 +1967,7 @@ class SharedPPUAttention(PPUAttentionProjections):
                 kv_rows, indices, lengths = build_cp_prefill_workspace(
                     ops=self.ops, cache=cache, layer_id=self.layer_id, geometry=g, context=context,
                     selected_blocks=selected, window=g.window, swa_starts=swa_starts, cp=cp, shared=shared,
-                    q8=q8_attention,
+                    q8=q8_attention, state=state,
                     **({"swa_plan": swa_plan} if swa_plan is not None else {}),
                 )
             elif (local_layout := _local_prefill_workspace_layout(
@@ -1975,7 +2025,10 @@ class SharedPPUAttention(PPUAttentionProjections):
                     cache.release_swa(self.layer_id)
                     return result.reshape(shape)
                 route["mega_fallback"] = reason
-                q = _rope_tail(mega.unpack_query(q), frequency_table[positions])
+                fallback_freqs = frequency_table[positions]
+                q = _rope_tail(mega.unpack_query(q), fallback_freqs)
+                if defer_freqs:
+                    freqs = fallback_freqs
                 mega = None
             if q8_attention:
                 from rtp_llm.models_py.modules.dsv41.ppu.packed_attention import load_packed_backend

@@ -18,7 +18,22 @@ from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import env_value
 
 CP8_ENGRAM_ROUNDS_ENV = "RTP_V41_PPU_CP8_YOCO_ENGRAM_RS"
 CP8_MODE_TAG = 1 << 60
+CP8_PEER_SHARDS_TAG = 1 << 59
 CP8_MAX_FLAT_ROWS = 1 << 40
+
+
+def cp8_engram_topology(model, rank):
+    args, parallel = model._v4_args, model.parallelism_config
+    return (getattr(parallel, "tp_size", None) == 8 and getattr(parallel, "tp_rank", None) == rank
+            and tuple(getattr(args, name, None) for name in ("tp_size", "dp_size", "ep_size")) == (1, 1, 8)
+            and getattr(args, "dp_rank", None) == 0 and getattr(args, "ep_rank", None) == rank
+            and getattr(model, "_prefill_cp_size", None) == 8)
+
+
+def cp8_engram_prefill_profile(policy):
+    return ((policy.mode, policy.keep_tokens, policy.window, policy.max_rollback_tokens,
+             policy.encoder_replay) == ("compact", 140, 128, 0, False)
+            and env_value("RTP_V41_PPU_CP8_YOCO_FAST_PREFILL", "0") == "1")
 
 
 def _plain(value):
@@ -132,6 +147,7 @@ class CP8PrefillEngramSchedule:
     _bindings: tuple = field(repr=False, compare=False)
     _lease: _CPLease = field(repr=False, compare=False)
     layers: tuple = (1, 14)
+    peer_shards: bool = False
 
     def publish(self, layer_id, rows):
         lease = self._lease
@@ -191,38 +207,34 @@ class CP8PrefillEngramSchedule:
 def prepare_cp8_prefill_engram_schedule(runtime, state, *, epoch, evidence):
     """One WORLD MAX, with exactly the existing DP packet's29-int64 schema.
 
-    CP replaces the last dimension pair by MODE_TAG+flat_count. Dimension256
-    is still checked locally by the original binding capture. Mixed CP/DP
-    mode and unequal CP counts reject on every owner before any layer lookup.
+    CP replaces the last dimension pair by a tag, backend bit and flat count.
+    The binding capture still checks dimension 256 locally. Mixed modes,
+    mixed backends and unequal counts reject before any layer lookup.
     The packet does not claim agreement on request boundaries across ranks.
     """
     model, device = runtime.model, runtime.device
     rank = dist.get_rank(dist.group.WORLD)
     flag = getattr(runtime, "_cp_engram_requested", False)
     flag_valid = getattr(runtime, "_cp_engram_flag_valid", True)
-    args, parallel, ops = model._v4_args, model.parallelism_config, model._shared_ops
+    ops = model._shared_ops
     bindings = getattr(ops, "_engram", {})
     captured, geometry, binding_bad = engram._capture_local_engram_bindings(bindings, rank)
     group_bad = getattr(getattr(ops, "_enpm_group", None), "pg", None) is not dist.group.WORLD
     snapshot = _entry_snapshot(runtime, state)
     count = state.inputs.input_ids.numel() * 24
     count_valid = type(count) is int and 0 <= count < CP8_MAX_FLAT_ROWS and count % 24 == 0
-    protocol = CP8_MODE_TAG + (count if count_valid else 0)
+    mapped_layers = sum(item[1]._peer_table is not None for item in captured)
+    peer_shards = mapped_layers == 2
+    protocol = CP8_MODE_TAG + (CP8_PEER_SHARDS_TAG if peer_shards else 0) + (count if count_valid else 0)
     geometry = (*geometry[:9], protocol)
-    topology = (getattr(parallel, "tp_size", None) == 8 and getattr(parallel, "tp_rank", None) == rank
-                and tuple(getattr(args, name, None) for name in ("tp_size", "dp_size", "ep_size")) == (1, 1, 8)
-                and getattr(args, "dp_rank", None) == 0 and getattr(args, "ep_rank", None) == rank
-                and getattr(model, "_prefill_cp_size", None) == 8)
-    policy = runtime.policy
+    topology = cp8_engram_topology(model, rank)
     business = (state.prefill and not state.idle and not state.compacted and state.cache is not None
                 and state.cache._is_prefill and state.cache.sharded
                 and not getattr(model, "_is_speculative", False)
                 and not any(getattr(state, name, False) for name in ("is_graph", "is_graph_commit", "verify", "proposal"))
                 and not getattr(state.attn, "is_cuda_graph", False)
                 and not torch.is_grad_enabled()
-                and (policy.mode, policy.keep_tokens, policy.window, policy.max_rollback_tokens,
-                     policy.encoder_replay) == ("compact", 140, 128, 0, False)
-                and env_value("RTP_V41_PPU_CP8_YOCO_FAST_PREFILL", "0") == "1")
+                and cp8_engram_prefill_profile(runtime.policy))
     pinned = bool(captured) and all(item[1].pinned and item[1].payload.is_pinned()
                                   and item[1].scale.is_pinned() for item in captured)
     supported = bool(topology and not binding_bad and not group_bad and pinned and business and snapshot is not None
@@ -234,11 +246,11 @@ def prepare_cp8_prefill_engram_schedule(runtime, state, *, epoch, evidence):
             supported = engram._triton_kernels() is not None
         except Exception:
             supported, native_bad = False, True
-    rejected = (not flag_valid or not count_valid or type(flag) is not bool
+    on = int(flag is True or peer_shards)
+    rejected = (not flag_valid or not count_valid or type(flag) is not bool or mapped_layers == 1
                 or type(epoch) is not int or not 1 <= epoch < 2**62
                 or runtime._engram_incomplete or not runtime._engram_flag_valid or runtime._engram_requested
-                or (flag and (not topology or binding_bad or group_bad or native_bad)))
-    on = int(flag) if type(flag) is bool else 0
+                or (on and (not topology or binding_bad or group_bad or native_bad)))
     generation = epoch if type(epoch) is int and 0 <= epoch < 2**62 else 0
     dimensions = [item for value in geometry for item in (value, -value)]
     cap = engram.LOCAL_PREFILL_ENGRAM_ROUND_CAP
@@ -262,7 +274,7 @@ def prepare_cp8_prefill_engram_schedule(runtime, state, *, epoch, evidence):
     entry = _CPEntry(runtime, weakref.ref(state), generation, snapshot[0], snapshot[1], snapshot[2], count // 24)
     lease = _CPLease(evidence=evidence)
     schedule = CP8PrefillEngramSchedule(dist.group.WORLD, rank, generation, device, cap,
-                                      count, count, entry, captured, lease)
+                                      count, count, entry, captured, lease, peer_shards=peer_shards)
     lease.schedule = schedule
     evidence.update(decision="adopted", consumed_layers=lease.records)
     return schedule

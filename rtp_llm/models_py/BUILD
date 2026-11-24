@@ -111,6 +111,7 @@ _DSV41_PPU_SHARED_MODULES = [
     "modules/dsv41/ppu/cp_prefill_paged_indexer.py",
     "modules/dsv41/ppu/cp_prefill_shared_global.py",
     "modules/dsv41/ppu/cp_prefill_shared_indexer.py",
+    "modules/dsv41/ppu/cp_prefill_swa_batch.py",
     "modules/dsv41/ppu/mega_attention.py",
     "modules/dsv41/ppu/norm_store.py",
     "modules/dsv41/ppu/prefill_runtime.py",

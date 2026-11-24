@@ -425,6 +425,35 @@ class LocalPrefillMetadataCPU(unittest.TestCase):
             self.assertIsNot(lookup(attn, state, state.context)[1], compact_context)
             self.assertTrue(state._cp_metadata_invalid)
 
+    def test_cp8_deferred_mega_rope_requires_current_positions_and_step_context(self):
+        from rtp_llm.models_py.modules.dsv41.ppu import attention_layer, prefill_runtime
+
+        state = prefill_runtime.SharedForwardState.__new__(prefill_runtime.SharedForwardState)
+        attn, context, cp = object(), object(), object()
+        positions = torch.arange(2, dtype=torch.int64)
+        table = torch.zeros((8, 32), dtype=torch.complex64)
+        mega = NS(owner=attn, freqs_cis=table)
+        state.context = cp
+        state.cache = NS(lengths=(8,))
+        state.compacted = False
+        state._cp_metadata_invalid = False
+        record = NS(rows=(positions,), keys=(prefill_runtime._row_tensor_key(positions),))
+        state._cp_metadata_entries = {False: NS(record=record, values={"step": (context, object())})}
+        admit = attention_layer._cp8_defer_mega_rope
+        flag = attention_layer.CP8_DEFER_MEGA_ROPE_ENV
+        with patch.object(attention_layer, "readonly_prefill_positions", return_value=True):
+            with patch.dict(os.environ, {flag: "0"}):
+                self.assertFalse(admit(attn, state, cp, context, positions, table, mega))
+            with patch.dict(os.environ, {flag: "1"}):
+                self.assertTrue(admit(attn, state, cp, context, positions, table, mega))
+                self.assertFalse(admit(attn, state, cp, object(), positions, table, mega))
+                self.assertFalse(admit(attn, state, cp, context, positions.clone(), table, mega))
+                state.compacted = True
+                self.assertFalse(admit(attn, state, cp, context, positions, table, mega))
+                state.compacted = False
+                positions.add_(1)
+                self.assertFalse(admit(attn, state, cp, context, positions, table, mega))
+
     def test_local_metadata_mega_readonly_binding_rejects_unknown_and_changed_consumers(self):
         import importlib.metadata
         import tempfile

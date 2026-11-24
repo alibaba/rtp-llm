@@ -1,5 +1,7 @@
 """Read and write the CP byte slices of native SWA Prefill pages."""
 
+from dataclasses import dataclass
+
 import torch
 import triton.language as tl
 from triton import cdiv, jit
@@ -215,16 +217,33 @@ def write_rows(pool, placement, request, positions, packed):
     )
 
 
+@dataclass(frozen=True)
+class PrefillSwaWrite:
+    positions: list[int]
+    owned_rows: int
+
+
+def _owned_rows_before(position, entries, first_row, stop_row):
+    cycles, row = divmod(position, entries)
+    return cycles * (stop_row - first_row) + max(0, min(row, stop_row) - first_row)
+
+
 def write_prefill_range(pool, placement, host_table, request, start, end, window, packed):
     """Store a request slice and return its old-path absolute-position receipt."""
     if start == end:
-        return []
+        return PrefillSwaWrite([], 0)
     first = start // pool.span
     stop = (end - 1) // pool.span + 1
     if start < 0 or stop > host_table.shape[1]:
         raise ValueError(f"native Prefill {pool.framework_tag} position outside block table")
 
+    width = _WIDTH["swa_kv"]
+    entries = placement.full_entries
+    first_row = min(entries, placement.rank * placement.slice_elements // width)
+    stop_row = min(entries, cdiv((placement.rank + 1) * placement.slice_elements, width))
+    full_ownership = first_row == 0 and stop_row == entries
     written = []
+    owned_rows = 0
     blocks = set()
     for column, block in enumerate(host_table[request, first:stop].tolist(), first):
         column_end = min(end, (column + 1) * pool.span)
@@ -238,9 +257,13 @@ def write_prefill_range(pool, placement, host_table, request, start, end, window
         blocks.add(block)
         begin = max(start, column * pool.span, column_end - pool.entries)
         written.extend(range(begin, column_end))
+        if not full_ownership:
+            # A row belongs to the rank whenever its bytes intersect the
+            # rank's slice, including a row split across two ranks.
+            owned_rows += _owned_rows_before(column_end, entries, first_row, stop_row)
+            owned_rows -= _owned_rows_before(begin, entries, first_row, stop_row)
 
     if written:
-        width = _WIDTH["swa_kv"]
         _write_prefill_ring_range[(stop - first, cdiv(placement.slice_elements, 512))](
             pool.tensor,
             pool.table[request],
@@ -256,7 +279,7 @@ def write_prefill_range(pool, placement, host_table, request, start, end, window
             width,
             512,
         )
-    return written
+    return PrefillSwaWrite(written, len(written) if full_ownership else owned_rows)
 
 
 def read_staged_rows(domain, packed, positions):

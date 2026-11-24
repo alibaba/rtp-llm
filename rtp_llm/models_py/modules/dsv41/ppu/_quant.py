@@ -911,6 +911,34 @@ def _triton_kernels():
 
     ns.dequant_v41_swa_segments = _dequantize_v41_swa_segments_kernel
 
+    @triton.jit
+    def _dequantize_v41_swa_batch_kernel(
+        reference, descriptors, out, out_stride,
+        WIDTH: tl.constexpr, DIM: tl.constexpr, GROUP: tl.constexpr,
+    ):
+        row = tl.program_id(0).to(tl.int64)
+        segment = tl.program_id(1).to(tl.int64)
+        descriptor = descriptors + segment * 6
+        count = tl.load(descriptor + 5)
+        if row < count:
+            tail = tl.load(descriptor).to(reference.dtype)
+            fresh = tl.load(descriptor + 1).to(reference.dtype)
+            begin = tl.load(descriptor + 2)
+            start = tl.load(descriptor + 3)
+            tail_rows = tl.load(descriptor + 4)
+            slot = row + start
+            if slot < tail_rows:
+                base = tail + slot * WIDTH
+            else:
+                base = fresh + (slot - tail_rows) * WIDTH
+            column = tl.arange(0, DIM)
+            value = tl.load(base + column).to(tl.float32)
+            scale = tl.load(base.to(tl.pointer_type(tl.uint8)) + DIM + column // GROUP)
+            tl.store(out + (begin + row) * out_stride + column,
+                     (value * _ue8m0_to_fp32(scale)).to(tl.bfloat16))
+
+    ns.dequant_v41_swa_batch = _dequantize_v41_swa_batch_kernel
+
     _KERNELS = ns
     return ns
 
@@ -1078,6 +1106,45 @@ def try_dequantize_swa_segments(tail, fresh, start, out):
             out, start, tail.shape[0], out.stride(0),
             SWA_KV_ENTRY_BYTES, KV_DIM, FP8_GROUP,
         )
+    return True
+
+
+def try_dequantize_swa_batch(descriptors, out, max_rows, *, reference):
+    """Decode authenticated pointer descriptors with the legacy SWA row math.
+
+    The CP receipt validates descriptor values, bounds and owners before its
+    asynchronous upload. This boundary validates only the device tensor ABI;
+    it never downloads raw pointers. ``reference`` is a live packed-row FP8
+    view used only for its compiler pointer dtype, never loaded by the kernel.
+    """
+    if not (
+        type(max_rows) is int and max_rows > 0
+        and type(descriptors) is torch.Tensor
+        and descriptors.dtype == torch.int64
+        and descriptors.ndim == 2 and descriptors.shape[1] == 6
+        and descriptors.shape[0] > 0 and descriptors.is_contiguous()
+        and type(out) is torch.Tensor
+        and out.dtype == torch.bfloat16 and out.ndim == 2
+        and out.shape[1] == KV_DIM and out.stride(1) == 1
+        and out.stride(0) >= KV_DIM
+        and type(reference) is torch.Tensor
+        and reference.dtype == torch.float8_e4m3fn
+        and reference.ndim == 2 and reference.shape[1] == SWA_KV_ENTRY_BYTES
+        and reference.shape[0] > 0 and reference.is_contiguous()
+        and descriptors.device == out.device == reference.device
+        and all(not value.requires_grad and not value.is_neg() and not value.is_conj()
+                for value in (descriptors, out, reference))
+        and not torch.is_grad_enabled()
+        and not (out.is_cuda and torch.cuda.is_current_stream_capturing())
+        and not torch._C._is_alias_of(out, descriptors)
+        and not torch._C._is_alias_of(out, reference)
+        and _ppu_fast_path(out)
+    ):
+        return False
+    _triton_kernels().dequant_v41_swa_batch[(max_rows, descriptors.shape[0])](
+        reference, descriptors, out, out.stride(0),
+        SWA_KV_ENTRY_BYTES, KV_DIM, FP8_GROUP,
+    )
     return True
 
 

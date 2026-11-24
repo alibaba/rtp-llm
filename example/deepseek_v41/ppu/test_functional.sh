@@ -41,6 +41,10 @@ fi
 if [[ "$v41_role" == local-prefill-workspace-contracts || "$v41_role" == local-prefill-workspace-device ]]; then
     if [[ "$v41_role" == local-prefill-workspace-device ]]; then export RTP_V41_TEST_LOCAL_WORKSPACE_DEVICE=1; fi
     exec "$v41_python" -B -m unittest -v \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_cp8_compact_host_geometry \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_cp8_engram_rounds \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_cp8_swa_batch \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_cp8_swa_batch_kernel \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_workspace \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_rows \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_metadata \

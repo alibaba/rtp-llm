@@ -246,6 +246,51 @@ class CP8EngramRoundsContracts(unittest.TestCase):
                 engram.engram_lookup(rows[0], layer_id=1, shard=shard, layout=layout,
                                      group=adapter, uniform_rank_rows=True, round_schedule=legacy)
 
+    def test_peer_shards_select_both_layers_without_the_rs_flag(self):
+        with _CPUWorld() as world:
+            runtime, state, cp, bindings = _fixture(
+                0, world.group, lengths=(1377, 17), prefixes=(256, 9)
+            )
+            runtime._cp_engram_requested = False
+            for shard, _, _ in bindings.values():
+                shard._peer_table = NS(lookup=lambda rows, _shard, _layout: _expected(rows))
+            schedule = _prepare(runtime, state)
+            self.assertTrue(schedule.peer_shards)
+            self.assertEqual(
+                world.packets[0][-3].item(),
+                cp_rounds.CP8_MODE_TAG + cp_rounds.CP8_PEER_SHARDS_TAG + cp.chunk_length * 24,
+            )
+            for layer, hashes in zip((1, 14), _publish(runtime, state, cp)):
+                shard, layout, adapter = bindings[layer]
+                with patch.object(adapter, "all_gather_ids", side_effect=AssertionError("peer gather has no ID exchange")), \
+                        patch.object(adapter, "reduce_scatter_sum", side_effect=AssertionError("peer gather has no RS")):
+                    result = engram.engram_lookup(
+                        hashes, layer_id=layer, shard=shard, layout=layout,
+                        group=adapter, round_schedule=schedule,
+                    )
+                self.assertTrue(_same_bytes(result, _expected(hashes)))
+            self.assertTrue(schedule.close())
+            for record in runtime._engram_evidence["consumed_layers"]:
+                self.assertEqual(record["backend"], "peer_shards")
+                self.assertFalse(record["reduce_scatter"])
+                self.assertEqual(record["contribution_bytes"], 0)
+            self.assertEqual(len(world.packets), 1)
+
+    def test_peer_shard_disagreement_or_partial_mapping_is_rejected(self):
+        for failure in ("partial", "mixed_backend"):
+            with self.subTest(failure=failure), _CPUWorld() as world:
+                runtime, state, _, bindings = _fixture(0, world.group)
+                bindings[1][0]._peer_table = object()
+                if failure == "mixed_backend":
+                    bindings[14][0]._peer_table = object()
+
+                    def mix_backends(packet):
+                        packet[27] += cp_rounds.CP8_PEER_SHARDS_TAG
+
+                    world.mutate = mix_backends
+                with self.assertRaisesRegex(RuntimeError, "configuration/lifecycle disagreement"):
+                    _prepare(runtime, state)
+
 
 @unittest.skipUnless(os.environ.get("RTP_V41_TEST_LOCAL_WORKSPACE_DEVICE") == "1", "explicit PPU lease required")
 class CP8EngramRoundsDevice(unittest.TestCase):
@@ -332,6 +377,31 @@ def _world8_worker(rank, store):
                 except RuntimeError as error:
                     rejected = "disagreement" in str(error)
                 assert rejected
+            from rtp_llm.models_py.modules.dsv41.ppu.engram_peer import prepare_peer_shards
+
+            runtime, state, cp, bindings = _fixture(
+                rank, dist.group.WORLD, device, lengths=(4096,) * 7 + (4093,),
+                prefixes=(126976,) * 8, native=True,
+            )
+            runtime._cp_engram_requested = False
+            prepare_peer_shards(bindings, device, flag="1", eligible=True)
+            schedule = _prepare(runtime, state)
+            assert schedule.peer_shards
+            for layer, hashes in zip((1, 14), _publish(runtime, state, cp)):
+                shard, layout, adapter = bindings[layer]
+                old = engram.engram_lookup(
+                    hashes, layer_id=layer, shard=shard, layout=layout, group=adapter,
+                    uniform_rank_rows=True, max_rows_per_round=schedule.round_cap,
+                )
+                with patch.object(adapter, "all_gather_ids", side_effect=AssertionError("peer gather has no ID exchange")), \
+                        patch.object(adapter, "reduce_scatter_sum", side_effect=AssertionError("peer gather has no RS")):
+                    actual = engram.engram_lookup(
+                        hashes, layer_id=layer, shard=shard, layout=layout,
+                        group=adapter, round_schedule=schedule,
+                    )
+                assert _same_bytes(actual, old)
+            assert schedule.close()
+            assert all(record["backend"] == "peer_shards" for record in schedule._lease.records)
         torch.cuda.synchronize(device)
     finally:
         dist.destroy_process_group()

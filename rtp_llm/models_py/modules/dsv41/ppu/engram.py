@@ -1166,22 +1166,28 @@ def engram_lookup(
     device = rows.device
     adapter = _resolve_group(group, layout)
     record = None
+    peer_table = shard._peer_table
     if round_schedule is not None:
         from rtp_llm.models_py.modules.dsv41.ppu.cp_prefill_engram_rounds import CP8PrefillEngramSchedule
 
         if type(round_schedule) is CP8PrefillEngramSchedule:
-            if not uniform_rank_rows:
+            if not uniform_rank_rows and not round_schedule.peer_shards:
                 raise RuntimeError("CP8 Prefill Engram requires its independent uniform schedule")
+            if round_schedule.peer_shards != (peer_table is not None):
+                raise RuntimeError("CP8 Prefill Engram peer mapping changed after admission")
         elif not isinstance(round_schedule, LocalPrefillEngramSchedule) or uniform_rank_rows:
             raise RuntimeError("local Prefill Engram requires its independent padded schedule")
         record = round_schedule.claim(adapter, shard, layout, rows, layer_id)
-        if type(round_schedule) is LocalPrefillEngramSchedule and shard._peer_table is not None:
-            out = shard._peer_table.lookup(rows.detach(), shard, layout)
+        if peer_table is not None and type(round_schedule) in (
+            LocalPrefillEngramSchedule,
+            CP8PrefillEngramSchedule,
+        ):
+            out = peer_table.lookup(rows.detach(), shard, layout)
             record.update(backend="peer_shards", reduce_scatter=False, complete=True)
             return out
         max_rows_per_round = round_schedule.round_cap
-    elif shard._peer_table is not None and shard._peer_table.decode:
-        return shard._peer_table.lookup(rows.detach(), shard, layout)
+    elif peer_table is not None and peer_table.decode:
+        return peer_table.lookup(rows.detach(), shard, layout)
     flat = rows.detach().reshape(-1).to(torch.int64)
     if adapter is None:
         # Single-process direct lookup: the lone shard owns every valid row.

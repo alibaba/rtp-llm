@@ -216,6 +216,7 @@ py_test(
         srcs = ["//example/deepseek_v41/ppu:test_functional.sh"],
         args = ["local-prefill-workspace-" + mode],
         data = [
+            "test_cp8_compact_host_geometry.py",
             "test_cp8_cross_layer_mhc.py",
             "test_cp8_engram_gate.py",
             "test_cp8_engram_rounds.py",
@@ -234,6 +235,8 @@ py_test(
             "test_cp8_segmented_swa.py",
             "test_cp8_shared_global.py",
             "test_cp8_shared_indexer.py",
+            "test_cp8_swa_batch.py",
+            "test_cp8_swa_batch_kernel.py",
             "test_local_prefill_workspace.py",
             "test_local_prefill_rows.py",
             "test_local_prefill_metadata.py",

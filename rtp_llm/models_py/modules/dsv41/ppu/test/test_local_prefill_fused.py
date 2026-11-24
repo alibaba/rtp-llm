@@ -462,7 +462,7 @@ class LocalPrefillFusedDevice(unittest.TestCase):
             ), patch.object(
                 prefill_swa,
                 "write_prefill_range",
-                return_value=list(range(129, 138)),
+                return_value=prefill_swa.PrefillSwaWrite(list(range(129, 138)), 9),
             ), patch.dict(
                 os.environ,
                 {CP_DEQUANT_ENV: flag, "RTP_V41_PPU_CP8_DIRECT_SWA_WORKSPACE": "1",

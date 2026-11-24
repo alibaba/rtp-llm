@@ -388,7 +388,7 @@ class _CPPrefillWorkspace:
     """One CP query layout and immutable global bank within a forward."""
 
     def __init__(self, ops, cache, geometry, context, cp, source, ratio, window, starts, *, full_local_layout=False,
-                 allow_shared_global=True, swa_plan=None):
+                 allow_shared_global=True, swa_plan=None, state=None):
         self._swa_plan = swa_plan
         if swa_plan is not None and not swa_plan.current(context):
             raise RuntimeError("stale CP segmented SWA plan")
@@ -398,7 +398,19 @@ class _CPPrefillWorkspace:
         # Each provider still checks its own input layout before launching;
         # an unsupported indices/dequant request falls back independently.
         self.fused_dequant = self.fused_indices = cp8 or local
-        bounds = _full_cp_workspace_bounds(cp, positions) if cp8 and self.fused_indices else None
+        bounds = None
+        self._cp_compact_host_bounds = False
+        self._cp_compact_host_state = None
+        if cp8 and self.fused_indices and state is not None:
+            from rtp_llm.models_py.modules.dsv41.ppu.prefill_runtime import SharedForwardState
+
+            if type(state) is SharedForwardState:
+                bounds = state.cp_compact_workspace_bounds(cp, positions)
+                self._cp_compact_host_bounds = bounds is not None
+                if bounds is not None:
+                    self._cp_compact_host_state = weakref.ref(state)
+        if bounds is None and cp8 and self.fused_indices:
+            bounds = _full_cp_workspace_bounds(cp, positions)
         if bounds is None and local:
             bounds = _local_prefill_workspace_bounds(cache, context, cp, full_layout=full_local_layout)
         if bounds is None:
@@ -522,6 +534,12 @@ class _CPPrefillWorkspace:
                     if not (self.fused_dequant and _quant.try_dequantize_prefill_rows(packed, out, global_pool=True)):
                         ops.decode_kv(packed, pool_tag=tag, descriptor=descriptor, out=out)
 
+        self._swa_batch = None
+        if state is not None:
+            from rtp_llm.models_py.modules.dsv41.ppu.cp_prefill_swa_batch import prepare
+
+            self._swa_batch = prepare(state, cp, cache, self.kv, self.swa_ranges)
+
     def indices(self, positions, selected, ratio, window):
         if self._swa_plan is not None and (
             not self._swa_plan.current() or not _cp_swa_positions_alias(positions, self._swa_plan.cp)
@@ -580,6 +598,14 @@ class _CPPrefillWorkspace:
             stats["legacy_rows"] += self._swa_plan.legacy_rows
             stats["decoded_rows"] += self._swa_plan.decoded_rows
             stats["avoided_rows"] += self._swa_plan.legacy_rows - self._swa_plan.decoded_rows
+        if self._swa_batch is not None:
+            from rtp_llm.models_py.modules.dsv41.ppu.cp_prefill_swa_batch import try_refresh
+
+            if try_refresh(self._swa_batch, cache, layer_id):
+                if stats is not None:
+                    stats["dequant_calls"] += 1
+                    stats["fused_decode_hits"] += 1
+                return
         descriptor = cache.descriptors(layer_id)["swa_kv"]
         for index, (rid, begin, first, count, positions) in enumerate(self.swa_ranges):
             if stats is not None:
@@ -650,7 +676,7 @@ def _full_cp_workspace_bounds(cp, positions):
 
 def build_cp_prefill_workspace(
     *, ops, cache, layer_id, geometry, context, selected_blocks, window, swa_starts, cp, shared,
-    q8=False, swa_plan=None,
+    q8=False, swa_plan=None, state=None,
 ):
     """Reuse global rows and indices, refreshing only this layer's SWA rows."""
     ratio = geometry.ratio(layer_id)
@@ -672,10 +698,20 @@ def build_cp_prefill_workspace(
             full_local_layout=shared.get("local_prefill_workspace_layout") is cp,
             allow_shared_global=not q8,
             swa_plan=swa_plan,
+            state=state if not q8 else None,
         )
         shared["prefill_kv_workspace"] = (cp, layout, workspace)
     else:
         workspace = cached[2]
+        if getattr(workspace, "_cp_compact_host_bounds", False) and (
+            state is None
+            or workspace._cp_compact_host_state() is not state
+            or not state.cp_compact_workspace_bounds_current(cp, context.positions)
+        ):
+            # A workspace born from authenticated compact host bounds must
+            # never outlive that proof. Reject before any source refresh or
+            # indices launch; a consumer cannot recreate the birth receipt.
+            raise RuntimeError("stale CP compact host workspace bounds")
         if swa_plan is not None:
             cache._cp_segmented_swa_stats["workspace_hits"] += 1
         if workspace._shared_global is not None:

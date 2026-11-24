@@ -367,10 +367,35 @@ class LocalSwaNativeWriteCPU(_WriteCases, unittest.TestCase):
             actual = prefill_swa.write_prefill_range(
                 pool, _LocalSwaWriteGeometry(0, entries, pool.tensor.shape[1]), table, 0, start, end, 128, packed,
             )
-            self.assertEqual(actual, expected)
+            self.assertEqual(actual.positions, expected)
+            self.assertEqual(actual.owned_rows, len(expected))
             for pos in expected:
                 assert_bytes(self, pool.tensor[int(table[0, pos // span]),
                                                (pos % entries) * 528:(pos % entries + 1) * 528], packed[pos - start])
+
+    def test_sharded_receipt_counts_rows_that_intersect_the_byte_slice(self):
+        entries, span, start, end = 129, 257, 211, 683
+        table = torch.tensor([[0, -1, 1]], dtype=torch.int32)
+        expected = expected_positions(table, 0, start, end, entries, span)
+        packed = torch.zeros((end - start, 528), dtype=torch.uint8)
+        # A 528-byte row straddles this slice boundary. The omitted middle
+        # page must not contribute positions or ownership to the receipt.
+        slice_bytes = 8704
+        pool = NS(entries=entries, span=span, framework_tag="swa_kv", table=table,
+                  tensor=torch.zeros((2, slice_bytes), dtype=torch.uint8))
+        for rank in range(8):
+            with self.subTest(rank=rank), patch.object(prefill_swa, "_write_prefill_ring_range"):
+                placement = _LocalSwaWriteGeometry(rank, entries, slice_bytes)
+                actual = prefill_swa.write_prefill_range(
+                    pool, placement, table, 0, start, end, 128, packed,
+                )
+                self.assertEqual(actual.positions, expected)
+                old_count = sum(
+                    (p % entries) * 528 < (rank + 1) * slice_bytes
+                    and ((p % entries) + 1) * 528 > rank * slice_bytes
+                    for p in expected
+                )
+                self.assertEqual(actual.owned_rows, old_count)
 
     def test_rebind_during_mirror_is_not_certified(self):
         state = fixture(self.device, (17,), (141,))

@@ -189,21 +189,35 @@ class DeepSeekV41PPUModel(DeepSeekV41Model):
                 decode=True,
             )
         elif not self._is_decode_role and dist.is_initialized() and dist.get_world_size() == 8:
+            from rtp_llm.models_py.modules.dsv41.ppu.cp_prefill_engram_rounds import (
+                cp8_engram_prefill_profile,
+                cp8_engram_topology,
+            )
             from rtp_llm.models_py.modules.dsv41.ppu.engram import LOCAL_PREFILL_ENGRAM_ROUNDS_ENV
-            from rtp_llm.models_py.modules.dsv41.ppu.engram_peer import ENV, prepare_peer_shards
+            from rtp_llm.models_py.modules.dsv41.ppu.engram_peer import ENV, engram_in_hbm_flag, prepare_peer_shards
             from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import env_value
 
-            args = self._v4_args
+            args, rank = self._v4_args, dist.get_rank()
+            if self._prefill_cp_size == 8:
+                flag = engram_in_hbm_flag(decode=False)
+                eligible = (
+                    cp8_engram_topology(self, rank)
+                    and self.parallelism_config.prefill_cp_config.kv_cache_sharded
+                    and cp8_engram_prefill_profile(policy)
+                    and os.environ.get(LOCAL_PREFILL_ENGRAM_ROUNDS_ENV, "0") == "0"
+                )
+            else:
+                flag = os.environ.get(ENV, "0")
+                eligible = (
+                    self.parallelism_config.tp_size == args.tp_size == self._prefill_cp_size == 1
+                    and args.dp_size == args.ep_size == 8
+                    and args.dp_rank == args.ep_rank == rank
+                    and env_value(LOCAL_PREFILL_ENGRAM_ROUNDS_ENV, "0") == "1"
+                )
             prepare_peer_shards(
                 self._shared_ops._engram, self.v4.embed.weight.device,
-                flag=os.environ.get(ENV, "0"),
-                eligible=(
-                    not self._is_speculative
-                    and self.parallelism_config.tp_size == args.tp_size == self._prefill_cp_size == 1
-                    and args.dp_size == args.ep_size == 8
-                    and args.dp_rank == args.ep_rank == dist.get_rank()
-                    and env_value(LOCAL_PREFILL_ENGRAM_ROUNDS_ENV, "0") == "1"
-                ),
+                flag=flag,
+                eligible=not self._is_speculative and eligible,
             )
         self._bind_runtime_buffers(self.v4.embed.weight.device)
         self.shared_runtime = SharedNativeRuntime(self)

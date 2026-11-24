@@ -17,10 +17,21 @@ from functools import lru_cache
 import torch
 import torch.nn.functional as F
 
+from rtp_llm.models_py.modules.dsv41.prefill import ced as public_ced
 from rtp_llm.models_py.modules.dsv41.ppu.linear import (
     PPUPTPCLinear,
     prepare_shared_ptpc_input,
 )
+from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import env_value
+
+
+CP8_COMPACT_HOST_GEOMETRY_ENV = "RTP_V41_PPU_CP8_COMPACT_HOST_GEOMETRY"
+_CP8_LAYOUT_BINDINGS = tuple((owner, name, getattr(owner, name), getattr(owner, name).__code__)
+    for owner, names in (
+        (public_ced, ("_host_query_layout", "_upload_layout_arrays")),
+        (public_ced._RowExchange, ("compact", "restore")),
+        (public_ced.CEDPlan, ("compact", "compact_l20", "restore_rows", "restore_aux")),
+    ) for name in names)
 
 
 def _physical_pair_supported(first, second):
@@ -271,6 +282,182 @@ def _cp8_plan_transport(plan):
     return values
 
 
+def cp8_native_host_metadata(original):
+    """Borrow actual native CPU owners, without copying device metadata.
+
+    As with the original CP birth, native inference inputs are read-only for
+    the forward. Normal tensors additionally retain their version counters.
+    TensorImpl keys accommodate native getters returning new Python wrappers.
+    """
+    values = []
+    for name in ("prefill_qkv_restore_indice", "prefill_qkv_padding_mask"):
+        value = getattr(original.cp_info, name + "_cpu", None)
+        if not isinstance(value, torch.Tensor) or value.numel() == 0:
+            value = getattr(original.cp_info, name, None)
+        if (type(value) is not torch.Tensor or value.device.type != "cpu"
+                or value.layout != torch.strided or value.ndim != 1
+                or not value.is_contiguous() or value.is_neg() or value.is_conj()
+                or value.requires_grad or value.numel() != original.padded_seq_len):
+            return None
+        values.append(value)
+    if (values[0].dtype not in (torch.int32, torch.int64)
+            or values[1].dtype not in (torch.bool, torch.uint8, torch.int32, torch.int64)):
+        return None
+    keys = tuple((value._cdata, *_tensor_key(value)[1:]) for value in values)
+    return tuple(values), keys
+
+
+def _cp8_layout_bindings_current(plan):
+    return (
+        type(plan) is public_ced.CEDPlan and type(plan.exchange) is public_ced._RowExchange
+        and all(getattr(owner, name) is method and method.__code__ is code
+                for owner, name, method, code in _CP8_LAYOUT_BINDINGS)
+        and not any(name in vars(plan) for name in ("compact", "compact_l20", "restore_rows", "restore_aux"))
+        and not any(name in vars(plan.exchange) for name in ("compact", "restore"))
+    )
+
+
+def _cp8_immutable_host_owners(plan, *, validate=True):
+    original, compact, exchange = plan.original_context, plan.context, plan.exchange
+    values = (
+        original.input_lengths_global_host, original.prefix_lengths_host,
+        original.chunk_lengths_per_req, compact.input_lengths_global_host,
+        compact.prefix_lengths_host, compact.chunk_lengths_per_req,
+        exchange.send_sizes, exchange.receive_sizes, exchange.candidate_rows_host,
+        exchange.projection_groups_host, compact.swa_replay_starts_host,
+        plan.indexer_groups,
+    )
+    if not validate:
+        # Creation already proved every nested host container immutable.
+        # Currentness compares their exact owners, not1120 retained integers.
+        return values
+
+    def immutable(value):
+        return type(value) is tuple and all(
+            type(item) is int or (type(item) is tuple and immutable(item)) for item in value
+        )
+
+    # indexer_groups contains the exact versioned tensor pairs checked by the
+    # ordinary plan birth. Its outer/pair containers must also be immutable.
+    if (not all(value is None or immutable(value) for value in values[:-1])
+            or type(values[-1]) is not tuple
+            or any(type(pair) is not tuple for pair in values[-1])):
+        return None
+    return values
+
+
+@dataclass(frozen=True)
+class CP8CompactPlanHostGeometry:
+    """Host results born with the public packed layout, never at a consumer.
+
+    CPU slab values are the exact upload source, not a reconstructed device
+    layout. Every typed device view must still own that one packed allocation
+    at its original byte offset. The ordinary plan birth checks their versions.
+    """
+
+    native: tuple
+    host_owners: tuple
+    bounds: tuple
+    terminal_source_rows: tuple
+    output_covered: bool
+    stream_key: object
+
+    @classmethod
+    def try_create(cls, birth):
+        plan, original, compact, exchange = birth.plan, birth.original, birth.compact, birth.exchange
+        native = cp8_native_host_metadata(original)
+        owners = _cp8_immutable_host_owners(plan)
+        host = getattr(exchange, "_layout_host_buffer", None)
+        if (native is None or owners is None or not _cp8_layout_bindings_current(plan)
+                or type(host) is not torch.Tensor or host.device.type != "cpu"
+                or host.dtype != torch.uint8 or host.ndim != 1 or host.storage_offset() != 0
+                or host.is_inference() or not host.is_contiguous() or host._version != 0):
+            return None
+        # This exact public builder initializes the slab through NumPy, then
+        # uploads it once and creates views: all private counters start at0.
+        # Do not certify a post-upload write by taking a newer birth snapshot.
+        views = (
+            exchange.send_indices, exchange.receive_positions, compact.relative_positions,
+            compact.global_positions, compact.local_is_real, compact.unpad_restore,
+            compact.req_id_per_token, compact.gather_restore_positions,
+            *(value for pair in plan.indexer_groups for value in pair),
+        )
+        import numpy as np
+
+        dtypes = {torch.int64: np.dtype("int64"), torch.int32: np.dtype("int32"),
+                  torch.bool: np.dtype("bool")}
+        storage = views[0].untyped_storage()
+        offset, arrays = 0, []
+        raw = host.numpy()
+        for value in views:
+            offset = (offset + 15) // 16 * 16
+            if (type(value) is not torch.Tensor or value.dtype not in dtypes
+                    or value.untyped_storage()._cdata != storage._cdata
+                    or value.storage_offset() * value.element_size() != offset
+                    or value.ndim != 1 or not value.is_contiguous() or value._version != 0):
+                return None
+            size = value.numel() * value.element_size()
+            if offset + size > host.numel():
+                return None
+            arrays.append(raw[offset:offset + size].view(dtypes[value.dtype]))
+            offset += size
+        if (host.numel() != (offset + 15) // 16 * 16
+                or storage.nbytes() != host.numel()):
+            return None
+        send, receive, relative, absolute, real, restore, request, selected, *groups = arrays
+        if tuple(selected.tolist()) != birth.geometry[4]:
+            return None
+        # Use the native inverse map and mask actually validated by the public
+        # planner, including arbitrary inverse permutations and ragged padding.
+        native_restore, native_mask = (value.numpy() for value in native[0])
+        padded_start, terminal, bounds = 0, [], []
+        row_start = 0
+        for rid, (length, prefix, chunk, compact_chunk) in enumerate(zip(
+                original.input_lengths_global_host, original.prefix_lengths_host,
+                original.chunk_lengths_per_req, compact.chunk_lengths_per_req)):
+            if (np.count_nonzero(native_mask[padded_start:padded_start + length]) != length
+                    or np.count_nonzero(native_mask[padded_start + length:padded_start + chunk * 8])):
+                return None
+            flat = int(native_restore[padded_start + length - 1])
+            if not 0 <= flat < original.padded_seq_len:
+                return None
+            if flat // original.chunk_length == original.cp_rank:
+                terminal.append(flat % original.chunk_length)
+            stop = row_start + compact_chunk
+            if (not np.all(request[row_start:stop] == rid)
+                    or np.any(absolute[row_start:stop] < prefix)
+                    or np.any(absolute[row_start:stop] >= prefix + length)):
+                return None
+            # Padded query rows keep their actual clamped last-token positions;
+            # no all-live assumption or receive-size inference changes bounds.
+            bounds.append((rid, int(absolute[row_start:stop].min()), int(absolute[row_start:stop].max())))
+            padded_start += chunk * 8
+            row_start = stop
+        if (np.any(send < 0) or np.any(send >= original.chunk_length)
+                or np.any(receive < 0) or np.any(receive >= compact.chunk_length)
+                or len(set(send.tolist())) != send.size
+                or len(set(receive.tolist())) != receive.size
+                or set(np.flatnonzero(real).tolist()) != set(receive.tolist())):
+            return None
+        sent = set(send.tolist())
+        stream_key = None
+        if compact.global_positions.is_cuda:
+            stream = torch.cuda.current_stream(compact.global_positions.device)
+            stream_key = (stream.device, int(stream.cuda_stream))
+        return cls(native, owners, tuple(bounds), tuple(terminal),
+                   all(row in sent for row in terminal), stream_key)
+
+    def current(self, birth):
+        native = cp8_native_host_metadata(birth.original)
+        owners = _cp8_immutable_host_owners(birth.plan, validate=False)
+        return (
+            native is not None and native[1] == self.native[1]
+            and owners is not None and len(owners) == len(self.host_owners)
+            and all(old is new for old, new in zip(self.host_owners, owners))
+            and _cp8_layout_bindings_current(birth.plan)
+        )
+
+
 class CP8QueryPlanBirth:
     """A versioned private CP140 plan, minted only by bounded_plan's factory.
 
@@ -300,6 +487,10 @@ class CP8QueryPlanBirth:
         if any(value is not getattr(self.original, name, None)
                for name, value in zip(self.borrowed_names, self.borrowed)):
             raise ValueError("CP140 query context changed original source metadata")
+        self.host_geometry = (
+            CP8CompactPlanHostGeometry.try_create(self)
+            if env_value(CP8_COMPACT_HOST_GEOMETRY_ENV, "0") == "1" else None
+        )
 
     def current(self):
         plan = self.plan
