@@ -658,6 +658,17 @@ class PpuMegaMoEW4A8Strategy(PpuDeepEPFP4Strategy):
 
     name = "ppu_mega_moe_w4a8_fp32"
 
+    @staticmethod
+    def _resolve_token_cap(cfg, max_tokens):
+        # The mega-moe workspace is sized by the EP token capacity, so the
+        # per-call cap defaults to it; a stricter override must stay within it.
+        cap = cfg.max_tokens_per_rank if max_tokens is None else int(max_tokens)
+        if not 0 < cap <= cfg.max_tokens_per_rank:
+            raise ValueError(
+                "W4A8 MegaMoE token cap must be within the EP token capacity"
+            )
+        return cap
+
     @classmethod
     def can_handle(cls, cfg):
         return (
@@ -709,7 +720,7 @@ class PpuMegaMoEW4A8Strategy(PpuDeepEPFP4Strategy):
         *,
         resources,
         module_name="deep_gemm_route_a",
-        max_tokens=96,
+        max_tokens=None,
         **kwargs,
     ):
         if kwargs:
@@ -720,9 +731,7 @@ class PpuMegaMoEW4A8Strategy(PpuDeepEPFP4Strategy):
         self._mega = importlib.import_module(module_name)
         if not self.package_has_exact_capability(self._mega):
             raise RuntimeError("MegaMoE package lacks the exact W4A8/FP32 capability")
-        self._max_tokens = int(max_tokens)
-        if self._max_tokens <= 0:
-            raise ValueError("W4A8 MegaMoE token cap must be positive")
+        self._max_tokens = self._resolve_token_cap(cfg, max_tokens)
         self._resources = resources
         self._sym = None
 

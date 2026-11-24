@@ -76,7 +76,7 @@ class PpuDecodeProvider(PpuModuleProvider):
             strategy_kwargs["module_name"] = (
                 self._mega_fp8_module_name if exact else self._mega_module_name
             )
-            if exact_w4a8:
+            if exact_w4a8 and self._w4a8_max_tokens is not None:
                 strategy_kwargs["max_tokens"] = self._w4a8_max_tokens
             elif not exact:
                 strategy_kwargs["streamed"] = self._mega_streamed
@@ -155,18 +155,20 @@ class PpuDecodeProvider(PpuModuleProvider):
             raise ValueError("DSV4_PPU_MEGAMOE_EXACT_BACKEND must be w4a8 or routea")
         self._exact_backend = exact_backend
         w4a8_max_tokens = self.execution_options.get(
-            "DSV4_PPU_MEGAMOE_W4A8_MAX_TOKENS", "96"
+            "DSV4_PPU_MEGAMOE_W4A8_MAX_TOKENS"
         )
-        try:
-            self._w4a8_max_tokens = int(w4a8_max_tokens)
-        except (TypeError, ValueError):
-            raise ValueError(
-                "DSV4_PPU_MEGAMOE_W4A8_MAX_TOKENS must be a positive integer"
-            ) from None
-        if self._w4a8_max_tokens <= 0:
-            raise ValueError(
-                "DSV4_PPU_MEGAMOE_W4A8_MAX_TOKENS must be a positive integer"
-            )
+        self._w4a8_max_tokens = None
+        if w4a8_max_tokens is not None:
+            try:
+                self._w4a8_max_tokens = int(w4a8_max_tokens)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "DSV4_PPU_MEGAMOE_W4A8_MAX_TOKENS must be a positive integer"
+                ) from None
+            if self._w4a8_max_tokens <= 0:
+                raise ValueError(
+                    "DSV4_PPU_MEGAMOE_W4A8_MAX_TOKENS must be a positive integer"
+                )
         self._mega_resources = None
         self._mega_module_name = "deep_gemm_mega"
         self._mega_fp8_module_name = "deep_gemm_route_a"

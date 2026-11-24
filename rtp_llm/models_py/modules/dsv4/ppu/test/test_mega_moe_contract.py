@@ -131,6 +131,14 @@ class MegaMoEContractTest(unittest.TestCase):
         self.assertEqual(len(call.args[2]), 3)
         self.assertFalse(call.kwargs["fast_math"])
 
+    def test_w4a8_default_cap_follows_the_ep_token_capacity(self):
+        resolve = PpuMegaMoEW4A8Strategy._resolve_token_cap
+        self.assertEqual(resolve(self.cfg, None), self.cfg.max_tokens_per_rank)
+        self.assertEqual(resolve(self.cfg, 96), 96)
+        for bad in (0, -1, self.cfg.max_tokens_per_rank + 1):
+            with self.assertRaisesRegex(ValueError, "EP token capacity"):
+                resolve(self.cfg, bad)
+
     def test_w4a8_rejects_inputs_above_the_token_cap(self):
         strategy = object.__new__(PpuMegaMoEW4A8Strategy)
         torch.nn.Module.__init__(strategy)
@@ -285,7 +293,7 @@ class MegaMoEContractTest(unittest.TestCase):
             strategy = provider._build_moe_strategy(self.cfg)
         self.assertIsInstance(strategy, PpuMegaMoEW4A8Strategy)
         self.assertEqual(w4a8.call_args.kwargs["module_name"], "deep_gemm_route_a")
-        self.assertEqual(w4a8.call_args.kwargs["max_tokens"], 96)
+        self.assertNotIn("max_tokens", w4a8.call_args.kwargs)
         routea.assert_not_called()
         legacy.assert_not_called()
         with (
@@ -346,6 +354,7 @@ class MegaMoEContractTest(unittest.TestCase):
     def test_provider_validates_exact_backend_and_w4a8_cap(self):
         options = {**DECODE_EXECUTION_OPTIONS, "DSV4_PPU_DECODE_MOE_BACKEND": "megamoe"}
         self.assertEqual(PpuDecodeProvider(options)._exact_backend, "w4a8")
+        self.assertIsNone(PpuDecodeProvider(options)._w4a8_max_tokens)
         self.assertEqual(
             PpuDecodeProvider(
                 {**options, "DSV4_PPU_MEGAMOE_W4A8_MAX_TOKENS": "48"}
