@@ -11,6 +11,8 @@ import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
 
 import java.util.Set;
@@ -256,6 +258,158 @@ class GrpcCacheStatusCheckRunnerTest {
                         eq(1L),
                         eq(20L),
                         eq(RoleType.PREFILL));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void versionRegressionReplacesPreviouslyIndexedKeys(boolean restartedWithKeys) {
+        WorkerStatus worker = workerStatus();
+        String ipPort = worker.getLogicalIpPort();
+        WorkerDirectory directory = directory(worker);
+        var previous =
+                EngineRpcService.CacheStatusPB.newBuilder()
+                        .setVersion(5000)
+                        .putCacheKeys(42, true)
+                        .build();
+        var restarted = EngineRpcService.CacheStatusPB.newBuilder().setVersion(2);
+        if (restartedWithKeys) {
+            restarted.addCacheKeyList(99);
+        }
+        when(engineGrpcService.getCacheStatusAsync(
+                        anyString(),
+                        anyInt(),
+                        eq(worker),
+                        anyLong(),
+                        anyLong(),
+                        eq(RoleType.PREFILL)))
+                .thenReturn(
+                        CompletableFuture.completedFuture(previous),
+                        CompletableFuture.completedFuture(restarted.build()));
+        when(localKvCacheAwareManager.updateFromWorkerStatus(worker))
+                .thenReturn(WorkerCacheUpdateResult.builder().success(true).build());
+
+        runCachePoll(ipPort, worker, directory, false);
+        assertEquals(5000, worker.getCacheIndexedVersion());
+
+        runCachePoll(ipPort, worker, directory, false);
+        assertEquals(2, worker.getCacheIndexedVersion());
+        assertEquals(
+                restartedWithKeys ? Set.of(99L) : Set.of(),
+                worker.getCacheStatus().getCachedKeys());
+        verify(localKvCacheAwareManager, times(2)).updateFromWorkerStatus(worker);
+    }
+
+    @Test
+    void failedIndexUpdateAfterRegressionRequestsFullSnapshotEvenAtOldAcknowledgedVersion() {
+        WorkerStatus worker = workerStatus();
+        String ipPort = worker.getLogicalIpPort();
+        WorkerDirectory directory = directory(worker);
+        var previous =
+                EngineRpcService.CacheStatusPB.newBuilder()
+                        .setVersion(50)
+                        .putCacheKeys(42, true)
+                        .build();
+        var restarted =
+                EngineRpcService.CacheStatusPB.newBuilder()
+                        .setVersion(2)
+                        .putCacheKeys(99, true)
+                        .build();
+        var recovered = restarted.toBuilder().setVersion(50).build();
+        when(engineGrpcService.getCacheStatusAsync(
+                        anyString(),
+                        anyInt(),
+                        eq(worker),
+                        anyLong(),
+                        anyLong(),
+                        eq(RoleType.PREFILL)))
+                .thenReturn(
+                        CompletableFuture.completedFuture(previous),
+                        CompletableFuture.completedFuture(restarted),
+                        CompletableFuture.completedFuture(recovered));
+        var success = WorkerCacheUpdateResult.builder().success(true).build();
+        when(localKvCacheAwareManager.updateFromWorkerStatus(worker))
+                .thenReturn(
+                        success,
+                        WorkerCacheUpdateResult.builder()
+                                .success(false)
+                                .errorMessage("index failed")
+                                .build(),
+                        success);
+
+        runCachePoll(ipPort, worker, directory, false);
+        runCachePoll(ipPort, worker, directory, false);
+        assertEquals(-1, worker.getCacheIndexedVersion());
+
+        runCachePoll(ipPort, worker, directory, false);
+        assertEquals(Set.of(99L), worker.getCacheStatus().getCachedKeys());
+        assertEquals(50, worker.getCacheIndexedVersion());
+        verify(engineGrpcService, times(2))
+                .getCacheStatusAsync(
+                        eq("127.0.0.1"),
+                        eq(8081),
+                        eq(worker),
+                        eq(-1L),
+                        eq(20L),
+                        eq(RoleType.PREFILL));
+        verify(localKvCacheAwareManager, times(3)).updateFromWorkerStatus(worker);
+    }
+
+    @Test
+    void regressionToAcknowledgedVersionWithoutKeysRequestsFullSnapshotBeforeReplacingIndex() {
+        WorkerStatus worker = workerStatus();
+        String ipPort = worker.getLogicalIpPort();
+        WorkerDirectory directory = directory(worker);
+        var previous =
+                EngineRpcService.CacheStatusPB.newBuilder()
+                        .setVersion(50)
+                        .putCacheKeys(42, true)
+                        .build();
+        var advanced = previous.toBuilder().setVersion(60).build();
+        var omitted = EngineRpcService.CacheStatusPB.newBuilder().setVersion(50).build();
+        var full = omitted.toBuilder().addCacheKeyList(99).build();
+        when(engineGrpcService.getCacheStatusAsync(
+                        anyString(),
+                        anyInt(),
+                        eq(worker),
+                        anyLong(),
+                        anyLong(),
+                        eq(RoleType.PREFILL)))
+                .thenReturn(
+                        CompletableFuture.completedFuture(previous),
+                        CompletableFuture.completedFuture(advanced),
+                        CompletableFuture.completedFuture(omitted),
+                        CompletableFuture.completedFuture(full));
+        var success = WorkerCacheUpdateResult.builder().success(true).build();
+        when(localKvCacheAwareManager.updateFromWorkerStatus(worker))
+                .thenReturn(
+                        success,
+                        WorkerCacheUpdateResult.builder()
+                                .success(false)
+                                .errorMessage("index failed")
+                                .build(),
+                        success);
+
+        runCachePoll(ipPort, worker, directory, false);
+        runCachePoll(ipPort, worker, directory, false);
+        assertEquals(50, worker.getCacheIndexedVersion());
+        assertEquals(60, worker.getCacheStatus().getVersion());
+
+        runCachePoll(ipPort, worker, directory, false);
+        assertEquals(-1, worker.getCacheIndexedVersion());
+        verify(localKvCacheAwareManager, times(2)).updateFromWorkerStatus(worker);
+
+        runCachePoll(ipPort, worker, directory, false);
+        assertEquals(Set.of(99L), worker.getCacheStatus().getCachedKeys());
+        assertEquals(50, worker.getCacheIndexedVersion());
+        verify(engineGrpcService, times(2))
+                .getCacheStatusAsync(
+                        eq("127.0.0.1"),
+                        eq(8081),
+                        eq(worker),
+                        eq(-1L),
+                        eq(20L),
+                        eq(RoleType.PREFILL));
+        verify(localKvCacheAwareManager, times(3)).updateFromWorkerStatus(worker);
     }
 
     @Test

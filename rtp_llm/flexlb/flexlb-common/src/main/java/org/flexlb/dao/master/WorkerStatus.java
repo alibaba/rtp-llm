@@ -525,6 +525,13 @@ public class WorkerStatus {
         return cacheIndexSnapshot.get().indexedVersion();
     }
 
+    public void invalidateCacheIndexedVersion() {
+        requireGenerationLock();
+        requireActiveGeneration();
+        CacheIndexSnapshot current = cacheIndexSnapshot.get();
+        cacheIndexSnapshot.set(new CacheIndexSnapshot(current.cacheStatus(), false, -1L));
+    }
+
     public void publishCacheIndexedVersion(long version) {
         requireGenerationLock();
         requireActiveGeneration();
