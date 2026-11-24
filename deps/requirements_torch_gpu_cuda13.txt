@@ -19,9 +19,6 @@ nvidia-cuda-cccl==13.2.86
 # Triton 3.6.0 supports CUDA 13.x ptxas natively (no wrapper needed).
 triton==3.6.0
 
-# SM120 GDN requires the CUDA 13 compiler, alongside the shared DSL frontend.
-nvidia-cutlass-dsl==4.4.2
-nvidia-cutlass-dsl-libs-cu13==4.4.2
 
 # Use the CUDA 13.2 artifacts from the same RTP FlashInfer build.
 # Pinned to the RTP fork build (not upstream 0.6.9): upstream copies an
@@ -77,3 +74,10 @@ tabulate==0.9.0
 # tensorrt 10.x cu12 series — drop for cuda13 (use TRT-LLM plugins via C++ side).
 # multimodal video decode (matches deps/requirements_base.txt on main)
 av==16.1.0 ; platform_machine == "x86_64"
+
+# ViT attention and CuTe runtime dependencies.
+quack-kernels @ https://github.com/Dao-AILab/quack/archive/77a750c0d9548d4a6e23c0f64062d61b3ea420ff.tar.gz#sha256=ebc940da966e88a05be318c3dc3f650a7359a281642f8f2f77c28ba4e9affa05
+flash-attn-4 @ https://files.pythonhosted.org/packages/44/1c/7ee1a5949e9b275eb62017d6fcc70e385db161b5341b686a29beb94ea181/flash_attn_4-4.0.0b21-py3-none-any.whl#sha256=8ad0cdd22b279ef2ca8b4e43a4fb33b7dc78936d36c41788bad9d67372056949
+nvidia-cutlass-dsl==4.7.1
+nvidia-cutlass-dsl-libs-base==4.7.1
+torch-c-dlpack-ext==0.1.5
