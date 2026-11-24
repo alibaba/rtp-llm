@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <limits>
 #include <unordered_map>
 #include <cstdlib>
@@ -9,6 +10,7 @@
 #include <exception>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <utility>
 #include <unistd.h>
 
@@ -345,6 +347,7 @@ bool DeviceBlockPool::hasExternalRefNoLock(BlockIdxType block) const {
 }
 
 DeviceBlockPool::~DeviceBlockPool() {
+    deregUserMr();
     cache_aligned_buffer_ = torch::Tensor();
 }
 
@@ -699,14 +702,22 @@ bool DeviceBlockPool::init() {
 }
 
 void DeviceBlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
+    std::lock_guard<std::mutex> lock(registration_mutex_);
+    if (!registered_buffers_.empty()) {
+        return;
+    }
     if (cache_store) {
         cache_store_ = std::move(cache_store);
     }
-    if (cache_store_ && !kvcache_reg_mr_) {
-        RTP_LLM_LOG_INFO("start to register user mr, pool_name=%s", config().pool_name.c_str());
-        auto       memory_util = cache_store_->getMemoryUtil();
-        const bool gpu         = where() == MemoryType::MEMORY_GPU;
-
+    if (!cache_store_) {
+        return;
+    }
+    RTP_LLM_LOG_INFO("start to register user mr, pool_name=%s", config().pool_name.c_str());
+    auto       memory_util = cache_store_->getMemoryUtil();
+    const bool gpu         = where() == MemoryType::MEMORY_GPU;
+    // Reserve before publishing any registration so recording a successful one cannot allocate.
+    registered_buffers_.reserve(2 * config().memory_layouts.size());
+    try {
         for (size_t layout_idx = 0; layout_idx < config().memory_layouts.size(); ++layout_idx) {
             const auto& layout_cfg = config().memory_layouts[layout_idx];
 
@@ -728,25 +739,33 @@ void DeviceBlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cac
                                         "scale");
             }
         }
-        kvcache_reg_mr_ = true;
+    } catch (...) {
+        retireRegisteredBuffers();
+        throw;
     }
 }
 
 void DeviceBlockPool::deregUserMr() {
-    if (kvcache_reg_mr_ && cache_store_) {
-        RTP_LLM_LOG_INFO("start to deregister user mr, pool_name=%s", config().pool_name.c_str());
-        auto       memory_util = cache_store_->getMemoryUtil();
-        const bool gpu         = where() == MemoryType::MEMORY_GPU;
+    std::lock_guard<std::mutex> lock(registration_mutex_);
+    retireRegisteredBuffers();
+}
 
-        for (size_t layout_idx = 0; layout_idx < config().memory_layouts.size(); ++layout_idx) {
-            const auto& layout_cfg = config().memory_layouts[layout_idx];
-            deregisterUserMrForBuffer(memory_util, layout_idx, layout_cfg.kv_cache_offset_bytes, gpu, "kv");
-            if (layout_cfg.hasScale()) {
-                deregisterUserMrForBuffer(memory_util, layout_idx, layout_cfg.kv_scale_offset_bytes, gpu, "scale");
-            }
+void DeviceBlockPool::retireRegisteredBuffers() {
+    if (registered_buffers_.empty()) {
+        return;
+    }
+    auto       memory_util = cache_store_->getMemoryUtil();
+    const bool gpu         = where() == MemoryType::MEMORY_GPU;
+    while (!registered_buffers_.empty()) {
+        void* base = registered_buffers_.back();
+        if (!memory_util->deregUserMr(base, gpu)) {
+            RTP_LLM_LOG_ERROR(
+                "waiting for KV registration teardown, pool_name=%s base=%p", config().pool_name.c_str(), base);
+            do {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            } while (!memory_util->deregUserMr(base, gpu));
         }
-        RTP_LLM_LOG_INFO("deregister user mr for block pool success, pool_name=%s", config().pool_name.c_str());
-        kvcache_reg_mr_ = false;
+        registered_buffers_.pop_back();
     }
 }
 
@@ -760,13 +779,14 @@ void DeviceBlockPool::registerUserMrForBuffer(std::shared_ptr<MemoryUtil> memory
     void* base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_) + static_cast<ptrdiff_t>(offset_bytes));
     auto  start_us = currentTimeUs();
 
-    if (!memory_util->regUserMr(base_ptr, bytes, gpu, stride_bytes)) {
+    if (!memory_util->regLoadDestinationMr(base_ptr, bytes, gpu, stride_bytes)) {
         RTP_LLM_FAIL("register user mr for block pool layout[%zu] %s buffer failed, pool_name=%s",
                      layout_idx,
                      buffer_type.c_str(),
                      config().pool_name.c_str());
     }
 
+    registered_buffers_.push_back(base_ptr);
     auto cost_ms = (currentTimeUs() - start_us) / 1000;
     mr_cost_time_ms_ += cost_ms;
 
@@ -778,20 +798,6 @@ void DeviceBlockPool::registerUserMrForBuffer(std::shared_ptr<MemoryUtil> memory
                      bytes,
                      stride_bytes,
                      cost_ms);
-}
-
-void DeviceBlockPool::deregisterUserMrForBuffer(std::shared_ptr<MemoryUtil> memory_util,
-                                                size_t                      layout_idx,
-                                                size_t                      offset_bytes,
-                                                bool                        gpu,
-                                                const std::string&          buffer_type) {
-    void* base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_) + static_cast<ptrdiff_t>(offset_bytes));
-    if (!memory_util->deregUserMr(base_ptr, gpu)) {
-        RTP_LLM_FAIL("deregister user mr for block pool layout[%zu] %s buffer failed, pool_name=%s",
-                     layout_idx,
-                     buffer_type.c_str(),
-                     config().pool_name.c_str());
-    }
 }
 
 std::pair<int, int> DeviceBlockPool::mapGlobalLayerIdToLocal(int global_layer_id) const {

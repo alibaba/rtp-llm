@@ -22,6 +22,7 @@ message RdmaConnectionInfo {
     optional uint32 port = 2;
     optional uint64 peer_channel = 3;
     optional uint64 client_channel = 4;
+    optional uint64 server_generation = 5;
 }
 
 message RdmaBlockBufferAddrInfo {
@@ -54,10 +55,11 @@ message CacheLoadResponse {
     optional bool direct_write_response = 3[default=false]; // true is rdma, false is tcp
     repeated BlockBufferInfo blocks = 4;
     optional bool exact_rdma_channels = 5;
+    optional bool rdma_writes_placed = 6;
 };
 
 message CacheTransferInfo {
-    optional uint32 partition_count = 1; 
+    optional uint32 partition_count = 1;
     optional uint32 partition_id = 2;
     repeated string local_keys = 3;
     repeated string remote_keys = 4;
@@ -76,7 +78,7 @@ message CacheTransferRequest {
 }
 
 message CacheTransferResponse {
-    optional KvCacheStoreServiceErrorCode error_code = 1; 
+    optional KvCacheStoreServiceErrorCode error_code = 1;
     optional string error_msg = 2;
     optional int64 response_send_start_time_us = 3;
 }

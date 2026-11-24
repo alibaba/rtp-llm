@@ -51,7 +51,7 @@ std::shared_ptr<BlockBufferInfo> CacheStoreServiceImplContext::getAndEraseUnLoad
     return block_info;
 }
 
-void CacheStoreServiceImplContext::runSuccess(bool direct_write) {
+void CacheStoreServiceImplContext::runSuccess(bool direct_write, bool rdma_writes_placed) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%s] run success", request_id_.c_str());
     bool expected = false;
@@ -68,6 +68,9 @@ void CacheStoreServiceImplContext::runSuccess(bool direct_write) {
             response_->set_error_code(KvCacheStoreServiceErrorCode::EC_SUCCESS);
             response_->set_response_send_start_time_us(currentTimeUs());
             response_->set_direct_write_response(direct_write);
+            if (rdma_writes_placed) {
+                response_->set_rdma_writes_placed(true);
+            }
             response_ = nullptr;
         }
     }

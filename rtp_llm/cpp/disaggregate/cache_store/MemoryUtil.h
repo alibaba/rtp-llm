@@ -18,6 +18,11 @@ public:
     virtual bool supportsLoadWriteStop() {
         return !isRdmaMode();
     }
+    // The owning KV pool calls deregUserMr before releasing this allocation.
+    // Transports may reuse completed load registrations within that lifetime.
+    virtual bool regLoadDestinationMr(void* buf, uint64_t size, bool gpu, uint64_t aligned_size = 0) {
+        return regUserMr(buf, size, gpu, aligned_size);
+    }
 };
 
 }  // namespace rtp_llm

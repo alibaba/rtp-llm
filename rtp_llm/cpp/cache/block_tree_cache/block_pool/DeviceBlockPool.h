@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -171,6 +172,7 @@ private:
     void processLayerTensors(size_t layout_idx, const MemoryLayoutConfig& layout_cfg, size_t& global_layer_begin);
 
     // Helper functions for regUserMr/deregUserMr
+    void retireRegisteredBuffers();
     void registerUserMrForBuffer(std::shared_ptr<MemoryUtil> memory_util,
                                  size_t                      layout_idx,
                                  size_t                      offset_bytes,
@@ -178,11 +180,6 @@ private:
                                  size_t                      stride_bytes,
                                  bool                        gpu,
                                  const std::string&          buffer_type);
-    void deregisterUserMrForBuffer(std::shared_ptr<MemoryUtil> memory_util,
-                                   size_t                      layout_idx,
-                                   size_t                      offset_bytes,
-                                   bool                        gpu,
-                                   const std::string&          buffer_type);
 
 private:
     static constexpr size_t                          kRefTypeCount = static_cast<size_t>(DeviceBlockRefType::COUNT);
@@ -195,7 +192,8 @@ private:
     size_t        allocation_size_bytes_{0};
     bool          uses_dedicated_device_allocation_{false};
 
-    bool                        kvcache_reg_mr_  = false;
+    std::mutex                  registration_mutex_;
+    std::vector<void*>          registered_buffers_;
     int64_t                     mr_cost_time_ms_ = 0;
     std::shared_ptr<CacheStore> cache_store_;
 
