@@ -474,6 +474,35 @@ def validate_qwen4_5_arch_config(arch_cfg: Qwen4_5ArchConfig) -> Dict[int, int]:
             raise ValueError(f"Invalid ple_quant_scheme: {arch_cfg.ple_quant_scheme!r}")
         compute_ple_ngram_shard_shape(arch_cfg)
 
+    # QSA indexer
+    if arch_cfg.indexer_head_dim < 0:
+        raise ValueError(f"indexer_head_dim must be non-negative, got {arch_cfg.indexer_head_dim}")
+    if arch_cfg.has_qsa:
+        rotary_dim = int(arch_cfg.head_dim * arch_cfg.partial_rotary_factor)
+        if arch_cfg.indexer_head_dim <= 0 or (arch_cfg.indexer_head_dim & (arch_cfg.indexer_head_dim - 1)) != 0:
+            raise ValueError(
+                f"indexer_head_dim must be a positive power of two when QSA is enabled, got {arch_cfg.indexer_head_dim}"
+            )
+        if arch_cfg.indexer_head_dim < rotary_dim:
+            raise ValueError(
+                f"indexer_head_dim ({arch_cfg.indexer_head_dim}) must be >= rotary_dim ({rotary_dim})"
+            )
+        if arch_cfg.indexer_n_heads <= 0:
+            raise ValueError(f"indexer_n_heads must be positive, got {arch_cfg.indexer_n_heads}")
+        if arch_cfg.indexer_kv_heads != 1:
+            raise ValueError(f"QSA requires indexer_kv_heads=1, got {arch_cfg.indexer_kv_heads}")
+        if arch_cfg.indexer_compress_ratio <= 0:
+            raise ValueError(
+                f"indexer_compress_ratio must be positive, got {arch_cfg.indexer_compress_ratio}"
+            )
+        if arch_cfg.indexer_budget <= 0:
+            raise ValueError(f"indexer_budget must be positive, got {arch_cfg.indexer_budget}")
+        if arch_cfg.indexer_budget % arch_cfg.indexer_compress_ratio != 0:
+            raise ValueError(
+                f"indexer_budget ({arch_cfg.indexer_budget}) must be divisible by "
+                f"indexer_compress_ratio ({arch_cfg.indexer_compress_ratio})"
+            )
+
     return sharing
 
 
@@ -616,6 +645,12 @@ class Qwen4_5ModelConfig(_BaseModelConfig):
             "qwen4_5_kv_cache_plan",
             "qwen4_5_param_and_state_estimate",
             "qwen4_5_raw_config",
+            "qwen4_5_has_qsa",
+            "_qwen4_indexer_head_dim",
+            "_qwen4_indexer_n_heads",
+            "_qwen4_indexer_kv_heads",
+            "_qwen4_indexer_compress_ratio",
+            "_qwen4_indexer_budget",
         }
 
     def __init__(

@@ -123,6 +123,12 @@ def arch_config_to_hf_dict(cfg: Qwen4_5ArchConfig) -> Dict[str, Any]:
         "share_map": cfg.share_map,
         "enable_yoco_decode": cfg.enable_yoco_decode,
     }
+    if cfg.has_qsa:
+        data["indexer_head_dim"] = int(cfg.indexer_head_dim)
+        data["indexer_n_heads"] = int(cfg.indexer_n_heads)
+        data["indexer_kv_heads"] = int(cfg.indexer_kv_heads)
+        data["indexer_compress_ratio"] = int(cfg.indexer_compress_ratio)
+        data["indexer_budget"] = int(cfg.indexer_budget)
     if cfg.quant_method == "mxfp4":
         data["quantization_config"] = {
             "quant_method": "mxfp4",
@@ -537,6 +543,11 @@ def save_qwen4_5_safetensors_checkpoint(
                     tensors[f"{sa}v_sconv.weight"] = sa_mod.v_sconv.weight
             if layer.attn_output_sconv is not None:
                 tensors[f"{p}full_attn_output_sconv.weight"] = layer.attn_output_sconv.weight
+            if sa_mod.indexer is not None:
+                idx = sa_mod.indexer
+                tensors[f"{sa}indexer.index_qk_proj.weight"] = idx.index_qk_proj.weight
+                tensors[f"{sa}indexer.q_layernorm.weight"] = idx.q_layernorm.weight
+                tensors[f"{sa}indexer.k_layernorm.weight"] = idx.k_layernorm.weight
 
         # FFN
         if isinstance(layer.mlp, Qwen4_5DenseMLP):
@@ -767,6 +778,21 @@ def load_qwen4_5_from_checkpoint(
                         ops.append((f"{sa}v_sconv.weight", sa_mod.v_sconv.weight, None))
                 if layer.attn_output_sconv is not None:
                     ops.append((f"{p}full_attn_output_sconv.weight", layer.attn_output_sconv.weight, None))
+                if sa_mod.indexer is not None:
+                    idx = sa_mod.indexer
+                    qsa_specs = (
+                        (f"{sa}indexer.index_qk_proj.weight", idx.index_qk_proj.weight),
+                        (f"{sa}indexer.q_layernorm.weight", idx.q_layernorm.weight),
+                        (f"{sa}indexer.k_layernorm.weight", idx.k_layernorm.weight),
+                    )
+                    for qsa_k, qsa_param in qsa_specs:
+                        s_dt, s_sh = reader.get_tensor_spec(qsa_k)
+                        if s_dt not in (torch.bfloat16, qsa_param.dtype) or tuple(s_sh) != tuple(qsa_param.shape):
+                            raise ValueError(
+                                f"QSA tensor {qsa_k!r} spec mismatch: got dtype={s_dt}, shape={tuple(s_sh)}; "
+                                f"expected dtype=torch.bfloat16, shape={tuple(qsa_param.shape)}"
+                            )
+                        ops.append((qsa_k, qsa_param, None))
 
             # FFN
             if isinstance(layer.mlp, Qwen4_5DenseMLP):
@@ -961,6 +987,22 @@ def bind_qwen4_5_model_weights(
                     _copy_param(sa.v_sconv.weight, lw[QWEN4_5_W.full_v_sconv])
             if layer.attn_output_sconv is not None:
                 _copy_param(layer.attn_output_sconv.weight, lw[QWEN4_5_W.full_attn_output_sconv])
+            if sa.indexer is not None:
+                idx = sa.indexer
+                qsa_bind = (
+                    (QWEN4_5_W.full_indexer_qk_proj, idx.index_qk_proj.weight),
+                    (QWEN4_5_W.full_indexer_q_norm_w, idx.q_layernorm.weight),
+                    (QWEN4_5_W.full_indexer_k_norm_w, idx.k_layernorm.weight),
+                )
+                for w_name, qsa_param in qsa_bind:
+                    w_src = lw[w_name]
+                    if w_src.dtype != torch.bfloat16 or tuple(w_src.shape) != tuple(qsa_param.shape):
+                        raise ValueError(
+                            f"QSA ModelWeights {w_name!r} (layer {lid}) mismatch: "
+                            f"got dtype={w_src.dtype}, shape={tuple(w_src.shape)}; "
+                            f"expected dtype=torch.bfloat16, shape={tuple(qsa_param.shape)}"
+                        )
+                    _copy_param(qsa_param, w_src)
 
         # FFN
         if isinstance(layer.mlp, Qwen4_5DenseMLP):

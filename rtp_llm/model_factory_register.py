@@ -301,6 +301,11 @@ def _register_builtin_lazy_models() -> None:
         "rtp_llm.models.qwen4_5.qwen4_5",
         ["Qwen4_5ForCausalLM"],
     )
+    register_lazy_model(
+        "qwen4_5_dspark",
+        "rtp_llm.models.qwen4_5.qwen4_5_dspark",
+        ["DFlashQwenDraftModel", "Qwen4_5DSparkForCausalLM"],
+    )
     register_lazy_model("qwen_vl", "rtp_llm.models.qwen_vl", ["QWenMLMHeadModel"])
     register_lazy_model(
         "qwen2_vl",

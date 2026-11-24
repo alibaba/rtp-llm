@@ -249,6 +249,7 @@ class Qwen4_5DecoderLayer(nn.Module):
         prev_latent: Optional[torch.Tensor],
         deferred: Optional[Tuple[torch.Tensor, torch.Tensor]],
         shared_gdn_by_source: Dict[int, SharedGDNInputs],
+        shared_qsa_by_source: Optional[Dict[int, Tuple[torch.Tensor, torch.Tensor]]] = None,
         source_prefix_ssm: Optional[Dict[int, torch.Tensor]] = None,
         state: Optional[Qwen4_5RuntimeState] = None,
         positions: Optional[torch.Tensor] = None,
@@ -383,6 +384,41 @@ class Qwen4_5DecoderLayer(nn.Module):
             kv_cache = state.full_attn_kv.get(self.kv_cache_owner) if state is not None else None
             k_sc = state.k_sconv.get(lid) if (state is not None and not self.is_consumer) else None
             v_sc = state.v_sconv.get(lid) if (state is not None and not self.is_consumer) else None
+            qsa_kwargs: Dict[str, Any] = {}
+            if self.self_attn.indexer is not None:
+                if not self.is_consumer:
+                    raw_prev = state.qsa_raw_keys.get(lid) if state is not None else None
+                    past_raw = (
+                        raw_prev if (raw_prev is not None and raw_prev.shape[1] > 0) else None
+                    )
+                    src_k_norm = self.self_attn.indexer.k_norm_gamma
+
+                    def _record_raw(
+                        raw_k: torch.Tensor,
+                        _past: Optional[torch.Tensor] = past_raw,
+                        _lid: int = lid,
+                        _k_norm: torch.Tensor = src_k_norm,
+                    ) -> None:
+                        full_raw = (
+                            torch.cat([_past, raw_k], dim=1) if _past is not None else raw_k
+                        )
+                        if state is not None:
+                            state.qsa_raw_keys[_lid] = full_raw
+                        if shared_qsa_by_source is not None:
+                            shared_qsa_by_source[_lid] = (full_raw, _k_norm)
+
+                    qsa_kwargs["qsa_past_raw_keys"] = past_raw
+                    qsa_kwargs["qsa_on_raw_keys"] = _record_raw
+                else:
+                    src_lid = self.kv_cache_owner
+                    src_raw = None
+                    src_k_norm = None
+                    if shared_qsa_by_source is not None and src_lid in shared_qsa_by_source:
+                        src_raw, src_k_norm = shared_qsa_by_source[src_lid]
+                    elif state is not None and src_lid in state.qsa_raw_keys:
+                        src_raw = state.qsa_raw_keys[src_lid]
+                    qsa_kwargs["qsa_source_raw_keys"] = src_raw
+                    qsa_kwargs["qsa_source_k_norm_gamma"] = src_k_norm
             cat = "full_attn_consumer" if self.is_consumer else "full_attn_producer"
             if profiler is not None:
                 with profiler.record(cat):
@@ -393,6 +429,7 @@ class Qwen4_5DecoderLayer(nn.Module):
                         k_sconv_state=k_sc,
                         v_sconv_state=v_sc,
                         seq_offset=seq_offset,
+                        **qsa_kwargs,
                     )
             else:
                 attn_out = self.self_attn(
@@ -402,6 +439,7 @@ class Qwen4_5DecoderLayer(nn.Module):
                     k_sconv_state=k_sc,
                     v_sconv_state=v_sc,
                     seq_offset=seq_offset,
+                    **qsa_kwargs,
                 )
 
         # Step D: Attention output ShortConv (+ optional clip)
@@ -576,6 +614,12 @@ class Qwen4_5Model(nn.Module):
                     state.k_sconv[lid] = k_sc
                 if v_sc is not None:
                     state.v_sconv[lid] = v_sc
+                if layer.self_attn.indexer is not None:
+                    state.qsa_raw_keys[lid] = torch.empty(
+                        (batch_size, 0, self.config.indexer_head_dim),
+                        dtype=dt,
+                        device=dev,
+                    )
             if layer.attn_output_sconv is not None:
                 state.attn_output_sconv[lid] = layer.attn_output_sconv.alloc_state(
                     batch_size, device=dev, dtype=dt
@@ -798,6 +842,7 @@ class Qwen4_5Model(nn.Module):
         prev_latent: Optional[torch.Tensor] = None
         deferred: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
         shared_gdn_by_source: Dict[int, SharedGDNInputs] = {}
+        shared_qsa_by_source: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
         past_len = state.seq_len if state is not None else 0
         source_prefix_ssm: Optional[Dict[int, torch.Tensor]] = (
             {} if (state is not None and seq_len > 1 and past_len > 0) else None
@@ -811,6 +856,7 @@ class Qwen4_5Model(nn.Module):
                 prev_latent=prev_latent,
                 deferred=deferred,
                 shared_gdn_by_source=shared_gdn_by_source,
+                shared_qsa_by_source=shared_qsa_by_source,
                 source_prefix_ssm=source_prefix_ssm,
                 state=state,
                 positions=positions,

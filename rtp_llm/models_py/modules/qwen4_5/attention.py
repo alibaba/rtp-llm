@@ -26,6 +26,7 @@ from rtp_llm.models_py.modules.qwen4_5.contracts import (
     ShortConvState,
 )
 from rtp_llm.models_py.modules.qwen4_5.yoco import YoCoSharingPlan
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import Qwen4ExpQSAIndexer
 
 
 @triton.jit
@@ -331,6 +332,38 @@ def gemma_rmsnorm_and_partial_rope(
     return apply_partial_neox_rope(normed.to(x.dtype), positions, inv_freq, rotary_dim)
 
 
+class Qwen4_5QSAIndexer(Qwen4ExpQSAIndexer):
+    """``nn.Module`` owner wrapping ``Qwen4ExpQSAIndexer`` with registered BF16 parameters."""
+
+    def __init__(self, config: Qwen4_5ArchConfig) -> None:
+        idx_d = int(config.indexer_head_dim)
+        qk_out = (int(config.indexer_n_heads) + int(config.indexer_kv_heads)) * idx_d
+        index_qk_proj = nn.Linear(config.hidden_size, qk_out, bias=False)
+        q_layernorm = GemmaRMSNorm(idx_d, eps=config.rms_norm_eps)
+        k_layernorm = GemmaRMSNorm(idx_d, eps=config.rms_norm_eps)
+        super().__init__(
+            index_qk_proj.weight,
+            q_layernorm.weight,
+            k_layernorm.weight,
+            n_heads=int(config.indexer_n_heads),
+            kv_heads=int(config.indexer_kv_heads),
+            head_dim=idx_d,
+            token_budget=int(config.indexer_budget),
+            compress_ratio=int(config.indexer_compress_ratio),
+            norm_eps=float(config.rms_norm_eps),
+        )
+        self.index_qk_proj = index_qk_proj
+        self.q_layernorm = q_layernorm
+        self.k_layernorm = k_layernorm
+
+    def _apply(self, fn):  # type: ignore[override]
+        ret = super()._apply(fn)
+        self.qk_proj = self.index_qk_proj.weight
+        self.q_norm_gamma = self.q_layernorm.weight
+        self.k_norm_gamma = self.k_layernorm.weight
+        return ret
+
+
 class Qwen4_5Attention(nn.Module):
     """Qwen 4.5-Flash Dense MQA-1 Full Attention with output gate, KV short-conv, and YoCo sharing.
 
@@ -420,6 +453,13 @@ class Qwen4_5Attention(nn.Module):
             self.k_sconv = None
             self.v_sconv = None
 
+        if config.has_qsa:
+            self.indexer_rotary_dim = min(self.rotary_dim, int(config.indexer_head_dim))
+            self.indexer: Optional[Qwen4ExpQSAIndexer] = Qwen4_5QSAIndexer(config)
+        else:
+            self.indexer_rotary_dim = 0
+            self.indexer = None
+
     @classmethod
     def from_config(
         cls,
@@ -507,6 +547,11 @@ class Qwen4_5Attention(nn.Module):
         seq_offset: Optional[int] = None,
         k_sconv_fn: Optional[Callable[[torch.Tensor, Optional[ShortConvState]], torch.Tensor]] = None,
         v_sconv_fn: Optional[Callable[[torch.Tensor, Optional[ShortConvState]], torch.Tensor]] = None,
+        qsa_selected: Optional[torch.Tensor] = None,
+        qsa_past_raw_keys: Optional[torch.Tensor] = None,
+        qsa_source_raw_keys: Optional[torch.Tensor] = None,
+        qsa_source_k_norm_gamma: Optional[torch.Tensor] = None,
+        qsa_on_raw_keys: Optional[Callable[[torch.Tensor], None]] = None,
     ) -> torch.Tensor:
         """Forward pass for dense MQA-1 Full Attention (producer/normal or YoCo consumer).
 
@@ -632,12 +677,76 @@ class Qwen4_5Attention(nn.Module):
                 k_full = k
                 v_full = v
 
-        # 5. Attention core via PyTorch 2.11 SDPA with native MQA/GQA support
+        # 5. Attention core: QSA Sparse FMHA when indexer enabled, else Dense SDPA
         q_bhtd = q.transpose(1, 2)       # [B, 32, T, 256]
         k_bhtd = k_full.transpose(1, 2)  # [B, 1, total_seq, 256]
         v_bhtd = v_full.transpose(1, 2)  # [B, 1, total_seq, 256]
 
-        if seq_len == 1:
+        if self.indexer is not None:
+            from rtp_llm.models_py.modules.qwen4_5.qsa_bridge import (
+                build_qsa_neox_cos_sin,
+                qsa_select_causal_from_projected,
+                qsa_sparse_prefill_attention,
+            )
+
+            if qsa_selected is None:
+                if not self.is_consumer:
+                    q_idx, raw_k_idx = self.indexer.project(hidden_states)
+                    if qsa_on_raw_keys is not None:
+                        qsa_on_raw_keys(raw_k_idx)
+                    cur_raw = raw_k_idx
+                    past_raw = qsa_past_raw_keys
+                    k_gamma = self.indexer.k_norm_gamma
+                else:
+                    q_idx, _ = self.indexer.project(hidden_states)
+                    if qsa_source_raw_keys is None:
+                        raise ValueError(
+                            f"YoCo consumer FullAttn layer {self.layer_idx} QSA forward "
+                            "requires qsa_source_raw_keys or precomputed qsa_selected"
+                        )
+                    src_slice = qsa_source_raw_keys[:, :total_seq]
+                    past_raw = src_slice[:, :cur_offset] if cur_offset > 0 else None
+                    cur_raw = src_slice[:, cur_offset:total_seq]
+                    k_gamma = (
+                        qsa_source_k_norm_gamma
+                        if qsa_source_k_norm_gamma is not None
+                        else self.indexer.k_norm_gamma
+                    )
+                if cur_offset == 0 and past_raw is None:
+                    pos_all = pos
+                else:
+                    past_len_resolved = (
+                        int(past_raw.shape[1]) if past_raw is not None else cur_offset
+                    )
+                    prefix_pos = (
+                        torch.arange(past_len_resolved, device=device, dtype=pos.dtype)
+                        .unsqueeze(0)
+                        .expand(bsz, past_len_resolved)
+                    )
+                    pos_all = torch.cat([prefix_pos, pos], dim=1)
+                cos_all, sin_all = build_qsa_neox_cos_sin(
+                    pos_all,
+                    self.indexer_rotary_dim,
+                    self.rope_theta,
+                    hidden_states.dtype,
+                )
+                qsa_selected = qsa_select_causal_from_projected(
+                    self.indexer,
+                    q_idx,
+                    cur_raw,
+                    cos_all,
+                    sin_all,
+                    past_raw_keys=past_raw,
+                    k_norm_gamma=k_gamma,
+                )
+            attn_out = qsa_sparse_prefill_attention(
+                q_bhtd,
+                k_bhtd,
+                v_bhtd,
+                qsa_selected,
+                validate_selected=False,
+            )
+        elif seq_len == 1:
             attn_out = F.scaled_dot_product_attention(
                 q_bhtd,
                 k_bhtd,
@@ -768,6 +877,7 @@ class Qwen4_5Attention(nn.Module):
 __all__ = [
     "GemmaRMSNorm",
     "Qwen4_5Attention",
+    "Qwen4_5QSAIndexer",
     "apply_partial_neox_rope",
     "causal_dwconv1d",
     "gemma_rmsnorm_and_partial_rope",

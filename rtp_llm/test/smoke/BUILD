@@ -280,6 +280,41 @@ custom_smoke_test(
 )
 
 custom_smoke_test(
+    name = "qwen4_5_pd_8layer_qsa_smoke_sm103",
+    main = "qwen4_5_pd_smoke_test.py",
+    smoke_args = "--tp_size 1 --dp_size 1 --world_size 2 --act_type BF16 --seq_size_per_block 64 --max_seq_len 512 --max_context_batch_size 8 --concurrency_limit 16 --reuse_cache 1 --enable_device_cache 1 --enable_memory_cache 1 --enable_cuda_graph 1 --cache_store_rdma_mode 1 --use_local 1",
+    gpu_type = ["SM103_CU13"],
+    tags = ["qwen4_5", "qwen4_5_pd", "qwen4_5_qsa", "pd_contract"],
+    test_envs = {
+        "QWEN4_5_PD_SMOKE_MODE": "synthetic_8layer",
+        "QWEN4_5_QSA_ENABLED": "1",
+        "QWEN4_5_SEQ_SIZE_PER_BLOCK": "64",
+        "QWEN4_5_MEMORY_CACHE_SIZE_MB": "1024",
+        "RTP_TEST_WATCHDOG_SECONDS": "1200",
+    },
+    data = ["//rtp_llm:sdk", "qwen4_5_pd_server.py"],
+)
+
+custom_smoke_test(
+    name = "qwen4_5_pd_8layer_qsa_dspark_smoke_sm103",
+    main = "qwen4_5_pd_smoke_test.py",
+    smoke_args = "--tp_size 1 --dp_size 1 --world_size 2 --act_type BF16 --seq_size_per_block 64 --max_seq_len 512 --max_context_batch_size 8 --concurrency_limit 16 --reuse_cache 1 --enable_device_cache 1 --enable_memory_cache 1 --enable_cuda_graph 1 --cache_store_rdma_mode 1 --use_local 1",
+    gpu_type = ["SM103_CU13"],
+    tags = ["qwen4_5", "qwen4_5_pd", "qwen4_5_qsa", "qwen4_5_dspark", "pd_contract"],
+    test_envs = {
+        "QWEN4_5_PD_SMOKE_MODE": "synthetic_8layer",
+        "QWEN4_5_QSA_ENABLED": "1",
+        "QWEN4_5_SP_TYPE": "dspark",
+        "QWEN4_5_SP_MODEL_TYPE": "qwen4_5_dspark",
+        "QWEN4_5_GEN_NUM_PER_CYCLE": "8",
+        "QWEN4_5_SEQ_SIZE_PER_BLOCK": "64",
+        "QWEN4_5_MEMORY_CACHE_SIZE_MB": "1024",
+        "RTP_TEST_WATCHDOG_SECONDS": "1200",
+    },
+    data = ["//rtp_llm:sdk", "qwen4_5_pd_server.py"],
+)
+
+custom_smoke_test(
     name = "qwen4_5_pd_3fs_ep4x2_smoke_sm103",
     main = "qwen4_5_pd_smoke_test.py",
     smoke_args = "--tp_size 4 --ep_size 4 --dp_size 1 --world_size 8 --act_type BF16 --seq_size_per_block 64 --max_seq_len 2048 --max_context_batch_size 8 --concurrency_limit 16 --reuse_cache 1 --enable_device_cache 1 --enable_memory_cache 1 --enable_cuda_graph 0 --cache_store_rdma_mode 1 --use_local 1",

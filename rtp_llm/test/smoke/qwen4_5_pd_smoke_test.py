@@ -115,14 +115,17 @@ def _write_synthetic_qwen2_tokenizer(ckpt_dir: Path, vocab_size: int) -> None:
     )
 
 
-def _build_synthetic_8layer_checkpoint(ckpt_dir: Path) -> Path:
-    """Build a deterministic 8-layer Qwen 4.5-Flash (MXFP4 + FP8 PLE + YoCo) checkpoint."""
+def _build_synthetic_8layer_checkpoint(
+    ckpt_dir: Path, *, qsa_enabled: bool = False
+) -> Path:
+    """Build a deterministic 8-layer Qwen 4.5-Flash (MXFP4 + FP8 PLE + YoCo [+ QSA]) checkpoint."""
     from rtp_llm.models_py.model_desc.qwen4_5 import Qwen4_5ForCausalLM
     from rtp_llm.models_py.modules.qwen4_5.checkpoint_loader import (
         save_qwen4_5_safetensors_checkpoint,
     )
     from rtp_llm.models_py.modules.qwen4_5.contracts import Qwen4_5ArchConfig
 
+    qsa_budget = int(os.environ.get("QWEN4_5_QSA_BUDGET", "2048"))
     cfg = Qwen4_5ArchConfig(
         vocab_size=2048,
         hidden_size=512,
@@ -133,7 +136,7 @@ def _build_synthetic_8layer_checkpoint(ckpt_dir: Path) -> Path:
         bos_token_id=1,
         eos_token_id=2,
         tie_word_embeddings=False,
-        max_position_embeddings=256,
+        max_position_embeddings=512 if qsa_enabled else 256,
         full_attention_interval=4,
         num_attention_heads=8,
         num_key_value_heads=1,
@@ -189,6 +192,11 @@ def _build_synthetic_8layer_checkpoint(ckpt_dir: Path) -> Path:
         share_map="4->8,5->6,5->7",
         enable_yoco_decode=True,
         quant_method="mxfp4",
+        indexer_head_dim=128 if qsa_enabled else 0,
+        indexer_n_heads=8 if qsa_enabled else 0,
+        indexer_kv_heads=1,
+        indexer_compress_ratio=4,
+        indexer_budget=qsa_budget if qsa_enabled else 0,
     )
     with torch.no_grad():
         model = Qwen4_5ForCausalLM(
@@ -226,6 +234,73 @@ def _build_synthetic_8layer_checkpoint(ckpt_dir: Path) -> Path:
     save_qwen4_5_safetensors_checkpoint(model, ckpt_dir)
     _write_synthetic_qwen2_tokenizer(ckpt_dir, cfg.vocab_size)
     return ckpt_dir
+
+
+def _build_synthetic_8layer_dflash_checkpoint(
+    dflash_dir: Path,
+    *,
+    target_ckpt_dir: Path,
+    gen_num_per_cycle: int = 8,
+    mask_token_id: int = 2000,
+) -> Path:
+    """Build a deterministic 5-layer DFlash2 draft checkpoint paired with target."""
+    from collections import OrderedDict
+    from safetensors import safe_open
+    from safetensors.torch import save_file
+    from rtp_llm.models_py.modules.qwen4_5.tools.build_dflash_mock_checkpoint import (
+        DEFAULT_CONFIGS,
+        _make_tensor,
+        _tensor_specs,
+        build_dflash2_config,
+    )
+
+    dflash_dir.mkdir(parents=True, exist_ok=True)
+    with open(target_ckpt_dir / "config.json", "r", encoding="utf-8") as f:
+        base_cfg = json.load(f)
+
+    profile = dict(DEFAULT_CONFIGS["synthetic-8l"])
+    profile["block_size"] = int(gen_num_per_cycle)
+    profile["gamma"] = int(gen_num_per_cycle)
+    profile["mask_token_id"] = int(mask_token_id)
+    cfg = build_dflash2_config(base_cfg, profile, seed=2029)
+    cfg["model_type"] = "qwen4_5_dspark"
+    (dflash_dir / "config.json").write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+
+    idx_path = target_ckpt_dir / "model.safetensors.index.json"
+    if idx_path.is_file():
+        wmap = json.loads(idx_path.read_text(encoding="utf-8"))["weight_map"]
+        with safe_open(target_ckpt_dir / wmap["lm_head.weight"], framework="pt", device="cpu") as f_lm:
+            tgt_lm_head = f_lm.get_tensor("lm_head.weight").clone()
+        with safe_open(target_ckpt_dir / wmap["model.embed_tokens.weight"], framework="pt", device="cpu") as f_em:
+            tgt_embed = f_em.get_tensor("model.embed_tokens.weight").clone()
+    else:
+        with safe_open(target_ckpt_dir / "model.safetensors", framework="pt", device="cpu") as tgt:
+            tgt_lm_head = tgt.get_tensor("lm_head.weight").clone()
+            tgt_embed = tgt.get_tensor("model.embed_tokens.weight").clone()
+
+    gen = torch.Generator(device="cpu").manual_seed(2029)
+    specs = _tensor_specs(cfg)
+    weight_map: Dict[str, str] = OrderedDict()
+    tensors: Dict[str, torch.Tensor] = OrderedDict()
+    total_bytes = 0
+    for name, shape, dt_tag, init_kind in specs:
+        if name == "lm_head.weight" and tuple(tgt_lm_head.shape) == shape:
+            t = tgt_lm_head
+        elif name == "model.embed_tokens.weight" and tuple(tgt_embed.shape) == shape:
+            t = tgt_embed
+        else:
+            t = _make_tensor(gen, shape, dt_tag, init_kind)
+        tensors[name] = t
+        weight_map[name] = "model-00001-of-00001.safetensors"
+        total_bytes += int(t.numel() * t.element_size())
+
+    save_file(tensors, str(dflash_dir / "model-00001-of-00001.safetensors"), metadata={"format": "pt"})
+    (dflash_dir / "model.safetensors.index.json").write_text(
+        json.dumps({"metadata": {"total_size": total_bytes}, "weight_map": weight_map}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    _write_synthetic_qwen2_tokenizer(dflash_dir, int(base_cfg["vocab_size"]))
+    return dflash_dir
 
 
 def _prefill_cache_tiers(aux: Dict[str, Any]) -> Dict[str, int]:
@@ -386,12 +461,23 @@ class Qwen4_5PurePDSmokeTest(unittest.TestCase):
         self.concurrency_limit = 16
         self._tmpdir: Optional[tempfile.TemporaryDirectory[str]] = None
 
+        self.qsa_enabled = os.environ.get("QWEN4_5_QSA_ENABLED", "0").strip() == "1"
+        self.sp_type = os.environ.get("QWEN4_5_SP_TYPE", "").strip()
+        self.sp_model_type = os.environ.get("QWEN4_5_SP_MODEL_TYPE", "qwen4_5_dspark").strip()
+        self.sp_ckpt_path = os.environ.get("QWEN4_5_SP_CHECKPOINT_PATH", "").strip()
+        self.gen_num_per_cycle = int(os.environ.get("QWEN4_5_GEN_NUM_PER_CYCLE", "8"))
+        self.dspark_enabled = self.sp_type.lower() == "dspark"
         if self.mode == "synthetic_8layer":
             self.role_size = 1
             self.tp_size = 1
             self.ep_size = 1
-            self.seq_size_per_block = 16
-            self.max_seq_len = 256
+            self.seq_size_per_block = int(
+                os.environ.get(
+                    "QWEN4_5_SEQ_SIZE_PER_BLOCK",
+                    "64" if self.qsa_enabled else "16",
+                )
+            )
+            self.max_seq_len = 512 if self.qsa_enabled else 256
             self.reserve_mem_mb = 1024
             self.startup_timeout_s = 240
             self.memory_cache_size_mb = int(
@@ -399,9 +485,21 @@ class Qwen4_5PurePDSmokeTest(unittest.TestCase):
             )
             self._tmpdir = tempfile.TemporaryDirectory(prefix="qwen45_pd_8l_")
             self.addCleanup(self._tmpdir.cleanup)
+            target_dir = Path(self._tmpdir.name) / "target_ckpt"
+            target_dir.mkdir(parents=True, exist_ok=True)
             self.ckpt_path = str(
-                _build_synthetic_8layer_checkpoint(Path(self._tmpdir.name))
+                _build_synthetic_8layer_checkpoint(
+                    target_dir, qsa_enabled=self.qsa_enabled
+                )
             )
+            if self.dspark_enabled and not self.sp_ckpt_path:
+                self.sp_ckpt_path = str(
+                    _build_synthetic_8layer_dflash_checkpoint(
+                        Path(self._tmpdir.name) / "dflash_ckpt",
+                        target_ckpt_dir=target_dir,
+                        gen_num_per_cycle=self.gen_num_per_cycle,
+                    )
+                )
         elif self.mode == "real_3fs_40layer":
             self.role_size = 4
             self.tp_size = 4
@@ -416,6 +514,13 @@ class Qwen4_5PurePDSmokeTest(unittest.TestCase):
             self.ckpt_path = os.environ.get("QWEN4_5_CKPT_PATH", DEFAULT_3FS_CKPT)
             if not Path(self.ckpt_path).is_dir():
                 self.fail(f"Real 3FS checkpoint not found: {self.ckpt_path}")
+            cfg_json_path = Path(self.ckpt_path) / "config.json"
+            if cfg_json_path.is_file():
+                raw_cfg = json.loads(cfg_json_path.read_text(encoding="utf-8"))
+                self.qsa_enabled = (
+                    self.qsa_enabled
+                    or int(raw_cfg.get("indexer_head_dim", 0) or 0) > 0
+                )
         else:
             self.fail(f"Unsupported QWEN4_5_PD_SMOKE_MODE={self.mode!r}")
 
@@ -435,9 +540,54 @@ class Qwen4_5PurePDSmokeTest(unittest.TestCase):
             self.enable_decode_cuda_graph,
             self.memory_cache_size_mb,
         )
+        self._baseline_outputs: Optional[Dict[str, List[int]]] = None
+        if self.dspark_enabled and self.mode == "synthetic_8layer":
+            self._capture_non_speculative_baseline()
         self.prefill_mgr, self.decode_mgr = self._start_pd_servers()
 
-    def _start_pd_servers(self) -> Tuple[MagaServerManager, MagaServerManager]:
+    def _synthetic_8layer_decode_labels(self) -> Tuple[str, str, str, str]:
+        if self.dspark_enabled:
+            return ("Q1_171:", "Q2_10:", "Q3_82:", "Q4_109:")
+        if self.qsa_enabled:
+            return ("Q1_86:", "Q2_10:", "Q3_82:", "Q4_109:")
+        return ("D1_24:", "D2_60:", "D3_28:", "D4_15:")
+
+    def _capture_non_speculative_baseline(self) -> None:
+        """Capture greedy B=1 non-speculative Pure-PD QSA token IDs for exact equivalence checks."""
+        block = self.seq_size_per_block
+        prompt_a, _ids_a, prompt_b, _ids_b = self._build_branch_pair("8l_reg")
+        p_0, _ = _fit_exact_token_prompt(self.tokenizer, "P0:", "\n", block)
+        p_p1, _ = _fit_exact_token_prompt(self.tokenizer, "PP1:", "\n", block + 1)
+        d1_lbl, d2_lbl, d3_lbl, d4_lbl = self._synthetic_8layer_decode_labels()
+        p_d1, _ = _fit_exact_token_prompt(self.tokenizer, d1_lbl, "\n", block - 1)
+        p_d2, _ = _fit_exact_token_prompt(self.tokenizer, d2_lbl, "\n", 2 * block + 3)
+        p_d3, _ = _fit_exact_token_prompt(self.tokenizer, d3_lbl, "\n", block)
+        p_d4, _ = _fit_exact_token_prompt(self.tokenizer, d4_lbl, "\n", block + 1)
+        base_prefill, base_decode = self._start_pd_servers(enable_sp=False, suffix_tag="baseline")
+        self.prefill_mgr, self.decode_mgr = base_prefill, base_decode
+        baseline: Dict[str, List[int]] = {}
+        try:
+            for name, p, max_tok in (
+                ("cold_A", prompt_a, 8),
+                ("cold_B", prompt_b, 8),
+                ("page_0", p_0, 8),
+                ("page_p1", p_p1, 8),
+                ("cold_d1", p_d1, 48),
+                ("cold_d2", p_d2, 48),
+                ("cold_d3", p_d3, 32),
+                ("cold_d4", p_d4, 40),
+            ):
+                resp = self._post_generate(RequestSpec(f"base_{name}", p, max_tok, False))
+                baseline[name] = _output_ids(resp)
+            _emit("[DSpARK Baseline] captured greedy outputs for %d prompts", len(baseline))
+        finally:
+            base_decode.stop_server()
+            base_prefill.stop_server()
+        self._baseline_outputs = baseline
+
+    def _start_pd_servers(
+        self, *, enable_sp: bool = True, suffix_tag: str = ""
+    ) -> Tuple[MagaServerManager, MagaServerManager]:
         cuda_env = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
         if cuda_env:
             gpu_ids = [g.strip() for g in cuda_env.split(",") if g.strip()]
@@ -471,11 +621,16 @@ class Qwen4_5PurePDSmokeTest(unittest.TestCase):
             concurrency_limit=self.concurrency_limit,
             enable_decode_cuda_graph=self.enable_decode_cuda_graph,
             force_host_demotion=self.force_host_demotion,
-            role_name_suffix=self.mode,
+            role_name_suffix=f"{self.mode}_{suffix_tag}" if suffix_tag else self.mode,
+            sp_type=self.sp_type if (enable_sp and self.dspark_enabled) else "",
+            sp_model_type=self.sp_model_type,
+            sp_checkpoint_path=self.sp_ckpt_path,
+            gen_num_per_cycle=self.gen_num_per_cycle,
             extra_common_env={"FT_SERVER_TEST": "1"},
         )
-        self.addCleanup(prefill_mgr.stop_server)
-        self.addCleanup(decode_mgr.stop_server)
+        if not suffix_tag:
+            self.addCleanup(prefill_mgr.stop_server)
+            self.addCleanup(decode_mgr.stop_server)
 
         try:
             start_pure_pd_and_wait_rpc(
@@ -518,6 +673,7 @@ class Qwen4_5PurePDSmokeTest(unittest.TestCase):
             sess.trust_env = False
             if barrier is not None:
                 barrier.wait(timeout=30.0)
+            t0 = time.perf_counter()
             try:
                 resp = sess.post(
                     f"http://127.0.0.1:{self.prefill_mgr.port}/",
@@ -548,6 +704,7 @@ class Qwen4_5PurePDSmokeTest(unittest.TestCase):
                 text,
                 f"[{spec.name}] Expected {spec.expected_substr!r} in response {text!r}",
             )
+        data["_wall_ms"] = (time.perf_counter() - t0) * 1000.0
         return data
 
     def _run_concurrent_barrier(self, specs: Sequence[RequestSpec]) -> List[Dict[str, Any]]:
@@ -757,6 +914,71 @@ class Qwen4_5PurePDSmokeTest(unittest.TestCase):
         )
         _emit("[Decode CUDA Graph verified] captured_batches=%s", captured)
 
+    def _assert_qsa_active_in_logs(self) -> None:
+        """Verify QSA startup banner is present in both Prefill and Decode logs."""
+        if not self.qsa_enabled:
+            return
+        logs_dir = self._logs_root_dir()
+        engine_texts: List[str] = []
+        if logs_dir is not None:
+            for ep in sorted(logs_dir.glob("engine*.log")):
+                engine_texts.append(ep.read_text(errors="replace"))
+        matched_lines: Dict[str, str] = {}
+        for role_name, mgr in (("prefill", self.prefill_mgr), ("decode", self.decode_mgr)):
+            path = Path(mgr.log_file_path) if mgr.log_file_path else None
+            self.assertIsNotNone(path, f"{role_name} log_file_path missing")
+            assert path is not None
+            role_text = path.read_text(errors="replace") + "\n" + "\n".join(engine_texts)
+            found = [
+                ln.strip()
+                for ln in role_text.splitlines()
+                if "[Qwen4_5 QSA] enabled" in ln
+            ]
+            self.assertTrue(
+                found,
+                f"{role_name} logs lack [Qwen4_5 QSA] enabled confirmation",
+            )
+            matched_lines[role_name] = found[-1]
+        _emit("[QSA verified] %s", matched_lines)
+
+    @staticmethod
+    def _emit_latency_telemetry(prefix: str, spec: RequestSpec, res: Dict[str, Any]) -> None:
+        aux = res.get("aux_info") or {}
+        in_len = len(_input_ids(res))
+        out_len = len(_output_ids(res))
+        ttft_us = aux.get("first_token_cost_time_us")
+        cost_us = aux.get("cost_time_us")
+        wall_ms = float(res.get("_wall_ms", 0.0))
+        if isinstance(ttft_us, (int, float)) and isinstance(cost_us, (int, float)) and cost_us > 0:
+            ttft_ms = float(ttft_us) / 1000.0
+            cost_ms = float(cost_us) / 1000.0
+            tpot_ms = (
+                (float(cost_us) - float(ttft_us)) / 1000.0 / float(max(out_len - 1, 1))
+                if out_len > 1
+                else 0.0
+            )
+            _emit(
+                "%s %s ttft_ms=%.2f decode_tpot_ms=%.2f cost_ms=%.2f wall_ms=%.2f in_len=%d out_len=%d",
+                prefix,
+                spec.name,
+                ttft_ms,
+                tpot_ms,
+                cost_ms,
+                wall_ms,
+                in_len,
+                out_len,
+            )
+        else:
+            _emit(
+                "%s %s wall_ms=%.2f in_len=%d out_len=%d aux=%s",
+                prefix,
+                spec.name,
+                wall_ms,
+                in_len,
+                out_len,
+                aux,
+            )
+
     def _build_branch_pair(self, ns: str) -> Tuple[str, List[int], str, List[int]]:
         """Build prompts A and B sharing >= 1 full block while A spans >= 2 blocks."""
         block = self.seq_size_per_block
@@ -921,10 +1143,11 @@ class Qwen4_5PurePDSmokeTest(unittest.TestCase):
         p_0, ids_0 = _fit_exact_token_prompt(self.tokenizer, "P0:", "\n", block)
         p_p1, ids_p1 = _fit_exact_token_prompt(self.tokenizer, "PP1:", "\n", block + 1)
         # Prefixes chosen for >= 0.15 early margin, >= 0.06 full-horizon margin, and >= 0.20 active-logit margin across all 32-48 steps.
-        p_d1, ids_d1 = _fit_exact_token_prompt(self.tokenizer, "D1_24:", "\n", block - 1)
-        p_d2, ids_d2 = _fit_exact_token_prompt(self.tokenizer, "D2_60:", "\n", 2 * block + 3)
-        p_d3, ids_d3 = _fit_exact_token_prompt(self.tokenizer, "D3_28:", "\n", block)
-        p_d4, ids_d4 = _fit_exact_token_prompt(self.tokenizer, "D4_15:", "\n", block + 1)
+        d1_lbl, d2_lbl, d3_lbl, d4_lbl = self._synthetic_8layer_decode_labels()
+        p_d1, ids_d1 = _fit_exact_token_prompt(self.tokenizer, d1_lbl, "\n", block - 1)
+        p_d2, ids_d2 = _fit_exact_token_prompt(self.tokenizer, d2_lbl, "\n", 2 * block + 3)
+        p_d3, ids_d3 = _fit_exact_token_prompt(self.tokenizer, d3_lbl, "\n", block)
+        p_d4, ids_d4 = _fit_exact_token_prompt(self.tokenizer, d4_lbl, "\n", block + 1)
 
         # 1. Cold B=1 ground-truth baselines + exact page boundaries (15, 16, 17).
         cold_resp_a = self._post_generate(RequestSpec("cold_A", prompt_a, 8, False, expected_input_len=len(ids_a), return_logits=True))
@@ -951,7 +1174,8 @@ class Qwen4_5PurePDSmokeTest(unittest.TestCase):
         tiers_b = _prefill_cache_tiers(partial_b["aux_info"])
         self.assertGreaterEqual(tiers_b["device"], block)
         self.assertEqual(_output_ids(partial_b), cold_b)
-        self._assert_logits_close("partial_B", partial_b, cold_resp_b)
+        if not self.dspark_enabled:
+            self._assert_logits_close("partial_B", partial_b, cold_resp_b)
 
         return_a = self._post_generate(
             RequestSpec("return_A", prompt_a, 8, True, expected_input_len=len(ids_a), return_logits=True)
@@ -959,7 +1183,8 @@ class Qwen4_5PurePDSmokeTest(unittest.TestCase):
         tiers_a = _prefill_cache_tiers(return_a["aux_info"])
         self.assertGreaterEqual(tiers_a["device"], 2 * block)
         self.assertEqual(_output_ids(return_a), cold_a)
-        self._assert_logits_close("return_A", return_a, cold_resp_a)
+        if not self.dspark_enabled:
+            self._assert_logits_close("return_A", return_a, cold_resp_a)
 
         # 3. Composed Batch 1: Barrier-synchronized Mixed-Reuse Prefill Batch (B=4).
         snap_prefill = self._snapshot_batch_schedule_counts()
@@ -970,18 +1195,20 @@ class Qwen4_5PurePDSmokeTest(unittest.TestCase):
             RequestSpec("mix_pagep1_cold", p_p1, 8, False, expected_input_len=len(ids_p1), return_logits=True),
         ]
         mix_res = self._run_concurrent_barrier(mix_specs)
+        decode_phase = "sp_verify" if self.dspark_enabled else "decode"
         mix_prefill_bs = self._collect_new_batch_sizes(snap_prefill, "prefill", expected_min_bs=2)
-        mix_decode_bs = self._collect_new_batch_sizes(snap_prefill, "decode")
+        mix_decode_bs = self._collect_new_batch_sizes(snap_prefill, decode_phase)
         _emit(
             "[8L Composed Mixed Prefill B=4] prefill_bs=%s decode_bs=%s",
             mix_prefill_bs,
             mix_decode_bs,
         )
-        self.assertGreaterEqual(
-            max(mix_prefill_bs or [0]),
-            2,
-            f"Expected multi-request Prefill batch packing, observed prefill_bs={mix_prefill_bs}",
-        )
+        if not self.dspark_enabled:
+            self.assertGreaterEqual(
+                max(mix_prefill_bs or [0]),
+                2,
+                f"Expected multi-request Prefill batch packing, observed prefill_bs={mix_prefill_bs}",
+            )
         for spec, res, expected_ids, cold_ref_resp, expect_device_min in zip(
             mix_specs,
             mix_res,
@@ -999,7 +1226,8 @@ class Qwen4_5PurePDSmokeTest(unittest.TestCase):
                 exact_match,
             )
             self.assertEqual(out_ids, expected_ids)
-            self._assert_logits_close(spec.name, res, cold_ref_resp)
+            if not self.dspark_enabled:
+                self._assert_logits_close(spec.name, res, cold_ref_resp)
             if expect_device_min > 0:
                 self.assertGreaterEqual(tiers["device"], expect_device_min)
             else:
@@ -1023,7 +1251,7 @@ class Qwen4_5PurePDSmokeTest(unittest.TestCase):
             ],
             stagger_s=0.005,
         )
-        stag_decode_bs = self._collect_new_batch_sizes(snap_decode, "decode", expected_min_bs=3)
+        stag_decode_bs = self._collect_new_batch_sizes(snap_decode, decode_phase, expected_min_bs=3)
         _emit("[8L Staggered Decode] decode_bs=%s", stag_decode_bs)
         self.assertGreaterEqual(
             max(stag_decode_bs or [0]),
@@ -1082,19 +1310,92 @@ class Qwen4_5PurePDSmokeTest(unittest.TestCase):
                 0,
                 f"[{label}] cold_prefill_ref unexpectedly reused cache",
             )
-            cos = self._assert_logits_close(
-                label, got_resp, cold_prefill_resp, min_cos=0.995, max_abs=None
-            )
-            _emit(
-                "[8L Staggered Decode] %s prefix_match=%d/%d final_cos=%.6f",
-                label,
-                prefix_match,
-                len(ref_ids),
-                cos,
-            )
+            if not self.dspark_enabled:
+                cos = self._assert_logits_close(
+                    label, got_resp, cold_prefill_resp, min_cos=0.995, max_abs=None
+                )
+                _emit(
+                    "[8L Staggered Decode] %s prefix_match=%d/%d final_cos=%.6f",
+                    label,
+                    prefix_match,
+                    len(ref_ids),
+                    cos,
+                )
+            else:
+                self.assertEqual(
+                    _output_ids(cold_prefill_resp)[0],
+                    got_ids[-1],
+                    f"[{label}] cold_prefill_ref next token diverged from staggered DSpARK decode!",
+                )
+                _emit(
+                    "[8L Staggered Decode DSpARK] %s prefix_match=%d/%d cold_prefill_next_tok_match=True rounds=%s",
+                    label,
+                    prefix_match,
+                    len(ref_ids),
+                    (got_resp.get("aux_info") or {}).get("speculative_draft_rounds"),
+                )
 
+        if self.dspark_enabled:
+            self._assert_dspark_active_in_results_and_logs(
+                cold_resps={
+                    "cold_A": cold_resp_a,
+                    "cold_B": cold_resp_b,
+                    "page_0": cold_resp_0,
+                    "page_p1": cold_resp_p1,
+                    "cold_d1": cold_resp_d1,
+                    "cold_d2": cold_resp_d2,
+                    "cold_d3": cold_resp_d3,
+                    "cold_d4": cold_resp_d4,
+                },
+                reused_resps=(partial_b, return_a),
+            )
         self._assert_rdma_active_in_logs()
         self._assert_decode_cuda_graph_active_in_logs()
+        self._assert_qsa_active_in_logs()
+
+    def _assert_dspark_active_in_results_and_logs(
+        self,
+        *,
+        cold_resps: Dict[str, Dict[str, Any]],
+        reused_resps: Sequence[Dict[str, Any]],
+    ) -> None:
+        total_rounds = 0
+        total_accepted = 0
+        for label, resp in cold_resps.items():
+            aux = resp.get("aux_info") or {}
+            rounds = int(aux.get("speculative_draft_rounds", 0) or 0)
+            accepted = aux.get("speculative_accepted_tokens_per_pos") or []
+            self.assertGreater(
+                rounds, 0, f"[{label}] DSpARK speculative_draft_rounds <= 0: {aux}"
+            )
+            self.assertTrue(
+                isinstance(accepted, list) and len(accepted) > 0,
+                f"[{label}] Missing speculative_accepted_tokens_per_pos: {aux}",
+            )
+            total_rounds += rounds
+            total_accepted += sum(int(x) for x in accepted)
+            if self._baseline_outputs is not None and label in self._baseline_outputs:
+                self.assertEqual(
+                    _output_ids(resp),
+                    self._baseline_outputs[label],
+                    f"[{label}] DSpARK greedy tokens diverged from non-speculative QSA baseline!",
+                )
+        for idx_r, resp in enumerate(reused_resps):
+            aux = resp.get("aux_info") or {}
+            self.assertGreater(int(aux.get("speculative_draft_rounds", 0) or 0), 0)
+
+        decode_log = Path(self.decode_mgr.log_file_path).read_text(errors="replace")
+        for bad in (
+            "speculative target commit prepare failed",
+            "speculative target side-state commit failed",
+            "Unknown exception",
+        ):
+            self.assertNotIn(bad, decode_log, f"Found DSpARK runtime failure marker {bad!r}")
+        _emit(
+            "[DSpARK verified] greedy_eq=100%% total_rounds=%d total_accepted=%d",
+            total_rounds,
+            total_accepted,
+        )
 
     def _run_real_3fs_40layer(self) -> None:
         block = self.seq_size_per_block
@@ -1116,6 +1417,7 @@ class Qwen4_5PurePDSmokeTest(unittest.TestCase):
                 res.get("response"),
                 res.get("aux_info"),
             )
+            self._emit_latency_telemetry("[40L Telemetry]", spec, res)
 
         # 2. Prefix branching (A=CEDAR-AMBER, B=MAPLE-VIOLET) with shared block prefix.
         prompt_a, ids_a, prompt_b, ids_b = self._build_branch_pair("40l_3fs")
@@ -1231,6 +1533,7 @@ class Qwen4_5PurePDSmokeTest(unittest.TestCase):
 
         self._assert_rdma_active_in_logs()
         self._assert_decode_cuda_graph_active_in_logs()
+        self._assert_qsa_active_in_logs()
 
     def test_pure_pd_generation(self) -> None:
         if self.force_host_demotion:

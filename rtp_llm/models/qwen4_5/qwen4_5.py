@@ -128,6 +128,7 @@ class Qwen4_5(_BaseModel):
         config.expert_num = arch_cfg.num_experts
         config.moe_k = arch_cfg.num_experts_per_tok
         config.tie_word_embeddings = arch_cfg.tie_word_embeddings
+        cls._populate_qsa_fields(config, arch_cfg)
 
         # Attach pure-Python KV cache plan and exact sizing summary
         config.qwen4_5_kv_cache_plan = build_qwen4_5_kv_cache_plan(arch_cfg)
@@ -152,9 +153,7 @@ class Qwen4_5(_BaseModel):
                     config.special_tokens.bos_token_id = int(arch_cfg.bos_token_id)
                     config.special_tokens.eos_token_id = int(arch_cfg.eos_token_id)
                 if hasattr(config, "attn_config"):
-                    config.attn_config.head_num = arch_cfg.num_attention_heads
-                    config.attn_config.kv_head_num = arch_cfg.num_key_value_heads
-                    config.attn_config.size_per_head = arch_cfg.head_dim
+                    cls._apply_qsa_attn_config(config.attn_config, arch_cfg)
                 if hasattr(config, "hybrid_attention_config"):
                     # GDN uses OPAQUE_STATE cache descriptors rather than KVCacheSpecType.LINEAR;
                     # CacheConfigCreator requires hybrid_attention_types empty and linear_num_value_heads == 0.
@@ -167,6 +166,49 @@ class Qwen4_5(_BaseModel):
                 )
             except Exception:
                 pass
+
+    @staticmethod
+    def _populate_qsa_fields(config: Any, arch_cfg: Qwen4_5ArchConfig) -> None:
+        config.qwen4_5_has_qsa = bool(arch_cfg.has_qsa)
+        config._qwen4_indexer_head_dim = int(arch_cfg.indexer_head_dim)
+        config._qwen4_indexer_n_heads = int(arch_cfg.indexer_n_heads)
+        config._qwen4_indexer_kv_heads = int(arch_cfg.indexer_kv_heads)
+        config._qwen4_indexer_compress_ratio = int(arch_cfg.indexer_compress_ratio)
+        config._qwen4_indexer_budget = int(arch_cfg.indexer_budget)
+
+    @staticmethod
+    def _apply_qsa_attn_config(attn: Any, arch_cfg: Qwen4_5ArchConfig) -> None:
+        attn.head_num = arch_cfg.num_attention_heads
+        attn.kv_head_num = arch_cfg.num_key_value_heads
+        attn.size_per_head = arch_cfg.head_dim
+        if arch_cfg.has_qsa:
+            attn.is_sparse = True
+            if hasattr(attn, "use_sparse_gqa_fmha"):
+                attn.use_sparse_gqa_fmha = True
+            attn.indexer_head_dim = int(arch_cfg.indexer_head_dim)
+            attn.indexer_head_num = int(arch_cfg.indexer_n_heads)
+            attn.indexer_topk = int(
+                arch_cfg.indexer_budget // arch_cfg.indexer_compress_ratio
+            )
+
+    @classmethod
+    def _apply_kv_cache_config(
+        cls, model_config: Any, kv_cache_config: Any
+    ) -> None:
+        attn = getattr(model_config, "attn_config", None)
+        if attn is not None and kv_cache_config is not None:
+            seq_size = int(getattr(kv_cache_config, "seq_size_per_block", 0) or 0)
+            if seq_size > 0 and getattr(attn, "tokens_per_block", 0) in (0, None):
+                attn.tokens_per_block = seq_size
+            kernel_seq_size = int(
+                getattr(kv_cache_config, "kernel_seq_size_per_block", 0) or 0
+            )
+            if kernel_seq_size > 0 and getattr(attn, "kernel_tokens_per_block", 0) in (
+                0,
+                None,
+            ):
+                attn.kernel_tokens_per_block = kernel_seq_size
+        cls._post_build_model_config(model_config)
 
     @classmethod
     def _post_build_model_config(cls, model_config: Any) -> None:
@@ -188,14 +230,13 @@ class Qwen4_5(_BaseModel):
                 attn.tokens_per_block = 64
             if getattr(attn, "kernel_tokens_per_block", 0) in (0, None):
                 attn.kernel_tokens_per_block = attn.tokens_per_block
-            attn.head_num = arch_cfg.num_attention_heads
-            attn.kv_head_num = arch_cfg.num_key_value_heads
-            attn.size_per_head = arch_cfg.head_dim
+            cls._apply_qsa_attn_config(attn, arch_cfg)
             if getattr(attn, "dtype", None) is None:
                 import torch
 
                 attn.dtype = torch.bfloat16
 
+        cls._populate_qsa_fields(model_config, arch_cfg)
         model_config.hc_mult = arch_cfg.hc_count
         model_config.has_lm_head = True
         model_config.has_post_decoder_layernorm = False
@@ -208,7 +249,9 @@ class Qwen4_5(_BaseModel):
             if hasattr(model_config, "linear_attention_config"):
                 model_config.linear_attention_config.linear_num_value_heads = 0
             model_config.kv_cache_spec_descs = build_qwen4_5_kv_cache_spec_descs(
-                model_config, arch_cfg
+                model_config,
+                arch_cfg,
+                allow_small_block_explicit=True,
             )
         except Exception:
             # Pure-Python environment without compiled rtp_llm.ops

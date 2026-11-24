@@ -30,6 +30,7 @@ py_test(
     srcs = ["test_e2e_qwen4_5_model.py"],
     main = "test_e2e_qwen4_5_model.py",
     deps = [
+        "//rtp_llm:testlib",
         "//rtp_llm/models_py:models",
         "//rtp_llm/models_py:modules",
     ],
@@ -52,6 +53,28 @@ py_test(
     srcs = ["bench_qwen4_5_accuracy.py", "test_e2e_qwen4_5_model.py"],
     main = "bench_qwen4_5_accuracy.py",
     env = {"GPU_COUNT": "2"},
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:models",
+        "//rtp_llm/models_py:modules",
+    ],
+)
+
+py_test(
+    name = "qwen4_5_qsa_test",
+    srcs = ["test_qwen4_5_qsa.py"],
+    main = "test_qwen4_5_qsa.py",
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:models",
+        "//rtp_llm/models_py:modules",
+    ],
+)
+
+py_test(
+    name = "qwen4_5_dspark_test",
+    srcs = ["test_qwen4_5_dspark.py"],
+    main = "test_qwen4_5_dspark.py",
     deps = [
         "//rtp_llm:testlib",
         "//rtp_llm/models_py:models",

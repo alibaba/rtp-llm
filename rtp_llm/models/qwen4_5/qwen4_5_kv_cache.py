@@ -34,9 +34,20 @@ try:
         TpCacheTransferMode,
     )
 
+    from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
+        INDEXER_KV_TAG,
+        INDEXER_STATE_TAG,
+        indexer_kv_desc,
+        indexer_state_desc,
+    )
+
     _HAS_RTP_OPS = True
 except Exception:  # pragma: no cover - pure-Python fallback without C++ ops
     _HAS_RTP_OPS = False
+    INDEXER_KV_TAG = "indexer_kv"
+    INDEXER_STATE_TAG = "indexer_state"
+    indexer_kv_desc = None
+    indexer_state_desc = None
 
 FULL_ATTN_KV_TAG = "full"
 LINEAR_ATTN_TAG = "linear"
@@ -120,6 +131,12 @@ class Qwen4_5LayerCachePlan:
 
     # OPAQUE_STATE regions attached to this layer
     opaque_regions: Tuple[OpaqueStateRegionPlan, ...]
+
+    # QSA indexer KV + ring state (source non-GDN layers only)
+    has_qsa_indexer_cache: bool = False
+    indexer_kv_source_layer: Optional[int] = None
+    indexer_head_dim: int = 0
+    indexer_compress_ratio: int = 0
 
     @property
     def has_gdn_conv(self) -> bool:
@@ -325,6 +342,10 @@ def build_qwen4_5_kv_cache_plan(
         has_kv_sconv = False
         k_sconv_shape: Optional[Tuple[int, int]] = None
         v_sconv_shape: Optional[Tuple[int, int]] = None
+        has_qsa_indexer_cache = False
+        indexer_kv_source_layer: Optional[int] = None
+        indexer_head_dim = 0
+        indexer_compress_ratio = 0
 
         if ltype == "full_attention":
             if not is_consumer:
@@ -351,6 +372,12 @@ def build_qwen4_5_kv_cache_plan(
             else:
                 allocates_kv = False
                 kv_src = source_layer
+
+            if arch_cfg.has_qsa:
+                has_qsa_indexer_cache = not is_consumer
+                indexer_kv_source_layer = layer_idx if not is_consumer else source_layer
+                indexer_head_dim = int(arch_cfg.indexer_head_dim)
+                indexer_compress_ratio = int(arch_cfg.indexer_compress_ratio)
 
             if (
                 arch_cfg.has_output_sconv(
@@ -486,6 +513,10 @@ def build_qwen4_5_kv_cache_plan(
                 ple_conv_state_shape=ple_conv_shape,
                 ple_ngram_ctx_shape=ple_ctx_shape,
                 opaque_regions=tuple(opaque),
+                has_qsa_indexer_cache=has_qsa_indexer_cache,
+                indexer_kv_source_layer=indexer_kv_source_layer,
+                indexer_head_dim=indexer_head_dim,
+                indexer_compress_ratio=indexer_compress_ratio,
             )
         )
 
@@ -539,6 +570,7 @@ def build_qwen4_5_kv_cache_spec_descs(
     arch_cfg: Optional[Qwen4_5ArchConfig] = None,
     *,
     enable_yoco_decode: Optional[bool] = None,
+    allow_small_block_explicit: bool = False,
 ) -> List[List[Any]]:
     """Build per-layer RTP-LLM ``KVCacheSpecDesc`` lists mirroring ``qwen4_exp_kv_cache``.
 
@@ -574,6 +606,60 @@ def build_qwen4_5_kv_cache_spec_descs(
                 mha.cache_type = KVCacheSpecType.MHA
                 mha.tp_transfer_mode = TpCacheTransferMode.MHA_HEADS
                 descs.append(mha)
+            if lp.has_qsa_indexer_cache:
+                attn_cfg = getattr(config, "attn_config", None)
+                kernel_tpb = (
+                    int(getattr(attn_cfg, "kernel_tokens_per_block", 0) or 0)
+                    if attn_cfg is not None
+                    else 0
+                )
+                phys_tpb = (
+                    int(getattr(attn_cfg, "tokens_per_block", 0) or 0)
+                    if attn_cfg is not None
+                    else 0
+                )
+                effective_tpb = kernel_tpb if kernel_tpb > 0 else phys_tpb
+                if allow_small_block_explicit and 0 < effective_tpb < 128:
+                    if phys_tpb > 0 and kernel_tpb > 0 and phys_tpb != kernel_tpb:
+                        raise ValueError(
+                            f"QSA small-block explicit mode requires tokens_per_block ({phys_tpb}) "
+                            f"== kernel_tokens_per_block ({kernel_tpb})"
+                        )
+                    if effective_tpb % lp.indexer_compress_ratio != 0:
+                        raise ValueError(
+                            f"tokens_per_block ({effective_tpb}) must be divisible by "
+                            f"indexer_compress_ratio ({lp.indexer_compress_ratio})"
+                        )
+                    idx_kv = KVCacheSpecDesc()
+                    idx_kv.tag = INDEXER_KV_TAG
+                    idx_kv.cache_type = KVCacheSpecType.OPAQUE_KV
+                    idx_kv.is_state_cache = False
+                    idx_kv.dtype = DataType.TYPE_UINT8
+                    idx_kv.entry_dtype = DataType.TYPE_UINT8
+                    idx_kv.entry_elems = lp.indexer_head_dim * 2
+                    idx_kv.entry_count_mode = OpaqueBlockEntryCountMode.EXPLICIT
+                    idx_kv.explicit_entry_count = (
+                        effective_tpb // lp.indexer_compress_ratio
+                    )
+                    idx_kv.compression_ratio = lp.indexer_compress_ratio
+                    idx_reuse = CacheReusePolicyDesc()
+                    idx_reuse.enable_prefix_reuse = True
+                    idx_kv.reuse = idx_reuse
+                    idx_tail = CacheTailPolicyDesc()
+                    idx_tail.active_tail_blocks = 0
+                    idx_kv.tail = idx_tail
+                else:
+                    idx_kv = indexer_kv_desc(
+                        lp.indexer_head_dim, lp.indexer_compress_ratio
+                    )
+                idx_kv.tp_transfer_mode = TpCacheTransferMode.REPLICATED
+                descs.append(idx_kv)
+
+                idx_state = indexer_state_desc(
+                    lp.indexer_head_dim, lp.indexer_compress_ratio
+                )
+                idx_state.tp_transfer_mode = TpCacheTransferMode.REPLICATED
+                descs.append(idx_state)
         else:
             if lp.allocates_ssm_state:
                 assert lp.ssm_state_shape is not None

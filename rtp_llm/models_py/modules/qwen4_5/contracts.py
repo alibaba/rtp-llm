@@ -103,6 +103,13 @@ class Qwen4_5ArchConfig:
     share_map: Optional[str] = None
     enable_yoco_decode: bool = True
 
+    # QSA (Indexer Sparse Attention on non-GDN full_attention layers)
+    indexer_head_dim: int = 0
+    indexer_n_heads: int = 0
+    indexer_kv_heads: int = 1
+    indexer_compress_ratio: int = 4
+    indexer_budget: int = 0
+
     # Quantization
     quant_method: Optional[str] = "mxfp4"
 
@@ -153,6 +160,10 @@ class Qwen4_5ArchConfig:
         if set(pairs.keys()) & set(pairs.values()):
             raise ValueError("A sharing source cannot also be a consumer")
         return pairs
+
+    @property
+    def has_qsa(self) -> bool:
+        return int(self.indexer_head_dim) > 0
 
     def has_output_sconv(self, site: str, *, is_consumer: bool) -> bool:
         flag = getattr(self, f"use_{site}", False)
@@ -217,4 +228,5 @@ class Qwen4_5RuntimeState:
     attn_output_sconv: Dict[int, ShortConvState] = field(default_factory=dict)
     ffn_output_sconv: Dict[int, ShortConvState] = field(default_factory=dict)
     ple: Dict[int, PLELayerState] = field(default_factory=dict)
+    qsa_raw_keys: Dict[int, torch.Tensor] = field(default_factory=dict)
     seq_len: int = 0                # global cached sequence length

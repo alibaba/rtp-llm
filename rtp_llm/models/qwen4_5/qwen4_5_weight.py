@@ -125,6 +125,9 @@ class QWEN4_5_W:
     full_k_sconv = "qwen4_5.self_attn.k_sconv"
     full_v_sconv = "qwen4_5.self_attn.v_sconv"
     full_attn_output_sconv = "qwen4_5.full_attn_output_sconv"
+    full_indexer_qk_proj = "qwen4_5.self_attn.indexer.index_qk_proj"
+    full_indexer_q_norm_w = "qwen4_5.self_attn.indexer.q_layernorm"
+    full_indexer_k_norm_w = "qwen4_5.self_attn.indexer.k_layernorm"
 
     # Dense FFN (Layer 0)
     dense_gate_proj = "qwen4_5.mlp.gate_proj"
@@ -606,6 +609,34 @@ def _build_layer_descriptors(
                     (h, 1, k_conv),
                     layer_idx,
                 )
+            )
+        if arch_cfg.has_qsa:
+            idx_d = arch_cfg.indexer_head_dim
+            idx_qk_out = (arch_cfg.indexer_n_heads + arch_cfg.indexer_kv_heads) * idx_d
+            descs.extend(
+                [
+                    Qwen4_5WeightDescriptor(
+                        QWEN4_5_W.full_indexer_qk_proj,
+                        f"{sa}indexer.index_qk_proj.weight",
+                        "BF16",
+                        (idx_qk_out, h),
+                        layer_idx,
+                    ),
+                    Qwen4_5WeightDescriptor(
+                        QWEN4_5_W.full_indexer_q_norm_w,
+                        f"{sa}indexer.q_layernorm.weight",
+                        "BF16",
+                        (idx_d,),
+                        layer_idx,
+                    ),
+                    Qwen4_5WeightDescriptor(
+                        QWEN4_5_W.full_indexer_k_norm_w,
+                        f"{sa}indexer.k_layernorm.weight",
+                        "BF16",
+                        (idx_d,),
+                        layer_idx,
+                    ),
+                ]
             )
 
     # 5. FFN (Dense on Layer 0; Latent MoE + Shared Expert + MXFP4 Routed Experts on Layers 1..39)

@@ -171,6 +171,11 @@ def build_pure_pd_managers(
     enable_decode_cuda_graph: bool = True,
     force_host_demotion: bool = False,
     role_name_suffix: str = "",
+    sp_type: str = "",
+    sp_model_type: str = "",
+    sp_checkpoint_path: str = "",
+    sp_act_type: str = "BF16",
+    gen_num_per_cycle: int = 1,
     extra_common_env: Optional[Dict[str, str]] = None,
 ) -> Tuple[MagaServerManager, MagaServerManager]:
     """Create paired pure-PD Prefill and Decode MagaServerManager instances."""
@@ -237,6 +242,16 @@ def build_pure_pd_managers(
     )
     if kv_cache_mem_mb is not None:
         common_args += f" --kv_cache_mem_mb {kv_cache_mem_mb}"
+    sp_type_clean = (sp_type or "").strip()
+    if sp_type_clean and sp_type_clean.lower() != "none":
+        common_args += (
+            f" --sp_type {sp_type_clean}"
+            f" --sp_model_type {sp_model_type}"
+            f" --sp_act_type {sp_act_type}"
+            f" --gen_num_per_cycle {int(gen_num_per_cycle)}"
+        )
+        if sp_checkpoint_path:
+            common_args += f" --sp_checkpoint_path {sp_checkpoint_path}"
 
     prefill_args = (
         f"{common_args} "
@@ -363,6 +378,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rdma-connect-timeout-ms", type=int, default=30000)
     parser.add_argument("--load-workers", type=int, default=8)
     parser.add_argument("--startup-timeout", type=int, default=1800)
+    parser.add_argument("--sp-type", default="")
+    parser.add_argument("--sp-model-type", default="qwen4_5_dspark")
+    parser.add_argument("--sp-checkpoint-path", default="")
+    parser.add_argument("--sp-act-type", default="BF16")
+    parser.add_argument("--gen-num-per-cycle", type=int, default=8)
     return parser
 
 
@@ -403,6 +423,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         max_context_batch_size=args.max_context_batch_size,
         concurrency_limit=args.concurrency_limit,
         enable_decode_cuda_graph=args.enable_decode_cuda_graph,
+        sp_type=args.sp_type,
+        sp_model_type=args.sp_model_type,
+        sp_checkpoint_path=args.sp_checkpoint_path,
+        sp_act_type=args.sp_act_type,
+        gen_num_per_cycle=args.gen_num_per_cycle,
     )
 
     stop_requested = False
