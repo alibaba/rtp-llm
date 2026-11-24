@@ -22,7 +22,10 @@ for name, expr in [("ATOM_RTP_MTP_HC_FUSION", hc_expr), ("ATOM_RTP_TOPK512", top
                               atom_config=SimpleNamespace(plugin_config=None if rtp is None else SimpleNamespace(is_rtpllm=rtp)),
                               os=os, is_rtpllm=lambda: rtp, renormalize=True, topk=10,
                               token=4, shared=1, scoring="sigmoid",
-                              gating_output=SimpleNamespace(dtype="bf16", shape=(4, 513), stride=lambda _: 1))
-                    actual = bool(eval(compile(ast.Expression(expr), "dispatch", "eval"), ns))
-                    assert actual == bool(hip and rtp and value != "0"), (name, hip, rtp, value)
+                              gating_output=SimpleNamespace(device=None, dtype="bf16", shape=(4, 513), stride=lambda _: 1))
+                    test = compile(ast.Expression(expr), "dispatch", "eval")
+                    for mi308x in (False, True):
+                        ns["is_mi308x"] = lambda device: mi308x
+                        expected = hip and rtp and value != "0" and (expr is hc_expr or mi308x)
+                        assert bool(eval(test, ns)) == bool(expected), (name, hip, rtp, value, mi308x)
 print("PASS: both defaults, explicit overrides, non-ROCm and non-RTP guards")

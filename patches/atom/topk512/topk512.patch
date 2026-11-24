@@ -1,18 +1,21 @@
 --- a/atom/plugin/rtpllm/utils/topk_compat.py
 +++ b/atom/plugin/rtpllm/utils/topk_compat.py
-@@ -13,6 +13,11 @@
+@@ -8,11 +8,14 @@
+ from __future__ import annotations
+
+ import inspect
++import os
+ from functools import lru_cache
+
  import torch
  import triton
  import triton.language as tl
 +
-+
-+@lru_cache(maxsize=None)
-+def _mi308x_topk(device: torch.device) -> bool:
-+    return "MI308X" in torch.cuda.get_device_properties(device).name
- 
++from atom.utils import is_mi308x
+
  
  @lru_cache(maxsize=2)
-@@ -74,7 +79,18 @@
+@@ -74,7 +77,18 @@
      )
      scoring = fused_shared_experts_scoring_func or ""
      args = (weights, ids, token_ids, gating_output, renormalize, shared, scoring)
@@ -20,9 +23,9 @@
 +    from atom.plugin.prepare import is_rtpllm
 +
 +    if (torch.version.hip is not None and is_rtpllm()
-+        and __import__("os").getenv("ATOM_RTP_TOPK512", "1") == "1"
++        and os.getenv("ATOM_RTP_TOPK512", "1") == "1"
 +        and renormalize and topk == 10
-+        and (0 < token <= 4 or (4 < token <= 1024 and _mi308x_topk(gating_output.device)))
++        and 0 < token <= 1024 and is_mi308x(gating_output.device)
 +        and gating_output.dtype == torch.bfloat16 and gating_output.stride(1) == 1
 +        and gating_output.shape[1] == 512 + shared and shared in (0, 1)
 +        and (shared == 0 or scoring == "sigmoid")):
@@ -66,3 +69,21 @@
 +
 +def run(g, w, i, valid=None):
 +    _topk512[g.shape[0],](g, w, i, valid, g.stride(0), w.stride(0), i.stride(0), g.shape[1] == 513, valid is not None, num_warps=1)
+--- a/atom/utils/__init__.py
++++ b/atom/utils/__init__.py
+@@ -781,6 +781,15 @@
+
+ context_manager = None
+ torch_compile_start_time: float = 0.0
++
++
++@lru_cache(maxsize=None)
++def is_mi308x(device: torch.device) -> bool:
++    return (
++        torch.version.hip is not None
++        and device.type == "cuda"
++        and "MI308X" in torch.cuda.get_device_properties(device).name
++    )
+
+
+ def is_torch_equal_or_newer(target: str) -> bool:

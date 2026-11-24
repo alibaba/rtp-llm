@@ -1,15 +1,3 @@
---- a/atom/plugin/rtpllm/utils/qwen4_exp_context.py
-+++ b/atom/plugin/rtpllm/utils/qwen4_exp_context.py
-@@ -1024,7 +1024,8 @@
-             role = str(runtime.parallelism_config.role_type).rsplit(".", 1)[-1]
-             single_verify = (
-                 gdn_metadata is not None
--                and gdn_metadata.num_spec_decodes in (1, 2)
-+                and (gdn_metadata.num_spec_decodes in (1, 2)
-+                     or (role == "PDFUSION" and gdn_metadata.num_spec_decodes in (4, 8, 16)))
-                 and gdn_metadata.num_spec_decode_tokens == 4 * gdn_metadata.num_spec_decodes
-                 and not runtime._rtp_model_config.is_mtp
-                 and (
 --- a/atom/model_ops/moe.py
 +++ b/atom/model_ops/moe.py
 @@ -1219,7 +1219,7 @@
@@ -27,9 +15,9 @@
 
 +    sort_policy = 0
 +    if hidden_states.shape[0] in (16, 32, 64) and rtp_single_verify.get():
-+        from atom.plugin.rtpllm.utils.topk_compat import _mi308x_topk
++        from atom.utils import is_mi308x
 +
-+        if _mi308x_topk(hidden_states.device):
++        if is_mi308x(hidden_states.device):
 +            from aiter.fused_moe import QWEN4_VERIFY_PACK
 +
 +            sort_policy = QWEN4_VERIFY_PACK
@@ -220,46 +208,3 @@
 +    }
 +  }
 +}
---- a/atom/model_ops/qwen4_exp/hc_verify.py
-+++ b/atom/model_ops/qwen4_exp/hc_verify.py
-@@ -35,7 +35,7 @@
-     rows = x.shape[0]
-     if not (
-         rtp_single_verify.get() and rank == 320 and hc_count == 4
--        and rows in (4, 8) and x.shape == (rows, 10240) and weight.shape == (324, 10240)
-+        and rows in (4, 8, 16, 32, 64) and x.shape == (rows, 10240) and weight.shape == (324, 10240)
-         and x.dtype == weight.dtype == torch.bfloat16 and x.device == weight.device
-         and x.is_contiguous() and weight.is_contiguous() and _mi308x_topk(x.device)
-     ):
-@@ -53,7 +53,8 @@
-         if status:
-             raise RuntimeError(f"HC verifier kernel launch failed with HIP status {status}")
-     else:
--        partials = torch.empty((32, rows, 324), device=x.device, dtype=torch.float32)
--        split_project[(11, 32)](x, weight, partials, rows, 32, 64, 32, num_warps=4)
--        finalize[(rows, 6)](partials, gate, inject, rows, 32, 32, num_warps=2)
-+        splits, bn, bk, bm = (32, 32, 64, 16) if rows == 8 else (16, 64, 128, 64 if rows == 64 else 16)
-+        partials = torch.empty((splits, rows, 324), device=x.device, dtype=torch.float32)
-+        split_project[((324 + bn - 1) // bn, splits, max(1, rows // bm))](x, weight, partials, rows, bn, bk, splits, bm, num_warps=4)
-+        finalize[(rows, 6)](partials, gate, inject, rows, splits, splits, num_warps=2)
-     return gate, inject
---- a/atom/model_ops/qwen4_exp/hc_verify_triton.py
-+++ b/atom/model_ops/qwen4_exp/hc_verify_triton.py
-@@ -2,12 +2,14 @@
- import triton.language as tl
-
- @triton.jit
--def split_project(X,W,P,M:tl.constexpr,BN:tl.constexpr,BK:tl.constexpr,S:tl.constexpr):
-+def split_project(X,W,P,M:tl.constexpr,BN:tl.constexpr,BK:tl.constexpr,S:tl.constexpr,BM:tl.constexpr):
-     n=tl.program_id(0)*BN+tl.arange(0,BN)
--    m=tl.arange(0,16)
-+    m=tl.arange(0,BM)
-+    if M > BM:
-+        m+=tl.program_id(2)*BM
-     split=tl.program_id(1)
-     k=split*(10240//S)+tl.arange(0,BK)
--    acc=tl.full((16,BN),0,tl.float32)
-+    acc=tl.full((BM,BN),0,tl.float32)
-     for i in range((10240//S)//BK):
-         x=tl.load(X+m[:,None]*10240+k[None,:],m[:,None]<M,0)
-         w=tl.load(W+n[None,:]*10240+k[:,None],n[None,:]<324,0)

@@ -1,6 +1,22 @@
 --- a/atom/model_ops/qwen38_moe_dispatch.py
 +++ b/atom/model_ops/qwen38_moe_dispatch.py
-@@ -29,6 +29,8 @@
+@@ -1,11 +1,14 @@
+ """Shape-specific gfx942 EP MoE dispatch for channel-scaled FP8 weights."""
+
++from contextvars import ContextVar
+ import os
+
+ import torch
+ from aiter import ActivationType, QuantType
+-from aiter.jit.utils.chip_info import get_gfx
++from atom.utils import is_mi308x
+
++rtp_single_verify = ContextVar("rtp_single_verify", default=False)
++FUSION_VERIFY_MOE = os.environ.get("ATOM_QWEN4_FUSION_VERIFY_MOE", "1") == "1"
+ _ENABLE_SMALL_DECODE = os.environ.get("ATOM_QWEN38_MOE_SMALL_DECODE", "1") == "1"
+
+
+@@ -26,15 +29,19 @@
      swiglu_limit: float | None,
      gate_mode: str,
      scheduled_tokens: torch.Tensor | None,
@@ -9,7 +25,29 @@
  ) -> torch.Tensor | None:
      # Real EP routes favor native decode at these verification sizes. Larger
      # batches, prefill, and unsupported contracts keep the existing CK/ASM
-@@ -87,6 +89,10 @@
+     # dispatcher. Weight storage is shuffled by the compressed-FP8 loader.
+     if not _ENABLE_SMALL_DECODE:
+         return None
++    rows = hidden_states.shape[0]
++    if rows not in (3, 6, 12) and not (rows in (4, 8) and rtp_single_verify.get()):
++        return None
+     if (
+-        hidden_states.shape[0] not in (3, 6, 12)
+-        or hidden_states.shape[1] != 2560
++        hidden_states.shape[1] != 2560
+         or tuple(w1.shape) != (257, 1280, 2560)
+         or tuple(w2.shape) != (257, 2560, 640)
+         or tuple(topk_ids.shape) != (hidden_states.shape[0], 12)
+@@ -62,7 +69,7 @@
+         or tuple(w2_scale.shape) != (257, 2560, 1)
+         or w1_scale.dtype != torch.float32
+         or w2_scale.dtype != torch.float32
+-        or get_gfx() != "gfx942"
++        or not is_mi308x(hidden_states.device)
+     ):
+         return None
+     if not all(
+@@ -82,6 +89,10 @@
 
      from aiter.ops.flydsl.fused_moe_gfx942 import run_flydsl_moe_gfx942
 
@@ -20,7 +58,7 @@
      # The sort maps global routes to local experts and drops remote routes.
      # Keep the original ids/weights: no remap allocation, kernel, or host sync.
      return run_flydsl_moe_gfx942(
-@@ -104,4 +110,5 @@
+@@ -99,4 +110,5 @@
          0,
          "16_16_16_False:default:0",
          swiglu_limit,
@@ -125,7 +163,7 @@
 +from atom.model_ops.qwen38_moe_dispatch import maybe_small_decode, rtp_single_verify
 +from atom.model_ops.topK import topk_meta_rows
 +from atom.plugin.prepare import is_rtpllm
-+from atom.plugin.rtpllm.utils.topk_compat import _mi308x_topk
++from atom.utils import is_mi308x
 +from atom.utils.forward_context import pass_scheduled_tokens_gpu
 +
 +_ENABLED = os.environ.get("ATOM_RTP_TOPK512", "1") == "1"
@@ -177,7 +215,7 @@
 +
 +
 +def try_qwen4_verify(model, hidden_states, logits):
-+    if not (_ENABLED and is_rtpllm() and rtp_single_verify.get() and _mi308x_topk(logits.device)):
++    if not (_ENABLED and is_rtpllm() and rtp_single_verify.get() and is_mi308x(logits.device)):
 +        return None
 +    ex = model.experts
 +    quant = ex.quant_method
@@ -421,3 +459,50 @@
 +  }
 +}
 +#endif
+--- a/atom/plugin/rtpllm/utils/qwen4_exp_context.py
++++ b/atom/plugin/rtpllm/utils/qwen4_exp_context.py
+@@ -1018,13 +1018,33 @@
+                 host_lens=host_lens,
+                 context_slots=context_slots,
+             )
++            from atom.model_ops.qwen38_moe_dispatch import FUSION_VERIFY_MOE, rtp_single_verify
++
++            # Select only the verifier graph for one or two requests and three proposals.
++            role = str(runtime.parallelism_config.role_type).rsplit(".", 1)[-1]
++            single_verify = (
++                gdn_metadata is not None
++                and (gdn_metadata.num_spec_decodes in (1, 2)
++                     or (role == "PDFUSION" and gdn_metadata.num_spec_decodes in (4, 8, 16)))
++                and gdn_metadata.num_spec_decode_tokens == 4 * gdn_metadata.num_spec_decodes
++                and not runtime._rtp_model_config.is_mtp
++                and (
++                    role == "DECODE"
++                    or (role == "PDFUSION" and FUSION_VERIFY_MOE
++                        and gdn_metadata.num_prefills == 0 and gdn_metadata.num_decodes == 0)
++                )
++            )
+             # The MTP draft is a single QSA layer with no PLE cache groups.
+             # Keep its QSA metadata live through forward without binding PLE.
+             if runtime._rtp_model_config.is_mtp or cls._bind_ple_caches(
+                 runtime, model, resolved_layer_maps[0]
+             ) is None:
+                 metadata.ple_metadata = None
+-                yield
++                token = rtp_single_verify.set(single_verify)
++                try:
++                    yield
++                finally:
++                    rtp_single_verify.reset(token)
+                 return
+             tagged_inputs = getattr(inputs, "attention_inputs_by_tag", {})
+             ple_inputs = tagged_inputs.get("ple_conv_state")
+@@ -1080,4 +1100,8 @@
+                         ),
+                     }
+                 metadata.ple_metadata.rtp_checkpoint_targets = ple_checkpoints
+-            yield
++            token = rtp_single_verify.set(single_verify)
++            try:
++                yield
++            finally:
++                rtp_single_verify.reset(token)

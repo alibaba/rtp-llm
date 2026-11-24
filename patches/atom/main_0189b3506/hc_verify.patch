@@ -43,7 +43,7 @@
      def apply_pending(
 --- /dev/null
 +++ b/atom/model_ops/qwen4_exp/hc_verify.py
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,60 @@
 +"""Qwen4 gated down projection for the MI308X PD decode verifier."""
 +import ctypes
 +import os
@@ -53,7 +53,7 @@
 +import torch
 +
 +from atom.model_ops.qwen38_moe_dispatch import rtp_single_verify
-+from atom.plugin.rtpllm.utils.topk_compat import _mi308x_topk
++from atom.utils import is_mi308x
 +from atom.model_ops.qwen4_exp.hc_verify_triton import split_project, finalize
 +
 +
@@ -81,9 +81,9 @@
 +    rows = x.shape[0]
 +    if not (
 +        rtp_single_verify.get() and rank == 320 and hc_count == 4
-+        and rows in (4, 8) and x.shape == (rows, 10240) and weight.shape == (324, 10240)
++        and rows in (4, 8, 16, 32, 64) and x.shape == (rows, 10240) and weight.shape == (324, 10240)
 +        and x.dtype == weight.dtype == torch.bfloat16 and x.device == weight.device
-+        and x.is_contiguous() and weight.is_contiguous() and _mi308x_topk(x.device)
++        and x.is_contiguous() and weight.is_contiguous() and is_mi308x(x.device)
 +    ):
 +        return None
 +    gate = x.new_empty((rows, 320))
@@ -99,9 +99,10 @@
 +        if status:
 +            raise RuntimeError(f"HC verifier kernel launch failed with HIP status {status}")
 +    else:
-+        partials = torch.empty((32, rows, 324), device=x.device, dtype=torch.float32)
-+        split_project[(11, 32)](x, weight, partials, rows, 32, 64, 32, num_warps=4)
-+        finalize[(rows, 6)](partials, gate, inject, rows, 32, 32, num_warps=2)
++        splits, bn, bk, bm = (32, 32, 64, 16) if rows == 8 else (16, 64, 128, 64 if rows == 64 else 16)
++        partials = torch.empty((splits, rows, 324), device=x.device, dtype=torch.float32)
++        split_project[((324 + bn - 1) // bn, splits, max(1, rows // bm))](x, weight, partials, rows, bn, bk, splits, bm, num_warps=4)
++        finalize[(rows, 6)](partials, gate, inject, rows, splits, splits, num_warps=2)
 +    return gate, inject
 --- /dev/null
 +++ b/atom/model_ops/qwen4_exp/hc_verify.hip
@@ -151,17 +152,19 @@
 +}
 --- /dev/null
 +++ b/atom/model_ops/qwen4_exp/hc_verify_triton.py
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,29 @@
 +import triton
 +import triton.language as tl
 +
 +@triton.jit
-+def split_project(X,W,P,M:tl.constexpr,BN:tl.constexpr,BK:tl.constexpr,S:tl.constexpr):
++def split_project(X,W,P,M:tl.constexpr,BN:tl.constexpr,BK:tl.constexpr,S:tl.constexpr,BM:tl.constexpr):
 +    n=tl.program_id(0)*BN+tl.arange(0,BN)
-+    m=tl.arange(0,16)
++    m=tl.arange(0,BM)
++    if M > BM:
++        m+=tl.program_id(2)*BM
 +    split=tl.program_id(1)
 +    k=split*(10240//S)+tl.arange(0,BK)
-+    acc=tl.full((16,BN),0,tl.float32)
++    acc=tl.full((BM,BN),0,tl.float32)
 +    for i in range((10240//S)//BK):
 +        x=tl.load(X+m[:,None]*10240+k[None,:],m[:,None]<M,0)
 +        w=tl.load(W+n[None,:]*10240+k[:,None],n[None,:]<324,0)
