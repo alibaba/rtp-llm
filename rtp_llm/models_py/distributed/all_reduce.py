@@ -210,8 +210,10 @@ def init_all_reduce(group, device, parallelism, options: CollectiveConfig):
         options.large_prefill,
         error,
         _group is group,
-        options.batch_invariant,
     ]
+    # Disabled ranks keep the wire format understood by older peers.
+    if options.batch_invariant:
+        state.append(True)
     peers = exchange_group_state(group, state, "policy")
     if any(peer[2] is not None for peer in peers):
         raise ValueError(f"Invalid AllReduce configuration: {peers}")

@@ -270,6 +270,18 @@ class AllReduceUnitTest(unittest.TestCase):
                 self.init(CollectiveConfig("sm120_p2p"))
         probe.assert_not_called()
 
+    def test_batch_invariant_policy_preserves_legacy_payload_when_disabled(self):
+        legacy = ["nccl", None, None, False]
+        for batch_invariant, expected in ((False, legacy), (True, [*legacy, True])):
+            with self.subTest(batch_invariant=batch_invariant):
+                all_reduce_module.destroy_all_reduce()
+                self.assertIsNone(
+                    self.init(CollectiveConfig("nccl", batch_invariant=batch_invariant))
+                )
+                all_reduce_module.exchange_group_state.assert_called_with(
+                    self.group, expected, "policy"
+                )
+
     def test_rank_policy_mismatch_fails_before_optional_initialization(self):
         def disagree(group, state, tag):
             return [state, ["nccl", None, None, False]]

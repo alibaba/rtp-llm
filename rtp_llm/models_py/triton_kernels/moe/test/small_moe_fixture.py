@@ -23,6 +23,7 @@ class SmallMoeGemvTestFixture:
             N=160,
             K=2560,
             inter_size=80,
+            _batch_invariant=False,
             _decode_alignment=True,
             _decode_tiles=True,
             _small_moe_gemv=False,
