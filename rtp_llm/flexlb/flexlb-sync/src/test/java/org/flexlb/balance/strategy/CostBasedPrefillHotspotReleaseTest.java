@@ -11,6 +11,7 @@ import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
@@ -99,7 +100,33 @@ class CostBasedPrefillHotspotReleaseTest {
                 tokenContext(config), RoleType.PREFILL, "g").value()) {
             assertEquals("leader", selected.serverStatus().getServerIp());
         }
-        verify(leader, never()).governHotspotRelease(anyLong(), anyBoolean(), anyLong());
+        verify(leader, never()).governHotspotRelease(anyLong(), anyLong(), anyBoolean(), anyLong());
+    }
+
+    @Test
+    void hotspotSetpointIncludesRequestsStillQueuedAtTheRouter() {
+        FlexlbConfig config = configWithHotspotRelease();
+        config.getRouter().getRoles().getPrefill().getHotspotRelease().setOutlierFactor(2.0);
+        PrefillEndpoint leader = tokenEndpoint("leader");
+        PrefillEndpoint other = tokenEndpoint("other");
+        PrefillEndpoint idle = tokenEndpoint("idle");
+        when(leader.queuedRequestCount()).thenReturn(80);
+        when(other.queuedRequestCount()).thenReturn(20);
+        var status = other.getStatus();
+        var observation = StrategyTestSupport.response(RoleType.PREFILL, true, 1000L, 1000L, 1L);
+        observation.setWaitingQueryLen(3);
+        StrategyTestSupport.publish(status, observation);
+        var strategy = tokenStrategy(config, List.of(
+                new EndpointRegistry.PrefillRoutingEntry("leader:8080", leader),
+                new EndpointRegistry.PrefillRoutingEntry("other:8080", other),
+                new EndpointRegistry.PrefillRoutingEntry("idle:8080", idle)));
+
+        try (var selected = strategy.select(tokenContext(config), RoleType.PREFILL, "g").value()) {
+            // Depths are 80, 20 + 3 and 0. Every worker uses the same median-based setpoint.
+            verify(leader).governHotspotRelease(eq(80L), eq(46L), eq(true), anyLong());
+            verify(other).governHotspotRelease(eq(23L), eq(46L), eq(true), anyLong());
+            verify(idle).governHotspotRelease(eq(0L), eq(46L), eq(true), anyLong());
+        }
     }
 
     @Test
@@ -110,12 +137,10 @@ class CostBasedPrefillHotspotReleaseTest {
                 mock(WorkerDirectory.class), mock(CacheAwareService.class), reporter);
 
         assertEquals(0, strategy.selectBestCandidate(
-                candidates(100L, 1000L, 500L, 600L), 100L,
-                RoleType.PREFILL, null, 1_000L, config, false),
+                candidates(100L, 1000L, 500L, 600L), RoleType.PREFILL, null, 1_000L, config, false, Long.MAX_VALUE),
                 "gate off: the TTFT cap must keep rejecting the leader");
         assertEquals(1, strategy.selectBestCandidate(
-                candidates(100L, 1000L, 500L, 600L), 100L,
-                RoleType.PREFILL, null, 1_000L, config, true),
+                candidates(100L, 1000L, 500L, 600L), RoleType.PREFILL, null, 1_000L, config, true, Long.MAX_VALUE),
                 "gate on: the closed line replaces the TTFT cap");
         verify(reporter).reportCacheAffinityDecision(
                 RoleType.PREFILL, "10.1.0.2", "CACHE_LEADER");
@@ -131,10 +156,32 @@ class CostBasedPrefillHotspotReleaseTest {
         when(survivors.endpoint(1).hotspotReleaseLine()).thenReturn(80.0);
 
         assertEquals(0, strategy.selectBestCandidate(
-                survivors, 100L, RoleType.PREFILL, null, 1_000L, config, true),
+                survivors, RoleType.PREFILL, null, 1_000L, config, true, Long.MAX_VALUE),
                 "a released leader must lose to the minimum-TTFT baseline");
         verify(reporter).reportCacheAffinityDecision(
                 RoleType.PREFILL, "10.1.0.1", "HOTSPOT_RELEASE");
+    }
+
+    @Test
+    void shortBurstUsesAnIdleWorkerWhenThePinnedQueueWouldMissTheDeadline() {
+        FlexlbConfig config = affinityConfig();
+        config.getScheduler().setDecision(DecisionPolicyConfig.single());
+        config.setDispatcher(DispatcherConfig.nonBatch());
+        var strategy = new CostBasedPrefillStrategy(mock(WorkerDirectory.class), mock(CacheAwareService.class),
+                mock(EngineHealthReporter.class));
+        PrefillCandidateSet candidates = new PrefillCandidateSet();
+        candidates.reset(2);
+        addCandidate(candidates, 1, "cold", 45_000L, 45_000L, 0L);
+        addCandidate(candidates, 2, "hot", 60_000L, 1_000L, 950L);
+        PrefillEndpoint hot = candidates.endpoint(1);
+        when(hot.queuedRequestCount()).thenReturn(80);
+        assertEquals(0, strategy.selectBestCandidate(candidates, RoleType.PREFILL, null, 1_000L,
+                config, true, 30_000L), "the cold worker can dispatch now even though execution takes 45s");
+        assertEquals(1, strategy.selectBestCandidate(candidates, RoleType.PREFILL, null, 1_000L,
+                config, true, 65_000L), "the hot queue can still dispatch within the longer deadline");
+        when(candidates.endpoint(0).observedRequestCount()).thenReturn(1L);
+        assertEquals(1, strategy.selectBestCandidate(candidates, RoleType.PREFILL, null, 1_000L,
+                config, true, 30_000L), "a busy peer must not trigger the short-burst escape");
     }
 
     /** Release is strict: a hit rate exactly on the line is still pinned. */
@@ -234,14 +281,14 @@ class CostBasedPrefillHotspotReleaseTest {
             long firstTtftMs, long secondTtftMs, long firstHit, long secondHit) {
         PrefillCandidateSet candidates = new PrefillCandidateSet();
         candidates.reset(2);
-        addCandidate(candidates, 1, "10.1.0.1", firstTtftMs, firstHit);
-        addCandidate(candidates, 2, "10.1.0.2", secondTtftMs, secondHit);
+        addCandidate(candidates, 1, "10.1.0.1", firstTtftMs, firstTtftMs, firstHit);
+        addCandidate(candidates, 2, "10.1.0.2", secondTtftMs, secondTtftMs, secondHit);
         return candidates;
     }
 
     private static void addCandidate(
             PrefillCandidateSet candidates, int index, String ip,
-            long ttftMs, long hitTokens) {
+            long ttftMs, long executionMs, long hitTokens) {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getIp()).thenReturn(ip);
         candidates.addCandidate(
@@ -249,7 +296,7 @@ class CostBasedPrefillHotspotReleaseTest {
                 endpoint,
                 new RouteProjection.Candidate(
                         ttftMs,
-                        ttftMs,
+                        executionMs,
                         RouteProjection.Candidate.InitialHeadDisposition.NONE,
                         "",
                         hitTokens,

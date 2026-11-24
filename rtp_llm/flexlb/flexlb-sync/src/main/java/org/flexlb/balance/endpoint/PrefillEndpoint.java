@@ -160,13 +160,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     /** One governor round over this endpoint's release line; no-op while disabled. */
-    public void governHotspotRelease(long setpoint, boolean poolSpare, long nowMs) {
+    public void governHotspotRelease(long waitingDepth, long setpoint, boolean poolSpare, long nowMs) {
         HotspotReleaseGate gate = hotspotReleaseGate;
         if (gate == null) {
             return;
         }
-        gate.govern(Math.max(0L, getStatus().committedEngineObservation().waitingQueryLen()),
-                setpoint, poolSpare, nowMs);
+        gate.govern(waitingDepth, setpoint, poolSpare, nowMs);
     }
 
     /** Advisory Engine waiting-queue admission gate verdict for diagnostics. */

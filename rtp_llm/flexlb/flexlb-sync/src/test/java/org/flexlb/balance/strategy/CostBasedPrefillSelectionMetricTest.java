@@ -392,7 +392,7 @@ class CostBasedPrefillSelectionMetricTest {
                 new long[] {500L, 500L, 0L});
 
         int selectedIndex = strategy.selectBestCandidate(
-                candidates, 100L, RoleType.PREFILL, null, 1_000L, config, false);
+                candidates, RoleType.PREFILL, null, 1_000L, config, false, Long.MAX_VALUE);
 
         assertEquals(0, selectedIndex,
                 "equal cache hit must preserve the minimum-TTFT baseline");
@@ -410,7 +410,7 @@ class CostBasedPrefillSelectionMetricTest {
                 new long[] {500L, 600L, 0L});
 
         int selectedIndex = strategy.selectBestCandidate(
-                candidates, 100L, RoleType.PREFILL, null, 1_000L, config, false);
+                candidates, RoleType.PREFILL, null, 1_000L, config, false, Long.MAX_VALUE);
 
         assertEquals(1, selectedIndex);
         verify(reporter).reportCacheAffinityDecision(
@@ -432,7 +432,7 @@ class CostBasedPrefillSelectionMetricTest {
         Set<Integer> selected = new HashSet<>();
         for (int attempt = 0; attempt < 6; attempt++) {
             selected.add(strategy.selectBestCandidate(
-                    candidates, 100L, RoleType.PREFILL, null, 1_000L, config, false));
+                    candidates, RoleType.PREFILL, null, 1_000L, config, false, Long.MAX_VALUE));
         }
 
         assertEquals(affinityEnabled ? Set.of(1) : Set.of(0, 1), selected);
@@ -448,7 +448,7 @@ class CostBasedPrefillSelectionMetricTest {
         Set<Integer> selected = new HashSet<>();
         for (int attempt = 0; attempt < 6; attempt++) {
             selected.add(strategy.selectBestCandidate(
-                    candidates, 100L, RoleType.PREFILL, null, 1_000L, config, false));
+                    candidates, RoleType.PREFILL, null, 1_000L, config, false, Long.MAX_VALUE));
         }
 
         assertEquals(Set.of(0, 2), selected);

@@ -3,7 +3,7 @@ package org.flexlb.balance.endpoint;
 /**
  * Integral hotspot release line of one Prefill endpoint. The line is the
  * hit-rate percentage below which a pinned cache-affinity request may drift to
- * balanced ranking: it climbs only while the Engine waiting queue stays above
+ * balanced ranking: it climbs only while the combined router and Engine queue stays above
  * the fleet-relative setpoint for a sustained stretch AND the pool still has an
  * idle worker, decays when pressure falls back, and retreats while the whole
  * pool is saturated, because releasing into a full pool only burns cache hit

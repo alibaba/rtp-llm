@@ -50,6 +50,7 @@ class HotspotReleaseScenarioTest {
     private CostBasedPrefillStrategy strategy;
     private CacheAwareService cache;
     private long requestId;
+    private long governorTimeMs;
 
     @BeforeEach
     void setUp() {
@@ -185,19 +186,13 @@ class HotspotReleaseScenarioTest {
         }
     }
 
-    /** Advance the pool governor over injected timestamps ending at now. */
+    /** Drive production governor rounds with a monotonic test clock. */
     private void driveGovernor(long seconds) {
-        long now = System.currentTimeMillis();
-        long rounds = seconds * 10L;
-        for (long round = 1; round <= rounds; round++) {
-            long at = now - rounds * 100L + round * 100L;
-            long setpoint = CostBasedPrefillStrategy.hotspotReleaseSetpoint(
-                    config.getRouter().getRoles().getPrefill().getHotspotRelease(),
-                    new long[] {
-                            leader.getStatus().committedEngineObservation().waitingQueryLen(),
-                            idle.getStatus().committedEngineObservation().waitingQueryLen()});
-            leader.governHotspotRelease(setpoint, true, at);
-            idle.governHotspotRelease(setpoint, true, at);
+        var pool = registry.prefillRoutingSnapshot(RoleType.PREFILL);
+        governorTimeMs = Math.max(governorTimeMs, System.currentTimeMillis());
+        for (long round = 0; round < seconds * 10L; round++) {
+            governorTimeMs += 100L;
+            strategy.governHotspotRelease(pool, config, governorTimeMs);
         }
     }
 

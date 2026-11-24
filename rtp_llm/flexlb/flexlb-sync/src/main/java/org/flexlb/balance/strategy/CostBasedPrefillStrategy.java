@@ -11,6 +11,7 @@ import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.balance.scheduler.PrefillQueueShedding;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
@@ -96,14 +97,14 @@ public class CostBasedPrefillStrategy {
         boolean hotspotRelease = config.getRouter().getRoles()
                 .getPrefill().getHotspotRelease().isEnabled();
         if (hotspotRelease) {
-            governHotspotRelease(discovery.candidates(), config);
+            governHotspotRelease(discovery.candidates(), config, System.currentTimeMillis());
         }
         int selectedIndex = tokenBalance != null
                 ? selectTokenBalancedCandidate(
                         survivors, roleType, group, seqLen, tokenBalance, hotspotRelease)
                 : selectBestCandidate(
-                        survivors, survivors.minimumProjectedTtftMs,
-                        roleType, group, seqLen, config, hotspotRelease);
+                        survivors, roleType, group, seqLen, config, hotspotRelease,
+                        balanceContext.getRequestExpiresAtMs() - System.currentTimeMillis());
 
         if (selectedIndex < 0) {
             Logger.debug(
@@ -391,12 +392,13 @@ public class CostBasedPrefillStrategy {
      * still shorten modeled work.
      */
     int selectBestCandidate(PrefillCandidateSet survivors,
-                            long minProjectedTtftMs,
                             RoleType roleType,
                             String group,
                             long seqLen,
                             FlexlbConfig config,
-                            boolean hotspotRelease) {
+                            boolean hotspotRelease,
+                            long remainingQueueMs) {
+        long minProjectedTtftMs = survivors.minimumProjectedTtftMs;
         if (survivors.size() == 0) {
             return -1;
         }
@@ -462,6 +464,15 @@ public class CostBasedPrefillStrategy {
         int selectedIndex;
         if (!preferredCandidates.isEmpty()) {
             selectedIndex = selectCacheLeader(survivors, preferredCandidates, roleType, group);
+            if (hotspotRelease && config.isSingleDecision()
+                    && config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH) {
+                int idle = selectIdleAlternativeBeforeDeadline(survivors, roleType, group, selectedIndex,
+                        remainingQueueMs, config.getRouter().getRoles().getPrefill().getHotspotRelease().getSetpointFloor());
+                if (idle >= 0) {
+                    selectedIndex = idle;
+                    affinityReason = "QUEUE_DEADLINE";
+                }
+            }
         } else {
             selectedIndex = selectBaselineCandidate(
                     survivors, minProjectedTtftMs, roleType, group,
@@ -520,6 +531,24 @@ public class CostBasedPrefillStrategy {
                 i -> survivors.projectedTtftMs(i) == minimumTtftMs
                         && (!preferCache || survivors.cacheHit(i) == selectedCacheHit),
                 survivors::endpointAddress);
+    }
+
+    /** A short burst can fill the pinned queue before the sustained-pressure window elapses. */
+    private int selectIdleAlternativeBeforeDeadline(PrefillCandidateSet candidates, RoleType role, String group,
+                                                   int pinned, long remainingQueueMs, long depthFloor) {
+        if (remainingQueueMs <= 0L || candidates.projectedWaitMs(pinned) < remainingQueueMs
+                || candidates.endpoint(pinned).queuedRequestCount() <= depthFloor) {
+            return -1;
+        }
+        BitSet idle = new BitSet(candidates.size());
+        for (int i = 0; i < candidates.size(); i++) {
+            if (candidates.admissionBlock(i) == null && candidates.projectedWaitMs(i) < remainingQueueMs
+                    && candidates.projectedTtftMs(i) < candidates.projectedTtftMs(pinned)
+                    && candidates.endpoint(i).observedRequestCount() == 0L) {
+                idle.set(i);
+            }
+        }
+        return idle.isEmpty() ? -1 : selectCacheLeader(candidates, idle, role, group);
     }
 
     /** Fairly rotate only endpoints with the same best cache hit and projected TTFT. */
@@ -681,19 +710,19 @@ public class CostBasedPrefillStrategy {
     /**
      * Advance every Prefill endpoint's hotspot release line at most once per
      * window: one concurrent selector wins the CAS and governs the whole pool
-     * snapshot in a single pass over the fleet's committed waiting depths —
+     * snapshot in a single pass over the fleet's router and Engine waiting depths —
      * every endpoint integrates against the shared fleet-relative setpoint.
      * A pool with any fully idle worker counts as having spare capacity, so
      * congestion there is load imbalance, not fleet saturation, and the line
      * is still allowed to climb.
      */
-    private void governHotspotRelease(
+    void governHotspotRelease(
             List<EndpointRegistry.PrefillRoutingEntry> candidates,
-            FlexlbConfig config) {
+            FlexlbConfig config,
+            long nowMs) {
         if (candidates.isEmpty()) {
             return;
         }
-        long nowMs = System.currentTimeMillis();
         long lastMs = hotspotGovernAtMs.get();
         if (lastMs >= 0L && nowMs - lastMs < HOTSPOT_GOVERN_INTERVAL_MS) {
             return;
@@ -703,12 +732,12 @@ public class CostBasedPrefillStrategy {
         }
         long[] waitingDepths = new long[candidates.size()];
         boolean poolSpare = false;
-        int depthIndex = 0;
-        for (EndpointRegistry.PrefillRoutingEntry routingEntry : candidates) {
-            PrefillEndpoint endpoint = routingEntry.endpoint();
-            waitingDepths[depthIndex++] = Math.max(0L,
-                    endpoint.getStatus().committedEngineObservation().waitingQueryLen());
-            if (endpoint.queuedRequestCount() == 0
+        for (int i = 0; i < candidates.size(); i++) {
+            PrefillEndpoint endpoint = candidates.get(i).endpoint();
+            // NON_BATCH can hold the backlog at the router while the Engine queue stays shallow.
+            waitingDepths[i] = saturatingAdd(endpoint.queuedRequestCount(),
+                    Math.max(0L, endpoint.getStatus().committedEngineObservation().waitingQueryLen()));
+            if (waitingDepths[i] == 0L
                     && endpoint.getInflightBatchCount() == 0) {
                 poolSpare = true;
             }
@@ -716,8 +745,8 @@ public class CostBasedPrefillStrategy {
         long setpoint = hotspotReleaseSetpoint(
                 config.getRouter().getRoles().getPrefill().getHotspotRelease(),
                 waitingDepths);
-        for (EndpointRegistry.PrefillRoutingEntry routingEntry : candidates) {
-            routingEntry.endpoint().governHotspotRelease(setpoint, poolSpare, nowMs);
+        for (int i = 0; i < candidates.size(); i++) {
+            candidates.get(i).endpoint().governHotspotRelease(waitingDepths[i], setpoint, poolSpare, nowMs);
         }
     }
 
@@ -734,7 +763,7 @@ public class CostBasedPrefillStrategy {
         Arrays.sort(sorted);
         double median = sorted.length % 2 == 1
                 ? sorted[sorted.length / 2]
-                : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2.0;
+                : 0.5 * sorted[sorted.length / 2 - 1] + 0.5 * sorted[sorted.length / 2];
         double floor = Math.max(1L, release.getSetpointFloor());
         double outlierFactor = Math.max(1.0, release.getOutlierFactor());
         return (long) Math.max(floor, outlierFactor * median);

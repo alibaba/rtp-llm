@@ -66,6 +66,8 @@ final class PrefillCandidateSet {
     String endpointAddress(int index) { return endpointAddresses[index]; }
     long cacheHit(int index) { return cacheHitTokens[index]; }
     long projectedTtftMs(int index) { return projectedTtftMs[index]; }
+    /** Predicted time before a SINGLE / NON_BATCH request starts service. */
+    long projectedWaitMs(int index) { return projectedTtftMs[index] - incomingPrefillMs[index]; }
     long prefillMs(int index) { return incomingPrefillMs[index]; }
     long routingCacheMatchTokens(int index) { return routingCacheMatchTokens[index]; }
     long ownershipVersion(int index) { return ownershipVersions[index]; }
