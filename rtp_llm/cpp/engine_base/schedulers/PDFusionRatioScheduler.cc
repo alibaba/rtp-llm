@@ -157,6 +157,9 @@ PDFusionRatioScheduler::PDFusionRatioScheduler(const RuntimeConfig&             
     decode_since_prefill_(0),
     prefill_since_decode_(0),
     explicit_force_single_prefill_(runtime_config.fifo_scheduler_config.force_single_prefill) {
+#if USING_ROCM
+    prefix_aware_admission_ = model_config.model_type == "atom_qwen4_exp";
+#endif
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu]",
                      max_generate_batch_size_,
                      max_batch_tokens_size_);
@@ -373,8 +376,8 @@ int64_t PDFusionRatioScheduler::reusableDeviceBlocks(const GenerateStreamPtr& st
     // blocks. The normal allocator still performs the authoritative match and
     // capacity check; this read-only peek only removes known reusable blocks
     // from the scheduler's conservative no-hit admission estimate.
-    if (!cache_manager_ || !stream->reuseCache() || stream->curBlocksNum() != 0 || stream->maxBatchSize() != 1
-        || cache_manager_->cpSlotMapper()) {
+    if (!prefix_aware_admission_ || !cache_manager_ || !stream->reuseCache() || stream->curBlocksNum() != 0
+        || stream->maxBatchSize() != 1 || cache_manager_->cpSlotMapper()) {
         return 0;
     }
     const auto cache = cache_manager_->blockTreeCache();

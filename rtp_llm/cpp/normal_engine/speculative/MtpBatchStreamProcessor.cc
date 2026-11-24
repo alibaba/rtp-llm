@@ -796,10 +796,8 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
     // Greedy sampling with identity history penalties reads only the output
     // token slot. Keep the full-history path for stochastic sampling, beams,
     // penalties, n-grams and custom logits processors.
-    const char* compact_env     = std::getenv("RTP_LLM_MTP_COMPACT_GREEDY_HISTORY");
-    const bool  compact_enabled = compact_env == nullptr || std::strcmp(compact_env, "0") != 0;
-    const bool  compact_greedy_history =
-        compact_enabled && !spec_logits_result.has_active_processor
+    const bool compact_greedy_history =
+        compact_atom_history_ && !spec_logits_result.has_active_processor
         && std::all_of(all_streams.begin(), all_streams.end(), [](const GenerateStreamPtr& stream) {
                const auto& config = stream->generateConfig();
                return !config->stochastic() && stream->currentNumBeams() == 1 && stream->nextNumBeams() == 1

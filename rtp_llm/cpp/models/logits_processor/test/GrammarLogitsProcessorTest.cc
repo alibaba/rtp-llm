@@ -245,7 +245,11 @@ TEST(GrammarLogitsProcessorTest, InstanceDeclaresMtpAndCommittedStateContract) {
     auto incremental = makeProcessor(backend, "ab");
 
     EXPECT_EQ(incremental->mtpCapability().mode, MtpProcessorMode::SPEC_VERIFY);
+#if USING_ROCM
     EXPECT_TRUE(incremental->mtpCapability().requires_executor_thread);
+#else
+    EXPECT_FALSE(incremental->mtpCapability().requires_executor_thread);
+#endif
     ASSERT_TRUE(incremental->committedOutputLen().has_value());
     EXPECT_EQ(incremental->committedOutputLen().value(), 0);
 }

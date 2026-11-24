@@ -82,6 +82,7 @@ private:
     // it through FIFOSchedulerBase would silently change PDFUSION+prefill-CP
     // batching, so the CP component is intentionally left out here.
     bool explicit_force_single_prefill_ = false;
+    bool prefix_aware_admission_        = false;
 };
 
 }  // namespace rtp_llm

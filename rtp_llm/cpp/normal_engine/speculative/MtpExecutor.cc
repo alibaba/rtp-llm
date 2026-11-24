@@ -624,6 +624,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     data_type_             = params.model_config_.data_type;
     mtp_input_hidden_size_ = static_cast<size_t>(params.model_config_.getMtpInputHiddenSize());
     propose_step_          = propose_params->gen_num_per_circle;
+    atom_qwen4_exp_ = params.model_config_.model_type == "atom_qwen4_exp";
     require_speculative_target_commit_fail_stop_ = params.kv_cache_config.linear_ssm_replay;
     RTP_LLM_CHECK_WITH_INFO(
         propose_step_ > 0, "speculative proposal width/gen_num_per_cycle must be positive, got %zu", propose_step_);
@@ -1002,7 +1003,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     speculative_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, propose_step_));
     if (!is_block_draft_) {
         fast_topk_sampler_.reset(new speculative::FastTopKSampler(
-            d2t_map_, role_type_ == RoleType::DECODE && params.model_config_.model_type == "atom_qwen4_exp"));
+            d2t_map_, role_type_ == RoleType::DECODE && atom_qwen4_exp_));
     }
 
     RTP_LLM_LOG_INFO("[speculative decoding] d2t_map size: %ld", d2t_map_.defined() ? d2t_map_.numel() : 0);
@@ -3300,12 +3301,12 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                               (model_input.sequence_lengths.defined() ?
                                    toCudaInt32WithHostHold(model_input.sequence_lengths, buffer_holder_) :
                                    torch::Tensor());
-#if !USING_CUDA
+#if USING_ROCM
     // The post-rejection draft prefill reuses this exact prefix. Materialize
     // its host metadata now, before the draft/target GPU forwards, so ROCm's
     // Python attention adapter does not synchronize the full target tail when
     // it prepares the draft prefill input.
-    const bool    use_host_metadata_mirror = useStreamAsync() || useAsyncDeviceState();
+    const bool    use_host_metadata_mirror = atom_qwen4_exp_ && (useStreamAsync() || useAsyncDeviceState());
     torch::Tensor spec_prefix_lengths_host;
     if (use_host_metadata_mirror && spec_prefix_lengths.defined()) {
         spec_prefix_lengths_host = spec_prefix_lengths.cpu().contiguous();
@@ -3469,7 +3470,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 
         model_input.input_lengths  = std::move(input_lengths);
         model_input.prefix_lengths = spec_prefix_lengths;
-#if !USING_CUDA
+#if USING_ROCM
         if (use_host_metadata_mirror) {
             model_input.mtp_prefix_lengths_host = std::move(spec_prefix_lengths_host);
             model_input.mtp_input_lengths_host =

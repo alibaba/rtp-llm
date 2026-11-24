@@ -259,7 +259,7 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::run(const LaunchTas
     }
 #endif
     try {
-#if USING_CUDA || USING_ROCM
+#if USING_ROCM
         // Async verification runs on a worker thread whose current device may
         // differ from the producer's. Allocate buffers and record events on
         // the same device as the draft tokens (and target logits).

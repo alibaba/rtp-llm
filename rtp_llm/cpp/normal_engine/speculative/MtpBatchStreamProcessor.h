@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstdlib>
+#include <cstring>
+
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsVerifyRunner.h"
@@ -23,7 +26,12 @@ public:
         vocab_size_(model_config.vocab_size),
         is_block_draft_(isBlockDraftType(sp_config.type)),
         dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)),
-        dspark_sample_from_anchor_(sp_config.sp_dspark_sample_from_anchor) {}
+        dspark_sample_from_anchor_(sp_config.sp_dspark_sample_from_anchor) {
+#if USING_ROCM
+        const char* compact = std::getenv("RTP_LLM_MTP_COMPACT_GREEDY_HISTORY");
+        compact_atom_history_ = model_config.model_type == "atom_qwen4_exp" && (!compact || std::strcmp(compact, "0") != 0);
+#endif
+    }
 
     mtp::DraftInputLayout draftInputLayout() const;
 
@@ -170,6 +178,7 @@ protected:
 
     int     propose_step_;
     size_t  vocab_size_                   = 0;
+    bool    compact_atom_history_         = false;
     bool    is_block_draft_                = false;
     int32_t dspark_mask_token_id_         = -1;
     bool    dspark_sample_from_anchor_     = true;

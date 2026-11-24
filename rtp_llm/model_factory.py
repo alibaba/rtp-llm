@@ -50,6 +50,9 @@ def _configure_atom_ssm_replay(model_config: ModelConfig, engine_config: EngineC
     sp = engine_config.sp_config
     linear = model_config.linear_attention_config
     role = parallel.role_type
+    if cache.linear_ssm_double_buffer:
+        # An explicit double buffer takes precedence over automatic single-state replay.
+        return
     if not (
         torch.version.hip
         and (
