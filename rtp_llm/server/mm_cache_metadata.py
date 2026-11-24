@@ -2,9 +2,13 @@
 
 import sys
 from array import array
+from dataclasses import dataclass
+from typing import Optional, Sequence
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.mm_download_domains import check_download_urls
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalHashResponsePB
+from rtp_llm.telemetry import vit_media
 
 MAX_METADATA_KEYS = 256
 MAX_METADATA_ROWS = 1048576
@@ -13,6 +17,51 @@ MAX_METADATA_BYTES = 16 * 1024 * 1024
 
 MM_CACHE_SNAPSHOT_MAX_KEYS = 100000
 MM_CACHE_SNAPSHOT_MAX_BYTES = 16 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class MMRoutingSnapshot:
+    """Frontend-side ViT expansion result for an early first packet.
+
+    ``prompt_token_num`` is the expanded prompt length (text + media tokens);
+    ``split_sizes`` holds each media item's token count and ``feature_hashes``
+    is the flattened per-token hash tensor, so ``sum(split_sizes)`` must equal
+    ``len(feature_hashes)``.
+    """
+
+    prompt_token_num: int
+    split_sizes: tuple[int, ...]
+    feature_hashes: tuple[int, ...]
+
+
+def snapshot_from_metadata(
+    keys: Sequence[str],
+    metadata: Optional[dict],
+    prompt_token_num: int,
+) -> Optional[MMRoutingSnapshot]:
+    """Build a snapshot only when every requested key has complete hashes."""
+    if metadata is None:
+        return None
+    entries = {entry["key"]: entry for entry in metadata.get("entries", [])}
+    split_sizes: list[int] = []
+    feature_hashes: list[int] = []
+    for key in keys:
+        entry = entries.get(key)
+        if entry is None or not entry.get("hash_hit", entry.get("hit", False)):
+            return None
+        sizes = entry.get("split_size") or []
+        hashes = entry.get("feature_hashes") or []
+        if not sizes or sum(sizes) != len(hashes):
+            return None
+        split_sizes.extend(int(size) for size in sizes)
+        feature_hashes.extend(int(value) for value in hashes)
+    if not split_sizes:
+        return None
+    return MMRoutingSnapshot(
+        prompt_token_num=int(prompt_token_num),
+        split_sizes=tuple(split_sizes),
+        feature_hashes=tuple(feature_hashes),
+    )
 
 
 def get_mm_cache_keys(engine, max_keys=MM_CACHE_SNAPSHOT_MAX_KEYS):
@@ -47,6 +96,12 @@ def get_mm_cache_metadata(
     service_name="",
     cancellation_event=None,
     binary_hashes=False,
+    external_request_id="",
+    region=None,
+    input_inspection_enabled=None,
+    defer_inspection=False,
+    inspection_lifetime_ms=0,
+    inspection_request_id=0,
 ):
     if engine is None or engine.is_proxy_mode:
         # Routing metadata belongs to the exact worker selected by FlexLB.
@@ -57,6 +112,10 @@ def get_mm_cache_metadata(
         raise ValueError("invalid multimodal cache key")
     if timeout_ms <= 0:
         raise ValueError("multimodal hash timeout must be positive")
+    if inputs is not None:
+        if len(inputs.multimodal_inputs) > MAX_METADATA_KEYS:
+            raise ValueError("too many multimodal inputs")
+        check_download_urls(item.multimodal_url for item in inputs.multimodal_inputs)
     cache = engine._hash_key_cache
     try:
         metadata = cache.metadata(
@@ -64,29 +123,65 @@ def get_mm_cache_metadata(
         )
     except ValueError as error:
         raise OverflowError(str(error)) from error
-    inspection_enabled = (
+    greennet_enabled = (
         engine._greennet_enabled() if hasattr(engine, "_greennet_enabled") else False
     )
-    if inspection_enabled:
+    # A request-level disable wins over the process configuration; enable and
+    # unset both follow it (enable still requires the provider to be on).
+    inspection_enabled = (
+        greennet_enabled if input_inspection_enabled is not False else False
+    )
+    ticket = inputs.inspection_ticket if inputs is not None else ""
+    if (
+        defer_inspection
+        and inputs is None
+        and keys
+        and inspection_enabled
+        and getattr(engine, "supports_deferred_inspection", lambda: False)()
+    ):
+        ticket = engine._inspection.tickets.open(
+            metadata["entries"], inspection_lifetime_ms / 1000, inspection_request_id
+        )
+    if ticket:
+        if not inspection_enabled or not engine.supports_deferred_inspection():
+            raise RuntimeError("Deferred inspection unavailable")
+        metadata["inspection_ticket"] = ticket
         for entry in metadata["entries"]:
-            if not entry.get("greennet_passed", False):
-                entry.update(hit=False, hash_hit=False)
+            if entry.get("greennet_passed"):
+                engine._inspection.tickets.bind(
+                    ticket,
+                    entry["key"],
+                    entry["entry_generation"],
+                    None,
+                    inputs.request_id if inputs is not None else inspection_request_id,
+                )
+    elif inspection_enabled:
+        request_scoped = engine._request_scoped_inspection()
+        for entry in metadata["entries"]:
+            # A scoped verdict can only authorize the call that obtained it.
+            if request_scoped or not entry.get("greennet_passed", False):
+                entry.update(hit=False, hash_hit=False, greennet_passed=False)
                 for field in ("feature_hashes", "split_size", "entry_generation"):
                     entry.pop(field, None)
     missing = {entry["key"] for entry in metadata["entries"] if not entry["hash_hit"]}
+    if ticket and inputs is not None:
+        missing.update(
+            entry["key"]
+            for entry in metadata["entries"]
+            if not entry.get("greennet_passed")
+        )
     if not missing or inputs is None:
         return metadata
 
     from rtp_llm.multimodal.multimodal_util import trans_mm_input
 
-    if len(inputs.multimodal_inputs) > MAX_METADATA_KEYS:
-        raise ValueError("too many multimodal inputs")
     if any(
         not item.multimodal_url or item.multimodal_tensor.ByteSize()
         for item in inputs.multimodal_inputs
     ):
         raise ValueError("hash submission requires URL inputs without tensors")
-    by_key = {item.cache_key(): item for item in trans_mm_input(inputs)}
+    original_inputs = trans_mm_input(inputs)
+    by_key = {item.cache_key(): item for item in original_inputs}
     if not missing.issubset(by_key) or not by_key.keys() <= set(keys):
         raise ValueError("multimodal inputs do not match requested cache keys")
     missing_keys = [key for key in dict.fromkeys(keys) if key in missing]
@@ -95,22 +190,32 @@ def get_mm_cache_metadata(
         if cancellation_event is not None
         else {}
     )
-    results = engine.get_embedding_result(
-        [by_key[key] for key in missing_keys],
-        request_id=inputs.request_id,
-        timeout_ms=timeout_ms,
-        hashes_only=True,
-        user_id=user_id,
-        service_name=service_name,
-        **kwargs,
-    )
+    if ticket:
+        kwargs["inspection_ticket"] = ticket
+    with vit_media.original_input_indices(original_inputs):
+        results = engine.get_embedding_result(
+            [by_key[key] for key in missing_keys],
+            request_id=inputs.request_id,
+            timeout_ms=timeout_ms,
+            hashes_only=True,
+            user_id=user_id,
+            service_name=service_name,
+            external_request_id=external_request_id,
+            region=region,
+            input_inspection_enabled=input_inspection_enabled,
+            **kwargs,
+        )
     if len(results) != len(missing_keys):
         raise FtRuntimeException(
             ExceptionType.MM_PROCESS_ERROR, "ViT returned incomplete feature hashes"
         )
     tiers = engine._embedding_cache.resident_tiers(missing_keys)
     completed = {}
-    total_rows = sum(sum(entry.get("split_size", [])) for entry in metadata["entries"])
+    total_rows = sum(
+        sum(entry.get("split_size", []))
+        for entry in metadata["entries"]
+        if entry["key"] not in missing
+    )
     for key, result in zip(missing_keys, results):
         hashes = result.feature_hashes
         if not hashes or any(h.numel() == 0 for h in hashes):
@@ -125,7 +230,7 @@ def get_mm_cache_metadata(
             "key": key,
             "hit": True,
             "hash_hit": True,
-            "greennet_passed": inspection_enabled,
+            "greennet_passed": bool(inspection_enabled and not ticket),
             "embedding_hit": key in tiers,
             "embedding_tier": tiers.get(key),
             "split_size": sizes,
@@ -147,6 +252,7 @@ def get_mm_cache_metadata(
 def metadata_to_proto(metadata):
     response = MultimodalHashResponsePB(
         worker_instance=metadata["worker_instance"],
+        inspection_ticket=metadata.get("inspection_ticket", ""),
     )
     for entry in metadata["entries"]:
         response.entries.add(
@@ -196,5 +302,10 @@ def metadata_from_proto(response):
         )
     return {
         "worker_instance": response.worker_instance,
+        **(
+            {"inspection_ticket": response.inspection_ticket}
+            if response.inspection_ticket
+            else {}
+        ),
         "entries": entries,
     }

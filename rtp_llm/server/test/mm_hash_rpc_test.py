@@ -1,4 +1,5 @@
 import asyncio
+import os
 import struct
 import threading
 import unittest
@@ -28,7 +29,13 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 )
 from rtp_llm.multimodal.mm_embedding_cache import MMEmbeddingCache, MMHashKeyCache
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
-from rtp_llm.ops import MMPreprocessConfig, MultimodalInput, PDSepConfig, VitSeparation
+from rtp_llm.ops import (
+    MMPreprocessConfig,
+    MultimodalInput,
+    PDSepConfig,
+    VitSeparation,
+    get_block_cache_keys,
+)
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.master_client import FlexlbResponse, MasterClient
 from rtp_llm.server.mm_cache_metadata import metadata_from_proto
@@ -48,6 +55,7 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
             _hash_key_cache=MMHashKeyCache(max_bytes=65536),
             _embedding_cache=MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=4096),
             _greennet_enabled=Mock(return_value=False),
+            _request_scoped_inspection=Mock(return_value=False),
             get_embedding_result=Mock(side_effect=self.compute),
             cancel_queued_request=Mock(),
             report_vit_error=Mock(),
@@ -80,6 +88,7 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
         self.request.headers = {
             "X-DashScope-Uid": "uid-rpc",
             "X-DashScope-Service": "service-rpc",
+            "X-DashScope-RequestId": "dash-hash-rpc",
         }
         self.keys = multimodal_cache_keys(self.request)
 
@@ -194,6 +203,8 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(call.kwargs["hashes_only"])
         self.assertEqual(call.kwargs["user_id"], "uid-rpc")
         self.assertEqual(call.kwargs["service_name"], "service-rpc")
+        self.assertEqual(call.kwargs["external_request_id"], "dash-hash-rpc")
+        self.assertEqual(call.kwargs["request_id"], 123)
         self.assertIsNotNone(call.kwargs["cancellation_event"])
         self.assertEqual(
             self.request.greennet_verified_vit,
@@ -213,6 +224,137 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(hot["entries"][0]["embedding_hit"])
 
+    async def test_deferred_hash_fill_and_query_over_grpc(self):
+        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+            ErrorDetailsPB,
+            GreenNetQueryPB,
+        )
+        from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
+        from rtp_llm.multimodal.mm_inspection_tickets import InspectionTickets
+
+        tickets = InspectionTickets(ttl=30)
+        self.engine._inspection = SimpleNamespace(tickets=tickets)
+        self.engine._greennet_enabled.return_value = True
+        self.engine.supports_deferred_inspection = lambda: True
+        self.engine._hash_key_cache.put(self.keys[0], self.hashes)
+        future = futures.Future()
+
+        def fill(inputs, **kwargs):
+            tickets.bind(
+                kwargs["inspection_ticket"],
+                self.keys[0],
+                "generation",
+                future,
+                kwargs["request_id"],
+            )
+            return [MMEmbeddingRes([], feature_hashes=self.hashes)]
+
+        self.engine.get_embedding_result.side_effect = fill
+        metadata = await self.client.get_vit_cache_metadata(
+            self.address, self.keys, self.request
+        )
+        self.assertTrue(metadata["entries"][0]["hash_hit"])
+        self.assertFalse(metadata["entries"][0]["greennet_passed"])
+        ticket = metadata["inspection_ticket"]
+        self.assertEqual(
+            trans_input(self.request).multimodal_request.inspection_ticket, ticket
+        )
+        self.assertIsNone(self.request.greennet_verified_vit)
+        call = self.stub.GetGreenNetVerdict(
+            GreenNetQueryPB(
+                inspection_ticket=ticket, request_id=self.request.request_id
+            ),
+            timeout=2,
+        )
+        self.assertFalse(call.done())
+        future.set_result(GreenNetVerdict(False, 2, "blocked"))
+        with self.assertRaises(grpc.aio.AioRpcError) as rejected:
+            await call
+        details = ErrorDetailsPB.FromString(
+            rejected.exception.trailing_metadata()["grpc-status-details-bin"]
+        )
+        self.assertEqual(details.error_code, ExceptionType.UNSAFE_INPUT_CONTENT)
+        self.assertEqual(details.error_message, "blocked")
+        # A retried read on the same channel gets the typed frontend error even
+        # when the compute and hash entries have already been released.
+        from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
+
+        self.request.generate_config.role_addrs = [self.address]
+        client = SimpleNamespace(
+            _channel_pool=SimpleNamespace(get=AsyncMock(return_value=self.channel))
+        )
+        with self.assertRaises(FtRuntimeException) as frontend_error:
+            await ModelRpcClient._wait_greennet_verdict(
+                client, self.request, trans_input(self.request)
+            )
+        self.assertEqual(
+            frontend_error.exception.exception_type, ExceptionType.UNSAFE_INPUT_CONTENT
+        )
+        with self.assertRaises(grpc.aio.AioRpcError):
+            await self.stub.GetGreenNetVerdict(
+                GreenNetQueryPB(inspection_ticket="unknown")
+            )
+        self.engine.get_embedding_result.assert_called_once()
+
+    async def test_request_scoped_hash_hit_checks_each_caller(self):
+        self.engine._greennet_enabled.return_value = True
+        self.engine._request_scoped_inspection.return_value = True
+        await self.client.get_vit_cache_metadata(self.address, self.keys, self.request)
+        self.assertTrue(self.engine._hash_key_cache.greennet_passed(self.keys[0]))
+
+        self.request.headers["X-DashScope-Uid"] = "second-user"
+        self.engine.get_embedding_result.side_effect = FtRuntimeException(
+            ExceptionType.UNSAFE_INPUT_CONTENT, "blocked for second user"
+        )
+        with self.assertRaises(FtRuntimeException) as raised:
+            await self.client.get_vit_cache_metadata(
+                self.address, self.keys, self.request
+            )
+        self.assertEqual(
+            raised.exception.exception_type, ExceptionType.UNSAFE_INPUT_CONTENT
+        )
+        self.assertEqual(
+            self.engine.get_embedding_result.call_args.kwargs["user_id"], "second-user"
+        )
+        self.assertIsNone(self.request.greennet_verified_vit)
+
+    async def test_parsed_region_reaches_vit_for_all_media(self):
+        self.request.headers["region"] = "cn-beijing"
+        self.request.mm_inputs.append(
+            MultimodalInput(
+                "https://example/second-image",
+                1,
+                torch.empty(0),
+                MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], -1),
+            )
+        )
+        keys = multimodal_cache_keys(self.request)
+        await self.client.get_vit_cache_metadata(self.address, keys, self.request)
+        call = self.engine.get_embedding_result.call_args
+        self.assertEqual(call.kwargs["region"], "cn-beijing")
+        self.assertEqual(len(call.args[0]), 2)
+
+    async def test_domain_denylist_rejects_even_a_warm_hash(self):
+        self.engine._hash_key_cache.put(self.keys[0], self.hashes)
+        with patch.dict(
+            os.environ, {"MM_DOWNLOAD_DOMAIN_DENYLIST": '["https://example/"]'}
+        ):
+            with self.assertRaises(FtRuntimeException) as error:
+                await self.client.get_vit_cache_metadata(
+                    self.address, self.keys, self.request
+                )
+            self.assertEqual(
+                error.exception.exception_type, ExceptionType.MM_WRONG_FORMAT_ERROR
+            )
+            with self.assertRaises(grpc.aio.AioRpcError) as error:
+                await self.stub.GetMultimodalHashes(self.wire_request())
+            self.assertEqual(error.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
+        self.engine.get_embedding_result.assert_not_called()
+
+    async def test_missing_region_reaches_vit_as_none(self):
+        await self.client.get_vit_cache_metadata(self.address, self.keys, self.request)
+        self.assertIsNone(self.engine.get_embedding_result.call_args.kwargs["region"])
+
     async def test_cache_disabled_still_returns_hashes_without_embeddings(self):
         self.engine._hash_key_cache.resize(0)
         self.engine._embedding_cache.clear()
@@ -224,7 +366,7 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             set(response.DESCRIPTOR.fields_by_name),
-            {"worker_instance", "entries"},
+            {"worker_instance", "entries", "inspection_ticket"},
         )
         self.assertFalse(self.engine._hash_key_cache.contains(self.keys[0]))
 

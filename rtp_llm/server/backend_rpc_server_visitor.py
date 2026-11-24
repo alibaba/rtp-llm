@@ -3,6 +3,7 @@ import inspect
 import logging
 import os
 import time
+from contextlib import nullcontext
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, List, Optional, Set
 
@@ -30,9 +31,11 @@ from rtp_llm.server.master_client import (
     VIT_ROUTE_STALE_CODE,
     FlexlbResponse,
     MasterClient,
+    remaining_vit_hash_time,
+    vit_hash_deadline,
 )
 from rtp_llm.server.misc import format_exception
-from rtp_llm.server.mm_cache_metadata import MAX_METADATA_KEYS
+from rtp_llm.server.mm_cache_metadata import MAX_METADATA_KEYS, snapshot_from_metadata
 from rtp_llm.server.mm_cache_routing import multimodal_routing_tokens
 from rtp_llm.server.recent_cache_key_window import RecentCacheKeyWindow
 from rtp_llm.server.request_headers import (
@@ -40,7 +43,7 @@ from rtp_llm.server.request_headers import (
     extract_trace_id,
 )
 from rtp_llm.telemetry import attributes as trace_attrs
-from rtp_llm.telemetry import start_internal_span
+from rtp_llm.telemetry import internal_span, start_internal_span
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutputs,
@@ -62,6 +65,7 @@ def get_role_names(role_addrs: List[RoleAddr]) -> Set[str]:
 
 PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV = "RTP_LLM_PD_ROUTE_RETRY_ON_UNAVAILABLE"
 DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE = 3
+VIT_HASH_CONCURRENCY_RETRIES = 2
 _RETRYABLE_ROUTE_EXCEPTION_TYPES = frozenset(
     {
         ExceptionType.GET_HOST_FAILED,
@@ -156,7 +160,9 @@ class BackendRPCServerVisitor:
         )
 
         host_args = HostServiceArgs.create_from_env()
-        self._prefill_has_decode_routing = bool(host_args.decode_domain or host_args.master_domain)
+        self._prefill_has_decode_routing = bool(
+            host_args.decode_domain or host_args.master_domain
+        )
         self.backend_role_list = self.get_backend_role_list(
             self.pd_sep_config, host_args, vit_separation
         )
@@ -309,6 +315,15 @@ class BackendRPCServerVisitor:
         """
         input.mm_token_expansion = None
         token_expansion = None
+        input.mm_routing_snapshot = None
+        input.deferred_inspection = None
+        input.greennet_verified_vit = None
+        multimodal_cache_spans = []
+        semantic_mm_token_id = (
+            int(getattr(self.mm_model_config, "semantic_mm_token_id", -1))
+            if getattr(input, "mm_inputs", None)
+            else -1
+        )
         token_ids = (
             input.token_ids.tolist()[0]
             if len(input.token_ids.shape) == 2
@@ -347,18 +362,31 @@ class BackendRPCServerVisitor:
         if getattr(self, "_mm_cache_routing", False) and getattr(
             input, "mm_inputs", None
         ):
-            keys = multimodal_cache_keys(input)
+            with internal_span(
+                "rtp_llm.frontend.prepare_media_keys",
+                **{"request_id": str(input.request_id)},
+            ):
+                keys = multimodal_cache_keys(input)
             metadata = None
             if keys and len(keys) <= 256 and all(len(key) <= 4096 for key in keys):
-                vit_result = await self.master_client.get_backend_role_addrs(
-                    block_cache_keys=[],
-                    cache_key_block_size=self._cache_key_block_size(),
-                    input=input,
-                    request_id=input.request_id,
-                    cache_affinity_keys=keys,
-                    vit_only=True,
-                )
-                if vit_result.is_ok:
+                deadline = vit_hash_deadline(input)
+                for attempt in range(VIT_HASH_CONCURRENCY_RETRIES + 1):
+                    vit_result = await self.master_client.get_backend_role_addrs(
+                        block_cache_keys=[],
+                        cache_key_block_size=self._cache_key_block_size(),
+                        input=input,
+                        request_id=input.request_id,
+                        cache_affinity_keys=keys,
+                        vit_only=True,
+                        timeout_s=remaining_vit_hash_time(deadline),
+                    )
+                    if not vit_result.is_ok:
+                        if (
+                            not vit_result.connection_failed
+                            and vit_result.error_code not in (404, 405, 501)
+                        ):
+                            return vit_result
+                        break
                     vit_addrs = [
                         addr
                         for addr in vit_result.role_addrs
@@ -369,7 +397,7 @@ class BackendRPCServerVisitor:
                             ExceptionType.ROUTE_ERROR,
                             "master returned invalid ViT route",
                         )
-                    selected_vit = vit_addrs[0]
+                    vit = vit_addrs[0]
                     selected_status = None
                     for status in (vit_result.result or {}).get("server_status", []):
                         if not isinstance(status, dict):
@@ -389,40 +417,58 @@ class BackendRPCServerVisitor:
                             ExceptionType.ROUTE_ERROR,
                             "master returned ViT route without matching server status",
                         )
-                    route_args["selected_vit"] = selected_status
-                    metadata = await self.master_client.get_vit_cache_metadata(
-                        selected_vit, keys, input=input
-                    )
-                    if metadata is None:
-                        # A proxy without the hash RPC uses the normal embedding
-                        # route, which preserves inference without ViT cache affinity.
-                        selected_vit = None
-                        route_args.pop("selected_vit")
-                elif not vit_result.connection_failed and vit_result.error_code not in (
-                    404,
-                    405,
-                    501,
-                ):
-                    return vit_result
+                    try:
+                        metadata = await self.master_client.get_vit_cache_metadata(
+                            vit, keys, input=input, deadline=deadline
+                        )
+                    except FtRuntimeException as error:
+                        if (
+                            error.exception_type
+                            != ExceptionType.CONCURRENCY_LIMIT_ERROR
+                            or attempt == VIT_HASH_CONCURRENCY_RETRIES
+                        ):
+                            raise
+                        route_logger.info(
+                            "Retrying ViT hash route after concurrency limit, request_id=%s, retry=%d, old_address=%s:%s",
+                            input.request_id,
+                            attempt + 1,
+                            vit.ip,
+                            vit.grpc_port,
+                        )
+                        continue
+                    # An older proxy may not serve hashes. Only pin a worker that returned metadata.
+                    if metadata is not None:
+                        selected_vit = vit
+                        route_args["selected_vit"] = selected_status
+                    break
             try:
-                expanded_spans = []
-                token_ids, full_length = multimodal_routing_tokens(
-                    token_ids,
-                    self.mm_model_config.mm_sep_tokens,
-                    self.mm_model_config.include_sep_tokens,
-                    keys,
-                    metadata,
-                    self.max_seq_len,
-                    compact=True,
-                    expanded_spans=expanded_spans,
-                )
+                with internal_span(
+                    "rtp_llm.frontend.expand_routing_tokens",
+                    **{"request_id": str(input.request_id)},
+                ):
+                    expanded_spans = []
+                    token_ids, full_length = multimodal_routing_tokens(
+                        token_ids,
+                        self.mm_model_config.mm_sep_tokens,
+                        self.mm_model_config.include_sep_tokens,
+                        keys,
+                        metadata,
+                        self.max_seq_len,
+                        compact=True,
+                        expanded_spans=expanded_spans,
+                        cache_spans=multimodal_cache_spans,
+                        semantic_mm_token_id=semantic_mm_token_id,
+                    )
                 if selected_vit is not None and full_length is None:
                     raise ValueError(
                         "ViT did not return complete routing hashes within the sequence limit"
                     )
                 if full_length is not None:
+                    input.mm_routing_snapshot = snapshot_from_metadata(
+                        keys, metadata, full_length
+                    )
                     token_expansion = MultimodalTokenExpansion(
-                        token_ids, expanded_spans
+                        token_ids, expanded_spans, multimodal_cache_spans
                     )
                     route_args["seq_len"] = full_length - input.prefix_length
             except (
@@ -450,13 +496,22 @@ class BackendRPCServerVisitor:
         # Keep hash generation at the physical KV block granularity. Page-RR
         # routing samples canonical keys from this full logical-block key list;
         # it must not recompute request hashes with the virtual block size.
-        full_block_cache_keys = get_block_cache_keys(
-            token_ids,
-            self.seq_size_per_block,
-            v41_inputs=input.v41_inputs,
-            cache_key_seed=self.cache_key_seed,
-        )
-        block_cache_keys = self._route_cache_keys(full_block_cache_keys)
+        with (
+            internal_span(
+                "rtp_llm.frontend.prepare_cache_keys",
+                **{"request_id": str(input.request_id)},
+            )
+            if input.mm_inputs
+            else nullcontext()
+        ):
+            full_block_cache_keys = get_block_cache_keys(
+                token_ids,
+                self.seq_size_per_block,
+                v41_inputs=input.v41_inputs,
+                cache_key_seed=self.cache_key_seed,
+                multimodal_cache_spans=multimodal_cache_spans,
+            )
+            block_cache_keys = self._route_cache_keys(full_block_cache_keys)
         self._report_recent_cache_key_metrics(block_cache_keys)
         if getattr(input, "_frontend_batch_cache_probe", False):
             # Native batch metrics reuse the actual routing hashes, including
@@ -468,14 +523,25 @@ class BackendRPCServerVisitor:
         try:
             retry_vit_route = False
             input.mm_token_expansion = token_expansion
-            route_result = await self.master_client.get_backend_role_addrs(
-                block_cache_keys=block_cache_keys,
-                cache_key_block_size=self._cache_key_block_size(),
-                input=input,
-                request_id=input.request_id,
-                input_pb=trans_input(input),
-                **route_args,
-            )
+            with (
+                internal_span(
+                    "rtp_llm.frontend.schedule_pd",
+                    **{
+                        "request_id": str(input.request_id),
+                        "rtp_llm.route.retry_count": 0,
+                    },
+                )
+                if input.mm_inputs
+                else nullcontext()
+            ):
+                route_result = await self.master_client.get_backend_role_addrs(
+                    block_cache_keys=block_cache_keys,
+                    cache_key_block_size=self._cache_key_block_size(),
+                    input=input,
+                    request_id=input.request_id,
+                    input_pb=trans_input(input),
+                    **route_args,
+                )
             if (
                 selected_vit is not None
                 and token_expansion is not None
@@ -488,16 +554,23 @@ class BackendRPCServerVisitor:
                 route_args.pop("seq_len", None)
                 selected_vit = None
                 token_expansion = None
+                input.mm_routing_snapshot = None
+                input.greennet_verified_vit = None
+                input.deferred_inspection = None
                 input.mm_token_expansion = None
-                route_result = await self.master_client.get_backend_role_addrs(
-                    block_cache_keys=[],
-                    cache_key_block_size=self._cache_key_block_size(),
-                    input=input,
-                    request_id=input.request_id,
-                    cache_affinity_keys=keys,
-                    vit_only=True,
-                    **route_args,
-                )
+                with internal_span(
+                    "rtp_llm.frontend.reselect_vit",
+                    **{"request_id": str(input.request_id)},
+                ):
+                    route_result = await self.master_client.get_backend_role_addrs(
+                        block_cache_keys=[],
+                        cache_key_block_size=self._cache_key_block_size(),
+                        input=input,
+                        request_id=input.request_id,
+                        cache_affinity_keys=keys,
+                        vit_only=True,
+                        **route_args,
+                    )
             if (
                 route_result.is_ok
                 and retry_vit_route
@@ -527,46 +600,72 @@ class BackendRPCServerVisitor:
                 metadata = await self.master_client.get_vit_cache_metadata(
                     selected_vit, keys, input=input
                 )
-                original_tokens = input.token_ids.reshape(-1).tolist()
-                expanded_spans = []
-                token_ids, full_length = multimodal_routing_tokens(
-                    original_tokens,
-                    self.mm_model_config.mm_sep_tokens,
-                    self.mm_model_config.include_sep_tokens,
-                    keys,
-                    metadata,
-                    self.max_seq_len,
-                    compact=True,
-                    expanded_spans=expanded_spans,
-                )
-                if full_length is None and metadata is not None:
-                    raise FtRuntimeException(
-                        ExceptionType.MM_PROCESS_ERROR,
-                        "Incomplete replacement ViT routing hashes",
+                with internal_span(
+                    "rtp_llm.frontend.prepare_replacement_route",
+                    **{"request_id": str(input.request_id)},
+                ):
+                    original_tokens = input.token_ids.reshape(-1).tolist()
+                    expanded_spans = []
+                    token_ids, full_length = multimodal_routing_tokens(
+                        original_tokens,
+                        self.mm_model_config.mm_sep_tokens,
+                        self.mm_model_config.include_sep_tokens,
+                        keys,
+                        metadata,
+                        self.max_seq_len,
+                        compact=True,
+                        expanded_spans=expanded_spans,
+                        cache_spans=multimodal_cache_spans,
+                        semantic_mm_token_id=semantic_mm_token_id,
                     )
-                block_cache_keys = self._route_cache_keys(
-                    get_block_cache_keys(token_ids, self.seq_size_per_block)
-                )
-                if full_length is None:
-                    selected_vit = None
-                    route_args.pop("seq_len", None)
-                else:
-                    token_expansion = MultimodalTokenExpansion(
-                        token_ids, expanded_spans
+                    if full_length is None and metadata is not None:
+                        raise FtRuntimeException(
+                            ExceptionType.MM_PROCESS_ERROR,
+                            "Incomplete replacement ViT routing hashes",
+                        )
+                    block_cache_keys = self._route_cache_keys(
+                        get_block_cache_keys(
+                            token_ids,
+                            self.seq_size_per_block,
+                            cache_key_seed=self.cache_key_seed,
+                            multimodal_cache_spans=multimodal_cache_spans,
+                        )
                     )
-                    route_args.update(
-                        selected_vit=status, seq_len=full_length - input.prefix_length
+                    if full_length is None:
+                        selected_vit = None
+                        route_args.pop("seq_len", None)
+                    else:
+                        input.mm_routing_snapshot = snapshot_from_metadata(
+                            keys, metadata, full_length
+                        )
+                        token_expansion = MultimodalTokenExpansion(
+                            token_ids, expanded_spans, multimodal_cache_spans
+                        )
+                        route_args.update(
+                            selected_vit=status,
+                            seq_len=full_length - input.prefix_length,
+                        )
+                        input.mm_token_expansion = token_expansion
+                    del metadata, original_tokens, token_ids
+                with (
+                    internal_span(
+                        "rtp_llm.frontend.schedule_pd",
+                        **{
+                            "request_id": str(input.request_id),
+                            "rtp_llm.route.retry_count": 1,
+                        },
                     )
-                    input.mm_token_expansion = token_expansion
-                del metadata, original_tokens, token_ids
-                route_result = await self.master_client.get_backend_role_addrs(
-                    block_cache_keys=block_cache_keys,
-                    cache_key_block_size=self._cache_key_block_size(),
-                    input=input,
-                    request_id=input.request_id,
-                    input_pb=trans_input(input),
-                    **route_args,
-                )
+                    if input.mm_inputs
+                    else nullcontext()
+                ):
+                    route_result = await self.master_client.get_backend_role_addrs(
+                        block_cache_keys=block_cache_keys,
+                        cache_key_block_size=self._cache_key_block_size(),
+                        input=input,
+                        request_id=input.request_id,
+                        input_pb=trans_input(input),
+                        **route_args,
+                    )
         except BaseException:
             input.mm_token_expansion = None
             raise
@@ -596,6 +695,9 @@ class BackendRPCServerVisitor:
             route_result.error_message or "",
         )
         input.mm_token_expansion = None
+        input.mm_routing_snapshot = None
+        input.greennet_verified_vit = None
+        input.deferred_inspection = None
         return route_result
 
     def _report_master_route_failure(
@@ -786,7 +888,8 @@ class BackendRPCServerVisitor:
                     if addr.ip and addr.role in (RoleType.DECODE, RoleType.PDFUSION)
                 ),
                 None,
-            ) != RoleType.DECODE
+            )
+            != RoleType.DECODE
         ):
             return
         vit_addrs = [
@@ -818,6 +921,7 @@ class BackendRPCServerVisitor:
             input.generate_config.can_use_pd_separation = False
             return
         spans = []
+        cache_spans = []
         try:
             token_ids, full_length = multimodal_routing_tokens(
                 input.token_ids.reshape(-1).tolist(),
@@ -828,6 +932,10 @@ class BackendRPCServerVisitor:
                 self.max_seq_len,
                 compact=True,
                 expanded_spans=spans,
+                cache_spans=cache_spans,
+                semantic_mm_token_id=int(
+                    getattr(self.mm_model_config, "semantic_mm_token_id", -1)
+                ),
             )
             if full_length is None:
                 raise ValueError("Selected ViT did not return complete routing hashes")
@@ -836,7 +944,10 @@ class BackendRPCServerVisitor:
                 ExceptionType.MM_PROCESS_ERROR,
                 f"Cannot expand PD multimodal tokens: {error}",
             ) from error
-        input.mm_token_expansion = MultimodalTokenExpansion(token_ids, spans)
+        input.mm_token_expansion = MultimodalTokenExpansion(
+            token_ids, spans, cache_spans
+        )
+        input.mm_routing_snapshot = snapshot_from_metadata(keys, metadata, full_length)
 
     async def route_ips(self, input: GenerateInput):
         # PD node selection span: master routing is a real RPC round-trip that
@@ -1086,6 +1197,15 @@ class BackendRPCServerVisitor:
             )
 
     def _validate_input(self, input: GenerateInput) -> None:
+        if (
+            getattr(input, "mm_inputs", None)
+            and getattr(self, "remote_vit", False)
+            and RoleType.VIT not in self.backend_role_list
+        ):
+            raise FtRuntimeException(
+                ExceptionType.MM_EMPTY_ENGINE_ERROR,
+                "Multimodal requests require a VIT domain when VIT_SEPARATION=2.",
+            )
         if input.prompt_length <= 0:
             raise FtRuntimeException(
                 ExceptionType.LONG_PROMPT_ERROR,
@@ -1164,6 +1284,7 @@ class BackendRPCServerVisitor:
             is_streaming = bool(getattr(input.generate_config, "is_streaming", False))
             first_exc: Optional[BaseException] = None
             observer_failure_logged = False
+            early_sent = False
 
             def observe_backend_output(output: Any, output_attempt: int) -> None:
                 nonlocal observer_failure_logged
@@ -1184,9 +1305,30 @@ class BackendRPCServerVisitor:
                 stream = None
                 try:
                     stream = await route_and_enqueue(attempt_input)
+                    early = None
                     try:
+                        hook = getattr(input, "on_mm_routed", None)
+                        if hook is not None and not early_sent:
+                            try:
+                                early = hook(attempt_input)
+                            except Exception:
+                                route_logger.warning(
+                                    "early first packet hook failed, request_id=%s",
+                                    input.request_id,
+                                    exc_info=True,
+                                )
+                            if early is not None and not getattr(
+                                attempt_input, "deferred_inspection", None
+                            ):
+                                early_sent = True
+                                yield early
+                                early = None
                         if is_streaming:
                             async for output in stream:
+                                if early is not None:
+                                    early_sent = True
+                                    yield early
+                                    early = None
                                 observe_backend_output(output, attempt)
                                 if getattr(output, "frontend_metric_only", False):
                                     continue
@@ -1195,6 +1337,10 @@ class BackendRPCServerVisitor:
                         else:
                             buffered_outputs = []
                             async for output in stream:
+                                if early is not None:
+                                    early_sent = True
+                                    yield early
+                                    early = None
                                 observe_backend_output(output, attempt)
                                 if getattr(output, "frontend_metric_only", False):
                                     continue
@@ -1282,7 +1428,9 @@ class BackendRPCServerVisitor:
         return stream_with_aux_info()
 
     @torch.inference_mode()
-    async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs | FtRuntimeException]:
+    async def batch_enqueue(
+        self, inputs: list[GenerateInput]
+    ) -> list[GenerateOutputs | FtRuntimeException]:
         if not inputs:
             return []
         for input in inputs:

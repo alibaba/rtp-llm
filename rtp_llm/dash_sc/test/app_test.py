@@ -27,9 +27,9 @@ from rtp_llm.dash_sc.app import (
 from rtp_llm.dash_sc.server import DashScGrpcDrainAioInterceptor, DashScGrpcServer
 
 
-class V41CheckpointProcessorConfigTest(TestCase):
+class V41CheckpointImageTokenTest(TestCase):
     @skipUnless(os.environ.get("DSV41_MODEL_PATH"), "requires V4.1 checkpoint config")
-    def test_real_model_factory_config_builds_image_processor(self):
+    def test_real_model_factory_config_exposes_only_image_token_id(self):
         from rtp_llm.config.dsv41_config import V41Config
         from rtp_llm.config.py_config_modules import PyEnvConfigs
         from rtp_llm.model_factory import ModelFactory
@@ -50,11 +50,9 @@ class V41CheckpointProcessorConfigTest(TestCase):
         )
         self.assertNotIn("text_config", config.deepseek_v41_config)
         self.assertIn("text_config", config.mm_related_params.config["v41_config"])
-        processor = bg_app._v41_image_processor_config(config)
+        image_token_id = bg_app._v41_image_token_id(config)
         source = V41Config.from_path(checkpoint)
-        self.assertEqual(processor.image_token_id, source.image_token_id)
-        self.assertEqual(processor.vision_patch_size, source.vision["patch_size"])
-        self.assertEqual(processor.max_seq_len, config.max_seq_len)
+        self.assertEqual(image_token_id, source.image_token_id)
 
 
 class _EnvCfg:

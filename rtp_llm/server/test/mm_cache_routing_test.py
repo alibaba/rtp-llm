@@ -359,7 +359,9 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.request.generate_config.role_addrs = [self.vit, self.prefill, decode]
         self.request.enqueued_by_master = True
         self.visitor.master_client.get_vit_cache_metadata.return_value = None
-        with self.assertRaisesRegex(FtRuntimeException, "routing hashes are unavailable"):
+        with self.assertRaisesRegex(
+            FtRuntimeException, "routing hashes are unavailable"
+        ):
             await self.visitor._expand_pd_multimodal_tokens(self.request)
         self.assertIsNone(self.request.mm_token_expansion)
 
@@ -636,6 +638,65 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.request.generate_config.role_addrs)
         self.assertIsNone(self.request.mm_token_expansion)
 
+    async def test_hash_concurrency_limit_reselects_vit_before_routing_pd(self):
+        keys = multimodal_cache_keys(self.request)
+        client = self.visitor.master_client
+        workers = [
+            self.vit.model_copy(update={"grpc_port": port})
+            for port in (8001, 8002, 8003)
+        ]
+        statuses = [{**self.status, "grpc_port": w.grpc_port} for w in workers]
+        client.get_backend_role_addrs.side_effect = [
+            FlexlbResponse(role_addrs=[worker], result={"server_status": [status]})
+            for worker, status in zip(workers, statuses)
+        ] + [FlexlbResponse.ok([self.prefill, workers[-1]])]
+        client.get_vit_cache_metadata.side_effect = [
+            FtRuntimeException(ExceptionType.CONCURRENCY_LIMIT_ERROR, "busy"),
+            FtRuntimeException(ExceptionType.CONCURRENCY_LIMIT_ERROR, "busy again"),
+            metadata(keys, [[31, 32, 33]]),
+        ]
+        await self.visitor.get_master_route_addrs(self.request)
+        reads = client.get_vit_cache_metadata.await_args_list
+        self.assertEqual([call.args[0] for call in reads], workers)
+        self.assertEqual(len({call.kwargs["deadline"] for call in reads}), 1)
+        *selections, pd = client.get_backend_role_addrs.await_args_list
+        self.assertEqual(len(selections), 3)
+        for call in selections:
+            self.assertTrue(call.kwargs["vit_only"])
+            self.assertEqual(call.kwargs["request_id"], self.request.request_id)
+            self.assertEqual(call.kwargs["cache_affinity_keys"], keys)
+        self.assertEqual(pd.kwargs["selected_vit"], statuses[-1])
+        self.assertEqual(pd.kwargs["seq_len"], 5)
+
+    async def test_hash_errors_stop_before_pd_at_the_retry_limit(self):
+        client = self.visitor.master_client
+        client.get_backend_role_addrs.side_effect = None
+        client.get_backend_role_addrs.return_value = FlexlbResponse(
+            role_addrs=[self.vit], result={"server_status": [self.status]}
+        )
+        for code, calls in (
+            (ExceptionType.CONCURRENCY_LIMIT_ERROR, 3),
+            (ExceptionType.UNSAFE_INPUT_CONTENT, 1),
+        ):
+            with self.subTest(code=code):
+                client.get_backend_role_addrs.reset_mock()
+                client.get_vit_cache_metadata.reset_mock()
+                errors = [
+                    FtRuntimeException(code, f"failure {i}") for i in range(calls)
+                ]
+                client.get_vit_cache_metadata.side_effect = errors
+                with self.assertRaises(FtRuntimeException) as raised:
+                    await self.visitor.get_master_route_addrs(self.request)
+                self.assertIs(raised.exception, errors[-1])
+                self.assertEqual(client.get_vit_cache_metadata.await_count, calls)
+                self.assertEqual(client.get_backend_role_addrs.await_count, calls)
+                self.assertTrue(
+                    all(
+                        call.kwargs["vit_only"]
+                        for call in client.get_backend_role_addrs.await_args_list
+                    )
+                )
+
     async def test_stale_vit_reselection_acquires_new_hashes_before_prefill(self):
         new_vit = self.vit.model_copy(update={"ip": "127.0.0.3"})
         new_status = {**self.status, "server_ip": new_vit.ip}
@@ -892,6 +953,9 @@ class MMCacheApiTest(unittest.TestCase):
                     "hashes_only": True,
                     "user_id": "uid-http",
                     "service_name": "service-http",
+                    "external_request_id": "",
+                    "region": None,
+                    "input_inspection_enabled": None,
                 },
             )
 

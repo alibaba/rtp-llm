@@ -2,6 +2,8 @@ from array import array
 from itertools import islice
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+
 
 def multimodal_routing_tokens(
     token_ids: List[int],
@@ -12,13 +14,30 @@ def multimodal_routing_tokens(
     max_seq_len: int,
     compact: bool = False,
     expanded_spans: Optional[List[Tuple[int, int]]] = None,
+    cache_spans: Optional[List[Tuple[int, List[int]]]] = None,
+    semantic_mm_token_id: int = -1,
 ) -> Tuple[Sequence[int], Optional[int]]:
-    """Expand routing hashes independently of local embedding residency."""
+    """Build canonical routing tokens and optional cache-identity sidecars."""
     from libth_transformer_config import get_multimodal_token_spans
 
     if expanded_spans is not None:
         expanded_spans.clear()
-    spans = get_multimodal_token_spans(token_ids, separators, include_separators)
+    if cache_spans is not None:
+        cache_spans.clear()
+    if (
+        type(semantic_mm_token_id) is not int
+        or semantic_mm_token_id < -1
+        or semantic_mm_token_id >= 1 << 31
+    ):
+        raise ValueError("invalid semantic multimodal token id")
+    try:
+        spans = get_multimodal_token_spans(token_ids, separators, include_separators)
+    except ValueError as error:
+        # Match the C++ processor's tag-validation error, without reclassifying
+        # worker metadata failures below as malformed user input.
+        raise FtRuntimeException(
+            ExceptionType.MM_WRONG_FORMAT_ERROR, str(error)
+        ) from error
     if not spans:
         return [], None
     safe_prefix = token_ids[: spans[0][0]]
@@ -45,16 +64,40 @@ def multimodal_routing_tokens(
             if segment >= len(spans):
                 raise ValueError("multimodal metadata exceeds tag count")
             begin, end = spans[segment]
-            if len(output) + begin - cursor + size >= max_seq_len:
-                return safe_prefix, None
+            expanded_length = len(output) + begin - cursor + size
+            if expanded_length >= max_seq_len:
+                if expanded_spans is not None:
+                    expanded_spans.clear()
+                if cache_spans is not None:
+                    cache_spans.clear()
+                raise FtRuntimeException(
+                    ExceptionType.MM_LONG_PROMPT_ERROR,
+                    f"input after multimodal process is at least {expanded_length} "
+                    f">= max_seq_len({max_seq_len})",
+                )
             output.extend(token_ids[i] for i in range(cursor, begin))
+            output_offset = len(output)
             if expanded_spans is not None:
-                expanded_spans.append((len(output), size))
-            output.extend(islice(hash_values, size))
+                expanded_spans.append((output_offset, size))
+            row_hashes = list(islice(hash_values, size))
+            if semantic_mm_token_id >= 0:
+                if cache_spans is not None:
+                    cache_spans.append((output_offset, row_hashes))
+                output.extend([semantic_mm_token_id] * size)
+            else:
+                output.extend(row_hashes)
             cursor, segment = end, segment + 1
     if segment != len(spans):
         raise ValueError("multimodal metadata does not match tag count")
     output.extend(token_ids[i] for i in range(cursor, len(token_ids)))
     if len(output) >= max_seq_len:
-        return safe_prefix, None
+        if expanded_spans is not None:
+            expanded_spans.clear()
+        if cache_spans is not None:
+            cache_spans.clear()
+        raise FtRuntimeException(
+            ExceptionType.MM_LONG_PROMPT_ERROR,
+            f"input after multimodal process is {len(output)} "
+            f">= max_seq_len({max_seq_len})",
+        )
     return output, len(output)

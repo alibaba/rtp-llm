@@ -86,6 +86,7 @@ class MultimodalTokenExpansion:
     token_ids: Sequence[int]
     # (offset, length) in the expanded sequence, in ViT output segment order.
     spans: List[Tuple[int, int]]
+    cache_spans: List[Tuple[int, List[int]]] = field(default_factory=list)
 
 
 @dataclass
@@ -110,6 +111,9 @@ class GenerateInput:
     # Internal receipt from ViT metadata, bound to the selected worker and media.
     # It is not accepted from request headers/config or sent to the model RPC.
     greennet_verified_vit: Optional[Tuple[str, int, Tuple[str, ...]]] = field(
+        default=None, init=False, repr=False
+    )
+    deferred_inspection: Optional[Tuple[str, int, str]] = field(
         default=None, init=False, repr=False
     )
     mm_token_expansion: Optional[MultimodalTokenExpansion] = field(
