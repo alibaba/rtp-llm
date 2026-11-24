@@ -132,15 +132,9 @@ def _require_n_shared_experts(config_json: dict) -> int:
 
 
 def _is_ppu_flash(config):
-    if config.model_type not in ("deepseek_v4", "deepseek_v4_mtp"):
-        return False
-    from rtp_llm.device.device_type import is_ppu
+    from rtp_llm.models_py.new_models.deepseek_v4.ppu_platform import is_ppu_flash
 
-    return (
-        is_ppu()
-        and config.hidden_size == 4096
-        and config.num_layers == (1 if config.model_type == "deepseek_v4_mtp" else 43)
-    )
+    return is_ppu_flash(config)
 
 
 def configure_ppu_scheduler(config, scheduler):
@@ -716,7 +710,7 @@ class DeepSeekV4(DeepSeekV2):
 
         model_config.kv_cache_spec_descs = descs
 
-    def create_model_loader(self):
+    def load(self, skip_python_model: bool = False):
         if _is_ppu_flash(self.model_config):
             from rtp_llm.models_py.modules.dsv4.ppu.metadata.cache import (
                 configure_indexer_cache,
@@ -734,7 +728,7 @@ class DeepSeekV4(DeepSeekV2):
                     self.parallelism_config,
                     options={"DSV4_PPU_TP_COMM_WARMUP": "1", **os.environ},
                 )
-        return super().create_model_loader()
+        return super().load(skip_python_model=skip_python_model)
 
     def _create_python_model(self):
         if _is_ppu_flash(self.model_config):
@@ -994,6 +988,20 @@ class DeepSeekV4MtpWeight(DeepSeekV4Weight, DeepSeekV3MtpWeight):
     """MTP draft weight loader for the V4 `mtp.{i}.*` checkpoint layout."""
 
     _LAYER_PREFIX: str = "mtp.{i}"
+
+    def get_weight_info(self):
+        info = super().get_weight_info()
+        # A native FP8 projection already serializes its scale. Keep the
+        # standalone descriptor only when no composite owns that record;
+        # otherwise the FT writer correctly rejects the duplicate global.
+        owned_scales = {
+            name
+            for field in info.weights
+            for name in getattr(field, "sub_weights", {})
+            if name in (W.v4_mtp_e_proj_s, W.v4_mtp_h_proj_s)
+        }
+        info.weights = [field for field in info.weights if field.name not in owned_scales]
+        return info
 
     def _process_meta(self, meta_dict, weight_keys):  # type: ignore[override]
         super()._process_meta(meta_dict, weight_keys)

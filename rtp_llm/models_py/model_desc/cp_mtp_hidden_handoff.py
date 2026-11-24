@@ -10,14 +10,14 @@ class CpMtpHiddenHandoff:
         initialized = super().initialize(init_resource)
         cp = getattr(self.parallelism_config, "prefill_cp_config", None)
         self._cp_mtp_handoff_enabled = bool(
-            init_resource.is_speculative
+            getattr(init_resource, "is_speculative", False)
             and not init_resource.is_decode_role
             and cp is not None
             and cp.is_enabled()
         )
         self._cp_mtp_hidden = None
         if self._cp_mtp_handoff_enabled:
-            reference = next(iter(self.weight.global_weights.values()))
+            reference = self._cp_handoff_reference()
             # Publish capability during construction, without reserving a full
             # max-sequence buffer. Forward retains its own output tensor.
             self._cp_mtp_hidden = torch.empty(
@@ -26,6 +26,9 @@ class CpMtpHiddenHandoff:
                 device=reference.device,
             )
         return initialized
+
+    def _cp_handoff_reference(self):
+        return next(iter(self.weight.global_weights.values()))
 
     def has_mtp_hidden_buffer(self) -> bool:
         return getattr(self, "_cp_mtp_handoff_enabled", False)

@@ -108,7 +108,7 @@ models_py_test(
     name = "wiring_test",
     src = "wiring_test.py",
     gpu = "L20_CU13",
-    deps = _FIXTURE_DEPS,
+    deps = _FIXTURE_DEPS + ["//rtp_llm/models_py:new_weight_loader"],
 )
 
 test_suite(

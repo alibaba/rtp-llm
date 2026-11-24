@@ -3,10 +3,23 @@ import os
 import tempfile
 import unittest
 
-from rtp_llm.config.quant_config import ModelOptFp4Config, QuantizationConfig
+import torch
+
+from rtp_llm.config.quant_config import (
+    ModelOptFp4Config,
+    QuantizationConfig,
+    WeightOnlyInt8PerChannelQuantConfig,
+)
 
 
 class QuantConfigTest(unittest.TestCase):
+    def test_weight_only_int8_rejects_fp32_compute_at_configuration(self):
+        config = WeightOnlyInt8PerChannelQuantConfig()
+        for dtype in (torch.float16, torch.bfloat16):
+            config.verify_compute_dtype_and_kv_cache_dtype(dtype, torch.float32)
+        with self.assertRaisesRegex(ValueError, "compute_dtype"):
+            config.verify_compute_dtype_and_kv_cache_dtype(torch.float32, torch.float32)
+
     def _load_config(self, config_json):
         with tempfile.TemporaryDirectory() as checkpoint_path:
             with open(

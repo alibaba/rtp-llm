@@ -438,7 +438,9 @@ class WeightOnlyInt8PerChannelQuantConfig(QuantizationConfig):
         return "weight_only_per_col"
 
     def get_supported_compute_dtypes(self) -> List[torch.dtype]:
-        return [torch.float32, torch.float16, torch.bfloat16]
+        # Both the CUDA mixed-dtype GEMM and its packed-weight Triton kernel
+        # consume FP16/BF16 activations; this is W8A16, not W8A32.
+        return [torch.float16, torch.bfloat16]
 
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
         return [torch.float32, torch.float16, torch.bfloat16, torch.int8]
@@ -835,6 +837,30 @@ class GPTQConfig(QuantizationConfig):
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return GPTQConfig(**config)
+
+
+def resolve_nvfp4_backend(config):
+    """Select one layout for both checkpoint preparation and MoE dispatch."""
+    backend = getattr(config, "fp4_moe_op", "auto")
+    strategy = getattr(config, "moe_strategy", "auto")
+    required = {
+        "nvfp4_marlin": "marlin",
+        "nvfp4_cutlass": "cutlass",
+        "fp4_no_dp": "trtllm",
+        "fp4_ep_normal": "trtllm",
+        "fp4_ep_low_latency": "cutedsl",
+    }.get(strategy)
+    if required is not None:
+        if backend not in ("auto", required):
+            raise ValueError(f"{strategy} requires FP4_MOE_OP=auto or {required}, got {backend}")
+        return required
+    if backend in ("cutlass", "marlin"):
+        raise ValueError(f"FP4_MOE_OP={backend} requires MOE_STRATEGY=nvfp4_{backend}")
+    if backend == "auto":
+        if getattr(config, "use_deepep_moe", False) and getattr(config, "use_deepep_low_latency", False):
+            return "cutedsl"
+        return "trtllm"
+    return backend
 
 
 class ModelOptFp4Config(QuantizationConfig):

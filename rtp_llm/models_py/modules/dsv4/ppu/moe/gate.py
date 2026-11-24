@@ -2,7 +2,6 @@
 
 import os
 from functools import partial
-from rtp_llm.utils.model_weight import W
 from typing import Optional, Tuple
 
 import torch
@@ -157,14 +156,20 @@ class PpuGate(Gate):
     def __init__(self, *args, layer_weights, platform_provider, **kwargs):
         if platform_provider is None:
             raise ValueError("PPU Gate requires an instance-owned operator adapter")
-        keys = {
-            W.v4_router_w: W.moe_gate,
-            W.v4_router_bias: W.moe_gate_bias,
-            W.v4_router_tid2eid: W.moe_gate_tid2eid,
-        }
-        weights = {
-            dst: layer_weights[src] for src, dst in keys.items() if src in layer_weights
-        }
+        if hasattr(layer_weights, "take_executor_weight"):
+            kwargs["weight_owner"] = layer_weights
+            weights = None
+        else:
+            from rtp_llm.utils.model_weight import W
+
+            keys = {
+                W.v4_router_w: W.moe_gate,
+                W.v4_router_bias: W.moe_gate_bias,
+                W.v4_router_tid2eid: W.moe_gate_tid2eid,
+            }
+            weights = {
+                dst: layer_weights[src] for src, dst in keys.items() if src in layer_weights
+            }
         options = platform_provider.execution_options
         super().__init__(
             *args,

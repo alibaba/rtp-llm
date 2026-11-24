@@ -6,7 +6,6 @@ import torch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
-from rtp_llm.model_loader.weight_module import CustomAtomicWeight
 from rtp_llm.models.downstream_modules.custom_module import CustomHandler, CustomModule
 from rtp_llm.models.downstream_modules.embedding.api_datatype import (
     EmbeddingResponseFormat,
@@ -93,9 +92,6 @@ class SparseEmbeddingHandler(CustomHandler):
             in_features=self.config_.hidden_size, out_features=1
         )
         self.dtype_ = to_torch_dtype(self.config_.data_type)
-
-    def custom_weight_info(self) -> List[CustomAtomicWeight]:
-        return []
 
     def init(self, tensor_map: Dict[str, torch.Tensor]) -> None:
         sparse_linear_path = os.path.join(self.config_.ckpt_path, "sparse_linear.pt")

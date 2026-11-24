@@ -29,10 +29,12 @@ mode reads tensors from `mw.global_weights[W.*]` and
 `mw.weights[layer_id][W.v4_*]` (W tag enum, no string keys).
 """
 
+from __future__ import annotations
+
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
 import torch
 
@@ -55,7 +57,6 @@ from rtp_llm.models_py.modules.dsv4.decode.forward import (
     forward_decode,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import primary_attention_inputs
-from rtp_llm.models_py.modules.dsv4.prefill.forward import forward_prefill
 from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     cp_padded_tokens_per_rank_bound,
@@ -63,6 +64,13 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer imp
 )
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.warmup import model_warm_up_enabled
+
+if TYPE_CHECKING:
+    from rtp_llm.ops.compute_ops import (
+        PyModelInitResources,
+        PyModelInputs,
+        PyModelOutputs,
+    )
 
 
 def _materialize_meta_buffers(module: torch.nn.Module, device: str) -> int:
@@ -85,9 +93,6 @@ def _materialize_meta_buffers(module: torch.nn.Module, device: str) -> int:
                 )
                 count += 1
     return count
-
-
-from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelInputs, PyModelOutputs
 
 
 def _is_decode_fmha(fmha_impl: Any) -> bool:
@@ -583,12 +588,17 @@ class DeepSeekV4Model(GptModelBase):
         idx_w = 2 * 2 * index_head_dim
         return main_w, idx_w
 
-    def _initialize_commit_only(
-        self, init_resource: PyModelInitResources, device_str: str
-    ) -> bool:
-        """Initialize an attention-only DSpARK PREFILL commit model."""
+    def _runtime_weight_device(self):
+        return (
+            next(iter(self.weight.global_weights.values())).device
+            if self.weight.global_weights
+            else "cuda:0"
+        )
+
+    def _build_runtime_backbone(self) -> None:
+        """Default factory for an engine-supplied ModelWeights snapshot."""
         logging.info(
-            "[DeepSeekV4Model] building DSpARK commit-only transformer "
+            "[DeepSeekV4Model] building V4Transformer via factory "
             "(layers=%d, globals=%d)",
             len(self.weight.weights),
             len(self.weight.global_weights),
@@ -601,11 +611,19 @@ class DeepSeekV4Model(GptModelBase):
         finally:
             torch.set_default_dtype(prev_dtype)
 
+    def _release_runtime_weight_source(self) -> None:
+        self._load_extra_weights(self.weight)
+        del self.weight
+
+    def _initialize_commit_only(
+        self, init_resource: PyModelInitResources, device_str: str
+    ) -> bool:
+        """Initialize an attention-only DSpARK PREFILL commit model."""
+        self._build_runtime_backbone()
         for layer in self.v4.layers:
             layer.attn.init_rope_cache(device=device_str)
 
-        self._load_extra_weights(self.weight)
-        del self.weight
+        self._release_runtime_weight_source()
         self._bind_runtime_buffers(torch.device(device_str))
         self._materialized = True
         return True
@@ -668,11 +686,7 @@ class DeepSeekV4Model(GptModelBase):
         if self._materialized:
             return True
 
-        device = (
-            next(iter(self.weight.global_weights.values())).device
-            if self.weight.global_weights
-            else "cuda:0"
-        )
+        device = self._runtime_weight_device()
         device_str = str(device)
 
         self._is_speculative = bool(init_resource.is_speculative)
@@ -720,29 +734,7 @@ class DeepSeekV4Model(GptModelBase):
         if bool(getattr(self._v4_args, "commit_only", False)):
             return self._initialize_commit_only(init_resource, device_str)
 
-        # ``self.weight`` is a framework ``ModelWeights`` populated by the
-        # ``DeepSeekV4Weight`` descriptor (see ``rtp_llm/models/deepseek_v4.py``)
-        # via the fastsafetensors loader.  Each dsv4 sub-module's factory
-        # mode reads tensors directly from ``mw.global_weights[W.*]`` and
-        # ``mw.weights[layer_id][W.v4_*]`` — see the per-module __init__
-        # for the W tags consumed.
-        logging.info(
-            "[DeepSeekV4Model] building V4Transformer via factory "
-            "(layers=%d, globals=%d) ...",
-            len(self.weight.weights),
-            len(self.weight.global_weights),
-        )
-        # Construct under meta device so the nn.Embedding / nn.Linear /
-        # QuantizedLinear placeholder allocations inside the module tree
-        # skip real RAM. Each module's factory branch then reassigns
-        # `.weight`/`.scale` to the cuda tensors from the weights dict.
-        prev_dtype = torch.get_default_dtype()
-        torch.set_default_dtype(torch.bfloat16)
-        try:
-            with torch.device("meta"):
-                self.v4 = V4Transformer(self._v4_args, mw=self.weight)
-        finally:
-            torch.set_default_dtype(prev_dtype)
+        self._build_runtime_backbone()
         if self._captures_aux_hidden:
             self.v4.set_aux_hidden_capture_layer_ids(self._capture_aux_hidden_layer_ids)
 
@@ -754,12 +746,7 @@ class DeepSeekV4Model(GptModelBase):
         # Subclass hook: lift any model-level weights (e.g. MTP fusion
         # norms / projections) off the ModelWeights wrapper before we
         # discard it.  Default impl is a no-op.
-        self._load_extra_weights(self.weight)
-
-        # Drop the ModelWeights wrapper — per-tensor refs are now held
-        # only by the V4Transformer modules (or were popped during
-        # MoE._setup_mega_moe / per-expert routed init).
-        del self.weight
+        self._release_runtime_weight_source()
 
         if torch.cuda.is_available() and device_str.startswith("cuda"):
             gpu_mem_gb = torch.cuda.memory_allocated(torch.device(device_str)) / 1024**3
@@ -1351,6 +1338,8 @@ class DeepSeekV4Model(GptModelBase):
             hidden = torch.zeros(
                 T, self._v4_args.dim, dtype=torch.bfloat16, device=device
             )
+            from rtp_llm.ops.compute_ops import PyModelOutputs
+
             return PyModelOutputs(hidden)
         # Group-invariant view of ``PyModelInputs.attention_inputs``; the
         # per-tag block tables are resolved inside forward_prefill /
@@ -1396,6 +1385,8 @@ class DeepSeekV4Model(GptModelBase):
         elif attn.is_prefill:
             with _profiler.moe_record_function_scope():
                 capture = self.capture_context(inputs.capture_hidden_states)
+            from rtp_llm.models_py.modules.dsv4.prefill.forward import forward_prefill
+
             return forward_prefill(
                 self.v4,
                 self.kv_cache,

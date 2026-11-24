@@ -26,6 +26,7 @@ from rtp_llm.utils.model_weight import (
     get_tensor_reciprocal,
     identity,
     merge_qkv_transpose_concat0,
+    sp_id,
     transpose,
     transpose_w13,
 )
@@ -34,6 +35,30 @@ W_SUFFIX = ".weight"
 B_SUFFIX = ".bias"
 ACT_S_SUFFIX = "_input_scale"
 W_S_SUFFIX = ".scales"
+
+
+def _decoder_qkv_scales(values, widths):
+    parts = []
+    for value, width in zip(values, widths):
+        parts.append(value.reshape(-1).expand(width))
+    return torch.cat(parts)
+
+
+def _gate_scales(values):
+    gate, up = (s.reshape(-1) for s in values)
+    width = max(gate.numel(), up.numel())
+    return torch.cat((gate.expand(width), up.expand(width))).reshape(1, -1)
+
+
+def _split_gate_scales(t, ffn_tp_size, ffn_tp_rank, **kwargs):
+    gate, up = t.reshape(-1).chunk(2)
+    if gate.numel() == 1:
+        return t
+    if gate.numel() % ffn_tp_size:
+        raise ValueError("FT gate/up output scales must split on whole channels")
+    return torch.cat(
+        (gate.chunk(ffn_tp_size)[ffn_tp_rank], up.chunk(ffn_tp_size)[ffn_tp_rank])
+    ).reshape(1, -1)
 
 
 class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
@@ -104,7 +129,9 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
         scale: Optional[AtomicWeight] = None
         act_scale: Optional[AtomicWeight] = None
         act_scale_inv: Optional[AtomicWeight] = None
-        logging.debug("PerTensorInt8QuantWeight : %s, %s", self.qs_suffix, self.qw_suffix)
+        logging.debug(
+            "PerTensorInt8QuantWeight : %s, %s", self.qs_suffix, self.qw_suffix
+        )
 
         if src_weight_info.name == W.attn_qkv_w:
             (kernel, scale, act_scale, act_scale_inv) = self._get_qkv_quant_weight_info(
@@ -148,6 +175,13 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
         self.scale = scale
         self.act_scale = act_scale
         self.act_scale_inv = act_scale_inv
+        # Calibration steps are shared by all ranks. Only the gate/up weight
+        # scales split, along the output channels within each branch.
+        for field in (act_scale, act_scale_inv):
+            if field is not None:
+                field.gpt_style_tp_strategy = {field.name: sp_id}
+        if scale is not None and scale.name == W.ffn_s13:
+            scale.gpt_style_tp_strategy = {scale.name: _split_gate_scales}
 
     def get_pre_decoder_ln_weight(
         self, src_weight_info: AtomicWeight
@@ -210,13 +244,24 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
             config=src_weight_info.config,
         )
 
+        decoder_q = weights[0].name.endswith(".q_proj.weight")
+        cfg = src_weight_info.config
+        scale_merge = functools.partial(expand_scale, hidden_size=cfg.hidden_size)
+        if decoder_q:
+            kv = cfg.head_num_kv if cfg.head_num_kv > 0 else cfg.head_num
+            scale_merge = functools.partial(
+                _decoder_qkv_scales,
+                widths=(
+                    cfg.head_num * cfg.size_per_head,
+                    kv * cfg.size_per_head,
+                    kv * cfg.size_per_head,
+                ),
+            )
         qkv_s = create_w8a8_int8_weight(
             src_weight_info,
             W.attn_qkv_s,
             qkv_s_list,
-            functools.partial(
-                expand_scale, hidden_size=src_weight_info.config.hidden_size
-            ),
+            scale_merge,
             data_type=torch.float32,
             config=src_weight_info.config,
         )
@@ -245,8 +290,56 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
                     config=src_weight_info.config,
                 ),
             ]
-        else:
-            return [qkv_w, qkv_s, None, None]
+        if decoder_q:
+            name = weights[0].name.removesuffix("q_proj.weight") + "qkv_input_scale"
+            self._decoder_qkv_step = CkptWeightInfo(name)
+            return [
+                qkv_w,
+                qkv_s,
+                *[
+                    create_w8a8_int8_weight(
+                        src_weight_info,
+                        field,
+                        [CkptWeightInfo(name)],
+                        transform,
+                        data_type=torch.float32,
+                        config=cfg,
+                    )
+                    for field, transform in self.INT8_ACT_SCALE_MAP[W.attn_qkv_w]
+                ],
+            ]
+        return [qkv_w, qkv_s, None, None]
+
+    def _load_raw_tensor(self, tensor_source, layer_id, device, load_config):
+        step = getattr(self, "_decoder_qkv_step", None)
+        if step is not None:
+            nominal = step.tensor_name(layer_id)
+            stem = nominal.removesuffix("qkv_input_scale")
+            aliases = [
+                stem + suffix
+                for suffix in (
+                    "qkv_input_scale",
+                    "qkv_proj_input_scale",
+                    "q_proj_input_scale",
+                    "qkv_proj.input_scale",
+                )
+                if tensor_source.has_tensor(stem + suffix)
+            ]
+            if len(aliases) != 1:
+                raise ValueError(
+                    f"Expected one calibrated INT8 QKV input scale for {stem}, found {aliases}"
+                )
+
+            source = tensor_source
+
+            class ResolvedSource:
+                def load_tensor(self, key, dtype):
+                    return source.load_tensor(
+                        aliases[0] if key == nominal else key, dtype
+                    )
+
+            tensor_source = ResolvedSource()
+        return super()._load_raw_tensor(tensor_source, layer_id, device, load_config)
 
     def _get_attn_out_quant_weight_info(
         self, src_weight_info: WeightModule
@@ -331,7 +424,7 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
                         CkptWeightInfo(w1_name + self.qs_suffix, identity),
                         CkptWeightInfo(w3_name + self.qs_suffix, identity),
                     ],
-                    transpose_w13,
+                    _gate_scales,
                     data_type=torch.float32,
                     config=src_weight.config,
                 ),
@@ -422,7 +515,16 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
         # need reshape for kernel weight
         processed_res = super()._postprocess(tensor, device, load_config)
         kernel_weight = processed_res[self.kernel.name]
-        kernel_weight = kernel_weight.reshape(kernel_weight.shape[-1], -1)
+        from rtp_llm.models_py.quant_methods.int8 import PrequantizedInt8ExportModule
+
+        # Keep FT's byte layout and activation-scale fields unchanged. The
+        # BERT pre-decoder norm is floating point despite this recipe's name.
+        module = PrequantizedInt8ExportModule(
+            kernel_weight,
+            per_channel=False,
+            norm=self.kernel.name == W.pre_decoder_ln_gamma,
+        )
+        kernel_weight, _ = module.export()
         processed_res[self.kernel.name] = kernel_weight
 
         return processed_res

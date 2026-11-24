@@ -95,7 +95,7 @@ def _fused_logits_head_gate_kernel(
             # downstream consumer is fp8_paged_mqa_logits + top-k selection,
             # which is already FP8-quantized — 0.09% drift in weights is well
             # below the FP8 noise floor.
-            acc += tl.dot(x, w, out_dtype=tl.float32, input_precision="tf32")
+            partial = tl.dot(x, w, out_dtype=tl.float32, input_precision="tf32")
         else:
             # [BLOCK_N, BLOCK_K] with K as inner dim (coalesced: stride_w_k=1)
             w = tl.load(
@@ -103,7 +103,15 @@ def _fused_logits_head_gate_kernel(
                 mask=mask_n[:, None] & mask_k[None, :],
                 other=0.0,
             ).to(tl.float32)
-            acc += tl.dot(x, tl.trans(w), out_dtype=tl.float32, input_precision="tf32")
+            partial = tl.dot(
+                x, tl.trans(w), out_dtype=tl.float32, input_precision="tf32"
+            )
+
+        # Start each tensor-core dot at zero, then accumulate the partial
+        # sums with an explicitly rounded FP32 addition. Plain `+= tl.dot`
+        # is folded into a single MMA accumulator across all K tiles. Its
+        # rounding error matters even when both inputs are exactly BF16.
+        acc = tl.fma(partial, 1.0, acc)
 
     # Load q_scale [BLOCK_M, BLOCK_N] (already squeezed from [T, N, 1])
     qs = tl.load(

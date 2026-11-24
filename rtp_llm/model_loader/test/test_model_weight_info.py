@@ -818,6 +818,11 @@ class GetWeightInfoOutputVocabPipelineTest(unittest.TestCase):
         self.assertEqual(
             [w.name for w in replacement.weights], ["lm_head.weight", "embed.weight"]
         )
+        same = torch.arange(20, dtype=torch.float16).reshape(5, 4)
+        replacement.process_fun([None, same])
+        self.assertEqual(deploy.ft_head_provenance["source"], "embedding")
+        replacement.process_fun([same.clone(), same])
+        self.assertEqual(deploy.ft_head_provenance["source"], "lm_head")
 
     def test_pipeline_keeps_original_dtype_without_fp32(self):
         deploy = self.build(

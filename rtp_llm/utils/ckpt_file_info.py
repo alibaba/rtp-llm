@@ -199,7 +199,45 @@ class FinetuneType(enum.Enum):
     ptuning = "ptuning"
 
 
-class CkptFileInfo:
+class ShardPageCache:
+    """Per-file accounting shared by mapped scratch readers. Never owns the fd."""
+
+    def __init__(self, file_name: str):
+        self.file_name = file_name
+        self._unadvised_read_bytes = 0
+        self._fadvise_broken = False
+
+    @staticmethod
+    def enabled() -> bool:
+        return _DROP_PAGE_CACHE
+
+    def _drop_page_cache(self) -> None:
+        # safetensors doesn't expose its internal fd; advice applies to the file.
+        try:
+            fd = os.open(self.file_name, os.O_RDONLY)
+            try:
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            finally:
+                os.close(fd)
+        except OSError as error:
+            self._fadvise_broken = True
+            logging.warning("Cannot advise page cache for %s: %s", self.file_name, error)
+
+    def _note_bytes_read(self, nbytes: int) -> None:
+        if not _DROP_PAGE_CACHE or self._fadvise_broken or nbytes <= 0:
+            return
+        self._unadvised_read_bytes += nbytes
+        if self._unadvised_read_bytes >= _DROP_PAGE_CACHE_THRESHOLD:
+            self._unadvised_read_bytes = 0
+            self._drop_page_cache()
+
+    def finish_page_cache(self) -> None:
+        if _DROP_PAGE_CACHE and not self._fadvise_broken:
+            self._unadvised_read_bytes = 0
+            self._drop_page_cache()
+
+
+class CkptFileInfo(ShardPageCache):
     """The abstract file for any type checkpoint file."""
 
     file_name: str
@@ -222,10 +260,8 @@ class CkptFileInfo:
         else:
             raise Exception(f"unsupport file type : {file_name}")
 
-        self.file_name = file_name
+        super().__init__(file_name)
         self.finetune_type = finetune_type
-        self._unadvised_read_bytes = 0
-        self._fadvise_broken = False
         self._metadata_loaded = False
         if tensor_names is not None and self.is_safetensor():
             # A HuggingFace index already provides every tensor name. Keep a
@@ -327,38 +363,11 @@ class CkptFileInfo:
             self._st_handle = safe_open(self.file_name, framework="pt")
         return self._st_handle
 
-    def _drop_page_cache(self) -> None:
-        # fadvise acts on the file's page cache; a throwaway read-only fd is
-        # enough (safetensors does not expose its internal fd).
-        try:
-            fd = os.open(self.file_name, os.O_RDONLY)
-            try:
-                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
-            finally:
-                os.close(fd)
-        except OSError as e:
-            # e.g. a filesystem that rejects fadvise; disable rather than spam.
-            self._fadvise_broken = True
-            logging.warning(
-                f"drop page cache failed for {self.file_name}: {e}; disabled for this shard"
-            )
-
-    def _note_bytes_read(self, nbytes: int) -> None:
-        if not _DROP_PAGE_CACHE or self._fadvise_broken or nbytes <= 0:
-            return
-        self._unadvised_read_bytes += nbytes
-        if self._unadvised_read_bytes >= _DROP_PAGE_CACHE_THRESHOLD:
-            self._unadvised_read_bytes = 0
-            self._drop_page_cache()
-
     def close_safetensor_handle(self):
         if hasattr(self, "_st_handle") and self._st_handle is not None:
             self._st_handle.__exit__(None, None, None)
             self._st_handle = None
-            if _DROP_PAGE_CACHE and not self._fadvise_broken:
-                # Final shed: this shard's pages are no longer needed by us.
-                self._unadvised_read_bytes = 0
-                self._drop_page_cache()
+            self.finish_page_cache()
 
     def get_tensor_shape(self, name: str) -> torch.Size:
         return torch.Size(self._get_safetensor_handle().get_slice(name).get_shape())

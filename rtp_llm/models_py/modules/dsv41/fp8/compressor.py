@@ -42,9 +42,16 @@ import torch.nn as nn
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
-from rtp_llm.ops.compute_ops import rtp_llm_ops
+from rtp_llm.models_py.modules.dsv4 import native_ops as rtp_llm_ops
 
-_CUBLAS_GEMM_BF16_BF16_FP32 = getattr(rtp_llm_ops, "cublas_gemm_bf16_bf16_fp32", None)
+
+def _cublas_gemm_bf16_bf16_fp32(x, weight):
+    op = getattr(rtp_llm_ops, "cublas_gemm_bf16_bf16_fp32", None)
+    if op is None:
+        raise RuntimeError("cublas_gemm_bf16_bf16_fp32 op is not built")
+    return op(x, weight)
+
+
 _COMPRESSOR_REGISTRY: "weakref.WeakSet" = weakref.WeakSet()
 
 
@@ -52,7 +59,7 @@ def _linear_bf16_bf16_fp32(x: torch.Tensor, weight: torch.Tensor) -> torch.Tenso
     """F.linear(x, weight) with BF16 operands and FP32 accumulation/output."""
     leading_shape = x.shape[:-1]
     x_2d = x.reshape(-1, x.shape[-1])
-    out_2d = _CUBLAS_GEMM_BF16_BF16_FP32(x_2d, weight)
+    out_2d = _cublas_gemm_bf16_bf16_fp32(x_2d, weight)
     return out_2d.reshape(*leading_shape, weight.shape[0])
 
 

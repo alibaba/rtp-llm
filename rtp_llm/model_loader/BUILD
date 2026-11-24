@@ -7,6 +7,7 @@ py_library(
     ]),
     deps = [
         "//rtp_llm:utils",
+        "//rtp_llm/models_py:int8_export_helpers",
         "//rtp_llm/model_loader/tipc:tipc"
     ]
 )

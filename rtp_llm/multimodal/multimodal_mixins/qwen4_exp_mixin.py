@@ -49,6 +49,34 @@ class Qwen4ExpImageEmbedding(Qwen3_5MoeImageEmbedding):
 
 
 class Qwen4ExpMixin(Qwen3_5MoeMixin):
+    _new_vision_embedding = Qwen4ExpImageEmbedding
+
+    @classmethod
+    def from_new_loader(
+        cls,
+        compute_dtype,
+        device,
+        mm_related_params,
+        load_method,
+        vit_config,
+        ckpt_path,
+    ):
+        from rtp_llm.models_py.new_models.qwen4_exp.media_text_embedding import (
+            load_qwen4_media_text_embedding,
+        )
+
+        result = super().from_new_loader(
+            compute_dtype, device, mm_related_params, load_method, vit_config, ckpt_path
+        )
+        # Timestamp/start/end media tokens need the complete CPU vocabulary,
+        # independently of the language model's TP partition. Keep the module
+        # alive as the owner rather than retaining a checkpoint buffer view.
+        result.mm_part.text_embedding_owner = load_qwen4_media_text_embedding(
+            ckpt_path, compute_dtype, load_method
+        )
+        result.mm_part.text_embedding = result.mm_part.text_embedding_owner.weight
+        return result
+
     def _init_multimodal(self):
         self.mm_part = Qwen4ExpImageEmbedding(self.mm_related_params)
         self.mm_related_params.vit_weights = Qwen3_5MoeVitWeight(

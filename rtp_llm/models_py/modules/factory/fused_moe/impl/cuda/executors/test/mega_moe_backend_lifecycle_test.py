@@ -59,7 +59,7 @@ class MegaMoeLifecycleTest(unittest.TestCase):
         )
         with patch.dict(buffer._MEGA_BUF_CACHE, {}, clear=True):
             with patch(
-                "deep_gemm.get_symm_buffer_for_mega_moe", return_value=arena
+                "deep_gemm.get_symm_buffer_for_mega_moe", return_value=arena, create=True
             ) as allocate:
                 generic = buffer._get_or_create_mega_buf(**params)
                 cached = buffer._get_or_create_mega_buf(**params)
@@ -366,10 +366,13 @@ class MegaMoeLifecycleTest(unittest.TestCase):
                 with patch(
                     "rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.shared_weights.prepare_fp8_weight_scale_for_deepgemm",
                     return_value=sf,
+                ), patch(
+                    "deep_gemm.get_block_m_for_mega_moe_fp8", create=True
                 ):
                     with patch(
                         "deep_gemm.transform_weights_for_mega_moe",
                         return_value=((w1, sf), (w2, sf)),
+                        create=True,
                     ) as fp4_transform:
                         with patch(
                             "deep_gemm.transform_weights_for_mega_moe_fp8",

@@ -159,7 +159,7 @@ def _build_real_layer(rank, parallelism_config, with_gate):
         raise AssertionError(f"unexpected test linear weight key: {weight_key}")
 
     with patch(
-        "rtp_llm.models_py.model_desc.generic_moe.LinearFactory.create_linear_from_weights",
+        "rtp_llm.models_py.model_desc.generic_moe.runtime_modules.LinearFactory.create_linear_from_weights",
         side_effect=make_linear,
     ):
         layer = GenericMoeLayer(

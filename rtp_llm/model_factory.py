@@ -50,14 +50,6 @@ class ModelFactory:
             return json.loads(text)
 
     @staticmethod
-    def get_weight_cls(model_type: str):
-        global _model_factory
-        if not ensure_model_registered(model_type):
-            raise KeyError(f"model type [{model_type}] is not registered")
-        model_cls = _model_factory[model_type]
-        return model_cls.get_weight_cls()
-
-    @staticmethod
     def get_model_cls(model_type: str):
         global _model_factory
         if not ensure_model_registered(model_type):
@@ -112,6 +104,9 @@ class ModelFactory:
             vit_config=vit_config,
             merge_lora=merge_lora,
             force_cpu_load_weights=engine_config.load_config.force_cpu_load_weights,
+            reserve_runtime_mem_mb=getattr(
+                engine_config.runtime_config, "reserve_runtime_mem_mb", 0
+            ),
             loader_recycle_handles=engine_config.load_config.loader_recycle_handles,
             moe_pure_tp_preshard=engine_config.load_config.moe_pure_tp_preshard,
         )
@@ -180,11 +175,6 @@ class ModelFactory:
                 return None
 
             load_method = engine_config.load_config.load_method
-            if parallelism_config.pp_size > 1:
-                # Only the last PP stage loads draft weights, but fastsafetensors
-                # requires all WORLD ranks to participate in its collectives.
-                # Force SCRATCH here because AUTO may select fastsafetensors.
-                load_method = "scratch"
 
             # Need to create GPT model for propose model
             model_cls = ModelFactory.get_model_cls(propose_model_config.model_type)
@@ -240,6 +230,9 @@ class ModelFactory:
                 vit_config=None,  # Propose model doesn't need vit_config
                 merge_lora=False,  # Propose model doesn't need merge_lora
                 force_cpu_load_weights=engine_config.load_config.force_cpu_load_weights,
+                reserve_runtime_mem_mb=getattr(
+                    engine_config.runtime_config, "reserve_runtime_mem_mb", 0
+                ),
                 loader_recycle_handles=engine_config.load_config.loader_recycle_handles,
                 moe_pure_tp_preshard=engine_config.load_config.moe_pure_tp_preshard,
                 weight_alias_owner=target_model if alias_names else None,
@@ -265,6 +258,8 @@ class ModelFactory:
                     alias_names,
                     aliased_local_bytes / (1024**3),
                 )
+            if propose_model_config.model_type == "qwen_3_moe_eagle3":
+                ModelFactory._bind_eagle3_target(target_model, gpt_model)
             logging.info(f"create propose model {engine_config.sp_config.type}")
             return ProposeModel(sp_type, gen_num_per_circle, gpt_model)
         elif sp_type == SpeculativeType.DETERMINISTIC:
@@ -487,19 +482,32 @@ class ModelFactory:
         if not sp_config.checkpoint_path:
             return None
 
-        # Current learned-draft SP engine supports MTP, EAGLE, DSpARK and DFlash.
+        if sp_config.model_type == "qwen_3_moe_eagle3" and sp_config.type in (
+            SpeculativeType.MTP, SpeculativeType.EAGLE
+        ):
+            # Older deployment examples used these names for this exact
+            # draft. Select its real execution and capture strategy on all ranks.
+            sp_config.type = SpeculativeType.EAGLE3
+        if (sp_config.type == SpeculativeType.EAGLE3) != (
+            sp_config.model_type == "qwen_3_moe_eagle3"
+        ):
+            raise ValueError(
+                "qwen_3_moe_eagle3 requires sp_type=eagle3 and vice versa; "
+                f"got sp_model_type={sp_config.model_type}, sp_type={sp_config.type.name}"
+            )
         if sp_config.type not in [
             SpeculativeType.MTP,
             SpeculativeType.EAGLE,
+            SpeculativeType.EAGLE3,
             SpeculativeType.DSPARK,
             SpeculativeType.DFLASH,
         ]:
             logging.error(
-                "Speculative engine only supports MTP, EAGLE, DSpARK and DFlash, but got %s",
+                "Speculative engine only supports MTP, EAGLE, EAGLE3, DSpARK and DFlash, but got %s",
                 sp_config.type.name,
             )
             raise ValueError(
-                "Speculative engine only supports MTP, EAGLE, DSpARK and DFlash, but got %s"
+                "Speculative engine only supports MTP, EAGLE, EAGLE3, DSpARK and DFlash, but got %s"
                 % sp_config.type.name
             )
 
@@ -549,8 +557,51 @@ class ModelFactory:
             ModelFactory._setup_dflash_configs(
                 sp_config, model_config, propose_model_config
             )
+        elif sp_config.type == SpeculativeType.EAGLE3:
+            ModelFactory._setup_eagle3_configs(
+                model_config, propose_model_config, engine_config.parallelism_config
+            )
 
         return propose_model_config
+
+    @staticmethod
+    def _bind_eagle3_target(target, draft):
+        import weakref
+
+        if target is None or tuple(target.py_model._mtp_aux_capture_layer_ids) != tuple(
+            sorted(draft.py_model.capture_ids)
+        ):
+            raise ValueError(
+                "EAGLE3 requires an initialized target with matching capture layers"
+            )
+        # The draft already holds the target for its vocabulary loans. Do not
+        # register the draft block in the target or introduce a strong cycle.
+        target.py_model._eagle3_capture_projection = weakref.WeakMethod(
+            draft.py_model.project_target_hidden
+        )
+
+    @staticmethod
+    def _setup_eagle3_configs(target, draft, parallel):
+        ids = tuple(draft.capture_aux_hidden_layer_ids)
+        if target.model_type != "qwen_3_moe":
+            raise ValueError("qwen_3_moe_eagle3 requires a Qwen3 MoE target")
+        if (target.hidden_size, target.vocab_size) != (
+            draft.hidden_size,
+            draft.vocab_size,
+        ):
+            raise ValueError("EAGLE3 target and draft hidden/vocabulary sizes differ")
+        if getattr(parallel, "pp_size", 1) != 1:
+            raise ValueError(
+                "EAGLE3 target vocabulary loans require co-located input/output stages"
+            )
+        if len(ids) != 3 or min(ids) < 0 or max(ids) >= target.num_layers:
+            raise ValueError("EAGLE3 capture layer outside target decoder")
+        # Captures and both borrowed vocabulary tables enter the draft body
+        # directly. Use the target's effective dtype after quantization policy.
+        # The binding reads a DataType enum but its setter accepts a string.
+        draft.data_type = target.data_type.name.removeprefix("TYPE_").lower()
+        draft.enable_fp32_lm_head = target.enable_fp32_lm_head
+        target.capture_aux_hidden_layer_ids = sorted(ids)
 
     @staticmethod
     def _setup_dspark_configs(

@@ -98,20 +98,20 @@ class GroupedFp4Executor(Fp8Fp4ExecutorBase):
         FP4 blocks to the CUDA driver so they don't sit in PyTorch's
         caching allocator while KV-pool sizing measures available HBM.
         """
-        from rtp_llm.utils.model_weight import W
+        from rtp_llm.models_py.modules.fp8_fp4_weight_source import take_weight
 
         cfg = self.cfg
         E, D, inter = cfg.n_routed_experts, cfg.dim, cfg.moe_inter_dim
-        self._w13 = layer_weights.pop(W.moe_w1)
-        s13_raw = layer_weights.pop(W.moe_s1)
+        self._w13 = take_weight(layer_weights, "routed_w13")
+        s13_raw = take_weight(layer_weights, "routed_s13")
         self._w13, s13_raw = normalize_moe_w13_gate_up(
             self._w13,
             s13_raw,
             inter,
             cfg.moe_w1_layout,
         )
-        self._w2 = layer_weights.pop(W.moe_w2)
-        s2_raw = layer_weights.pop(W.moe_s2)
+        self._w2 = take_weight(layer_weights, "routed_w2")
+        s2_raw = take_weight(layer_weights, "routed_s2")
 
         self._s13 = prepare_fp4_weight_scale_for_deepgemm(s13_raw, 2 * inter, D, E)
         self._s2 = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)

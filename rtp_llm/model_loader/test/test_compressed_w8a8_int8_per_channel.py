@@ -6,6 +6,7 @@ import unittest
 from types import SimpleNamespace
 
 import torch
+from safetensors.torch import save_file
 
 from rtp_llm.config.quant_config import (
     CompressedW8A8Int8PerChannelQuantConfig,
@@ -17,11 +18,13 @@ from rtp_llm.model_loader.compressed_w8a8_int8_per_channel_weight import (
 )
 from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig
 from rtp_llm.model_loader.load_config import LoadConfig
-from rtp_llm.model_loader.loader import ModelLoader
 from rtp_llm.model_loader.per_channel_fp8_quant_weight import PerChannelFp8Weight
 from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models_py.distributed.deepep_wrapper import DeepepWrapperConfig
+from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
+from rtp_llm.models_py.module_base import RtpModule
+from rtp_llm.models_py.registry import register_model
 from rtp_llm.models_py.modules.factory.fused_moe.strategy_registry import (
     StrategyRegistry,
 )
@@ -476,7 +479,67 @@ class CompressedW8A8WeightTest(unittest.TestCase):
         )
 
 
+@register_model("_test_stacked_channel_routes")
+class _StackedRoutes(RtpModule):
+    """Record the tensors actually delivered by NewModelLoader on this EP rank."""
+
+    def __init__(self, config, load):
+        super().__init__()
+
+    def load_weights(self, weights):
+        self.routed = {}
+        for name, value in weights:
+            if name in self.routed:
+                raise AssertionError(f"duplicate local expert tensor: {name}")
+            self.routed[name] = value
+
+
 class StackedMoePerChannelWeightTest(unittest.TestCase):
+    def _check_stacked_routes(self, template, dtype):
+        # The old loader mapped a name to a W.* template; NewLoader directly
+        # emits each local expert's kernel and scale from the real shard.
+        key = template.format(i=0)
+        base, projection = key.rsplit(".", 1)
+        kernel = torch.arange(16).reshape(2, 4, 2).to(dtype)
+        scale = torch.arange(8, dtype=torch.float32).reshape(2, 4, 1) + 0.5
+        config = SimpleNamespace(
+            model_type="_test_stacked_channel_routes",
+            num_layers=1,
+            expert_num=2,
+            activation_type="SiGLU",
+            quant_config=None,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            save_file(
+                {key: kernel, key + ".weight_scale": scale},
+                os.path.join(directory, "model.safetensors"),
+            )
+            for rank in (0, 1):
+                load = NewLoaderConfig(
+                    device="cpu",
+                    compute_dtype=torch.float32,
+                    load_method="scratch",
+                    ep_size=2,
+                    ep_rank=rank,
+                )
+                actual = (
+                    NewModelLoader(config, load, model_path=directory).load().routed
+                )
+                prefix = f"{base}.{rank}.{projection}"
+                self.assertEqual(
+                    set(actual), {prefix + ".weight", prefix + ".weight_scale"}
+                )
+                self.assertEqual(actual[prefix + ".weight"].dtype, dtype)
+                torch.testing.assert_close(
+                    actual[prefix + ".weight"].view(torch.uint8),
+                    kernel[rank].view(torch.uint8),
+                    atol=0,
+                    rtol=0,
+                )
+                torch.testing.assert_close(
+                    actual[prefix + ".weight_scale"], scale[rank], atol=0, rtol=0
+                )
+
     _fused_key = "model.language_model.layers.{i}.mlp.experts.gate_up_proj"
 
     def _load_config(self):
@@ -519,17 +582,7 @@ class StackedMoePerChannelWeightTest(unittest.TestCase):
             weight.scale.weights[0].name, self._fused_key + ".weight_scale"
         )
 
-        stacked_keys = ModelLoader._build_stacked_key_config(
-            SimpleNamespace(layer_weights=[weight], weights=[])
-        )
-        self.assertEqual(
-            stacked_keys[self._fused_key.format(i="0")],
-            f"layers.0.moe.{W.moe_w1}.{{expert_id}}.0",
-        )
-        self.assertEqual(
-            stacked_keys[(self._fused_key + ".weight_scale").format(i="0")],
-            f"layers.0.moe.{W.moe_s1}.{{expert_id}}.0",
-        )
+        self._check_stacked_routes(self._fused_key, torch.int8)
 
     def test_qwen35_fused_kernel_and_scale_use_identical_gate_up_order(self):
         source = self._fused_source()
@@ -560,11 +613,7 @@ class StackedMoePerChannelWeightTest(unittest.TestCase):
         self.assertEqual(weight.scale.data_type, torch.float32)
         self.assertIs(weight.scale.weights[0].merge_fun, identity)
 
-        stacked_keys = ModelLoader._build_stacked_key_config(
-            SimpleNamespace(layer_weights=[weight], weights=[])
-        )
-        self.assertIn(self._fused_key.format(i="0"), stacked_keys)
-        self.assertIn((self._fused_key + ".weight_scale").format(i="0"), stacked_keys)
+        self._check_stacked_routes(self._fused_key, torch.float8_e4m3fn)
 
     def test_qwen35_stacked_down_proj_uses_no_suffix_kernel_and_scale_keys(self):
         fused_key = "model.language_model.layers.{i}.mlp.experts.down_proj"
@@ -598,11 +647,7 @@ class StackedMoePerChannelWeightTest(unittest.TestCase):
         torch.testing.assert_close(loaded[W.moe_w2], kernel, rtol=0, atol=0)
         torch.testing.assert_close(loaded[W.moe_s2], scale, rtol=0, atol=0)
 
-        stacked_keys = ModelLoader._build_stacked_key_config(
-            SimpleNamespace(layer_weights=[weight], weights=[])
-        )
-        self.assertIn(fused_key.format(i="0"), stacked_keys)
-        self.assertIn((fused_key + ".weight_scale").format(i="0"), stacked_keys)
+        self._check_stacked_routes(fused_key, torch.int8)
 
     def test_split_experts_keep_weight_suffix_and_existing_order(self):
         source = MoeAtomicWeight(

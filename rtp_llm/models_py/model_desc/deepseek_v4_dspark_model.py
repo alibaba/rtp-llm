@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 from contextlib import contextmanager
 from types import SimpleNamespace
-from typing import Any, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Optional, Tuple
 
 import torch
 
@@ -61,17 +61,15 @@ from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     build_block_tables_for_tags,
     primary_attention_inputs,
 )
-from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear
-from rtp_llm.models_py.modules.factory.attention.common import (
-    create_write_cache_store_impl,
-)
 from rtp_llm.models_py.speculative.dspark_proposer_mixin import (
     DSparkProposerMixin,
     optional_tensor,
 )
 from rtp_llm.ops import RoleType
-from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
+
+if TYPE_CHECKING:
+    from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 
 
 class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
@@ -235,6 +233,10 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         )
 
     def _load_extra_weights(self, weights: ModelWeights) -> None:
+        # This factory constructs the legacy tensor-backed linear. Direct
+        # owners already have an FP8 linear and validate its backend at load.
+        from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear
+
         gw = weights.global_weights
         self.main_norm = RMSNorm(
             gw[W.v4_dspark_main_norm], float(self._v4_args.norm_eps)
@@ -613,6 +615,10 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         swa_attention_inputs = as_attention_inputs_by_tag(
             attention_inputs, self.kv_cache
         ).get(SWA_KV)
+        from rtp_llm.models_py.modules.factory.attention.common import (
+            create_write_cache_store_impl,
+        )
+
         write_cache_store_impl = create_write_cache_store_impl(
             swa_attention_inputs, self.kv_cache
         )
@@ -854,6 +860,8 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     ) -> PyModelOutputs:
         device = self._forward_device()
         if getattr(self, "kv_cache", None) is None:
+            from rtp_llm.ops.compute_ops import PyModelOutputs
+
             return PyModelOutputs(
                 torch.zeros(
                     (0, int(self._v4_args.dim)),

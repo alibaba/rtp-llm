@@ -343,10 +343,14 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
         if (first_moe_layer >= 0) {
             const auto range =
                 stageLayerRange(parallelism_config_, parallelism_config_.pp_rank, params.model_config_.num_layers);
-            const auto& moe_kernel = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel;
-            auto        moe_weight_type     = torchDTypeToDataType(moe_kernel.dtype());
-            bool        is_gated_activation = params.model_config_.isGatedActivation();
-            auto        moe_inter_size      = is_gated_activation ? moe_kernel.size(1) / 2 : moe_kernel.size(1);
+            // Python-owned experts do not populate legacy DenseWeights.
+            DataType moe_weight_type = DataType::TYPE_FP16;
+            int64_t  moe_inter_size  = 0;
+            if (ExpertBalancerPythonWrapper::weightOwnership(params.py_eplb) == EplbWeightOwnership::Legacy) {
+                const auto& moe_kernel = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel;
+                moe_weight_type        = torchDTypeToDataType(moe_kernel.dtype());
+                moe_inter_size = params.model_config_.isGatedActivation() ? moe_kernel.size(1) / 2 : moe_kernel.size(1);
+            }
 
             expert_balancer_ =
                 std::make_shared<ExpertBalancer>(params.model_config_.expert_num,
@@ -659,8 +663,7 @@ std::optional<ErrorInfo> PPExecutor::validateStream(const GenerateStream& stream
     /** Requests with max_new_tokens == 0 need no generated tokens, so skip sampling compatibility checks. */
     if (sp_enabled && !config.isPrefillOnly()) {
         if (sp_type == SP_TYPE_DSPARK && stream.maxBatchSize() != 1) {
-            return ErrorInfo(ErrorCode::INVALID_PARAMS,
-                             "PP DSpARK does not support num_return_sequences > 1");
+            return ErrorInfo(ErrorCode::INVALID_PARAMS, "PP DSpARK does not support num_return_sequences > 1");
         }
         if (auto error = LogitsProcessorFactory::validateMtpCompatibility(stream.getAllLogitsProcessorPtr());
             error.has_value()) {
@@ -976,9 +979,12 @@ PPDraftOutput PPExecutor::runDraftStep(const PPExecutionPlan&  plan,
                                                                             hidden_states_d_t,
                                                                             buffer_holder_);
                 } else {
-                    batch_stream_processor_->prepareDraftPrefillAfterTargetPrefill(
-                        draft_input, target_hidden_states, sampler_output.token_ids, draft_next_position_ids, buffer_holder_,
-                        plan.middle_chunk_boundary_tokens);
+                    batch_stream_processor_->prepareDraftPrefillAfterTargetPrefill(draft_input,
+                                                                                   target_hidden_states,
+                                                                                   sampler_output.token_ids,
+                                                                                   draft_next_position_ids,
+                                                                                   buffer_holder_,
+                                                                                   plan.middle_chunk_boundary_tokens);
                 }
             } else if (is_verify && draft_input_layout_ == mtp::DraftInputLayout::FIXED_WIDTH) {
                 /** Fixed-width rejection sync skips shape exchange; allocate peer buffers for its CUDA broadcasts. */
@@ -1011,9 +1017,10 @@ PPDraftOutput PPExecutor::runDraftStep(const PPExecutionPlan&  plan,
         if (!is_dspark_ && isStageRoot()) {
             /** With no final rows, use the first middle request for DP alignment and discard its proposals. */
             const auto proposal_rows = std::max<int64_t>(sampling_plan.sequence_lengths.numel(), 1);
-            auto draft_logits = PPBatchStreamProcessor::gatherMtpProposalLogits(draft_prefill_output.logits, proposal_rows);
-            auto draft_sample  = fast_topk_sampler_->forward(draft_logits, 1);
-            auto draft_tokens  = to_i32_flat(draft_sample.token_ids);
+            auto       draft_logits =
+                PPBatchStreamProcessor::gatherMtpProposalLogits(draft_prefill_output.logits, proposal_rows);
+            auto draft_sample = fast_topk_sampler_->forward(draft_logits, 1);
+            auto draft_tokens = to_i32_flat(draft_sample.token_ids);
             if (!middle_only) {
                 proposed_token_ids = draft_tokens.unsqueeze(1);
             }
@@ -1023,8 +1030,7 @@ PPDraftOutput PPExecutor::runDraftStep(const PPExecutionPlan&  plan,
                 torch::Tensor hidden_states;
                 if (cp_enabled) {
                     hidden_states = draft_model_->getMtpLastHiddenStates(request_batch_size);
-                    RTP_LLM_CHECK_WITH_INFO(hidden_states.defined()
-                                                && hidden_states.dim() == 2
+                    RTP_LLM_CHECK_WITH_INFO(hidden_states.defined() && hidden_states.dim() == 2
                                                 && hidden_states.size(0) == request_batch_size,
                                             "PP CP draft last hidden states must be a 2-D tensor with %ld rows "
                                             "(one per request)",
@@ -1175,8 +1181,8 @@ absl::Status PPExecutor::processImpl(const ScheduleOutput& schedule_output, int6
     }
 
     /** 1. Build or receive the plan and retain its CPU payload for forwarding. */
-    PPExecutionPlan plan;
-    torch::Tensor   plan_payload;
+    PPExecutionPlan     plan;
+    torch::Tensor       plan_payload;
     PPExecutionSnapshot execution_snapshot;
     if (isFirstStage()) {
         const StreamGroups stream_groups(streams);
@@ -1296,7 +1302,8 @@ absl::Status PPExecutor::processImpl(const ScheduleOutput& schedule_output, int6
             auto target_input             = model_input;
             target_input.pp_intermediates = std::move(input_tensors.tensors);
             {
-                RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.pp.target_forward(verify=%d,batch=%" PRId64 ",tokens=%" PRId64 ")",
+                RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.pp.target_forward(verify=%d,batch=%" PRId64 ",tokens=%" PRId64
+                                              ")",
                                               model_input.is_target_verify,
                                               model_input.input_lengths.numel(),
                                               model_input.combo_tokens.numel());
@@ -1566,7 +1573,8 @@ void PPExecutor::collectTokenCounts(const PPExecutionSnapshot&               sna
             counts.context_with_cache += execute_tokens;
             counts.total += execute_tokens;
             if (execution.reuse_length_for_tps > 0) {
-                counts.context_with_cache += static_cast<int64_t>(execution.reuse_length_for_tps) * execution.batch_size;
+                counts.context_with_cache +=
+                    static_cast<int64_t>(execution.reuse_length_for_tps) * execution.batch_size;
             }
         } else if (!result.request_errors[row].hasError()) {
             auto&         counts = token_counts_by_priority[execution.priority];
@@ -1601,10 +1609,10 @@ void PPExecutor::reportResultMetrics(int64_t                                    
      * This deferred report also carries the result-time dispatch and the returned last-stage sampling. */
     metrics_reporter_->report<RtpLLMExecutorMetrics, RtpLLMExecutorMetricsCollector>(nullptr, &executor_collector);
 
-    int64_t context_tokens = 0;
+    int64_t context_tokens            = 0;
     int64_t context_tokens_with_cache = 0;
-    int64_t generate_tokens = 0;
-    int64_t total_tokens    = 0;
+    int64_t generate_tokens           = 0;
+    int64_t total_tokens              = 0;
     for (const auto& entry : token_counts_by_priority) {
         context_tokens += entry.second.context;
         context_tokens_with_cache += entry.second.context_with_cache;
@@ -1612,11 +1620,8 @@ void PPExecutor::reportResultMetrics(int64_t                                    
         total_tokens += entry.second.total;
     }
     RtpLLMTokenPSMetricsCollector tps_collector;
-    tps_collector.addTokenSize(context_tokens,
-                               context_tokens_with_cache,
-                               generate_tokens,
-                               total_tokens,
-                               batch_latency_us);
+    tps_collector.addTokenSize(
+        context_tokens, context_tokens_with_cache, generate_tokens, total_tokens, batch_latency_us);
     tps_collector.addTokenSizeByPriority(token_counts_by_priority, batch_latency_us);
     tps_reporter_.report(&tps_collector);
     wall_tps_reporter_.report(&tps_collector);

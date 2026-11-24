@@ -22,6 +22,27 @@ class DecodeRopeContractError(RuntimeError):
     """Decode RoPE input/state invariant violation that must not fall back."""
 
 
+def _apply_scaled_rope(qkv, attn_configs, params, *, decode):
+    # The pinned rtp-kernel wheels use a decode launch length of one for NTK
+    # and scale Llama3 angles rather than frequencies. Use the same algorithm
+    # as FlashInfer prefill, then let the native No-RoPE path write Q/K/V.
+    # Lazy import keeps optional Triton out of unrelated ops initialization.
+    from rtp_llm.models_py.kernels.cuda.scaled_rope import scaled_rope_qkv
+
+    return scaled_rope_qkv(
+        qkv,
+        num_heads=attn_configs.head_num,
+        num_kv_heads=attn_configs.kv_head_num,
+        head_size=attn_configs.size_per_head,
+        rope_config=attn_configs.rope_config,
+        llama3=attn_configs.rope_config.style == RopeStyle.Llama3,
+        positions=params.position_ids,
+        sequence_lengths=params.sequence_lengths if decode else None,
+        cu_seqlens=None if decode else params.cu_seqlens,
+        prefix_lengths=None if decode else params.prefix_lengths,
+    )
+
+
 def _load_fused_rope_kvcache_without_package_init() -> ModuleType:
     """Load the independent fused RoPE wrapper when optional siblings fail.
 
@@ -184,6 +205,11 @@ class FusedRopeKVCachePrefillOpBase:
             if check_rope_cache(rope_config, rope_cache):
                 rope_cache_data = rope_cache.data
 
+        native_rope_style = rope_config.style
+        if rope_config.style in (RopeStyle.Llama3, RopeStyle.DynamicNTK):
+            qkv = _apply_scaled_rope(qkv, self.attn_configs, params, decode=False)
+            native_rope_style, rope_cache_data = RopeStyle.No, None
+
         return _get_fused_rope_kvcache().prefill_fused_rope_kvcache(
             qkv,
             params.cu_seqlens,
@@ -208,7 +234,7 @@ class FusedRopeKVCachePrefillOpBase:
             padding_offset=params.padding_offset,
             position_ids=params.position_ids,
             use_logn_attn=self.attn_configs.use_logn_attn,
-            rope_style=rope_config.style,
+            rope_style=native_rope_style,
             rope_dim=rope_config.dim,
             rope_base=rope_config.base,
             rope_scale=rope_config.scale,
@@ -414,6 +440,10 @@ class FusedRopeKVCacheDecodeOp:
             RopeStyle.Yarn,
         )
         decode_index_factor = 1 if cached_decode else rope_config.index_factor
+        native_rope_style = rope_config.style
+        if rope_config.style in (RopeStyle.Llama3, RopeStyle.DynamicNTK):
+            qkv = _apply_scaled_rope(qkv, self.attn_configs, params, decode=True)
+            native_rope_style, use_rope_cache = RopeStyle.No, False
         return _get_fused_rope_kvcache().decode_fused_rope_kvcache(
             qkv,
             params.position_ids,
@@ -430,7 +460,7 @@ class FusedRopeKVCacheDecodeOp:
             kv_cache_offset_h=params.kv_cache_offset_h,
             rope_cache=rope_cache.data if use_rope_cache else None,
             use_logn_attn=self.attn_configs.use_logn_attn,
-            rope_style=rope_config.style,
+            rope_style=native_rope_style,
             rope_dim=rope_config.dim,
             rope_base=rope_config.base,
             rope_scale=rope_config.scale,

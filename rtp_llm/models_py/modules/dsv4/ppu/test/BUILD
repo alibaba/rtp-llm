@@ -1,7 +1,7 @@
 load("@arch_config//:arch_select.bzl", "triton_deps")
 
 _PPU_CONTRACT_TESTS = [
-    "attention_gemm_config",
+    "attention_gemm_config", "mtp_owned_fusion",
     "mtp_weights", "mtp_hidden", "compressor_norm_dispatch", "mtp_swa_ring_page",
     "chunked_moe", "deepep_graph_dispatch", "ppu_deep_gemm_layout_compat",
     "strategy_select", "tp_norm", "v4_router_contract", "v4_tp_reduce_contract",
@@ -16,7 +16,11 @@ _PPU_CONTRACT_TESTS = [
     env = {"GPU_COUNT": "1"},
     exec_properties = {"gpu": "PPU-ZW810E", "gpu_count": "1"},
     data = ["//rtp_llm/models_py:ppu_sources"],
-    deps = [":ppu_test_runtime", "//rtp_llm:device"],
+    deps = [":ppu_test_runtime", "//rtp_llm:device"] + ([
+        "//rtp_llm/models_py:new_weight_loader",
+    ] if name == "mtp_owned_fusion" else []) + ([
+        "//rtp_llm/model_loader:loader",
+    ] if name == "mtp_weights" else []),
     tags = ["PPU-ZW810E"],
     target_compatible_with = select({
         "@//:using_ppu": [],
@@ -83,7 +87,11 @@ py_test(
     name = "platform_boundary_test",
     srcs = ["test_platform_boundary.py"],
     main = "test_platform_boundary.py",
-    data = ["//rtp_llm:models/deepseek_v4.py", "//rtp_llm/models_py:modules/dsv4/ppu/resources.py"],
+    data = [
+        "//rtp_llm:models/deepseek_v4.py",
+        "//rtp_llm/models_py:modules/dsv4/ppu/resources.py",
+        "//rtp_llm/models_py:new_models/deepseek_v4/ppu_platform.py",
+    ],
 )
 
 py_test(
@@ -466,6 +474,7 @@ py_test(
     name = "prefill_defaults_test",
     srcs = ["test_prefill_defaults.py"],
     main = "test_prefill_defaults.py",
+    env = {"GPU_COUNT": "0"},
     data = ["//rtp_llm/models_py:ppu_sources"],
     deps = ["//rtp_llm:torch"],
 )

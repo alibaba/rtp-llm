@@ -36,6 +36,11 @@ from rtp_llm.models_py.utils.arch import get_sm
 class DeepepNormalRouterBase(FusedMoeDataRouter):
     """Base class for DeepEP normal routers."""
 
+    # Most non-FP8/non-FP4 executors expect global IDs with a nonlocal
+    # sentinel. Executors indexing a rank-local weight bank need the unmodified
+    # DeepEP IDs instead, including -1 for routes owned by another rank.
+    keep_local_expert_ids = False
+
     @classmethod
     def router_type(cls):
         return RouterType.DEEPEP_NORMAL
@@ -165,7 +170,10 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
             num_recv_tokens_per_expert_list, device=expert_x.device, dtype=torch.int32
         )
 
-        if recv_topk_idx.numel() != 0 and (not use_fp8) and (not use_fp4):
+        if (
+            not (self.keep_local_expert_ids or use_fp8 or use_fp4)
+            and recv_topk_idx.numel() != 0
+        ):
             expert_topk_ids = torch.where(
                 recv_topk_idx == -1,
                 self.expert_num - 1 if self.rank_expert_offset == 0 else 0,
@@ -179,6 +187,7 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
             expert_x_scale=expert_x_scale,
             expert_x_origin_dtype=act_dtype,
             expert_topk_ids=expert_topk_ids,
+            expert_ids_are_local=self.keep_local_expert_ids,
             expert_topk_weights=recv_topk_weights,
             expert_tokens_meta=ExpertTokensMetadata(
                 expert_num_tokens=expert_num_tokens,
@@ -307,6 +316,29 @@ class DeepepNormalRouterNoQuant(DeepepNormalRouterBase):
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method is None)
+
+
+class DeepepNormalRouterWeightOnly(DeepepNormalRouterBase):
+    """Unquantized activations and rank-local IDs for packed integer experts."""
+
+    keep_local_expert_ids = True
+
+    def __init__(self, config: MoEConfigAdapter, quant_config: FusedMoEQuantConfig):
+        if quant_config.is_quantized:
+            raise ValueError("Weight-only DeepEP must dispatch unquantized activations")
+        super().__init__(config, quant_config, expert_alignment=1)
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        super().check_conditions(checker, config)
+        checker.check(config.moe_quant_method in ("awq", "gptq", "INT8"))
+        checker.check(config.use_deepep_moe and not config.moe_config.use_all_gather)
+        checker.check(MoeConfigResolver.is_bf16(config))
+
+    def _prepare_dispatch_input(self, a1, slice_begin, slice_size, use_fp8):
+        if a1.dtype != torch.bfloat16:
+            raise ValueError("CUDA DeepEP weight-only combine requires BF16 activations")
+        return super()._prepare_dispatch_input(a1, slice_begin, slice_size, use_fp8)
 
 
 class DeepepNormalRouterFp8PerTensor(DeepepNormalRouterBase):

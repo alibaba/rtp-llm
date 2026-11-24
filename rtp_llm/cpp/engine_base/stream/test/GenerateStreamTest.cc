@@ -549,6 +549,16 @@ TEST_F(GenerateStreamTest, mtpCpuProposalClearsStaleGpuMirror) {
     EXPECT_EQ(stream->getSPOutputBuffer()->tokens[0][1].item<int32_t>(), 11);
 }
 
+TEST_F(GenerateStreamTest, staticLoraSelectionCannotSilentlyServeAnotherAdapter) {
+    GenerateConfig config;
+    EXPECT_NO_THROW(config.validateStaticLoraSelection(""));
+    EXPECT_NO_THROW(config.validateStaticLoraSelection("merged"));
+    config.adapter_name = "merged";
+    EXPECT_NO_THROW(config.validateStaticLoraSelection("merged"));
+    EXPECT_THROW(config.validateStaticLoraSelection(""), std::invalid_argument);
+    EXPECT_THROW(config.validateStaticLoraSelection("other"), std::invalid_argument);
+}
+
 TEST_F(GenerateStreamTest, prefillOnlyValidationPreservesCacheSetting) {
     GenerateConfig config;
     config.max_new_tokens = 0;

@@ -47,6 +47,10 @@ public:
         pause_ = true;
     }
 
+    bool isPaused() const {
+        return pause_.load();
+    }
+
     void restart() {
         pause_ = false;
     }

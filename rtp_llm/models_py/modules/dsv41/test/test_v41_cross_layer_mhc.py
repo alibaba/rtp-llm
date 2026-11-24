@@ -182,6 +182,29 @@ class CrossLayerMHCCPUTest(unittest.TestCase):
         right.attn_hc.set_previous(left.attn_hc)
         self.assertFalse(transition.can_defer_decode_post(left, right, False))
 
+    def test_only_explicit_native_decode_class_can_opt_in(self):
+        class DirectBlock(Block):
+            _dsv41_native_decode_block = Block
+
+        class DerivedBlock(DirectBlock):
+            pass
+
+        class CustomDecode(Block):
+            _dsv41_native_decode_block = Block
+
+            def forward_decode(self, *args, **kwargs):
+                raise AssertionError("not the native implementation")
+
+        for cls, expected in (
+            (DirectBlock, True),
+            (DerivedBlock, False),
+            (CustomDecode, False),
+        ):
+            with self.subTest(cls=cls):
+                self.assertEqual(
+                    transition._plain_decode_block(cls.__new__(cls)), expected
+                )
+
     def test_backend_error_propagates_without_materializing_post(self):
         blocks = make_blocks()
         pending = transition.forward_decode_layer(

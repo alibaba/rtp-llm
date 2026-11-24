@@ -3,13 +3,55 @@
 #include <gmock/gmock.h>
 
 #include <memory>
+#include <type_traits>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientFactory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/Subscriber.h"
 
 namespace kv_cache_manager {
 
-class MockMetaClient: public MetaClient {
+// The SDKs currently shipped for open and internal builds have different
+// MetaClient ABIs. Derive the overrides from the selected SDK, not the GPU.
+template<class Client, class Signature = decltype(&Client::StartWrite)>
+class MockWriteClient;
+
+template<class Client, class Result, class... Args>
+class MockWriteClient<Client, Result (Client::*)(Args...)>: public Client {
+public:
+    Result StartWrite(Args... args) override {
+        if constexpr (sizeof...(Args) == 5) {
+            return OnStartWrite(args..., 0);  // Legacy SDK has no minimum replica count.
+        } else {
+            return OnStartWrite(args...);
+        }
+    }
+    MOCK_METHOD((std::pair<ClientErrorCode, WriteLocation>),
+                OnStartWrite,
+                (const std::string&, const std::vector<int64_t>&, const std::vector<int64_t>&,
+                 const std::vector<std::string>&, int64_t, int32_t));
+};
+
+template<class Client, class BackendQuery, class HostQuery>
+class MockQueryClient;
+
+template<class Client, class B, class... BA, class H, class... HA>
+class MockQueryClient<Client, B (Client::*)(BA...), H (Client::*)(HA...)>: public MockWriteClient<Client> {
+public:
+    ::testing::MockFunction<B(BA...)> backend_locations;
+    ::testing::MockFunction<H(HA...)> host_state;
+
+    B GetCacheLocationsByBackend(BA... args) override { return backend_locations.Call(args...); }
+    H GetHostCacheState(HA... args) override { return host_state.Call(args...); }
+};
+
+template<class Client, class = void>
+struct MetaMockBase: MockWriteClient<Client> {};
+
+template<class Client>
+struct MetaMockBase<Client, std::void_t<decltype(&Client::GetCacheLocationsByBackend), decltype(&Client::GetHostCacheState)>>:
+    MockQueryClient<Client, decltype(&Client::GetCacheLocationsByBackend), decltype(&Client::GetHostCacheState)> {};
+
+class MockMetaClient: public MetaMockBase<MetaClient> {
 public:
     MOCK_METHOD((std::pair<ClientErrorCode, Locations>),
                 MatchLocation,
@@ -20,15 +62,6 @@ public:
                  const BlockMask&,
                  int32_t,
                  const std::vector<std::string>&),
-                (override));
-    MOCK_METHOD((std::pair<ClientErrorCode, WriteLocation>),
-                StartWrite,
-                (const std::string&,
-                 const std::vector<int64_t>&,
-                 const std::vector<int64_t>&,
-                 const std::vector<std::string>&,
-                 int64_t,
-                 int32_t),
                 (override));
     MOCK_METHOD(ClientErrorCode,
                 FinishWrite,
@@ -43,27 +76,6 @@ public:
                 MatchLocationLen,
                 (const std::string&, QueryType, const std::vector<int64_t>&, const std::vector<int64_t>&, int32_t),
                 (override));
-    MOCK_METHOD((std::pair<ClientErrorCode, std::vector<std::vector<BackendLocation>>>),
-                GetCacheLocationsByBackend,
-                (const std::string&,
-                 const std::vector<int64_t>&,
-                 const std::vector<int64_t>&,
-                 const BlockMask&,
-                 const std::vector<std::string>&,
-                 StorageType,
-                 BackendSelectStrategy),
-                (override));
-    MOCK_METHOD((std::pair<ClientErrorCode, std::vector<HostCacheMatch>>),
-                GetHostCacheState,
-                (const std::string&, QueryType, const std::vector<int64_t>&, const std::vector<std::string>&, int32_t),
-                ());
-    // The selected SDK exposes either the legacy five-argument API or the new
-    // backend-aware API. Its matching overload implements the pure virtual.
-    MOCK_METHOD((std::pair<ClientErrorCode, std::vector<HostCacheMatch>>),
-                GetHostCacheState,
-                (const std::string&, QueryType, const std::vector<int64_t>&, const std::vector<std::string>&, int32_t,
-                 const std::vector<StorageType>&),
-                ());
     MOCK_METHOD(ClientErrorCode,
                 RemoveCache,
                 (const std::string&, const std::vector<int64_t>&, const std::vector<int64_t>&, const BlockMask&),

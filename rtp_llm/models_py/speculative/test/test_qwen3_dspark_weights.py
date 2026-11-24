@@ -5,23 +5,13 @@ import math
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import patch
 
 import torch
 from safetensors.torch import save_file
 
-from rtp_llm.config.kv_cache_config import KVCacheConfig
-from rtp_llm.model_loader.load_config import LoadMethod
-from rtp_llm.model_loader.loader import ModelLoader
-from rtp_llm.models.qwen_3_dspark import Qwen3DSpark, Qwen3DSparkWeight
-from rtp_llm.ops import HWKernelConfig, ParallelismConfig
-from rtp_llm.utils.database import CkptDatabase
-from rtp_llm.utils.model_weight import W
+from rtp_llm.models.qwen_3_dspark import Qwen3DSpark
+from rtp_llm.models_py.speculative.test.draft_checkpoint_case import load_draft
 
-_DEVICE = SimpleNamespace(
-    maybe_rewrite_weight_by_key=lambda _name, tensor, **_kwargs: tensor,
-)
 _HIDDEN = 64
 _VOCAB = 64
 _LAYERS = 5
@@ -98,53 +88,17 @@ def _checkpoint(*, include_lm_head=False):
     return tensors
 
 
-def _parallel(tp, rank):
-    parallel = ParallelismConfig()
-    parallel.tp_size = parallel.world_size = parallel.local_world_size = tp
-    parallel.tp_rank = parallel.world_rank = parallel.local_rank = rank
-    parallel.ffn_tp_size, parallel.ffn_tp_rank = tp, rank
-    return parallel
-
-
 class Qwen3DSparkWeightTest(unittest.TestCase):
-    def _load(self, path, checkpoint, tp, rank, *, aliases=None):
+    def _load(self, path, tp, rank):
         config = Qwen3DSpark._create_config(path)
         config.ckpt_path = path
-        config.phy2log_path = ""
+        config.model_type = "qwen_3_dspark"
         config.data_type = "bf16"
         config.enable_fp32_lm_head = False
-        database = CkptDatabase(path)
-        try:
-            builder = Qwen3DSparkWeight(
-                model_config=config,
-                parallelism_config=_parallel(tp, rank),
-                hw_kernel_config=HWKernelConfig(),
-                kv_cache_config=KVCacheConfig(),
-            )
-            builder.process_meta_from_ckpt(database.pretrain_file_list)
-            self.assertEqual(builder.transformer_prefix, "model.")
-            info = builder.get_weight_info()
-            self.assertEqual(len(info.layer_weights), _LAYERS)
-            with (
-                patch("rtp_llm.device.get_current_device", return_value=_DEVICE),
-                patch.object(ModelLoader, "force_clean_cuda_memory"),
-                patch.object(
-                    database, "load_tensor", wraps=database.load_tensor
-                ) as reads,
-            ):
-                loader = ModelLoader(
-                    config,
-                    builder,
-                    None,
-                    database,
-                    load_method=LoadMethod.SCRATCH,
-                    force_cpu_load_weights=True,
-                )
-                weights = loader.load_weights("cpu", global_weight_aliases=aliases)
-            return config, weights, {call.args[0] for call in reads.call_args_list}
-        finally:
-            for file_info in database.pretrain_file_list:
-                file_info.close_safetensor_handle()
+        config.gen_num_per_cycle = 3
+        roles = ("lm_head",) if config.dspark_share_target_lm_head else ()
+        model, target, read = load_draft(config, tp, rank, roles)
+        return config, model, target, read
 
     def test_real_torchspec_converted_checkpoint_tp_contract(self):
         checkpoint = _checkpoint()
@@ -155,52 +109,58 @@ class Qwen3DSparkWeightTest(unittest.TestCase):
             for tp in (1, 2, 8):
                 for rank in range(tp):
                     with self.subTest(tp=tp, rank=rank):
-                        target_head = torch.full(
-                            (_VOCAB // tp, _HIDDEN), rank + 1, dtype=torch.bfloat16
-                        )
-                        config, weights, requested = self._load(
-                            path, checkpoint, tp, rank, aliases={W.lm_head: target_head}
-                        )
+                        config, model, target, requested = self._load(path, tp, rank)
+                        target_head = target.lm_head.weight
                         self.assertTrue(config.dspark_share_target_lm_head)
                         self.assertTrue(config.dspark_sample_from_anchor)
                         self.assertEqual(config.dspark_target_layer_ids, _TARGET_LAYERS)
-                        globals_ = weights.global_weights
-                        self.assertIs(globals_[W.lm_head], target_head)
+                        self.assertIs(model.lm_head.weight, target_head)
                         self.assertEqual(
-                            globals_[W.lm_head].data_ptr(), target_head.data_ptr()
+                            model.lm_head.weight.data_ptr(), target_head.data_ptr()
                         )
                         torch.testing.assert_close(
-                            globals_[W.embedding],
-                            checkpoint["model.embed_tokens.weight"].chunk(tp, dim=1)[
+                            model.embed_tokens.weight,
+                            checkpoint["model.embed_tokens.weight"].chunk(tp, dim=0)[
                                 rank
                             ],
                             atol=0,
                             rtol=0,
                         )
                         torch.testing.assert_close(
-                            globals_[W.final_ln_gamma],
+                            model.norm.weight,
                             checkpoint["model.norm.weight"],
                             atol=0,
                             rtol=0,
                         )
                         torch.testing.assert_close(
-                            globals_[W.dspark_fc_w],
-                            checkpoint["fc.weight"].T,
+                            model.fc.weight,
+                            checkpoint["fc.weight"],
                             atol=0,
                             rtol=0,
                         )
                         for runtime_name, source_name in (
-                            (W.dspark_hidden_norm_gamma, "hidden_norm.weight"),
-                            (W.dspark_markov_w1, "markov_head.markov_w1.weight"),
-                            (W.dspark_markov_w2, "markov_head.markov_w2.weight"),
+                            (model.hidden_norm.weight, "hidden_norm.weight"),
+                            (
+                                model.markov_head.markov_w1.weight,
+                                "markov_head.markov_w1.weight",
+                            ),
+                            (
+                                model.markov_head.markov_w2.weight,
+                                "markov_head.markov_w2.weight",
+                            ),
                         ):
+                            rows = checkpoint[source_name].shape[0]
                             torch.testing.assert_close(
-                                globals_[runtime_name],
+                                runtime_name[:rows],
                                 checkpoint[source_name],
                                 atol=0,
                                 rtol=0,
                             )
-                        layer = weights.weights[0]
+                            self.assertEqual(
+                                torch.count_nonzero(runtime_name[rows:]), 0
+                            )
+                        self.assertEqual(len(model.layers), _LAYERS)
+                        layer = model.layers[0]
                         prefix = "model.layers.0."
                         expected_qkv = torch.cat(
                             [
@@ -212,10 +172,13 @@ class Qwen3DSparkWeightTest(unittest.TestCase):
                             dim=1,
                         )
                         torch.testing.assert_close(
-                            layer[W.attn_qkv_w], expected_qkv, atol=0, rtol=0
+                            layer.self_attn.qkv_proj.weight.T,
+                            expected_qkv,
+                            atol=0,
+                            rtol=0,
                         )
                         torch.testing.assert_close(
-                            layer[W.attn_o_w],
+                            layer.self_attn.o_proj.weight.T,
                             checkpoint[prefix + "self_attn.o_proj.weight"].T.chunk(
                                 tp, dim=0
                             )[rank],
@@ -234,10 +197,13 @@ class Qwen3DSparkWeightTest(unittest.TestCase):
                             dim=1,
                         )
                         torch.testing.assert_close(
-                            layer[W.ffn_w13], expected_w13, atol=0, rtol=0
+                            layer.mlp.gate_up_proj.weight.T,
+                            expected_w13,
+                            atol=0,
+                            rtol=0,
                         )
                         torch.testing.assert_close(
-                            layer[W.ffn_w2],
+                            layer.mlp.down_proj.weight.T,
                             checkpoint[prefix + "mlp.down_proj.weight"].T.chunk(
                                 tp, dim=0
                             )[rank],
@@ -255,13 +221,13 @@ class Qwen3DSparkWeightTest(unittest.TestCase):
                 json.dumps(_raw_config(lm_head_source="checkpoint"))
             )
             save_file(checkpoint, str(root / "model.safetensors"))
-            config, weights, requested = self._load(path, checkpoint, 2, 1)
+            config, model, _, requested = self._load(path, 2, 1)
         self.assertFalse(config.dspark_share_target_lm_head)
         torch.testing.assert_close(
-            weights.global_weights[W.lm_head],
+            model.lm_head.weight,
             checkpoint["lm_head.weight"]
             .chunk(2, dim=0)[1]
-            .to(weights.global_weights[W.lm_head].dtype),
+            .to(model.lm_head.weight.dtype),
             atol=0,
             rtol=0,
         )
@@ -275,8 +241,8 @@ class Qwen3DSparkWeightTest(unittest.TestCase):
                 json.dumps(_raw_config(lm_head_source="checkpoint"))
             )
             save_file(checkpoint, str(root / "model.safetensors"))
-            with self.assertRaisesRegex(Exception, "ts is empty"):
-                self._load(path, checkpoint, 1, 0)
+            with self.assertRaisesRegex((RuntimeError, ValueError), "lm_head"):
+                self._load(path, 1, 0)
 
 
 if __name__ == "__main__":

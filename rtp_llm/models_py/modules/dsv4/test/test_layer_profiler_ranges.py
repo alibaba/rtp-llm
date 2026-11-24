@@ -314,9 +314,8 @@ class LayerProfilerRangeTest(unittest.TestCase):
             return_value=_logging_layer_range(commit_events),
         ), patch.object(
             dspark_module, "require_pool_tokens_per_block", return_value=16
-        ), patch.object(
-            dspark_module,
-            "create_write_cache_store_impl",
+        ), patch(
+            "rtp_llm.models_py.modules.factory.attention.common.create_write_cache_store_impl",
             return_value=lambda cache: commit_events.append(("store", cache)),
         ):
             model.commit_feature_rows(

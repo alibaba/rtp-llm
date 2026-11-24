@@ -278,7 +278,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                     "primary_attention_inputs",
                     return_value=inputs.attention_inputs,
                 ), patch.object(
-                    model_module, "forward_prefill", side_effect=forward_prefill
+                    prefill_forward, "forward_prefill", side_effect=forward_prefill
                 ), torch.profiler.profile(
                     activities=[torch.profiler.ProfilerActivity.CPU]
                 ) as prof:

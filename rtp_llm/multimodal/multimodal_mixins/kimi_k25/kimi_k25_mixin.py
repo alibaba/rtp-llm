@@ -13,7 +13,6 @@ from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.multimodal.multimodal_mixin_register import register_multimodal_mixin
 from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
     BaseMultiModalMixin,
-    BaseVitWeights,
 )
 from rtp_llm.multimodal.multimodal_mixins.kimi_k25.kimi_k25_vit import (
     KimiK25ImageEmbedding,
@@ -21,29 +20,49 @@ from rtp_llm.multimodal.multimodal_mixins.kimi_k25.kimi_k25_vit import (
 from rtp_llm.utils.base_model_datatypes import VitParameters
 
 
-class KimiK25VitWeight(BaseVitWeights):
-    def _set_weight_prefix(self):
-        # HF Kimi-K2.5 keeps vision_tower.* / mm_projector.* at top level;
-        # no `model.` / `language_model.` prefix.
-        self._ckpt_prefix = ""
-        self._ft_prefix = "self.mm_part."
-
-
 class KimiK25Mixin(BaseMultiModalMixin):
-    def _init_multimodal(self):
-        # KimiK25ImageEmbedding now reads `model_config` only via its own
-        # `mm_related_params.config`, so we no longer need to pass the
-        # outer ModelConfig through.
-        self.mm_part = KimiK25ImageEmbedding(self.mm_related_params)
-        # vit_weights dict keys must match the on-disk ckpt prefix segment
-        # so that BaseVitWeights builds names like
-        # `vision_tower.encoder.blocks.X.xxx` and `mm_projector.proj.X.xxx`.
-        self.mm_related_params.vit_weights = KimiK25VitWeight(
-            {
-                "vision_tower": self.mm_part.vision_tower,
-                "mm_projector": self.mm_part.mm_projector,
-            },
-            with_prefix=True,
+    def __init__(
+        self,
+        compute_dtype,
+        device,
+        mm_related_params,
+        load_method,
+        vit_config,
+        ckpt_path,
+    ):
+        from rtp_llm.models_py.new_models.kimi_k25.vision import load_kimi_k25_vision
+
+        owner = load_kimi_k25_vision(
+            mm_related_params.config["vision_config"],
+            ckpt_path,
+            compute_dtype,
+            device,
+            load_method,
+        )
+        self.compute_dtype = compute_dtype
+        self.mm_related_params = mm_related_params
+        self.load_method = load_method
+        self.vit_config = vit_config
+        self.ckpt_path = ckpt_path
+        self.mm_part = KimiK25ImageEmbedding(
+            mm_related_params,
+            vision_tower=owner.vision_tower,
+            mm_projector=owner.mm_projector,
+        )
+
+    @classmethod
+    def from_new_loader(
+        cls,
+        compute_dtype,
+        device,
+        mm_related_params,
+        load_method,
+        vit_config,
+        ckpt_path,
+    ):
+        """Public factory entry; both construction paths use direct checkpoint owners."""
+        return cls(
+            compute_dtype, device, mm_related_params, load_method, vit_config, ckpt_path
         )
 
     @classmethod

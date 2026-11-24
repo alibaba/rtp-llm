@@ -83,13 +83,13 @@ class Qwen4ExpDecoderLayerTest(TestCase):
         with (
             patch.object(qwen3_next, "Qwen3NextGatedDeltaNet", return_value=attention),
             patch.object(
-                generic_moe.LinearFactory,
+                generic_moe.runtime_modules.LinearFactory,
                 "create_linear_from_weights",
                 return_value=nn.Linear(_HIDDEN, _EXPERTS, bias=False),
             ),
-            patch.object(generic_moe, "SelectTopk", return_value=_select_topk),
+            patch.object(generic_moe.runtime_modules, "SelectTopk", return_value=_select_topk),
             patch.object(
-                generic_moe.FusedMoeFactory,
+                generic_moe.runtime_modules.FusedMoeFactory,
                 "create_fused_moe",
                 return_value=_RoutedBackend(),
             ),
@@ -129,13 +129,13 @@ class Qwen4ExpDecoderLayerTest(TestCase):
                 qwen3_next, "Qwen3NextGatedDeltaNet", return_value=attention
             ) as gdn_cls,
             patch.object(
-                generic_moe.LinearFactory,
+                generic_moe.runtime_modules.LinearFactory,
                 "create_linear_from_weights",
                 return_value=nn.Linear(_HIDDEN, _EXPERTS, bias=False),
             ),
-            patch.object(generic_moe, "SelectTopk", return_value=_select_topk),
+            patch.object(generic_moe.runtime_modules, "SelectTopk", return_value=_select_topk),
             patch.object(
-                generic_moe.FusedMoeFactory,
+                generic_moe.runtime_modules.FusedMoeFactory,
                 "create_fused_moe",
                 return_value=_RoutedBackend(),
             ),
@@ -385,11 +385,21 @@ class Qwen4ExpFmhaRoutingTest(TestCase):
 
 
 class Qwen4ExpSharedHCStorageTest(TestCase):
+    def test_restart_only_storage_blocks_invalid_payload_before_mutation(self):
+        from rtp_llm.models_py.runtime_weight_update import RuntimeWeightTransaction, TensorUpdate
+
+        backing = torch.arange(16).reshape(4, 4)
+        projected = backing[:2]
+        projected._rtp_requires_restart_for_update = True
+        with self.assertRaisesRegex(PermissionError, "restart"):
+            RuntimeWeightTransaction([TensorUpdate("hc.inject", projected, None)])
+        torch.testing.assert_close(backing, torch.arange(16).reshape(4,4))
+
     def test_real_residual_builder_reuses_owner_and_blocks_updates(self):
         import weakref
 
         from rtp_llm.model_loader.model_weight_info import ModelWeights
-        from rtp_llm.model_loader.weight_manager import WeightManager
+        from rtp_llm.models_py.runtime_weight_update import RuntimeWeightTransaction, TensorUpdate
 
         if not torch.cuda.is_available():
             self.skipTest("requires CUDA")
@@ -454,17 +464,16 @@ class Qwen4ExpSharedHCStorageTest(TestCase):
             with self.assertRaisesRegex(PermissionError, "restart"):
                 weights.update_layer_weight(0, down, torch.zeros_like(unit.mix_down))
             torch.testing.assert_close(unit.merged_down_inject, before, rtol=0, atol=0)
-        manager = WeightManager.__new__(WeightManager)
-        manager._weights = weights
-        # Invalid IPC data would fail decoding if the shared-view guard were late.
+        # The direct owner must refuse changes to the published view before
+        # interpreting the supplied payload or changing its merged storage.
+        protected = layer.attn_hyper_connection.inject
+        before = protected.clone()
         with self.assertRaisesRegex(PermissionError, "restart"):
-            manager.update(
-                dict(
-                    name="model.layers.0." + W.qwen4_hc_attn_inject,
-                    method="shm",
-                    desc="invalid-ipc-description",
-                )
+            RuntimeWeightTransaction(
+                [TensorUpdate("model.layers.0." + W.qwen4_hc_attn_inject,
+                              protected, None)]
             )
+        torch.testing.assert_close(protected, before, rtol=0, atol=0)
 
     def test_unsupported_cpu_keeps_original_storage(self):
         fixture = Qwen4ExpDecoderLayerTest()

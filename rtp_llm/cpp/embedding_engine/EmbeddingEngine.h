@@ -58,6 +58,7 @@ private:
 
 private:
     ModelConfig                         model_config_;
+    int64_t                             token_type_table_rows_ = 0;
     ParallelismConfig                   parallelism_config;
     ConcurrencyConfig                   concurrency_config;
     std::thread                         loop_thread_;

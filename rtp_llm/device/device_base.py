@@ -3,12 +3,7 @@ from typing import Optional
 
 import torch
 
-from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.device.device_type import DeviceType, get_device_type
-from rtp_llm.ops.compute_ops import (
-    get_device_id,
-    preprocess_weight_scale,
-)
 
 
 class MemInfo:
@@ -37,6 +32,8 @@ class DeviceBase:
         return get_device_type()
 
     def get_device_id(self) -> int:
+        from rtp_llm.ops.compute_ops import get_device_id
+
         return get_device_id()
 
     @property
@@ -94,6 +91,13 @@ class DeviceBase:
         use_swizzle_a: Optional[bool] = None,
     ) -> torch.Tensor:
         return weight
+
+    def shuffle_moe_weight(
+        self, x: torch.Tensor, datatype: torch.dtype, name: str
+    ) -> torch.Tensor:
+        # Portable CPU FT files and CUDA use canonical [expert, N, K] order.
+        # Backends with a specialized packed layout (ROCm) override this.
+        return x
 
     def maybe_prepare_static_weights_for_fp4_moe(
         self,

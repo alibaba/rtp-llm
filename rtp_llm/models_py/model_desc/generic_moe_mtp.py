@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import nn
@@ -11,8 +13,10 @@ from rtp_llm.models_py.model_desc.glm5 import Glm5ModelBase
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import LinearFactory, RMSNorm, RMSResNorm
 from rtp_llm.ops import MoeConfig, ParallelismConfig
-from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
+
+if TYPE_CHECKING:
+    from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 
 _MTP_INDEXER_ROLE_NORMAL = 0
 _MTP_INDEXER_ROLE_SEED = 1
@@ -73,21 +77,25 @@ class GenericMoeMTPModel(Glm5ModelBase):
             weights.global_weights[W.multi_tokens_predict_final_ln_gamma],
             eps=model_config.layernorm_eps,
         )
-        topk = int(model_config.attn_config.indexer_topk)
+        self._init_mtp_indexer_state(
+            max_generate_batch_size, weights.global_weights[W.multi_tokens_predict_enorm].device
+        )
+
+    def _init_mtp_indexer_state(self, max_generate_batch_size, buffer_device):
+        topk = int(self.config.attn_config.indexer_topk)
         self._mtp_indexer_share_enabled = _mtp_indexer_share_active(
-            model_config, parallelism_config, self.layer_num, topk
+            self.config, self.parallelism_config, self.layer_num, topk
         )
         self._mtp_indexer_role = _MTP_INDEXER_ROLE_NORMAL
-        buffer_device = weights.global_weights[W.multi_tokens_predict_enorm].device
         buffer_shape = (
             (max_generate_batch_size, topk)
             if self._mtp_indexer_share_enabled
             else (0, 0)
         )
-        self._mtp_shared_topk_indices = torch.zeros(
-            buffer_shape,
-            dtype=torch.int32,
-            device=buffer_device,
+        self.register_buffer(
+            "_mtp_shared_topk_indices",
+            torch.zeros(buffer_shape, dtype=torch.int32, device=buffer_device),
+            persistent=False,
         )
 
     def clone_for_cuda_graph(
@@ -144,6 +152,7 @@ class GenericMoeMTPModel(Glm5ModelBase):
             role if self._mtp_indexer_share_enabled else _MTP_INDEXER_ROLE_NORMAL
         )
 
+    @torch.inference_mode()
     def load_mtp_indexer_topk(self, topk_indices: torch.Tensor) -> None:
         if not self._mtp_indexer_share_enabled:
             return
@@ -280,6 +289,8 @@ class GenericMoeMTPModel(Glm5ModelBase):
 
         hidden_states, _ = self.norm(result.hidden_states, result.residual)
         self.capture_cp_mtp_hidden(hidden_states)
+        from rtp_llm.ops.compute_ops import PyModelOutputs
+
         return PyModelOutputs(hidden_states)
 
     def _mask_position_zero_embeddings(

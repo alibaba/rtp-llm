@@ -38,7 +38,7 @@ class Qwen3VLEmbeddingTest(TestCase):
             "rtp_llm.multimodal.multimodal_mixins.qwen3_vl_mixin.Qwen2VLImageProcessor.from_pretrained",
             return_value=Mock(),
         ), patch(
-            "rtp_llm.multimodal.multimodal_mixins.qwen3_vl_mixin.Qwen3VLConfig.from_pretrained",
+            "rtp_llm.multimodal.multimodal_mixins.qwen3_vl_mixin.AutoConfig.from_pretrained",
             return_value=SimpleNamespace(vision_config=config),
         ), patch(
             "rtp_llm.multimodal.multimodal_mixins.qwen3_vl_mixin.default_attn_impl",
@@ -54,6 +54,12 @@ class Qwen3VLEmbeddingTest(TestCase):
         generator = torch.Generator().manual_seed(height * 10 + width)
         pixels = torch.randn(height * width, 24, generator=generator)
         return pixels, torch.tensor([[1, height, width]], dtype=torch.int64)
+
+    def test_cpu_runtime_frequencies_are_not_replaced(self):
+        frequencies = self.embedding.visual.rotary_pos_emb.inv_freq
+        self.embedding.prepare_newloader_runtime_buffers("cpu")
+        self.assertIs(self.embedding.visual.rotary_pos_emb.inv_freq, frequencies)
+        self.assertNotIn("rotary_pos_emb.inv_freq", self.embedding.visual.state_dict())
 
     def test_embedding_uses_pooled_output_and_preserves_deepstack(self):
         data = self.media(4, 4)

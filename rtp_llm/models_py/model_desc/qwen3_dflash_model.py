@@ -7,40 +7,27 @@ full layer policy therefore come from each draft checkpoint.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
-from torch import nn
 
-from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import is_hip
-from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.layers.linear import ColumnParallelLinear
+from rtp_llm.models_py.layers.norm import RMSNorm
 from rtp_llm.models_py.model_desc.block_map import select_attention_inputs_for_layer
-from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.model_desc.qwen3_dspark_model import (
+from rtp_llm.models_py.model_desc.qwen3_dspark_runtime import (
+    Qwen3DSparkRuntime,
     _RopePositions,
-    _TorchMhaRotaryEmbeddingOp,
 )
-from rtp_llm.models_py.modules import (
-    DenseMLP,
-    Embedding,
-    FusedQKRMSNorm,
-    LinearFactory,
-    RMSNorm,
-)
-from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
-from rtp_llm.models_py.modules.factory.attention.common import (
-    create_write_cache_store_impl,
+from rtp_llm.models_py.module_base import RtpModule
+from rtp_llm.models_py.new_models.qwen3.language import (
+    Qwen3Attention, Qwen3ForCausalLM, Qwen3MLP,
 )
 from rtp_llm.models_py.speculative.dspark_proposer_mixin import DSparkProposerMixin
-from rtp_llm.models_py.triton_kernels.common.dflash_attention import (
-    DFlashCacheLayout,
-    dflash_paged_attention,
-    dflash_write_paged_kv,
-)
-from rtp_llm.ops import ParallelismConfig
-from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
-from rtp_llm.utils.model_weight import W
+
+if TYPE_CHECKING:
+    from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
+    from rtp_llm.models_py.triton_kernels.common.dflash_attention import DFlashCacheLayout
 
 
 def _single_attention_input(model, inputs: PyModelInputs, layer_idx: int):
@@ -76,6 +63,8 @@ def _block_table(attention, device: torch.device) -> torch.Tensor:
 
 
 def _cache_layout(cache: torch.Tensor, fmha_config: Any) -> DFlashCacheLayout:
+    from rtp_llm.models_py.triton_kernels.common.dflash_attention import DFlashCacheLayout
+
     if not is_hip():
         return DFlashCacheLayout.CUDA
     is_fp8 = cache.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn)
@@ -87,62 +76,17 @@ def _cache_layout(cache: torch.Tensor, fmha_config: Any) -> DFlashCacheLayout:
     )
 
 
-class _DFlashAttention(nn.Module):
-    def __init__(
-        self,
-        config: ModelConfig,
-        parallelism_config: ParallelismConfig,
-        weights: dict[str, torch.Tensor],
-        layer_idx: int,
-        layer_type: str,
-        quant_config: Any,
-        hw_kernel_config: Any,
-    ) -> None:
-        super().__init__()
-        self.layer_idx = layer_idx
+class _DFlashAttention(Qwen3Attention):
+    def __init__(self, *, layer_type, window_size, **kwargs):
+        super().__init__(**kwargs)
         self.layer_type = layer_type
-        self.parallelism_config = parallelism_config
-        self.attn_configs = config.getAttentionConfigs(
-            parallelism_config.get_attn_tp_size()
-        )
-        self.q_heads = self.attn_configs.head_num
-        self.kv_heads = self.attn_configs.kv_head_num
-        self.head_dim = self.attn_configs.size_per_head
-        self.q_size = self.q_heads * self.head_dim
-        self.kv_size = self.kv_heads * self.head_dim
-        self.window_size = int(config.dflash_sliding_window or 0)
-        if layer_type == "sliding_attention" and self.window_size <= 0:
+        self.window_size = window_size
+        self.q_heads = self.num_heads_per_partition
+        self.kv_heads = self.num_kv_heads_per_partition
+        if layer_type == "sliding_attention" and window_size <= 0:
             raise ValueError("DFlash sliding_attention needs a positive window")
         if layer_type not in ("sliding_attention", "full_attention"):
             raise ValueError(f"unsupported DFlash layer type {layer_type!r}")
-        self.qkv_proj = LinearFactory.create_linear_from_weights(
-            weights,
-            W.attn_qkv_w,
-            W.attn_qkv_s,
-            W.attn_qkv_b,
-            quant_config=quant_config,
-            hw_kernel_config=hw_kernel_config,
-            weight_scale_2_key=W.attn_qkv_s2,
-            input_scale_key=W.attn_qkv_i_s,
-        )
-        self.o_proj = LinearFactory.create_linear_from_weights(
-            weights,
-            W.attn_o_w,
-            W.attn_o_s,
-            W.attn_o_b,
-            quant_config=quant_config,
-            hw_kernel_config=hw_kernel_config,
-            weight_scale_2_key=W.attn_o_s2,
-            input_scale_key=W.attn_o_i_s,
-        )
-        self.qk_norm = FusedQKRMSNorm(
-            weights[W.q_ln_gamma],
-            weights[W.k_ln_gamma],
-            self.q_heads,
-            self.kv_heads,
-            self.head_dim,
-            config.layernorm_eps,
-        )
         # _out is the CUDA-graph-stable attention output buffer: captured
         # graphs hold raw pointers into it, so it must never be reallocated
         # after the first capture. _eager_out backs eager steps whose rows
@@ -243,10 +187,14 @@ class _DFlashAttention(nn.Module):
         query_width: int,
         cache: torch.Tensor,
         block_table: torch.Tensor,
-        rope: _TorchMhaRotaryEmbeddingOp,
+        rope: Any,
         fmha_config: Any,
     ) -> torch.Tensor:
-        qkv = self.qk_norm(self.qkv_proj(hidden_states))
+        from rtp_llm.models_py.triton_kernels.common.dflash_attention import (
+            dflash_paged_attention, dflash_write_paged_kv,
+        )
+
+        qkv = self._apply_qk_norm(self.qkv_proj(hidden_states))
         query = qkv[:, : self.q_size].view(-1, self.q_heads, self.head_dim)
         key = qkv[:, self.q_size : self.q_size + self.kv_size].view(
             -1, self.kv_heads, self.head_dim
@@ -280,45 +228,28 @@ class _DFlashAttention(nn.Module):
             cache_layout=layout,
             out=self._output_buffer(query),
         )
-        output = self.o_proj(attn.reshape(hidden_states.shape[0], -1).contiguous())
-        if self.parallelism_config.get_attn_tp_size() > 1:
-            output = all_reduce(output, group=Group.TP)
-        return output
+        # RowParallelLinear owns the attention TP reduction.
+        return self.o_proj(attn.reshape(hidden_states.shape[0], -1).contiguous())
 
 
-class _DFlashDecoderLayer(nn.Module):
+class _DFlashDecoderLayer(RtpModule):
     def __init__(
-        self,
-        config: ModelConfig,
-        parallelism_config: ParallelismConfig,
-        weights: dict[str, torch.Tensor],
-        layer_idx: int,
-        layer_type: str,
-        quant_config: Any,
-        hw_kernel_config: Any,
-    ) -> None:
+        self, hidden_size, num_heads, num_kv_heads, intermediate_size, head_dim,
+        layer_idx, attn_tp_size, attn_tp_rank, ffn_tp_size, ffn_tp_rank,
+        quant_config, params_dtype, rms_norm_eps, prefix, *, layer_types, window_size,
+    ):
         super().__init__()
         self.self_attn = _DFlashAttention(
-            config,
-            parallelism_config,
-            weights,
-            layer_idx,
-            layer_type,
-            quant_config,
-            hw_kernel_config,
+            hidden_size=hidden_size, num_heads=num_heads, num_kv_heads=num_kv_heads,
+            head_dim=head_dim, layer_idx=layer_idx, tp_size=attn_tp_size, tp_rank=attn_tp_rank,
+            params_dtype=params_dtype, rms_norm_eps=rms_norm_eps, prefix=f"{prefix}.self_attn",
+            layer_type=layer_types[layer_idx], window_size=window_size,
         )
-        self.input_layernorm = RMSNorm(
-            weights[W.pre_ln_gamma], eps=config.layernorm_eps
-        )
-        self.post_attention_layernorm = RMSNorm(
-            weights[W.post_ln_gamma], eps=config.layernorm_eps
-        )
-        self.mlp = DenseMLP(
-            config.activation_type,
-            parallelism_config,
-            weights,
-            quant_config,
-            hw_kernel_config,
+        self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps, params_dtype=params_dtype)
+        self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps, params_dtype=params_dtype)
+        self.mlp = Qwen3MLP(
+            hidden_size, intermediate_size, tp_size=ffn_tp_size, tp_rank=ffn_tp_rank,
+            params_dtype=params_dtype, prefix=f"{prefix}.mlp",
         )
 
     def forward(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
@@ -332,91 +263,58 @@ class _DFlashDecoderLayer(nn.Module):
         return residual + hidden_states
 
 
-class Qwen3DFlashModel(DSparkProposerMixin, GptModelBase):
-    """DFlash V1 using target-owned embedding and lm-head weights."""
+class Qwen3DFlashModel(DSparkProposerMixin, Qwen3ForCausalLM):
+    """DFlash V1: the runtime consumes the very parameters NewLoader fills."""
 
-    def __init__(
-        self,
-        config: ModelConfig,
-        parallelism_config: ParallelismConfig,
-        weights: ModelWeights,
-        max_generate_batch_size: int,
-        quant_config=None,
-        fmha_config=None,
-        py_hw_kernel_config=None,
-    ) -> None:
-        if quant_config is not None:
-            raise NotImplementedError("Qwen3 DFlash quantization is not supported")
-        super().__init__(
-            config,
-            parallelism_config,
-            weights,
-            max_generate_batch_size=max_generate_batch_size,
-            fmha_config=fmha_config,
-            py_hw_kernel_config=py_hw_kernel_config,
-        )
-        layer_types = config.dflash_layer_types or []
-        if len(layer_types) != self.layer_num:
+    _decoder_layer = _DFlashDecoderLayer
+    runtime_parameter_paths = {"embedding": "embed_tokens.weight", "lm_head": "lm_head.weight"}
+
+    def _decoder_kwargs(self, parallelism_config):
+        return dict(layer_types=self.config.dflash_layer_types,
+                    window_size=int(self.config.dflash_sliding_window or 0))
+
+    def __init__(self, model_config, load_config):
+        quant = getattr(load_config, "quant_config", None)
+        if getattr(quant, "quant_type", "none") != "none":
+            raise ValueError("Qwen3 DFlash V1 requires unquantized weights")
+        if len(model_config.dflash_layer_types or ()) != model_config.num_layers:
             raise ValueError("DFlash layer policy does not match draft layer count")
+        if load_config.parallelism_config.pp_size > 1:
+            raise ValueError("DFlash V1 requires pp_size=1")
+        super().__init__(model_config, load_config)
+        width = model_config.gen_num_per_cycle
+        target_layers = model_config.dflash_target_layer_ids
         self.init_dspark_proposer(
-            width=int(config.gen_num_per_cycle),
-            query_width=int(config.gen_num_per_cycle) + 1,
-            noise_token_id=int(config.dflash_mask_token_id),
-            aux_feature_dim=len(config.dflash_target_layer_ids or [])
-            * config.hidden_size,
-            hidden_dim=config.hidden_size,
+            width=width, query_width=width + 1, noise_token_id=model_config.dflash_mask_token_id,
+            aux_feature_dim=len(target_layers) * model_config.hidden_size,
+            hidden_dim=model_config.hidden_size,
         )
-        self.attn_configs = config.getAttentionConfigs(
-            parallelism_config.get_attn_tp_size()
+        self.attn_configs = model_config.getAttentionConfigs(load_config.attn_tp_size)
+        self.fc = ColumnParallelLinear(
+            self._dspark_aux_feature_dim, model_config.hidden_size,
+            params_dtype=load_config.compute_dtype, prefix="fc",
         )
-        self.embed_tokens = Embedding(
-            config, parallelism_config, weights.get_global_weight(W.embedding)
-        )
-        self.norm = RMSNorm(
-            weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps
-        )
-        self.fc = LinearFactory.create_linear_from_weights(
-            weights.global_weights, W.dspark_fc_w
-        )
-        self.hidden_norm = RMSNorm(
-            weights.get_global_weight(W.dspark_hidden_norm_gamma),
-            eps=config.layernorm_eps,
-        )
-        q_cols = self.attn_configs.head_num * self.attn_configs.size_per_head
-        context_kv_weights = []
-        self.context_k_norms = nn.ModuleList()
-        for layer_weights in weights.weights[: self.layer_num]:
-            context_kv_weights.append(layer_weights[W.attn_qkv_w][:, q_cols:])
-            self.context_k_norms.append(
-                RMSNorm(layer_weights[W.k_ln_gamma], eps=config.layernorm_eps)
-            )
-        self.context_kv_projection = LinearFactory.create_linear(
-            torch.cat(context_kv_weights, dim=1),
-            None,
-            None,
-            None,
-            py_hw_kernel_config,
-        )
-        if is_hip():
-            self.context_rope = _TorchMhaRotaryEmbeddingOp(self.attn_configs)
-        else:
-            from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
-                MhaRotaryEmbeddingOp,
-            )
+        self.hidden_norm = RMSNorm(model_config.hidden_size, eps=model_config.layernorm_eps,
+                                   params_dtype=load_config.compute_dtype)
+        self.context_rope = None
 
-            self.context_rope = MhaRotaryEmbeddingOp(self.attn_configs)
-        self.layers = nn.ModuleList(
-            _DFlashDecoderLayer(
-                config,
-                parallelism_config,
-                weights.weights[index],
-                index,
-                layer_types[index],
-                quant_config,
-                py_hw_kernel_config,
-            )
-            for index in range(self.layer_num)
-        )
+    def prepare_borrowed_parameters(self, aliases):
+        if set(aliases) != {"lm_head.weight", "embed_tokens.weight"}:
+            raise ValueError("DFlash borrows both the target embedding and lm-head")
+        for name, binding in aliases.items():
+            leaf = self.get_submodule(name.rsplit(".", 1)[0])
+            owner = binding.owner.get_submodule(binding.source_path.rsplit(".", 1)[0])
+            if (leaf.tp_size, leaf.tp_rank) != (owner.tp_size, owner.tp_rank):
+                raise ValueError("DFlash parameter loan requires the same local TP partition")
+        # The owner already normalized/scaled the head. Never apply a second
+        # postprocess or let dense Qwen's missing-head fallback copy into it.
+        self._lm_head_postprocessed = True
+        self.tie_word_embeddings = False
+
+    def process_weights_after_loading(self):
+        super().process_weights_after_loading()
+        if self.embed_tokens.weight.is_cuda:
+            Qwen3DSparkRuntime.initialize_context_rope(self)
 
     def cuda_graph_input_hidden_size(self) -> int:
         return self._dspark_aux_feature_dim
@@ -473,21 +371,16 @@ class Qwen3DFlashModel(DSparkProposerMixin, GptModelBase):
         head_dim = self.attn_configs.size_per_head
         kv_heads = self.attn_configs.kv_head_num
         dummy_q = hidden.new_zeros((hidden.shape[0], 1, head_dim))
-        all_kv = self.context_kv_projection(hidden).view(
-            -1,
-            self.layer_num,
-            2,
-            kv_heads,
-            head_dim,
-        )
-        for layer_idx in range(self.layer_num):
-            key, value = all_kv[:, layer_idx].unbind(1)
-            # Selecting one layer retains the layer stride in the leading
-            # dimensions.  RMSNorm's CUDA binding requires a contiguous
-            # input, while the paged writer accepts the original strided V.
-            key = self.context_k_norms[layer_idx](
-                key.contiguous().reshape(-1, head_dim)
-            ).view(-1, kv_heads, head_dim)
+        from rtp_llm.models_py.modules.factory.attention.common import create_write_cache_store_impl
+        from rtp_llm.models_py.triton_kernels.common.dflash_attention import dflash_write_paged_kv
+
+        for layer_idx, layer in enumerate(self.layers):
+            # Slice the rank-local packed projection. Avoid a second set of KV
+            # parameters that could become stale after a weight update.
+            attn = layer.self_attn
+            kv = torch.nn.functional.linear(hidden, attn.qkv_proj.weight[attn.q_size:])
+            key, value = kv.reshape(-1, 2, kv_heads, head_dim).unbind(1)
+            key = attn.k_norm(key.contiguous().reshape(-1, head_dim)).view(-1, kv_heads, head_dim)
             self.context_rope._apply_rope(
                 dummy_q, key, _RopePositions(context_positions.clamp_min(0))
             )
@@ -601,6 +494,8 @@ class Qwen3DFlashModel(DSparkProposerMixin, GptModelBase):
         del fmha_impl
         device = self._forward_device()
         if self.kv_cache is None:
+            from rtp_llm.ops.compute_ops import PyModelOutputs
+
             return PyModelOutputs(
                 torch.empty(
                     (0, self.config.hidden_size), dtype=torch.bfloat16, device=device

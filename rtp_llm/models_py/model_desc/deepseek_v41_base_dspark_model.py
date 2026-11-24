@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 from contextlib import contextmanager
 from types import SimpleNamespace
-from typing import Any, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Optional, Tuple
 
 import torch
 
@@ -68,16 +68,15 @@ from rtp_llm.models_py.modules.dsv41.kv_cache_utils import (
     create_tagged_cache_store_writer,
 )
 from rtp_llm.models_py.modules.dsv41.utils import _v4_fp8_linear
-from rtp_llm.models_py.modules.factory.attention.common import (
-    create_write_cache_store_impl,
-)
 from rtp_llm.models_py.speculative.dspark_proposer_mixin import (
     DSparkProposerMixin,
     optional_tensor,
 )
 from rtp_llm.ops import RoleType
-from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
+
+if TYPE_CHECKING:
+    from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 
 
 def _write_dspark_swa(*, kv, slot_mapping, swa_pool_3d, bsz, q_len, head_dim):
@@ -882,6 +881,8 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     ) -> PyModelOutputs:
         device = self._forward_device()
         if getattr(self, "kv_cache", None) is None:
+            from rtp_llm.ops.compute_ops import PyModelOutputs
+
             return PyModelOutputs(
                 torch.zeros(
                     (0, int(self._v4_args.dim)),

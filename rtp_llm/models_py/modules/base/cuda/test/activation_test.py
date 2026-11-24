@@ -66,6 +66,18 @@ class ActivationTest(TestCase):
             ):
                 self._run_silu_and_mul_test(*params)
 
+    def test_newloader_matches_serving_silu_exactly(self):
+        from rtp_llm.models_py.layers.activation import silu_and_mul
+
+        # The aligned case includes an observed FP16 rounding boundary. An
+        # eager FP32 reimplementation is close, but not token-replay equivalent.
+        for d in (4864, 855):
+            with self.subTest(d=d):
+                x = torch.empty(2, 2 * d, dtype=torch.float16, device=self.device)
+                x[:, :d].fill_(0.2371826171875)
+                x[:, d:].fill_(0.59912109375)
+                self.assertTrue(torch.equal(silu_and_mul(x), FusedSiluAndMul()(x)))
+
 
 if __name__ == "__main__":
     main()

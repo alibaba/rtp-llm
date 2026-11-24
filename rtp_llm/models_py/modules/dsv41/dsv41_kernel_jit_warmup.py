@@ -27,15 +27,25 @@ _DECODE_QUERY_WARMED: set[tuple] = set()
 def collect_v41_dense_shapes(model):
     """Keep MXFP8 separate from V4's group128 FP8/FP4 scale contracts."""
     linears, outputs = {}, {}
+
+    def add_linear(name, module):
+        linear = getattr(module, "v41_runtime_linear", None)
+        if linear is not None:
+            key = (int(linear.N), int(linear.K))
+            linears.setdefault(key, (name, linear))
+
     for name, module in model.named_modules():
-        if type(module).__name__ == "V41MXFP8Linear":
-            key = (int(module.N), int(module.K))
-            linears.setdefault(key, (name, module))
-        if type(module).__name__ == "AttentionV41FP8":
+        add_linear(name, module)
+        if getattr(module, "v41_group32_attention", False):
             weight = getattr(module, "_wo_a_stk_w", None)
             if isinstance(weight, torch.Tensor):
                 key = tuple(int(dim) for dim in weight.shape)
                 outputs.setdefault(key, (name, module))
+            # NewLoader deliberately does not register these derived views as
+            # checkpoint owners. Do not lose their real launch shapes.
+            add_linear(f"{name}.wq_a_wkv", getattr(module, "wq_a_wkv", None))
+            for i, linear in enumerate(getattr(module, "_wo_a_groups_v41", ())):
+                add_linear(f"{name}._wo_a_groups_v41.{i}", linear)
     return linears, outputs
 
 
@@ -343,14 +353,14 @@ def warmup_v41_decode_query_jit(model, *, max_m, device):
     common._assert_not_capturing()
     signatures = {}
     for name, attn in model.named_modules():
-        if type(attn).__name__ != "AttentionV41FP8":
+        if not getattr(attn, "v41_group32_attention", False):
             continue
         linear = getattr(attn, "wq_a_wkv", None)
         norm = getattr(attn, "q_norm", None)
         rank = int(attn.q_lora_rank)
         if (
-            type(linear).__name__ != "V41MXFP8Linear"
-            or type(attn.wq_b).__name__ != "V41MXFP8Linear"
+            getattr(linear, "v41_runtime_linear", None) is None
+            or getattr(attn.wq_b, "v41_runtime_linear", None) is None
             or not isinstance(norm, torch.Tensor)
             or norm.dtype != torch.bfloat16
             or norm.shape != (rank,)

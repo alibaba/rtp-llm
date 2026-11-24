@@ -331,7 +331,7 @@ class CommonMegaMoeExecutionTest(unittest.TestCase):
         with patch(
             PACKAGE + ".mega_moe.prepare_fp4_weight_scale_for_deepgemm", new=prepare
         ), patch(
-            "deep_gemm.transform_weights_for_mega_moe", new=transform
+            "deep_gemm.transform_weights_for_mega_moe", new=transform, create=True
         ), patch.object(
             executor, "_setup_buffer_and_warmup", new=allocate
         ):
@@ -357,6 +357,7 @@ class CommonMegaMoeExecutionTest(unittest.TestCase):
         ) as requant, patch(
             "deep_gemm.transform_weights_for_mega_moe",
             side_effect=lambda l1, l2: (l1, l2),
+            create=True,
         ), patch.object(
             prepared, "_setup_buffer_and_warmup"
         ):
@@ -400,9 +401,9 @@ class CommonMegaMoeExecutionTest(unittest.TestCase):
                 PACKAGE + ".mega_moe.prepare_fp4_weight_scale_for_deepgemm",
                 side_effect=lambda t, *args: t,
             ), patch(
-                "deep_gemm.transform_weights_for_mega_moe", side_effect=transform
-            ), patch(
-                "deep_gemm.mega._transpose_sf_for_utccp", side_effect=lambda t: t
+                "deep_gemm.transform_weights_for_mega_moe",
+                side_effect=transform,
+                create=True,
             ), patch.object(
                 executor, "_setup_buffer_and_warmup"
             ):

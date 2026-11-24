@@ -202,6 +202,8 @@ class WeightModule(ABC):
                     __extract_tensor(v)
                 else:
                     tensor = v.to(self.resident_output_devices.get(k, device))
+                    if tensor is not v and getattr(v, "is_shuffled", False):
+                        tensor.is_shuffled = True
                     flat_res.update({k: tensor})
 
         __extract_tensor(processed_tensors)

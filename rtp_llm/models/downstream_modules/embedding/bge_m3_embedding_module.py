@@ -8,7 +8,6 @@ from rtp_llm.config.base_model_config import PyDanticModelBase
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
-from rtp_llm.model_loader.weight_module import CustomAtomicWeight
 from rtp_llm.models.downstream_modules.custom_module import (
     CustomHandler,
     CustomModule,
@@ -59,9 +58,6 @@ class BgeM3EmbeddingModule(CustomModule):
             self._sparse_module.handler,
             self._colbert_module.handler,
         )
-
-    def custom_weight_info(self) -> List[CustomAtomicWeight]:
-        return []
 
     def get_renderer(self, request: Dict[str, Any]) -> CustomRenderer:
         request_type = request.get(TYPE_STR, EmbeddingType.DENSE)

@@ -19,20 +19,35 @@ class DeepSelectGateTest(unittest.TestCase):
         device_query.assert_not_called()
 
     def test_planning_availability_and_missing_native_binding(self):
+        # Patch the namespace used by the selector, not the pybind module
+        # behind it: a lazy native_ops lookup caches its resolved symbol.
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
-            rtp_llm_ops, "deepselect_bf16_available", return_value=True, create=True
-        ), mock.patch.object(selector, "_device_supported", return_value=True):
+            selector, "rtp_llm_ops"
+        ) as bindings, mock.patch.object(
+            selector, "_device_supported", return_value=True
+        ) as device_query:
+            bindings.deepselect_bf16_available.return_value = True
             self.assertTrue(selector.is_available(torch.device("cuda:0")))
             self.assertFalse(selector.is_available(torch.device("cpu")))
-            with mock.patch.object(
-                rtp_llm_ops, "deepselect_bf16_available", return_value=False
-            ):
-                self.assertFalse(selector.is_available(torch.device("cuda:0")))
-        with mock.patch.object(
-            rtp_llm_ops, "deepselect_bf16_available", return_value=False, create=True
-        ), mock.patch.object(selector, "_device_supported") as device_query:
+            device_query.reset_mock()
+            bindings.deepselect_bf16_available.return_value = False
+            self.assertFalse(selector.is_available(torch.device("cuda:0")))
+            del bindings.deepselect_bf16_available
             self.assertFalse(selector.is_available(torch.device("cuda:0")))
             device_query.assert_not_called()
+
+    def test_selected_binding_failure_propagates(self):
+        # Exercise the Python dispatch contract without requiring SM100.
+        logits = torch.zeros((1, 512), dtype=torch.bfloat16)
+        ends = torch.tensor([512], dtype=torch.int32)
+        out = torch.empty((1, 512), dtype=torch.int32)
+        with mock.patch.object(
+            selector, "is_supported", return_value=True
+        ), mock.patch.object(selector, "rtp_llm_ops") as bindings:
+            bindings.deepselect_bf16.side_effect = RuntimeError("native failure")
+            with self.assertRaisesRegex(RuntimeError, "native failure"):
+                selector.try_select_sparse_tokens(logits, ends, out)
+            bindings.deepselect_bf16.assert_called_once_with(logits, ends, out)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -181,7 +196,9 @@ class DeepSelectCudaTest(unittest.TestCase):
         with mock.patch.object(selector, "is_available", return_value=False):
             self.assertIsNone(selector.try_select_sparse_tokens(logits, ends))
         with mock.patch.object(
-            rtp_llm_ops, "deepselect_bf16", side_effect=RuntimeError("native failure")
+            selector.rtp_llm_ops,
+            "deepselect_bf16",
+            side_effect=RuntimeError("native failure"),
         ):
             with self.assertRaisesRegex(RuntimeError, "native failure"):
                 selector.try_select_sparse_tokens(logits, ends)

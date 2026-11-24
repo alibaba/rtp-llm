@@ -1,12 +1,17 @@
 import unittest
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.model_loader.loader import ModelLoader
-from rtp_llm.model_loader.weight_module import AtomicWeight
+from rtp_llm.models_py.borrowed_parameters import (
+    BorrowedParameter,
+    FixedHostCheckpointStorage,
+    bind_borrowed_parameters,
+    validate_borrowed_parameters,
+)
+from rtp_llm.models_py.layers.embedding import VocabParallelEmbedding
+from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.modules.base.common.fp8_embedding import Fp8VocabEmbedding
 
 
@@ -165,62 +170,54 @@ class Fp8VocabEmbeddingTest(unittest.TestCase):
                 )
 
 
-@unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+class _HostEmbedding(FixedHostCheckpointStorage, VocabParallelEmbedding):
+    pass
+
+
+class _VocabOwner(RtpModule):
+    def __init__(self):
+        super().__init__()
+        self.embedding = _HostEmbedding(7, 8, params_dtype=torch.bfloat16)
+        self.head = VocabParallelEmbedding(7, 8, params_dtype=torch.bfloat16)
+
+    def prepare_borrowed_parameters(self, bindings):
+        if set(bindings) != {"embedding.weight", "head.weight"}:
+            raise ValueError("borrow the complete vocabulary")
+
+
 class WeightResidencyContractTest(unittest.TestCase):
+    def test_fixed_host_embedding_does_not_migrate_with_parent(self):
+        owner = _VocabOwner()
+        values = torch.arange(56).reshape(7, 8).bfloat16()
+        owner.load_weights({"embedding.weight": values, "head.weight": values + 1})
+        before = owner.embedding.weight.data_ptr()
+        owner.to("meta")  # Verify allocator dispatch without claiming CUDA coverage.
+        self.assertTrue(owner.head.weight.is_meta)
+        self.assertEqual(owner.embedding.weight.device.type, "cpu")
+        self.assertEqual(owner.embedding.weight.data_ptr(), before)
+        torch.testing.assert_close(owner.embedding.weight, values)
 
-    def test_loader_accepts_cpu_embedding_and_cuda_lm_head_aliases(self):
-        loader = ModelLoader.__new__(ModelLoader)
-        loader._model_weights_info = SimpleNamespace(
-            weights=[
-                SimpleNamespace(name="embedding", resident_device="cpu"),
-                SimpleNamespace(name="lm_head", resident_device=None),
-            ]
-        )
-        loader._load_config = SimpleNamespace(is_ft_style_weight=True)
-        sentinel = object()
-        loader._load_from_ft_style = lambda device: sentinel
-        loader._load_dynamic_weights = lambda *args: None
-        loader._init_eplb_weight = lambda *args: None
-        embedding = torch.randn(7, 8, dtype=torch.bfloat16)
-        head = torch.randn(7, 8, dtype=torch.bfloat16, device="cuda")
-        self.assertIs(
-            loader.load_weights("cuda:0", {"embedding": embedding, "lm_head": head}),
-            sentinel,
-        )
-        self.assertEqual(
-            loader._global_weight_aliases["embedding"].data_ptr(), embedding.data_ptr()
-        )
-        with self.assertRaisesRegex(ValueError, "expected cuda"):
-            loader.load_weights(
-                "cuda:0", {"embedding": embedding, "lm_head": embedding}
-            )
-
-    def test_descriptor_load_keeps_cpu_residency_without_cuda_staging(self):
-        class CpuWeight(AtomicWeight):
-            resident_device = "cpu"
-
-            @classmethod
-            def support(cls, quant_config, src_weight_info):
-                return False
-
-            def _load_raw_tensor(self, source, layer_id, device, load_config):
-                self.received_device = device
-                return {"embedding": torch.randn(7, 8, dtype=torch.bfloat16)}
-
-            def _split(self, tensors, load_config):
-                return tensors
-
-            def _postprocess(self, tensors, device, load_config):
-                return tensors
-
-        descriptor = CpuWeight("embedding", weights=[])
-        before = torch.cuda.memory_allocated()
-        result = descriptor.load(
-            None, None, "cuda:0", SimpleNamespace(merge_lora=False)
-        )
-        self.assertEqual(descriptor.received_device, "cpu")
-        self.assertEqual(result["embedding"].device.type, "cpu")
-        self.assertEqual(torch.cuda.memory_allocated(), before)
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_cpu_embedding_cuda_head_loan_preserves_both_owners(self):
+        owner = _VocabOwner()
+        values = torch.arange(56).reshape(7, 8).bfloat16()
+        owner.load_weights({"embedding.weight": values, "head.weight": values + 1})
+        owner.to("cuda")
+        self.assertEqual(owner.embedding.weight.device.type, "cpu")
+        self.assertTrue(owner.head.weight.is_cuda)
+        draft = _VocabOwner()
+        loans = {
+            key: BorrowedParameter(owner, key)
+            for key in ("embedding.weight", "head.weight")
+        }
+        bind_borrowed_parameters(draft, loans, "cuda")
+        draft.to("cuda")
+        validate_borrowed_parameters(draft, "cuda")
+        self.assertIs(draft.head.weight, owner.head.weight)
+        self.assertIs(draft.embedding.weight, owner.embedding.weight)
+        loans["head.weight"] = BorrowedParameter(owner, "embedding.weight")
+        with self.assertRaisesRegex(ValueError, "residency"):
+            bind_borrowed_parameters(_VocabOwner(), loans, "cuda")
 
 
 if __name__ == "__main__":

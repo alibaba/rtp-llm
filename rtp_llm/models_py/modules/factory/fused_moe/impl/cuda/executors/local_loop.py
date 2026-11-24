@@ -128,11 +128,11 @@ class LocalLoopExecutor(Fp8Fp4ExecutorBase):
         for the small-batch fast path. They share storage with the per-Expert
         slices — no extra memory.
         """
-        from rtp_llm.utils.model_weight import W
+        from rtp_llm.models_py.modules.fp8_fp4_weight_source import take_weight
 
         cfg = self.cfg
-        w13 = layer_weights.pop(W.moe_w1)
-        s13 = layer_weights.pop(W.moe_s1)
+        w13 = take_weight(layer_weights, "routed_w13")
+        s13 = take_weight(layer_weights, "routed_s13")
         inter = cfg.moe_inter_dim
         layout = cfg.moe_w1_layout
         gate_w, up_w = split_moe_w13_gate_up(w13, inter, layout)
@@ -140,8 +140,8 @@ class LocalLoopExecutor(Fp8Fp4ExecutorBase):
         stacked_routed = {
             "w1_w": gate_w,
             "w1_s": gate_s,
-            "w2_w": layer_weights.pop(W.moe_w2),
-            "w2_s": layer_weights.pop(W.moe_s2),
+            "w2_w": take_weight(layer_weights, "routed_w2"),
+            "w2_s": take_weight(layer_weights, "routed_s2"),
             "w3_w": up_w,
             "w3_s": up_s,
         }

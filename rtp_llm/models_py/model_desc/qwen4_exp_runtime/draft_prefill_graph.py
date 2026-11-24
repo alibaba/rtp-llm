@@ -4,7 +4,7 @@ from collections.abc import Mapping
 
 import torch
 
-from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import INDEXER_STATE_TAG
+from rtp_llm.config.qwen4_cache_tags import INDEXER_KV_TAG, INDEXER_STATE_TAG
 
 from .state_cache_inputs import prepare_state_cache_inputs
 
@@ -45,6 +45,46 @@ def draft_graph_rows(inputs, token_capacity):
     visible = prefixes.unsqueeze(1) + offsets.unsqueeze(0) + 1
     visible = torch.where(active, visible, 0).to(torch.int32)
     return sources, inverse, packed_valid, positions, visible
+
+
+def make_mtp_draft_replay(model, impls, *, token_capacity):
+    """Bind physical pools from the actual model, never from checkpoint layout."""
+    bounds = []
+    for layer_idx in range(len(model.layers)):
+        tag = model._attention_tag(layer_idx)
+        cache = model.kv_cache.get_layer_cache(layer_idx, tag)
+        bounds.append(
+            (
+                tag,
+                int(cache.kv_cache_base.shape[0]),
+                int(impls[tag].attn_configs.kernel_tokens_per_block),
+                False,
+            )
+        )
+        for side_tag in (INDEXER_KV_TAG, INDEXER_STATE_TAG):
+            cache = model.kv_cache.get_layer_cache(layer_idx, side_tag)
+            page = int(cache.seq_size_per_block)
+            bounds.append(
+                (
+                    side_tag,
+                    int(cache.kv_cache_base.shape[0]),
+                    (
+                        page // int(model.config._qwen4_indexer_compress_ratio)
+                        if side_tag == INDEXER_KV_TAG
+                        else page
+                    ),
+                    side_tag == INDEXER_KV_TAG,
+                )
+            )
+    for impl in impls.values():
+        impl.set_mtp_draft_mode(True)
+    return DraftPrefillGraphReplay(
+        impls,
+        bounds,
+        model.cuda_graph_position_id_len_factor(),
+        token_capacity,
+        state_cache=model.kv_cache,
+    )
 
 
 class DraftPrefillGraphReplay(Mapping):

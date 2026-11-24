@@ -32,17 +32,30 @@ void drainPpuCopy(cudaStream_t stream, const char* phase) noexcept {
     }
 }
 
-}  // namespace
-
-std::shared_ptr<DeviceHostCopyStreams> acquireDeviceHostCopyStreams(int device_index) {
-    return std::make_shared<DeviceHostCopyStreams>(device_index, 0, 0);
-}
-
-void execNoBlockCopy(const MultiCopyParams& params) {
+void copyBlocks(const MultiCopyParams& params, const DeviceHostCopyExecutionContext* context) {
     RTP_LLM_CHECK_WITH_INFO(params.multi_src.size() == params.multi_dst.size(),
                             "multi_src.size(%zu) != multi_dst.size(%zu)",
                             params.multi_src.size(),
                             params.multi_dst.size());
+
+    // These are byte copies. Reject an invalid later item before submitting
+    // any earlier copy in the same request.
+    for (size_t i = 0; i < params.multi_src.size(); ++i) {
+        const auto& src = params.multi_src[i];
+        const auto& dst = params.multi_dst[i];
+        TORCH_CHECK(src.defined() && dst.defined(), "PPU copy has undefined tensor at index ", i);
+        TORCH_CHECK((src.is_cpu() || src.is_cuda()) && (dst.is_cpu() || dst.is_cuda()),
+                    "PPU copy requires CPU or CUDA tensors at index ", i);
+        TORCH_CHECK(src.is_contiguous() && dst.is_contiguous(), "PPU byte copy requires contiguous tensors at index ", i);
+        TORCH_CHECK(dst.nbytes() >= src.nbytes(), "PPU copy destination is too small at index ", i);
+        if (context) {
+            const bool h2d = context->direction == DeviceHostCopyDirection::H2D;
+            TORCH_CHECK(h2d ? (src.is_cpu() && dst.is_cuda()) : (src.is_cuda() && dst.is_cpu()),
+                        "PPU copy direction does not match context at index ", i);
+            TORCH_CHECK(context->owner && context->deviceIndex() == (h2d ? dst.get_device() : src.get_device()),
+                        "PPU copy device does not match context at index ", i);
+        }
+    }
 
     c10::OptionalDeviceGuard    device_guard;
     std::optional<cudaStream_t> stream;
@@ -87,8 +100,18 @@ void execNoBlockCopy(const MultiCopyParams& params) {
     }
 }
 
-void execNoBlockCopy(const MultiCopyParams& params, const DeviceHostCopyExecutionContext&) {
-    execNoBlockCopy(params);
+}  // namespace
+
+std::shared_ptr<DeviceHostCopyStreams> acquireDeviceHostCopyStreams(int device_index) {
+    return std::make_shared<DeviceHostCopyStreams>(device_index, 0, 0);
+}
+
+void execNoBlockCopy(const MultiCopyParams& params) {
+    copyBlocks(params, nullptr);
+}
+
+void execNoBlockCopy(const MultiCopyParams& params, const DeviceHostCopyExecutionContext& context) {
+    copyBlocks(params, &context);
 }
 
 void warmupNoBlockCopy() {}

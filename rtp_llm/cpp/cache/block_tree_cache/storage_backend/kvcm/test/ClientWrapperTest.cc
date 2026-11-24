@@ -1199,7 +1199,7 @@ TEST_P(MetadataClientLifetimeTest, VipRefreshRetainsInFlightClient) {
             return std::make_pair(kv_cache_manager::ER_SERVICE_NOT_LEADER, kv_cache_manager::Locations{});
         }));
     } else if (GetParam() == "start_write") {
-        EXPECT_CALL(*old_client, StartWrite(_, _, _, _, _, 0)).WillOnce(Invoke([hold](const auto&...) {
+        EXPECT_CALL(*old_client, OnStartWrite(_, _, _, _, _, 0)).WillOnce(Invoke([hold](const auto&...) {
             hold();
             return std::make_pair(kv_cache_manager::ER_SERVICE_NOT_LEADER, kv_cache_manager::WriteLocation{});
         }));

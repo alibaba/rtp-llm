@@ -36,6 +36,31 @@ namespace rtp_llm {
 
 namespace {
 
+// The Python writer uses this same lock. Hold it through C++ post layers as
+// those also retain runtime tensor views. Writers drain outstanding GPU work
+// before copying and synchronize before releasing the lock.
+class RuntimeWeightReadGuard {
+public:
+    explicit RuntimeWeightReadGuard(const py::object& model) {
+        py::gil_scoped_acquire acquire;
+        if (py::hasattr(model, "_weight_update_lock")) {
+            lock_ = model.attr("_weight_update_lock");
+            lock_.attr("acquire")();
+        }
+    }
+
+    ~RuntimeWeightReadGuard() {
+        py::gil_scoped_acquire acquire;
+        if (lock_) {
+            lock_.attr("release")();
+            lock_ = py::object();
+        }
+    }
+
+private:
+    py::object lock_;
+};
+
 /** Record metadata readiness after these copies, independently of the per-layer KV events. */
 torch::Tensor toHostAsync(const torch::Tensor& tensor, bool& has_d2h) {
     if (!tensor.defined() || !tensor.is_cuda()) {
@@ -983,6 +1008,13 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.forward");
+    RuntimeWeightReadGuard weight_read(py_model_);
+    if (direct_eplb_stats_) {
+        // Eager and graph replay both write into these same address-stable
+        // buffers. Each forward publishes one batch, not a cumulative count.
+        overall_expert_stats_.stats_buf.log_stats_buf.zero_();
+        overall_expert_stats_.stats_buf.gpu_loads_buf.zero_();
+    }
 
     // Establish the cleanup guard before touching inputs: both the performance
     // wrapper and host-buffer retention can throw. A failed async prepare must
@@ -1096,6 +1128,14 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
         const bool can_run_graph = moe_forward_allows_graph_ && !capture_hidden_states && enable_cuda_graph_
                                    && graph_runner != nullptr && graph_runner->canRun(py_model_inputs, graph_state);
+        if (eplb_live_rows_.defined()) {
+            // Match the runner's packed token count (including real verify
+            // tokens), not the number of requests or the selected bucket width.
+            const auto live_rows = is_prefill_cuda_graph_mode_ || is_generation_prefill_runner ?
+                                       graph_state.current_seq_len :
+                                       graph_state.seq_len_sum;
+            eplb_live_rows_.fill_(can_run_graph ? live_rows : std::numeric_limits<int>::max());
+        }
         // The eager Python instance retains this wrapper's SEED/REUSE role and
         // shares its request-local TopK buffer with the graph clones. Batches
         // outside the captured buckets must use that same role eagerly.

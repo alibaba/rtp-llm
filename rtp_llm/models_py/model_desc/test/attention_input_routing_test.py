@@ -172,7 +172,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
         attention_inputs = PyAttentionInputs()
         inputs = SimpleNamespace(attention_inputs=attention_inputs)
         with patch(
-            "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl"
+            "rtp_llm.models_py.modules.AttnImplFactory.get_fmha_impl"
         ) as factory:
             routes = model.prepare_fmha_impl(inputs)
             factory.assert_called_once_with(
@@ -212,7 +212,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
         attention_inputs = PyAttentionInputs()
         inputs = SimpleNamespace(attention_inputs=attention_inputs)
         with patch(
-            "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl"
+            "rtp_llm.models_py.modules.AttnImplFactory.get_fmha_impl"
         ) as factory:
             routes = model.prepare_fmha_impl(
                 inputs,
@@ -246,7 +246,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
         attention_inputs = PyAttentionInputs()
         inputs = SimpleNamespace(attention_inputs=attention_inputs)
         with patch(
-            "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl"
+            "rtp_llm.models_py.modules.AttnImplFactory.get_fmha_impl"
         ) as factory:
             impls = model.prepare_fmha_impl(
                 inputs,
@@ -304,6 +304,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
         hidden_states = torch.zeros((2, 4), dtype=torch.float32)
         residual = torch.zeros_like(hidden_states)
         decoder_layer = Mock(
+            carries_dsa_topk=False,
             return_value=SimpleNamespace(
                 hidden_states=hidden_states,
                 residual=residual,
@@ -372,7 +373,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
         )
 
         with patch(
-            "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl"
+            "rtp_llm.models_py.modules.AttnImplFactory.get_fmha_impl"
         ) as factory:
             for attention_inputs in invalid_mappings:
                 with self.subTest(tags=list(attention_inputs)):
@@ -481,7 +482,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
         model.decode_cascade_max_requests = 8
 
         with patch(
-            "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl",
+            "rtp_llm.models_py.modules.AttnImplFactory.get_fmha_impl",
             side_effect=lambda **kwargs: kwargs["attn_inputs"],
         ) as factory:
             fmha_impl = model.prepare_fmha_impl(
@@ -504,7 +505,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
         model = RoutingModel(None)
 
         with patch(
-            "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl",
+            "rtp_llm.models_py.modules.AttnImplFactory.get_fmha_impl",
             side_effect=lambda **kwargs: kwargs["attn_inputs"],
         ) as factory:
             fmha_impl = model.prepare_fmha_impl(inputs)
@@ -542,7 +543,8 @@ class AttentionInputRoutingTest(unittest.TestCase):
 
         module = "rtp_llm.models_py.model_desc.deepseek_v4_dspark_model"
         with patch(f"{module}.require_pool_tokens_per_block", return_value=16), patch(
-            f"{module}.create_write_cache_store_impl", side_effect=make_writer
+            "rtp_llm.models_py.modules.factory.attention.common.create_write_cache_store_impl",
+            side_effect=make_writer,
         ):
             model.commit_feature_rows(
                 torch.zeros(1, 4),

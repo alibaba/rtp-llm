@@ -6,6 +6,13 @@
 #include <algorithm>
 #include <limits>
 
+#if USE_PPU
+#include <c10/cuda/CUDAException.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAStream.h>
+#include <cuda_runtime_api.h>
+#endif
+
 namespace rtp_llm {
 
 // Initialization function
@@ -29,6 +36,20 @@ bool MemoryLayoutStrategy::init(const MemoryLayoutConfig& config,
 
 // Clear tensor function
 void MemoryLayoutStrategy::clearKVTensor(torch::Tensor& kv_cache_tensor) {
+#if USE_PPU
+    // Pool views are dense. All supported KV formats encode zero as zero
+    // bytes; avoid the PPU SDK's vectorized Half fill launch on this buffer.
+    // Use the owning device's current stream, just as fill_ would.
+    if (kv_cache_tensor.is_cuda() && kv_cache_tensor.is_contiguous()) {
+        if (kv_cache_tensor.nbytes() == 0) {
+            return;
+        }
+        const c10::cuda::CUDAGuard guard(kv_cache_tensor.device());
+        const auto                 stream = c10::cuda::getCurrentCUDAStream(kv_cache_tensor.get_device());
+        C10_CUDA_CHECK(cudaMemsetAsync(kv_cache_tensor.data_ptr(), 0, kv_cache_tensor.nbytes(), stream.stream()));
+        return;
+    }
+#endif
     kv_cache_tensor.fill_(0);
 }
 

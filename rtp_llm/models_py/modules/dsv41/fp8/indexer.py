@@ -22,6 +22,7 @@ What this class does NOT do — by design:
 from __future__ import annotations
 
 from contextlib import suppress
+from functools import lru_cache
 from typing import Any, Callable, Dict, NamedTuple, Optional
 
 import torch
@@ -58,7 +59,7 @@ from rtp_llm.models_py.modules.dsv41.fp8.compressor import (
 )
 from rtp_llm.models_py.modules.dsv41.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.dsv41.qlinear import QuantizedLinear
-from rtp_llm.ops.compute_ops import rtp_llm_ops
+from rtp_llm.models_py.modules.dsv4 import native_ops as rtp_llm_ops
 
 
 def _as_bf16_contig(t: torch.Tensor) -> torch.Tensor:
@@ -73,8 +74,16 @@ def _flat_1d(t: torch.Tensor) -> torch.Tensor:
     return t.reshape(-1).contiguous()
 
 
-_TOPK_V3_OK = hasattr(rtp_llm_ops, "topk_v3")
-_FAST_PREFILL_TOPK_OK = hasattr(rtp_llm_ops, "fast_topk_v2_variable")
+@lru_cache(maxsize=1)
+def _has_topk_v3() -> bool:
+    return hasattr(rtp_llm_ops, "topk_v3")
+
+
+@lru_cache(maxsize=1)
+def _has_fast_prefill_topk() -> bool:
+    return hasattr(rtp_llm_ops, "fast_topk_v2_variable")
+
+
 _TOPK_V3_WORKSPACE_SIZE = 1024 * 1024
 _FAST_PREFILL_TOPK_MAX_INPUT_TOKENS = 12 * 1024
 _topk_v3_workspace_cache: Dict[torch.device, torch.Tensor] = {}
@@ -90,7 +99,7 @@ def _run_prefill_topk(
 ) -> None:
     estimated_input_tokens = int(logits.size(1)) * int(compress_ratio)
     if (
-        _FAST_PREFILL_TOPK_OK
+        _has_fast_prefill_topk()
         and int(topk) in (512, 1024, 2048)
         and (estimated_input_tokens <= _FAST_PREFILL_TOPK_MAX_INPUT_TOKENS)
     ):
@@ -138,7 +147,7 @@ def _run_topk_v3(
     k: int,
     max_seq_len: int,
 ) -> bool:
-    if k not in (512, 1024, 2048) or not _TOPK_V3_OK:
+    if k not in (512, 1024, 2048) or not _has_topk_v3():
         return False
     rtp_llm_ops.topk_v3(
         logits, lengths, output, _get_topk_workspace(logits.device), k, max_seq_len

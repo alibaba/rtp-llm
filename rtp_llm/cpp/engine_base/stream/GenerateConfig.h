@@ -149,6 +149,13 @@ public:
         return max_new_tokens == 0;
     }
 
+    void validateStaticLoraSelection(const std::string& merged_name) const {
+        if (!adapter_name.empty() && adapter_name != merged_name) {
+            throw std::invalid_argument("Cannot select LoRA adapter '" + adapter_name
+                                        + "': request-scoped LoRA is not supported; serve it as a merged adapter");
+        }
+    }
+
     void enforcePromptScoringConstraints() {
         max_new_tokens        = 1;
         is_streaming          = false;

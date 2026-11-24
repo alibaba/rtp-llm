@@ -1,12 +1,37 @@
 package(default_visibility = ["//:__subpackages__"])
 
 py_library(
+    name = "ft_export_engram",
+    srcs = ["ft_export_engram.py"],
+    deps = ["//rtp_llm:safetensors_torch"],
+)
+
+py_library(
+    name = "ft_export_metadata",
+    srcs = ["ft_export_metadata.py"],
+    deps = ["//rtp_llm:safetensors_torch"],
+)
+
+py_library(
+    name = "ft_export_writer",
+    srcs = ["ft_export_writer.py"],
+    deps = ["//rtp_llm:safetensors_torch"],
+)
+
+py_test(
+    name = "ft_export_metadata_test",
+    srcs = ["ft_export_metadata_test.py"],
+    deps = [":ft_export_metadata", "//rtp_llm:torch"],
+)
+
+py_library(
     name = "convert",
     srcs = glob([
         "*.py",
     ]),
     deps = [
         "//rtp_llm:config",
+        "//rtp_llm:model_factory",
         "//rtp_llm:models",
         "//rtp_llm:openai_api",
         "//rtp_llm:structure",

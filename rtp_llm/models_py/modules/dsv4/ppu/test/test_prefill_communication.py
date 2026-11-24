@@ -133,7 +133,7 @@ class PrefillCommunicationTest(unittest.TestCase):
         start = next(
             n
             for n in manager.body
-            if isinstance(n, ast.FunctionDef) and n.name == "create_model_loader"
+            if isinstance(n, ast.FunctionDef) and n.name == "load"
         )
         warm = next(
             n
@@ -152,7 +152,7 @@ class PrefillCommunicationTest(unittest.TestCase):
                 and n.func.attr == method
             )
 
-        self.assertLess(warm.lineno, line("create_model_loader"))
+        self.assertLess(warm.lineno, line("load"))
         self.assertEqual(
             [ast.unparse(arg) for arg in warm.args],
             ["self.parallelism_config"],

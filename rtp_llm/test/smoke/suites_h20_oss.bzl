@@ -1,5 +1,5 @@
 load("//rtp_llm/test/smoke:cache_tier_args.bzl", "HOST_REUSE_AFTER_DEMOTION_ARGS")
-load("//rtp_llm/test/smoke:defs.bzl", "shared_smoke_test", "smoke_test")
+load("//rtp_llm/test/smoke:defs.bzl", "custom_smoke_test", "shared_smoke_test", "smoke_test")
 load("//rtp_llm/test/smoke:suites_remote_cache.bzl", "REMOTE_CACHE_DEVICE_STORE_ARGS")
 
 def h20_oss_suites():
@@ -88,6 +88,21 @@ def h20_oss_suites():
                 name = "moe_generation_prefill_cuda_graph",
                 task_info = "data/model/qwen3_moe/q_r_30b_generation_prefill_cuda_graph.json",
                 smoke_args = "--moe_strategy fp8_per_block_no_dp_masked --quantization FP8_PER_BLOCK --warm_up 0 --act_type BF16 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --use_all_gather 1 --use_deepep_moe 0 --reserver_runtime_mem_mb 16005 --seq_size_per_block 64 --test_block_num 1000 --concurrency_limit 2 --max_context_batch_size 2 --reuse_cache 0 --enable_cuda_graph 1 --decode_capture_config '1,2' --generation_prefill_cuda_graph_max_requests 2 --generation_prefill_capture_config '64'",
+                gpu_type = ["H20_CU13"],
+            ),
+            # An unchanged greedy Qwen3-30B TP2 golden, with required evidence
+            # of post-startup all-rank FST EPLB commit followed by graph replay.
+            custom_smoke_test(
+                name = "moe_fst_eplb_graph_ep2",
+                main = "fst_eplb_graph_test.py",
+                data = [
+                    "//rtp_llm:sdk",
+                    ":smoke_framework_srcs",
+                    "data/model/qwen3_moe/q_r_30b_py_tp2.json",
+                    "data/prompt_candidates.json",
+                ],
+                # AUTO must choose the SM90 graph-capable masked executor.
+                smoke_args = "--moe_strategy auto --quantization FP8_PER_BLOCK --act_type BF16 --tp_size 2 --ep_size 2 --world_size 2 --use_deepep_moe 0 --load_method fastsafetensors --eplb_mode ALL --redundant_expert 2 --eplb_update_time 12 --eplb_test_mode 1 --eplb_force_repack 1 --warm_up 0 --enable_cuda_graph 1 --decode_capture_config '1' --reserver_runtime_mem_mb 16005 --seq_size_per_block 64 --concurrency_limit 4",
                 gpu_type = ["H20_CU13"],
             ),
             smoke_test(

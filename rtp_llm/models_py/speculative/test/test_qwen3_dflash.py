@@ -3,20 +3,16 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import torch
 
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_factory_register import ModelDict, ensure_model_registered
-from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
-from rtp_llm.model_loader.weight_module import AtomicWeight
-from rtp_llm.models.qwen_3_dflash import Qwen3DFlash, Qwen3DFlashWeight
+from rtp_llm.models.qwen_3_dflash import Qwen3DFlash
 from rtp_llm.models_py.speculative.dspark_proposer_mixin import DSparkProposerMixin
 from rtp_llm.models_py.triton_kernels.common.dflash_attention import is_supported
 from rtp_llm.ops import DataType, KvCacheDataType
 from rtp_llm.ops.compute_ops import PyAttentionInputs
-from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
 
 
 def _reference_rtp_rms_norm(
@@ -73,8 +69,8 @@ def _reference_dflash_hidden(
     width = query_ids.numel()
     hidden = model.embed_tokens(query_ids.reshape(-1))
     context = _reference_aiter_rms_norm(
-        features @ weights.global_weights[W.dspark_fc_w],
-        weights.global_weights[W.dspark_hidden_norm_gamma],
+        features @ weights.global_weights["dspark_fc_w"],
+        weights.global_weights["dspark_hidden_norm_gamma"],
         model.config.layernorm_eps,
     )
     positions = prefix + torch.arange(width, device=hidden.device, dtype=torch.int32)
@@ -85,14 +81,14 @@ def _reference_dflash_hidden(
         dtype=torch.int32,
     )
     context_kv = context @ torch.cat(
-        [layer_weights[W.attn_qkv_w][:, q_size:] for layer_weights in weights.weights],
+        [layer_weights["attn_qkv_w"][:, q_size:] for layer_weights in weights.weights],
         dim=1,
     )
     for index, layer_weights in enumerate(weights.weights):
         pre = _reference_aiter_rms_norm(
-            hidden, layer_weights[W.pre_ln_gamma], model.config.layernorm_eps
+            hidden, layer_weights["pre_ln_gamma"], model.config.layernorm_eps
         )
-        qkv = pre @ layer_weights[W.attn_qkv_w]
+        qkv = pre @ layer_weights["attn_qkv_w"]
         query = qkv[:, :q_size].view(width, attn.head_num, attn.size_per_head)
         key = qkv[:, q_size : q_size + kv_size].view(
             width, attn.kv_head_num, attn.size_per_head
@@ -102,16 +98,16 @@ def _reference_dflash_hidden(
         )
         # Q/K use RTP fused_qk_rmsnorm, not AITER RMSNorm; it stores RN BF16.
         query = _reference_rtp_rms_norm(
-            query, layer_weights[W.q_ln_gamma], model.config.layernorm_eps
+            query, layer_weights["q_ln_gamma"], model.config.layernorm_eps
         )
         key = _reference_rtp_rms_norm(
-            key, layer_weights[W.k_ln_gamma], model.config.layernorm_eps
+            key, layer_weights["k_ln_gamma"], model.config.layernorm_eps
         )
         context_key = _reference_aiter_rms_norm(
             context_kv[:, index * 2 * kv_size : index * 2 * kv_size + kv_size].view(
                 context_rows, attn.kv_head_num, attn.size_per_head
             ),
-            layer_weights[W.k_ln_gamma],
+            layer_weights["k_ln_gamma"],
             model.config.layernorm_eps,
         )
         context_value = context_kv[
@@ -153,16 +149,16 @@ def _reference_dflash_hidden(
         attended = torch.einsum("qhk,khd->qhd", scores.softmax(-1), values).to(
             hidden.dtype
         )
-        hidden = hidden + attended.reshape(width, q_size) @ layer_weights[W.attn_o_w]
+        hidden = hidden + attended.reshape(width, q_size) @ layer_weights["attn_o_w"]
         post = _reference_aiter_rms_norm(
-            hidden, layer_weights[W.post_ln_gamma], model.config.layernorm_eps
+            hidden, layer_weights["post_ln_gamma"], model.config.layernorm_eps
         )
-        mlp_gate = post @ layer_weights[W.ffn_w1]
-        mlp_up = post @ layer_weights[W.ffn_w3]
+        mlp_gate = post @ layer_weights["ffn_w1"]
+        mlp_up = post @ layer_weights["ffn_w3"]
         activated = _reference_aiter_silu_and_mul(mlp_gate, mlp_up)
-        hidden = hidden + activated @ layer_weights[W.ffn_w2]
+        hidden = hidden + activated @ layer_weights["ffn_w2"]
     return _reference_aiter_rms_norm(
-        hidden, weights.global_weights[W.final_ln_gamma], model.config.layernorm_eps
+        hidden, weights.global_weights["final_ln_gamma"], model.config.layernorm_eps
     )
 
 
@@ -450,41 +446,13 @@ class Qwen3DFlashConfigTest(unittest.TestCase):
             ModelFactory._setup_dflash_configs(sp_config, target_config, draft_config)
 
     def test_loader_declares_borrowed_vocab_tensors_and_dflash_globals(self) -> None:
-        base_info = ModelWeightInfo(
-            [
-                AtomicWeight(
-                    W.embedding,
-                    [CkptWeightInfo("embed_tokens.weight", identity)],
-                    identity,
-                ),
-                AtomicWeight(
-                    W.lm_head, [CkptWeightInfo("lm_head.weight", identity)], identity
-                ),
-                AtomicWeight(
-                    W.final_ln_gamma,
-                    [CkptWeightInfo("norm.weight", identity)],
-                    identity,
-                ),
-            ],
-            [],
-        )
-        with patch(
-            "rtp_llm.models.qwen_3_dflash.QWenV3Weight._get_weight_info",
-            return_value=base_info,
-        ):
-            # ``super()`` needs an instance compatible with the concrete
-            # loader class even though the mocked parent method does not read
-            # instance state.
-            info = Qwen3DFlashWeight._get_weight_info(
-                Qwen3DFlashWeight.__new__(Qwen3DFlashWeight)
-            )
+        from rtp_llm.models_py.model_desc.qwen3_dflash_model import Qwen3DFlashModel
+        from rtp_llm.models_py.registry import get_model_class
 
-        names = [weight.name for weight in info.weights]
-        self.assertIn(W.embedding, names)
-        self.assertIn(W.lm_head, names)
-        self.assertIn(W.final_ln_gamma, names)
-        self.assertIn(W.dspark_fc_w, names)
-        self.assertIn(W.dspark_hidden_norm_gamma, names)
+        self.assertIs(get_model_class("qwen_3_dflash"), Qwen3DFlashModel)
+        self.assertEqual(Qwen3DFlashModel.runtime_parameter_paths, {
+            "embedding": "embed_tokens.weight", "lm_head": "lm_head.weight",
+        })
 
     def test_production_alias_contract_requires_identical_full_vocab(self) -> None:
         values = {
@@ -498,7 +466,7 @@ class Qwen3DFlashConfigTest(unittest.TestCase):
         draft = SimpleNamespace(**values)
         self.assertEqual(
             Qwen3DFlash.speculative_weight_alias_names(target, draft),
-            (W.embedding, W.lm_head),
+            ("embedding", "lm_head"),
         )
         # The compatible tuple must keep the fixture and the production check in
         # sync field-for-field; every field must reject a mismatched draft.
@@ -630,8 +598,8 @@ class Qwen3DFlashConfigTest(unittest.TestCase):
         if not torch.cuda.is_available():
             self.skipTest("requires CUDA or ROCm for production Triton attention")
 
-        from rtp_llm.model_loader.model_weight_info import ModelWeights
-        from rtp_llm.models_py.model_desc.qwen3_dflash_model import Qwen3DFlashModel
+        from safetensors.torch import save_file
+        from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
         from rtp_llm.ops import ParallelismConfig
 
         device = torch.device("cuda")
@@ -678,7 +646,7 @@ class Qwen3DFlashConfigTest(unittest.TestCase):
                 config.gen_num_per_cycle = width - 1
                 config.max_seq_len = 64
                 par = ParallelismConfig()
-                weights = ModelWeights(3, str(device), torch.bfloat16)
+                weights = SimpleNamespace(global_weights={}, weights=[{} for _ in range(3)])
 
                 def random(shape):
                     return (
@@ -690,29 +658,55 @@ class Qwen3DFlashConfigTest(unittest.TestCase):
                         *shape, device=device, dtype=torch.bfloat16
                     ) + random(shape)
 
-                weights.set_global_weight(W.embedding, random((64, 192)))
+                weights.global_weights["embedding"] = random((64, 192))
                 target_head = random((64, 192))
-                weights.set_global_weight(W.lm_head, target_head)
-                weights.set_global_weight(W.final_ln_gamma, norm((192,)))
-                weights.set_global_weight(W.dspark_fc_w, random((768, 192)))
-                weights.set_global_weight(W.dspark_hidden_norm_gamma, norm((192,)))
+                weights.global_weights["lm_head"] = target_head
+                weights.global_weights["final_ln_gamma"] = norm((192,))
+                weights.global_weights["dspark_fc_w"] = random((768, 192))
+                weights.global_weights["dspark_hidden_norm_gamma"] = norm((192,))
                 for layer_index in range(3):
                     layer = weights.weights[layer_index]
-                    layer[W.pre_ln_gamma] = norm((192,))
-                    layer[W.post_ln_gamma] = norm((192,))
-                    layer[W.q_ln_gamma] = norm((64,))
-                    layer[W.k_ln_gamma] = norm((64,))
-                    layer[W.attn_qkv_w] = random(
+                    layer["pre_ln_gamma"] = norm((192,))
+                    layer["post_ln_gamma"] = norm((192,))
+                    layer["q_ln_gamma"] = norm((64,))
+                    layer["k_ln_gamma"] = norm((64,))
+                    layer["attn_qkv_w"] = random(
                         (192, (head_num + 2 * kv_head_num) * 64)
                     )
-                    layer[W.attn_o_w] = random((head_num * 64, 192))
-                    layer[W.ffn_w1] = random((192, 256))
-                    layer[W.ffn_w3] = random((192, 256))
-                    layer[W.ffn_w2] = random((256, 192))
+                    layer["attn_o_w"] = random((head_num * 64, 192))
+                    layer["ffn_w1"] = random((192, 256))
+                    layer["ffn_w3"] = random((192, 256))
+                    layer["ffn_w2"] = random((256, 192))
 
-                model = Qwen3DFlashModel(
-                    config, par, weights, max_generate_batch_size=1
-                )
+                # Materialize HF-shaped checkpoint tensors. The dense oracle below
+                # keeps its independent KxN matrices and does not read the owner's
+                # loaded weights as its reference.
+                g = weights.global_weights
+                ckpt = {"embed_tokens.weight": g["embedding"], "lm_head.weight": target_head,
+                        "norm.weight": g["final_ln_gamma"], "fc.weight": g["dspark_fc_w"].T,
+                        "hidden_norm.weight": g["dspark_hidden_norm_gamma"]}
+                for i, ref in enumerate(weights.weights):
+                    p = f"layers.{i}."
+                    for src, dst in (("pre_ln_gamma", "input_layernorm"), ("post_ln_gamma", "post_attention_layernorm"),
+                                     ("q_ln_gamma", "self_attn.q_norm"), ("k_ln_gamma", "self_attn.k_norm")):
+                        ckpt[p + dst + ".weight"] = ref[src]
+                    for src, dst in (("attn_o_w", "self_attn.o_proj"), ("ffn_w1", "mlp.gate_proj"),
+                                     ("ffn_w3", "mlp.up_proj"), ("ffn_w2", "mlp.down_proj")):
+                        ckpt[p + dst + ".weight"] = ref[src].T
+                    for part, w in zip("qkv", ref["attn_qkv_w"].split(
+                        (head_num * 64, kv_head_num * 64, kv_head_num * 64), dim=1)):
+                        ckpt[p + f"self_attn.{part}_proj.weight"] = w.T
+                with tempfile.TemporaryDirectory() as path:
+                    config.ckpt_path = path
+                    config.model_type = "qwen_3_dflash"
+                    config.enable_fp32_lm_head = False
+                    Path(path, "config.json").write_text(json.dumps(raw))
+                    save_file({k: v.cpu().contiguous() for k, v in ckpt.items()},
+                              str(Path(path) / "model.safetensors"))
+                    model = NewModelLoader(config, NewLoaderConfig(
+                        device=str(device), compute_dtype=torch.bfloat16,
+                        load_method="scratch", parallelism_config=par, max_generate_batch_size=1,
+                    ), model_path=path).load()
                 caches = [
                     SimpleNamespace(
                         kv_cache_base=torch.zeros(
@@ -743,10 +737,8 @@ class Qwen3DFlashConfigTest(unittest.TestCase):
                 features = random((5, 768))
                 main_x = model.combine_hidden_states(features)
                 captured_context = []
-                hook = model.context_kv_projection.register_forward_pre_hook(
-                    lambda _module, args: captured_context.append(
-                        args[0].detach().clone()
-                    )
+                hook = model.hidden_norm.register_forward_hook(
+                    lambda _module, _args, output: captured_context.append(output.detach().clone())
                 )
                 try:
                     model.commit_feature_rows(
@@ -760,7 +752,9 @@ class Qwen3DFlashConfigTest(unittest.TestCase):
                     hook.remove()
                 self.assertEqual(len(captured_context), 1)
                 torch.testing.assert_close(
-                    captured_context[0], model.hidden_norm(main_x), atol=2e-2, rtol=2e-2
+                    captured_context[0],
+                    _reference_aiter_rms_norm(main_x, g["dspark_hidden_norm_gamma"], config.layernorm_eps),
+                    atol=2e-2, rtol=2e-2,
                 )
                 committed_nonzero = [
                     int(cache.kv_cache_base.count_nonzero()) for cache in caches

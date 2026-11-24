@@ -723,6 +723,36 @@ class ModelConfig(CppModelConfig):
 
         self.attn_config.rope_config.style = rope_type[rope_override_args["type"]]
 
+        if rope_override_args["type"] in ("dynamicntk", "llama3"):
+            rope = self.attn_config.rope_config
+            scale = float(rope_override_args.get("factor", rope.scale))
+            original = int(
+                rope_override_args.get("original_max_position_embeddings", rope.max_pos)
+            )
+            low = float(rope_override_args.get("low_freq_factor", rope.factor1))
+            high = float(rope_override_args.get("high_freq_factor", rope.factor2))
+            if (
+                not math.isfinite(scale)
+                or scale <= 0
+                or (scale != 1.0 and original <= 0)
+            ):
+                raise ValueError(
+                    "scaled RoPE override requires a positive factor and "
+                    "original_max_position_embeddings"
+                )
+            if rope_override_args["type"] == "llama3" and scale != 1.0:
+                if (
+                    not math.isfinite(low)
+                    or not math.isfinite(high)
+                    or not 0 < low < high
+                ):
+                    raise ValueError(
+                        "Llama3 RoPE override requires 0 < low_freq_factor < high_freq_factor"
+                    )
+            # scale=1 needs no scaling fields; preserve style-only overrides.
+            rope.scale, rope.max_pos = scale, original
+            rope.factor1, rope.factor2 = low, high
+
         if rope_override_args["type"] == "yarn":
             assert (
                 "factor" in rope_override_args
@@ -823,6 +853,7 @@ class ModelConfig(CppModelConfig):
         self.model_name: str = (
             ""  # Model name (also set to engine_config.runtime_config.model_name)
         )
+        self.phy2log_path: str = ""  # Optional expert placement file, also for offline export.
         self.lora_infos: Dict[str, str] = {}  # Python-only (C++ lora code removed)
 
         # Model architecture fields
@@ -1230,6 +1261,12 @@ def apply_layer_num_override(model_config: ModelConfig, num_layers: int) -> None
         layer_id for layer_id in model_config.moe_layer_index if layer_id < num_layers
     ]
     model_config.kv_cache_spec_descs = []
+    # Keep the original bound so a direct checkpoint owner can distinguish
+    # explicitly pruned decoder layers from invalid checkpoint layer indices.
+    if num_layers < old_num_layers and not hasattr(
+        model_config, "_checkpoint_num_layers_before_override"
+    ):
+        model_config._checkpoint_num_layers_before_override = old_num_layers
     model_config.num_layers = num_layers
 
 

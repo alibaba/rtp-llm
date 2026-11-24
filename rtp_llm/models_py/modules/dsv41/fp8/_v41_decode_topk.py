@@ -14,13 +14,13 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.modules.dsv41.fp8.indexer import _TOPK_V3_OK, _get_topk_workspace
-from rtp_llm.ops.compute_ops import rtp_llm_ops
+from rtp_llm.models_py.modules.dsv41.fp8.indexer import _has_topk_v3, _get_topk_workspace
+from rtp_llm.models_py.modules.dsv4 import native_ops as rtp_llm_ops
 
 
 def is_supported(logits: torch.Tensor, lengths: torch.Tensor, topk: int) -> bool:
     return (
-        _TOPK_V3_OK
+        _has_topk_v3()
         and logits.is_cuda
         and logits.dtype == torch.float32
         and logits.ndim == 2

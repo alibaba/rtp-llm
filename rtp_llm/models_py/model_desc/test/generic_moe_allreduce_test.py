@@ -57,20 +57,20 @@ def _make_layer(
 
     with (
         patch(
-            "rtp_llm.models_py.model_desc.generic_moe.LinearFactory.create_linear_from_weights",
+            "rtp_llm.models_py.model_desc.generic_moe.runtime_modules.LinearFactory.create_linear_from_weights",
             return_value=Mock(),
         ),
         patch(
-            "rtp_llm.models_py.model_desc.generic_moe.SelectTopk",
+            "rtp_llm.models_py.model_desc.generic_moe.runtime_modules.SelectTopk",
             return_value=Mock(),
         ),
         patch(
-            "rtp_llm.models_py.model_desc.generic_moe.DenseMLP",
+            "rtp_llm.models_py.model_desc.generic_moe.runtime_modules.DenseMLP",
             return_value=Mock(),
         ),
         patch("rtp_llm.models_py.model_desc.generic_moe.MoEConfigAdapter"),
         patch(
-            "rtp_llm.models_py.model_desc.generic_moe.FusedMoeFactory"
+            "rtp_llm.models_py.model_desc.generic_moe.runtime_modules.FusedMoeFactory"
         ) as fused_moe_factory,
     ):
         fused_moe_factory.return_value.create_fused_moe.return_value = fused_moe

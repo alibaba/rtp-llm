@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/embedding_engine/EmbeddingEngine.h"
+#include "rtp_llm/cpp/embedding_engine/EmbeddingTokenRange.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
@@ -18,6 +19,12 @@ EmbeddingEngine::EmbeddingEngine(const EngineInitParams& params, py::object hand
     metrics_reporter_(params.metrics_reporter),
     step_profiler_(params.profiling_debug_logging_config.torch_cuda_profiler_dir,
                    params.parallelism_config.world_rank) {
+    // type_vocab_size may be absent even when the checkpoint has trained
+    // segment embeddings. Read the published table's shape, not its contents.
+    const auto& type_weights = params.gpt_weights.token_type_embedding;
+    if (type_weights && type_weights->kernel.defined() && type_weights->kernel.numel() > 0) {
+        token_type_table_rows_ = type_weights->kernel.size(0);
+    }
     {
         size_t device_id = params.parallelism_config.world_rank % params.parallelism_config.local_world_size;
         rtp_llm::initRuntime(device_id);
@@ -90,6 +97,22 @@ std::shared_ptr<EmbeddingOutput> EmbeddingEngine::decode(th::Tensor             
 
 std::shared_ptr<EmbeddingOutput> EmbeddingEngine::decode(std::shared_ptr<EmbeddingInput> input,
                                                          EmbeddingProfileConfig          profile_config) {
+    // Direct encoder owners publish the checkpoint's real input table rows.
+    // Validate at the host admission boundary, before batching/device copies;
+    // an advertised config/tokenizer vocabulary may be larger than this table.
+    if (model_config_.input_vocab_size > 0 && model_config_.has_positional_encoding) {
+        TORCH_CHECK(input->token_ids.device().is_cpu() && input->token_ids.scalar_type() == torch::kInt32
+                        && input->token_ids.is_contiguous(),
+                    "Embedding input token IDs must be contiguous host int32 tensors");
+        validateEmbeddingTokenRange(
+            input->token_ids.data_ptr<int32_t>(), input->token_ids.numel(), model_config_.input_vocab_size);
+    }
+    if (token_type_table_rows_ > 0) {
+        const auto& ids = input->token_type_ids;
+        TORCH_CHECK(ids.device().is_cpu() && ids.scalar_type() == torch::kInt32 && ids.is_contiguous(),
+                    "Embedding token type IDs must be contiguous host int32 tensors");
+        validateEmbeddingTokenRange(ids.data_ptr<int32_t>(), ids.numel(), token_type_table_rows_, "token type");
+    }
     auto embedding_stream = std::make_shared<EmbeddingStream>(input, std::move(profile_config));
     embedding_stream->setMetricReporter(metrics_reporter_);
     THROW_IF_STATUS_ERROR(enqueue(embedding_stream));

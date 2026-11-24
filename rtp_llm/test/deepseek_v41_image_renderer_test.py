@@ -55,20 +55,17 @@ class V41ImageRendererTest(TestCase):
         cls.renderer.think_mode = False
 
     def test_mixin_preserves_norm_precision_and_three_delimiters(self):
-        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_mixin import (
-            V41VitWeights,
-        )
         from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_vision import (
-            DeepSeekV41VisionEmbedding,
+            OwnedDeepSeekV41VisionEmbedding,
         )
 
         config = V41Config.from_path(os.environ["DSV41_MODEL_PATH"])
         with torch.device("meta"):
-            adapter = DeepSeekV41VisionEmbedding(config)
+            adapter = OwnedDeepSeekV41VisionEmbedding({"v41_config": config}, None)
         state = adapter.state_dict()
-        weights = V41VitWeights({"vision_model": adapter})
-        self.assertEqual(set(weights.weight_names), set(state))
-        self.assertEqual(weights.ckpt_prefix, "")
+        owns = adapter.checkpoint_weight_name_filter()
+        self.assertTrue(all(owns(name) for name in state))
+        self.assertFalse(owns("layers.0.attn.wq.weight"))
         fp32_norms = {
             name for name, tensor in state.items() if tensor.dtype == torch.float32
         }

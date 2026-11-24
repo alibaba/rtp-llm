@@ -2,7 +2,7 @@
 
 Multimodal models refer to models that communicate through multiple modalities with computers, aiming to enable models to process and understand multi-modal information. Currently, common multimodal research directions include images, videos, audio, etc.
 
-In rtp-llm, the currently supported multimodal models are mainly models that accept images as input, such as [qwen-vl](https://github.com/QwenLM/Qwen-VL) and [llava](https://github.com/haotian-liu/LLaVA).
+This page describes the historical Qwen-VL and LLaVA interfaces. Their model names are still recognized, but their original checkpoints do not have direct vision loaders. For a runnable example with the current loader, use [Qwen2.5-VL](../supported_models/multimodal_language_models.md).
 
 ## Usage
 

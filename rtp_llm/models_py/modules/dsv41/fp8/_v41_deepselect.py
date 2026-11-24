@@ -14,7 +14,7 @@ from functools import lru_cache
 
 import torch
 
-from rtp_llm.ops.compute_ops import rtp_llm_ops
+from rtp_llm.models_py.modules.dsv4 import native_ops as rtp_llm_ops
 
 
 @lru_cache(maxsize=None)

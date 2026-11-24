@@ -20,6 +20,10 @@ def merge_qkv_hf(ts: List[torch.Tensor]):
 
 
 class HfWeightNames(BaseModel):
+    FINAL_NORM_W: str = "encoder.ln.weight"
+    FINAL_NORM_B: str = "encoder.ln.bias"
+    ATTENTION_NORM_W: str = "encoder.layer.{i}.attention.ln.weight"
+    ATTENTION_NORM_B: str = "encoder.layer.{i}.attention.ln.bias"
     Q_W: str = "encoder.layer.{i}.attention.self.query.weight"
     Q_B: str = "encoder.layer.{i}.attention.self.query.bias"
     K_W: str = "encoder.layer.{i}.attention.self.key.weight"
@@ -71,9 +75,21 @@ class MegatronBertWeightInfo(ModelDeployWeightInfo):
         if self._contains(weight_keys, "beta") and self._contains(weight_keys, "gamma"):
             self._names.POST_LN_W = self._names.POST_LN_W.replace("weight", "gamma")
             self._names.POST_LN_B = self._names.POST_LN_B.replace("bias", "beta")
+            for field in (
+                "FINAL_NORM_W",
+                "FINAL_NORM_B",
+                "ATTENTION_NORM_W",
+                "ATTENTION_NORM_B",
+            ):
+                name = getattr(self._names, field)
+                legacy = name.replace(".weight", ".gamma").replace(".bias", ".beta")
+                if legacy.replace("{i}", "0") in weight_keys:
+                    setattr(self._names, field, legacy)
 
     def _get_weight_info(self):
         weights: List[WeightModule] = [
+            AtomicWeight(W.final_ln_gamma, [CkptWeightInfo(self._names.FINAL_NORM_W)]),
+            AtomicWeight(W.final_ln_beta, [CkptWeightInfo(self._names.FINAL_NORM_B)]),
             AtomicWeight(W.embedding, [CkptWeightInfo(self._names.TOKEN_EMBEDDING)]),
             AtomicWeight(
                 W.positional_embedding, [CkptWeightInfo(self._names.POSITION_EMBEDDING)]
@@ -86,16 +102,12 @@ class MegatronBertWeightInfo(ModelDeployWeightInfo):
         layer_weights = [
             AtomicWeight(
                 W.pre_ln_gamma,
-                [
-                    CkptWeightInfo(
-                        "bert.encoder.layer.{i}.attention.ln.weight", identity
-                    )
-                ],
+                [CkptWeightInfo(self._names.ATTENTION_NORM_W, identity)],
                 identity,
             ),
             AtomicWeight(
                 W.pre_ln_beta,
-                [CkptWeightInfo("bert.encoder.layer.{i}.attention.ln.bias", identity)],
+                [CkptWeightInfo(self._names.ATTENTION_NORM_B, identity)],
                 identity,
             ),
             AttnAtomicWeight(

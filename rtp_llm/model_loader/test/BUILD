@@ -11,7 +11,7 @@ py_test(
 py_test(
     name = "test_stacked_moe_weight",
     srcs = ["test_stacked_moe_weight.py"],
-    deps = py_test_deps,
+    deps = py_test_deps + ["//rtp_llm/models_py:owner_migration_checkpoint_test_cases"],
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
@@ -45,7 +45,7 @@ py_test(
 py_test(
     name = "test_compressed_w8a8_int8_per_channel",
     srcs = ["test_compressed_w8a8_int8_per_channel.py"],
-    deps = py_test_deps,
+    deps = py_test_deps + ["//rtp_llm:safetensors_torch", "//rtp_llm/models_py:new_weight_loader"],
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
@@ -67,7 +67,12 @@ py_test(
 py_test(
     name = "test_pp_layer_filter",
     srcs = ["test_pp_layer_filter.py"],
-    deps = py_test_deps,
+    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
+    deps = [
+        "//rtp_llm/models_py:new_weight_loader",
+        "//rtp_llm/tools/convert:ft_export_metadata",
+        "//rtp_llm/tools/convert:ft_export_writer",
+    ],
 )
 
 py_test(
@@ -85,7 +90,7 @@ py_test(
 py_test(
     name = "test_inline_fp8_quant",
     srcs = ["test_inline_fp8_quant.py"],
-    deps = py_test_deps,
+    deps = py_test_deps + ["//rtp_llm/models_py:owner_migration_checkpoint_test_cases"],
     tags = ["rocm"],
     exec_properties = {
         'gpu': 'MI308X-ROCM7',
@@ -101,7 +106,25 @@ py_test(
 py_test(
     name = "test_fastsafetensors_fanout",
     srcs = ["test_fastsafetensors_fanout.py"],
-    deps = py_test_deps,
+    args = ["DirectFanoutTest"],
+    deps = ["//rtp_llm/models_py:new_loader_core"],
+)
+
+py_test(
+    name = "test_fastsafetensors_fanout_native",
+    srcs = ["test_fastsafetensors_fanout.py"],
+    main = "test_fastsafetensors_fanout.py",
+    args = ["NativeFanoutTest"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "ROCR_VISIBLE_DEVICES": ""},
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "@//:using_cuda13_arm": [],
+        "@//:using_cuda12_9_x86": [],
+        "@//:using_cuda12_arm": [],
+        "@//:using_rocm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = ["//rtp_llm/models_py:new_loader_core", "//rtp_llm:fastsafetensors"],
 )
 
 py_test(
