@@ -148,7 +148,7 @@ def check_install(prefill_path=None):
                             else "pass"
                         ),
                         (
-                            "assert hashlib.sha256(open(deep_gemm_route_a._C.__file__, 'rb').read()).hexdigest() == '495872e3c2eab553d728ad54e709b3006d3a3e6818dc2e363f8cf2ba29455fa7'"
+                            "assert hashlib.sha256(open(deep_gemm_route_a._C.__file__, 'rb').read()).hexdigest() == '14c733f6e12dfde13e9bbc91fa149ede25f6fc52422818911675680cd88d1968'"
                             if runtime_path is None
                             else "pass"
                         ),
