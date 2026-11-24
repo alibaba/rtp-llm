@@ -19,6 +19,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
     private final KvCacheManager cache;
     private final RtpMetrics metrics;
     private final Map<String, GenerateStream> active = new LinkedHashMap<>();
+    private final NavigableMap<Long, Integer> deadlineCounts = new TreeMap<>();
     protected final ArrayDeque<GenerateStream> waiting = new ArrayDeque<>();
     private final Set<GenerateStream> running = new LinkedHashSet<>();
     private final Set<GenerateStream> notifications = new LinkedHashSet<>();
@@ -52,6 +53,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         if (active.containsKey(input.identity())) throw new RequestFailure(DUPLICATE, "Active request identity already exists");
         var stream = new GenerateStream(input, Objects.requireNonNull(listener));
         active.put(input.identity(), stream);
+        if (input.deadline() != Long.MAX_VALUE) deadlineCounts.merge(input.deadline(), 1, Integer::sum);
         metrics.started();
         if (prefill()) waiting.addLast(stream);
         else stream.phase = Phase.CAPACITY;
@@ -256,8 +258,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
     @Override public QueueSnapshot queues() { return queueSnapshot(false); }
 
     @Override public long nextDeadline() {
-        return active.values().stream().filter(stream -> !stream.state.terminating())
-            .mapToLong(stream -> stream.input.deadline()).min().orElse(Long.MAX_VALUE);
+        return deadlineCounts.isEmpty() ? Long.MAX_VALUE : deadlineCounts.firstKey();
     }
 
     @Override public List<Task> tasks() {
@@ -410,6 +411,8 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         removeWaiting(stream);
         running.remove(stream);
         stream.preparation = null;
+        if (stream.input.deadline() != Long.MAX_VALUE)
+            deadlineCounts.computeIfPresent(stream.input.deadline(), (deadline, count) -> count == 1 ? null : count - 1);
         stream.state.finish(failure);
     }
 

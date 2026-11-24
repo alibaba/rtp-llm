@@ -29,6 +29,33 @@ import static org.junit.jupiter.api.Assertions.*;
 class RtpSchedulerTest {
     @TempDir Path directory;
 
+    @Test void nextDeadlineExcludesCancelledRequestsWhileTransferStillHoldsKv() throws Exception {
+        var config = config("decode", "1", 2);
+        long firstDeadline = System.nanoTime() + TimeUnit.MINUTES.toNanos(1);
+        long laterDeadline = firstDeadline + TimeUnit.SECONDS.toNanos(1);
+        var cancellation = new RequestFailure(RequestFailure.Reason.CANCELLED, "test");
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 32, 0);
+             var scheduler = RtpTestMetrics.fifo(new Object(), config, cache)) {
+            scheduler.enqueue(input(1, false), new Listener());
+            var later = scheduler.enqueue(input(2, false, laterDeadline), new Listener());
+            var first = scheduler.enqueue(input(3, false, firstDeadline), new Listener());
+            var sameDeadline = scheduler.enqueue(input(4, false, firstDeadline), new Listener());
+            scheduler.prepareKvAndCheckTimeouts();
+            assertEquals(firstDeadline, scheduler.nextDeadline());
+
+            try (var transfer = scheduler.beginTransfer(first)) {
+                scheduler.abort(first, cancellation);
+                assertEquals(firstDeadline, scheduler.nextDeadline());
+                scheduler.abort(sameDeadline, cancellation);
+                assertTrue(scheduler.requests().contains(first));
+                assertEquals(laterDeadline, scheduler.nextDeadline());
+                scheduler.abort(first, cancellation);
+                scheduler.abort(later, cancellation);
+                assertEquals(Long.MAX_VALUE, scheduler.nextDeadline());
+            }
+        }
+    }
+
     @ParameterizedTest
     @CsvSource({"12,3,128,2", "2,5,128,1", "12,5,7,1"})
     void sampledRequestAndContextLimitsDoNotReplaceAcceptanceWithDeliveredTokens(
@@ -858,7 +885,11 @@ class RtpSchedulerTest {
     }
 
     private static EngineScheduler.Input input(long id, boolean retained) {
-        return new EngineScheduler.Input(Long.toString(id), id, 0, 5, 3, 0, System.nanoTime(), Long.MAX_VALUE, new PromptCacheKeys(2, Collections.nCopies(5, 0), List.of()), false, retained, 0, false);
+        return input(id, retained, Long.MAX_VALUE);
+    }
+
+    private static EngineScheduler.Input input(long id, boolean retained, long deadline) {
+        return new EngineScheduler.Input(Long.toString(id), id, 0, 5, 3, 0, System.nanoTime(), deadline, new PromptCacheKeys(2, Collections.nCopies(5, 0), List.of()), false, retained, 0, false);
     }
 
     private static String completeAndCheckTpot(RtpFifoScheduler scheduler, EngineScheduler.Work work, RtpConfig config,
