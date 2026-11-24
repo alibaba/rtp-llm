@@ -145,11 +145,22 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&        sample_out
 
     auto          draft_token_probs_d_t  = draft_token_probs;
     auto          target_token_probs_d_t = target_token_probs;
+#if defined(USE_PPU) && USE_PPU
+    // The rejection kernel writes every output slot: accepted drafts, the
+    // first rejected/bonus token, and -1 padding for the rest. The accepted
+    // length is written for every row as well, so zero-initialization is dead.
+    torch::Tensor output_token_ids_d =
+        torch::empty({(long)batch_size, (long)propose_step_ + 1},
+                     torch::TensorOptions().device(target_device).dtype(torch::kInt32).requires_grad(false));
+    torch::Tensor output_accepted_token_num_d = torch::empty(
+        {(long)batch_size}, torch::TensorOptions().device(target_device).dtype(torch::kInt32).requires_grad(false));
+#else
     torch::Tensor output_token_ids_d =
         torch::zeros({(long)batch_size, (long)propose_step_ + 1},
                      torch::TensorOptions().device(target_device).dtype(torch::kInt32).requires_grad(false));
     torch::Tensor output_accepted_token_num_d = torch::zeros(
         {(long)batch_size}, torch::TensorOptions().device(target_device).dtype(torch::kInt32).requires_grad(false));
+#endif
 
     RTP_LLM_CHECK_WITH_INFO(draft_probs_point_mass
                                 || (draft_token_probs_d_t.defined() && draft_token_probs_d_t.dim() == 3),
@@ -233,7 +244,11 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&        sample_out
 
     // use async sample here, we assume accept all tokens
     // so we need to reset -1 to 0 in output_token_ids_d
+#if defined(USE_PPU) && USE_PPU
+    output_token_ids_d.masked_fill_(output_token_ids_d == -1, 0);
+#else
     output_token_ids_d.index_put_({output_token_ids_d == -1}, 0);
+#endif
     sample_output.accept_tokens = output_token_ids_d;
     sample_output.accept_len    = output_accepted_token_num_d;
 }
