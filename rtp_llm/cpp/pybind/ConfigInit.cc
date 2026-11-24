@@ -1557,6 +1557,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("max_context_batch_size", &FIFOSchedulerConfig::max_context_batch_size)
         .def_readwrite("max_batch_tokens_size", &FIFOSchedulerConfig::max_batch_tokens_size)
+        .def_readwrite("max_batch_kv_len", &FIFOSchedulerConfig::max_batch_kv_len)
         .def_readwrite("pdfusion_scheduler_mode", &FIFOSchedulerConfig::pdfusion_scheduler_mode)
         .def_readwrite("decode_prefill_ratio", &FIFOSchedulerConfig::decode_prefill_ratio)
         .def_readwrite("cp_force_single_prefill", &FIFOSchedulerConfig::cp_force_single_prefill)
@@ -1575,15 +1576,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.max_inited_kv_cache_streams,
                                       self.max_batch_tokens_without_cache,
                                       self.prefill_chunk_size,
-                                      self.force_single_prefill);
+                                      self.force_single_prefill,
+                                      self.max_batch_kv_len);
             },
             [](py::tuple t) {
-                // Tuple ladder after merging main's chunked prefill (#1460):
-                // size 8 = main's prefill_chunk_size (index 7); size 9 appends
-                // force_single_prefill (index 8). Older mainline states keep
-                // decoding unchanged.
+                // Main's nine-slot state ends in force_single_prefill (bool);
+                // older KV-budget states end in max_batch_kv_len (int).
                 if (t.size() != 2 && t.size() != 4 && t.size() != 6 && t.size() != 7 && t.size() != 8
-                    && t.size() != 9)
+                    && t.size() != 9 && t.size() != 10)
                     throw std::runtime_error("Invalid state!");
                 FIFOSchedulerConfig c;
                 try {
@@ -1604,7 +1604,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.prefill_chunk_size = t[7].cast<int64_t>();
                     }
                     if (t.size() >= 9) {
-                        c.force_single_prefill = t[8].cast<bool>();
+                        if (t.size() == 10 || py::isinstance<py::bool_>(t[8])) {
+                            c.force_single_prefill = t[8].cast<bool>();
+                        } else {
+                            c.max_batch_kv_len = t[8].cast<int64_t>();
+                        }
+                    }
+                    if (t.size() == 10) {
+                        c.max_batch_kv_len = t[9].cast<int64_t>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FIFOSchedulerConfig unpickle error: ") + e.what());

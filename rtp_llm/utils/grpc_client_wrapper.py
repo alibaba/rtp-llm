@@ -15,7 +15,7 @@ from rtp_llm.utils.time_util import Timer
 
 
 class GrpcClientWrapper:
-    """Wrapper for direct gRPC calls to replace async_request_server"""
+    """Wrapper for direct gRPC calls"""
 
     def __init__(
         self,

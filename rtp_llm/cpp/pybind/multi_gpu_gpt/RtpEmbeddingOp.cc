@@ -79,7 +79,6 @@ void RtpEmbeddingOp::init(py::object model,
                                 py_model);
         params.nccl_comm_config      = engine_config.attr("nccl_comm_config").cast<NcclCommConfig>();
         params.server_config         = engine_config.attr("server_config");
-        py::object custom_module     = model.attr("custom_module");
         py::object py_render         = model.attr("custom_module").attr("renderer");
         py::object py_tokenizer      = model.attr("tokenizer");
         py::object py_handler        = model.attr("custom_module").attr("handler");
@@ -114,7 +113,6 @@ void RtpEmbeddingOp::init(py::object model,
                        py_tokenizer,
                        params.metrics_reporter,
                        mm_processor_);
-        startHttpServer(embedding_engine_, mm_processor_, params, custom_module);
         grpc_server_thread_ = std::thread(&RtpEmbeddingOp::initGrpcServer,
                                           this,
                                           embedding_rpc_port,
@@ -173,10 +171,6 @@ void RtpEmbeddingOp::stop() {
         embedding_rpc_service_->stop();
         embedding_rpc_service_.reset();
     }
-    if (http_server_) {
-        http_server_->stop();
-        http_server_.reset();
-    }
     if (!is_server_shutdown_ && embedding_engine_) {
         (void)embedding_engine_->stop();
         embedding_engine_.reset();
@@ -192,20 +186,6 @@ void RtpEmbeddingOp::stop() {
 
 void RtpEmbeddingOp::setServing(bool serving) {
     setKmonServiceServing(serving);
-}
-
-void RtpEmbeddingOp::startHttpServer(std::shared_ptr<EmbeddingEngine>     embedding_engine,
-                                     std::shared_ptr<MultimodalProcessor> mm_processor,
-                                     const EngineInitParams&              params,
-                                     py::object                           custom_module) {
-    http_server_.reset(new HttpApiServer(embedding_engine, mm_processor, params, custom_module));
-    int64_t     http_port = params.server_config.attr("http_port").cast<int64_t>();
-    std::string http_server_address("tcp:0.0.0.0:" + std::to_string(http_port));
-    if (http_server_->start(http_server_address)) {
-        RTP_LLM_LOG_INFO("embedding HTTP Server listening on %s", http_server_address.c_str());
-    } else {
-        throw std::runtime_error("embedding HTTP Server start fail.");
-    }
 }
 
 void RtpEmbeddingOp::startRpcServer(int64_t                              model_rpc_port,

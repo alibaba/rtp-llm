@@ -405,7 +405,7 @@ class MagaServerManager(object):
             expected_status_codes = set(expected_status_code)
         else:
             expected_status_codes = {expected_status_code}
-        port_offset = 5 if int(self._env_args.get("HTTP_API_TEST", 0)) else 0
+        port_offset = 0
         # for dp test, random select dp for visit
         if int(self._env_args.get("DP_SIZE", 1)) > 1:
             port_offset = (

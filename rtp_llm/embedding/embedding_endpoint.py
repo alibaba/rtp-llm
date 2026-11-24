@@ -75,6 +75,17 @@ class EmbeddingEndpoint(object):
             options=self.options, cleanup_interval=60
         )
 
+    async def health_check(self) -> bool:
+        """Liveness probe for the embedding backend over gRPC."""
+        try:
+            channel = await self._channel_pool.get(self.address)
+            stub = pb2_grpc.EmbeddingRpcServiceStub(channel)
+            await stub.health(pb2.EmbeddingHealthRequestPB(request_id=0), timeout=3)
+            return True
+        except Exception as e:
+            logging.warning("embedding backend health check failed: %s", e)
+            return False
+
     async def start_profile(self, req: Any) -> Dict[str, Any]:
         try:
             if isinstance(req, str):

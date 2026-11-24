@@ -52,7 +52,6 @@ from rtp_llm.utils.shutdown_config import (
     normalize_non_negative_seconds,
     pre_stop_drain_headroom_seconds,
 )
-from rtp_llm.utils.util import async_request_server
 from rtp_llm.utils.version_info import VersionInfo
 
 # make buffer larger to avoid throw exception "RemoteProtocolError Receive buffer too long"
@@ -683,8 +682,11 @@ class FrontendApp(object):
                 await check_all_health()
                 return "ok"
             if self.frontend_server.is_embedding:
-                return await async_request_server(
-                    "post", self.server_config.http_port, "health_check", {}
+                if await self.frontend_server._embedding_endpoint.health_check():
+                    return "ok"
+                return ORJSONResponse(
+                    status_code=400,
+                    content={"error": f" HTTP health check failed"},
                 )
             response = await self.grpc_client.post_request("health_check", {})
             if response.get("status", "") != "ok":
