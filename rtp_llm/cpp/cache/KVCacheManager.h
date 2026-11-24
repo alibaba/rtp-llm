@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionQuery.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
@@ -29,6 +30,8 @@ struct BlockTreeCacheLayout;
 using BlockTreeCacheLayoutConstPtr = std::shared_ptr<const BlockTreeCacheLayout>;
 class PrefillCacheHitMetricsReporter;
 class KVCacheAllocationWaitState;
+class P2PConnector;
+class Meta;
 class KVCacheEventReporter;
 class FrozenTaskRecovery;
 class TransferCompletionCleanup;
@@ -77,6 +80,7 @@ public:
     // miss a release racing with that attempt.
     uint64_t allocationGeneration() const;
     bool     waitForAllocationChange(uint64_t observed_generation, int64_t timeout_ms, int64_t minimum_wait_ms = 0);
+    void     cancelP2PLoad(const std::shared_ptr<AsyncContext>& context);
 
     int
     singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step) const;
@@ -140,15 +144,54 @@ public:
     void regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
     void stopMetricsReporter();
 
-    // CacheStore ownership (set by RemoteRpcServer, read during model forward)
+    // CacheStore ownership, read during model forward
     void                        setCacheStore(std::shared_ptr<CacheStore> cache_store);
     std::shared_ptr<CacheStore> getCacheStore() const;
+
+    // 异步连接器操作
+    // async load cache from connector to gpu, for all rank
+    std::shared_ptr<AsyncContext> asyncLoadCache(const KVCacheResource&       kv_cache_resource,
+                                                 const std::shared_ptr<Meta>& meta,
+                                                 size_t                       tree_covered_block_num);
 
     // for every single rank
     // Returns whether a trustworthy mem_response was formed, not whether the transfer
     // succeeded; the transfer outcome is reported through mem_response.code.
     bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
 
+    // Handle a decode-side StartLoad RPC directly through P2PConnector.
+    void handleRead(const P2PConnectorStartLoadRequestPB& request,
+                    P2PConnectorStartLoadResponsePB&      response,
+                    std::function<bool()>                 is_cancelled = nullptr);
+
+    bool               hasActiveConnectors() const;
+    bool               hasP2PConnector() const;
+    const std::string& p2pPipelineLayout() const {
+        return p2p_pipeline_layout_;
+    }
+    int64_t prefillRequestDeadline(const std::string& unique_key, int64_t timeout_ms, ErrorInfo* error);
+    void    cancelPrefillRequest(const std::string& unique_key, int64_t request_deadline_ms);
+    void    expirePrefillRequest(const std::string& unique_key, int64_t request_deadline_ms);
+    void    publishPrefillPayload(const std::string&                    unique_key,
+                                  int64_t                               deadline_ms,
+                                  PrefillResultStore::SideChannelData&& data);
+    void
+    failP2PPublication(int64_t request_id, const std::string& unique_key, int64_t deadline_ms, const ErrorInfo& error);
+    void finishP2PPublication(const torch::Tensor& final_prefill,
+                              const torch::Tensor& pd_separation,
+                              const torch::Tensor& request_ids,
+                              const torch::Tensor& deadlines,
+                              int64_t              clock_offset_ms);
+    bool writeP2PLayer(size_t                               model_id,
+                       int                                  local_layer_id,
+                       const std::string&                   tag,
+                       const std::vector<int64_t>&          cache_keys,
+                       const std::vector<int32_t>&          block_ids,
+                       int64_t                              request_id,
+                       const std::shared_ptr<torch::Event>& event,
+                       int64_t                              deadline_ms,
+                       int64_t                              deadline_clock_offset_ms,
+                       int                                  chunk_id = 0);
     // One observation of the original execution; does not release frozen references.
     TransferCompletionQueryResult queryTransferCompletion(const FrozenTask::ExecutionInfo& execution,
                                                           int                              timeout_ms) const;
@@ -181,6 +224,7 @@ private:
     void                              missingCleanupLoop();
     void                              stopMissingCleanup();
     void                              reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
+    bool                              initP2PConnector();
     std::shared_ptr<BroadcastManager> createMultiRankBlockTransferManager() const;
     TransferTaskRegistry::State       localTransferCompletion(const TransferExecutionTrace& trace_id) const;
     TransferTaskRegistry::ForgetResult localForgetTransferCompletion(const TransferExecutionTrace& trace_id) const;
@@ -197,6 +241,7 @@ private:
     const RuntimeConfig                runtime_config_;
     const SpeculativeExecutionConfig   sp_config_;
     const PDSepConfig                  pd_sep_config_;
+    const CacheStoreConfig             cache_store_config_;
     const bool                         use_device_malloc_block_pool_;
     const bool                         warmup_;
     const BlockTreeCacheLayoutConstPtr block_tree_layout_;
@@ -220,6 +265,11 @@ private:
     std::unique_ptr<FrozenTaskRecovery>         frozen_task_recovery_;
     std::shared_ptr<TransferCompletionCleanup>  completion_cleanup_;
     std::shared_ptr<KVCacheAllocationWaitState> allocation_wait_state_;
+
+    mutable std::mutex                 cache_status_snapshot_mutex_;
+    std::shared_ptr<const KVCacheInfo> cache_status_snapshot_;
+    std::shared_ptr<P2PConnector>      p2p_connector_;
+    std::string                        p2p_pipeline_layout_;
 
     mutable std::mutex          cache_store_mutex_;
     std::shared_ptr<CacheStore> cache_store_;

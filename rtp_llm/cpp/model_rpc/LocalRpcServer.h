@@ -3,8 +3,9 @@
 #include <atomic>
 #include <chrono>
 #include <deque>
-#include <iostream>
+#include <functional>
 #include <memory>
+#include <iostream>
 #include <mutex>
 #include <string>
 #include <unordered_set>
@@ -30,6 +31,8 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
+class PDCancelRegistry;
+
 class LocalRpcServer {
 public:
     LocalRpcServer() {}
@@ -108,6 +111,16 @@ public:
     typedef grpc::internal::WriterInterface<GenerateOutputsPB> WriterInterface;
 
 protected:
+    grpc::Status generateLocalBatch(grpc::ServerContext*        context,
+                                    const BatchGenerateInputPB* request,
+                                    BatchGenerateOutputsPB*     response,
+                                    PDCancelRegistry*           cancel_registry);
+
+    grpc::Status generateLocalStream(grpc::ServerContext*   context,
+                                     const GenerateInputPB* request,
+                                     WriterInterface*       writer,
+                                     PDCancelRegistry*      cancel_registry);
+
     virtual bool isCancelled(grpc::ServerContext* context) const {
         return context && context->IsCancelled();
     }
@@ -115,20 +128,23 @@ protected:
     grpc::Status serializeErrorMsg(const std::string& request_key, ErrorInfo error_info);
     grpc::Status
     serializeErrorMsg(const std::string& request_key, const RequestInfo& request_info, ErrorInfo error_info);
-    grpc::Status pollStreamOutput(grpc::ServerContext*             context,
-                                  const std::string&               request_key,
-                                  WriterInterface*                 writer,
-                                  std::shared_ptr<GenerateStream>& stream);
+    grpc::Status pollStreamOutput(grpc::ServerContext*                         context,
+                                  const std::string&                           request_key,
+                                  WriterInterface*                             writer,
+                                  std::shared_ptr<GenerateStream>&             stream,
+                                  const std::function<FirstError::Snapshot()>& check_remote = {});
+    // Preserve input order and settle each admitted stream independently.
+    grpc::Status pollBatchStreamOutput(grpc::ServerContext* context,
+                                       const std::vector<GenerateStreamPtr>& streams,
+                                       BatchGenerateOutputsPB* response,
+                                       const std::function<void(int64_t, const ErrorInfo&)>& fail_item);
+    virtual void updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_ptr<GenerateStream>& stream) {}
 
     // Shared helpers for single and batch paths
     ErrorInfo prepareInput(const GenerateInputPB&                                              input_pb,
                            std::shared_ptr<GenerateInput>&                                     output,
                            const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span = {},
                            grpc::ServerContext* server_context                                             = nullptr);
-    ErrorInfo
-                 updateMultimodalFeaturesWithTrace(std::shared_ptr<GenerateInput>&                                     input,
-                                                   const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span,
-                                                   grpc::ServerContext* server_context = nullptr);
     ErrorInfo    collectStreamOutput(grpc::ServerContext*                  context,
                                      std::shared_ptr<GenerateStream>&      stream,
                                      const std::shared_ptr<GenerateInput>& input,

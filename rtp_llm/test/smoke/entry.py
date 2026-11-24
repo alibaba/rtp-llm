@@ -37,10 +37,11 @@ def get_runner_type(
         return CaseRunner
     else:
         if "prefill" in env_args:
-            if "DECODE_ENTRANCE=1" in env_args["prefill"]:
-                return DpSeperationCaseRunner
-            else:
+            if str_to_bool(os.environ.get("SMOKE_START_FLEXLB_MASTER", "0")) or any(
+                role == "vit" or role.startswith("vit_") for role in env_args
+            ):
                 return PdSeperationCaseRunner
+            return DpSeperationCaseRunner
         elif "llm" in env_args and any(
             role == "vit" or role.startswith("vit_") for role in env_args
         ):

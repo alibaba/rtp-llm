@@ -1,5 +1,7 @@
 package org.flexlb.mock.engine.service;
 
+import org.flexlb.mock.protocol.grpc.MockEngineProtocol.RemoteStage;
+
 import org.flexlb.mock.protocol.grpc.MockDecodeServiceGrpc;
 import org.flexlb.mock.protocol.grpc.MockEngineProtocol.DecodeFrame;
 import org.flexlb.mock.protocol.grpc.MockEngineProtocol.DecodeLayout;
@@ -491,6 +493,26 @@ class PdGenerationTest {
             try (var fetch = new Call(p, request, true)) { assertEquals(8429, code(fetch.error(Status.Code.RESOURCE_EXHAUSTED))); }
             assertEquals(CancelStatusPB.CANCEL_STATUS_TOMBSTONED, cancel(p, 105));
             assertEquals(Status.Code.INVALID_ARGUMENT, assertThrows(StatusRuntimeException.class, () -> cancel(p, 0)).getStatus().getCode());
+        }
+    }
+
+    @Test void decodeCancelRoutesToOriginalPrefillAndPreservesFenceAndTerminalFeedback() throws Exception {
+        try (var p = node("prefill", 8, 1000); var d = node("decode", 8, 1)) {
+            var rpc = RpcServiceGrpc.newBlockingStub(d.channel).withDeadlineAfter(3, TimeUnit.SECONDS);
+            var unseen = CancelRequestPB.newBuilder().setRequestId(901).setPrefillAddress(p.node.rpcAddress()).build();
+            assertEquals(CancelStatusPB.CANCEL_STATUS_TOMBSTONED, rpc.cancel(unseen).getStatus());
+            assertEquals(8429, enqueue(p, 1000, input(d, 901, 5, 4, 3000, true)).getErrors(0).getErrorInfo().getErrorCode());
+            var request = input(d, 902, 5, 4, 5000, true);
+            assertEquals(1, enqueue(p, 1500, request).getSuccessesCount());
+            assertEquals(CancelStatusPB.CANCEL_STATUS_ACCEPTED,
+                rpc.cancel(unseen.toBuilder().setRequestId(902).build()).getStatus());
+            await(() -> p.status().getRunningTaskInfoCount() == 0 && d.status().getRunningTaskInfoCount() == 0);
+            assertTrue(p.status().getFinishedTaskListList().stream().anyMatch(task -> task.getRequestId() == 902
+                && task.getErrorInfo().getErrorCode() == 8429));
+            assertEquals(Status.Code.INVALID_ARGUMENT, assertThrows(StatusRuntimeException.class,
+                () -> rpc.cancel(unseen.toBuilder().clearPrefillAddress().build())).getStatus().getCode());
+            assertEquals(Status.Code.INVALID_ARGUMENT, assertThrows(StatusRuntimeException.class,
+                () -> rpc.cancel(unseen.toBuilder().setPrefillAddress(d.node.rpcAddress()).build())).getStatus().getCode());
         }
     }
 

@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import com.google.protobuf.InvalidProtocolBufferException;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
@@ -14,6 +15,8 @@ import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.constant.GrpcConstants;
+import org.flexlb.dao.BalanceContext;
+import org.flexlb.engine.grpc.EngineRpcService;
 
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
@@ -43,6 +46,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
     private final LongSupplier batchIds;
     private final RequestRegistry requests;
     private final DeliveryMetrics telemetry;
+    private final RouteDeliveryStrategy routeDelivery;
 
     public BatchDeliveryStrategy(
             Supplier<CapacityBoundary.Attempt<PreparedSubmission>> prepareSubmission,
@@ -53,6 +57,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         this.batchIds = Objects.requireNonNull(batchIds, "batchIds");
         this.requests = Objects.requireNonNull(requests, "requests");
         this.telemetry = Objects.requireNonNull(telemetry, "telemetry");
+        this.routeDelivery = new RouteDeliveryStrategy(requests, telemetry);
     }
 
     @Override
@@ -63,12 +68,18 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         if (candidates.isEmpty()) {
             throw new IllegalArgumentException("batch delivery requires at least one candidate");
         }
+        if (requiresClientRoute(candidates.get(0).ctx())) {
+            return routeDelivery.prepare(candidates.subList(0, 1), evaluator, OptionalLong.empty());
+        }
         return admit(candidates, evaluator, plannedPredictionMs);
     }
 
     @Override
     public double projectGroupDurationMs(
             List<ScheduledRequest> items, PrefillTimePredictor.Evaluator evaluator) {
+        if (items.stream().anyMatch(item -> requiresClientRoute(item.ctx()))) {
+            return routeDelivery.projectGroupDurationMs(items, evaluator);
+        }
         return PrefillPredictionBoundary.predictDecisionGroupMs(
                 evaluator,
                 PrefillBatchFeatures.from(
@@ -80,8 +91,11 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             PrefillTimePredictor.Evaluator evaluator) {
         PrefillTimePredictor.BatchPrediction prediction = evaluator.newBatchPrediction();
         return (added, items) -> {
-            return PrefillPredictionBoundary.requireValidDecisionGroupMs(
-                    prediction.append(added.seqLen(), added.hitCache()));
+            double predicted = prediction.append(added.seqLen(), added.hitCache());
+            if (items.stream().anyMatch(item -> requiresClientRoute(item.ctx()))) {
+                return routeDelivery.projectGroupDurationMs(items, evaluator);
+            }
+            return PrefillPredictionBoundary.requireValidDecisionGroupMs(predicted);
         };
     }
 
@@ -133,6 +147,35 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
     }
 
+    static boolean requiresClientRoute(BalanceContext context) {
+        if (context == null
+                || context.getGenerateInputPb() == null
+                || context.getGenerateInputPb().isEmpty()) {
+            return false;
+        }
+        // These requests retain queue admission but are delivered as client routes.
+        var request = context.getRequest();
+        if (request.getMaxNewTokens() <= 1 || request.getNumBeams() > 1) {
+            return true;
+        }
+        try {
+            var input = EngineRpcService.GenerateInputPB.parseFrom(context.getGenerateInputPb());
+            var generation = input.getGenerateConfig();
+            return input.getMultimodalInputsCount() > 0
+                    || input.hasV41Inputs()
+                    || input.hasMultimodalTokenLayout()
+                    || !generation.getCanUsePdSeparation()
+                    || generation.getMaxNewTokens() <= 1
+                    || generation.getReturnPromptLogits()
+                    || generation.getNumBeams() > 1
+                    || generation.getVariableNumBeamsCount() > 0
+                    || generation.getNumReturnSequences() > 1;
+        } catch (InvalidProtocolBufferException ignored) {
+            // The batch dispatcher reports a malformed serialized request.
+            return false;
+        }
+    }
+
     private BatchTransaction admit(
             List<ScheduledRequest> candidates,
             PrefillTimePredictor.Evaluator evaluator,
@@ -153,6 +196,9 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         try {
             for (int index = 0; index < candidates.size(); index++) {
                 ScheduledRequest item = candidates.get(index);
+                if (requiresClientRoute(item.ctx())) {
+                    break;
+                }
                 long itemBytes = item.batchPayloadSizeUpperBound();
                 if (!admitted.isEmpty()
                         && itemBytes > GrpcConstants.MAX_MESSAGE_SIZE - payloadBytes) {

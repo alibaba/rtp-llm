@@ -70,16 +70,14 @@ private:
                         bool                                                 no_transfer      = false,
                         P2PBroadcastClient::RankRoutes                       rank_routes      = {},
                         std::vector<int>                                     active_route_ids = {},
-                        uint64_t                                             plan_digest      = 0);
-
-    /// @brief 校验对端上报的 CP 片数与本端配置推导出的值一致（设计文档 §3.2.4）。
-    ///
-    /// 「对端 layout 由本端推导」是跨端协议零改动的前提，这条断言是它唯一的保护：
-    /// 把配置漂移 / 版本不一致从传输期的疑难杂症变成首个请求上的确定性报错。
-    ErrorInfo checkPeerCpLayout(int prefill_tp_size, int prefill_cp_size) const;
+                        uint64_t                                             plan_digest      = 0,
+                        bool                                                 pipeline         = false);
 
     /// @brief 按两侧布局和有界副本偏移缓存计划，避免跨 Decode DP 固定选中同一源。
-    std::shared_ptr<const PlanResult> planFor(int prefill_tp_size, int prefill_cp_size, const std::string& unique_key);
+    std::shared_ptr<const PlanResult> planFor(int                prefill_tp_size,
+                                              int                prefill_cp_size,
+                                              const std::string& unique_key,
+                                              const std::string& prefill_pipeline_layout = {});
 
     /// @brief 把 plan 投影成「每个 decode worker 的 route 列表 + 具体 block」。
     ///
@@ -96,7 +94,7 @@ private:
     const P2PConnectorSchedulerConfig                    config_;
     // 每种布局最多 prefill_tp_size 个偏移，不能按 unique_key 无界缓存。
     mutable std::mutex                                                       plan_cache_mutex_;
-    std::map<std::tuple<int, int, size_t>, std::shared_ptr<const PlanResult>> plan_cache_;
+    std::map<std::tuple<int, int, size_t, std::string>, std::shared_ptr<const PlanResult>> plan_cache_;
     kmonitor::MetricsReporterPtr                         metrics_reporter_;
     std::shared_ptr<P2PBroadcastClient>                  tp_broadcast_client_;
     std::shared_ptr<DecodeLoadHelper>                   server_caller_;

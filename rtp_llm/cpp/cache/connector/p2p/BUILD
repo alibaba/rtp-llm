@@ -60,6 +60,10 @@ cc_library(
     hdrs = [
         "P2PConnectorMetrics.h",
     ],
+    visibility = [
+        "//rtp_llm/cpp/engine_base/stream:__pkg__",
+        "//rtp_llm/cpp/model_rpc:__pkg__",
+    ],
     deps = [
         "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/utils:time_util",
@@ -98,6 +102,7 @@ cc_library(
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:grpc_address_util",
         "//rtp_llm/cpp/utils:rpc_completion_queue",
         "//rtp_llm/cpp/utils:time_util",
         "@havenask//aios/autil:thread",
@@ -150,6 +155,7 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:rpc_completion_queue",
         "//rtp_llm/cpp/utils:time_util",
+        "@havenask//aios/autil:scope",
         "@havenask//aios/autil:thread",
         "@havenask//aios/autil:net",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:backend_factory",

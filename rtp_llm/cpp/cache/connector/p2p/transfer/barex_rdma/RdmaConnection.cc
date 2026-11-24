@@ -116,7 +116,8 @@ void RdmaConnection::onConnectFailed(const std::shared_ptr<::accl::barex::XConne
 void RdmaConnection::read(
     const std::vector<std::pair<torch::Tensor, std::shared_ptr<RemoteBuffer>>>& local_remote_buffers,
     RdmaReadCallback callback,
-    uint64_t deadline_ms) {
+    uint64_t deadline_ms,
+    std::function<bool()> is_cancelled) {
     auto collector           = std::make_shared<RdmaMetricsCollector>();
     collector->start_time_us = currentTimeUs();
     collector->block_count   = static_cast<int64_t>(local_remote_buffers.size());
@@ -136,7 +137,7 @@ void RdmaConnection::read(
         callback(ec, message);
     };
 
-    enqueuePendingRequest({local_remote_buffers, callback2, collector, deadline_ms});
+    enqueuePendingRequest({local_remote_buffers, callback2, collector, deadline_ms, std::move(is_cancelled)});
 
     RTP_LLM_LOG_DEBUG("rdma connection %s:%u read: enqueued pending request, "
                       "deadline_ms=%lu, block_count=%zu, state=%d",
@@ -204,7 +205,7 @@ std::vector<RdmaConnection::PendingReadRequest> RdmaConnection::drainPendingRequ
 void RdmaConnection::dispatchRequests(std::vector<PendingReadRequest>&             requests,
                                       const std::shared_ptr<::accl::barex::XConnection>& conn) {
     for (auto& req : requests) {
-        sendReadRequest(req.local_remote_buffers, req.collector, req.callback, req.deadline_ms, conn);
+        sendReadRequest(req.local_remote_buffers, req.collector, req.callback, req.deadline_ms, conn, req.is_cancelled);
     }
 }
 
@@ -360,7 +361,8 @@ void RdmaConnection::sendReadRequest(
     const std::shared_ptr<RdmaMetricsCollector>& collector,
     RdmaReadCallback callback,
     uint64_t deadline_ms,
-    const std::shared_ptr<::accl::barex::XConnection>& conn) {
+    const std::shared_ptr<::accl::barex::XConnection>& conn,
+    const std::function<bool()>& is_cancelled) {
     collector->pending_done_time_us = currentTimeUs();
 
     bool admitted = false;
@@ -427,6 +429,10 @@ void RdmaConnection::sendReadRequest(
     }
     // The paired Barex backend returns synchronous errors before accepting
     // work. Accepted batches report their result only through the drain callback.
+    if (is_cancelled && is_cancelled()) {
+        callback(TransferErrorCode::CANCELLED, readContext() + "RDMA read cancelled before submission");
+        return;
+    }
     if (deadline_ms > 0 && static_cast<uint64_t>(currentTimeMs()) >= deadline_ms) {
         callback(TransferErrorCode::TIMEOUT, readContext() + "RDMA read deadline expired before submission");
         return;

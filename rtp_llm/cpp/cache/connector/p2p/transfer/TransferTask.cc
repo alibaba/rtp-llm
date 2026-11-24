@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferTask.h"
 
+#include <algorithm>
 #include <exception>
 #include <limits>
 #include <mutex>
@@ -45,6 +46,7 @@ void TransferTask::cancel() {
         if (done_) {
             return;
         }
+        cancel_requested_ = true;
         cancel_callbacks.swap(cancel_callbacks_);
         if (in_flight_ == 0) {
             // PENDING: fast fail，立即终止
@@ -57,7 +59,6 @@ void TransferTask::cancel() {
             done_callback       = std::move(done_callback_);
         } else {
             // TRANSFERRING: 仅记录取消意图，等待 notifyDone() 真正结束
-            cancel_requested_ = true;
             if (error_code_ == TransferErrorCode::OK) {
                 error_code_ = TransferErrorCode::CANCELLED;
                 error_msg_  = "TransferTask cancelled during transfer";
@@ -87,11 +88,16 @@ void TransferTask::removeCancelCallback(size_t id) {
 
 bool TransferTask::startTransfer() {
     std::unique_lock<std::shared_mutex> lock(mutex_);
-    if (done_ || cancel_requested_) {
+    if (done_ || cancel_requested_ || error_code_ != TransferErrorCode::OK) {
         return false;
     }
     ++in_flight_;
     return true;
+}
+
+bool TransferTask::isCancelled() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    return cancel_requested_;
 }
 
 void TransferTask::forceCancel() {
@@ -101,6 +107,7 @@ void TransferTask::forceCancel() {
         if (done_) {
             return;
         }
+        cancel_requested_   = true;
         done_               = true;
         if (error_code_ == TransferErrorCode::OK) {
             error_code_ = TransferErrorCode::CANCELLED;
@@ -150,12 +157,16 @@ void TransferTask::completeTransfer(TransferErrorCode           error_code,
                                     const std::string&          error_msg,
                                     const std::vector<int64_t>* batch_keys,
                                     bool                        started) {
+    // The transport calls here after the write (and any staging copy) completes.
+    // Concurrent callbacks can acquire mutex_ in a different order.
+    const auto callback_time_us = currentTimeUs();
     std::function<void()> done_callback;
     {
         std::unique_lock<std::shared_mutex> lock(mutex_);
         if (done_) {
             return;
         }
+        last_physical_callback_time_us_ = std::max(last_physical_callback_time_us_, callback_time_us);
         if (started && in_flight_ > 0) {
             --in_flight_;
         }

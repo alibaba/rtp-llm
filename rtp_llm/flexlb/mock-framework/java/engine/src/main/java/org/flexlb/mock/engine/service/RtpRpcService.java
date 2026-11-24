@@ -40,6 +40,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
     private final DecodeRpcServer decode;
 
     private final boolean groups;
+    private final DecodeCancelForwarder cancelForwarder = new DecodeCancelForwarder();
 
     private final AtomicLong inflightRequests = new AtomicLong();
     private final AtomicLong statusVersion = new AtomicLong();
@@ -63,6 +64,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
 
     public void close() {
         closed = true;
+        cancelForwarder.close();
         RuntimeException failure = null;
         for (AutoCloseable component : new AutoCloseable[]{prefill, decode}) {
             if (component == null) continue;
@@ -126,13 +128,19 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
     }
 
     @Override public void cancel(CancelRequestPB request, StreamObserver<CancelResponsePB> response) {
-        if (prefill == null) { super.cancel(request, response); return; }
+        if (closed) { response.onError(Status.UNAVAILABLE.withDescription("Engine closed").asRuntimeException()); return; }
+        if (prefill == null) { cancelForwarder.cancel(request, response); return; }
         reply(response, () -> CancelResponsePB.newBuilder().setStatus(prefill.cancel(request.getRequestId())).build());
     }
 
     @Override public void generateStreamCall(GenerateInputPB request, StreamObserver<GenerateOutputsPB> observer) {
         if (prefill == null) { super.generateStreamCall(request, observer); return; }
         prefill.generate(request, observer);
+    }
+
+    // A zero TP size identifies the mock's Prefill-entry/FetchResponse protocol.
+    @Override public void getPeerInfo(GetPeerInfoRequestPB request, StreamObserver<GetPeerInfoResponsePB> response) {
+        reply(response, GetPeerInfoResponsePB::getDefaultInstance);
     }
 
     @Override public void checkHealth(EmptyPB request, StreamObserver<CheckHealthResponsePB> response) {

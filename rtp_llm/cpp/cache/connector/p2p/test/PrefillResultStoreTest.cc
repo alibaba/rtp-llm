@@ -287,4 +287,18 @@ TEST_F(PrefillResultStoreTest, SerializationFailureClearsPartialPayload) {
     EXPECT_FALSE(response.has_payload());
 }
 
+TEST_F(PrefillResultStoreTest, SideChannelCarriesPrefillFrontendMetrics) {
+    PrefillResultStore::SideChannelData data;
+    data.frontend_context_token_num                  = 3;
+    data.frontend_context_token_num_with_cache       = 5;
+    data.frontend_context_execute_time_us            = 7;
+    data.frontend_context_execute_time_with_cache_us = 11;
+    P2PConnectorStartLoadResponsePB response;
+    ASSERT_TRUE(PrefillResultStore::fillStartLoadResponsePayload(data, response).ok());
+    EXPECT_EQ(response.payload().frontend_context_token_num(), 3);
+    EXPECT_EQ(response.payload().frontend_context_token_num_with_cache(), 5);
+    EXPECT_EQ(response.payload().frontend_context_execute_time_us(), 7);
+    EXPECT_EQ(response.payload().frontend_context_execute_time_with_cache_us(), 11);
+}
+
 }  // namespace rtp_llm

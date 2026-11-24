@@ -85,11 +85,11 @@ public final class LLMMockEngine implements AutoCloseable {
         result.put("rpc", rpcAddress()); result.put("control", address.http(api.port()));
         result.put("metrics", metrics.prometheus() ? address.http(api.port()) + "/metrics" : "");
         result.put("metrics_backend", metrics.prometheus() ? "prometheus" : "kmonitor");
-        var supported = new ArrayList<>(List.of("ExecuteFunction", "CheckHealth", "GetWorkerStatus", "GetCacheStatus"));
+        var supported = new ArrayList<>(List.of("ExecuteFunction", "CheckHealth", "GetWorkerStatus", "GetCacheStatus", "GetPeerInfo"));
         if (prefill) {
             supported.addAll(List.of("GenerateStreamCall", "FetchResponse", "Cancel"));
             if (config.groupScheduling()) supported.addAll(List.of("EnqueueBatch", "EnqueueGroup"));
-        } else supported.addAll(List.of("GetDecodeLayout", "RemoteGenerate"));
+        } else supported.addAll(List.of("GetDecodeLayout", "RemoteGenerate", "Cancel"));
         result.put("supported_rpc", List.copyOf(supported));
         var kvcm = cacheManager.kvcmStatus();
         if (!kvcm.isEmpty()) result.put("kvcm", kvcm);

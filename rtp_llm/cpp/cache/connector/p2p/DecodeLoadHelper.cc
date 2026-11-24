@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/DecodeLoadHelper.h"
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/GrpcAddressUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/RpcCompletionQueue.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -17,22 +18,6 @@
 namespace rtp_llm {
 
 namespace {
-
-std::string formatGrpcHostPort(const std::string& host, uint32_t port) {
-    if (host.empty() || port == 0 || port > 65535) {
-        return "";
-    }
-    if (host.front() == '[' || host.back() == ']') {
-        if (host.front() == '[' && host.back() == ']') {
-            return host + ":" + std::to_string(port);
-        }
-        return "";
-    }
-    if (host.find(':') != std::string::npos) {
-        return "[" + host + "]:" + std::to_string(port);
-    }
-    return host + ":" + std::to_string(port);
-}
 
 struct WorkerAddrParts {
     std::string host;
@@ -131,16 +116,17 @@ DecodeLoadHelper::DecodeLoadHelper(const std::vector<std::string>& worker_addrs,
     }
 }
 
-std::shared_ptr<DecodeLoadHelper::Result> DecodeLoadHelper::load(int64_t            request_id,
-                                                                   const std::string& prefill_ip,
-                                                                   uint32_t           prefill_port,
-                                                                   const std::string& unique_key,
-                                                                   int64_t            request_deadline_ms,
-                                                                   int64_t            transfer_deadline_ms,
-                                 int64_t            load_timeout_ms,
-                                                                   bool               no_transfer,
-                                                                   uint64_t           plan_digest,
-                                                                   const std::vector<int>& active_route_ids) {
+std::shared_ptr<DecodeLoadHelper::Result> DecodeLoadHelper::load(int64_t                 request_id,
+                                                                 const std::string&      prefill_ip,
+                                                                 uint32_t                prefill_port,
+                                                                 const std::string&      unique_key,
+                                                                 int64_t                 request_deadline_ms,
+                                                                 int64_t                 transfer_deadline_ms,
+                                                                 int64_t                 load_timeout_ms,
+                                                                 bool                    no_transfer,
+                                                                 uint64_t                plan_digest,
+                                                                 const std::vector<int>& active_route_ids,
+                                                                 const std::string&      decode_pipeline_layout) {
     auto result        = std::make_shared<Result>();
     result->request_id = request_id;
     result->unique_key = unique_key;
@@ -204,7 +190,8 @@ std::shared_ptr<DecodeLoadHelper::Result> DecodeLoadHelper::load(int64_t        
                                request_id,
                                no_transfer,
                                plan_digest,
-                               active_route_ids)) {
+                               active_route_ids,
+                               decode_pipeline_layout)) {
         if (result->status.ok())
             result->status = grpcStatusFromErrorInfo(
                 ErrorInfo(ErrorCode::RPC_FINISH_FAILED,
@@ -232,17 +219,19 @@ std::shared_ptr<DecodeLoadHelper::Result> DecodeLoadHelper::load(int64_t        
 }
 
 bool DecodeLoadHelper::buildAndStartAsyncRpc(const std::shared_ptr<Result>& result,
-                                              const std::string&             unique_key,
-                                              int64_t                        request_deadline_ms,
-                                              int64_t                        transfer_deadline_ms,
-                               int64_t                        load_timeout_ms,
-                                              int64_t                        request_id,
-                                              bool                           no_transfer,
-                                              uint64_t                       plan_digest,
-                                              const std::vector<int>&        active_route_ids) {
+                                             const std::string&             unique_key,
+                                             int64_t                        request_deadline_ms,
+                                             int64_t                        transfer_deadline_ms,
+                                             int64_t                        load_timeout_ms,
+                                             int64_t                        request_id,
+                                             bool                           no_transfer,
+                                             uint64_t                       plan_digest,
+                                             const std::vector<int>&        active_route_ids,
+                                             const std::string&             decode_pipeline_layout) {
     result->request.set_unique_key(unique_key);
     result->request.set_no_transfer(no_transfer);
     result->request.set_plan_digest(plan_digest);
+    result->request.set_decode_pipeline_layout(decode_pipeline_layout);
     for (int route_id : active_route_ids) {
         result->request.add_active_route_ids(route_id);
     }
@@ -333,6 +322,11 @@ void DecodeLoadHelper::Result::parseSideChannelPayload(P2PSideChannelPayload& si
         side_channel_payload.has_first_token =
             payload.has_first_generate_token() || payload.first_generate_token_id() != 0;
         side_channel_payload.first_token_id   = payload.first_generate_token_id();
+        side_channel_payload.frontend_context_token_num            = payload.frontend_context_token_num();
+        side_channel_payload.frontend_context_token_num_with_cache = payload.frontend_context_token_num_with_cache();
+        side_channel_payload.frontend_context_execute_time_us      = payload.frontend_context_execute_time_us();
+        side_channel_payload.frontend_context_execute_time_with_cache_us =
+            payload.frontend_context_execute_time_with_cache_us();
         side_channel_payload.generation_prefill_cuda_graph_status = payload.generation_prefill_cuda_graph_status();
         side_channel_payload.prefill_use_independent_block_pools  = payload.prefill_use_independent_block_pools();
         side_channel_payload.total_reuse_len  = payload.total_reuse_len();
@@ -399,6 +393,7 @@ void DecodeLoadHelper::Result::parseSideChannelPayload(P2PSideChannelPayload& si
 }
 
 void DecodeLoadHelper::Result::complete(bool ok) {
+    const auto receive_time = currentTimeUs();
     if (done()) {
         return;
     }
@@ -450,6 +445,11 @@ void DecodeLoadHelper::Result::complete(bool ok) {
                     "observer_role=DECODE peer="
                     + server_addr + " request_id=" + std::to_string(request_id) + " key=" + unique_key + "]";
             } else {
+                first_token_timing_.received_us = receive_time;
+                const auto produced_us = response.payload().first_token_time_us();
+                if (produced_us > 0) {
+                    first_token_timing_.produced_us = produced_us;
+                }
                 side_channel_payload = std::move(parsed_payload);
                 success_             = true;
                 error_code           = ErrorCode::NONE_ERROR;

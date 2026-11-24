@@ -80,6 +80,13 @@ VARIANTS = {
         "model_type": "qwen35_moe",
         "family": "PP_QWEN35_MOE",
     },
+    "pp1_pp2_mtp3": {
+        "prefill_pp": 1,
+        "decode_pp": 2,
+        "sp": 3,
+        "model_type": "qwen35_moe",
+        "family": "PP_QWEN35_MOE",
+    },
 }
 
 

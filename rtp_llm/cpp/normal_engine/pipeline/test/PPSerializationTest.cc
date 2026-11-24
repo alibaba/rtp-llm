@@ -281,6 +281,7 @@ TEST_F(PPSerializationTest, PlanPreservesEveryModelInputTensorAndScalar) {
         {"lm_output_lengths", &GptModelInputs::lm_output_lengths},
         {"prefix_lengths", &GptModelInputs::prefix_lengths},
         {"cache_store_publish_start_tokens", &GptModelInputs::cache_store_publish_start_tokens},
+        {"p2p_final_prefill", &GptModelInputs::p2p_final_prefill},
         {"sequence_lengths_plus_1", &GptModelInputs::sequence_lengths_plus_1},
         {"combo_tokens_type_ids", &GptModelInputs::combo_tokens_type_ids},
         {"combo_position_ids", &GptModelInputs::combo_position_ids},
@@ -295,6 +296,7 @@ TEST_F(PPSerializationTest, PlanPreservesEveryModelInputTensorAndScalar) {
         {"input_embeddings_locs", &GptModelInputs::input_embeddings_locs},
         {"request_id", &GptModelInputs::request_id},
         {"request_pd_separation", &GptModelInputs::request_pd_separation},
+        {"request_deadline_ms", &GptModelInputs::request_deadline_ms},
         {"cache_keys", &GptModelInputs::cache_keys},
     };
     PPExecutionPlan plan;
@@ -316,6 +318,7 @@ TEST_F(PPSerializationTest, PlanPreservesEveryModelInputTensorAndScalar) {
     plan.model_input.multimodal_features = std::vector<torch::Tensor>{torch::tensor({3.5f})};
     plan.model_input.mm_extra_input      = std::vector<torch::Tensor>{torch::tensor({4.5f})};
     plan.model_input.input_embeddings    = std::vector<torch::Tensor>{torch::tensor({5.5f})};
+    plan.model_input.p2p_deadline_clock_offset_ms = -1234;
     plan.is_decode                      = true;
     plan.draft_next_position_ids        = torch::tensor({71, 72}, torch::kInt32);
     plan.finished_request_ids           = {81, 82};
@@ -331,6 +334,7 @@ TEST_F(PPSerializationTest, PlanPreservesEveryModelInputTensorAndScalar) {
         EXPECT_TRUE(torch::equal(actual, torch::tensor({value, value + 100}, torch::kInt64)));
     }
     EXPECT_EQ(received.model_input.kv_cache_group_tags, (std::vector<std::string>{"linear", "full"}));
+    EXPECT_EQ(received.model_input.p2p_deadline_clock_offset_ms, -1234);
     EXPECT_EQ(received.model_input.kv_block_stride_bytes, 1024u);
     EXPECT_EQ(received.model_input.kv_scale_stride_bytes, 2048u);
     EXPECT_EQ(received.model_input.seq_size_per_block, 128u);
@@ -360,7 +364,6 @@ TEST_F(PPSerializationTest, PlanPreservesEveryModelInputTensorAndScalar) {
 TEST_F(PPSerializationTest, PlanExecutionFlagsAreIndependent) {
     const std::vector<std::pair<const char*, bool GptModelInputs::*>> flags = {
         {"pd_separation", &GptModelInputs::pd_separation},
-        {"decode_entrance", &GptModelInputs::decode_entrance},
         {"use_opaque_kv_cache_store", &GptModelInputs::use_opaque_kv_cache_store},
         {"need_all_logits", &GptModelInputs::need_all_logits},
         {"need_all_hidden_states", &GptModelInputs::need_all_hidden_states},

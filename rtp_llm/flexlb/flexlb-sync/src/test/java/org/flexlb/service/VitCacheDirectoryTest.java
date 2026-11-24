@@ -66,8 +66,8 @@ class VitCacheDirectoryTest {
     void setUp() {
         a = worker("10.0.0.1", "one");
         b = worker("10.0.0.2", "two");
-        live.put(a.getIpPort(), a);
-        live.put(b.getIpPort(), b);
+        live.put(a.getLogicalIpPort(), a);
+        live.put(b.getLogicalIpPort(), b);
         var workers = mock(WorkerDirectory.class);
         when(workers.statusSnapshot(RoleType.VIT)).thenAnswer(call -> Map.copyOf(live));
         when(workers.endpointAddressSnapshot(RoleType.VIT))
@@ -139,7 +139,7 @@ class VitCacheDirectoryTest {
         assertEquals(
                 pendingWorker.getIp(),
                 selector.select(context("cold"), pendingWorker.getGroup()).getServerIp());
-        live.remove(other.getIpPort());
+        live.remove(other.getLogicalIpPort());
         assertEquals(pendingWorker.getIp(), selector.select(context("cold"), null).getServerIp());
     }
 
@@ -315,9 +315,9 @@ class VitCacheDirectoryTest {
     void cacheAffinityNeverOverridesGroupOrHealth() {
         snapshot(a, "a1", "image");
         assertEquals(b.getIp(), selector.select(context("image"), "two").getServerIp());
-        live.remove(a.getIpPort());
+        live.remove(a.getLogicalIpPort());
         assertEquals(b.getIp(), selector.select(context("image"), null).getServerIp());
-        live.remove(b.getIpPort());
+        live.remove(b.getLogicalIpPort());
         assertFalse(selector.select(context("image"), null).isSuccess());
     }
 
@@ -347,10 +347,36 @@ class VitCacheDirectoryTest {
     }
 
     @Test
+    void cacheAffinityPinsTheEngineThatOwnsTheImageBehindASharedAddress() {
+        live.clear();
+        WorkerStatus first =
+                WorkerStatus.createDiscovered(
+                        RoleType.VIT, "one", "10.0.0.1", 8000, 8001, "", null, 0, 2);
+        WorkerStatus second =
+                WorkerStatus.createDiscovered(
+                        RoleType.VIT, "one", "10.0.0.1", 8000, 8002, "", null, 1, 2);
+        live.put(first.getLogicalIpPort(), first);
+        live.put(second.getLogicalIpPort(), second);
+        snapshot(first, "first");
+        snapshot(second, "second", "image");
+
+        var ctx = context("image");
+        var selected = selector.select(ctx, "one");
+        assertEquals(1, selected.getEngineIndex());
+        ctx.getRequest().setSelectedVit(selected);
+        try (var pinned = selector.selectPinned(ctx, "one")) {
+            org.junit.jupiter.api.Assertions.assertNotNull(pinned);
+            assertEquals(second.getGenerationId(), pinned.serverStatus().getWorkerGeneration());
+        }
+        live.remove(second.getLogicalIpPort());
+        assertFalse(selector.validate(ctx, "one").isSuccess());
+    }
+
+    @Test
     void rejectsStaleSnapshotAndInvalidSelectedWorker() {
         snapshot(a, "a1", "image");
         WorkerStatus replacement = worker(a.getIp(), "one");
-        live.put(a.getIpPort(), replacement);
+        live.put(a.getLogicalIpPort(), replacement);
         snapshot(a, "old", "image");
         snapshot(b, "b1", "image");
         assertEquals(b.getIp(), selector.select(context("image"), null).getServerIp());
@@ -359,7 +385,7 @@ class VitCacheDirectoryTest {
         ctx.getRequest().setSelectedVit(selected);
         assertTrue(selector.validate(ctx, "two").isSuccess());
         assertFalse(selector.validate(ctx, "one").isSuccess());
-        live.remove(b.getIpPort());
+        live.remove(b.getLogicalIpPort());
         assertFalse(selector.validate(ctx, null).isSuccess());
     }
 
@@ -407,7 +433,7 @@ class VitCacheDirectoryTest {
             org.junit.jupiter.api.Assertions.assertNotNull(pinned);
             assertEquals(a.getGenerationId(), pinned.serverStatus().getWorkerGeneration());
         }
-        live.put(a.getIpPort(), worker(a.getIp(), "one"));
+        live.put(a.getLogicalIpPort(), worker(a.getIp(), "one"));
         assertFalse(selector.validate(ctx, "one").isSuccess());
         org.junit.jupiter.api.Assertions.assertNull(selector.selectPinned(ctx, "one"));
     }

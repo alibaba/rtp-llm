@@ -1,5 +1,7 @@
 #pragma once
 
+#include <limits>
+
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -23,6 +25,13 @@ public:
     std::atomic<bool>    decode_schedule_success{true};
     int64_t              decode_schedule_start_time_us = 0;
     std::atomic<int64_t> decode_schedule_server_call_cost_time_us{-1};
+    // Cross-machine wall-clock deltas can be negative, including -1 us.
+    static constexpr int64_t kMissingHandoffDelta = std::numeric_limits<int64_t>::min();
+    std::atomic<int64_t> prefill_first_token_to_decode_receive_us{kMissingHandoffDelta};
+    std::atomic<int64_t> prefill_first_token_to_decode_kv_complete_us{kMissingHandoffDelta};
+    int64_t decode_handoff_ready_to_second_token_output_us = kMissingHandoffDelta;
+    int64_t decode_handoff_ready_to_running_us = kMissingHandoffDelta;
+    int64_t decode_first_to_second_token_output_us = kMissingHandoffDelta;
     std::atomic<int64_t> decode_schedule_tp_sync_cost_time_us{-1};
     std::atomic<int64_t> decode_schedule_total_cost_time_us{-1};
     std::atomic<int64_t> decode_schedule_plan_cost_time_us{-1};
@@ -104,6 +113,11 @@ public:
 
 private:
     kmonitor::MutableMetric* decode_schedule_server_call_cost_time_us_metric    = nullptr;
+    kmonitor::MutableMetric* prefill_first_token_to_decode_receive_us_metric = nullptr;
+    kmonitor::MutableMetric* prefill_first_token_to_decode_kv_complete_us_metric = nullptr;
+    kmonitor::MutableMetric* decode_handoff_ready_to_second_token_output_us_metric = nullptr;
+    kmonitor::MutableMetric* decode_handoff_ready_to_running_us_metric = nullptr;
+    kmonitor::MutableMetric* decode_first_to_second_token_output_us_metric = nullptr;
     kmonitor::MutableMetric* decode_schedule_tp_sync_cost_time_us_metric        = nullptr;
     kmonitor::MutableMetric* decode_schedule_plan_cost_time_us_metric           = nullptr;
     kmonitor::MutableMetric* decode_schedule_kickoff_queue_time_us_metric       = nullptr;

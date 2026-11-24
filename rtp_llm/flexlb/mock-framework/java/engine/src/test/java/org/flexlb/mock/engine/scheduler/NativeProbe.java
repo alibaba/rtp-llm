@@ -1,5 +1,7 @@
 package org.flexlb.mock.engine.scheduler;
 
+import org.flexlb.mock.protocol.grpc.MockEngineProtocol.RemoteStage;
+
 import org.flexlb.mock.protocol.grpc.MockDecodeServiceGrpc;
 import org.flexlb.mock.protocol.grpc.MockEngineProtocol.DecodeFrame;
 import com.fasterxml.jackson.databind.ObjectMapper;

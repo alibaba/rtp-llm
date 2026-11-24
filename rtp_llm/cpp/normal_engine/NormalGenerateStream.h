@@ -27,6 +27,7 @@ public:
     bool                             beginFrontendMetricsStep() override;
     void                             endFrontendMetricsStep() override;
     bool                             publishFrontendMetrics(const FrontendMetricUpdate& update) override;
+    bool                             hasPendingFrontendMetrics() const override;
     bool                             hasOutput() override;
     ErrorResult<GenerateOutputs>     nextOutput(int64_t wait_timeout_ms = 0) override;
     void                             updateOutput(const StreamUpdateInfo& update_info) override;
@@ -41,6 +42,7 @@ private:
     GenerateOutputs        prepareGenerateOutput(const StreamUpdateInfo& update_info);
     void                   enqueueGenerateOutput(GenerateOutputs&& generate_results);
     bool                   consumerReadyWithoutLock() const override;
+    torch::Tensor   selectLogits(const torch::Tensor& logits) const;
     void                   fillFrontendTimingCounters(GenerateOutputs& generate_results);
     void                   fillFrontendMetricCounters(GenerateOutputs& generate_results);
     GenerateOutputs        prepareFrontendMetricOutput();
@@ -59,6 +61,7 @@ private:
     std::vector<std::pair<uint64_t, double>> frontend_sp_tpot_samples_;
     bool                                     frontend_metric_marker_pending_ = false;
     std::optional<GenerateOutputs>           latest_frontend_metric_output_;
+    std::function<void()>                    pending_prefill_publication_;
     std::deque<GenerateOutputs>              generate_outputs_;
 };
 

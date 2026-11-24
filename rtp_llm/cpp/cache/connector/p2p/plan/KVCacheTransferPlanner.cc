@@ -635,20 +635,239 @@ PlanResult KVCacheTransferPlanner::plan(const ShardLayout&              src,
     return result;
 }
 
-uint64_t TransferPlan::digest() const {
-    // FNV-1a over the route fields, in vector order.
-    uint64_t       hash  = 14695981039346656037ULL;
-    constexpr auto prime = 1099511628211ULL;
-    auto           mix   = [&hash](uint64_t value) {
+namespace {
+
+struct PlanDigest {
+    uint64_t hash = 14695981039346656037ULL;
+
+    void mix(uint64_t value) {
         for (int i = 0; i < 8; ++i) {
             hash ^= (value >> (i * 8)) & 0xffULL;
-            hash *= prime;
+            hash *= 1099511628211ULL;
         }
+    }
+
+    void mixString(const std::string& value) {
+        mix(value.size());
+        for (unsigned char byte : value) {
+            mix(byte);
+        }
+    }
+};
+
+ErrorInfo validatePipeline(const PipelineTransferLayout& side, int& main_layers, PlanDigest& digest) {
+    if (side.stages.empty() || side.worker_count == 0) {
+        return planError("PP layout has no stages or workers");
+    }
+    digest.mix(side.worker_count);
+    digest.mix(side.stages.size());
+    std::set<int> used_workers;
+    for (size_t s = 0; s < side.stages.size(); ++s) {
+        const auto& stage = side.stages[s];
+        if (stage.main_layer_begin != main_layers || stage.main_layer_count <= 0
+            || stage.layer_tags.size() < static_cast<size_t>(stage.main_layer_count)
+            || stage.layer_tags.size() > static_cast<size_t>(std::numeric_limits<int>::max() - main_layers)) {
+            return planError("invalid main-layer interval for PP stage " + std::to_string(s));
+        }
+        main_layers += stage.main_layer_count;
+        const bool has_draft = stage.layer_tags.size() > static_cast<size_t>(stage.main_layer_count);
+        const auto tp        = stage.main_shards.pc.tp_size;
+        if (has_draft && (s + 1 != side.stages.size() || stage.draft_shards.pc.tp_size != tp)) {
+            return planError("invalid draft layout for PP stage " + std::to_string(s));
+        }
+        if (tp <= 0 || tp > kMaxPlanRankCount || stage.worker_indices.size() != static_cast<size_t>(tp)) {
+            return planError("worker count does not match TP width for PP stage " + std::to_string(s));
+        }
+        digest.mix(stage.main_layer_begin);
+        digest.mix(stage.main_layer_count);
+        digest.mix(stage.worker_indices.size());
+        for (int worker : stage.worker_indices) {
+            if (worker < 0 || static_cast<size_t>(worker) >= side.worker_count || !used_workers.insert(worker).second) {
+                return planError("invalid or duplicate worker index for PP stage " + std::to_string(s));
+            }
+            digest.mix(worker);
+        }
+        for (const auto* shards : {&stage.main_shards, &stage.draft_shards}) {
+            digest.mix(shards->rankCount());
+            digest.mix(shards->pc.get_attn_tp_size());
+            digest.mix(shards->cpSize());
+            digest.mix(shards->cache_key_tokens_per_block);
+            digest.mix(shards->use_mla);
+            digest.mix(shards->use_group_cache_transfer_policy);
+            digest.mix(shards->groups.size());
+            for (const auto& [tag, group] : shards->groups) {
+                const int heads = group.head_shard_count;
+                if (heads <= 0 || shards->pc.get_attn_tp_size() % heads != 0) {
+                    return planError("invalid head shard count for PP stage " + std::to_string(s) + " tag=" + tag);
+                }
+                digest.mixString(tag);
+                digest.mix(static_cast<int>(group.policy.group_type));
+                digest.mix(static_cast<int>(group.policy.cp_mapping));
+                digest.mix(static_cast<int>(group.policy.cp_slice));
+                digest.mix(group.policy.active_tail_blocks);
+                digest.mix(group.spec_type);
+                digest.mix(group.kv_block_stride_bytes);
+                digest.mix(group.kv_scale_stride_bytes);
+                digest.mix(group.k_block_payload_bytes);
+                digest.mix(group.seq_size_per_block);
+                digest.mix(group.pre_sliced);
+                digest.mix(group.global_kv_heads);
+                digest.mix(heads);
+                digest.mix(shards->physicalCpSize(tag));
+            }
+        }
+        digest.mix(stage.layer_tags.size());
+        for (size_t layer = 0; layer < stage.layer_tags.size(); ++layer) {
+            const auto& shards =
+                layer < static_cast<size_t>(stage.main_layer_count) ? stage.main_shards : stage.draft_shards;
+            const auto&                 tags = stage.layer_tags[layer];
+            const std::set<std::string> ordered(tags.begin(), tags.end());
+            if (ordered.empty() || ordered.size() != tags.size()) {
+                return planError("empty or duplicate layer tags for PP stage " + std::to_string(s)
+                                 + " local_layer=" + std::to_string(layer));
+            }
+            digest.mix(ordered.size());
+            for (const auto& tag : ordered) {
+                if (tag.empty() || !shards.hasGroup(tag)) {
+                    return planError("missing layout for PP stage " + std::to_string(s) + " tag=" + tag);
+                }
+                if (!side.stages.front().main_shards.hasGroup(tag)) {
+                    return planError("PP cache tag has no Stage 0 block table: " + tag);
+                }
+                digest.mixString(tag);
+            }
+        }
+    }
+    return used_workers.size() == side.worker_count ? ErrorInfo::OkStatus() : planError("PP worker list is incomplete");
+}
+
+}  // namespace
+
+PlanResult KVCacheTransferPlanner::planStages(const PipelineTransferLayout& prefill,
+                                              const PipelineTransferLayout& decode,
+                                              const std::string&            unique_key) {
+    PlanDigest layout_digest;
+    int        prefill_main = 0, decode_main = 0;
+    auto       error = validatePipeline(prefill, prefill_main, layout_digest);
+    if (error.ok()) {
+        error = validatePipeline(decode, decode_main, layout_digest);
+    }
+    if (!error.ok()) {
+        return {{}, std::move(error)};
+    }
+    if (prefill_main != decode_main) {
+        return {{}, planError("Prefill and Decode cover different main-model layers")};
+    }
+    const auto draftCount = [](const auto& stage) {
+        return static_cast<int>(stage.layer_tags.size()) - stage.main_layer_count;
     };
+    const int draft_layers         = draftCount(decode.stages.back());
+    const int prefill_draft_layers = draftCount(prefill.stages.back());
+    if (prefill_draft_layers < draft_layers) {
+        return {{},
+                planError("Prefill is missing draft layers required by Decode: Prefill="
+                          + std::to_string(prefill_draft_layers) + " Decode=" + std::to_string(draft_layers))};
+    }
+
+    TransferPlan result;
+    result.layout_digest = layout_digest.hash;
+    for (size_t s = 0, d = 0; s < prefill.stages.size() && d < decode.stages.size();) {
+        const auto& src     = prefill.stages[s];
+        const auto& dst     = decode.stages[d];
+        const int   src_end = src.main_layer_begin + src.main_layer_count;
+        const int   dst_end = dst.main_layer_begin + dst.main_layer_count;
+        const auto  append_routes =
+            [&](int begin, int end, const ShardLayout& src_shards, const ShardLayout& dst_shards) -> ErrorInfo {
+            // Order by the exact layer set, then by tag, then by the TP planner's route order.
+            std::map<std::string, std::vector<int>> layers_by_tag;
+            for (int layer = begin; layer < end; ++layer) {
+                const auto& src_tags = src.layer_tags[layer - src.main_layer_begin];
+                for (const auto& tag : dst.layer_tags[layer - dst.main_layer_begin]) {
+                    if (std::find(src_tags.begin(), src_tags.end(), tag) == src_tags.end()) {
+                        return planError("Prefill is missing global layer " + std::to_string(layer) + " tag=" + tag);
+                    }
+                    layers_by_tag[tag].push_back(layer);
+                }
+            }
+            std::vector<std::pair<std::vector<int>, std::string>> groups;
+            for (auto& [tag, layers] : layers_by_tag) {
+                groups.emplace_back(std::move(layers), tag);
+            }
+            std::sort(groups.begin(), groups.end());
+            const auto offset = sourceReplicaOffset(unique_key, src_shards.rankCount());
+            for (const auto& [layers, tag] : groups) {
+                auto shards = plan(src_shards, dst_shards, {tag}, offset);
+                if (!shards.ok()) {
+                    return shards.error;
+                }
+                std::set<int> covered_lanes;
+                for (auto& route : shards.plan.routes) {
+                    covered_lanes.insert(route.dst_rank);
+                    const size_t src_scale = src_shards.group(tag).kv_scale_stride_bytes;
+                    const size_t dst_scale = dst_shards.group(tag).kv_scale_stride_bytes;
+                    const auto   src_parts = static_cast<size_t>(route.src_partition.count);
+                    const auto   dst_parts = static_cast<size_t>(route.dst_partition.count);
+                    if (src_scale % src_parts != 0 || dst_scale % dst_parts != 0
+                        || src_scale / src_parts != dst_scale / dst_parts
+                        || (src_scale != 0 && (route.src_slice.count > 1 || route.dst_slice.count > 1))) {
+                        return planError("incompatible scale layout for PP transfer tag=" + tag);
+                    }
+                    if (result.routes.size() >= static_cast<size_t>(std::numeric_limits<int>::max())) {
+                        return planError("PP transfer has too many routes");
+                    }
+                    route.route_id = static_cast<int>(result.routes.size());
+                    route.src_rank = src.worker_indices[route.src_rank];
+                    route.dst_rank = dst.worker_indices[route.dst_rank];
+                    route.src_slice_payload_bytes = src_shards.group(tag).k_block_payload_bytes;
+                    route.dst_slice_payload_bytes = dst_shards.group(tag).k_block_payload_bytes;
+                    for (int layer : layers) {
+                        route.layers.push_back({layer, layer - src.main_layer_begin, layer - dst.main_layer_begin});
+                    }
+                    result.routes.push_back(std::move(route));
+                }
+                if (covered_lanes.size() != dst.worker_indices.size()) {
+                    return planError("incomplete PP route coverage for global layer " + std::to_string(layers.front())
+                                     + " tag=" + tag);
+                }
+            }
+            return ErrorInfo::OkStatus();
+        };
+        error = append_routes(std::max(src.main_layer_begin, dst.main_layer_begin),
+                              std::min(src_end, dst_end),
+                              src.main_shards,
+                              dst.main_shards);
+        if (error.ok() && src_end == prefill_main && dst_end == decode_main && draft_layers > 0) {
+            error = append_routes(prefill_main, prefill_main + draft_layers, src.draft_shards, dst.draft_shards);
+        }
+        if (!error.ok()) {
+            return {{}, std::move(error)};
+        }
+        s += src_end <= dst_end;
+        d += dst_end <= src_end;
+    }
+    return {std::move(result), ErrorInfo::OkStatus()};
+}
+
+uint64_t TransferPlan::digest() const {
+    PlanDigest digest;
+    const auto mix = [&digest](uint64_t value) { digest.mix(value); };
+    if (layout_digest != 0) {
+        mix(layout_digest);
+    }
     for (const auto& r : routes) {
         mix(static_cast<uint64_t>(r.route_id));
         mix(static_cast<uint64_t>(r.src_rank));
         mix(static_cast<uint64_t>(r.dst_rank));
+        if (!r.layers.empty()) {
+            mix(r.layers.size());
+            for (const auto& layer : r.layers) {
+                mix(layer.global_id);
+                mix(layer.src_local_id);
+                mix(layer.dst_local_id);
+            }
+            mix(r.src_slice_payload_bytes);
+            mix(r.dst_slice_payload_bytes);
+        }
         for (char c : r.cache_tag) {
             mix(static_cast<uint64_t>(static_cast<unsigned char>(c)));
         }
@@ -673,7 +892,7 @@ uint64_t TransferPlan::digest() const {
         mix(static_cast<uint64_t>(r.cache_key_tokens_per_block));
         mix(static_cast<uint64_t>(r.group_tokens_per_block));
     }
-    return hash;
+    return digest.hash;
 }
 
 ShardLayout ShardLayout::forPeer(const ShardLayout&       self,

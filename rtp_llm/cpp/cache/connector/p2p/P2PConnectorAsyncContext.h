@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rtp_llm/cpp/config/ConfigModules.h"
+
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
@@ -115,7 +117,7 @@ public:
     void pollLeaseIfNeeded(const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client);
 
     bool needLeasePoll() const {
-        if (!calls_ready_.load(std::memory_order_acquire)
+        if (lease_query_timeout_ms_ <= 0 || !calls_ready_.load(std::memory_order_acquire)
             || !lease_hold_pending_.load(std::memory_order_acquire)) {
             return false;
         }
@@ -146,6 +148,11 @@ public:
         return &server_call_result_->side_channel_payload;
     }
 
+    int64_t handoffReadyTimeUs() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return handoff_ready_time_us_;
+    }
+
     ErrorInfo errorInfo() const override;
 
     size_t matchedBlockCount() const {
@@ -161,6 +168,7 @@ private:
     friend class P2PConnectorAsyncReadContextChecker;
 
     void dispatchDoneCallbacks();
+    void scheduleCancelRetry(const char* reason);
     struct DoneNotifier {
         P2PConnectorAsyncReadContext& context;
         ~DoneNotifier() { context.dispatchDoneCallbacks(); }
@@ -183,6 +191,7 @@ private:
     MergedReadOutcome mergeReadResultsWhenBothDone() const;
     void              applyMergedReadOutcome(const MergedReadOutcome& outcome);
     void              beginLeaseHold();
+    void              releaseLeaseHoldLocked(bool all_ranks_stopped, int64_t now_us);
     std::function<void()> completionCallback() const;
     void                  registerReadCompletionCallbacksLocked();
     void                  notify() const;
@@ -213,9 +222,11 @@ private:
     std::condition_variable done_cv_;
     bool                    done_{false};
     bool                    success_{false};
+    int64_t                 handoff_ready_time_us_{0};
     ErrorCode               error_code_;
     std::string             error_message_;
     std::atomic<int64_t>                         lease_hold_start_us_{0};  // steady clock
+    bool                                         lease_released_{false};  // guarded by state_mutex_
     std::atomic<bool>       lease_hold_pending_{false};
     std::atomic<bool>                            tp_cancel_broadcast_triggered_{false};
     std::shared_ptr<P2PBroadcastClient::Result> cancel_result_;  // guarded by state_mutex_
@@ -237,6 +248,8 @@ private:
     KickoffState         kickoff_state_{KickoffState::QUEUED};  // guarded by state_mutex_
     std::shared_ptr<const std::function<void()>> wakeup_callback_;  // accessed with atomic_load/store
     std::atomic<int64_t>             control_retry_ms_{0};
+    int64_t                          cancel_retry_interval_ms_{10};
+    int64_t                          next_cancel_warning_ms_{0};
     std::atomic<bool>                control_active_{false};
 };
 
@@ -291,9 +304,7 @@ private:
     size_t                               control_capacity_{0};
     std::map<std::string, size_t>                              group_block_bytes_;
     size_t                                                     total_kv_bytes_{0};
-    int                                                        kv_leak_exit_threshold_percent_{30};
     int64_t                                                    last_leak_log_ms_{0};
-    int64_t                                                    retained_kv_over_threshold_since_ms_{0};
 };
 
 }  // namespace rtp_llm

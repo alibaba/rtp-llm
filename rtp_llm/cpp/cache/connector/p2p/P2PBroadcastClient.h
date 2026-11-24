@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include <functional>
 #include <memory>
+#include <optional>
 #include <atomic>
 #include <optional>
 #include <string>
@@ -54,6 +55,7 @@ public:
             return completed;
         }
         bool success() const;
+        std::optional<int64_t> kvPhysicalCompletionTimeUs() const;
         void checkDone();
         void setDoneCallback(std::function<void()> callback) {
             if (tp_broadcast_result_) {
@@ -103,6 +105,7 @@ public:
         std::vector<std::pair<std::string, uint32_t>> peer_workers;
         RankRoutes                                    routes;
         uint64_t                                      plan_digest{0};
+        std::function<bool()>                         is_cancelled;
     };
 
     std::shared_ptr<Result> broadcast(BroadcastParams params);
@@ -148,7 +151,8 @@ public:
 private:
     std::shared_ptr<Result> broadcastRequests(std::vector<FunctionRequestPB> requests,
                                               const std::string&             unique_key,
-                                              int64_t                        deadline_ms);
+                                              int64_t                        deadline_ms,
+                                              const std::function<bool()>&   is_cancelled);
 
     void genBroadcastRequest(FunctionRequestPB&                  request,
                              const BroadcastParams&              params,

@@ -463,27 +463,35 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
     return result;
 }
 
-std::vector<StageCacheSnapshot> PPSnapshotCollector::collect() {
-    const auto payload    = local_.serialize();
+std::vector<std::string> collectPPStagePayloads(const std::string& payload, int64_t pp_size) {
     const auto local_size = torch::tensor({static_cast<int64_t>(payload.size())}, torch::kInt64);
-    auto       sizes      = torch::empty({pp_size_}, torch::kInt64);
+    auto       sizes      = torch::empty({pp_size}, torch::kInt64);
     execAllGather({{sizes}, ParallelMode::PP, {local_size}, false});
 
     // The existing tensor all-gather stages CPU buffers through NCCL and copies them back before returning.
     const auto* size_data = sizes.data_ptr<int64_t>();
-    const auto  max_size  = *std::max_element(size_data, size_data + pp_size_);
+    const auto  max_size  = *std::max_element(size_data, size_data + pp_size);
     auto        send      = torch::zeros({max_size}, torch::kUInt8);
     std::memcpy(send.data_ptr(), payload.data(), payload.size());
-    auto received = torch::empty({pp_size_, max_size}, torch::kUInt8);
+    auto received = torch::empty({pp_size, max_size}, torch::kUInt8);
     execAllGather({{received}, ParallelMode::PP, {send}, false});
 
-    const auto*                     data = received.data_ptr<uint8_t>();
+    const auto*              data = received.data_ptr<uint8_t>();
+    std::vector<std::string> stages;
+    stages.reserve(static_cast<size_t>(pp_size));
+    for (int64_t s = 0; s < pp_size; ++s) {
+        stages.emplace_back(reinterpret_cast<const char*>(data + s * max_size), size_data[s]);
+    }
+    return stages;
+}
+
+std::vector<StageCacheSnapshot> PPSnapshotCollector::collect() {
+    const auto                      payloads = collectPPStagePayloads(local_.serialize(), pp_size_);
     std::vector<StageCacheSnapshot> stages;
-    stages.reserve(static_cast<size_t>(pp_size_));
-    for (size_t s = 0; s < static_cast<size_t>(pp_size_); ++s) {
+    stages.reserve(payloads.size());
+    for (size_t s = 0; s < payloads.size(); ++s) {
         try {
-            stages.push_back(StageCacheSnapshot::deserialize(
-                std::string(reinterpret_cast<const char*>(data + s * max_size), size_data[s])));
+            stages.push_back(StageCacheSnapshot::deserialize(payloads[s]));
         } catch (const std::exception& e) {
             RTP_LLM_FAIL("PP snapshot exchange: stage %zu payload rejected: %s", s, e.what());
         }

@@ -2,6 +2,7 @@ import copy
 import json
 import logging
 import os
+import platform
 import shlex
 import shutil
 import socket
@@ -89,7 +90,6 @@ def _wait_tcp_port_ready(
             time.sleep(1.0)
 
 
-
 def _dump_manager_logs(managers, max_lines: int = 200) -> None:
     """Best-effort process-log dump for managers whose run failed mid-flight."""
     for manager in managers:
@@ -150,43 +150,50 @@ class SeparatedCaseRunner(CaseRunner):
             type="Vipserver", address=f"127.0.0.1:{port}", protocol="http", path="/"
         )
 
-    def _start_master(self, ports: Dict[str, int], port: int):
+    def _start_master(self, endpoints: GroupEndPoint, port: int):
         """Start a local FlexLB master for the optional full-topology smoke."""
         workspace = Path(os.environ.get("TEST_SRCDIR", "")) / os.environ.get(
             "TEST_WORKSPACE", ""
         )
-        bundle = workspace / "rtp_llm/test/smoke/flexlb_runtime"
-        jar = Path(os.environ.get("FLEXLB_API_JAR", bundle / "flexlb-api.jar"))
-        java = Path(os.environ.get("FLEXLB_JAVA", bundle / "java/bin/java"))
-        if not java.is_file():
-            java = Path(shutil.which("java") or "")
+        jar = Path(
+            os.environ.get(
+                "FLEXLB_API_JAR", workspace / "rtp_llm/flexlb/flexlb-api.jar"
+            )
+        )
+        runtime_arch = "java_arm" if platform.machine() in ("aarch64", "arm64") else "java_x86"
+        bundled_java = workspace / "rtp_llm/flexlb/ci_prebuilt" / runtime_arch / "bin/java"
+        java = Path(
+            os.environ.get("FLEXLB_JAVA")
+            or (
+                str(bundled_java)
+                if bundled_java.is_file()
+                else shutil.which("java") or ""
+            )
+        )
         if not jar.is_file() or not java.is_file():
             raise FileNotFoundError(
                 f"FlexLB smoke needs Java 21 and jar; java={java}, jar={jar}"
             )
-        roles = {
-            "prefill": [PREFILL_ROLE_NAME],
-            "decode": [DECODE_ROLE_NAME],
-            "vit": self.vit_roles,
-        }
         hosts = {
-            f"smoke.{role}": [f"127.0.0.1:{ports[name]}" for name in names]
-            for role, names in roles.items()
-            if all(name in ports for name in names) and names
+            role: endpoint.address.split(",")
+            for role, endpoint in (
+                ("prefill", endpoints.prefill_endpoint),
+                ("decode", endpoints.decode_endpoint),
+                ("vit", endpoints.vit_endpoint),
+            )
+            if endpoint is not None
         }
-        group = {"group": "default"}
-        for role in hosts:
-            name = role.removeprefix("smoke.")
-            group[f"{name}_endpoint"] = {
-                "address": role,
+        group = {"group": endpoints.group}
+        for role, addresses in hosts.items():
+            group[f"{role}_endpoint"] = {
+                "address": f"smoke.{role}",
+                "discovery": {"type": "static-env", "hosts": addresses},
                 "protocol": "http",
                 "path": "/",
             }
         route = {
             "service_id": SMOKE_SERVICE_ID,
-            "load_balance": True,
             "role_endpoints": [group],
-            "hosts": hosts,
         }
         config = {
             "schemaVersion": 3,
@@ -222,9 +229,14 @@ class SeparatedCaseRunner(CaseRunner):
                 "RTP_LLM_TRACE_CONFIG": '{"enabled":false}',
             }
         )
+        # ARM AJDK 21 crashes in both C2 matching and C1 nmethod installation.
+        # The smoke Master uses the interpreter while retaining the real service.
+        compiler_args = ["-Xint"] if runtime_arch == "java_arm" else []
         process = subprocess.Popen(
             [
                 str(java),
+                *compiler_args,
+                f"-XX:ErrorFile={log_dir / 'hs_err_pid%p.log'}",
                 f"-Dserver.port={port}",
                 "-jar",
                 str(jar),
@@ -237,11 +249,6 @@ class SeparatedCaseRunner(CaseRunner):
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
-        expected = {
-            role.upper(): len(names)
-            for role, names in roles.items()
-            if names and all(name in ports for name in names)
-        }
         deadline = time.monotonic() + 120
         url = f"http://127.0.0.1:{port}/rtp_llm/master/info"
         try:
@@ -256,10 +263,10 @@ class SeparatedCaseRunner(CaseRunner):
                     )
                     with urllib.request.urlopen(request, timeout=2) as response:
                         info = json.load(response)
-                    summary = info.get("worker_summary", {})
+                    summary = info.get("worker_summary") or {}
                     if info.get("ready") and all(
-                        summary.get(role, {}).get("alive") == count
-                        for role, count in expected.items()
+                        summary.get(role.upper(), {}).get("alive") == len(addresses)
+                        for role, addresses in hosts.items()
                     ):
                         return process, stream
                 except (OSError, ValueError):
@@ -270,6 +277,15 @@ class SeparatedCaseRunner(CaseRunner):
             process.terminate()
             process.wait(timeout=10)
             stream.close()
+            for diagnostic in [log_path, *sorted(log_dir.glob("hs_err_pid*.log"))]:
+                try:
+                    with diagnostic.open("rb") as source:
+                        source.seek(0, os.SEEK_END)
+                        source.seek(max(0, source.tell() - 32768))
+                        tail = source.read().decode("utf-8", errors="replace")
+                    logging.error("FlexLB startup diagnostic %s:\n%s", diagnostic, tail)
+                except OSError:
+                    logging.exception("Cannot read FlexLB diagnostic %s", diagnostic)
             raise
 
     def _assert_vit_cache_affinity(
@@ -523,9 +539,9 @@ class SeparatedCaseRunner(CaseRunner):
         master_locks = []
         master_port = None
         if start_master:
-            if frontend_envs is None or not has_pd or len(self.vit_roles) < 2:
+            if frontend_envs is None or not has_pd or len(self.vit_roles) == 1:
                 raise ValueError(
-                    "local FlexLB smoke requires frontend, PD, and two ViTs"
+                    "local FlexLB smoke requires frontend, PD, and zero or at least two ViTs"
                 )
             master_ports, master_locks = PortManager().get_consecutive_ports(3)
             master_port = master_ports[0]
@@ -545,8 +561,14 @@ class SeparatedCaseRunner(CaseRunner):
         route_json = service_route.model_dump_json()
         for role in backend_roles:
             envs[role]["MODEL_SERVICE_CONFIG"] = route_json
+        master_only_frontend = start_master and not self.vit_roles
         if frontend_envs is not None:
-            frontend_envs["MODEL_SERVICE_CONFIG"] = route_json
+            # A text request must fail if the master cannot supply its P/D route.
+            frontend_envs["MODEL_SERVICE_CONFIG"] = (
+                service_route.model_dump_json(exclude={"role_endpoints"})
+                if master_only_frontend
+                else route_json
+            )
 
         configs = [
             {
@@ -577,7 +599,7 @@ class SeparatedCaseRunner(CaseRunner):
                     state.err_msg = f"{role} server start failed, {state.err_msg}"
                     return state
             if master_port is not None:
-                master, master_stream = self._start_master(ports, master_port)
+                master, master_stream = self._start_master(group, master_port)
             if frontend_envs is not None:
                 frontend_state = TaskStates()
                 frontend_port = MagaServerManager.get_free_port()
@@ -587,6 +609,9 @@ class SeparatedCaseRunner(CaseRunner):
                     self.task_info,
                     port=frontend_port,
                     role_name=FRONTEND_ROLE_NAME,
+                    health_check_path=(
+                        "/frontend_health" if master_only_frontend else "/health"
+                    ),
                 )
                 if not frontend_state.ret or frontend is None:
                     frontend_state.err_msg = (
@@ -712,16 +737,33 @@ class DpSeperationCaseRunner(CaseRunner):
         decode_port = MagaServerManager.get_free_port()
         gpu_ids = [str(x) for x in get_gpu_ids()]
 
-        # 提前选择机器，直接指定具体的机器地址而不是使用负载均衡
+        def role_addresses(base_port, world_size, args, envs):
+            return ",".join(
+                _build_local_dp_addresses(
+                    base_port,
+                    world_size // max(1, _extract_int_arg(args, "--pp_size", 1)),
+                    _extract_int_arg(args, "--tp_size", 1),
+                    _extract_int_arg(
+                        args,
+                        "--worker_info_port_num",
+                        int(envs.get("WORKER_INFO_PORT_NUM", MIN_WORKER_INFO_PORT_NUM)),
+                    ),
+                )
+            )
+
         decode_endpoint = EndPoint(
             type="Vipserver",
-            address=f"127.0.0.1:{decode_port}",
+            address=role_addresses(
+                decode_port, decode_gpu_size, decode_args, decode_envs
+            ),
             protocol="http",
             path="/",
         )
         prefill_endpoint = EndPoint(
             type="Vipserver",
-            address=f"127.0.0.1:{prefill_port}",
+            address=role_addresses(
+                prefill_port, prefill_gpu_size, prefill_args, prefill_envs
+            ),
             protocol="http",
             path="/",
         )
@@ -791,7 +833,9 @@ class DpSeperationCaseRunner(CaseRunner):
         if enable_remote_cache and self.remote_kvcm_server is not None:
             started.append(self.remote_kvcm_server)
         try:
-            server_managers, task_states_list = self.start_servers_parallel(server_configs)
+            server_managers, task_states_list = self.start_servers_parallel(
+                server_configs
+            )
             started.extend(m for m in server_managers if m is not None)
 
             decode_server_manager, decode_task_states = (
@@ -874,7 +918,25 @@ class DpSeperationCaseRunner(CaseRunner):
                     servers, enable_remote_cache=enable_remote_cache
                 )
 
-            task_states = self.curl_server(curl_server_mgr)
+            dp_repeats = max(
+                _extract_int_arg(prefill_args, "--dp_size", 1),
+                _extract_int_arg(decode_args, "--dp_size", 1),
+            )
+            if frontend_server_manager is not None and dp_repeats > 1:
+                import copy
+
+                original_queries = self.task_info.query_result
+                self.task_info.query_result = [
+                    copy.deepcopy(query)
+                    for query in original_queries
+                    for _ in range(dp_repeats)
+                ]
+                try:
+                    task_states = self.curl_server(curl_server_mgr)
+                finally:
+                    self.task_info.query_result = original_queries
+            else:
+                task_states = self.curl_server(curl_server_mgr)
             prefill_server_manager.stop_server()
             decode_server_manager.stop_server()
 
@@ -953,7 +1015,9 @@ class FrontAppSeperationCaseRunner(CaseRunner):
                 role_name="frontend",
             )
             if task_states.ret != True:
-                task_states.err_msg = "frontend server start failed, " + task_states.err_msg
+                task_states.err_msg = (
+                    "frontend server start failed, " + task_states.err_msg
+                )
                 return task_states
             assert (
                 frontend_server_manager is not None
@@ -972,9 +1036,13 @@ class FrontAppSeperationCaseRunner(CaseRunner):
                 role_name="pd_fusion",  # Fixed: use "pd_fusion" to match BUILD file key
             )
             if task_states.ret != True:
-                task_states.err_msg = "PDFUSION server start failed, " + task_states.err_msg
+                task_states.err_msg = (
+                    "PDFUSION server start failed, " + task_states.err_msg
+                )
                 return task_states
-            assert server_manager is not None, "PDFUSION server manager should not be None"
+            assert (
+                server_manager is not None
+            ), "PDFUSION server manager should not be None"
 
             if str_to_bool(os.environ.get("SMOKE_KEEP_SERVER_ALIVE", "False")):
                 return self._keep_servers_alive(

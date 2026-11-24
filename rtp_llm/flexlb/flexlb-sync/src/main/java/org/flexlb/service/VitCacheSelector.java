@@ -5,6 +5,7 @@ import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.WorkerIdentity;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.VitCacheDirectory.Candidate;
@@ -49,8 +50,7 @@ public class VitCacheSelector {
             return null;
         }
         WorkerEndpoint.GenerationPin pin =
-                workers.captureEndpoint(
-                        RoleType.VIT, result.getServerIp() + ":" + result.getHttpPort());
+                workers.captureEndpoint(RoleType.VIT, result.getLogicalIpPort());
         if (pin == null) {
             return null;
         }
@@ -73,7 +73,8 @@ public class VitCacheSelector {
         Map<String, Candidate> candidates = directory.candidates(group, keys);
         long now = System.currentTimeMillis();
         if (now - pendingPrunedAt >= 5000) {
-            pending.values().removeIf(p -> !p.matches(candidates.get(p.worker().getIpPort()), now));
+            pending.values()
+                    .removeIf(p -> !p.matches(candidates.get(p.worker().getLogicalIpPort()), now));
             pendingPrunedAt = now;
         }
         List<Candidate> best = new ArrayList<>();
@@ -134,9 +135,12 @@ public class VitCacheSelector {
         if (selected == null) {
             return errorStatus(StrategyErrorType.NO_VIT_WORKER);
         }
-        try (var pin =
-                workers.captureEndpoint(
-                        RoleType.VIT, selected.getServerIp() + ":" + selected.getHttpPort())) {
+        WorkerIdentity identity =
+                new WorkerIdentity(
+                        selected.getServerIp(),
+                        selected.getHttpPort(),
+                        selected.getEngineIndex() == null ? 0 : selected.getEngineIndex());
+        try (var pin = workers.captureEndpoint(RoleType.VIT, identity.getLogicalIpPort())) {
             WorkerStatus worker = pin == null ? null : pin.endpoint().getStatus();
             if (selected.getRole() != RoleType.VIT
                     || worker == null
@@ -163,6 +167,7 @@ public class VitCacheSelector {
         status.setWorkerGeneration(worker.getGenerationId());
         status.setServerIp(worker.getIp());
         status.setHttpPort(worker.getPort());
+        status.setSelectedEngineIndex(worker.getEngineIndex(), worker.getMultiEngineNum());
         status.setGrpcPort(worker.getGrpcPort());
         status.setGroup(worker.getGroup());
         status.setRequestId(requestId);

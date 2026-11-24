@@ -53,8 +53,10 @@ public:
         return pollStreamOutput(nullptr, "request", nullptr, stream);
     }
 
-    grpc::Status poll(WriterInterface* writer, std::shared_ptr<GenerateStream>& stream) {
-        return pollStreamOutput(nullptr, "request", writer, stream);
+    grpc::Status poll(WriterInterface*                             writer,
+                      std::shared_ptr<GenerateStream>&             stream,
+                      const std::function<FirstError::Snapshot()>& check_remote = {}) {
+        return pollStreamOutput(nullptr, "request", writer, stream, check_remote);
     }
 
     void setModelType(const std::string& model_type) {
@@ -340,7 +342,7 @@ std::shared_ptr<MockGenerateStream> createMockStream() {
     return std::make_shared<MockGenerateStream>(input, model_config, RuntimeConfig{});
 }
 
-std::shared_ptr<NormalGenerateStream> createNormalStream() {
+std::shared_ptr<NormalGenerateStream> createNormalStream(RoleType role = RoleType::PDFUSION) {
     auto input             = std::make_shared<GenerateInput>();
     input->generate_config = std::make_shared<GenerateConfig>();
     input->begin_time_us   = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -348,7 +350,9 @@ std::shared_ptr<NormalGenerateStream> createNormalStream() {
 
     ModelConfig model_config;
     model_config.max_seq_len = 3;
-    return std::make_shared<NormalGenerateStream>(input, model_config, RuntimeConfig{}, ResourceContext{}, nullptr);
+    ResourceContext resources;
+    resources.role_type = role;
+    return std::make_shared<NormalGenerateStream>(input, model_config, RuntimeConfig{}, resources, nullptr);
 }
 
 ErrorResult<GenerateOutputs> wakeResult(WakeReason reason) {
@@ -1094,7 +1098,12 @@ TEST(LocalRpcServerTest, GenerateStreamCallRejectsNullWriterBeforeEngineAccess) 
 TEST(RpcErrorCodeTest, InvalidParamsUsesDeclaredRpcEnum) {
     EXPECT_EQ(transErrorCodeToRPC(ErrorCode::INVALID_PARAMS), ErrorCodePB::INVALID_PARAMS);
     EXPECT_EQ(transRPCErrorCode(ErrorCodePB::INVALID_PARAMS), ErrorCode::INVALID_PARAMS);
-    EXPECT_NE(static_cast<int>(ErrorCodePB::INVALID_PARAMS), static_cast<int>(ErrorCode::INVALID_PARAMS));
+    EXPECT_EQ(static_cast<int>(ErrorCodePB::INVALID_PARAMS), 26);
+    EXPECT_EQ(static_cast<int>(ErrorCode::INVALID_PARAMS), 605);
+    EXPECT_EQ(transErrorCodeToRPC(ErrorCode::EXECUTION_EXCEPTION), ErrorCodePB::EXECUTION_EXCEPTION);
+    EXPECT_EQ(transRPCErrorCode(ErrorCodePB::EXECUTION_EXCEPTION), ErrorCode::EXECUTION_EXCEPTION);
+    EXPECT_EQ(static_cast<int>(ErrorCodePB::EXECUTION_EXCEPTION), 27);
+    EXPECT_EQ(static_cast<int>(ErrorCode::EXECUTION_EXCEPTION), 606);
 }
 
 TEST(LocalRpcServerTest, UninitializedServerRejectsValidBatchRequests) {
@@ -1270,7 +1279,7 @@ TEST(LocalRpcServerTest, PollChecksCancellationBeforeHandlingEveryWakeReason) {
 TEST(LocalRpcServerTest, PollDrainsPrefillTokenAfterMetricOnlyHandoffMarker) {
     TestLocalRpcServer server;
     auto               mock_stream = createMockStream();
-    mock_stream->reportEvent(StreamEvents::NeedRemoteGenerate);
+    mock_stream->reportEvent(StreamEvents::PrefillHandoffReady);
     GenerateOutputs metric;
     metric.request_id           = 1;
     metric.frontend_metric_only = true;
@@ -1392,6 +1401,153 @@ TEST(LocalRpcServerTest, CollectInterruptsBlockedNextOutputAfterClientCancellati
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CANCELLED);
 }
 
+TEST(LocalRpcServerTest, DecodeTerminalResponseStopsPollingCompanionPrefillRpc) {
+    TestLocalRpcServer server;
+    RecordingWriter    writer;
+    auto               normal               = createNormalStream(RoleType::DECODE);
+    normal->generateConfig()->pd_separation = true;
+    GenerateOutputs outputs;
+    GenerateOutput  output;
+    output.finished   = true;
+    output.output_ids = torch::tensor({{42}}, torch::kInt32);
+    outputs.generate_outputs.push_back(std::move(output));
+    normal->enqueueGenerateOutput(std::move(outputs));
+    normal->generate_status_->status.store(StreamState::FINISHED);
+    std::shared_ptr<GenerateStream> stream = normal;
+
+    FirstError late_failure;
+    late_failure.record(ErrorInfo(ErrorCode::CANCELLED, "late Prefill error"));
+    int  polls = 0;
+    auto status =
+        server.poll(&writer, stream, [&] { return ++polls == 1 ? FirstError::Snapshot{} : late_failure.snapshot(); });
+
+    EXPECT_TRUE(status.ok()) << status.error_message();
+    EXPECT_EQ(polls, 1);
+    ASSERT_EQ(writer.outputs_.size(), 1u);
+}
+
+TEST(LocalRpcServerTest, PrefillCompletionWaitHonorsHandoffDeadline) {
+    TestLocalRpcServer server;
+    RecordingWriter    writer;
+    auto               normal                    = createNormalStream(RoleType::PREFILL);
+    normal->generateConfig()->pd_separation      = true;
+    normal->generateInput()->request_deadline_ms = currentTimeMs() - 1;
+    normal->generate_status_->status.store(StreamState::RUNNING);
+    GenerateOutputs outputs;
+    GenerateOutput  output;
+    output.finished   = true;
+    output.output_ids = torch::tensor({{42}}, torch::kInt32);
+    outputs.generate_outputs.push_back(std::move(output));
+    normal->enqueueGenerateOutput(std::move(outputs));
+    normal->reportEvent(StreamEvents::PrefillHandoffReady);
+    std::shared_ptr<GenerateStream> stream = normal;
+
+    const auto status = server.poll(&writer, stream);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
+    EXPECT_EQ(normal->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+    ASSERT_EQ(writer.outputs_.size(), 1u);
+}
+
+TEST(LocalRpcServerTest, PollCollectsOnlyNonStreamingDecodeHandoffBlocks) {
+    for (const auto role : {RoleType::PDFUSION, RoleType::DECODE}) {
+        for (bool streaming : {false, true}) {
+            SCOPED_TRACE(static_cast<int>(role));
+            SCOPED_TRACE(streaming);
+            TestLocalRpcServer server;
+            RecordingWriter    writer;
+            auto               normal               = createNormalStream(role);
+            normal->generateConfig()->pd_separation = role == RoleType::DECODE;
+            normal->generateConfig()->is_streaming  = streaming;
+            normal->generateConfig()->aux_info      = true;
+            for (int block = 0; block < 2; ++block) {
+                GenerateOutputs outputs;
+                outputs.request_id = 123;
+                GenerateOutput output;
+                output.finished = block == 1;
+                output.output_ids =
+                    block == 0 ? torch::tensor({{7}}, torch::kInt32) : torch::tensor({{8, 9}}, torch::kInt32);
+                output.aux_info.output_len      = block == 0 ? 1 : 3;
+                output.aux_info.step_output_len = block == 0 ? 1 : 2;
+                output.aux_info.reuse_len       = 96;
+                if (block == 0) {
+                    output.logits = torch::ones({1, 4});
+                }
+                outputs.generate_outputs.push_back(std::move(output));
+                normal->enqueueGenerateOutput(std::move(outputs));
+            }
+            normal->generate_status_->status.store(StreamState::FINISHED);
+            std::shared_ptr<GenerateStream> stream = normal;
+            ASSERT_TRUE(server.poll(&writer, stream).ok());
+            const bool collected = role == RoleType::DECODE && !streaming;
+            ASSERT_EQ(writer.outputs_.size(), collected ? 1u : 2u);
+            const auto& final = writer.outputs_.back().flatten_output();
+            ASSERT_EQ(final.aux_info_size(), 1);
+            EXPECT_EQ(final.aux_info(0).step_output_len(), collected ? 3 : 2);
+            EXPECT_EQ(final.aux_info(0).total_reuse_len(), 96);
+            EXPECT_EQ(final.output_ids().shape(2), collected ? 3 : 2);
+            EXPECT_EQ(final.logits().shape_size(), 0);
+        }
+    }
+}
+
+TEST(LocalRpcServerTest, PollKeepsTerminalLogitsWhenSelectionCannotMatch) {
+    for (const bool aux_info : {false, true}) {
+        SCOPED_TRACE(aux_info);
+        auto input                               = std::make_shared<GenerateInput>();
+        input->generate_config                   = std::make_shared<GenerateConfig>();
+        input->begin_time_us                     = autil::TimeUtility::currentTimeInMicroSeconds();
+        input->input_ids                         = torch::tensor({1, 2, 3}, torch::kInt32);
+        input->generate_config->pd_separation    = true;
+        input->generate_config->is_streaming     = false;
+        input->generate_config->max_new_tokens   = 3;
+        input->generate_config->ignore_eos       = true;
+        input->generate_config->return_logits    = true;
+        input->generate_config->logits_index     = 4;
+        input->generate_config->aux_info         = aux_info;
+        input->generate_config->select_tokens_id = {3, 1};
+
+        ModelConfig model;
+        model.max_seq_len = 16;
+        model.vocab_size  = 16;
+        ResourceContext resources;
+        resources.role_type = RoleType::DECODE;
+        auto normal = std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, resources, nullptr);
+        normal->generate_status_->status.store(StreamState::RUNNING);
+
+        const auto logits = torch::zeros({1, 16});
+        for (int step = 1; step <= 3; ++step) {
+            logits.copy_(torch::arange(16, logits.options()) + step * 10);
+            normal->step();
+            normal->update(StreamUpdateInfo{.new_tokens             = torch::tensor({{step + 6}}, torch::kInt32),
+                                            .num_new_tokens         = 1,
+                                            .logits                 = logits,
+                                            .update_remote_generate = step > 1});
+        }
+
+        ASSERT_TRUE(normal->hasEvent(StreamEvents::GenerateDone));
+        TestLocalRpcServer             server;
+        RecordingWriter                writer;
+        std::shared_ptr<GenerateStream> stream = normal;
+        ASSERT_TRUE(server.poll(&writer, stream).ok());
+        ASSERT_EQ(writer.outputs_.size(), 1u);
+        const auto& output = writer.outputs_.front().flatten_output();
+        ASSERT_EQ(output.finished_size(), 1);
+        EXPECT_TRUE(output.finished(0));
+        ASSERT_EQ(output.aux_info_size(), aux_info ? 1 : 0);
+        if (aux_info) {
+            EXPECT_EQ(output.aux_info(0).output_len(), 3);
+        }
+        const auto expected_tokens = torch::tensor({7, 8, 9}, torch::kInt32);
+        EXPECT_EQ(output.output_ids().int32_data(),
+                  std::string(static_cast<const char*>(expected_tokens.data_ptr()), expected_tokens.nbytes()));
+        ASSERT_TRUE(output.has_logits());
+        const auto expected_logits = torch::tensor({33.0f, 31.0f});
+        EXPECT_EQ(output.logits().fp32_data(),
+                  std::string(static_cast<const char*>(expected_logits.data_ptr()), expected_logits.nbytes()));
+    }
+}
+
 TEST(LocalRpcServerTest, PollWritesFinalLocalOutputBeforeRemoteHandoff) {
     TestLocalRpcServer              server;
     RecordingWriter                 writer;
@@ -1405,7 +1561,7 @@ TEST(LocalRpcServerTest, PollWritesFinalLocalOutputBeforeRemoteHandoff) {
         GenerateOutputs             outputs;
         outputs.request_id = 123;
         normal_stream->enqueueGenerateOutput(std::move(outputs));
-        normal_stream->reportEventWithoutLock(StreamEvents::NeedRemoteGenerate);
+        normal_stream->reportEventWithoutLock(StreamEvents::PrefillHandoffReady);
     }
 
     const auto status = server.poll(&writer, stream);
@@ -1413,7 +1569,7 @@ TEST(LocalRpcServerTest, PollWritesFinalLocalOutputBeforeRemoteHandoff) {
     EXPECT_TRUE(status.ok());
     ASSERT_EQ(writer.outputs_.size(), 1);
     EXPECT_EQ(writer.outputs_[0].request_id(), 123);
-    EXPECT_TRUE(stream->hasEvent(StreamEvents::NeedRemoteGenerate));
+    EXPECT_TRUE(stream->hasEvent(StreamEvents::PrefillHandoffReady));
     EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
     EXPECT_FALSE(normal_stream->stream_cache_resource_->isResourceReleased());
     EXPECT_FALSE(normal_stream->hasOutput());
