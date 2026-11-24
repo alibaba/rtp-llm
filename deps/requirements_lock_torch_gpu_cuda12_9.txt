@@ -3833,7 +3833,7 @@ xgrammar==0.2.5 \
     --hash=sha256:69901bd7469127b59e22668a41efc25e9062a591b4596e5a8877fae18bd10832 \
     --hash=sha256:7038525ffb1f3f2c5cf2dc200332e79f6f2fd836a106e7147d8c6b9c63d787a4 \
     --hash=sha256:a0e49cfd0d447247c72f10505c7d6b84696296f68dd03ca294fc1d961db4e786
-    # via -r internal_source/deps/../../deps/requirements_base.txt
+    # via -r deps/requirements_base.txt
 xxhash==3.5.0 \
     --hash=sha256:02c2e816896dc6f85922ced60097bcf6f008dedfc5073dcba32f9c8dd786f3c1 \
     --hash=sha256:0691bfcc4f9c656bcb96cc5db94b4d75980b9d5589f2e59de790091028580837 \

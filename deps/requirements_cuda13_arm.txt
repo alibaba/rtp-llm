@@ -10,7 +10,7 @@ flashinfer-python==0.6.9+8c4f4dcf
 flashinfer-cubin==0.6.9+8c4f4dcf
 
 # Self-built wheels against torch 2.11+cu130; SHAs encoded in filename.
-deep-gemm==2.8.1+057ca59
+deep-gemm==2.8.2+341b656.cu132
 flash-mla==1.0.0+2e5429f
 # Preserve existing model KV formats through a separate namespace.
 flash-mla-legacy==1.0.0+92fd68b.rtp1
@@ -38,5 +38,10 @@ av==16.1.0
 
 fast-hadamard-transform @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_hadamard_transform-1.0.4.post1-cp310-cp310-linux_aarch64.whl
 
-nvidia-cutlass-dsl==4.5.0
-nvidia-cutlass-dsl-libs-base==4.5.0
+
+# V4.1 attention and CuTe runtime dependencies.
+quack-kernels @ https://github.com/Dao-AILab/quack/archive/77a750c0d9548d4a6e23c0f64062d61b3ea420ff.tar.gz#sha256=ebc940da966e88a05be318c3dc3f650a7359a281642f8f2f77c28ba4e9affa05
+flash-attn-4 @ https://files.pythonhosted.org/packages/44/1c/7ee1a5949e9b275eb62017d6fcc70e385db161b5341b686a29beb94ea181/flash_attn_4-4.0.0b21-py3-none-any.whl#sha256=8ad0cdd22b279ef2ca8b4e43a4fb33b7dc78936d36c41788bad9d67372056949
+nvidia-cutlass-dsl==4.7.1
+nvidia-cutlass-dsl-libs-base==4.7.1
+torch-c-dlpack-ext==0.1.5

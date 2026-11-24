@@ -19,7 +19,10 @@ from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,
     init_distributed_environment,
 )
-from rtp_llm.models_py.modules.base.cuda.indexer_op import IndexerOp
+from rtp_llm.models_py.modules.base.cuda.indexer_op import (
+    IndexerOp,
+    _fp8_mqa_logits_compat,
+)
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
     generate_q_indices,
 )
@@ -63,7 +66,6 @@ def _expected_ue8m0_dequant(values: torch.Tensor) -> torch.Tensor:
 
 
 def _tp2_indexer_worker(rank: int, nccl_port: int) -> None:
-    import deep_gemm
     import torch.distributed as dist
 
     from rtp_llm.models_py.kernels.cuda.fast_topk import (
@@ -259,7 +261,7 @@ def _tp2_indexer_worker(rank: int, nccl_port: int) -> None:
             atol=0,
         )
 
-        reference_logits = deep_gemm.fp8_mqa_logits(
+        reference_logits = _fp8_mqa_logits_compat(
             q_fp8[total_local_ids].contiguous(),
             (gathered_k, gathered_scale_bytes.view(torch.float32).view(-1)),
             q_scale[total_local_ids].squeeze(-1).contiguous(),

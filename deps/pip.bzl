@@ -51,10 +51,65 @@ FLASHINFER_069_ANNOTATIONS = {
     ),
 }
 
-# rules_python omits RECORD by default; retain it for the compiler integrity check.
 CUDA13_ANNOTATIONS = dict(FLASHINFER_069_ANNOTATIONS)
-CUDA13_ANNOTATIONS["nvidia-cutlass-dsl-libs-cu13"] = package_annotation(
-    data = [":dist_info"],
+# CUTLASS 4.7 replaced make_fragment with make_rmem_tensor. Keep this
+# compatibility patch confined to the exact FlashInfer wheel used by CUDA13.
+CUDA13_ANNOTATIONS["flashinfer-python"] = package_annotation(
+    whl_patches = {
+        "@rtp_llm//patches/flashinfer:0016-python-decode-max-kv-len.patch": json.encode({
+            "whls": ["flashinfer_python-0.6.9+8c4f4dcf-py3-none-any.whl"],
+            "patch_strip": 1,
+        }),
+        "@rtp_llm//patches/flashinfer:0018-cute-register-tensor-api.patch": json.encode({
+            "whls": ["flashinfer_python-0.6.9+8c4f4dcf-py3-none-any.whl"],
+            "patch_strip": 1,
+        }),
+    },
+)
+CUDA13_ANNOTATIONS["deep-gemm"] = package_annotation(
+    whl_patches = {
+        "@rtp_llm//patches/deep_gemm:0002-normal-gemm-pdl-trigger.patch": json.encode({
+            "whls": [
+                "deep_gemm-2.8.2+341b656.cu132-cp310-cp310-linux_x86_64.whl",
+                "deep_gemm-2.8.2+341b656.cu132-cp310-cp310-linux_aarch64.whl",
+            ],
+            "patch_strip": 1,
+        }),
+        "@rtp_llm//patches/deep_gemm:0003-dsv41-swa-kv-numerical-boundaries.patch": json.encode({
+            "whls": [
+                "deep_gemm-2.8.2+341b656.cu132-cp310-cp310-linux_x86_64.whl",
+                "deep_gemm-2.8.2+341b656.cu132-cp310-cp310-linux_aarch64.whl",
+            ],
+            "patch_strip": 1,
+        }),
+    },
+)
+CUDA13_ANNOTATIONS["nvidia-cutlass-dsl-libs-core"] = package_annotation(
+    whl_patches = {
+        "@rtp_llm//patches/cutlass:0001-bazel-split-package-paths.patch": json.encode({
+            "whls": ["nvidia_cutlass_dsl_libs_core-4.7.1-py3-none-any.whl"],
+            "patch_strip": 1,
+        }),
+    },
+)
+CUDA13_ANNOTATIONS["nvidia-cutlass-dsl-libs-base"] = package_annotation(
+    whl_patches = {
+        "@rtp_llm//patches/cutlass:0002-bazel-toolkit-library-paths.patch": json.encode({
+            "whls": [
+                "nvidia_cutlass_dsl_libs_base-4.7.1-cp310-cp310-manylinux_2_28_x86_64.whl",
+                "nvidia_cutlass_dsl_libs_base-4.7.1-cp310-cp310-manylinux_2_28_aarch64.whl",
+            ],
+            "patch_strip": 1,
+        }),
+    },
+)
+CUDA13_ANNOTATIONS["flash-attn-4"] = package_annotation(
+    whl_patches = {
+        "@rtp_llm//patches/flash_attn4:0001-quack-packed-sub.patch": json.encode({
+            "whls": ["flash_attn_4-4.0.0b21-py3-none-any.whl"],
+            "patch_strip": 1,
+        }),
+    },
 )
 
 def pip_deps():
@@ -130,7 +185,7 @@ def pip_deps():
 
     pip_parse(
         name = "pip_cuda13_arm_torch",
-        annotations = FLASHINFER_069_ANNOTATIONS,
+        annotations = CUDA13_ANNOTATIONS,
         requirements_lock = "@rtp_pip_deps//:requirements_lock_cuda13_arm.txt",
         python_interpreter = "/opt/conda310/bin/python3",
         extra_pip_args = PIP_EXTRA_ARGS + PIP_INDEX_ARGS,

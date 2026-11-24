@@ -8,6 +8,7 @@ This is particularly useful in testing environments where you want to use
 a specific version of flashinfer different from the system-installed one.
 """
 
+import hashlib
 import importlib.metadata
 import logging
 import os
@@ -87,6 +88,20 @@ def _build_variant(source_path):
     return None
 
 
+def _python_source_digest(source_path):
+    """Identify patched Python sources independently of action paths and mtimes."""
+    root = Path(source_path)
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*.py")):
+        relative = path.relative_to(root).as_posix().encode()
+        content = path.read_bytes()
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
+
+
 def _cache_key(package_name, version, source_path):
     # The interpreter ABI is part of the build identity too: a host can serve
     # jobs running different Python versions from the same pip variant (the
@@ -96,9 +111,14 @@ def _cache_key(package_name, version, source_path):
     # on 3.10). Key on it so each interpreter stages its own copy.
     py_tag = "cp%d%d" % sys.version_info[:2]
     variant = _build_variant(source_path)
-    if variant is None:
-        return "%s_python-%s-%s" % (package_name, version, py_tag)
-    return "%s_python-%s-%s__%s" % (package_name, version, py_tag, variant)
+    key = "%s_python-%s-%s" % (package_name, version, py_tag)
+    if variant is not None:
+        key += "__" + variant
+    if package_name == "flashinfer":
+        # Wheel patches retain the upstream version. Reusing an older stable
+        # copy would hide the patched CuTe kernels from the very tests using it.
+        key += "__" + _python_source_digest(source_path)
+    return key
 
 
 def copy_package_with_lock(package_name, cache_dir):
