@@ -293,7 +293,7 @@ TEST(KVCMSafetyTest, RejectedBroadcastHasNoSubmittedWorkersAndDoesNotFreeze) {
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), 1u);
 }
 
-TEST(KVCMSafetyTest, TimeoutKeepsReadDestinationFrozenAndReleasesAbortedWriteSource) {
+TEST(KVCMSafetyTest, RpcTimeoutKeepsReadDestinationFrozenAndLeavesWriteSessionOpen) {
     for (const bool is_write : {false, true}) {
         SafetyBroadcastGroup group;
         ASSERT_TRUE(group.start());
@@ -331,11 +331,8 @@ TEST(KVCMSafetyTest, TimeoutKeepsReadDestinationFrozenAndReleasesAbortedWriteSou
             write_location.locations = tp2Locations();
             EXPECT_CALL(*wrapper, getWriteLocation(_, _, _, _, _, _, 0))
                 .WillOnce(Return(std::make_pair(true, write_location)));
-            EXPECT_CALL(*wrapper,
-                        finishWrite(_, _, "safety_session",
-                                    ::testing::VariantWith<kv_cache_manager::BlockMaskOffset>(::testing::Eq(0u)),
-                                    ::testing::IsEmpty()))
-                .WillOnce(Return(true));
+            EXPECT_CALL(*wrapper, finishWrite(_, _, "safety_session", _, _)).Times(0);
+            EXPECT_CALL(*wrapper, abortWrite(_, _, "safety_session")).Times(0);
             EXPECT_TRUE(backend->write(backend->prepareWrite(makeStorageRequest(environment))));
         } else {
             EXPECT_CALL(*wrapper, match(_, _, _, _, _, _)).WillOnce(Return(std::make_pair(true, tp2Locations())));
@@ -388,41 +385,27 @@ TEST(KVCMSafetyTest, TimeoutKeepsReadDestinationFrozenAndReleasesAbortedWriteSou
     }
 }
 
-TEST(KVCMSafetyTest, UnknownWriteReleasesSourceWhenSessionAbortFails) {
-    for (const bool compensation_throws : {false, true}) {
-        auto environment = makeBackendEnvironment("kvcm_safety_write_cleanup");
-        auto wrapper     = std::make_shared<MockClientWrapper>();
-        // Mark the SDK call as submitted so its timeout has unknown completion.
-        wrapper->save_status = kv_cache_manager::ER_SDK_TIMEOUT;
-        EXPECT_CALL(*wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
-        EXPECT_CALL(*wrapper, shutdown()).Times(1);
-        auto backend = makeBackend(environment, singleRankConfig(), wrapper);
-        ASSERT_TRUE(initSingleRank(*backend.backend, environment));
-        EXPECT_CALL(*wrapper, getWriteLocation(_, _, _, _, _, _, 0))
-            .WillOnce(Return(std::make_pair(true, singleWriteLocation())));
-        EXPECT_CALL(*wrapper, saveKvCachesForTagWithStatus("default", _, _, _))
-            .WillOnce(Return(std::make_pair(kv_cache_manager::ER_SDK_TIMEOUT, kv_cache_manager::UriStrVec{})));
-        EXPECT_CALL(*wrapper, finishWrite(_, _, "safety_session", _, _))
-            .WillOnce(Invoke([compensation_throws](const auto&,
-                                                   const auto&,
-                                                   const auto&,
-                                                   const kv_cache_manager::BlockMask& mask,
-                                                   const auto&                        locations) {
-                EXPECT_EQ(std::get<kv_cache_manager::BlockMaskOffset>(mask), 0u);
-                EXPECT_TRUE(locations.empty());
-                if (compensation_throws) {
-                    throw std::runtime_error("cleanup failure");
-                }
-                return false;
-            }));
-        EXPECT_TRUE(backend->write(backend->prepareWrite(makeStorageRequest(environment))));
-        ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
-        EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
-        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), 1u);
-        backend->shutdown();
-        EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
-        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), 1u);
-    }
+TEST(KVCMSafetyTest, SdkTimeoutWithUnknownCompletionLeavesWriteSessionOpen) {
+    auto environment     = makeBackendEnvironment("kvcm_safety_write_cleanup");
+    auto wrapper         = std::make_shared<MockClientWrapper>();
+    wrapper->save_status = kv_cache_manager::ER_SDK_TIMEOUT;
+    EXPECT_CALL(*wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
+    EXPECT_CALL(*wrapper, shutdown()).Times(1);
+    auto backend = makeBackend(environment, singleRankConfig(), wrapper);
+    ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+    EXPECT_CALL(*wrapper, getWriteLocation(_, _, _, _, _, _, 0))
+        .WillOnce(Return(std::make_pair(true, singleWriteLocation())));
+    EXPECT_CALL(*wrapper, saveKvCachesForTagWithStatus("default", _, _, _))
+        .WillOnce(Return(std::make_pair(kv_cache_manager::ER_SDK_TIMEOUT, kv_cache_manager::UriStrVec{})));
+    EXPECT_CALL(*wrapper, finishWrite(_, _, "safety_session", _, _)).Times(0);
+    EXPECT_CALL(*wrapper, abortWrite(_, _, "safety_session")).Times(0);
+    EXPECT_TRUE(backend->write(backend->prepareWrite(makeStorageRequest(environment))));
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
+    EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
+    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), 1u);
+    backend->shutdown();
+    EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
+    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), 1u);
 }
 
 TEST(KVCMSafetyTest, LocalSdkExceptionPermanentlyProtectsDestination) {

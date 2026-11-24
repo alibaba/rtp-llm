@@ -511,7 +511,7 @@ TEST(KVCMMockOnlyFullTest, TP2CoordinatorBroadcastsRankOrderedReadAndWritePayloa
         kv_cache_manager::LocationSpecUnit{"tp1_Fdefault", "write_rank_1"},
         kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "write_rank_0"},
     }};
-    EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, _, _, _, 40, 0))
+    EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, _, _, _, 300, 0))
         .WillOnce(Return(std::make_pair(true, write_location)));
     EXPECT_CALL(*client_wrapper, finishWrite(_, _, "tp2_broadcast_write", _, _))
         .WillOnce(Invoke([](const std::string&,
@@ -546,7 +546,7 @@ TEST(KVCMMockOnlyFullTest, TP2CoordinatorBroadcastsRankOrderedReadAndWritePayloa
     }
 }
 
-TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSessionAndReleasesSource) {
+TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureLeavesWriteSessionOpen) {
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_tp2_broadcast_failure");
     auto client_wrapper = std::make_shared<MockClientWrapper>();
 
@@ -588,20 +588,7 @@ TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSessionAndReleasesSourc
     EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, _, _, _, _, 0))
         .WillOnce(Return(std::make_pair(true, write_location)));
     EXPECT_CALL(*client_wrapper, abortWrite(_, _, "tp2_failed_broadcast_write")).Times(0);
-    EXPECT_CALL(*client_wrapper, finishWrite(_, _, "tp2_failed_broadcast_write", _, _))
-        .WillOnce(Invoke([](const std::string&,
-                            const std::string&,
-                            const std::string&,
-                            const kv_cache_manager::BlockMask& block_mask,
-                            const kv_cache_manager::Locations& locations) {
-            const auto* offset = std::get_if<kv_cache_manager::BlockMaskOffset>(&block_mask);
-            EXPECT_NE(offset, nullptr);
-            if (offset != nullptr) {
-                EXPECT_EQ(*offset, 0u);
-            }
-            EXPECT_TRUE(locations.empty());
-            return true;
-        }));
+    EXPECT_CALL(*client_wrapper, finishWrite(_, _, "tp2_failed_broadcast_write", _, _)).Times(0);
 
     const auto source_ref_count = environment.device_pool->refCount(environment.block_id);
     backend->write(backend->prepareWrite(makeStorageRequest(environment)));
@@ -750,7 +737,7 @@ TEST(KVCMMockOnlyFullTest, WritePublishesActualUri) {
     write_location.block_mask       = kv_cache_manager::BlockMaskOffset{0};
     write_location.locations        = {
         kv_cache_manager::Location{kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "write_uri"}}};
-    EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, std::vector<int64_t>{101}, std::vector<int64_t>{}, _, 40, 0))
+    EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, std::vector<int64_t>{101}, std::vector<int64_t>{}, _, 300, 0))
         .WillOnce(Return(std::make_pair(true, write_location)));
     EXPECT_CALL(*client_wrapper, saveKvCachesForTag("default", kv_cache_manager::UriStrVec{"write_uri"}, _, _))
         .WillOnce(Return(std::make_pair(true, kv_cache_manager::UriStrVec{"actual_uri"})));
@@ -795,7 +782,7 @@ TEST(KVCMMockOnlyFullTest, WriteHonorsOffsetBlockMask) {
         kv_cache_manager::Location{kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "write_uri_103"}},
     };
     EXPECT_CALL(*client_wrapper,
-                getWriteLocation(_, _, std::vector<int64_t>({101, 102, 103}), std::vector<int64_t>{}, _, 40, 0))
+                getWriteLocation(_, _, std::vector<int64_t>({101, 102, 103}), std::vector<int64_t>{}, _, 300, 0))
         .WillOnce(Invoke([&](const auto&...) {
             for (const auto block : block_ids)
                 EXPECT_EQ(environment.device_pool->refCount(block), 2u);
@@ -846,7 +833,7 @@ TEST(KVCMMockOnlyFullTest, WriteHonorsOffsetBlockMask) {
 
     write_location.write_session_id = "invalid_mask_session";
     write_location.block_mask       = kv_cache_manager::BlockMaskOffset{block_ids.size() + 1};
-    EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, _, _, _, 40, 0))
+    EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, _, _, _, 300, 0))
         .WillOnce(Return(std::make_pair(true, write_location)));
     EXPECT_CALL(*client_wrapper, saveKvCachesForTag(_, _, _, _)).Times(0);
     EXPECT_CALL(*client_wrapper, finishWrite(_, _, _, _, _)).Times(0);
@@ -866,7 +853,7 @@ TEST(KVCMMockOnlyFullTest, WriteHonorsOffsetBlockMask) {
     write_location.write_session_id = "mismatched_locations_session";
     write_location.block_mask       = kv_cache_manager::BlockMaskOffset{1};
     write_location.locations.resize(1);
-    EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, _, _, _, 40, 0))
+    EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, _, _, _, 300, 0))
         .WillOnce(Return(std::make_pair(true, write_location)));
     EXPECT_CALL(*client_wrapper, abortWrite(_, _, "mismatched_locations_session")).WillOnce(Invoke([&](const auto&...) {
         for (const auto block : block_ids)
@@ -1059,7 +1046,7 @@ TEST(KVCMMockOnlyFullTest, StartWriteFailureDoesNotFinishSession) {
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
 }
 
-TEST(KVCMMockOnlyFullTest, TransferFailureAbortsWriteSession) {
+TEST(KVCMMockOnlyFullTest, UnsubmittedWriteFailureAbortsSession) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
     auto            environment    = makeBackendEnvironment("kvcm_storage_backend_abort_write");
     auto            client_wrapper = std::make_shared<MockClientWrapper>();
@@ -1078,7 +1065,6 @@ TEST(KVCMMockOnlyFullTest, TransferFailureAbortsWriteSession) {
         .WillOnce(Return(std::make_pair(true, write_location)));
     EXPECT_CALL(*client_wrapper, saveKvCachesForTag("default", kv_cache_manager::UriStrVec{"write_uri"}, _, _))
         .WillOnce(Return(std::make_pair(false, kv_cache_manager::UriStrVec{})));
-    // An unknown payload keeps the existing single Finish(0) attempt.
     EXPECT_CALL(*client_wrapper, abortWrite(_, _, "abort_session")).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, finishWrite(_, _, _, _, _)).Times(0);
     backend->write(backend->prepareWrite(makeStorageRequest(environment)));
@@ -1138,7 +1124,7 @@ TEST(KVCMMockOnlyFullTest, LatePayloadCompletionReturnsDeadlineWithoutFreezingCo
     write_location.write_session_id = "late_completed_session";
     write_location.block_mask       = kv_cache_manager::BlockMaskOffset{0};
     write_location.locations        = locations;
-    EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, _, _, _, 40, 0))
+    EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, _, _, _, 300, 0))
         .WillOnce(Return(std::make_pair(true, write_location)));
     EXPECT_CALL(*client_wrapper, abortWrite(_, _, "late_completed_session")).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, finishWrite(_, _, _, _, _)).Times(0);

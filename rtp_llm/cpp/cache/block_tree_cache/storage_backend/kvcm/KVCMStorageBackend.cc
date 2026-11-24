@@ -730,7 +730,7 @@ public:
                                                      keys,
                                                      /*tokens=*/{},
                                                      location_spec_group_names,
-                                                     /*write_timeout_seconds=*/40,
+                                                     /*write_timeout_seconds=*/300,
                                                      /*min_replica_count=*/0);
         }();
         RTP_LLM_CHECK_WITH_INFO(success, "KVCM StartWrite failed");
@@ -901,16 +901,15 @@ public:
     void abortUnfinishedWrite(const std::string&                      write_session_id,
                               bool                                    source_may_be_touched,
                               RtpLLMRemoteCacheWriteMetricsCollector& collector) {
+        if (source_may_be_touched) {
+            return;
+        }
         const auto                             stage_start = Clock::now();
         block_tree_cache_detail::ScopeRollback timer(
             [&] { collector.remote_finish_write_time_us += elapsedTimeUs(stage_start); });
         try {
             const auto abort_trace = nextTraceId("abort_write", finish_write_trace_sequence_);
-            const bool aborted     = source_may_be_touched ?
-                                         client_wrapper_->finishWrite(
-                                         "", abort_trace, write_session_id, kv_cache_manager::BlockMaskOffset{0}, {}) :
-                                         client_wrapper_->abortWrite("", abort_trace, write_session_id);
-            if (!aborted) {
+            if (!client_wrapper_->abortWrite("", abort_trace, write_session_id)) {
                 RTP_LLM_LOG_WARNING("KVCM failed to abort write session [%s]", write_session_id.c_str());
             }
         } catch (...) {
