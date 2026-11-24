@@ -200,19 +200,18 @@ def cached_main_padded_lengths(context, visible, main_table):
 def rope_config_signature(config):
     # The prefill builders derive their inverse frequencies from base and dim.
     style = config.style
-    return (type(style), str(style)) + tuple(
-        getattr(config, name, None)
-        for name in (
-            "base",
-            "dim",
-            "scale",
-            "index_factor",
-            "indexer_is_neox_style",
-            "mrope_interleaved",
-            "mrope_dim1",
-            "mrope_dim2",
-            "mrope_dim3",
-        )
+    return (
+        type(style),
+        str(style),
+        config.base,
+        config.dim,
+        config.scale,
+        config.index_factor,
+        config.indexer_is_neox_style,
+        config.mrope_interleaved,
+        config.mrope_dim1,
+        config.mrope_dim2,
+        config.mrope_dim3,
     )
 
 

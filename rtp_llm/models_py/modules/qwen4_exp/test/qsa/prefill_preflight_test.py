@@ -59,6 +59,7 @@ class PrefillPreflightTest(unittest.TestCase):
             attn_configs=SimpleNamespace(kernel_tokens_per_block=4),
             head_dim=16,
             kv_head_num=1,
+            _model_prefill_geometry=None,
         )
         return impl, cache, bases, lengths
 

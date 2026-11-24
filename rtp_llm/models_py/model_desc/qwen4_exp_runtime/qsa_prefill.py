@@ -241,7 +241,7 @@ def write_prefill_indexer_cache(
             check_cu_partition()
             raise
         if fused_result is not None:
-            object.__setattr__(self, "_side_cache_undo", fused_result.pop("undo"))
+            self._side_cache_undo = fused_result.pop("undo")
             return lengths, rope_cos, rope_sin, fused_result
 
     # Unsupported geometry or aliased pages returned without a mutation.
@@ -435,7 +435,7 @@ def select_draft_graph_tokens(
         state_table,
         norm_eps=float(indexer.norm_eps),
     )
-    object.__setattr__(self, "_side_cache_undo", undo)
+    self._side_cache_undo = undo
     if prepared is None:
         rotated = apply_partial_rope(q, cos.unsqueeze(1), sin.unsqueeze(1))
         padded = rotated.index_select(0, sources).reshape(batch, lanes, heads, dim)
@@ -625,7 +625,7 @@ def _incremental_prefill_selection(
             plan.state_table,
             norm_eps=float(indexer.norm_eps),
         )
-        object.__setattr__(self, "_side_cache_undo", undo)
+        self._side_cache_undo = undo
     elif plan.aligned_write is not None:
         undo = write_aligned_prefill_cache(
             raw_keys,
@@ -638,7 +638,7 @@ def _incremental_prefill_selection(
             ratio=plan.ratio,
             norm_eps=float(indexer.norm_eps),
         )
-        object.__setattr__(self, "_side_cache_undo", undo)
+        self._side_cache_undo = undo
     else:
         self._write_indexer_cache_with_undo(
             raw_keys,

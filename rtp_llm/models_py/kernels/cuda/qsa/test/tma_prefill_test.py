@@ -655,6 +655,7 @@ class TmaPrefillTest(unittest.TestCase):
         impl.head_num, impl.kv_head_num, impl.head_dim, impl.q_width = 12, 1, 256, 3072
         impl.kv_width = 256
         impl.is_prefill, impl.is_target_verify, impl._is_mtp_draft = True, False, False
+        impl._model_prefill_geometry = None
         impl.attn_configs = SimpleNamespace(
             indexer_topk=512, kernel_tokens_per_block=128
         )

@@ -47,6 +47,8 @@ class QSARuntimeFixture:
             mrope_dim3=0,
             mrope_interleaved=True,
             base=10_000,
+            scale=1.0,
+            indexer_is_neox_style=True,
         )
         self.indexer = SimpleNamespace(
             head_dim=self.D,
@@ -188,6 +190,10 @@ class QSARuntimeFixture:
             base=10_000,
             scale=1.0,
             indexer_is_neox_style=indexer_is_neox_style,
+            mrope_interleaved=False,
+            mrope_dim1=0,
+            mrope_dim2=0,
+            mrope_dim3=0,
         )
 
     @staticmethod

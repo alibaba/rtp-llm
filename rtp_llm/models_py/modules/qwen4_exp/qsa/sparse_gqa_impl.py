@@ -77,6 +77,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         self._qsa_main_cache_mutation_started = False
         self._qsa_target_visible_lengths = None
         self._qsa_main_geometry = None
+        self._model_prefill_geometry = None
         self._validate_runtime_mode()
         rope_writer_cls = (
             FusedRopeKVCachePrefillOpQKVOut

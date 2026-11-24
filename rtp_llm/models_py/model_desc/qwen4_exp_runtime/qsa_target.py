@@ -25,7 +25,7 @@ def select_target_verify_tokens(
     """Select all ``gamma + 1`` target rows using a bounded tail overwrite."""
     token_count = int(raw_keys.shape[0]) if raw_keys.dim() == 2 else -1
     plan = self._target_verify_plan
-    object.__setattr__(self, "_target_verify_plan", None)
+    self._target_verify_plan = None
     if plan is None:
         plan = self._target_verify_geometry(
             indexer=indexer, token_count=token_count, device=raw_keys.device
@@ -109,7 +109,7 @@ def select_target_verify_tokens(
         )
     if prepared is not None:
         rotated_q, undo = prepared
-        object.__setattr__(self, "_side_cache_undo", undo)
+        self._side_cache_undo = undo
     else:
         if position_state is not None:
             rope_cos, rope_sin = position_state.rope(rope_config, group=True)
@@ -155,7 +155,7 @@ def select_target_verify_tokens(
                 plan.state_table,
                 norm_eps=float(indexer.norm_eps),
             )
-            object.__setattr__(self, "_side_cache_undo", undo)
+            self._side_cache_undo = undo
         else:
             self._write_indexer_cache_transactional(
                 raw_keys,

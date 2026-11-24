@@ -131,8 +131,7 @@ class DraftPrefillGraphTest(unittest.TestCase):
                     delegate.reset_mock()
                     positions = anchor.combo_position_ids
                     positions.fill_(999)
-                    original = getattr(anchor, field)
-                    setattr(anchor, field, value)
+                    groups["full"] = SimpleNamespace(**(vars(anchor) | {field: value}))
                     if busy:
                         hook._workspace_lock.acquire()
                     try:
@@ -147,7 +146,7 @@ class DraftPrefillGraphTest(unittest.TestCase):
                     torch.testing.assert_close(
                         positions, torch.full_like(positions, 999)
                     )
-                    setattr(anchor, field, original)
+                    groups["full"] = anchor
                     hook.prepare_cuda_graph(groups)
                     self.assertIs(hook._workspace, workspace)
                     delegate.prepare_cuda_graph.assert_called_once_with(anchor)
@@ -664,11 +663,9 @@ class DraftPrefillGraphTest(unittest.TestCase):
                         state.kv_cache_block_id_device = (
                             state.kv_cache_block_id_device.T.contiguous().T
                         )
-                    setattr(
-                        groups["full"],
-                        field,
-                        torch.tensor(values, device=device, dtype=torch.int32),
-                    )
+                    value = torch.tensor(values, device=device, dtype=torch.int32)
+                    anchor = groups["full"]
+                    groups["full"] = SimpleNamespace(**(vars(anchor) | {field: value}))
                     with self.assertRaisesRegex(
                         RuntimeError, "raw-state pages, cu_seqlens"
                     ):

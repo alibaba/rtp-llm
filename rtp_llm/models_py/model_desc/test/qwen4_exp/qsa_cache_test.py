@@ -80,6 +80,7 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
                     is_prefill=False,
                     is_target_verify=False,
                     _selected_indices=None,
+                    _model_prefill_geometry=None,
                     _is_draft_graph=lambda: False,
                     _is_prefix_reuse_prefill=lambda: False,
                     _paged_kv_scale_args=lambda cache: None,
@@ -435,12 +436,14 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
                     )
 
                 def assert_rope_equal(actual, expected):
-                    for name in ("current_cos", "current_sin", "rope_cos", "rope_sin"):
+                    for actual_rope, expected_rope in (
+                        (actual.current_cos, expected.current_cos),
+                        (actual.current_sin, expected.current_sin),
+                        (actual.rope_cos, expected.rope_cos),
+                        (actual.rope_sin, expected.rope_sin),
+                    ):
                         torch.testing.assert_close(
-                            getattr(actual, name),
-                            getattr(expected, name),
-                            rtol=0,
-                            atol=0,
+                            actual_rope, expected_rope, rtol=0, atol=0
                         )
 
                 expected = prepare(context, None)
@@ -567,7 +570,7 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
             # The model preflight is covered separately; exercise the planner
             # with the scope marker it supplies before any persistent write.
             checks.prefill_metadata_readonly = True
-            object.__setattr__(owner, "_prewrite_checks", checks)
+            owner._prewrite_checks = checks
             return owner._draft_incremental_prefill_geometry(**options), checks
 
         expected, first = plan(context)

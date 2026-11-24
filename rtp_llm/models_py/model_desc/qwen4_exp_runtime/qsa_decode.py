@@ -315,7 +315,7 @@ def select_decode_tokens(
             state_table,
             norm_eps=float(indexer.norm_eps),
         )
-        object.__setattr__(self, "_side_cache_undo", undo)
+        self._side_cache_undo = undo
     else:
         cu_seqlens = torch.arange(batch_size + 1, dtype=torch.int32, device=q.device)
         self._write_indexer_cache_transactional(

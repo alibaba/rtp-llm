@@ -889,7 +889,7 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
             state_table=state_table,
             is_mtp_draft=False,
         )
-        object.__setattr__(context, "metadata_cache", {})
+        context.metadata_cache = {}
         q = torch.randn(sum(lengths), 4, 128, dtype=torch.bfloat16, device="cuda")
         raw = torch.randn(sum(lengths), 256, dtype=torch.bfloat16, device="cuda")[
             :, 128:

@@ -206,7 +206,7 @@ class DraftPrefillGraphReplay(Mapping):
     def _validate_replay_layout(self, anchor):
         """Check bucket metadata before allocating scratch or writing graph inputs."""
         transported = anchor.combo_position_ids
-        if not isinstance(transported, torch.Tensor) or transported.dtype not in (
+        if not torch.is_tensor(transported) or transported.dtype not in (
             torch.int32,
             torch.int64,
         ):
@@ -215,9 +215,9 @@ class DraftPrefillGraphReplay(Mapping):
             )
         if transported.numel() != self.token_capacity * self.position_factor:
             raise RuntimeError("QSA draft graph transported position capacity changed")
-        cu = getattr(anchor, "cu_seqlens_device", None)
+        cu = anchor.cu_seqlens_device
         if (
-            not isinstance(cu, torch.Tensor)
+            not torch.is_tensor(cu)
             or cu.dtype != torch.int32
             or tuple(cu.shape) != (anchor.input_lengths.numel() + 1,)
         ):

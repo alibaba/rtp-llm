@@ -35,7 +35,7 @@ def state_page_table(
 ) -> torch.Tensor:
     """Invert FULL block expansion without changing the state pool's geometry."""
     if (
-        not isinstance(kernel_table, torch.Tensor)
+        not torch.is_tensor(kernel_table)
         or kernel_table.ndim != 2
         or kernel_table.dtype != torch.int32
         or kernel_table.numel() == 0
@@ -82,7 +82,7 @@ def prepare_state_cache_inputs(groups, kv_cache, *, workspace=None) -> Any:
         factor = physical // kernel
         binding = None if workspace is None else workspace.get(tag)
         layout = None
-        if workspace is not None and isinstance(source, torch.Tensor):
+        if workspace is not None and torch.is_tensor(source):
             layout = (
                 source.shape,
                 source.stride(),
