@@ -98,20 +98,23 @@ def _mask_decode_pages(
     COLS: tl.constexpr,
     TABLE_STRIDE: tl.constexpr,
     PAGES: tl.constexpr,
+    QUERY_LEN: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     row = tl.program_id(0)
     cols = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     visible = (cols < COLS) & (cols < tl.load(counts + row))
-    page = tl.load(table + row * TABLE_STRIDE + cols // 32, visible, other=0)
+    page = tl.load(
+        table + (row // QUERY_LEN) * TABLE_STRIDE + cols // 32, visible, other=0
+    )
     missing = (page <= 0) | (page >= PAGES)
     tl.store(scores + row * COLS + cols, float("-inf"), visible & missing)
 
 
-def mask_qsa_decode_pages(scores, table, counts, pages):
+def mask_qsa_decode_pages(scores, table, counts, pages, *, query_len=1):
     rows, cols = scores.shape
     _mask_decode_pages[(rows, triton.cdiv(cols, 256))](
-        scores, table, counts, cols, table.stride(0), pages, 256
+        scores, table, counts, cols, table.stride(0), pages, query_len, 256
     )
 
 

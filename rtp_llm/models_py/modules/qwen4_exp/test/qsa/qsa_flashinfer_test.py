@@ -353,6 +353,257 @@ class QsaFlashInferTest(unittest.TestCase):
         for actual, expected in zip((kv, state, coords), initial):
             torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
+    def test_fused_target_decode_matches_verify_and_replay(self):
+        from rtp_llm.models_py.kernels.cuda.qsa.indexer_norm_rope import _norm_rope
+        from rtp_llm.models_py.kernels.cuda.qsa.position_state import (
+            store_positions,
+            target_position_slots,
+        )
+        from rtp_llm.models_py.kernels.cuda.qsa.target_writer import (
+            _snapshot_target_window,
+            _write_target_window,
+        )
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
+            IndexerCacheUndo,
+            restore_indexer_cache,
+        )
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode import (
+            try_prepare_fused_target_decode,
+        )
+
+        for width in (1, 2, 3, 4):
+            rope, inv, joint, gamma = self._prep_fixture(width)
+            rope.scale = 1.75
+            q, raw = joint[:, :8], joint[:, 8]
+            prefix = torch.tensor([127], device="cuda", dtype=torch.int32)
+            cu = prefix.new_tensor([0, width])
+            order = torch.arange(width, device="cuda", dtype=torch.int32)
+            positions = (
+                prefix[:, None] + 17 * order[:, None] + prefix.new_tensor([8, 37, 69])
+            ).contiguous()
+            table = prefix.new_tensor([[1, 2, 3]])
+            kv = q.new_empty((4, 32, 128)).normal_()
+            state = q.new_empty((4, 8, 128)).normal_().float()
+            coords = torch.randint(
+                100, 200_000, (4, 8, 3), device="cuda", dtype=torch.int32
+            )
+            visible = (prefix[:, None] + order + 1).contiguous()
+            pools = kv, state, coords
+
+            def prepare():
+                slots, history, current = target_position_slots(
+                    prefix, cu, table, width, coords.shape[0]
+                )
+                result = try_prepare_fused_target_decode(
+                    q,
+                    raw,
+                    prefix,
+                    positions,
+                    gamma,
+                    gamma,
+                    inv,
+                    state,
+                    table,
+                    kv,
+                    table,
+                    coords,
+                    visible,
+                    slots,
+                    history,
+                    current,
+                    norm_eps=1e-6,
+                    rope_config=rope,
+                )
+                self.assertIsNotNone(result)
+                return slots, result
+
+            def reference(initial):
+                ref_kv, ref_state, ref_coords = (x.clone() for x in initial)
+                lookup = target_position_slots(
+                    prefix, cu, table, width, coords.shape[0]
+                )
+                write_slots, history_slots, current_rows = lookup
+                history = ref_coords.flatten(0, 1)[history_slots]
+                current = positions[current_rows.clamp_min(0)]
+                group_positions = torch.where(
+                    current_rows[:, None] >= 0, current, history
+                )
+                old_positions = torch.where(
+                    write_slots[:, None] >= 0,
+                    ref_coords.flatten(0, 1)[write_slots.clamp_min(0)],
+                    0,
+                )
+                axes = torch.arange(32, device=q.device)
+                axis = torch.zeros_like(axes)
+                axis[1 : 3 * rope.mrope_dim2 : 3] = 1
+                axis[2 : 3 * rope.mrope_dim3 : 3] = 2
+
+                def cos_sin(xyz):
+                    angle = (xyz[:, axis].float() * (1 / rope.scale)) * inv
+                    cos, sin = angle.cos().to(q.dtype), angle.sin().to(q.dtype)
+                    return cos.repeat(1, 2), sin.repeat(1, 2)
+
+                kcos, ksin = cos_sin(group_positions)
+                qcos, qsin = cos_sin(positions)
+                store_positions(ref_coords, write_slots, positions)
+                undo = IndexerCacheUndo(
+                    state_pool=ref_state,
+                    state_slots=torch.empty_like(write_slots),
+                    original_state=torch.empty_like(raw, dtype=ref_state.dtype),
+                    kv_pool=ref_kv,
+                    kv_slots=torch.empty_like(prefix, dtype=torch.int64),
+                    original_kv=q.new_empty((1, 128)),
+                    padded_slots=True,
+                )
+                layout = dict(
+                    Q=width,
+                    KTW=table.shape[1],
+                    STW=table.shape[1],
+                    KB=ref_kv.shape[0],
+                    SB=ref_state.shape[0],
+                    BQ=1 << (width - 1).bit_length(),
+                    num_warps=4,
+                )
+                _snapshot_target_window[(1,)](
+                    prefix,
+                    ref_kv,
+                    table,
+                    ref_state,
+                    table,
+                    undo.state_slots,
+                    undo.original_state,
+                    undo.kv_slots,
+                    undo.original_kv,
+                    **layout,
+                )
+                _write_target_window[(1,)](
+                    raw,
+                    prefix,
+                    kcos,
+                    ksin,
+                    gamma,
+                    ref_kv,
+                    table,
+                    ref_state,
+                    table,
+                    RAW_STRIDE=raw.stride(0),
+                    EPS=1e-6,
+                    **layout,
+                )
+                rotated = torch.empty(q.shape, device=q.device, dtype=q.dtype)
+                _norm_rope[(width, 8)](
+                    q,
+                    gamma,
+                    qcos,
+                    qsin,
+                    rotated,
+                    HEADS=8,
+                    STRIDE=q.stride(0),
+                    EPS=1e-6,
+                    num_warps=1,
+                    enable_fp_fusion=False,
+                )
+                return rotated, undo, old_positions, (ref_kv, ref_state, ref_coords)
+
+            side = torch.cuda.Stream()
+            side.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(side):
+                prepare()
+            torch.cuda.current_stream().wait_stream(side)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=side):
+                slots, (rotated, lengths, undo, old_positions) = prepare()
+
+            for page in (124, 125, 126, 127, 128, 255, 256, 127):
+                padded = page == 256
+                prefix.fill_(page)
+                positions.copy_(
+                    prefix[:, None]
+                    + 17 * order[:, None]
+                    + prefix.new_tensor([81, 37, 69])
+                )
+                visible.copy_(prefix[:, None] + order + 1)
+                if padded:
+                    table.zero_()
+                    visible.zero_()
+                else:
+                    table.copy_(
+                        table.new_tensor(
+                            [[1 + page % 3, 1 + (page + 1) % 3, 1 + (page + 2) % 3]]
+                        )
+                    )
+                joint.normal_()
+                gamma.normal_(0, 0.1)
+                inv.mul_(0.97)
+                kv.normal_()
+                state.copy_(state.to(torch.bfloat16).normal_())
+                coords.random_(100, 200_000)
+                initial = tuple(x.clone() for x in pools)
+                expected_q, expected_undo, expected_positions, expected_pools = (
+                    reference(initial)
+                )
+                graph.replay()
+                with self.subTest(width=width, prefix=page, padded=padded):
+                    self.assertTrue(
+                        torch.equal(
+                            rotated.view(torch.uint8), expected_q.view(torch.uint8)
+                        )
+                    )
+                    torch.testing.assert_close(lengths, visible[:, 0] + width - 1)
+                    torch.testing.assert_close(old_positions, expected_positions)
+                    for field in (
+                        "state_slots",
+                        "original_state",
+                        "kv_slots",
+                        "original_kv",
+                    ):
+                        torch.testing.assert_close(
+                            getattr(undo, field),
+                            getattr(expected_undo, field),
+                            atol=0,
+                            rtol=0,
+                        )
+                    torch.testing.assert_close(pools, expected_pools, atol=0, rtol=0)
+                    restore_indexer_cache(undo)
+                    store_positions(coords, slots, old_positions)
+                    torch.testing.assert_close(pools, initial, atol=0, rtol=0)
+            graph.reset()
+
+        with self.subTest("two requests cannot share one writer's ownership"):
+            before = tuple(x.clone() for x in pools)
+            prefixes = prefix.repeat(2)
+            repeated_table = table.repeat(2, 1)
+            slots, history, current = target_position_slots(
+                prefixes,
+                cu.new_tensor([0, width, 2 * width]),
+                repeated_table,
+                2 * width,
+                coords.shape[0],
+            )
+            self.assertIsNone(
+                try_prepare_fused_target_decode(
+                    q.repeat(2, 1, 1),
+                    raw.repeat(2, 1),
+                    prefixes,
+                    positions.repeat(2, 1),
+                    gamma,
+                    gamma,
+                    inv,
+                    state,
+                    repeated_table,
+                    kv,
+                    repeated_table,
+                    coords,
+                    visible.repeat(2, 1),
+                    slots,
+                    history,
+                    current,
+                    norm_eps=1e-6,
+                    rope_config=rope,
+                )
+            )
+            torch.testing.assert_close(pools, before, atol=0, rtol=0)
+
     def test_indexer_selects_segment_local_causal_blocks_and_tail(self):
         tokens = 2055  # 513 complete blocks plus a partial tail.
         q = torch.zeros((1, tokens, 8, 128), device="cuda", dtype=torch.bfloat16)

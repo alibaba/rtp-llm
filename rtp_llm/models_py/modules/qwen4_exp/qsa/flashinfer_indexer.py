@@ -133,7 +133,7 @@ def select_flashinfer_prefix_blocks(
     )["indices"]
 
 
-def prepare_flashinfer_decode_selection(q, cache, table):
+def prepare_flashinfer_decode_selection(q, cache, table, *, query_len=1):
     if not (
         q.is_cuda
         and q.dtype == cache.dtype == torch.bfloat16
@@ -142,6 +142,7 @@ def prepare_flashinfer_decode_selection(q, cache, table):
         and q.shape[1:] == (8, 128)
         and cache.shape[1:] == (32, 128)
         and table.stride(1) == 1
+        and 1 <= query_len <= 4
     ):
         return None
 
@@ -171,16 +172,26 @@ def prepare_flashinfer_decode_selection(q, cache, table):
                 threads_per_cta=threads,
             )
         score_recipe = compile_qsa_score_paged(
-            h_i=heads, s_q=1, page_size=128, has_block_lens=False, device=q.device.index
+            h_i=heads,
+            s_q=query_len,
+            page_size=128,
+            has_block_lens=False,
+            device=q.device.index,
         )
     except NotImplementedError:
         return None
     return run_qsa_score_paged, score_recipe, topk, topk_recipe
 
 
-def try_flashinfer_decode_selection(q, cache, table, lengths, *, recipe=None):
+def try_flashinfer_decode_selection(
+    q, cache, table, lengths, *, recipe=None, kv_lengths=None
+):
+    """Select paged blocks for one query or a contiguous query window per request."""
+    query_len = lengths.shape[1] if lengths.ndim == 2 else 1
     if recipe is None:
-        recipe = prepare_flashinfer_decode_selection(q, cache, table)
+        recipe = prepare_flashinfer_decode_selection(
+            q, cache, table, query_len=query_len
+        )
         if recipe is None:
             return None
 
@@ -190,6 +201,13 @@ def try_flashinfer_decode_selection(q, cache, table, lengths, *, recipe=None):
     )
 
     run_qsa_score_paged, score_recipe, topk, topk_recipe = recipe
+    # MTP draft windows can have trailing padding. Anchor the causal window at
+    # the first query and keep the actual per-query lengths for output masking.
+    lengths = lengths.reshape(-1)
+    if kv_lengths is None:
+        kv_lengths = (
+            lengths[::query_len] + (query_len - 1) if query_len > 1 else lengths
+        )
     rows, _, dim = q.shape
     cols = table.shape[1] * 32
     scores = torch.empty((rows, cols), device=q.device, dtype=torch.float32)
@@ -201,7 +219,7 @@ def try_flashinfer_decode_selection(q, cache, table, lengths, *, recipe=None):
         q,
         cache,
         table,
-        lengths,
+        kv_lengths,
         scores,
         counts,
         None,
@@ -211,6 +229,6 @@ def try_flashinfer_decode_selection(q, cache, table, lengths, *, recipe=None):
     )
     # FROST treats physical page zero as valid. Mask invalid pages before TopK;
     # expansion also drops masked IDs when fewer than 512 valid blocks remain.
-    mask_qsa_decode_pages(scores, table, counts, cache.shape[0])
+    mask_qsa_decode_pages(scores, table, counts, cache.shape[0], query_len=query_len)
     topk.run_qsa_topk_decode(topk_recipe, scores, counts, block_ids, stream=stream)
     return expand_qsa_block_ids(block_ids, lengths, scores)
