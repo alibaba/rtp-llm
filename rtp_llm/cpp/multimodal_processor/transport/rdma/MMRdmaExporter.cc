@@ -123,13 +123,23 @@ bool MMRdmaExporter::exportSlots(const torch::Tensor&                embedding,
     if (descriptors.size() != groups.size()) {
         return false;
     }
-    for (size_t group = 0; group < descriptors.size(); ++group) {
-        MMRdmaSlotPB slot;
-        rdma_transport::toProto(descriptors[group], slot.mutable_rdma_descriptor());
-        for (const auto role : group_roles[group]) {
-            slot.add_roles(role);
+    try {
+        for (size_t group = 0; group < descriptors.size(); ++group) {
+            MMRdmaSlotPB slot;
+            rdma_transport::toProto(descriptors[group], slot.mutable_rdma_descriptor());
+            for (const auto role : group_roles[group]) {
+                slot.add_roles(role);
+            }
+            slots->push_back(std::move(slot));
         }
-        slots->push_back(std::move(slot));
+    } catch (...) {
+        std::vector<std::string> handles;
+        handles.reserve(descriptors.size());
+        for (const auto& descriptor : descriptors) {
+            handles.push_back(descriptor.lease_id);
+        }
+        exporter_->release(handles);
+        throw;
     }
     return !slots->empty();
 }
@@ -148,11 +158,31 @@ std::vector<py::bytes> MMRdmaExporter::exportEmbedding(torch::Tensor            
     if (!exported) {
         return output;
     }
-    output.reserve(slots.size());
-    for (const auto& slot : slots) {
-        output.push_back(py::bytes(slot.SerializeAsString()));
+    try {
+        output.reserve(slots.size());
+        for (const auto& slot : slots) {
+            output.push_back(py::bytes(slot.SerializeAsString()));
+        }
+    } catch (...) {
+        std::vector<std::string> handles;
+        handles.reserve(slots.size());
+        for (const auto& slot : slots) {
+            handles.push_back(slot.rdma_descriptor().lease_id());
+        }
+        release(handles);
+        throw;
     }
     return output;
+}
+
+bool MMRdmaExporter::offer(const std::vector<std::string>& handles) {
+    py::gil_scoped_release unlocked;
+    return exporter_->offer(handles);
+}
+
+bool MMRdmaExporter::claim(const std::vector<std::string>& handles) {
+    py::gil_scoped_release unlocked;
+    return exporter_->claim(handles);
 }
 
 void MMRdmaExporter::release(const std::vector<std::string>& handles) {
@@ -175,6 +205,8 @@ void registerMMRdmaExporter(py::module& module) {
              py::arg("embedding"),
              py::arg("pos_id"),
              py::arg("extra_inputs"))
+        .def("offer", &MMRdmaExporter::offer)
+        .def("claim", &MMRdmaExporter::claim)
         .def("release", &MMRdmaExporter::release, py::arg("handles"));
 }
 

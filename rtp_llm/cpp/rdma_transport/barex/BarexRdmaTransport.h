@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <cstdint>
@@ -44,61 +45,65 @@ public:
 
     bool init();
 
-    bool create(const std::vector<torch::Tensor>& tensors, RdmaDescriptor* descriptor);
-    void release(const std::vector<std::string>& lease_ids);
+    bool           create(const std::vector<torch::Tensor>& tensors, RdmaDescriptor* descriptor);
+    bool           offer(const std::vector<std::string>& lease_ids);
+    bool           claim(const std::vector<std::string>& lease_ids);
+    void           release(const std::vector<std::string>& lease_ids);
     RdmaReadResult read(const std::vector<RdmaDescriptor>& descriptors,
-                        int64_t timeout_ms = 0,
-                        std::function<void()> release_after_completion = {},
-                        bool* release_deferred = nullptr);
+                        int64_t                            timeout_ms               = 0,
+                        std::function<void()>              release_after_completion = {},
+                        bool*                              release_deferred         = nullptr);
 
 private:
     struct Slot {
-        void* addr{nullptr};
-        uint64_t allocated_bytes{0};
+        void*                                 addr{nullptr};
+        uint64_t                              allocated_bytes{0};
+        std::chrono::steady_clock::time_point offer_deadline{};
     };
 
     std::string genLeaseId();
-    void releaseSlot(const Slot& slot);
-    void gcLoop();  // Reclaims confirmed late reads; exported slots never expire by time.
+    bool        releaseSlot(const Slot& slot);
+    void        gcLoop();
+    void        expireOffers();
 
     std::vector<std::shared_ptr<::accl::barex::XConnection>>
-    getConnections(const std::string& ip, uint32_t port, int64_t timeout_ms);
-    void invalidateConnection(const std::string& ip,
-                              uint32_t port,
+         getConnections(const std::string& ip, uint32_t port, int64_t timeout_ms);
+    void invalidateConnection(const std::string&                                 ip,
+                              uint32_t                                           port,
                               const std::shared_ptr<::accl::barex::XConnection>& connection);
-    bool readOne(const RdmaDescriptor& descriptor,
+    bool readOne(const RdmaDescriptor&       descriptor,
                  std::vector<torch::Tensor>* tensors,
-                 int64_t timeout_ms,
-                 std::function<void()> release_after_completion,
-                 bool* release_deferred);
+                 int64_t                     timeout_ms,
+                 std::function<void()>       release_after_completion,
+                 bool*                       release_deferred);
 
 private:
     RdmaConfig config_;
-    Mode mode_;
-    int device_id_;
+    Mode       mode_;
+    int        device_id_;
 
-    bool factory_acquired_{false};
-    std::shared_ptr<::arpc::RdmaMempool> mempool_;
+    bool                                           factory_acquired_{false};
+    std::shared_ptr<::arpc::RdmaMempool>           mempool_;
     std::shared_ptr<::accl::barex::XSimpleMempool> x_mempool_;
 
     // Export mode only.
     std::shared_ptr<::accl::barex::XServerTransport> server_;
-    std::string rdma_ip_;
-    uint32_t rdma_port_{0};
+    std::string                                      rdma_ip_;
+    uint32_t                                         rdma_port_{0};
 
     // Read mode only.
-    std::shared_ptr<::accl::barex::XClientTransport> client_;
-    std::mutex connections_mutex_;
+    std::shared_ptr<::accl::barex::XClientTransport>                 client_;
+    std::mutex                                                       connections_mutex_;
     std::map<std::string, std::shared_ptr<BarexRdmaConnectionState>> connections_;
 
     // Exported lease table and timeout reclamation.
-    RdmaDeferredReadQueue deferred_reads_;
-    std::mutex slots_mutex_;
-    uint64_t inflight_bytes_{0};
+    RdmaDeferredReadQueue       deferred_reads_;
+    std::mutex                  slots_mutex_;
+    uint64_t                    inflight_bytes_{0};
     std::map<std::string, Slot> slots_;
-    std::atomic<uint64_t> lease_seq_{0};
-    std::atomic<bool> running_{false};
-    std::thread gc_thread_;
+    std::atomic<uint64_t>       lease_seq_{0};
+    std::atomic<bool>           running_{false};
+    std::thread                 gc_thread_;
 };
 
 }  // namespace rdma_transport

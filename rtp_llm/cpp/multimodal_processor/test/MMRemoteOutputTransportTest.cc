@@ -1,3 +1,4 @@
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <functional>
@@ -18,6 +19,12 @@
 #include "rtp_llm/cpp/multimodal_processor/transport/MMRemoteOutputTransport.h"
 #include "rtp_llm/cpp/multimodal_processor/transport/grpc/MMGrpcTransport.h"
 #include "rtp_llm/cpp/multimodal_processor/transport/rdma/MMRdmaReader.h"
+#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
+#include "rtp_llm/cpp/telemetry/RpcTraceHelper.h"
+#include "opentelemetry/exporters/memory/in_memory_span_exporter_factory.h"
+#include "opentelemetry/exporters/memory/in_memory_span_data.h"
+#include "opentelemetry/sdk/trace/span_data.h"
+#include "opentelemetry/trace/scope.h"
 
 // Orchestration of the LLM-side output transport: which reader gets a receipt and what happens
 // when the encoder answers with a data plane that does not match the configured mode. The data
@@ -516,10 +523,152 @@ TEST(MMRemoteOutputTransportTest, strictRdmaRejectsInlineAndReleasesMalformedMix
     EXPECT_EQ(strict_client.control->released.front(), std::vector<std::string>({"unread-slot"}));
 }
 
+TEST(MMRemoteOutputTransportTest, expiredGrpcBudgetReturnsTimeoutBeforeConnecting) {
+    auto metrics = std::make_shared<MMTransportMetrics>(nullptr);
+    auto client  = createGrpcMMControlClient(metrics, 1000);
+    for (const int64_t timeout_ms : {0, -1}) {
+        DeadlineBudget     budget(timeout_ms);
+        MultimodalInputsPB request;
+        auto               result = client->request("127.0.0.1:1", request, budget);
+        ASSERT_FALSE(result.ok());
+        EXPECT_EQ(result.status().code(), ErrorCode::GENERATE_TIMEOUT);
+        EXPECT_EQ(result.status().ToString(), "vit rpc budget exhausted before the call");
+    }
+}
+
 TEST(MMRemoteOutputTransportTest, typedRequestBudgetDoesNotExtendConfiguredRpcBudget) {
     MultimodalInputsPB request;
     request.set_timeout_ms(8000);
     EXPECT_EQ(resolveRpcTimeoutMs(request, 5000), 5000);
     EXPECT_EQ(resolveRpcTimeoutMs(request, 10000), 8000);
+}
+
+class MMGrpcTraceTest: public ::testing::Test {
+protected:
+    class Service: public MultimodalRpcService::Service {
+    public:
+        std::atomic<int>      claims{0};
+        std::atomic<int>      releases{0};
+        std::mutex            release_mutex;
+        std::set<std::string> acknowledged;
+        grpc::Status          ClaimRdmaLease(grpc::ServerContext*, const ReleaseLeasePB* request, EmptyPB*) override {
+            ++claims;
+            return request->lease_id_size() == 1 && request->lease_id(0) == "offered" ?
+                                grpc::Status::OK :
+                                grpc::Status(grpc::StatusCode::NOT_FOUND, "expired offer");
+        }
+        grpc::Status ReleaseRdmaLease(grpc::ServerContext*, const ReleaseLeasePB* request, EmptyPB*) override {
+            if (++releases == 1) {
+                return grpc::Status(grpc::StatusCode::UNAVAILABLE, "retry release");
+            }
+            std::lock_guard<std::mutex> lock(release_mutex);
+            acknowledged.insert(request->lease_id().begin(), request->lease_id().end());
+            return grpc::Status::OK;
+        }
+        grpc::Status RemoteMultimodalEmbedding(grpc::ServerContext*      context,
+                                               const MultimodalInputsPB* request,
+                                               MultimodalOutputPB*       receipt) override {
+            if (request->support_rdma() && context->client_metadata().count("x-rtp-rdma-claim")) {
+                receipt->set_rdma_claim_required(true);
+                auto* slot = receipt->add_output_rdma_slots()->mutable_rdma_descriptor();
+                slot->set_lease_id(request->request_id() == 1 ? "offered" : "expired");
+            }
+            grpc::Status                   status = request->request_id() == 43 ?
+                                                        grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, "private error") :
+                                                        grpc::Status::OK;
+            telemetry::GrpcStatusSpanGuard guard(telemetry::startRpcServerSpan("test_vit_worker", context), &status);
+            return status;
+        }
+    } service_;
+    std::shared_ptr<opentelemetry::exporter::memory::InMemorySpanData> data_;
+    std::unique_ptr<grpc::Server>                                      server_;
+    int                                                                port_ = 0;
+
+    void SetUp() override {
+        telemetry::TelemetryRuntime::shutdown(5000);
+        auto exporter = opentelemetry::exporter::memory::InMemorySpanExporterFactory::Create(data_);
+        telemetry::TelemetryConfig config;
+        config.enabled = true;
+        config.role    = "test";
+        ASSERT_TRUE(telemetry::TelemetryRuntime::initWithExporter(std::move(exporter), config));
+        grpc::ServerBuilder builder;
+        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port_);
+        builder.RegisterService(&service_);
+        server_ = builder.BuildAndStart();
+        ASSERT_NE(server_, nullptr);
+    }
+
+    void TearDown() override {
+        if (server_) {
+            server_->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(3));
+        }
+        telemetry::TelemetryRuntime::shutdown(5000);
+    }
+};
+
+TEST_F(MMGrpcTraceTest, ClaimBeforeReadAndRetryFailedReleaseIndependentlyOfRequestBudget) {
+    {
+        auto               client   = createGrpcMMControlClient(std::make_shared<MMTransportMetrics>(nullptr), 1000);
+        const auto         endpoint = "127.0.0.1:" + std::to_string(port_);
+        MultimodalInputsPB request;
+        request.set_support_rdma(true);
+        DeadlineBudget budget(3000);
+        request.set_request_id(1);
+        EXPECT_TRUE(client->request(endpoint, request, budget).ok());
+        DeadlineBudget expired(0);
+        client->release(endpoint, {"offered"}, expired);
+        request.set_request_id(2);
+        EXPECT_FALSE(client->request(endpoint, request, budget).ok());
+    }
+    EXPECT_EQ(service_.claims.load(), 2);
+    EXPECT_GE(service_.releases.load(), 2);
+    std::lock_guard<std::mutex> lock(service_.release_mutex);
+    EXPECT_EQ(service_.acknowledged, (std::set<std::string>{"expired", "offered"}));
+}
+
+TEST_F(MMGrpcTraceTest, ScopedVitParentCrossesRealTransportAndPreservesFailures) {
+    namespace trace = opentelemetry::trace;
+    auto client     = createGrpcMMControlClient(std::make_shared<MMTransportMetrics>(nullptr), 1000);
+    auto parent     = telemetry::TelemetryRuntime::tracer()->StartSpan("rtp_llm.vit");
+    {
+        trace::Scope scope(parent);
+        for (int id : {42, 43}) {
+            MultimodalInputsPB request;
+            request.set_request_id(id);
+            DeadlineBudget budget(3000);
+            auto           result = client->request("127.0.0.1:" + std::to_string(port_), request, budget);
+            EXPECT_EQ(result.ok(), id == 42);
+            if (!result.ok()) {
+                EXPECT_EQ(result.status().code(), ErrorCode::CONCURRENCY_LIMIT_ERROR);
+            }
+        }
+    }
+    EXPECT_FALSE(trace::Tracer::GetCurrentSpan()->GetContext().IsValid());
+    parent->End();
+    ASSERT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
+    auto spans = data_->GetSpans();
+    ASSERT_EQ(spans.size(), 5u);
+    int clients = 0;
+    int errors  = 0;
+    for (const auto& span : spans) {
+        EXPECT_EQ(span->GetTraceId(), parent->GetContext().trace_id());
+        if (span->GetStatus() == trace::StatusCode::kError) {
+            ++errors;
+        }
+        if (span->GetSpanKind() == trace::SpanKind::kClient) {
+            ++clients;
+            EXPECT_EQ(span->GetParentSpanId(), parent->GetContext().span_id());
+        }
+        if (span->GetName() == "test_vit_worker") {
+            bool found_parent = false;
+            for (const auto& candidate : spans) {
+                found_parent |= candidate->GetSpanKind() == trace::SpanKind::kClient
+                                && candidate->GetSpanId() == span->GetParentSpanId();
+            }
+            EXPECT_TRUE(found_parent);
+        }
+    }
+    EXPECT_EQ(clients, 2);
+    EXPECT_EQ(errors, 2);
 }
 }  // namespace rtp_llm

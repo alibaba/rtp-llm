@@ -11,8 +11,10 @@
 #include <unordered_set>
 
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDACachingAllocator.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAFunctions.h>
+#include <c10/util/ScopeExit.h>
 #include <torch/cuda.h>
 
 #include "aios/network/accl-barex/include/accl/barex/highlevel/xclient_transport.h"
@@ -27,6 +29,8 @@
 #include "aios/network/rdma/accl/RdmaMempoolFactory.h"
 #include "autil/NetUtil.h"
 
+#include "rtp_llm/cpp/rdma_transport/barex/GpuAllocationRetry.h"
+#include "rtp_llm/cpp/rdma_transport/barex/ReadCompletionState.h"
 #include "rtp_llm/cpp/rdma_transport/RdmaTransport.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -36,48 +40,30 @@ namespace rdma_transport {
 
 namespace {
 
-constexpr uint32_t kIoThreadCount = 2;
-constexpr uint32_t kWorkerThreadCount = 2;
-constexpr uint32_t kReadAttempts = 2;
-constexpr uint64_t kMinGpuAllocBytes = 64UL * 1024;
-constexpr auto kConnectionRetryBackoff = std::chrono::seconds(1);
-
-using RdmaAllocFn = std::function<::accl::barex::BarexResult()>;
-using RdmaShrinkFn = std::function<::accl::barex::BarexResult(float)>;
-
-::accl::barex::BarexResult allocWithOomShrinkRetry(const RdmaAllocFn& alloc, const RdmaShrinkFn& shrink) {
-    auto result = alloc();
-    if (result != ::accl::barex::BAREX_ERR_OOM) {
-        return result;
-    }
-    shrink(0.5F);
-    result = alloc();
-    if (result != ::accl::barex::BAREX_ERR_OOM) {
-        return result;
-    }
-    shrink(1.0F);
-    return alloc();
-}
+constexpr uint32_t kIoThreadCount          = 2;
+constexpr uint32_t kWorkerThreadCount      = 2;
+constexpr uint32_t kReadAttempts           = 2;
+constexpr auto     kConnectionRetryBackoff = std::chrono::seconds(1);
 
 uint64_t alignUp(uint64_t value, uint64_t alignment) {
     return (value + alignment - 1) / alignment * alignment;
 }
 
 ::accl::barex::BarexResult allocGpuBufferWithOomRecovery(const std::shared_ptr<::accl::barex::XSimpleMempool>& pool,
-                                                         ::accl::barex::memp_t& memory,
-                                                         uint64_t size,
+                                                         ::accl::barex::memp_t&                                memory,
+                                                         uint64_t                                              size,
                                                          int device_id) {
-    auto alloc = [&]() { return pool->AllocLimitBuffer(memory, size, ::accl::barex::GPU, /*nic_id=*/-1, device_id); };
+    auto alloc  = [&]() { return pool->AllocLimitBuffer(memory, size, ::accl::barex::GPU, /*nic_id=*/-1, device_id); };
     auto shrink = [&](float ratio) {
         const auto before = pool->Stats(::accl::barex::GPU);
-        RTP_LLM_LOG_WARNING("tensor rdma GPU allocation hit pool OOM; shrinking %.0f%% of free buckets "
+        RTP_LLM_LOG_WARNING("tensor rdma GPU allocation OOM; shrinking %.0f%% of free buckets "
                             "(total=%lu busy=%lu free=%lu)",
                             ratio * 100.0F,
                             before.total_bytes,
                             before.busy_bytes,
                             before.free_bytes);
         const auto result = pool->Shrink(::accl::barex::GPU, ratio, 0.0F);
-        const auto after = pool->Stats(::accl::barex::GPU);
+        const auto after  = pool->Stats(::accl::barex::GPU);
         RTP_LLM_LOG_WARNING("tensor rdma GPU pool shrink finished, result=%d (total=%lu busy=%lu free=%lu)",
                             result,
                             after.total_bytes,
@@ -85,7 +71,25 @@ uint64_t alignUp(uint64_t value, uint64_t alignment) {
                             after.free_bytes);
         return result;
     };
-    return allocWithOomShrinkRetry(alloc, shrink);
+    auto reclaim = [&]() noexcept {
+        try {
+            at::cuda::CUDAGuard device_guard(device_id);
+            RTP_LLM_LOG_WARNING("tensor rdma GPU allocation still physical OOM after pool shrink; "
+                                "releasing unused Torch cache before one final retry, device=%d size=%lu",
+                                device_id,
+                                size);
+            // The raw Barex cudaMalloc cannot enter Torch's allocator fallback.
+            // Reclaim only its unused cache, and only on the allocation slow path.
+            c10::cuda::CUDACachingAllocator::emptyCache();
+            return true;
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("tensor rdma Torch cache reclamation failed: %s", e.what());
+        } catch (...) {
+            RTP_LLM_LOG_WARNING("tensor rdma Torch cache reclamation failed with an unknown exception");
+        }
+        return false;
+    };
+    return detail::allocWithOomShrinkRetry(alloc, shrink, reclaim);
 }
 
 TensorDataType toRdmaDtype(torch::ScalarType type) {
@@ -164,15 +168,10 @@ public:
 
 private:
     RdmaDeferredReadQueue::Ticket ticket_;
-    bool* release_deferred_;
+    bool*                         release_deferred_;
 };
 
-struct ReadState {
-    struct ChunkResult {
-        bool done{false};
-        bool ok{false};
-    };
-
+struct ReadState: detail::ReadCompletionState {
     ReadState(std::shared_ptr<::accl::barex::XSimpleMempool> pool, int device_id):
         pool(std::move(pool)), device_id(device_id) {}
 
@@ -184,13 +183,8 @@ struct ReadState {
     }
 
     std::shared_ptr<::accl::barex::XSimpleMempool> pool;
-    int device_id;
-    ::accl::barex::memp_t memory{};
-    std::mutex mutex;
-    std::condition_variable cv;
-    std::vector<ChunkResult> chunks;
-    size_t completed{0};
-    std::shared_ptr<std::atomic<bool>> completion_confirmed{std::make_shared<std::atomic<bool>>(false)};
+    int                                            device_id;
+    ::accl::barex::memp_t                          memory{};
 };
 
 }  // namespace
@@ -204,15 +198,15 @@ struct BarexRdmaConnectionState {
 
     explicit BarexRdmaConnectionState(size_t expected_count): target_count(expected_count) {}
 
-    std::mutex mutex;
-    std::condition_variable cv;
-    Status status{Status::CONNECTING};
+    std::mutex                                               mutex;
+    std::condition_variable                                  cv;
+    Status                                                   status{Status::CONNECTING};
     std::vector<std::shared_ptr<::accl::barex::XConnection>> connections;
-    const size_t target_count;
-    size_t pending{0};
-    size_t next{0};
-    bool retired{false};
-    std::chrono::steady_clock::time_point retry_after;
+    const size_t                                             target_count;
+    size_t                                                   pending{0};
+    size_t                                                   next{0};
+    bool                                                     retired{false};
+    std::chrono::steady_clock::time_point                    retry_after;
 };
 
 namespace {
@@ -331,8 +325,8 @@ bool BarexRdmaRuntime::init() {
         return false;
     }
     factory_acquired_ = true;
-    mempool_ = ::arpc::RdmaMempoolFactory::GetMempool();
-    x_mempool_ = mempool_ ? mempool_->GetXMempool() : nullptr;
+    mempool_          = ::arpc::RdmaMempoolFactory::GetMempool();
+    x_mempool_        = mempool_ ? mempool_->GetXMempool() : nullptr;
     if (!x_mempool_) {
         RTP_LLM_LOG_WARNING("tensor rdma init failed: Barex mempool is unavailable");
         return false;
@@ -352,7 +346,7 @@ bool BarexRdmaRuntime::init() {
             return false;
         }
 
-        rdma_port_ = config_.port > 0 ? static_cast<uint32_t>(config_.port) : autil::NetUtil::randomPort();
+        rdma_port_    = config_.port > 0 ? static_cast<uint32_t>(config_.port) : autil::NetUtil::randomPort();
         auto callback = std::make_shared<ServerConnectionCallback>();
         if (server_->Listen(::accl::barex::TCP_V4, rdma_port_, callback) != ::accl::barex::BAREX_SUCCESS) {
             RTP_LLM_LOG_WARNING("tensor rdma export init failed: listen on port %u failed", rdma_port_);
@@ -366,6 +360,7 @@ bool BarexRdmaRuntime::init() {
         }
         running_.store(true);
 
+        gc_thread_ = std::thread(&BarexRdmaRuntime::gcLoop, this);
         RTP_LLM_LOG_INFO("tensor rdma export listening on %s:%u", rdma_ip_.c_str(), rdma_port_);
         return true;
     }
@@ -387,11 +382,13 @@ std::string BarexRdmaRuntime::genLeaseId() {
            + std::to_string(currentTimeUs());
 }
 
-void BarexRdmaRuntime::releaseSlot(const Slot& slot) {
-    if (slot.addr && x_mempool_) {
-        at::cuda::CUDAGuard device_guard(device_id_);
-        x_mempool_->ReleaseBuffer(slot.addr, ::accl::barex::GPU);
+bool BarexRdmaRuntime::releaseSlot(const Slot& slot) {
+    const auto result = x_mempool_->ReleaseBuffer(slot.addr, ::accl::barex::GPU);
+    if (result != ::accl::barex::BAREX_SUCCESS) {
+        RTP_LLM_LOG_WARNING("tensor rdma release: registered buffer release failed, result=%d", result);
+        return false;
     }
+    return true;
 }
 
 bool BarexRdmaRuntime::create(const std::vector<torch::Tensor>& tensors, RdmaDescriptor* descriptor) {
@@ -402,8 +399,8 @@ bool BarexRdmaRuntime::create(const std::vector<torch::Tensor>& tensors, RdmaDes
     at::cuda::CUDAGuard device_guard(device_id_);
 
     struct Segment {
-        uint64_t offset;
-        uint64_t nbytes;
+        uint64_t       offset;
+        uint64_t       nbytes;
         TensorDataType dtype;
     };
     std::vector<Segment> segments;
@@ -444,21 +441,36 @@ bool BarexRdmaRuntime::create(const std::vector<torch::Tensor>& tensors, RdmaDes
         return false;
     }
 
+    // Reserve the bookkeeping node before acquiring the buffer. Even an allocation
+    // failure while building the descriptor must leave a retryable release handle.
+    const std::string     lease_id = genLeaseId();
+    decltype(slots_)      unpublished;
+    Slot&                 slot = unpublished.try_emplace(lease_id).first->second;
     ::accl::barex::memp_t memory;
-    auto result = allocGpuBufferWithOomRecovery(x_mempool_, memory, total, device_id_);
+    auto                  result = allocGpuBufferWithOomRecovery(x_mempool_, memory, total, device_id_);
     if (result != ::accl::barex::BAREX_SUCCESS || memory.buf == nullptr) {
         RTP_LLM_LOG_WARNING(
             "tensor rdma export: registered GPU allocation failed, result=%d, nbytes=%lu", result, total);
         return false;
     }
 
-    const uint64_t actual_bytes = memory.buf_len;
+    // buf_len is the requested length. Each registered MR spans the full size class.
+    const uint64_t actual_bytes = memory.mr ? memory.mr->length : memory.buf_len;
+    slot                        = Slot{memory.buf, actual_bytes};
+    auto rollback               = c10::make_scope_exit([&] {
+        if (!releaseSlot(slot)) {
+            std::lock_guard<std::mutex> lock(slots_mutex_);
+            slot.offer_deadline = std::chrono::steady_clock::now();
+            slots_.merge(unpublished);
+            inflight_bytes_ += actual_bytes;
+        }
+    });
 
     try {
         for (size_t i = 0; i < tensors.size(); ++i) {
-            torch::Tensor source = tensors[i].contiguous();
-            auto options = torch::TensorOptions().dtype(source.scalar_type()).device(source.device());
-            torch::Tensor target = torch::from_blob(memory.buf + segments[i].offset, source.sizes(), options);
+            torch::Tensor source  = tensors[i].contiguous();
+            auto          options = torch::TensorOptions().dtype(source.scalar_type()).device(source.device());
+            torch::Tensor target  = torch::from_blob(memory.buf + segments[i].offset, source.sizes(), options);
             target.copy_(source);
         }
         // Do not publish the descriptor until packing into registered memory is complete.
@@ -466,33 +478,30 @@ bool BarexRdmaRuntime::create(const std::vector<torch::Tensor>& tensors, RdmaDes
         at::cuda::getCurrentCUDAStream(device_id_).synchronize();
     } catch (const std::exception& e) {
         RTP_LLM_LOG_WARNING("tensor rdma export: packing failed: %s", e.what());
-        x_mempool_->ReleaseBuffer(memory.buf, ::accl::barex::GPU);
         return false;
     }
 
-    const std::string lease_id = genLeaseId();
-    descriptor->lease_id = lease_id;
-    descriptor->host = rdma_ip_;
-    descriptor->port = rdma_port_;
-    descriptor->remote_addr = reinterpret_cast<uint64_t>(memory.buf);
+    descriptor->lease_id      = lease_id;
+    descriptor->host          = rdma_ip_;
+    descriptor->port          = rdma_port_;
+    descriptor->remote_addr   = reinterpret_cast<uint64_t>(memory.buf);
     descriptor->payload_bytes = total;
     descriptor->nic_keys.clear();
     descriptor->tensors.clear();
     for (const auto& item : memory.mrs) {
         RdmaNicKey key;
         key.nic_id = item.first;
-        key.rkey = item.second->rkey;
+        key.rkey   = item.second->rkey;
         descriptor->nic_keys.push_back(std::move(key));
     }
     if (descriptor->nic_keys.empty()) {
         RTP_LLM_LOG_WARNING("tensor rdma export: allocation has no registered NIC");
-        x_mempool_->ReleaseBuffer(memory.buf, ::accl::barex::GPU);
         return false;
     }
     for (size_t i = 0; i < tensors.size(); ++i) {
         TensorMeta meta;
         meta.shape.assign(tensors[i].sizes().begin(), tensors[i].sizes().end());
-        meta.dtype = segments[i].dtype;
+        meta.dtype  = segments[i].dtype;
         meta.offset = segments[i].offset;
         meta.nbytes = segments[i].nbytes;
         descriptor->tensors.push_back(std::move(meta));
@@ -500,15 +509,19 @@ bool BarexRdmaRuntime::create(const std::vector<torch::Tensor>& tensors, RdmaDes
 
     {
         std::lock_guard<std::mutex> lock(slots_mutex_);
-        // Do not expire slots by wall time: a timed-out peer may still have an
-        // unconfirmed NIC READ. Bound retained leases instead of reusing memory.
+        // Direct and claimed leases may already be in use by a remote NIC.
         if (actual_bytes > static_cast<uint64_t>(config_.max_receipt_bytes)
             || inflight_bytes_ > static_cast<uint64_t>(config_.max_receipt_bytes) - actual_bytes) {
-            x_mempool_->ReleaseBuffer(memory.buf, ::accl::barex::GPU);
+            RTP_LLM_LOG_WARNING("tensor rdma export quota exceeded: inflight=%lu requested=%lu limit=%ld leases=%zu",
+                                inflight_bytes_,
+                                actual_bytes,
+                                config_.max_receipt_bytes,
+                                slots_.size());
             descriptor->lease_id.clear();
             return false;
         }
-        slots_[lease_id] = Slot{memory.buf, actual_bytes};
+        slots_.merge(unpublished);
+        rollback.release();
         inflight_bytes_ += actual_bytes;
     }
     RTP_LLM_LOG_DEBUG("tensor rdma export: lease_id=%s addr=%p logical=%lu allocated=%lu tensors=%zu",
@@ -520,57 +533,115 @@ bool BarexRdmaRuntime::create(const std::vector<torch::Tensor>& tensors, RdmaDes
     return true;
 }
 
-void BarexRdmaRuntime::release(const std::vector<std::string>& lease_ids) {
-    at::cuda::CUDAGuard device_guard(device_id_);
-    std::vector<Slot> released;
-    {
-        std::lock_guard<std::mutex> lock(slots_mutex_);
-        for (const auto& lease_id : lease_ids) {
-            auto it = slots_.find(lease_id);
-            if (it == slots_.end()) {
-                RTP_LLM_LOG_DEBUG("tensor rdma release: unknown or expired lease %s", lease_id.c_str());
-                continue;
-            }
-            inflight_bytes_ -= it->second.allocated_bytes;
-            released.push_back(it->second);
-            slots_.erase(it);
+bool BarexRdmaRuntime::offer(const std::vector<std::string>& lease_ids) {
+    std::lock_guard<std::mutex> lock(slots_mutex_);
+    for (const auto& id : lease_ids) {
+        if (slots_.find(id) == slots_.end()) {
+            throw std::runtime_error("cannot offer an unknown RDMA lease");
         }
     }
-    for (const auto& slot : released) {
-        releaseSlot(slot);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(config_.slot_gc_timeout_ms);
+    for (const auto& id : lease_ids) {
+        slots_.at(id).offer_deadline = deadline;
+    }
+    return true;
+}
+
+bool BarexRdmaRuntime::claim(const std::vector<std::string>& lease_ids) {
+    std::lock_guard<std::mutex> lock(slots_mutex_);
+    const auto                  now = std::chrono::steady_clock::now();
+    for (const auto& id : lease_ids) {
+        const auto it = slots_.find(id);
+        if (it == slots_.end() || it->second.offer_deadline <= now) {
+            return false;
+        }
+    }
+    for (const auto& id : lease_ids) {
+        slots_.at(id).offer_deadline = {};
+    }
+    return !lease_ids.empty();
+}
+
+void BarexRdmaRuntime::expireOffers() {
+    const auto               now = std::chrono::steady_clock::now();
+    std::vector<std::string> expired;
+    {
+        std::lock_guard<std::mutex> lock(slots_mutex_);
+        for (const auto& [id, slot] : slots_) {
+            if (slot.offer_deadline != std::chrono::steady_clock::time_point{} && slot.offer_deadline <= now) {
+                expired.push_back(id);
+            }
+        }
+    }
+    // An expired offer can no longer be claimed. Concurrent explicit release is idempotent.
+    if (!expired.empty()) {
+        release(expired);
+    }
+}
+
+void BarexRdmaRuntime::release(const std::vector<std::string>& lease_ids) {
+    at::cuda::CUDAGuard         device_guard(device_id_);
+    std::lock_guard<std::mutex> lock(slots_mutex_);
+    bool                        all_released = true;
+    for (const auto& id : lease_ids) {
+        const auto it = slots_.find(id);
+        if (it == slots_.end()) {
+            continue;
+        }
+        if (!releaseSlot(it->second)) {
+            // Explicit release or unpublished rollback already proves this slot is safe.
+            // Let the exporter retry even if the caller disappears before receiving the error.
+            it->second.offer_deadline = std::chrono::steady_clock::now();
+            all_released              = false;
+            continue;
+        }
+        inflight_bytes_ -= it->second.allocated_bytes;
+        slots_.erase(it);
+    }
+    if (!all_released) {
+        throw std::runtime_error("Barex failed to release registered GPU buffer");
     }
 }
 
 void BarexRdmaRuntime::gcLoop() {
     while (running_.load()) {
-        deferred_reads_.reclaimCompleted();
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        if (mode_ == Mode::EXPORT) {
+            try {
+                expireOffers();
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_WARNING("tensor rdma offer cleanup failed: %s", e.what());
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        } else {
+            deferred_reads_.reclaimCompleted();
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
     }
 }
 
 std::vector<std::shared_ptr<::accl::barex::XConnection>>
 BarexRdmaRuntime::getConnections(const std::string& ip, uint32_t port, int64_t timeout_ms) {
-    const std::string endpoint = ip + ":" + std::to_string(port);
+    const std::string                         endpoint = ip + ":" + std::to_string(port);
     std::shared_ptr<BarexRdmaConnectionState> state;
     {
         std::lock_guard<std::mutex> lock(connections_mutex_);
-        auto it = connections_.find(endpoint);
+        auto                        it = connections_.find(endpoint);
         if (it == connections_.end()) {
-            state = std::make_shared<BarexRdmaConnectionState>(config_.qp_count);
+            state                  = std::make_shared<BarexRdmaConnectionState>(config_.qp_count);
             connections_[endpoint] = state;
         } else {
             state = it->second;
         }
     }
 
-    size_t connect_count = 0;
-    size_t active_count = 0;
-    size_t pending_count = 0;
-    bool wait_for_connections = false;
+    size_t connect_count        = 0;
+    size_t active_count         = 0;
+    size_t pending_count        = 0;
+    bool   wait_for_connections = false;
     {
         std::lock_guard<std::mutex> lock(state->mutex);
-        active_count = state->connections.size();
-        wait_for_connections = active_count == 0;
+        active_count             = state->connections.size();
+        wait_for_connections     = active_count == 0;
         const size_t provisioned = active_count + state->pending;
         if (!state->retired && provisioned < state->target_count
             && std::chrono::steady_clock::now() >= state->retry_after) {
@@ -613,7 +684,7 @@ BarexRdmaRuntime::getConnections(const std::string& ip, uint32_t port, int64_t t
     std::vector<std::shared_ptr<::accl::barex::XConnection>> stale_connections;
     {
         std::lock_guard<std::mutex> connections_lock(connections_mutex_);
-        auto it = connections_.find(endpoint);
+        auto                        it = connections_.find(endpoint);
         if (it != connections_.end() && it->second == state) {
             std::lock_guard<std::mutex> state_lock(state->mutex);
             state->retired = true;
@@ -628,22 +699,22 @@ BarexRdmaRuntime::getConnections(const std::string& ip, uint32_t port, int64_t t
     return {};
 }
 
-void BarexRdmaRuntime::invalidateConnection(const std::string& ip,
-                                            uint32_t port,
+void BarexRdmaRuntime::invalidateConnection(const std::string&                                 ip,
+                                            uint32_t                                           port,
                                             const std::shared_ptr<::accl::barex::XConnection>& connection) {
     const std::string endpoint = ip + ":" + std::to_string(port);
     {
         std::lock_guard<std::mutex> lock(connections_mutex_);
-        auto it = connections_.find(endpoint);
+        auto                        it = connections_.find(endpoint);
         if (it != connections_.end()) {
-            const auto state = it->second;
+            const auto                  state = it->second;
             std::lock_guard<std::mutex> state_lock(state->mutex);
-            auto& state_connections = state->connections;
+            auto&                       state_connections = state->connections;
             state_connections.erase(std::remove(state_connections.begin(), state_connections.end(), connection),
                                     state_connections.end());
             state->retry_after = std::chrono::steady_clock::now() + kConnectionRetryBackoff;
             if (state_connections.empty() && state->pending == 0) {
-                state->status = BarexRdmaConnectionState::Status::FAILED;
+                state->status  = BarexRdmaConnectionState::Status::FAILED;
                 state->retired = true;
                 connections_.erase(it);
             } else if (state_connections.empty()) {
@@ -659,11 +730,11 @@ void BarexRdmaRuntime::invalidateConnection(const std::string& ip,
     }
 }
 
-bool BarexRdmaRuntime::readOne(const RdmaDescriptor& descriptor,
+bool BarexRdmaRuntime::readOne(const RdmaDescriptor&       descriptor,
                                std::vector<torch::Tensor>* tensors,
-                               int64_t timeout_ms,
-                               std::function<void()> release_after_completion,
-                               bool* release_deferred) {
+                               int64_t                     timeout_ms,
+                               std::function<void()>       release_after_completion,
+                               bool*                       release_deferred) {
     if (mode_ != Mode::READ || tensors == nullptr || descriptor.tensors.empty() || descriptor.payload_bytes == 0
         || descriptor.nic_keys.empty()) {
         RTP_LLM_LOG_WARNING("tensor rdma read: invalid mode, output, or descriptor");
@@ -675,8 +746,8 @@ bool BarexRdmaRuntime::readOne(const RdmaDescriptor& descriptor,
                             config_.max_slot_bytes);
         return false;
     }
-    const std::string& rdma_ip = descriptor.host;
-    const uint32_t rdma_port = descriptor.port;
+    const std::string& rdma_ip   = descriptor.host;
+    const uint32_t     rdma_port = descriptor.port;
     if (rdma_ip.empty() || rdma_port == 0) {
         RTP_LLM_LOG_WARNING("tensor rdma read: descriptor has no endpoint");
         return false;
@@ -686,9 +757,9 @@ bool BarexRdmaRuntime::readOne(const RdmaDescriptor& descriptor,
         timeout_ms > 0 ? std::min<int64_t>(timeout_ms, config_.read_timeout_ms) : config_.read_timeout_ms;
     const auto operation_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budget_ms);
     std::shared_ptr<ReadState> state;
-    double read_us = 0;
-    std::vector<int> selected_local_nics;
-    std::vector<int> selected_remote_nics;
+    double                     read_us = 0;
+    std::vector<int>           selected_local_nics;
+    std::vector<int>           selected_remote_nics;
     for (uint32_t attempt = 0; attempt < kReadAttempts; ++attempt) {
         const auto remaining =
             std::chrono::duration_cast<std::chrono::milliseconds>(operation_deadline - std::chrono::steady_clock::now())
@@ -713,10 +784,10 @@ bool BarexRdmaRuntime::readOne(const RdmaDescriptor& descriptor,
 
         struct ReadPath {
             std::shared_ptr<::accl::barex::XConnection> connection;
-            ::accl::barex::XChannel* channel;
-            int local_nic;
-            int remote_nic;
-            uint32_t remote_rkey;
+            ::accl::barex::XChannel*                    channel;
+            int                                         local_nic;
+            int                                         remote_nic;
+            uint32_t                                    remote_rkey;
         };
         std::vector<ReadPath> paths;
         for (const auto& connection : connections) {
@@ -731,8 +802,8 @@ bool BarexRdmaRuntime::readOne(const RdmaDescriptor& descriptor,
                 invalidateConnection(rdma_ip, rdma_port, connection);
                 continue;
             }
-            const int remote_nic = channel->GetPeerNicId();
-            auto remote_rkey = std::find_if(descriptor.nic_keys.begin(),
+            const int remote_nic  = channel->GetPeerNicId();
+            auto      remote_rkey = std::find_if(descriptor.nic_keys.begin(),
                                             descriptor.nic_keys.end(),
                                             [remote_nic](const auto& item) { return item.nic_id == remote_nic; });
             if (remote_rkey == descriptor.nic_keys.end()) {
@@ -754,52 +825,39 @@ bool BarexRdmaRuntime::readOne(const RdmaDescriptor& descriptor,
         // Allocate ownership tracking before any NIC submission. On exceptional
         // or timeout paths the reclaimer owns both local storage and remote lease.
         ReadCleanupHandoff handoff(std::move(ticket), release_deferred);
-        const auto read_start = std::chrono::steady_clock::now();
-        uint64_t offset = 0;
+        const auto         read_start = std::chrono::steady_clock::now();
+        uint64_t           offset     = 0;
         for (size_t i = 0; i < paths.size(); ++i) {
             const uint64_t chunks_left = paths.size() - i;
             const uint64_t chunk_bytes = (descriptor.payload_bytes - offset + chunks_left - 1) / chunks_left;
 
             ::accl::barex::rw_memp_t read_memory;
-            read_memory.data = candidate->memory;
-            read_memory.data.buf = candidate->memory.buf + offset;
+            read_memory.data         = candidate->memory;
+            read_memory.data.buf     = candidate->memory.buf + offset;
             read_memory.data.buf_len = chunk_bytes;
-            read_memory.data.mr = candidate->memory.mrs.at(paths[i].local_nic);
-            read_memory.r_addr = descriptor.remote_addr + offset;
-            read_memory.r_key = paths[i].remote_rkey;
-            read_memory.r_ttl_ms = currentTimeMs() + remaining;
+            read_memory.data.mr      = candidate->memory.mrs.at(paths[i].local_nic);
+            read_memory.r_addr       = descriptor.remote_addr + offset;
+            read_memory.r_key        = paths[i].remote_rkey;
+            read_memory.r_ttl_ms     = currentTimeMs() + remaining;
             std::vector<::accl::barex::rw_memp_t> reads{read_memory};
 
             result = paths[i].channel->ReadBatch(
                 reads,
-                [candidate, i](::accl::barex::Status status) {
-                    std::lock_guard<std::mutex> lock(candidate->mutex);
-                    if (candidate->chunks[i].done) {
-                        return;
-                    }
-                    candidate->chunks[i].done = true;
-                    candidate->chunks[i].ok = status.IsOk();
-                    ++candidate->completed;
-                    if (candidate->completed == candidate->chunks.size()) {
-                        candidate->completion_confirmed->store(true, std::memory_order_release);
-                    }
-                    candidate->cv.notify_one();
-                },
+                [candidate, i](::accl::barex::Status status) { candidate->completeChunk(i, status.IsOk()); },
                 false);
             if (result != ::accl::barex::BAREX_SUCCESS) {
                 RTP_LLM_LOG_WARNING("tensor rdma read: ReadBatch submission failed, qp=%zu result=%d", i, result);
-                // A failed submit is not a completion receipt. A provider may
-                // have submitted part of the work; only its callback can retire it.
+                candidate->rejectBeforeSubmission(i, result);
                 invalidateConnection(rdma_ip, rdma_port, paths[i].connection);
             }
             offset += chunk_bytes;
         }
 
-        bool read_ok = false;
+        bool              read_ok = false;
         std::vector<bool> path_ok(paths.size(), false);
         {
             std::unique_lock<std::mutex> lock(candidate->mutex);
-            const auto remaining_wait = std::chrono::duration_cast<std::chrono::milliseconds>(
+            const auto                   remaining_wait = std::chrono::duration_cast<std::chrono::milliseconds>(
                                             operation_deadline - std::chrono::steady_clock::now())
                                             .count();
             if (remaining_wait <= 0 || !candidate->cv.wait_for(lock, std::chrono::milliseconds(remaining_wait), [&]() {
@@ -885,7 +943,7 @@ bool BarexRdmaRuntime::readOne(const RdmaDescriptor& descriptor,
                 return false;
             }
             const auto& shape = tensor.shape;
-            uint64_t numel = 1;
+            uint64_t    numel = 1;
             for (int64_t dim : shape) {
                 if (dim < 0 || (dim > 0 && numel > std::numeric_limits<uint64_t>::max() / dim)) {
                     RTP_LLM_LOG_WARNING("tensor rdma read: invalid or overflowing tensor shape");
@@ -920,9 +978,9 @@ bool BarexRdmaRuntime::readOne(const RdmaDescriptor& descriptor,
 }
 
 RdmaReadResult BarexRdmaRuntime::read(const std::vector<RdmaDescriptor>& descriptors,
-                                      int64_t timeout_ms,
-                                      std::function<void()> release_after_completion,
-                                      bool* release_deferred) {
+                                      int64_t                            timeout_ms,
+                                      std::function<void()>              release_after_completion,
+                                      bool*                              release_deferred) {
     RdmaReadResult result;
     if (release_deferred) {
         *release_deferred = false;
@@ -931,7 +989,7 @@ RdmaReadResult BarexRdmaRuntime::read(const std::vector<RdmaDescriptor>& descrip
         result.status = ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid mode or empty descriptor list");
         return result;
     }
-    at::cuda::CUDAGuard device_guard(device_id_);
+    at::cuda::CUDAGuard             device_guard(device_id_);
     std::unordered_set<std::string> lease_ids;
     for (const auto& descriptor : descriptors) {
         const auto validation = validateRdmaDescriptor(descriptor, config_.max_slot_bytes);
@@ -946,7 +1004,7 @@ RdmaReadResult BarexRdmaRuntime::read(const std::vector<RdmaDescriptor>& descrip
     }
 
     const int64_t budget_ms = timeout_ms > 0 ? timeout_ms : config_.read_timeout_ms;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budget_ms);
+    const auto    deadline  = std::chrono::steady_clock::now() + std::chrono::milliseconds(budget_ms);
     for (const auto& descriptor : descriptors) {
         const auto remaining_ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
@@ -985,6 +1043,12 @@ public:
         return descriptor;
     }
 
+    bool offer(const std::vector<std::string>& lease_ids) override {
+        return runtime_->offer(lease_ids);
+    }
+    bool claim(const std::vector<std::string>& lease_ids) override {
+        return runtime_->claim(lease_ids);
+    }
     void release(const std::vector<std::string>& lease_ids) override {
         runtime_->release(lease_ids);
     }
@@ -998,9 +1062,9 @@ public:
     explicit BarexRdmaRead(std::shared_ptr<BarexRdmaRuntime> runtime): runtime_(std::move(runtime)) {}
 
     RdmaReadResult readWithCleanup(const std::vector<RdmaDescriptor>& descriptors,
-                                   int64_t timeout_ms,
-                                   std::function<void()> release_after_completion,
-                                   bool* release_deferred) override {
+                                   int64_t                            timeout_ms,
+                                   std::function<void()>              release_after_completion,
+                                   bool*                              release_deferred) override {
         return runtime_->read(descriptors, timeout_ms, std::move(release_after_completion), release_deferred);
     }
     RdmaReadResult read(const std::vector<RdmaDescriptor>& descriptors, int64_t timeout_ms) override {
