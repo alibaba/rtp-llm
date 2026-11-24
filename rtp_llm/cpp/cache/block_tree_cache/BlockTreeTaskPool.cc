@@ -80,15 +80,31 @@ bool BlockTreeTaskPool::submit(BlockTreeTaskClass               task_class,
     return true;
 }
 
+BlockTreeTaskPool::PreparedCompletion BlockTreeTaskPool::prepareCompletion(std::function<void()> task) {
+    PreparedCompletion node;
+    if (task) {
+        node.push_back(std::move(task));
+    }
+    return node;
+}
+
 bool BlockTreeTaskPool::submitCompletion(std::function<void()> task) {
     if (!task) {
+        return false;
+    }
+    PreparedCompletion node = prepareCompletion(std::move(task));
+    return submitPreparedCompletion(node);
+}
+
+bool BlockTreeTaskPool::submitPreparedCompletion(PreparedCompletion& node) noexcept {
+    if (node.empty()) {
         return false;
     }
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
     if (!started_ || shutdown_) {
         return false;
     }
-    completion_queue_.push_back(std::move(task));
+    completion_queue_.splice(completion_queue_.end(), node);
     taskStarted();
     queue_cv_.notify_one();
     return true;
@@ -186,7 +202,7 @@ void BlockTreeTaskPool::shutdown() {
     std::shared_ptr<autil::LockFreeThreadPool> thread_pool;
     std::deque<QueuedTask>                    dropped_load;
     std::deque<QueuedTask>                    dropped_background;
-    std::deque<std::function<void()>>         dropped_completions;
+    std::list<std::function<void()>>          dropped_completions;
     bool                                       was_started   = false;
     size_t                                     dropped_tasks = 0;
     {

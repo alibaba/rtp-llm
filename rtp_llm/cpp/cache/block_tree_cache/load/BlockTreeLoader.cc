@@ -10,6 +10,9 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/MockDiskCacheSource.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/MockMemoryCacheSource.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/remote_mock/RemoteMockAdapter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/CompletionStage.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -17,18 +20,48 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
+namespace {
 
-BlockTreeLoader::BlockTreeLoader(BlockTree*                      tree,
-                                 BlockTreeEvictor&               evictor,
-                                 BlockTransferDispatcher*        transfer_dispatcher,
-                                 BlockTreeTaskPool*              task_pool,
-                                 BlockTreeCacheMetricsReporter&  metrics_reporter,
-                                 std::mutex&                     mutex,
-                                 int                             disk_timeout_ms,
-                                 int                             host_timeout_ms,
-                                 bool                            enable_device_cache,
-                                 std::shared_ptr<StorageBackend> storage_backend,
-                                 SettledFn                       settled):
+uint64_t mockDiskSourcePosition(uint64_t position) {
+    // SplitMix64's fixed integer avalanche prevents a fixed request length and
+    // bank size from repeatedly selecting only a strided subset of the bank.
+    position += 0x9e3779b97f4a7c15ULL;
+    position = (position ^ (position >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    position = (position ^ (position >> 27)) * 0x94d049bb133111ebULL;
+    return position ^ (position >> 31);
+}
+
+bool validRemoteDecision(const MockCacheHitDecision& decision, const RemoteMockAdapter* adapter) {
+    if (!adapter) {
+        return !decision.remote_server_epoch && !decision.remote_session_id && !decision.remote_generation
+               && !decision.planned_remote_blocks;
+    }
+    const RemoteMockSession frozen{
+        decision.remote_server_epoch, decision.remote_session_id, decision.remote_generation};
+    return frozen == adapter->session() && decision.cumulative_eligible_blocks >= decision.eligible_blocks
+           && decision.planned_remote_blocks <= decision.eligible_blocks
+           && decision.planned_disk_blocks <= decision.eligible_blocks - decision.planned_remote_blocks
+           && decision.planned_memory_blocks
+                  <= decision.eligible_blocks - decision.planned_remote_blocks - decision.planned_disk_blocks;
+}
+
+}  // namespace
+
+BlockTreeLoader::BlockTreeLoader(BlockTree*                                   tree,
+                                 BlockTreeEvictor&                            evictor,
+                                 BlockTransferDispatcher*                     transfer_dispatcher,
+                                 BlockTreeTaskPool*                           task_pool,
+                                 BlockTreeCacheMetricsReporter&               metrics_reporter,
+                                 std::mutex&                                  mutex,
+                                 int                                          disk_timeout_ms,
+                                 int                                          host_timeout_ms,
+                                 bool                                         enable_device_cache,
+                                 std::shared_ptr<StorageBackend>              storage_backend,
+                                 SettledFn                                    settled,
+                                 std::shared_ptr<const MockMemoryCacheSource> mock_memory_cache_source,
+                                 std::shared_ptr<const MockDiskCacheSource>   mock_disk_cache_source,
+                                 const RemoteMockAdapter*                     remote_adapter,
+                                 int                                          remote_timeout_ms):
     tree_(tree),
     evictor_(evictor),
     transfer_dispatcher_(transfer_dispatcher),
@@ -37,17 +70,167 @@ BlockTreeLoader::BlockTreeLoader(BlockTree*                      tree,
     mutex_(mutex),
     enable_device_cache_(enable_device_cache),
     storage_backend_(std::move(storage_backend)),
+    mock_memory_cache_source_(std::move(mock_memory_cache_source)),
+    mock_disk_cache_source_(std::move(mock_disk_cache_source)),
+    remote_adapter_(remote_adapter),
     settled_(std::move(settled)),
-    load_task_runner_(tree_->groupSets(), host_timeout_ms, disk_timeout_ms),
+    load_task_runner_(tree_->groupSets(), host_timeout_ms, disk_timeout_ms, tree, remote_timeout_ms),
     load_join_registry_(tree),
     load_context_coordinator_(std::make_shared<LoadContextCoordinator>(
         [this](const std::shared_ptr<LoadAsyncContext>& context) { return commitLoad(context); },
         [this](LoadAsyncContext& context) {
+            if (context.isMockLoad()) {
+                // Pending mock contexts have neither source LOAD holds nor target LOAD holds.
+                return;
+            }
             CacheLockGuard lock(mutex_, metrics_reporter_, "load_abort");
             abortLoadLocked(
                 context.loadDescs(), context.joinedLoads(), 0, context.contextId(), /*release_transferred_refs=*/false);
         },
         [task_pool](std::function<void()> cleanup) { return task_pool->submitCompletion(std::move(cleanup)); })) {}
+
+std::shared_ptr<LoadAsyncContext>
+BlockTreeLoader::mockCacheLoad(const MockCacheHitDecision&                           decision,
+                               const std::shared_ptr<BlockTreeCacheMetricsReporter>& owner_reporter) {
+    if (!validRemoteDecision(decision, remote_adapter_)) {
+        return nullptr;
+    }
+    const size_t gpu_prefix   = decision.gpuPrefixBlocks();
+    const size_t remote_begin = decision.eligible_blocks - decision.planned_remote_blocks;
+    const size_t disk_begin   = remote_begin - decision.planned_disk_blocks;
+    // Walk the configured reservoir across admissions rather than repeatedly
+    // touching only the first request-length records. This offset is frozen in
+    // the request decision, so retries and TP descriptor replay keep the same IDs.
+    const uint64_t source_begin = decision.cumulative_eligible_blocks >= decision.eligible_blocks ?
+                                      decision.cumulative_eligible_blocks - decision.eligible_blocks :
+                                      0;
+    if ((decision.planned_memory_blocks && !mock_memory_cache_source_)
+        || (decision.planned_disk_blocks && !mock_disk_cache_source_)
+        || (decision.planned_remote_blocks && !remote_adapter_)) {
+        return nullptr;
+    }
+    std::vector<TransferDescriptor> descriptors;
+    for (size_t group_id = 0; group_id < tree_->groupSets().size(); ++group_id) {
+        const auto&  group = tree_->groupSets()[group_id];
+        const size_t required =
+            std::min(decision.eligible_blocks, group->computeReuseBlockCount(decision.eligible_blocks));
+        for (size_t index = std::max(decision.eligible_blocks - required, gpu_prefix); index < decision.eligible_blocks;
+             ++index) {
+            if (index >= remote_begin) {
+                descriptors.push_back(TransferDescriptor::remoteToDevice(
+                    group_id, remote_adapter_->freezeSource(group_id, source_begin, index), {}));
+                continue;
+            }
+            const bool disk  = index >= disk_begin;
+            const auto block = disk ? mock_disk_cache_source_->blockFor(group->groupSetId(),
+                                                                        mockDiskSourcePosition(source_begin + index)) :
+                                      mock_memory_cache_source_->blockFor(group->groupSetId(), index);
+            descriptors.push_back(
+                {nullptr, group_id, index, disk ? Tier::DISK : Tier::HOST, Tier::DEVICE, {block}, false});
+        }
+    }
+    if (descriptors.empty()) {
+        return nullptr;
+    }
+    auto context = load_context_coordinator_->create(descriptors,
+                                                     std::vector<bool>(descriptors.size(), false),
+                                                     decision.eligible_blocks,
+                                                     nullptr,
+                                                     {},
+                                                     LoadSourceKind::MOCK_CACHE,
+                                                     gpu_prefix,
+                                                     decision.planned_disk_blocks,
+                                                     decision.planned_remote_blocks);
+    if (!context) {
+        return nullptr;
+    }
+    context->setTransferOutcomeCallback([reporter = owner_reporter,
+                                         memory   = decision.planned_memory_blocks,
+                                         disk     = decision.planned_disk_blocks,
+                                         remote   = decision.planned_remote_blocks](bool success) {
+        reporter->recordMockCacheLoad(memory, disk, success, remote);
+    });
+    return load_context_coordinator_->registerContext(context) ? context : nullptr;
+}
+
+BlockTreeMatchResult
+BlockTreeLoader::matchMockCacheLocked(const CacheKeysType&                                  cache_keys,
+                                      const std::function<bool(size_t)>&                    valid_prefix,
+                                      const MockCachePlanner&                               planner,
+                                      const std::shared_ptr<BlockTreeCacheMetricsReporter>& owner_reporter) {
+    RTP_LLM_CHECK(planner != nullptr);
+    auto              path = tree_->findNode(cache_keys);
+    std::vector<bool> candidate_valid;
+    std::vector<bool> structural_valid;
+    validMatch(path, candidate_valid, valid_prefix, /*skip_linear=*/false, &structural_valid);
+    const auto valid_gpu_prefix = [this, &path, &structural_valid](size_t count) {
+        if (count == 0) {
+            return true;
+        }
+        if (count > path.size() || !structural_valid[count - 1]) {
+            return false;
+        }
+        for (size_t group_id = 0; group_id < tree_->groupSets().size(); ++group_id) {
+            const auto&  group    = tree_->groupSets()[group_id];
+            const size_t required = std::min(count, group->computeReuseBlockCount(count));
+            for (size_t index = count - required; index < count; ++index) {
+                if (!path[index]->group_set_resources[group_id].hasCompleteDeviceValue()) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+    const auto decision = planner(path.size(), valid_gpu_prefix);
+    if (!validRemoteDecision(decision, remote_adapter_)) {
+        return {};
+    }
+    // A retry may see a longer, shorter, or structurally different tree. The
+    // admitted length and all source boundaries remain immutable. A zero plan
+    // stays zero even if a prefix appeared since admission.
+    if (decision.eligible_blocks == 0) {
+        return {};
+    }
+    if (decision.eligible_blocks > path.size() || !candidate_valid[decision.eligible_blocks - 1]
+        || decision.planned_remote_blocks > decision.eligible_blocks
+        || decision.planned_disk_blocks > decision.eligible_blocks - decision.planned_remote_blocks
+        || decision.planned_memory_blocks
+               > decision.eligible_blocks - decision.planned_remote_blocks - decision.planned_disk_blocks
+        || !valid_gpu_prefix(decision.gpuPrefixBlocks())) {
+        return {};
+    }
+    path.resize(decision.eligible_blocks);
+    BlockTreeMatchResult result;
+    result.matched_device_blocks = decision.gpuPrefixBlocks();
+    result.mock_memory_blocks    = decision.planned_memory_blocks;
+    result.mock_disk_blocks      = decision.planned_disk_blocks;
+    result.mock_remote_blocks    = decision.planned_remote_blocks;
+    const auto access_time_us    = currentTimeUs();
+    const auto access_seq        = evictor_.nextAccessSeq();
+    if (result.mock_memory_blocks || result.mock_disk_blocks || result.mock_remote_blocks) {
+        result.async_context = mockCacheLoad(decision, owner_reporter);
+        if (!result.async_context) {
+            result.mock_load_failed = true;
+            return result;
+        }
+    }
+    for (size_t group_id = 0; group_id < tree_->groupSets().size(); ++group_id) {
+        const auto&  group = tree_->groupSets()[group_id];
+        const size_t required =
+            std::min(result.matched_device_blocks, group->computeReuseBlockCount(result.matched_device_blocks));
+        MultiNodeResource resource{group_id, Tier::DEVICE};
+        for (size_t index = result.matched_device_blocks - required; index < result.matched_device_blocks; ++index) {
+            collectReuseTimeMetrics(path[index], group_id, access_seq, access_time_us, result.reuse_time_metrics);
+            resource.node_blocks.emplace_back(nullptr,
+                                              path[index]->group_set_resources[group_id].getBlocks(Tier::DEVICE));
+        }
+        if (!resource.node_blocks.empty()) {
+            group->referenceBlocks(resource);
+            result.matched_device_resources.push_back(std::move(resource));
+        }
+    }
+    return result;
+}
 
 BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType&               cache_keys,
                                                   const std::function<bool(size_t)>& valid_prefix,
@@ -72,7 +255,8 @@ BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType&          
 bool BlockTreeLoader::validMatch(std::vector<TreeNode*>&            path,
                                  std::vector<bool>&                 candidate_valid,
                                  const std::function<bool(size_t)>& valid_prefix,
-                                 bool                               skip_linear) const {
+                                 bool                               skip_linear,
+                                 std::vector<bool>*                 structural_valid) const {
     size_t valid_block_count = 0;
     candidate_valid.reserve(path.size());
     std::vector<std::unique_ptr<MatchValidator>> match_validators;
@@ -93,6 +277,9 @@ bool BlockTreeLoader::validMatch(std::vector<TreeNode*>&            path,
                 all_groups_valid = false;
             }
         }
+        if (structural_valid != nullptr) {
+            structural_valid->push_back(all_groups_valid);
+        }
         all_groups_valid = all_groups_valid && (!valid_prefix || valid_prefix(i + 1));
         if (all_groups_valid) {
             valid_block_count = i + 1;
@@ -103,10 +290,16 @@ bool BlockTreeLoader::validMatch(std::vector<TreeNode*>&            path,
     if (!has_considered_group_set) {
         path.clear();
         candidate_valid.clear();
+        if (structural_valid != nullptr) {
+            structural_valid->clear();
+        }
         return false;
     }
     path.resize(valid_block_count);
     candidate_valid.resize(valid_block_count);
+    if (structural_valid != nullptr) {
+        structural_valid->resize(valid_block_count);
+    }
     return valid_block_count > 0;
 }
 
@@ -359,7 +552,11 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
     const uint64_t                         context_id          = context->contextId();
     size_t                                 prepared_desc_count = 0;
     block_tree_cache_detail::ScopeRollback rollback_guard(
-        [this, &load_descs, &joined_loads, &prepared_desc_count, context_id]() {
+        [this, &load_descs, &joined_loads, &prepared_desc_count, context_id, &context]() {
+            if (context->isMockLoad()) {
+                abortMockLoadLocked(load_descs, prepared_desc_count);
+                return;
+            }
             abortLoadLocked(load_descs,
                             joined_loads,
                             prepared_desc_count,
@@ -367,14 +564,16 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
                             /*release_transferred_refs=*/false);
         });
 
-    for (const auto& desc : load_descs) {
-        if (desc.isCurrentOwner() && desc.node->group_set_resources[desc.group_set_id].transfer_detached) {
-            abortLoadLocked(load_descs, joined_loads, 0, context_id, false);
-            rollback_guard.dismiss();
-            context->setSettlementReadyCallback(
-                [this](const auto& ready) { scheduleContextSettlement(nullptr, ready); });
-            context->cancelUnsubmittedTransfers();
-            return true;
+    if (!context->isMockLoad()) {
+        for (const auto& desc : load_descs) {
+            if (desc.isCurrentOwner() && desc.node->group_set_resources[desc.group_set_id].transfer_detached) {
+                abortLoadLocked(load_descs, joined_loads, 0, context_id, false);
+                rollback_guard.dismiss();
+                context->setSettlementReadyCallback(
+                    [this](const auto& ready) { scheduleContextSettlement(nullptr, ready); });
+                context->cancelUnsubmittedTransfers();
+                return true;
+            }
         }
     }
 
@@ -384,15 +583,22 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
             ++prepared_desc_count;
             continue;
         }
-        if (desc.isCurrentOwner()
-            && !changeTransferState(
-                desc.node, desc.group_set_id, GroupSetTransferState::LOAD_PENDING, GroupSetTransferState::LOADING)) {
-            RTP_LLM_LOG_ERROR("committed load source is not LOAD_PENDING, group_set_id=%zu", desc.group_set_id);
-            return false;
-        }
-        if (desc.initial_owner) {
-            RTP_LLM_CHECK(
-                load_join_registry_.start(desc.node, desc.group_set_id, desc.generation, desc.target_blocks, context));
+        if (context->isMockLoad()) {
+            RTP_LLM_CHECK(desc.node == nullptr
+                          && (desc.source_tier == Tier::HOST || desc.source_tier == Tier::DISK || desc.isRemoteMock())
+                          && desc.target_tier == Tier::DEVICE);
+            RTP_LLM_CHECK(desc.target_blocks.size() == tree_->groupSets()[desc.group_set_id]->devicePools().size());
+        } else {
+            if (desc.isCurrentOwner()
+                && !changeTransferState(
+                    desc.node, desc.group_set_id, GroupSetTransferState::LOAD_PENDING, GroupSetTransferState::LOADING)) {
+                RTP_LLM_LOG_ERROR("committed load source is not LOAD_PENDING, group_set_id=%zu", desc.group_set_id);
+                return false;
+            }
+            if (desc.initial_owner) {
+                RTP_LLM_CHECK(load_join_registry_.start(
+                    desc.node, desc.group_set_id, desc.generation, desc.target_blocks, context));
+            }
         }
         tree_->groupSets()[desc.group_set_id]->referenceBlocks(
             MultiNodeResource{desc.group_set_id, Tier::DEVICE, {{desc.node, desc.target_blocks}}},
@@ -420,8 +626,10 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
                 RTP_LLM_LOG_WARNING("failed to record expired load, descriptor_count=%zu", descriptor_count);
             }
         };
-        const TransferTask& queue_task =
-            task->disk_to_device_task.descriptors().empty() ? task->host_to_device_task : task->disk_to_device_task;
+        const TransferTask& queue_task = !task->remote_to_device_task.descriptors().empty() ?
+                                             task->remote_to_device_task :
+                                         task->disk_to_device_task.descriptors().empty() ? task->host_to_device_task :
+                                                                                           task->disk_to_device_task;
         if (queue_task.expired()) {
             on_timeout();
             rollback_guard.dismiss();
@@ -443,6 +651,16 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
 
     rollback_guard.dismiss();
     return true;
+}
+
+void BlockTreeLoader::abortMockLoadLocked(const std::vector<TransferDescriptor>& load_descs,
+                                          size_t                                 prepared_desc_count) {
+    for (size_t i = 0; i < prepared_desc_count; ++i) {
+        const auto& desc = load_descs[i];
+        tree_->groupSets()[desc.group_set_id]->unreferenceBlocks(
+            MultiNodeResource{desc.group_set_id, Tier::DEVICE, {{nullptr, desc.target_blocks}}},
+            BlockTreeRefType::LOAD);
+    }
 }
 
 void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& load_descs,
@@ -517,14 +735,19 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& loa
 }
 
 void BlockTreeLoader::runLoadTask(const LoadTaskRunner::TaskPtr& task) {
-    const auto complete = [task](ErrorInfo) noexcept {
+    const auto complete = [task](ErrorInfo error) noexcept {
         task->phase = LoadTaskRunner::Task::Phase::FINISHED;
-        for (const Tier tier : {Tier::HOST, Tier::DISK}) {
-            const auto&  transfer = tier == Tier::HOST ? task->host_to_device_task : task->disk_to_device_task;
-            const auto&  result   = tier == Tier::HOST ? task->host_result : task->disk_result;
+        for (const Tier tier : {Tier::HOST, Tier::DISK, Tier::REMOTE}) {
+            const auto&  transfer = tier == Tier::HOST ? task->host_to_device_task :
+                                    tier == Tier::DISK ? task->disk_to_device_task :
+                                                         task->remote_to_device_task;
+            const auto&  result   = tier == Tier::HOST ? task->host_result :
+                                    tier == Tier::DISK ? task->disk_result :
+                                                         task->remote_result;
             const size_t count    = transfer.descriptors().size();
             const bool   success  = result.ok() && !result.block_errors.empty();
-            if (count != 0 && !task->context->completeTransfers(count, success, tier)) {
+            const auto   detail   = tier == Tier::REMOTE ? (result.ok() ? error : result.status) : ErrorInfo::OkStatus();
+            if (count != 0 && !task->context->completeTransfers(count, success, tier, detail)) {
                 RTP_LLM_LOG_WARNING("failed to record load copy completion, descriptor_count=%zu", count);
             }
         }
@@ -621,6 +844,13 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&              task,
                                        bool&                              host_success,
                                        std::vector<JoinedLoadCompletion>& joined_contexts,
                                        const CacheStageContext&           stage_context) {
+    if (task.context->isMockLoad()) {
+        // Request references retain successful destinations. Every terminal outcome
+        // drops the temporary target holds; reservoir MOCK_SOURCE holds are cache-owned.
+        load_task_runner_.releaseTaskResources(task);
+        settled_(false);
+        return aggregate_success;
+    }
     std::vector<BlockTreeEvictor::InvalidationSource> corrupted;
     const auto collect_corrupted = [this, &corrupted](const TransferTask& transfer, const TransferResult& result) {
         for (size_t index = 0; index < result.block_errors.size(); ++index) {
@@ -687,6 +917,8 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&              task,
                     group_set->unreferenceBlocks(source_protection, BlockTreeRefType::CACHE);
                     resource.evictFromTier(desc.source_tier);
                     task.target_installed[desc_index] = true;
+                    tree_->recordPressurePublication(CacheTransferOperation::LOAD, desc);
+                    tree_->refreshPressureHostOwner(desc.node, desc.group_set_id);
                 }
                 const bool state_changed = changeTransferState(
                     desc.node, desc.group_set_id, GroupSetTransferState::LOADING, GroupSetTransferState::IDLE);

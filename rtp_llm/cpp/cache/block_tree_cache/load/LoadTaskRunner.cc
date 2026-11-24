@@ -1,7 +1,9 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadTaskRunner.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 
 #include <exception>
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -12,14 +14,23 @@
 
 namespace rtp_llm {
 
-LoadTaskRunner::LoadTaskRunner(const std::vector<GroupSetPtr>& group_sets, int host_timeout_ms, int disk_timeout_ms):
-    group_sets_(group_sets), host_timeout_ms_(host_timeout_ms), disk_timeout_ms_(disk_timeout_ms) {}
+LoadTaskRunner::LoadTaskRunner(const std::vector<GroupSetPtr>& group_sets,
+                               int                             host_timeout_ms,
+                               int                             disk_timeout_ms,
+                               BlockTree*                      pressure_tree,
+                               int                             remote_timeout_ms):
+    pressure_tree_(pressure_tree),
+    group_sets_(group_sets),
+    host_timeout_ms_(host_timeout_ms),
+    disk_timeout_ms_(disk_timeout_ms),
+    remote_timeout_ms_(remote_timeout_ms) {}
 
 LoadTaskRunner::TaskPtr LoadTaskRunner::createTask(const std::shared_ptr<LoadAsyncContext>& context) {
     const std::vector<TransferDescriptor>& load_descs = context->loadDescs();
     std::vector<TransferDescriptor>        task_load_descs;
     std::vector<TransferDescriptor>        host_to_device_descriptors;
     std::vector<TransferDescriptor>        disk_to_device_descriptors;
+    std::vector<TransferDescriptor>        remote_descriptors;
     for (size_t desc_index = 0; desc_index < load_descs.size(); ++desc_index) {
         const TransferDescriptor& desc = load_descs[desc_index];
         if (context->joinedLoads()[desc_index] || desc.source_tier == Tier::DEVICE) {
@@ -28,8 +39,12 @@ LoadTaskRunner::TaskPtr LoadTaskRunner::createTask(const std::shared_ptr<LoadAsy
         task_load_descs.push_back(desc);
         if (desc.source_tier == Tier::HOST) {
             host_to_device_descriptors.push_back(desc);
-        } else {
+        } else if (desc.source_tier == Tier::DISK) {
             disk_to_device_descriptors.push_back(desc);
+        } else if (desc.isRemoteMock()) {
+            remote_descriptors.push_back(desc);
+        } else {
+            throw std::invalid_argument("unsupported load source");
         }
     }
     if (task_load_descs.empty()) {
@@ -42,9 +57,12 @@ LoadTaskRunner::TaskPtr LoadTaskRunner::createTask(const std::shared_ptr<LoadAsy
             std::move(host_to_device_descriptors), std::chrono::milliseconds(host_timeout_ms_), context->requestId()),
         TransferTask(
             std::move(disk_to_device_descriptors), std::chrono::milliseconds(disk_timeout_ms_), context->requestId()),
-        context);
+        context,
+        TransferTask(
+            std::move(remote_descriptors), std::chrono::milliseconds(remote_timeout_ms_), context->requestId()));
     task->host_to_device_task.setWorkflow(context->workflowId(), context->workflowId());
     task->disk_to_device_task.setWorkflow(context->workflowId(), context->workflowId());
+    task->remote_to_device_task.setWorkflow(context->workflowId(), context->workflowId());
     return task;
 }
 
@@ -53,8 +71,10 @@ void LoadTaskRunner::runTransfer(TaskPtr                        task,
                                  BlockTreeCacheMetricsReporter& metrics_reporter,
                                  TransferDoneCallback           callback) {
     task->phase = Task::Phase::TRANSFERRING;
-    const auto& completion_transfer =
-        task->disk_to_device_task.descriptors().empty() ? task->host_to_device_task : task->disk_to_device_task;
+    const auto& completion_transfer = !task->remote_to_device_task.descriptors().empty() ?
+                                          task->remote_to_device_task :
+                                      task->disk_to_device_task.descriptors().empty() ? task->host_to_device_task :
+                                                                                        task->disk_to_device_task;
     const auto workflow  = CacheStageContext::forWorkflow(metrics_reporter,
                                                          task->load_descs,
                                                          "load",
@@ -69,8 +89,18 @@ void LoadTaskRunner::runTransfer(TaskPtr                        task,
             callback(std::move(result.status));
         });
 
-    for (Tier source_tier : {Tier::HOST, Tier::DISK}) {
-        const auto& transfer = source_tier == Tier::HOST ? task->host_to_device_task : task->disk_to_device_task;
+    const auto task_for_tier = [](const Task& t, Tier source_tier) -> const TransferTask& {
+        if (source_tier == Tier::HOST) {
+            return t.host_to_device_task;
+        }
+        if (source_tier == Tier::DISK) {
+            return t.disk_to_device_task;
+        }
+        return t.remote_to_device_task;
+    };
+
+    for (Tier source_tier : {Tier::HOST, Tier::DISK, Tier::REMOTE}) {
+        const auto& transfer = task_for_tier(*task, source_tier);
         if (transfer.descriptors().empty()) {
             continue;
         }
@@ -79,10 +109,13 @@ void LoadTaskRunner::runTransfer(TaskPtr                        task,
         bool    transfer_started = false;
         auto    complete = [this, task, transfers, &metrics_reporter, source_tier, observe_wait = workflow.enabled](
                             TransferResult result, int64_t transfer_begin, bool transfer_started) {
-            const auto& transfer = source_tier == Tier::HOST ? task->host_to_device_task : task->disk_to_device_task;
+            const auto& transfer = source_tier == Tier::HOST ? task->host_to_device_task :
+                                   source_tier == Tier::DISK ? task->disk_to_device_task :
+                                                               task->remote_to_device_task;
             auto        stage_context = CacheStageContext::forTransfer(metrics_reporter, transfer, "load");
             auto total = TransferStageTimer::scope(stage_context, "callback_total", "workflow_callback", result.ok());
-            if (observe_wait && !task->host_to_device_task.descriptors().empty()
+            if (observe_wait && (source_tier == Tier::HOST || source_tier == Tier::DISK)
+                && !task->host_to_device_task.descriptors().empty()
                 && !task->disk_to_device_task.descriptors().empty()) {
                 std::lock_guard<std::mutex> lock(task->wait_mutex);
                 bool&      completed       = source_tier == Tier::HOST ? task->host_completed : task->disk_completed;
@@ -95,10 +128,14 @@ void LoadTaskRunner::runTransfer(TaskPtr                        task,
                         stage_context, source_tier == Tier::HOST ? "wait_disk2d" : "wait_h2d", "workflow_callback");
                 }
             }
+            if (pressure_tree_) {
+                pressure_tree_->recordPressureWorkflowFailure(
+                    CacheTransferOperation::LOAD, transfer.descriptors(), result);
+            }
             try {
                 auto metrics =
                     TransferStageTimer::scope(stage_context, "metrics_report", "workflow_callback", result.ok());
-                if (transfer_started) {
+                if (transfer_started && source_tier != Tier::REMOTE) {
                     reportStageFinished(
                         *task, metrics_reporter, source_tier, transfer.descriptors(), transfer_begin, result.ok());
                     metrics_reporter.maybeReportCopyError(source_tier, Tier::DEVICE, result);
@@ -113,21 +150,26 @@ void LoadTaskRunner::runTransfer(TaskPtr                        task,
 
             {
                 auto save = TransferStageTimer::scope(stage_context, "save_result", "workflow_callback", result.ok());
-                auto&                saved_result = source_tier == Tier::HOST ? task->host_result : task->disk_result;
-                saved_result                      = result;
+                auto& saved_result = source_tier == Tier::HOST ? task->host_result :
+                                     source_tier == Tier::DISK ? task->disk_result :
+                                                                 task->remote_result;
+                saved_result = result;
             }
             transfers->completeBatch(std::move(result));
         };
         try {
             auto stage_context = CacheStageContext::forTransfer(metrics_reporter, transfer, "load");
             auto submit        = TransferStageTimer::scope(stage_context, "next_stage_submit", "workflow_callback");
-            transfer_begin =
-                metrics_reporter.reportTransferStarted(TransferOperation::LOAD, source_tier, Tier::DEVICE);
-            transfer_started = true;
+            if (source_tier != Tier::REMOTE) {
+                transfer_begin =
+                    metrics_reporter.reportTransferStarted(TransferOperation::LOAD, source_tier, Tier::DEVICE);
+                transfer_started = true;
+            }
             transfer_dispatcher.runTransfer(
+                CacheTransferOperation::LOAD,
                 transfer,
-                [complete, transfer_begin](TransferResult result) {
-                    complete(std::move(result), transfer_begin, true);
+                [complete, transfer_begin, transfer_started](TransferResult result) {
+                    complete(std::move(result), transfer_begin, transfer_started);
                 },
                 "load");
         } catch (const std::exception& exception) {

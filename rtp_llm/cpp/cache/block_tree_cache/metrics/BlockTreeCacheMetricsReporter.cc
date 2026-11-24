@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <cassert>
+#include <limits>
 #include <unordered_set>
 #include <utility>
 
+#include "rtp_llm/cpp/cache/MockCacheHitController.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/CacheStageMetrics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
@@ -19,6 +21,24 @@ namespace {
 constexpr std::array<Tier, 3>           kMetricTiers      = {Tier::DEVICE, Tier::HOST, Tier::DISK};
 constexpr std::array<CacheGroupType, 3> kMetricGroupTypes = {
     CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::LINEAR};
+
+int64_t boundedMockCount(uint64_t count) {
+    return static_cast<int64_t>(std::min<uint64_t>(count, std::numeric_limits<int64_t>::max()));
+}
+
+void addMockCount(int64_t& count, size_t increment) {
+    count += static_cast<int64_t>(std::min<uint64_t>(increment, std::numeric_limits<int64_t>::max() - count));
+}
+
+int64_t mockRatioPpm(int64_t numerator, int64_t denominator) {
+    if (denominator == 0) {
+        return 0;
+    }
+    const auto quotient = static_cast<unsigned __int128>(numerator) * 1000000 / denominator;
+    return quotient > static_cast<unsigned __int128>(std::numeric_limits<int64_t>::max()) ?
+               std::numeric_limits<int64_t>::max() :
+               static_cast<int64_t>(quotient);
+}
 
 size_t transferOperationIndex(TransferOperation operation) {
     return static_cast<size_t>(operation);
@@ -37,32 +57,172 @@ int metricGroupTypeIndex(CacheGroupType group_type) {
     return -1;
 }
 
-CachePoolMetrics makePoolMetrics(Tier tier, const IBlockPool& pool) {
-    CachePoolMetrics metrics_data;
-    metrics_data.tier                       = tier;
-    metrics_data.pool_name                  = pool.poolName();
-    metrics_data.block_size_bytes           = pool.blockSizeBytes();
-    metrics_data.total_blocks               = pool.totalBlocksNum();
-    metrics_data.free_blocks                = pool.freeBlocksNum();
-    metrics_data.used_blocks                = metrics_data.total_blocks - metrics_data.free_blocks;
-    metrics_data.active_blocks              = pool.activeBlocksNum();
-    metrics_data.available_blocks           = pool.availableBlocksNum();
-    metrics_data.block_cache_ref_blocks     = pool.referencedBlocksNum(BlockTreeRefType::CACHE);
-    metrics_data.load_ref_blocks            = pool.referencedBlocksNum(BlockTreeRefType::LOAD);
-    metrics_data.eviction_ref_blocks        = pool.referencedBlocksNum(BlockTreeRefType::EVICT);
-    metrics_data.frozen_ref_blocks          = pool.referencedBlocksNum(BlockTreeRefType::FROZEN);
-    return metrics_data;
-}
-
-CachePoolMetrics makeDevicePoolMetrics(const DeviceBlockPool& pool) {
-    CachePoolMetrics metrics_data            = makePoolMetrics(Tier::DEVICE, pool);
-    metrics_data.request_ref_blocks          = pool.referencedBlocksNum();
-    metrics_data.remote_connector_ref_blocks = pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR);
-    metrics_data.pd_connector_ref_blocks     = pool.referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR);
-    return metrics_data;
-}
-
 }  // namespace
+
+CachePoolMetrics BlockTreeCacheMetricsReporter::snapshotPool(Tier tier, const IBlockPool& pool) {
+    CachePoolMetrics metrics_data;
+    metrics_data.tier                   = tier;
+    metrics_data.pool_name              = pool.poolName();
+    metrics_data.block_size_bytes       = pool.blockSizeBytes();
+    metrics_data.total_blocks           = pool.totalBlocksNum();
+    metrics_data.free_blocks            = pool.freeBlocksNum();
+    metrics_data.used_blocks            = metrics_data.total_blocks - metrics_data.free_blocks;
+    metrics_data.active_blocks          = pool.activeBlocksNum();
+    metrics_data.available_blocks       = pool.availableBlocksNum();
+    metrics_data.block_cache_ref_blocks = pool.referencedBlocksNum(BlockTreeRefType::CACHE);
+    metrics_data.load_ref_blocks        = pool.referencedBlocksNum(BlockTreeRefType::LOAD);
+    metrics_data.eviction_ref_blocks    = pool.referencedBlocksNum(BlockTreeRefType::EVICT);
+    metrics_data.store_ref_blocks       = pool.referencedBlocksNum(BlockTreeRefType::STORE);
+    metrics_data.frozen_ref_blocks      = pool.referencedBlocksNum(BlockTreeRefType::FROZEN);
+    if (tier == Tier::DEVICE) {
+        const auto& device_pool                  = static_cast<const DeviceBlockPool&>(pool);
+        metrics_data.request_ref_blocks          = device_pool.referencedBlocksNum();
+        metrics_data.remote_connector_ref_blocks = device_pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR);
+        metrics_data.pd_connector_ref_blocks     = device_pool.referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR);
+    }
+    metrics_data.mock_source_ref_blocks = pool.referencedBlocksNum(BlockTreeRefType::MOCK_SOURCE);
+    if (tier == Tier::HOST || tier == Tier::DISK) {
+        const size_t stride = tier == Tier::HOST ? static_cast<const HostBlockPool&>(pool).strideBytes() :
+                                                   static_cast<const DiskBlockPool&>(pool).strideBytes();
+        metrics_data.mock_source_ref_bytes =
+            metrics_data.mock_source_ref_blocks > std::numeric_limits<size_t>::max() / stride ?
+                std::numeric_limits<size_t>::max() :
+                metrics_data.mock_source_ref_blocks * stride;
+    }
+    return metrics_data;
+}
+
+void BlockTreeCacheMetricsReporter::updateMockCachePlan(const MockCacheHitDecision& decision) {
+    std::lock_guard<std::mutex> lock(mock_memory_metrics_mutex_);
+    mock_cache_metrics_.eligible_blocks =
+        std::max(mock_cache_metrics_.eligible_blocks, boundedMockCount(decision.cumulative_eligible_blocks));
+    mock_cache_metrics_.planned_memory_blocks = std::max(mock_cache_metrics_.planned_memory_blocks,
+                                                         boundedMockCount(decision.cumulative_planned_memory_blocks));
+    mock_cache_metrics_.planned_remote_blocks = std::max(mock_cache_metrics_.planned_remote_blocks,
+                                                         boundedMockCount(decision.cumulative_planned_remote_blocks));
+    mock_cache_metrics_.planned_disk_blocks =
+        std::max(mock_cache_metrics_.planned_disk_blocks, boundedMockCount(decision.cumulative_planned_disk_blocks));
+    mock_memory_metrics_.eligible_blocks     = mock_cache_metrics_.eligible_blocks;
+    mock_memory_metrics_.planned_host_blocks = mock_cache_metrics_.planned_memory_blocks;
+    mock_memory_metrics_.planned_ratio_ppm =
+        mockRatioPpm(mock_memory_metrics_.planned_host_blocks, mock_memory_metrics_.eligible_blocks);
+}
+
+void BlockTreeCacheMetricsReporter::recordMockCacheLoad(size_t memory_blocks,
+                                                        size_t disk_blocks,
+                                                        bool   success,
+                                                        size_t remote_blocks) {
+    std::lock_guard<std::mutex> lock(mock_memory_metrics_mutex_);
+    addMockCount(success ? mock_memory_metrics_.successful_h2d_blocks : mock_memory_metrics_.failed_h2d_blocks,
+                 memory_blocks);
+    mock_memory_metrics_.success_ratio_ppm =
+        mockRatioPpm(mock_memory_metrics_.successful_h2d_blocks, mock_memory_metrics_.eligible_blocks);
+    if (success) {
+        addMockCount(mock_cache_metrics_.successful_memory_blocks, memory_blocks);
+        addMockCount(mock_cache_metrics_.successful_disk_blocks, disk_blocks);
+        addMockCount(mock_cache_metrics_.successful_remote_blocks, remote_blocks);
+    } else {
+        addMockCount(mock_cache_metrics_.failed_blocks, memory_blocks);
+        addMockCount(mock_cache_metrics_.failed_blocks, disk_blocks);
+        addMockCount(mock_cache_metrics_.failed_blocks, remote_blocks);
+    }
+}
+
+void BlockTreeCacheMetricsReporter::startLocalStoreRequest() {
+    std::lock_guard<std::mutex> lock(mock_memory_metrics_mutex_);
+    ++local_store_.pending_requests;
+}
+
+void BlockTreeCacheMetricsReporter::finishLocalStoreRequest(bool released) {
+    std::lock_guard<std::mutex> lock(mock_memory_metrics_mutex_);
+    --local_store_.pending_requests;
+    if (released)
+        ++local_store_.released_requests;
+    else
+        ++local_store_.abandoned_requests;
+}
+
+void BlockTreeCacheMetricsReporter::recordLocalStoreRejection(Tier tier) {
+    std::lock_guard<std::mutex> lock(mock_memory_metrics_mutex_);
+    if (tier == Tier::DISK)
+        ++local_store_.rejected_disk_stores;
+    else
+        ++local_store_.rejected_host_stores;
+}
+
+LocalStoreSnapshot BlockTreeCacheMetricsReporter::localStoreSnapshot() const {
+    std::lock_guard<std::mutex> lock(mock_memory_metrics_mutex_);
+    return local_store_;
+}
+
+MockCacheMetricsSnapshot BlockTreeCacheMetricsReporter::mockCacheMetricsSnapshot() const {
+    std::lock_guard<std::mutex> lock(mock_memory_metrics_mutex_);
+    return mock_cache_metrics_;
+}
+
+void BlockTreeCacheMetricsReporter::updateMockMemorySource(const std::vector<GroupSetPtr>& group_sets) {
+    std::lock_guard<std::mutex> lock(mock_memory_metrics_mutex_);
+    mock_memory_metrics_.source_blocks = 0;
+    mock_memory_metrics_.source_bytes  = 0;
+    for (const auto& group : group_sets) {
+        if (const auto host = group->hostPool()) {
+            const auto snapshot = snapshotPool(Tier::HOST, *host);
+            addMockCount(mock_memory_metrics_.source_blocks, snapshot.mock_source_ref_blocks);
+            addMockCount(mock_memory_metrics_.source_bytes, snapshot.mock_source_ref_bytes);
+        }
+    }
+}
+
+void BlockTreeCacheMetricsReporter::recordMockMemoryD2HSubmitted(size_t host_records) {
+    std::lock_guard<std::mutex> lock(mock_memory_metrics_mutex_);
+    addMockCount(mock_memory_metrics_.d2h_submitted_blocks, host_records);
+}
+
+void BlockTreeCacheMetricsReporter::recordMockMemoryD2HFinished(size_t host_records, bool success) {
+    std::lock_guard<std::mutex> lock(mock_memory_metrics_mutex_);
+    addMockCount(success ? mock_memory_metrics_.d2h_completed_blocks : mock_memory_metrics_.d2h_failed_blocks,
+                 host_records);
+}
+
+void BlockTreeCacheMetricsReporter::reportMockMemoryMetrics() const {
+    if (!metrics_reporter_) {
+        return;
+    }
+    RtpLLMMockMemoryCacheMetricsCollector snapshot;
+    {
+        std::lock_guard<std::mutex> lock(mock_memory_metrics_mutex_);
+        snapshot = mock_memory_metrics_;
+    }
+    metrics_reporter_->report<RtpLLMMockMemoryCacheMetrics, RtpLLMMockMemoryCacheMetricsCollector>(nullptr, &snapshot);
+}
+
+void BlockTreeCacheMetricsReporter::recordMockDiskWriteSubmitted(size_t records) {
+    std::lock_guard<std::mutex> lock(mock_memory_metrics_mutex_);
+    addMockCount(mock_disk_write_metrics_.submitted_records, records);
+}
+
+void BlockTreeCacheMetricsReporter::recordMockDiskWriteFinished(size_t records, bool success) {
+    std::lock_guard<std::mutex> lock(mock_memory_metrics_mutex_);
+    addMockCount(success ? mock_disk_write_metrics_.completed_records : mock_disk_write_metrics_.failed_records,
+                 records);
+}
+
+MockDiskWriteMetricsSnapshot BlockTreeCacheMetricsReporter::mockDiskWriteMetricsSnapshot() const {
+    std::lock_guard<std::mutex> lock(mock_memory_metrics_mutex_);
+    return mock_disk_write_metrics_;
+}
+
+MockMemoryCacheMetricsSnapshot BlockTreeCacheMetricsReporter::mockMemoryMetricsSnapshot() const {
+    std::lock_guard<std::mutex> lock(mock_memory_metrics_mutex_);
+    const auto&                 metrics = mock_memory_metrics_;
+    return {metrics.eligible_blocks,
+            metrics.planned_host_blocks,
+            metrics.successful_h2d_blocks,
+            metrics.failed_h2d_blocks,
+            metrics.d2h_submitted_blocks,
+            metrics.d2h_completed_blocks,
+            metrics.d2h_failed_blocks};
+}
 
 BlockTreeCacheMetricsReporter::BlockTreeCacheMetricsReporter(
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter,
@@ -146,17 +306,17 @@ BlockTreeCacheMetricsReporter::collectPoolMetrics(const std::vector<GroupSetPtr>
             if (!insert_result.second) {
                 continue;
             }
-            metrics_list.push_back(makeDevicePoolMetrics(*pool));
+            metrics_list.push_back(snapshotPool(Tier::DEVICE, *pool));
         }
 
         const std::shared_ptr<HostBlockPool> host_pool = group_set->hostPool();
         if (host_pool != nullptr) {
-            metrics_list.push_back(makePoolMetrics(Tier::HOST, *host_pool));
+            metrics_list.push_back(snapshotPool(Tier::HOST, *host_pool));
         }
 
         const std::shared_ptr<DiskBlockPool> disk_pool = group_set->diskPool();
         if (disk_pool != nullptr) {
-            auto               metrics_data = makePoolMetrics(Tier::DISK, *disk_pool);
+            auto               metrics_data = snapshotPool(Tier::DISK, *disk_pool);
             const PoolIOSample sample{disk_pool->readBytes(), disk_pool->writeBytes(), now};
             metrics_data.read_bytes  = static_cast<int64_t>(sample.read_bytes);
             metrics_data.write_bytes = static_cast<int64_t>(sample.write_bytes);
@@ -509,6 +669,9 @@ int BlockTreeCacheMetricsReporter::transferDirectionIndex(Tier source_tier, Tier
     }
     if (source_tier == Tier::DISK && target_tier == Tier::DEVICE) {
         return 3;
+    }
+    if (source_tier == Tier::DEVICE && target_tier == Tier::DISK) {
+        return 4;
     }
     return -1;
 }

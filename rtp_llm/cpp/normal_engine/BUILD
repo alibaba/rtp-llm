@@ -1,6 +1,14 @@
 load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
+cc_library(
+    name = "pressure_step_recorder",
+    hdrs = ["PressureStepRecorder.h"],
+    srcs = ["PressureStepRecorder.cc"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
 # Header-only PP wire types so consumers can depend on them without the whole executor.
 cc_library(
     name = "pipeline_types",
@@ -18,20 +26,26 @@ cc_library(
 
 cc_library(
     name = "normal_engine",
-    hdrs = glob([
-        "*.h",
-        "speculative/*.h",
-        "accuracy/*.h",
-    ]) + [
+    hdrs = glob(
+        [
+            "*.h",
+            "speculative/*.h",
+            "accuracy/*.h",
+        ],
+        exclude = ["PressureStepRecorder.h"],
+    ) + [
         "pipeline/PPBatchStreamProcessor.h",
         "pipeline/PPExecutor.h",
         "pipeline/PPSerialization.h",
         "pipeline/PPTransport.h",
     ],
-    srcs = glob([
-        "*.cc",
-        "speculative/*.cc",
-    ]) + [
+    srcs = glob(
+        [
+            "*.cc",
+            "speculative/*.cc",
+        ],
+        exclude = ["PressureStepRecorder.cc"],
+    ) + [
         "pipeline/PPBatchStreamProcessor.cc",
         "pipeline/PPExecutor.cc",
         "pipeline/PPSerialization.cc",
@@ -41,6 +55,7 @@ cc_library(
         "//conditions:default": [],
     }),
     deps = [
+        ":pressure_step_recorder",
         "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
         ":pipeline_types",
         "//rtp_llm/cpp/cache:cache",

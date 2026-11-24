@@ -6,13 +6,67 @@
 #include <map>
 #include <stdexcept>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/CachePressureState.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
+namespace {
+
+PressureTransferKey
+pressureTransferKey(const TransferDescriptor& desc, const std::string& pool, CacheTransferOperation operation) {
+    // Remote descriptors carry a session handle in place of a local pool index.
+    return {desc.group_set_id,
+            pool,
+            operation,
+            desc.isRemoteMock() ? Tier::REMOTE : desc.source_tier,
+            desc.isRemoteWrite() ? Tier::REMOTE : desc.target_tier};
+}
+
+// Match DeviceHostCopyGeometry's group-local layer ordinals and KV/scale
+// buffer strides. Compute this immutable geometry once per cache instance.
+size_t memberCopyBytes(const GroupSet& group, size_t member) {
+    if (member >= group.groupTags().size()) {
+        return 0;
+    }
+    if (group.groupTags().size() == 1) {
+        return group.payloadBytes();
+    }
+    const auto& tag  = group.groupTags()[member];
+    const auto& pool = group.devicePools()[member];
+    if (!group.usesPhysicalPayloadGeometry() || !pool) {
+        return group.topologyPtr()->blockSizeBytesForGroup(tag);
+    }
+    size_t remaining = group.topologyPtr()->layerIdsForGroup(tag).size();
+    size_t bytes     = 0;
+    for (const auto& layout : pool->config().memory_layouts) {
+        const auto layers = std::min<size_t>(remaining, layout.layer_num);
+        bytes += layers * (layout.kv_block_stride_bytes + layout.kv_scale_stride_bytes);
+        remaining -= layers;
+    }
+    return bytes;
+}
+
+}  // namespace
+
 BlockTree::BlockTree(std::vector<GroupSetPtr> group_sets): group_sets_(std::move(group_sets)) {
+    pressure_state_     = std::make_unique<CachePressureState>();
+    const auto add_pool = [this](Tier tier, const IBlockPool* pool) {
+        if (pool && pressure_pool_indices_.emplace(pool, pressure_pools_.size()).second) {
+            pressure_pools_.push_back({"pool_" + std::to_string(pressure_pools_.size()), tier, pool});
+        }
+    };
+    for (const auto& group : group_sets_) {
+        auto& member_bytes = pressure_device_payloads_.emplace_back();
+        for (size_t member = 0; member < group->devicePools().size(); ++member) {
+            add_pool(Tier::DEVICE, group->devicePools()[member].get());
+            member_bytes.push_back(memberCopyBytes(*group, member));
+        }
+        add_pool(Tier::HOST, group->hostPool().get());
+        add_pool(Tier::DISK, group->diskPool().get());
+    }
     for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
         const auto& group_tags = group_sets_[group_set_id]->groupTags();
         for (size_t member_group_id = 0; member_group_id < group_tags.size(); ++member_group_id) {
@@ -89,6 +143,7 @@ void BlockTree::releaseNode(TreeNode* node) {
             resource.disk_block = NULL_BLOCK_IDX;
         }
         resource.transfer_state = GroupSetTransferState::IDLE;
+        refreshPressureHostOwner(node, group_set_id);
     }
 }
 
@@ -213,6 +268,9 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
     auto publishTier = [this](TreeNode* node, size_t group_set_id, const GroupSetResource& resource, Tier tier) {
         const MultiNodeResource published{group_set_id, tier, {{node, resource.getBlocks(tier)}}};
         group_sets_[group_set_id]->referenceBlocks(published, BlockTreeRefType::CACHE);
+        if (tier == Tier::HOST) {
+            refreshPressureHostOwner(node, group_set_id);
+        }
     };
 
     for (size_t i = 0; i < cache_keys.size(); ++i) {
@@ -293,6 +351,9 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
                 if (old_blocks != nullptr) {
                     old_blocks->push_back(previous_block);
                     existing.evictFromTier(previous_tier);
+                    if (previous_tier == Tier::HOST) {
+                        refreshPressureHostOwner(current, group_set_id);
+                    }
                 }
                 existing.candidate_meta = {};
                 ++result.accepted_resource_count;
@@ -358,6 +419,9 @@ bool BlockTree::canReleaseNode(TreeNode* node) const {
 }
 
 void BlockTree::removeNode(TreeNode* node) {
+    for (size_t group_id = 0; group_id < group_sets_.size(); ++group_id) {
+        pressure_state_->setHostOwner({group_id, node->cache_key}, std::nullopt);
+    }
     RTP_LLM_LOG_DEBUG("removing node key=%ld, pool_size=%zu", node->cache_key, node_pool_.size());
 
     if (node->parent == nullptr) {
@@ -482,6 +546,133 @@ void BlockTree::refreshPublishedState(const TreeNode* node) {
         published_groups_[node->cache_key] = std::move(device_ready_groups);
     } else if (it != published_groups_.end()) {
         published_groups_.erase(it);
+    }
+}
+
+CachePressureState& BlockTree::pressureState() const {
+    return *pressure_state_;
+}
+
+const std::string& BlockTree::pressurePoolId(const IBlockPool* pool) const {
+    return pressure_pools_.at(pressure_pool_indices_.at(pool)).id;
+}
+
+void BlockTree::refreshPressureHostOwner(const TreeNode* node, size_t group_id) {
+    const auto& pool = group_sets_.at(group_id)->hostPool();
+    if (!pool) {
+        return;
+    }
+    const auto& resource = node->group_set_resources.at(group_id);
+    if (resource.transfer_detached || !resource.hasTier(Tier::HOST)) {
+        pressure_state_->setHostOwner({group_id, node->cache_key}, std::nullopt);
+    } else {
+        pressure_state_->setHostOwner({group_id, node->cache_key},
+                                      PressureBlock{pressurePoolId(pool.get()), resource.host_block});
+    }
+}
+
+// Every endpoint is reported in its own physical pool units (packed HOST/DISK
+// record versus individual DEVICE member blocks). No request-derived keys.
+void BlockTree::recordPressurePublication(CacheTransferOperation operation, const TransferDescriptor& desc) {
+    const auto& group = group_sets_.at(desc.group_set_id);
+    for (Tier tier : {desc.source_tier, desc.target_tier}) {
+        const auto record = [&](const IBlockPool* pool, uint64_t blocks) {
+            if (pool && blocks) {
+                pressure_state_->recordPublication(pressureTransferKey(desc, pressurePoolId(pool), operation),
+                                                   blocks,
+                                                   blocks * pool->blockSizeBytes());
+            }
+        };
+        if (tier == Tier::DEVICE) {
+            const auto& blocks = desc.blocksAt(tier);
+            for (size_t i = 0; i < group->devicePools().size() && i < blocks.size(); ++i) {
+                if (!isNullBlockIdx(blocks[i])) {
+                    record(group->devicePools()[i].get(), 1);
+                }
+            }
+        } else if (tier == Tier::HOST) {
+            record(group->hostPool().get(), desc.blocksAt(tier).size());
+        } else if (tier == Tier::DISK) {
+            record(group->diskPool().get(), desc.blocksAt(tier).size());
+        }
+    }
+}
+
+void BlockTree::recordPressureCopy(CacheTransferOperation operation,
+                                   DescriptorView         descriptors,
+                                   const TransferResult&  result) {
+    recordPressureResult(operation, descriptors, result, true);
+}
+
+void BlockTree::recordPressureWorkflowFailure(CacheTransferOperation operation,
+                                              DescriptorView         descriptors,
+                                              const TransferResult&  result) {
+    if (!result.ok()) {
+        try {
+            recordPressureResult(operation, descriptors, result, false);
+        } catch (...) {
+            workflow_evidence_complete_.store(false);
+            RTP_LLM_LOG_ERROR("cache pressure workflow failure could not be recorded");
+        }
+    }
+}
+
+void BlockTree::recordPressureResult(CacheTransferOperation operation,
+                                     DescriptorView         descriptors,
+                                     const TransferResult&  result,
+                                     bool                   physical) {
+    // Aggregate once per logical operation/key so failed_operations is not a block count.
+    struct CopyTotal {
+        uint64_t blocks{0};
+        uint64_t bytes{0};
+        bool     failed{false};
+    };
+    std::map<PressureTransferKey, CopyTotal> totals;
+    for (size_t index = 0; index < descriptors.size(); ++index) {
+        const auto& desc   = descriptors[index];
+        const auto& group  = group_sets_.at(desc.group_set_id);
+        const bool  copied = result.blockError(index) == CacheCopyError::NONE;
+        if (!physical && copied) {
+            continue;
+        }
+        for (Tier tier : {desc.source_tier, desc.target_tier}) {
+            const auto add = [&](const IBlockPool* pool, uint64_t blocks, size_t bytes_per_block) {
+                if (!pool) {
+                    return;
+                }
+                auto& total = totals[pressureTransferKey(desc, pressurePoolId(pool), operation)];
+                if (copied) {
+                    total.blocks += blocks;
+                    total.bytes += blocks * bytes_per_block;
+                } else {
+                    total.failed = true;
+                }
+            };
+            if (tier == Tier::DEVICE) {
+                const auto& blocks = desc.blocksAt(tier);
+                for (size_t i = 0; i < group->devicePools().size() && i < blocks.size(); ++i) {
+                    if (!isNullBlockIdx(blocks[i])) {
+                        add(group->devicePools()[i].get(), 1, pressure_device_payloads_[desc.group_set_id][i]);
+                    }
+                }
+            } else if (tier == Tier::HOST) {
+                const bool disk_io = desc.source_tier == Tier::DISK || desc.target_tier == Tier::DISK;
+                const auto bytes =
+                    disk_io && group->diskPool() ? group->diskPool()->strideBytes() : group->payloadBytes();
+                add(group->hostPool().get(), desc.blocksAt(tier).size(), bytes);
+            } else if (tier == Tier::DISK) {
+                if (const auto& disk = group->diskPool()) {
+                    add(disk.get(), desc.blocksAt(tier).size(), disk->strideBytes());
+                }
+            }
+        }
+    }
+    for (const auto& [key, total] : totals) {
+        if (physical) {
+            pressure_state_->recordCopy(key, total.blocks, total.bytes, !total.failed);
+        } else {
+            pressure_state_->recordWorkflowFailure(key);
+        }
     }
 }
 

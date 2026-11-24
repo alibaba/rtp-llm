@@ -3,6 +3,13 @@ load("//bazel:arch_select.bzl", "no_block_copy_link_deps", "torch_deps")
 
 cc_test = cc_test_wrapper
 
+# Actual CacheStore in the parent library requires the real execution runtime.
+# Keep this dependency in test executables, matching cache/test's platform routing.
+test_runtime_deps = select({
+    "@//:using_rocm": ["//rtp_llm/models_py/bindings/core:exec_ctx_rocm"],
+    "//conditions:default": ["//rtp_llm/models_py/bindings/core:exec_ops_test_lib"],
+})
+
 test_copts = [
     "-fno-access-control",
 ] + copts()
@@ -23,7 +30,7 @@ test_deps = [
     "//rtp_llm/cpp/cache/block_tree_cache",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
-] + cuda13_torch_link_deps + torch_deps() + no_block_copy_link_deps()
+] + test_runtime_deps + cuda13_torch_link_deps + torch_deps() + no_block_copy_link_deps()
 
 cc_library(
     name = "block_transfer_engine_test_utils",
@@ -351,4 +358,35 @@ cc_test(
     tags = ["L20_CU13", "smoke_case", "manual"],
     exec_properties = {"gpu": "L20_CU13"},
     timeout = "moderate",
+)
+
+cc_library(
+    name = "remote_copy_failure_test_utils",
+    testonly = True,
+    srcs = ["RemoteCopyFailureTestUtils.cc"],
+    hdrs = ["RemoteCopyFailureTestUtils.h"],
+    visibility = ["//rtp_llm/cpp/cache/block_tree_cache:__subpackages__"],
+    deps = ["//rtp_llm/cpp/cache/block_tree_cache"] + no_block_copy_link_deps(),
+    copts = test_copts,
+    linkopts = [
+        "-Wl,--wrap=cudaMemcpyAsync",
+        "-Wl,--wrap=cudaFreeHost",
+    ],
+)
+
+cc_library(
+    name = "remote_allocation_failure_test_utils",
+    testonly = True,
+    srcs = ["RemoteAllocationFailureTestUtils.cc"],
+    hdrs = ["RemoteAllocationFailureTestUtils.h"],
+    visibility = ["//rtp_llm:__subpackages__"],
+    deps = ["//rtp_llm/cpp/cache/block_tree_cache"],
+    copts = test_copts,
+    linkopts = [
+        "-Wl,--wrap=_Znwm",
+        "-Wl,--export-dynamic-symbol=*RemoteCompletionState*",
+        "-Wl,--export-dynamic-symbol=*BlockTreeCache21completeRemoteRequest*",
+        "-Wl,--export-dynamic-symbol=*RemoteMockWriteback4Impl4send*",
+        "-Wl,--export-dynamic-symbol=*TransferBatchAsyncContext6onDone*",
+    ],
 )

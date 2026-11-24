@@ -16,6 +16,8 @@
 
 namespace rtp_llm {
 
+class RemoteMockAdapter;
+
 class PerRankBlockTransferEngine {
 public:
     // Disk queue sizes are derived from Q and the configured batch limit;
@@ -34,7 +36,16 @@ public:
     virtual ~PerRankBlockTransferEngine();
 
     // Group a logical request by direction and GroupSet, then submit bounded batches.
-    std::shared_ptr<TransferAsyncContext> execute(TransferTask task);
+    virtual std::shared_ptr<TransferAsyncContext> execute(TransferTask task);
+    // External pinned staging does not occupy a Host cache block. The owner retains
+    // its storage and any device references through actual copy completion.
+    std::shared_ptr<TransferAsyncContext> executeHostBuffers(TransferTask                       task,
+                                                             std::vector<HostBufferView>        hosts,
+                                                             std::shared_ptr<void>              owner,
+                                                             TransferAsyncContext::DoneCallback terminal = {});
+    // Startup attachment: workers execute owner indices without local allocation authority.
+    void setRemoteMockAdapter(const std::shared_ptr<RemoteMockAdapter>& adapter, bool owns_device_allocations = true);
+    RemoteMockWritebackStats remoteWritebackStats() const;
     // Staging pools are validated at initialization to hold a full configured batch.
     size_t batchLimit() const noexcept {
         return max_descriptors_per_batch_;
@@ -68,6 +79,11 @@ public:
 
 private:
     virtual std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task);
+    std::shared_ptr<TransferAsyncContext>         executeRemote(TransferTask task);
+    std::shared_ptr<TransferAsyncContext>         executeDeviceToDisk(TransferTask task);
+
+    std::weak_ptr<RemoteMockAdapter> remote_adapter_;
+    bool                             owns_device_allocations_{true};
 
     std::vector<GroupSetPtr> group_sets_;
     size_t                   max_descriptors_per_batch_;

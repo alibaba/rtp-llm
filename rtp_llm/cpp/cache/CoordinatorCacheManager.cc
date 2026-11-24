@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/remote_mock/RemoteMockAdapter.h"
 #include "rtp_llm/cpp/cache/SingleTypeCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
@@ -19,6 +20,7 @@
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include <unordered_map>
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <iomanip>
 #include <numeric>
@@ -168,6 +170,12 @@ bool CoordinatorCacheManager::init() {
 }
 
 MallocResult CoordinatorCacheManager::initMalloc(const MallocInfo& malloc_info) {
+    if (malloc_info.mock_cache_request && malloc_info.mock_memory_cache_request
+        && *malloc_info.mock_cache_request != *malloc_info.mock_memory_cache_request) {
+        RTP_LLM_LOG_ERROR("conflicting mock_cache_request and mock_memory_cache_request for request=%ld",
+                          malloc_info.request_id);
+        return MallocResult{false, 0, 0, MallocStatus::INTERNAL_ERROR};
+    }
     auto finalize_init_failure = [this, &malloc_info](MallocResult result) {
         // Cache matching can satisfy part of a request from lower tiers, so
         // classify capacity only after materialization fails. Use the
@@ -373,12 +381,34 @@ void CoordinatorCacheManager::attachBlockTreeCache(BlockTreeCachePtr block_tree_
     RTP_LLM_CHECK_WITH_INFO(block_tree_cache_ == nullptr, "BlockTreeCache has already been attached");
 
     block_tree_cache_ = std::move(block_tree_cache);
+    if ((block_tree_cache_->config().mock_memory_cache || block_tree_cache_->config().mock_disk_cache
+         || block_tree_cache_->config().mock_remote_cache)
+        && block_tree_cache_->config().mock_memory_cache_coordinator) {
+        const auto& config = block_tree_cache_->config();
+        mock_cache_hit_controller_ =
+            std::make_unique<MockCacheHitController>(config.mock_memory_cache ? config.mock_memory_cache_hit_ratio : 0,
+                                                     config.mock_disk_cache ? config.mock_disk_cache_hit_ratio : 0,
+                                                     config.mock_remote_cache ? config.mock_remote_cache_hit_ratio : 0);
+    }
     for (const auto& group : cacheGroups()) {
         const std::string tag = group->tag();
         group->setEvictCallback([cache = block_tree_cache_, tag](size_t need_blocks) {
             const int reclaimed = cache->evictForGroup(tag, need_blocks);
             return reclaimed > 0 ? static_cast<size_t>(reclaimed) : 0;
         });
+    }
+}
+
+void CoordinatorCacheManager::appendLocalMockTargets(CachePressureSnapshot& snapshot) const {
+    if (mock_cache_hit_controller_) {
+        const auto& config = block_tree_cache_->config();
+        snapshot.local_mock_targets =
+            LocalMockTargets{config.mock_memory_cache,
+                             config.mock_disk_cache,
+                             config.mock_memory_cache ? config.mock_memory_cache_hit_ratio : 0.0,
+                             config.mock_disk_cache ? config.mock_disk_cache_hit_ratio : 0.0,
+                             mock_cache_hit_controller_->memoryRatioPpm(),
+                             mock_cache_hit_controller_->diskRatioPpm()};
     }
 }
 
@@ -568,7 +598,9 @@ std::vector<CachePoolMetrics> CoordinatorCacheManager::poolMetrics() const {
         metrics_data.block_cache_ref_blocks      = pool->referencedBlocksNum(BlockTreeRefType::CACHE);
         metrics_data.load_ref_blocks             = pool->referencedBlocksNum(BlockTreeRefType::LOAD);
         metrics_data.eviction_ref_blocks         = pool->referencedBlocksNum(BlockTreeRefType::EVICT);
+        metrics_data.store_ref_blocks            = pool->referencedBlocksNum(BlockTreeRefType::STORE);
         metrics_data.frozen_ref_blocks           = pool->referencedBlocksNum(BlockTreeRefType::FROZEN);
+        metrics_data.mock_source_ref_blocks      = pool->referencedBlocksNum(BlockTreeRefType::MOCK_SOURCE);
         metrics_data.used_ratio =
             metrics_data.total_blocks == 0 ?
                 0.0f :
@@ -595,20 +627,26 @@ size_t CoordinatorCacheManager::loadTargetPosition(size_t                       
 }
 
 std::shared_ptr<LoadAsyncContext>
-CoordinatorCacheManager::prepareKVCache(const CacheKeysType&                 cache_keys,
-                                        BatchKVCacheResource&                kv_resource,
-                                        const std::shared_ptr<CPSlotMapper>& cp_mapper,
-                                        PreparedKVCache&                     prepared,
-                                        const std::function<bool(size_t)>&   valid_prefix,
-                                        bool                                 enable_storage_backend,
-                                        std::optional<int64_t>               request_id,
-                                        bool                                 skip_linear) {
-    if (!block_tree_cache_ || cache_keys.empty()) {
+CoordinatorCacheManager::prepareKVCache(const CacheKeysType&                         cache_keys,
+                                        BatchKVCacheResource&                        kv_resource,
+                                        const std::shared_ptr<CPSlotMapper>&         cp_mapper,
+                                        PreparedKVCache&                             prepared,
+                                        const std::function<bool(size_t)>&           valid_prefix,
+                                        bool                                         enable_storage_backend,
+                                        std::optional<int64_t>                       request_id,
+                                        bool                                         skip_linear,
+                                        const std::function<BlockTreeMatchResult()>& match_override) {
+    if (!block_tree_cache_ || (!match_override && cache_keys.empty())) {
         return nullptr;
     }
     const int            cp_scale = (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->cpSize() : 1;
     BlockTreeMatchResult match_result =
-        block_tree_cache_->match(cache_keys, valid_prefix, enable_storage_backend, request_id, skip_linear);
+        match_override ? match_override() :
+                         block_tree_cache_->match(cache_keys, valid_prefix, enable_storage_backend, request_id, skip_linear);
+    if (match_result.mock_load_failed) {
+        prepared.materialize_status = MallocStatus::INTERNAL_ERROR;
+        return nullptr;
+    }
     std::shared_ptr<LoadAsyncContext> load_context = std::move(match_result.async_context);
     prepared.matched_device_blocks                 = match_result.matched_device_blocks;
     prepared.total_logical_blocks =
@@ -674,6 +712,13 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
     prepared.referenced_blocks.resize(kv_cache_groups_.size());
     std::shared_ptr<LoadAsyncContext> load_context;
 
+    // A retained plan, including a zero-block decision, owns admission across allocation retries.
+    const bool mock_cache =
+        kv_resource->mockCachePlan().has_value()
+        || (block_tree_cache_
+            && (block_tree_cache_->config().mock_disk_cache || block_tree_cache_->config().mock_memory_cache
+                || block_tree_cache_->config().mock_remote_cache)
+            && malloc_info.mock_cache_request.value_or(malloc_info.mock_memory_cache_request.value_or(true)));
     if (malloc_info.enable_cache_lookup) {
         CacheKeysType match_keys = cpCanonicalCacheKeys(cp_mapper, cache_keys);
         const size_t  max_keys   = static_cast<size_t>(config_.maxPrefixReuseTokens(seq_len))
@@ -684,18 +729,46 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
                    static_cast<int>(match_keys.size()) * reuse_unit_tokens, config_.cache_min_replay_tokens)) {
             match_keys.pop_back();
         }
-        const int64_t begin_us = currentTimeUs();
-        load_context           = prepareKVCache(
-            match_keys,
-            *kv_resource,
-            cp_mapper,
-            prepared,
-            [tokens = malloc_info.complete_token_ids, reuse_unit_tokens](size_t count) {
-                return tokens->isValidReuseLength(static_cast<int>(count) * reuse_unit_tokens);
-            },
-            malloc_info.enable_storage_backend,
-            malloc_info.request_id,
-            malloc_info.pd_decode_linear_tail_only);
+        const int64_t begin_us     = currentTimeUs();
+        const auto    valid_prefix = [tokens = malloc_info.complete_token_ids, reuse_unit_tokens](size_t count) {
+            return tokens->isValidReuseLength(static_cast<int>(count) * reuse_unit_tokens);
+        };
+        if (mock_cache && mock_cache_hit_controller_ && mock_cache_hit_controller_->hasActiveRatios()) {
+            load_context = prepareKVCache(
+                match_keys,
+                *kv_resource,
+                cp_mapper,
+                prepared,
+                valid_prefix,
+                malloc_info.enable_storage_backend,
+                malloc_info.request_id,
+                malloc_info.pd_decode_linear_tail_only,
+                [&]() {
+                    return block_tree_cache_->matchMockCache(
+                        match_keys, valid_prefix, [&](size_t eligible, const std::function<bool(size_t)>& valid_gpu) {
+                            if (!kv_resource->mockCachePlan()) {
+                                auto decision = mock_cache_hit_controller_->plan(eligible, valid_gpu);
+                                if (const auto& remote = block_tree_cache_->remoteMockAdapter()) {
+                                    const auto session           = remote->session();
+                                    decision.remote_server_epoch = session.server_epoch;
+                                    decision.remote_session_id   = session.session_id;
+                                    decision.remote_generation   = session.generation;
+                                }
+                                kv_resource->setMockCachePlan(decision);
+                            }
+                            return *kv_resource->mockCachePlan();
+                        });
+                });
+        } else {
+            load_context = prepareKVCache(match_keys,
+                                          *kv_resource,
+                                          cp_mapper,
+                                          prepared,
+                                          valid_prefix,
+                                          malloc_info.enable_storage_backend,
+                                          malloc_info.request_id,
+                                          malloc_info.pd_decode_linear_tail_only);
+        }
         match_end_time_us  = currentTimeUs();
         match_cost_time_us = match_end_time_us - begin_us;
         load_attempted     = load_context != nullptr;
@@ -718,6 +791,10 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
         }
         return result;
     };
+
+    if (prepared.materialize_status != MallocStatus::NONE) {
+        return rollback();
+    }
 
     if (load_context && load_context->needBackendMatch()) {
         auto deferred_prepared = std::make_shared<PreparedKVCache>(std::move(prepared));
@@ -1169,6 +1246,69 @@ void CoordinatorCacheManager::reclaimLinearHistory(const BatchKVCacheResourcePtr
     }
 }
 
+bool CoordinatorCacheManager::mapCacheResources(const BatchKVCacheResource&    resource,
+                                                int                            batch_id,
+                                                size_t                         canonical_position,
+                                                std::vector<GroupSetResource>& resources) const {
+    const auto& group_sets = block_tree_cache_->groupSets();
+    resources.resize(group_sets.size());
+    const bool cp_active = cp_slot_mapper_ && cp_slot_mapper_->isSharded();
+    for (size_t group_id = 0; group_id < group_sets.size(); ++group_id) {
+        const auto& group = group_sets[group_id];
+        if (!group || group->groupSetId() != group_id || group->groupTags().empty()
+            || group->groupTags().size() != group->devicePools().size()) {
+            return false;
+        }
+        auto& mapped = resources[group_id].device_blocks;
+        mapped.assign(group->devicePools().size(), NULL_BLOCK_IDX);
+        size_t valid = 0;
+        for (size_t member = 0; member < group->groupTags().size(); ++member) {
+            const auto& tag = group->groupTags()[member];
+            if (!kv_cache_groups_[groupIdForTag(tag)]->prefixReuseEnabled()) {
+                return false;
+            }
+            const size_t position =
+                loadTargetPosition(canonical_position, tag, cp_slot_mapper_, cp_active ? cp_slot_mapper_->cpSize() : 1);
+            const auto& blocks = resource.blocks(batch_id, tag);
+            if (position < blocks.size() && !isNullBlockIdx(blocks[position])) {
+                mapped[member] = blocks[position];
+                ++valid;
+            }
+        }
+        if (valid == 0 && group->groupType() != CacheGroupType::FULL) {
+            mapped.clear();  // Released SWA history is absent, never read.
+        } else if (valid != mapped.size()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool CoordinatorCacheManager::visitCompletedResources(
+    const BatchKVCacheResource& resource, const std::function<bool(size_t, const BlockIndicesType&)>& visitor) const {
+    if (!block_tree_cache_) {
+        return false;
+    }
+    const int    batches = config_.groupNums() == 1 ? std::min(1, resource.batchSize()) : resource.batchSize();
+    const size_t cp      = cp_slot_mapper_ && cp_slot_mapper_->isSharded() ? cp_slot_mapper_->cpSize() : 1;
+    for (int batch = 0; batch < batches; ++batch) {
+        const auto&  keys          = resource.cacheKeys(batch);
+        const size_t complete_keys = keys.size() - (!resource.lastBlockAligned() && !keys.empty() ? 1 : 0);
+        for (size_t position = 0; position < complete_keys / cp; ++position) {
+            std::vector<GroupSetResource> resources;
+            if (!mapCacheResources(resource, batch, position, resources)) {
+                return false;  // Malformed eligible geometry fails the whole Remote intent.
+            }
+            for (size_t group = 0; group < resources.size(); ++group) {
+                if (!resources[group].device_blocks.empty() && !visitor(group, resources[group].device_blocks)) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length) {
     resident_prefix_length  = 0;
     auto& kv_cache_resource = insert_info.batch_kv_cache_resource;
@@ -1281,9 +1421,15 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
             remote_reuse_begin =
                 std::min(resource.reuseBlockNum() - resource.storageBackendReuseBlockNum(), remote_reuse_end);
         }
-        resident_prefix_length += block_tree_cache_->insert(
-            insert_keys, resources, insert_info.target_tier, insert_info.is_resident, insert_info.request_id,
-            remote_reuse_begin, remote_reuse_end);
+        resident_prefix_length += block_tree_cache_->insert(insert_keys,
+                                                            resources,
+                                                            insert_info.target_tier,
+                                                            insert_info.is_resident,
+                                                            insert_info.request_id,
+                                                            remote_reuse_begin,
+                                                            remote_reuse_end,
+                                                            insert_info.mock_memory_cache,
+                                                            insert_info.mock_disk_cache);
     }
 }
 
@@ -1461,6 +1607,9 @@ bool CoordinatorCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batc
 
         BatchKVCacheResource staged_resource;
         staged_resource.resetBatchSize(new_batch_size);
+        if (batch_kv_cache_resource->mockCachePlan()) {
+            staged_resource.setMockCachePlan(*batch_kv_cache_resource->mockCachePlan());
+        }
         std::vector<TaggedBlockIdPair>            staged_mapping;
         std::vector<std::pair<BlockIds*, size_t>> replacement_slots;
         std::vector<std::pair<int, int>>          retained_slots;
@@ -1635,7 +1784,12 @@ bool CoordinatorCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batc
     }
 
     std::vector<KVCacheResource> old_resources;
+    // This is a reshape of one request, rather than a new-stream reset.
+    const auto mixed_mock_plan = batch_kv_cache_resource->mockCachePlan();
     batch_kv_cache_resource->resetAndReturnOldResources(new_batch_size, old_resources);
+    if (mixed_mock_plan) {
+        batch_kv_cache_resource->setMockCachePlan(*mixed_mock_plan);
+    }
     batch_kv_cache_resource->initGroups(config_.topologyPtr());
     std::vector<size_t> next_replacement(static_cast<size_t>(group_nums), 0);
 

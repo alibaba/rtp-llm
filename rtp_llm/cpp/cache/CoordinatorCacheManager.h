@@ -15,6 +15,7 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/MockCacheHitController.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/FullCacheManager.h"
@@ -28,6 +29,9 @@ namespace rtp_llm {
 class CPSlotMapper;
 class LoadAsyncContext;
 class BlockTreeCache;
+struct BlockTreeMatchResult;
+struct CachePressureSnapshot;
+struct GroupSetResource;
 using BlockTreeCachePtr = std::shared_ptr<BlockTreeCache>;
 class SingleTypeCacheManager;
 using SingleTypeCacheManagerPtr = std::shared_ptr<SingleTypeCacheManager>;
@@ -61,6 +65,10 @@ public:
     virtual void                   free(const FreeInfo& free_info);
     void reclaimLinearHistory(const BatchKVCacheResourcePtr& resource, int committed_tokens, bool reuse_cache);
     virtual void                   insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length);
+    // Nonmutating completed cacheable geometry, using the same FULL/CP/SWA mapping
+    // as local publication. Visitor false stops before further metadata capture.
+    bool                           visitCompletedResources(const BatchKVCacheResource&                                 resource,
+                                                           const std::function<bool(size_t, const BlockIndicesType&)>& visitor) const;
     virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const;
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const;
     virtual std::vector<BlockInfo>
@@ -117,6 +125,7 @@ public:
     }
 
     void attachBlockTreeCache(BlockTreeCachePtr block_tree_cache);
+    void appendLocalMockTargets(CachePressureSnapshot& snapshot) const;
 
     BlockTreeCachePtr blockTreeCache() const {
         return block_tree_cache_;
@@ -224,10 +233,11 @@ protected:
     }
 
     // Own the immutable configuration binding for all dense manager/pool rows.
-    const CacheConfig                  config_;
-    AllocationType                     allocation_type_;
-    BlockTreeCachePtr                  block_tree_cache_;
-    std::shared_ptr<CPSlotMapper>      cp_slot_mapper_;
+    const CacheConfig                       config_;
+    AllocationType                          allocation_type_;
+    BlockTreeCachePtr                       block_tree_cache_;
+    std::unique_ptr<MockCacheHitController> mock_cache_hit_controller_;
+    std::shared_ptr<CPSlotMapper>           cp_slot_mapper_;
     const kmonitor::MetricsReporterPtr metrics_reporter_             = nullptr;
     bool                               use_device_malloc_block_pool_ = false;
 
@@ -250,14 +260,15 @@ protected:
         MallocStatus                   materialize_status = MallocStatus::NONE;
     };
 
-    std::shared_ptr<LoadAsyncContext> prepareKVCache(const CacheKeysType&                 cache_keys,
-                                                     BatchKVCacheResource&                kv_resource,
-                                                     const std::shared_ptr<CPSlotMapper>& cp_mapper,
-                                                     PreparedKVCache&                     prepared,
-                                                     const std::function<bool(size_t)>&   valid_prefix           = {},
-                                                     bool                                 enable_storage_backend = true,
-                                                     std::optional<int64_t>               request_id             = {},
-                                                     bool                                 skip_linear            = false);
+    std::shared_ptr<LoadAsyncContext> prepareKVCache(const CacheKeysType&                         cache_keys,
+                                                     BatchKVCacheResource&                        kv_resource,
+                                                     const std::shared_ptr<CPSlotMapper>&         cp_mapper,
+                                                     PreparedKVCache&                             prepared,
+                                                     const std::function<bool(size_t)>&           valid_prefix           = {},
+                                                     bool                                         enable_storage_backend = true,
+                                                     std::optional<int64_t>                       request_id             = {},
+                                                     bool                                         skip_linear            = false,
+                                                     const std::function<BlockTreeMatchResult()>& match_override         = {});
     bool                              materializeInitialBlocks(const MallocInfo& malloc_info,
                                                                PreparedKVCache&  prepared,
                                                                LoadAsyncContext* context,
@@ -309,6 +320,10 @@ protected:
     std::unique_ptr<GpuBlockCopy> gpu_block_copy_;
 
 private:
+    bool   mapCacheResources(const BatchKVCacheResource&    resource,
+                             int                            batch_id,
+                             size_t                         canonical_position,
+                             std::vector<GroupSetResource>& resources) const;
     size_t groupIdForTag(std::string_view tag) const;
 };
 

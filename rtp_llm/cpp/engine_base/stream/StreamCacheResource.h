@@ -31,7 +31,9 @@ public:
         resource_context_(resource_context),
         need_release_resource_(need_release_resource) {}
 
-    ~StreamCacheResource() = default;
+    ~StreamCacheResource();
+    StreamCacheResource(const StreamCacheResource&)            = delete;
+    StreamCacheResource& operator=(const StreamCacheResource&) = delete;
 
     void                 init(int batch_size);
     bool                 hasCacheKeys() const;
@@ -145,6 +147,13 @@ public:
     bool enableDiskCache() const;
     bool enableCacheLookup() const;
     Tier insertTarget() const;
+    void freezeMockWritebackPolicy();
+    void freezeRemoteWritebackPolicy();
+    void finishLocalStoreRequest(bool released);
+    bool local_store_pending_{false};
+    bool mock_writeback_frozen_{false};
+    bool mock_memory_writeback_{false};
+    bool mock_disk_writeback_{false};
     void reportCacheReuseMetrics();
 
     std::string debugString() const {
@@ -190,8 +199,11 @@ private:
     int64_t                          load_wait_begin_time_us_ = 0;
     std::shared_ptr<AsyncContext>    p2p_load_context_;
     std::weak_ptr<AsyncContext>      released_p2p_load_context_;
-    absl::Status                     allocator_load_error_;
-    bool                             p2p_cancel_requested_{false};
+    absl::Status                                             allocator_load_error_;
+    bool                                                     p2p_cancel_requested_{false};
+    std::optional<bool>                                      mock_remote_writeback_;
+    bool                                                     remote_completion_captured_{false};
+    std::shared_ptr<BlockTreeCache::RemoteCompletionRequest> remote_completion_request_;
 
     // Physical block pins held for PD separation.
 };

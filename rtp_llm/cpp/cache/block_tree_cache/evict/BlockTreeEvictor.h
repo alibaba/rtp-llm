@@ -68,6 +68,7 @@ public:
     // ---- Semantic events (must be called while holding BlockTreeCache mutex) ----
     void                   onInserted(const BlockTreeInsertResult& result);
     uint64_t               nextAccessSeq();
+    uint64_t               pendingReleaseBlocks(const IBlockPool* pool) const;
     // A real match hit: re-sort the node in its heap. Access clock / hit_count
     // bookkeeping is owned by the caller (BlockTreeLoader), which also decides
     // which group sets participate (e.g. skip_linear filtering).

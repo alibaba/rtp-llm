@@ -19,11 +19,25 @@ cuda13_torch_link_deps = select({
     "//conditions:default": [],
 })
 
+test_runtime_deps = select({
+    "@//:using_rocm": ["//rtp_llm/models_py/bindings/core:exec_ctx_rocm"],
+    "//conditions:default": ["//rtp_llm/models_py/bindings/core:exec_ops_test_lib"],
+})
+
 test_deps = [
     "//rtp_llm/cpp/cache/block_tree_cache",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
-] + cuda13_torch_link_deps + torch_deps() + no_block_copy_link_deps()
+] + test_runtime_deps + cuda13_torch_link_deps + torch_deps() + no_block_copy_link_deps()
+
+cc_test(
+    name = "cache_pressure_state_test",
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13", "exclusive-if-local"],
+    srcs = ["CachePressureStateTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+)
 
 cc_test(
     name = "block_tree_task_pool_test",

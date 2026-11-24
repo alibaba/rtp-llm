@@ -143,8 +143,10 @@ void TransferWorkLoop::start() {
     });
 }
 
-std::shared_ptr<TransferAsyncContext>
-TransferWorkLoop::reject(const TransferTask& task, const char* message, ErrorCode code) {
+std::shared_ptr<TransferAsyncContext> TransferWorkLoop::reject(const TransferTask&     task,
+                                                               const char*             message,
+                                                               ErrorCode               code,
+                                                               BeforeCompleteCallback* before_complete) {
     const auto count = task.descriptors().size();
     auto       total = timer(task, "worker_task_total", 0, count, AsyncProfileKind::Lifecycle, "worker_task");
     auto       queue = timer(
@@ -152,31 +154,44 @@ TransferWorkLoop::reject(const TransferTask& task, const char* message, ErrorCod
     const auto end_us = (total || queue) ? AsyncProfileSession::steadyNowUs() : -1;
     queue.finishAtSteady(end_us, false);
     total.finishAtSteady(end_us, false);
-    return std::make_shared<CompletedTransferAsyncContext>(
-        unsubmittedResult(TransferResult(ErrorInfo(code, message), CacheCopyError::NOT_EXECUTED)),
-        count,
-        task.completionProof());
+    auto result = unsubmittedResult(TransferResult(ErrorInfo(code, message), CacheCopyError::NOT_EXECUTED));
+    result.expandBlockErrors(count);
+    if (before_complete && *before_complete) {
+        try {
+            (*before_complete)(result);
+        } catch (...) {}
+    }
+    return std::make_shared<CompletedTransferAsyncContext>(std::move(result), count, task.completionProof());
 }
 
 std::shared_ptr<TransferAsyncContext>
 TransferWorkLoop::execute(TransferTask&& task, BeforeCompleteCallback&& before_complete, bool* retryable) {
+    return executeHostBuffers(std::move(task), {}, nullptr, std::move(before_complete), retryable);
+}
+
+std::shared_ptr<TransferAsyncContext> TransferWorkLoop::executeHostBuffers(TransferTask&&              task,
+                                                                           std::vector<HostBufferView> hosts,
+                                                                           std::shared_ptr<void>       owner,
+                                                                           BeforeCompleteCallback&&    before_complete,
+                                                                           bool*                       retryable) {
     if (retryable) {
         *retryable = false;
     }
+    const bool                             use_external_hosts = owner != nullptr;
     block_tree_cache_detail::ScopeRollback unsubmitted([proof = task.completionProof()] {
         if (proof)
             proof->report(true);
     });
     return abortOnOom([&]() -> std::shared_ptr<TransferAsyncContext> {
         const auto count = task.descriptors().size();
-        if (!count)
-            return reject(task, "empty WorkLoop transfer", ErrorCode::INVALID_PARAMS);
+        if (!count || (use_external_hosts && hosts.size() != count))
+            return reject(task, "empty WorkLoop transfer", ErrorCode::INVALID_PARAMS, &before_complete);
         if (task.expired())
-            return reject(task, "transfer expired before WorkLoop admission", ErrorCode::DEADLINE_EXCEEDED);
+            return reject(task, "transfer expired before WorkLoop admission", ErrorCode::DEADLINE_EXCEEDED, &before_complete);
         std::unique_lock<std::mutex> lock(mutex_);
         if (!accepting_) {
             lock.unlock();
-            return reject(task, "async transfer owner stopped", ErrorCode::EXECUTION_EXCEPTION);
+            return reject(task, "async transfer owner stopped", ErrorCode::EXECUTION_EXCEPTION, &before_complete);
         }
         if (entry_count_ == capacity_) {
             if (retryable) {
@@ -185,7 +200,7 @@ TransferWorkLoop::execute(TransferTask&& task, BeforeCompleteCallback&& before_c
                 return nullptr;
             }
             lock.unlock();
-            return reject(task, "RESOURCE_EXHAUSTED: async transfer queue full", ErrorCode::EXECUTION_EXCEPTION);
+            return reject(task, "RESOURCE_EXHAUSTED: async transfer queue full", ErrorCode::EXECUTION_EXCEPTION, &before_complete);
         }
         // Admission and the move are atomic with respect to competing submitters
         // and shutdown. The resident budget counts unfinished batches.
@@ -199,10 +214,16 @@ TransferWorkLoop::execute(TransferTask&& task, BeforeCompleteCallback&& before_c
                                              &total_timer.trace(),
                                              total_timer.startSteadyUs());
         Entries incoming;
-        incoming.push_back(std::make_unique<Entry>(std::move(task), std::move(before_complete)));
-        incoming.front()->task_timer              = std::move(total_timer);
-        incoming.front()->queue_or_finalize_timer = std::move(queue_or_finalize_timer);
-        auto context                              = incoming.front()->context;
+        auto    entry = std::make_unique<Entry>(std::move(task), std::move(before_complete));
+        if (use_external_hosts) {
+            entry->hosts          = std::move(hosts);
+            entry->external_owner = std::move(owner);
+            entry->external_hosts = true;
+        }
+        entry->task_timer              = std::move(total_timer);
+        entry->queue_or_finalize_timer = std::move(queue_or_finalize_timer);
+        auto context                   = entry->context;
+        incoming.push_back(std::move(entry));
         unsubmitted.dismiss();
         incoming_.splice(incoming_.end(), incoming);
         ++entry_count_;
@@ -296,8 +317,6 @@ bool TransferWorkLoop::plan(Entry& entry) {
     const auto& descriptors = entry.task.descriptors();
     const auto& first       = descriptors.front();
     const bool  combined    = first.source_tier == Tier::DISK && first.target_tier == Tier::DEVICE;
-    entry.hosts.clear();
-    entry.hosts.reserve(descriptors.size());
     entry.step = first.source_tier == Tier::DISK   ? Step::DISK_READ :
                  first.source_tier == Tier::DEVICE ? Step::CRC_EVICT :
                  first.target_tier == Tier::DISK   ? Step::DISK_WRITE :
@@ -305,6 +324,11 @@ bool TransferWorkLoop::plan(Entry& entry) {
     if (isDeviceCopy(entry.step) && !group(entry)->crcEnabled()) {
         entry.step = Step::PLAIN_DEVICE_COPY;
     }
+    if (entry.external_hosts) {
+        return true;
+    }
+    entry.hosts.clear();
+    entry.hosts.reserve(descriptors.size());
     if (combined) {
         if (!staging_.pools[stagingIndex(entry)])
             throw std::invalid_argument("async disk staging is unavailable");
@@ -732,6 +756,7 @@ void TransferWorkLoop::finish(Entry& entry) {
     auto finalize_timer =
         entry.crc_timing.completed_us ? std::move(entry.queue_or_finalize_timer) : TransferStageTimer{};
     entry.task_timer.finish(entry.result.ok());
+    entry.external_owner.reset();
     try {
         abortOnOom([&] {
             if (entry.before_complete)

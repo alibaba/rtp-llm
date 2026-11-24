@@ -8,6 +8,7 @@
 #include <functional>
 #include <initializer_list>
 #include <memory>
+#include <new>
 #include <optional>
 #include <string>
 #include <utility>
@@ -16,6 +17,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSetResource.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/remote_mock/RemoteMockTypes.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBufferSafety.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
@@ -25,7 +27,10 @@ namespace rtp_llm {
 enum class TransferOperation : uint8_t {
     LOAD,
     EVICT,
+    STORE,
 };
+
+using CacheTransferOperation = TransferOperation;
 
 inline const char* transferOperationName(TransferOperation operation) {
     switch (operation) {
@@ -33,8 +38,14 @@ inline const char* transferOperationName(TransferOperation operation) {
             return "load";
         case TransferOperation::EVICT:
             return "evict";
+        case TransferOperation::STORE:
+            return "store";
     }
     return "unknown";
+}
+
+inline const char* cacheTransferOperationName(CacheTransferOperation operation) {
+    return transferOperationName(operation);
 }
 
 // Disk -> Device uses host staging internally without exposing Disk -> Host.
@@ -240,6 +251,13 @@ struct TransferResult {
         return block_errors.empty() ? copy_error : block_errors[index];
     }
 
+    // A missing participant ACK applies to its whole physical batch. An aggregate
+    // preserves that ownership information independently of per-block CRC/I/O errors.
+    bool completionUnknown(size_t index) const {
+        return status.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN
+               && (unconfirmed_blocks.empty() || unconfirmed_blocks[index]);
+    }
+
     void expandBlockErrors(size_t block_count) {
         if (block_errors.empty()) {
             block_errors.assign(block_count, copy_error);
@@ -249,6 +267,7 @@ struct TransferResult {
     ErrorInfo                   status{ErrorInfo::OkStatus()};
     CacheCopyError              copy_error{CacheCopyError::NONE};
     std::vector<CacheCopyError> block_errors;
+    std::vector<bool>           unconfirmed_blocks;
     // True only when this operation can no longer access any of its buffers.
     // False means unproven, not necessarily in-flight. Business success, error
     // codes and NOT_EXECUTED diagnostics never implicitly grant this proof.
@@ -344,8 +363,53 @@ struct TransferDescriptor {
         return desc;
     }
 
+    static TransferDescriptor
+    deviceToDisk(size_t group_set_id, std::vector<BlockIdxType> device_blocks, BlockIdxType disk_block) {
+        TransferDescriptor desc;
+        desc.group_set_id  = group_set_id;
+        desc.source_tier   = Tier::DEVICE;
+        desc.target_tier   = Tier::DISK;
+        desc.source_blocks = std::move(device_blocks);
+        desc.target_blocks = {disk_block};
+        return desc;
+    }
+
+    static TransferDescriptor
+    remoteToDevice(size_t group_set_id, RemoteMockSourceHandle source, std::vector<BlockIdxType> device_blocks) {
+        TransferDescriptor desc;
+        desc.group_set_id  = group_set_id;
+        desc.path_index    = source.logical_index;
+        desc.target_tier   = Tier::DEVICE;
+        desc.target_blocks = std::move(device_blocks);
+        desc.remote_source = std::move(source);
+        return desc;
+    }
+
+    static TransferDescriptor deviceToRemote(size_t                    group_set_id,
+                                             RemoteMockSession         session,
+                                             uint64_t                  record_index,
+                                             std::vector<BlockIdxType> device_blocks) {
+        TransferDescriptor desc;
+        desc.group_set_id  = group_set_id;
+        desc.source_tier   = Tier::DEVICE;
+        desc.source_blocks = std::move(device_blocks);
+        desc.remote_target = RemoteMockWriteTarget{session, record_index};
+        return desc;
+    }
+
+    bool isRemoteWrite() const {
+        return remote_target.has_value() && !remote_source && source_tier == Tier::DEVICE && target_tier == Tier::NONE
+               && node == nullptr && target_blocks.empty();
+    }
+
+    bool isRemoteMock() const {
+        return remote_source.has_value() && !remote_target && source_tier == Tier::NONE && target_tier == Tier::DEVICE
+               && node == nullptr && source_blocks.empty() && remote_source->group == group_set_id
+               && remote_source->logical_index == path_index;
+    }
+
     bool needsTransfer() const {
-        return target_tier != Tier::NONE && source_tier != target_tier;
+        return isRemoteWrite() || (target_tier != Tier::NONE && source_tier != target_tier);
     }
 
     const std::vector<BlockIdxType>& blocksAt(Tier tier) const {
@@ -357,8 +421,14 @@ struct TransferDescriptor {
     }
 
     bool isExecutable() const {
+        if (remote_target) {
+            return isRemoteWrite() && endpointResolved(source_tier, source_blocks);
+        }
+        if (remote_source) {
+            return isRemoteMock() && endpointResolved(target_tier, target_blocks);
+        }
         const bool supported_direction =
-            (source_tier == Tier::DEVICE && target_tier == Tier::HOST)
+            (source_tier == Tier::DEVICE && (target_tier == Tier::HOST || target_tier == Tier::DISK))
             || (source_tier == Tier::HOST && (target_tier == Tier::DEVICE || target_tier == Tier::DISK))
             || (source_tier == Tier::DISK && target_tier == Tier::DEVICE);
         return supported_direction && endpointResolved(source_tier, source_blocks)
@@ -371,15 +441,17 @@ struct TransferDescriptor {
                + blocksDebugString(source_blocks) + "], target_blocks=[" + blocksDebugString(target_blocks) + "]}";
     }
 
-    TreeNode*                 node{nullptr};
-    size_t                    group_set_id{0};
-    size_t                    path_index{0};
-    Tier                      source_tier{Tier::NONE};
-    Tier                      target_tier{Tier::NONE};
-    std::vector<BlockIdxType> source_blocks;
-    std::vector<BlockIdxType> target_blocks;
-    bool                      initial_owner{true};
-    uint64_t                  generation{0};
+    TreeNode*                             node{nullptr};
+    size_t                                group_set_id{0};
+    size_t                                path_index{0};
+    Tier                                  source_tier{Tier::NONE};
+    Tier                                  target_tier{Tier::NONE};
+    std::vector<BlockIdxType>             source_blocks;
+    std::vector<BlockIdxType>             target_blocks;
+    bool                                  initial_owner{true};
+    uint64_t                              generation{0};
+    std::optional<RemoteMockSourceHandle> remote_source;
+    std::optional<RemoteMockWriteTarget>  remote_target;
 
     bool isCurrentOwner() const {
         return node && initial_owner && generation == node->group_set_resources[group_set_id].generation;
@@ -451,6 +523,7 @@ private:
 class TransferTask {
 public:
     using Clock = std::chrono::steady_clock;
+    std::optional<CacheTransferOperation> operation;
 
     TransferTask(std::vector<TransferDescriptor> descriptors,
                  std::chrono::milliseconds       timeout,
@@ -464,6 +537,16 @@ public:
     TransferTask& operator=(const TransferTask&)     = default;
     TransferTask(TransferTask&&) noexcept            = default;
     TransferTask& operator=(TransferTask&&) noexcept = default;
+
+    void addDescriptor(TransferDescriptor descriptor) {
+        auto copy = descriptors_ ?
+                        std::make_shared<Descriptors>(descriptors_->begin() + begin_, descriptors_->begin() + end_) :
+                        std::make_shared<Descriptors>();
+        copy->push_back(std::move(descriptor));
+        descriptors_ = std::move(copy);
+        begin_       = 0;
+        end_         = descriptors_->size();
+    }
 
     std::optional<int64_t> requestId() const {
         return request_id_;
@@ -583,6 +666,7 @@ private:
     }
 
     TransferTask(std::vector<TransferDescriptor> descriptors, const TransferTask& parent):
+        operation(parent.operation),
         descriptors_(makeDescriptors(std::move(descriptors))),
         end_(descriptors_ ? descriptors_->size() : 0),
         deadline_(parent.deadline_),

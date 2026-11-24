@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/CachePressureState.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
@@ -26,6 +27,9 @@ class BlockTransferDispatcher;
 class FrozenTask;
 class TransferCompletionCleanup;
 class FullPrefixInvariantScanner;
+class MockMemoryCacheSource;
+class MockDiskCacheSource;
+class RemoteMockAdapter;
 struct CacheStats {
     size_t tree_node_count{0};
     size_t device_heap_total_size{0};
@@ -36,8 +40,78 @@ struct BlockTreeKeySnapshot {
     int64_t                   version{-1};
     std::vector<CacheKeyType> keys;
 };
+struct CachePressurePoolSnapshot: BlockTreePoolMetricsSnapshot {
+    std::string pool_id;
+    uint64_t    pending_release_blocks{0};
+    uint64_t    published_host_blocks{0};
+    bool        request_ref_blocks_available{false};
+    uint64_t    disk_read_bytes{0}, disk_write_bytes{0};
+};
+struct CachePressureGroupSnapshot {
+    size_t                     group_id{0};
+    CacheGroupType             group_type{CacheGroupType::FULL};
+    std::vector<std::string>   device_pool_ids;
+    std::optional<std::string> host_pool_id, disk_pool_id;
+    TierWatermark              device_watermark, host_watermark, disk_watermark;
+    uint64_t                   watermark_trigger_count{0};  // DEVICE high-watermark transitions.
+    std::vector<std::string>   group_tags;
+    uint64_t                   block_tokens{0}, payload_bytes{0}, storage_bytes{0};
+    bool                       crc_enabled{false};
+};
+struct CachePressureTransferSnapshot: TransferEvidence {
+    size_t                 group_id{0};
+    std::string            pool_id;
+    Tier                   pool_tier{Tier::NONE};
+    CacheTransferOperation operation{CacheTransferOperation::LOAD};
+    Tier                   source_tier{Tier::NONE}, target_tier{Tier::NONE};
+};
+struct CachePressureOwnership {
+    enum class Mode {
+        UNSUPPORTED = 0,
+        INDEPENDENT = 1,
+        SHARED_TP   = 2
+    };
+    Mode             mode{Mode::UNSUPPORTED};
+    int              owner_world_rank{0};
+    std::vector<int> participant_world_ranks;
+    bool             all_participant_publication{false};
+};
+struct LocalMockTargets {
+    bool     memory_enabled, disk_enabled;
+    double   memory_ratio, disk_ratio;
+    uint64_t memory_ppm, disk_ppm;
+};
+struct CachePressureSnapshot {
+    std::vector<CachePressurePoolSnapshot>        pools;
+    std::vector<CachePressureGroupSnapshot>       groups;
+    std::vector<CachePressureTransferSnapshot>    transfers;
+    std::optional<CachePressureOwnership>         ownership;
+    bool                                          complete{true};
+    std::optional<MockMemoryCacheMetricsSnapshot> mock_memory;
+    std::optional<MockCacheMetricsSnapshot>       mock_cache;
+    MockDiskWriteMetricsSnapshot                  mock_disk_write;
+    RemoteMockCompletionStats                     mock_remote_write;
+    RemoteMockSafetySnapshot                      remote_mock_safety;
+    std::optional<RemoteMockRuntimeSnapshot>      remote_runtime;
+    uint64_t                                      remote_write_acknowledged_payload_bytes{0};
+    uint64_t                                      remote_read_payload_bytes{0};  // Actual application bytes for this rank only.
+    std::optional<LocalMockTargets>               local_mock_targets;
+    std::optional<LocalStoreSnapshot>             local_store;
+};
 // Unified configuration for BlockTreeCache behavior and pool sizing.
 struct BlockTreeCacheConfig {
+    bool                                  mock_remote_cache{false};
+    double                                mock_remote_cache_hit_ratio{0};
+    int                                   mock_remote_cache_timeout_ms{10000};
+    bool                                  mock_disk_cache{false};
+    double                                mock_disk_cache_hit_ratio{0.0};
+    uint64_t                              mock_disk_cache_seed{1};
+    size_t                                mock_disk_cache_source_blocks{64};
+    bool                                  mock_memory_cache{false};
+    bool                                  mock_memory_cache_real_match{false};
+    double                                mock_memory_cache_hit_ratio{0.0};
+    bool                                  mock_memory_cache_coordinator{true};
+    std::optional<CachePressureOwnership> pressure_ownership;
     // ---- Tier enable flags ----
     bool enable_device_cache{true};
     bool enable_host_cache{false};
@@ -124,7 +198,31 @@ public:
                    std::shared_ptr<StorageBackend>                storage_backend,
                    std::unique_ptr<BlockTransferDispatcher>       transfer_dispatcher,
                    std::unique_ptr<BlockTreeTaskPool>             task_pool,
-                   std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter);
+                   std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter,
+                   std::shared_ptr<MockMemoryCacheSource>         mock_memory_cache_source = nullptr,
+                   std::shared_ptr<MockDiskCacheSource>           mock_disk_cache_source   = nullptr,
+                   std::shared_ptr<RemoteMockAdapter>             remote_adapter           = nullptr);
+
+    const std::shared_ptr<RemoteMockAdapter>& remoteMockAdapter() const {
+        return remote_adapter_;
+    }
+    // Thread-safe read while the cache is owned. Faults are permanent: stop the
+    // measurement and restart the full engine; quarantine is released only at teardown.
+    RemoteMockSafetySnapshot remoteMockSafety() const;
+    struct RemoteCompletionRequest;
+    using RemoteGeometryVisitor = std::function<bool(size_t, const BlockIndicesType&)>;
+    // A request ticket covers successful allocation through actual resource release,
+    // including deferred bookkeeping after consumer/HTTP completion.
+    std::shared_ptr<RemoteCompletionRequest> enrollRemoteCompletion();
+    void completeRemoteRequest(const std::shared_ptr<RemoteCompletionRequest>&          request,
+                               const std::function<bool(const RemoteGeometryVisitor&)>& capture);
+    // Permanent engine shutdown only. Already enrolled requests may still capture.
+    void stopRemoteCompletionAdmission();
+    // Reusable window barrier. Caller quiesces external ingress; new traffic can
+    // extend the wait. Never synchronously wait under stream/cache/scheduler locks.
+    // Callback follows request retirement, all logical intents and physical drain.
+    // remoteMockSafety() remains authoritative for unknown-peer quarantine.
+    void drainRemoteCompletions(std::function<void()> callback);
 
     ~BlockTreeCache();
     bool init();
@@ -138,6 +236,9 @@ public:
                                bool                               enable_storage_backend = true,
                                std::optional<int64_t>             request_id             = {},
                                bool                               skip_linear            = false);
+    BlockTreeMatchResult matchMockCache(const CacheKeysType&                     cache_keys,
+                                        const std::function<bool(size_t)>&       valid_prefix,
+                                        const BlockTreeLoader::MockCachePlanner& planner);
     void                 insert(const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& resources,
                                 Tier                                              target_tier);
@@ -148,12 +249,15 @@ public:
                   bool                                              is_resident,
                   std::optional<int64_t>                            request_id         = {},
                   size_t                                            remote_reuse_begin = 0,
-                  size_t                                            remote_reuse_end   = 0);
+                  size_t                                            remote_reuse_end   = 0,
+                  bool                                              mock_memory_cache  = false,
+                  bool                                              mock_disk_cache    = false);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
     // Skips plans containing device blocks that would remain referenced after dropping.
     int evictForGroup(std::string_view group_tag, size_t num_blocks);
 
+    CachePressureSnapshot         pressureSnapshot() const;
     CacheStats                    getStats() const;
     std::vector<CachePoolMetrics> poolMetrics() const;
     void                          reportMetrics() const;
@@ -185,6 +289,12 @@ public:
     std::shared_ptr<StorageBackend> storageBackend() const {
         return storage_backend_;
     }
+    std::shared_ptr<const MockMemoryCacheSource> mockMemoryCacheSource() const {
+        return mock_memory_cache_source_;
+    }
+    std::shared_ptr<const MockDiskCacheSource> mockDiskCacheSource() const {
+        return mock_disk_cache_source_;
+    }
 
     // Tier enable queries
     bool isDeviceCacheEnabled() const {
@@ -203,6 +313,13 @@ public:
         return initialized_;
     }
 
+    void startLocalStoreRequest() {
+        metrics_reporter_->startLocalStoreRequest();
+    }
+    void finishLocalStoreRequest(bool released) {
+        metrics_reporter_->finishLocalStoreRequest(released);
+    }
+
     const BlockTreeCacheConfig& config() const {
         return config_;
     }
@@ -212,9 +329,15 @@ private:
     // Caller holds mutex_.
     void onWorkflowSettledLocked(bool check_watermark);
 
+    struct RemoteCompletionState;
+    std::shared_ptr<RemoteCompletionState>         remote_completions_;
     BlockTreeCacheConfig                           config_;
     std::unique_ptr<BlockTree>                     tree_;
     std::shared_ptr<StorageBackend>                storage_backend_;
+    // Declared before workers so reservations outlive loader/transfer destruction.
+    std::shared_ptr<MockMemoryCacheSource>         mock_memory_cache_source_;
+    std::shared_ptr<MockDiskCacheSource>           mock_disk_cache_source_;
+    std::shared_ptr<RemoteMockAdapter>             remote_adapter_;
     std::unique_ptr<BlockTransferDispatcher>       transfer_dispatcher_;
     std::unique_ptr<BlockTreeTaskPool>             task_pool_;
     std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter_;

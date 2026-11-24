@@ -85,6 +85,7 @@ public:
 
     size_t             payloadBytes() const;
     size_t             strideBytes() const;
+    bool               bufferedIO() const;
     size_t             blockSizeBytes() const override;
     size_t             readBytes() const;
     size_t             writeBytes() const;

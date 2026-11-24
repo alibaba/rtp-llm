@@ -168,8 +168,12 @@ std::shared_ptr<BlockTransferDispatcher::InflightTicket> BlockTransferDispatcher
 }
 
 BlockTransferDispatcher::BlockTransferDispatcher(std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine,
-                                                 std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine):
-    per_rank_engine_(std::move(per_rank_engine)), multi_rank_engine_(std::move(multi_rank_engine)) {
+                                                 std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine,
+                                                 size_t                                        max_descriptors_per_batch):
+    per_rank_engine_(std::move(per_rank_engine)),
+    multi_rank_engine_(std::move(multi_rank_engine)),
+    max_descriptors_per_batch_(max_descriptors_per_batch),
+    make_observed_context_([](size_t count) { return std::make_shared<TransferBatchAsyncContext>(count); }) {
     RTP_LLM_LOG_INFO("transfer_lifecycle event=dispatcher_init registry=%s engine=%p",
                      task_registry_->epoch().c_str(),
                      static_cast<const void*>(per_rank_engine_.get()));
@@ -231,6 +235,24 @@ std::shared_ptr<TransferAsyncContext> BlockTransferDispatcher::executePerRank(Tr
     TransferAsyncContext::DoneCallback complete = [ticket, context](TransferResult result) {
         context->complete(std::move(result));
     };
+    const auto                                 evidence = local_copy_observation_;
+    std::shared_ptr<TransferBatchAsyncContext> observed;
+    TransferAsyncContext::DoneCallback         observe;
+    if (task.operation && evidence) {
+        try {
+            observed = make_observed_context_(task.descriptors().size());
+            observe  = [task, evidence, observed](TransferResult result) {
+                try {
+                    evidence->observer(task, result);
+                } catch (...) {
+                    evidence->complete.store(false);
+                }
+                observed->complete(std::move(result));
+            };
+        } catch (...) {
+            evidence->complete.store(false);
+        }
+    }
     TransferResult observation_failure(
         ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "failed to observe submitted local transfer completion"));
     task.setCompletionProof(std::move(proof));
@@ -242,6 +264,9 @@ std::shared_ptr<TransferAsyncContext> BlockTransferDispatcher::executePerRank(Tr
         try {
             child->onDone(complete);
         } catch (...) {
+            if (evidence) {
+                evidence->complete.store(false);
+            }
             // The producer still owns its proof even when business observation fails.
             try {
                 if (child->done()) {
@@ -252,7 +277,17 @@ std::shared_ptr<TransferAsyncContext> BlockTransferDispatcher::executePerRank(Tr
             complete(std::move(observation_failure));
         }
     }
-    return context;
+    if (!observe) {
+        return context;
+    }
+    observed->holdUntilCompletion(context);
+    try {
+        context->onDone(std::move(observe));
+    } catch (...) {
+        evidence->complete.store(false);
+        return context;
+    }
+    return observed;
 }
 
 void BlockTransferDispatcher::warnRegistrySize() const noexcept {
@@ -430,11 +465,96 @@ void BlockTransferDispatcher::runTransfer(TransferTask         task,
         }
         done(std::move(result));
     };
-    submitCoordinated(task.rpcSubtask(), std::move(callback), completion_operation);
+    const auto descriptors = task.descriptors();
+    if (descriptors.empty()) {
+        TransferResult result(ErrorInfo(ErrorCode::INVALID_PARAMS, "empty transfer task"),
+                              CacheCopyError::NOT_EXECUTED);
+        result.buffer_safe = true;
+        callback(std::move(result));
+        return;
+    }
+    const bool split_store = task.operation == CacheTransferOperation::STORE && !descriptors.empty()
+                             && std::any_of(descriptors.begin(), descriptors.end(), [](const TransferDescriptor& d) {
+                                    return d.target_tier == Tier::DISK || d.group_set_id != 0;
+                                });
+    const bool needs_split = !descriptors.empty() && (max_descriptors_per_batch_ > 0 || split_store);
+    if (!needs_split) {
+        submitCoordinated(task.rpcSubtask(), std::move(callback), completion_operation);
+        return;
+    }
+
+    struct DescriptorGroup {
+        Tier                            source;
+        Tier                            target;
+        size_t                          group_set_id;
+        std::vector<TransferDescriptor> descriptors;
+        std::vector<size_t>             indices;
+    };
+    std::vector<DescriptorGroup> groups;
+    for (size_t index = 0; index < descriptors.size(); ++index) {
+        const auto& descriptor = descriptors[index];
+        const bool  separate   = task.operation == CacheTransferOperation::STORE && descriptor.target_tier == Tier::DISK;
+        const auto  group      = separate ?
+                                     groups.end() :
+                                     std::find_if(groups.begin(), groups.end(), [&descriptor](const DescriptorGroup& item) {
+                                      return item.source == descriptor.source_tier
+                                             && item.target == descriptor.target_tier
+                                             && item.group_set_id == descriptor.group_set_id;
+                                  });
+        if (group != groups.end()) {
+            group->descriptors.push_back(descriptor);
+            group->indices.push_back(index);
+        } else {
+            groups.push_back(DescriptorGroup{
+                descriptor.source_tier, descriptor.target_tier, descriptor.group_set_id, {descriptor}, {index}});
+        }
+    }
+
+    auto stage_state = std::make_shared<TransferStageState>(std::move(callback), descriptors.size());
+    struct Batch {
+        TransferTask        task;
+        std::vector<size_t> indices;
+    };
+    std::vector<Batch> batches;
+    for (const auto& group : groups) {
+        const size_t batch_limit = max_descriptors_per_batch_ > 0 ? max_descriptors_per_batch_ : group.descriptors.size();
+        for (size_t begin = 0; begin < group.descriptors.size(); begin += batch_limit) {
+            const size_t end = std::min(begin + batch_limit, group.descriptors.size());
+            auto         subtask =
+                task.rpcSubtask({group.descriptors.begin() + begin, group.descriptors.begin() + end});
+            std::vector<size_t> indices(group.indices.begin() + begin, group.indices.begin() + end);
+            batches.push_back({std::move(subtask), std::move(indices)});
+        }
+    }
+    for (auto& batch : batches) {
+        stage_state->addBatch();
+        try {
+            submitCoordinated(
+                std::move(batch.task),
+                [stage_state, indices = std::move(batch.indices)](TransferResult result) {
+                    stage_state->completeBatch(std::move(result), indices);
+                },
+                completion_operation);
+        } catch (...) {
+            TransferResult failure;
+            failure.status.setErrorCode(ErrorCode::EXECUTION_EXCEPTION);
+            failure.copy_error = CacheCopyError::NOT_EXECUTED;
+            if (multi_rank_engine_) {
+                failure.status.setErrorCode(ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+                failure.copy_error = CacheCopyError::RPC_FAILED;
+            }
+            stage_state->completeBatch(std::move(failure), batch.indices);
+        }
+    }
+    stage_state->finishSubmitting();
 }
 
 void BlockTransferDispatcher::cancelPendingStagingTransfers() const {
     per_rank_engine_->cancelPendingStagingTransfers();
+}
+
+RemoteMockSafetySnapshot BlockTransferDispatcher::remoteMockSafety() const {
+    return multi_rank_engine_ ? multi_rank_engine_->remoteMockSafety() : RemoteMockSafetySnapshot{};
 }
 
 BlockTreeQueueSizes BlockTransferDispatcher::queueSizes() const {

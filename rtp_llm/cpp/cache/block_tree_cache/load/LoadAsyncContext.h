@@ -20,6 +20,11 @@ namespace rtp_llm {
 
 class LoadContextCoordinator;
 
+enum class LoadSourceKind {
+    TREE,
+    MOCK_CACHE
+};
+
 struct LoadMatchResult {
     // Keep bool-returning callbacks source-compatible. A callback failure that
     // does not provide a capacity verdict is terminal rather than eligible for
@@ -49,12 +54,22 @@ public:
                      size_t                                         local_matched_blocks,
                      uint64_t                                       context_id,
                      const std::shared_ptr<LoadContextCoordinator>& coordinator,
-                     std::shared_ptr<StorageBackend>                storage_backend = nullptr,
-                     StorageRequest                                 storage_request = {});
+                     std::shared_ptr<StorageBackend>                storage_backend           = nullptr,
+                     StorageRequest                                 storage_request           = {},
+                     LoadSourceKind                                 source_kind               = LoadSourceKind::TREE,
+                     size_t                                         mock_device_prefix_blocks = 0,
+                     size_t                                         mock_disk_blocks          = 0,
+                     size_t                                         mock_remote_blocks        = 0);
     ~LoadAsyncContext() override;
 
-    bool                   empty() const;
-    uint64_t               contextId() const;
+    bool           empty() const;
+    uint64_t       contextId() const;
+    LoadSourceKind sourceKind() const {
+        return source_kind_;
+    }
+    bool isMockLoad() const {
+        return source_kind_ != LoadSourceKind::TREE;
+    }
     std::optional<int64_t> requestId() const {
         return request_id_;
     }
@@ -78,6 +93,10 @@ public:
     }
     void setMatchCallback(MatchCallback callback);
     void setSettlementReadyCallback(SettlementReadyCallback callback);
+    // Observe transfer terminal notification separately from deferred resource
+    // settlement. Pre-transfer abort/rejection reports a failed outcome.
+    void setTransferOutcomeCallback(std::function<void(bool)> callback);
+    void reportTransferOutcome(bool success);
     void startBackendMatch();
     void setTargetBlocks(size_t desc_index, std::vector<BlockIdxType> target_blocks);
     void setBackendTargetBlock(size_t key_index, size_t handle_index, BlockIdxType target_block);
@@ -92,7 +111,10 @@ public:
     void startJoinWait(int64_t start_time_us);
     bool
     completeJoinedOne(bool success, bool& join_completed, int64_t& join_wait_latency_us, Tier source_tier = Tier::NONE);
-    bool completeTransfers(size_t count, bool success, Tier source_tier = Tier::NONE);
+    bool completeTransfers(size_t    count,
+                           bool      success,
+                           Tier      source_tier = Tier::NONE,
+                           ErrorInfo error       = ErrorInfo::OkStatus());
     void cancelUnsubmittedTransfers();
     bool aggregateSuccess() const;
     bool localTransfersSucceeded() const;
@@ -128,12 +150,16 @@ private:
 
     std::shared_ptr<LoadContextCoordinator> coordinator_;
     const uint64_t                          context_id_;
+    const LoadSourceKind                    source_kind_{LoadSourceKind::TREE};
     std::vector<TransferDescriptor>         load_descs_;
     std::vector<bool>                       joined_load_;
     const size_t                            local_matched_blocks_{0};
+    const size_t                            mock_device_prefix_blocks_{0};
+    const size_t                            mock_disk_blocks_{0};
+    const size_t                            mock_remote_blocks_{0};
     size_t                                  matched_blocks_{0};
     size_t                                  backend_matched_blocks_{0};
-    std::array<size_t, 3>                   matched_blocks_by_tier_{};
+    std::array<size_t, 4>                   matched_blocks_by_tier_{};
     std::unordered_map<size_t, Tier>        reuse_tier_by_path_;
     size_t                                  matched_device_host_blocks_{0};
     size_t                                  device_ready_blocks_{0};
@@ -170,6 +196,7 @@ private:
     bool                      settlement_ready_{false};
     SettlementReadyCallback   settlement_ready_callback_;
     std::vector<DoneCallback> callbacks_;
+    std::function<void(bool)> transfer_outcome_callback_;
 
     AsyncProfileSpan  workflow_span_, join_span_;
     std::atomic<bool> workflow_trace_finished_{false}, join_trace_finished_{false};
@@ -188,8 +215,12 @@ public:
     std::shared_ptr<LoadAsyncContext> create(std::vector<TransferDescriptor> load_descs,
                                              std::vector<bool>               joined_load,
                                              size_t                          matched_blocks,
-                                             std::shared_ptr<StorageBackend> storage_backend = nullptr,
-                                             StorageRequest                  storage_request = {});
+                                             std::shared_ptr<StorageBackend> storage_backend           = nullptr,
+                                             StorageRequest                  storage_request           = {},
+                                             LoadSourceKind                  source_kind               = LoadSourceKind::TREE,
+                                             size_t                          mock_device_prefix_blocks = 0,
+                                             size_t                          mock_disk_blocks          = 0,
+                                             size_t                          mock_remote_blocks        = 0);
     bool                              registerContext(const std::shared_ptr<LoadAsyncContext>& context);
     bool                              commit(uint64_t context_id);
     bool                              abort(LoadAsyncContext& context) noexcept;
