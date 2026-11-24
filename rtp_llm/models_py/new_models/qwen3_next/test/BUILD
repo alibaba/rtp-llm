@@ -1,6 +1,15 @@
 load("//rtp_llm/models_py:checkpoint_test_platforms.bzl", "checkpoint_reader_test_env")
 
 py_test(
+    name = "gated_fp8_checkpoint_test",
+    srcs = ["gated_fp8_checkpoint_test.py", "main_checkpoint_test.py"],
+    tags = ["H20_CU13"],
+    env = {"GPU_COUNT": "2"},
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "2"},
+    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:safetensors_torch"],
+)
+
+py_test(
     name = "scratch_policy_test",
     srcs = ["scratch_policy_test.py", "main_checkpoint_test.py"],
     main = "scratch_policy_test.py",

@@ -1055,14 +1055,17 @@ class NewModelLoader:
             if model_filter is not None and not model_filter(name):
                 return ReadSpec.skip(name, shape)
 
-            mapped_name = self._mapped_checkpoint_name(model, name)
-            load_target, read_spec = model.resolve_checkpoint_load_plan(
-                mapped_name, shape
-            )
-            if checkpoint_load_plan is not None and load_target is not None:
-                checkpoint_load_plan[mapped_name] = load_target
-            if not model.allow_checkpoint_read_spec(name):
-                read_spec = None
+            # A model transform can split one physical tensor into multiple
+            # logical parameters (e.g. interleaved Q/gate FP8 scales). No one
+            # leaf can validate its source shape or own a cached direct target.
+            read_spec = None
+            if model.allow_checkpoint_read_spec(name):
+                mapped_name = self._mapped_checkpoint_name(model, name)
+                load_target, read_spec = model.resolve_checkpoint_load_plan(
+                    mapped_name, shape
+                )
+                if checkpoint_load_plan is not None and load_target is not None:
+                    checkpoint_load_plan[mapped_name] = load_target
             if read_spec is None:
                 read_spec = ReadSpec.full(name, shape)
             else:
