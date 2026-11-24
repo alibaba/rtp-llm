@@ -20,7 +20,7 @@ struct CopyTask {
 };
 
 /// @brief GPU 拷贝工具类，封装批量拷贝逻辑
-/// 内部委托给 DeviceOps::noBlockCopy 实现，支持 CUDA、ROCm 及其他平台
+/// 返回成功时，调用方可以读取目标 buffer 或释放源 buffer。
 class CudaCopyUtil {
 public:
     CudaCopyUtil()  = default;

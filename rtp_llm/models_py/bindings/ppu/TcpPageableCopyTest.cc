@@ -4,6 +4,7 @@
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 #include <cstring>
+#include <future>
 #include <limits>
 #include <string>
 
@@ -35,18 +36,47 @@ TEST(PpuTcpCopyTest, RoundTripPageablePayloadsAndHostBlocks) {
     EXPECT_EQ(cpu_result, cpu_source);
 }
 
-TEST(PpuTcpCopyTest, RejectsFailedDmaWithoutPublishingPageablePayload) {
+TEST(PpuTcpCopyTest, RpcWorkersRoundTripConcurrentInteriorBlocksWithoutPooledDma) {
+    constexpr int workers = 4, bytes = 2048;
+    auto pool = torch::zeros({workers, bytes + 2}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    std::vector<std::future<bool>> transfers;
+    for (int i = 0; i < workers; ++i) {
+        transfers.emplace_back(std::async(std::launch::async, [&, i] {
+            // The old implementation fails here even if its host staging is pinned.
+            struct ResetHook {
+                ~ResetHook() { no_block_copy_detail::cuda_result_for_test = nullptr; }
+            } reset;
+            no_block_copy_detail::cuda_result_for_test = [](const char* phase, int result) {
+                return std::strcmp(phase, "generic_submit") == 0 ? static_cast<int>(cudaErrorInvalidValue) : result;
+            };
+            CudaCopyUtil copy;
+            std::string input(bytes, static_cast<char>(i + 1)), output(bytes + 2, '-');
+            char* block = static_cast<char*>(pool.data_ptr()) + i * (bytes + 2) + 1;
+            std::vector<CopyTask> upload{{input.data(), bytes, block, pool.get_device(), true}};
+            std::vector<CopyTask> download{{block, bytes, output.data() + 1, pool.get_device(), true}};
+            return copy.batchCopyToDevice(upload) && copy.batchCopyToHost(download)
+                   && output == "-" + input + "-";
+        }));
+    }
+    for (auto& transfer : transfers) {
+        EXPECT_TRUE(transfer.get());
+    }
+    auto result = pool.cpu();
+    for (int i = 0; i < workers; ++i) {
+        EXPECT_EQ(result[i][0].item<int>(), 0);
+        EXPECT_EQ(result[i][bytes + 1].item<int>(), 0);
+    }
+}
+
+TEST(PpuTcpCopyTest, RejectsUnavailableDeviceWithoutPublishingPageablePayload) {
     auto gpu = torch::ones({16}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     std::string payload(16, 'x');
-    std::vector<CopyTask> send = {{gpu.data_ptr(), payload.size(), payload.data(), gpu.get_device(), true}};
-    std::vector<CopyTask> recv = {{payload.data(), payload.size(), static_cast<char*>(gpu.data_ptr()), gpu.get_device(), true}};
-    struct ResetHook {
-        ~ResetHook() { no_block_copy_detail::cuda_result_for_test = nullptr; }
-    } reset;
-    no_block_copy_detail::cuda_result_for_test = [](const char* phase, int result) {
-        return std::strcmp(phase, "generic_submit") == 0 ? static_cast<int>(cudaErrorInvalidValue) : result;
-    };
+    int unavailable = 0;
+    ASSERT_EQ(cudaGetDeviceCount(&unavailable), cudaSuccess);
+    std::vector<CopyTask> send = {{gpu.data_ptr(), payload.size(), payload.data(), unavailable, true}};
+    std::vector<CopyTask> recv = {{payload.data(), payload.size(), static_cast<char*>(gpu.data_ptr()), unavailable, true}};
     CudaCopyUtil copy;
     EXPECT_FALSE(copy.batchCopyToHost(send));
     EXPECT_EQ(payload, std::string(16, 'x'));
