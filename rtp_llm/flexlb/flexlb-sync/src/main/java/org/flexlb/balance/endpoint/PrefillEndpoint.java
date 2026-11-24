@@ -186,7 +186,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         gate.govern(waitingDepth, setpoint, poolSpare, nowMs);
     }
 
-    /** Advisory Engine waiting-queue admission gate verdict for diagnostics. */
+    /** Whether the Engine waiting-queue gate blocks new work on this endpoint. */
     public boolean engineQueueAdmissionBlocked() {
         EngineQueueAdmission admission = engineQueueAdmission;
         return admission != null

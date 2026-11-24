@@ -231,10 +231,16 @@ goes first. Ties prefer fewer compute tokens, then fewer input tokens, then
 enqueue order. Zero-hit requests use the same dispatch capacity as cache hits.
 
 With `prefillQueueShedding` enabled, a separate monitor evaluates blocked
-placement attempts with a Prefill work estimate. It reads pool pressure and
-picks candidates outside the queue lock. Each eviction checks that the same
-blocked attempt still owns the queue entry. The request timer enforces the
-absolute deadline even when the monitor or estimator is busy.
+placement attempts with a Prefill work estimate. It counts a worker as accepting
+when its Engine waiting-queue gate is open, disabled, or has unknown queue
+depth. If the accepting share reaches `minAcceptingWorkerPercent`, a cold
+eviction candidate gets another placement attempt. With `deadlineBudget`, the
+share of workers with a blocked Engine queue gate must reach
+`saturatedWorkerPercent` for `saturationHoldMs` before budget-based eviction.
+Prefill dispatch slot occupancy is excluded from both percentages.
+Each eviction checks that the same blocked attempt still owns the queue entry.
+The request timer enforces the absolute deadline even when the monitor or
+estimator is busy.
 
 QUEUE resolves one scheduling deadline at ingress. The effective wait is
 `scheduler.queueTimeoutMs`, capped by `prefillQueueShedding.maxWaitMs` when

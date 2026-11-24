@@ -41,6 +41,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
@@ -229,6 +230,28 @@ class CostBasedPrefillSelectionMetricTest {
             occupants.forEach(item -> endpoint.releaseCommittedItem(item.execution()));
             reservations.forEach(org.flexlb.balance.endpoint.PrefillState.RouteReservation::close);
         }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"0,1", "11,0"})
+    void queueSheddingCountsAcceptingEnginesIndependentlyOfFullDispatchSlots(
+            int waiting, int expectedAccepting) {
+        config.getDispatcher().setMaxInflightPerPrefillWorker(1);
+        var balance = new RoutingConfig.TokenBalanceConfig();
+        balance.setEngineQueueAdmissionThreshold(10L);
+        config.getRouter().getRoles().getPrefill().setTokenBalance(balance);
+        var source = WorkerStatus.createDiscovered(RoleType.PREFILL, "target", "10.0.0.2", 8080, 8081, "test");
+        var response = StrategyTestSupport.response(RoleType.PREFILL, true, 1_000_000L, 1_000_000L, 1L);
+        response.setRunningQueryLen(1);
+        response.setWaitingQueryLen(waiting);
+        StrategyTestSupport.publish(source, response);
+        var endpoint = (PrefillEndpoint) StrategyTestSupport.publishEndpoint(
+                registry, RoleType.PREFILL, "10.0.0.2:8080", source);
+
+        assertFalse(endpoint.canAcceptRequest(), "the running request occupies the only dispatch slot");
+        var snapshot = strategy.prefillPoolSnapshot(RoleType.PREFILL, "target");
+        assertEquals(1, snapshot.workers());
+        assertEquals(expectedAccepting, snapshot.accepting());
     }
 
     @ParameterizedTest

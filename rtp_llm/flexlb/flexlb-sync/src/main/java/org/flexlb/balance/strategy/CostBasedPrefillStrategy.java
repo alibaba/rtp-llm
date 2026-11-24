@@ -271,7 +271,7 @@ public class CostBasedPrefillStrategy {
     /** Occupancy snapshot of one Prefill pool, used by queue shedding decisions. */
     public record PrefillPoolSnapshot(int workers, int accepting, long pendingTokens) { }
 
-    /** Worker count, accepting share and outstanding uncached tokens of one pool. */
+    /** Queue shedding measures Engine admission independently of local delivery slots. */
     public PrefillPoolSnapshot prefillPoolSnapshot(RoleType roleType, String group) {
         List<EndpointRegistry.PrefillRoutingEntry> candidates =
                 discoverEndpoints(roleType, group).candidates();
@@ -282,7 +282,7 @@ public class CostBasedPrefillStrategy {
         long pendingTokens = 0L;
         for (EndpointRegistry.PrefillRoutingEntry routingEntry : candidates) {
             PrefillEndpoint endpoint = routingEntry.endpoint();
-            if (endpoint.canAcceptRequest()) {
+            if (!endpoint.engineQueueAdmissionBlocked()) {
                 accepting++;
             }
             pendingTokens += Math.max(0L, endpoint.pendingTokenWork());

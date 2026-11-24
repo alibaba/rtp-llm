@@ -16,9 +16,8 @@ public final class PrefillQueueSheddingConfig {
     private RecoveryConfig recovery;
     /** Gradually withdraw cold-request age exemption after sustained actual queue hard timeouts. */
     private boolean sustainedOverloadProtection = true;
-    /** Minimum accepting percentage for cold shedding veto and pool-wide Engine queue relief.
-     * Includes capacity-blocked workers in the denominator; does not gate ordinary routing.
-     */
+    /** Retry a cold eviction candidate when at least this percentage of workers can accept placement
+     * according to their Engine waiting-queue gates. Disabled and unknown gates count as accepting. */
     private double minAcceptingWorkerPercent = DEFAULT_MIN_ACCEPTING_WORKER_PERCENT;
 
     /** Opt-in deadline budgeting with explicitly calibrated uncached throughput. */
@@ -30,6 +29,7 @@ public final class PrefillQueueSheddingConfig {
         /** Per-worker aggregate uncached tokens/second; deliberately has no guessed default. */
         private double tokensPerSecond;
         private double capacityFactor = 0.9;
+        /** Minimum percentage of the pool with a blocked Engine queue gate to start the saturation timer. */
         private double saturatedWorkerPercent = 90.0;
         private long saturationHoldMs = 2_000L;
         /** Leave time for status/dispatch transport and the next control round. */
