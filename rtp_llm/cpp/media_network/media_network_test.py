@@ -1,7 +1,12 @@
+import gzip
 import socket
 import threading
 import unittest
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import requests
+from urllib3.exceptions import DecodeError
 
 from rtp_llm.cpp.media_network import _media_network as native
 
@@ -10,9 +15,13 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-    def reply(self, code, body, location=None):
+    def reply(self, code, body, location=None, encoding=None):
         self.send_response(code)
         self.send_header("Content-Length", str(len(body)))
+        if isinstance(encoding, str):
+            encoding = (encoding,)
+        for value in encoding or ():
+            self.send_header("Content-Encoding", value)
         if location:
             self.send_header("Location", location)
         self.end_headers()
@@ -20,7 +29,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self.server.visits.append(self.path)
-        if self.path in self.server.gates:
+        if self.path in getattr(self.server, "encoded", {}):
+            encoding, body = self.server.encoded[self.path]
+            self.reply(200, body, encoding=encoding)
+        elif self.path in self.server.gates:
             started, release = self.server.gates[self.path]
             started.set()
             release.wait(10)
@@ -227,6 +239,102 @@ class MediaNetworkTest(unittest.TestCase):
     def test_redirect_ignores_truncated_redirect_body(self):
         self.assertEqual(self.fetch("/short-redirect")[:2], (200, ""))
         self.assertEqual(self.server.visits, ["/short-redirect", "/binary"])
+
+    def test_mislabeled_and_compressed_media(self):
+        payload = b"image bytes" * 100
+        # Independent wire fixtures for this payload, from brotli.compress and
+        # zstandard.ZstdCompressor().compress. No Python codec needed at runtime.
+        br = bytes.fromhex("1b4b04008c54b5bf06119bcb53657435486d155c76fbf102")
+        zstd = bytes.fromhex("28b52ffd604c0395000058696d61676520627974657301003ef82f5e")
+        valid = {
+            "/utf-8": ("uTf-8", payload),
+            "/utf8": ("utf8", payload),
+            "/gbk": ("GBK", payload),
+            "/unknown": ("unknown", payload),
+            "/unknown-list": ("unknown, GBK", payload),
+            "/gzip": ("gzip", gzip.compress(payload)),
+            "/br": ("br", br),
+            "/zstd": ("zstd", zstd),
+            "/chained": ("br, gzip", gzip.compress(br)),
+        }
+        invalid = {
+            "/broken-gzip": ("gzip", b"invalid gzip"),
+            "/broken-br": ("br", b"\xff" * 16),
+            "/broken-zstd": ("zstd", b"invalid zstd"),
+            "/mixed": ("unknown, gzip", gzip.compress(payload)),
+        }
+        self.server.encoded = {**valid, **invalid}
+        for path in valid:
+            with self.subTest(path=path):
+                result = self.fetch(path, attempts=3)
+                self.assertEqual(result[:5], (200, "", payload, False, 0))
+                self.assertEqual(self.server.visits.count(path), 1)
+                limited = self.fetch(path, limit=len(payload) - 1)
+                self.assertEqual(limited[1], "too_large")
+        for path in invalid:
+            with self.subTest(path=path):
+                self.assertEqual(self.fetch(path)[1], "body_transport")
+
+    def test_content_decoding_matches_legacy_read1(self):
+        data = b"media bytes" * 9000
+        gz = gzip.compress(data)
+        df = zlib.compress(data)
+        self.server.encoded = {
+            "/gzip-members": (
+                "x-gzip",
+                gzip.compress(data[:100]) + gzip.compress(data[100:]),
+            ),
+            "/gzip-trailer": ("gzip", gz + b"extra"),
+            "/gzip-truncated": ("gzip", gz[:-2]),
+            "/not-a-gzip": ("gzip", df),
+            "/deflate-extra": ("deflate", df + b"extra"),
+            "/raw-deflate": ("deflate", df[2:-4]),
+            "/deflate-first": ("deflate", df + df),
+            "/unknown-inner": ("unknown, gzip", gzip.compress(df)),
+            "/unknown-outer": ("gzip, unknown", zlib.compress(gz)),
+            "/repeated-field": (("gzip", "unknown"), zlib.compress(gz)),
+            "/identity-in-list": ("gzip, identity", zlib.compress(gz)),
+            "/empty-in-list": ("gzip,", zlib.compress(gz)),
+            "/single-whitespace": ("gzip ", gz),
+            "/only-unknown": (("utf8", "GBK"), data),
+            "/bad-layer": ("unknown, gzip", gz),
+        }
+        with requests.Session() as legacy:
+            legacy.trust_env = False
+            for path in self.server.encoded:
+                with self.subTest(path=path):
+                    url = f"http://127.0.0.1:{self.server.server_port}{path}"
+                    with legacy.get(url, stream=True, timeout=5) as response:
+                        try:
+                            expected = b"".join(
+                                iter(
+                                    lambda: response.raw.read1(
+                                        65536, decode_content=True
+                                    ),
+                                    b"",
+                                )
+                            )
+                        except DecodeError:
+                            expected = None
+                    status, error, body = self.fetch(path)[:3]
+                    if expected is None:
+                        self.assertEqual(error, "body_transport")
+                    else:
+                        self.assertEqual((status, error, body), (200, "", expected))
+
+    def test_truncated_zstd_and_decoded_size_limit(self):
+        # A complete Zstandard frame containing b"image bytes" * 100.
+        frame = bytes.fromhex(
+            "28b52ffd604c0395000058696d61676520627974657301003ef82f5e"
+        )
+        self.server.encoded = {
+            "/short-zstd": ("zstd", frame[:-1]),
+            "/empty-zstd": ("zstd", b""),
+            "/tiny-gzip": ("gzip", gzip.compress(b"x")),
+        }
+        for path in ("/short-zstd", "/empty-zstd"):
+            self.assertEqual(self.fetch(path)[1], "body_transport")
+        self.assertEqual(self.fetch("/tiny-gzip", limit=1)[:3], (200, "", b"x"))
 
     def test_service_body(self):
         for method in ("PUT", "POST"):
