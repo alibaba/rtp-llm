@@ -4,7 +4,7 @@ opentelemetry-exporter-otlp-proto-http==1.15.0
 
 # CUDA 13.2 / torch 2.11+cu130 / triton 3.6.0 dep set.
 # Includes official DeepEP main@a56d6156 built against NCCL 2.30.4 and
-# NVSHMEM 3.5.19, plus the official FlashInfer CUDA 13 wheels.
+# NVSHMEM 3.5.19, plus FlashInfer built for CUDA 13.2.
 # FlashAttention 3 remains deferred.
 
 # Core torch stack — wheels mirrored to OSS by us; upstream is
@@ -18,9 +18,8 @@ nvidia-cuda-cccl==13.2.86
 # Triton 3.6.0 supports CUDA 13.x ptxas natively (no wrapper needed).
 triton==3.6.0
 
-# Official FlashInfer CUDA 13 wheels.
-flashinfer-python[cu13]==0.7.4
-flashinfer-cubin @ https://github.com/flashinfer-ai/flashinfer/releases/download/v0.7.4/flashinfer_cubin-0.7.4-py3-none-any.whl
+flashinfer-python[cu13]==0.7.5+57f949b8.cu132
+flashinfer-cubin==0.7.5+57f949b8.cu132
 
 # Upstream v1.1.0.post2@e7706faf, rebuilt for torch 2.11+cu130.
 fast-hadamard-transform==1.1.0+e7706fa.cu132.torch2.11.cxx11abitrue
