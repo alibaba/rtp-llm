@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/BlockTreeLoader.h"
 
 #include <atomic>
@@ -25,6 +26,8 @@
 
 namespace rtp_llm {
 namespace {
+
+using block_transfer_engine_test::bufferSafeResult;
 
 using block_tree_cache_test::FullSWAEnvironment;
 using block_tree_cache_test::FullSWAEnvironmentOptions;
@@ -819,7 +822,7 @@ public:
             released = released_;
         }
         if (released) {
-            context->complete(ErrorInfo::OkStatus());
+            context->complete(bufferSafeResult());
         }
         cv_.notify_all();
         return context;
@@ -835,7 +838,8 @@ public:
         return tasks_.size();
     }
 
-    void completeResult(size_t index, TransferResult result) {
+    void completeResult(size_t index, TransferResult result, bool buffer_safe = true) {
+        result.buffer_safe = buffer_safe;
         std::shared_ptr<TransferBatchAsyncContext> context;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -852,7 +856,7 @@ public:
             contexts  = contexts_;
         }
         for (const auto& context : contexts) {
-            context->complete(ErrorInfo::OkStatus());
+            context->complete(bufferSafeResult());
         }
     }
 
@@ -887,7 +891,7 @@ public:
                     }
                 }
             }
-            context->complete(std::move(result));
+            context->complete(bufferSafeResult(std::move(result)));
         }
     }
 
@@ -1229,7 +1233,7 @@ TEST(BlockTreeLoaderTest, DecodeSourcesValidateTheActualFallbackSwaWindow) {
     }
 }
 
-TEST(BlockTreeLoaderTest, UnknownDiskCompletionFreezesOnlyDiskTransferAndStillPublishesHost) {
+TEST(BlockTreeLoaderTest, UnknownDiskCompletionFreezesOnlyItsTargetBeforeHostCompletion) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -1253,8 +1257,18 @@ TEST(BlockTreeLoaderTest, UnknownDiskCompletionFreezesOnlyDiskTransferAndStillPu
     auto refs = bindTargets(*env, owner);
     ASSERT_TRUE(owner->commit());
     ASSERT_TRUE(engine->waitForBatches(2));
-    engine->completeResult(1, ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "disk completion unknown"));
+    engine->completeResult(1, ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "disk completion unknown"), false);
     EXPECT_FALSE(owner->done());
+    auto& reclaimer = env->cache->reclaimer();
+    const auto& frozen_tasks = reclaimer.frozen_;
+    ASSERT_EQ(frozen_tasks.size(), 1u);
+    for (size_t group = 0; group < env->groups.size(); ++group) {
+        EXPECT_EQ(env->groups[group]->hostPool()->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+        EXPECT_EQ(env->groups[group]->diskPool()->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+        for (const auto& pool : env->groups[group]->devicePools()) {
+            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), group);
+        }
+    }
     engine->complete(0, 1);
     owner->waitDone();
     EXPECT_FALSE(owner->success());
@@ -1263,7 +1277,7 @@ TEST(BlockTreeLoaderTest, UnknownDiskCompletionFreezesOnlyDiskTransferAndStillPu
     EXPECT_TRUE(env->resourcesForPathNode(0)[1].hasTier(Tier::DISK));
     for (size_t group = 0; group < env->groups.size(); ++group) {
         EXPECT_EQ(env->groups[group]->hostPool()->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
-        EXPECT_EQ(env->groups[group]->diskPool()->referencedBlocksNum(BlockTreeRefType::FROZEN), group);
+        EXPECT_EQ(env->groups[group]->diskPool()->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
         for (const auto& pool : env->groups[group]->devicePools()) {
             EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), group);
         }
@@ -1271,6 +1285,11 @@ TEST(BlockTreeLoaderTest, UnknownDiskCompletionFreezesOnlyDiskTransferAndStillPu
     releaseTargets(refs);
     env->releaseMatch(match);
     env->reclaimAll();
+    for (const auto& target : frozen_tasks.begin()->second.targets) {
+        EXPECT_EQ(target.pool->treeRefCount(target.block), 1u);
+    }
+    reclaimer.release(frozen_tasks.begin()->first, std::nullopt);
+    env->expectFullyReclaimed();
 }
 
 TEST(BlockTreeLoaderTest, SwaCorruptionDropsNonLeafResourceAndPreservesFullPath) {

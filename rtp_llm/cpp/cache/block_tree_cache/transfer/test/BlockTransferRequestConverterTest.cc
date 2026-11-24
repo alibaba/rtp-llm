@@ -658,6 +658,8 @@ TEST(BlockTransferRequestConverterTest, ResponseDefaultCodeMeansSuccess) {
     EXPECT_EQ(received.code(), MemoryOperationResponsePB::OK);
     const auto result = BlockTransferRequestConverter::decodeTransferResult(received, 1);
     EXPECT_TRUE(result.ok());
+    // Legacy responses omit the safety field; success alone supplies no proof.
+    EXPECT_FALSE(result.buffer_safe);
     EXPECT_EQ(result.copy_error, CacheCopyError::NONE);
     EXPECT_EQ(result.block_errors, std::vector<CacheCopyError>{CacheCopyError::NONE});
 }
@@ -701,6 +703,7 @@ TEST(BlockTransferRequestConverterTest, ResponseReportsHighestCopyErrorForEntire
 
 TEST(BlockTransferRequestConverterTest, ResponseRoundTripPreservesMixedBlockOutcomes) {
     TransferResult result(TransferStatus::CRC_MISMATCH);
+    result.buffer_safe = true;
     result.block_errors = {
         CacheCopyError::NONE, CacheCopyError::NOT_EXECUTED, CacheCopyError::CRC_MISMATCH, CacheCopyError::IO_FAILED};
     MemoryOperationResponsePB response;
@@ -709,12 +712,14 @@ TEST(BlockTransferRequestConverterTest, ResponseRoundTripPreservesMixedBlockOutc
     ASSERT_TRUE(received.ParseFromString(response.SerializeAsString()));
     const auto decoded = BlockTransferRequestConverter::decodeTransferResult(received, 4);
     EXPECT_FALSE(decoded.ok());
+    EXPECT_TRUE(decoded.buffer_safe);
     EXPECT_EQ(decoded.copy_error, CacheCopyError::CRC_MISMATCH);
     EXPECT_EQ(decoded.block_errors, result.block_errors);
     EXPECT_EQ(decoded.status.ToString(), result.status.ToString());
 
     const auto incomplete = BlockTransferRequestConverter::decodeTransferResult(received, 5);
     EXPECT_FALSE(incomplete.ok());
+    EXPECT_FALSE(incomplete.buffer_safe);
     EXPECT_EQ(incomplete.copy_error, CacheCopyError::COPY_FAILED);
     EXPECT_EQ(incomplete.block_errors, std::vector<CacheCopyError>(5, CacheCopyError::COPY_FAILED));
 }

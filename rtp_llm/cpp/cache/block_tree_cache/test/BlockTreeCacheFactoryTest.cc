@@ -782,46 +782,42 @@ TEST_F(BlockTreeCacheFactoryTest, SingleTypeBindsExistingTargetGroupAndPool) {
     expectTargetGroupsBoundByTag(cache, allocator);
 }
 
-TEST_F(BlockTreeCacheFactoryTest, FrozenAbortBoundsPropagateToHostAndDiskPools) {
-    for (const auto& [lower, upper] : {std::pair{0.0, 0.4}, {0.6, 0.85}}) {
-        SCOPED_TRACE(::testing::Message() << "lower=" << lower << " upper=" << upper);
-        const auto config    = makeSingleConfig();
-        auto       allocator = initAllocator<CoordinatorCacheManager>(config);
-        block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_frozen_ratio");
-        KVCacheConfig                            kv_cache_config;
-        kv_cache_config.enable_memory_cache                       = true;
-        kv_cache_config.memory_cache_size_mb                      = 1;
-        kv_cache_config.enable_disk_cache                         = true;
-        kv_cache_config.disk_cache_size_mb                        = 1;
-        kv_cache_config.disk_cache_paths                          = disk_dir.path;
-        kv_cache_config.block_pool_frozen_abort_lower_ratio       = lower;
-        kv_cache_config.block_pool_frozen_abort_upper_ratio = upper;
-        auto cache = createBlockTreeCache(config, kv_cache_config, allocator);
+TEST_F(BlockTreeCacheFactoryTest, FrozenAbortBoundsReachDeviceHostAndDiskPools) {
+    for (const auto& [lower, upper] : {std::pair{0.3, 0.4}, {0.6, 0.85}, {0.0, 0.4}, {1.0, 1.0}}) {
+        SCOPED_TRACE(::testing::Message() << lower << ", " << upper);
+        auto config = makeSingleConfig();
+        config.block_pool_frozen_abort_lower_ratio = lower;
+        config.block_pool_frozen_abort_upper_ratio = upper;
+        auto allocator = initAllocator<CoordinatorCacheManager>(config);
+        block_transfer_engine_test::TempDirGuard directory("frozen_threshold");
+        KVCacheConfig options;
+        options.enable_memory_cache = true;
+        options.memory_cache_size_mb = 1;
+        options.enable_disk_cache = true;
+        options.disk_cache_size_mb = 1;
+        options.disk_cache_paths = directory.path;
+        options.block_pool_frozen_abort_lower_ratio = lower;
+        options.block_pool_frozen_abort_upper_ratio = upper;
+        auto cache = createBlockTreeCache(config, options, allocator);
         ASSERT_NE(cache, nullptr);
-        ASSERT_EQ(cache->groupSets().size(), 1u);
-        const auto& group_set = cache->groupSets().front();
-        ASSERT_NE(group_set->hostPool(), nullptr);
-        ASSERT_NE(group_set->diskPool(), nullptr);
-
-        const std::array<std::shared_ptr<IBlockPool>, 2> pools{group_set->hostPool(), group_set->diskPool()};
+        const auto& group = cache->groupSets().front();
+        const std::array<std::shared_ptr<IBlockPool>, 3> pools{group->devicePools().front(), group->hostPool(), group->diskPool()};
         for (const auto& pool : pools) {
-            SCOPED_TRACE(pool->poolName());
-            ASSERT_DOUBLE_EQ(pool->config_->frozen_block_abort_lower_ratio, lower);
-            ASSERT_DOUBLE_EQ(pool->config_->frozen_block_abort_upper_ratio, upper);
-            ASSERT_GE(pool->totalBlocksNum(), 10u);
-            // Freeze more than the default 30% so a missing configuration
-            // override cannot silently pass once the guard covers all tiers.
-            const auto blocks = pool->malloc((pool->totalBlocksNum() + 1) / 2);
-            ASSERT_TRUE(blocks.has_value());
-            for (const auto block : *blocks) {
-                pool->freezeBlock(block);
+            ASSERT_NE(pool, nullptr);
+            EXPECT_DOUBLE_EQ(pool->config_->frozen_block_abort_lower_ratio, lower);
+            EXPECT_DOUBLE_EQ(pool->config_->frozen_block_abort_upper_ratio, upper);
+            if (lower == 0.0 || lower == upper) {
+                EXPECT_DOUBLE_EQ(pool->effective_frozen_block_abort_ratio_, lower);
+                const auto blocks = pool->malloc(pool->freeBlocksNum());
+                ASSERT_TRUE(blocks.has_value());
+                for (const auto block : *blocks)
+                    pool->freezeBlock(block);
+                EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), blocks->size());
+                pool->decTreeRef(*blocks, BlockTreeRefType::FROZEN);
+            } else {
+                EXPECT_GE(pool->effective_frozen_block_abort_ratio_, lower);
+                EXPECT_LT(pool->effective_frozen_block_abort_ratio_, upper);
             }
-            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), blocks->size());
-            for (const auto block : *blocks) {
-                pool->decTreeRef(block, BlockTreeRefType::FROZEN);
-            }
-            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
-            EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
         }
     }
 }

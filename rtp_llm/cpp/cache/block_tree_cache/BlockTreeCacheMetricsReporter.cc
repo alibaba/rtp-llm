@@ -76,6 +76,36 @@ BlockTreeCacheMetricsReporter::BlockTreeCacheMetricsReporter(
     }
 }
 BlockTreeCacheMetricsReporter::~BlockTreeCacheMetricsReporter() = default;
+
+void BlockTreeCacheMetricsReporter::reportUnfreezeMetrics(const std::vector<TransferTargetBlock>& blocks, const std::string& backend, bool forced) const {
+    if (!metrics_reporter_) {
+        return;
+    }
+    struct PoolTargets {
+        Tier                             tier = Tier::NONE;
+        std::unordered_set<BlockIdxType> blocks;
+    };
+    std::unordered_map<const IBlockPool*, PoolTargets> targets;
+    for (const auto& target : blocks) {
+        auto& pool_targets = targets[target.pool.get()];
+        switch (target.pool->poolType()) {
+            case BlockPoolType::DEVICE: pool_targets.tier = Tier::DEVICE; break;
+            case BlockPoolType::HOST: pool_targets.tier = Tier::HOST; break;
+            case BlockPoolType::DISK: pool_targets.tier = Tier::DISK; break;
+        }
+        pool_targets.blocks.insert(target.block);
+    }
+    for (const auto& [pool, pool_targets] : targets) {
+        RtpLLMCacheUnfreezeMetricsCollector collector;
+        collector.blocks = static_cast<int64_t>(pool_targets.blocks.size());
+        kmonitor::MetricsTags tags("pool_name", pool->poolName());
+        tags.AddTag("tier", tierName(pool_targets.tier));
+        tags.AddTag("backend", backend);
+        tags.AddTag("forced", forced ? "true" : "false");
+        metrics_reporter_->report<RtpLLMCachePoolMetrics, RtpLLMCacheUnfreezeMetricsCollector>(&tags, &collector);
+    }
+}
+
 void BlockTreeCacheMetricsReporter::flushStageMetrics() const {
     if (stage_metrics_)
         stage_metrics_->flush();

@@ -30,6 +30,7 @@ TEST(TransferStageStateTest, EmptyStageCompletesExactlyOnce) {
     size_t             callback_count = 0;
     TransferStageState state([&](TransferResult error) {
         EXPECT_TRUE(error.ok());
+        EXPECT_TRUE(error.buffer_safe);
         ++callback_count;
     });
 

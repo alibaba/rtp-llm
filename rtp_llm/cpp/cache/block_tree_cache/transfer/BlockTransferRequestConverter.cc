@@ -2,12 +2,14 @@
 
 #include <algorithm>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -218,6 +220,38 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
     return true;
 }
 
+std::optional<TransferTask>
+BlockTransferRequestConverter::decodeTransferTask(const MemoryOperationRequestPB&  request,
+                                                  const std::vector<GroupSetPtr>& group_sets,
+                                                  MemoryOperationResponsePB&      response) {
+    const auto reject = [&](const char* message) {
+        TransferResult result(ErrorInfo(ErrorCode::INVALID_PARAMS, message));
+        result.buffer_safe = true;
+        result.expandBlockErrors(request.copy_items_size());
+        encodeTransferResult(response, result);
+        RTP_LLM_LOG_WARNING("%s", message);
+        return std::nullopt;
+    };
+    if (request.transfer_trace_id() == 0) {
+        return reject("transfer execution trace ID is required");
+    }
+    std::vector<TransferDescriptor> descriptors;
+    if (!decodeTransfer(request, descriptors, group_sets)) {
+        return reject("invalid grouped transfer request");
+    }
+    if (request.timeout_ms() > std::numeric_limits<int>::max()) {
+        return reject("transfer timeout exceeds supported range");
+    }
+    const auto timeout = request.timeout_ms() > 0 ? std::chrono::milliseconds(request.timeout_ms()) :
+                                                    BlockTreeTaskPool::kDefaultQueueWaitTimeout;
+    const auto request_id = request.has_transfer_request_id() ? std::optional<int64_t>(request.transfer_request_id()) :
+                                                               std::nullopt;
+    TransferTask task(std::move(descriptors), timeout, request_id);
+    task.setTraceId(request.transfer_trace_id());
+    task.setWorkflow(request.transfer_workflow_id(), request.transfer_parent_id());
+    return task;
+}
+
 MemoryOperationResponsePB::Code BlockTransferRequestConverter::encodeCode(CacheCopyError error) {
     switch (error) {
         case CacheCopyError::NONE:
@@ -255,6 +289,7 @@ CacheCopyError BlockTransferRequestConverter::decodeCode(MemoryOperationResponse
 void BlockTransferRequestConverter::encodeTransferResult(MemoryOperationResponsePB& response,
                                                          const TransferResult&      result) {
     response.set_code(encodeCode(result.copy_error));
+    response.set_buffer_safe(result.buffer_safe);
     response.mutable_error_info()->set_error_code(static_cast<int64_t>(result.status.code()));
     response.mutable_error_info()->set_error_message(result.status.ToString());
     response.clear_block_errors();
@@ -271,7 +306,8 @@ TransferResult BlockTransferRequestConverter::decodeTransferResult(const MemoryO
         result.expandBlockErrors(block_count);
         return result;
     }
-    result.copy_error = decodeCode(response.code());
+    result.buffer_safe = response.buffer_safe();
+    result.copy_error  = decodeCode(response.code());
     for (int index = 0; index < response.block_errors_size(); ++index) {
         const auto block_error = decodeCode(response.block_errors(index));
         result.block_errors.push_back(block_error);

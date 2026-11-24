@@ -93,18 +93,6 @@ CacheConfig makeMtpCacheConfig() {
 
 }  // namespace
 
-TEST(DeviceBlockPoolTest, FrozenAbortBoundsSurviveCacheConfigAndPoolNormalization) {
-    for (const auto& [lower, upper] : {std::pair{0.0, 0.4}, {0.55, 0.85}, {1.0, 1.0}}) {
-        SCOPED_TRACE(::testing::Message() << "lower=" << lower << " upper=" << upper);
-        auto config = makeConfig(lower, upper);
-        EXPECT_DOUBLE_EQ(config->frozen_block_abort_lower_ratio, lower);
-        EXPECT_DOUBLE_EQ(config->frozen_block_abort_upper_ratio, upper);
-        DeviceBlockPool pool(config);
-        EXPECT_DOUBLE_EQ(pool.config().frozen_block_abort_lower_ratio, lower);
-        EXPECT_DOUBLE_EQ(pool.config().frozen_block_abort_upper_ratio, upper);
-    }
-}
-
 TEST(DeviceBlockPoolTest, InitKeepsBlockZeroInvalid) {
     auto config                       = makeConfig();
     config->use_device_malloc_backing = false;

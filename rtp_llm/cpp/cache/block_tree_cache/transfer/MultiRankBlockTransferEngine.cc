@@ -25,8 +25,7 @@ class MultiRankTransferAsyncContext final:
     public std::enable_shared_from_this<MultiRankTransferAsyncContext> {
 public:
     static std::shared_ptr<MultiRankTransferAsyncContext>
-    create(std::shared_ptr<TransferBroadcastResult>       result,
-           size_t                                         worker_count,
+    create(size_t                                         worker_count,
            size_t                                         block_count,
            SharedTransferStageTimer                       wait_timer,
            std::shared_ptr<BlockTreeCacheMetricsReporter> reporter,
@@ -35,7 +34,7 @@ public:
            CacheStageContext                              identity,
            const char*                                    completion_operation) {
         auto context = std::shared_ptr<MultiRankTransferAsyncContext>(
-            new MultiRankTransferAsyncContext(std::move(result), worker_count, block_count));
+            new MultiRankTransferAsyncContext(worker_count, block_count));
         context->wait_timer_  = std::move(wait_timer);
         context->reporter_    = std::move(reporter);
         context->request_id_  = request_id;
@@ -44,19 +43,58 @@ public:
         context->completion_identity_ = identity;
         if (completion_operation)
             context->completion_identity_.operation = completion_operation;
-        context->start();
+        context->unknown_result_ = TransferResult(
+            ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "transfer broadcast completion could not be established"),
+            CacheCopyError::RPC_FAILED);
+        context->unknown_result_.expandBlockErrors(block_count);
+        context->unknown_publication_                 = context->unknown_result_;
+        context->prepareCallback();
         return context;
     }
 
+    void attach(std::shared_ptr<TransferBroadcastResult> result) {
+        broadcast_result_ = std::move(result);
+        try {
+            if (auto probe = block_tree_cache_detail::before_transfer_broadcast_subscription_for_test.load(
+                    std::memory_order_acquire)) {
+                probe();
+            }
+            broadcast_result_->onDone(std::move(completion_callback_));
+        } catch (...) {
+            completeUnknown();
+        }
+    }
+
+    void completeUnknown() {
+        // Both results and the callback were prepared before submitting RPCs.
+        // Registration failure must not escape as an ordinary execution error.
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (completion_.done() || finishing_ || fallback_started_) {
+                return;
+            }
+            fallback_started_ = true;
+        }
+        completion_callback_ = {};
+        publish(std::move(unknown_result_), std::move(unknown_publication_));
+    }
+
+    void discardUnsubmittedCallback() {
+        completion_callback_ = {};
+    }
+
     void waitDone() override {
+        if (done()) {
+            return;
+        }
         try {
             broadcast_result_->waitDone(/*timeout_ms=*/0, /*fatal_on_error=*/false);
-        } catch (const std::exception& error) {
-            evaluate(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, error.what()));
         } catch (...) {
-            evaluate(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "unknown multi-rank transfer failure"));
+            completeUnknown();
         }
-        evaluate();
+        if (!done()) {
+            evaluateWithFallback();
+        }
         completion_.waitDone();
     }
 
@@ -76,18 +114,15 @@ public:
         return completion_.result();
     }
 
-private:
-    MultiRankTransferAsyncContext(std::shared_ptr<TransferBroadcastResult> result,
-                                  size_t                                   worker_count,
-                                  size_t                                   block_count):
-        broadcast_result_(std::move(result)),
-        worker_count_(worker_count),
-        block_count_(block_count),
-        completion_(block_count) {}
 
-    void start() {
+private:
+    MultiRankTransferAsyncContext(size_t                                   worker_count,
+                                  size_t                                   block_count):
+        worker_count_(worker_count), block_count_(block_count), completion_(block_count) {}
+
+    void prepareCallback() {
         std::shared_ptr<MultiRankTransferAsyncContext> self = shared_from_this();
-        broadcast_result_->onDone([self = std::move(self)] {
+        completion_callback_ = [self = std::move(self)] {
             TransferStageTimer total(self->reporter_,
                                      "completion_total",
                                      self->request_id_,
@@ -97,22 +132,35 @@ private:
                                      "coordinator_completion",
                                      self->transfer_id_,
                                      self->completion_identity_);
-            total.finish(self->evaluate());
-        });
+            total.finish(self->evaluateWithFallback());
+        };
     }
 
-    bool evaluate(ErrorInfo forced_error = ErrorInfo::OkStatus()) {
-        TransferResult result =
-            forced_error.ok() ? TransferResult{} : TransferResult(std::move(forced_error), CacheCopyError::RPC_FAILED);
-        if (result.ok()) {
-            if (!broadcast_result_->done()) {
+    bool evaluateWithFallback() {
+        try {
+            return evaluate();
+        } catch (...) {
+            // A transient allocation failure before the completion claim can
+            // be retried immediately. Async consumers must not depend on a
+            // future waitDone() call to retry the only CQ notification.
+            try {
+                return evaluate();
+            } catch (...) {
+                completeUnknown();
                 return false;
             }
-            if (!broadcast_result_->success()) {
-                result = {ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN,
-                                    "multi-rank transfer RPC failed: " + broadcast_result_->failureSummary()),
-                          CacheCopyError::RPC_FAILED};
-            }
+        }
+    }
+
+    bool evaluate() {
+        if (!broadcast_result_->done()) {
+            return false;
+        }
+        auto result = TransferResult::emptyAggregate();
+        if (!broadcast_result_->success()) {
+            result = {ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN,
+                                "multi-rank transfer RPC failed: " + broadcast_result_->failureSummary()),
+                      CacheCopyError::RPC_FAILED};
         }
 
         TransferStageTimer merge(reporter_,
@@ -124,6 +172,18 @@ private:
                                  "coordinator_completion",
                                  transfer_id_,
                                  completion_identity_);
+        aggregateRankResults(result);
+        // Copy before claiming completion: allocation failure must leave the
+        // context retryable. Once claimed, publication cannot allocate.
+        if (auto probe =
+                block_tree_cache_detail::before_transfer_publication_copy_for_test.load(std::memory_order_acquire))
+            probe();
+        auto published_result = result;
+        merge.finish(result.ok());
+        return publish(std::move(result), std::move(published_result));
+    }
+
+    void aggregateRankResults(TransferResult& result) const {
         const auto responses = broadcast_result_->responses();
         if (responses.size() != worker_count_) {
             result.merge({ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "multi-rank transfer response count mismatch"),
@@ -132,6 +192,7 @@ private:
         result.expandBlockErrors(block_count_);
         for (size_t rank = 0; rank < responses.size(); ++rank) {
             if (!broadcast_result_->rpcSucceeded(rank)) {
+                result.still_io_worker_ids.push_back(rank);
                 continue;
             }
             const auto& response = responses[rank];
@@ -166,16 +227,16 @@ private:
                 rank_result.status =
                     ErrorInfo(rank_result.status.code(),
                               "rank=" + std::to_string(rank) + " {" + rank_result.status.ToString() + "}");
-                result.merge(std::move(rank_result));
             }
+            if (rank_result.checkNeedFreeze())
+                result.still_io_worker_ids.push_back(rank);
+            result.merge(std::move(rank_result));
         }
-        // Copy before claiming completion: allocation failure must leave the
-        // context retryable. Once claimed, publication cannot allocate.
-        if (auto probe =
-                block_tree_cache_detail::before_transfer_publication_copy_for_test.load(std::memory_order_acquire))
-            probe();
-        auto published_result = result;
-        merge.finish(result.ok());
+        if (responses.size() != worker_count_)
+            result.still_io_worker_ids.clear();
+    }
+
+    bool publish(TransferResult result, TransferResult published_result) {
         static_assert(std::is_nothrow_move_assignable_v<TransferResult>);
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -192,7 +253,7 @@ private:
         if (wait_timer_) {
             wait_timer_.finish(result.ok());
             try {
-                const auto times = broadcast_result_->completionTimesUs();
+                const auto times = broadcast_result_ ? broadcast_result_->completionTimesUs() : std::vector<int64_t>{};
                 if (times.size() > 1 && std::all_of(times.begin(), times.end(), [](int64_t t) { return t > 0; })) {
                     const auto    bounds  = std::minmax_element(times.begin(), times.end());
                     const int64_t skew_us = *bounds.second - *bounds.first;
@@ -243,6 +304,10 @@ private:
     mutable std::mutex                             mutex_;
     bool                                           finishing_{false};
     TransferBatchAsyncContext                      completion_;
+    TransferResult unknown_result_;
+    TransferResult unknown_publication_;
+    TransferBroadcastResult::DoneCallback completion_callback_;
+    bool fallback_started_{false};
     SharedTransferStageTimer                       wait_timer_;
     std::shared_ptr<BlockTreeCacheMetricsReporter> reporter_;
     int64_t                                        request_id_{-1};
@@ -261,6 +326,10 @@ MultiRankBlockTransferEngine::MultiRankBlockTransferEngine(
     broadcast_manager_(std::move(broadcast_manager)),
     metrics_reporter_(std::move(metrics_reporter)) {}
 
+size_t MultiRankBlockTransferEngine::workerCount() const {
+    return broadcast_manager_ ? broadcast_manager_->workerNum() : 0;
+}
+
 std::shared_ptr<TransferAsyncContext> MultiRankBlockTransferEngine::execute(TransferTask task,
                                                                             const char*  completion_operation) const {
     const bool   has_descriptors   = !task.descriptors().empty();
@@ -278,13 +347,15 @@ std::shared_ptr<TransferAsyncContext> MultiRankBlockTransferEngine::execute(Tran
                                                                                   identity,
                                                                                   AsyncProfileKind::Wait) :
                                                        SharedTransferStageTimer{};
-    const size_t block_count       = task.descriptors().size();
-    const auto   deadline_exceeded = [block_count]() {
-        return std::make_shared<CompletedTransferAsyncContext>(
-            TransferResult(
-                ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer deadline exceeded before multi-rank submission"),
-                CacheCopyError::NOT_EXECUTED),
-            block_count);
+    const size_t block_count = task.descriptors().size();
+    const auto unsubmitted = [block_count](TransferResult result) {
+        result.buffer_safe = true;
+        return std::make_shared<CompletedTransferAsyncContext>(std::move(result), block_count);
+    };
+    const auto deadline_exceeded = [&] {
+        return unsubmitted(
+            {ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer deadline exceeded before multi-rank submission"),
+             CacheCopyError::NOT_EXECUTED});
     };
     MemoryOperationRequestPB request;
     if (!BlockTransferRequestConverter::encodeTransfer(request, task, group_sets_)) {
@@ -292,12 +363,10 @@ std::shared_ptr<TransferAsyncContext> MultiRankBlockTransferEngine::execute(Tran
             return deadline_exceeded();
         }
         RTP_LLM_LOG_WARNING("failed to encode transfer batch, item_count=%zu", task.descriptors().size());
-        return std::make_shared<CompletedTransferAsyncContext>(
-            ErrorInfo(ErrorCode::INVALID_PARAMS, "failed to encode transfer batch"), block_count);
+        return unsubmitted(ErrorInfo(ErrorCode::INVALID_PARAMS, "failed to encode transfer batch"));
     }
     if (!broadcast_manager_) {
-        return std::make_shared<CompletedTransferAsyncContext>(
-            ErrorInfo(ErrorCode::INVALID_PARAMS, "missing transfer broadcast manager"), block_count);
+        return unsubmitted(ErrorInfo(ErrorCode::INVALID_PARAMS, "missing transfer broadcast manager"));
     }
     const size_t      worker_count = broadcast_manager_->workerNum();
     FunctionRequestPB function_request;
@@ -311,34 +380,40 @@ std::shared_ptr<TransferAsyncContext> MultiRankBlockTransferEngine::execute(Tran
     for (auto& rank_request : requests) {
         rank_request.mutable_mem_request()->set_timeout_ms(broadcast_timeout_ms);
     }
-    auto broadcast_result = broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
-        requests,
-        broadcast_timeout_ms,
-        [](const std::shared_ptr<RpcService::Stub>&    stub,
-           const std::shared_ptr<grpc::ClientContext>& context,
-           const FunctionRequestPB&                    rpc_request,
-           grpc::CompletionQueue*                      completion_queue) {
-            return stub->AsyncExecuteFunction(context.get(), rpc_request, completion_queue);
-        },
-        task.requestId(),
-        MemoryOperationRequestPB_CopyDirection_Name(request.copy_direction()),
-        /*fatal_on_error=*/false);
-    if (broadcast_result == nullptr) {
-        RTP_LLM_LOG_WARNING("failed to start broadcast");
-        return std::make_shared<CompletedTransferAsyncContext>(
-            TransferResult(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "failed to start transfer broadcast"),
-                           CacheCopyError::RPC_FAILED),
-            block_count);
+    auto context = MultiRankTransferAsyncContext::create(broadcast_manager_->workerNum(),
+                                                        block_count,
+                                                        std::move(wait_timer),
+                                                        metrics_reporter_,
+                                                        task.requestId().value_or(-1),
+                                                        task.traceId(),
+                                                        identity,
+                                                        completion_operation);
+    std::shared_ptr<TransferBroadcastResult> broadcast_result;
+    try {
+        broadcast_result = broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
+            requests,
+            broadcast_timeout_ms,
+            [](const std::shared_ptr<RpcService::Stub>&    stub,
+               const std::shared_ptr<grpc::ClientContext>& context,
+               const FunctionRequestPB&                    rpc_request,
+               grpc::CompletionQueue*                      completion_queue) {
+                return stub->AsyncExecuteFunction(context.get(), rpc_request, completion_queue);
+            },
+            task.requestId(),
+            MemoryOperationRequestPB_CopyDirection_Name(request.copy_direction()),
+            /*fatal_on_error=*/false);
+    } catch (...) {
+        context->completeUnknown();
+        return context;
     }
-    return MultiRankTransferAsyncContext::create(std::move(broadcast_result),
-                                                 worker_count,
-                                                 block_count,
-                                                 std::move(wait_timer),
-                                                 metrics_reporter_,
-                                                 task.requestId().value_or(-1),
-                                                 task.traceId(),
-                                                 identity,
-                                                 completion_operation);
+    if (broadcast_result == nullptr) {
+        context->discardUnsubmittedCallback();
+        RTP_LLM_LOG_WARNING("failed to start broadcast");
+        return unsubmitted({ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "failed to start transfer broadcast"),
+                            CacheCopyError::RPC_FAILED});
+    }
+    context->attach(std::move(broadcast_result));
+    return context;
 }
 
 }  // namespace rtp_llm

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <functional>
@@ -8,6 +9,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 
 namespace rtp_llm {
 
@@ -46,12 +48,19 @@ public:
     // queued business settlement must be drained separately afterwards.
     void waitForTransfers() const;
 
+    void setReclaimer(std::shared_ptr<BlockTreeReclaimer> reclaimer) { reclaimer_ = std::move(reclaimer); }
+
 private:
     class InflightTicket;
     std::shared_ptr<InflightTicket> trackTransfer() const;
+    struct TargetBlockSafetyHandler;
 
     std::shared_ptr<TransferAsyncContext> executeMultiRank(TransferTask task,
                                                            const char*  completion_operation = nullptr) const;
+    void registerTargetsAndSubmitTransfer(TransferTask task,
+                                          TransferDoneCallback done,
+                                          const char* completion_operation) const;
+    std::vector<TransferTargetBlock> resolveTargetBlockRefs(const TransferTask& task) const;
 
     std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine_;
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine_;
@@ -59,6 +68,7 @@ private:
     mutable std::condition_variable               inflight_cv_;
     mutable size_t                                inflight_count_{0};
     std::function<void()>                         drain_observer_for_test_;
+    std::shared_ptr<BlockTreeReclaimer> reclaimer_{std::make_shared<BlockTreeReclaimer>()};
 };
 
 using BlockTransferDispatcherPtr = std::shared_ptr<BlockTransferDispatcher>;

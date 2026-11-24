@@ -46,7 +46,11 @@ cc_test(
         "//rtp_llm/cpp/cache/block_tree_cache/transfer/legacy:TransferExecutorTest.cc",
     ],
     copts = test_copts,
-    deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils"],
+    deps = test_deps + [
+        ":block_transfer_engine_test_utils",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
+        "@grpc//:grpc++",
+    ],
     tags = ["L20_CU13"],
 )
 

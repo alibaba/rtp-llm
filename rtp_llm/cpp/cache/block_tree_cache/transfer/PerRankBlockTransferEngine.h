@@ -38,11 +38,17 @@ public:
     virtual ~PerRankBlockTransferEngine();
 
     // Group a logical request by direction and GroupSet, then submit bounded batches.
-    std::shared_ptr<TransferAsyncContext> execute(TransferTask task);
+    // Takes ownership of closing submission, including preparation failures.
+    // An optional execution tracker reports safety independently of business completion.
+    std::shared_ptr<TransferAsyncContext> execute(
+        TransferTask task, std::shared_ptr<TransferBufferSafetyTracker> safety = nullptr);
     // Maximum physical batch for this route, precomputed during initialization.
     size_t batchLimit(Tier source, Tier target) const noexcept {
         return async_ && source == Tier::DISK && target == Tier::DEVICE ? staging_batch_limit_ :
                                                                           max_descriptors_per_batch_;
+    }
+    const std::vector<GroupSetPtr>& groupSets() const noexcept {
+        return group_sets_;
     }
     void                cancelPendingStagingTransfers();
     // Monitoring compatibility: async reports outstanding batches, including

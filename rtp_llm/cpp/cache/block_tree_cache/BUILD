@@ -140,6 +140,8 @@ cc_library(
         "TreeNode.h",
         "transfer/TransferAsyncContext.h",
         "transfer/TransferBatchAsyncContext.h",
+        "transfer/FrozenTaskReclaimer.h",
+        "transfer/TransferTaskRegistry.h",
         "transfer/TransferStageState.h",
         "transfer/CrcCopyExecutor.h",
         "transfer/DeviceHostCopyGeometry.h",
@@ -205,6 +207,7 @@ cc_library(
     srcs = [
         "BlockTree.cc",
         "BlockTreeCache.cc",
+        "BlockTreeReclaimer.cc",
         "diagnostic/FullPrefixInvariantScanner.cc",
         "storage_backend/StorageBackend.cc",
         "storage_backend/StorageBackendExecutor.cc",
@@ -224,6 +227,7 @@ cc_library(
     ],
     hdrs = [
         "BlockTreeCache.h",
+        "BlockTreeReclaimer.h",
         "diagnostic/FullPrefixInvariantScanner.h",
         "BlockTreeCacheFactory.h",
         "evict/EvictionTaskRunner.h",

@@ -28,6 +28,8 @@
 namespace rtp_llm {
 namespace {
 
+using block_transfer_engine_test::bufferSafeResult;
+
 kmonitor::MetricsTags stageTags(const char* stage, const char* source, bool success) {
     kmonitor::MetricsTags tags("operation", "load");
     tags.AddTag("source_tier", source);
@@ -54,7 +56,8 @@ double snapshotMetric(kmonitor::MutableMetric* metric, const kmonitor::MetricsTa
     return std::stod(record.Values().front()->Value());
 }
 
-GroupSetPtr makeTaskRunnerTestGroupSet(size_t group_set_id = 0, bool enable_crc = false) {
+GroupSetPtr makeTaskRunnerTestGroupSet(size_t group_set_id = 0, bool enable_crc = false,
+                                     size_t device_block_count = 1, bool disable_frozen_abort = false) {
     using namespace block_transfer_engine_test;
 
     auto policy                                             = defaultCacheGroupPolicy(CacheGroupType::FULL);
@@ -64,8 +67,8 @@ GroupSetPtr makeTaskRunnerTestGroupSet(size_t group_set_id = 0, bool enable_crc 
     const auto                                 scale_bytes  = group_config.group.kvScaleStrideBytes();
     const std::shared_ptr<const CacheTopology> topology     = makeTestTopology({group_config});
     DeviceBlockPoolPtr                         pool         = makeTestDevicePool({{kv_bytes, scale_bytes}},
-                                                 /*usable_count=*/1,
-                                                 "load_task_runner_" + std::to_string(group_set_id));
+                                                 device_block_count,
+                                                 "load_task_runner_" + std::to_string(group_set_id), disable_frozen_abort);
     auto                                       host_pool    = makeHostPool(kv_bytes, /*usable_count=*/2);
     auto                                       disk_pool    = makeDiskPool(kv_bytes,
                                   /*usable_count=*/2,
@@ -106,10 +109,10 @@ public:
         const bool result = results_.front();
         results_.pop_front();
         if (result) {
-            return std::make_shared<CompletedTransferAsyncContext>(ErrorInfo::OkStatus());
+            return std::make_shared<CompletedTransferAsyncContext>(bufferSafeResult());
         }
         return std::make_shared<CompletedTransferAsyncContext>(
-            ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "submission failed"));
+            bufferSafeResult(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "submission failed")));
     }
 
     std::vector<std::vector<TransferDescriptor>> batches_;
@@ -119,7 +122,8 @@ public:
 
 class PendingPerRankEngine final: public PerRankBlockTransferEngine {
 public:
-    PendingPerRankEngine(): PerRankBlockTransferEngine(std::vector<GroupSetPtr>{}) {}
+    explicit PendingPerRankEngine(std::vector<GroupSetPtr> groups = {}):
+        PerRankBlockTransferEngine(std::move(groups)) {}
 
     std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override {
         auto context  = std::make_shared<TransferBatchAsyncContext>();
@@ -131,7 +135,7 @@ public:
             released = released_;
         }
         if (released) {
-            context->complete(ErrorInfo::OkStatus());
+            context->complete(bufferSafeResult());
         }
         return context;
     }
@@ -151,7 +155,7 @@ public:
             contexts  = contexts_;
         }
         for (const auto& context : contexts) {
-            context->complete(ErrorInfo::OkStatus());
+            context->complete(bufferSafeResult());
         }
     }
 
@@ -323,8 +327,8 @@ TEST_P(ConcurrentLoadTaskRunnerTest, BothDirectionsSubmitAndDrainBeforeCompletio
     EXPECT_EQ(engine->batches_[1].front().source_tier, Tier::DISK);
     const auto finish = [&](size_t index) {
         const bool success = index == 0 ? host_success : disk_success;
-        engine->contexts_[index]->complete(success ? ErrorInfo::OkStatus() :
-                                                     ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "copy failed"));
+        const auto status = success ? ErrorInfo::OkStatus() : ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "copy failed");
+        engine->contexts_[index]->complete(bufferSafeResult(status));
     };
     finish(host_first ? 0 : 1);
     EXPECT_FALSE(result.has_value());
@@ -359,8 +363,8 @@ TEST_P(ConcurrentLoadTaskRunnerTest, PreservesStageMetricsAndReportsOnlyTheSucce
     ASSERT_EQ(engine->contextCount(), 2u);
     const auto finish = [&](size_t index) {
         const bool success = index == 0 ? host_success : disk_success;
-        engine->contexts_[index]->complete(success ? ErrorInfo::OkStatus() :
-                                                     ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "copy failed"));
+        const auto status = success ? ErrorInfo::OkStatus() : ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "copy failed");
+        engine->contexts_[index]->complete(bufferSafeResult(status));
     };
     finish(host_first ? 0 : 1);
     EXPECT_EQ(completions, 0u);
@@ -512,7 +516,7 @@ TEST(LoadTaskRunnerTest, SimultaneousCompletionsReportExactlyOneDirectionalWait)
             cv.notify_all();
             cv.wait(lock, [&] { return ready == 2; });
         }
-        engine->contexts_[index]->complete(ErrorInfo::OkStatus());
+        engine->contexts_[index]->complete(bufferSafeResult());
     };
     std::thread host(finish, 0);
     std::thread disk(finish, 1);
@@ -531,23 +535,32 @@ TEST(LoadTaskRunnerTest, SimultaneousCompletionsReportExactlyOneDirectionalWait)
 TEST(LoadTaskRunnerTest, ConcurrentFailuresPreserveUnknownCompletionAndCorruption) {
     for (bool host_unknown : {false, true}) {
         for (bool host_first : {false, true}) {
-            const std::vector<GroupSetPtr> group_sets{makeTaskRunnerTestGroupSet()};
+            const std::vector<GroupSetPtr> group_sets{makeTaskRunnerTestGroupSet(0, false, 2, true)};
+            // Unknown completion now retains physical targets in the coordinator.
+            auto device_pool = group_sets.front()->devicePools().front();
+            const auto host_target = block_transfer_engine_test::poolMalloc(*device_pool);
+            const auto disk_target = block_transfer_engine_test::poolMalloc(*device_pool);
+            ASSERT_NE(host_target, NULL_BLOCK_IDX);
+            ASSERT_NE(disk_target, NULL_BLOCK_IDX);
             LoadTaskRunner                 runner(group_sets, 30'000, 30'000);
-            auto                           engine = std::make_shared<PendingPerRankEngine>();
+            auto                           engine = std::make_shared<PendingPerRankEngine>(group_sets);
             BlockTransferDispatcher        dispatcher(engine);
             BlockTreeCacheMetricsReporter  metrics_reporter{nullptr};
             auto                           task = makeLoadTask(
-                {TransferDescriptor::hostToDevice(0, 1, {1}), TransferDescriptor::diskToDevice(0, 2, {2})});
+                {TransferDescriptor::hostToDevice(0, 1, {host_target}),
+                 TransferDescriptor::diskToDevice(0, 2, {disk_target})});
             std::optional<ErrorInfo>               result;
             block_tree_cache_detail::ScopeRollback drain([&] { engine->completeAll(); });
             runner.runTransfer(task, dispatcher, metrics_reporter, [&](ErrorInfo error) { result = std::move(error); });
             ASSERT_EQ(engine->contextCount(), 2u);
             const auto finish = [&](size_t index) {
                 const bool unknown = (index == 0) == host_unknown;
-                engine->contexts_[index]->complete(TransferResult(
+                TransferResult completion(
                     ErrorInfo(unknown ? ErrorCode::TRANSFER_COMPLETION_UNKNOWN : ErrorCode::EXECUTION_EXCEPTION,
                               unknown ? "completion unknown" : "CRC mismatch"),
-                    unknown ? CacheCopyError::RPC_FAILED : CacheCopyError::CRC_MISMATCH));
+                    unknown ? CacheCopyError::RPC_FAILED : CacheCopyError::CRC_MISMATCH);
+                completion.buffer_safe = !unknown;
+                engine->contexts_[index]->complete(std::move(completion));
             };
             finish(host_first ? 0 : 1);
             EXPECT_FALSE(result.has_value());
@@ -558,6 +571,8 @@ TEST(LoadTaskRunnerTest, ConcurrentFailuresPreserveUnknownCompletionAndCorruptio
             EXPECT_NE(result->ToString().find("completion unknown"), std::string::npos);
             EXPECT_EQ((host_unknown ? task->disk_result : task->host_result).blockError(0),
                       CacheCopyError::CRC_MISMATCH);
+            EXPECT_TRUE(device_pool->isFrozen(host_unknown ? host_target : disk_target));
+            EXPECT_FALSE(device_pool->isFrozen(host_unknown ? disk_target : host_target));
         }
     }
 }

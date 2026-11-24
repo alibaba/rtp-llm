@@ -6,6 +6,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
+#include <mutex>
+#include <stdexcept>
 #include <optional>
 #include <string>
 #include <utility>
@@ -105,6 +108,21 @@ inline ErrorInfo transferStatusToErrorInfo(TransferStatus status) {
     }
     return ErrorInfo(ErrorCode::UNKNOWN_ERROR, "unknown block transfer status");
 }
+struct TransferCompletionKey {
+    enum class LegacyWireField { NONE, TRANSFER_TRACE_ID, KVCM_TRACE_ID };
+
+    std::string trace_id;
+    LegacyWireField legacy_wire_field{LegacyWireField::NONE};
+
+    TransferCompletionKey() = default;
+    TransferCompletionKey(uint64_t id):
+        trace_id(id == 0 ? std::string{} : std::to_string(id)), legacy_wire_field(LegacyWireField::TRANSFER_TRACE_ID) {}
+    TransferCompletionKey(std::string id, LegacyWireField legacy_field = LegacyWireField::NONE):
+        trace_id(std::move(id)), legacy_wire_field(legacy_field) {}
+
+    bool operator==(const TransferCompletionKey& other) const { return trace_id == other.trace_id; }
+};
+
 // Results are ordered like the task's descriptors; NONE means the target copy completed,
 // and NOT_EXECUTED means no target was committed to the caller. The copy may
 // have been skipped or discarded after a batch CRC failure; target bytes can change.
@@ -123,13 +141,42 @@ struct TransferResult {
                                                                 CacheCopyError::COPY_FAILED) {}
     TransferResult(ErrorInfo error, CacheCopyError copy_error): status(std::move(error)), copy_error(copy_error) {}
 
+    // Identity for combining independent operations, not proof for an executed
+    // operation. Every contributing result must explicitly prove buffer safety.
+    static TransferResult emptyAggregate(size_t block_count = 0) {
+        TransferResult result(block_count);
+        result.buffer_safe = true;
+        return result;
+    }
+
     bool ok() const {
         return status.ok();
+    }
+
+    bool checkNeedFreeze() const noexcept {
+        return !buffer_safe;
+    }
+
+    // Completion evidence must survive failure to allocate the diagnostic itself.
+    static TransferResult executionException(bool safe, const char* message = nullptr) noexcept {
+        TransferResult result;
+        result.status.setErrorCode(ErrorCode::EXECUTION_EXCEPTION);
+        result.copy_error = CacheCopyError::COPY_FAILED;
+        result.buffer_safe = safe;
+        if (message) {
+            try {
+                result.status = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, message);
+            } catch (...) {}
+        }
+        return result;
     }
 
     // Append every failure message; keep unknown completion ahead of known failures
     // without losing higher-priority copy diagnostics such as confirmed CRC errors.
     void merge(TransferResult other) {
+        // A successful business result can still lack completion proof. Merge
+        // safety before either early return, independently of error precedence.
+        buffer_safe = buffer_safe && other.buffer_safe;
         if (other.ok()) {
             return;
         }
@@ -143,7 +190,11 @@ struct TransferResult {
             || other.status.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN) {
             code = ErrorCode::TRANSFER_COMPLETION_UNKNOWN;
         }
-        status          = ErrorInfo(code, status.ToString() + "; " + other.status.ToString());
+        try {
+            status = ErrorInfo(code, status.ToString() + "; " + other.status.ToString());
+        } catch (...) {
+            status.setErrorCode(code);
+        }
         copy_error      = std::max(copy_error, other.copy_error);
     }
 
@@ -160,6 +211,11 @@ struct TransferResult {
     ErrorInfo                   status{ErrorInfo::OkStatus()};
     CacheCopyError              copy_error{CacheCopyError::NONE};
     std::vector<CacheCopyError> block_errors;
+    // True only when this operation can no longer access any of its buffers.
+    // False means unproven, not necessarily in-flight. Business success, error
+    // codes and NOT_EXECUTED diagnostics never implicitly grant this proof.
+    bool buffer_safe{false};
+    std::vector<size_t> still_io_worker_ids;
 };
 
 struct HostBufferView {
@@ -292,10 +348,72 @@ private:
     }
 };
 
-// Shared task description across preparation, RPC transport and local batching.
-// Builders resolve descriptors before submission; execution entrances validate
-// their batch constraints. Executors own their copy and do not mutate it.
-// Results use the current descriptor order; PerRank owns the parent-index maps.
+class TransferBufferSafety {
+public:
+    explicit TransferBufferSafety(std::function<void()> safe_callback): safe_callback_(std::move(safe_callback)) {}
+
+    bool bufferSafe() const noexcept {
+        return reported_.load(std::memory_order_acquire);
+    }
+
+    void report(bool buffer_safe) noexcept {
+        if (!buffer_safe || reported_.exchange(true, std::memory_order_acq_rel)) {
+            return;
+        }
+        auto callback = std::move(safe_callback_);
+        if (callback) {
+            callback();
+        }
+    }
+
+private:
+    std::atomic<bool>     reported_{false};
+    std::function<void()> safe_callback_;
+};
+
+class TransferBufferSafetyTracker {
+public:
+    explicit TransferBufferSafetyTracker(std::function<void()> safe_callback):
+        safe_callback_(std::move(safe_callback)) {}
+
+    void addBatch() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (submitting_finished_) {
+            throw std::logic_error("cannot add a transfer batch after submission finished");
+        }
+        ++remaining_;
+    }
+
+    void finishSubmitting() noexcept {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (submitting_finished_)
+                return;
+            submitting_finished_ = true;
+        }
+        completeBatch();
+    }
+
+    void completeBatch() noexcept {
+        std::function<void()> callback;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (--remaining_ == 0) {
+                callback.swap(safe_callback_);
+            }
+        }
+        if (callback) {
+            callback();
+        }
+    }
+
+private:
+    std::mutex            mutex_;
+    size_t                remaining_{1};
+    bool                  submitting_finished_{false};
+    std::function<void()> safe_callback_;
+};
+
 class TransferTask {
 public:
     using Clock = std::chrono::steady_clock;
@@ -332,6 +450,13 @@ public:
         }
     }
 
+    const std::shared_ptr<TransferBufferSafety>& completionProof() const noexcept {
+        return completion_proof_;
+    }
+    void setCompletionProof(std::shared_ptr<TransferBufferSafety> proof) noexcept {
+        completion_proof_ = std::move(proof);
+    }
+
     const std::vector<TransferDescriptor>& descriptors() const {
         return descriptors_;
     }
@@ -362,7 +487,14 @@ public:
     }
 
     TransferTask subtask(std::vector<TransferDescriptor> descriptors) const {
-        return TransferTask(std::move(descriptors), *this);
+        // The proof covers this complete physical batch, not an arbitrary
+        // subset or intermediate stage. Ownership must be transferred explicitly.
+        auto task      = TransferTask(std::move(descriptors), *this);
+        task.completion_proof_.reset();
+        task.trace_id_ = trace_id_;
+        task.workflow_id_     = workflow_id_;
+        task.parent_trace_id_ = parent_trace_id_;
+        return task;
     }
 
 private:
@@ -374,9 +506,10 @@ private:
         workflow_id_(parent.workflow_id_),
         parent_trace_id_(parent.parent_trace_id_) {}
 
-    std::vector<TransferDescriptor>     descriptors_;
-    Clock::time_point                   deadline_;
-    std::optional<int64_t>              request_id_;
+    std::vector<TransferDescriptor>       descriptors_;
+    Clock::time_point                     deadline_;
+    std::optional<int64_t>                request_id_;
+    std::shared_ptr<TransferBufferSafety> completion_proof_;
     inline static std::atomic<uint64_t> next_trace_id_{1};
     uint64_t                            trace_id_{next_trace_id_.fetch_add(1, std::memory_order_relaxed)};
     uint64_t                            workflow_id_{trace_id_};

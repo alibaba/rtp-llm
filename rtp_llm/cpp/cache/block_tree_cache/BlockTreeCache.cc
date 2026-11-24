@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 
 #include <algorithm>
@@ -7,6 +8,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/FullPrefixInvariantScanner.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
@@ -56,8 +58,13 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tr
     storer_(tree_.get(), evictor_, *metrics_reporter_, storage_backend_, [this](bool check_watermark) {
         onWorkflowSettledLocked(check_watermark);
     }) {
-    if (storage_backend_)
+    reclaimer_ = std::make_shared<BlockTreeReclaimer>(metrics_reporter_);
+    if (transfer_dispatcher_)
+        transfer_dispatcher_->setReclaimer(reclaimer_);
+    if (storage_backend_) {
+        storage_backend_->setReclaimer(reclaimer_);
         storage_backend_->setStageMetricsReporter(metrics_reporter_);
+    }
 }
 
 bool BlockTreeCache::init() {
@@ -96,11 +103,18 @@ bool BlockTreeCache::init() {
                              config_.full_prefix_scan_interval_ms);
         }
     }
+    if (!reclaimer_->start())
+        return false;
     initialized_ = true;
     return true;
 }
 
+void BlockTreeCache::stopBackgroundTasks() {
+    reclaimer_->stop();
+}
+
 BlockTreeCache::~BlockTreeCache() {
+    stopBackgroundTasks();
     full_prefix_scanner_.reset();
     RTP_LLM_LOG_INFO("destroying, closing load tickets...");
     shutdownLoads();
@@ -123,6 +137,40 @@ BlockTreeCache::~BlockTreeCache() {
 
 void BlockTreeCache::shutdownLoads() {
     loader_.shutdown();
+}
+
+bool BlockTreeCache::executeFunction(BlockTreeCache*          cache,
+                                     int                      rank,
+                                     const FunctionRequestPB& request,
+                                     FunctionResponsePB&      response) {
+    switch (request.request_case()) {
+        case FunctionRequestPB::kCompletionQuery:
+        case FunctionRequestPB::kCompletionForget:
+            return BlockTreeReclaimer::executeFunction(
+                cache ? cache->reclaimer_.get() : nullptr, rank, request, response);
+        case FunctionRequestPB::kRemoteRequest:
+            if (!cache || !cache->storage_backend_) {
+                RTP_LLM_LOG_WARNING("remote storage backend is not initialized");
+                return false;
+            }
+            return cache->storage_backend_->executeRemoteRequest(request.remote_request(), response);
+        case FunctionRequestPB::kMemRequest: {
+            if (!cache) {
+                RTP_LLM_LOG_WARNING("block tree cache is not initialized");
+                return false;
+            }
+            auto& reply = *response.mutable_mem_response();
+            auto  task  =
+                BlockTransferRequestConverter::decodeTransferTask(request.mem_request(), cache->groupSets(), reply);
+            if (task) {
+                BlockTransferRequestConverter::encodeTransferResult(reply, cache->executeTransfer(std::move(*task)));
+            }
+            return true;
+        }
+        default:
+            RTP_LLM_LOG_WARNING("unsupported cache RPC request type");
+            return false;
+    }
 }
 
 TransferResult BlockTreeCache::executeTransfer(TransferTask task) {

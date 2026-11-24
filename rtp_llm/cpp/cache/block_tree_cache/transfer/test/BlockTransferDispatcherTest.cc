@@ -1,4 +1,6 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 #include <gtest/gtest.h>
+#include <grpcpp/grpcpp.h>
 #include <algorithm>
 
 #include <atomic>
@@ -14,14 +16,18 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
+#include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 
 namespace rtp_llm {
 namespace {
 
 using block_tree_cache_test::BoundedThread;
+using block_transfer_engine_test::bufferSafeResult;
 
 class TestSignal {
 public:
@@ -46,15 +52,16 @@ private:
 };
 
 std::shared_ptr<TransferAsyncContext> okContext() {
-    return std::make_shared<CompletedTransferAsyncContext>(ErrorInfo::OkStatus());
+    return std::make_shared<CompletedTransferAsyncContext>(bufferSafeResult());
 }
 
 class ScriptedPerRankEngine final: public PerRankBlockTransferEngine {
 public:
     explicit ScriptedPerRankEngine(std::deque<std::shared_ptr<TransferAsyncContext>> contexts  = {},
                                    size_t                                            max_batch = 8,
-                                   bool                                              async     = true):
-        PerRankBlockTransferEngine({}, false, {}, 128, max_batch, 4, 10000, nullptr, 0, 4, async),
+                                   bool                                              async     = true,
+                                   std::vector<GroupSetPtr>                          groups    = {}):
+        PerRankBlockTransferEngine(std::move(groups), false, {}, 128, max_batch, 4, 10000, nullptr, 0, 4, async),
         contexts_(std::move(contexts)) {}
 
     std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override {
@@ -63,6 +70,7 @@ public:
         submitted_batches_.push_back(descriptors);
         submitted_deadlines_.push_back(task.deadline());
         submitted_trace_ids_.push_back(task.traceId());
+        submitted_proofs_.push_back(task.completionProof());
         if (contexts_.empty()) {
             return okContext();
         }
@@ -85,6 +93,7 @@ private:
     std::vector<std::vector<TransferDescriptor>>      submitted_batches_;
     std::vector<TransferTask::Clock::time_point>      submitted_deadlines_;
     std::vector<uint64_t>                             submitted_trace_ids_;
+    std::vector<std::shared_ptr<TransferBufferSafety>> submitted_proofs_;
 };
 
 TransferDescriptor descriptor(size_t group_id) {
@@ -121,6 +130,7 @@ TEST(BlockTransferDispatcherTest, ExpiredTaskFailsBeforePerRankExecution) {
 
     EXPECT_FALSE(context->success());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::DEADLINE_EXCEEDED);
+    EXPECT_TRUE(context->result().buffer_safe);
     EXPECT_EQ(context->result().copy_error, CacheCopyError::NOT_EXECUTED);
     EXPECT_EQ(context->result().block_errors,
               (std::vector<CacheCopyError>{CacheCopyError::NOT_EXECUTED, CacheCopyError::NOT_EXECUTED}));
@@ -149,8 +159,8 @@ TEST_P(DispatcherBackendTest, LocalRequestSplitsBeforeEngineAndPreservesDeadline
         EXPECT_EQ(engine->submitted_deadlines_[i], deadline);
         EXPECT_EQ(engine->submitted_trace_ids_[i], trace_id);
     }
-    first->complete(TransferStatus::OK);
-    third->complete(TransferStatus::OK);
+    first->complete(bufferSafeResult());
+    third->complete(bufferSafeResult());
     EXPECT_FALSE(context->done());
     second->complete(TransferStatus::DISK_IO_ERROR);
     ASSERT_TRUE(context->done());
@@ -171,6 +181,7 @@ TEST(BlockTransferDispatcherTest, EmptyTaskFailsBeforeDispatch) {
     size_t    callback_count = 0;
     ErrorInfo final_error    = ErrorInfo::OkStatus();
     dispatcher.runTransfer(TransferTask({}, std::chrono::milliseconds(100)), [&](TransferResult error) {
+        EXPECT_TRUE(error.buffer_safe);
         ++callback_count;
         final_error = std::move(error.status);
     });
@@ -232,7 +243,7 @@ TEST(BlockTransferDispatcherTest, RunTransferDoesNotWaitForPendingPerRankContext
         });
         EXPECT_FALSE(pending->done());
         EXPECT_EQ(callback_count, previous);
-        pending->complete(ErrorInfo::OkStatus());
+        pending->complete(bufferSafeResult());
         BoundedThread<void> drain([dispatcher] { dispatcher->waitForTransfers(); });
         ASSERT_EQ(drain.waitFor(std::chrono::seconds(5)), std::future_status::ready);
         drain.get();
@@ -247,14 +258,24 @@ TEST(BlockTransferDispatcherTest, AsynchronousRunTransferGroupsAndWaitsForEveryB
         auto first  = std::make_shared<TransferBatchAsyncContext>();
         auto second = std::make_shared<TransferBatchAsyncContext>();
         auto third  = std::make_shared<TransferBatchAsyncContext>();
+        auto host = block_transfer_engine_test::makeHostPool(16, 8);
+        const auto target = host->malloc();
+        ASSERT_TRUE(target.has_value());
+        host->incTreeRef(*target, BlockTreeRefType::LOAD);
+        auto group = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{}, host, nullptr);
         auto engine = std::make_shared<ScriptedPerRankEngine>(
-            std::deque<std::shared_ptr<TransferAsyncContext>>{first, reject_second_batch ? nullptr : second, third}, 2);
+            std::deque<std::shared_ptr<TransferAsyncContext>>{first, reject_second_batch ? nullptr : second, third},
+            2, true, std::vector<GroupSetPtr>{group, group});
         BlockTransferDispatcher dispatcher(engine, nullptr);
 
         size_t    callback_count = 0;
         ErrorInfo final_error    = ErrorInfo::OkStatus();
         dispatcher.runTransfer(
-            TransferTask({descriptor(0), descriptor(1), descriptor(0), descriptor(0)}, std::chrono::seconds(30)),
+            TransferTask({TransferDescriptor::deviceToHost(0, {1}, *target),
+                          TransferDescriptor::deviceToHost(1, {2}, *target),
+                          TransferDescriptor::deviceToHost(0, {3}, *target),
+                          TransferDescriptor::deviceToHost(0, {4}, *target)},
+                         std::chrono::seconds(30)),
             [&](TransferResult error) {
                 ++callback_count;
                 final_error = std::move(error.status);
@@ -269,16 +290,21 @@ TEST(BlockTransferDispatcherTest, AsynchronousRunTransferGroupsAndWaitsForEveryB
         EXPECT_EQ(engine->submittedBatches()[2].size(), 1u);
         EXPECT_EQ(engine->submittedBatches()[2][0].group_set_id, 1u);
         if (!reject_second_batch) {
-            second->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "second failed"));
+            second->complete(bufferSafeResult(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "second failed")));
         }
-        first->complete(ErrorInfo::OkStatus());
+        first->complete(bufferSafeResult());
         EXPECT_EQ(callback_count, 0u);
-        third->complete(ErrorInfo::OkStatus());
+        third->complete(bufferSafeResult());
         EXPECT_EQ(callback_count, 1u);
         EXPECT_FALSE(final_error.ok());
+        EXPECT_EQ(host->isFrozen(*target), reject_second_batch);
         if (reject_second_batch) {
+            auto& reclaimer = *dispatcher.reclaimer_;
+            ASSERT_EQ(reclaimer.frozen_.size(), 1u);
+            EXPECT_TRUE(reclaimer.unfreezeTargetBlocksInOneWorkerWithTraceID(reclaimer.frozen_.begin()->first, 0));
             EXPECT_NE(final_error.ToString().find("null context"), std::string::npos);
         }
+        host->decTreeRef(*target, BlockTreeRefType::LOAD);
     }
 }
 
@@ -299,10 +325,10 @@ TEST(BlockTransferDispatcherTest, ReorderedBatchesReturnBlockResultsInOriginalTa
         });
     TransferResult failed(TransferStatus::CRC_MISMATCH);
     failed.block_errors = {CacheCopyError::NOT_EXECUTED, CacheCopyError::CRC_MISMATCH};
-    third->complete(TransferStatus::OK);
-    first->complete(std::move(failed));
+    third->complete(bufferSafeResult());
+    first->complete(bufferSafeResult(std::move(failed)));
     EXPECT_EQ(callback_count, 0u);
-    second->complete(TransferStatus::OK);
+    second->complete(bufferSafeResult());
     EXPECT_EQ(callback_count, 1u);
     EXPECT_FALSE(result.ok());
     EXPECT_EQ(result.copy_error, CacheCopyError::CRC_MISMATCH);
@@ -327,7 +353,7 @@ TEST(BlockTransferDispatcherTest, ExecutePerRankDrainWaitsForConsumerCallbackRet
     });
     dispatcher->drain_observer_for_test_ = [observed] { observed->signal(); };
     block_tree_cache_detail::ScopeRollback cleanup([release] { release->signal(); });
-    BoundedThread<void>                    complete([pending] { pending->complete(TransferStatus::OK); });
+    BoundedThread<void>                    complete([pending] { pending->complete(bufferSafeResult()); });
     ASSERT_EQ(entered->waitFor(), std::future_status::ready);
     EXPECT_TRUE(context->done());
     BoundedThread<void> drain([dispatcher] { dispatcher->waitForTransfers(); });
@@ -369,7 +395,7 @@ TEST(BlockTransferDispatcherTest, DrainAndShutdownWaitForCallbackReturnNotOnlyCo
                 release->signal();
                 release_observer->signal();
             });
-            BoundedThread<void>                    complete([pending] { pending->complete(ErrorInfo::OkStatus()); });
+            BoundedThread<void>                    complete([pending] { pending->complete(bufferSafeResult()); });
             ASSERT_EQ(entered->waitFor(), std::future_status::ready);
             EXPECT_TRUE(pending->done());
             BoundedThread<void> drain([dispatcher, shutdown] {
@@ -419,11 +445,11 @@ TEST(BlockTransferDispatcherTest, DrainIncludesNextStageSubmittedByCallback) {
             dispatcher->drain_observer_for_test_ = [observed] { observed->signal(); };
             BoundedThread<void> drain([dispatcher] { dispatcher->waitForTransfers(); });
             ASSERT_EQ(observed->waitFor(), std::future_status::ready);
-            first->complete(ErrorInfo::OkStatus());
+            first->complete(bufferSafeResult());
             if (!synchronous_child) {
                 EXPECT_EQ(calls->load(), 1u);
                 EXPECT_EQ(drain.waitFor(std::chrono::milliseconds(0)), std::future_status::timeout);
-                second->complete(ErrorInfo::OkStatus());
+                second->complete(bufferSafeResult());
             }
             ASSERT_EQ(drain.waitFor(std::chrono::seconds(5)), std::future_status::ready);
             drain.get();
@@ -449,7 +475,7 @@ TEST(BlockTransferDispatcherTest, ThrowingCallbackDoesNotLeaveDrainPending) {
         if (asynchronous) {
             submit();
             EXPECT_EQ(calls, 0u);
-            EXPECT_NO_THROW(pending->complete(ErrorInfo::OkStatus()));
+            EXPECT_NO_THROW(pending->complete(bufferSafeResult()));
         } else {
             EXPECT_THROW(submit(), std::runtime_error);
         }
@@ -469,7 +495,7 @@ TEST(BlockTransferDispatcherTest, RetainedBatchCallbackDoesNotBlockDrain) {
     ASSERT_EQ(pending->callbacks_.size(), 1u);
     // Keep StageState alive after completion without retaining its final callback.
     const auto retained = pending->callbacks_.front();
-    pending->complete(TransferStatus::OK);
+    pending->complete(bufferSafeResult());
     EXPECT_EQ(calls, 1u);
     BoundedThread<void> drain([dispatcher] { dispatcher->waitForTransfers(); });
     ASSERT_EQ(drain.waitFor(std::chrono::seconds(5)), std::future_status::ready);
@@ -489,6 +515,7 @@ TEST(BlockTransferDispatcherTest, ExpiredTaskFailsWithoutSubmittingABatch) {
     dispatcher.runTransfer(std::move(task), [&](TransferResult error) {
         ++callback_count;
         EXPECT_EQ(error.copy_error, CacheCopyError::NOT_EXECUTED);
+        EXPECT_TRUE(error.buffer_safe);
         EXPECT_EQ(error.block_errors,
                   (std::vector<CacheCopyError>{CacheCopyError::NOT_EXECUTED, CacheCopyError::NOT_EXECUTED}));
         final_error = std::move(error.status);
@@ -588,14 +615,71 @@ TEST(BlockTransferDispatcherTest, OverlappingTasksKeepIndependentResults) {
         ++healthy_calls;
     });
     EXPECT_EQ(engine->submittedBatchCount(), 2u);
-    failed->complete({ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "CRC mismatch"), CacheCopyError::CRC_MISMATCH});
+    failed->complete(
+        bufferSafeResult({ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "CRC mismatch"), CacheCopyError::CRC_MISMATCH}));
     EXPECT_EQ(failed_calls, 1u);
     EXPECT_EQ(healthy_calls, 0u);
-    healthy->complete(ErrorInfo::OkStatus());
+    healthy->complete(bufferSafeResult());
     EXPECT_EQ(healthy_calls, 1u);
     EXPECT_EQ(failed_result.copy_error, CacheCopyError::CRC_MISMATCH);
     EXPECT_TRUE(healthy_result.ok());
     EXPECT_EQ(healthy_result.copy_error, CacheCopyError::NONE);
+}
+
+class ControlledProducer final: public PerRankBlockTransferEngine {
+public:
+    ControlledProducer(): PerRankBlockTransferEngine({}, false, {}, 128, 1, 1, 8, nullptr, 0, 4, true) {}
+    std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask batch) override {
+        auto context = std::make_shared<TransferBatchAsyncContext>(batch.descriptors().size(), nullptr, batch.completionProof());
+        proofs.push_back(batch.completionProof());
+        contexts.push_back(context);
+        on_submit(batch.traceId());
+        return context;
+    }
+    std::vector<std::shared_ptr<TransferBufferSafety>> proofs;
+    std::vector<std::shared_ptr<TransferBatchAsyncContext>> contexts;
+    std::function<void(uint64_t)> on_submit;
+};
+
+TEST(BlockTransferDispatcherTest, OneTraceBecomesSafeOnlyAfterSubmissionAndEveryBatchProof) {
+    auto engine = std::make_shared<ControlledProducer>();
+    BlockTransferDispatcher dispatcher(engine);
+    using State = TransferTaskRegistry::State;
+    TransferTask execution({descriptor(0), descriptor(0), descriptor(0)}, std::chrono::seconds(30));
+    const auto trace = execution.traceId();
+    engine->on_submit = [&](uint64_t id) {
+        EXPECT_EQ(id, trace);
+        if (engine->contexts.size() == 1) {
+            engine->contexts.front()->complete(bufferSafeResult());
+        }
+        EXPECT_EQ(dispatcher.reclaimer_->localState(std::to_string(trace)), State::RUNNING);
+    };
+    TransferTask late({descriptor(0)}, std::chrono::seconds(30));
+    auto worker = dispatcher.reclaimer_;
+    ASSERT_EQ(worker->queryIfIoFinishedInOneWorkerWithTraceIDs({std::to_string(late.traceId())}).front(), State::REJECTED);
+    ASSERT_EQ(worker->forgetTaskInfoOnWorker({std::to_string(late.traceId())}).front(), TransferTaskRegistry::ForgetResult::DONE);
+    auto rejected = dispatcher.executePerRank(std::move(late));
+    EXPECT_EQ(rejected->result().copy_error, CacheCopyError::NOT_EXECUTED);
+    EXPECT_TRUE(engine->contexts.empty());
+    auto original = dispatcher.executePerRank(execution);
+    ASSERT_EQ(engine->contexts.size(), 3u);
+    execution.deadline_ = TransferTask::Clock::now() - std::chrono::seconds(1);
+    auto check_duplicate = [&] {
+        auto duplicate = dispatcher.executePerRank(execution);
+        EXPECT_EQ(duplicate->errorInfo().code(), ErrorCode::INVALID_PARAMS);
+        EXPECT_EQ(duplicate->result().copy_error, CacheCopyError::NOT_EXECUTED);
+        EXPECT_EQ(engine->contexts.size(), 3u);
+    };
+    check_duplicate();
+    engine->contexts[1]->complete(bufferSafeResult());
+    engine->contexts[2]->complete(TransferStatus::DISK_IO_ERROR);
+    ASSERT_TRUE(original->done());
+    EXPECT_FALSE(original->success());
+    engine->proofs[0]->report(true);
+    EXPECT_EQ(dispatcher.reclaimer_->localState(std::to_string(trace)), State::RUNNING);
+    engine->proofs[2]->report(true);
+    check_duplicate();
+    EXPECT_EQ(dispatcher.reclaimer_->localState(std::to_string(trace)), State::BUFFER_SAFE);
 }
 
 }  // namespace
