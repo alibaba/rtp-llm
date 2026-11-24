@@ -276,7 +276,7 @@ def fused_update_decode_meta_pure(
 
 
 @triton.jit
-def _copy_pool_block_table_kernel(
+def _copy_pool_block_table_body(
     src_ptr,
     dst_ptr,
     bs,
@@ -285,31 +285,74 @@ def _copy_pool_block_table_kernel(
     max_cols,
     src_stride,
     dst_stride,
+    dst_rows,
+    r,
+    cols,
+):
+    if r < dst_rows:
+        if r < n_rows:
+            v = tl.load(
+                src_ptr + r * src_stride + cols,
+                mask=cols < n_cols,
+                other=0,
+            )
+            tl.store(dst_ptr + r * dst_stride + cols, v, mask=cols < max_cols)
+        elif r >= bs:
+            tl.store(
+                dst_ptr + r * dst_stride + cols,
+                0,
+                mask=cols < max_cols,
+            )
+
+
+@triton.jit
+def _copy_pool_block_tables_kernel(
+    src0, dst0, src1, dst1, src2, dst2, src3, dst3,
+    bs,
+    n_rows0, n_cols0, max_cols0, src_stride0, dst_stride0, dst_rows0,
+    n_rows1, n_cols1, max_cols1, src_stride1, dst_stride1, dst_rows1,
+    n_rows2, n_cols2, max_cols2, src_stride2, dst_stride2, dst_rows2,
+    n_rows3, n_cols3, max_cols3, src_stride3, dst_stride3, dst_rows3,
+    HAS0: tl.constexpr, HAS1: tl.constexpr,
+    HAS2: tl.constexpr, HAS3: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     r = tl.program_id(0)
     cols = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
-    if r < n_rows:
-        v = tl.load(
-            src_ptr + r * src_stride + cols,
-            mask=cols < n_cols,
-            other=0,
-        )
-        tl.store(dst_ptr + r * dst_stride + cols, v, mask=cols < max_cols)
-    elif r >= bs:
-        tl.store(
-            dst_ptr + r * dst_stride + cols,
-            0,
-            mask=cols < max_cols,
-        )
+    tag = tl.program_id(2)
+    if tag == 0:
+        if HAS0:
+            _copy_pool_block_table_body(
+                src0, dst0, bs, n_rows0, n_cols0, max_cols0,
+                src_stride0, dst_stride0, dst_rows0, r, cols,
+            )
+    elif tag == 1:
+        if HAS1:
+            _copy_pool_block_table_body(
+                src1, dst1, bs, n_rows1, n_cols1, max_cols1,
+                src_stride1, dst_stride1, dst_rows1, r, cols,
+            )
+    elif tag == 2:
+        if HAS2:
+            _copy_pool_block_table_body(
+                src2, dst2, bs, n_rows2, n_cols2, max_cols2,
+                src_stride2, dst_stride2, dst_rows2, r, cols,
+            )
+    elif tag == 3:
+        if HAS3:
+            _copy_pool_block_table_body(
+                src3, dst3, bs, n_rows3, n_cols3, max_cols3,
+                src_stride3, dst_stride3, dst_rows3, r, cols,
+            )
 
 
 def fused_copy_pool_block_tables(meta, paged_block_tables, bs: int) -> None:
     """Copy each pool's block-table prefix and clear stale rows/tail.
 
-    One kernel per cache tag replaces the previous three tiny
-    copy/zero kernels per tag. The copy/zero ranges are identical.
+    One launch handles all cache tags. The copy/zero ranges are identical to
+    the former per-tag kernel.
     """
+    entries = []
     for at, src_bt in paged_block_tables.items():
         dst_bt = meta.pool_block_tables.get(at)
         if dst_bt is None:
@@ -326,18 +369,38 @@ def fused_copy_pool_block_tables(meta, paged_block_tables, bs: int) -> None:
             if n_cols < max_cols:
                 dst_bt[:n_rows, n_cols:].zero_()
             continue
-        grid = (dst_bt.shape[0], triton.cdiv(max_cols, 128))
-        _copy_pool_block_table_kernel[grid](
-            src_bt,
-            dst_bt,
-            bs,
-            n_rows,
-            n_cols,
-            max_cols,
-            src_bt.stride(0),
-            dst_bt.stride(0),
-            BLOCK=128,
+        entries.append(
+            (src_bt, dst_bt, n_rows, n_cols, max_cols,
+             src_bt.stride(0), dst_bt.stride(0), dst_bt.shape[0])
         )
+    if not entries:
+        return
+    if len(entries) > 4:
+        raise ValueError("fused block-table copy supports at most four pools")
+    present = len(entries)
+    while len(entries) < 4:
+        entries.append(entries[0])
+    grid = (
+        max(entry[7] for entry in entries),
+        max(triton.cdiv(entry[4], 128) for entry in entries),
+        4,
+    )
+    args = []
+    for src, dst, *_ in entries:
+        args.extend((src, dst))
+    args.append(bs)
+    for _, _, n_rows, n_cols, max_cols, src_stride, dst_stride, dst_rows in entries:
+        args.extend((n_rows, n_cols, max_cols, src_stride, dst_stride, dst_rows))
+    _copy_pool_block_tables_kernel[grid](
+        *args,
+        HAS0=present > 0,
+        HAS1=present > 1,
+        HAS2=present > 2,
+        HAS3=present > 3,
+        BLOCK=128,
+    )
+
+
 @triton.jit
 def _fused_phase2b_pool_slot_mapping_kernel(
     # start_pos
