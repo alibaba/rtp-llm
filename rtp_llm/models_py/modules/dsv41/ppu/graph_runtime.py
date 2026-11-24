@@ -160,7 +160,8 @@ class SharedGraphRuntime:
             raise ValueError("PPU Graph requires grouped W4A8 or MegaMoE W4A4")
         self.verify_moe_overlap = None
         if (
-            not draft and row_width == 4 and self.grouped is None and self.gc_decode is None
+            not draft and row_width == 4 and self.grouped is None
+            and (self.gc_decode is None or self.gc_decode.mode == "routed")
             and env_bool(os.environ, "RTP_V41_PPU_VERIFY_MOE_OVERLAP", default=True)
         ):
             from rtp_llm.models_py.modules.dsv41.ppu.verify_moe_overlap import VerifyMoEOverlapPlans

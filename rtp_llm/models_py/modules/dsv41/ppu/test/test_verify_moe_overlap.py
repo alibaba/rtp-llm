@@ -46,6 +46,8 @@ class _LocalEngine:
 
 
 class _LocalGate:
+    top_k = 6
+
     def __init__(self, state, device):
         self.state = state
         self.bias = torch.tensor(3, dtype=torch.int64, device=device)
@@ -282,6 +284,52 @@ class VerifyMoEOverlapDevice(unittest.TestCase):
                     plan.validate()
         for _, _, _, caller, _, _, _ in captured:
             caller.synchronize()
+
+    @torch.inference_mode()
+    def test_gc_routed_graph_replays_with_live_masks(self):
+        actual, reference = _fixture(self.device), _fixture(self.device)
+        engine, state, owner, flat, load = actual
+        engine.gc_decode = SimpleNamespace(
+            mode="routed", graph_safe=True, token_bound=32, workspace=object(),
+            weights={layer: (engine.bias,) for layer in range(40)},
+        )
+        engine._mega_buffer = None
+
+        def forward_gc(flat, ids, weights, *, layer_id, expert_load, valid, shared_weights):
+            self.assertIs(valid, state.metadata.valid_mask)
+            self.assertEqual(ids.shape, (32, 6))
+            self.assertEqual(shared_weights, ())
+            return engine.forward_shared_graph(
+                flat, ids, weights, layer_id=layer_id, expert_load=expert_load, fused_expert_load=False,
+            )
+
+        engine.forward_gc_decode = forward_gc
+        with patch.dict("os.environ", {"RTP_V41_PPU_VERIFY_MOE_ROUTED_ON_CALLER": "1"}):
+            plan, caller = VerifyMoEOverlap(self.device, engine), torch.cuda.Stream()
+        caller.wait_stream(torch.cuda.current_stream())
+        plan.bind_caller(caller)
+        with torch.cuda.stream(caller):
+            plan.forward(owner, flat, flat.shape, state, load)
+        caller.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=caller):
+            output = plan.forward(owner, flat, flat.shape, state, load)
+        with torch.cuda.stream(caller):
+            for _ in range(2):
+                flat.neg_()
+                state.metadata.valid_mask.logical_not_()
+                _copy_inputs(reference, actual)
+                graph.replay()
+                expected = _serial(reference[2], reference[3], flat.shape, reference[1], reference[4])
+                torch.testing.assert_close(output, expected, rtol=0, atol=0)
+                self._assert_state(actual, reference)
+        caller.synchronize()
+        self.assertEqual(owner.gate.streams, [int(caller.cuda_stream)] * 2)
+        self.assertEqual(engine.streams, owner.gate.streams)
+        self.assertEqual(owner.shared_expert.streams, [int(plan.side_stream.cuda_stream)] * 2)
+        engine.gc_decode.workspace = object()
+        with self.assertRaisesRegex(RuntimeError, "recapture"):
+            plan.validate()
 
     @torch.inference_mode()
     def test_delayed_tuple_consumer_and_side_allocator_churn(self):

@@ -1,6 +1,6 @@
 """An explicit fork/join plan for the fixed target Verify MoE surface.
 
-The existing router, MegaMoE, shared expert and BF16 addition do all math.
+The router, routed MoE, shared expert and BF16 addition do all math.
 This plan owns only stream ordering and its capture-external resources.
 Collective progress must be verified on the deployed provider and topology.
 """
@@ -35,7 +35,7 @@ def _metadata(value):
 class VerifyMoEOverlap:
     """One nonreentrant caller/side-stream DAG for dense target Verify.
 
-    Construct after ``engine.prepare_shared_graph``. Register the actual C++
+    Construct after preparing the routed workspace. Register the actual C++
     runner's nondefault capture stream with ``bind_caller`` in eager warmup;
     constructor-time current/default streams are not the capture caller.
     Hold this plan for the lifetime of every graph that records its resources.
@@ -53,15 +53,16 @@ class VerifyMoEOverlap:
         if target_layers != 40 or max_rows <= 0:
             raise ValueError("Verify MoE overlap requires target40 and positive row capacity")
         self.engine = engine
+        self.gc_decode = getattr(engine, "gc_decode", None)
         self.target_layers, self.max_rows = target_layers, max_rows
-        if not self._engine_ready() or not all(
-            (layer, self.device) in getattr(engine, "_processed", {}) for layer in range(target_layers)
-        ):
-            raise ValueError("prepare target MegaMoE W4A4 resources before overlap")
-        self._owner_weights = {
-            layer: (engine._processed[layer, self.device], _metadata(engine._processed[layer, self.device]))
-            for layer in range(target_layers)
-        }
+        if not self._engine_ready():
+            raise ValueError("prepare target routed W4A4 resources before overlap")
+        self._owner_weights = {}
+        for layer in range(target_layers):
+            weights = self._routed_weights(layer)
+            if weights is None:
+                raise ValueError("bind target routed weights before overlap")
+            self._owner_weights[layer] = weights, _metadata(weights)
         self._resources = OverlapResources(self.device, name="Verify MoE overlap")
         self._routed_on_caller = env_bool(os.environ, "RTP_V41_PPU_VERIFY_MOE_ROUTED_ON_CALLER")
         self._lock = self._resources.lock
@@ -92,14 +93,28 @@ class VerifyMoEOverlap:
     def _closed(self):
         return self._resources.closed
 
+    def _routed_weights(self, layer):
+        if self.gc_decode is not None:
+            return self.gc_decode.weights.get(layer)
+        return getattr(self.engine, "_processed", {}).get((layer, self.device))
+
     def _engine_ready(self):
         engine = self.engine
-        return (
-            (getattr(engine, "backend", None), getattr(engine, "precision", None)) == ("megamoe", "w4a4")
+        gc_decode = self.gc_decode
+        if not (
+            getattr(engine, "gc_decode", None) is gc_decode
+            and getattr(engine, "precision", None) == "w4a4"
             and getattr(engine, "ep_size", 0) > 0
             and getattr(engine, "hidden_size", None) == 5120
             and getattr(engine, "inter_dim", None) == 2304
             and getattr(engine, "num_routed_experts", None) == 384
+        ):
+            return False
+        if gc_decode is not None:
+            return (gc_decode.mode == "routed" and gc_decode.graph_safe
+                    and gc_decode.workspace is not None and gc_decode.token_bound >= self.max_rows)
+        return (
+            getattr(engine, "backend", None) == "megamoe"
             and getattr(engine, "_mega_buffer", None) is not None
             and getattr(engine, "_mega_capacity", 0) >= self.max_rows
             and getattr(engine, "_mega_device", None) == self.device
@@ -113,6 +128,12 @@ class VerifyMoEOverlap:
         Event object identities are stable across their first native record.
         """
         engine = self.engine
+        gc_decode = self.gc_decode
+        if gc_decode is not None:
+            return (
+                id(engine), id(gc_decode), id(gc_decode.workspace), gc_decode.token_bound,
+                id(gc_decode.weights), *self._resources.storage_signature(),
+            )
         return (
             id(engine), id(getattr(engine, "_mega_buffer", None)),
             getattr(engine, "_mega_generation", None), getattr(engine, "_mega_capacity", None),
@@ -165,7 +186,7 @@ class VerifyMoEOverlap:
             return False
         metadata = getattr(state, "metadata", None)
         original, signature = self._owner_weights[owner.layer_id]
-        current = getattr(self.engine, "_processed", {}).get((owner.layer_id, self.device))
+        current = self._routed_weights(owner.layer_id)
         if current is not original or _metadata(current) != signature:
             return False
         rows = flat.shape[0]
@@ -242,11 +263,18 @@ class VerifyMoEOverlap:
                 # router exception must not count an attempted MegaMoE call.
                 if not (getattr(state, "bulk_counters", False) or getattr(state, "bulk_verify_counters", False)):
                     state.moe_calls[owner.layer_id].add_(1)
-                routed = self.engine.forward_shared_graph(
-                    flat, ids, weights, layer_id=owner.layer_id, expert_load=expert_load,
-                    fused_expert_load=enabled("STATS"),
-                    **route_options,
-                )
+                if self.gc_decode is not None:
+                    top_k = owner.gate.top_k
+                    routed = self.engine.forward_gc_decode(
+                        flat, ids[:, :top_k], weights[:, :top_k], layer_id=owner.layer_id,
+                        expert_load=expert_load, valid=state.metadata.valid_mask,
+                        shared_weights=(), **route_options,
+                    )
+                else:
+                    routed = self.engine.forward_shared_graph(
+                        flat, ids, weights, layer_id=owner.layer_id, expert_load=expert_load,
+                        fused_expert_load=enabled("STATS"), **route_options,
+                    )
             # The side result is consumed on caller after the join.
             record_stream(shared if self._routed_on_caller else routed, caller)
         except BaseException as error:
@@ -267,7 +295,7 @@ class VerifyMoEOverlap:
             caller=self._caller_key, side=_stream_key(self.side_stream),
             python_calls=self._python_calls, forks=self._forks, joins=self._joins,
             closed=self._closed, storage_signature=self.storage_signature(),
-            scope="stream DAG only; MegaMoE progress requires provider and topology validation",
+            scope="stream DAG only; routed MoE progress requires provider and topology validation",
         )
 
     def close(self):
@@ -276,7 +304,7 @@ class VerifyMoEOverlap:
 
 
 class VerifyMoEOverlapPlans:
-    """Capture-caller resources sharing one serially executed Mega workspace.
+    """Capture-caller resources sharing one serially executed routed workspace.
 
     Native dtype discovery and capture warmup use different caller streams.
     Each receives its own single-caller plan. This pool does not authorize
