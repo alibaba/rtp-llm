@@ -1,0 +1,4 @@
+# ATOM 0189b3506 pins 5.16.1; XGrammar 0.2.5 declares <5. Override both
+# vendor constraints to match requirements_base.txt and the validated tokenizer.
+transformers==5.2.0
+tokenizers==0.22.2

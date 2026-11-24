@@ -1,5 +1,4 @@
 -r requirements_base.txt
-transformers==5.2.0
 auto_gptq
 autoawq
 apache-tvm-ffi

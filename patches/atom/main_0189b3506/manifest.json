@@ -2,7 +2,7 @@
   "atom_version": "0.1.1.dev1+g0189b3506",
   "source_commit": "0189b35066e8ceac6446fac19cd8ba77671d1848",
   "wheel_sha256": "021920395fa6e95e7d3fe75631d0f8c93083c90f5c1ae3f4a4d46a93d940cbcc",
-  "transformers_version": "5.16.1",
+  "transformers_version": "5.2.0",
   "patch_sha256": "b7dc88fedb9347d7fcf8e000927687bd64676bb0fb16329cdb686a93b9a50f14",
   "source_files_sha256": {
     "atom/model_ops/attention_gdn.py": "445af0bdfb84603faee2ec892836b56a8a2686608628db152de89d793c099cc9",

@@ -118,11 +118,29 @@ sh_test(
     data = ["update_cuda13_locks.sh"],
 )
 
-compile_pip_requirements(
+filegroup(
     name = "requirements_rocm",
-    src = "requirements_rocm.txt",
-    extra_args = PIP_EXTRA_ARGS,
-    extra_data = ["//:requirements_base.txt"],
-    requirements_txt = "requirements_lock_rocm.txt",
+    srcs = ["requirements_lock_rocm.txt"],
+)
+
+_ROCM_LOCK_FILES = [
+    ":requirements_rocm",
+    "requirements_base.txt",
+    "requirements_rocm.txt",
+    "requirements_rocm_overrides.txt",
+]
+
+sh_binary(
+    name = "requirements_rocm.update",
+    srcs = ["update_rocm_lock.sh"],
+    data = _ROCM_LOCK_FILES,
+    tags = ["manual"],
+)
+
+sh_test(
+    name = "requirements_rocm_test",
+    srcs = ["update_rocm_lock.sh"],
+    args = ["--check"],
+    data = _ROCM_LOCK_FILES,
     tags = ["manual"],
 )

@@ -2,7 +2,6 @@
 # Matches the x86 cuda13 pattern: only self-built wheels against torch 2.11+cu130.
 # FlashAttention wheels remain deferred.
 -r requirements_base.txt
-transformers==5.2.0
 torch==2.11.0+cu130
 torchvision==0.26.0+cu130
 mysql-connector-python

@@ -279,13 +279,6 @@ def ml_pin_reqs():
     the lock of the environment the wheel is installed into.
     """
     return select({
-        "@rtp_llm//:using_rocm": [
-            "transformers==5.16.1",
-            "tokenizers==0.23.3",
-            "sentence-transformers==5.2.0",
-            "pyarrow==14.0.0",
-            "xgrammar==0.2.5",
-        ],
         "@rtp_llm//:using_ppu": [
             "transformers==4.57.1",
             "sentence-transformers==2.7.0",
