@@ -150,3 +150,23 @@ def rocm_per_token_quant_fp8(
         dynamic_per_token_scaled_quant(x_q, x, x_s)  # Use original tensor, not reshaped
 
     return x_q, x_s
+
+
+def prepare_draft_lm_head(weight):
+    """Pack one FP8 row per output channel before ATOM draft graph capture."""
+    from aiter.ops.quant import per_token_quant_hip
+    from aiter.ops.shuffle import shuffle_weight
+
+    if torch.cuda.get_device_properties(weight.device).gcnArchName.split(":")[0] != "gfx942":
+        return None
+    q, scale = per_token_quant_hip(weight.contiguous(), quant_dtype=torch.float8_e4m3fnuz)
+    return shuffle_weight(q), scale
+
+
+def project_draft_lm_head(hidden, weight, scales):
+    """Quantize the current activation per token and return local BF16 logits."""
+    from aiter.ops.quant import per_token_quant_hip
+    from aiter.ops.gemm_op_a8w8 import gemm_a8w8_bpreshuffle
+
+    q, scale = per_token_quant_hip(hidden.contiguous(), quant_dtype=torch.float8_e4m3fnuz)
+    return gemm_a8w8_bpreshuffle(q, weight, scale, scales)

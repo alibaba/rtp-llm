@@ -609,10 +609,36 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             && py::hasattr(py_instance, "supports_mtp_draft_loop_graph")
             && py_instance.attr("supports_mtp_draft_loop_graph").cast<bool>()
             && py::str(py_instance.attr("__class__").attr("__module__")).cast<std::string>().rfind("atom.", 0) == 0) {
+            torch::Tensor draft_fp8_weight, draft_fp8_scales;
+            const char* enable = std::getenv("RTP_LLM_ROCM_DRAFT_PTPC_LM_HEAD");
+            if (enable && std::string(enable) == "1" && params.parallelism_config.role_type == RoleType::DECODE
+                && params.parallelism_config.tp_size == 2 && weights_.lm_head && weights_.lm_head->kernel.defined()) {
+                const auto& w = weights_.lm_head->kernel;
+                if (w.scalar_type() == torch::kBFloat16 && w.dim() == 2 && w.size(0) == 124160 && w.size(1) == 2560) {
+                    auto head_module = py::module_::import("rtp_llm.models_py.kernels.rocm.fp8_kernel");
+                    auto packed = head_module.attr("prepare_draft_lm_head")(w);
+                    if (!packed.is_none()) {
+                        auto tensors = packed.template cast<py::tuple>();
+                        draft_fp8_weight = tensors[0].template cast<torch::Tensor>();
+                        draft_fp8_scales = tensors[1].template cast<torch::Tensor>();
+                        RTP_LLM_LOG_INFO("ROCm ATOM PD draft PTPC head prepared");
+                    }
+                }
+            }
             graph_runner->configureMtpDraftLoop(
-                params.sp_config.gen_num_per_cycle - 1, [this, pd_decode = params.parallelism_config.role_type == RoleType::DECODE](const torch::Tensor& hidden) {
+                params.sp_config.gen_num_per_cycle - 1, [this, draft_fp8_weight, draft_fp8_scales, pd_decode = params.parallelism_config.role_type == RoleType::DECODE](const torch::Tensor& hidden) {
                     // This branch's computeLogits already includes TP gather and FP32 promotion.
-                    auto logits = computeLogits(hidden);
+                    torch::Tensor logits;
+                    if (draft_fp8_weight.defined()) {
+                        {
+                            py::gil_scoped_acquire gil;
+                            logits = py::module_::import("rtp_llm.models_py.kernels.rocm.fp8_kernel").attr("project_draft_lm_head")(
+                                hidden, draft_fp8_weight, draft_fp8_scales).template cast<torch::Tensor>();
+                        }
+                        logits = tpSyncEmbeddingOrLogits(logits).to(torch::kFloat32);
+                    } else {
+                        logits = computeLogits(hidden);
+                    }
                     if (description_.output_vocab_size > 0) {
                         logits = logits.narrow(1, 0, description_.output_vocab_size).contiguous();
                     }
