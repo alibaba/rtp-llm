@@ -14,6 +14,26 @@
 using namespace std;
 namespace rtp_llm {
 
+namespace {
+
+bool earlierEnqueueTime(const GenerateStreamPtr& lhs, const GenerateStreamPtr& rhs) {
+    return lhs->schedulerEnqueueTimeUs() < rhs->schedulerEnqueueTimeUs();
+}
+
+bool isLoadedChunkContext(const GenerateStreamPtr& stream) {
+    return stream->hasEvent(StreamEvents::LoadInitiated) && stream->chunkedPrefillEnabled()
+           && stream->isContextStream();
+}
+
+size_t prefillAdmissionSeqLen(const GenerateStreamPtr& stream, bool continuous_prefill) {
+    if (continuous_prefill && stream->chunkedPrefillEnabled() && stream->isContextStream()) {
+        return static_cast<size_t>(std::max(stream->seqLength(), 0));
+    }
+    return prefillSeqLenWithCache(stream);
+}
+
+}  // namespace
+
 FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_config,
                              const ModelConfig&                     model_config,
                              const PDSepConfig&                     pd_sep_config,
@@ -141,6 +161,18 @@ FIFOScheduler::enqueueGroup(const vector<GenerateStreamPtr>& streams) {
     return {std::move(enqueue_successes), streams};
 }
 
+bool FIFOScheduler::usesChunkedPrefillAdmission() const {
+    return pd_sep_config_.role_type == RoleType::PREFILL && prefill_chunk_size_ > 0
+           && active_admission_lane_ != AdmissionLane::GROUP;
+}
+
+bool FIFOScheduler::hasPendingLocalDecode() const {
+    return std::any_of(pending_decode_streams_.begin(), pending_decode_streams_.end(), [](const auto& stream) {
+        return stream && !stream->isContextStream() && !stream->queryPdSep() && stream->isActive()
+               && !stream->hasEvent(StreamEvents::GenerateDone);
+    });
+}
+
 bool FIFOScheduler::evaluateRunningMemory(const ScheduleRuntime& runtime, const GenerateStreamPtr& new_stream) {
     if (!FIFOSchedulerBase::evaluateRunningMemory(runtime, new_stream)) {
         return false;
@@ -159,68 +191,75 @@ bool FIFOScheduler::evaluateRunningMemory(const ScheduleRuntime& runtime, const 
     return fitsPrefillTokenLimits(runtime, new_stream);
 }
 
-bool FIFOScheduler::fitsPrefillTokenLimits(const ScheduleRuntime& runtime, const GenerateStreamPtr& candidate) const {
-    const auto admitted_stream_count   = runtime.admitted_stream_count;
-    const auto admitted_tokens         = runtime.admitted_prefill_token_size_with_cache;
-    const auto admitted_max_seq_len    = runtime.admitted_prefill_max_seq_len_with_cache;
-    const auto admitted_sequence_count = runtime.admitted_prefill_sequence_count;
-    // Preserve the historical singleton fast path for all execution modes,
-    // including when the batch token budget is smaller than the prompt or zero.
-    // Prefill-only requests need no decode-token reserve at the sequence limit.
-    const auto singleton_tokens = candidate->contextLength() + running_streams_.size();
-    if (admitted_stream_count == 0
-        && (singleton_tokens < max_seq_len_ || (isPrefillOnly(candidate) && singleton_tokens == max_seq_len_))) {
+bool FIFOScheduler::fitsPrefillTokenLimits(const ScheduleRuntime&   runtime,
+                                           const GenerateStreamPtr& candidate,
+                                           bool                     continuous_prefill,
+                                           bool                     already_accounted) const {
+    const auto running_token_reserve = continuous_prefill ? 0 : running_streams_.size();
+    const auto prefill_only          = isPrefillOnly(candidate);
+    const auto candidate_length      = prefillAdmissionSeqLen(candidate, continuous_prefill);
+    // A lone request can exceed either batching budget. Prefill-only requests
+    // can also reach the model sequence limit because they need no decode token.
+    const auto singleton_tokens =
+        (continuous_prefill ? candidate_length : candidate->contextLength()) + running_token_reserve;
+    if (runtime.admitted_stream_count == 0
+        && (singleton_tokens < max_seq_len_ || (prefill_only && singleton_tokens == max_seq_len_))) {
         return true;
     }
 
-    // Preserve the existing one-token reserve for each already-running stream.
-    // Prefill is not mixed with a running batch, so this is normally zero, but
-    // keeping it here makes both callers retain the original boundary semantics.
-    const auto running_token_reserve = running_streams_.size();
+    const auto fits = [running_token_reserve, prefill_only](size_t admitted, size_t candidate_tokens, size_t limit) {
+        if (running_token_reserve >= limit) {
+            return false;
+        }
+        const auto available_tokens = limit - running_token_reserve - (prefill_only ? 0 : 1);
+        return admitted <= available_tokens && candidate_tokens <= available_tokens - admitted;
+    };
+    const auto candidate_rows      = already_accounted ? 0 : static_cast<size_t>(candidate->currentBatchSize());
+    const auto candidate_kv_tokens = candidate_length * candidate_rows;
+    const auto admitted_kv_tokens  = runtime.admitted_prefill_token_size_with_cache;
     if (max_batch_kv_len_ > 0) {
-        const auto fits = [running_token_reserve, prefill_only = isPrefillOnly(candidate)](
-                              size_t admitted, size_t candidate_tokens, size_t limit) {
-            if (running_token_reserve >= limit) {
-                return false;
-            }
-            const auto available_tokens = limit - running_token_reserve - (prefill_only ? 0 : 1);
-            return admitted <= available_tokens && candidate_tokens <= available_tokens - admitted;
-        };
-        return fits(admitted_tokens, prefillTokenCostWithCache(candidate), max_batch_kv_len_)
-               && fits(runtime.admitted_prefill_token_size_without_cache,
-                       prefillTokenCostWithoutCache(candidate, prefill_cp_size_),
-                       max_batch_tokens_size_);
+        // A restored cache load already owns its KV reservation. Count the queries
+        // it can add to the current chunk, including per-sequence CP padding.
+        auto admitted_queries  = runtime.admitted_prefill_token_size_without_cache;
+        auto candidate_queries = prefillQueryTokens(candidate, continuous_prefill);
+        if (continuous_prefill) {
+            const auto chunk_limit = prefillChunkQueryLimit();
+            admitted_queries       = std::min(admitted_queries, chunk_limit);
+            candidate_queries      = std::min(candidate_queries, chunk_limit - admitted_queries);
+        }
+        return fits(admitted_kv_tokens, candidate_kv_tokens, max_batch_kv_len_)
+               && fits(admitted_queries, candidate_queries, max_batch_tokens_size_);
     }
 
-    if (running_token_reserve >= max_batch_tokens_size_) {
-        return false;
-    }
-    // Admission partitions execution modes before reaching this helper. On this
-    // budget path, only prefill-only batches may fill the cap; generation retains its strict reserve.
-    const bool prefill_only     = isPrefillOnly(candidate);
-    const auto available_tokens = max_batch_tokens_size_ - running_token_reserve - (prefill_only ? 0 : 1);
-
-    // Include reused prefixes. Subtraction avoids overflow in the token sum.
-    if (admitted_tokens > available_tokens) {
-        return false;
-    }
-    const auto candidate_tokens = prefillTokenCostWithCache(candidate);
-    if (candidate_tokens > available_tokens - admitted_tokens) {
+    if (!fits(admitted_kv_tokens, candidate_kv_tokens, max_batch_tokens_size_)) {
         return false;
     }
 
-    // The model executes prefill as a padded rectangle. Use the full logical
-    // sequence length (prefix included) and the real sequence width represented
-    // by currentBatchSize(). Division and subtraction avoid overflow in both
-    // max_seq_len * width and the combined sequence count.
-    const auto candidate_sequence_count = static_cast<size_t>(candidate->currentBatchSize());
-    const auto max_seq_len              = std::max(admitted_max_seq_len, prefillSeqLenWithCache(candidate));
+    // The legacy path also bounds the padded rectangle using logical KV lengths
+    // and expanded sequence width. Division avoids overflow in length * width.
+    const auto max_seq_len = std::max(runtime.admitted_prefill_max_seq_len_with_cache, candidate_length);
     if (max_seq_len == 0) {
         return true;
     }
+    const auto available_tokens   = max_batch_tokens_size_ - running_token_reserve - (prefill_only ? 0 : 1);
     const auto max_sequence_count = available_tokens / max_seq_len;
-    return admitted_sequence_count <= max_sequence_count
-           && candidate_sequence_count <= max_sequence_count - admitted_sequence_count;
+    const auto admitted_rows      = runtime.admitted_prefill_sequence_count;
+    return admitted_rows <= max_sequence_count && candidate_rows <= max_sequence_count - admitted_rows;
+}
+
+size_t FIFOScheduler::prefillChunkQueryLimit() const {
+    return prefill_chunk_padded_rows_ > 0 ? prefill_chunk_padded_rows_ : prefill_chunk_size_;
+}
+
+size_t FIFOScheduler::prefillQueryTokens(const GenerateStreamPtr& stream, bool continuous_prefill) const {
+    if (!continuous_prefill || !stream->chunkedPrefillEnabled() || !stream->isContextStream()) {
+        return prefillTokenCostWithoutCache(stream, prefill_cp_size_);
+    }
+    // A continuation's previous grant may be smaller than this round's grant.
+    const auto remaining = stream->seqLength() - stream->reuseLength();
+    const auto queries =
+        paddedPrefillTokens(remaining, prefill_cp_size_) * static_cast<size_t>(stream->currentBatchSize());
+    return std::min(queries, prefillChunkQueryLimit());
 }
 
 size_t FIFOScheduler::countInitedKVCacheStreams() const {
@@ -269,23 +308,31 @@ bool FIFOScheduler::waitPredicate() {
     // Check streams directly without calling empty() which acquires lock_ (already held by schedule())
     // Pending loads and capacity-blocked waiters are polled by the timed wait below. They are not
     // wakeup events themselves, otherwise a retryable KV shortage spins the scheduler.
-    return stop_ || schedule_trigger_ || !running_streams_.empty() || !pending_decode_streams_.empty();
+    const bool runnable_decode =
+        usesChunkedPrefillAdmission() ? hasPendingLocalDecode() : !pending_decode_streams_.empty();
+    return stop_ || schedule_trigger_ || !running_streams_.empty() || runnable_decode;
 }
 
 void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_streams,
-                                        const list<GenerateStreamPtr>& already_admitted_streams) {
+                                        const list<GenerateStreamPtr>& already_admitted_streams,
+                                        bool                           prepared_only) {
     RTP_LLM_PROFILE_FUNCTION();
+    const bool continuous_prefill = usesChunkedPrefillAdmission();
+    if (continuous_prefill) {
+        // Drain already-owned Prefill work so a parked local Decode can resume.
+        // Fresh admissions could otherwise keep context work alive indefinitely.
+        prepared_only = prepared_only || hasPendingLocalDecode();
+        // A completed cache load rejoins WAITING, but keeps its original FIFO
+        // position instead of falling behind requests that arrived during I/O.
+        waiting_streams.sort(earlierEnqueueTime);
+    }
     last_admitted_context_batch_size_ = 0;
     last_admitted_context_token_size_ = 0;
     last_waiting_oldest_age_us_       = 0;
     if (!waiting_streams.empty()) {
-        auto oldest_enqueue_time_us = (*std::min_element(waiting_streams.begin(),
-                                                         waiting_streams.end(),
-                                                         [](const auto& lhs, const auto& rhs) {
-                                                             return lhs->schedulerEnqueueTimeUs()
-                                                                    < rhs->schedulerEnqueueTimeUs();
-                                                         }))
-                                          ->schedulerEnqueueTimeUs();
+        const auto oldest_enqueue_time_us =
+            (*std::min_element(waiting_streams.begin(), waiting_streams.end(), earlierEnqueueTime))
+                ->schedulerEnqueueTimeUs();
         last_waiting_oldest_age_us_ =
             std::max<int64_t>(0, autil::TimeUtility::currentTimeInMicroSeconds() - oldest_enqueue_time_us);
     }
@@ -295,82 +342,170 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
     // queues. group_id/group_size on a stream in waiting_streams are status metadata;
     // they must not delay or isolate ordinary FIFO admission.
 
-    bool       has_execution_mode      = false;
-    bool       scheduling_prefill_only = false;
-    const auto capture_execution_mode  = [&](const list<GenerateStreamPtr>& streams) {
-        if (has_execution_mode) {
+    const bool can_top_up =
+        continuous_prefill && std::all_of(running_streams_.begin(), running_streams_.end(), [](const auto& stream) {
+            return stream->chunkedPrefillEnabled() && stream->isContextStream();
+        });
+    GenerateStreamPtr execution_mode_stream;
+    const auto        capture_execution_mode = [&](const list<GenerateStreamPtr>& streams) {
+        if (execution_mode_stream) {
             return;
         }
-        const auto it = std::find_if(streams.begin(), streams.end(), [](const auto& stream) {
-            return stream && stream->getStatus() == StreamState::RUNNING;
+        const auto it = std::find_if(streams.begin(), streams.end(), [continuous_prefill](const auto& stream) {
+            return stream && !stream->hasError()
+                   && (stream->getStatus() == StreamState::RUNNING
+                       || (continuous_prefill
+                           && (stream->getStatus() == StreamState::LOADING_CACHE
+                               || (stream->hasEvent(StreamEvents::LoadInitiated) && stream->curBlocksNum() > 0))));
         });
         if (it != streams.end()) {
-            has_execution_mode      = true;
-            scheduling_prefill_only = isPrefillOnly(*it);
+            execution_mode_stream = *it;
         }
     };
     capture_execution_mode(running_streams_);
     capture_execution_mode(already_admitted_streams);
 
-    auto schedule_runtime = initScheduleRuntime(already_admitted_streams);
-    for (const auto& stream : already_admitted_streams) {
-        if (stream->getStatus() == StreamState::RUNNING && stream->isContextStream()) {
+    auto       schedule_runtime = initScheduleRuntime();
+    const auto has_reservation  = [continuous_prefill](const GenerateStreamPtr& stream) {
+        return continuous_prefill && reservesExecution(stream) && isLoadedChunkContext(stream)
+               && stream->curBlocksNum() > 0;
+    };
+    const auto account_prompt = [&](const GenerateStreamPtr& stream) {
+        const auto seq_len = prefillAdmissionSeqLen(stream, continuous_prefill);
+        const auto rows    = static_cast<size_t>(stream->currentBatchSize());
+        schedule_runtime.admitted_prefill_token_size_with_cache += seq_len * rows;
+        schedule_runtime.admitted_prefill_max_seq_len_with_cache =
+            std::max(schedule_runtime.admitted_prefill_max_seq_len_with_cache, seq_len);
+        schedule_runtime.admitted_prefill_sequence_count += rows;
+    };
+    bool       has_running_context = false;
+    const auto account_progress    = [&](const GenerateStreamPtr& stream, bool continuation = false) {
+        if (!continuous_prefill) {
+            accountAdmission(schedule_runtime, stream);
+        } else {
+            ++schedule_runtime.admitted_stream_count;
+            if (stream->isContextStream()) {
+                schedule_runtime.admitted_prefill_token_size_without_cache += prefillQueryTokens(stream, true);
+                has_running_context |= stream->getStatus() == StreamState::RUNNING;
+            }
+        }
+        if (stream->isContextStream() && !continuation) {
             ++last_admitted_context_batch_size_;
             last_admitted_context_token_size_ += stream->contextLength();
         }
+    };
+    if (continuous_prefill) {
+        // Carry prompt budgets across rounds alongside the Base scheduler's
+        // physical row reservations. Only running work consumes this round's grant.
+        for (const auto& stream : running_streams_) {
+            if (stream->isContextStream() && reservesExecution(stream)) {
+                account_prompt(stream);
+                account_progress(stream, /*continuation=*/true);
+            }
+        }
+        for (const auto& stream : loading_cache_streams_) {
+            if (stream->isContextStream() && reservesExecution(stream)) {
+                account_prompt(stream);
+            }
+        }
+        auto& compute_tokens = schedule_runtime.admitted_prefill_token_size_without_cache;
+        compute_tokens       = std::min(compute_tokens, prefillChunkQueryLimit());
+        for (const auto& stream : waiting_streams) {
+            if (has_reservation(stream)) {
+                account_prompt(stream);
+                // Cache completion clears CanRun before the request rejoins WAITING.
+                accountExecutionRows(schedule_runtime, stream);
+            }
+        }
+        capture_execution_mode(loading_cache_streams_);
+        capture_execution_mode(waiting_streams);
+    }
+    for (const auto& stream : already_admitted_streams) {
+        if (stream->getStatus() == StreamState::RUNNING) {
+            accountExecutionRows(schedule_runtime, stream);
+            if (continuous_prefill) {
+                account_prompt(stream);
+            }
+            account_progress(stream);
+        }
     }
 
+    const auto update_waiting_queue = [&](auto waiter, StreamState state, StreamState new_state) {
+        if (new_state != state) {
+            const auto& stream = *waiter;
+            addStreamToNewState(stream, new_state);
+            if (!reservesExecution(stream)) {
+                accountExecutionRows(schedule_runtime, stream, false);
+            }
+            waiting_streams.erase(waiter);
+        }
+    };
     for (auto it = waiting_streams.begin(); it != waiting_streams.end();) {
         auto  current = it++;
         auto& stream  = *current;
 
-        if (stream->hasError()) {
+        if (stream->checkTimeoutAndHasError()) {
             accountExecutionRows(schedule_runtime, stream, false);
-            auto state     = stream->getStatus();
-            auto new_state = stream->moveToNext();
-            if (new_state != state) {
-                addStreamToNewState(stream, new_state);
-                waiting_streams.erase(current);
+            const auto state = stream->getStatus();
+            update_waiting_queue(current, state, stream->moveToNext());
+            continue;
+        }
+
+        // Once an older waiter is blocked, drain existing reservations before admitting newer work.
+        const bool already_reserved = has_reservation(stream);
+        if (prepared_only && !already_reserved) {
+            continue;
+        }
+        if (continuous_prefill && !already_reserved && stream->isContextStream()
+            && !fitsPrefillTokenLimits(ScheduleRuntime{}, stream, true)) {
+            const auto state     = stream->getStatus();
+            const auto kv_tokens = prefillAdmissionSeqLen(stream, true) * stream->currentBatchSize();
+            auto       limits    = "max_batch_tokens_size=" + std::to_string(max_batch_tokens_size_);
+            if (max_batch_kv_len_ > 0) {
+                limits += ", max_batch_kv_len=" + std::to_string(max_batch_kv_len_);
             }
+            stream->reportError(ErrorCode::INVALID_PARAMS,
+                                "input len " + std::to_string(stream->inputLength()) + " with batch token cost "
+                                    + std::to_string(kv_tokens) + " cannot fit " + limits
+                                    + " in an empty prefill batch");
+            update_waiting_queue(current, state, stream->moveToNext());
             continue;
         }
 
-        const bool prefill_only = isPrefillOnly(stream);
-        if (has_execution_mode && scheduling_prefill_only != prefill_only) {
-            continue;
-        }
-
-        // Stop admitting new work once this scheduling round reaches the uncached
-        // token quota. Keep scanning so errored streams behind it can still be
-        // finalized.
-        if (max_batch_tokens_without_cache_ > 0
-            && schedule_runtime.admitted_prefill_token_size_without_cache >= max_batch_tokens_without_cache_) {
-            continue;
-        }
-
-        // Check admission capacity and memory constraints.
-        //
-        // Some PD decode streams already carry CanRun before entering FIFO: DecodeRpcServer uses
-        // CanRun to drive the pre-enqueue KV allocation path. CanRun is a permanent event, so it
-        // cannot be used as proof that FIFO has admitted this stream in the current scheduling
-        // round. Always run FIFO capacity checks and only advance streams admitted here.
+        const bool mode_mismatch =
+            execution_mode_stream && isPrefillOnly(execution_mode_stream) != isPrefillOnly(stream);
+        const bool compute_quota_reached =
+            max_batch_tokens_without_cache_ > 0
+            && schedule_runtime.admitted_prefill_token_size_without_cache >= max_batch_tokens_without_cache_;
         const bool already_inited_kv = stream->curBlocksNum() > 0;
-        if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv
-            && inited_kv_streams + schedule_runtime.newly_inited_kv_streams >= max_inited_kv_cache_streams_) {
+        const bool kv_stream_limit_reached =
+            max_inited_kv_cache_streams_ > 0 && !already_inited_kv
+            && inited_kv_streams + schedule_runtime.newly_inited_kv_streams >= max_inited_kv_cache_streams_;
+        if (mode_mismatch || compute_quota_reached || kv_stream_limit_reached) {
+            prepared_only = prepared_only || continuous_prefill;
             continue;
         }
 
-        if (!evaluateRunningMemory(schedule_runtime, stream)) {
-            continue;
+        bool fits_batch;
+        if (can_top_up && stream->chunkedPrefillEnabled() && stream->isContextStream()) {
+            // Reserve KV and workspace for loads, but count only runnable contexts
+            // against single-prefill execution.
+            fits_batch = (!force_single_prefill_ || !has_running_context)
+                         && fitsPrefillTokenLimits(schedule_runtime, stream, true, already_reserved)
+                         && FIFOSchedulerBase::evaluateRunningMemory(schedule_runtime, stream);
+        } else {
+            fits_batch = evaluateRunningMemory(schedule_runtime, stream);
         }
         bool newly_reserved = false;
-        if (!stream->streamCacheResource().reserveLinearReplaySlot(&newly_reserved)) {
+        if (!fits_batch || !stream->streamCacheResource().reserveLinearReplaySlot(&newly_reserved)) {
+            prepared_only = prepared_only || continuous_prefill;
             continue;
         }
 
         const bool was_counted           = accountExecutionRows(schedule_runtime, stream, false);
         const auto state                 = stream->getStatus();
         const bool load_initiated_before = stream->hasEvent(StreamEvents::LoadInitiated);
+        // CanRun can predate FIFO admission on PD Decode streams. Advance only after this round's checks.
         if (!stream->hasEvent(StreamEvents::CanRun)) {
             stream->reportEvent(StreamEvents::CanRun);
         }
@@ -380,41 +515,29 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
         const bool load_initiated      = !load_initiated_before && stream->hasEvent(StreamEvents::LoadInitiated);
         const bool scheduling_progress = new_state == StreamState::RUNNING || new_state == StreamState::LOADING_CACHE
                                          || (new_state == StreamState::WAITING && (kv_initialized || load_initiated));
+
         if (newly_reserved && !scheduling_progress) {
             stream->streamCacheResource().releaseUnusedLinearReplaySlot();
         }
-
         if (was_counted || scheduling_progress) {
             accountExecutionRows(schedule_runtime, stream);
         }
 
         if (scheduling_progress) {
-            // A failed KV allocation owns no work this round and must not pin its execution mode.
-            if (!has_execution_mode) {
-                has_execution_mode      = true;
-                scheduling_prefill_only = prefill_only;
+            // A failed KV allocation must not pin the execution mode.
+            if (!execution_mode_stream) {
+                execution_mode_stream = stream;
             }
-            // Admission limits cover every stream that made progress in this
-            // round, including an async cache load. Otherwise multiple pending
-            // loads can oversubscribe max_generate_batch_size before any one of
-            // them reaches RUNNING.
-            accountAdmission(schedule_runtime, stream);
-            if (kv_initialized) {
-                ++schedule_runtime.newly_inited_kv_streams;
+            if (continuous_prefill && !already_reserved) {
+                account_prompt(stream);
             }
-            if (stream->isContextStream()) {
-                ++last_admitted_context_batch_size_;
-                last_admitted_context_token_size_ += stream->contextLength();
-            }
+            account_progress(stream);
+            schedule_runtime.newly_inited_kv_streams += kv_initialized;
+        } else if (continuous_prefill && new_state == StreamState::WAITING && !stream->hasError()) {
+            prepared_only = true;
         }
 
-        if (new_state != state) {
-            addStreamToNewState(stream, new_state);
-            if (!reservesExecution(stream)) {
-                accountExecutionRows(schedule_runtime, stream, false);
-            }
-            waiting_streams.erase(current);
-        }
+        update_waiting_queue(current, state, new_state);
     }
 }
 
@@ -607,31 +730,43 @@ void FIFOScheduler::appendExtraExecutionReservations(std::vector<GenerateStreamP
     }
 }
 
-bool FIFOScheduler::partitionChunkContinuations() {
+bool FIFOScheduler::partitionChunkContinuations(bool has_waiting_prefill) {
     refreshAndReapTerminalStreams(running_streams_);
-    const bool has_context = std::any_of(
-        running_streams_.begin(), running_streams_.end(), [](const auto& stream) { return stream->isContextStream(); });
+    const bool has_context =
+        has_waiting_prefill || std::any_of(running_streams_.begin(), running_streams_.end(), [](const auto& stream) {
+            return stream->isContextStream();
+        });
 
-    if (has_context) {
-        for (auto it = running_streams_.begin(); it != running_streams_.end();) {
-            if (!(*it)->isContextStream()) {
-                auto current = it++;
-                pending_decode_streams_.splice(pending_decode_streams_.end(), running_streams_, current);
-            } else {
-                ++it;
-            }
+    const bool park_pd_handoffs = usesChunkedPrefillAdmission();
+    for (auto it = running_streams_.begin(); it != running_streams_.end();) {
+        auto current = it++;
+        if (!(*current)->isContextStream() && (has_context || (park_pd_handoffs && (*current)->queryPdSep()))) {
+            pending_decode_streams_.splice(pending_decode_streams_.end(), running_streams_, current);
         }
-    } else if (!pending_decode_streams_.empty()) {
-        running_streams_.splice(running_streams_.begin(), pending_decode_streams_);
-        return true;
     }
-    return false;
+    if (has_context) {
+        return false;
+    }
+
+    // A remote handoff retains its KV and row reservations until GenerateDone.
+    // Only local fallback streams have decode work to return to the executor.
+    bool       restored        = false;
+    const auto insertion_point = running_streams_.begin();
+    for (auto it = pending_decode_streams_.begin(); it != pending_decode_streams_.end();) {
+        auto current = it++;
+        if (!park_pd_handoffs || !(*current)->queryPdSep()) {
+            running_streams_.splice(insertion_point, pending_decode_streams_, current);
+            restored = true;
+        }
+    }
+    return restored;
 }
 
 absl::StatusOr<ScheduleOutput> FIFOScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
+    const bool         pending_handoff = usesChunkedPrefillAdmission() && !pending_decode_streams_.empty();
     if (need_fill_fake_stream_ || !loading_cache_streams_.empty() || !loading_cache_group_queue_.empty()
-        || !waiting_group_queue_.empty()) {
+        || !waiting_group_queue_.empty() || pending_handoff) {
         cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return waitPredicate(); });
     } else if (!waiting_streams_.empty()) {
         // No running work can release capacity. Poll PD-held block releases without turning a
@@ -646,40 +781,32 @@ absl::StatusOr<ScheduleOutput> FIFOScheduler::schedule() {
     last_admitted_context_token_size_ = 0;
     last_waiting_oldest_age_us_       = 0;
 
-    // LOADING_CACHE -> DONE/WAITING: error / load cache done
+    const auto has_waiting_chunk = [this](bool waiting_queue_grew) {
+        if (active_admission_lane_ == AdmissionLane::GROUP) {
+            return false;
+        }
+        const bool continuous_prefill = usesChunkedPrefillAdmission();
+        if (!continuous_prefill && !waiting_queue_grew) {
+            return false;
+        }
+        return std::any_of(waiting_streams_.begin(), waiting_streams_.end(), [&](const auto& stream) {
+            return isLoadedChunkContext(stream)
+                   && (continuous_prefill ? reservesExecution(stream) : stream->hasEvent(StreamEvents::CanRun));
+        });
+    };
+
+    // A running explicit group owns the execution boundary. Leave ordinary loads queued until it drains.
     const size_t waiting_size_before_cache_update = waiting_streams_.size();
-    // A running explicit group owns the current execution boundary. Keep
-    // ordinary cache completions in LOADING_CACHE until that group drains.
     if (running_streams_.empty() || active_admission_lane_ != AdmissionLane::GROUP) {
         evaluateAndUpdateStreams(loading_cache_streams_);
     }
-    const bool has_requeued_prefill_stream =
-        waiting_streams_.size() > waiting_size_before_cache_update
-        && std::any_of(waiting_streams_.begin(), waiting_streams_.end(), [](const auto& stream) {
-               return stream->hasEvent(StreamEvents::CanRun) && stream->hasEvent(StreamEvents::LoadInitiated)
-                      && stream->chunkedPrefillEnabled() && stream->isContextStream();
-           });
-    // Release terminal deferred streams before any decode KV growth in this round.
+    bool has_requeued_prefill_stream = has_waiting_chunk(waiting_streams_.size() > waiting_size_before_cache_update);
+    // Park Decode before growing KV when a loaded context needs to rejoin this round.
     refreshAndReapTerminalStreams(pending_decode_streams_);
-    if (has_requeued_prefill_stream) {
-        // Do not advance a live final-prefill stream until load-done context streams rejoin.
-        // Park decode-ready rows now so the requeued context stream can own this prefill round.
-        refreshAndReapTerminalStreams(running_streams_);
-        for (auto it = running_streams_.begin(); it != running_streams_.end();) {
-            if (!(*it)->isContextStream()) {
-                auto current = it++;
-                pending_decode_streams_.splice(pending_decode_streams_.end(), running_streams_, current);
-            } else {
-                ++it;
-            }
-        }
-    } else {
-        if (prefill_chunk_size_ > 0) {
-            // Park live final-prefill streams before advancing RUNNING state. If no context remains,
-            // deferred streams are restored and the following evaluation allocates their decode KV.
-            partitionChunkContinuations();
-        }
-        // RUNNING -> DONE: error / finished
+    if (prefill_chunk_size_ > 0 || has_requeued_prefill_stream) {
+        partitionChunkContinuations(has_requeued_prefill_stream);
+    }
+    if (!has_requeued_prefill_stream) {
         evaluateAndUpdateStreams(running_streams_);
     }
 
@@ -708,13 +835,15 @@ absl::StatusOr<ScheduleOutput> FIFOScheduler::schedule() {
             // NORMAL lane. Always advance them; a group arriving later is the
             // barrier for new waiting streams, not for already-owned work.
             evaluateAndUpdateStreams(loading_cache_streams_);
-            if (!group_barrier) {
-                admitWaitingStreams(waiting_streams_, new_streams_);
-            } else {
-                // Do not admit another waiting stream after a group arrives.
-                // The current normal lane (including completed cache loads)
-                // drains to an isolated group boundary.
+            if (has_waiting_chunk(/*waiting_queue_grew=*/false)) {
+                partitionChunkContinuations(/*has_waiting_prefill=*/true);
+                has_requeued_prefill_stream = true;
+            }
+            if (group_barrier) {
                 prefer_group_next_ = true;
+            }
+            if (!group_barrier || usesChunkedPrefillAdmission()) {
+                admitWaitingStreams(waiting_streams_, new_streams_, /*prepared_only=*/group_barrier);
             }
         }
     } else {
@@ -794,6 +923,10 @@ absl::StatusOr<ScheduleOutput> FIFOScheduler::schedule() {
     }
 
     if (prefill_chunk_size_ > 0 && !running_streams_.empty() && running_streams_.front()->isContextStream()) {
+        if (usesChunkedPrefillAdmission()) {
+            // A newer request may have become ready while an older one loaded its cache.
+            running_streams_.sort(earlierEnqueueTime);
+        }
         auto prefill_batch = selectPrefillPrefix(running_streams_);
         if (!prefill_batch.empty()) {
             reportMetrics();

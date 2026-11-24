@@ -93,13 +93,11 @@ void GenerateStateMachine::handleWaiting() {
         return;
     }
 
-    // A PREFILL role normally runs only the context pass, so it must not call
-    // incrKVBlock while the stream is still a context stream. With PD fallback,
-    // the same role can continue into decode after GenerateStream::update()
-    // flips isContextStream() to false; from that point block tables must grow
-    // exactly like a decode stream.
+    // A PD prefill stream may leave context mode before the first-token
+    // handoff is committed. Only a local fallback needs decode slots.
+    const auto* stream = stream_cache_resource_->stream();
     if (stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL
-        && stream_cache_resource_->isContextStream()) {
+        && (stream_cache_resource_->isContextStream() || (stream != nullptr && stream->queryPdSep()))) {
         transitionToRunning();
         return;
     }
@@ -142,16 +140,16 @@ void GenerateStateMachine::handleRunning() {
         releaseResource();
         return;
     }
+    auto* stream = stream_cache_resource_->stream();
     if (stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL
-        && stream_cache_resource_->isContextStream()) {
+        && (stream_cache_resource_->isContextStream() || (stream != nullptr && stream->queryPdSep()))) {
         return;
     }
     // A pending MTP round may already own a complete device page-table
     // snapshot for the next execution.  If the existing allocation also has
     // enough reserved slots, do not touch the mutable host table: the worker
     // will commit the identical swaps before a later capacity boundary.
-    int             seq_len_override = -1;
-    GenerateStream* stream           = stream_cache_resource_->stream();
+    int seq_len_override = -1;
     if (stream != nullptr) {
         const bool  pending   = stream->hasPendingAsyncBookkeeping();
         const auto mtp_state = stream->getMtpAsyncDeviceState();

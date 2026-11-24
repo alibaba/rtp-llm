@@ -56,7 +56,14 @@ private:
         return "FIFOScheduler";
     }
     bool   evaluateRunningMemory(const ScheduleRuntime& runtime, const GenerateStreamPtr& new_stream) override;
-    bool   fitsPrefillTokenLimits(const ScheduleRuntime& runtime, const GenerateStreamPtr& candidate) const;
+    bool   usesChunkedPrefillAdmission() const;
+    bool   hasPendingLocalDecode() const;
+    bool   fitsPrefillTokenLimits(const ScheduleRuntime&   runtime,
+                                  const GenerateStreamPtr& candidate,
+                                  bool                     continuous_prefill = false,
+                                  bool                     already_accounted  = false) const;
+    size_t prefillChunkQueryLimit() const;
+    size_t prefillQueryTokens(const GenerateStreamPtr& stream, bool continuous_prefill) const;
     // Group-aware shadow of FIFOSchedulerBase::countInitedKVCacheStreams(): streams parked
     // in the group queues also hold inited KV blocks and must count against the limit.
     size_t countInitedKVCacheStreams() const;
@@ -70,7 +77,8 @@ private:
     // finalized. FIFOSchedulerBase::evaluateWaitingStreams() is left untouched for the other
     // FIFOSchedulerBase subclasses.
     void admitWaitingStreams(std::list<GenerateStreamPtr>&       waiting_streams,
-                             const std::list<GenerateStreamPtr>& already_admitted_streams);
+                             const std::list<GenerateStreamPtr>& already_admitted_streams,
+                             bool                                prepared_only = false);
 
     void cancelGroups(StreamGroupQueue& group_queue);
     void evaluateWaitingGroupQueue();
@@ -86,7 +94,7 @@ private:
     int64_t extraOnflightStreams() const override;
     void    fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const override;
     void    appendExtraRunningTaskList(std::vector<EngineScheduleInfo::TaskInfo>& task_list) const override;
-    bool    partitionChunkContinuations();
+    bool    partitionChunkContinuations(bool has_waiting_prefill = false);
     void    appendExtraExecutionReservations(std::vector<GenerateStreamPtr>& streams) const override;
 
     // Explicit request groups (enqueueGroup). Each group is admitted as a whole
