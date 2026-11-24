@@ -825,8 +825,9 @@ class PPUSharedMoE(nn.Module):
             if gc_decode is not None:
                 routed = engine.forward_gc_decode(
                     flat, ids[:, :self.gate.top_k], weights[:, :self.gate.top_k],
-                    layer_id=self.layer_id, expert_load=expert_load, valid=None,
+                    layer_id=self.layer_id, expert_load=expert_load, valid=real,
                     shared_weights=self.gc_shared_weights,
+                    **route_options,
                 )
                 if gc_decode.fuses_shared:
                     return routed.reshape(shape)

@@ -22,6 +22,10 @@ from rtp_llm.models_py.modules.dsv41.ppu.dspark_attention import SharedPPUDSpark
 from rtp_llm.models_py.modules.dsv41.ppu.dspark_modes import SharedDSparkMode
 from rtp_llm.models_py.modules.dsv41.ppu.layers import PPUSharedRMSNorm
 from rtp_llm.models_py.modules.dsv41.ppu.linear import prepare_shared_ptpc_input
+from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import (
+    gc_moe_mode,
+    gc_moe_token_bound,
+)
 from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import SharedNativeCache
 from rtp_llm.models_py.modules.dsv41.ppu.prefill_runtime import SharedForwardState
 from rtp_llm.models_py.modules.dsv41.ppu.prefill_runtime import _Overlay
@@ -173,6 +177,14 @@ class DeepSeekV41PPUDSparkModel(DeepSeekV41DSparkModel):
             top_k=g.n_activated_experts,
             dp_rank=self._v4_args.dp_rank, dp_size=self._v4_args.dp_size,
         )
+        mode = gc_moe_mode() if self._is_decode_role and not self._commit_only_prefill else "off"
+        if mode != "off":
+            ops.moe_engine.configure_gc_decode(
+                g.n_activated_experts,
+                gc_moe_token_bound(self._max_generate_batch_size, self.shared_mode.query_width),
+                mode=mode,
+                graph_safe=bool(getattr(self.py_hw_kernel_config, "enable_cuda_graph", False)),
+            )
         self._shared_ops = ops
         self._v4_args.fp8_kv_cache = self.fp8_kv_cache = True
         self.v4 = SharedPPUTransformer(self._v4_args, views, ops, enpm_group=enpm, block_factory=SharedPPUDSparkBlock)
@@ -439,6 +451,7 @@ class DeepSeekV41PPUDSparkModel(DeepSeekV41DSparkModel):
             raise RuntimeError("shared draft commit received non-finite target features")
         state = SharedForwardState(runtime, inputs, attn, cache, prefill=False, idle=idle, prefixes=prefixes, lengths=lengths)
         state.proposal = kind == "proposal"
+        state.use_gc_decode = state.proposal
         if kind == "proposal":
             state.active_token_mask = (torch.tensor(prefixes, device=runtime.device) > 0).repeat_interleave(self._dspark_query_width)
         state.proposal_native_before = cache.fingerprint(prefixes) if cache is not None and kind == "proposal" and os.environ.get("RTP_V41_SHARED_VALIDATE_STATE") == "1" else None

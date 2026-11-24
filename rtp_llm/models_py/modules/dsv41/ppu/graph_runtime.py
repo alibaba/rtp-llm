@@ -143,8 +143,8 @@ class SharedGraphRuntime:
         self.grouped = None
         self.gc_decode = getattr(engine, "gc_decode", None)
         if self.gc_decode is not None:
-            if not self.gc_decode.graph_safe or draft or row_width != 1:
-                raise ValueError("PPU GC MoE Graph requires ordinary single-token Decode")
+            if not self.gc_decode.graph_safe:
+                raise ValueError("PPU GC MoE Graph requires a graph-safe workspace")
             self.workspace = self.gc_decode.prepare_workspace()
         elif (engine.backend, engine.precision) == ("grouped", "w4a8"):
             from rtp_llm.models_py.modules.dsv41.ppu.graph_moe import GroupedW4A8Graph
@@ -160,7 +160,7 @@ class SharedGraphRuntime:
             raise ValueError("PPU Graph requires grouped W4A8 or MegaMoE W4A4")
         self.verify_moe_overlap = None
         if (
-            not draft and row_width == 4 and self.grouped is None
+            not draft and row_width == 4 and self.grouped is None and self.gc_decode is None
             and env_bool(os.environ, "RTP_V41_PPU_VERIFY_MOE_OVERLAP", default=True)
         ):
             from rtp_llm.models_py.modules.dsv41.ppu.verify_moe_overlap import VerifyMoEOverlapPlans

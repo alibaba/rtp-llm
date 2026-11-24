@@ -80,6 +80,9 @@ class SharedDSparkGraphImpl:
         self.rows = rows = inputs.input_ids.numel()
         if not 0 < batch <= model._max_generate_batch_size or rows <= 0 or rows % batch:
             raise ValueError("DSpark Graph needs a fixed public batch/token bucket")
+        gc_decode = getattr(runtime, "gc_decode", None)
+        if mode != "commit" and gc_decode is not None and rows > gc_decode.token_bound:
+            raise ValueError("DSpark Graph bucket exceeds the PPU GC MoE token bound")
         self.width = rows // batch
         if mode == "proposal":
             if self.width != model.shared_mode.query_width:

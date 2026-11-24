@@ -1718,9 +1718,14 @@ class PPUMoE:
         with self._BUFFER_LOCK:
             self._MEGA_ENGINES.add(self)
 
-    def forward_gc_decode(self, x, ids, weights, *, layer_id, expert_load, valid,
-                          shared_weights):
-        ids, weights = self._apply_fake_balance(ids, weights)
+    def forward_gc_decode(
+        self, x, ids, weights, *, layer_id, expert_load, valid, shared_weights,
+        routed_count=None, route_valid_mask=None,
+    ):
+        ids, weights = self._apply_fake_balance(
+            ids, weights, layer_id=layer_id,
+            routed_count=routed_count, route_valid_mask=route_valid_mask,
+        )
         ids = self._map_expert_ids(ids, weights, layer_id)
         return self.gc_decode.forward(
             x, ids, weights, layer_id=layer_id, expert_load=expert_load, valid=valid,

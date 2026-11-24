@@ -190,6 +190,39 @@ class FakeBalanceTest(unittest.TestCase):
             self.assertTrue(torch.all(ids[:, top_k:] == -1))
             self.assertEqual(processed.call_count, 2)
 
+    def test_gc_dispatch_receives_balanced_target_and_draft_routes(self):
+        for experts, top_k in ((384, 6), (128, 3)):
+            with self.subTest(experts=experts), patch.dict(os.environ, {
+                "RTP_V41_PPU_MOE_BACKEND": "megamoe",
+                "RTP_V41_PPU_MEGAMOE_FAKE_BALANCE_POLICY": "sail_round_robin",
+            }):
+                engine = PPUMoE(
+                    ep_size=8, ep_rank=2, num_routed_experts=experts,
+                    num_local_experts=experts // 8, top_k=top_k,
+                )
+                engine.configure_fake_balance(True, top_k=top_k, dp_rank=2, dp_size=8)
+                dispatch = Mock()
+                engine.gc_decode = NS(forward=dispatch)
+                ids, weights = routes(4)
+                ids[1] = -1
+                valid = torch.tensor([True, False, True, True])
+                count = torch.empty((), dtype=torch.int64)
+                layer = 1
+                expected = engine._apply_fake_balance(ids, weights, layer_id=layer)
+                with patch.object(engine, "_apply_fake_balance", wraps=engine._apply_fake_balance) as balance:
+                    engine.forward_gc_decode(
+                        object(), ids, weights, layer_id=layer, expert_load=None,
+                        valid=valid, shared_weights=(), routed_count=count, route_valid_mask=valid,
+                    )
+                self.assertEqual(balance.call_args.kwargs["layer_id"], layer)
+                self.assertIs(balance.call_args.kwargs["routed_count"], count)
+                self.assertIs(balance.call_args.kwargs["route_valid_mask"], valid)
+                self.assertIs(dispatch.call_args.kwargs["valid"], valid)
+                torch.testing.assert_close(dispatch.call_args.args[1], expected[0])
+                torch.testing.assert_close(dispatch.call_args.args[2], expected[1])
+                self.assertTrue(torch.all(dispatch.call_args.args[1][1] == -1))
+                self.assertTrue(torch.all(dispatch.call_args.args[2][1] == 0))
+
     def test_compact_target_and_draft_match_legacy_mapping_and_keep_masks(self):
         for experts, top_k in ((384, 6), (128, 3)):
             for rank in range(8):

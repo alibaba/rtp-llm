@@ -21,6 +21,14 @@ def gc_moe_mode(env: Optional[Mapping[str, str]] = None) -> str:
     return mode
 
 
+def gc_moe_token_bound(batch_size: int, row_width: int = 1) -> int:
+    max_rows = batch_size * row_width
+    bound = int(os.environ.get(GC_MOE_TOKEN_BOUND_ENV, max_rows))
+    if row_width > 1 and bound < max_rows:
+        raise ValueError(f"{GC_MOE_TOKEN_BOUND_ENV} must cover {max_rows} DSpARK rows per rank")
+    return bound
+
+
 def megamoe_module_name(env: Optional[Mapping[str, str]] = None) -> str:
     env = os.environ if env is None else env
     value = env.get("RTP_V41_PPU_MEGAMOE_MODULE", "deep_gemm")
