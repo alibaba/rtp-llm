@@ -1,4 +1,5 @@
 import json
+import os
 from typing import Any
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -36,6 +37,22 @@ class Qwen35Renderer(Qwen3CoderRenderer, Qwen2VLRenderer):
             misc_config,
             vit_config,
         )
+        self._prompt_backend = None
+        if (
+            renderer_params.model_type == "atom_qwen4_exp"
+            and os.getenv("ROLE_TYPE", "").upper() == "PREFILL"
+        ):
+            import torch
+            from transformers import PreTrainedTokenizerFast
+
+            hf = getattr(tokenizer, "tokenizer", None)
+            if (
+                torch.version.hip
+                and type(hf) is PreTrainedTokenizerFast
+                and getattr(tokenizer.encode, "__func__", None) is BaseTokenizer.encode
+                and hasattr(hf.backend_tokenizer, "encode_batch_fast")
+            ):
+                self._prompt_backend = hf.backend_tokenizer
         self.extra_stop_word_ids_list = [
             stop_word_ids
             for stop_word_ids in self.extra_stop_word_ids_list
@@ -67,7 +84,19 @@ class Qwen35Renderer(Qwen3CoderRenderer, Qwen2VLRenderer):
             request,
             request.extra_configs.add_vision_id if request.extra_configs else True,
         )
-        input_ids = self.tokenizer.encode(prompt_and_mm_input.prompt)
+        backend = self._prompt_backend
+        # The renderer consumes IDs only. Keep HF's default state handling
+        # when another caller configured padding, truncation or special tokens.
+        if (
+            backend is not None
+            and backend.padding is None
+            and backend.truncation is None
+            and backend.encode_special_tokens
+            == self.tokenizer.tokenizer.split_special_tokens
+        ):
+            input_ids = backend.encode_batch_fast([prompt_and_mm_input.prompt])[0].ids
+        else:
+            input_ids = self.tokenizer.encode(prompt_and_mm_input.prompt)
         return RenderedInputs(
             input_ids=input_ids,
             input_urls=prompt_and_mm_input.urls,
