@@ -1224,9 +1224,9 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
         if (with_linear) {
             config.layer_num = single_layer ? 1 : 2;
             config.fromGroupedSpecs({test::makeLinearSpec("linear", 4, TYPE_FP16, 1, 1), full},
-                                    {{0}, {single_layer ? 0 : 1}},
-                                    {CacheGroupType::LINEAR, CacheGroupType::FULL},
-                                    {"linear", "full"});
+                                               {{0}, {single_layer ? 0 : 1}},
+                                               {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                                               {"linear", "full"});
         }
         auto groups = config.topology().groups();
         for (auto& group : groups) {
@@ -3641,6 +3641,46 @@ TEST_F(MtpExecutorTest, testDraftModelDecodeExpandsTargetVerifyPositionIds) {
     };
     components.executor->setTargetModel(std::move(components.fake_target_model));
     components.executor->runTargetVerifyForward(model_input, stream_groups);
+}
+
+TEST_F(MtpExecutorTest, TransactionalTargetPrepareExpandsPositionsBeforeForward) {
+    MtpExecutorTestConfig config;
+    config.gen_num_per_cycle = 3;
+    auto       components    = createMtpExecutorComponents(config);
+    const auto main_thread   = std::this_thread::get_id();
+    const auto cuda_i32      = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const auto expected_positions =
+        torch::tensor({10, 20, 30, 11, 21, 31, 12, 22, 32, 13, 23, 33, 47, 51, 83, 48, 52, 84, 49, 53, 85, 50, 54, 86},
+                      torch::kInt32);
+    GptModelInputs input;
+    input.combo_tokens     = torch::zeros({8}, cuda_i32);
+    input.input_lengths    = torch::full({2}, 4, cuda_i32);
+    input.prefix_lengths   = torch::tensor({10, 47}, cuda_i32);
+    input.sequence_lengths = torch::empty({0}, cuda_i32);
+
+    MtpExecutor::TargetVerifyPrepare prepare;
+    prepare.draft_position_ids = torch::tensor({10, 20, 30, 47, 51, 83}, cuda_i32);
+    prepare.input_ready.emplace(cuda_graph::makeGraphEvent());
+    prepare.input_ready->record(cuda_graph::graphGetCurrentStream());
+
+    auto& target = components.fake_target_model;
+    target->enableSpeculativeTargetCommit();
+    target->setSkipInputCheck(true);
+    target->setOutputs({GptModelOutputs{}});
+    torch::Tensor prepared_positions;
+    target->setInputObserver([&](const GptModelInputs& prepared) {
+        EXPECT_NE(std::this_thread::get_id(), main_thread);
+        EXPECT_TRUE(prepared.is_target_verify);
+        EXPECT_TRUE(torch::equal(prepared.input_lengths.cpu(), input.input_lengths.cpu()));
+        EXPECT_TRUE(torch::equal(prepared.combo_position_ids.cpu(), expected_positions));
+        prepared_positions = prepared.combo_position_ids;
+    });
+    target->forward_hook = [&](GptModelInputs& actual) {
+        EXPECT_TRUE(actual.combo_position_ids.is_same(prepared_positions));
+    };
+    components.executor->setTargetModel(std::move(target));
+    components.executor->runTargetVerifyForward(input, StreamGroups{}, &prepare);
+    EXPECT_TRUE(input.combo_position_ids.is_same(prepared_positions));
 }
 
 TEST_F(MtpExecutorTest, testDSparkDraftMasksInvalidTemperatureAndUsesProbabilitySampling) {

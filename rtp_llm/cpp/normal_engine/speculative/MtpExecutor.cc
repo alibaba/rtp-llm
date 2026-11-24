@@ -1446,6 +1446,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     mtp::DSparkRoundState dspark_round_state;
     size_t                batch_size = 0;
+    TargetVerifyPrepare   early_target_prepare;
 
     if (is_dspark_) {
         // Proposal and target verification are two model phases with different
@@ -1529,7 +1530,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                              draft_probs_list,
                              draft_token_ids_t,
                              model_forward_us,
-                             release_after_draft_graph);
+                             release_after_draft_graph,
+                             &early_target_prepare);
             RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode end");
         }
     }
@@ -1620,7 +1622,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         if (speculativeTargetTransactionsEnabled()) {
             std::string target_forward_error;
             try {
-                model_output = runTargetVerifyForward(model_input, stream_groups);
+                model_output = runTargetVerifyForward(model_input, stream_groups, &early_target_prepare);
             } catch (const std::exception& e) {
                 target_forward_error = std::string("target verify forward threw: ") + e.what();
             } catch (...) {
@@ -2141,7 +2143,9 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
     }
 }
 
-GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups) {
+GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs&            model_input,
+                                                    const StreamGroups&        stream_groups,
+                                                    const TargetVerifyPrepare* early_prepare) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_model_verify)");
     // Verify rows contain generated text, while the gathered decode mask still
     // has only one entry per request rather than gamma+1 entries.
@@ -2178,11 +2182,35 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
 
     ensureModelInputsOnCuda(model_input, "decode.target_verify_forward");
     if (target_transactions_enabled) {
-        // Transactional target side state must observe the final verify
-        // geometry. Preparing here avoids stale metadata predicted before the
-        // draft forward and makes prepare failures part of the target-forward
-        // fail-stop boundary.
-        model_->prepareAttentionInputs(model_input);
+        if (early_prepare && early_prepare->input_ready) {
+            RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_transactional_target_async)");
+            auto prepare_input = model_input;
+            target_verify_prepare_runner_.launch([this, &prepare_input, early_prepare]() {
+                early_prepare->input_ready->block(cuda_graph::graphGetCurrentStream());
+                // Only the verify token count is needed for attention preparation.
+                // The actual tokens and LM-head indexes are still produced on the
+                // main stream and consumed by the target forward there.
+                const auto query_len        = static_cast<int64_t>(propose_step_ + 1);
+                const auto batch            = prepare_input.prefix_lengths.numel();
+                auto       options          = prepare_input.prefix_lengths.options();
+                prepare_input.input_lengths = torch::full({batch}, query_len, options);
+                if (early_prepare->draft_position_ids.defined()) {
+                    const auto base                  = early_prepare->draft_position_ids.reshape({batch, 1, -1});
+                    auto       steps                 = torch::arange(query_len, options).reshape({1, query_len, 1});
+                    prepare_input.combo_position_ids = (base + steps).reshape({-1});
+                }
+                model_->prepareAttentionInputs(prepare_input);
+            });
+            const auto forward_stream = cuda_graph::graphGetCurrentStream();
+            target_verify_prepare_runner_.sync(forward_stream);
+            prepare_input.input_lengths.record_stream(forward_stream);
+            if (prepare_input.combo_position_ids.defined()) {
+                prepare_input.combo_position_ids.record_stream(forward_stream);
+            }
+            model_input.combo_position_ids = std::move(prepare_input.combo_position_ids);
+        } else {
+            model_->prepareAttentionInputs(model_input);
+        }
     }
     GptModelOutputs model_output = forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET);
     RTP_LLM_LOG_DEBUG("[MTP decode] target model verify forward end");
@@ -3012,7 +3040,8 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                                    std::vector<torch::Tensor>& draft_probs_list,
                                    torch::Tensor&              draft_token_ids_t,
                                    int64_t&                    model_forward_us,
-                                   bool                        release_after_draft_graph) {
+                                   bool                        release_after_draft_graph,
+                                   TargetVerifyPrepare*        early_prepare) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(batch_size=%zu)", model_input.combo_tokens.size(0));
 
     const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
@@ -3053,6 +3082,19 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     if (!model_input.is_fake_stream && !model_input.warmup
         && draft_model_->supportsMtpDraftGraph(static_cast<int>(decode_steps))) {
         ensureModelInputsOnCuda(model_input, "draft_decode.loop_graph");
+        if (early_prepare && speculativeTargetTransactionsEnabled() && useDeviceInput() && !model_input.pd_separation
+            && spec_prefix_lengths.is_cuda()
+            // CUDA positions here come from prepareDecodeDraftModelInput's
+            // width-one expansion of the authoritative verify prefix.
+            && (!model_input.combo_position_ids.defined() || model_input.combo_position_ids.is_cuda())) {
+            static const bool requested = readEnvFlag(
+                "RTP_LLM_MTP_ASYNC_PREPARE", "async-prepare", "transactional_target_prepare", /*default_enabled=*/true);
+            if (requested) {
+                early_prepare->draft_position_ids = model_input.combo_position_ids;
+                early_prepare->input_ready.emplace(cuda_graph::makeGraphEvent());
+                early_prepare->input_ready->record(cuda_graph::graphGetCurrentStream());
+            }
+        }
         loop_output = draft_model_->forwardMtpDraft(model_input, static_cast<int>(decode_steps));
     }
     const bool used_loop_graph = !loop_output.draft_token_ids.empty();
@@ -3061,6 +3103,9 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     }
     if (release_after_draft_graph) {
         releaseAllModelBuffers();
+    }
+    if (!used_loop_graph && early_prepare) {
+        *early_prepare = {};
     }
     // The previous target token is only consumed when assembling verify
     // inputs. Queue the whole draft graph before gathering that token.
@@ -3170,10 +3215,17 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         // and device. Keep that receiver on CUDA before the mixed-rank broadcast.
         const bool device_position_receiver =
             stream_groups.empty() && model_input.prefix_lengths.defined() && model_input.prefix_lengths.is_cuda();
-        batch_stream_processor_->expandTargetVerifyPositionIds(
-            stream_groups,
-            model_input,
-            (pre_target_from_device_state || device_position_receiver) ? model_input.prefix_lengths : torch::Tensor());
+        if (early_prepare && early_prepare->input_ready) {
+            // Every TP rank has the same position bases from tpSyncModelInputs.
+            // The target prepare worker expands those bases to verify width.
+            model_input.combo_position_ids = torch::Tensor();
+        } else {
+            batch_stream_processor_->expandTargetVerifyPositionIds(
+                stream_groups,
+                model_input,
+                (pre_target_from_device_state || device_position_receiver) ? model_input.prefix_lengths :
+                                                                             torch::Tensor());
+        }
         model_input.sequence_lengths =
             torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
         model_input.last_hidden_states = torch::Tensor();
