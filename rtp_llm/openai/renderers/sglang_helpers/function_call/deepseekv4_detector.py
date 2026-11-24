@@ -14,11 +14,21 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.core_types import (
     ToolCallItem,
     _GetInfoFunc,
 )
-from rtp_llm.openai.renderers.sglang_helpers.function_call.utils import (
-    _find_common_prefix,
-)
 
 logger = logging.getLogger(__name__)
+
+
+def _longest_suffix_prefix_len(text: str, tag: str) -> int:
+    max_k = min(len(text), len(tag) - 1)
+    for k in range(max_k, 0, -1):
+        if text.endswith(tag[:k]):
+            return k
+    return 0
+
+
+def _strip_trailing_tag_prefix(text: str, tag: str) -> str:
+    k = _longest_suffix_prefix_len(text, tag)
+    return text[:-k] if k else text
 
 
 def _dsv4_detector_debug_enabled() -> bool:
@@ -108,6 +118,23 @@ class DeepSeekV4Detector(BaseFormatDetector):
         self.encoding_module = encoding_module
         self.thinking_mode = thinking_mode
         self._in_tool_calls_block = False
+        self._param_end_tag = "</｜DSML｜parameter>"
+        self._invoke_open_re = re.compile(r'<｜DSML｜invoke\s+name="([^"]+)"\s*>')
+        self._param_open_re = re.compile(
+            r'<｜DSML｜parameter\s+name="([^"]+)"\s+string="([^"]+)"\s*>'
+        )
+        self._stream_state = "OUTSIDE"
+        self._cur_func_name = ""
+        self._cur_param_config: Dict[str, Any] = {}
+        self._cur_param_name = ""
+        self._cur_param_string_attr = "true"
+        self._cur_defer_repair = False
+        self._cur_invoke_param_count = 0
+        self._cur_invoke_opened_json = False
+        self._cur_deferred_params: Dict[str, tuple[str, str]] = {}
+        self._cur_param_chunks: List[str] = []
+        self._cur_scan_pos = 0
+        self._emitted_normal_text = False
 
     def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
         """
@@ -213,19 +240,12 @@ class DeepSeekV4Detector(BaseFormatDetector):
         raw_parameters: Dict[str, tuple[str, str]],
         param_config: Dict[str, Any],
     ) -> Dict[str, Any]:
-        parameters: Dict[str, Any] = {}
-        for param_name, (param_value, string_attr) in raw_parameters.items():
-            if string_attr == "true":
-                parameters[param_name] = param_value
-                continue
-
-            param_type = "string"
-            if param_name in param_config and isinstance(
-                param_config[param_name], dict
-            ):
-                param_type = param_config[param_name].get("type", "string")
-            parameters[param_name] = self._convert_param_value(param_value, param_type)
-
+        parameters = {
+            param_name: self._convert_raw_param_value(
+                param_name, param_value, string_attr, param_config
+            )
+            for param_name, (param_value, string_attr) in raw_parameters.items()
+        }
         return self._repair_param_dict(parameters, param_config)
 
     def _parse_parameters_from_xml(
@@ -274,17 +294,24 @@ class DeepSeekV4Detector(BaseFormatDetector):
         if allow_partial:
             remaining_content = invoke_content[last_match_end:]
 
-            # Remove incomplete parameter_end_call prefix in case they are captured by param
-            for token in reversed(self.prefix_parameter_end_call):
-                remaining_content = remaining_content.rstrip(token)
+            # Strip only an actual trailing prefix of the closing parameter tag
+            # (never character-set rstrip, which corrupts ending characters).
+            remaining_content = _strip_trailing_tag_prefix(
+                remaining_content, "</｜DSML｜parameter>"
+            )
 
             # Match start of a parameter tag + value (potentially incomplete)
-            # Regex: <tag name="..." string="...">VALUE... (no end tag)
+            # Only emit partial values for string parameters so typed literals
+            # (boolean/integer/array/object) do not corrupt JSON mid-stream.
             partial_match = re.search(
                 self.partial_parameter_regex, remaining_content, re.DOTALL
             )
 
-            if partial_match and (param_value := partial_match.group(3)):
+            if (
+                partial_match
+                and partial_match.group(2) == "true"
+                and (param_value := partial_match.group(3))
+            ):
                 param_name = partial_match.group(1)
                 raw_parameters[param_name] = (param_value, partial_match.group(2))
 
@@ -353,163 +380,466 @@ class DeepSeekV4Detector(BaseFormatDetector):
             # return the normal text if parsing fails
             return StreamingParseResult(normal_text=text)
 
+    def _convert_raw_param_value(
+        self,
+        param_name: str,
+        param_value: str,
+        string_attr: str,
+        param_config: Dict[str, Any],
+    ) -> Any:
+        if string_attr == "true":
+            return param_value
+        param_type: Any = "string"
+        if param_name in param_config and isinstance(param_config[param_name], dict):
+            param_type = param_config[param_name].get("type", "string")
+        return self._convert_param_value(param_value, param_type)
+
+    def _emit_tool_args_fragment(
+        self, fragment: str, all_calls: List[ToolCallItem]
+    ) -> None:
+        if not fragment:
+            return
+        all_calls.append(
+            ToolCallItem(
+                tool_index=self.current_tool_id,
+                name=None,
+                parameters=fragment,
+            )
+        )
+        self.streamed_args_for_tool[self.current_tool_id] += fragment
+
+    def _start_invoke(
+        self, func_name: str, tools: List[Tool], all_calls: List[ToolCallItem]
+    ) -> None:
+        if self.current_tool_id == -1:
+            self.current_tool_id = 0
+            self.prev_tool_call_arr = []
+            self.streamed_args_for_tool = [""]
+        while len(self.prev_tool_call_arr) <= self.current_tool_id:
+            self.prev_tool_call_arr.append({})
+        while len(self.streamed_args_for_tool) <= self.current_tool_id:
+            self.streamed_args_for_tool.append("")
+
+        if not self.current_tool_name_sent:
+            all_calls.append(
+                ToolCallItem(
+                    tool_index=self.current_tool_id,
+                    name=func_name,
+                    parameters="",
+                )
+            )
+            self.current_tool_name_sent = True
+
+        self.prev_tool_call_arr[self.current_tool_id] = {
+            "name": func_name,
+            "arguments": {},
+        }
+        self._cur_func_name = func_name
+        self._cur_param_config = self._get_param_config(func_name, tools)
+        self._cur_param_name = ""
+        self._cur_param_string_attr = "true"
+        self._cur_defer_repair = False
+        self._cur_invoke_param_count = 0
+        self._cur_invoke_opened_json = False
+        self._cur_deferred_params = {}
+        self._cur_param_chunks = []
+        self._stream_state = "IN_INVOKE"
+
+    def _reset_invoke_state(self) -> None:
+        self.current_tool_id += 1
+        self.current_tool_name_sent = False
+        self._cur_func_name = ""
+        self._cur_param_config = {}
+        self._cur_param_name = ""
+        self._cur_param_string_attr = "true"
+        self._cur_defer_repair = False
+        self._cur_invoke_param_count = 0
+        self._cur_invoke_opened_json = False
+        self._cur_deferred_params = {}
+        self._cur_param_chunks = []
+        self._stream_state = "IN_BLOCK"
+
+    def _flush_deferred_before_next_param(self, all_calls: List[ToolCallItem]) -> None:
+        if not self._cur_deferred_params:
+            return
+        for pname, (pval, sattr) in self._cur_deferred_params.items():
+            converted = self._convert_raw_param_value(
+                pname, pval, sattr, self._cur_param_config
+            )
+            self.prev_tool_call_arr[self.current_tool_id].setdefault("arguments", {})[
+                pname
+            ] = converted
+            prefix = "{" if not self._cur_invoke_opened_json else ", "
+            self._cur_invoke_opened_json = True
+            fragment = (
+                prefix
+                + json.dumps(pname, ensure_ascii=False)
+                + ": "
+                + json.dumps(converted, ensure_ascii=False)
+            )
+            self._emit_tool_args_fragment(fragment, all_calls)
+        self._cur_deferred_params = {}
+        self._cur_defer_repair = False
+
+    def _finish_invoke_call(self, all_calls: List[ToolCallItem]) -> None:
+        if self._cur_deferred_params:
+            params = self._convert_raw_parameters(
+                self._cur_deferred_params, self._cur_param_config
+            )
+            self.prev_tool_call_arr[self.current_tool_id] = {
+                "name": self._cur_func_name,
+                "arguments": params,
+            }
+            self._emit_tool_args_fragment(
+                json.dumps(params, ensure_ascii=False), all_calls
+            )
+        elif self._cur_invoke_opened_json:
+            self._emit_tool_args_fragment("}", all_calls)
+        else:
+            self.prev_tool_call_arr[self.current_tool_id] = {
+                "name": self._cur_func_name,
+                "arguments": {},
+            }
+            self._emit_tool_args_fragment("{}", all_calls)
+        self._reset_invoke_state()
+
+    def _finalize_buffered_param(
+        self, raw_val: str, all_calls: List[ToolCallItem]
+    ) -> None:
+        if self._cur_defer_repair:
+            self._cur_deferred_params[self._cur_param_name] = (
+                raw_val,
+                self._cur_param_string_attr,
+            )
+            self._cur_defer_repair = False
+        else:
+            converted = self._convert_raw_param_value(
+                self._cur_param_name,
+                raw_val,
+                self._cur_param_string_attr,
+                self._cur_param_config,
+            )
+            self.prev_tool_call_arr[self.current_tool_id].setdefault("arguments", {})[
+                self._cur_param_name
+            ] = converted
+            prefix = "{" if not self._cur_invoke_opened_json else ", "
+            self._cur_invoke_opened_json = True
+            fragment = (
+                prefix
+                + json.dumps(self._cur_param_name, ensure_ascii=False)
+                + ": "
+                + json.dumps(converted, ensure_ascii=False)
+            )
+            self._emit_tool_args_fragment(fragment, all_calls)
+        self._cur_param_name = ""
+        self._cur_param_chunks = []
+        self._stream_state = "IN_INVOKE"
+
+    def _strip_stray_end_tags(self, text: str) -> str:
+        for e_token in (self.eot_token, self.invoke_end_token):
+            if e_token in text:
+                text = text.replace(e_token, "")
+        return text
+
+    def _find_earliest_tag(self, text: str, tags: tuple[str, ...]) -> tuple[int, str]:
+        best_pos = -1
+        best_tag = ""
+        for tag in tags:
+            pos = text.find(tag)
+            if pos != -1 and (best_pos == -1 or pos < best_pos):
+                best_pos = pos
+                best_tag = tag
+        return best_pos, best_tag
+
     def parse_streaming_increment(
         self, new_text: str, tools: List[Tool]
     ) -> StreamingParseResult:
         """
-        Streaming incremental parsing tool calls for DeepSeekV4 format.
-        Supports multiple consecutive invoke blocks and argument streaming.
+        Linear-time streaming incremental parser for DeepSeekV4 DSML tool calls.
+        Maintains an explicit state machine over incoming chunks so typed/non-string
+        parameters never corrupt JSON mid-stream and large tool arguments run in O(N).
         """
         self._buffer += new_text
-        current_text = self._buffer
-        normal_prefix = ""
+        normal_parts: List[str] = []
+        all_calls: List[ToolCallItem] = []
 
-        # Check if buffer contains any DSML markers or ends with potential tag prefix
-        # This handles partial/streaming DSML content
-        dsml_markers = ["｜DSML｜", "<｜", "</｜"]
-        potentially_dsml = any(marker in current_text for marker in dsml_markers)
-
-        # Also check if text ends with start of a tag (to handle "<" arriving separately)
-        dsml_prefixes = ["<", "<｜", "</", "</｜"]
-        ends_with_prefix = any(
-            current_text.rstrip().endswith(prefix) for prefix in dsml_prefixes
+        outside_tags = (
+            self.bot_token,
+            "<｜DSML｜invoke",
+            self.eot_token,
+            self.invoke_end_token,
         )
+        block_tags = ("<｜DSML｜invoke", self.eot_token)
+        param_boundary_tags = (
+            self._param_end_tag,
+            self.invoke_end_token,
+            self.eot_token,
+        )
+        direct_json_end_tags = (self.invoke_end_token, self.eot_token)
 
-        if not self._in_tool_calls_block and self.bot_token in current_text:
-            start_idx = current_text.find(self.bot_token)
-            normal_prefix = current_text[:start_idx]
-            current_text = current_text[start_idx + len(self.bot_token) :]
-            self._buffer = current_text
-            self._in_tool_calls_block = True
-
-        if (
-            not self._in_tool_calls_block
-            and not self.has_tool_call(current_text)
-            and not potentially_dsml
-            and not ends_with_prefix
-        ):
-            self._buffer = ""
-            for e_token in [self.eot_token, self.invoke_end_token]:
-                if e_token in current_text:
-                    current_text = current_text.replace(e_token, "")
-            return StreamingParseResult(normal_text=current_text)
-
-        all_calls: list[ToolCallItem] = []
         try:
-            # Loop to handle multiple consecutive invoke blocks
-            while True:
-                # Try to match an invoke block (may be partial)
-                invoke_match = re.search(
-                    pattern=self.invoke_regex,
-                    string=current_text,
-                    flags=re.DOTALL,
-                )
-                if not invoke_match:
-                    break
-
-                func_name = invoke_match.group(1).strip()
-                invoke_content = invoke_match.group(2)
-                # group(3) is either "</｜DSML｜invoke>" (complete) or "" (incomplete, matched with $)
-                is_tool_end = bool(invoke_match.group(3))
-
-                # Initialize state if this is the first tool call
-                if self.current_tool_id == -1:
-                    self.current_tool_id = 0
-                    self.prev_tool_call_arr = []
-                    self.streamed_args_for_tool = [""]
-
-                # Ensure arrays are large enough for current tool
-                while len(self.prev_tool_call_arr) <= self.current_tool_id:
-                    self.prev_tool_call_arr.append({})
-                while len(self.streamed_args_for_tool) <= self.current_tool_id:
-                    self.streamed_args_for_tool.append("")
-
-                # 1. Send tool name if not sent yet
-                if not self.current_tool_name_sent:
-                    all_calls.append(
-                        ToolCallItem(
-                            tool_index=self.current_tool_id,
-                            name=func_name,
-                            parameters="",
+            while self._buffer:
+                if self._stream_state == "OUTSIDE":
+                    bot_pos = self._buffer.find(self.bot_token)
+                    invoke_match = self._invoke_open_re.search(self._buffer)
+                    if bot_pos != -1 and (
+                        invoke_match is None or bot_pos <= invoke_match.start()
+                    ):
+                        prefix = self._strip_stray_end_tags(self._buffer[:bot_pos])
+                        if prefix and (self._emitted_normal_text or prefix.strip()):
+                            normal_parts.append(prefix)
+                            self._emitted_normal_text = True
+                        self._buffer = self._buffer[bot_pos + len(self.bot_token) :]
+                        self._in_tool_calls_block = True
+                        self._stream_state = "IN_BLOCK"
+                        continue
+                    if invoke_match is not None:
+                        prefix = self._strip_stray_end_tags(
+                            self._buffer[: invoke_match.start()]
                         )
-                    )
-                    self.current_tool_name_sent = True
+                        if prefix and (self._emitted_normal_text or prefix.strip()):
+                            normal_parts.append(prefix)
+                            self._emitted_normal_text = True
+                        self._buffer = self._buffer[invoke_match.start() :]
+                        self._in_tool_calls_block = True
+                        self._stream_state = "IN_BLOCK"
+                        continue
 
-                # 2. Parse current parameters (partial or complete)
-                current_params = self._parse_parameters_from_xml(
-                    invoke_content,
-                    allow_partial=not is_tool_end,
-                    param_config=self._get_param_config(func_name, tools),
-                )
-                current_args_json = json.dumps(current_params, ensure_ascii=False)
-
-                # 3. Calculate and send incremental arguments
-                sent_len = len(self.streamed_args_for_tool[self.current_tool_id])
-                prev_params = self.prev_tool_call_arr[self.current_tool_id].get(
-                    "arguments"
-                )
-
-                argument_diff = None
-
-                if is_tool_end:
-                    # If complete, send everything remaining
-                    argument_diff = current_args_json[sent_len:]
-                elif prev_params is not None:
-                    # If partial, send stable prefix diff
-                    prev_args_json = json.dumps(prev_params, ensure_ascii=False)
-                    if current_args_json != prev_args_json:
-                        prefix = _find_common_prefix(prev_args_json, current_args_json)
-                        if len(prefix) > sent_len:
-                            argument_diff = prefix[sent_len:]
-
-                if argument_diff:
-                    all_calls.append(
-                        ToolCallItem(
-                            tool_index=self.current_tool_id,
-                            name=None,
-                            parameters=argument_diff,
+                    inv_prefix_pos = self._buffer.find("<｜DSML｜invoke")
+                    if inv_prefix_pos != -1:
+                        prefix = self._strip_stray_end_tags(
+                            self._buffer[:inv_prefix_pos]
                         )
+                        if prefix and (self._emitted_normal_text or prefix.strip()):
+                            normal_parts.append(prefix)
+                            self._emitted_normal_text = True
+                        self._buffer = self._buffer[inv_prefix_pos:]
+                        self._in_tool_calls_block = True
+                        self._stream_state = "IN_BLOCK"
+                        continue
+
+                    hold_k = max(
+                        _longest_suffix_prefix_len(self._buffer, tag)
+                        for tag in outside_tags
                     )
-                    self.streamed_args_for_tool[self.current_tool_id] += argument_diff
-
-                # Update the stored arguments
-                self.prev_tool_call_arr[self.current_tool_id] = {
-                    "name": func_name,
-                    "arguments": current_params,
-                }
-
-                # Check if tool call is complete (has closing tag)
-                if is_tool_end:
-                    # Remove the completed tool call from buffer
-                    self._buffer = current_text[invoke_match.end() :]
-                    current_text = self._buffer  # Update for next iteration
-
-                    # Move to next tool call
-                    self.current_tool_id += 1
-                    self.current_tool_name_sent = False
-
-                    # Continue loop to check for more invoke blocks
+                    safe_len = len(self._buffer) - hold_k
+                    if safe_len <= 0:
+                        break
+                    emit = self._strip_stray_end_tags(self._buffer[:safe_len])
+                    self._buffer = self._buffer[safe_len:]
+                    if emit:
+                        normal_parts.append(emit)
+                        self._emitted_normal_text = True
                     continue
-                else:
-                    # Tool call not complete yet, don't return anything
-                    # Wait for more chunks until we see </｜DSML｜invoke>
+
+                if self._stream_state == "IN_BLOCK":
+                    invoke_match = self._invoke_open_re.search(self._buffer)
+                    eot_pos = self._buffer.find(self.eot_token)
+                    if eot_pos != -1 and (
+                        invoke_match is None or eot_pos < invoke_match.start()
+                    ):
+                        self._buffer = self._buffer[eot_pos + len(self.eot_token) :]
+                        self._in_tool_calls_block = False
+                        self._stream_state = "OUTSIDE"
+                        continue
+                    if invoke_match is not None:
+                        func_name = invoke_match.group(1).strip()
+                        self._buffer = self._buffer[invoke_match.end() :]
+                        self._start_invoke(func_name, tools, all_calls)
+                        continue
+
+                    hold_k = max(
+                        _longest_suffix_prefix_len(self._buffer, tag)
+                        for tag in block_tags
+                    )
+                    if hold_k > 0:
+                        self._buffer = self._buffer[len(self._buffer) - hold_k :]
+                    elif "<" in self._buffer:
+                        self._buffer = self._buffer[self._buffer.rfind("<") :]
+                    else:
+                        self._buffer = ""
                     break
 
-            # No more invoke blocks found
-            eot_pos = current_text.find(self.eot_token)
-            if eot_pos != -1:
-                trailing_text = current_text[eot_pos + len(self.eot_token) :]
-                self._buffer = trailing_text
-                self._in_tool_calls_block = False
-                if not trailing_text.strip():
-                    self._buffer = ""
+                if self._stream_state == "IN_INVOKE":
+                    stripped = self._buffer.lstrip()
+                    if not stripped:
+                        self._buffer = ""
+                        break
+                    if stripped.startswith("{"):
+                        self._buffer = stripped
+                        self._cur_param_chunks = []
+                        self._stream_state = "IN_DIRECT_JSON"
+                        continue
 
-            normal_text = normal_prefix if normal_prefix.strip() else ""
-            return StreamingParseResult(normal_text=normal_text, calls=all_calls)
+                    param_match = self._param_open_re.search(self._buffer)
+                    next_invoke_match = self._invoke_open_re.search(self._buffer)
+                    end_pos, end_tag = self._find_earliest_tag(
+                        self._buffer, (self.invoke_end_token, self.eot_token)
+                    )
+                    earliest_close_pos = end_pos
+                    earliest_close_kind = (
+                        "invoke_end" if end_tag == self.invoke_end_token else "eot"
+                    )
+                    if next_invoke_match is not None and (
+                        earliest_close_pos == -1
+                        or next_invoke_match.start() < earliest_close_pos
+                    ):
+                        earliest_close_pos = next_invoke_match.start()
+                        earliest_close_kind = "next_invoke"
 
+                    if earliest_close_pos != -1 and (
+                        param_match is None or earliest_close_pos < param_match.start()
+                    ):
+                        if earliest_close_kind == "invoke_end":
+                            self._buffer = self._buffer[
+                                earliest_close_pos + len(self.invoke_end_token) :
+                            ]
+                        else:
+                            self._buffer = self._buffer[earliest_close_pos:]
+                        self._finish_invoke_call(all_calls)
+                        continue
+
+                    if param_match is not None:
+                        self._flush_deferred_before_next_param(all_calls)
+                        param_name = param_match.group(1)
+                        string_attr = param_match.group(2)
+                        self._buffer = self._buffer[param_match.end() :]
+                        self._cur_param_name = param_name
+                        self._cur_param_string_attr = string_attr
+                        self._cur_defer_repair = (
+                            self._cur_invoke_param_count == 0
+                            and param_name in ("arguments", "input")
+                            and param_name not in self._cur_param_config
+                        )
+                        self._cur_invoke_param_count += 1
+                        self._cur_param_chunks = []
+
+                        if string_attr == "true" and not self._cur_defer_repair:
+                            prefix = (
+                                ("{" if not self._cur_invoke_opened_json else ", ")
+                                + json.dumps(param_name, ensure_ascii=False)
+                                + ': "'
+                            )
+                            self._cur_invoke_opened_json = True
+                            self._emit_tool_args_fragment(prefix, all_calls)
+                            self._stream_state = "IN_STRING_PARAM"
+                        else:
+                            self._stream_state = "IN_BUFFERED_PARAM"
+                        continue
+
+                    # Wait for complete <parameter ...> or </invoke> tag; discard only leading whitespace.
+                    self._buffer = stripped
+                    break
+
+                if self._stream_state == "IN_STRING_PARAM":
+                    boundary_pos, boundary_tag = self._find_earliest_tag(
+                        self._buffer, param_boundary_tags
+                    )
+                    if boundary_pos != -1:
+                        raw_tail = self._buffer[:boundary_pos]
+                        escaped_tail = json.dumps(raw_tail, ensure_ascii=False)[1:-1]
+                        self._emit_tool_args_fragment(escaped_tail + '"', all_calls)
+                        if boundary_tag == self._param_end_tag:
+                            self._buffer = self._buffer[
+                                boundary_pos + len(self._param_end_tag) :
+                            ]
+                        else:
+                            # Malformed output closed invoke/block without </｜DSML｜parameter>.
+                            self._buffer = self._buffer[boundary_pos:]
+                        self._cur_param_name = ""
+                        self._stream_state = "IN_INVOKE"
+                        continue
+
+                    hold_k = max(
+                        _longest_suffix_prefix_len(self._buffer, tag)
+                        for tag in param_boundary_tags
+                    )
+                    safe_len = len(self._buffer) - hold_k
+                    if safe_len <= 0:
+                        break
+                    emit_raw = self._buffer[:safe_len]
+                    self._buffer = self._buffer[safe_len:]
+                    escaped_emit = json.dumps(emit_raw, ensure_ascii=False)[1:-1]
+                    self._emit_tool_args_fragment(escaped_emit, all_calls)
+                    continue
+
+                if self._stream_state == "IN_BUFFERED_PARAM":
+                    boundary_pos, boundary_tag = self._find_earliest_tag(
+                        self._buffer, param_boundary_tags
+                    )
+                    if boundary_pos != -1:
+                        self._cur_param_chunks.append(self._buffer[:boundary_pos])
+                        raw_val = "".join(self._cur_param_chunks)
+                        if boundary_tag == self._param_end_tag:
+                            self._buffer = self._buffer[
+                                boundary_pos + len(self._param_end_tag) :
+                            ]
+                        else:
+                            self._buffer = self._buffer[boundary_pos:]
+                        self._finalize_buffered_param(raw_val, all_calls)
+                        continue
+
+                    hold_k = max(
+                        _longest_suffix_prefix_len(self._buffer, tag)
+                        for tag in param_boundary_tags
+                    )
+                    safe_len = len(self._buffer) - hold_k
+                    if safe_len <= 0:
+                        break
+                    self._cur_param_chunks.append(self._buffer[:safe_len])
+                    self._buffer = self._buffer[safe_len:]
+                    continue
+
+                if self._stream_state == "IN_DIRECT_JSON":
+                    close_pos, close_tag = self._find_earliest_tag(
+                        self._buffer, direct_json_end_tags
+                    )
+                    if close_pos != -1:
+                        self._cur_param_chunks.append(self._buffer[:close_pos])
+                        raw_json = "".join(self._cur_param_chunks).strip()
+                        self._cur_param_chunks = []
+                        if close_tag == self.invoke_end_token:
+                            self._buffer = self._buffer[
+                                close_pos + len(self.invoke_end_token) :
+                            ]
+                        else:
+                            self._buffer = self._buffer[close_pos:]
+                        params = self._parse_parameters_from_xml(
+                            raw_json,
+                            allow_partial=False,
+                            param_config=self._cur_param_config,
+                        )
+                        self.prev_tool_call_arr[self.current_tool_id] = {
+                            "name": self._cur_func_name,
+                            "arguments": params,
+                        }
+                        self._emit_tool_args_fragment(
+                            json.dumps(params, ensure_ascii=False), all_calls
+                        )
+                        self._reset_invoke_state()
+                        continue
+
+                    hold_k = max(
+                        _longest_suffix_prefix_len(self._buffer, tag)
+                        for tag in direct_json_end_tags
+                    )
+                    safe_len = len(self._buffer) - hold_k
+                    if safe_len <= 0:
+                        break
+                    self._cur_param_chunks.append(self._buffer[:safe_len])
+                    self._buffer = self._buffer[safe_len:]
+                    continue
+
+            return StreamingParseResult(
+                normal_text="".join(normal_parts), calls=all_calls
+            )
         except Exception as e:
             logger.error(f"Error in parse_streaming_increment: {e}")
-            return StreamingParseResult(normal_text=current_text)
+            remaining = self._buffer
+            self._buffer = ""
+            return StreamingParseResult(
+                normal_text="".join(normal_parts) + remaining, calls=all_calls
+            )
 
     def structure_info(self) -> _GetInfoFunc:
         return lambda name: StructureInfo(

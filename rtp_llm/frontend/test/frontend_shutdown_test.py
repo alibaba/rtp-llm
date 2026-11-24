@@ -762,6 +762,151 @@ class FrontendShutdownManagerTest(unittest.TestCase):
 
         self.assertLess(time.monotonic() - start, 0.5)
 
+    def test_track_streaming_response_closes_inner_iterator_on_early_close_and_cancel(
+        self,
+    ):
+        async def run():
+            manager = FrontendShutdownManager()
+            app_owner = FrontendApp.__new__(FrontendApp)
+            app_owner.shutdown_manager = manager
+
+            # 1. Explicit early aclose() after first chunk must close inner generator immediately.
+            inner_closed = asyncio.Event()
+
+            async def inner_gen_early():
+                try:
+                    yield b"first"
+                    await asyncio.sleep(10)
+                    yield b"second"
+                finally:
+                    inner_closed.set()
+
+            self.assertTrue(manager.try_begin_request())
+            tracked = app_owner._track_streaming_response(inner_gen_early())
+            first = await tracked.__anext__()
+            self.assertEqual(first, b"first")
+            self.assertFalse(inner_closed.is_set())
+            await tracked.aclose()
+            self.assertTrue(inner_closed.is_set())
+            self.assertEqual(manager.active_request_count(), 0)
+
+            # 2. Task cancellation mid-stream must close inner generator and decrement active count.
+            inner_cancel_closed = asyncio.Event()
+            waiting_second = asyncio.Event()
+
+            async def inner_gen_cancel():
+                try:
+                    yield b"first"
+                    waiting_second.set()
+                    await asyncio.sleep(10)
+                finally:
+                    inner_cancel_closed.set()
+
+            self.assertTrue(manager.try_begin_request())
+            tracked_cancel = app_owner._track_streaming_response(inner_gen_cancel())
+
+            async def consumer():
+                async for _ in tracked_cancel:
+                    pass
+
+            task = asyncio.create_task(consumer())
+            await waiting_second.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertTrue(inner_cancel_closed.is_set())
+            self.assertEqual(manager.active_request_count(), 0)
+
+            # 3. Failing inner aclose() must not leak shutdown_manager slot.
+            class _FailingCloseIter:
+                def __aiter__(self):
+                    return self
+
+                async def __anext__(self):
+                    raise StopAsyncIteration
+
+                async def aclose(self):
+                    raise RuntimeError("close failure")
+
+            self.assertTrue(manager.try_begin_request())
+            items = []
+            async for chunk in app_owner._track_streaming_response(_FailingCloseIter()):
+                items.append(chunk)
+            self.assertEqual(items, [])
+            self.assertEqual(manager.active_request_count(), 0)
+
+        asyncio.run(run())
+
+    def test_concurrency_exception_reports_conflict_metric_and_returns_429(self):
+        from unittest.mock import AsyncMock, patch
+
+        from fastapi.testclient import TestClient
+
+        from rtp_llm.config.py_config_modules import PyEnvConfigs
+        from rtp_llm.metrics import AccMetrics, kmonitor
+        from rtp_llm.utils.concurrency_controller import (
+            ConcurrencyException,
+            init_controller,
+            set_global_controller,
+        )
+
+        kmonitor.init()
+        py_env_configs = PyEnvConfigs()
+        py_env_configs.server_config.start_port = 0
+        py_env_configs.server_config.rank_id = 0
+        set_global_controller(init_controller(py_env_configs.concurrency_config))
+
+        frontend_app = FrontendApp(
+            py_env_configs=py_env_configs,
+            separated_frontend=True,
+        )
+        client = TestClient(frontend_app.create_app())
+
+        with (
+            patch.object(
+                frontend_app.frontend_server,
+                "chat_completion",
+                new=AsyncMock(side_effect=ConcurrencyException("limit exceeded")),
+            ),
+            patch.object(
+                frontend_app.frontend_server,
+                "anthropic_messages",
+                new=AsyncMock(side_effect=ConcurrencyException("limit exceeded")),
+            ),
+            patch.object(kmonitor, "report") as report_mock,
+        ):
+            oai_resp = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+            self.assertEqual(oai_resp.status_code, 429)
+
+            ant_resp = client.post(
+                "/v1/messages",
+                headers={
+                    "anthropic-version": "2023-06-01",
+                    "x-api-key": "test-key",
+                },
+                json={
+                    "model": "claude-sonnet",
+                    "max_tokens": 64,
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+            self.assertEqual(ant_resp.status_code, 429)
+            self.assertEqual(ant_resp.json()["error"]["type"], "overloaded_error")
+
+        conflict_calls = [
+            call
+            for call in report_mock.call_args_list
+            if call.args and call.args[0] == AccMetrics.CONFLICT_QPS_METRIC
+        ]
+        self.assertEqual(len(conflict_calls), 2)
+        self.assertEqual(frontend_app.shutdown_manager.active_request_count(), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

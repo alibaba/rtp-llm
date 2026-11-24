@@ -125,6 +125,8 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
     3. Supports thinking mode and tool calls
     """
 
+    render_chat_in_thread = True
+
     def __init__(
         self,
         tokenizer: BaseTokenizer,
@@ -854,16 +856,7 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
         """
         if not self.in_think_mode(request):
             return None
-
-        try:
-            # Check if the rendered prompt should use thinking mode
-            rendered_result = self.render_chat(request)
-            if "<think>" in rendered_result.rendered_prompt:
-                return ReasoningParser(model_type="deepseek-v3", force_reasoning=True)
-        except Exception:
-            return None
-
-        return None
+        return ReasoningParser(model_type="deepseek-v3", force_reasoning=True)
 
 
 register_renderer("deepseek_v4", DeepseekV4Renderer)

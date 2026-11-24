@@ -1055,5 +1055,250 @@ class DeepseekV4StreamResponseTest(TestCase):
         )
 
 
+class DeepSeekV4DetectorStreamingTest(TestCase):
+    def _make_tools(self):
+        from rtp_llm.openai.renderers.sglang_helpers.entrypoints.openai.protocol import (
+            Function,
+            Tool,
+        )
+
+        return [
+            Tool(
+                type="function",
+                function=Function(
+                    name="Write",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "file_path": {"type": "string"},
+                            "content": {"type": "string"},
+                            "overwrite": {"type": "boolean"},
+                            "line": {"type": "integer"},
+                            "ratio": {"type": "number"},
+                            "items": {"type": "array"},
+                            "obj": {"type": "object"},
+                        },
+                    },
+                ),
+            ),
+            Tool(
+                type="function",
+                function=Function(
+                    name="get_weather",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "city": {"type": "string"},
+                            "extra": {"type": "string"},
+                        },
+                    },
+                ),
+            ),
+            Tool(
+                type="function",
+                function=Function(
+                    name="get_time",
+                    parameters={"type": "object", "properties": {}},
+                ),
+            ),
+        ]
+
+    def _stream_collect(self, text: str, chunk_size: int, tools=None):
+        detector = DeepSeekV4Detector()
+        tools = self._make_tools() if tools is None else tools
+        normal_parts = []
+        names = {}
+        arg_parts = {}
+        for i in range(0, len(text), chunk_size):
+            res = detector.parse_streaming_increment(text[i : i + chunk_size], tools)
+            if res.normal_text:
+                normal_parts.append(res.normal_text)
+            for call in res.calls:
+                idx = call.tool_index
+                if call.name:
+                    names[idx] = call.name
+                if call.parameters:
+                    arg_parts.setdefault(idx, []).append(call.parameters)
+        parsed_args = {
+            idx: json.loads("".join(parts)) for idx, parts in arg_parts.items()
+        }
+        return "".join(normal_parts), names, parsed_args
+
+    def test_streaming_typed_parameters_never_corrupt_json(self):
+        text = (
+            "<｜DSML｜tool_calls>\n"
+            '<｜DSML｜invoke name="Write">\n'
+            '<｜DSML｜parameter name="file_path" string="true">/tmp/test.py</｜DSML｜parameter>\n'
+            '<｜DSML｜parameter name="overwrite" string="false">false</｜DSML｜parameter>\n'
+            '<｜DSML｜parameter name="line" string="false">42</｜DSML｜parameter>\n'
+            '<｜DSML｜parameter name="ratio" string="false">3.5</｜DSML｜parameter>\n'
+            '<｜DSML｜parameter name="items" string="false">["alpha", "beta", "a"]</｜DSML｜parameter>\n'
+            '<｜DSML｜parameter name="obj" string="false">{"a": 1, "b": "hello"}</｜DSML｜parameter>\n'
+            "</｜DSML｜invoke>\n"
+            "</｜DSML｜tool_calls>"
+        )
+        for chunk_size in (1, 2, 4):
+            normal, names, args = self._stream_collect(text, chunk_size=chunk_size)
+            self.assertEqual(normal, "")
+            self.assertEqual(names, {0: "Write"})
+            self.assertEqual(
+                args[0],
+                {
+                    "file_path": "/tmp/test.py",
+                    "overwrite": False,
+                    "line": 42,
+                    "ratio": 3.5,
+                    "items": ["alpha", "beta", "a"],
+                    "obj": {"a": 1, "b": "hello"},
+                },
+            )
+
+    def test_streaming_strings_preserve_tag_like_suffixes_and_escapes(self):
+        content_val = (
+            'Line1 "quoted" and \\backslash\\\n'
+            "<div>html</div> & 杭州\t"
+            "ends_with_parameter\n"
+            "ends_with_DSML\n"
+            "ends_with_</\n"
+            "ends_with_</｜DSML｜"
+        )
+        text = (
+            "Leading text\n"
+            "<｜DSML｜tool_calls>\n"
+            '<｜DSML｜invoke name="Write">\n'
+            f'<｜DSML｜parameter name="content" string="true">{content_val}</｜DSML｜parameter>\n'
+            '<｜DSML｜parameter name="file_path" string="true">parameter</｜DSML｜parameter>\n'
+            "</｜DSML｜invoke>\n"
+            "</｜DSML｜tool_calls>\n"
+            "Trailing text"
+        )
+        for chunk_size in (1, 2, 3, len(text)):
+            normal, names, args = self._stream_collect(text, chunk_size=chunk_size)
+            self.assertEqual(normal, "Leading text\n\nTrailing text")
+            self.assertEqual(names, {0: "Write"})
+            self.assertEqual(
+                args[0], {"content": content_val, "file_path": "parameter"}
+            )
+
+    def test_streaming_bare_invoke_split_across_chunks_without_bot_token(self):
+        text = (
+            "Intro\n"
+            '<｜DSML｜invoke name="get_weather">\n'
+            '<｜DSML｜parameter name="city" string="true">Tokyo</｜DSML｜parameter>\n'
+            "</｜DSML｜invoke>"
+        )
+        for chunk_size in (2, 5):
+            normal, names, args = self._stream_collect(text, chunk_size=chunk_size)
+            self.assertEqual(normal, "Intro\n")
+            self.assertEqual(names, {0: "get_weather"})
+            self.assertEqual(args, {0: {"city": "Tokyo"}})
+
+    def test_streaming_direct_json_zero_param_and_multi_invoke(self):
+        text = (
+            "<｜DSML｜tool_calls>\n"
+            '<｜DSML｜invoke name="get_time">\n'
+            "</｜DSML｜invoke>\n"
+            '<｜DSML｜invoke name="get_weather">\n'
+            '{"city": "San Francisco"}\n'
+            "</｜DSML｜invoke>\n"
+            '<｜DSML｜invoke name="Write">\n'
+            '<｜DSML｜parameter name="overwrite" string="false">true</｜DSML｜parameter>\n'
+            "</｜DSML｜invoke>\n"
+            "</｜DSML｜tool_calls>"
+        )
+        for chunk_size in (1, 3):
+            normal, names, args = self._stream_collect(text, chunk_size=chunk_size)
+            self.assertEqual(normal, "")
+            self.assertEqual(names, {0: "get_time", 1: "get_weather", 2: "Write"})
+            self.assertEqual(args[0], {})
+            self.assertEqual(args[1], {"city": "San Francisco"})
+            self.assertEqual(args[2], {"overwrite": True})
+
+    def test_streaming_wrapper_repair_and_malformed_tag_recovery(self):
+        # Single wrapper parameter ("arguments" / "input") unwraps cleanly on invoke close.
+        wrapped = (
+            "<｜DSML｜tool_calls>\n"
+            '<｜DSML｜invoke name="get_weather">\n'
+            '<｜DSML｜parameter name="arguments" string="true">{"city": "NYC"}</｜DSML｜parameter>\n'
+            "</｜DSML｜invoke>\n"
+            "</｜DSML｜tool_calls>"
+        )
+        _, names, args = self._stream_collect(wrapped, chunk_size=2)
+        self.assertEqual(names, {0: "get_weather"})
+        self.assertEqual(args[0], {"city": "NYC"})
+
+        # Wrapper candidate followed by a second parameter must not unwrap.
+        non_wrapped = (
+            "<｜DSML｜tool_calls>\n"
+            '<｜DSML｜invoke name="get_weather">\n'
+            '<｜DSML｜parameter name="input" string="true">{"city": "NYC"}</｜DSML｜parameter>\n'
+            '<｜DSML｜parameter name="extra" string="true">ok</｜DSML｜parameter>\n'
+            "</｜DSML｜invoke>\n"
+            "</｜DSML｜tool_calls>"
+        )
+        _, _, args2 = self._stream_collect(non_wrapped, chunk_size=2)
+        self.assertEqual(args2[0], {"input": '{"city": "NYC"}', "extra": "ok"})
+
+        # Missing closing parameter tag before </｜DSML｜invoke> still produces valid JSON.
+        malformed = (
+            "<｜DSML｜tool_calls>\n"
+            '<｜DSML｜invoke name="get_weather">\n'
+            '<｜DSML｜parameter name="city" string="true">Paris</｜DSML｜invoke>\n'
+            "</｜DSML｜tool_calls>"
+        )
+        _, names3, args3 = self._stream_collect(malformed, chunk_size=2)
+        self.assertEqual(names3, {0: "get_weather"})
+        self.assertEqual(args3[0], {"city": "Paris"})
+
+    def test_streaming_large_43kb_tool_call_is_linear_time(self):
+        import time
+
+        payload = ("x = 1234567890 # padding line with 'quotes' and \\slash\n") * 860
+        self.assertGreater(len(payload), 43000)
+        text = (
+            "<｜DSML｜tool_calls>\n"
+            '<｜DSML｜invoke name="Write">\n'
+            '<｜DSML｜parameter name="file_path" string="true">/tmp/big.py</｜DSML｜parameter>\n'
+            f'<｜DSML｜parameter name="content" string="true">{payload}</｜DSML｜parameter>\n'
+            '<｜DSML｜parameter name="overwrite" string="false">true</｜DSML｜parameter>\n'
+            "</｜DSML｜invoke>\n"
+            "</｜DSML｜tool_calls>"
+        )
+        start = time.monotonic()
+        _, names, args = self._stream_collect(text, chunk_size=4)
+        elapsed = time.monotonic() - start
+        self.assertLess(elapsed, 1.0)
+        self.assertEqual(names, {0: "Write"})
+        self.assertEqual(
+            args[0],
+            {"file_path": "/tmp/big.py", "content": payload, "overwrite": True},
+        )
+
+    def test_renderer_runs_render_chat_in_thread_and_skips_double_render(self):
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from rtp_llm.openai.renderers.deepseekv4_renderer import DeepseekV4Renderer
+
+        self.assertTrue(DeepseekV4Renderer.render_chat_in_thread)
+        renderer = _make_renderer(None)
+        request = SimpleNamespace()
+        with (
+            mock.patch.object(
+                renderer, "render_chat", side_effect=AssertionError("called")
+            ),
+            mock.patch.object(renderer, "in_think_mode", return_value=True),
+        ):
+            parser = renderer._create_reasoning_parser(request)
+            self.assertIsInstance(parser, ReasoningParser)
+        with (
+            mock.patch.object(
+                renderer, "render_chat", side_effect=AssertionError("called")
+            ),
+            mock.patch.object(renderer, "in_think_mode", return_value=False),
+        ):
+            self.assertIsNone(renderer._create_reasoning_parser(request))
+
+
 if __name__ == "__main__":
     main()

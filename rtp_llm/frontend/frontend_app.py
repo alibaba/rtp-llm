@@ -46,7 +46,7 @@ from rtp_llm.distribute.distributed_server import (
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.frontend.shutdown_manager import FrontendShutdownManager
-from rtp_llm.metrics import kmonitor
+from rtp_llm.metrics import AccMetrics, kmonitor
 from rtp_llm.openai.api_datatype import (
     BatchChatCompletionRequest,
     ChatCompletionRequest,
@@ -659,6 +659,7 @@ class FrontendApp(object):
                 return response
             except ConcurrencyException as e:
                 # Safety net: never let concurrency-limit overflow surface as 500.
+                kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC, 1)
                 if is_anthropic:
                     return ORJSONResponse(
                         anthropic_error_payload(
@@ -1070,4 +1071,11 @@ class FrontendApp(object):
             async for chunk in body_iterator:
                 yield chunk
         finally:
-            finish()
+            try:
+                aclose = getattr(body_iterator, "aclose", None)
+                if callable(aclose):
+                    await aclose()
+            except Exception:
+                logging.debug("Failed to close streaming body iterator", exc_info=True)
+            finally:
+                finish()
