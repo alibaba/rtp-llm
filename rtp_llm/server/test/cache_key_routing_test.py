@@ -128,6 +128,22 @@ class CacheKeyRoutingTest(unittest.TestCase):
                             expected[cp - 1 :: cp] if sharded else expected,
                         )
 
+    def test_overlapping_spans_preserve_input_order_and_ignore_partial_page(self):
+        tokens = list(range(11))
+        spans = [
+            (3, [7, 8, 9]),
+            (-1, [13, 14, 15, 16, 17]),
+            (2, []),
+            (7, [21, 22]),
+            (8, [31, 32]),
+        ]
+        self.assertEqual(
+            get_block_cache_keys(
+                tokens, 4, cache_key_seed=-7, multimodal_cache_spans=spans
+            ),
+            _backend_full_keys(tokens, 4, seed=-7, spans=spans),
+        )
+
     def test_changed_image_rows_change_all_later_prefix_keys(self):
         tokens = list(range(1024))
         rows = list(range(32))
