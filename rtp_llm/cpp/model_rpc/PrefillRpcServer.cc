@@ -651,6 +651,8 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     auto&             client_stream = prefill_context.client_stream;
     GenerateRequestPB alloc_request;
     alloc_request.set_stage(RemoteStage::ALLOCATE);
+    alloc_request.set_nvfp4_kv_cache(maga_init_params_.model_config_.attn_config.kv_cache_dtype
+                                     == KvCacheDataType::NVFP4);
     alloc_request.set_client_id(process_id_);
     alloc_request.set_request_id(prefill_context.request_id);
     // TODO(xinfei.sxf) reduce copy
@@ -674,6 +676,12 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     GenerateOutputsPB allocate_response;
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, client_stream->Read(&allocate_response), ErrorCode::REMOTE_ALLOCATE_RESOURCE_READ_FAILED);
+    if (allocate_response.nvfp4_kv_cache() != alloc_request.nvfp4_kv_cache()) {
+        client_context->TryCancel();
+        prefill_context.error_status = grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                                                    "Prefill and Decode must use the same NVFP4 KV cache layout");
+        return;
+    }
     if (prefillTraceLogEnabled() && allocate_response.has_error_info()
         && allocate_response.error_info().error_code() != 0) {
         RTP_LLM_LOG_WARNING("Prefill request trace: event=remote_allocate_response_error request_id=%ld "

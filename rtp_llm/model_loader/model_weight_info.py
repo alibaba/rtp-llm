@@ -51,7 +51,7 @@ def _apply_mega_moe_fp4_wrappers(
     """Walk ``weight_info`` and replace MoE w1/w2 weights with mega-MoE FP4
     load-time quantizers when a MegaMoE strategy is selected.
 
-    Three cases are handled:
+    The following checkpoint formats are handled:
       - **Offline FP4 ckpt** (``quantization_config.expert_dtype == "fp4"`` or
         ModelOpt ``quantized_layers`` contains MXFP4; fallback: FP4 expert
         scale keys): replace with
@@ -69,29 +69,39 @@ def _apply_mega_moe_fp4_wrappers(
         ``Fp8BlockWiseQuantConfig``), including ``Mxfp8Weight`` with its
         1x32 UE8M0 exponent scale: replace with
         :class:`OnlineMegaMoeFp4FromFp8Weight` (FP8 → FP4).
+      - ``PerGroupFp4Weight`` (ModelOpt NVFP4): preserve each projection's
+        E4M3 block scale and FP32 global scale for native execution, or convert
+        to MXFP4 when native execution is disabled.
+
+    ``RTP_LLM_MOE_WEIGHT_FORMAT=nvfp4`` also converts MXFP4, FP8 and BF16
+    routed experts to the native NVFP4 MegaMoE format.
     """
     from rtp_llm.model_loader.offline_modelopt_fp4_quant_weight import (
         is_offline_mega_moe_fp4_ckpt,
         wrap_for_offline_fp4,
     )
     from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
+        get_mega_moe_weight_format,
         is_mega_moe_fused_strategy,
         is_mega_moe_strategy,
         wrap_moe_for_mega_moe,
     )
     from rtp_llm.model_loader.per_block_fp8_quant_weight import PerBlockFp8Weight
 
+    target_format = get_mega_moe_weight_format()
     if not is_mega_moe_strategy():
         return weight_info
 
-    is_offline = is_offline_mega_moe_fp4_ckpt(database)
+    is_offline = not isinstance(
+        quant_config, ModelOptFp4Config
+    ) and is_offline_mega_moe_fp4_ckpt(database)
     include_shared_expert = is_mega_moe_fused_strategy()
     scale_dtype = (
         PerBlockFp8Weight._get_scale_dtype(getattr(quant_config, "scale_fmt", None))
         if is_offline
         else torch.float32
     )
-    if is_offline:
+    if is_offline and target_format == "auto":
         logging.info(
             "[mega_moe] offline FP4 MoE detected in ckpt; using "
             "OfflineMegaMoeFp4MoeWeight%s (skip online quantization)",
@@ -106,6 +116,7 @@ def _apply_mega_moe_fp4_wrappers(
                 weight,
                 include_shared_expert=include_shared_expert,
                 scale_dtype=scale_dtype,
+                convert_to_nvfp4=target_format == "nvfp4",
             )
         else:
             wrapped = wrap_moe_for_mega_moe(weight)

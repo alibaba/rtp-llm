@@ -142,3 +142,11 @@ py_test(
     tags = ["open_skip", "H20_CU13"],
     exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
 )
+
+py_test(
+    name = "nvfp4_kv_test",
+    srcs = ["nvfp4_kv_test.py"],
+    deps = py_test_deps,
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+)

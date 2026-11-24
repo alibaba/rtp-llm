@@ -69,6 +69,15 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=int,
         help="是否开启FP8的KV_CACHE",
     )
+    kv_cache_group.add_argument(
+        "--nvfp4_kv_cache",
+        env_name="NVFP4_KV_CACHE",
+        bind_to=(kv_cache_config, "nvfp4_kv_cache"),
+        type=int,
+        choices=(0, 1),
+        default=0,
+        help="将 GLM5 稀疏 MLA 和 Indexer KV 存储设为 NVFP4，计算时按需解包为 FP8",
+    )
     # compatible with old version
     kv_cache_group.add_argument(
         "--blockwise_use_fp8_kv_cache",

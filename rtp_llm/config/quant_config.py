@@ -352,6 +352,7 @@ class QuantizationConfig(ABC):
                         "is_quanted": True,
                         "mixed_attention": mixed_attention,
                         "scale_fmt": quant_config.get("scale_fmt", None),
+                        "exclude_modules": quant_config.get("ignore", []),
                     }
                 )
 
@@ -804,6 +805,7 @@ class ModelOptFp4Config(QuantizationConfig):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
         self.mixed_attention = kwargs.get("mixed_attention", False)
         self.scale_fmt = kwargs.get("scale_fmt", None)
+        self.exclude_modules = set(kwargs.get("exclude_modules", []) or [])
         hybrid_attn_quant_method = kwargs.get("hybrid_attn_quant_method", None)
         if hybrid_attn_quant_method is not None:
             method_norm = str(hybrid_attn_quant_method).upper()

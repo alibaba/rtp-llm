@@ -37,6 +37,8 @@ def kv_cache_dtype_to_torch_dtype(
         return torch.int8
     elif kv_cache_dtype == KvCacheDataType.FP8:
         return torch.float8_e4m3fn
+    elif kv_cache_dtype == KvCacheDataType.NVFP4:
+        return torch.uint8
     else:  # BASE
         return data_type.to_torch_dtype()
 
@@ -275,6 +277,15 @@ class ModelConfig(CppModelConfig):
             return 0
         # Get kv_cache_dtype from attn_config
         kv_cache_dtype_enum = self.attn_config.kv_cache_dtype
+        if kv_cache_dtype_enum == KvCacheDataType.NVFP4:
+            mapping = self.glm52_indexer_kv_slot_mapping
+            indexer_layers = (
+                max(mapping) + 1
+                if self.enable_glm52_shared_indexer_kv_cache and mapping
+                else self.num_layers
+            )
+            # Match the aligned rows in MLAKVCacheSpec.
+            return (432 * self.num_layers + 80 * indexer_layers) * self.max_seq_len
         kv_cache_bytes = (
             1
             if kv_cache_dtype_enum in [KvCacheDataType.FP8, KvCacheDataType.INT8]
@@ -649,30 +660,24 @@ class ModelConfig(CppModelConfig):
                 quant_config.group_size(),
             )
 
-        # Initialize data_type: first try act_type, then config_dtype, finally default to FP16
-        data_type: Optional[WEIGHT_TYPE] = None
-        if act_type:
-            data_type = WEIGHT_TYPE.from_str(act_type)
-            logging.info(f"Initializing data_type from act_type: {data_type}")
-        else:
-            # Parse config_dtype if available
-            config_dtype_parsed = None
+        native_nvfp4_moe = os.getenv("RTP_LLM_MOE_WEIGHT_FORMAT") == "nvfp4"
+        nvfp4_cache = bool(getattr(kv_cache_config, "nvfp4_kv_cache", False))
+        resolve_auto = native_nvfp4_moe or nvfp4_cache
+        # NVFP4 needs a concrete compute dtype before weight/cache validation.
+        data_type = WEIGHT_TYPE.from_str(act_type) if act_type else None
+        if resolve_auto and data_type == WEIGHT_TYPE.AUTO:
+            data_type = None
+        if data_type is None:
             if self.config_dtype:
-                config_dtype_parsed = WEIGHT_TYPE.from_str(self.config_dtype)
-                logging.info(
-                    f"act_type is empty, using config_dtype: {config_dtype_parsed}"
-                )
-
-            if config_dtype_parsed:
-                data_type = config_dtype_parsed
+                data_type = WEIGHT_TYPE.from_str(self.config_dtype)
                 if data_type == WEIGHT_TYPE.FP32:
                     data_type = WEIGHT_TYPE.FP16
                     logging.info("auto convert embedding model to fp16")
-            else:
-                data_type = WEIGHT_TYPE.FP16
-                logging.info(
-                    f"act_type and config_dtype are both empty, using default: {data_type}"
-                )
+                elif resolve_auto and data_type == WEIGHT_TYPE.AUTO:
+                    data_type = None
+            if data_type is None:
+                data_type = WEIGHT_TYPE.BF16 if native_nvfp4_moe else WEIGHT_TYPE.FP16
+        logging.info(f"Resolved activation data_type: {data_type}")
 
         # Apply quantization-specific overrides
         if quant_config and isinstance(quant_config, Fp8BlockWiseQuantConfig):
@@ -714,9 +719,34 @@ class ModelConfig(CppModelConfig):
                     "ACT_TYPE can be configured manually."
                 )
 
-        # Set attn_config.kv_cache_dtype based on kv_cache_config
+        if native_nvfp4_moe and data_type != WEIGHT_TYPE.BF16:
+            raise ValueError(
+                "Native NVFP4 MegaMoE requires BF16 activations. Set ACT_TYPE=bf16."
+            )
+
+        # Explicit NVFP4 storage takes precedence over FP8 defaults. The
+        # checkpoint's weight quantization and FP8 consumer formats are separate.
         if kv_cache_config is not None:
-            if kv_cache_config.int8_kv_cache:
+            if nvfp4_cache:
+                if kv_cache_config.int8_kv_cache:
+                    raise ValueError(
+                        "NVFP4_KV_CACHE cannot be combined with INT8_KV_CACHE"
+                    )
+                attn = self.attn_config
+                if (
+                    self.model_type not in ("glm_5", "glm_5_mtp")
+                    or not attn.use_mla
+                    or not attn.is_sparse
+                    or (attn.kv_lora_rank, attn.rope_head_dim, attn.indexer_head_dim)
+                    != (512, 64, 128)
+                ):
+                    raise ValueError(
+                        "NVFP4_KV_CACHE requires GLM5 sparse MLA with "
+                        "kv_lora_rank=512, rope_head_dim=64 and indexer_head_dim=128"
+                    )
+                attn.kv_cache_dtype = KvCacheDataType.NVFP4
+                logging.info("Using NVFP4 KV cache storage")
+            elif kv_cache_config.int8_kv_cache:
                 self.attn_config.kv_cache_dtype = KvCacheDataType.INT8
                 logging.info(
                     "Setting attn_config.kv_cache_dtype to INT8 based on kv_cache_config.int8_kv_cache"
@@ -732,7 +762,11 @@ class ModelConfig(CppModelConfig):
                     "Setting attn_config.kv_cache_dtype to BASE (default, no int8/fp8 kv_cache specified)"
                 )
 
-        if quant_config and quant_config.get_method().lower() == "fp8":
+        if (
+            quant_config
+            and quant_config.get_method().lower() == "fp8"
+            and self.attn_config.kv_cache_dtype != KvCacheDataType.NVFP4
+        ):
             self.attn_config.kv_cache_dtype = KvCacheDataType.FP8
             logging.info(
                 "Setting attn_config.kv_cache_dtype to FP8 based on quant_config.get_method().lower() == 'fp8'"
@@ -740,8 +774,12 @@ class ModelConfig(CppModelConfig):
 
         # Validate configuration with quant_config
         if quant_config:
+            kv_cache_dtype = self.attn_config.kv_cache_dtype
+            if kv_cache_dtype == KvCacheDataType.NVFP4:
+                # Quantization configs validate the format consumed by attention.
+                kv_cache_dtype = KvCacheDataType.FP8
             kv_cache_torch_dtype = kv_cache_dtype_to_torch_dtype(
-                self.attn_config.kv_cache_dtype, data_type
+                kv_cache_dtype, data_type
             )
             logging.info(
                 f"Validating precision configuration with quant_config: "

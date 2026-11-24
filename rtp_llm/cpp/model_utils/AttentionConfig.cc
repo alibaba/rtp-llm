@@ -12,6 +12,8 @@ static std::string kvCacheDataTypeToString(KvCacheDataType kv_cache_dtype) {
             return "INT8";
         case KvCacheDataType::FP8:
             return "FP8";
+        case KvCacheDataType::NVFP4:
+            return "NVFP4";
         default:
             return "UNKNOWN(" + std::to_string(static_cast<int>(kv_cache_dtype)) + ")";
     }

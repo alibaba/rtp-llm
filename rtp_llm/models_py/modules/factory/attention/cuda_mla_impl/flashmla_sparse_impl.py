@@ -30,7 +30,7 @@ try:
 except (ImportError, AttributeError, ValueError) as _e:
     logging.warning(f"flash_mla not available: {_e}. Requires CUDA >= 12.9")
 
-from rtp_llm.models_py.modules.base.cuda.paged_mqa import paged_mqa_context_lens
+from rtp_llm.models_py.modules.base.cuda.paged_mqa import paged_mqa_schedule_inputs
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
     MlaKVCacheWriteOp,
@@ -65,6 +65,7 @@ from rtp_llm.ops.compute_ops import (
 )
 from rtp_llm.utils.model_weight import W
 
+from .nvfp4_mla_cache import MAX_NVFP4_MLA_SELECTED_ROWS, gather_selected_mla_fp8
 from .rope_emb_new import NewMlaRotaryEmbeddingOp
 
 # ---------------------------------------------------------------------------
@@ -315,6 +316,7 @@ class SparseMlaFp8Op(SparseMlaOp):
 
     def __init__(self, *args, **kwargs):
         self.use_cuda_graph = bool(kwargs.pop("use_cuda_graph", False))
+        self.use_nvfp4_cache = bool(kwargs.pop("use_nvfp4_cache", False))
         bf16_prefill_num_heads = kwargs.pop("bf16_prefill_num_heads", None)
         super().__init__(*args, **kwargs)
         self.bf16_num_heads = (
@@ -381,7 +383,8 @@ class SparseMlaFp8Op(SparseMlaOp):
 
         # Gather path: only for prefill, gated by env var.
         gather_enabled = (
-            os.environ.get("USE_GATHER_PATH", "0") == "1"
+            not self.use_nvfp4_cache
+            and os.environ.get("USE_GATHER_PATH", "0") == "1"
             and attn_inputs is not None
             and getattr(attn_inputs, "is_prefill", False)
             and not _is_multi_token_decode(attn_inputs)
@@ -419,6 +422,10 @@ class SparseMlaFp8Op(SparseMlaOp):
         physical_indices: Optional[torch.Tensor] = None,
         attn_sink: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if self.use_nvfp4_cache:
+            if physical_indices is None:
+                physical_indices = self._convert_topk_indices_to_global(topk_indices)
+            return self._forward_nvfp4(q, kv, physical_indices, attn_sink)
         if self._gather is not None and physical_indices is None:
             return self._forward_gather(q, kv, topk_indices, attn_sink)
         return self._forward_with_kvcache(
@@ -486,6 +493,55 @@ class SparseMlaFp8Op(SparseMlaOp):
             **sink_kwargs,
         )
         return out[:, :actual_heads]
+
+    def _forward_nvfp4(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        physical_indices: torch.Tensor,
+        attn_sink: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        q_dtype = q.dtype
+        # The FP8 FlashMLA kernel consumes BF16 Q. Preserve the caller's
+        # activation dtype for the absorbed output BMM.
+        if q_dtype == torch.float16:
+            q = q.to(torch.bfloat16)
+        q, attn_sink, actual_heads = self._pad_query_and_sink(q, attn_sink)
+        if q.size(0) == 0:
+            return q.new_empty((0, actual_heads, self.kv_lora_rank), dtype=q_dtype)
+
+        indices = _topk_2d(physical_indices)
+        chunk_rows = max(1, MAX_NVFP4_MLA_SELECTED_ROWS // indices.size(1))
+        # Every chunk gets its own scheduler metadata because the last chunk
+        # may use a different query length. Scratch bounds depend only on shapes.
+        output = (
+            q.new_empty((q.size(0), actual_heads, self.kv_lora_rank), dtype=q_dtype)
+            if q.size(0) > chunk_rows
+            else None
+        )
+        for start in range(0, q.size(0), chunk_rows):
+            end = min(start + chunk_rows, q.size(0))
+            fp8_cache, remapped = gather_selected_mla_fp8(kv, indices[start:end])
+            sched_meta, _ = get_mla_metadata()
+            sink_kwargs = {} if attn_sink is None else {"attn_sink": attn_sink}
+            result, _ = flash_mla_with_kvcache(
+                q=q[start:end].unsqueeze(0),
+                k_cache=fp8_cache,
+                block_table=None,
+                head_dim_v=self.kv_lora_rank,
+                cache_seqlens=None,
+                tile_scheduler_metadata=sched_meta,
+                is_fp8_kvcache=True,
+                indices=remapped.unsqueeze(0),
+                softmax_scale=self.scale,
+                **sink_kwargs,
+            )
+            result = result.squeeze(0)[:, :actual_heads]
+            if output is None:
+                return result.to(q_dtype)
+            output[start:end].copy_(result)
+            del fp8_cache, remapped, result
+        return output
 
     def _forward_with_kvcache(
         self,
@@ -577,12 +633,15 @@ class SparseMlaImpl(MlaImplBase):
         self.is_prefill = attn_inputs.is_prefill
         self.parallelism_config = parallelism_config
 
+        self.use_nvfp4_cache = attn_configs.kv_cache_dtype == getattr(
+            KvCacheDataType, "NVFP4", None
+        )
         # Pick the right op class
         if fmha_impl is not None:
             op_cls = fmha_impl
         elif attn_configs.kv_cache_dtype == KvCacheDataType.BASE:
             op_cls = SparseMlaOp
-        elif attn_configs.kv_cache_dtype == KvCacheDataType.FP8:
+        elif attn_configs.kv_cache_dtype == KvCacheDataType.FP8 or self.use_nvfp4_cache:
             op_cls = SparseMlaFp8Op
         else:
             raise ValueError(
@@ -591,6 +650,8 @@ class SparseMlaImpl(MlaImplBase):
         op_kwargs = {"parallelism_config": parallelism_config}
         if issubclass(op_cls, SparseMlaFp8Op):
             op_kwargs["use_cuda_graph"] = is_cuda_graph
+            if self.use_nvfp4_cache:
+                op_kwargs["use_nvfp4_cache"] = True
         has_hy4_sink = any(W.hy4_attn_sink in layer for layer in weights)
         kernel_num_heads = attn_configs.head_num
         if has_hy4_sink:
@@ -619,12 +680,10 @@ class SparseMlaImpl(MlaImplBase):
             kv_cache_dtype=attn_configs.kv_cache_dtype,
         )
 
-        self._fuse_qk_rope_cat_cache_mla = fuse_kernels_enabled()
-        self._kv_cache_type = (
-            "fp8_ds_mla"
-            if attn_configs.kv_cache_dtype == KvCacheDataType.FP8
-            else "auto"
+        self._fuse_qk_rope_cat_cache_mla = (
+            not self.use_nvfp4_cache and fuse_kernels_enabled()
         )
+        self._kv_cache_type = self.kv_cache_write_op.kv_cache_type
         self._cos_sin_cache = cos_sin_cache
         self._is_neox_style = attn_configs.rope_config.is_neox_style
         self._cuda_dag_indexer_metadata = None
@@ -674,9 +733,15 @@ class SparseMlaImpl(MlaImplBase):
             lengths = self.fmha_params.kvlen_d
         if not isinstance(lengths, torch.Tensor) or lengths.numel() == 0:
             return
-        lengths_2d = paged_mqa_context_lens(attn_inputs, self.fmha_params)
+        lengths_2d, query_indices = paged_mqa_schedule_inputs(
+            deep_gemm, attn_inputs, self.fmha_params
+        )
+        metadata_args = {} if query_indices is None else {"indices": query_indices}
         new_schedule = deep_gemm.get_paged_mqa_logits_metadata(
-            lengths_2d, self.seq_size_per_block, deep_gemm.get_num_sms()
+            lengths_2d,
+            self.seq_size_per_block,
+            deep_gemm.get_num_sms(),
+            **metadata_args,
         )
 
         current = getattr(self.fmha_params, "schedule_metadata", None)
@@ -723,7 +788,11 @@ class SparseMlaImpl(MlaImplBase):
             attn_configs.is_sparse
             and attn_configs.use_mla
             and attn_configs.kv_cache_dtype
-            in (KvCacheDataType.BASE, KvCacheDataType.FP8)
+            in (
+                KvCacheDataType.BASE,
+                KvCacheDataType.FP8,
+                getattr(KvCacheDataType, "NVFP4", None),
+            )
         )
 
     def prepare(

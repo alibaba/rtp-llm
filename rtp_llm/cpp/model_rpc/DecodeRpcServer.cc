@@ -112,6 +112,11 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
                       allocate_request.stage() == RemoteStage::ALLOCATE,
                       grpc::StatusCode::INTERNAL,
                       "message first status != RemoteStage::ALLOCATE");
+    const bool use_nvfp4 = maga_init_params_.model_config_.attn_config.kv_cache_dtype == KvCacheDataType::NVFP4;
+    GRPC_RET_IF_ERROR(decode_context,
+                      allocate_request.nvfp4_kv_cache() == use_nvfp4,
+                      grpc::StatusCode::FAILED_PRECONDITION,
+                      "Prefill and Decode must use the same NVFP4 KV cache layout");
     decode_context.request_id  = allocate_request.request_id();
     decode_context.request_key = makeRequestKey(allocate_request.client_id(), allocate_request.request_id());
 
@@ -175,8 +180,10 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
         return;
     }
 
+    GenerateOutputsPB allocate_ack;
+    allocate_ack.set_nvfp4_kv_cache(decode_context.allocate_request.nvfp4_kv_cache());
     GRPC_RET_IF_ERROR(decode_context,
-                      decode_context.rpc_context.grpc_stream->Write(GenerateOutputsPB()),
+                      decode_context.rpc_context.grpc_stream->Write(allocate_ack),
                       grpc::StatusCode::INTERNAL,
                       "failed to write allocate output");
 

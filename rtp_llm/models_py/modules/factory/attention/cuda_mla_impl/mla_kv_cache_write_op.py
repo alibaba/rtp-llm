@@ -12,6 +12,8 @@ import torch
 from rtp_llm.ops import KvCacheDataType, compute_ops
 from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
 
+from .nvfp4_mla_cache import write_nvfp4_mla_cache
+
 
 class MlaKVCacheWriteOp:
     """Write compressed KV cache for Multi-Latent Attention."""
@@ -20,11 +22,15 @@ class MlaKVCacheWriteOp:
         self,
         kv_cache_dtype: KvCacheDataType,
     ) -> None:
-        self.kv_cache_type = (
-            "fp8_ds_mla" if kv_cache_dtype == KvCacheDataType.FP8 else "auto"
-        )
-        # Scale tensor is required for concat_and_cache_mla even in non-FP8 mode
-        self.scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
+        self.use_nvfp4_cache = kv_cache_dtype == getattr(KvCacheDataType, "NVFP4", None)
+        if self.use_nvfp4_cache:
+            self.kv_cache_type = "nvfp4_ds_mla"
+        else:
+            self.kv_cache_type = (
+                "fp8_ds_mla" if kv_cache_dtype == KvCacheDataType.FP8 else "auto"
+            )
+            # concat_and_cache_mla also requires a scale tensor in non-FP8 mode.
+            self.scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
 
     def forward(
         self,
@@ -49,6 +55,11 @@ class MlaKVCacheWriteOp:
                 slot_mapping = fmha_params.slot_mapping
             else:
                 slot_mapping = fmha_params.slot_mapping[total_global_ids]
+            if self.use_nvfp4_cache:
+                write_nvfp4_mla_cache(
+                    append_ckv_t, key_pe, kv_cache.kv_cache_base, slot_mapping
+                )
+                return
             compute_ops.concat_and_cache_mla(
                 append_ckv_t,
                 key_pe,

@@ -64,6 +64,7 @@ from .flashmla_sparse_impl import (
     _topk_2d,
 )
 from .glm53_prefill_workspace import Glm53PrefillWorkspace
+from .nvfp4_mla_cache import gather_padded_nvfp4_mla_rows
 
 # Preserve the historical default when the rollback implementation is selected.
 _REMAP_HISTORY_TOPK_DEFAULT = "1" if PREFILL_OPTIMIZATIONS_ENABLED else "0"
@@ -540,6 +541,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         parallelism_config: Optional[ParallelismConfig] = None,
         use_cuda_graph: bool = False,
         bf16_prefill_num_heads: Optional[int] = None,
+        use_nvfp4_cache: bool = False,
     ):
         super().__init__(
             num_heads=num_heads,
@@ -551,6 +553,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             top_k=top_k,
             use_cuda_graph=use_cuda_graph,
             bf16_prefill_num_heads=bf16_prefill_num_heads,
+            use_nvfp4_cache=use_nvfp4_cache,
         )
         self.attn_inputs = None
         self.cp_info = None
@@ -955,18 +958,23 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self._refresh_full_rope_positions(mla_params.positions_d, int(local_tokens))
 
         # Gather path: prefill-only, gated by USE_GATHER_PATH (mirrors non-CP).
+        use_nvfp4_cache = getattr(self, "use_nvfp4_cache", False)
         gather_enabled = (
-            (os.environ.get("USE_GATHER_PATH", "0") == "1" or self.kv_cache_sharded)
+            not use_nvfp4_cache
+            and (os.environ.get("USE_GATHER_PATH", "0") == "1" or self.kv_cache_sharded)
             and attn_inputs is not None
             and getattr(attn_inputs, "is_prefill", False)
             and (not self.use_cuda_graph or self.kv_cache_sharded)
         )
         self._gather = self._build_gather_workspace() if gather_enabled else None
-        new_offsets = (
-            self._gather.workspace_starts[self.precomputed_req_ids]
-            if self._gather is not None and self.precomputed_req_ids is not None
-            else None
-        )
+        new_offsets = None
+        if self.precomputed_req_ids is not None:
+            if use_nvfp4_cache and self.kv_cache_sharded:
+                new_offsets = mla_params.prefill_ragged_kv_len_indptr_d[
+                    self.precomputed_req_ids
+                ]
+            elif self._gather is not None:
+                new_offsets = self._gather.workspace_starts[self.precomputed_req_ids]
         self.precomputed_kv_offsets = _copy_or_replace_graph_tensor(
             self.precomputed_kv_offsets,
             new_offsets,
@@ -1163,6 +1171,13 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
 
+        use_nvfp4_cache = getattr(self, "use_nvfp4_cache", False)
+        # All CP ranks must participate in history gather, even with no local Q.
+        packed_history = (
+            self._gather_nvfp4_cp_history(kv_cache)
+            if use_nvfp4_cache and self.kv_cache_sharded
+            else None
+        )
         no_q_work = (
             topk is None
             or topk.numel() == 0
@@ -1197,7 +1212,9 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             q0 = q if q.is_contiguous() else q.contiguous()
         else:
             q0 = q[self.total_local_ids].contiguous()
-        if self._gather is not None:
+        if use_nvfp4_cache:
+            out0 = self._attend_nvfp4_cp(q0, kv_cache, topk, packed_history, attn_sink)
+        elif self._gather is not None:
             out0 = self._attend_gather(
                 q0,
                 kv_cache,
@@ -1473,6 +1490,41 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         fused_kv.copy_(gathered[self.sharded_kv_restore_indices])
         return None
 
+    def _gather_nvfp4_cp_history(self, kv_cache) -> torch.Tensor:
+        local = gather_padded_nvfp4_mla_rows(
+            kv_cache.kv_cache_base,
+            self.block_table,
+            self.sharded_actual_local_kv_lens,
+            self.sharded_local_kv_lens,
+            self.sharded_workspace_starts,
+            self.sharded_total_local_kv_len,
+        )
+        # CP exchanges packed bytes. The selected-row reader below is the only
+        # MLA consumer that expands history to FlashMLA's FP8 format.
+        global_rank_major = all_gather(local, group=Group.TP, role="mla_history")
+        return global_rank_major.reshape(-1, 1, local.size(-1))
+
+    def _attend_nvfp4_cp(
+        self,
+        q: torch.Tensor,
+        kv_cache,
+        topk: torch.Tensor,
+        packed_history: Optional[torch.Tensor],
+        attn_sink: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        if packed_history is None:
+            physical_indices = self._convert_topk_indices_to_global(topk)
+            return self._forward_nvfp4(
+                q, kv_cache.kv_cache_base, physical_indices, attn_sink
+            )
+        physical_indices = offset_cp_topk(
+            _topk_2d(topk),
+            self.precomputed_kv_offsets,
+            self.sharded_kv_restore_indices,
+            packed_history.shape[0],
+        )
+        return self._forward_nvfp4(q, packed_history, physical_indices, attn_sink)
+
     def _attend_with_kvcache(
         self,
         q0: torch.Tensor,
@@ -1600,6 +1652,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             parallelism_config: Optional[ParallelismConfig] = None,
             use_cuda_graph: bool = False,
             bf16_prefill_num_heads: Optional[int] = None,
+            use_nvfp4_cache: bool = False,
         ):
             super().__init__(
                 num_heads=num_heads,
@@ -1611,6 +1664,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 top_k=top_k,
                 use_cuda_graph=use_cuda_graph,
                 bf16_prefill_num_heads=bf16_prefill_num_heads,
+                use_nvfp4_cache=use_nvfp4_cache,
             )
             self.attn_inputs = None
             self.cp_info = None
@@ -1951,18 +2005,28 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 self.full_rope_pos_ids = None
 
             # Gather path: prefill-only, gated by USE_GATHER_PATH (mirrors non-CP).
+            use_nvfp4_cache = getattr(self, "use_nvfp4_cache", False)
             gather_enabled = (
-                (os.environ.get("USE_GATHER_PATH", "0") == "1" or self.kv_cache_sharded)
+                not use_nvfp4_cache
+                and (
+                    os.environ.get("USE_GATHER_PATH", "0") == "1"
+                    or self.kv_cache_sharded
+                )
                 and attn_inputs is not None
                 and getattr(attn_inputs, "is_prefill", False)
                 and (not self.use_cuda_graph or self.kv_cache_sharded)
             )
             self._gather = self._build_gather_workspace() if gather_enabled else None
-            new_offsets = (
-                self._gather.workspace_starts[self.precomputed_req_ids]
-                if self._gather is not None and self.precomputed_req_ids is not None
-                else None
-            )
+            new_offsets = None
+            if self.precomputed_req_ids is not None:
+                if use_nvfp4_cache and self.kv_cache_sharded:
+                    new_offsets = mla_params.prefill_ragged_kv_len_indptr_d[
+                        self.precomputed_req_ids
+                    ]
+                elif self._gather is not None:
+                    new_offsets = self._gather.workspace_starts[
+                        self.precomputed_req_ids
+                    ]
             self.precomputed_kv_offsets = _copy_or_replace_graph_tensor(
                 self.precomputed_kv_offsets,
                 new_offsets,
@@ -2025,6 +2089,13 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 self.write_cache_store_impl, self.attn_inputs, kv_cache
             )
 
+            use_nvfp4_cache = getattr(self, "use_nvfp4_cache", False)
+            # All CP ranks must participate in history gather, even with no local Q.
+            packed_history = (
+                self._gather_nvfp4_cp_history(kv_cache)
+                if use_nvfp4_cache and self.kv_cache_sharded
+                else None
+            )
             no_q_work = (
                 topk is None
                 or topk.numel() == 0
@@ -2059,7 +2130,11 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 q0 = q if q.is_contiguous() else q.contiguous()
             else:
                 q0 = q[self.total_local_ids].contiguous()
-            if self._gather is not None:
+            if use_nvfp4_cache:
+                out0 = self._attend_nvfp4_cp(
+                    q0, kv_cache, topk, packed_history, attn_sink
+                )
+            elif self._gather is not None:
                 out0 = self._attend_gather(
                     q0,
                     kv_cache,

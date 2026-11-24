@@ -54,8 +54,16 @@ def get_mla_impl(
         if (attn_inputs.is_prefill and not use_decode_mla)
         else DECODE_MLA_IMPS
     )
+    use_nvfp4_cache = attn_configs.kv_cache_dtype == getattr(
+        KvCacheDataType, "NVFP4", None
+    )
     allow_cuda_graph_prefill_absorb = False
-    if is_cuda_graph and attn_inputs.is_prefill and not use_decode_mla:
+    if (
+        is_cuda_graph
+        and attn_inputs.is_prefill
+        and not use_decode_mla
+        and not use_nvfp4_cache
+    ):
         try:
             input_lengths = attn_inputs.input_lengths
             prefix_lengths = attn_inputs.prefix_lengths
@@ -76,6 +84,8 @@ def get_mla_impl(
             allow_cuda_graph_prefill_absorb = False
     for impl in mla_impls:
         impl_name = impl.__name__
+        if use_nvfp4_cache and not impl.is_sparse():
+            continue
         if not impl.support(attn_configs, attn_inputs):
             continue
 
@@ -84,6 +94,7 @@ def get_mla_impl(
             attn_inputs.is_prefill
             and not use_decode_mla
             and not force_sparse_mla
+            and not use_nvfp4_cache
             and not (
                 parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
             )

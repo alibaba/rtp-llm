@@ -10,7 +10,7 @@ from rtp_llm.models_py import prefill_optimization as _prefill_optimization
 from rtp_llm.models_py.distributed.collective_torch import Group, barrier
 from rtp_llm.models_py.distributed.pynccl_cp import all_gather
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
-from rtp_llm.models_py.modules.base.cuda.paged_mqa import paged_mqa_context_lens
+from rtp_llm.models_py.modules.base.cuda.paged_mqa import paged_mqa_schedule_inputs
 from rtp_llm.models_py.modules.base.cuda.paged_mqa import (
     physical_block_table as _physical_block_table,
 )
@@ -33,6 +33,7 @@ except Exception as e:
 
 
 _persistent_topk_workspace: Dict[torch.device, torch.Tensor] = {}
+_INDEXER_FP8_STAGING_BYTES = 256 << 20
 
 
 def _get_topk_workspace(device: torch.device) -> torch.Tensor:
@@ -277,6 +278,7 @@ class IndexerOp(nn.Module):
         scale_fmt: str = "ue8m0",
         is_neox_style: bool = True,
         use_hadamard: bool = True,
+        nvfp4_kv_cache: bool = False,
     ):
         """
         Initialize IndexerOp.
@@ -302,6 +304,9 @@ class IndexerOp(nn.Module):
         self.scale_fmt = scale_fmt
         self.is_neox_style = is_neox_style
         self.use_hadamard = use_hadamard
+        self.nvfp4_kv_cache = nvfp4_kv_cache
+        if nvfp4_kv_cache and (index_head_dim != 128 or block_size != 128):
+            raise ValueError("NVFP4 indexer KV requires 128-element keys")
         # vLLM HY4 uses the quantizer default (1e-10). The legacy shared
         # indexer path uses 1e-4 and retains that behavior.
         self.q_quant_eps = 1e-4 if use_hadamard else 1e-10
@@ -369,9 +374,80 @@ class IndexerOp(nn.Module):
         return self.index_head_dim + self.index_head_dim // self.block_size * 4
 
     def _kv_cache_blocks(self, kv_cache: KVCache) -> torch.Tensor:
-        return _indexer_cache_blocks(
-            kv_cache.kv_scale_base, self.blocksize, self._head_dim_with_sf()
+        stride = self._head_dim_with_sf()
+        if self.nvfp4_kv_cache:
+            from rtp_llm.models_py.kernels.cuda.nvfp4_kv import INDEXER_ROW_BYTES
+
+            stride = INDEXER_ROW_BYTES
+        return _indexer_cache_blocks(kv_cache.kv_scale_base, self.blocksize, stride)
+
+    @staticmethod
+    def _modern_mqa_api() -> bool:
+        return hasattr(deep_gemm, "fp8_fp4_mqa_logits") and not hasattr(
+            deep_gemm, "fp8_mqa_logits"
         )
+
+    @classmethod
+    def _mxfp8_mqa(cls, device: torch.device) -> bool:
+        return (
+            cls._modern_mqa_api()
+            and device.type == "cuda"
+            and torch.cuda.get_device_capability(device)[0] == 10
+        )
+
+    @staticmethod
+    def _mxfp8_query(q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # The original per-head Q scale is already folded into the head
+        # weights. Unit UE8M0 scales keep the FP8 Q values unchanged.
+        scales = torch.full(
+            q.shape[:-1], 0x7F7F7F7F, dtype=torch.int32, device=q.device
+        )
+        return q, scales
+
+    def _prefill_kv_for_mqa(self, values, scale_bytes):
+        if not self._mxfp8_mqa(values.device):
+            return values, scale_bytes.view(torch.float32).squeeze(-1)
+        if self.nvfp4_kv_cache:
+            return values, scale_bytes.view(torch.int32).squeeze(-1)
+
+        from rtp_llm.models_py.kernels.cuda.nvfp4_kv import ragged_fp8_to_mxfp8
+
+        return ragged_fp8_to_mxfp8(values, scale_bytes.view(torch.float32).squeeze(-1))
+
+    def _prefill_mqa_logits(self, q, kv, weights, ks, ke, max_seq_len):
+        if not self._modern_mqa_api():
+            logits = deep_gemm.fp8_mqa_logits(
+                q, kv, weights, ks, ke, clean_logits=False
+            )
+            return logits, ks, ke
+
+        if self._mxfp8_mqa(q.device):
+            query = self._mxfp8_query(q)
+            weights = weights.to(torch.bfloat16).contiguous()
+        else:
+            query = (q, None)
+        logits = deep_gemm.fp8_fp4_mqa_logits(query, kv, weights, ks, ke, max_seq_len)
+        # The modern return is compact: column 0 corresponds to K[ks[row]].
+        return logits.float(), torch.zeros_like(ks), ke - ks
+
+    def _gather_indexer_kv(self, cache, k_fp8, k_scale, block_table, cu_seqlens):
+        if self.nvfp4_kv_cache:
+            from rtp_llm.models_py.kernels.cuda.nvfp4_kv import gather_indexer_fp8
+
+            gather_indexer_fp8(
+                cache.view(torch.uint8),
+                k_fp8,
+                k_scale,
+                block_table,
+                cu_seqlens,
+                self.blocksize,
+                self.scale_fmt == "ue8m0",
+                mxfp8=self._mxfp8_mqa(cache.device),
+            )
+        else:
+            rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+                cache, k_fp8, k_scale, block_table, cu_seqlens
+            )
 
     def apply_rope_and_rotate_q_k(
         self,
@@ -532,12 +608,19 @@ class IndexerOp(nn.Module):
             slot_mapping: Physical slot indices [num_tokens]
         """
         assert kv_cache is not None, "kv_cache is required"
+        cache = self._kv_cache_blocks(kv_cache)
+        if self.nvfp4_kv_cache:
+            from rtp_llm.models_py.kernels.cuda.nvfp4_kv import (
+                pack_nvfp4_rows,
+                write_nvfp4_rows,
+            )
+
+            write_nvfp4_rows(
+                cache.view(torch.uint8), pack_nvfp4_rows(key), slot_mapping
+            )
+            return
         rtp_llm_ops.indexer_k_quant_and_cache(
-            key,  # Original key in BF16/FP16 [num_tokens, index_head_dim]
-            self._kv_cache_blocks(kv_cache),  # [num_blocks, block_size, cache_stride]
-            slot_mapping,  # [num_tokens] physical slot indices
-            self.block_size,  # quantization block size (128)
-            self.scale_fmt,  # "ue8m0" for power-of-2 scaling
+            key, cache, slot_mapping, self.block_size, self.scale_fmt
         )
 
     def quant_k_cp_only(
@@ -552,13 +635,7 @@ class IndexerOp(nn.Module):
             key.contiguous(), group=Group.TP, role="indexer_k_bf16"
         ).reshape(-1, key.size(-1))
         restored_key = gathered_key[kv_restore_unpad_indices]
-        rtp_llm_ops.indexer_k_quant_and_cache(
-            restored_key,
-            self._kv_cache_blocks(kv_cache),
-            slot_mapping,
-            self.block_size,
-            self.scale_fmt,
-        )
+        self.quant_k_only(restored_key, kv_cache, slot_mapping)
 
     def quant_q_k(
         self,
@@ -599,13 +676,7 @@ class IndexerOp(nn.Module):
 
         # Cache key
         assert kv_cache is not None, "kv_cache is required"
-        rtp_llm_ops.indexer_k_quant_and_cache(
-            key,  # Original key in BF16/FP16 [num_tokens, index_head_dim]
-            self._kv_cache_blocks(kv_cache),  # [num_blocks, block_size, cache_stride]
-            slot_mapping,  # [num_tokens] physical slot indices
-            self.block_size,  # quantization block size (128)
-            self.scale_fmt,  # "ue8m0" for power-of-2 scaling
-        )
+        self.quant_k_only(key, kv_cache, slot_mapping)
 
         return q_fp8, q_scale
 
@@ -788,17 +859,11 @@ class IndexerOp(nn.Module):
         is_draft_extend = bool(getattr(attention_inputs, "is_draft_extend", False))
         is_multi_token_decode = is_target_verify or is_draft_extend
 
-        num_heads_kv = 1
-        head_dim_with_sf = self._head_dim_with_sf()
-        kv_cache_fp8 = (
-            self._kv_cache_blocks(kv_cache)
-            .view(-1, self.blocksize, num_heads_kv, head_dim_with_sf)
-            .view(dtype=torch.uint8)
-        )
-
         block_table = _physical_block_table(attention_inputs)
         lengths = fmha_params.expanded_seq_lens
-        kvlen_2d = paged_mqa_context_lens(attention_inputs, fmha_params)
+        kvlen_2d, query_indices = paged_mqa_schedule_inputs(
+            deep_gemm, attention_inputs, fmha_params
+        )
 
         if q_fp8.shape[0] == 0:
             return torch.empty(
@@ -823,51 +888,94 @@ class IndexerOp(nn.Module):
                     tokens_per_batch, dim=0, output_size=num_tokens
                 )
 
-        # Native MTP shares the request's page table and KV reads across queries.
-        # Keep this layout identical to the scheduler's context_lens layout.
+        # Native MTP shares page reads across a request's query rows.
         paged_q = q_fp8.view(*kvlen_2d.shape, self.index_n_heads, self.index_head_dim)
-
+        query_rows, queries_per_row = kvlen_2d.shape
         max_seq_len = block_table.shape[1] * self.blocksize
-        schedule_metadata = getattr(fmha_params, "schedule_metadata", None)
-        has_schedule_metadata = False
-        if isinstance(schedule_metadata, torch.Tensor):
-            try:
-                has_schedule_metadata = schedule_metadata.numel() > 0
-            except RuntimeError:
-                has_schedule_metadata = False
-        if not has_schedule_metadata:
-            schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
-                kvlen_2d,
-                self.blocksize,
-                deep_gemm.get_num_sms(),
+        cached_keys = self._kv_cache_blocks(kv_cache).view(dtype=torch.uint8)
+        mxfp8 = query_indices is not None
+        stage_kv = self.nvfp4_kv_cache or mxfp8
+        rows_per_chunk = query_rows
+        if stage_kv:
+            from rtp_llm.models_py.kernels.cuda.nvfp4_kv import (
+                FP8_INDEXER_ROW_BYTES,
+                indexer_paged_fp8,
             )
 
-        logits = deep_gemm.fp8_paged_mqa_logits(
-            paged_q,
-            kv_cache_fp8.view(dtype=torch.uint8),
-            weights,
-            kvlen_2d,
-            block_table,
-            schedule_metadata,
-            max_seq_len,
-            clean_logits=False,
-        )
+            # A decode graph's block table can be padded to max_seq_len.
+            # Bound staging by request rows, retaining all candidate keys for
+            # each query and stable shapes on every graph replay.
+            staged_row_bytes = max_seq_len * FP8_INDEXER_ROW_BYTES
+            rows_per_chunk = min(
+                query_rows,
+                max(1, _INDEXER_FP8_STAGING_BYTES // max(1, staged_row_bytes)),
+            )
+        else:
+            kv_fp8 = cached_keys.view(-1, self.blocksize, 1, self._head_dim_with_sf())
 
-        assert (
-            fmha_params.expanded_seq_lens.device == logits.device
-        ), "expanded_seq_lens must be on the same device as logits"
+        if mxfp8:
+            weights = weights.to(torch.bfloat16).contiguous()
+        full_schedule = getattr(fmha_params, "schedule_metadata", None)
+        if not isinstance(full_schedule, torch.Tensor) or not full_schedule.numel():
+            full_schedule = None
+        topk_result = q_fp8.new_empty(
+            (q_fp8.shape[0], self.index_topk), dtype=torch.int32
+        )
+        for start in range(0, query_rows, rows_per_chunk):
+            end = min(start + rows_per_chunk, query_rows)
+            out_start, out_end = start * queries_per_row, end * queries_per_row
+            part_lens = kvlen_2d[start:end]
+            part_blocks = block_table[start:end]
+            if stage_kv:
+                kv_fp8, part_blocks = indexer_paged_fp8(
+                    cached_keys,
+                    part_blocks,
+                    part_lens,
+                    self.blocksize,
+                    self.scale_fmt == "ue8m0",
+                    mxfp8=mxfp8,
+                    source_nvfp4=self.nvfp4_kv_cache,
+                )
+            indices = query_indices[: end - start] if mxfp8 else None
+            schedule = full_schedule if rows_per_chunk == query_rows else None
+            if schedule is None:
+                metadata_args = {} if indices is None else {"indices": indices}
+                schedule = deep_gemm.get_paged_mqa_logits_metadata(
+                    part_lens, self.blocksize, deep_gemm.get_num_sms(), **metadata_args
+                )
 
-        topk_result = logits.new_empty(
-            (logits.shape[0], self.index_topk), dtype=torch.int32
-        )
-        self._paged_topk_op(
-            logits,
-            lengths,
-            topk_result,
-            _get_topk_workspace(logits.device),
-            self.index_topk,
-            max_seq_len,
-        )
+            part_q = paged_q[start:end]
+            logits_args = (
+                kv_fp8,
+                weights[out_start:out_end],
+                part_lens,
+                part_blocks,
+                schedule,
+                max_seq_len,
+            )
+            if self._modern_mqa_api():
+                query = self._mxfp8_query(part_q) if mxfp8 else (part_q, None)
+                logits = deep_gemm.fp8_fp4_paged_mqa_logits(
+                    query, *logits_args, indices=indices
+                ).float()
+            else:
+                logits = deep_gemm.fp8_paged_mqa_logits(
+                    part_q, *logits_args, clean_logits=False
+                )
+            assert (
+                lengths.device == logits.device
+            ), "expanded_seq_lens must be on the same device as logits"
+            self._paged_topk_op(
+                logits,
+                lengths[out_start:out_end],
+                topk_result[out_start:out_end],
+                _get_topk_workspace(logits.device),
+                self.index_topk,
+                max_seq_len,
+            )
+            del logits, logits_args
+            if stage_kv:
+                del kv_fp8
 
         return topk_result
 
@@ -920,7 +1028,7 @@ class IndexerOp(nn.Module):
         )
 
         block_table = _prefill_physical_block_table(attention_inputs)
-        rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+        self._gather_indexer_kv(
             self._kv_cache_blocks(kv_cache),  # [num_blocks, block_size, cache_stride]
             k_fp8,  # output [num_tokens, index_head_dim]
             k_scale,  # output [num_tokens, scale_size]
@@ -930,7 +1038,7 @@ class IndexerOp(nn.Module):
 
         # Compute logits
         weights = weights.squeeze(-1)
-        kv_fp8 = (k_fp8, k_scale.view(torch.float32).squeeze(-1))
+        kv_fp8 = self._prefill_kv_for_mqa(k_fp8, k_scale)
 
         assert (
             fmha_params.ks is not None and fmha_params.ke is not None
@@ -955,21 +1063,21 @@ class IndexerOp(nn.Module):
         row_start = 0
         while row_start < num_rows:
             row_end = min(row_start + chunk_rows, num_rows)
-            logits = deep_gemm.fp8_mqa_logits(
+            logits, topk_start, topk_end = self._prefill_mqa_logits(
                 q_fp8[row_start:row_end],
                 kv_fp8,
                 weights[row_start:row_end],
                 fmha_params.ks[row_start:row_end],
                 fmha_params.ke[row_start:row_end],
-                clean_logits=False,
+                prefill_max_kv_len,
             )
             topk_part = logits.new_empty(
                 (logits.shape[0], self.index_topk), dtype=torch.int32
             )
             self._run_prefill_topk(
                 logits,
-                fmha_params.ks[row_start:row_end],
-                fmha_params.ke[row_start:row_end],
+                topk_start,
+                topk_end,
                 topk_part,
                 prefill_max_kv_len,
             )
@@ -1093,7 +1201,7 @@ class IndexerOp(nn.Module):
                     dtype=k_scale.dtype,
                     device=device,
                 )
-                rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+                self._gather_indexer_kv(
                     self._kv_cache_blocks(kv_cache),
                     actual_k,
                     actual_s,
@@ -1122,7 +1230,7 @@ class IndexerOp(nn.Module):
             # synchronize/empty_cache on the hot path.
             del actual_k, actual_s
         else:
-            rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+            self._gather_indexer_kv(
                 self._kv_cache_blocks(kv_cache),
                 k_fp8,
                 k_scale,
@@ -1225,7 +1333,7 @@ class IndexerOp(nn.Module):
             k_fp8, k_scale = prepared_k
         if not has_local_ids:
             return torch.empty((0, self.index_topk), dtype=torch.int32, device=device)
-        kv_fp8_full = (k_fp8, k_scale.view(torch.float32).squeeze(-1))
+        kv_fp8_full = self._prefill_kv_for_mqa(k_fp8, k_scale)
         prefill_max_kv_len = int(
             getattr(fmha_params, "prefill_max_kv_len", total_kv_tokens)
         )
@@ -1253,21 +1361,21 @@ class IndexerOp(nn.Module):
             row_start = 0
             while row_start < nr:
                 row_end = min(row_start + chunk_rows, nr)
-                logits_p = deep_gemm.fp8_mqa_logits(
+                logits_p, topk_start, topk_end = self._prefill_mqa_logits(
                     q_part[row_start:row_end],
                     kv_fp8_full,
                     weights_part[row_start:row_end],
                     ks[row_start:row_end],
                     ke[row_start:row_end],
-                    clean_logits=False,
+                    prefill_max_kv_len,
                 )
                 topk_part = logits_p.new_empty(
                     (logits_p.shape[0], self.index_topk), dtype=torch.int32
                 )
                 self._run_prefill_topk(
                     logits_p,
-                    ks[row_start:row_end],
-                    ke[row_start:row_end],
+                    topk_start,
+                    topk_end,
                     topk_part,
                     prefill_max_kv_len,
                 )
@@ -1325,13 +1433,7 @@ class IndexerOp(nn.Module):
             gathered_key = gathered_key.reshape(-1, key.size(-1))
             restored_key = gathered_key[kv_restore_unpad_indices]  # element wise
 
-            rtp_llm_ops.indexer_k_quant_and_cache(
-                restored_key,
-                self._kv_cache_blocks(kv_cache),
-                slot_mapping,
-                self.block_size,
-                self.scale_fmt,
-            )
+            self.quant_k_only(restored_key, kv_cache, slot_mapping)
             query_flat = query.view(-1, self.index_head_dim)
             q_fp8, q_scale = sgl_per_token_group_quant_fp8(
                 query_flat,
@@ -1398,7 +1500,7 @@ class IndexerOp(nn.Module):
             )
 
             block_table = _prefill_physical_block_table(attention_inputs)
-            rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+            self._gather_indexer_kv(
                 self._kv_cache_blocks(
                     kv_cache
                 ),  # [num_blocks, block_size, cache_stride]
@@ -1410,7 +1512,7 @@ class IndexerOp(nn.Module):
 
             # Compute logits
             weights = weights.squeeze(-1)
-            kv_fp8 = (k_fp8, k_scale.view(torch.float32).squeeze(-1))
+            kv_fp8 = self._prefill_kv_for_mqa(k_fp8, k_scale)
 
             assert (
                 fmha_params.ks is not None and fmha_params.ke is not None
@@ -1432,21 +1534,21 @@ class IndexerOp(nn.Module):
             row_start = 0
             while row_start < num_rows:
                 row_end = min(row_start + chunk_rows, num_rows)
-                logits = deep_gemm.fp8_mqa_logits(
+                logits, topk_start, topk_end = self._prefill_mqa_logits(
                     q_fp8[row_start:row_end],
                     kv_fp8,
                     weights[row_start:row_end],
                     fmha_params.ks[row_start:row_end],
                     fmha_params.ke[row_start:row_end],
-                    clean_logits=False,
+                    prefill_max_kv_len,
                 )
                 topk_part = logits.new_empty(
                     (logits.shape[0], self.index_topk), dtype=torch.int32
                 )
                 self._run_prefill_topk(
                     logits,
-                    fmha_params.ks[row_start:row_end],
-                    fmha_params.ke[row_start:row_end],
+                    topk_start,
+                    topk_end,
                     topk_part,
                     prefill_max_kv_len,
                 )
@@ -1576,7 +1678,7 @@ class IndexerOp(nn.Module):
                         dtype=k_scale.dtype,
                         device=device,
                     )
-                    rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+                    self._gather_indexer_kv(
                         self._kv_cache_blocks(kv_cache),
                         actual_k,
                         actual_s,
@@ -1605,7 +1707,7 @@ class IndexerOp(nn.Module):
                 # synchronize/empty_cache on the hot path.
                 del actual_k, actual_s
             else:
-                rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+                self._gather_indexer_kv(
                     self._kv_cache_blocks(kv_cache),
                     k_fp8,
                     k_scale,
@@ -1616,7 +1718,7 @@ class IndexerOp(nn.Module):
                 return torch.empty(
                     (0, self.index_topk), dtype=torch.int32, device=device
                 )
-            kv_fp8_full = (k_fp8, k_scale.view(torch.float32).squeeze(-1))
+            kv_fp8_full = self._prefill_kv_for_mqa(k_fp8, k_scale)
             prefill_max_kv_len = int(
                 getattr(fmha_params, "prefill_max_kv_len", total_kv_tokens)
             )
@@ -1639,21 +1741,21 @@ class IndexerOp(nn.Module):
                 row_start = 0
                 while row_start < nr:
                     row_end = min(row_start + chunk_rows, nr)
-                    logits_p = deep_gemm.fp8_mqa_logits(
+                    logits_p, topk_start, topk_end = self._prefill_mqa_logits(
                         q_part[row_start:row_end],
                         kv_fp8_full,
                         weights_part[row_start:row_end],
                         ks[row_start:row_end],
                         ke[row_start:row_end],
-                        clean_logits=False,
+                        prefill_max_kv_len,
                     )
                     topk_part = logits_p.new_empty(
                         (logits_p.shape[0], self.index_topk), dtype=torch.int32
                     )
                     self._run_prefill_topk(
                         logits_p,
-                        ks[row_start:row_end],
-                        ke[row_start:row_end],
+                        topk_start,
+                        topk_end,
                         topk_part,
                         prefill_max_kv_len,
                     )

@@ -166,6 +166,8 @@ class Glm5Cmp:
         if str(getattr(self.config, "model_type", "")) not in _SUPPORTED_MODEL_TYPES:
             return "unsupported model type"
         attn = self.config.attn_config
+        if getattr(getattr(attn, "kv_cache_dtype", None), "name", None) == "NVFP4":
+            return "NVFP4 KV requires the sparse MLA cache adapters"
         if not bool(getattr(attn, "use_mla", False)):
             return "attention is not MLA"
         if int(getattr(attn, "kernel_tokens_per_block", 0)) != 64:
@@ -181,6 +183,8 @@ class Glm5Cmp:
         return None
 
     def _static_moe_prepack_disabled_reason(self) -> str | None:
+        if getattr(getattr(self.mlp, "fused_moe", None), "_native_nvfp4", False):
+            return "NVFP4 uses block-16 activation scales, not FP8 CMP prepacking"
         # RTP-kernel writes router outputs directly into MegaMoE's stable input
         # buffers. Keep this optional optimization limited to the deployed ABI.
         config = self.config

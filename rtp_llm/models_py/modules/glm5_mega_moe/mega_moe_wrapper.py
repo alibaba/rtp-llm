@@ -55,6 +55,10 @@ class MegaMoeWrapper(nn.Module):
     """
 
     def _get_mega_moe_cls(self):
+        if getattr(self, "_native_nvfp4", False):
+            from .mega_moe_nvfp4 import GLM5MegaMoENVFP4
+
+            return GLM5MegaMoENVFP4
         return GLM5MegaMoE
 
     def __init__(
@@ -67,6 +71,9 @@ class MegaMoeWrapper(nn.Module):
         max_generate_batch_size: int = 0,
     ):
         super().__init__()
+        from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
+            get_mega_moe_weight_format,
+        )
         from rtp_llm.utils.model_weight import W
 
         ep_size = parallelism_config.ep_size
@@ -149,6 +156,14 @@ class MegaMoeWrapper(nn.Module):
             )
             max_tokens_per_rank = resolved
 
+        self._native_nvfp4 = get_mega_moe_weight_format() == "nvfp4"
+        if self._native_nvfp4:
+            if type(self) is not MegaMoeWrapper:
+                raise ValueError(
+                    "Native NVFP4 requires the routed-only MegaMoE wrapper"
+                )
+            if W.moe_w1_s2 not in weights or W.moe_w2_s2 not in weights:
+                raise ValueError("Native NVFP4 requires W1 and W2 projection scales")
         self.mega_moe = self._get_mega_moe_cls().from_params(
             layer_id=layer_idx,
             dim=dim,
@@ -173,7 +188,17 @@ class MegaMoeWrapper(nn.Module):
                 "quantization without checkpoint scales is not supported."
             )
 
-        if w1.dtype == torch.int8 and w2.dtype == torch.int8:
+        if self._native_nvfp4:
+            self.mega_moe.setup_weights_from_nvfp4(
+                w1,
+                s1,
+                weights.pop(W.moe_w1_s2),
+                w2,
+                s2,
+                weights.pop(W.moe_w2_s2),
+            )
+            del w1, s1, w2, s2
+        elif w1.dtype == torch.int8 and w2.dtype == torch.int8:
             self.mega_moe.setup_weights_from_fp4(
                 w1_w=w1,
                 w1_s=s1,
@@ -257,6 +282,7 @@ class MegaMoeWrapper(nn.Module):
         )
         clone.expert_num = self.expert_num
         clone._activation_clamp = self._activation_clamp
+        clone._native_nvfp4 = getattr(self, "_native_nvfp4", False)
         return clone
 
     @property

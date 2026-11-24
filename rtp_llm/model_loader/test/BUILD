@@ -46,3 +46,21 @@ py_test(
     tags = ["SM103_CU13"],
     exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
 )
+
+py_test(
+    name = "test_native_mega_moe_nvfp4",
+    srcs = ["test_native_mega_moe_nvfp4.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["SM100_ARM_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "test_native_mega_moe_nvfp4_ep",
+    srcs = ["test_native_mega_moe_nvfp4.py", "test_native_mega_moe_nvfp4_ep.py"],
+    main = "test_native_mega_moe_nvfp4_ep.py",
+    env = {"GPU_COUNT": "4"},
+    deps = ["//rtp_llm:testlib"],
+    tags = ["SM100_ARM_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "4"},
+)

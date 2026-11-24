@@ -48,6 +48,31 @@ class ServerArgsSetTest(TestCase):
                 parser.parse_args(cli_args)
                 self.assertEqual(admission.sandbox_process_memory_limit_mb, expected)
 
+    def test_nvfp4_kv_cache_flag_and_pickle(self):
+        from rtp_llm.ops import KVCacheConfig
+        from rtp_llm.server.server_args.kv_cache_group_args import (
+            init_kv_cache_group_args,
+        )
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        for env, argv, expected in (
+            (None, [], 0),
+            ("1", [], 1),
+            ("1", ["--nvfp4_kv_cache", "0"], 0),
+        ):
+            with self.subTest(env=env, argv=argv):
+                os.environ.pop("NVFP4_KV_CACHE", None)
+                if env is not None:
+                    os.environ["NVFP4_KV_CACHE"] = env
+                config = KVCacheConfig()
+                parser = EnvArgumentParser()
+                parser.set_root_config(SimpleNamespace())
+                init_kv_cache_group_args(parser, config)
+                parser.parse_args(argv)
+                self.assertEqual(config.nvfp4_kv_cache, expected)
+                restored = pickle.loads(pickle.dumps(config))
+                self.assertEqual(restored.nvfp4_kv_cache, expected)
+
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""
         # Set environment variables

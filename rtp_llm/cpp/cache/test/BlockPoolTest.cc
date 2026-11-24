@@ -279,6 +279,53 @@ TEST_F(BlockPoolTest, GpuCacheTensorsCoverTieredMlaIndexerAndHbm) {
     }
 }
 
+TEST_F(BlockPoolTest, Nvfp4SparseMlaAndIndexerStorageGeometry) {
+    auto model                                 = makeTestModelConfig(4);
+    model.attn_config.use_mla                  = true;
+    model.attn_config.is_sparse                = true;
+    model.attn_config.kv_cache_dtype           = KvCacheDataType::NVFP4;
+    model.attn_config.kv_lora_rank             = 512;
+    model.attn_config.rope_head_dim            = 64;
+    model.attn_config.indexer_head_dim         = 128;
+    model.attn_config.tokens_per_block         = 64;
+    model.model_type                           = "glm_5";
+    model.enable_glm52_shared_indexer_kv_cache = true;
+    model.glm52_indexer_kv_slot_mapping        = {0, 0, 1, 1};
+
+    auto cache      = SingleConfigCreator::createSingleConfig(model, ParallelismConfig{}, false);
+    cache.block_num = 8;
+    EXPECT_EQ(cache.dtype, DataType::TYPE_UINT8);
+    EXPECT_EQ(cache.kv_block_stride_bytes, 432u * 64u);
+    EXPECT_EQ(cache.kv_scale_stride_bytes, 80u * 64u);
+    EXPECT_EQ(cache.block_size_bytes, (432u * 4u + 80u * 2u) * 64u);
+
+    BlockPool pool(BlockPoolConfigHelper::createConfig(cache), AllocationType::HOST);
+    ASSERT_TRUE(pool.init());
+    const auto& mla     = pool.allLayerCacheBase();
+    const auto& indexer = pool.allLayerScaleCacheBase();
+    ASSERT_EQ(mla.size(), 4u);
+    ASSERT_EQ(indexer.size(), 4u);
+    EXPECT_EQ(mla[0].scalar_type(), torch::kUInt8);
+    EXPECT_EQ(mla[0].sizes().vec(), (std::vector<int64_t>{8, 64, 432}));
+    EXPECT_EQ(indexer[0].sizes().vec(), (std::vector<int64_t>{8, 64, 80}));
+    EXPECT_FALSE(indexer[1].defined());
+    EXPECT_TRUE(indexer[2].defined());
+    EXPECT_FALSE(indexer[3].defined());
+
+    const auto parts = pool.convertIndexToBuffer(0, 3);
+    ASSERT_EQ(parts.size(), 2u);
+    EXPECT_EQ(parts[0].size_bytes, 432u * 64u);
+    EXPECT_EQ(parts[1].size_bytes, 80u * 64u);
+    EXPECT_EQ(parts[0].addr, mla[0][3].data_ptr());
+    EXPECT_EQ(parts[1].addr, indexer[0][3].data_ptr());
+    EXPECT_EQ(pool.convertIndexToBuffer(1, 3).size(), 1u);
+
+    model.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
+    auto fp8                         = SingleConfigCreator::createSingleConfig(model, ParallelismConfig{}, false);
+    EXPECT_EQ(fp8.kv_block_stride_bytes, 656u * 64u);
+    EXPECT_EQ(fp8.kv_scale_stride_bytes, 132u * 64u);
+}
+
 // Initialization Test
 TEST_F(BlockPoolTest, ConstructorAndInit) {
     auto config = createTestConfig();

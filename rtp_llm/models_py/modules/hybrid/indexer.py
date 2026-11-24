@@ -13,7 +13,12 @@ from rtp_llm.config.prefill_optimization import (
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.modules import IndexerOp, LayerNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
-from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
+from rtp_llm.ops import (
+    AttentionConfigs,
+    HWKernelConfig,
+    KvCacheDataType,
+    ParallelismConfig,
+)
 from rtp_llm.ops.compute_ops import KVCache
 from rtp_llm.utils.model_weight import W
 
@@ -150,6 +155,10 @@ class Indexer(nn.Module):
             scale_fmt=self.scale_fmt,
             is_neox_style=self.is_neox_style,
             use_hadamard=self.use_hadamard,
+            nvfp4_kv_cache=(
+                getattr(attn_config, "kv_cache_dtype", None)
+                == getattr(KvCacheDataType, "NVFP4", object())
+            ),
         )
 
     def _prefill_cp_enabled(self) -> bool:
@@ -492,6 +501,7 @@ class Indexer(nn.Module):
             plan = getattr(cp_params, "indexer_cp_plan", None)
             early = (
                 getattr(plan, "early_history", None) is not None
+                and not getattr(self.indexer_op, "nvfp4_kv_cache", False)
                 and self.indexer_op.index_head_dim == 128
                 and self.indexer_op.block_size == 128
             )
@@ -632,6 +642,7 @@ class Indexer(nn.Module):
         plan = getattr(cp_params, "indexer_cp_plan", None)
         early_history = (
             getattr(plan, "early_history", None) is not None
+            and not getattr(self.indexer_op, "nvfp4_kv_cache", False)
             and self.indexer_op.index_head_dim == 128
             and self.indexer_op.block_size == 128
         )

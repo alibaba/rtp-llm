@@ -355,6 +355,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("linear_step", &KVCacheConfig::linear_step)
         .def_readwrite("int8_kv_cache", &KVCacheConfig::int8_kv_cache)
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
+        .def_readwrite("nvfp4_kv_cache", &KVCacheConfig::nvfp4_kv_cache)
         .def_readwrite("ssm_state_dtype", &KVCacheConfig::ssm_state_dtype)
         .def_readwrite("kv_cache_mem_mb", &KVCacheConfig::kv_cache_mem_mb)
         .def_readwrite("seq_size_per_block", &KVCacheConfig::seq_size_per_block)
@@ -459,7 +460,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_prefix_tree_memory_cache,
                                       self.enable_legacy_memory_connector_fallback,
                                       self.prefix_tree_memory_state_swa_pool_ratio,
-                                      self.enable_dsv4_state_block_independent_eviction);
+                                      self.enable_dsv4_state_block_independent_eviction,
+                                      self.nvfp4_kv_cache);
             },
             [](py::tuple t) {
                 const bool   has_disk_fields = t.size() >= 50 && py::isinstance<py::str>(t[9]);
@@ -543,6 +545,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                             if (extra_count >= 6) {
                                 c.prefix_tree_memory_state_swa_pool_ratio      = t[extra_start + 4].cast<int64_t>();
                                 c.enable_dsv4_state_block_independent_eviction = t[extra_start + 5].cast<bool>();
+                            }
+                            if (extra_count >= 7) {
+                                c.nvfp4_kv_cache = t[extra_start + 6].cast<int>();
                             }
                         }
                     }
@@ -1408,7 +1413,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::enum_<KvCacheDataType>(m, "KvCacheDataType")
         .value("BASE", KvCacheDataType::BASE)
         .value("INT8", KvCacheDataType::INT8)
-        .value("FP8", KvCacheDataType::FP8);
+        .value("FP8", KvCacheDataType::FP8)
+        .value("NVFP4", KvCacheDataType::NVFP4);
 
     // Register RopeStyle enum
     py::enum_<RopeStyle>(m, "RopeStyle")

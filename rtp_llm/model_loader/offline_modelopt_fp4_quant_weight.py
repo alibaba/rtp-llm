@@ -361,6 +361,15 @@ def is_offline_mega_moe_fp4_ckpt(database: Optional[BaseDatabase]) -> bool:
                 with open(cfg_path) as f:
                     cfg = _json.load(f)
                 qc = cfg.get("quantization_config") or {}
+                # NVFP4 has E4M3 block-16 scales AND per-tensor scale_2.
+                # Its .weight_scale suffix alone does not imply MXFP4.
+                if str(qc.get("quant_algo", "")).upper() == "NVFP4":
+                    return False
+                if (
+                    str((qc.get("quantization") or {}).get("quant_algo", "")).upper()
+                    == "NVFP4"
+                ):
+                    return False
                 if qc.get("expert_dtype") == "fp4":
                     return True
                 modelopt_quant = qc.get("quantization") or {}
@@ -376,8 +385,10 @@ def is_offline_mega_moe_fp4_ckpt(database: Optional[BaseDatabase]) -> bool:
 
     # (2) fallback: legacy ``.weight_scale`` only (not ``.scale``)
     try:
-        names = database.get_pretrain_tensor_names()
+        names = list(database.get_pretrain_tensor_names())
     except Exception:
+        return False
+    if any(".experts." in n and n.endswith(".weight_scale_2") for n in names):
         return False
     for n in names:
         if _OFFLINE_FP4_SCALE_RE.search(n):
@@ -386,7 +397,10 @@ def is_offline_mega_moe_fp4_ckpt(database: Optional[BaseDatabase]) -> bool:
 
 
 def wrap_moe_for_offline_fp4(
-    weight: WeightModule, scale_dtype: torch.dtype = torch.float32
+    weight: WeightModule,
+    scale_dtype: torch.dtype = torch.float32,
+    *,
+    convert_to_nvfp4: bool = False,
 ) -> WeightModule:
     """Replace a MoE w1/w2 wrapper with offline FP4 loader.
 
@@ -396,13 +410,20 @@ def wrap_moe_for_offline_fp4(
     """
     from rtp_llm.model_loader.per_block_fp8_quant_weight import PerBlockFp8Weight
 
+    loader = OfflineMegaMoeFp4MoeWeight
+    if convert_to_nvfp4:
+        from rtp_llm.model_loader.native_mega_moe_nvfp4_weight import (
+            OnlineMegaMoeNvfp4FromMxfp4Weight,
+        )
+
+        loader = OnlineMegaMoeNvfp4FromMxfp4Weight
     if isinstance(weight, PerBlockFp8Weight) and weight.name in _MEGA_MOE_KERNEL_NAMES:
         kernel = weight.kernel
         if kernel is None or not isinstance(kernel, MoeAtomicWeight):
             return weight
-        return OfflineMegaMoeFp4MoeWeight(kernel, scale_dtype=scale_dtype)
+        return loader(kernel, scale_dtype=scale_dtype)
     if isinstance(weight, MoeAtomicWeight) and weight.name in _MEGA_MOE_KERNEL_NAMES:
-        return OfflineMegaMoeFp4MoeWeight(weight, scale_dtype=scale_dtype)
+        return loader(weight, scale_dtype=scale_dtype)
     return weight
 
 
@@ -441,13 +462,17 @@ def wrap_for_offline_fp4(
     weight: WeightModule,
     include_shared_expert: bool = False,
     scale_dtype: torch.dtype = torch.float32,
+    *,
+    convert_to_nvfp4: bool = False,
 ) -> WeightModule:
     """Replace offline FP4 MoE weights, optionally including shared experts.
 
     ``mega_moe`` only consumes routed expert weights. ``mega_moe_se`` and
     ``mega_moe_fused`` also wrap shared-expert FP8 per-block weights.
     """
-    wrapped = wrap_moe_for_offline_fp4(weight, scale_dtype=scale_dtype)
+    wrapped = wrap_moe_for_offline_fp4(
+        weight, scale_dtype=scale_dtype, convert_to_nvfp4=convert_to_nvfp4
+    )
     if wrapped is not weight or not include_shared_expert:
         return wrapped
     return wrap_shared_expert_for_offline_fp4(weight, scale_dtype=scale_dtype)

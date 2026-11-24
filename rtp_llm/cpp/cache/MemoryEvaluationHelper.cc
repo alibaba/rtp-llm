@@ -30,6 +30,9 @@ void MemoryEvaluationHelper::updateMemoryIfNeeded(size_t& current_size, size_t m
 }
 
 rtp_llm::DataType MemoryEvaluationHelper::getDataTypeForCache(const ModelConfig& model_config) {
+    if (model_config.attn_config.kv_cache_dtype == KvCacheDataType::NVFP4) {
+        return rtp_llm::DataType::TYPE_UINT8;
+    }
 #if defined(BUILDING_ARM_ONLY)
     auto dtype =
         model_config.attn_config.kv_cache_dtype == KvCacheDataType::INT8 ? rtp_llm::TYPE_INT8 : rtp_llm::TYPE_FP32;

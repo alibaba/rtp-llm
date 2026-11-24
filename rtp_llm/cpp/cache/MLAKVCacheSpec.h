@@ -14,6 +14,12 @@ namespace rtp_llm {
 struct MLAKVCacheSpec: public KVCacheSpec {
     uint32_t kv_lora_rank;
     uint32_t rope_head_dim;
+    bool     is_nvfp4 = false;
+    // Each row contains packed E2M1, one E4M3 scale per 16 values, a FP32
+    // row scale, then BF16 RoPE for MLA. Pad both rows to 16-byte alignment.
+    static constexpr size_t kNvfp4MlaNopeBytes    = 256 + 32 + 4;
+    static constexpr size_t kNvfp4MlaRowBytes     = 432;
+    static constexpr size_t kNvfp4IndexerRowBytes = 80;
     // DSA (DeepSeek Sparse Attention) indexer K cache piggybacks on the kv_scale
     // slot of the layout (132 bytes per token = 128B fp8 K + 4B fp32 scale per
     // 128-elem block, ×seq_size_per_block per cache block). When ``is_sparse``
@@ -36,9 +42,17 @@ struct MLAKVCacheSpec: public KVCacheSpec {
         rope_head_dim      = static_cast<uint32_t>(attn_config.rope_head_dim);
         is_sparse          = attn_config.is_sparse;
         indexer_head_dim   = static_cast<uint32_t>(attn_config.indexer_head_dim);
+        is_nvfp4           = attn_config.kv_cache_dtype == KvCacheDataType::NVFP4;
+        if (is_nvfp4) {
+            RTP_LLM_CHECK_WITH_INFO(is_sparse && kv_lora_rank == 512 && rope_head_dim == 64 && indexer_head_dim == 128,
+                                    "NVFP4 KV requires sparse MLA with dimensions 512/64/128");
+        }
     }
 
     size_t block_size() const override {
+        if (is_nvfp4) {
+            return kNvfp4MlaRowBytes * seq_size_per_block;
+        }
         auto is_fp8      = (dtype == DataType::TYPE_FP8_E4M3 || dtype == DataType::TYPE_FP8_E8M0);
         auto single_size = local_head_num_kv * (kv_lora_rank + rope_head_dim);
         if (is_fp8) {
@@ -51,9 +65,15 @@ struct MLAKVCacheSpec: public KVCacheSpec {
         return single_size * seq_size_per_block;
     }
     size_t k_block_size() const override {
+        if (is_nvfp4) {
+            return kNvfp4MlaNopeBytes * seq_size_per_block;
+        }
         return local_head_num_kv * kv_lora_rank * seq_size_per_block;
     }
     size_t v_block_size() const override {
+        if (is_nvfp4) {
+            return (kNvfp4MlaRowBytes - kNvfp4MlaNopeBytes) * seq_size_per_block;
+        }
         return local_head_num_kv * rope_head_dim * seq_size_per_block;
     }
 
@@ -67,12 +87,15 @@ struct MLAKVCacheSpec: public KVCacheSpec {
         return v_block_size() * rtp_llm::getTypeSize(dtype);
     }
 
-    // DSA indexer K cache: 128 bytes FP8 + 4 bytes FP32 scale per 128-elem
-    // quant block (`indexer_head_dim/128 * 4`), per token, times
+    // DSA indexer K cache: the baseline is 128 bytes FP8 + 4 bytes FP32
+    // scale per 128-elem quant block (`indexer_head_dim/128 * 4`), per token, times
     // seq_size_per_block tokens per cache block. Returns 0 when DSA is off.
     size_t scale_block_size_bytes() const override {
         if (!is_sparse || indexer_head_dim == 0) {
             return 0;
+        }
+        if (is_nvfp4) {
+            return kNvfp4IndexerRowBytes * seq_size_per_block;
         }
         return static_cast<size_t>(indexer_head_dim + indexer_head_dim / 128 * 4)
                * static_cast<size_t>(seq_size_per_block);

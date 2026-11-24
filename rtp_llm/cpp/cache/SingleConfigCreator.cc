@@ -28,8 +28,12 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     config.dtype     = dtype;
     config.is_sparse = model_config.attn_config.is_sparse;
 
+    const bool use_mla  = model_config.attn_config.use_mla && model_config.mla_ops_type != rtp_llm::MlaOpsType::MHA;
+    const bool is_nvfp4 = model_config.attn_config.kv_cache_dtype == KvCacheDataType::NVFP4;
+    RTP_LLM_CHECK_WITH_INFO(!is_nvfp4 || use_mla, "NVFP4 KV cache requires the sparse MLA backend");
+
     KVCacheSpecPtr spec;
-    if (model_config.attn_config.use_mla && model_config.mla_ops_type != rtp_llm::MlaOpsType::MHA) {
+    if (use_mla) {
         spec = std::make_shared<MLAKVCacheSpec>(model_config.attn_config, parallelism_config);
     } else {
         spec = std::make_shared<MHAKVCacheSpec>(model_config.attn_config, parallelism_config);
@@ -47,8 +51,10 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     config.kv_scale_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
 
     if (config.is_sparse) {
-        auto indexer_dim             = model_config.attn_config.indexer_head_dim;
-        config.kv_scale_stride_bytes = (indexer_dim + indexer_dim / 128 * 4) * spec->seq_size_per_block;
+        if (!use_mla) {
+            const auto indexer_dim       = model_config.attn_config.indexer_head_dim;
+            config.kv_scale_stride_bytes = (indexer_dim + indexer_dim / 128 * 4) * spec->seq_size_per_block;
+        }
         size_t indexer_slot_num      = config.layer_num;
         if (model_config.enable_glm52_shared_indexer_kv_cache) {
             RTP_LLM_CHECK_WITH_INFO(!is_mtp, "DSA shared Indexer KV cache must not be enabled for the MTP model");

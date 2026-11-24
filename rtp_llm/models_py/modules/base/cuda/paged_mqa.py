@@ -43,6 +43,27 @@ def paged_mqa_context_lens(attention_inputs: Any, fmha_params: Any) -> torch.Ten
     return lengths.reshape(-1, 1)
 
 
+def paged_mqa_schedule_inputs(
+    deep_gemm: Any, attention_inputs: Any, fmha_params: Any
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Build matching context lengths and query mapping for 2.8.2 paged MQA."""
+    multi_token = bool(getattr(attention_inputs, "is_target_verify", False)) or bool(
+        getattr(attention_inputs, "is_draft_extend", False)
+    )
+    lengths = fmha_params.expanded_seq_lens if multi_token else fmha_params.kvlen_d
+    if (
+        not hasattr(deep_gemm, "fp8_paged_mqa_logits")
+        and hasattr(deep_gemm, "fp8_fp4_paged_mqa_logits")
+        and lengths.is_cuda
+        and torch.cuda.get_device_capability(lengths.device)[0] == 10
+    ):
+        # The 2.8.2 kernel resolves each flattened query through indices.
+        return lengths.reshape(-1, 1), torch.arange(
+            lengths.numel(), dtype=torch.int32, device=lengths.device
+        )
+    return paged_mqa_context_lens(attention_inputs, fmha_params), None
+
+
 def adaptive_target_layout(attention_inputs: Any) -> bool:
     return bool(getattr(attention_inputs, "is_target_verify", False)) and (
         os.environ.get("RTP_LLM_ADAPTIVE_VERIFICATION", "0") == "1"
