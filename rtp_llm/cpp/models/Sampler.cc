@@ -318,12 +318,15 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         from_batch_idx_out = to_batch_idx_out;
     }
 
-    return SamplerOutput({std::move(all_token_ids_out),
-                          std::move(all_cum_log_probs_out),
-                          std::move(inputs.all_probs),
-                          std::move(all_beam_indices),
-                          std::move(all_success),
-                          std::move(processor_errors)});
+    auto output                     = SamplerOutput({std::move(all_token_ids_out),
+                                                     std::move(all_cum_log_probs_out),
+                                                     std::move(inputs.all_probs),
+                                                     std::move(all_beam_indices),
+                                                     std::move(all_success),
+                                                     std::move(processor_errors)});
+    output.raw_logprobs_logits      = inputs.raw_logprobs_logits;
+    output.raw_logprobs_row_indices = inputs.raw_logprobs_row_indices;
+    return output;
 }
 
 std::vector<std::optional<ErrorInfo>> Sampler::preprocessLogits(const SamplerInputs& inputs) {

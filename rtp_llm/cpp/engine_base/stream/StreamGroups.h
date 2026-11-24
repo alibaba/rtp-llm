@@ -313,6 +313,35 @@ public:
         return false;
     }
 
+    bool needReturnLogProbs() const {
+        for (const auto& stream : context_streams_) {
+            if (stream->generateConfig()->return_logprobs) {
+                return true;
+            }
+        }
+        for (const auto& stream : decode_streams_) {
+            if (stream->generateConfig()->return_logprobs) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    int maxTopLogProbs() const {
+        int max_top_logprobs = 0;
+        for (const auto& stream : context_streams_) {
+            if (stream->generateConfig()->return_logprobs) {
+                max_top_logprobs = std::max(max_top_logprobs, stream->generateConfig()->top_logprobs);
+            }
+        }
+        for (const auto& stream : decode_streams_) {
+            if (stream->generateConfig()->return_logprobs) {
+                max_top_logprobs = std::max(max_top_logprobs, stream->generateConfig()->top_logprobs);
+            }
+        }
+        return max_top_logprobs;
+    }
+
     std::list<GenerateStreamPtr> allStreams() const {
         std::list<GenerateStreamPtr> all_streams = decode_streams_;
         all_streams.splice(all_streams.end(), std::list<GenerateStreamPtr>(context_streams_));

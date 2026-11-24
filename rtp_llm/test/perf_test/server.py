@@ -1,10 +1,59 @@
 import argparse
 import logging
 import os
+import time
 from typing import Dict, List, Optional
 
-from rtp_llm.test.perf_test.dataset import extract_arg
+import requests
+
+from rtp_llm.test.perf_test.engine_paths import extract_arg
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
+
+
+def configure_scheduler(
+    port, *, batch_size, mode, post, timeout=60, attempts=1, retry_delay=3
+):
+    """Require an explicit successful acknowledgement before issuing requests."""
+    if batch_size <= 0:
+        raise ValueError("scheduler batch_size must be positive")
+    if mode not in ("decode", "prefill"):
+        raise ValueError(f"unsupported scheduler mode: {mode}")
+    payload = {"batch_size": batch_size, "mode": mode}
+    for attempt in range(1, attempts + 1):
+        try:
+            response = post(
+                f"http://127.0.0.1:{port}/update_scheduler_info",
+                json=payload,
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            acknowledgement = response.json()
+            if (
+                not isinstance(acknowledgement, dict)
+                or acknowledgement.get("status") != "ok"
+                or acknowledgement.get("error")
+            ):
+                raise RuntimeError(f"scheduler rejected {payload}: {acknowledgement}")
+            logging.info(
+                "scheduler configured: payload=%s response=%s",
+                payload,
+                acknowledgement,
+            )
+            return acknowledgement
+        except Exception as error:
+            if attempt == attempts:
+                if attempts == 1:
+                    raise
+                raise RuntimeError(
+                    f"failed to configure scheduler after retries: {error!r}"
+                ) from error
+            logging.warning(
+                "failed to configure scheduler, retrying (%d/%d): %r",
+                attempt,
+                attempts,
+                error,
+            )
+            time.sleep(retry_delay)
 
 
 class EngineServer:
@@ -14,6 +63,12 @@ class EngineServer:
         self._args = args
         self._remaining_args = remaining_args
         self._server: Optional[MagaServerManager] = None
+        self._existing_port = getattr(args, "existing_server_port", None)
+        if self._existing_port is not None and (
+            type(self._existing_port) is not int
+            or not 1 <= self._existing_port <= 65535
+        ):
+            raise ValueError("existing_server_port must be between 1 and 65535")
 
     def start(
         self,
@@ -23,6 +78,14 @@ class EngineServer:
         use_batch_decode_scheduler: Optional[bool] = True,
     ) -> None:
         """Assemble CLI args and start MagaServerManager."""
+        if self._existing_port is not None:
+            response = requests.get(
+                f"http://127.0.0.1:{self._existing_port}/health", timeout=10
+            )
+            response.raise_for_status()
+            logging.info("Using existing engine server on port %d", self._existing_port)
+            return
+
         engine_cli = self._build_engine_cli(max_seq_len, max_concurrency)
 
         env: Dict[str, str] = {
@@ -36,6 +99,9 @@ class EngineServer:
             env["USE_BATCH_DECODE_SCHEDULER"] = (
                 "1" if use_batch_decode_scheduler else "0"
             )
+        if getattr(self._args, "cache_profile_backend", "kineto") == "nsys":
+            env["GEN_TIMELINE_SYNC"] = "0"
+            engine_cli += " --gen_timeline_sync=False"
 
         logging.info(f"Starting server with engine CLI: {engine_cli}")
         logging.info(f"remaining_args (raw list): {self._remaining_args}")
@@ -60,8 +126,16 @@ class EngineServer:
         if server is not None:
             server.stop_server()
 
+    def set_scheduler_mode(self, *, batch_size: int, mode: str) -> Dict[str, object]:
+        """Configure BatchDecodeScheduler before issuing performance requests."""
+        return configure_scheduler(
+            self.port, batch_size=batch_size, mode=mode, post=requests.post, attempts=20
+        )
+
     @property
     def port(self) -> int:
+        if self._existing_port is not None:
+            return self._existing_port
         assert self._server is not None, "Server not started"
         return self._server.port
 
