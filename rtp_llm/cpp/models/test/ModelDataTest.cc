@@ -327,10 +327,16 @@ void checkGroupedTpRound(GptModelInputs&                 inputs,
     }
     inputs.kv_cache_group_tags = local_tags;
     if (rank == 0) {
-        inputs.combo_tokens                = torch::tensor({7, 8}, torch::kInt32);
-        inputs.input_lengths               = torch::tensor({1, 1}, torch::kInt32);
-        inputs.sequence_lengths            = torch::tensor({4, 5}, torch::kInt32);
-        inputs.kv_cache_block_id           = physical.clone();
+        inputs.combo_tokens                     = torch::tensor({7, 8}, torch::kInt32);
+        inputs.input_lengths                    = torch::tensor({1, 1}, torch::kInt32);
+        inputs.sequence_lengths                 = torch::tensor({4, 5}, torch::kInt32);
+        inputs.pressure_session_id              = empty_tables ? "" : std::string("s\0x", 3);
+        inputs.pressure_phase                   = empty_tables ? "" : "measure";
+        inputs.pressure_step_id                 = empty_tables ? 0 : 17;
+        inputs.pressure_context_batch           = empty_tables ? 0 : 2;
+        inputs.pressure_decode_batch            = empty_tables ? 0 : 3;
+        inputs.pressure_tokens                  = empty_tables ? 0 : 1234;
+        inputs.kv_cache_block_id                = physical.clone();
         inputs.kv_cache_kernel_block_id    = kernel.clone();
         inputs.kv_cache_group_types        = types.clone();
         inputs.kv_cache_update_mapping     = copies.clone();
@@ -351,6 +357,12 @@ void checkGroupedTpRound(GptModelInputs&                 inputs,
     tpSyncModelInputs(inputs, config);
 
     EXPECT_EQ(inputs.kv_cache_group_tags, local_tags);
+    EXPECT_EQ(inputs.pressure_session_id, empty_tables ? "" : std::string("s\0x", 3));
+    EXPECT_EQ(inputs.pressure_phase, empty_tables ? "" : "measure");
+    EXPECT_EQ(inputs.pressure_step_id, empty_tables ? 0 : 17);
+    EXPECT_EQ(inputs.pressure_context_batch, empty_tables ? 0 : 2);
+    EXPECT_EQ(inputs.pressure_decode_batch, empty_tables ? 0 : 3);
+    EXPECT_EQ(inputs.pressure_tokens, empty_tables ? 0 : 1234);
     std::vector<int64_t> local_to_root;
     for (const auto& tag : local_tags) {
         local_to_root.push_back(std::find(root_tags.begin(), root_tags.end(), tag) - root_tags.begin());

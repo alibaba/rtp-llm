@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <list>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 #include "absl/status/status.h"
@@ -26,7 +27,8 @@ public:
     virtual absl::Status enqueue(const GenerateStreamPtr& stream) = 0;
     virtual std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
                                            enqueueGroup(const std::vector<GenerateStreamPtr>& streams) = 0;
-    virtual absl::StatusOr<ScheduleOutput> schedule()                                                  = 0;
+    virtual void                           wakeForControl() {}
+    virtual absl::StatusOr<ScheduleOutput> schedule() = 0;
 
     // Conservative-KV scheduling variant for async execution. The async path
     // schedules step N+1 before step N's specUpdate has run, so seq_len is not
@@ -49,6 +51,10 @@ public:
     virtual bool    empty()            = 0;
     virtual int64_t lastScheduleTime() = 0;
     virtual int64_t onflightStreams()  = 0;
+    // Observed local waiting and cache-loading work, excluding running streams.
+    virtual std::optional<uint64_t> pressureWaitingRequests() {
+        return std::nullopt;
+    }
 
     virtual std::vector<EngineScheduleInfo::TaskInfo> waitingTaskList() {
         return {};

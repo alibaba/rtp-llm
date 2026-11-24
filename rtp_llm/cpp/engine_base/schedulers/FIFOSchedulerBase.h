@@ -33,6 +33,16 @@ public:
     ~FIFOSchedulerBase() override = default;
 
     absl::Status enqueue(const GenerateStreamPtr& stream) override;
+    void         wakeForControl() override {
+        // A busy schedule already makes progress. The control waiter retries
+        // until the engine boundary or deadline, including the idle-wait race.
+        std::unique_lock<std::mutex> lock(lock_, std::try_to_lock);
+        if (lock.owns_lock()) {
+            schedule_trigger_ = true;
+            lock.unlock();
+            cond_.notify_all();
+        }
+    }
     // Default group enqueue: validates each stream and admits the valid ones as
     // ordinary individual streams (no co-scheduling). FIFOScheduler overrides this
     // with real group-queue semantics.

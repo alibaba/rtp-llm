@@ -847,6 +847,14 @@ absl::StatusOr<ScheduleOutput> FIFOScheduler::schedule() {
     return ScheduleOutput{running_streams_};
 }
 
+std::optional<uint64_t> FIFOScheduler::pressureWaitingRequests() {
+    std::lock_guard<std::mutex> lock(lock_);
+    if (!waiting_group_queue_.empty() || !loading_cache_group_queue_.empty()) {
+        return std::nullopt;
+    }
+    return waiting_streams_.size() + loading_cache_streams_.size();
+}
+
 void FIFOScheduler::updateCacheExposedWait() {
     // Measure scheduler-observed stalls between batches, after both lanes had
     // a chance to provide runnable work. A group parked here may already be ready.

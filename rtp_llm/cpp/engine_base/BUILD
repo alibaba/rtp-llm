@@ -2,12 +2,11 @@ load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
 
-# Pressure diagnostics and profile status headers
+# Pressure diagnostics header
 cc_library(
     name = "pressure_diagnostics",
     hdrs = [
         "PressureDiagnostics.h",
-        "ProfileStatus.h",
     ],
     deps = [
         "//rtp_llm/cpp/cache/block_tree_cache",
@@ -52,6 +51,7 @@ cc_library(
     name = "profiler",
     hdrs = [
         "TorchProfiler.h",
+        "ProfileStatus.h",
     ],
     srcs = [
         "TorchProfiler.cc",
@@ -99,6 +99,7 @@ cc_library(
     ],
     deps = [
         ":executor",
+        ":pressure_diagnostics",
         ":profiler",
         ":worker_status_info",
         "//rtp_llm/cpp/engine_base/stream:stream",

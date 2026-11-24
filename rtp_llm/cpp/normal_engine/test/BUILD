@@ -4,6 +4,15 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
+cc_test(
+    name = "pressure_step_recorder_test",
+    srcs = ["PressureStepRecorderTest.cc"],
+    deps = [
+        "//rtp_llm/cpp/normal_engine:pressure_step_recorder",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 test_copts = [
     "-fno-access-control",
 ] + copts()

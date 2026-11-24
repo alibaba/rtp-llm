@@ -1,4 +1,6 @@
 #pragma once
+#include "rtp_llm/cpp/engine_base/PressureDiagnostics.h"
+#include "rtp_llm/cpp/engine_base/ProfileStatus.h"
 
 #include <atomic>
 #include <utility>
@@ -66,6 +68,21 @@ public:
     virtual absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                                      preRunMode                            mode) = 0;
 
+    virtual ErrorResult<CachePressureSnapshot> getCachePressure() const {
+        return unsupportedCachePressure();
+    }
+    virtual PressureStepPage getPressureSteps(const std::string&, uint64_t, size_t) const {
+        return {};
+    }
+    virtual std::optional<uint64_t> getPressureWaitingRequests() const {
+        return std::nullopt;
+    }
+    virtual ErrorResult<int64_t> controlPressureDiagnostics(const PressureSessionControl&,
+                                                            std::chrono::system_clock::time_point) {
+        return {kPressureDiagnosticsUnsupported, "pressure session diagnostics unsupported"};
+    }
+    virtual void wakePressureControlProgress() {}
+
     virtual KVCacheInfo getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) = 0;
 
     virtual const ResourceContext& resourceContext() const {
@@ -97,6 +114,12 @@ public:
         return false;
     }
     virtual void startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) {}
+    virtual bool stopTimelineProfiling(const std::string& trace_name) {
+        return false;
+    }
+    virtual ProfileStatus getProfileStatus() const {
+        return {};
+    }
 
     std::shared_ptr<KVCacheManager> getCacheManager() const;
 

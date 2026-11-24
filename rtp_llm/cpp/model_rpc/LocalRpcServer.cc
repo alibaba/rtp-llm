@@ -2,7 +2,10 @@
 #include <chrono>
 #include <cmath>
 #include <exception>
+#include <future>
 #include <memory>
+#include <random>
+#include <set>
 #include <stdexcept>
 #include <unistd.h>
 #include <thread>
@@ -1262,6 +1265,715 @@ LocalRpcServer::SetLogLevel(grpc::ServerContext* context, const SetLogLevelReque
     return grpc::Status::OK;
 }
 
+namespace {
+int64_t pressureNowNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+grpc::Status drainRemoteCompletions(EngineBase*                           engine,
+                                    grpc::ServerContext*                  context,
+                                    std::chrono::system_clock::time_point deadline) {
+    if (std::chrono::system_clock::now() >= deadline) {
+        return {grpc::StatusCode::DEADLINE_EXCEEDED, "remote completion drain deadline exceeded"};
+    }
+    const auto manager = engine ? engine->getCacheManager() : nullptr;
+    const auto cache   = manager ? manager->blockTreeCache() : nullptr;
+    if (cache) {
+        auto drained   = std::make_shared<std::promise<void>>();
+        auto completed = drained->get_future();
+        cache->drainRemoteCompletions([drained] { drained->set_value(); });
+        // No cache/stream/scheduler/execution mutex is held here. gRPC sync
+        // handlers have replacement pollers; MAX_POLLERS is not a handler cap.
+        // The shared promise remains valid if the diagnostic deadline expires.
+        if (completed.wait_until(deadline) != std::future_status::ready
+            || std::chrono::system_clock::now() >= deadline) {
+            return {grpc::StatusCode::DEADLINE_EXCEEDED, "remote completion drain deadline exceeded"};
+        }
+    }
+    if (context->IsCancelled()) {
+        return {grpc::StatusCode::CANCELLED, "diagnostic request cancelled after drain"};
+    }
+    return grpc::Status::OK;
+}
+void profileStatusToProto(const ProfileStatus& value, ProfileStatusPB* pb) {
+    pb->set_supported(value.supported);
+    pb->set_state(value.state);
+    pb->set_trace_name(value.trace_name);
+    pb->set_stop_requested(value.stop_requested);
+    pb->set_collection_complete(value.collection_complete);
+    pb->set_export_complete(value.export_complete);
+    pb->set_collection_error(value.collection_error);
+    pb->set_export_error(value.export_error);
+    pb->set_file_name(value.file_name);
+    pb->set_capture_begin_ns(value.capture_begin_ns);
+    pb->set_capture_end_ns(value.capture_end_ns);
+}
+PressureTierPB pressureTier(Tier tier) {
+    switch (tier) {
+        case Tier::DEVICE:
+            return PRESSURE_DEVICE;
+        case Tier::HOST:
+            return PRESSURE_HOST;
+        case Tier::DISK:
+            return PRESSURE_DISK;
+        case Tier::REMOTE:
+            return PRESSURE_REMOTE;
+        case Tier::NONE:
+            return PRESSURE_NONE;
+    }
+    return PRESSURE_TIER_UNSPECIFIED;
+}
+PressureGroupTypePB pressureGroup(CacheGroupType type) {
+    switch (type) {
+        case CacheGroupType::FULL:
+            return PRESSURE_FULL;
+        case CacheGroupType::SWA:
+            return PRESSURE_SWA;
+        case CacheGroupType::LINEAR:
+            return PRESSURE_LINEAR;
+    }
+    return PRESSURE_GROUP_UNSPECIFIED;
+}
+PressureOperationPB pressureOperation(CacheTransferOperation operation) {
+    switch (operation) {
+        case CacheTransferOperation::LOAD:
+            return PRESSURE_LOAD;
+        case CacheTransferOperation::EVICT:
+            return PRESSURE_EVICT;
+        case CacheTransferOperation::STORE:
+            return PRESSURE_STORE;
+    }
+    return PRESSURE_OPERATION_UNSPECIFIED;
+}
+void pressureWatermark(const TierWatermark& value, PressureWatermarkPB* output) {
+    output->set_low_ratio(value.low_ratio);
+    output->set_high_ratio(value.high_ratio);
+}
+void pressureSnapshotToProto(const CachePressureSnapshot& snapshot, CachePressureRankPB* output) {
+    if (snapshot.ownership) {
+        const auto& ownership = *snapshot.ownership;
+        auto*       pb        = output->mutable_ownership();
+        pb->set_mode(static_cast<PressureOwnershipPB::Mode>(ownership.mode));
+        pb->mutable_owner_world_rank()->set_value(ownership.owner_world_rank);
+        for (int rank : ownership.participant_world_ranks) {
+            pb->add_participant_world_ranks(rank);
+        }
+        pb->set_publication_scope(ownership.all_participant_publication ? PressureOwnershipPB::ALL_PARTICIPANTS :
+                                                                          PressureOwnershipPB::LOCAL);
+    }
+    if (snapshot.remote_runtime) {
+        const auto& runtime = *snapshot.remote_runtime;
+        auto*       pb      = output->mutable_remote_runtime();
+        pb->set_version(1);
+        for (const auto& [name, value] : runtime.options)
+            (*pb->mutable_options())[name] = value;
+        pb->set_callback_endpoint(runtime.callback_endpoint);
+        pb->set_server_epoch(runtime.session.server_epoch);
+        pb->set_session_id(runtime.session.session_id);
+        pb->set_generation(runtime.session.generation);
+        pb->set_layout_hash(runtime.layout_hash);
+        pb->set_rank(runtime.rank);
+        pb->set_expected_ranks(runtime.expected_ranks);
+#define LIMIT(name) (*pb->mutable_limits())[#name] = runtime.limits.name
+        LIMIT(total_bytes);
+        LIMIT(source_bytes);
+        LIMIT(write_slot_bytes);
+        LIMIT(read_staging_bytes);
+        LIMIT(write_staging_bytes);
+        LIMIT(write_slots);
+        LIMIT(max_rpc_bytes);
+        LIMIT(max_blocks_per_rpc);
+        LIMIT(max_read_operations);
+        LIMIT(max_ranks);
+        LIMIT(max_groups_per_rank);
+        LIMIT(max_sources_per_group);
+        LIMIT(max_members_per_group);
+        LIMIT(replay_window);
+        LIMIT(max_delay_ms);
+#undef LIMIT
+#define CREDIT(name) (*pb->mutable_credits())[#name] = runtime.credits.name
+        CREDIT(local_read_bytes);
+        CREDIT(local_write_bytes);
+        CREDIT(service_read_bytes);
+        CREDIT(service_write_bytes);
+        CREDIT(read_operations);
+        CREDIT(write_operations);
+        CREDIT(first_write_slot);
+        CREDIT(write_slots);
+        CREDIT(max_slice_bytes);
+        CREDIT(max_batch_records);
+        CREDIT(max_write_slice_bytes);
+#undef CREDIT
+        for (const auto& layout : runtime.layouts) {
+            auto* group = pb->add_layouts();
+#define LAYOUT(name) group->set_##name(layout.name)
+            LAYOUT(group);
+            LAYOUT(pool);
+            LAYOUT(payload_bytes);
+            LAYOUT(storage_bytes);
+            LAYOUT(stride_bytes);
+            LAYOUT(source_count);
+            LAYOUT(alignment);
+            LAYOUT(dtype);
+            LAYOUT(crc_enabled);
+            LAYOUT(crc_format_version);
+            LAYOUT(crc_footer_offset);
+            LAYOUT(tokens_per_block);
+            LAYOUT(cp_world_size);
+            LAYOUT(cp_rank);
+            LAYOUT(attention_window);
+#undef LAYOUT
+        }
+    }
+    output->set_remote_read_payload_bytes(snapshot.remote_read_payload_bytes);
+    output->set_remote_write_acknowledged_payload_bytes(snapshot.remote_write_acknowledged_payload_bytes);
+    auto* remote_write = output->mutable_mock_remote_write();
+    remote_write->set_submitted(snapshot.mock_remote_write.submitted);
+    remote_write->set_completed(snapshot.mock_remote_write.completed);
+    remote_write->set_failed(snapshot.mock_remote_write.failed);
+    remote_write->set_rejected(snapshot.mock_remote_write.rejected);
+    remote_write->set_pending_requests(snapshot.mock_remote_write.pending_requests);
+    remote_write->set_pending_intents(snapshot.mock_remote_write.pending_intents);
+    remote_write->set_retained_descriptors(snapshot.mock_remote_write.retained_descriptors);
+    remote_write->set_faulted(snapshot.remote_mock_safety.faulted);
+    remote_write->set_quarantined_blocks(snapshot.remote_mock_safety.quarantined_blocks);
+    if (snapshot.mock_cache) {
+        const auto& metrics = *snapshot.mock_cache;
+        auto*       pb      = output->mutable_mock_cache();
+        pb->set_terminal_outcome_version(1);
+        pb->set_eligible_blocks(metrics.eligible_blocks);
+        pb->set_planned_memory_blocks(metrics.planned_memory_blocks);
+        pb->set_planned_disk_blocks(metrics.planned_disk_blocks);
+        pb->set_successful_memory_blocks(metrics.successful_memory_blocks);
+        pb->set_successful_disk_blocks(metrics.successful_disk_blocks);
+        pb->set_planned_remote_blocks(metrics.planned_remote_blocks);
+        pb->set_successful_remote_blocks(metrics.successful_remote_blocks);
+        pb->set_failed_blocks(metrics.failed_blocks);
+        pb->set_disk_write_submitted_records(snapshot.mock_disk_write.submitted_records);
+        pb->set_disk_write_completed_records(snapshot.mock_disk_write.completed_records);
+        pb->set_disk_write_failed_records(snapshot.mock_disk_write.failed_records);
+    }
+    if (snapshot.local_store) {
+        auto* pb = output->mutable_local_store();
+        pb->set_released_requests(snapshot.local_store->released_requests);
+        pb->set_pending_requests(snapshot.local_store->pending_requests);
+        pb->set_abandoned_requests(snapshot.local_store->abandoned_requests);
+        pb->set_rejected_host_stores(snapshot.local_store->rejected_host_stores);
+        pb->set_rejected_disk_stores(snapshot.local_store->rejected_disk_stores);
+    }
+    if (snapshot.local_mock_targets) {
+        const auto& targets = *snapshot.local_mock_targets;
+        auto*       pb      = output->mutable_local_mock_targets();
+        pb->set_memory_enabled(targets.memory_enabled);
+        pb->set_disk_enabled(targets.disk_enabled);
+        pb->set_memory_ratio(targets.memory_ratio);
+        pb->set_disk_ratio(targets.disk_ratio);
+        pb->set_memory_ppm(targets.memory_ppm);
+        pb->set_disk_ppm(targets.disk_ppm);
+    }
+    if (snapshot.mock_memory) {
+        const auto& metrics = *snapshot.mock_memory;
+        auto*       pb      = output->mutable_mock_memory();
+        pb->set_terminal_outcome_version(PressureMockMemoryPB::TRANSFER_TERMINAL_V1);
+        pb->set_eligible_blocks(metrics.eligible_blocks);
+        pb->set_planned_host_blocks(metrics.planned_host_blocks);
+        pb->set_successful_h2d_blocks(metrics.successful_h2d_blocks);
+        pb->set_failed_h2d_blocks(metrics.failed_h2d_blocks);
+        pb->set_d2h_submitted_blocks(metrics.d2h_submitted_blocks);
+        pb->set_d2h_completed_blocks(metrics.d2h_completed_blocks);
+        pb->set_d2h_failed_blocks(metrics.d2h_failed_blocks);
+    }
+    for (const auto& pool : snapshot.pools) {
+        auto* pb = output->add_pools();
+        pb->set_pool_id(pool.pool_id);
+        pb->set_tier(pressureTier(pool.tier));
+        pb->set_pool_name(pool.pool_name);
+        pb->set_block_size_bytes(pool.block_size_bytes);
+        pb->set_total_blocks(pool.total_blocks);
+        pb->set_free_blocks(pool.free_blocks);
+        pb->set_used_blocks(pool.used_blocks);
+        pb->set_available_blocks(pool.available_blocks);
+        pb->set_active_blocks(pool.active_blocks);
+        pb->set_block_cache_ref_blocks(pool.block_cache_ref_blocks);
+        pb->set_load_ref_blocks(pool.load_ref_blocks);
+        pb->set_eviction_target_ref_blocks(pool.eviction_ref_blocks);
+        pb->set_store_ref_blocks(pool.store_ref_blocks);
+        pb->set_pending_release_blocks(pool.pending_release_blocks);
+        pb->set_published_host_blocks(pool.published_host_blocks);
+        pb->set_mock_source_ref_blocks(pool.mock_source_ref_blocks);
+        pb->set_mock_source_ref_bytes(pool.mock_source_ref_bytes);
+        pb->set_disk_read_bytes(pool.disk_read_bytes);
+        pb->set_disk_write_bytes(pool.disk_write_bytes);
+        if (pool.request_ref_blocks_available) {
+            pb->mutable_request_ref_blocks()->set_value(pool.request_ref_blocks);
+        }
+    }
+    for (const auto& group : snapshot.groups) {
+        auto* pb = output->add_groups();
+        pb->set_group_id(group.group_id);
+        pb->set_group_type(pressureGroup(group.group_type));
+        pb->set_block_tokens(group.block_tokens);
+        pb->set_payload_bytes(group.payload_bytes);
+        pb->set_storage_bytes(group.storage_bytes);
+        pb->set_crc_enabled(group.crc_enabled);
+        for (const auto& tag : group.group_tags) {
+            pb->add_group_tags(tag);
+        }
+        for (const auto& id : group.device_pool_ids) {
+            pb->add_device_pool_ids(id);
+        }
+        if (group.host_pool_id) {
+            pb->mutable_host_pool_id()->set_value(*group.host_pool_id);
+        }
+        if (group.disk_pool_id) {
+            pb->mutable_disk_pool_id()->set_value(*group.disk_pool_id);
+        }
+        pressureWatermark(group.device_watermark, pb->mutable_device_watermark());
+        pressureWatermark(group.host_watermark, pb->mutable_host_watermark());
+        pressureWatermark(group.disk_watermark, pb->mutable_disk_watermark());
+        pb->set_watermark_trigger_count(group.watermark_trigger_count);
+    }
+    for (const auto& transfer : snapshot.transfers) {
+        auto* pb = output->add_transfers();
+        pb->set_group_id(transfer.group_id);
+        pb->set_pool_id(transfer.pool_id);
+        pb->set_pool_tier(pressureTier(transfer.pool_tier));
+        pb->set_operation(pressureOperation(transfer.operation));
+        pb->set_source_tier(pressureTier(transfer.source_tier));
+        pb->set_target_tier(pressureTier(transfer.target_tier));
+        pb->set_copied_blocks(transfer.copied_blocks);
+        pb->set_copied_bytes(transfer.copied_bytes);
+        pb->set_published_blocks(transfer.published_blocks);
+        pb->set_published_bytes(transfer.published_bytes);
+        pb->set_failed_operations(transfer.failed_operations);
+        pb->set_physical_failed_operations(transfer.physical_failed_operations);
+    }
+}
+}  // namespace
+
+std::string LocalRpcServer::makePressureInstance() {
+    return std::to_string(getpid()) + "-" + std::to_string(pressureNowNs()) + "-"
+           + std::to_string(std::random_device{}());
+}
+
+namespace {
+grpc::Status validatePressureControl(const PressureSessionControlRequestPB& request) {
+    if (request.session_id().empty() || request.session_id().size() > 256 || request.phase().size() > 256
+        || request.action() < PressureSessionControlRequestPB::ENABLE
+        || request.action() > PressureSessionControlRequestPB::DISABLE
+        || request.recorder_capacity() > PressureStepRecorder::kMaxCapacity
+        || (request.action() != PressureSessionControlRequestPB::ENABLE && request.recorder_capacity())
+        || (request.action() == PressureSessionControlRequestPB::MARK_PHASE && request.phase().empty())) {
+        return {grpc::StatusCode::INVALID_ARGUMENT, "invalid pressure session control"};
+    }
+    return grpc::Status::OK;
+}
+}  // namespace
+
+grpc::Status LocalRpcServer::ControlPressureDiagnosticsInternal(grpc::ServerContext*                   context,
+                                                                const PressureSessionControlRequestPB* request,
+                                                                PressureSessionControlResponsePB*      response) {
+    response->Clear();
+    response->set_schema_version(1);
+    auto status = validatePressureControl(*request);
+    if (!status.ok()) {
+        return status;
+    }
+    auto* rank = response->add_ranks();
+    rank->set_world_rank(maga_init_params_.parallelism_config.world_rank);
+    rank->set_service_instance(pressure_instance_);
+    if (context->IsCancelled()) {
+        return {grpc::StatusCode::CANCELLED, "pressure control cancelled"};
+    }
+    PressureSessionControl control{request->session_id(),
+                                   static_cast<PressureControlAction>(request->action()),
+                                   request->phase(),
+                                   request->recorder_capacity()};
+    const auto             deadline = resolvePressureControlDeadline(context->deadline());
+    auto                   result   = engine_ ? engine_->controlPressureDiagnostics(control, deadline) :
+                                                ErrorResult<int64_t>(kPressureDiagnosticsUnsupported, "pressure diagnostics unsupported");
+    if (!result.ok()) {
+        rank->set_error(result.status().ToString());
+        auto code = grpc::StatusCode::FAILED_PRECONDITION;
+        if (result.status().code() == kPressureDiagnosticsUnsupported) {
+            code = grpc::StatusCode::UNIMPLEMENTED;
+        } else if (result.status().code() == ErrorCode::DEADLINE_EXCEEDED) {
+            code = grpc::StatusCode::DEADLINE_EXCEEDED;
+        }
+        return {code, result.status().ToString()};
+    }
+    rank->set_applied_monotonic_ns(result.value());
+    return grpc::Status::OK;
+}
+
+grpc::Status LocalRpcServer::ControlPressureDiagnostics(grpc::ServerContext*                   context,
+                                                        const PressureSessionControlRequestPB* request,
+                                                        PressureSessionControlResponsePB*      response) {
+    response->Clear();
+    response->set_schema_version(1);
+    auto status = validatePressureControl(*request);
+    if (!status.ok()) {
+        return status;
+    }
+    const auto& topology = maga_init_params_.parallelism_config;
+    if (topology.tp_rank != 0) {
+        return {grpc::StatusCode::INVALID_ARGUMENT, "pressure control fan-out requires tp_rank 0"};
+    }
+    const int        base = topology.world_rank - topology.tp_rank;
+    std::set<int>    seen;
+    std::vector<int> ranks(request->target_ranks().begin(), request->target_ranks().end());
+    if (ranks.empty()) {
+        for (int i = 0; i < topology.tp_size; ++i) {
+            ranks.push_back(base + i);
+        }
+    }
+    for (int rank : ranks) {
+        if (rank < base || rank >= base + topology.tp_size || !seen.insert(rank).second) {
+            return {grpc::StatusCode::INVALID_ARGUMENT, "duplicate or out-of-topology target rank"};
+        }
+    }
+    if (ranks.size() != static_cast<size_t>(topology.tp_size)) {
+        return {grpc::StatusCode::INVALID_ARGUMENT, "pressure recording controls require the entire TP group"};
+    }
+    struct Pending {
+        grpc::ClientContext                                                                context;
+        PressureSessionControlResponsePB                                                   response;
+        grpc::Status                                                                       status;
+        std::shared_ptr<RpcService::Stub>                                                  stub;
+        std::unique_ptr<grpc::ClientAsyncResponseReader<PressureSessionControlResponsePB>> reader;
+        PressureSessionControlRankPB*                                                      record;
+        int                                                                                rank;
+    };
+    // Do not reuse channels attached to a completion queue drained by an earlier request.
+    RPCPool                               pressure_rpc_pool;
+    grpc::CompletionQueue                 queue;
+    std::vector<std::unique_ptr<Pending>> pending;
+    const auto                            deadline     = resolvePressureControlDeadline(context->deadline());
+    const auto&                           addresses    = maga_init_params_.runtime_config.worker_grpc_addrs;
+    PressureSessionControlRankPB*         local_record = nullptr;
+    // Launch peers before waiting for the local engine boundary. Every rank shares the deadline.
+    for (int rank : ranks) {
+        auto* record = response->add_ranks();
+        record->set_world_rank(rank);
+        if (rank == topology.world_rank) {
+            local_record = record;
+            continue;
+        }
+        const int index = rank - base;
+        if (index >= addresses.size() || addresses[index].empty()) {
+            record->set_error("rank endpoint unavailable");
+            continue;
+        }
+        auto connection = pressure_rpc_pool.getConnection(addresses[index]);
+        if (!connection.ok()) {
+            record->set_error(connection.status().ToString());
+            continue;
+        }
+        auto call    = std::make_unique<Pending>();
+        call->record = record;
+        call->rank   = rank;
+        call->stub   = connection.value().stub;
+        call->context.set_deadline(deadline);
+        call->reader = call->stub->AsyncControlPressureDiagnosticsInternal(&call->context, *request, &queue);
+        call->reader->Finish(&call->response, &call->status, call.get());
+        pending.push_back(std::move(call));
+    }
+    grpc::Status local_status;
+    if (local_record) {
+        if (context->IsCancelled()) {
+            local_status = {grpc::StatusCode::CANCELLED, "pressure control cancelled"};
+        } else {
+            PressureSessionControl control{request->session_id(),
+                                           static_cast<PressureControlAction>(request->action()),
+                                           request->phase(),
+                                           request->recorder_capacity()};
+            auto                   result = engine_ ?
+                                                engine_->controlPressureDiagnostics(control, deadline) :
+                                                ErrorResult<int64_t>(kPressureDiagnosticsUnsupported, "pressure diagnostics unsupported");
+            local_record->set_service_instance(pressure_instance_);
+            if (result.ok()) {
+                local_record->set_applied_monotonic_ns(result.value());
+            } else {
+                local_status = {
+                    result.status().code() == kPressureDiagnosticsUnsupported ? grpc::StatusCode::UNIMPLEMENTED :
+                    result.status().code() == ErrorCode::DEADLINE_EXCEEDED    ? grpc::StatusCode::DEADLINE_EXCEEDED :
+                                                                                grpc::StatusCode::FAILED_PRECONDITION,
+                    result.status().ToString()};
+            }
+        }
+        if (!local_status.ok()) {
+            local_record->set_error(local_status.error_message());
+        }
+    }
+    bool cancellation_sent = false;
+    for (size_t i = 0; i < pending.size();) {
+        void*      tag = nullptr;
+        bool       ok  = false;
+        const auto now = std::chrono::system_clock::now();
+        if (now >= deadline || context->IsCancelled()) {
+            if (!cancellation_sent) {
+                for (auto& call : pending) {
+                    call->context.TryCancel();
+                }
+                cancellation_sent = true;
+            }
+            queue.Next(&tag, &ok);
+        } else {
+            // A peer may enqueue after the root's first empty TP broadcast, or
+            // root may not be a target at all. Keep the existing idle TP loop
+            // progressing only while this bounded control fan-out is pending.
+            if (engine_) {
+                engine_->wakePressureControlProgress();
+            }
+            if (queue.AsyncNext(&tag, &ok, std::min(deadline, now + std::chrono::milliseconds(10)))
+                != grpc::CompletionQueue::GOT_EVENT) {
+                continue;
+            }
+        }
+        ++i;
+        auto* call = static_cast<Pending*>(tag);
+        if (ok && call->status.ok() && call->response.schema_version() == 1 && call->response.ranks_size() == 1
+            && call->response.ranks(0).world_rank() == call->rank) {
+            *call->record = call->response.ranks(0);
+        } else {
+            call->record->set_error(call->status.ok() ? "invalid rank response" : call->status.error_message());
+        }
+    }
+    queue.Shutdown();
+    void* tag = nullptr;
+    bool  ok  = false;
+    while (queue.Next(&tag, &ok)) {}
+    return ranks.size() == 1 && local_record ? local_status : grpc::Status::OK;
+}
+
+grpc::Status LocalRpcServer::GetCachePressureInternal(grpc::ServerContext*          context,
+                                                      const CachePressureRequestPB* request,
+                                                      CachePressureResponsePB*      response) {
+    response->Clear();
+    response->set_schema_version(1);
+    response->set_coordinator_received_ns(pressureNowNs());
+    if (request->max_step_records() > kMaxPressureStepRecords) {
+        return {grpc::StatusCode::INVALID_ARGUMENT, "max_step_records exceeds 1024"};
+    }
+    const int rank = maga_init_params_.parallelism_config.world_rank;
+    response->add_requested_ranks(rank);
+    auto* record = response->add_ranks();
+    record->set_world_rank(rank);
+    record->set_service_instance(pressure_instance_);
+    record->set_sequence(pressure_sequence_.fetch_add(1) + 1);
+    if (context->IsCancelled()) {
+        return {grpc::StatusCode::CANCELLED, "diagnostic request cancelled"};
+    }
+    if (request->drain_remote_completions()) {
+        const auto deadline = std::min(
+            context->deadline(), std::chrono::system_clock::now() + std::chrono::milliseconds(kPressureRpcTimeoutMs));
+        const auto status = drainRemoteCompletions(engine_.get(), context, deadline);
+        if (!status.ok()) {
+            record->set_error(status.error_message());
+            return status;
+        }
+    }
+    const auto begin = pressureNowNs();
+    record->set_sampled_monotonic_ns(begin);
+    auto result = engine_ ? engine_->getCachePressure() : unsupportedCachePressure();
+    profileStatusToProto(engine_ ? engine_->getProfileStatus() : ProfileStatus{}, record->mutable_profile());
+    record->set_collect_duration_ns(pressureNowNs() - begin);
+    response->set_coordinator_sent_ns(pressureNowNs());
+    if (!result.ok()) {
+        record->set_error(result.status().ToString());
+        return {result.status().code() == kPressureDiagnosticsUnsupported ? grpc::StatusCode::UNIMPLEMENTED :
+                                                                            grpc::StatusCode::INTERNAL,
+                result.status().ToString()};
+    }
+    pressureSnapshotToProto(result.value(), record);
+    const auto cursor = request->after_step_sequence().find(rank);
+    auto       page =
+        engine_->getPressureSteps(request->session_id(),
+                                  cursor == request->after_step_sequence().end() ? 0 : cursor->second,
+                                  request->max_step_records() ? request->max_step_records() : kMaxPressureStepRecords);
+    record->set_step_history_available(page.available);
+    record->set_next_step_sequence(page.next_sequence);
+    record->set_step_records_lost(page.lost);
+    auto add_step = [&](const PressureStepRecord& step) {
+        auto* pb = record->add_steps();
+        pb->set_session_id(step.session_id);
+        pb->set_phase(step.phase);
+        pb->set_step_id(step.step_id);
+        pb->set_sequence(step.sequence);
+        pb->set_wall_start_ns(step.forward_enter_ns);
+        pb->set_wall_end_ns(step.forward_return_ns);
+        pb->set_cpu_start_ns(step.forward_enter_cpu_ns);
+        pb->set_cpu_end_ns(step.forward_return_cpu_ns);
+        pb->set_context_count(step.context_batch);
+        pb->set_decode_count(step.decode_batch);
+        pb->set_executed_tokens(step.tokens);
+        // NormalExecutor executes one token per decode batch row.
+        pb->set_context_tokens(step.tokens >= step.decode_batch ? step.tokens - step.decode_batch : 0);
+        pb->set_decode_tokens(step.decode_batch);
+        for (const auto& id : step.request_ids) {
+            pb->add_source_request_ids(id);
+        }
+        for (const auto id : step.stream_ids) {
+            pb->add_request_ids(id);
+        }
+        pb->set_completed(step.complete);
+        pb->set_preparation_begin_ns(step.begin_ns);
+        pb->set_forward_enter_ns(step.forward_enter_ns);
+        pb->set_forward_return_ns(step.forward_return_ns);
+        pb->set_end_ns(step.end_ns);
+    };
+    for (const auto& step : page.records) {
+        add_step(step);
+    }
+    if (page.available) {
+        // Only the scheduling rank observes the participating request identities.
+        if (!page.active || !page.active->stream_ids.empty()) {
+            record->mutable_activity()->mutable_running_requests()->set_value(
+                page.active ? page.active->stream_ids.size() : 0);
+        }
+        if (const auto waiting = engine_->getPressureWaitingRequests()) {
+            record->mutable_activity()->mutable_waiting_requests()->set_value(*waiting);
+        }
+    }
+    if (page.active) {
+        add_step(*page.active);
+    }
+    record->set_collect_duration_ns(pressureNowNs() - begin);
+    response->set_coordinator_sent_ns(pressureNowNs());
+    return grpc::Status::OK;
+}
+
+grpc::Status LocalRpcServer::GetCachePressure(grpc::ServerContext*          context,
+                                              const CachePressureRequestPB* request,
+                                              CachePressureResponsePB*      response) {
+    response->Clear();
+    response->set_schema_version(1);
+    response->set_coordinator_received_ns(pressureNowNs());
+    const auto& topology = maga_init_params_.parallelism_config;
+    if (topology.tp_rank != 0) {
+        return {grpc::StatusCode::INVALID_ARGUMENT, "cache pressure fan-out requires tp_rank 0"};
+    }
+    if (request->max_step_records() > kMaxPressureStepRecords) {
+        return {grpc::StatusCode::INVALID_ARGUMENT, "max_step_records exceeds 1024"};
+    }
+    const int        base = topology.world_rank - topology.tp_rank;
+    std::set<int>    seen;
+    std::vector<int> ranks(request->target_ranks().begin(), request->target_ranks().end());
+    if (ranks.empty()) {
+        for (int i = 0; i < topology.tp_size; ++i) {
+            ranks.push_back(base + i);
+        }
+    }
+    for (int rank : ranks) {
+        if (rank < base || rank >= base + topology.tp_size || !seen.insert(rank).second) {
+            return {grpc::StatusCode::INVALID_ARGUMENT, "duplicate or out-of-topology target rank"};
+        }
+        response->add_requested_ranks(rank);
+    }
+    const auto             deadline      = std::min(context->deadline(),
+                                   std::chrono::system_clock::now() + std::chrono::milliseconds(kPressureRpcTimeoutMs));
+    CachePressureRequestPB local_request = *request;
+    if (request->drain_remote_completions()) {
+        // The validated TP coordinator owns completion intents, even when the
+        // caller requests only worker snapshots or lists workers before it.
+        // Drain before any fanout; selection and response order stay unchanged.
+        const auto status = drainRemoteCompletions(engine_.get(), context, deadline);
+        if (!status.ok()) {
+            return status;
+        }
+        local_request.set_drain_remote_completions(false);
+    }
+    struct Pending {
+        grpc::ClientContext                                                       context;
+        CachePressureResponsePB                                                   response;
+        grpc::Status                                                              status;
+        std::shared_ptr<RpcService::Stub>                                         stub;
+        std::unique_ptr<grpc::ClientAsyncResponseReader<CachePressureResponsePB>> reader;
+        CachePressureRankPB*                                                      record;
+        int                                                                       rank;
+    };
+    // Keep channel ownership paired with this request's completion queue.
+    RPCPool                               pressure_rpc_pool;
+    grpc::CompletionQueue                 queue;
+    std::vector<std::unique_ptr<Pending>> pending;
+    grpc::Status                          local_status;
+    const auto&                           addresses = maga_init_params_.runtime_config.worker_grpc_addrs;
+    for (int rank : ranks) {
+        auto* record = response->add_ranks();
+        record->set_world_rank(rank);
+        const auto send = pressureNowNs();
+        record->set_coordinator_send_ns(send);
+        if (rank == topology.world_rank) {
+            CachePressureResponsePB local;
+            // Preserve each selected rank's physical callback drain, including
+            // the owner, without extending the original fanout deadline.
+            if (request->drain_remote_completions()) {
+                local_status = drainRemoteCompletions(engine_.get(), context, deadline);
+            }
+            if (local_status.ok()) {
+                local_status = GetCachePressureInternal(context, &local_request, &local);
+            }
+            if (local.ranks_size() == 1) {
+                *record = local.ranks(0);
+            }
+            if (!local_status.ok()) {
+                record->set_error(local_status.error_message());
+            }
+            record->set_coordinator_send_ns(send);
+            record->set_coordinator_receive_ns(pressureNowNs());
+            continue;
+        }
+        const int index = rank - base;
+        if (index >= addresses.size() || addresses[index].empty()) {
+            record->set_error("rank endpoint unavailable");
+            record->set_coordinator_receive_ns(pressureNowNs());
+            continue;
+        }
+        auto connection = pressure_rpc_pool.getConnection(addresses[index]);
+        if (!connection.ok()) {
+            record->set_error(connection.status().ToString());
+            record->set_coordinator_receive_ns(pressureNowNs());
+            continue;
+        }
+        auto call    = std::make_unique<Pending>();
+        call->record = record;
+        call->rank   = rank;
+        call->stub   = connection.value().stub;
+        call->context.set_deadline(deadline);
+        call->reader = call->stub->AsyncGetCachePressureInternal(&call->context, *request, &queue);
+        call->reader->Finish(&call->response, &call->status, call.get());
+        pending.push_back(std::move(call));
+    }
+    for (size_t i = 0; i < pending.size(); ++i) {
+        void* tag = nullptr;
+        bool  ok  = false;
+        queue.Next(&tag, &ok);
+        auto*      call = static_cast<Pending*>(tag);
+        const auto send = call->record->coordinator_send_ns();
+        if (ok && call->status.ok() && call->response.schema_version() == 1 && call->response.ranks_size() == 1
+            && call->response.ranks(0).world_rank() == call->rank) {
+            *call->record = call->response.ranks(0);
+        } else {
+            call->record->set_error(call->status.ok() ? "invalid rank response" : call->status.error_message());
+        }
+        call->record->set_coordinator_send_ns(send);
+        call->record->set_coordinator_receive_ns(pressureNowNs());
+    }
+    queue.Shutdown();
+    void* drained_tag = nullptr;
+    bool  drained_ok  = false;
+    while (queue.Next(&drained_tag, &drained_ok)) {}
+    response->set_coordinator_sent_ns(pressureNowNs());
+    if (request->drain_remote_completions() && std::chrono::system_clock::now() >= deadline) {
+        return {grpc::StatusCode::DEADLINE_EXCEEDED, "remote completion snapshot deadline exceeded"};
+    }
+    // Preserve peer failures in successful aggregates. A single unsupported local backend is explicit.
+    if (ranks.size() == 1 && ranks.front() == topology.world_rank && !local_status.ok()) {
+        return local_status;
+    }
+    return grpc::Status::OK;
+}
+
 grpc::Status
 LocalRpcServer::StartProfile(grpc::ServerContext* context, const StartProfileRequestPB* request, EmptyPB* response) {
     (void)response;
@@ -1320,6 +2032,172 @@ grpc::Status LocalRpcServer::StartProfileInternal(grpc::ServerContext*          
                      request->start_step(),
                      request->num_steps());
     engine_->startTimelineProfiling(request->trace_name(), request->start_step(), request->num_steps());
+    return grpc::Status::OK;
+}
+
+grpc::Status LocalRpcServer::StopProfileInternal(grpc::ServerContext*                context,
+                                                 const StopProfileInternalRequestPB* request,
+                                                 StopProfileResponsePB*              response) {
+    return stopProfileLocal(
+        context,
+        request,
+        response,
+        std::min(context->deadline(),
+                 std::chrono::system_clock::now() + std::chrono::milliseconds(kPressureRpcTimeoutMs)));
+}
+
+grpc::Status LocalRpcServer::stopProfileLocal(grpc::ServerContext*                  context,
+                                              const StopProfileInternalRequestPB*   request,
+                                              StopProfileResponsePB*                response,
+                                              std::chrono::system_clock::time_point deadline) {
+    response->Clear();
+    auto* rank = response->add_ranks();
+    rank->set_world_rank(maga_init_params_.parallelism_config.world_rank);
+    rank->set_service_instance(pressure_instance_);
+    if (context->IsCancelled() || std::chrono::system_clock::now() >= deadline) {
+        return {grpc::StatusCode::DEADLINE_EXCEEDED, "stop request deadline exceeded before acceptance"};
+    }
+    if (!engine_ || !engine_->getProfileStatus().supported) {
+        return {grpc::StatusCode::UNIMPLEMENTED, "profile cancellation unsupported"};
+    }
+    if (request->trace_name().empty() || request->trace_name().size() > 64) {
+        return {grpc::StatusCode::INVALID_ARGUMENT, "stop requires the configured trace identity (1..64 bytes)"};
+    }
+    rank->set_accepted(engine_->stopTimelineProfiling(request->trace_name()));
+    if (!rank->accepted()) {
+        profileStatusToProto(engine_->getProfileStatus(), rank->mutable_profile());
+        return {grpc::StatusCode::FAILED_PRECONDITION, "profile trace identity mismatch"};
+    }
+    while (true) {
+        const auto status = engine_->getProfileStatus();
+        profileStatusToProto(status, rank->mutable_profile());
+        // A duplicate cleanup of the last finished trace never cancels a newer trace.
+        if (status.trace_name != request->trace_name() || status.collection_complete)
+            break;
+        if (context->IsCancelled() || std::chrono::system_clock::now() >= deadline) {
+            rank->set_error("stop accepted; owner-thread collection deadline exceeded");
+            break;
+        }
+        engine_->wakePressureControlProgress();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return grpc::Status::OK;
+}
+
+grpc::Status LocalRpcServer::StopProfile(grpc::ServerContext*        context,
+                                         const StopProfileRequestPB* request,
+                                         StopProfileResponsePB*      response) {
+    response->Clear();
+    StopProfileInternalRequestPB internal;
+    internal.set_trace_name(request->trace_name());
+    if (!request->enable_all_rank()) {
+        if (!request->target_ranks().empty()) {
+            return {grpc::StatusCode::INVALID_ARGUMENT, "target_ranks requires enable_all_rank"};
+        }
+        return StopProfileInternal(context, &internal, response);
+    }
+    const auto& topology = maga_init_params_.parallelism_config;
+    if (topology.tp_rank != 0) {
+        return {grpc::StatusCode::INVALID_ARGUMENT, "all-rank stop requires tp_rank 0"};
+    }
+    const int        base = topology.world_rank;
+    std::vector<int> ranks(request->target_ranks().begin(), request->target_ranks().end());
+    if (ranks.empty()) {
+        for (int i = 0; i < topology.tp_size; ++i)
+            ranks.push_back(base + i);
+    }
+    std::set<int> seen;
+    for (int rank : ranks) {
+        if (rank < base || rank >= base + topology.tp_size || !seen.insert(rank).second) {
+            return {grpc::StatusCode::INVALID_ARGUMENT, "duplicate or out-of-topology stop target"};
+        }
+    }
+    struct Pending {
+        grpc::ClientContext                                                     context;
+        StopProfileResponsePB                                                   response;
+        grpc::Status                                                            status;
+        std::shared_ptr<RpcService::Stub>                                       stub;
+        std::unique_ptr<grpc::ClientAsyncResponseReader<StopProfileResponsePB>> reader;
+        StopProfileRankPB*                                                      record;
+        int                                                                     rank;
+    };
+    const auto deadline = std::min(context->deadline(),
+                                   std::chrono::system_clock::now() + std::chrono::milliseconds(kPressureRpcTimeoutMs));
+    // Keep channel ownership paired with this request's completion queue.
+    RPCPool                               pressure_rpc_pool;
+    grpc::CompletionQueue                 queue;
+    std::vector<std::unique_ptr<Pending>> pending;
+    const auto&                           addresses = maga_init_params_.runtime_config.worker_grpc_addrs;
+    StopProfileRankPB*                    local     = nullptr;
+    for (int rank : ranks) {
+        auto* record = response->add_ranks();
+        record->set_world_rank(rank);
+        if (rank == topology.world_rank) {
+            local = record;
+            continue;
+        }
+        const int index = rank - base;
+        if (index >= addresses.size() || addresses[index].empty()) {
+            record->set_error("rank endpoint unavailable");
+            continue;
+        }
+        auto connection = pressure_rpc_pool.getConnection(addresses[index]);
+        if (!connection.ok()) {
+            record->set_error(connection.status().ToString());
+            continue;
+        }
+        auto call    = std::make_unique<Pending>();
+        call->record = record;
+        call->rank   = rank;
+        call->stub   = connection.value().stub;
+        call->context.set_deadline(deadline);
+        call->reader = call->stub->AsyncStopProfileInternal(&call->context, internal, &queue);
+        call->reader->Finish(&call->response, &call->status, call.get());
+        pending.push_back(std::move(call));
+    }
+    if (local) {
+        // Give local handling the same bounded deadline as peers.
+        StopProfileResponsePB local_response;
+        const auto            status = stopProfileLocal(context, &internal, &local_response, deadline);
+        if (local_response.ranks_size())
+            *local = local_response.ranks(0);
+        if (!status.ok())
+            local->set_error(status.error_message());
+    }
+    bool cancelled = false;
+    for (size_t completed = 0; completed < pending.size();) {
+        void*      tag = nullptr;
+        bool       ok  = false;
+        const auto now = std::chrono::system_clock::now();
+        if (now >= deadline || context->IsCancelled()) {
+            if (!cancelled) {
+                for (auto& call : pending)
+                    call->context.TryCancel();
+                cancelled = true;
+            }
+            queue.Next(&tag, &ok);
+        } else {
+            // Internal responses wait for owner-thread collection, not merely
+            // acceptance. Delayed peer flags therefore still receive TP progress.
+            if (engine_)
+                engine_->wakePressureControlProgress();
+            if (queue.AsyncNext(&tag, &ok, std::min(deadline, now + std::chrono::milliseconds(10)))
+                != grpc::CompletionQueue::GOT_EVENT)
+                continue;
+        }
+        ++completed;
+        auto* call = static_cast<Pending*>(tag);
+        if (ok && call->status.ok() && call->response.ranks_size() == 1
+            && call->response.ranks(0).world_rank() == call->rank) {
+            *call->record = call->response.ranks(0);
+        } else {
+            call->record->set_error(call->status.ok() ? "invalid stop response" : call->status.error_message());
+        }
+    }
+    queue.Shutdown();
+    void* tag = nullptr;
+    bool  ok  = false;
+    while (queue.Next(&tag, &ok)) {}
     return grpc::Status::OK;
 }
 

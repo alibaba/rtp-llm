@@ -246,6 +246,12 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     shape_hints[GptModelInputIndex::requestDeadlineMsLength] =
         inputs.request_deadline_ms.defined() ? inputs.request_deadline_ms.numel() : 0;
     shape_hints[GptModelInputIndex::p2pDeadlineSourceTimeMs] = currentTimeMs();
+    shape_hints[GptModelInputIndex::pressureStepId]          = inputs.pressure_step_id;
+    shape_hints[GptModelInputIndex::pressureContextBatch]    = inputs.pressure_context_batch;
+    shape_hints[GptModelInputIndex::pressureDecodeBatch]     = inputs.pressure_decode_batch;
+    shape_hints[GptModelInputIndex::pressureTokens]          = inputs.pressure_tokens;
+    shape_hints[GptModelInputIndex::pressureSessionBytes]    = inputs.pressure_session_id.size();
+    shape_hints[GptModelInputIndex::pressurePhaseBytes]      = inputs.pressure_phase.size();
     return shape_hints;
 }
 
@@ -379,8 +385,14 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         static_cast<size_t>(checkedHint(GptModelInputIndex::seqSizePerBlock, "seqSizePerBlock"));
     inputs.kernel_seq_size_per_block =
         static_cast<size_t>(checkedHint(GptModelInputIndex::kernelSeqSizePerBlock, "kernelSeqSizePerBlock"));
-    inputs.record_execution_id = shape_hints_ptr[GptModelInputIndex::recordExecutionId];
+    inputs.pressure_step_id       = checkedHint(GptModelInputIndex::pressureStepId, "pressureStepId");
+    inputs.pressure_context_batch = checkedHint(GptModelInputIndex::pressureContextBatch, "pressureContextBatch");
+    inputs.pressure_decode_batch  = checkedHint(GptModelInputIndex::pressureDecodeBatch, "pressureDecodeBatch");
+    inputs.pressure_tokens        = checkedHint(GptModelInputIndex::pressureTokens, "pressureTokens");
+    inputs.record_execution_id    = shape_hints_ptr[GptModelInputIndex::recordExecutionId];
     if (inputs.skip_run) {
+        inputs.pressure_session_id.clear();
+        inputs.pressure_phase.clear();
         inputs.kv_cache_group_tags.clear();
         inputs.kv_cache_block_id           = torch::Tensor();
         inputs.kv_cache_kernel_block_id    = torch::Tensor();
@@ -740,6 +752,16 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
     }
 
+    // A failed or concurrent all-rank control can leave different sessions
+    // active. Carry the exact root identity in the existing packed CPU payload.
+    const auto session_bytes = checkedHint(GptModelInputIndex::pressureSessionBytes, "pressureSessionBytes");
+    const auto phase_bytes   = checkedHint(GptModelInputIndex::pressurePhaseBytes, "pressurePhaseBytes");
+    RTP_LLM_CHECK_WITH_INFO(session_bytes <= 256 && phase_bytes <= 256, "pressure identity exceeds wire limit");
+    const auto identity_offset = cpu_total_bytes;
+    const auto identity_bytes  = session_bytes + phase_bytes;
+    RTP_LLM_CHECK_WITH_INFO(cpu_total_bytes <= std::numeric_limits<int64_t>::max() - identity_bytes,
+                            "pressure identity packed-buffer overflow");
+    cpu_total_bytes += identity_bytes;
     bool is_root = parallelism_config.tp_rank == 0;
 
     // Allocate one packed buffer per device type.
@@ -750,6 +772,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         cpu_packed = torch::empty({cpu_total_bytes}, torch::TensorOptions(torch::kUInt8).pinned_memory(true));
         if (is_root) {
             auto* base = static_cast<uint8_t*>(cpu_packed.data_ptr());
+            if (identity_bytes) {
+                std::memcpy(base + identity_offset, inputs.pressure_session_id.data(), session_bytes);
+                std::memcpy(base + identity_offset + session_bytes, inputs.pressure_phase.data(), phase_bytes);
+            }
             for (auto& e : cpu_entries) {
                 auto contig = e.tensor->contiguous();
                 std::memcpy(base + e.offset, contig.data_ptr(), e.nbytes);
@@ -800,6 +826,14 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
 
     // Unpack from packed buffers back to each tensor's original storage.
     if (!is_root) {
+        if (identity_bytes) {
+            const auto* id = static_cast<const char*>(cpu_packed.data_ptr()) + identity_offset;
+            inputs.pressure_session_id.assign(id, session_bytes);
+            inputs.pressure_phase.assign(id + session_bytes, phase_bytes);
+        } else {
+            inputs.pressure_session_id.clear();
+            inputs.pressure_phase.clear();
+        }
         if (cpu_total_bytes > 0) {
             auto* base = static_cast<const uint8_t*>(cpu_packed.data_ptr());
             for (auto& e : cpu_entries) {
