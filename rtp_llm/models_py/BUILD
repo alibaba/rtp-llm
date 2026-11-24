@@ -841,6 +841,15 @@ py_test(
 )
 
 py_test(
+    name = "staged_moe_collective_order_test",
+    srcs = ["staged_moe_collective_order_test.py"],
+    main = "staged_moe_collective_order_test.py",
+    deps = [":new_weight_loader"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
+    timeout = "moderate",
+)
+
+py_test(
     name = "qwen3_moe_checkpoint_test",
     srcs = [
         "qwen3_moe_checkpoint_test.py",

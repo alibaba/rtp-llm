@@ -296,7 +296,7 @@ class _StagedFSTLoadCoordinator:
                 f"{self._module_names[child]} ({type(child).__name__})"
             )
         if child.checkpoint_load_complete():
-            child.process_weights_after_loading()
+            child.process_weights_during_staged_load()
             self._finalized.add(child)
 
     def load_child(self, child: nn.Module, weights: Any) -> None:

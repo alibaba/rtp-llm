@@ -300,6 +300,7 @@ class BaseMoEExperts(RtpModule):
         self._loaded_aux_keys = set()
         self._seen_checkpoint_names = set()
         self._post_load_done = False
+        self._expert_layout_ready = False
         self._runtime_layout_prepared = False
         self._runtime_layout_prepared_keys = set()
         self._runtime_weights_dict: Optional[Dict[str, torch.Tensor]] = None
@@ -971,13 +972,8 @@ class BaseMoEExperts(RtpModule):
     #  Post-load processing
     # ------------------------------------------------------------------ #
 
-    def process_weights_after_loading(self):
-        """Called after all weights are loaded.
-
-        Runs registered quant-method post-load work after verifying all expert
-        projection weights were loaded.
-        """
-        if self._post_load_done:
+    def process_weights_during_staged_load(self):
+        if self._expert_layout_ready or self._post_load_done:
             return
         self._check_load_complete()
         if self.w13.device.type == "cpu":
@@ -988,12 +984,23 @@ class BaseMoEExperts(RtpModule):
             # in a ROCm build whose native library has no CUDA router symbols.
             return
         self.quant_method.process_weights_after_loading(self)
+        self._expert_layout_ready = True
+
+    def process_weights_after_loading(self):
+        if self._post_load_done:
+            return
+        self.process_weights_during_staged_load()
+        if not self._expert_layout_ready:
+            return  # CPU checkpoint staging has no executable device layout.
+        # EP ranks can finish different checkpoint leaves at different points
+        # in a distributed FST stream. Construct collective-bearing executors
+        # only in the ordered post-load pass, after the reader has closed.
         self._maybe_build_fused_moe()
         self._post_load_done = True
 
     def prepare_eplb_reload_weights(self) -> Dict[str, torch.Tensor]:
         """Finalize a temporary reload module without constructing an executor."""
-        if self._post_load_done:
+        if self._post_load_done or self._expert_layout_ready:
             raise RuntimeError("EPLB reload weights were already finalized")
         self._check_load_complete()
         self.quant_method.process_weights_after_loading(self)

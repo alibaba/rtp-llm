@@ -520,3 +520,11 @@ class RtpModule(nn.Module):
 
     def process_weights_after_loading(self) -> None:
         """Perform device-dependent layout conversion after integrity validation."""
+
+    def process_weights_during_staged_load(self) -> None:
+        """Release staging storage. The reader can still be communicating with peers.
+
+        A staged leaf whose runtime construction uses collectives must defer that
+        part to process_weights_after_loading, called again after reader closure.
+        """
+        self.process_weights_after_loading()
