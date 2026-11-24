@@ -28,7 +28,7 @@ ErrorInfo updateMultimodalFeaturesWithTrace(
     const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& span,
     grpc::ServerContext* server_context);
 
-// Decode consumes FE-expanded IDs; Prefill performs multimodal embedding preparation.
+// Decode consumes a frontend layout or expands the original tokens with ViT.
 ErrorInfo preprocessForPD(std::shared_ptr<GenerateInput>& input,
                           MultimodalProcessor*            processor,
                           bool                            is_mtp_eagle,

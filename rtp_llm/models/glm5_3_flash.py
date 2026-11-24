@@ -343,6 +343,7 @@ def parse_glm53_flash_config(
         # vision block and post-attention norms despite the checkpoint value.
         vision_config["rms_norm_eps"] = 1e-6
         config.mm_model_config.is_multimodal = True
+        config.mm_model_config.token_layout_from_vit = True
         config.mm_model_config.mm_sep_tokens = [
             [
                 int(config_json.get("image_start_token_id", 154830)),

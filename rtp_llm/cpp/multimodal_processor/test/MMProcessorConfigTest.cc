@@ -38,6 +38,13 @@ TEST(MMProcessorConfigTest, downstreamPipelineStagesDoNotRequireMultimodalIngres
     }
 }
 
+TEST(MMProcessorConfigTest, DecodeIngressFetchesRemoteViTLayoutWhenRequired) {
+    EXPECT_EQ(resolveMMProcessorKind(true, VIT_SEPARATION_REMOTE, false, DECODE, 0, 0, true), MMProcessorKind::REMOTE);
+    EXPECT_EQ(resolveMMProcessorKind(true, VIT_SEPARATION_REMOTE, true, DECODE, 0, 0, true), MMProcessorKind::INVALID);
+    EXPECT_EQ(resolveMMProcessorKind(true, VIT_SEPARATION_REMOTE, false, DECODE, 1, 0, true), MMProcessorKind::NONE);
+    EXPECT_EQ(resolveMMProcessorKind(true, VIT_SEPARATION_REMOTE, false, DECODE, 0, 1, true), MMProcessorKind::NONE);
+}
+
 TEST(MMProcessorConfigTest, firstPipelineStageKeepsMultimodalValidation) {
     for (auto role_type : {PDFUSION, PREFILL}) {
         for (auto separation : {VIT_SEPARATION_LOCAL, VIT_SEPARATION_REMOTE}) {
