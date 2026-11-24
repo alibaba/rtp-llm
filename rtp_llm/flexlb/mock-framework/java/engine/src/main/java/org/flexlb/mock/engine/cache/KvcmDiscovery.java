@@ -10,7 +10,8 @@ import java.util.Objects;
 import java.util.ServiceLoader;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
-import org.flexlb.discovery.ServiceDiscovery;
+import org.flexlb.dao.route.Endpoint;
+import org.flexlb.discovery.ServiceDiscoveryProvider;
 import org.flexlb.kvcm.grpc.ErrorCode;
 import org.flexlb.kvcm.grpc.GetClusterInfoRequest;
 import org.flexlb.kvcm.grpc.MetaServiceGrpc;
@@ -21,7 +22,7 @@ import org.flexlb.kvcm.grpc.MetaServiceGrpc;
 public final class KvcmDiscovery implements AutoCloseable {
     private final URI direct;
     private final String bootstrap, instance;
-    private final ServiceDiscovery discovery;
+    private final ServiceDiscoveryProvider discovery;
 
     private URI leader;
     private ManagedChannel activeChannel;
@@ -29,7 +30,7 @@ public final class KvcmDiscovery implements AutoCloseable {
 
     private boolean closed;
 
-    KvcmDiscovery(URI direct, String bootstrap, String instance, ServiceDiscovery discovery) {
+    KvcmDiscovery(URI direct, String bootstrap, String instance, ServiceDiscoveryProvider discovery) {
         this.direct = direct;
         this.bootstrap = bootstrap;
         this.instance = instance;
@@ -43,9 +44,9 @@ public final class KvcmDiscovery implements AutoCloseable {
     public static KvcmDiscovery discover(String bootstrap, String instance, boolean vip) {
         if (bootstrap == null || bootstrap.isBlank() || instance == null || instance.isBlank())
             throw new IllegalArgumentException("KVCM requires a bootstrap address and instance");
-        ServiceDiscovery discovery = null;
+        ServiceDiscoveryProvider discovery = null;
         if (vip) {
-            var providers = ServiceLoader.load(ServiceDiscovery.class).iterator();
+            var providers = ServiceLoader.load(ServiceDiscoveryProvider.class).iterator();
             if (!providers.hasNext()) throw new IllegalArgumentException("VIPServer discovery requires the internal Engine package");
             discovery = providers.next();
             if (providers.hasNext()) {
@@ -98,7 +99,9 @@ public final class KvcmDiscovery implements AutoCloseable {
 
     private List<String> bootstrapAddresses(IllegalStateException failure) {
         var lookup = new FutureTask<>(() -> {
-            var hosts = discovery.getHosts(bootstrap);
+            var endpoint = new Endpoint();
+            endpoint.setAddress(bootstrap);
+            var hosts = discovery.getHosts(endpoint);
             List<String> addresses = new ArrayList<>(hosts.size());
             for (var host : hosts) {
                 try {
