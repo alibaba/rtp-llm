@@ -274,10 +274,10 @@ class QueuedPrefixReuseE2ETest {
             var next = h.scheduler.submit(request(h, 302)).get(4, TimeUnit.SECONDS);
             assertTrue(next.isSuccess(), next::getErrorMessage);
             AutoTpmE2EHarness.await(() -> h.decodeEngines.get(0).getCompletedCount() == 1
-                            && h.decodeEndpoint(0).getInflightCount() == 0,
-                    3000, "new request completed and Decode ownership drained");
+                            && h.decodeEndpoint(0).getInflightCount() == 0
+                            && h.prefillEndpoint(0).getLocallyOwnedRequestCount() == 0,
+                    3000, "new request completed and both endpoints released ownership");
             assertEquals(List.of(302L), h.engineArrivalOrder);
-            assertEquals(0, h.prefillEndpoint(0).getLocallyOwnedRequestCount());
             h.assertAutoPumpHealthy();
         }
     }

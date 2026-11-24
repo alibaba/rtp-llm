@@ -106,11 +106,13 @@ final class OrderedRequestQueue {
                 result.add(entry);
             }
         }
-        result.sort(priorityOrdering ? PRIORITY_ORDER : SEQUENCE_ORDER);
+        result.sort(entryOrder(priorityOrdering));
         return result;
     }
 
-    int highestUnscannedPriority() { return pendingPriorities.length() - 1; }
+    static Comparator<GlobalQueueEntry> entryOrder(boolean priorityOrdering) {
+        return priorityOrdering ? PRIORITY_ORDER : SEQUENCE_ORDER;
+    }
 
     boolean hasUnscannedRequests() {
         return priorityOrdering ? !pendingPriorities.isEmpty()

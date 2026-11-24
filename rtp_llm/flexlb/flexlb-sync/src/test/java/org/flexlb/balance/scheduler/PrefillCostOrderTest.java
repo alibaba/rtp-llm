@@ -11,65 +11,44 @@ import java.util.Random;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class PrefillCostOrderTest {
-    private static PrefillCostOrder.Candidate<String> c(String name, int priority, long seq, long input, long compute) {
-        return new PrefillCostOrder.Candidate<>(name, priority, seq, input, compute);
+    private record Request(int priority, int arrival, long input, long hits) {
+        long compute() { return input - hits; }
     }
-    @Test
-    void priorityThenFreshBenefitThenUnknownFifoUsesAllFreeSlots() {
-        var ready = List.of(c("lowHot", 10, 1, 100, 0), c("cold", 50, 2, 100, 100),
-                c("hot", 50, 3, 100, 10), c("earlyUnknown", 50, 0, 0, 0),
-                c("lateUnknown", 50, 5, 0, 0), c("highUnknown", 90, 4, 0, 0));
-        assertEquals(List.of("highUnknown", "hot", "cold", "earlyUnknown", "lateUnknown", "lowHot"),
-                PrefillCostOrder.first(ready, true, 6));
-        assertEquals(List.of("lowHot", "hot", "cold", "earlyUnknown", "highUnknown", "lateUnknown"),
-                PrefillCostOrder.first(ready, false, 6));
-    }
+
+    private static final Comparator<Request> WORKER_ORDER = PrefillCostOrder.workerOrder(
+            Request::priority, Request::input, Request::hits, Comparator.comparingInt(Request::arrival));
 
     @Test
     void closeRatiosAtLongMaxValueKeepTheirExactOrder() {
-        assertEquals(List.of("better", "worse"), PrefillCostOrder.first(List.of(
-                c("worse", 50, 1, Long.MAX_VALUE, Long.MAX_VALUE - 1),
-                c("better", 50, 2, Long.MAX_VALUE, Long.MAX_VALUE - 2)), false, 2));
+        var worse = new Request(50, 1, Long.MAX_VALUE, 1);
+        var better = new Request(50, 2, Long.MAX_VALUE, 2);
+        assertEquals(List.of(better, worse), List.of(worse, better).stream().sorted(WORKER_ORDER).toList());
     }
 
     @Test
-    void boundedSelectionMatchesStableFullOrderingAcrossBacklogs() {
+    void workerOrderingMatchesExactUnitCostAcrossBacklogs() {
+        Comparator<Request> byRatio = (a, b) ->
+                BigInteger.valueOf(a.compute()).multiply(BigInteger.valueOf(b.input()))
+                        .compareTo(BigInteger.valueOf(b.compute()).multiply(BigInteger.valueOf(a.input())));
+        var reference = Comparator.comparingInt(Request::priority).reversed()
+                .thenComparing(request -> request.input() == 0)
+                .thenComparing(byRatio)
+                .thenComparingLong(Request::compute)
+                .thenComparingLong(Request::input)
+                .thenComparingInt(Request::arrival);
         var random = new Random(20261114L);
-        for (int round = 0; round < 300; round++) {
-            var ready = new ArrayList<PrefillCostOrder.Candidate<Integer>>();
-            int size = 1 + random.nextInt(400);
-            for (int i = 0; i < size; i++) {
-                long input = round % 7 == 0 ? Long.MAX_VALUE - random.nextInt(100) : 1000L * (1 + random.nextInt(10));
-                Long compute = round % 3 == 0 ? input : round % 3 == 1 ? 0L : input / (1 + random.nextInt(10));
-                if (round % 11 == 0 && i == 0) { compute = null; }
-                var candidate = new PrefillCostOrder.Candidate<>(i, random.nextInt(3), random.nextInt(20), input, compute);
-                ready.add(candidate);
+        for (int round = 0; round < 50; round++) {
+            var requests = new ArrayList<Request>();
+            for (int i = 0; i < 100; i++) {
+                long input = switch (i % 4) {
+                    case 0 -> 0;
+                    case 1 -> Long.MAX_VALUE - random.nextInt(100);
+                    default -> 1000L * (1 + random.nextInt(10));
+                };
+                requests.add(new Request(random.nextInt(3), i, input, input / (1 + random.nextInt(10))));
             }
-            for (boolean priority : new boolean[]{false, true}) {
-                for (int limit : new int[]{0, 1, 8, 512}) {
-                    assertEquals(referenceFirst(ready, priority, limit),
-                            PrefillCostOrder.first(ready, priority, limit),
-                            "round=" + round + ", priority=" + priority + ", limit=" + limit);
-                }
-            }
+            assertEquals(requests.stream().sorted(reference).toList(),
+                    requests.stream().sorted(WORKER_ORDER).toList(), "round=" + round);
         }
-    }
-
-    private static List<Integer> referenceFirst(List<PrefillCostOrder.Candidate<Integer>> ready,
-            boolean priority, int limit) {
-        if (limit <= 0 || ready.isEmpty()) { return List.of(); }
-        Comparator<PrefillCostOrder.Candidate<Integer>> byPriority =
-                Comparator.comparingInt(candidate -> priority ? -candidate.priority() : 0);
-        Comparator<PrefillCostOrder.Candidate<Integer>> byRatio = (left, right) ->
-                BigInteger.valueOf(left.computeTokens()).multiply(BigInteger.valueOf(right.inputTokens()))
-                        .compareTo(BigInteger.valueOf(right.computeTokens()).multiply(BigInteger.valueOf(left.inputTokens())));
-        var known = ready.stream().filter(c -> c.computeTokens() != null).sorted(byPriority.thenComparing(byRatio)
-                .thenComparingLong(PrefillCostOrder.Candidate::computeTokens)
-                .thenComparingLong(PrefillCostOrder.Candidate::inputTokens)
-                .thenComparingLong(PrefillCostOrder.Candidate::sequence));
-        var unknown = ready.stream().filter(c -> c.computeTokens() == null)
-                .sorted(Comparator.comparingLong(PrefillCostOrder.Candidate::sequence));
-        return java.util.stream.Stream.concat(known, unknown).sorted(byPriority)
-                .limit(limit).map(PrefillCostOrder.Candidate::value).toList();
     }
 }

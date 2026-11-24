@@ -322,42 +322,6 @@ public class CostBasedPrefillStrategy {
         return false;
     }
 
-    /** Payload-free token estimate for benefit ordering; no time predictor or capacity reservation. */
-    public record TokenEstimate(long inputTokens, long hitTokens) {
-        public TokenEstimate {
-            if (inputTokens < 0 || hitTokens < 0 || hitTokens > inputTokens) {
-                throw new IllegalArgumentException("invalid Prefill token estimate");
-            }
-        }
-        public long computeTokens() { return inputTokens - hitTokens; }
-    }
-
-    /** Best reachable cached-input benefit for one queued request; null without a Prefill pool. */
-    public TokenEstimate estimateQueuedTokens(
-            BalanceContext balanceContext, RoleType roleType, String group) {
-        EndpointDiscovery discovery = discoverEndpoints(roleType, group);
-        if (discovery.candidates().isEmpty()) {
-            return null;
-        }
-        Request request = balanceContext.getRequest();
-        long seqLen = Math.max(0L, request.getSeqLen());
-        Map<String, Integer> cacheMatchResults = discovery.directory().isEmpty() ? Map.of()
-                : getCacheMatchResults(balanceContext, roleType, discovery);
-        long hit = 0L;
-        for (EndpointRegistry.PrefillRoutingEntry routingEntry : discovery.candidates()) {
-            hit = Math.max(hit, Math.max(0L, calculateCacheMatch(
-                    routingEntry.endpoint(), routingEntry.address(),
-                    cacheMatchResults, request).effectiveHitTokens()));
-        }
-        RoutingConfig.TokenBalanceConfig tokenBalance = balanceContext.getConfig().getRouter()
-                .getRoles().getPrefill().getTokenBalance();
-        if (tokenBalance != null && !PrefillTokenBalance.cacheFirst(
-                hit, seqLen, tokenBalance.getMinPrefixHitPercent())) {
-            hit = 0L;
-        }
-        return new TokenEstimate(seqLen, hit);
-    }
-
     /**
      * Advisory fleet estimate for one queued request: the best reachable cache
      * hit, the best modeled service time across the pool, and the pool size.

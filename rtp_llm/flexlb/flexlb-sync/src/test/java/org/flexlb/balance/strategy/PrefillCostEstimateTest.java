@@ -26,10 +26,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Cached-input token estimates used by queue admission cost ordering. */
+/** Fleet-level work and cache estimates for queue shedding. */
 class PrefillCostEstimateTest {
     private FlexlbConfig config;
-    private RoutingConfig.TokenBalanceConfig balance;
     private EndpointRegistry registry;
     private CacheAwareService cache;
     private CostBasedPrefillStrategy strategy;
@@ -39,7 +38,7 @@ class PrefillCostEstimateTest {
     void setUp() {
         config = StrategyTestSupport.config();
         config.setDispatcher(DispatcherConfig.nonBatch());
-        balance = new RoutingConfig.TokenBalanceConfig();
+        var balance = new RoutingConfig.TokenBalanceConfig();
         balance.setMinPrefixHitPercent(5);
         config.getRouter().getRoles().getPrefill().setTokenBalance(balance);
         config.getRouter().getRoles().getPrefill().getExecutionTimeEstimator()
@@ -70,24 +69,18 @@ class PrefillCostEstimateTest {
     }
 
     @Test
-    void benefitEstimateUsesEffectiveCacheAndIgnoresTimePrediction() {
+    void queueSheddingEstimatesWorkAndReachableCacheWithinThePolicyGroup() {
         when(cache.findMatchingEngines(any(), any(), any())).thenReturn(
                 Map.of("10.0.0.1:8080", 900, "10.0.0.2:8080", 999));
-        var estimate = strategy.estimateQueuedTokens(context, RoleType.PREFILL, "a");
+        var estimate = strategy.estimateQueuedWork(context, RoleType.PREFILL, "a");
         assertEquals(100_000L, estimate.inputTokens());
         assertEquals(90_000L, estimate.hitTokens());
-        assertEquals(10_000L, estimate.computeTokens());
-        assertNull(strategy.estimateQueuedTokens(context, RoleType.PREFILL, "missing"));
-        assertEquals(99_900L, strategy.estimateQueuedTokens(context, RoleType.PREFILL, null).hitTokens());
-        assertTrue(strategy.estimateQueuedWork(context, RoleType.PREFILL, "a").workMs() > 1_000_000L,
-                "time predictions and benefit token counts are independent");
-        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of("10.0.0.1:8080", 50));
-        assertEquals(0L, strategy.estimateQueuedTokens(context, RoleType.PREFILL, "a").hitTokens(),
-                "exactly the affinity threshold is routed as cold");
-        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of("10.0.0.1:8080", 51));
-        assertEquals(5_100L, strategy.estimateQueuedTokens(context, RoleType.PREFILL, "a").hitTokens());
+        assertEquals(1, estimate.workers());
+        assertTrue(estimate.workMs() > 1_000_000L);
+        assertNull(strategy.estimateQueuedWork(context, RoleType.PREFILL, "missing"));
+        assertEquals(99_900L, strategy.estimateQueuedWork(context, RoleType.PREFILL, null).hitTokens());
         when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of("10.0.0.1:8080", 2000));
-        assertEquals(99_900L, strategy.estimateQueuedTokens(context, RoleType.PREFILL, "a").hitTokens(),
+        assertEquals(99_900L, strategy.estimateQueuedWork(context, RoleType.PREFILL, "a").hitTokens(),
                 "reachable cache benefit is bounded by the request length");
     }
 

@@ -6,7 +6,6 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
-import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.PrefillQueueSheddingConfig;
 import org.flexlb.dao.BalanceContext;
@@ -22,7 +21,6 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -49,9 +47,7 @@ import java.util.concurrent.locks.ReentrantLock;
  * index operations; route projection and RPCs are never performed while it is
  * held.</p>
  *
- * <p>Ready requests receive planning slots in FIFO/priority order, optionally
- * ordered by successful input tokens per new compute token within business
- * priority. Available slots can be used regardless of in-flight estimates. A request
+ * <p>Ready requests receive planning slots in FIFO or priority-then-FIFO order. A request
  * that cannot be admitted waits for a relevant capacity event; it does not fence
  * later requests from trying the same worker with different resource demands.
  * Planning is bounded and parallel; completed plans are published without waiting
@@ -61,7 +57,6 @@ import java.util.concurrent.locks.ReentrantLock;
 final class GlobalQueueCoordinator implements AutoCloseable {
 
     private static final int MIN_PLANNER_THREADS = 1;
-    private final ExecutorService costEstimator;
     private final DefaultRouter router;
     private final BatchSchedulerReporter reporter;
     private final EvictionManager evictionManager;
@@ -70,8 +65,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     private final boolean priorityOrdering;
     private final int plannerCount;
     private final double scanBudgetMultiplier;
-    /** Optional ordering of queued Prefill admission by cached-input benefit density. */
-    private final boolean prefillCostOrder;
+    private final boolean trackPendingPrefixes;
     private final ConfigService configService;
     private final PrefillSheddingMonitor shedding;
     private final ReentrantLock lock = new ReentrantLock();
@@ -86,14 +80,6 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     private final Set<GlobalQueueEntry> inFlight =
             Collections.newSetFromMap(new IdentityHashMap<>());
     private final ArrayDeque<Plan> completedPlans = new ArrayDeque<>();
-    /** Cost-order candidates whose planning slots are not yet committed. */
-    private final Set<GlobalQueueEntry> costOrderPending = Collections.newSetFromMap(new IdentityHashMap<>());
-    // Protected by lock. A completed estimate is visible to the next dequeue.
-    private final Map<GlobalQueueEntry, WorkEstimate> costOrderEstimates = new IdentityHashMap<>();
-    /** Includes the in-progress lookup until its result is published under the lock. */
-    private final LinkedHashSet<GlobalQueueEntry> costRefreshQueue = new LinkedHashSet<>();
-    /** At most one read-only refresh runs independently of placement planners. */
-    private boolean refreshingCosts;
     /** Published by the decision thread; timeout readers never acquire the queue lock. */
     private volatile Map<String, Object> waitDiagnostics = Map.of("cause", "waiting for placement");
     private final ExecutorService planners;
@@ -127,13 +113,8 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         this.prefixes = new PendingPrefillPrefixes(orderedQueue::markRequestReadyForRetry);
         this.waitingRequests = new PlacementWaitQueue(priorityOrdering, availability);
         this.scanBudgetMultiplier = checkedConfig.loadBalanceConfig().queueScheduler().getScanBudgetMultiplier();
-        this.prefillCostOrder = checkedConfig.loadBalanceConfig().isPrefillCostOrder();
+        this.trackPendingPrefixes = checkedConfig.loadBalanceConfig().isPrefillCostOrder();
 
-        this.costEstimator = prefillCostOrder ? Executors.newSingleThreadExecutor(task -> {
-            var thread = new Thread(task, "flexlb-prefill-cost-estimator");
-            thread.setDaemon(true);
-            return thread;
-        }) : null;
         AtomicInteger plannerId = new AtomicInteger();
         ThreadFactory plannerFactory = task -> {
             Thread thread = new Thread(task,
@@ -261,7 +242,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         try {
             while (!closed.get()) {
                 // Commit every plan that finished before this round began, then
-                // backfill all freed slots in one ranking pass. A lone completion
+                // backfill all freed slots in one scan. A lone completion
                 // still backfills immediately because the batch drains first.
                 for (Plan completed : drainCompletedPlans()) {
                     processCompletedPlan(completed);
@@ -273,7 +254,6 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             closed.set(true);
             availability.removeListener(availabilityListener);
             planners.shutdown();
-            if (costEstimator != null) { costEstimator.shutdownNow(); }
             if (shedding != null) { shedding.close(); }
             drainOnClose();
         }
@@ -298,11 +278,10 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         lock.lock();
         try {
             int slots = plannerCount - inFlight.size();
-            if (closed.get() || (slots == 0 && !prefillCostOrder)) {
+            if (closed.get() || slots == 0) {
                 return List.of();
             }
-            List<GlobalQueueEntry> candidates = planningCandidates(slots == 0 ? plannerCount : slots);
-            if (prefillCostOrder) { candidates = rankCostCandidates(candidates, slots); }
+            List<GlobalQueueEntry> candidates = planningCandidates(slots);
             inFlight.addAll(candidates);
             return candidates;
         } finally {
@@ -318,9 +297,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             long nextPrefixWakeMs = prefixes.resumeExpired(System.currentTimeMillis());
             if (closed.get() || !completedPlans.isEmpty()) { return; }
             if (inFlight.size() < plannerCount && (orderedQueue.hasUnscannedRequests()
-                    || waitingRequests.hasReadyRequests() || !costOrderPending.isEmpty())) { return; }
-            if (prefillCostOrder && costOrderPending.size() < calculateScanBudget(plannerCount)
-                    && orderedQueue.hasUnscannedRequests()) { return; }
+                    || waitingRequests.hasReadyRequests())) { return; }
             if (nextPrefixWakeMs == Long.MAX_VALUE) { changed.await(); }
             else { changed.await(nextPrefixWakeMs, TimeUnit.MILLISECONDS); }
         } catch (InterruptedException interruption) {
@@ -401,26 +378,12 @@ final class GlobalQueueCoordinator implements AutoCloseable {
 
     /** Caller holds lock; every examined entry counts against the scan budget. */
     private List<GlobalQueueEntry> planningCandidates(int slots) {
-        int budget = calculateScanBudget(slots);
-        // Cost ordering needs the whole visible page to rank before committing slots.
-        int lookahead = prefillCostOrder ? budget : slots;
-        if (!prefillCostOrder) {
-            waitingRequests.resumeReady(lookahead, entry -> {
-                if (shedding != null) { shedding.remove(entry); }
-                orderedQueue.markRequestReadyForRetry(entry);
-            });
-        } else {
-            int remaining = calculateScanBudget(plannerCount) - costOrderPending.size();
-            if (remaining <= 0) {
-                // A higher-priority arrival may enter even when the lookahead window is full.
-                int highest = costOrderPending.stream().mapToInt(entry -> entry.priority).max().orElse(-1);
-                if (!priorityOrdering || orderedQueue.highestUnscannedPriority() <= highest) { return List.of(); }
-                remaining = 1;
-            }
-            lookahead = Math.min(lookahead, remaining);
-        }
+        waitingRequests.resumeReady(slots, entry -> {
+            if (shedding != null) { shedding.remove(entry); }
+            orderedQueue.markRequestReadyForRetry(entry);
+        });
         return orderedQueue.scanForPlanningCandidates(
-                lookahead, budget, entry -> {
+                slots, calculateScanBudget(slots), entry -> {
                     if (entry.future.isDone()) {
                         removeRequestUnderLock(entry);
                         return false;
@@ -428,79 +391,6 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                     return !entry.removed && !inFlight.contains(entry)
                             && !waitingRequests.isWaiting(entry) && !prefixes.isWaiting(entry);
                 });
-    }
-
-    /** Cached-input benefit and the time the background lookup completed. */
-    private record WorkEstimate(long atNanos, CostBasedPrefillStrategy.TokenEstimate tokens) { }
-
-    /** Only ready requests compete for the next available planning slots. */
-    private List<GlobalQueueEntry> rankCostCandidates(List<GlobalQueueEntry> page, int slots) {
-        costOrderPending.addAll(page);
-        long now = System.nanoTime();
-        var contenders = new ArrayList<>(costOrderPending);
-        // Keep wakeups in their ranked domain index until a planner actually selects them.
-        waitingRequests.collectReadyHeads(calculateScanBudget(slots), contenders);
-        var candidates = new ArrayList<PrefillCostOrder.Candidate<GlobalQueueEntry>>(contenders.size());
-        for (var entry : contenders) {
-            var estimate = costOrderEstimates.get(entry);
-            if (estimate == null || now - estimate.atNanos() >= TimeUnit.SECONDS.toNanos(1)) {
-                // Stale-while-revalidate: this round keeps ranking on the last
-                // completed estimate; the background renewal swaps in the new value
-                // when it lands, so an expired estimate never falls back to
-                // arrival order while its refresh is still in flight.
-                costRefreshQueue.add(entry);
-            }
-            candidates.add(benefitCandidate(entry, estimate));
-        }
-        if (!refreshingCosts && !costRefreshQueue.isEmpty()) {
-            refreshingCosts = true;
-            costEstimator.execute(this::refreshCosts);
-        }
-        var selected = PrefillCostOrder.first(candidates, priorityOrdering, slots);
-        for (var entry : selected) {
-            costOrderPending.remove(entry);
-            if (waitingRequests.resumeIfWaiting(entry) && shedding != null) { shedding.remove(entry); }
-        }
-        return selected;
-    }
-
-    private void refreshCosts() {
-        lock.lock();
-        try {
-            while (!closed.get() && !costRefreshQueue.isEmpty()) {
-                var entry = costRefreshQueue.getFirst();
-                CostBasedPrefillStrategy.TokenEstimate tokens = null;
-                lock.unlock();
-                try {
-                    if (!entry.removed && !entry.future.isDone()) {
-                        tokens = router.estimateQueuedTokens(entry.context, entry.routingGroup);
-                    }
-                } catch (RuntimeException unavailable) {
-                    Logger.debug("Prefill token estimate renewal failed; keeping the last value", unavailable);
-                } finally {
-                    lock.lock();
-                }
-                if (!costRefreshQueue.remove(entry) || entry.future.isDone()) { continue; }
-                WorkEstimate previous = costOrderEstimates.get(entry);
-                var updated = new WorkEstimate(System.nanoTime(), tokens != null ? tokens
-                        : previous == null ? null : previous.tokens());
-                costOrderEstimates.put(entry, updated);
-                if (tokens != null && waitingRequests.isWaiting(entry)) {
-                    waitingRequests.updatePrefillCost(benefitCandidate(entry, updated));
-                }
-            }
-        } finally {
-            refreshingCosts = false;
-            changed.signal();
-            lock.unlock();
-        }
-    }
-
-    private PrefillCostOrder.Candidate<GlobalQueueEntry> benefitCandidate(
-            GlobalQueueEntry entry, WorkEstimate estimate) {
-        CostBasedPrefillStrategy.TokenEstimate tokens = estimate == null ? null : estimate.tokens();
-        return new PrefillCostOrder.Candidate<>(entry, entry.priority, entry.sequence,
-                tokens == null ? 0L : tokens.inputTokens(), tokens == null ? null : tokens.computeTokens());
     }
 
     private Plan plan(GlobalQueueEntry entry) {
@@ -664,8 +554,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         lock.lock();
         try {
             if (!isQueued(plan.entry)) { return true; }
-            var rank = prefillCostOrder ? benefitCandidate(plan.entry, costOrderEstimates.get(plan.entry)) : null;
-            parked = waitingRequests.park(plan.entry, plan.waitKey(), plan.availabilitySequence, rank);
+            parked = waitingRequests.park(plan.entry, plan.waitKey(), plan.availabilitySequence);
             PrefillQueueShedding.Estimate estimate = plan.entry.sheddingEstimate;
             if (estimate != null && estimate.hitTokens() == 0L) {
                 plan.entry.knownColdRequest = true;
@@ -707,7 +596,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     }
 
     void prefillEnded(RequestExecution item, boolean completed) {
-        if (item == null || !prefillCostOrder) { return; }
+        if (item == null || !trackPendingPrefixes) { return; }
         lock.lock();
         try {
             if (prefixes.finished(item, completed)) { changed.signal(); }
@@ -736,9 +625,6 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     private void removeRequestUnderLock(GlobalQueueEntry entry) {
         prefixes.removeWait(entry);
         if (shedding != null) { shedding.remove(entry); }
-        costOrderPending.remove(entry);
-        costOrderEstimates.remove(entry);
-        costRefreshQueue.remove(entry);
         if (orderedQueue.remove(entry)) {
             waitingRequests.remove(entry);
             changed.signal();
@@ -848,9 +734,6 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             waitingRequests.clear();
             registered.clear();
             prefixes.clear();
-            costOrderPending.clear();
-            costOrderEstimates.clear();
-            costRefreshQueue.clear();
             completed = List.copyOf(completedPlans);
             completedPlans.clear();
             inFlight.clear();

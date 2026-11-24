@@ -16,7 +16,7 @@ public final class QueueOrderingConfig {
     }
 
     private Type type = Type.FIFO;
-    /** Prefer higher input-token benefit per new compute token within business priority. */
+    /** Rank requests waiting on the same Prefill by compute cost within business priority. */
     private boolean prefillCostOrder;
     private int defaultPriority = 50;
     private PreemptionConfig preemption;

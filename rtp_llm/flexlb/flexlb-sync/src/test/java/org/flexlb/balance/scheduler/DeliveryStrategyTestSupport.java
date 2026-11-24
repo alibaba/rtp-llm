@@ -172,7 +172,7 @@ public final class DeliveryStrategyTestSupport {
             Mockito.when(routeCommit.reserve(Mockito.any(), Mockito.anyLong()))
                     .thenAnswer(invocation -> new PrefillState.ReservationResult<>(
                             PrefillState.CapacityStatus.ACQUIRED, routeReservations.get(invocation.getArgument(0))));
-            Mockito.when(prefill.routeAdmissionAvailability(Mockito.any())).thenReturn(unavailable);
+            Mockito.when(prefill.routeAdmissionAvailability()).thenReturn(unavailable);
             Mockito.when(prefill.tryBeginRouteCommitAdmission())
                     .thenReturn(routeCommit);
             Mockito.when(routeCommit.commit(

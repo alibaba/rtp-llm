@@ -201,18 +201,17 @@ FIFO orders by enqueue sequence. PRIORITY orders by normalized priority
 (1–100, higher first) and then by enqueue sequence. `defaultPriority` is used
 only when the caller did not supply a priority.
 
-Ordering is global to one model's `GlobalQueueCoordinator`. Its rolling
-planning frontier is an implementation pipeline, not a decision group. Before
-each commit, PRIORITY revalidates that no newer higher-priority request is
-eligible, so planner count cannot change ordering semantics. An exact-capacity
+One model's `GlobalQueueCoordinator` assigns planning slots in global queue
+order among eligible requests. Planners can run concurrently, and the
+coordinator processes their results as they become available. An exact-capacity
 conflict is replanned only when the selected endpoint's placement version proves
 that the captured generation is stale; an unchanged capacity miss parks on that
 endpoint immediately. Delivery callbacks are
 serialized by the endpoint worker thread; asynchronous Engine
 ACK/completion order is not a FIFO or priority guarantee.
 
-For example, suppose the global order is `[A, B, C]`. The coordinator commits
-each independently selected route in that order. In `BATCH` mode a fixed window
+For example, suppose the global order is `[A, B, C]`. The coordinator starts
+planning in that order. In `BATCH` mode a fixed window
 is only a decision boundary: `[A, B]` may become one endpoint-local batch or
 two batches if the requests choose different Prefill endpoints. The endpoint
 runtime can still split either group if an exact capacity or deadline check
@@ -224,10 +223,12 @@ different policy groups progress independently; an unbound group overlaps all
 groups. The policy group is frozen at ingress and reused for route selection. Once a route is committed, delivery backpressure can delay
 the group but cannot trigger a second route selection.
 
-With `prefillCostOrder` enabled, a single estimator refreshes cache benefits
-for a bounded window of ready requests. Each free planner takes the next ready request immediately. Business priority
-comes first when enabled. Within the same priority, requests with fresh estimates
-are ordered by benefit, followed by requests without estimates in arrival order.
+The global queue uses the configured FIFO or PRIORITY order for placement and
+capacity retries. With `prefillCostOrder` enabled, requests waiting on the same
+Prefill compete for delivery by business priority (when enabled), then by the
+fraction of input tokens requiring computation on that worker. A smaller fraction
+goes first. Ties prefer fewer compute tokens, then fewer input tokens, then
+enqueue order. Zero-hit requests use the same dispatch capacity as cache hits.
 
 With `prefillQueueShedding` enabled, a separate monitor evaluates blocked
 placement attempts with a Prefill work estimate. It reads pool pressure and

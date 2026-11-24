@@ -129,12 +129,11 @@ class PrefillEndpointTest {
     }
 
     @Test
-    void lateCacheHitUsesFreeSlotWhileColdRequestWaits() throws Exception {
+    void coldRequestsUseFreeSlotsAndQueuedRequestsCompeteByCostAtDispatch() throws Exception {
         FlexlbConfig config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
         org.flexlb.balance.scheduler.SchedulingTestConfig.usePrefillCostOrder(config);
         config.setDispatcher(DispatcherConfig.nonBatch());
         config.getDispatcher().setMaxInflightPerPrefillWorker(2);
-        config.getWorkerRegistry().getHealth().setStatusPollIntervalMs(50L);
         var deliveries = new java.util.concurrent.LinkedBlockingQueue<DeliveryResult>();
         var runtime = new EndpointTestSupport.TestRequestRuntime() {
             @Override
@@ -148,20 +147,23 @@ class PrefillEndpointTest {
         try {
             var first = createScheduledRequest(worker, config, 1L, 1024L, 0L);
             var cold = createScheduledRequest(worker, config, 2L, 1024L, 0L);
-            var hot = createScheduledRequest(worker, config, 3L, 1024L, 960L);
+            var queuedCold = createScheduledRequest(worker, config, 3L, 1024L, 0L);
+            var hot = createScheduledRequest(worker, config, 4L, 1024L, 960L);
             assertTrue(EndpointTestSupport.offer(worker, first));
             assertEquals(DeliveryResult.delivered(), deliveries.poll(2, TimeUnit.SECONDS));
             assertTrue(EndpointTestSupport.offer(worker, cold));
-            assertFalse(worker.routeAdmissionAvailability(cold).isAvailable());
-            assertTrue(EndpointTestSupport.offer(worker, hot));
             assertEquals(DeliveryResult.delivered(), deliveries.poll(2, TimeUnit.SECONDS));
-            assertEquals(List.of(cold), worker.captureQueueSnapshot().items());
-            assertFalse(worker.canAcceptRequest());
+            assertFalse(worker.routeAdmissionAvailability().isAvailable());
+            assertTrue(EndpointTestSupport.offer(worker, queuedCold));
+            assertTrue(EndpointTestSupport.offer(worker, hot));
+            assertEquals(List.of(hot, queuedCold), worker.captureQueueSnapshot().items());
 
             assertTrue(worker.releaseCommittedItem(first.execution()));
-            assertFalse(worker.routeAdmissionAvailability(cold).isAvailable());
+            assertEquals(DeliveryResult.delivered(), deliveries.poll(2, TimeUnit.SECONDS));
+            assertEquals(List.of(queuedCold), worker.captureQueueSnapshot().items());
             assertTrue(worker.releaseCommittedItem(hot.execution()));
             assertEquals(DeliveryResult.delivered(), deliveries.poll(2, TimeUnit.SECONDS));
+            assertTrue(worker.releaseCommittedItem(queuedCold.execution()));
             assertTrue(worker.releaseCommittedItem(cold.execution()));
         } finally {
             worker.close();

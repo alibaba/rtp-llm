@@ -86,14 +86,6 @@ public class DefaultRouter {
                 : prefillSelector.estimateQueuedWork(context, role, policyGroup);
     }
 
-    /** Cached-input token estimate for one queued request; null without a Prefill pool. */
-    public CostBasedPrefillStrategy.TokenEstimate estimateQueuedTokens(
-            BalanceContext context, String policyGroup) {
-        RoleType role = prefillRole();
-        return role == null ? null
-                : prefillSelector.estimateQueuedTokens(context, role, policyGroup);
-    }
-
     boolean hasBetterResidentPrefix(ScheduledRequest item, String policyGroup) {
         return prefillSelector.hasBetterResidentPrefix(item.ctx(), item.prefill().getRole(), policyGroup, item.prefillEp());
     }

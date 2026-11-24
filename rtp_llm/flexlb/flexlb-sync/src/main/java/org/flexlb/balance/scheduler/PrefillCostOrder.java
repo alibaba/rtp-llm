@@ -2,33 +2,11 @@ package org.flexlb.balance.scheduler;
 
 import java.math.BigInteger;
 import java.util.Comparator;
-import java.util.List;
 import java.util.function.ToIntFunction;
 import java.util.function.ToLongFunction;
 
 /** Input-token benefit per unit of new Prefill computation, within business priority. */
 final class PrefillCostOrder {
-    record Candidate<T>(T value, int priority, long sequence, long inputTokens, Long computeTokens) { }
-
-    static <T> List<T> first(List<Candidate<T>> ready, boolean priorityOrdering, int limit) {
-        if (limit <= 0 || ready.isEmpty()) { return List.of(); }
-        return ready.stream().sorted(comparator(priorityOrdering))
-                .limit(limit).map(Candidate::value).toList();
-    }
-
-    static <T> Comparator<Candidate<T>> comparator(boolean priorityOrdering) {
-        return Comparator.<Candidate<T>>comparingInt(candidate -> priorityOrdering ? -candidate.priority() : 0)
-                .thenComparing(PrefillCostOrder::compareEstimates)
-                .thenComparingLong(Candidate::sequence);
-    }
-
-    private static int compareEstimates(Candidate<?> left, Candidate<?> right) {
-        boolean leftUnknown = unknownCost(left);
-        boolean rightUnknown = unknownCost(right);
-        if (leftUnknown || rightUnknown) { return Boolean.compare(leftUnknown, rightUnknown); }
-        return compareCosts(left.inputTokens(), left.computeTokens(), right.inputTokens(), right.computeTokens());
-    }
-
     /** Worker placement freezes the selected endpoint's hit count for both dispatch and projection. */
     static <T> Comparator<T> workerOrder(ToIntFunction<T> priority, ToLongFunction<T> length,
                                          ToLongFunction<T> hits, Comparator<T> arrival) {
@@ -45,11 +23,6 @@ final class PrefillCostOrder {
         if (ratio != 0) { return ratio; }
         int compute = Long.compare(computeA, computeB);
         return compute != 0 ? compute : Long.compare(lengthA, lengthB);
-    }
-
-    private static boolean unknownCost(Candidate<?> candidate) {
-        return candidate.inputTokens() <= 0 || candidate.computeTokens() == null
-                || candidate.computeTokens() < 0 || candidate.computeTokens() > candidate.inputTokens();
     }
 
     /** Lower C/T means more successful input tokens (including cache) per compute token.
