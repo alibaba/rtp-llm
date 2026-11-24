@@ -1760,7 +1760,7 @@ TEST_F(P2PConnectorSchedulerTest, LeaseQueriesForDistinctRequestsCanOverlap) {
     ASSERT_TRUE(waitUntil([&] { return !first->resourceHoldPending() && !second->resourceHoldPending(); }));
 }
 
-TEST(P2PRetainedKvTest, OldLeaseStillRequiresPhysicalStopConfirmation) {
+TEST(P2PRetainedKvTest, ReleasesExpiredLeaseWithoutPhysicalStopConfirmation) {
     const auto deadline = currentTimeMs() - 1;
     auto make_context = [&](const std::string& key) {
         auto context = std::make_shared<P2PConnectorAsyncReadContext>(
@@ -1770,12 +1770,19 @@ TEST(P2PRetainedKvTest, OldLeaseStillRequiresPhysicalStopConfirmation) {
         return context;
     };
     auto expired = make_context("expired-hold");
-    expired->lease_hold_start_us_.store(P2PNotification::nowUs() - 10 * 60 * 1000 * 1000LL);
     expired->markKickoffUnconfirmed({ErrorCode::GENERATE_TIMEOUT, "late kickoff error"});
+    const auto hold_start_us = expired->lease_hold_start_us_.load();
+    constexpr int64_t timeout_us = 5 * 60 * 1000 * 1000LL;
+    EXPECT_EQ(expired->nextWakeupMs(false), (hold_start_us + timeout_us + 999) / 1000);
+    EXPECT_FALSE(expired->expireLeaseHoldIfNeeded(hold_start_us + timeout_us - 1));
     EXPECT_TRUE(expired->resourceHoldPending());
     EXPECT_TRUE(expired->resource_);
+    EXPECT_TRUE(expired->expireLeaseHoldIfNeeded(hold_start_us + timeout_us));
+    EXPECT_FALSE(expired->resourceHoldPending());
+    EXPECT_FALSE(expired->resource_);
     EXPECT_FALSE(expired->lease_all_ranks_stopped_.load());
     EXPECT_EQ(expired->nextWakeupMs(false), std::numeric_limits<int64_t>::max());
+    EXPECT_FALSE(expired->expireLeaseHoldIfNeeded(hold_start_us + timeout_us + 1));
 }
 
 TEST(P2PRetainedKvTest, CapacityIncludesAllDecodePipelineStages) {

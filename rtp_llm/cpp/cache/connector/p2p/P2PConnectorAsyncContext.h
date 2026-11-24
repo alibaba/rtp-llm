@@ -86,6 +86,7 @@ public:
     void checkDone();
     void checkCancelDone();
     bool expireTransferDeadlineIfNeeded();
+    bool expireLeaseHoldIfNeeded(int64_t now_us);
     bool needCancel() const;
     void cancel(const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client);
 

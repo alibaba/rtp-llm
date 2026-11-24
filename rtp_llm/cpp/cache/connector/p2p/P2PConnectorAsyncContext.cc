@@ -18,6 +18,7 @@ constexpr int64_t kLeasePollMaxIntervalMs     = 100;
 constexpr int64_t kLeasePollRpcTimeoutMs      = 500;
 constexpr int64_t kCancelRetryMaxBaseMs       = 800;
 constexpr int64_t kCancelWarningIntervalMs    = 30 * 1000;
+constexpr int64_t kKvForceReleaseTimeoutMs    = 5 * 60 * 1000;
 
 const char* readOutcomeHoldReason(ErrorCode error_code) {
     switch (error_code) {
@@ -189,6 +190,22 @@ void P2PConnectorAsyncReadContext::releaseLeaseHoldLocked(bool all_ranks_stopped
     lease_all_ranks_stopped_.store(all_ranks_stopped, std::memory_order_release);
     lease_poll_next_ms_.store(0, std::memory_order_relaxed);
     lease_hold_pending_.store(false, std::memory_order_release);
+}
+
+bool P2PConnectorAsyncReadContext::expireLeaseHoldIfNeeded(int64_t now_us) {
+    DoneNotifier                done_notifier{*this};
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    const auto                  hold_start_us = lease_hold_start_us_.load();
+    if (!resourceHoldPending() || hold_start_us <= 0 || now_us - hold_start_us < kKvForceReleaseTimeoutMs * 1000) {
+        return false;
+    }
+    RTP_LLM_LOG_WARNING("P2P forcibly releasing retained Decode KV without all-rank stop confirmation, "
+                        "unique_key=%s hold_ms=%ld cancel_confirmed=%d",
+                        uniqueKey().c_str(),
+                        (now_us - hold_start_us) / 1000,
+                        cancel_confirmed_.load(std::memory_order_acquire));
+    releaseLeaseHoldLocked(/*all_ranks_stopped=*/false, now_us);
+    return true;
 }
 
 bool P2PConnectorAsyncReadContext::expireTransferDeadlineIfNeeded() {
@@ -663,6 +680,10 @@ int64_t P2PConnectorAsyncReadContext::nextWakeupMs(bool allow_control) const {
         next = transfer_stop_at_ms_;
     }
     if (resourceHoldPending()) {
+        const auto hold_start_us = lease_hold_start_us_.load();
+        if (hold_start_us > 0) {
+            next = std::min(next, (hold_start_us + 999) / 1000 + kKvForceReleaseTimeoutMs);
+        }
         if (lease_query_timeout_ms_ > 0 && allow_control && calls_ready_.load(std::memory_order_acquire)
             && cancel_confirmed_.load()) {
             next = std::min(next, lease_poll_next_ms_.load());
@@ -925,6 +946,7 @@ void P2PConnectorAsyncReadContextChecker::advanceRead(const P2PConnectorAsyncRea
     }
     try {
         context->expireTransferDeadlineIfNeeded();
+        context->expireLeaseHoldIfNeeded(P2PNotification::nowUs());
         context->checkCancelDone();
     } catch (const std::exception& error) {
         RTP_LLM_LOG_ERROR("P2P read deadline or cancellation processing failed, key=%s error=%s",
