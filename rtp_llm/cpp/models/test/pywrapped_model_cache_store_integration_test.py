@@ -1531,11 +1531,15 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         model = SpeculativeCommitBridgeModel()
         self.assertFalse(run_speculative_commit_bridge(model, "fail_stop_capability"))
         model.requires_speculative_target_commit_fail_stop = lambda: True
-        self.assertTrue(run_speculative_commit_bridge(model, "fail_stop_capability"))
+        self.assertEqual(
+            run_speculative_commit_bridge(model, "fail_stop_capability"),
+            torch.version.hip is not None,
+        )
         self.assertFalse(
             run_speculative_commit_bridge(model, "fail_stop_capability", False)
         )
 
+    @unittest.skipUnless(torch.version.hip, "ROCm single-SSM transaction")
     def test_irreversible_commit_capability_requires_strict_bool(self):
         for value in (0, 1, None, "true", object()):
             with self.subTest(value=value):
@@ -1544,6 +1548,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "must return bool"):
                     run_speculative_commit_bridge(model, "fail_stop_capability")
 
+    @unittest.skipUnless(torch.version.hip, "ROCm single-SSM transaction")
     def test_irreversible_commit_capability_refreshes_after_cache_install(self):
         model = SpeculativeCommitBridgeModel()
         model.cache_installed = False
@@ -1556,6 +1561,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             (False, True),
         )
 
+    @unittest.skipUnless(torch.version.hip, "ROCm single-SSM transaction")
     def test_irreversible_commit_capability_can_be_installed_after_initialization(self):
         model = SpeculativeCommitBridgeModel()
         model.install_cache_views = lambda: setattr(
@@ -1566,6 +1572,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             (False, True),
         )
 
+    @unittest.skipUnless(torch.version.hip, "ROCm single-SSM transaction")
     def test_irreversible_commit_capability_rejects_missing_transaction_hooks(self):
         class NoCommitHooksModel:
             initialize = SpeculativeCommitBridgeModel.initialize

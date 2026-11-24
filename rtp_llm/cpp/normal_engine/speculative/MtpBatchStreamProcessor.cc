@@ -1566,6 +1566,7 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
     const auto& draft_model_output   = draft_prefill_output.model_output;
     const auto& draft_sampler_output = draft_prefill_output.sampler_output;
 
+#if USING_ROCM
     // Keep graph-owned output alive once per batch. Async dispatch already
     // copied it on the main stream, so its worker must not copy every row.
     torch::Tensor owned_draft_probs;
@@ -1573,6 +1574,7 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         owned_draft_probs = draft_probs_owned ? draft_sampler_output.all_probs :
                                                 draft_sampler_output.all_probs.to(torch::kCUDA).clone();
     }
+#endif
 
     int batch_idx_in  = 0;
     int batch_idx_out = 0;
@@ -1583,8 +1585,16 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         auto next_batch_size = stream->nextBatchSize();
 
         // speculative decoding info
+#if USING_ROCM
         torch::Tensor propose_all_probs =
             owned_draft_probs.defined() ? owned_draft_probs.narrow(0, batch_idx_out, next_batch_size) : torch::Tensor();
+#else
+        torch::Tensor propose_all_probs;
+        if (draft_sampler_output.all_probs.defined()) {
+            propose_all_probs =
+                draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
+        }
+#endif
 
         // This scalar read runs on the bookkeeping worker after accept_len is
         // ready, so it does not sync the main thread. Move to main thread only
@@ -1593,9 +1603,11 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
 
         torch::Tensor last_hidden_states;
         if (propose_step_ > 1 && !is_block_draft_) {
+#if USING_ROCM
             if (draft_probs_owned) {
                 last_hidden_states = stream->getLastHiddenStatesGpu();
             }
+#endif
             if (!last_hidden_states.defined()) {
                 last_hidden_states =
                     cloneHiddenSlice(draft_model_output.all_hidden_states, token_offset + cur_accept_len - 1, 1);

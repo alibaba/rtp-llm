@@ -625,7 +625,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     mtp_input_hidden_size_ = static_cast<size_t>(params.model_config_.getMtpInputHiddenSize());
     propose_step_          = propose_params->gen_num_per_circle;
     atom_qwen4_exp_ = params.model_config_.model_type == "atom_qwen4_exp";
+#if USING_ROCM
     require_speculative_target_commit_fail_stop_ = params.kv_cache_config.linear_ssm_replay;
+#endif
     RTP_LLM_CHECK_WITH_INFO(
         propose_step_ > 0, "speculative proposal width/gen_num_per_cycle must be positive, got %zu", propose_step_);
     vocab_size_                 = params.model_config_.vocab_size;
@@ -3834,11 +3836,13 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     auto* processor          = batch_stream_processor_.get();
     auto  spec_decode_copy   = spec_decode_output;
     auto  draft_prefill_copy = std::move(draft_prefill_output);
+#if USING_ROCM
     // Reuse the owned graph-output copy already published as per-stream device
     // state instead of cloning every vocabulary-sized row in the worker.
     if (draft_probs_all.defined()) {
         draft_prefill_copy.sampler_output.all_probs = draft_probs_all;
     }
+#endif
     auto       stream_groups_copy = stream_groups;
     const bool fail_stop          = model_ != nullptr && model_->requiresSpeculativeTargetCommitFailStop();
 

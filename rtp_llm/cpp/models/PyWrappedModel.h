@@ -113,6 +113,7 @@ public:
     HiddenStateCaptureStats    hiddenStateCaptureStats() const;
     std::optional<std::string> takeDeferredHiddenStateCaptureError() override;
     bool                       hasSpeculativeTargetCommitHooks() const override;
+#if USING_ROCM
     bool                       requiresSpeculativeTargetCommitFailStop() const override {
         if (!use_spec_decoding_) {
             return false;
@@ -132,6 +133,7 @@ public:
                                 "irreversible speculative target state requires all commit hooks");
         return required;
     }
+#endif
     std::string                prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) override;
     std::string                finishSpeculativeTargetCommit(bool commit) override;
     std::string                finalizeSpeculativeTargetCommit() override;
@@ -434,9 +436,13 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             const bool lifecycle = py::hasattr(py_model_, "on_cuda_graph_warmup")
                                    && py::hasattr(py_model_, "on_cuda_graph_capture")
                                    && py::hasattr(py_model_, "on_cuda_graph_replay");
+#if USING_ROCM
             const bool target_hooks = py::hasattr(py_model_, "clear_speculative_target_graph_capture")
                                       && py::hasattr(py_model_, "save_speculative_target_graph_capture")
                                       && py::hasattr(py_model_, "activate_speculative_target_graph_replay");
+#else
+            constexpr bool target_hooks = false;
+#endif
             RTP_LLM_CHECK_WITH_INFO(lifecycle || target_hooks,
                                     "speculative target CUDA Graph requires capture, save and replay transaction "
                                     "hooks to preserve side-state across graph instances");
@@ -524,9 +530,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         if (params.kv_cache_layer_layout.has_value()) {
             RTP_LLM_CHECK_WITH_INFO(cache_manager_ != nullptr, "cache-backed CUDA graph requires a cache manager");
             graph_params.kv_cache_group_tags = params.kv_cache_layer_layout->topology().groupTags();
+#if USING_ROCM
             for (const auto& group : params.kv_cache_layer_layout->topology().groups()) {
                 graph_params.kv_cache_state_layouts.push_back(group.policy.linear_state_layout);
             }
+#endif
         }
         // Most models transport explicit positions only for MRoPE. A model
         // that consumes those positions with Base RoPE (Qwen4 MTP's indexer)
