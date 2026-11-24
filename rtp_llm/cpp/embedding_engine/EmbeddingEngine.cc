@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <c10/core/InferenceMode.h>
+#include <c10/util/ScopeExit.h>
 #include <exception>
 #include <utility>
 
@@ -36,14 +37,12 @@ EmbeddingEngine::~EmbeddingEngine() {
     (void)stop();
 }
 
-void EmbeddingEngine::startTimelineProfiling(const std::string& trace_name,
-                                             int                start_step,
-                                             int                num_steps,
-                                             bool               enable_all_rank) {
+void EmbeddingEngine::startTimelineProfiling(
+    const std::string& trace_name, int start_step, int num_steps, bool enable_all_rank, bool profile_light) {
     if (enable_all_rank && parallelism_config.tp_size > 1) {
         throw std::invalid_argument("embedding profiling does not support broadcasting to all TP ranks");
     }
-    step_profiler_.configure(true, trace_name, start_step, num_steps);
+    step_profiler_.configure(true, trace_name, start_step, num_steps, profile_light);
 }
 
 absl::Status EmbeddingEngine::startLoop() {
@@ -67,6 +66,7 @@ void EmbeddingEngine::loop() {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_INFO("loop begin");
     c10::InferenceMode inference_guard(true);
+    auto               stop_profiler = c10::make_scope_exit([this] { step_profiler_.stop(); });
     while (running_) {
         auto status = step();
         if (!status.ok()) {
@@ -118,7 +118,7 @@ absl::Status EmbeddingEngine::step() {
             if (stream && stream->genTimeline()) {
                 const auto& cfg       = stream->profileConfig();
                 const int   num_steps = cfg.profile_step > 0 ? cfg.profile_step : 1;
-                step_profiler_.configure(true, cfg.profile_trace_name, 0, num_steps);
+                step_profiler_.configure(true, cfg.profile_trace_name, 0, num_steps, cfg.profile_light);
                 break;
             }
         }

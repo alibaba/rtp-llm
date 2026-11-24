@@ -9,6 +9,7 @@ import torch
 
 from rtp_llm.models_py.utils.profiler import (
     _NOOP_RECORD_FUNCTION_RANGE,
+    active_layer_forward_range,
     disable_record_function_ranges,
 )
 from rtp_llm.models_py.utils.profiler import (
@@ -37,12 +38,6 @@ def _noop_layer_forward_range(_layer_idx: int) -> ContextManager[Any]:
     return _NOOP_RECORD_FUNCTION_RANGE
 
 
-def _active_layer_forward_range(layer_idx: int) -> ContextManager[Any]:
-    # FUNCTION scope retains CPU layer attribution without projecting a user
-    # annotation onto every GPU stream covered by the range.
-    return torch._C._profiler._RecordFunctionFast(f"forward(layer={layer_idx})")
-
-
 def make_layer_forward_range() -> LayerForwardRange:
     """Capture profiler state before the fast path suppresses nested ranges."""
     if not record_function_ranges_enabled():
@@ -50,7 +45,7 @@ def make_layer_forward_range() -> LayerForwardRange:
     profiler_enabled = getattr(torch.autograd, "_profiler_enabled", None)
     if profiler_enabled is not None and not profiler_enabled():
         return _noop_layer_forward_range
-    return _active_layer_forward_range
+    return active_layer_forward_range()
 
 
 @contextmanager

@@ -122,12 +122,24 @@ TorchProfile::~TorchProfile() {
     }
 }
 
-void TorchProfile::start() {
+void TorchProfile::start(bool profile_light) {
     profile_device_ = activities_.count(tpi::ActivityType::CUDA) ? currentProfileDevice() : -1;
     count_ += 1;
-    stopped_ = false;
+    config_.report_input_shapes = !profile_light;
     tap::prepareProfiler(config_, activities_);
-    tap::enableProfiler(config_, activities_);
+    if (profile_light) {
+        // Push before Kineto installs its own TLS and pop after disableProfiler().
+        light_context_.emplace(c10::DebugInfoKind::INFERENCE_CONTEXT, std::make_shared<LightTimelineContext>());
+        try {
+            tap::enableProfiler(config_, activities_, {at::RecordScope::USER_SCOPE});
+        } catch (...) {
+            light_context_.reset();
+            throw;
+        }
+    } else {
+        tap::enableProfiler(config_, activities_);
+    }
+    stopped_       = false;
     async_profile_ = AsyncProfileSession::start();
 }
 
@@ -157,15 +169,15 @@ std::pair<std::unique_ptr<CollectedProfile>, std::string> TorchProfile::stopAndC
             } catch (const std::exception& e) {
                 RTP_LLM_LOG_ERROR("failed to collect cache transfer events; retaining native capture: %s", e.what());
             } catch (...) {
-                RTP_LLM_LOG_ERROR(
-                    "failed to collect cache transfer events; retaining native capture");
+                RTP_LLM_LOG_ERROR("failed to collect cache transfer events; retaining native capture");
             }
         }
     });
+    light_context_.reset();
     if (!res) {
         return {nullptr, ""};
     }
-    std::string file_name = output_dir_ + "/" + prefix_ + std::to_string(count_) + ".json";
+    std::string file_name   = output_dir_ + "/" + prefix_ + std::to_string(count_) + ".json";
     auto        collected   = std::make_unique<CollectedProfile>();
     collected->kineto       = std::move(res);
     collected->async_events = std::move(async_events);
@@ -228,12 +240,12 @@ StepWindowProfiler::StepWindowProfiler(const std::string& default_output_dir, in
     default_output_dir_(default_output_dir.empty() ? "." : default_output_dir), world_rank_(world_rank) {}
 
 StepWindowProfiler::StepScope::StepScope(StepWindowProfiler& profiler): profiler_(profiler) {
-    profiler_.beginStep();
+    profiler_.startStep();
 }
 
 StepWindowProfiler::StepScope::~StepScope() {
     try {
-        profiler_.endStep();
+        profiler_.finishStep();
     } catch (const std::exception& e) {
         RTP_LLM_LOG_ERROR("timeline profiler endStep failed: %s", e.what());
     } catch (...) {
@@ -241,7 +253,9 @@ StepWindowProfiler::StepScope::~StepScope() {
     }
 }
 
-void StepWindowProfiler::configure(bool enable, const std::string& trace_name, int start_step, int num_steps) {
+void StepWindowProfiler::configure(
+    bool enable, const std::string& trace_name, int start_step, int num_steps, bool profile_light) {
+    std::lock_guard<std::mutex> lock(mu_);
     // First-come-first-served: if a profiling session is already active, ignore new requests
     // to prevent concurrent requests from repeatedly restarting the profiler.
     if (enable && enabled_.load(std::memory_order_relaxed)) {
@@ -251,21 +265,19 @@ void StepWindowProfiler::configure(bool enable, const std::string& trace_name, i
     // Trust-boundary sanitization: trace_name flows into the output file path
     // (TorchProfile::stopAndCollect concatenates output_dir + "/" + prefix + ...),
     // and gRPC/ARPC callers do not pass through the Python HTTP entry's sanitize step.
-    std::string safe_trace_name = sanitizeTraceName(trace_name);
-    {
-        std::lock_guard<std::mutex> lock(mu_);
-        trace_name_ = safe_trace_name;
-    }
+    trace_name_                           = sanitizeTraceName(trace_name);
+    profile_light_                        = profile_light;
     static constexpr int kDefaultNumSteps = 3;
     start_step_.store(std::max(0, start_step));
     num_steps_.store(num_steps > 0 ? std::min(num_steps, kMaxNumSteps) : kDefaultNumSteps);
-    enabled_.store(enable);
     reconfigure_.store(true);
-    RTP_LLM_LOG_INFO("timeline profiling configured: enable=%d start_step=%d num_steps=%d trace=%s",
+    enabled_.store(enable);
+    RTP_LLM_LOG_INFO("timeline profiling configured: enable=%d start_step=%d num_steps=%d trace=%s light=%d",
                      int(enable),
                      start_step_.load(),
                      num_steps_.load(),
-                     safe_trace_name.c_str());
+                     trace_name_.c_str(),
+                     int(profile_light));
 }
 
 void StepWindowProfiler::configureFromConfig(const ProfilingDebugLoggingConfig& cfg) {
@@ -275,121 +287,24 @@ void StepWindowProfiler::configureFromConfig(const ProfilingDebugLoggingConfig& 
     configure(true, cfg.timeline_trace_name, cfg.timeline_start_step, cfg.timeline_num_steps);
 }
 
-void StepWindowProfiler::beginStep() {
-    // Fast path: no profiling active and no profiler to clean up — zero cost
-    if (!enabled_.load(std::memory_order_relaxed) && !has_profiler_.load(std::memory_order_relaxed)) {
-        return;
-    }
-
-    if (!enabled_.load(std::memory_order_relaxed)) {
-        stopProfiler("disabled");
-        return;
-    }
-
-    // Handle reconfigure: stop current profiler so a new one can start with new settings
-    if (reconfigure_.exchange(false)) {
-        std::lock_guard<std::mutex> lock(mu_);
-        if (profiler_) {
-            auto [res, file_name] = profiler_->stopAndCollect();
-            if (res) {
-                save_worker_.enqueue(std::move(res), std::move(file_name));
-            }
-            profiler_.reset();
-            has_profiler_.store(false, std::memory_order_relaxed);
-            RTP_LLM_LOG_INFO("timeline profiler stopped for reconfigure");
-        }
-        waited_steps_   = 0;
-        profiled_steps_ = 0;
-    }
-
-    std::lock_guard<std::mutex> lock(mu_);
-
-    // If profiler not yet started, check if we've waited enough steps
-    if (!profiler_) {
-        if (waited_steps_ < start_step_.load()) {
-            waited_steps_++;
-            return;
-        }
-        // Build trace prefix
-        std::string prefix = trace_name_;
-        if (prefix.empty()) {
-            prefix = "profiler_ts" + std::to_string(autil::TimeUtility::currentTimeInMicroSeconds());
-        }
-        if (prefix.back() != '_') {
-            prefix += "_";
-        }
-        prefix += "wr" + std::to_string(world_rank_) + "_";
-        profiler_ = std::make_shared<TorchProfile>(prefix, default_output_dir_);
-        has_profiler_.store(true, std::memory_order_relaxed);
-        profiler_->start();
-        profiled_steps_ = 0;
-        RTP_LLM_LOG_INFO("timeline profiler started: prefix=%s start_step=%d num_steps=%d",
-                         prefix.c_str(),
-                         start_step_.load(),
-                         num_steps_.load());
-    }
-}
-
-void StepWindowProfiler::endStep() {
-    // Fast path: no profiling active and no profiler to clean up — zero cost
-    if (!enabled_.load(std::memory_order_relaxed) && !has_profiler_.load(std::memory_order_relaxed)) {
-        return;
-    }
-
-    if (!enabled_.load(std::memory_order_relaxed)) {
-        stopProfiler("disabled");
-        return;
-    }
-
-    std::lock_guard<std::mutex> lock(mu_);
-    if (!profiler_) {
-        return;
-    }
-
-    // Profiler is running, count steps
-    profiled_steps_++;
-    const int target = num_steps_.load();
-    if (target > 0 && profiled_steps_ >= target) {
-        enabled_.store(false);
-        auto [res, file_name] = profiler_->stopAndCollect();
-        if (res) {
-            save_worker_.enqueue(std::move(res), std::move(file_name));
-        }
-        profiler_.reset();
-        has_profiler_.store(false, std::memory_order_relaxed);
-        RTP_LLM_LOG_INFO("timeline profiler stopped: reached %ld/%d steps", profiled_steps_, target);
-    }
-}
-
 void StepWindowProfiler::startStep() {
     // Fast path: no profiling active and no profiler to clean up — zero cost.
     if (!enabled_.load(std::memory_order_relaxed) && !has_profiler_.load(std::memory_order_relaxed)) {
         return;
     }
 
+    std::lock_guard<std::mutex> lock(mu_);
     if (!enabled_.load(std::memory_order_relaxed)) {
-        stopProfiler("disabled");
+        stopProfilerLocked("disabled");
         return;
     }
 
-    // Handle reconfigure on the engine loop thread, preserving Kineto thread
-    // affinity for stop/start.
     if (reconfigure_.exchange(false)) {
-        std::lock_guard<std::mutex> lock(mu_);
-        if (profiler_) {
-            auto [res, file_name] = profiler_->stopAndCollect();
-            if (res) {
-                save_worker_.enqueue(std::move(res), std::move(file_name));
-            }
-            profiler_.reset();
-            has_profiler_.store(false, std::memory_order_relaxed);
-            RTP_LLM_LOG_INFO("timeline profiler stopped for reconfigure");
-        }
+        stopProfilerLocked("reconfigure");
         waited_steps_   = 0;
         profiled_steps_ = 0;
     }
 
-    std::lock_guard<std::mutex> lock(mu_);
     if (profiler_) {
         return;
     }
@@ -406,9 +321,15 @@ void StepWindowProfiler::startStep() {
         prefix += "_";
     }
     prefix += "wr" + std::to_string(world_rank_) + "_";
-    profiler_ = std::make_shared<TorchProfile>(prefix, default_output_dir_);
+    auto profiler = std::make_shared<TorchProfile>(prefix, default_output_dir_);
+    try {
+        profiler->start(profile_light_);
+    } catch (...) {
+        enabled_.store(false);
+        throw;
+    }
+    profiler_ = std::move(profiler);
     has_profiler_.store(true, std::memory_order_relaxed);
-    profiler_->start();
     profiled_steps_ = 0;
     RTP_LLM_LOG_INFO("timeline profiler started: prefix=%s start_step=%d num_steps=%d",
                      prefix.c_str(),
@@ -426,6 +347,16 @@ void StepWindowProfiler::finishStep() {
         return;
     }
 
+    if (!enabled_.load(std::memory_order_relaxed)) {
+        stopProfilerLocked("disabled");
+        return;
+    }
+    // A new window can be armed while the last step of a cancelled window is
+    // running. Only startStep() may consume the pending configuration.
+    if (reconfigure_.load()) {
+        stopProfilerLocked("reconfigure");
+        return;
+    }
     profiled_steps_++;
     const int target = num_steps_.load();
     if (target > 0 && profiled_steps_ >= target) {
@@ -441,11 +372,16 @@ void StepWindowProfiler::finishStep() {
 }
 
 StepWindowProfiler::~StepWindowProfiler() {
-    stopProfiler("destructor");
+    stop();
 }
 
-void StepWindowProfiler::stopProfiler(const char* reason) {
+void StepWindowProfiler::stop() {
     std::lock_guard<std::mutex> lock(mu_);
+    enabled_.store(false);
+    stopProfilerLocked("shutdown");
+}
+
+void StepWindowProfiler::stopProfilerLocked(const char* reason) {
     if (profiler_) {
         auto [res, file_name] = profiler_->stopAndCollect();
         if (res) {

@@ -369,6 +369,8 @@ private:
 class RtpLLMEngineMetricsCollector final {
 public:
     int64_t step_latency_us = 0;
+    // Start-to-start interval between non-empty executor calls; zero skips the first sample.
+    int64_t step_interval_us = 0;
 };
 
 class RtpLLMEngineMetrics: public kmonitor::MetricsGroup {
@@ -377,7 +379,8 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMEngineMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* step_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* step_latency_us_metric  = nullptr;
+    kmonitor::MutableMetric* step_interval_us_metric = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -1497,6 +1500,18 @@ public:
                        / (static_cast<double>(total_accepted_token_num) / total_stream_num) :
                     0.0;
     }
+    // Main-thread waits in the current async MTP decode batch, before sampling.
+    // -1 excludes other paths; zero means this batch did not wait at that join.
+    int64_t main_thread_wait_bookkeeping_us = -1;
+    int64_t main_thread_wait_spec_verify_us = -1;
+    // Current decode decision; zero is a valid anchor-only verification budget.
+    int64_t verify_budget              = -1;
+    int64_t decided_draft_token_num    = -1;
+    int64_t acceptance_metrics_dropped = 0;
+    // Completed verification budget, aligned with accepted tokens and stream
+    // count above. It may combine several ready rounds. -1 preserves legacy
+    // callers that verify spec_steps drafts per stream.
+    int64_t total_verify_draft_token_num = -1;
 };
 
 class RtpLLMSpeculativeEngineMetrics: public kmonitor::MetricsGroup {
@@ -1505,16 +1520,22 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMSpeculativeEngineMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* step_latency_us_metric                = nullptr;
-    kmonitor::MutableMetric* propose_step_latency_us_metric        = nullptr;
-    kmonitor::MutableMetric* score_step_latency_us_metric          = nullptr;
-    kmonitor::MutableMetric* speculative_sampler_latency_us_metric = nullptr;
-    kmonitor::MutableMetric* total_propose_token_num_metric        = nullptr;
-    kmonitor::MutableMetric* total_accepted_token_num_metric       = nullptr;
-    kmonitor::MutableMetric* sp_avg_accept_token_num_metric        = nullptr;
-    kmonitor::MutableMetric* sp_avg_accept_rate_metric             = nullptr;
-    kmonitor::MutableMetric* sp_avg_fix_accept_rate_metric         = nullptr;
-    kmonitor::MutableMetric* sp_estimate_tpot_us_metric            = nullptr;
+    kmonitor::MutableMetric* step_latency_us_metric                 = nullptr;
+    kmonitor::MutableMetric* propose_step_latency_us_metric         = nullptr;
+    kmonitor::MutableMetric* score_step_latency_us_metric           = nullptr;
+    kmonitor::MutableMetric* speculative_sampler_latency_us_metric  = nullptr;
+    kmonitor::MutableMetric* main_thread_wait_bookkeeping_us_metric = nullptr;
+    kmonitor::MutableMetric* main_thread_wait_spec_verify_us_metric = nullptr;
+    kmonitor::MutableMetric* total_propose_token_num_metric         = nullptr;
+    kmonitor::MutableMetric* total_accepted_token_num_metric        = nullptr;
+    kmonitor::MutableMetric* sp_avg_accept_token_num_metric         = nullptr;
+    kmonitor::MutableMetric* sp_avg_accept_rate_metric              = nullptr;
+    kmonitor::MutableMetric* sp_avg_fix_accept_rate_metric          = nullptr;
+    kmonitor::MutableMetric* sp_estimate_tpot_us_metric             = nullptr;
+    kmonitor::MutableMetric* verify_budget_metric                   = nullptr;
+    kmonitor::MutableMetric* decided_draft_token_num_metric         = nullptr;
+    kmonitor::MutableMetric* total_verify_draft_token_num_metric    = nullptr;
+    kmonitor::MutableMetric* acceptance_metrics_dropped_metric      = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -1522,14 +1543,9 @@ private:
 
 class RtpLLmEplbMetricsCollector final {
 public:
-    int64_t ep_rank;
-    int64_t update_layer_id;
-
-    int64_t update_weights_latency_ms;
-    bool    update_weights_qps;
-
-    int64_t              layer_begin = 0;  // Global ID of the first reported layer.
-    std::vector<int64_t> gpu_loads;
+    // Planner steps and monitor windows report independently.
+    int64_t step_latency_us = -1;
+    double  moe_lb          = -1;
 };
 
 class RtpLLmEplbMetrics: public kmonitor::MetricsGroup {
@@ -1538,10 +1554,8 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLmEplbMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* update_weights_qps_metric        = nullptr;
-    kmonitor::MutableMetric* update_layer_weights_qps_metric  = nullptr;
-    kmonitor::MutableMetric* update_weights_latency_ms_metric = nullptr;
-    kmonitor::MutableMetric* gpu_loads_metric                 = nullptr;
+    kmonitor::MutableMetric* step_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* moe_lb_metric          = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

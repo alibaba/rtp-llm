@@ -95,6 +95,7 @@ class EmbeddingEndpoint(object):
                 trace_name=str(req.get("trace_name", "")),
                 start_step=int(req.get("start_step", 0)),
                 num_steps=int(req.get("num_steps", 0)),
+                profile_light=req.get("profile_light", False),
                 enable_all_rank=self._as_bool(
                     req.get("enable_all_rank", req.get("all_tp", False))
                 ),
@@ -157,6 +158,7 @@ class EmbeddingEndpoint(object):
             "gen_timeline": EmbeddingEndpoint._as_bool(
                 config.get("gen_timeline", False)
             ),
+            "profile_light": EmbeddingEndpoint._as_bool(config.get("profile_light")),
             "profile_step": as_int(config.get("profile_step", 1)),
             "profile_trace_name": re.sub(
                 r"[^A-Za-z0-9_-]", "", str(config.get("profile_trace_name", ""))
@@ -216,6 +218,7 @@ class EmbeddingEndpoint(object):
             multimodal_features=multimodal_features,
             vit_role_addr=vit_role_addr,
             gen_timeline=profile_config.get("gen_timeline", False),
+            profile_light=profile_config.get("profile_light", False),
             profile_step=profile_config.get("profile_step", 1),
             profile_trace_name=profile_config.get("profile_trace_name", ""),
         )

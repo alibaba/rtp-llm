@@ -183,10 +183,8 @@ TEST_F(ServiceStatusTest, DirectSdkMetricPathsHonorReadinessSuppressionAndDraini
         reuse.match_to_ready_latency_us     = 37;
         reporter->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &reuse);
         RtpLLmEplbMetricsCollector eplb{};
-        eplb.ep_rank            = 2;
-        eplb.gpu_loads          = {19};
-        eplb.update_layer_id    = 0;
-        eplb.update_weights_qps = true;
+        eplb.step_latency_us = 19;
+        eplb.moe_lb          = 1.25;
         reporter->report<RtpLLmEplbMetrics, RtpLLmEplbMetricsCollector>(&tags, &eplb);
         reportKmonMetric(reporter, 41, "rtp_llm_model_inputs_log_us", kmonitor::GAUGE, &tags);
         reportKmonMetric(reporter, 1, "rtp_llm_cuda_graph_replay_oom_retry_qps", kmonitor::QPS);
@@ -213,11 +211,15 @@ TEST_F(ServiceStatusTest, DirectSdkMetricPathsHonorReadinessSuppressionAndDraini
                     kmonitor::MinMaxCalculator expected;
                     expected.Add(3);
                     EXPECT_EQ(value->Value(), expected.ToString());
-                } else if (value->Name() == "rtp_llm_gpu_loads") {
-                    EXPECT_EQ(record->Tags()->FindTag("ep_rank"), "2");
-                    EXPECT_EQ(record->Tags()->FindTag("layer"), "0");
+                } else if (value->Name() == "rtp_llm_eplb_step_latency_us") {
+                    EXPECT_EQ(record->Tags()->FindTag("priority"), "7");
                     kmonitor::MinMaxCalculator expected;
                     expected.Add(19);
+                    EXPECT_EQ(value->Value(), expected.ToString());
+                } else if (value->Name() == "rtp_llm_moe_lb") {
+                    EXPECT_EQ(record->Tags()->FindTag("priority"), "7");
+                    kmonitor::MinMaxCalculator expected;
+                    expected.Add(1.25);
                     EXPECT_EQ(value->Value(), expected.ToString());
                 }
             }
@@ -236,8 +238,8 @@ TEST_F(ServiceStatusTest, DirectSdkMetricPathsHonorReadinessSuppressionAndDraini
                                      "rtp_llm_kv_cache_load_joined_request_qps",
                                      "rtp_llm_kv_cache_load_join_wait_latency_us",
                                      "rtp_llm_kv_cache_match_to_ready_latency_us",
-                                     "rtp_llm_gpu_loads",
-                                     "rtp_llm_update_layer_weights_qps",
+                                     "rtp_llm_eplb_step_latency_us",
+                                     "rtp_llm_moe_lb",
                                      "rtp_llm_model_inputs_log_us",
                                      "rtp_llm_cuda_graph_replay_oom_retry_qps"}) {
                 EXPECT_EQ(names.count(name), 1) << name;
