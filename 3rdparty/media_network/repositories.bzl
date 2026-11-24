@@ -26,6 +26,7 @@ def media_network_deps():
     )
     http_archive(
         name = "media_brotli",
+        build_file = "//3rdparty/media_network:brotli.BUILD",
         sha256 = "816c96e8e8f193b40151dad7e8ff37b1221d019dbcb9c35cd3fadbfe6477dfec",
         strip_prefix = "brotli-1.2.0",
         urls = ["https://github.com/google/brotli/archive/refs/tags/v1.2.0.tar.gz"],
