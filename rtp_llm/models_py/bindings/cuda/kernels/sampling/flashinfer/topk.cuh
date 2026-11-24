@@ -58,6 +58,48 @@ inline size_t GetRadixTopKAvailableOrderedSmemBytes(size_t max_smem_per_block,
   return max_smem_per_block - fixed_smem_aligned - launch_headroom;
 }
 
+#if defined(USE_PPU) && USE_PPU
+// On PPU, the driver queries below are synchronous round-trips. Device
+// properties are immutable for a given device, and the dynamic shared-memory
+// opt-in is a per-kernel constant, so cache both per host thread.
+inline cudaError_t GetRadixTopKDeviceProps(int device, int* num_sms, int* max_smem_per_block) {
+  thread_local int cached_device = -1;
+  thread_local int cached_num_sms = 0;
+  thread_local int cached_max_smem = 0;
+  if (cached_device != device) {
+    FLASHINFER_CUDA_CALL(
+        cudaDeviceGetAttribute(&cached_num_sms, cudaDevAttrMultiProcessorCount, device));
+    FLASHINFER_CUDA_CALL(
+        cudaDeviceGetAttribute(&cached_max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
+    cached_device = device;
+  }
+  *num_sms = cached_num_sms;
+  *max_smem_per_block = cached_max_smem;
+  return cudaSuccess;
+}
+
+template <typename Kernel>
+inline cudaError_t SetMaxDynamicSharedMemorySize(Kernel kernel, size_t smem_size) {
+  thread_local const void* cached_kernel = nullptr;
+  thread_local size_t cached_smem = 0;
+  if (cached_kernel == reinterpret_cast<const void*>(kernel) && cached_smem == smem_size) {
+    return cudaSuccess;
+  }
+  cudaError_t err =
+      cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+  if (err == cudaSuccess) {
+    cached_kernel = reinterpret_cast<const void*>(kernel);
+    cached_smem = smem_size;
+  }
+  return err;
+}
+#else
+template <typename Kernel>
+inline cudaError_t SetMaxDynamicSharedMemorySize(Kernel kernel, size_t smem_size) {
+  return cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+}
+#endif
+
 // ==================== Multi-CTA Top-K Implementation ====================
 
 // Acquire/Release primitives for inter-CTA synchronization
@@ -1804,10 +1846,14 @@ cudaError_t RadixTopKRenormProbMultiCTA(DType* probs, DType* renormed_prob, IdTy
   int device;
   FLASHINFER_CUDA_CALL(cudaGetDevice(&device));
   int num_sms;
-  FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, device));
   int max_smem_per_block;
+#if defined(USE_PPU) && USE_PPU
+  FLASHINFER_CUDA_CALL(GetRadixTopKDeviceProps(device, &num_sms, &max_smem_per_block));
+#else
+  FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, device));
   FLASHINFER_CUDA_CALL(
       cudaDeviceGetAttribute(&max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
+#endif
 
   // Fixed shared memory overhead: histogram[256] + suffix_sum[256] + 4 scalars + 1 float
   constexpr size_t fixed_smem_size = sizeof(uint32_t) * (256 + 256 + 4) + sizeof(float);
@@ -1841,8 +1887,7 @@ cudaError_t RadixTopKRenormProbMultiCTA(DType* probs, DType* renormed_prob, IdTy
     if (single_cta) {
       auto kernel =
           RadixTopKRenormProbKernel_MultiCTA<BLOCK_THREADS, VEC_SIZE, true, DType, IdType>;
-      FLASHINFER_CUDA_CALL(
-          cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+      FLASHINFER_CUDA_CALL(SetMaxDynamicSharedMemorySize(kernel, smem_size));
 
       dim3 nblks(total_ctas);
       dim3 nthrs(BLOCK_THREADS);
@@ -1852,8 +1897,7 @@ cudaError_t RadixTopKRenormProbMultiCTA(DType* probs, DType* renormed_prob, IdTy
     } else {
       auto kernel =
           RadixTopKRenormProbKernel_MultiCTA<BLOCK_THREADS, VEC_SIZE, false, DType, IdType>;
-      FLASHINFER_CUDA_CALL(
-          cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+      FLASHINFER_CUDA_CALL(SetMaxDynamicSharedMemorySize(kernel, smem_size));
 
       dim3 nblks(total_ctas);
       dim3 nthrs(BLOCK_THREADS);
