@@ -648,6 +648,7 @@ filelock==3.20.0 \
     # via
     #   -r deps/requirements_base.txt
     #   blobfile
+    #   flashinfer-python
     #   huggingface-hub
     #   torch
 flash-attn==2.8.3.post1+cu13torch2.11cxx11abitrue.r1 \
@@ -659,11 +660,11 @@ flash-attn-4[cu13]==4.0.0b39 \
 flash-mla==1.0.0+9241ae3 \
     --hash=sha256:67bba01c854fe3b06397c297d49724e16029984a37124d05047a78ff48e7c44f
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
-flashinfer-cubin @ https://github.com/flashinfer-ai/flashinfer/releases/download/v0.7.4/flashinfer_cubin-0.7.4-py3-none-any.whl \
-    --hash=sha256:8af62986f52e8cd29d1eaef7ecc63c441c1c214bd33175019a8f548a128bc2e2
+flashinfer-cubin==0.7.5+57f949b8.cu132 \
+    --hash=sha256:2fa84c29f933f6086512d3426b19456ea4e4cf3ed7120003b0e7f3d9a93c73c2
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
-flashinfer-python[cu13]==0.7.4 \
-    --hash=sha256:a051a62e09a2738e8b0de47a1944fd2f0f3eff01b728b662141ea660cb09dd32
+flashinfer-python[cu13]==0.7.5+57f949b8.cu132 \
+    --hash=sha256:ff88497cd323676e592780f8f681ffafa4663b63588ab3784b658f776d56476c
     # via
     #   -r internal_source/deps/requirements_torch_gpu_cuda13.txt
     #   rtp-kernel
@@ -2356,12 +2357,13 @@ pooch==1.8.2 \
     --hash=sha256:3529a57096f7198778a5ceefd5ac3ef0e4d06a6ddaf9fc2d609b806f25302c47 \
     --hash=sha256:76561f0de68a01da4df6af38e9955c4c9d1a5c90da73f7e40276a5728ec83d10
     # via librosa
-portalocker==3.2.0 \
-    --hash=sha256:1f3002956a54a8c3730586c5c77bf18fae4149e07eaf1c29fc3faf4d5a3f89ac \
-    --hash=sha256:3cdc5f565312224bc570c49337bd21428bba0ef363bbcf58b9ef4a9f11779968
+portalocker[win32]==4.4.2 \
+    --hash=sha256:7ac85bb2aa3c7873bf2ac72586fc6154afa4671ac786994a16617a6b7ccb3e5e \
+    --hash=sha256:e661b91af34fc1806740f8e0e42990fe55cd85cbae55675ac48a400a9656a51b
     # via
     #   -r deps/requirements_base.txt
     #   concurrent-log-handler
+    #   flashinfer-python
 prettytable==3.16.0 \
     --hash=sha256:3c64b31719d961bf69c9a7e03d0c1e477320906a98da63952bc6698d6164ff57 \
     --hash=sha256:b5eccfabb82222f5aa46b798ff02a8452cf530a352c31bddfa29be41242863aa
