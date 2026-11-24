@@ -4,6 +4,10 @@ import triton
 import triton.language as tl
 from triton.language.extra.cuda import libdevice
 
+from rtp_llm.models_py.kernels.cuda.qsa.position_state import (
+    _store_pair_coefficients,
+    group_position_angle,
+)
 from rtp_llm.models_py.kernels.cuda.qsa.target_writer import (
     _snapshot_target_window,
     _write_target_window,
@@ -29,6 +33,14 @@ def _prepare_target_window(
     OS,
     KS,
     OK,
+    POS_POOL,
+    GROUP_SLOTS,
+    GROUP_MASK,
+    GROUP_CURRENT,
+    QUERY_COS,
+    QUERY_SIN,
+    POSITION_SLOTS,
+    OLD_POSITIONS,
     Q: tl.constexpr,
     H: tl.constexpr,
     XS: tl.constexpr,
@@ -40,6 +52,9 @@ def _prepare_target_window(
     KB: tl.constexpr,
     SB: tl.constexpr,
     BQ: tl.constexpr,
+    MROPE: tl.constexpr,
+    H_PAIRS: tl.constexpr,
+    W_PAIRS: tl.constexpr,
 ):
     request = tl.program_id(0)
     local = tl.program_id(1)
@@ -72,11 +87,14 @@ def _prepare_target_window(
     c = tl.load(X + offset + col + 2).to(tl.float32)
     d = tl.load(X + offset + col + 3).to(tl.float32)
     inv = tl.rsqrt(tl.sum(((a * a + b * b) + c * c) + d * d, 0) / 128.0 + EPS)
-    position = tl.load(QP + row * PS).to(tl.float32)
-    frequency = tl.load(FREQ + lane)
-    angle = (position * INV_SCALE) * frequency
-    cosine = libdevice.cos(angle).to(tl.bfloat16).to(tl.float32)
-    sine = libdevice.sin(angle).to(tl.bfloat16).to(tl.float32)
+    if MROPE:
+        cosine = tl.load(QUERY_COS + row * 64 + lane).to(tl.float32)
+        sine = tl.load(QUERY_SIN + row * 64 + lane).to(tl.float32)
+    else:
+        position = tl.load(QP + row * PS).to(tl.float32)
+        angle = (position * INV_SCALE) * tl.load(FREQ + lane)
+        cosine = libdevice.cos(angle).to(tl.bfloat16).to(tl.float32)
+        sine = libdevice.sin(angle).to(tl.bfloat16).to(tl.float32)
     for j in tl.static_range(4):
         i = col + j
         partner = tl.where(i < 32, i + 32, i - 32)
@@ -99,11 +117,26 @@ def _prepare_target_window(
         )
         tl.store(ROTATED + (row * H + head) * 128 + i, result)
     if head == 0:
-        kp = tl.load(KP + row * PS).to(tl.float32)
-        ka = (kp * INV_SCALE) * frequency
-        kc = libdevice.cos(ka)
-        ks = libdevice.sin(ka)
-        tl.store(COS + row * 64 + lane, kc)
-        tl.store(COS + row * 64 + lane + 32, kc)
-        tl.store(SIN + row * 64 + lane, ks)
-        tl.store(SIN + row * 64 + lane + 32, ks)
+        if MROPE:
+            slot = tl.load(POSITION_SLOTS + row)
+            axis = tl.arange(0, 4)
+            old = tl.load(POS_POOL + slot * 3 + axis, axis < 3, other=0)
+            tl.store(OLD_POSITIONS + row * 3 + axis, old, axis < 3)
+            prefix = tl.load(PREFIX + request)
+            if step == 3 - (prefix & 3):
+                ka = group_position_angle(
+                    POS_POOL,
+                    GROUP_SLOTS,
+                    GROUP_MASK,
+                    GROUP_CURRENT,
+                    FREQ,
+                    row,
+                    lane,
+                    H_PAIRS,
+                    W_PAIRS,
+                )
+                _store_pair_coefficients(COS, SIN, row, lane, ka)
+        else:
+            kp = tl.load(KP + row * PS).to(tl.float32)
+            ka = (kp * INV_SCALE) * tl.load(FREQ + lane)
+            _store_pair_coefficients(COS, SIN, row, lane, ka)

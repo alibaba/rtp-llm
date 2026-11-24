@@ -78,6 +78,11 @@ def _write_target_window(
     SB: tl.constexpr,
     EPS: tl.constexpr,
     BQ: tl.constexpr,
+    POSITION_POOL=None,
+    POSITIONS=None,
+    POSITION_SLOTS=None,
+    POSITION_STRIDE: tl.constexpr = 3,
+    WRITE_POSITIONS: tl.constexpr = False,
 ):
     request = tl.program_id(0)
     d = tl.arange(0, 128)
@@ -154,3 +159,9 @@ def _write_target_window(
         raw,
         valid[:, None],
     )
+    if WRITE_POSITIONS:
+        row = request * Q + step
+        slot = tl.load(POSITION_SLOTS + row, step < Q, other=-1)
+        for axis in tl.static_range(3):
+            value = tl.load(POSITIONS + row * POSITION_STRIDE + axis, step < Q, other=0)
+            tl.store(POSITION_POOL + slot * 3 + axis, value, (step < Q) & (slot >= 0))
