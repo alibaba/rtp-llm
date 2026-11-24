@@ -19,7 +19,9 @@ def _validate_state_pairs(table, pairs, pool_blocks, label, checks):
     if not pairs:
         return
     # Resolve the small tail of the whole batch in one device operation.
-    indices = torch.tensor(pairs, device="cpu", dtype=torch.long, pin_memory=True)
+    indices = torch.tensor(
+        pairs, device="cpu", dtype=torch.long, pin_memory=table.device.type != "cpu"
+    )
     indices = indices.to(device=table.device, non_blocking=True)
     blocks = table[indices[:, 0], indices[:, 1]]
     _validate_state_blocks(blocks, pool_blocks, label, checks)
