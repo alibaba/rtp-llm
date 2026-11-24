@@ -156,8 +156,14 @@ protected:
     // post_rejection=true forks with the final post-commit input, which is
     // safe under speculative target hooks; the default pre-rejection fork
     // keeps its historical useAsyncPrepare() gate.
-    void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input, bool post_rejection = false);
-    GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
+    void launchDraftPrefillPrepareAsync(const GptModelInputs& model_input, bool post_rejection = false);
+    struct TargetVerifyPrepare {
+        std::optional<torch::Event> input_ready;
+        torch::Tensor               draft_position_ids;
+    };
+    GptModelOutputs runTargetVerifyForward(GptModelInputs&            model_input,
+                                           const StreamGroups&        stream_groups,
+                                           const TargetVerifyPrepare* early_prepare = nullptr);
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
                                                          const StreamGroups&   stream_groups) const;
     void            broadcastPostRejectionInputs(GptModelInputs& model_input);
@@ -202,7 +208,8 @@ protected:
                           std::vector<torch::Tensor>& draft_probs_list,
                           torch::Tensor&              draft_token_ids_t,
                           int64_t&                    model_forward_us,
-                          bool                        release_after_draft_graph = false);
+                          bool                        release_after_draft_graph = false,
+                          TargetVerifyPrepare*        early_prepare             = nullptr);
 
     bool useDeviceInput() const;
     bool checkDeviceInput() const;
