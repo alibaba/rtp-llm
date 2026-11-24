@@ -18,20 +18,25 @@ def _worker(rank: int, port: int) -> None:
     torch.cuda.set_device(rank)
     dist.init_process_group("nccl", rank=rank, world_size=2)
     try:
-        for hidden_size in (5120, 2560):
-            _check_eager_and_graph_replay(rank, hidden_size)
+        _check_eager_and_graph_replay(rank, 5120, 16)
+        # MTP verifies four rows per request. Packed shared/routed outputs
+        # therefore require 16/32/64/128 rows at concurrency 2/4/8/16.
+        for packed_rows in (16, 32, 64, 128):
+            _check_eager_and_graph_replay(rank, 2560, packed_rows)
     finally:
         dist.destroy_process_group()
 
 
-def _check_eager_and_graph_replay(rank: int, hidden_size: int) -> None:
+def _check_eager_and_graph_replay(
+    rank: int, hidden_size: int, graph_tokens: int
+) -> None:
     communicator = FlashInferAllReduce(
         dist.group.WORLD, torch.device("cuda", rank), single_node=True
     )
     assert not communicator.disabled
 
     try:
-        for tokens in (1, 4, 16, 128):
+        for tokens in (1, 4, 16, 32, 64, 128):
             base = torch.arange(
                 tokens * hidden_size, device="cuda", dtype=torch.float32
             ).reshape(tokens, hidden_size)
@@ -46,7 +51,7 @@ def _check_eager_and_graph_replay(rank: int, hidden_size: int) -> None:
             torch.testing.assert_close(output, reference, rtol=0, atol=0)
 
         static_input = torch.full(
-            (32 if hidden_size == 2560 else 16, hidden_size),
+            (graph_tokens, hidden_size),
             rank + 1,
             device="cuda",
             dtype=torch.bfloat16,
