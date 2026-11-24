@@ -1,3 +1,4 @@
+import os
 import weakref
 from collections.abc import Mapping
 from typing import Any, Dict, Optional
@@ -904,6 +905,13 @@ class Qwen4ExpModel(Qwen35Model):
             self.embed_tokens.prepare_byte_gather(
                 role=getattr(parallelism_config, "role_type", "PDFUSION")
             )
+        self._profile_verify_graph_event = (
+            torch.cuda.Event(external=True)
+            if os.environ.get("QWEN4_PROFILE_VERIFY_GRAPH_EVENT") == "1"
+            and torch.version.hip is None
+            and self.__class__ is Qwen4ExpModel
+            else None
+        )
         self.ple_layers = nn.ModuleDict()
         self._ple_target_transaction: Optional[_PLETargetTransaction] = None
         self._ple_graph_target_transactions: Dict[int, _PLETargetTransaction] = {}
@@ -1567,6 +1575,15 @@ class Qwen4ExpModel(Qwen35Model):
         module_hooks = torch.nn.modules.module
         qsa_metadata_cache = {}
         for i, decoder_layer in enumerate(self.layers):
+            if (
+                i == 12
+                and self._profile_verify_graph_event is not None
+                and is_cuda_graph
+                and get_primary_attention_inputs(inputs).is_target_verify
+                and torch.cuda.is_current_stream_capturing()
+            ):
+                # Let the driver submit a prefix while it traces later graph nodes.
+                self._profile_verify_graph_event.record()
             if str(i) in self.ple_layers:
                 if pending_injection is not None:
                     hyper_states = inject_into_residual(
