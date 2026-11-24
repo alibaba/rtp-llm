@@ -73,8 +73,6 @@ def _prepare_replay_metadata_torch(
 
     # A draft can need three preceding raw keys and up to four current keys.
     # A small or non-power-of-two page can put interior columns in that window.
-    if page_size <= 0 or not table.shape[1]:
-        raise RuntimeError("QSA draft graph requires a nonempty raw-state page table")
     lanes = token_capacity // lengths.numel()
     first = (host_prefixes - host_prefixes.remainder(4)) // page_size
     last = (host_prefixes + (host_lengths - 1)) // page_size
@@ -181,6 +179,9 @@ class DraftPrefillGraphReplay(Mapping):
 
     This intentionally is not a dict: the existing graph runner calls the
     model-wide callback with all cache groups, rather than each FMHA separately.
+    Tagged inputs share request lengths and prefixes, and the position and CU
+    buffers are on one device. The caller supplies positive raw-state page
+    sizes and a nonempty physical state table.
     """
 
     def __init__(
@@ -223,10 +224,6 @@ class DraftPrefillGraphReplay(Mapping):
         ):
             raise RuntimeError(
                 "QSA draft graph requires int32 device cu_seqlens matching the request capacity"
-            )
-        if transported.device != cu.device:
-            raise RuntimeError(
-                "QSA draft graph positions and cu_seqlens must use the same device"
             )
         return transported, cu
 
@@ -294,11 +291,6 @@ class DraftPrefillGraphReplay(Mapping):
         state_geometry = None
         for tag, pool_size, page_size, compressed in self.bounds:
             inputs = groups[tag]
-            if inputs is not anchor and (
-                not torch.equal(inputs.input_lengths, anchor.input_lengths)
-                or not torch.equal(inputs.prefix_lengths, anchor.prefix_lengths)
-            ):
-                raise RuntimeError("QSA draft graph cache groups disagree on lengths")
             if tag == INDEXER_STATE_TAG:
                 # The model's state view derives physical pages from the
                 # refreshed kernel table; do not use a stale host mirror.

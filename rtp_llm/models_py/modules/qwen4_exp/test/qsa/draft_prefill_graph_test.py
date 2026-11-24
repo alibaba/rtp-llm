@@ -114,11 +114,6 @@ class DraftPrefillGraphTest(unittest.TestCase):
             ("cu_seqlens_device", torch.zeros(4, dtype=torch.int64), "cu_seqlens"),
             ("cu_seqlens_device", torch.zeros(3, dtype=torch.int32), "cu_seqlens"),
             ("cu_seqlens_device", torch.zeros(4, 1, dtype=torch.int32), "cu_seqlens"),
-            (
-                "cu_seqlens_device",
-                torch.empty(4, dtype=torch.int32, device="meta"),
-                "same device",
-            ),
         )
         for index, (field, value, error) in enumerate(bad_layouts):
             # Layout validation precedes locking; one busy case covers ordering.
