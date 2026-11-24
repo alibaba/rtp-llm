@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
@@ -148,9 +149,11 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
     }
 
     static boolean requiresClientRoute(BalanceContext context) {
-        if (context == null
-                || context.getGenerateInputPb() == null
-                || context.getGenerateInputPb().isEmpty()) {
+        if (context == null) {
+            return false;
+        }
+        ByteString generateInput = context.getGenerateInputPb();
+        if (generateInput == null || generateInput.isEmpty()) {
             return false;
         }
         // These requests retain queue admission but are delivered as client routes.
@@ -159,7 +162,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             return true;
         }
         try {
-            var input = EngineRpcService.GenerateInputPB.parseFrom(context.getGenerateInputPb());
+            var input = EngineRpcService.GenerateInputPB.parseFrom(generateInput);
             var generation = input.getGenerateConfig();
             return input.getMultimodalInputsCount() > 0
                     || input.hasV41Inputs()
