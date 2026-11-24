@@ -64,6 +64,19 @@ struct PyWrappedModelTestPeer {
             hidden, true, need_all_logits, indexes, hidden.size(0), inputs, torch::Tensor(), true);
     }
 
+    static torch_ext::PyAttentionInputs buildAttentionInputs(PyWrappedModel& model, const GptModelInputs& inputs) {
+        model.d2d_copies_.clear();
+        auto result = model.buildPyAttentionInputs(inputs);
+        fusedCopy(model.d2d_copies_);
+        return result;
+    }
+
+    static torch_ext::PyAttentionInputs
+    buildCacheStoreInputs(PyWrappedModel& model, const GptModelInputs& inputs, const GptModelInputs& host_inputs) {
+        model.prepareAttentionInputs(inputs, true, &host_inputs);
+        return model.attention_inputs_;
+    }
+
     static bool generationPrefillCudaGraphReady(const PyWrappedModel& model) {
         return model.generation_prefill_graph_runner_ != nullptr;
     }
@@ -73,6 +86,8 @@ namespace {
 
 constexpr int    kLayerId        = 0;
 constexpr size_t kPhysicalBlocks = 8;
+
+void ensureRuntimeInitialized();
 
 struct MetricSnapshot {
     std::string          name;
@@ -244,6 +259,70 @@ CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
     config.setTopology(std::move(topology_groups), {std::move(layer)});
     return config;
 }
+
+// Keep wrapper initialization outside the profiled metadata-only call. This
+// exercises the production builder and deferred H2D flush without a model,
+// cache allocation, graph capture, or forward synchronization in the fixture.
+class AttentionInputBuilder {
+public:
+    explicit AttentionInputBuilder(py::object py_model) {
+        ensureRuntimeInitialized();
+        Weights weights;
+        weights.layers.resize(1);
+        GptModelDescription description;
+        description.data_type = DataType::TYPE_BF16;
+        GptModelInitParams params{weights, description, std::nullopt};
+        params.cache_manager = std::make_shared<KVCacheManager>(
+            makeCacheConfig({{"full", 4, 64}}), true, nullptr, KVCacheConfig{}, ParallelismConfig{});
+        params.hw_kernel_config.enable_cuda_graph = false;
+        model_                                    = std::make_unique<PyWrappedModel>(params, std::move(py_model));
+    }
+
+    torch_ext::PyAttentionInputs build(const torch::Tensor& input_lengths,
+                                       const torch::Tensor& prefix_lengths,
+                                       const torch::Tensor& sequence_lengths,
+                                       const torch::Tensor& combo_tokens,
+                                       bool                 is_target_verify) {
+        GptModelInputs inputs;
+        inputs.input_lengths    = input_lengths;
+        inputs.prefix_lengths   = prefix_lengths;
+        inputs.sequence_lengths = sequence_lengths;
+        inputs.combo_tokens     = combo_tokens;
+        inputs.is_target_verify = is_target_verify;
+        return PyWrappedModelTestPeer::buildAttentionInputs(*model_, inputs);
+    }
+
+    py::dict buildCacheStoreInputs(const torch::Tensor& local_lengths,
+                                   const torch::Tensor& global_lengths,
+                                   const torch::Tensor& prefix_lengths,
+                                   const torch::Tensor& block_table_host,
+                                   const torch::Tensor& block_table_device) {
+        GptModelInputs inputs;
+        inputs.input_lengths            = local_lengths;
+        inputs.prefix_lengths           = prefix_lengths;
+        inputs.sequence_lengths         = torch::empty({0}, torch::kInt32);
+        inputs.combo_tokens             = torch::empty({local_lengths.sum().item<int64_t>()}, torch::kInt32);
+        inputs.kv_cache_block_id        = block_table_device;
+        inputs.kv_cache_kernel_block_id = block_table_device;
+        inputs.pd_separation            = true;
+        inputs.request_id               = torch::ones({local_lengths.numel()}, torch::kInt64);
+        auto host_inputs                = inputs;
+        host_inputs.input_lengths       = global_lengths;
+        host_inputs.kv_cache_block_id   = block_table_host;
+        auto result                     = PyWrappedModelTestPeer::buildCacheStoreInputs(*model_, inputs, host_inputs);
+        TORCH_CHECK(result.cache_store_inputs.has_value(), "expected cache-store host metadata");
+        const auto& store = result.cache_store_inputs.value();
+        py::dict    snapshot;
+        snapshot["attention_inputs"]     = py::cast(result);
+        snapshot["input_lengths_host"]   = store.input_lengths_host;
+        snapshot["prefix_lengths_host"]  = store.prefix_lengths_host;
+        snapshot["host_kv_cache_offset"] = store.host_kv_cache_offset;
+        return snapshot;
+    }
+
+private:
+    std::unique_ptr<PyWrappedModel> model_;
+};
 
 struct LayoutAndBases {
     GroupedCacheLayerLayout          layout;
@@ -1061,7 +1140,8 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
     RTP_LLM_CHECK_WITH_INFO(forward_count > 0, "forward_count must be positive");
 
     const bool cacheless_warmup = scenario_name == "cacheless_warmup";
-    const auto input_scenario   = cacheless_warmup ? "multi_tag" : scenario_name;
+    const bool          eplb_phase       = scenario_name == "eplb_prefill_then_verify";
+    const auto          input_scenario   = (cacheless_warmup || eplb_phase) ? "multi_tag" : scenario_name;
     auto       scenario         = makeScenario(input_scenario);
     auto                cache_store = std::make_shared<RecordingCacheStore>();
     FakeMetricsReporter fake_metrics_reporter;
@@ -1093,6 +1173,10 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
     description.attention_conf.head_num      = 1;
     description.attention_conf.kv_head_num   = 1;
     description.attention_conf.size_per_head = scenario.hidden_size;
+    if (eplb_phase) {
+        description.ffn_conf.moe_configs = MoeConfigs{2, 0, 1};
+        scenario.parallelism.role_type   = RoleType::PDFUSION;
+    }
 
     GptModelInitParams params{weights,
                               description,
@@ -1114,6 +1198,11 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
                               scenario.capture_layer_ids,
                               scenario.capture_dtype};
     params.owns_py_model = owns_py_model;
+    if (eplb_phase) {
+        params.eplb_config.eplb_mode              = EplbMode::ALL;
+        params.eplb_config.eplb_update_time       = 1;
+        params.eplb_config.eplb_stats_window_size = 1;
+    }
     if (cacheless_warmup) {
         params.cache_manager                     = nullptr;
         scenario.inputs.warmup                   = true;
@@ -1147,6 +1236,10 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
         }
         for (size_t i = 0; i < forward_count; ++i) {
             auto forward_inputs = scenario.inputs;
+            if (eplb_phase) {
+                forward_inputs.is_target_verify = i > 0;
+                forward_inputs.pd_separation    = false;
+            }
             if (capture_only_first_forward && i > 0) {
                 forward_inputs.capture_hidden_states = false;
             }
@@ -1277,7 +1370,9 @@ py::dict runDirtyGenerationPrefillCaptureScenario(py::object py_model) {
 
 py::dict runGenerationPrefillCaptureScenario(py::object                                py_model,
                                              const std::string&                        expected_error_substring,
-                                             const std::vector<std::pair<bool, bool>>& forward_flags) {
+                                             const std::vector<std::pair<bool, bool>>& forward_flags,
+                                             bool                                      release_gil_during_construction,
+                                             bool                                      enable_eplb) {
     static std::once_flag runtime_once;
     std::call_once(runtime_once, []() {
         initRuntime(/*device_id=*/0);
@@ -1306,6 +1401,9 @@ py::dict runGenerationPrefillCaptureScenario(py::object                         
     description.attention_conf.head_num      = 1;
     description.attention_conf.kv_head_num   = 1;
     description.attention_conf.size_per_head = 4;
+    if (enable_eplb) {
+        description.ffn_conf.moe_configs = MoeConfigs{2, 0, 1};
+    }
 
     HWKernelConfig hw_kernel_config;
     hw_kernel_config.enable_cuda_graph                          = true;
@@ -1328,6 +1426,9 @@ py::dict runGenerationPrefillCaptureScenario(py::object                         
                               manager,
                               /*mtp_cache_config_index=*/std::nullopt};
     params.kernel_block_table_width = 1;
+    if (enable_eplb) {
+        params.eplb_config.eplb_mode = EplbMode::STATS;
+    }
 
     if (!forward_flags.empty()) {
         params.hidden_state_capture_layer_ids = {0, 1};
@@ -1339,7 +1440,14 @@ py::dict runGenerationPrefillCaptureScenario(py::object                         
     std::string capture_error_message;
     py::list    forwards;
     try {
-        PyWrappedModel model(params, py_model);
+        auto model_owner = [&]() {
+            if (release_gil_during_construction) {
+                py::gil_scoped_release release;
+                return std::make_unique<PyWrappedModel>(params, py_model);
+            }
+            return std::make_unique<PyWrappedModel>(params, py_model);
+        }();
+        auto& model      = *model_owner;
         available_during = manager->availableBlocksNum();
         graph_enabled    = PyWrappedModelTestPeer::generationPrefillCudaGraphReady(model);
         for (size_t i = 0; i < forward_flags.size(); ++i) {
@@ -1603,6 +1711,11 @@ runPyWrappedModelSpeculativeCommitBridge(py::object py_model, const std::string&
 PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
     torch_ext::registerPyOpDefs(m);
     rtp_llm::registerExecCtxOps(m);
+    py::class_<rtp_llm::test::AttentionInputBuilder>(m, "AttentionInputBuilder")
+        .def(py::init<py::object>())
+        .def("build", &rtp_llm::test::AttentionInputBuilder::build)
+        .def("build_cache_store_inputs", &rtp_llm::test::AttentionInputBuilder::buildCacheStoreInputs);
+
     m.def("make_native_lm_head",
           &rtp_llm::test::makeNativeLmHead,
           py::arg("py_model"),
@@ -1654,8 +1767,10 @@ PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
     m.def("run_generation_prefill_capture_scenario",
           &rtp_llm::test::runGenerationPrefillCaptureScenario,
           py::arg("py_model"),
-          py::arg("expected_error_substring") = "",
-          py::arg("forward_flags")            = std::vector<std::pair<bool, bool>>{});
+          py::arg("expected_error_substring")        = "",
+          py::arg("forward_flags")                   = std::vector<std::pair<bool, bool>>{},
+          py::arg("release_gil_during_construction") = false,
+          py::arg("enable_eplb")                     = false);
     m.def("run_speculative_commit_bridge",
           &rtp_llm::test::runPyWrappedModelSpeculativeCommitBridge,
           py::arg("py_model"),

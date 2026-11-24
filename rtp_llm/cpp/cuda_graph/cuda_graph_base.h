@@ -1,4 +1,5 @@
 #pragma once
+#include "rtp_llm/cpp/cuda_graph/dspark_cuda_graph_budget.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include <cstddef>
 #include <cstdint>
@@ -51,6 +52,8 @@ struct GraphParams {
     size_t max_context_batch_size = 128;
     std::size_t      hidden_size           = 0;
     c10::ScalarType  model_data_type       = c10::ScalarType::Float;
+    bool is_packed_target_verify = false;
+    int dspark_capacity_query_width = 0;
     std::vector<int> prefill_capture_seq_lens;
     std::vector<int> decode_capture_batch_sizes;
     int              generation_prefill_cuda_graph_max_requests = 0;
@@ -78,6 +81,9 @@ struct GraphParams {
     // setting them after capture leaves the graph bound to undefined tensors.
     torch::Tensor position_encoding;
     torch::Tensor token_type_embedding;
+
+    // Shared by eager forwards and every graph bucket; owned by the monitor.
+    torch::Tensor expert_token_counts;
 };
 
 class GraphBase {
@@ -100,6 +106,10 @@ public:
     // Refresh only captured kv_cache_kernel_block_id state and FlashInfer plan
     // buffers after page-table changes. Other captured fields stay untouched.
     virtual void updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) {}
+
+    virtual std::optional<DSparkCapturedCapacity> capturedDSparkCapacity(int64_t /*batch*/) const {
+        return std::nullopt;
+    }
 
     py::object py_instance_;
 };

@@ -124,10 +124,6 @@ public:
 
     virtual ~Executor() {};
 
-    virtual bool updateEplbConfig(const EPLBConfig& config) {
-        return false;
-    }
-
 public:
 };
 

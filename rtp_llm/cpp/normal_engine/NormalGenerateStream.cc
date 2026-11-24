@@ -263,6 +263,8 @@ AuxInfo NormalGenerateStream::prepareAuxInfo(size_t output_len) const {
     aux.remote_reuse_len                    = remote_reuse_length_;
     aux.memory_reuse_len                    = host_reuse_length_;
     aux.disk_reuse_len                      = disk_reuse_length_;
+    aux.xgrammar_update_timeout             = xgrammarUpdateTimedOut();
+    aux.speculative_verified_draft_tokens   = speculative_verified_draft_tokens_;
     aux.speculative_draft_rounds            = sp_iter_count_;
     aux.speculative_accepted_tokens_per_pos = speculative_accepted_tokens_per_pos_;
     aux.generation_prefill_cuda_graph_status =
@@ -369,7 +371,6 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
                 generate_output.logits = logits_result.narrow(0, i, 1).cpu().clone();
             }
         }
-
         if (generate_input_->generate_config->return_logprobs) {
             RTP_LLM_CHECK(last_output_pos_ >= (size_t)inputLength());
             const int64_t total_output_len   = seqLength() - inputLength();
@@ -391,12 +392,18 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
                 const int64_t history_start = compact_output_start - content_output_start;
                 RTP_LLM_CHECK(history_start + logprobs_count <= logprobs_history_size_);
                 RTP_LLM_CHECK(logprobs_history_size_ <= token_logprobs_.size(1));
-                generate_output.token_logprobs = token_logprobs_[i].narrow(0, history_start, logprobs_count).clone();
+                // Preserve NaN/+Inf diagnostics while matching the output floor for log(0).
+                constexpr float min_output_logprob = -9999.0f;
+                generate_output.token_logprobs =
+                    token_logprobs_[i].narrow(0, history_start, logprobs_count).clamp_min(min_output_logprob);
                 generate_output.top_logprob_token_ids =
                     top_logprob_token_ids_[i].narrow(0, history_start, logprobs_count).clone();
-                generate_output.top_logprobs = top_logprobs_[i].narrow(0, history_start, logprobs_count).clone();
+                generate_output.top_logprobs =
+                    top_logprobs_[i].narrow(0, history_start, logprobs_count).clamp_min(min_output_logprob);
             }
         }
+
+
 
         if (generate_input_->generate_config->return_hidden_states && update_info.hidden_states.defined()) {
             if (update_info.hidden_states.size(0) == 1) {
@@ -717,6 +724,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     if (update_info.all_probs.defined()) {
         all_probs_ = update_info.all_probs.cpu();
     }
+
 
     // TODO: move it to better position
     RTP_LLM_LOG_DEBUG("stream [%s] finished: %d, pd_sep: %d, is_streaming: %d, need_remote_generate: %d",

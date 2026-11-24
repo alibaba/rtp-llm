@@ -338,7 +338,12 @@ std::string SpeculativeExecutionConfig::to_string() const {
         << "quantization: " << quantization << "\n"
         << "checkpoint_path: " << checkpoint_path << "\n"
         << "sp_dspark_mask_token_id: " << sp_dspark_mask_token_id << ", "
-        << "sp_dspark_sample_from_anchor: " << sp_dspark_sample_from_anchor;
+        << "sp_dspark_sample_from_anchor: " << sp_dspark_sample_from_anchor << "\n"
+        << "sp_dspark_confidence_mode: " << sp_dspark_confidence_mode << "\n"
+        << "sp_dspark_confidence_temperature: " << sp_dspark_confidence_temperature << "\n"
+        << "sp_dspark_verify_budget: " << sp_dspark_verify_budget << "\n"
+        << "sp_dspark_verify_mode: " << sp_dspark_verify_mode << "\n"
+        << "sp_dspark_verify_budget_mode: " << sp_dspark_verify_budget_mode;
     return oss.str();
 }
 
@@ -443,6 +448,7 @@ std::string GrammarConfig::to_string() const {
         << "compile_concurrency: " << compile_concurrency << "\n"
         << "compile_queue_size: " << compile_queue_size << "\n"
         << "compiler_cache_bytes: " << compiler_cache_bytes << "\n"
+        << "update_timeout_ms: " << update_timeout_ms << "\n"
         << "tokenizer_info_json_size: " << tokenizer_info_json.size();
     return oss.str();
 }

@@ -75,7 +75,9 @@ class Qwen4MoeLayer(GenericMoeLayer):
         self._shared_input_ready = torch.cuda.Event()
         self._shared_output_ready = torch.cuda.Event()
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, expert_load=None) -> torch.Tensor:
+        if expert_load is not None:
+            return super().forward(hidden_states, expert_load=expert_load)
         stream = self._shared_stream
         # Larger shapes did not improve in the complete TP2 consumer. Keep
         # their established schedule and each layer's distinct event pair.

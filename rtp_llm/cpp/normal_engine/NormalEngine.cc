@@ -29,6 +29,7 @@
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include <c10/core/InferenceMode.h>
+#include <c10/util/ScopeExit.h>
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -190,7 +191,8 @@ int NormalEngine::calculateReserveStep(const EngineInitParams& params) {
 }
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
-                           std::unique_ptr<ProposeModelEngineInitParams> propose_params):
+                           std::unique_ptr<ProposeModelEngineInitParams> propose_params,
+                           bool                                          start_loop):
     EngineBase(params),
     model_config_(params.model_config_),
     parallelism_config(params.parallelism_config),
@@ -324,7 +326,9 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     releaseHostMemoryCache();
 
     initScheduler();
-    (void)startLoop();
+    if (start_loop) {
+        (void)startLoop();
+    }
     (void)construction_guard.release();
 }
 
@@ -1110,6 +1114,11 @@ KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_c
 }
 
 absl::Status NormalEngine::startLoop() {
+#if !USING_CUDA
+    // Deferred RPC startup runs outside the constructor's device guard.
+    c10::DeviceGuard startup_device_guard(
+        c10::Device(c10::kCUDA, static_cast<c10::DeviceIndex>(parallelism_config.local_rank)));
+#endif
     if (parallelism_config.tp_rank == 0) {
         THROW_IF_STATUS_ERROR(initSystemPrompt());
     }
@@ -1132,8 +1141,10 @@ absl::Status NormalEngine::stop() {
     // Ask rank 0 to stop at a step boundary. Receivers must finish all model
     // collectives for inputs that rank 0 has already published before exiting.
     CpuTpBroadcaster::instance().requestStop();
-    loop_thread_->join();
-    loop_thread_.reset();
+    if (loop_thread_) {
+        loop_thread_->join();
+        loop_thread_.reset();
+    }
     // The loop has stopped using FIFO resources. Batch Decode releases its
     // streams later in finalizeStop(), after the executor has drained.
     const auto release_status = scheduler_->stop();
@@ -1153,6 +1164,7 @@ absl::Status NormalEngine::stop() {
 }
 
 void NormalEngine::loop() try {
+    auto stop_profiler = c10::make_scope_exit([this] { step_profiler_.stop(); });
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_INFO("loop begin");
     c10::InferenceMode inference_guard(true);
@@ -1380,7 +1392,7 @@ absl::Status NormalEngine::step() try {
         for (const auto& stream : streams) {
             if (stream && stream->genTimeline()) {
                 const auto& cfg = stream->generateConfig();
-                step_profiler_.configure(true, cfg->profile_trace_name, 0, cfg->profile_step);
+                step_profiler_.configure(true, cfg->profile_trace_name, 0, cfg->profile_step, cfg->profile_light);
                 break;
             }
         }
@@ -1447,7 +1459,7 @@ absl::Status NormalEngine::pp_step() {
         for (const auto& stream : streams) {
             if (stream && stream->genTimeline()) {
                 const auto& cfg = stream->generateConfig();
-                step_profiler_.configure(true, cfg->profile_trace_name, 0, cfg->profile_step);
+                step_profiler_.configure(true, cfg->profile_trace_name, 0, cfg->profile_step, cfg->profile_light);
                 break;
             }
         }
@@ -1472,15 +1484,10 @@ absl::Status NormalEngine::pp_step() {
     return status;
 }
 
-bool NormalEngine::updateEplbConfig(const EPLBConfig& config) {
-    if (executor_) {
-        return executor_->updateEplbConfig(config);
-    }
-    return true;
-}
 
-void NormalEngine::startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) {
-    step_profiler_.configure(true, trace_name, start_step, num_steps);
+
+void NormalEngine::startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps, bool profile_light) {
+    step_profiler_.configure(true, trace_name, start_step, num_steps, profile_light);
 }
 
 bool NormalEngine::isMTPEagle() {

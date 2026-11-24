@@ -129,6 +129,9 @@ XGrammarBackend::Options XGrammarBackend::optionsFromConfig(const GrammarConfig&
     if (cfg.compile_timeout_ms <= 0) {
         throw std::invalid_argument("grammar compile_timeout_ms must be greater than 0");
     }
+    if (cfg.update_timeout_ms <= 0) {
+        throw std::invalid_argument("grammar update_timeout_ms must be greater than 0");
+    }
     if (cfg.compile_concurrency <= 0) {
         throw std::invalid_argument("grammar compile_concurrency must be greater than 0");
     }
@@ -142,6 +145,7 @@ XGrammarBackend::Options XGrammarBackend::optionsFromConfig(const GrammarConfig&
     opts.terminate_without_stop_token = cfg.terminate_without_stop_token;
     opts.max_compiler_threads         = cfg.num_workers;
     opts.compile_timeout_ms           = cfg.compile_timeout_ms;
+    opts.update_timeout_ms            = cfg.update_timeout_ms;
     opts.compile_concurrency          = cfg.compile_concurrency;
     opts.compile_queue_size           = cfg.compile_queue_size;
     if (cfg.compiler_cache_bytes <= 0) {

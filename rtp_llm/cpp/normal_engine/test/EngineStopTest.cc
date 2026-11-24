@@ -4,6 +4,8 @@
 #include <cstdlib>
 #include <exception>
 #include <future>
+#include <functional>
+#include <stdexcept>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -299,6 +301,7 @@ void EngineStopTest::checkStopWaitsForDispatch(int max_new_tokens) {
     auto* executor                        = dynamic_cast<NormalExecutor*>(engine->executor_.get());
     ASSERT_NE(executor, nullptr);
     EXPECT_EQ(executor->useStreamAsync(), stream_async);
+    EXPECT_FALSE(executor->useDeviceInput());
     EXPECT_EQ(executor->batch_stream_processor_->output_dispatcher_->thread_pool_ != nullptr, GetParam() > 0);
 
     auto query                             = std::make_shared<GenerateInput>();
@@ -320,6 +323,11 @@ void EngineStopTest::checkStopWaitsForDispatch(int max_new_tokens) {
     EXPECT_EQ(started.wait_for(std::chrono::seconds(30)), std::future_status::ready);
     EXPECT_EQ(stream->hasPendingAsyncBookkeeping(), stream_async && max_new_tokens > 0);
     EXPECT_FALSE(stream->decode_completed.load());
+    if (stream_async && max_new_tokens > 0) {
+        // Async dispatch also works with the explicitly selected host-input path.
+        const auto state = stream->getNormalAsyncDeviceState();
+        EXPECT_FALSE(state.next_seq_len_gpu.defined());
+    }
     std::promise<void> stop_started;
     auto               stopping = stop_started.get_future();
     auto               stopped  = std::async(std::launch::async, [&]() {
@@ -372,8 +380,12 @@ TEST_P(EngineStopTest, SystemPromptsDoNotConsumeProfilingWindow) {
         params.profiling_debug_logging_config.gen_timeline_sync   = true;
         params.profiling_debug_logging_config.timeline_start_step = 1000;
     });
-    ASSERT_TRUE(engine->stop().ok());
     EXPECT_TRUE(engine->step_profiler_.enabled());
+    EXPECT_EQ(engine->step_profiler_.waited_steps_, 0);
+    EXPECT_EQ(engine->step_profiler_.profiled_steps_, 0);
+    EXPECT_EQ(engine->step_profiler_.profiler_, nullptr);
+    ASSERT_TRUE(engine->stop().ok());
+    EXPECT_FALSE(engine->step_profiler_.enabled());
     EXPECT_EQ(engine->step_profiler_.waited_steps_, 0);
     EXPECT_EQ(engine->step_profiler_.profiled_steps_, 0);
     EXPECT_EQ(engine->step_profiler_.profiler_, nullptr);

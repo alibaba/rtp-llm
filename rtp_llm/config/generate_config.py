@@ -240,6 +240,7 @@ class GenerateConfig(BaseModel):
     aux_info: bool = True
     can_use_pd_separation: bool = True
     gen_timeline: bool = False
+    profile_light: bool = False
     profile_step: int = 3
     profile_trace_name: str = ""
     out_prefix: str = ""
@@ -511,6 +512,7 @@ class GenerateConfig(BaseModel):
             "variable_num_beams": bool(self.variable_num_beams),
             "num_return_sequences": self.num_return_sequences > 1,
             "return_logits": self.return_logits,
+            "return_logprobs": self.return_logprobs,
             "calculate_loss": self.calculate_loss != 0,
             "return_softmax_probs": self.return_softmax_probs,
             "return_all_probs": self.return_all_probs != ReturnAllProbsMode.NONE,

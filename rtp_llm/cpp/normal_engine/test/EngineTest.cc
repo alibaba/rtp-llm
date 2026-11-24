@@ -1,5 +1,6 @@
 #include "c10/util/intrusive_ptr.h"
 #include "autil/TimeUtility.h"
+#include "autil/EnvUtil.h"
 #include "torch/all.h"
 #include <algorithm>
 #include <cstdlib>
@@ -30,6 +31,7 @@
 #include <limits>
 #include <memory>
 #include <pybind11/embed.h>
+#include <set>
 
 namespace py = pybind11;
 
@@ -1407,7 +1409,8 @@ TEST_F(NormalEngineTest, testEnqueueMultipleRejectsMixedModesBeforeRoleFiltering
 
 TEST_F(NormalEngineTest, testEnqueueMultipleIgnoresInvalidStreamForModeCheck) {
     CustomConfig config;
-    auto         engine = createMockEngine(config);
+    // Inspect enqueue state before any background step can finish the valid request.
+    auto engine = createMockEngine(config, false);
 
     auto make_query = [](int max_new_tokens, int min_new_tokens) {
         auto query                             = make_shared<GenerateInput>();

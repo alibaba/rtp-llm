@@ -128,28 +128,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                                 metrics_reporter_);
     }
 
-    if (params.eplb_config.enable_eplb() && params.model_config_.moe_style != 0 && !accuracy_check_mode_) {
-        // use first moe layer weight as moe weight type
-        int         first_moe_layer = params.model_config_.moe_layer_index.front();
-        const auto& moe_kernel      = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel;
-        auto        moe_weight_type = torchDTypeToDataType(moe_kernel.dtype());
-        bool        is_gated_activation = params.model_config_.isGatedActivation();
-        auto        moe_inter_size      = is_gated_activation ? moe_kernel.size(1) / 2 : moe_kernel.size(1);
-
-        expert_balancer_ = make_shared<ExpertBalancer>(params.model_config_.expert_num,
-                                                       params.eplb_config.phy_exp_num(params.model_config_.expert_num),
-                                                       params.model_config_.num_layers,
-                                                       moe_inter_size,
-                                                       params.model_config_.hidden_size,
-                                                       params.parallelism_config,
-                                                       std::pair<int64_t, int64_t>{0, params.model_config_.num_layers},
-                                                       params.py_eplb,
-                                                       moe_weight_type,
-                                                       params.model_config_.quant_algo,
-                                                       metrics_reporter_,
-                                                       params.eplb_config);
-    }
-
     // Scheduler limits the number of streams, but a stream may fan out into more sampler rows
     // through num_return_sequences or variable beams. Preallocate the common case and grow safely.
     const auto initial_sampler_batch_size =
@@ -175,8 +153,16 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          cache_manager,
          is_propose_ ? std::make_optional(propose_model_index_) : std::nullopt,
          params.model_config_.hc_mult});
-    model_init_params.owns_py_model                  = !warm_up_ && !accuracy_check_mode_;
-    model_init_params.metrics_reporter               = metrics_reporter_;
+    model_init_params.owns_py_model = !warm_up_ && !accuracy_check_mode_;
+    model_init_params.metrics_reporter = metrics_reporter_;
+    model_init_params.quant_algo       = params.model_config_.quant_algo;
+    model_init_params.eplb_config      = params.eplb_config;
+    if (accuracy_check_mode_) {
+        model_init_params.eplb_config = EPLBConfig{};
+    } else if (warm_up_) {
+        // Disable EPLB metrics during warmup.
+        model_init_params.eplb_config.eplb_metrics_report_interval = 0;
+    }
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
         is_propose_ ? HiddenStateCaptureModelRole::DRAFT : HiddenStateCaptureModelRole::TARGET,
         role_type_,
@@ -220,6 +206,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
 
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
+        allow_cuda_graph = allow_cuda_graph && !(params.sp_config.type == SP_TYPE_DSPARK && warm_up_ && !cache_manager);
         if (params.hw_kernel_config.enable_dynamic_decode_backend) {
             py::gil_scoped_acquire gil;
             params.py_model.attr("configure_dynamic_decode")(dynamic_decode_enabled && !warm_up && !accuracy_check_mode
@@ -427,11 +414,6 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
         model_output                        = std::move(model_->forward(model_input));
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
-    if (expert_balancer_) {
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        expert_balancer_->stepForward(*model_, executor_collector);
-        executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-    }
 
     if (auto capture_error = model_->takeDeferredHiddenStateCaptureError(); capture_error.has_value()) {
         cudaSyncAndCheck();
@@ -608,13 +590,6 @@ void NormalExecutor::reportMetrics(const StreamGroups&                        st
         tps_reporter_.report(&tps_collector);
         wall_tps_reporter_.report(&tps_collector);
     }
-}
-
-bool NormalExecutor::updateEplbConfig(const EPLBConfig& config) {
-    if (expert_balancer_) {
-        return expert_balancer_->updateEplbConfig(config);
-    }
-    return true;
 }
 
 bool NormalExecutor::useStreamAsync() const {

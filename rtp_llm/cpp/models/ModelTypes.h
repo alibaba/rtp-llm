@@ -2,11 +2,11 @@
 
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/cpp/models/models_weight/Weights.h"
-#include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/cuda_graph/dspark_cuda_graph_budget.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <array>
@@ -85,6 +85,8 @@ struct GptModelInitParams {
 
     // Warmup wrappers borrow the Python model later used by the real executor.
     bool owns_py_model = true;
+    EPLBConfig              eplb_config;
+    QuantAlgo               quant_algo;
 };
 
 enum GptModelInputIndex : size_t {
@@ -211,6 +213,9 @@ public:
     /** Builds rank-local PP warmup activations from full model inputs, applying CP padding when enabled. */
     virtual PPIntermediateTensors      makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp);
     virtual void                       releaseBuffers() {}
+    virtual std::optional<DSparkCapturedCapacity> capturedDSparkCapacity(int64_t /*batch*/) const {
+        return std::nullopt;
+    }
     virtual void                       prepareAttentionInputs(const GptModelInputs& inputs) {}
     virtual std::optional<std::string> takeDeferredHiddenStateCaptureError() {
         return std::nullopt;
@@ -299,9 +304,8 @@ public:
         return torch::Tensor();
     }
 
-    rtp_llm::Weights            weights_;
-    rtp_llm::OverallExpertStats overall_expert_stats_;
-    size_t                      model_id_ = 0;
+    rtp_llm::Weights weights_;
+    size_t           model_id_ = 0;
 };
 
 }  // namespace rtp_llm

@@ -7,6 +7,7 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <cstring>
 #if USING_CUDA
+#include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDACachingAllocator.h>
 #endif
@@ -557,10 +558,21 @@ void prepareDSparkProposeInput(GptModelInputs&            draft_input,
     const int64_t query_width   = static_cast<int64_t>(propose_step) + static_cast<int64_t>(!sample_from_anchor);
     const int64_t logits_rows   = batch_size * static_cast<int64_t>(propose_step);
     const auto    cuda_i32      = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-    const bool    width_changed = buffers.combo_tokens.defined()
-                               && (buffers.combo_tokens.dim() != 2 || buffers.combo_tokens.size(1) != query_width);
-    if (!buffers.combo_tokens.defined() || width_changed || buffers.combo_tokens.size(0) < batch_size) {
-        buffers.combo_tokens = torch::full({batch_size, query_width}, mask_token_id, cuda_i32);
+    const bool    width_changed = buffers.query_width != query_width;
+    if (round_state.proposal_tokens.defined()) {
+        const auto& tokens = round_state.proposal_tokens;
+        RTP_LLM_CHECK_WITH_INFO(tokens.is_cuda() && tokens.scalar_type() == torch::kInt32 && tokens.dim() == 1
+                                    && tokens.numel() == batch_size * query_width && tokens.is_contiguous(),
+                                "dspark fused proposal tokens must be contiguous CUDA int32 [batch * width]");
+        draft_input.combo_tokens = tokens;
+    } else {
+        if (!buffers.combo_tokens.defined() || buffers.combo_tokens.dim() != 2
+            || buffers.combo_tokens.size(1) != query_width || buffers.combo_tokens.size(0) < batch_size) {
+            buffers.combo_tokens = torch::full({batch_size, query_width}, mask_token_id, cuda_i32);
+        }
+        auto combo_tokens = buffers.combo_tokens.narrow(0, 0, batch_size);
+        combo_tokens.select(1, 0).copy_(toCudaInt32(anchors, host_holder));
+        draft_input.combo_tokens = combo_tokens.reshape({-1});
     }
     if (!buffers.input_lengths.defined() || width_changed || buffers.input_lengths.size(0) < batch_size) {
         buffers.input_lengths = torch::full({batch_size}, query_width, cuda_i32);
@@ -577,10 +589,7 @@ void prepareDSparkProposeInput(GptModelInputs&            draft_input,
         }
     }
 
-    auto combo_tokens = buffers.combo_tokens.narrow(0, 0, batch_size);
-    combo_tokens.select(1, 0).copy_(toCudaInt32(anchors, host_holder));
-
-    draft_input.combo_tokens = combo_tokens.reshape({-1});
+    buffers.query_width = query_width;
     draft_input.combo_position_ids =
         expandDSparkPositionIds(toCudaInt32(round_state.position_bases, host_holder), query_width);
     draft_input.engram_token_windows    = torch::Tensor();
@@ -601,6 +610,16 @@ torch::Tensor expandDSparkPositionIds(const torch::Tensor& position_bases, int64
     RTP_LLM_CHECK_WITH_INFO(width > 0, "DSpARK position width must be positive, got %ld", width);
     RTP_LLM_CHECK_WITH_INFO(
         position_bases.dim() == 2, "DSpARK position bases must be [batch, factor], got dim=%ld", position_bases.dim());
+#if USING_CUDA
+    if (position_bases.is_cuda() && position_bases.scalar_type() == torch::kInt32 && position_bases.stride(1) == 1
+        && position_bases.get_device() == at::cuda::current_device()) {
+        auto result = torch::empty({position_bases.numel() * width}, position_bases.options());
+        c10::cuda::CUDACachingAllocator::recordStream(position_bases.storage().data_ptr(),
+                                                      cuda_graph::graphGetCurrentStream());
+        invokeMtpPositionExpand(position_bases, result, width, at::cuda::getCurrentCUDAStream().stream());
+        return result;
+    }
+#endif
     auto bases = position_bases.to(torch::kInt32).unsqueeze(1);
     auto steps =
         torch::arange(width, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA)).reshape({1, width, 1});

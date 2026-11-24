@@ -328,6 +328,17 @@ void finalizeSelectedMtpTargetLogprobs(MtpTargetLogprobs&          target_logpro
     RTP_LLM_CHECK(!target_logprobs.top_logprob_token_ids.defined());
     RTP_LLM_CHECK(emitted_token_ids.defined());
 
+    if (target_logprobs.packed_to_dense.defined()) {
+        // This runs after acceptance on the bookkeeping worker. Only the small
+        // row map crosses to the host; the LM-head tensor remains a zero-copy view.
+        auto rows = target_logprobs.packed_to_dense.to(torch::kCPU).contiguous();
+        RTP_LLM_CHECK(rows.scalar_type() == torch::kInt64);
+        RTP_LLM_CHECK(rows.numel() == target_logprobs.raw_logits.size(0));
+        target_logprobs.captured_dense_row_indices.assign(rows.data_ptr<int64_t>(),
+                                                          rows.data_ptr<int64_t>() + rows.numel());
+        target_logprobs.source_row_indices = std::move(target_logprobs.packed_to_dense);
+    }
+
     // A decode packet may contain only reasoning tokens.  Treat that as a
     // successfully finalized empty payload: no logsumexp/top-k kernel is
     // launched and, crucially, the zero-copy raw LM-head owner is released as

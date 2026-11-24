@@ -1,8 +1,12 @@
 import copy
 import gc
+import json
 import os
+import statistics
 import unittest
 import weakref
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 from unittest.mock import MagicMock, patch
 
@@ -319,6 +323,21 @@ class AuxiliaryOutputModel:
         return PyModelOutputs(hidden_states, target_features)
 
 
+class ConfidenceOutputModel(AuxiliaryOutputModel):
+    """Expose a scalar output with a different width and dtype from hidden."""
+
+    def __init__(self, enabled=True):
+        self.enabled = enabled
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        outputs = super().forward(inputs, fmha_impl)
+        if self.enabled:
+            outputs.dspark_confidence_hidden_logits = (
+                inputs.input_hiddens.float().sum(dim=1, keepdim=True) - 11.0
+            )
+        return outputs
+
+
 class FailOnceGraphPrepare:
     def __init__(self) -> None:
         self.call_count = 0
@@ -327,6 +346,215 @@ class FailOnceGraphPrepare:
         self.call_count += 1
         if self.call_count == 1:
             raise RuntimeError("injected prepare_cuda_graph failure")
+
+
+class _MetadataPrepareImpl:
+    def __init__(self, inputs, device_only):
+        self.device_only = device_only
+        if device_only:
+            self.cuda_graph_uses_device_metadata = True
+        self.signature = torch.empty(4, device="cuda", dtype=torch.bfloat16)
+        self.prepare_cuda_graph(inputs)
+
+    def prepare_cuda_graph(self, inputs):
+        full = inputs["full"]
+        if self.device_only:
+            starts = (
+                full.prefix_lengths_device
+                if full.is_target_verify
+                else full.sequence_lengths_plus_1_device - 1
+            )
+            tables = [inputs[tag].kv_cache_kernel_block_id_device for tag in GROUP_TAGS]
+        else:
+            starts = (
+                full.prefix_lengths if full.is_target_verify else full.sequence_lengths
+            )
+            tables = [inputs[tag].kv_cache_kernel_block_id for tag in GROUP_TAGS]
+        # The legacy backend really consumes refreshed CPU values. The device
+        # backend never reads a host mirror, including padded table rows.
+        signature = torch.stack(
+            (starts.sum(), starts[-1], tables[0].sum(), tables[1].sum())
+        )
+        self.signature.copy_(signature.to(device="cuda", dtype=torch.bfloat16))
+
+
+class DeviceMetadataPrepareModel:
+    def __init__(self, device_only):
+        self.device_only = device_only
+
+    def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+        return _MetadataPrepareImpl(inputs.attention_inputs, self.device_only)
+
+    def forward(self, inputs, fmha_impl=None):
+        return PyModelOutputs(inputs.input_hiddens + fmha_impl.signature)
+
+
+class DictMetadataPrepareModel(TaggedBlockTableModel):
+    def __init__(self, flags):
+        self.flags = flags
+
+    def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+        return {
+            tag: SimpleNamespace(
+                prepare_cuda_graph=lambda _inputs: None,
+                cuda_graph_uses_device_metadata=flag,
+            )
+            for tag, flag in zip(GROUP_TAGS, self.flags)
+        }
+
+
+class _PackedMetadataPrepareImpl:
+    cuda_graph_uses_device_metadata = True
+    cuda_graph_uses_valid_request_count = True
+
+    def __init__(self, inputs):
+        rows = inputs.input_ids.numel()
+        self.rows = torch.arange(rows, device="cuda", dtype=torch.int64)
+        self.signature = torch.empty((rows, 4), device="cuda", dtype=torch.bfloat16)
+        self.features = torch.empty((rows, 8), device="cuda", dtype=torch.bfloat16)
+        self.prepare_cuda_graph(inputs.attention_inputs)
+
+    def prepare_cuda_graph(self, inputs, valid_request_count=None):
+        full, aux = inputs["full"], inputs["aux"]
+        lengths = full.input_lengths_device
+        prefixes = full.prefix_lengths_device
+        cu = full.cu_seqlens_device
+        owners = torch.searchsorted(cu[1:].long().contiguous(), self.rows, right=True)
+        positions = prefixes[owners] + self.rows - cu[owners]
+        self.signature.copy_(
+            torch.stack(
+                (owners, positions, lengths[owners], cu[-1].expand_as(owners)), dim=1
+            )
+        )
+        full_table = full.kv_cache_kernel_block_id_device
+        aux_table = aux.kv_cache_kernel_block_id_device
+        live = lengths.numel() if valid_request_count is None else valid_request_count
+        self.features.copy_(
+            torch.stack(
+                (
+                    full_table[owners, 0],
+                    aux_table[owners, 0],
+                    full_table.sum().expand_as(owners),
+                    aux_table.sum().expand_as(owners),
+                    full.cu_kv_seqlens_device[-1].expand_as(owners),
+                    torch.full_like(owners, live),
+                    lengths[-1].expand_as(owners),
+                    prefixes[-1].expand_as(owners),
+                ),
+                dim=1,
+            )
+        )
+
+
+class PackedMetadataPrepareModel:
+    """Expose actual captured request boundaries, padding, and device metadata."""
+
+    def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+        return _PackedMetadataPrepareImpl(inputs)
+
+    def forward(self, inputs, fmha_impl=None):
+        return PyModelOutputs(
+            inputs.input_hiddens + fmha_impl.signature, fmha_impl.features
+        )
+
+
+class CapacityKVModel(PackedMetadataPrepareModel):
+    """Exercise real graph staging and the V4.1 FP8 writer with visible owners."""
+
+    def __init__(self, graph_batch):
+        self.pool = torch.full(
+            (2 * graph_batch + 1, 32, 584), 165, dtype=torch.uint8, device="cuda"
+        )
+        self.columns = torch.arange(512, dtype=torch.bfloat16, device="cuda") / 512
+
+    def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+        assert all(a.is_packed_target_verify for a in inputs.attention_inputs.values())
+        return super().prepare_fmha_impl(inputs, is_cuda_graph)
+
+    def forward(self, inputs, fmha_impl=None):
+        from rtp_llm.models_py.modules.dsv41.fp8.decode.write_swa import (
+            decode_write_swa_fp8,
+        )
+
+        signature = fmha_impl.signature
+        blocks = fmha_impl.features[:, 0].long()
+        slots = torch.where(
+            blocks > 0,
+            blocks * 32 + signature[:, 1].long().remainder(32),
+            torch.full_like(blocks, -1),
+        )
+        token_values = inputs.input_ids.to(torch.bfloat16).unsqueeze(1)
+        kv = (token_values + self.columns).contiguous()
+        decode_write_swa_fp8(kv, slots, self.pool, kv.shape[0], 1, 512)
+        return PyModelOutputs(
+            inputs.input_hiddens + signature + token_values, fmha_impl.features
+        )
+
+
+class TargetFeatureIdentityModel(PackedMetadataPrepareModel):
+    """Distinct target features identify request, position, token and layer."""
+
+    def __init__(self):
+        # V4.1 target layers all write a persistent model-owned feature buffer;
+        # each budget runner must capture a copy into its own output storage.
+        self.shared_features = torch.zeros(
+            (24, 12), dtype=torch.bfloat16, device="cuda"
+        )
+
+    def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+        for attention in inputs.attention_inputs.values():
+            width = inputs.input_ids.numel() // attention.input_lengths.numel()
+            assert attention.is_target_verify
+            assert attention.is_packed_target_verify == (width < 6)
+            # Initial dtype probing leaves total_tokens unset; captured/runtime
+            # row counts are checked by the output signature below.
+            assert attention.total_tokens in (0, inputs.input_ids.numel())
+        return super().prepare_fmha_impl(inputs, is_cuda_graph)
+
+    def forward(self, inputs, fmha_impl=None):
+        features = torch.cat(
+            [
+                torch.cat(
+                    (
+                        fmha_impl.signature[:, :2],
+                        inputs.input_ids.to(torch.bfloat16).unsqueeze(1),
+                        torch.full_like(inputs.input_hiddens[:, :1], layer),
+                    ),
+                    dim=1,
+                )
+                for layer in (37, 38, 39)
+            ],
+            dim=1,
+        )
+        # A caller using normalized hidden instead of the explicit feature
+        # output gets both a wrong width and a poison value.
+        shared = self.shared_features[: inputs.input_ids.numel()]
+        shared.copy_(features)
+        return PyModelOutputs(inputs.input_hiddens - 100, shared)
+
+
+class BudgetExpertMonitorModel(TargetFeatureIdentityModel):
+    """Every captured budget writes the same externally owned accumulator."""
+
+    def __init__(self, counts):
+        super().__init__()
+        self.counts = counts
+
+    def forward(self, inputs, fmha_impl=None):
+        assert inputs.expert_token_counts.data_ptr() == self.counts.data_ptr()
+        inputs.expert_token_counts[0, 0].add_(1)
+        inputs.expert_token_counts[0, 1].add_(inputs.input_ids.numel())
+        return super().forward(inputs, fmha_impl)
+
+
+class FeatureCommitIdentityModel(TargetFeatureIdentityModel):
+    """Observe both transferred target features and commit row metadata."""
+
+    def forward(self, inputs, fmha_impl=None):
+        return PyModelOutputs(
+            inputs.input_hiddens + fmha_impl.signature.repeat(1, 3),
+            inputs.input_hiddens + 1,
+        )
 
 
 class RetryableGraphPrepareModel(TaggedBlockTableModel):
@@ -687,6 +915,85 @@ def _build_target_verify_inputs(
         batch_size=batch_size,
         token_count=token_count,
         block_count=block_count,
+    )
+
+
+def _build_packed_verify_inputs(lengths, prefixes, block_ids):
+    batch = len(lengths)
+    token_count = sum(lengths)
+    cu_q, cu_kv = [0], [0]
+    for length, prefix in zip(lengths, prefixes):
+        cu_q.append(cu_q[-1] + length)
+        cu_kv.append(cu_kv[-1] + prefix + length)
+    attn = PyAttentionInputs()
+    attn.is_prefill = True
+    attn.is_target_verify = True
+    attn.is_packed_target_verify = True
+    attn.input_lengths = torch.tensor(lengths, dtype=torch.int32, device="cuda")
+    attn.prefix_lengths = torch.tensor(prefixes, dtype=torch.int32, device="cuda")
+    attn.sequence_lengths = torch.empty(0, dtype=torch.int32).pin_memory()
+    attn.sequence_lengths_plus_1_device = attn.prefix_lengths + 1
+    attn.cu_seqlens = torch.empty(0, dtype=torch.int32).pin_memory()
+    attn.cu_seqlens_device = torch.tensor(cu_q, dtype=torch.int32, device="cuda")
+    attn.cu_kv_seqlens_device = torch.tensor(cu_kv, dtype=torch.int32, device="cuda")
+    attn.decode_cu_seqlens = torch.arange(batch + 1, dtype=torch.int32).pin_memory()
+    attn.decode_cu_seqlens_device = attn.decode_cu_seqlens.cuda()
+    attn.context_total_kv_length = -1
+    block_count = (
+        max(p + n for p, n in zip(prefixes, lengths)) + TOKENS_PER_BLOCK - 1
+    ) // TOKENS_PER_BLOCK
+    inputs = _build_common_inputs(
+        attn, GROUP_TAGS, {"full": 0, "aux": 0}, batch, token_count, block_count
+    )
+    tagged = inputs.attention_inputs
+    for tag, multiplier in (("full", 1), ("aux", 2)):
+        table = (
+            torch.tensor(block_ids, dtype=torch.int32, device="cuda")[:, None]
+            .expand(batch, block_count)
+            .contiguous()
+            * multiplier
+        )
+        tagged[tag].kv_cache_kernel_block_id = table
+        tagged[tag].kv_cache_kernel_block_id_device = table
+        tagged[tag].kv_cache_block_id = table
+        tagged[tag].kv_cache_block_id_device = table
+    inputs.attention_inputs = tagged
+    return inputs, block_count
+
+
+def _build_capacity_eager_reference(lengths, prefixes, block_ids):
+    inputs, block_count = _build_packed_verify_inputs(lengths, prefixes, block_ids)
+    tagged = {}
+    for tag, attention in inputs.attention_inputs.items():
+        # PyWrappedModel/test-runner supplies the two read-only device mirrors
+        # before prepare. A direct Python eager call must supply the same real
+        # CUDA tensors explicitly; it does not pass through that C++ builder.
+        values = {
+            "input_lengths_device": attention.input_lengths,
+            "prefix_lengths_device": attention.prefix_lengths,
+            "cu_seqlens_device": attention.cu_seqlens_device,
+            "cu_kv_seqlens_device": attention.cu_kv_seqlens_device,
+            "kv_cache_kernel_block_id_device": attention.kv_cache_kernel_block_id_device,
+        }
+        for name, value in values.items():
+            assert isinstance(value, torch.Tensor) and value.is_cuda, (tag, name)
+            assert value.dtype == torch.int32 and value.is_contiguous(), (tag, name)
+        assert values["input_lengths_device"].shape == (len(lengths),)
+        assert values["prefix_lengths_device"].shape == (len(lengths),)
+        assert values["cu_seqlens_device"].shape == (len(lengths) + 1,)
+        assert values["cu_kv_seqlens_device"].shape == (len(lengths) + 1,)
+        tagged[tag] = SimpleNamespace(
+            **values,
+            is_target_verify=attention.is_target_verify,
+            is_packed_target_verify=attention.is_packed_target_verify,
+        )
+    return (
+        SimpleNamespace(
+            input_ids=inputs.input_ids,
+            input_hiddens=inputs.input_hiddens,
+            attention_inputs=tagged,
+        ),
+        block_count,
     )
 
 
@@ -2085,6 +2392,13 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                         query_len=query_len,
                         prefix_len=prefix_len,
                     )
+                    # Device-only metadata producers intentionally do not
+                    # synchronize to populate the host KV total. Padding must
+                    # derive its cumulative tail from live device metadata.
+                    tagged = inputs.attention_inputs
+                    for attention in tagged.values():
+                        attention.context_total_kv_length = -1
+                    inputs.attention_inputs = tagged
                     self.assertTrue(runner.canRun(inputs))
                     self.assertEqual(runner.getCurrentRealGraphSize(), graph_size)
 
@@ -2414,6 +2728,47 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     tuple(output.mtp_target_hidden_states.shape),
                 )
                 torch.testing.assert_close(output.mtp_target_hidden_states, expected)
+
+    def test_scalar_confidence_output_changes_on_replay_and_batch_shrink(self) -> None:
+        for enabled in (False, True):
+            runner = CudaGraphRunner()
+            runner.init_decode(
+                ConfidenceOutputModel(enabled),
+                HIDDEN_SIZE,
+                64,
+                KERNEL_BLOCK_TABLE_WIDTH,
+                [1, 4],
+                GROUP_TAGS,
+            )
+            for round_id, batch_size in enumerate((4, 1, 3, 1, 4)):
+                with self.subTest(
+                    enabled=enabled, round_id=round_id, batch_size=batch_size
+                ):
+                    inputs = _build_decode_inputs(
+                        GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=batch_size
+                    )
+                    inputs.input_hiddens.copy_(
+                        torch.arange(
+                            batch_size * HIDDEN_SIZE,
+                            dtype=inputs.input_hiddens.dtype,
+                            device=inputs.input_hiddens.device,
+                        ).reshape(batch_size, HIDDEN_SIZE)
+                        + round_id * 5
+                    )
+                    self.assertTrue(runner.canRun(inputs))
+                    output = runner.forward(inputs)
+                    torch.cuda.synchronize()
+                    partial = output.dspark_confidence_hidden_logits
+                    if enabled:
+                        self.assertEqual(tuple(partial.shape), (batch_size, 1))
+                        self.assertEqual(partial.dtype, torch.float32)
+                        torch.testing.assert_close(
+                            partial,
+                            inputs.input_hiddens.float().sum(dim=1, keepdim=True)
+                            - 11.0,
+                        )
+                    else:
+                        self.assertIsNone(partial)
 
 
 if __name__ == "__main__":

@@ -24,7 +24,9 @@ struct AccuracyScenario;
 
 class NormalEngine: public EngineBase {
 public:
-    NormalEngine(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams> propose_params);
+    NormalEngine(const EngineInitParams&                       params,
+                 std::unique_ptr<ProposeModelEngineInitParams> propose_params,
+                 bool                                          start_loop = true);
     ~NormalEngine();
 
     std::shared_ptr<GenerateStream> makeStream(const std::shared_ptr<GenerateInput>& input) override;
@@ -47,8 +49,10 @@ public:
             metrics_reporter_->report<RtpLLMEngineMetrics, RtpLLMEngineMetricsCollector>(nullptr, &collector);
         }
     }
-    bool updateEplbConfig(const EPLBConfig& config) override;
-    void startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) override;
+    void startTimelineProfiling(const std::string& trace_name,
+                                int                start_step,
+                                int                num_steps,
+                                bool               profile_light = false) override;
 
 private:
     static int calculateReserveStep(const EngineInitParams& params);

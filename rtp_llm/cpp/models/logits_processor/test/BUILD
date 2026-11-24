@@ -144,3 +144,31 @@ cc_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+# CPU-only lifecycle checks still load CUDA-linked runtime libraries.
+[
+    cc_test(
+        name = "grammar_factory_shutdown_test" + suffix,
+        srcs = ["GrammarFactoryShutdownTest.cc"],
+        copts = test_copts,
+        deps = [
+            "//rtp_llm/cpp/engine_base/grammar:grammar_cpp_lib",
+            "//rtp_llm/cpp/models:logits_processor",
+            "//rtp_llm/cpp/metrics",
+            "//rtp_llm/cpp/config:model_config",
+            "@com_google_googletest//:gtest_main",
+            "@xgrammar",
+        ] + torch_deps(),
+        timeout = "short",
+        exec_properties = {"gpu": gpu, "gpu_count": "1"},
+        tags = [gpu],
+        target_compatible_with = select({
+            config: [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+    )
+    for suffix, config, gpu in [
+        ("", "@//:using_cuda13_x86", "L20_CU13"),
+        ("_arm", "@//:using_cuda13_arm", "SM100_ARM_CU13"),
+    ]
+]

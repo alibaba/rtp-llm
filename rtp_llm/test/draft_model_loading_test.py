@@ -199,7 +199,9 @@ class DraftModelLoadingTest(unittest.TestCase):
                     )
                     engine_config.load_config.load_method = load_method
                     target_config = SimpleNamespace(
-                        max_seq_len=128, gen_num_per_cycle=2
+                        max_seq_len=128,
+                        gen_num_per_cycle=2,
+                        eplb_config=SimpleNamespace(),
                     )
                     draft_config = SimpleNamespace(
                         model_type="test_draft", num_layers=2, is_mtp=True

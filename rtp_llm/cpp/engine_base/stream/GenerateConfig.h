@@ -117,8 +117,9 @@ public:
     int                max_thinking_tokens = 0;
     std::vector<int>   begin_think_token_ids;
     std::vector<int>   end_think_token_ids;
-    bool               gen_timeline = false;
-    int                profile_step = 3;
+    bool               gen_timeline  = false;
+    bool               profile_light = false;
+    int                profile_step  = 3;
     std::string        profile_trace_name;
     bool               ignore_eos          = false;
     bool               reuse_cache         = true;
@@ -210,6 +211,9 @@ public:
         if (return_all_probs != ReturnAllProbsMode::NONE) {
             throw std::invalid_argument("max_new_tokens == 0 does not support return_all_probs");
         }
+        if (return_logprobs) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support return_logprobs");
+        }
         if (return_cum_log_probs) {
             throw std::invalid_argument("max_new_tokens == 0 does not support return_cum_log_probs");
         }
@@ -282,6 +286,7 @@ public:
                      << ", json_schema: " << summarize_optional_string(json_schema)
                      << ", regex: " << summarize_optional_string(regex) << ", ebnf: " << summarize_optional_string(ebnf)
                      << ", structural_tag: " << summarize_optional_string(structural_tag)
+                     << ", return_logprobs: " << return_logprobs << ", top_logprobs: " << top_logprobs
                      << ", stop_words_list:" << vectorsToString(stop_words_list)
                      << ", grammar_terminate_without_stop_token: " << grammar_terminate_without_stop_token
                      << ", can_use_pd_separation: " << can_use_pd_separation << ", pd_separation: " << pd_separation
@@ -289,8 +294,9 @@ public:
                      << ", max_thinking_tokens: " << max_thinking_tokens
                      << ", begin_think_token_ids: " << vectorToString(begin_think_token_ids)
                      << ", end_think_token_ids: " << vectorToString(end_think_token_ids)
-                     << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
-                     << ", reuse_cache: " << reuse_cache << ", enable_device_cache: " << enable_device_cache
+                     << ", gen_timeline: " << gen_timeline << ", profile_light: " << profile_light
+                     << ", profile_step: " << profile_step << ", reuse_cache: " << reuse_cache
+                     << ", enable_device_cache: " << enable_device_cache
                      << ", enable_memory_cache: " << enable_memory_cache << ", enable_disk_cache: " << enable_disk_cache
                      << ", enable_remote_cache: " << enable_remote_cache << ", unique_key: " << unique_key
                      << ", combo_token_size: " << combo_token_size
@@ -401,6 +407,8 @@ public:
                 // field absent or other parse error — keep prior value
             }
         }
+        JSONIZE(return_logprobs);
+        JSONIZE(top_logprobs);
         JSONIZE(sp_advice_prompt);
         JSONIZE(sp_advice_prompt_token_ids);
         JSONIZE(in_think_mode);
@@ -411,6 +419,7 @@ public:
         JSONIZE(begin_think_token_ids);
         JSONIZE(end_think_token_ids);
         JSONIZE(gen_timeline);
+        JSONIZE(profile_light);
         JSONIZE(profile_step);
         JSONIZE(profile_trace_name);
         JSONIZE(reuse_cache);

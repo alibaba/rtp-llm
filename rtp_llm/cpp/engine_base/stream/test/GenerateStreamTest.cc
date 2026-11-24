@@ -3,17 +3,23 @@
 #include "autil/EnvUtil.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
+#include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/Exception.h"
+#include "autil/EnvUtil.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -200,6 +206,27 @@ private:
 
 class GenerateStreamTest: public DeviceTestBase {
 protected:
+    std::shared_ptr<GrammarLogitsProcessor> makeTimeoutGrammarProcessor() {
+        std::vector<std::string> vocab;
+        for (int i = 0; i < 128; ++i) {
+            vocab.emplace_back(1, static_cast<char>(i));
+        }
+        xgrammar::TokenizerInfo tokenizer_info(vocab, xgrammar::VocabType::RAW, 128, std::vector<int32_t>{0});
+        GrammarConfig           config;
+        config.num_workers = 1;
+        auto backend       = XGrammarBackend::create(tokenizer_info.SerializeJSON(), config);
+        auto matcher       = backend->createMatcherFromKey({"regex", "a*"});
+        EXPECT_TRUE(matcher.ok()) << matcher.status().ToString();
+        if (!matcher.ok()) {
+            return nullptr;
+        }
+        auto processor = std::make_shared<GrammarLogitsProcessor>(matcher.value());
+        // The native startup boundary requires a positive budget; force only the
+        // test instance to count each synchronous update as slow without sleeping.
+        processor->update_timeout_ms_ = 0;
+        return processor;
+    }
+
     // Chunk windows are active only after the stream reaches RUNNING.
     static void markRunning(const GenerateStreamPtr& stream) {
         stream->generate_status_->status = StreamState::RUNNING;
@@ -473,6 +500,101 @@ TEST_F(GenerateStreamTest, CacheExposedWaitIncludesRetriedLoadWindow) {
     EXPECT_GE(stream->getTimeInfo().cache_exposed_wait_us, 1100);
 }
 
+TEST_F(GenerateStreamTest, PublishedVerifiedDraftCountsIgnoreFinishedRowsInSharedRound) {
+    autil::EnvGuard perf("PERF_TEST", "0");
+    auto            builder = GenerateStreamBuilder();
+    auto            make    = [&](int max_new_tokens) {
+        auto stream                              = builder.createContextStream({1, 2, 3});
+        stream->generateConfig()->max_new_tokens = max_new_tokens;
+        stream->generateConfig()->aux_info       = true;
+        stream->generateConfig()->is_streaming   = true;
+        stream->generate_status_->status.store(StreamState::RUNNING);
+        auto buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
+        buffer->tokens = torch::zeros({1, 1}, torch::kInt32);
+        stream->setSPOutputBuffer(buffer);
+        return stream;
+    };
+    auto finished = make(1);
+    auto live     = make(16);
+    auto commit   = [](const GenerateStreamPtr& stream, int64_t verified) {
+        StreamSpecUpdateInfo update{torch::tensor({{17}}, torch::kInt32), 1, torch::Tensor(), {}, {}};
+        update.speculative_propose_step = 5;
+        update.verified_draft_tokens    = verified;
+        stream->specUpdate(update);
+    };
+    EXPECT_EQ(finished->speculativeVerifiedDraftTokens(), 0);
+    commit(finished, 3);
+    commit(live, 3);
+    ASSERT_TRUE(finished->hasEvent(StreamEvents::GenerateDone));
+    finished->generate_status_->status.store(StreamState::FINISHED);
+    // The asynchronous next shared result contains both rows; only the live
+    // row publishes. Nominal 3*sum(R)=9 differs from actual published V=11.
+    commit(finished, 5);
+    commit(live, 5);
+    EXPECT_EQ(finished->spIterCount(), 1);
+    EXPECT_EQ(live->spIterCount(), 2);
+    EXPECT_EQ(finished->speculativeVerifiedDraftTokens(), 3);
+    EXPECT_EQ(live->speculativeVerifiedDraftTokens(), 8);
+    auto output = finished->nextOutput(1);
+    ASSERT_TRUE(output.ok());
+    EXPECT_EQ(output.value().generate_outputs[0].aux_info.speculative_verified_draft_tokens, 3);
+}
+
+TEST_F(GenerateStreamTest, PublishedVerifiedDraftCountsZeroAndUnknownAreSticky) {
+    autil::EnvGuard perf("PERF_TEST", "0");
+    auto            builder = GenerateStreamBuilder();
+    for (const auto& budgets : std::vector<std::vector<int64_t>>{{0, 2, 5}, {3, -1, 2}}) {
+        auto stream                              = builder.createContextStream({1, 2, 3});
+        stream->generateConfig()->max_new_tokens = 16;
+        auto buffer                              = std::make_shared<SpeculativeExecutorStreamOutput>();
+        buffer->tokens                           = torch::zeros({1, 1}, torch::kInt32);
+        stream->setSPOutputBuffer(buffer);
+        for (const auto budget : budgets) {
+            StreamSpecUpdateInfo update{torch::tensor({{17}}, torch::kInt32), 1, torch::Tensor(), {}, {}};
+            update.speculative_propose_step = 5;
+            update.verified_draft_tokens    = budget;
+            stream->specUpdate(update);
+            ASSERT_FALSE(stream->hasError()) << stream->statusInfo().ToString();
+        }
+        EXPECT_EQ(stream->spIterCount(), 3);
+        EXPECT_EQ(stream->speculativeVerifiedDraftTokens(), budgets[0] == 0 ? 7 : -1);
+        // An error packet is rejected at the same pre-publication guard as A/R.
+        StreamSpecUpdateInfo error{torch::tensor({{18}}, torch::kInt32), 1, torch::Tensor(), {}, {}};
+        error.speculative_propose_step = 5;
+        error.verified_draft_tokens    = 5;
+        error.error_info               = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "deliberate update error");
+        stream->specUpdate(error);
+        EXPECT_EQ(stream->spIterCount(), 3);
+        EXPECT_EQ(stream->speculativeVerifiedDraftTokens(), budgets[0] == 0 ? 7 : -1);
+    }
+}
+
+TEST_F(GenerateStreamTest, PublishedVerifiedDraftCountPrecedesTerminalWindowClipping) {
+    autil::EnvGuard perf("PERF_TEST", "0");
+    auto            builder = GenerateStreamBuilder();
+    ResourceContext context;
+    context.cache_manager = std::make_shared<KVCacheManager>(builder.init_config());
+    ASSERT_TRUE(context.cache_manager->init());
+    auto stream                              = builder.createContextStream({1, 2, 3}, context);
+    stream->generateConfig()->max_new_tokens = 1;
+    stream->generateConfig()->aux_info       = true;
+    auto buffer                              = std::make_shared<SpeculativeExecutorStreamOutput>();
+    buffer->tokens                           = torch::zeros({1, 6}, torch::kInt32);
+    stream->setSPOutputBuffer(buffer);
+    StreamSpecUpdateInfo update{torch::tensor({{17, 18, 19, 20, 21, 22}}, torch::kInt32), 6, torch::Tensor(), {}, {}};
+    update.speculative_propose_step = 5;
+    update.accepted_draft_tokens    = 5;
+    update.verified_draft_tokens    = 5;
+    stream->specUpdate(update);
+    ASSERT_FALSE(stream->hasError()) << stream->statusInfo().ToString();
+    EXPECT_EQ(stream->outputTokenLen(), 1);
+    EXPECT_EQ(stream->spIterCount(), 1);
+    EXPECT_EQ(stream->speculativeVerifiedDraftTokens(), 5);
+    auto output = stream->nextOutput(1);
+    ASSERT_TRUE(output.ok());
+    EXPECT_EQ(output.value().generate_outputs[0].aux_info.speculative_verified_draft_tokens, 5);
+}
+
 TEST_F(GenerateStreamTest, generationPrefillCudaGraphReplayStatusIsReturnedInAuxInfo) {
     auto builder = GenerateStreamBuilder();
     auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createComplexContextStream({1, 2, 3}));
@@ -522,6 +644,271 @@ TEST_F(GenerateStreamTest, generationPrefillCudaGraphReplayStatusIsReturnedInAux
     ASSERT_EQ(decode_output_result.value().generate_outputs.size(), 1);
     EXPECT_EQ(decode_output_result.value().generate_outputs[0].aux_info.generation_prefill_cuda_graph_status,
               "replayed");
+}
+
+TEST_F(GenerateStreamTest, threeGrammarUpdateTimeoutsKeepDecodeOutputAndDisableOnlyGrammar) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createContextStream({1, 2, 3}));
+    stream->generateConfig()->max_new_tokens = 8;
+    stream->generateConfig()->is_streaming   = true;
+    stream->generateConfig()->aux_info       = true;
+    stream->generate_status_->status.store(StreamState::RUNNING);
+    auto processor = makeTimeoutGrammarProcessor();
+    ASSERT_TRUE(processor);
+    stream->sampling_state_.logits_processors.push_back(processor);
+    EXPECT_FALSE(stream->xgrammarUpdateTimedOut());
+
+    for (int round = 0; round < 8; ++round) {
+        SCOPED_TRACE(round);
+        // A fast third commit resets the first two slow samples. The next
+        // three slow commits disable grammar; subsequent fast commits keep it off.
+        processor->update_timeout_ms_ = round == 2 || round >= 6 ? std::numeric_limits<int>::max() : 0;
+        SamplerInputs inputs;
+        inputs.logits = torch::zeros({1, 128}, torch::kFloat32);
+        ASSERT_FALSE(processor->process(inputs, 0, 1).has_value());
+        EXPECT_EQ(inputs.logits[0]['a'].item<float>(), 0.0f);
+        if (round < 6) {
+            EXPECT_LT(inputs.logits[0]['b'].item<float>(), -1e20f);
+        } else {
+            EXPECT_TRUE(torch::equal(inputs.logits, torch::zeros_like(inputs.logits)));
+        }
+        const int32_t token = round < 6 ? 'a' : 'b';
+        updateOneToken(stream, token);
+        ASSERT_FALSE(stream->hasError()) << stream->statusInfo().ToString();
+        EXPECT_FALSE(stream->hasEvent(StreamEvents::Error));
+        EXPECT_EQ(stream->xgrammarUpdateTimedOut(), round >= 5);
+        EXPECT_EQ(processor->updateTimedOut(), round >= 5);
+        EXPECT_EQ(stream->outputTokenLen(), round + 1);
+        EXPECT_EQ(processor->committedOutputLen(), round + 1);
+        EXPECT_TRUE(processor->isStateful());
+        EXPECT_FALSE(stream->validateLogitsProcessorState().has_value());
+        ASSERT_TRUE(stream->hasOutput());
+
+        auto output = stream->nextOutput(1);
+        ASSERT_TRUE(output.ok()) << output.status().ToString();
+        ASSERT_EQ(output.value().generate_outputs.size(), 1);
+        const auto& generated = output.value().generate_outputs[0];
+        EXPECT_TRUE(torch::equal(generated.output_ids, torch::full({1, 1}, token, torch::kInt32)));
+        EXPECT_EQ(generated.aux_info.xgrammar_update_timeout, round >= 5);
+        EXPECT_EQ(generated.finished, round == 7);
+        if (round == 1 || round == 4) {
+            // Empty updates at the stream/processor boundary neither add a
+            // sample nor erase the two pending slow commits.
+            for (const int budget : {0, std::numeric_limits<int>::max()}) {
+                processor->update_timeout_ms_ = budget;
+                ASSERT_FALSE(stream->updateLogitProcessorStatus(torch::empty({1, 0}, torch::kInt32), 0).has_value());
+                EXPECT_FALSE(stream->xgrammarUpdateTimedOut());
+                EXPECT_EQ(processor->committedOutputLen(), round + 1);
+            }
+        }
+    }
+    EXPECT_FALSE(stream->hasOutput());
+    auto finished = stream->nextOutput(1);
+    ASSERT_FALSE(finished.ok());
+    EXPECT_EQ(finished.status().code(), ErrorCode::FINISHED);
+}
+
+TEST_F(GenerateStreamTest, threeGrammarUpdateTimeoutsKeepMtpOutputIncludingMaxTokensBoundary) {
+    // Finish on the third slow commit or the following degraded commit,
+    // with both complete and truncated two-token MTP windows.
+    for (const int max_new_tokens : {5, 6, 7, 8}) {
+        SCOPED_TRACE(max_new_tokens);
+        auto builder = GenerateStreamBuilder();
+        // Successful multi-token commits consult the cache topology even when
+        // this MHA fixture has no linear-attention blocks to swap.
+        ResourceContext resource_context;
+        resource_context.cache_manager = std::make_shared<KVCacheManager>(builder.init_config());
+        ASSERT_TRUE(resource_context.cache_manager->init());
+        auto stream = std::dynamic_pointer_cast<NormalGenerateStream>(
+            builder.createContextStream({1, 2, 3}, resource_context));
+        ASSERT_EQ(stream->currentBatchSize(), 1);
+        stream->generateConfig()->max_new_tokens = max_new_tokens;
+        stream->generateConfig()->is_streaming   = max_new_tokens != 6;
+        stream->generateConfig()->aux_info       = true;
+        stream->generate_status_->status.store(StreamState::RUNNING);
+        auto processor = makeTimeoutGrammarProcessor();
+        ASSERT_TRUE(processor);
+        stream->sampling_state_.logits_processors.push_back(processor);
+        auto sp_output_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
+        sp_output_buffer->tokens = torch::zeros({1, 2}, torch::kInt32);
+        stream->setSPOutputBuffer(sp_output_buffer);
+        EXPECT_FALSE(stream->xgrammarUpdateTimedOut());
+
+        for (int round = 0; round < (max_new_tokens + 1) / 2; ++round) {
+            SCOPED_TRACE(round);
+            const int32_t        token = round < 3 ? 'a' : 'b';
+            StreamSpecUpdateInfo update_info{
+                .new_tokens          = torch::full({1, 2}, token, torch::kInt32),
+                .num_new_tokens      = 2,
+                .draft_tokens        = torch::Tensor(),
+                .draft_hidden_states = torch::Tensor(),
+                .draft_token_probs   = torch::Tensor(),
+            };
+            stream->specUpdate(update_info);
+            ASSERT_FALSE(stream->hasError()) << stream->statusInfo().ToString();
+            EXPECT_FALSE(stream->hasEvent(StreamEvents::Error));
+            EXPECT_EQ(stream->xgrammarUpdateTimedOut(), round >= 2);
+            EXPECT_EQ(processor->updateTimedOut(), round >= 2);
+            const int committed = std::min((round + 1) * 2, max_new_tokens);
+            EXPECT_EQ(stream->outputTokenLen(), committed);
+            EXPECT_EQ(processor->committedOutputLen(), committed);
+            EXPECT_TRUE(processor->isStateful());
+            EXPECT_FALSE(stream->validateLogitsProcessorState().has_value());
+            EXPECT_EQ(sp_output_buffer->tokens[0][0].item<int32_t>(), token);
+
+            const bool finished = committed == max_new_tokens;
+            if (!stream->isStreaming() && !finished) {
+                EXPECT_FALSE(stream->hasOutput());
+                continue;
+            }
+            ASSERT_TRUE(stream->hasOutput());
+            auto output = stream->nextOutput(1);
+            ASSERT_TRUE(output.ok()) << output.status().ToString();
+            ASSERT_EQ(output.value().generate_outputs.size(), 1);
+            const auto& generated  = output.value().generate_outputs[0];
+            const int   output_len = stream->isStreaming() ? committed - round * 2 : max_new_tokens;
+            EXPECT_TRUE(torch::equal(generated.output_ids, torch::full({1, output_len}, token, torch::kInt32)));
+            EXPECT_EQ(generated.aux_info.xgrammar_update_timeout, round >= 2);
+            EXPECT_EQ(generated.finished, finished);
+        }
+        EXPECT_FALSE(stream->hasOutput());
+        auto finished = stream->nextOutput(1);
+        ASSERT_FALSE(finished.ok());
+        EXPECT_EQ(finished.status().code(), ErrorCode::FINISHED);
+    }
+}
+
+TEST_F(GenerateStreamTest, threeGrammarVerifyTimeoutsSurviveFastMtpCommitsAndReachAuxInfo) {
+    constexpr int   kStep   = 2;
+    constexpr int   kVocab  = 128;
+    constexpr int   kWords  = kVocab / 32;
+    auto            builder = GenerateStreamBuilder();
+    ResourceContext resource_context;
+    resource_context.cache_manager = std::make_shared<KVCacheManager>(builder.init_config());
+    ASSERT_TRUE(resource_context.cache_manager->init());
+    auto stream = std::dynamic_pointer_cast<NormalGenerateStream>(
+        builder.createContextStream({1, 2, 3}, resource_context));
+    ASSERT_EQ(stream->currentBatchSize(), 1);
+    stream->generateConfig()->max_new_tokens = 8;
+    stream->generateConfig()->is_streaming   = true;
+    stream->generateConfig()->aux_info       = true;
+    stream->generate_status_->status.store(StreamState::RUNNING);
+    auto processor = makeTimeoutGrammarProcessor();
+    ASSERT_TRUE(processor);
+    stream->sampling_state_.logits_processors.push_back(processor);
+    auto sp_output_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
+    sp_output_buffer->tokens = torch::zeros({1, 2}, torch::kInt32);
+    stream->setSPOutputBuffer(sp_output_buffer);
+
+    for (int round = 0; round < 4; ++round) {
+        SCOPED_TRACE(round);
+        const int32_t                    draft[] = {'a', 'b'};
+        std::vector<int32_t>             mask((kStep + 1) * kWords, 0);
+        const SpecLogitsProcessorRequest request{draft, kStep, mask.data(), kWords, kVocab};
+        processor->update_timeout_ms_ = round < 3 ? 0 : std::numeric_limits<int>::max();
+        const auto cap                = processor->prepareSpeculative(request);
+        ASSERT_TRUE(cap.ok()) << cap.status().ToString();
+        EXPECT_EQ(cap.value(), round < 3 ? 1 : kStep);
+        EXPECT_EQ(processor->committedOutputLen(), round * kStep);
+        EXPECT_EQ(stream->outputTokenLen(), round * kStep);
+        EXPECT_EQ(stream->xgrammarUpdateTimedOut(), round >= 2);
+        if (round < 3) {
+            // Both rows preceding the rejected draft token retain the grammar.
+            for (int row = 0; row < 2; ++row) {
+                EXPECT_NE(static_cast<uint32_t>(mask[row * kWords + 'a' / 32]) & (1u << ('a' % 32)), 0u);
+                EXPECT_EQ(static_cast<uint32_t>(mask[row * kWords + 'b' / 32]) & (1u << ('b' % 32)), 0u);
+            }
+        } else {
+            // Only the next verification bypasses grammar, including the bonus row.
+            for (const auto word : mask) {
+                EXPECT_EQ(word, SpecLogitsProcessorRequest::kBitmaskAllowAll);
+            }
+        }
+
+        // These commits are always fast. They must not erase the independent
+        // verify streak. The third round keeps its computed result; b can first
+        // be produced by the following unconstrained verification.
+        processor->update_timeout_ms_ = std::numeric_limits<int>::max();
+        const auto accepted =
+            torch::tensor(std::vector<int32_t>{'a', round < 3 ? 'a' : 'b'}, torch::kInt32).reshape({1, kStep});
+        StreamSpecUpdateInfo update_info{
+            .new_tokens          = accepted,
+            .num_new_tokens      = kStep,
+            .draft_tokens        = torch::Tensor(),
+            .draft_hidden_states = torch::Tensor(),
+            .draft_token_probs   = torch::Tensor(),
+        };
+        stream->specUpdate(update_info);
+        ASSERT_FALSE(stream->hasError()) << stream->statusInfo().ToString();
+        EXPECT_EQ(processor->committedOutputLen(), (round + 1) * kStep);
+        EXPECT_TRUE(processor->isStateful());
+        EXPECT_EQ(stream->outputTokenLen(), (round + 1) * kStep);
+        EXPECT_FALSE(stream->validateLogitsProcessorState().has_value());
+        EXPECT_EQ(stream->xgrammarUpdateTimedOut(), round >= 2);
+        EXPECT_EQ(sp_output_buffer->tokens[0][0].item<int32_t>(), round < 3 ? 'a' : 'b');
+        ASSERT_TRUE(stream->hasOutput());
+        auto output = stream->nextOutput(1);
+        ASSERT_TRUE(output.ok()) << output.status().ToString();
+        ASSERT_EQ(output.value().generate_outputs.size(), 1);
+        const auto& generated = output.value().generate_outputs[0];
+        EXPECT_TRUE(torch::equal(generated.output_ids, accepted));
+        EXPECT_EQ(generated.aux_info.xgrammar_update_timeout, round >= 2);
+        EXPECT_EQ(generated.finished, round == 3);
+    }
+    auto finished = stream->nextOutput(1);
+    ASSERT_FALSE(finished.ok());
+    EXPECT_EQ(finished.status().code(), ErrorCode::FINISHED);
+}
+
+TEST_F(GenerateStreamTest, grammarRejectionOnThirdSlowCommitStillFailsWithoutPublishingOutput) {
+    for (const bool speculative : {false, true}) {
+        SCOPED_TRACE(speculative);
+        auto builder = GenerateStreamBuilder();
+        auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createContextStream({1, 2, 3}));
+        stream->generateConfig()->max_new_tokens = 5;
+        stream->generateConfig()->is_streaming   = true;
+        stream->generate_status_->status.store(StreamState::RUNNING);
+        auto processor = makeTimeoutGrammarProcessor();
+        ASSERT_TRUE(processor);
+        stream->sampling_state_.logits_processors.push_back(processor);
+        auto sp_output_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
+        sp_output_buffer->tokens = torch::zeros({1, 2}, torch::kInt32);
+        stream->setSPOutputBuffer(sp_output_buffer);
+        for (int round = 0; round < 2; ++round) {
+            if (speculative) {
+                stream->specUpdate({.new_tokens     = torch::full({1, 1}, 'a', torch::kInt32),
+                                    .num_new_tokens = 1,
+                                    .draft_tokens   = torch::Tensor()});
+            } else {
+                updateOneToken(stream, 'a');
+            }
+            ASSERT_FALSE(stream->hasError());
+            ASSERT_TRUE(stream->nextOutput(1).ok());
+            EXPECT_FALSE(stream->xgrammarUpdateTimedOut());
+        }
+        if (speculative) {
+            // A valid prefix followed by a rejected token must roll back the
+            // whole commit, even when this would be the third slow update.
+            stream->specUpdate(
+                {.new_tokens     = torch::tensor(std::vector<int32_t>{'a', 'b'}, torch::kInt32).reshape({1, 2}),
+                 .num_new_tokens = 2,
+                 .draft_tokens   = torch::Tensor()});
+            EXPECT_EQ(sp_output_buffer->tokens[0][0].item<int32_t>(), 'a');
+        } else {
+            updateOneToken(stream, 'b');
+        }
+        ASSERT_TRUE(stream->hasError());
+        EXPECT_EQ(stream->statusInfo().code(), ErrorCode::GRAMMAR_PARSER_REJECTED_TOKEN);
+        EXPECT_TRUE(stream->hasEvent(StreamEvents::Error));
+        EXPECT_FALSE(stream->xgrammarUpdateTimedOut());
+        EXPECT_FALSE(processor->updateTimedOut());
+        EXPECT_TRUE(processor->isStateful());
+        EXPECT_EQ(processor->committedOutputLen(), 2);
+        EXPECT_FALSE(stream->hasOutput());
+        auto output = stream->nextOutput(1);
+        ASSERT_FALSE(output.ok());
+        EXPECT_EQ(output.status().code(), ErrorCode::GRAMMAR_PARSER_REJECTED_TOKEN);
+    }
 }
 
 TEST_F(GenerateStreamTest, mtpUpdateKeepsLastGpuProposalWhenNextProposalIsMissing) {
@@ -652,6 +1039,7 @@ TEST_F(GenerateStreamTest, prefillOnlyValidationRejectsUnsupportedConfigWithoutM
         {"variable_num_beams", +[](GenerateConfig& config) { config.variable_num_beams = {1}; }},
         {"num_return_sequences", +[](GenerateConfig& config) { config.num_return_sequences = 2; }},
         {"return_logits", +[](GenerateConfig& config) { config.return_logits = true; }},
+        {"return_logprobs", +[](GenerateConfig& config) { config.return_logprobs = true; }},
         {"calculate_loss", +[](GenerateConfig& config) { config.calculate_loss = 1; }},
         {"return_softmax_probs", +[](GenerateConfig& config) { config.return_softmax_probs = true; }},
         {"return_all_probs", +[](GenerateConfig& config) { config.return_all_probs = ReturnAllProbsMode::DEFAULT; }},
@@ -1622,7 +2010,8 @@ TEST_F(GenerateStreamTest, speculativeCommitCrossesNextRoundLimitAndCapsProcesso
         EXPECT_EQ(stream->seqLength(), max_new_tokens == 2 ? 8 : 10);
         EXPECT_EQ(processor->committed_tokens,
                   max_new_tokens == 2 ? (std::vector<int32_t>{2, 3}) : (std::vector<int32_t>{2, 3, 4, 5}));
-        EXPECT_EQ(stream->getProposeToken(), (std::vector<int>{5, 6, 7, 8}));
+        EXPECT_EQ(stream->getProposeToken(),
+                  max_new_tokens == 2 ? (std::vector<int>{3, 6, 7, 8}) : (std::vector<int>{5, 6, 7, 8}));
         EXPECT_EQ(stream->speculativeAcceptedTokensPerPos(), (std::vector<int32_t>{1, 1, 1}));
         /** Linear KV swaps must follow the committed prefix after request truncation. */
         for (const auto& group : cache_config.topology().groups()) {
@@ -2731,6 +3120,7 @@ void publishTerminalTestOutput(const std::shared_ptr<NormalGenerateStream>& stre
 TEST_F(GenerateStreamTest, terminalSnapshotOwnsSuffixScoresAndMetadataAfterStreamDestruction) {
     auto stream = makeTerminalTestStream();
     auto scores = torch::tensor({-1.0f, -2.0f});
+    stream->speculative_verified_draft_tokens_ = 7;
     publishTerminalTestOutput(stream, scores);
     ASSERT_TRUE(stream->hasOutput());
     ASSERT_TRUE(stream->generate_outputs_.front().generate_outputs.empty());
@@ -2745,6 +3135,7 @@ TEST_F(GenerateStreamTest, terminalSnapshotOwnsSuffixScoresAndMetadataAfterStrea
     EXPECT_EQ(snapshot->aux_info.input_len, 3);
     EXPECT_EQ(snapshot->aux_info.output_len, 2);
     EXPECT_EQ(snapshot->aux_info.step_output_len, 2);
+    EXPECT_EQ(snapshot->aux_info.speculative_verified_draft_tokens, 7);
     // Force alias mutation to prove no subsequent stream/sampler state is read.
     stream->completeTokenIds().fill_(99);
     scores.fill_(-99.0f);

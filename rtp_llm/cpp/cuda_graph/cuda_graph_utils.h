@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/cuda_graph_prepare.h"
 #include <torch/version.h>
 
 #include <string>
@@ -28,6 +29,10 @@ public:
         mtp_target_hidden_states_ = hidden_states;
     };
 
+    void setDsparkConfidenceHiddenLogits(at::Tensor hidden_logits) {
+        dspark_confidence_hidden_logits_ = hidden_logits;
+    };
+
     CaptureMemoryHold() {}
 
     CaptureMemoryHold(at::Tensor hidden_states, torch_ext::PyModelInputs& inputs, bool is_embedding):
@@ -48,6 +53,7 @@ public:
         py_model_inputs_.attention_inputs.combo_position_ids       = inputs.attention_inputs.combo_position_ids;
         py_model_inputs_.input_ids                                 = inputs.input_ids;
         py_model_inputs_.engram_token_windows                      = inputs.engram_token_windows;
+        py_model_inputs_.expert_token_counts                       = inputs.expert_token_counts;
         py_model_inputs_.combo_position_ids                        = inputs.combo_position_ids;
 
         // for spec
@@ -60,8 +66,10 @@ public:
         py_model_inputs_.attention_inputs.is_target_verify        = inputs.attention_inputs.is_target_verify;
         py_model_inputs_.attention_inputs.is_cuda_graph           = inputs.attention_inputs.is_cuda_graph;
         py_model_inputs_.attention_inputs.is_draft_extend         = inputs.attention_inputs.is_draft_extend;
+        py_model_inputs_.attention_inputs.is_packed_target_verify = inputs.attention_inputs.is_packed_target_verify;
         py_model_inputs_.attention_inputs.dtype                   = inputs.attention_inputs.dtype;
         py_model_inputs_.attention_inputs.context_total_kv_length = inputs.attention_inputs.context_total_kv_length;
+        py_model_inputs_.attention_inputs.total_tokens            = inputs.attention_inputs.total_tokens;
 
         py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params =
             inputs.attention_inputs.prefill_cuda_graph_copy_params;
@@ -74,23 +82,34 @@ public:
     }
 
 public:
-    py::object               attn_pyobj_{py::none()};
-    at::Tensor               decoder_layer_hidden_states_;
-    at::Tensor               mtp_target_hidden_states_;
+    py::object attn_pyobj_{py::none()};
+    // Opt-in backend contract: prepare/replay do not read host metadata
+    // values. Cached at capture so replay does not need a Python lookup.
+    bool       uses_device_metadata_{false};
+    at::Tensor decoder_layer_hidden_states_;
+    at::Tensor mtp_target_hidden_states_;
+    // V4.1 confidence-head hidden contributions: FP32 [tokens, 1].
+    at::Tensor               dspark_confidence_hidden_logits_;
     torch_ext::PyModelInputs py_model_inputs_;
 };
 
 class GraphInstance {
 public:
-#if (TORCH_VERSION_MAJOR > 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 8)
+#if USING_CUDA && ((TORCH_VERSION_MAJOR > 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 9))
+    explicit GraphInstance(bool keep_graph = false): graph_(true) {
+        (void)keep_graph;  // Live input nodes require their original graph handles.
+    }
+#elif (TORCH_VERSION_MAJOR > 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 8)
     explicit GraphInstance(bool keep_graph = false): graph_(keep_graph) {}
 #else
     explicit GraphInstance(bool keep_graph = false): graph_() {
         (void)keep_graph;
     }
 #endif
-    at::cuda::CUDAGraph graph_;
-    CaptureMemoryHold   mem_hold_;
+    at::cuda::CUDAGraph             graph_;
+    CaptureMemoryHold               mem_hold_;
+    rtp_llm::CudaGraphPrepareReplay prepare_replay_;
+    rtp_llm::CudaGraphPrepareReplay metadata_replay_;
 };
 
 class CudaGraphStreamLife {

@@ -76,7 +76,6 @@ public:
 
     absl::Status finish() override;
 
-    bool updateEplbConfig(const EPLBConfig& config) override;
 
     /** Filter scheduled requests before DP fake padding so admission rejection cannot empty a padded batch. */
     static void validateAndFilterStreams(std::list<GenerateStreamPtr>& streams, SpeculativeType sp_type);
@@ -249,7 +248,6 @@ private:
     std::unique_ptr<ModelBase>              model_;
     std::unique_ptr<Sampler>                sampler_;
     std::unique_ptr<PPBatchStreamProcessor> batch_stream_processor_;
-    std::shared_ptr<ExpertBalancer>         expert_balancer_;
     // Holds executor-owned CPU sources for copies to the device; models and PPCommTicket own their buffers.
     TensorHolder   buffer_holder_;
     SamplingStates sampling_states_;

@@ -199,7 +199,7 @@ def _build_block(
 
 
 class V4Transformer(nn.Module):
-    """Standalone V4 forward. No TP/EP/PP sharding (world_size=1)."""
+    """V4 forward with framework-provided parallelism and weights."""
 
     def __init__(self, args: V4Args, mw):
         """``mw`` is the framework's ``ModelWeights`` (with ``.global_weights``
@@ -561,7 +561,11 @@ class V4Transformer(nn.Module):
         for layer_idx, layer in enumerate(self.layers):
             with layer_forward_range(layer_idx):
                 h = layer.forward_decode(
-                    h, attn_metadata, input_ids_2d, kv_cache=kv_cache
+                    h,
+                    attn_metadata,
+                    input_ids_2d,
+                    kv_cache=kv_cache,
+                    expert_load=None,
                 )
         h = self._hc_head_reduce(h)  # [B, q_len, dim]
         # Framework RMSNorm wants 2D — flatten to [T_total, dim] and
@@ -675,6 +679,7 @@ class V4Transformer(nn.Module):
                         cu_seqlens,
                         kv_cache=kv_cache,
                         block_tables_by_type=block_tables_by_type,
+                        expert_load=None,
                     )
         h = h_flat.unsqueeze(0)  # [1, S, hc, d]
         h = self._hc_head_reduce(h)  # [B, S, d]

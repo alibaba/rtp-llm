@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import grpc
 from google.protobuf.json_format import MessageToDict
@@ -22,7 +22,6 @@ class GrpcClientWrapper:
         server_port: int,
         dp_addresses: Optional[List[str]] = None,
         client_config: Optional[Dict[str, int]] = None,
-        eplb_address_resolver: Optional[Callable[[], List[str]]] = None,
     ):
         self.server_port = server_port
         self.address = f"localhost:{server_port}"
@@ -33,7 +32,6 @@ class GrpcClientWrapper:
         self._dp_channels: Dict[str, Any] = {}
         self._dp_stubs: Dict[str, Any] = {}
         self._client_config = client_config or {}
-        self._eplb_address_resolver = eplb_address_resolver
 
     async def _ensure_connection(self):
         """Ensure gRPC channel and stub are created"""
@@ -186,6 +184,7 @@ class GrpcClientWrapper:
                 trace_name=str(req.get("trace_name", "")),
                 start_step=int(req.get("start_step", 0)),
                 num_steps=int(req.get("num_steps", 0)),
+                profile_light=req.get("profile_light", False),
                 enable_all_rank=bool(
                     req.get("enable_all_rank", req.get("all_tp", False))
                 ),
@@ -262,46 +261,6 @@ class GrpcClientWrapper:
             "errors": errors,
         }
 
-    async def update_eplb_config(self, req: Any) -> Dict[str, Any]:
-        """Update the local backend, or fan out to PP stage roots when configured."""
-        try:
-            if isinstance(req, str):
-                req = json.loads(req)
-            eplb_req = pb2.UpdateEplbConfigRequestPB(
-                mode=req.get("mode", "NONE"),
-                update_time=int(time.time()),
-            )
-            if self._eplb_address_resolver is None:
-                await self._ensure_connection()
-                await self.stub.UpdateEplbConfig(eplb_req)
-                return {"status": "ok"}
-
-            # All stages receive the same control update. Each backend handles
-            # its own MoE layers; a stage without an expert balancer is a no-op.
-            addresses = await asyncio.to_thread(self._eplb_address_resolver)
-
-            async def send_to_address(address: str):
-                await self._ensure_dp_connection(address)
-                await self._dp_stubs[address].UpdateEplbConfig(eplb_req, timeout=3)
-
-            results = await asyncio.gather(
-                *(send_to_address(address) for address in addresses),
-                return_exceptions=True,
-            )
-            errors = [
-                f"{address}: {result}"
-                for address, result in zip(addresses, results)
-                if isinstance(result, Exception)
-            ]
-            if errors:
-                return {
-                    "error": f"Failed to update EPLB config on stage roots: {errors}"
-                }
-            return {"status": "ok"}
-        except Exception as e:
-            logging.error(f"Update EPLB config failed: {e}")
-            return {"error": f"Failed to update EPLB config: {str(e)}"}
-
     async def update_scheduler_info(self, req: Any) -> Dict[str, Any]:
         """Update scheduler info on all DP addresses"""
         try:
@@ -351,8 +310,6 @@ class GrpcClientWrapper:
                 return await self.start_profile(req)
             elif uri == "dump_torch_allocator":
                 return await self.dump_torch_allocator(req)
-            elif uri == "update_eplb_config":
-                return await self.update_eplb_config(req)
             elif uri == "update_scheduler_info":
                 return await self.update_scheduler_info(req)
             else:

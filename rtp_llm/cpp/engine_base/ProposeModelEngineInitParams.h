@@ -15,14 +15,13 @@ struct ProposeModelEngineInitParams {
 
     // Constructor for vanilla propose model
     // Only model_config differs between propose and score models, other configs are shared
-    ProposeModelEngineInitParams(size_t                           model_id,
-                                 SpeculativeType                  sp_type,
-                                 size_t                           gen_num_per_circle,
-                                 const ModelConfig&               model_config,
-                                 const EngineInitParams&          base_params,
-                                 rtp_llm::Weights&&               gpt_weights,
-                                 py::object                       py_model = py::none(),
-                                 py::object                       py_eplb = py::none()):
+    ProposeModelEngineInitParams(size_t                  model_id,
+                                 SpeculativeType         sp_type,
+                                 size_t                  gen_num_per_circle,
+                                 const ModelConfig&      model_config,
+                                 const EngineInitParams& base_params,
+                                 rtp_llm::Weights&&      gpt_weights,
+                                 py::object              py_model = py::none()):
         sp_type(sp_type),
         gen_num_per_circle(gen_num_per_circle),
         vanilla_model_params(new EngineInitParams(
@@ -44,8 +43,7 @@ struct ProposeModelEngineInitParams {
             base_params.grpc_config,
             base_params.vit_config,
             std::move(gpt_weights),
-            py_model,
-            py_eplb)) {}
+            py_model)) {}
 
     // Consturctor for deterministic propose model
     ProposeModelEngineInitParams(SpeculativeType sp_type, size_t gen_num_per_circle):

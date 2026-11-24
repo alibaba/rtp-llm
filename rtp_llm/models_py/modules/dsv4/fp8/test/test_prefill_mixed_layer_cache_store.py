@@ -103,7 +103,7 @@ class _FakeLayer:
         input_ids,
         positions,
         cu_seqlens,
-        *,
+        expert_load,
         kv_cache=None,
         block_tables_by_type=None,
     ):
@@ -228,6 +228,7 @@ class MixedLayerCacheStoreOrderTest(unittest.TestCase):
                 block_tables_by_type={0: torch.ones(1, 1, dtype=torch.int32)},
                 attn_inputs=attn_inputs,
                 attention_inputs=tagged_inputs,
+                expert_token_counts=None,
             )
 
         self.assertEqual(tuple(out.shape), (4, 4))

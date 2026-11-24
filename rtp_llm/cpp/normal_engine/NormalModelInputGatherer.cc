@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
@@ -385,10 +386,46 @@ torch::Tensor publishInt32ToCuda(const torch::Tensor& tensor, TensorHolder& host
     return tensor.to(cuda_i32, /*non_blocking=*/true);
 }
 
-void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolder& host_holder) {
+void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolder& host_holder,
+                                      bool publish_page_tables) {
     // TODO(async): stream state is still gathered through CPU pointers above.
     // Publish only device tensors at the model boundary.
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.publish_core_tensors_to_cuda");
+    const std::array<torch::Tensor*, 4> fields = {&model_input.combo_tokens,
+                                                  &model_input.input_lengths,
+                                                  &model_input.sequence_lengths,
+                                                  &model_input.prefix_lengths};
+    std::array<int64_t, 4>              offsets{};
+    int64_t                             total = 0;
+    int                                 count = 0;
+    for (size_t i = 0; i < fields.size(); ++i) {
+        const auto& tensor = *fields[i];
+        if (tensor.defined() && tensor.device().is_cpu() && tensor.scalar_type() == torch::kInt32
+            && tensor.is_contiguous() && tensor.numel() > 0) {
+            total      = (total + 3) / 4 * 4;  // Preserve 16-byte alignment for every device view.
+            offsets[i] = total;
+            total += tensor.numel();
+            ++count;
+        } else {
+            offsets[i] = -1;
+        }
+    }
+    if (count > 1) {
+        auto packed = torch::empty({total}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+        for (size_t i = 0; i < fields.size(); ++i) {
+            if (offsets[i] >= 0) {
+                std::memcpy(packed.data_ptr<int32_t>() + offsets[i],
+                            fields[i]->data_ptr<int32_t>(),
+                            fields[i]->numel() * sizeof(int32_t));
+            }
+        }
+        auto device = publishInt32ToCuda(packed, host_holder);
+        for (size_t i = 0; i < fields.size(); ++i) {
+            if (offsets[i] >= 0) {
+                *fields[i] = device.narrow(0, offsets[i], fields[i]->numel()).view(fields[i]->sizes());
+            }
+        }
+    }
     model_input.combo_tokens     = publishInt32ToCuda(model_input.combo_tokens, host_holder);
     model_input.input_lengths    = publishInt32ToCuda(model_input.input_lengths, host_holder);
     model_input.sequence_lengths = publishInt32ToCuda(model_input.sequence_lengths, host_holder);
@@ -397,8 +434,10 @@ void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolde
     // consume both views, and the speculative async path snapshots the pair
     // atomically for the next round. This also replaces the former per-group
     // tensorHoldHostAndToCuda copies in PyWrappedModel.
-    model_input.kv_cache_block_id        = publishInt32ToCuda(model_input.kv_cache_block_id, host_holder);
-    model_input.kv_cache_kernel_block_id = publishInt32ToCuda(model_input.kv_cache_kernel_block_id, host_holder);
+    if (publish_page_tables) {
+        model_input.kv_cache_block_id        = publishInt32ToCuda(model_input.kv_cache_block_id, host_holder);
+        model_input.kv_cache_kernel_block_id = publishInt32ToCuda(model_input.kv_cache_kernel_block_id, host_holder);
+    }
 }
 
 }  // anonymous namespace
@@ -718,7 +757,8 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                 ctx.input_lengths[ctx.batch_idx]    = stream->inputLength();
                 ctx.sequence_lengths[ctx.batch_idx] = stream->seqLength() - 1;
                 if (config_.has_engram) {
-                    fillEngramTokenWindows(stream->completeTokenIdsVec(i),
+                    fillEngramTokenWindows(stream->getCompleteTokenIds()->data(i),
+                                           stream->seqLength(),
                                            stream->seqLength() - 1,
                                            1,
                                            model_input.engram_token_windows.data_ptr<int32_t>() + ctx.batch_idx * 4);
@@ -812,7 +852,8 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             }
             memcpy(ctx.merged_tokens + ctx.token_idx, input_tokens.data(), input_tokens.size() * sizeof(int));
             if (config_.has_engram) {
-                fillEngramTokenWindows(stream->completeTokenIdsVec(i),
+                fillEngramTokenWindows(stream->getCompleteTokenIds()->data(i),
+                                       stream->seqLength(),
                                        stream->prefixLength(),
                                        input_tokens.size(),
                                        model_input.engram_token_windows.data_ptr<int32_t>() + ctx.token_idx * 4);
@@ -905,8 +946,10 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
         model_input.mm_features_locs  = model_input.mm_features_locs.slice(0, 0, ctx.mm_feature_index);
         model_input.mm_features_spans = model_input.mm_features_spans.slice(0, 0, ctx.mm_feature_index);
     }
-    model_input.prefix_lengths =
-        deviceInputEnabled() ? publishInt32ToCuda(prefix_lengths_host, host_holder) : prefix_lengths_host;
+    // Keep the CPU producer's metadata until the final placement decision.
+    // Prefill CP planning and cache publication both need these host lengths;
+    // uploading them here would force a D2H read inside the model forward.
+    model_input.prefix_lengths = prefix_lengths_host;
     if (model_input.custom_output_indexes.defined()) {
         model_input.custom_output_indexes = model_input.custom_output_indexes.narrow(0, 0, custom_output_count);
     }
@@ -1010,8 +1053,8 @@ absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheKernelBlock
 }
 
 absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGroups& stream_groups,
-                                                                TensorHolder&       host_holder,
-                                                                bool                record_lengths) const {
+                                                                TensorHolder& host_holder, bool record_lengths,
+                                                                bool defer_page_tables, bool defer_token_metadata) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_LOG_DEBUG("context_streams size = %d, decode_streams size = %d",
                       stream_groups.contextStreams().size(),
@@ -1068,15 +1111,18 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     initializeKvCacheMetadata(model_input);
     RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups));
     RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups, host_holder));
-    // No host mirrors are kept for ModelInputsLogger: it snapshots every tensor
-    // in place (device-side clone + per-device c10::Event) and only pays the D2H
-    // on its own worker thread, so it reads post-publish CUDA members directly.
-    if (deviceInputEnabled()) {
-        publishModelInputCoreTensorsToCuda(model_input, host_holder);
+    // Prefill starts from known host tokens, lengths and block tables. Preserve
+    // that representation for CP planning and cache-store metadata; the model
+    // publishes the device views asynchronously immediately before use. Decode
+    // keeps its device-state contract, including mixed-batch compatibility.
+    if (deviceInputEnabled() && stream_groups.totalDecodeBatchSize() > 0 && defer_token_metadata
+        && !defer_page_tables) {
+        model_input.kv_cache_block_id        = publishInt32ToCuda(model_input.kv_cache_block_id, host_holder);
+        model_input.kv_cache_kernel_block_id = publishInt32ToCuda(model_input.kv_cache_kernel_block_id, host_holder);
+    }
+    if (deviceInputEnabled() && stream_groups.totalDecodeBatchSize() > 0 && !defer_token_metadata) {
+        publishModelInputCoreTensorsToCuda(model_input, host_holder, !defer_page_tables);
         if (stream_groups.hasNormalDeviceStates()) {
-            // Shared MTP gather still expands host positions. Only the normal
-            // snapshot path publishes this payload here; retain pinned storage
-            // until its asynchronous H2D copy has completed.
             model_input.combo_position_ids = publishInt32ToCuda(model_input.combo_position_ids, host_holder);
         }
         model_input.lm_output_indexes = buildLmOutputIndexesOnCuda(model_input, stream_groups);

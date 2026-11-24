@@ -43,7 +43,8 @@ public:
                            int64_t                        eos_token_id,
                            GrammarPrefetchContext*        grammar_prefetch        = nullptr,
                            bool                           create_grammar_processor = true,
-                           bool                           output_vocab_enabled     = false);
+                           bool                           output_vocab_enabled     = false,
+                           std::string                    stream_log_tag = {});
 
     static GrammarPrefetchContext prefetchGrammars(const std::vector<GrammarKeyCpp>& keys);
 

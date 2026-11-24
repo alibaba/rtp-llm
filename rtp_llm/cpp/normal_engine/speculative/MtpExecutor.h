@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+#include <deque>
 #include <list>
 #include <map>
 #include <memory>
@@ -11,13 +13,13 @@
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
-#include "rtp_llm/cpp/models/eplb/ExpertBalancer.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/normal_engine/AsyncRunner.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsVerifyRunner.h"
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
+#include "rtp_llm/cpp/normal_engine/speculative/DSparkAdaptiveBudget.h"
 
 namespace rtp_llm {
 
@@ -48,7 +50,6 @@ public:
                          bool                                           warm_up            = false);
 
     absl::Status process(const ScheduleOutput& schedule_output, int64_t schedule_time_us = 0) override;
-    bool         updateEplbConfig(const EPLBConfig& config) override;
 
     void setModelForwardCallbacks(std::function<void()> before, std::function<void()> after) {
         before_model_forward_ = std::move(before);
@@ -100,20 +101,28 @@ public:
                                                              bool cache_snapshot_ready = false);
     static int               selectMtpPreviousSeqLenUpperBound(bool pending, int previous_next_bound, int host_seq_len);
 
-    static bool              hasLinearCacheSnapshotCapacity(const std::list<GenerateStreamPtr>& streams,
-                                                            const CacheConfig&                  cache_config,
-                                                            const std::vector<CacheGroupType>&  group_types,
-                                                            int64_t                             physical_width,
-                                                            int64_t                             kernel_width,
-                                                            int64_t                             max_accept_length);
+    static bool hasLinearCacheSnapshotCapacity(const std::list<GenerateStreamPtr>& streams,
+                                               const CacheConfig&                  cache_config,
+                                               const std::vector<CacheGroupType>&  group_types,
+                                               int64_t                             physical_width,
+                                               int64_t                             kernel_width,
+                                               int64_t                             max_accept_length);
 
 protected:
     static bool speculativePrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type);
-    static bool dsparkDraftGraphAllowed(bool is_dspark, RoleType role_type);
+    static bool v41AsyncCacheReservationAllowed(const std::string& model_type,
+                                                RoleType           role_type,
+                                                int                tp_size,
+                                                bool               linear_attention);
+    static std::shared_ptr<torch::Event> bookkeepingReadyEvent(bool v41_async_reservation,
+                                                               const std::shared_ptr<torch::Event>& transfer_event,
+                                                               const std::shared_ptr<torch::Event>& draft_event);
+    static bool                          dsparkDraftGraphAllowed(bool is_dspark, RoleType role_type);
     struct AcceptLenMetricsSnapshot {
-        int64_t total_accept_len        = 0;
-        int64_t total_stream_num        = 0;
-        int64_t total_propose_token_num = 0;
+        int64_t total_accept_len             = 0;
+        int64_t total_stream_num             = 0;
+        int64_t total_propose_token_num      = 0;
+        int64_t total_verify_draft_token_num = 0;
         // Per-priority accept counts derived from the same staged accept_len
         // rows as total_accept_len, so the bucket sums match it exactly.
         std::map<int32_t, int64_t> accept_len_by_priority;
@@ -132,8 +141,8 @@ protected:
     absl::Status        rendezvousSpeculativeTargetSamplingStatus(const absl::Status& local_status);
     absl::Status
     prepareAndCommitSpeculativeTargetState(torch::Tensor& accept_len, size_t batch_size, bool is_fake_stream = false);
-    void                rollbackSpeculativeTargetStateOrFailStop(const char* phase);
-    void                rollbackSpeculativeTargetStateBestEffort(const char* phase) noexcept;
+    void rollbackSpeculativeTargetStateOrFailStop(const char* phase);
+    void rollbackSpeculativeTargetStateBestEffort(const char* phase) noexcept;
 
     void maybePrintModelInput(const GptModelInputs& model_input, const std::string& prefix) const;
     void beginProfiledWork();
@@ -156,25 +165,36 @@ protected:
     // owns a single phase (prepare, forward, broadcast, dispatch) and
     // preserves the original PROFILE_SCOPE labels.
     void waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams);
-    void launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
-    // post_rejection=true forks with the final post-commit input, which is
-    // safe under speculative target hooks; the default pre-rejection fork
-    // keeps its historical useAsyncPrepare() gate.
+    void
+    launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size, bool geometry_ready = false);
     void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input, bool post_rejection = false);
     GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
                                                          const StreamGroups&   stream_groups) const;
     void            broadcastPostRejectionInputs(GptModelInputs& model_input);
     GptModelOutputs runDSparkProposeForward(GptModelInputs& model_input);
-    SamplerOutput   sampleDSparkDraft(const StreamGroups&  stream_groups,
-                                      const torch::Tensor& base_logits,
-                                      const torch::Tensor& anchors);
-    void            runDSparkProposal(GptModelInputs&              proposal_input,
-                                      const StreamGroups&          stream_groups,
-                                      const mtp::DSparkRoundState& round_state,
-                                      SamplerOutput&               draft_sampler_output,
-                                      int64_t&                     model_forward_us);
-    GptModelOutputs runDraftPrefillForward(GptModelInputs& model_input);
+    // Pre-norm hidden projection [B*gamma,1], FP32. Undefined in off mode.
+    SamplerOutput sampleDSparkDraft(const StreamGroups&  stream_groups,
+                                    const torch::Tensor& base_logits,
+                                    const torch::Tensor& anchors,
+                                    const torch::Tensor& confidence_hidden_logits = torch::Tensor());
+    struct DSparkVerifyPlan {
+        // -1 means the original full-width path (full budget, or no plan).
+        int64_t                           draft_budget = -1;
+        std::optional<DSparkCapacityPlan> capacity;
+        std::vector<int64_t>              stable_order;
+        // Adaptive observations preserve proposal row identities even if the
+        // scheduler reorders or retires streams before the D2H copy completes.
+        std::vector<int64_t>          request_ids;
+        int                           budget_per_request = -1;
+        std::shared_ptr<torch::Event> start_event;
+    };
+    DSparkVerifyPlan runDSparkProposal(GptModelInputs&         proposal_input,
+                                       const StreamGroups&     stream_groups,
+                                       const DSparkRoundState& round_state,
+                                       SamplerOutput&          draft_sampler_output,
+                                       int64_t&                model_forward_us);
+    GptModelOutputs  runDraftPrefillForward(GptModelInputs& model_input);
     SpecLogitsVerifyRunner::LaunchResult
          buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
                                      const torch::Tensor&                draft_tokens,
@@ -183,7 +203,10 @@ protected:
                               torch::Event&                                accept_len_ready_event,
                               const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
                               MtpMetricsCollector&                         metrics_collector,
-                              int64_t                                      model_forward_us);
+                              int64_t                                      model_forward_us,
+                              const torch::Tensor&                         confidence_rates         = torch::Tensor(),
+                              const torch::Tensor&                         confidence_valid_lengths = torch::Tensor(),
+                              int64_t                                      verify_draft_token_num   = -1);
     std::shared_ptr<MtpTargetLogprobs>
                  launchEarlyMtpTargetLogprobsFinalize(const StreamGroups&                          stream_groups,
                                                       const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
@@ -194,6 +217,7 @@ protected:
     absl::Status dispatchDecodeOutput(const StreamGroups&                          stream_groups,
                                       const std::list<GenerateStreamPtr>&          streams,
                                       const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
+                                      MtpTargetLogprobs                            target_logprobs,
                                       const torch::Tensor&                         verify_position_ids,
                                       const torch::Tensor&                         kv_cache_block_id,
                                       const torch::Tensor&                         kv_cache_kernel_block_id,
@@ -201,10 +225,11 @@ protected:
                                       SamplerOutput                                draft_prefill_sampler_output,
                                       const std::optional<LinearReplayInputs>&     linear_replay,
                                       const std::vector<GenerateStream::LinearReplayRound>& replay_rounds,
-                                      std::shared_ptr<torch::Event>                rejection_event,
-                                      std::shared_ptr<torch::Event>                draft_event,
-                                      std::shared_ptr<RecordedBatch>               recorded_batch,
-                                      MtpTargetLogprobs                            target_logprobs);
+                                      std::shared_ptr<torch::Event>                         rejection_event,
+                                      std::shared_ptr<torch::Event>                         draft_event,
+                                      const torch::Tensor&                                  engram_anchor,
+                                      torch::Tensor&                                        engram_output,
+                                      std::shared_ptr<RecordedBatch>                        recorded_batch = nullptr);
 
     torch::Tensor gatherPreviousTargetTokens(const StreamGroups& stream_groups,
                                              int64_t             batch_size,
@@ -223,10 +248,21 @@ protected:
     void checkModelInputsOnCuda(const GptModelInputs& model_input, const char* tag) const;
 
     AcceptLenMetricsSnapshot consumePendingAcceptLenMetrics();
-    void                     stageAcceptLenMetrics(const torch::Tensor& accept_len,
+    void                     collectPendingDecodeMetrics(MtpMetricsCollector& metrics_collector);
+    torch::Tensor            snapshotConfidenceValidLengths(const torch::Tensor&                        draft_lengths,
+                                                            const SpecLogitsVerifyRunner::LaunchResult& verify_result,
+                                                            const c10::Device&                          device,
+                                                            torch::Event&                               ready_event);
+    DSparkVerifyPlan         prepareDSparkVerifyPlan(const StreamGroups& stream_groups);
+    void                     consumeDSparkBudgetObservations();
+    void                     stageDSparkBudgetObservation(const DSparkVerifyPlan&       plan,
+                                                          const torch::Tensor&          confidence_rates,
+                                                          std::shared_ptr<torch::Event> finish_event);
+    bool                     stageAcceptLenMetrics(const torch::Tensor& accept_len,
                                                    torch::Event&        accept_len_ready_event,
                                                    size_t               stream_count,
-                                                   std::vector<int32_t> row_priorities);
+                                                   std::vector<int32_t> row_priorities,
+                                                   int64_t              verify_draft_token_num = -1);
 
     void prepareStreams(const std::list<GenerateStreamPtr>& streams,
                         std::list<GenerateStreamPtr>&       prefill_streams,
@@ -262,17 +298,19 @@ protected:
     // Attach next-step device state, then fork a worker that waits on caller-
     // recorded rejection/draft events and runs D2H/specUpdate/KV release off
     // the main thread.
-    absl::Status dispatchDecodeAsync(const StreamGroups&                          stream_groups,
-                                     const speculative::SpeculativeSamplerOutput& spec_decode_output,
-                                     const torch::Tensor&                         verify_position_ids,
-                                     const torch::Tensor&                         kv_cache_block_id,
-                                     const torch::Tensor&                         kv_cache_kernel_block_id,
-                                     MergedOutput                                 draft_prefill_output,
+    absl::Status dispatchDecodeAsync(const StreamGroups&                                   stream_groups,
+                                     const speculative::SpeculativeSamplerOutput&          spec_decode_output,
+                                     MtpTargetLogprobs                                     target_logprobs,
+                                     const torch::Tensor&                                  verify_position_ids,
+                                     const torch::Tensor&                                  kv_cache_block_id,
+                                     const torch::Tensor&                                  kv_cache_kernel_block_id,
+                                     MergedOutput                                          draft_prefill_output,
                                      const std::optional<LinearReplayInputs>&              linear_replay,
                                      const std::vector<GenerateStream::LinearReplayRound>& replay_rounds,
-                                     std::shared_ptr<torch::Event>                rejection_event,
-                                     std::shared_ptr<torch::Event>                draft_event,
-                                     MtpTargetLogprobs                            target_logprobs);
+                                     std::shared_ptr<torch::Event>                         rejection_event,
+                                     std::shared_ptr<torch::Event>                         draft_event,
+                                     const torch::Tensor&                                  engram_anchor,
+                                     torch::Tensor&                                        engram_output);
 
     // Synchronous dispatch also publishes the same per-stream device state as
     // the async path, using the host seqLength after specUpdate as truth.
@@ -289,10 +327,18 @@ protected:
     void releaseAllModelBuffers();
 
 private:
-    static torch::Tensor snapshotMutableHostInputToCuda(const torch::Tensor& tensor, TensorHolder& holder);
+    static torch::Tensor snapshotMutableHostInput(const torch::Tensor& tensor, TensorHolder& holder);
 
     static bool canEarlyReturnTargetOnlyPrefill(int64_t dp_size);
     static bool shouldSkipEmptyDecode(bool streams_empty);
+
+    // Fence used on the early-return (fake/empty/non-root) paths right before
+    // releaseAllModelBuffers(). Warmup keeps the device-wide sync so CUDA errors
+    // surface where they happen; serving only needs the previous forward to be
+    // done, because TensorHolder keeps the staging tensors alive for two more
+    // release points and every real step already synchronizes through its
+    // sampler D2H copy.
+    void fenceModelBufferRelease();
 
     void collectPrefillMetrics(const StreamGroups&  stream_groups,
                                MtpMetricsCollector& metrics_collector,
@@ -312,7 +358,6 @@ private:
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
     WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
-    std::shared_ptr<ExpertBalancer>                                                            expert_balancer_;
     size_t                                                                                     vocab_size_;
 
     // for mtp
@@ -321,6 +366,7 @@ private:
     size_t   propose_step_;
     // Fixed-width block diffusion: one draft forward emits gamma proposals;
     // unlike MTP there is no autoregressive draft loop or hidden-state chain.
+    bool is_dspark_      = false;
     bool is_block_draft_ = false;
     bool is_dflash_      = false;
     // Dedicated PREFILL workers only seed DSpARK's draft feature KV and must
@@ -329,6 +375,26 @@ private:
     size_t        draft_vocab_size_;
     torch::Tensor dspark_markov_w1_;
     torch::Tensor dspark_markov_w2_;
+    // DeepSeek V4.1 only; proposal width stays fixed. Adaptive verification
+    // chooses the packed target/commit width independently each round.
+    std::string   dspark_confidence_mode_ = "off";
+    torch::Tensor dspark_confidence_head_;
+    // Independent sigmoid temperature; checkpoint training temperature is unknown.
+    double                                             dspark_confidence_temperature_ = 1.0;
+    int64_t                                            dspark_verify_budget_          = -1;
+    bool                                               dspark_packed_verify_          = false;
+    std::unique_ptr<speculative::DSparkAdaptiveBudget> dspark_adaptive_budget_;
+    struct DSparkBudgetObservation {
+        std::vector<int64_t>          request_ids;
+        int                           budget_per_request;
+        torch::Tensor                 confidence_cpu;
+        std::shared_ptr<torch::Event> start_event;
+        std::shared_ptr<torch::Event> finish_event;
+        std::shared_ptr<torch::Event> ready_event;
+    };
+    std::deque<DSparkBudgetObservation> dspark_budget_observations_;
+    int64_t                             dspark_last_budget_batch_ = -1;
+    int                                 dspark_last_budget_       = -1;
     // The two wrappers keep stable runtime roles. Ordinary MTP uses decode and
     // post-verify prefill roles; DSpARK supplies propose and commit construction
     // parameters to the same two slots.
@@ -348,21 +414,35 @@ private:
     // True when any KV-cache group is CacheGroupType::LINEAR (RWKV / Mamba /
     // hybrid linear+full). Per-step state advances every token, so the page
     // table must be re-gathered between draft propose and target verify.
-    bool is_linear_attention_model_ = false;
+    bool is_linear_attention_model_   = false;
+    bool v41_async_cache_reservation_ = false;
 
     torch::Tensor d2t_map_;
 
+    struct PendingAcceptLenMetrics {
+        torch::Tensor                 accept_len_sum_gpu;
+        torch::Tensor                 accept_len_sum_cpu;
+        torch::Tensor                 accept_len_rows_gpu;
+        torch::Tensor                 accept_len_rows_cpu;
+        torch::Tensor                 confidence_gpu;
+        torch::Tensor                 confidence_cpu;
+        torch::Tensor                 confidence_lengths_cpu;
+        std::vector<torch::Tensor>    host_inputs;
+        std::vector<int32_t>          row_priorities;
+        std::shared_ptr<torch::Event> ready_event;
+        int64_t                       total_stream_num             = 0;
+        int64_t                       total_propose_token_num      = 0;
+        int64_t                       total_verify_draft_token_num = 0;
+    };
     torch::Stream collect_metrics_stream_;
-    torch::Tensor metrics_accept_len_sum_gpu_;
-    torch::Tensor metrics_accept_len_sum_cpu_;
-    // Per-stream accept_len rows staged next to the scalar sum so priority
-    // buckets can be rebuilt on consume without an extra sync.
-    torch::Tensor                 metrics_accept_len_rows_gpu_;
-    torch::Tensor                 metrics_accept_len_rows_cpu_;
-    std::vector<int32_t>          metrics_accept_len_row_priorities_;
-    std::shared_ptr<torch::Event> metrics_accept_len_ready_event_;
-    int64_t                       metrics_accept_len_stream_num_        = 0;
-    int64_t                       metrics_accept_len_propose_token_num_ = 0;
+    // Keep each round's budget beside its asynchronous result. A busy metrics
+    // stream must neither block Decode nor overwrite an in-flight D2H buffer.
+    static constexpr size_t             kMaxPendingAcceptLenMetrics = 8;
+    std::deque<PendingAcceptLenMetrics> pending_accept_len_metrics_;
+
+    // Records the most recent forward so an early-return step can wait for it
+    // before its buffers are released, without a device-wide sync.
+    std::shared_ptr<torch::Event> last_forward_event_;
 
     AsyncRunner target_verify_prepare_runner_;
     AsyncRunner draft_prefill_prepare_runner_;

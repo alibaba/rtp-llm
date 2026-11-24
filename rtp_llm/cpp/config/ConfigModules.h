@@ -399,7 +399,20 @@ struct SpeculativeExecutionConfig {
     int64_t sp_dspark_mask_token_id = -1;
     // True: gamma query rows, including the anchor prediction. False:
     // one conditioning anchor followed by gamma prediction rows.
-    bool        sp_dspark_sample_from_anchor = true;
+    bool sp_dspark_sample_from_anchor = true;
+    // DeepSeek V4.1 only. observe preserves fixed-width sampling; bounded
+    // verifies a confidence-selected prefix using a budget fixed before draw.
+    std::string sp_dspark_confidence_mode        = "off";
+    double      sp_dspark_confidence_temperature = 1.0;
+    // Average draft positions per request (not including the anchor), or -1
+    // for the full gamma budget. Also the cold-start budget in adaptive mode.
+    int64_t sp_dspark_verify_budget = -1;
+    // dense preserves the legacy physical width; packed computes only each
+    // selected prefix and its anchor in DeepSeek V4.1 decode.
+    std::string sp_dspark_verify_mode = "dense";
+    // fixed uses the configured budget; adaptive chooses it from historical
+    // confidence and measured GPU round times before sampling the next round.
+    std::string sp_dspark_verify_budget_mode = "fixed";
     std::string to_string() const;
     size_t      speculativeReserveStep() const;
 
@@ -519,7 +532,10 @@ struct GrammarConfig {
     int         compile_queue_size = 2;
     std::string tokenizer_info_json;
     // Total byte cap split between xgrammar's cache and the engine verdict LRU; <=0 = unlimited.
-    int64_t     compiler_cache_bytes = 2L * 1024L * 1024L * 1024L;
+    int64_t compiler_cache_bytes = 2L * 1024L * 1024L * 1024L;
+    // Positive wall-clock budget in ms for each CPU MTP verification or committed update.
+    // Each stage tracks its own streak; three consecutive overruns disable grammar for the stream.
+    int         update_timeout_ms = 10;
     std::string to_string() const;
 };
 
@@ -543,6 +559,8 @@ struct RuntimeConfig {
 
     std::string              model_name = "";
     std::vector<std::string> worker_grpc_addrs;
+    // All engine ranks in world-rank order, unlike the TP-only worker addresses.
+    std::vector<std::string> shutdown_worker_grpc_addrs;
     std::vector<std::string> worker_addrs;
 
     std::string specify_gpu_arch = "";

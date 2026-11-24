@@ -7,6 +7,7 @@
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
+#include <algorithm>
 
 namespace rtp_llm {
 
@@ -427,12 +428,22 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     }
 
     if (has_engram) {
-        auto history  = model_input.engram_token_windows.to(torch::kCPU);
-        auto indexes  = torch::tensor(cp_select_indices, torch::kInt64);
-        auto valid    = torch::tensor(cp_valid_mask, torch::kUInt8).to(torch::kBool);
-        auto selected = history.index_select(0, indexes).contiguous();
-        selected.masked_fill_(valid.logical_not().unsqueeze(1), -1);
-        model_input.engram_token_windows = selected.pin_memory();
+        auto history = model_input.engram_token_windows.to(torch::kCPU).contiguous();
+        RTP_LLM_CHECK_WITH_INFO(history.dim() == 2 && history.size(0) == global_token_num && history.size(1) == 4
+                                    && history.scalar_type() == torch::kInt32,
+                                "Engram history must be int32 [total_tokens, 4] before CP");
+        auto        selected = torch::empty({local_token_num, 4}, pinned_i32);
+        const auto* src      = history.data_ptr<int32_t>();
+        auto*       dst      = selected.data_ptr<int32_t>();
+        // Reuse the common CP remap, writing each pinned output row once.
+        for (int64_t i = 0; i < local_token_num; ++i) {
+            if (cp_valid_mask[i]) {
+                std::memcpy(dst + i * 4, src + cp_select_indices[i] * 4, 4 * sizeof(int32_t));
+            } else {
+                std::fill_n(dst + i * 4, 4, -1);
+            }
+        }
+        model_input.engram_token_windows = std::move(selected);
     }
     if (need_token_remap) {
         cp_params.prefill_mm_spans = model_input.mm_features_spans;
@@ -503,10 +514,17 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         model_input.last_hidden_states = split_hidden;
     }
 
-    model_input.combo_tokens  = cp_split_input_tokens.to(torch::kCUDA, /*non_blocking=*/true);
-    model_input.input_lengths = input_lengths.to(torch::kCUDA, /*non_blocking=*/true);
-    model_input.sequence_lengths =
-        sequence_lengths.is_cuda() ? sequence_lengths : sequence_lengths.to(torch::kCUDA, /*non_blocking=*/true);
+    model_input.combo_tokens = cp_split_input_tokens.to(torch::kCUDA, /*non_blocking=*/true);
+    if (num_decode_stream == 0) {
+        // These local lengths were computed on the CPU above. Keep them for
+        // PyWrappedModel's host metadata planner instead of uploading and then
+        // reading them back. Its device views are staged before GPU consumers.
+        model_input.input_lengths = input_lengths;
+    } else {
+        model_input.input_lengths = input_lengths.to(torch::kCUDA, /*non_blocking=*/true);
+        model_input.sequence_lengths =
+            sequence_lengths.is_cuda() ? sequence_lengths : sequence_lengths.to(torch::kCUDA, /*non_blocking=*/true);
+    }
 
     auto cp_padding_lengths = prefill_cp_padding_lengths;
     auto cp_chunk_lengths   = prefill_cp_chunk_lengths;

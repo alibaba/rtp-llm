@@ -3,10 +3,157 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from rtp_llm.model_factory import ModelFactory
-from rtp_llm.ops import SpeculativeType
+from rtp_llm.ops import EPLBConfig, EplbMode, SpeculativeType
 
 
 class DSparkRuntimeConfigTest(unittest.TestCase):
+
+    def test_confidence_defaults_off_and_is_v41_only(self):
+        sp, target, draft = self._configs(3)
+        ModelFactory._setup_dspark_configs(sp, target, draft)
+        self.assertFalse(draft.dspark_confidence_enabled)
+        sp.sp_dspark_confidence_mode = "observe"
+        with self.assertRaisesRegex(ValueError, "only for DeepSeek V4.1"):
+            ModelFactory._setup_dspark_configs(sp, target, draft)
+        draft.is_deepseek_v41 = True
+        with self.assertRaisesRegex(ValueError, "only for DeepSeek V4.1"):
+            ModelFactory._setup_dspark_configs(sp, target, draft)
+        target.is_deepseek_v41 = True
+        ModelFactory._setup_dspark_configs(sp, target, draft)
+        self.assertTrue(draft.dspark_confidence_enabled)
+        draft.dspark_sample_from_anchor = False
+        with self.assertRaisesRegex(ValueError, "requires sampling from anchor"):
+            ModelFactory._setup_dspark_configs(sp, target, draft)
+
+    def test_confidence_rejects_invalid_temperature_and_budget(self):
+        sp, target, draft = self._configs(3)
+        draft.is_deepseek_v41 = True
+        target.is_deepseek_v41 = True
+        sp.sp_dspark_confidence_mode = "observe"
+        for temperature in (0.0, -1.0, float("nan"), float("inf")):
+            with self.subTest(temperature=temperature):
+                sp.sp_dspark_confidence_temperature = temperature
+                with self.assertRaisesRegex(ValueError, "positive and finite"):
+                    ModelFactory._setup_dspark_configs(sp, target, draft)
+        sp.sp_dspark_confidence_temperature = 0.7
+        sp.sp_dspark_verify_budget = 1
+        with self.assertRaisesRegex(ValueError, "requires bounded"):
+            ModelFactory._setup_dspark_configs(sp, target, draft)
+        sp.sp_dspark_confidence_mode = "bounded"
+        for budget in (-1, 0, 1, 3):
+            sp.sp_dspark_verify_budget = budget
+            ModelFactory._setup_dspark_configs(sp, target, draft)
+        for budget in (-2, 4):
+            sp.sp_dspark_verify_budget = budget
+            with self.assertRaisesRegex(ValueError, "between 0 and gamma"):
+                ModelFactory._setup_dspark_configs(sp, target, draft)
+
+    def test_confidence_config_pickle_roundtrip(self):
+        import pickle
+
+        from rtp_llm.ops import SpeculativeExecutionConfig
+
+        config = SpeculativeExecutionConfig()
+        config.sp_dspark_confidence_mode = "bounded"
+        config.sp_dspark_confidence_temperature = 0.75
+        config.sp_dspark_verify_budget = 2
+        config.sp_dspark_verify_mode = "packed"
+        config.sp_dspark_verify_budget_mode = "adaptive"
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertEqual(restored.sp_dspark_confidence_mode, "bounded")
+        self.assertEqual(restored.sp_dspark_confidence_temperature, 0.75)
+        self.assertEqual(restored.sp_dspark_verify_budget, 2)
+        self.assertEqual(restored.sp_dspark_verify_mode, "packed")
+        self.assertEqual(restored.sp_dspark_verify_budget_mode, "adaptive")
+
+    def test_invalid_verify_mode_is_rejected_before_model_loading(self):
+        sp, target, draft = self._configs(3)
+        sp.sp_dspark_verify_mode = "ragged"
+        with self.assertRaisesRegex(ValueError, "invalid DSpark verify mode"):
+            ModelFactory._setup_dspark_configs(sp, target, draft)
+
+    def test_packed_requires_bounded_mode_and_explicit_budget(self):
+        for mode, budget in (
+            ("off", -1),
+            ("off", 0),
+            ("observe", -1),
+            ("observe", 0),
+            ("bounded", -1),
+        ):
+            with self.subTest(mode=mode, budget=budget):
+                sp, target, draft = self._configs(3)
+                target.is_deepseek_v41 = draft.is_deepseek_v41 = True
+                sp.sp_dspark_verify_mode = "packed"
+                sp.sp_dspark_confidence_mode = mode
+                sp.sp_dspark_verify_budget = budget
+                with self.assertRaisesRegex(ValueError, "requires bounded"):
+                    ModelFactory._setup_dspark_configs(sp, target, draft)
+
+    def test_invalid_verify_budget_mode_is_rejected_before_model_loading(self):
+        sp, target, draft = self._configs(3)
+        sp.sp_dspark_verify_budget_mode = "dynamic"
+        with self.assertRaisesRegex(ValueError, "invalid DSpark verify budget mode"):
+            ModelFactory._setup_dspark_configs(sp, target, draft)
+
+    def test_adaptive_requires_bounded_packed_and_explicit_cold_start_budget(self):
+        for confidence_mode, verify_mode, budget in (
+            ("off", "dense", -1),
+            ("observe", "dense", -1),
+            ("bounded", "dense", 1),
+            ("bounded", "packed", -1),
+        ):
+            with self.subTest(
+                confidence_mode=confidence_mode, verify_mode=verify_mode, budget=budget
+            ):
+                sp, target, draft = self._configs(3)
+                target.is_deepseek_v41 = draft.is_deepseek_v41 = True
+                sp.sp_dspark_confidence_mode = confidence_mode
+                sp.sp_dspark_verify_mode = verify_mode
+                sp.sp_dspark_verify_budget = budget
+                sp.sp_dspark_verify_budget_mode = "adaptive"
+                with self.assertRaisesRegex(ValueError, "Adaptive DSpark verification"):
+                    ModelFactory._setup_dspark_configs(sp, target, draft)
+
+    def test_adaptive_accepts_zero_partial_and_full_cold_start_budget(self):
+        for budget in (0, 1, 3):
+            with self.subTest(budget=budget):
+                sp, target, draft = self._configs(3)
+                target.is_deepseek_v41 = draft.is_deepseek_v41 = True
+                sp.sp_dspark_confidence_mode = "bounded"
+                sp.sp_dspark_verify_mode = "packed"
+                sp.sp_dspark_verify_budget = budget
+                sp.sp_dspark_verify_budget_mode = "adaptive"
+                ModelFactory._setup_dspark_configs(sp, target, draft)
+                self.assertEqual(sp.sp_dspark_verify_budget, budget)
+                self.assertEqual(sp.gen_num_per_cycle, 3)
+                self.assertTrue(draft.dspark_confidence_enabled)
+
+    def test_packed_requires_v41_target_and_draft(self):
+        for target_v41, draft_v41 in ((False, False), (False, True), (True, False)):
+            with self.subTest(target_v41=target_v41, draft_v41=draft_v41):
+                sp, target, draft = self._configs(3)
+                target.is_deepseek_v41 = target_v41
+                draft.is_deepseek_v41 = draft_v41
+                sp.sp_dspark_verify_mode = "packed"
+                sp.sp_dspark_confidence_mode = "bounded"
+                sp.sp_dspark_verify_budget = 1
+                with self.assertRaisesRegex(ValueError, "only for DeepSeek V4.1"):
+                    ModelFactory._setup_dspark_configs(sp, target, draft)
+
+    def test_packed_budget_zero_partial_and_full_width_are_valid(self):
+        for budget in (0, 1, 3):
+            with self.subTest(budget=budget):
+                sp, target, draft = self._configs(3)
+                target.is_deepseek_v41 = draft.is_deepseek_v41 = True
+                sp.sp_dspark_verify_mode = "packed"
+                sp.sp_dspark_confidence_mode = "bounded"
+                sp.sp_dspark_verify_budget = budget
+                ModelFactory._setup_dspark_configs(sp, target, draft)
+                self.assertTrue(draft.dspark_confidence_enabled)
+                self.assertEqual(sp.sp_dspark_verify_budget, budget)
+                self.assertEqual(sp.gen_num_per_cycle, 3)
+                self.assertEqual(target.capture_aux_hidden_layer_ids, [40, 41, 42])
+
     @staticmethod
     def _configs(gamma: int):
         sp_config = SimpleNamespace(
@@ -66,17 +213,33 @@ class DSparkRuntimeConfigTest(unittest.TestCase):
             ModelFactory._setup_dspark_configs(sp_config, target_config, draft_config)
 
     def test_only_explicit_dspark_wires_dspark_runtime_config(self):
-        for sp_type, model_type, should_setup_dspark in (
-            (SpeculativeType.MTP, "deepseek_v4_mtp", False),
-            (SpeculativeType.DSPARK, "deepseek_v4_dspark", True),
+        for sp_type, model_type, should_setup_dspark, mode in (
+            (sp_type, model_type, should_setup_dspark, mode)
+            for mode in (EplbMode.NONE, EplbMode.ALL)
+            for sp_type, model_type, should_setup_dspark in (
+                (SpeculativeType.MTP, "deepseek_v4_mtp", False),
+                (SpeculativeType.EAGLE, "eagle", False),
+                (SpeculativeType.DSPARK, "deepseek_v4_dspark", True),
+                (SpeculativeType.DSPARK, "deepseek_v41_dspark", True),
+            )
         ):
-            with self.subTest(sp_type=sp_type, model_type=model_type):
+            with self.subTest(sp_type=sp_type, model_type=model_type, mode=mode):
                 sp_config, target_config, draft_config = self._configs(gamma=3)
                 sp_config.type = sp_type
                 sp_config.checkpoint_path = "/unused/checkpoint"
                 sp_config.model_type = model_type
                 sp_config.quantization = None
                 target_config.max_seq_len = 4096
+                target_config.eplb_config = EPLBConfig()
+                target_config.eplb_config.eplb_mode = mode
+                target_config.eplb_config.redundant_expert = 32
+                target_config.eplb_config.eplb_metrics_report_interval = 4
+                target_config.eplb_config.eplb_update_time = 7
+                target_config.eplb_config.eplb_stats_window_size = 3
+                target_config.eplb_config.eplb_rearrange_after_prefill = True
+                target_config.eplb_config.eplb_rearrange_p2p_groups = 2
+                target_config.eplb_config.eplb_metrics_snapshot_max_files = 5
+                draft_config.eplb_config = EPLBConfig()
                 target_config.capture_aux_hidden_layer_ids = None
                 draft_config.tokenizer_path = ""
                 draft_config.ckpt_path = ""
@@ -106,6 +269,14 @@ class DSparkRuntimeConfigTest(unittest.TestCase):
 
                 self.assertIs(result, draft_config)
                 self.assertEqual(result.max_seq_len, target_config.max_seq_len)
+                expected_eplb = (
+                    target_config.eplb_config if should_setup_dspark else EPLBConfig()
+                )
+                self.assertEqual(
+                    result.eplb_config.__getstate__(), expected_eplb.__getstate__()
+                )
+                self.assertEqual(target_config.eplb_config.eplb_mode, mode)
+                self.assertEqual(target_config.eplb_config.redundant_expert, 32)
                 if should_setup_dspark:
                     setup_dspark.assert_called_once_with(
                         sp_config, target_config, draft_config

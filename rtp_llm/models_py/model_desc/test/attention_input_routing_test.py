@@ -328,7 +328,9 @@ class AttentionInputRoutingTest(unittest.TestCase):
 
         outputs = model.forward(
             SimpleNamespace(
-                input_ids=torch.tensor([1, 2]), capture_hidden_states=False
+                input_ids=torch.tensor([1, 2]),
+                capture_hidden_states=False,
+                expert_token_counts=None,
             ),
             fmha_impl,
         )

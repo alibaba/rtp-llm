@@ -535,9 +535,9 @@ class LinearReplayArgumentsTest(TestCase):
         config.model_warm_up = False
         config.output_dispatcher_worker_count = 3
         state = config.__getstate__()
-        self.assertEqual(len(state), 15)
+        self.assertEqual(len(state), 16)
 
-        for size in (12, 13, 14):
+        for size in (12, 13, 14, 15):
             with self.subTest(size=size):
                 restored = RuntimeConfig.__new__(RuntimeConfig)
                 restored.__setstate__(state[:size])

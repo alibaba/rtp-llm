@@ -17,6 +17,18 @@ cc_library(
 )
 
 cc_library(
+    name = "dspark_adaptive_budget",
+    hdrs = ["speculative/DSparkAdaptiveBudget.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "dspark_sample_seed",
+    hdrs = ["speculative/DSparkSampleSeed.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "normal_engine",
     hdrs = glob([
         "*.h",
@@ -87,14 +99,21 @@ cc_library(
         "//rtp_llm/models_py/bindings:op_defs",
     ] + select({
         "//:using_cuda": [
+            "//rtp_llm/models_py/bindings/cuda:bf16_gemm_op",
             "//rtp_llm/models_py/bindings/cuda/ops:standalone_ops",
+            "//rtp_llm/models_py/bindings/cuda/kernels:deepselect_fp32",
+            "//rtp_llm/models_py/bindings/cuda/kernels:dspark_confidence",
             "//rtp_llm/models_py/bindings/cuda/kernels:mtp_target_verify_prepare",
+            "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
             "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
         ],
         "@//:using_rocm": [
             "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
+            "//rtp_llm/models_py/bindings/rocm/kernels:mtp_target_verify_prepare",
         ],
-        "//conditions:default": [],
+        "//conditions:default": [
+            "//rtp_llm/models_py/bindings/rocm/kernels:mtp_target_verify_prepare",
+        ],
     }) + torch_deps(),
     visibility = ["//visibility:public"],
 )

@@ -53,32 +53,25 @@ SamplerInputs makeSamplerInputs(int64_t batch_size, int32_t top_k_value, float t
     auto              logits     = torch::tensor({0.0f, 0.2f, 0.4f, 0.6f, 0.8f, 1.0f, 1.2f, 1.4f}, torch::kFloat32)
                       .repeat({batch_size, 1})
                       .to(torch::kCUDA);
-    return {logits,
-            torch::zeros({batch_size, 1}, torch::kInt32),
-            torch::zeros({batch_size}, torch::kInt32),
-            torch::zeros({batch_size}, torch::kInt32),
-            std::make_shared<LogitsProcessorStates>(),
-            vocab_size,
-            /*step=*/0,
-            static_cast<size_t>(batch_size),
-            static_cast<size_t>(batch_size),
-            torch::ones({batch_size}, torch::kLong),
-            torch::ones({batch_size}, torch::kLong),
-            torch::full({batch_size}, top_k_value, torch::kInt32).pin_memory(),
-            torch::full({batch_size}, top_p_value, torch::kFloat32).pin_memory(),
-            torch::ones({batch_size}, torch::kFloat32).pin_memory(),
-            torch::Tensor(),
-            torch::Tensor(),
-            torch::Tensor(),
-            torch::Tensor(),
-            torch::Tensor(),
-            torch::Tensor(),
-            /*return_original_all_probs=*/false,
-            /*skip_logits_probs_restore=*/false,
-            /*all_probs_point_mass=*/false,
-            torch::zeros({batch_size}, torch::kFloat32),
-            /*return_logprobs=*/false,
-            makeGenerators(batch_size, seed)};
+    SamplerInputs inputs{};
+    inputs.logits                      = logits;
+    inputs.token_ids                   = torch::zeros({batch_size, 1}, torch::kInt32);
+    inputs.input_lengths               = torch::zeros({batch_size}, torch::kInt32);
+    inputs.sequence_lengths            = torch::zeros({batch_size}, torch::kInt32);
+    inputs.logits_processor_states_ptr = std::make_shared<LogitsProcessorStates>();
+    inputs.vocab_size                  = vocab_size;
+    inputs.step                        = 0;
+    inputs.batch_size                  = static_cast<size_t>(batch_size);
+    inputs.batch_size_out              = static_cast<size_t>(batch_size);
+    inputs.num_beams_in                = torch::ones({batch_size}, torch::kLong);
+    inputs.num_beams_out               = torch::ones({batch_size}, torch::kLong);
+    inputs.top_k                       = torch::full({batch_size}, top_k_value, torch::kInt32).pin_memory();
+    inputs.top_p                       = torch::full({batch_size}, top_p_value, torch::kFloat32).pin_memory();
+    inputs.temperature                 = torch::ones({batch_size}, torch::kFloat32).pin_memory();
+    inputs.probability_output          = SamplerProbabilityOutput::DENSE;
+    inputs.cum_log_probs               = torch::zeros({batch_size}, torch::kFloat32);
+    inputs.generator                   = makeGenerators(batch_size, seed);
+    return inputs;
 }
 
 void expectSampleMatchesReturnedProbability(const SamplerOutput& output) {

@@ -19,38 +19,42 @@ protected:
     std::unique_ptr<Sampler> sampler_;
 };
 
-TEST_F(SamplerTest, testDynamicGreedySamplingBuffersGrow) {
+namespace {
+SamplerInputs makeGreedySamplerInput(int64_t rows) {
+    SamplerInputs inputs;
+    inputs.batch_size = inputs.batch_size_out = rows;
+    inputs.vocab_size                         = 8;
+    inputs.step                               = 1;
+    inputs.logits                             = torch::zeros({rows, 8}, torch::TensorOptions().device(torch::kCUDA));
+    inputs.logits.select(1, 3).fill_(10);
+    inputs.token_ids     = torch::zeros({rows, 2}, torch::kInt32);
+    inputs.input_lengths = inputs.sequence_lengths = torch::ones({rows}, torch::kInt32);
+    inputs.num_beams_in = inputs.num_beams_out = torch::ones({rows}, torch::kInt64);
+    inputs.top_k                               = torch::ones({rows}, torch::kInt32);
+    inputs.top_p                               = torch::zeros({rows}, torch::kFloat32);
+    inputs.temperature                         = torch::ones({rows}, torch::kFloat32);
+    inputs.generator.resize(rows);
+    return inputs;
+}
+}  // namespace
+
+TEST_F(SamplerTest, testDynamicBatchCapacityThroughForward) {
     Sampler sampler(SamplerInitParams{1, false});
-
-    sampler.ensureGreedySamplingBuffers(2);
-
-    ASSERT_EQ(sampler.max_batch_size_, 2);
-    for (const auto& slot : sampler.greedy_sampling_buffer_slots_) {
-        ASSERT_EQ(slot.buffers.max_batch_size, 2);
-        ASSERT_GE(slot.buffers.seed_host.numel(), 2);
-        ASSERT_GE(slot.buffers.offset_host.numel(), 2);
-        ASSERT_GE(slot.buffers.output_ids_ptrs_host.numel(), 2);
+    for (const int64_t rows : {2, 5, 1, 5}) {
+        auto inputs = makeGreedySamplerInput(rows);
+        auto output = sampler.forward(inputs);
+        EXPECT_TRUE(torch::equal(output.token_ids.select(1, 1).cpu(), torch::full({rows}, 3, torch::kInt32)));
+        EXPECT_TRUE(output.success.all().item<bool>());
     }
-
-    GreedySamplingBuffers* used_slots[Sampler::kGreedySamplingBufferSlots] = {};
-    for (size_t i = 0; i < Sampler::kGreedySamplingBufferSlots; ++i) {
-        auto& buffers = sampler.nextGreedySamplingBuffers(2);
-        used_slots[i] = &buffers;
-        ASSERT_EQ(&sampler.greedy_sampling_buffer_slots_[i].buffers, &buffers);
-        sampler.markGreedySamplingBufferReady();
-        ASSERT_TRUE(sampler.greedy_sampling_buffer_slots_[i].ready_event);
-    }
-
-    auto& reused_buffers = sampler.nextGreedySamplingBuffers(2);
-    ASSERT_EQ(used_slots[0], &reused_buffers);
-    ASSERT_FALSE(sampler.greedy_sampling_buffer_slots_[0].ready_event);
-    sampler.markGreedySamplingBufferReady();
 }
 
-TEST_F(SamplerTest, testFixedGreedySamplingBuffersRejectGrow) {
+TEST_F(SamplerTest, testFixedBatchCapacityThroughForward) {
     Sampler sampler(SamplerInitParams{1, true});
-
-    EXPECT_THROW(sampler.ensureGreedySamplingBuffers(2), rtp_llm::RTPException);
+    auto    oversized = makeGreedySamplerInput(2);
+    EXPECT_THROW(sampler.forward(oversized), rtp_llm::RTPException);
+    // Rejecting an oversized batch must not prevent a subsequent valid call.
+    auto valid = makeGreedySamplerInput(1);
+    EXPECT_EQ(sampler.forward(valid).token_ids[0][1].item<int32_t>(), 3);
 }
 
 TEST_F(SamplerTest, testMixedDynamicBeamTransitionsUseIndependentOutput) {
@@ -81,30 +85,23 @@ TEST_F(SamplerTest, testMixedDynamicBeamTransitionsUseIndependentOutput) {
     auto cum_log_probs    = torch::tensor({0.0f, 0.0f, -100.0f, 0.0f}, torch::kFloat32).to(torch::kCUDA);
 
     std::vector<at::Generator> generators(batch_size);
-    SamplerInputs              inputs{logits,
-                         token_ids,
-                         input_lengths,
-                         sequence_lengths,
-                         std::make_shared<LogitsProcessorStates>(),
-                         vocab_size,
-                         step,
-                         batch_size,
-                         batch_size_out,
-                         num_beams_in,
-                         num_beams_out,
-                         top_k,
-                         top_p,
-                         temperature,
-                         torch::Tensor(),
-                         torch::Tensor(),
-                         torch::Tensor(),
-                         torch::Tensor(),
-                         torch::Tensor(),
-                         torch::Tensor(),
-                         false,
-                         cum_log_probs,
-                         torch::Tensor(),
-                         generators};
+    SamplerInputs inputs{};
+    inputs.logits                      = logits;
+    inputs.token_ids                   = token_ids;
+    inputs.input_lengths               = input_lengths;
+    inputs.sequence_lengths            = sequence_lengths;
+    inputs.logits_processor_states_ptr = std::make_shared<LogitsProcessorStates>();
+    inputs.vocab_size                  = vocab_size;
+    inputs.step                        = step;
+    inputs.batch_size                  = batch_size;
+    inputs.batch_size_out              = batch_size_out;
+    inputs.num_beams_in                = num_beams_in;
+    inputs.num_beams_out               = num_beams_out;
+    inputs.top_k                       = top_k;
+    inputs.top_p                       = top_p;
+    inputs.temperature                 = temperature;
+    inputs.cum_log_probs               = cum_log_probs;
+    inputs.generator                   = generators;
 
     auto output = sampler_->forward(inputs).token_ids.cpu().contiguous();
 
@@ -164,32 +161,26 @@ TEST_F(SamplerTest, testGeneralSampling) {
     std::vector<at::Generator> generator;
     generator.resize(batch_size);
 
-    SamplerInputs inputs{
-        logits.clone(),
-        output_token_ids.clone(),
-        input_lengths,
-        sequence_lengths,
-        state_ptr,
-        size_t(vocab_size),
-        size_t(step),
-        batch_size,
-        batch_size,
-        num_beams_in,
-        num_beams_out,
-        top_k,
-        top_p,
-        temperature,
-        repetition_penalty,
-        presence_penalty,
-        frequency_penalty,
-        torch::Tensor(),  // no_repeat_ngram_size
-        torch::Tensor(),  // do_sample
-        torch::Tensor(),  // finished_mask
-        false,            // return_original_all_probs
-        cum_log_probs.clone(),
-        torch::Tensor(),  // all_probs
-        generator,
-    };
+    SamplerInputs inputs{};
+    inputs.logits                      = logits.clone();
+    inputs.token_ids                   = output_token_ids.clone();
+    inputs.input_lengths               = input_lengths;
+    inputs.sequence_lengths            = sequence_lengths;
+    inputs.logits_processor_states_ptr = state_ptr;
+    inputs.vocab_size                  = size_t(vocab_size);
+    inputs.step                        = size_t(step);
+    inputs.batch_size                  = batch_size;
+    inputs.batch_size_out              = batch_size;
+    inputs.num_beams_in                = num_beams_in;
+    inputs.num_beams_out               = num_beams_out;
+    inputs.top_k                       = top_k;
+    inputs.top_p                       = top_p;
+    inputs.temperature                 = temperature;
+    inputs.repetition_penalty          = repetition_penalty;
+    inputs.presence_penalty            = presence_penalty;
+    inputs.frequency_penalty           = frequency_penalty;
+    inputs.cum_log_probs               = cum_log_probs.clone();
+    inputs.generator                   = generator;
 
     auto outputs = sampler_->forward(inputs);
     std::cout << "output_token_ids: " << outputs.token_ids.cpu() << std::endl;
@@ -293,7 +284,8 @@ TEST_F(SamplerTest, testGeneralSampling) {
     outputs              = sampler_->forward(inputs);
     EXPECT_TRUE(
         torch::equal(outputs.token_ids.select(1, step).cpu(), torch::full({(int64_t)batch_size}, 7, torch::kInt32)));
-    EXPECT_TRUE(torch::equal(outputs.all_probs, point_mass.slice(1, 0, 4)));
+    EXPECT_EQ(outputs.all_probs.sizes().vec(), point_mass.sizes().vec());
+    EXPECT_TRUE(torch::equal(outputs.all_probs, point_mass));
     EXPECT_TRUE(torch::allclose(outputs.cum_log_probs, cum_log_probs));
 }
 

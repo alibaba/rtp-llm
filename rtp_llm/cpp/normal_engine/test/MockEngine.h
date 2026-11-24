@@ -220,7 +220,7 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     return rtp_llm_params;
 }
 
-std::shared_ptr<NormalEngine> createMockEngine(const CustomConfig& config) {
+std::shared_ptr<NormalEngine> createMockEngine(const CustomConfig& config, bool start_loop = true) {
     rtp_llm::ModelConfig   model_config;
     rtp_llm::RuntimeConfig runtime_config;
     rtp_llm::KVCacheConfig kv_cache_config;
@@ -235,7 +235,7 @@ std::shared_ptr<NormalEngine> createMockEngine(const CustomConfig& config) {
             NormalExecutor::test_model_factory = nullptr;
         }
     } factory_reset_guard;
-    return make_shared<NormalEngine>(rtp_llm_params, nullptr);
+    return make_shared<NormalEngine>(rtp_llm_params, nullptr, start_loop);
 }
 
 }  // namespace rtp_llm

@@ -1,4 +1,6 @@
 #define PYBIND11_DETAILED_ERROR_MESSAGES
+#include <cmath>
+#include <limits>
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputClass.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTokenUtils.h"
 #include "rtp_llm/cpp/pybind/common/blockUtil.h"
@@ -1227,6 +1229,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("checkpoint_path", &SpeculativeExecutionConfig::checkpoint_path)
         .def_readwrite("sp_dspark_mask_token_id", &SpeculativeExecutionConfig::sp_dspark_mask_token_id)
         .def_readwrite("sp_dspark_sample_from_anchor", &SpeculativeExecutionConfig::sp_dspark_sample_from_anchor)
+        .def_readwrite("sp_dspark_confidence_mode", &SpeculativeExecutionConfig::sp_dspark_confidence_mode)
+        .def_readwrite("sp_dspark_confidence_temperature", &SpeculativeExecutionConfig::sp_dspark_confidence_temperature)
+        .def_readwrite("sp_dspark_verify_budget", &SpeculativeExecutionConfig::sp_dspark_verify_budget)
+        .def_readwrite("sp_dspark_verify_mode", &SpeculativeExecutionConfig::sp_dspark_verify_mode)
+        .def_readwrite("sp_dspark_verify_budget_mode", &SpeculativeExecutionConfig::sp_dspark_verify_budget_mode)
         .def("to_string", [](const SpeculativeExecutionConfig& self) { return self.to_string(); })
         .def(py::pickle(
             [](const SpeculativeExecutionConfig& self) {
@@ -1237,10 +1244,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.quantization,
                                       self.checkpoint_path,
                                       self.sp_dspark_mask_token_id,
-                                      self.sp_dspark_sample_from_anchor);
+                                      self.sp_dspark_sample_from_anchor,
+                                      self.sp_dspark_confidence_mode,
+                                      self.sp_dspark_confidence_temperature,
+                                      self.sp_dspark_verify_budget,
+                                      self.sp_dspark_verify_mode,
+                                      self.sp_dspark_verify_budget_mode);
             },
             [](py::tuple t) {
-                if (t.size() != 6 && t.size() != 7 && t.size() != 8)
+                if (t.size() != 6 && t.size() != 7 && t.size() != 8 && t.size() != 13)
                     throw std::runtime_error("Invalid state!");
                 SpeculativeExecutionConfig c;
                 try {
@@ -1253,9 +1265,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     if (t.size() == 7) {
                         c.sp_dspark_mask_token_id = t[6].cast<int64_t>();
                     }
-                    if (t.size() == 8) {
+                    if (t.size() >= 8) {
                         c.sp_dspark_mask_token_id      = t[6].cast<int64_t>();
                         c.sp_dspark_sample_from_anchor = t[7].cast<bool>();
+                    }
+                    if (t.size() == 13) {
+                        c.sp_dspark_confidence_mode = t[8].cast<std::string>();
+                        c.sp_dspark_confidence_temperature = t[9].cast<double>();
+                        c.sp_dspark_verify_budget = t[10].cast<int64_t>();
+                        c.sp_dspark_verify_mode = t[11].cast<std::string>();
+                        c.sp_dspark_verify_budget_mode = t[12].cast<std::string>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("SpeculativeExecutionConfig unpickle error: ") + e.what());
@@ -1662,6 +1681,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("compile_queue_size", &GrammarConfig::compile_queue_size)
         .def_readwrite("tokenizer_info_json", &GrammarConfig::tokenizer_info_json)
         .def_readwrite("compiler_cache_bytes", &GrammarConfig::compiler_cache_bytes)
+        .def_readwrite("update_timeout_ms", &GrammarConfig::update_timeout_ms)
         .def("to_string", &GrammarConfig::to_string)
         .def("__repr__",
              [](const GrammarConfig& c) {
@@ -1672,7 +1692,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                      << ", num_workers=" << c.num_workers << ", compile_timeout_ms=" << c.compile_timeout_ms
                      << ", compile_concurrency=" << c.compile_concurrency
                      << ", compile_queue_size=" << c.compile_queue_size
-                     << ", compiler_cache_bytes=" << c.compiler_cache_bytes << ")";
+                     << ", compiler_cache_bytes=" << c.compiler_cache_bytes
+                     << ", update_timeout_ms=" << c.update_timeout_ms << ")";
                  return oss.str();
              })
         .def(py::pickle(
@@ -1684,10 +1705,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.terminate_without_stop_token,
                                       self.compile_timeout_ms,
                                       self.compile_concurrency,
-                                      self.compile_queue_size);
+                                      self.compile_queue_size,
+                                      self.update_timeout_ms);
             },
             [](py::tuple t) {
-                if (t.size() != 5 && t.size() != 6 && t.size() != 8)
+                if (t.size() != 5 && t.size() != 6 && t.size() != 8 && t.size() != 9)
                     throw std::runtime_error("Invalid state!");
                 GrammarConfig c;
                 try {
@@ -1705,13 +1727,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.constrained_json_disable_any_whitespace = t[0].cast<bool>();
                         c.num_workers                             = t[1].cast<int>();
                         c.tokenizer_info_json                     = t[2].cast<std::string>();
-                        if (t.size() == 8) {
-                            // Current layout appends compile controls after the prior five-field state.
+                        if (t.size() == 8 || t.size() == 9) {
+                            // Compile controls follow the prior five-field state; update timeout was added last.
                             c.compiler_cache_bytes         = t[3].cast<int64_t>();
                             c.terminate_without_stop_token = t[4].cast<bool>();
                             c.compile_timeout_ms           = t[5].cast<int>();
                             c.compile_concurrency          = t[6].cast<int>();
                             c.compile_queue_size           = t[7].cast<int>();
+                            if (t.size() == 9) {
+                                c.update_timeout_ms = t[8].cast<int>();
+                            }
                         } else if (t.size() == 6) {
                             // Previous layout:
                             // (disable_any_whitespace, num_workers, tokenizer_info_json, override_stop_tokens,
@@ -1753,6 +1778,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("use_batch_decode_scheduler", &RuntimeConfig::use_batch_decode_scheduler)
         .def_readwrite("model_name", &RuntimeConfig::model_name)
         .def_readwrite("worker_grpc_addrs", &RuntimeConfig::worker_grpc_addrs)
+        .def_readwrite("shutdown_worker_grpc_addrs", &RuntimeConfig::shutdown_worker_grpc_addrs)
         .def_readwrite("worker_addrs", &RuntimeConfig::worker_addrs)
         .def_readwrite("specify_gpu_arch", &RuntimeConfig::specify_gpu_arch)
         // Add sub-configs as properties that return references
@@ -1781,10 +1807,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.specify_gpu_arch,
                                       self.model_warm_up,
                                       self.output_dispatcher_worker_count,
-                                      self.enable_linear_replay);
+                                      self.enable_linear_replay,
+                                      self.shutdown_worker_grpc_addrs);
             },
             [](py::tuple t) {
-                if (t.size() != 12 && t.size() != 13 && t.size() != 14 && t.size() != 15)
+                if (t.size() != 12 && t.size() != 13 && t.size() != 14 && t.size() != 15 && t.size() != 16)
                     throw std::runtime_error("Invalid state!");
                 RuntimeConfig c;
                 try {
@@ -1807,7 +1834,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.output_dispatcher_worker_count = t[13].cast<int>();
                     }
                     if (t.size() >= 15) {
-                        c.enable_linear_replay = t[14].cast<bool>();
+                        if (py::isinstance<py::bool_>(t[14])) {
+                            c.enable_linear_replay = t[14].cast<bool>();
+                        } else {
+                            // Older feature snapshots used this slot for shutdown peers.
+                            c.shutdown_worker_grpc_addrs = t[14].cast<std::vector<std::string>>();
+                        }
+                    }
+                    if (t.size() >= 16) {
+                        c.shutdown_worker_grpc_addrs = t[15].cast<std::vector<std::string>>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("RuntimeConfig unpickle error: ") + e.what());
@@ -2006,44 +2041,62 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
             })
         .def_readwrite("redundant_expert", &EPLBConfig::redundant_expert)
-        .def_readwrite("balance_method", &EPLBConfig::balance_method)
-        .def_readwrite("eplb_force_repack", &EPLBConfig::eplb_force_repack)
         .def_readwrite("eplb_stats_window_size", &EPLBConfig::eplb_stats_window_size)
-        .def_readwrite("eplb_control_step", &EPLBConfig::eplb_control_step)
-        .def_readwrite("eplb_test_mode", &EPLBConfig::eplb_test_mode)
-        .def_readwrite("eplb_balance_layer_per_step", &EPLBConfig::eplb_balance_layer_per_step)
+        .def_readwrite("eplb_rearrange_after_prefill", &EPLBConfig::eplb_rearrange_after_prefill)
+        .def_readwrite("eplb_rearrange_p2p_groups", &EPLBConfig::eplb_rearrange_p2p_groups)
+        .def_readwrite("eplb_metrics_report_interval", &EPLBConfig::eplb_metrics_report_interval)
+        .def_readwrite("eplb_metrics_snapshot_max_files", &EPLBConfig::eplb_metrics_snapshot_max_files)
         .def("enable_eplb", &EPLBConfig::enable_eplb, "Get enable_eplb status")
         .def("phy_exp_num", &EPLBConfig::phy_exp_num, py::arg("expert_num"), "Get physical expert number")
         .def(py::pickle(
             [](const EPLBConfig& self) {
-                return py::make_tuple(self.eplb_update_time,
-                                      EPLBConfig::to_string(self.eplb_mode),
-                                      self.redundant_expert,
-                                      self.balance_method,
-                                      self.eplb_force_repack,
-                                      self.eplb_stats_window_size,
-                                      self.eplb_control_step,
-                                      self.eplb_test_mode,
-                                      self.eplb_balance_layer_per_step);
+                return py::make_tuple(2,
+                                      py::make_tuple(self.eplb_update_time,
+                                                     EPLBConfig::to_string(self.eplb_mode),
+                                                     self.redundant_expert,
+                                                     self.eplb_stats_window_size,
+                                                     self.eplb_rearrange_after_prefill,
+                                                     self.eplb_rearrange_p2p_groups,
+                                                     self.eplb_metrics_report_interval,
+                                                     self.eplb_metrics_snapshot_max_files));
             },
             [](py::tuple t) {
-                if (t.size() != 9)
-                    throw std::runtime_error("Invalid state!");
                 EPLBConfig c;
                 try {
-                    c.eplb_update_time = t[0].cast<int64_t>();
-                    if (py::isinstance<py::str>(t[1])) {
-                        c.eplb_mode = EPLBConfig::from_string(t[1].cast<std::string>());
+                    py::tuple fields;
+                    if (t.size() == 9 || t.size() == 11) {
+                        // Legacy unversioned state: ignore retired layer-selection and control settings.
+                        fields = py::make_tuple(t[0],
+                                                t[1],
+                                                t[2],
+                                                t[5],
+                                                false,
+                                                1,
+                                                t.size() == 11 ? t[9].cast<int>() : 0,
+                                                t.size() == 11 ? t[10].cast<int>() : 0);
+                    } else if (t.size() == 10 && t[0].cast<int>() == 1) {
+                        // Version 1 retained the control interval at index 5.
+                        fields = py::make_tuple(t[1], t[2], t[3], t[4], t[6], t[7], t[8], t[9]);
+                    } else if (t.size() == 2 && t[0].cast<int>() == 2) {
+                        fields = t[1].cast<py::tuple>();
                     } else {
-                        c.eplb_mode = t[1].cast<EplbMode>();
+                        throw std::runtime_error("Invalid EPLBConfig pickle state");
                     }
-                    c.redundant_expert            = t[2].cast<int64_t>();
-                    c.balance_method              = t[3].cast<std::string>();
-                    c.eplb_force_repack           = t[4].cast<int64_t>();
-                    c.eplb_stats_window_size      = t[5].cast<int64_t>();
-                    c.eplb_control_step           = t[6].cast<int>();
-                    c.eplb_test_mode              = t[7].cast<bool>();
-                    c.eplb_balance_layer_per_step = t[8].cast<int>();
+                    if (fields.size() != 8) {
+                        throw std::runtime_error("Invalid EPLBConfig pickle state");
+                    }
+                    c.eplb_update_time = fields[0].cast<int64_t>();
+                    if (py::isinstance<py::str>(fields[1])) {
+                        c.eplb_mode = EPLBConfig::from_string(fields[1].cast<std::string>());
+                    } else {
+                        c.eplb_mode = fields[1].cast<EplbMode>();
+                    }
+                    c.redundant_expert                = fields[2].cast<int64_t>();
+                    c.eplb_stats_window_size          = fields[3].cast<int64_t>();
+                    c.eplb_rearrange_after_prefill    = fields[4].cast<bool>();
+                    c.eplb_rearrange_p2p_groups       = fields[5].cast<int>();
+                    c.eplb_metrics_report_interval    = fields[6].cast<int>();
+                    c.eplb_metrics_snapshot_max_files = fields[7].cast<int>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("EPLBConfig unpickle error: ") + e.what());
                 }
@@ -2057,6 +2110,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("is_multimodal", &MMModelConfig::is_multimodal)
         .def_readwrite("mm_sep_tokens", &MMModelConfig::mm_sep_tokens)
         .def_readwrite("include_sep_tokens", &MMModelConfig::include_sep_tokens)
+        .def_readwrite("semantic_mm_token_id", &MMModelConfig::semantic_mm_token_id)
         .def_readwrite("mm_position_ids_style", &MMModelConfig::mm_position_ids_style);
 
     py::class_<CacheReusePolicyDesc>(m, "CacheReusePolicyDesc")

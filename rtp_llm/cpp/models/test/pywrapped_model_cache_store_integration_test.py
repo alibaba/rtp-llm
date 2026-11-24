@@ -1049,6 +1049,186 @@ class TpSyncModelInputsIntegrationTest(unittest.TestCase):
                     process.join(timeout=5)
 
 
+class AttentionInputMetadataModel:
+    def __init__(self, device_only: bool) -> None:
+        self.supports_device_only_attention_metadata = device_only
+
+    def initialize(self, resources) -> bool:
+        return True
+
+    def forward(self, inputs):
+        raise AssertionError("metadata test must not execute a model forward")
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA/ROCm")
+class AttentionInputMetadataTest(unittest.TestCase):
+    def build_inputs(self, input_device, prefix_device, *, verify=False):
+        lengths = torch.tensor([2, 3], dtype=torch.int32, device=input_device)
+        prefixes = torch.tensor([7, 11], dtype=torch.int32, device=prefix_device)
+        sequences = torch.empty(0, dtype=torch.int32)
+        tokens = torch.empty(5, dtype=torch.int32)
+        return lengths, prefixes, sequences, tokens, verify
+
+    @unittest.skipIf(
+        torch.version.hip is not None, "device metadata kernel is CUDA-only"
+    )
+    def test_capability_property_is_queried_after_initialize(self):
+        class InitializedMetadataModel:
+            def __init__(self):
+                self.ready = False
+
+            @property
+            def supports_device_only_attention_metadata(self):
+                return self.ready
+
+            def initialize(self, resources):
+                self.ready = True
+                return True
+
+            def forward(self, inputs):
+                raise AssertionError("metadata test must not execute forward")
+
+        model = InitializedMetadataModel()
+        self.assertFalse(model.supports_device_only_attention_metadata)
+        builder = _extension.AttentionInputBuilder(model)
+        self.assertTrue(model.supports_device_only_attention_metadata)
+        args = self.build_inputs("cuda", "cuda", verify=True)
+        builder.build(*args)
+        torch.cuda.synchronize()
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU]
+        ) as profile:
+            result = builder.build(*args)
+        torch.cuda.synchronize()
+        self.assertNotIn("aten::item", {e.key for e in profile.key_averages()})
+        self.assertEqual(result.context_total_kv_length, -1)
+        self.assertEqual(result.cu_kv_seqlens_device.cpu().tolist(), [0, 9, 23])
+
+    @unittest.skipIf(
+        torch.version.hip is not None, "device metadata kernel is CUDA-only"
+    )
+    def test_device_lengths_avoid_scalar_sync_and_preserve_metadata(self):
+        builder = _extension.AttentionInputBuilder(AttentionInputMetadataModel(True))
+        for verify in (False, True):
+            for prefix_device in ("cuda", "cpu"):
+                with self.subTest(verify=verify, prefix_device=prefix_device):
+                    args = self.build_inputs("cuda", prefix_device, verify=verify)
+                    # Exercise the actual copy/kernel ordering on a nondefault
+                    # stream. Warm allocations and CUDA libraries before profiling.
+                    stream = torch.cuda.Stream()
+                    stream.wait_stream(torch.cuda.current_stream())
+                    with torch.cuda.stream(stream):
+                        builder.build(*args)
+                    stream.synchronize()
+                    with torch.profiler.profile(
+                        activities=[torch.profiler.ProfilerActivity.CPU]
+                    ) as profile:
+                        with torch.cuda.stream(stream):
+                            result = builder.build(*args)
+                    stream.synchronize()
+                    names = {event.key for event in profile.key_averages()}
+                    self.assertNotIn("aten::item", names)
+                    self.assertNotIn("aten::_local_scalar_dense", names)
+                    self.assertEqual(result.total_tokens, 5)
+                    self.assertEqual(
+                        result.context_total_kv_length,
+                        -1 if prefix_device == "cuda" else 23,
+                    )
+                    self.assertEqual(result.is_target_verify, verify)
+                    self.assertEqual(result.cu_seqlens_device.cpu().tolist(), [0, 2, 5])
+                    self.assertEqual(
+                        result.cu_kv_seqlens_device.cpu().tolist(), [0, 9, 23]
+                    )
+                    self.assertEqual(
+                        result.padding_offset.cpu().tolist(), [0, 0, 1, 1, 1]
+                    )
+                    expected_seq = [8, 12] if verify else []
+                    self.assertEqual(
+                        result.sequence_lengths_plus_1_device.cpu().tolist(),
+                        expected_seq,
+                    )
+
+    def test_host_metadata_and_generic_scalar_contract(self):
+        for device_only in (False, True):
+            builder = _extension.AttentionInputBuilder(
+                AttentionInputMetadataModel(device_only)
+            )
+            for input_device, prefix_device in (
+                ("cpu", "cpu"),
+                ("cpu", "cuda"),
+                ("cuda", "cuda"),
+            ):
+                if torch.version.hip is not None and input_device == "cuda":
+                    continue
+                with self.subTest(
+                    device_only=device_only,
+                    input_device=input_device,
+                    prefix_device=prefix_device,
+                ):
+                    result = builder.build(
+                        *self.build_inputs(input_device, prefix_device)
+                    )
+                    torch.cuda.synchronize()
+                    expected_total = (
+                        -1
+                        if device_only and input_device == prefix_device == "cuda"
+                        else 23
+                    )
+                    self.assertEqual(result.context_total_kv_length, expected_total)
+                    self.assertEqual(result.total_tokens, 5)
+                    self.assertEqual(
+                        result.cu_kv_seqlens_device.cpu().tolist(), [0, 9, 23]
+                    )
+
+    def test_cp_cache_store_keeps_global_host_geometry(self):
+        builder = _extension.AttentionInputBuilder(AttentionInputMetadataModel(True))
+        local = torch.tensor([2, 3], dtype=torch.int32).pin_memory()
+        global_lengths = torch.tensor([5, 11], dtype=torch.int32).pin_memory()
+        prefixes = torch.tensor([0, 1024], dtype=torch.int32).pin_memory()
+        blocks = torch.tensor([[2, 4], [7, 9]], dtype=torch.int32).pin_memory()
+        device_blocks = blocks.cuda()
+        snapshot = builder.build_cache_store_inputs(
+            local, global_lengths, prefixes, blocks, device_blocks
+        )
+        result = snapshot["attention_inputs"]
+        self.assertEqual(snapshot["input_lengths_host"].tolist(), [5, 11])
+        self.assertEqual(snapshot["prefix_lengths_host"].tolist(), [0, 1024])
+        self.assertEqual(snapshot["host_kv_cache_offset"].tolist(), [[2, 4], [7, 9]])
+        self.assertEqual(snapshot["host_kv_cache_offset"].data_ptr(), blocks.data_ptr())
+        self.assertEqual(result.input_lengths.tolist(), [2, 3])
+        self.assertEqual(result.cu_seqlens_device.cpu().tolist(), [0, 2, 5])
+
+    def test_decode_and_mixed_batch_contract(self):
+        builder = _extension.AttentionInputBuilder(AttentionInputMetadataModel(True))
+        for device in ("cpu", "cuda"):
+            with self.subTest(device=device):
+                result = builder.build(
+                    torch.tensor([1, 1], dtype=torch.int32, device=device),
+                    torch.empty(0, dtype=torch.int32),
+                    torch.tensor([7, 11], dtype=torch.int32, device=device),
+                    torch.empty(2, dtype=torch.int32),
+                    False,
+                )
+                torch.cuda.synchronize()
+                self.assertFalse(result.is_prefill)
+                self.assertEqual(result.total_tokens, 0)
+                self.assertEqual(result.context_total_kv_length, 0)
+                self.assertEqual(
+                    result.decode_cu_seqlens_device.cpu().tolist(), [0, 1, 2]
+                )
+                self.assertEqual(
+                    result.sequence_lengths_plus_1_device.cpu().tolist(), [8, 12]
+                )
+        with self.assertRaisesRegex(RuntimeError, "mixed prefill\\+decode batch"):
+            builder.build(
+                torch.tensor([1, 2], dtype=torch.int32),
+                torch.tensor([7], dtype=torch.int32),
+                torch.tensor([11], dtype=torch.int32),
+                torch.empty(3, dtype=torch.int32),
+                False,
+            )
+
+
 class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
     def test_borrowed_warmup_model_survives_until_owning_wrapper_is_destroyed(self):
         model = CloseAwareCacheStoreForwardModel()
@@ -1222,20 +1402,116 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
     def test_late_constructor_failure_destroys_clean_graphs_without_cache_allocation(
         self,
     ) -> None:
-        model = LateInitializeFailureGenerationPrefillCaptureModel()
-        result = run_generation_prefill_capture_scenario(
-            model, "Python model initialization failed"
-        )
+        for release_gil in (False, True):
+            with self.subTest(release_gil_during_construction=release_gil):
+                model = LateInitializeFailureGenerationPrefillCaptureModel()
+                result = run_generation_prefill_capture_scenario(
+                    model,
+                    "Python model initialization failed",
+                    release_gil_during_construction=release_gil,
+                )
 
-        self.assertEqual(model.initialize_calls, 2)
-        self.assertEqual(model.prefill_forward_calls, 4)
-        self.assertTrue(result["saw_capture_error"])
-        self.assertIn(
-            "Python model initialization failed", result["capture_error_message"]
+                self.assertEqual(model.initialize_calls, 2)
+                self.assertEqual(model.prefill_forward_calls, 4)
+                self.assertTrue(result["saw_capture_error"])
+                self.assertIn(
+                    "Python model initialization failed",
+                    result["capture_error_message"],
+                )
+                self.assertFalse(result["graph_enabled"])
+                self.assertEqual(result["available_during"], result["available_before"])
+                self.assertEqual(result["available_after"], result["available_before"])
+
+    def test_pdfusion_target_verify_reaches_eplb_as_decode_with_prefill_shapes(self):
+        class Model(CacheStoreForwardModel):
+            def __init__(self):
+                super().__init__()
+                self.eplb_prompts = []
+                self.eligible_samples = []
+                self.counts = None
+
+            def get_eplb_layers(self):
+                return [self]
+
+            def _forward_one(self, inputs):
+                self.counts = inputs.expert_token_counts
+                self.counts.fill_(self.forward_calls)
+                return super()._forward_one(inputs)
+
+        class Runtime:
+            def __init__(
+                self,
+                layers,
+                config,
+                ep_rank,
+                ep_size,
+                model_id,
+                is_normal_engine,
+                sync_prompt_phase,
+            ):
+                self.model = layers[0]
+                assert is_normal_engine
+                assert not sync_prompt_phase
+
+            def step(self, counts, is_prompt=False):
+                self.model.eplb_prompts.append(is_prompt)
+                if not is_prompt:
+                    self.model.eligible_samples.append(counts.clone())
+                return False
+
+        module = types.ModuleType("rtp_llm.eplb.runtime")
+        module.RuntimeExpertBalancer = Runtime
+        model = Model()
+        # NormalEngine enters inference mode before warmup and its worker loop.
+        with torch.inference_mode(), patch.dict(sys.modules, {module.__name__: module}):
+            run_scenario(model, "eplb_prefill_then_verify", forward_count=2)
+
+        self.assertEqual(model.forward_calls, 2)
+        self.assertEqual(model.seen_input_lengths, [[4], [4]])
+        self.assertEqual(model.eplb_prompts, [True, False])
+        self.assertEqual(
+            [sample.tolist() for sample in model.eligible_samples], [[[2, 2]]]
         )
-        self.assertFalse(result["graph_enabled"])
-        self.assertEqual(result["available_during"], result["available_before"])
-        self.assertEqual(result["available_after"], result["available_before"])
+        self.assertEqual(model.counts.tolist(), [[0, 0]])
+
+    def test_python_constructor_failure_without_outer_gil_releases_model(self) -> None:
+        class FailingModel:
+            def __init__(self, failure_stage):
+                self.failure_stage = failure_stage
+                self.initialize_calls = 0
+                self.eplb_calls = 0
+
+            def initialize(self, resources):
+                self.initialize_calls += 1
+                if self.failure_stage == "initialize":
+                    raise NotImplementedError("Python constructor failure: initialize")
+                return True
+
+            def get_eplb_layers(self):
+                self.eplb_calls += 1
+                raise NotImplementedError("Python constructor failure: get_eplb_layers")
+
+        for failure_stage in ("initialize", "get_eplb_layers"):
+            with self.subTest(failure_stage=failure_stage):
+                model = FailingModel(failure_stage)
+                references_before = sys.getrefcount(model)
+                expected_error = f"Python constructor failure: {failure_stage}"
+                result = run_generation_prefill_capture_scenario(
+                    model,
+                    expected_error,
+                    release_gil_during_construction=True,
+                    enable_eplb=failure_stage == "get_eplb_layers",
+                )
+                self.assertEqual(model.initialize_calls, 1)
+                self.assertEqual(
+                    model.eplb_calls, int(failure_stage == "get_eplb_layers")
+                )
+                self.assertTrue(result["saw_capture_error"])
+                self.assertIn(expected_error, result["capture_error_message"])
+                self.assertFalse(result["graph_enabled"])
+                self.assertEqual(result["available_during"], result["available_before"])
+                self.assertEqual(result["available_after"], result["available_before"])
+                self.assertEqual(sys.getrefcount(model), references_before)
 
     def test_dirty_generation_prefill_capture_does_not_retain_cache_manager(
         self,

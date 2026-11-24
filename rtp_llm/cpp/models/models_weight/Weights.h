@@ -136,6 +136,9 @@ struct Weights {
     // Replicated low-rank transition weights used by the C++ DSpARK sampler.
     torch::Tensor dspark_markov_w1;
     torch::Tensor dspark_markov_w2;
+    // Replicated V4.1 [1, hidden+markov_rank] confidence head. Required when
+    // confidence is explicitly enabled; off mode leaves it undefined.
+    torch::Tensor dspark_confidence_head;
 };
 
 using WeightsPtr = std::shared_ptr<const Weights>;
