@@ -10,6 +10,7 @@ import torch
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
+from rtp_llm.utils.model_weight import W
 
 from .defs.fused_moe import FusedMoe
 from .strategy_registry import StrategyRegistry
@@ -50,10 +51,29 @@ class FusedMoeFactory:
         Raises:
             ValueError: If no suitable strategy is found or configuration is not supported
         """
+        logical_to_physical = weights.get(W.log2phy)
+        logical_count = weights.get(W.logic_expert_cnt)
+        if (logical_to_physical is None) != (logical_count is None):
+            raise ValueError("EPLB requires both log2phy and logic_expert_cnt")
         strategy = self.registry.get_strategy(config)
 
         router = strategy.create_router(config)
         executor = strategy.create_executor(config, weights)
+
+        eplb_layer = None
+        if logical_to_physical is not None:
+            from rtp_llm.eplb.runtime import EplbLayer
+
+            eplb_layer = EplbLayer(
+                config.layer_id,
+                logical_to_physical,
+                logical_count,
+                executor.get_eplb_weights(),
+                ep_rank=config.ep_rank,
+                # PureTP peers reduce partial outputs and must choose the same copy.
+                # Independent MoE input groups rotate by separate phases.
+                replica_offset=config.ep_rank // config.tp_size,
+            )
 
         strategy_name = (
             getattr(strategy, "strategy_name", None) or strategy.__class__.__name__
@@ -61,6 +81,7 @@ class FusedMoeFactory:
         return FusedMoe(
             router,
             executor,
-            expert_num=config.expert_num,
+            expert_num=config.physical_expert_num,
             strategy_name=strategy_name,
+            eplb_layer=eplb_layer,
         )

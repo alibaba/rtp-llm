@@ -2,6 +2,7 @@
 # Licensed under the Apache License, Version 2.0
 
 import logging
+from typing import Optional
 
 import torch
 import triton
@@ -94,6 +95,7 @@ def _fwd_kernel_ep_scatter_2(
     output_index_stride0,
     output_index_stride1,
     output_capacity,
+    expert_token_counts,
     topk_num: tl.constexpr,
     num_experts: tl.constexpr,
     HIDDEN_SIZE: tl.constexpr,
@@ -120,6 +122,8 @@ def _fwd_kernel_ep_scatter_2(
             topk_index = topk_idx_int32.to(tl.int64)
             expert_id = tl.load(recv_topk + token_id * recv_topk_stride0 + topk_index)
             if expert_id >= 0 and expert_id < num_experts:
+                if expert_token_counts is not None:
+                    tl.atomic_add(expert_token_counts + expert_id, 1)
                 dest_token_index_int32 = tl.atomic_add(expert_start_loc + expert_id, 1)
                 dest_token_index = dest_token_index_int32.to(tl.int64)
                 dest_is_valid = dest_token_index < output_capacity
@@ -158,6 +162,7 @@ def ep_scatter(
     output_tensor_scale: torch.Tensor,
     m_indices: torch.Tensor,
     output_index: torch.Tensor,
+    expert_token_counts: Optional[torch.Tensor],
     scale_ue8m0: bool = False,
     align_m: int = 128,
     derive_counts_from_topk: bool = False,
@@ -232,6 +237,7 @@ def ep_scatter(
         output_index.stride(0),
         output_index.stride(1),
         output_tensor.shape[0],
+        expert_token_counts,
         topk_num=recv_topk.shape[1],
         num_experts=num_experts,
         num_warps=num_warps,
@@ -278,6 +284,7 @@ def _fwd_kernel_ep_scatter_2_v2(
     output_index,
     output_index_stride0,
     output_index_stride1,
+    expert_token_counts,
     topk_num: tl.constexpr,
     num_experts: tl.constexpr,
     alignment: tl.constexpr,
@@ -305,6 +312,8 @@ def _fwd_kernel_ep_scatter_2_v2(
             topk_index = topk_idx_int32.to(tl.int64)
             expert_id = tl.load(recv_topk + token_id * recv_topk_stride0 + topk_index)
             if expert_id >= 0 and expert_id < num_experts:
+                if expert_token_counts is not None:
+                    tl.atomic_add(expert_token_counts + expert_id, 1)
                 dest_token_index_int32 = tl.atomic_add(expert_start_loc + expert_id, 1)
                 dest_token_index = dest_token_index_int32.to(tl.int64)
                 tl.store(
@@ -339,6 +348,7 @@ def ep_scatter_v2(
     output_tensor: torch.Tensor,
     output_tensor_scale: torch.Tensor,
     output_index: torch.Tensor,
+    expert_token_counts: Optional[torch.Tensor],
     scale_ue8m0: bool = False,
 ):
     BLOCK_D = 128  # block size of quantization
@@ -383,6 +393,7 @@ def ep_scatter_v2(
         output_index,
         output_index.stride(0),
         output_index.stride(1),
+        expert_token_counts,
         topk_num=recv_topk.shape[1],
         num_experts=num_experts,
         alignment=alignment,
@@ -835,6 +846,7 @@ def _compute_problem_sizes_kernel(
     topk_ids_ptr,
     problem_sizes1_ptr,
     problem_sizes2_ptr,
+    expert_token_counts_ptr,
     topk_length,
     n,
     k,
@@ -844,12 +856,16 @@ def _compute_problem_sizes_kernel(
 ):
     expert_id = tl.program_id(0).to(tl.int64)
 
-    occurrences = 0
+    occurrences = tl.full((), 0, tl.int32)
     for start in range(0, topk_length, BLOCK_SIZE):
         offsets = start.to(tl.int64) + tl.arange(0, BLOCK_SIZE).to(tl.int64)
         mask = offsets < topk_length
         ids = tl.load(topk_ids_ptr + offsets, mask=mask, other=-1)
         occurrences += tl.sum((ids == expert_id).to(tl.int32))
+
+    if expert_token_counts_ptr is not None:
+        count = occurrences.to(expert_token_counts_ptr.dtype.element_ty)
+        tl.atomic_add(expert_token_counts_ptr + expert_id, count)
 
     base = expert_id * 3
     n2 = 2 * n
@@ -904,14 +920,16 @@ def get_cutlass_moe_mm_without_permute_info(
     k: int,
     problem_1_swap_ab: bool,
     problem_2_swap_ab: bool,
+    expert_token_counts: torch.Tensor | None,
 ):
     topk_length = topk_ids.numel()
-    BLOCK_SIZE = min(1024, triton.next_power_of_2(topk_length))
+    BLOCK_SIZE = min(1024, triton.next_power_of_2(max(1, topk_length)))
 
     _compute_problem_sizes_kernel[(num_experts,)](
         topk_ids,
         problem_sizes1,
         problem_sizes2,
+        expert_token_counts,
         topk_length,
         n,
         k,

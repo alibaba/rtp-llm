@@ -59,14 +59,15 @@ def make_loader(
 ) -> ModelLoader:
     weights_info = MagicMock(is_attn_model=False, layer_range=load_config.layer_range)
     weights_info.create_load_config.return_value = load_config
-    with patch.object(ModelLoader, "create_eplb", return_value=(None, None)), patch(
-        "rtp_llm.device.get_current_device"
-    ):
+    with patch.object(
+        ModelLoader, "_create_expert_placement", return_value=None
+    ), patch("rtp_llm.device.get_current_device"):
         return ModelLoader(
             SimpleNamespace(
                 task_type=task_type,
                 compute_dtype=load_config.compute_dtype,
                 num_layers=load_config.num_layers,
+                eplb_config=SimpleNamespace(eplb_mode=EplbMode.NONE),
             ),
             weights_info,
             misc_weights_info,
@@ -87,7 +88,7 @@ def make_eplb_loader(
     eplb_mode=EplbMode.EPLB,
     phy_exp_num=4,
 ):
-    """Exercise the real loader and balancer with small metadata and no device I/O."""
+    """Exercise static placement and stage-local mapping without device I/O."""
     cfg.moe_layer_index = moe_layers
     cfg.expert_num = 2
     cfg.phy_exp_num = phy_exp_num
@@ -127,9 +128,7 @@ def make_eplb_loader(
     device = SimpleNamespace(support_dio_load=False)
     with patch(
         "rtp_llm.model_loader.loader.CkptDatabase", return_value=cfg.database
-    ), patch("rtp_llm.device.get_current_device", return_value=device), patch(
-        "rtp_llm.eplb.ep_balancer.get_current_device", return_value=device
-    ):
+    ), patch("rtp_llm.device.get_current_device", return_value=device):
         return ModelLoader(
             model_config,
             weights_info,
@@ -139,7 +138,8 @@ def make_eplb_loader(
 
 
 class PPEplbLoadingTest(unittest.TestCase):
-    def test_balancer_scope_and_mapping_initialization(self):
+
+    def test_stage_scope_and_mapping_initialization(self):
         cases = [
             (8, range(1), [1, 3, 5, 7], []),
             (8, range(1, 4), [1, 3, 5, 7], [1, 3]),
@@ -152,10 +152,7 @@ class PPEplbLoadingTest(unittest.TestCase):
             with self.subTest(layers=layers, layer_range=layer_range):
                 cfg = make_load_config(layers, layer_range)
                 loader = make_eplb_loader(cfg, moe_layers)
-                if expected:
-                    self.assertEqual(loader._py_eplb.moe_layer_index, expected)
-                else:
-                    self.assertIsNone(loader._py_eplb)
+                self.assertEqual(loader._load_config.phy2log, [[0, 1, 0, 1]] * layers)
                 weights = ModelWeights(layers, "cpu", torch.float32)
                 loader._init_eplb_weight(weights, "cpu")
                 self.assertEqual(
@@ -176,32 +173,30 @@ class PPEplbLoadingTest(unittest.TestCase):
     def test_redundant_mapping_without_dynamic_balancer(self):
         cfg = make_load_config(8, range(4, 8))
         loader = make_eplb_loader(cfg, [1, 3, 5, 7], enabled=False)
-        self.assertIsNone(loader._py_eplb)
+        self.assertEqual(loader._load_config.phy2log, [[0, 1, 0, 1]] * 8)
         weights = ModelWeights(8, "cpu", torch.float32)
         loader._init_eplb_weight(weights, "cpu")
         self.assertEqual(
             [i for i, row in enumerate(weights.weights) if W.log2phy in row], [5, 7]
         )
 
-    def test_balancer_never_selects_another_stage(self):
-        from rtp_llm.eplb.ep_balancer import SelectLayerMethod
-
+    def test_mapping_initialization_preserves_other_stages(self):
         loader = make_eplb_loader(make_load_config(8, range(4, 8)), [1, 3, 5, 7])
-        balancer = loader._py_eplb
-        gpu_loads = torch.tensor([[0], [1000], [0], [900], [0], [10], [0], [20]])
-        balancer.select_layer_method = SelectLayerMethod.ROUND
-        self.assertEqual(
-            [balancer.get_balanced_layer(gpu_loads) for _ in range(4)], [5, 7, 5, 7]
-        )
-        balancer.select_layer_method = SelectLayerMethod.MOST_UNBALANCED_LAYER
-        self.assertEqual(balancer.get_balanced_layer(gpu_loads), 7)
-        for method in (SelectLayerMethod.RANDOM, SelectLayerMethod.MIX):
-            balancer.select_layer_method = method
-            for step in range(8):
-                balancer.update_cnt = step
-                self.assertIn(balancer.get_balanced_layer(gpu_loads), [5, 7])
+        weights = ModelWeights(8, "cpu", torch.float32)
+        untouched = torch.tensor([99], dtype=torch.int32)
+        for layer_id in (1, 3):
+            weights.weights[layer_id][W.logic_expert_cnt] = untouched
+        loader._init_eplb_weight(weights, "cpu")
+        for layer_id in (1, 3):
+            self.assertIs(weights.weights[layer_id][W.logic_expert_cnt], untouched)
+            self.assertNotIn(W.log2phy, weights.weights[layer_id])
+        for layer_id in (5, 7):
+            torch.testing.assert_close(
+                weights.weights[layer_id][W.logic_expert_cnt],
+                torch.tensor([2, 2], dtype=torch.int32),
+            )
 
-    def test_static_and_dynamic_use_the_same_ep_node_count(self):
+    def test_static_placement_uses_ep_node_count(self):
         for ep_size, num_nodes in ((1, 1), (2, 1), (2, 2)):
             with self.subTest(ep_size=ep_size, num_nodes=num_nodes):
                 cfg = make_load_config(8, range(4, 8))
@@ -216,37 +211,28 @@ class PPEplbLoadingTest(unittest.TestCase):
                 self.assertEqual(
                     static_placement.call_args.kwargs["num_nodes"], num_nodes
                 )
-                self.assertEqual(loader._py_eplb.num_nodes, num_nodes)
-                self.assertEqual(loader._py_eplb.num_gpu, ep_size)
+                self.assertEqual(static_placement.call_args.kwargs["ep_size"], ep_size)
+                expected = LoadConfig.create_redundant_expert(
+                    layer_num=8,
+                    expert_num=2,
+                    phy_exp_num=4,
+                    ep_size=ep_size,
+                    num_nodes=num_nodes,
+                )
+                self.assertEqual(loader._load_config.phy2log, expected)
 
-    def test_hierarchical_layout_guard_is_mode_scoped(self):
-        for eplb_mode, num_groups, should_reject in (
-            (EplbMode.STATS, 0, False),
-            (EplbMode.STATS, 8, False),
-            (EplbMode.EPLB, 8, True),
-            (EplbMode.ALL, 8, True),
-        ):
-            with self.subTest(eplb_mode=eplb_mode, num_groups=num_groups):
+    def test_node_layout_guard_only_applies_to_redundant_placement(self):
+        for mode in (EplbMode.NONE, EplbMode.STATS, EplbMode.EPLB, EplbMode.ALL):
+            with self.subTest(eplb_mode=mode):
                 cfg = make_load_config(8, range(8))
-                cfg.moe_n_group = num_groups
                 cfg.ep_size = 1
                 cfg.num_nodes = 2
-                if should_reject:
-                    with self.assertRaisesRegex(ValueError, "ep_size 1.*num_nodes 2"):
-                        make_eplb_loader(
-                            cfg,
-                            [1, 3, 5, 7],
-                            eplb_mode=eplb_mode,
-                            phy_exp_num=2,
-                        )
-                else:
-                    loader = make_eplb_loader(
-                        cfg,
-                        [1, 3, 5, 7],
-                        eplb_mode=eplb_mode,
-                        phy_exp_num=2,
-                    )
-                    self.assertIsNotNone(loader._py_eplb)
+                loader = make_eplb_loader(
+                    cfg, [1, 3, 5, 7], eplb_mode=mode, phy_exp_num=2
+                )
+                self.assertEqual(loader._load_config.phy2log, [[0, 1]] * 8)
+                with self.assertRaisesRegex(Exception, "ep_size 1.*num_nodes 2"):
+                    make_eplb_loader(cfg, [1, 3, 5, 7], eplb_mode=mode, phy_exp_num=4)
 
 
 EMBEDDING_NAMES = {W.embedding, W.positional_embedding}

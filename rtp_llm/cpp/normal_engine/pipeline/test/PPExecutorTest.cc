@@ -1269,7 +1269,7 @@ TEST_F(PPExecutorTest, FirstLocalMoeLayerUsesStageRange) {
     }
 }
 
-TEST_F(PPExecutorTest, CommonDenseStageDoesNotStartExpertBalancer) {
+TEST_F(PPExecutorTest, CommonDenseStageRejectsExpertBalancer) {
     auto params                                     = makeStageParams(0);
     params.model_config_.num_layers                 = 8;
     params.model_config_.moe_style                  = 1;
@@ -1277,8 +1277,13 @@ TEST_F(PPExecutorTest, CommonDenseStageDoesNotStartExpertBalancer) {
     params.model_config_.moe_layer_index            = {2, 4, 5, 7};
     params.parallelism_config.pp_stage_layer_counts = {2, 3, 3};
     params.eplb_config.eplb_mode                    = EplbMode::ALL;
-    PPExecutor executor(params, nullptr, true);
-    EXPECT_EQ(executor.expert_balancer_, nullptr);
+    try {
+        PPExecutor executor(params, nullptr, true);
+        FAIL() << "PP with EPLB must be rejected";
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("PP with EPLB or expert-load monitoring is not supported"),
+                  std::string::npos);
+    }
 }
 
 TEST_F(PPExecutorTpTest, CommonPythonTargetIgnoresGenerationPrefillGraphBuckets) {

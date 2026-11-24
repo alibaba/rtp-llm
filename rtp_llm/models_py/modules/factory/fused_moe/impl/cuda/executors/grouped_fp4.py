@@ -40,6 +40,7 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
 from rtp_llm.models_py.triton_kernels.moe.silu_mul_fp8_quant import (
     silu_mul_fp8_quant_packed,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 from rtp_llm.models_py.utils.math import align, ceil_div
 from rtp_llm.resident_weights import resident_init_tensors
 
@@ -75,7 +76,6 @@ def _has_fp8_fp4_grouped_kernel() -> bool:
 
 
 class GroupedFp4Executor(Fp8Fp4ExecutorBase):
-
     @classmethod
     def check_conditions(cls, checker: Any, config) -> None:
         super().check_conditions(checker, config)
@@ -103,7 +103,7 @@ class GroupedFp4Executor(Fp8Fp4ExecutorBase):
 
         cfg = self.cfg
         group = (
-            f"fp8_fp4.grouped_fp4.routed:e{cfg.n_routed_experts}:d{cfg.dim}"
+            f"fp8_fp4.grouped_fp4.routed:e{cfg.physical_expert_num}:d{cfg.dim}"
             f":i{cfg.moe_inter_dim}:w1_{cfg.moe_w1_layout}"
         )
         (
@@ -132,7 +132,7 @@ class GroupedFp4Executor(Fp8Fp4ExecutorBase):
         from rtp_llm.utils.model_weight import W
 
         cfg = self.cfg
-        E, D, inter = cfg.n_routed_experts, cfg.dim, cfg.moe_inter_dim
+        E, D, inter = cfg.physical_expert_num, cfg.dim, cfg.moe_inter_dim
         w13 = layer_weights.pop(W.moe_w1)
         s13_raw = layer_weights.pop(W.moe_s1)
         w13, s13_raw = normalize_moe_w13_gate_up(
@@ -172,6 +172,16 @@ class GroupedFp4Executor(Fp8Fp4ExecutorBase):
         torch.cuda.empty_cache()
         return w13, s13, w2, s2, s13_dense_t, s2_dense_t
 
+    def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
+        return (
+            self._w13,
+            self._s13,
+            self._w2,
+            self._s2,
+            self._s13_dense_t,
+            self._s2_dense_t,
+        )
+
     def dense_gemm_warmup_weights(self):
         """Expose the two dense fallback GEMMs to model-level JIT warmup."""
         return (
@@ -184,6 +194,7 @@ class GroupedFp4Executor(Fp8Fp4ExecutorBase):
         x: torch.Tensor,
         weights: torch.Tensor,
         indices: torch.Tensor,
+        expert_load: Optional[ExpertLoadContext],
     ) -> torch.Tensor:
         """4-opt prefill path; returns ``[N, D] fp32``.
 
@@ -198,13 +209,16 @@ class GroupedFp4Executor(Fp8Fp4ExecutorBase):
         """
         cfg = self.cfg
         N, D = x.shape
-        E = cfg.n_routed_experts
+        E = cfg.physical_expert_num
         inter = cfg.moe_inter_dim
         device = x.device
 
         if N == 0:
             return torch.zeros(N, D, dtype=torch.float32, device=device)
         if torch.cuda.is_current_stream_capturing():
+            if expert_load is not None:
+                _, num_recv = recompute_topk_ids_sum_expert_count(indices, 0, E)
+                expert_load.expert_token_counts.add_(num_recv)
             return self._forward_capture_topk(x, weights, indices)
 
         # (1) Quant input ONCE — column-major TMA-aligned UE8M0 packed scale,
@@ -224,6 +238,8 @@ class GroupedFp4Executor(Fp8Fp4ExecutorBase):
             current_expert_start_id=0,
             num_local_experts=E,
         )
+        if expert_load is not None:
+            expert_load.expert_token_counts.add_(num_recv)
 
         # Sum of aligned counts → all_tokens (CPU sync, ~E ints; same kind of
         # sync the framework's contiguous executor does at deepgemm_hybrid_executor.py:445).
@@ -278,6 +294,7 @@ class GroupedFp4Executor(Fp8Fp4ExecutorBase):
             m_indices,
             output_index,
             scale_ue8m0=True,
+            expert_token_counts=None,
         )
         # Defensive clamp against any -1 leakage (e.g. if num_local_experts is
         # later split for EP > 1); matches framework safety guard.

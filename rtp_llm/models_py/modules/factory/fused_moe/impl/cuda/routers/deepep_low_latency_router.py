@@ -69,7 +69,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         )
 
         # DeepEpLowLatency-specific initialization
-        self._num_experts = config.expert_num
+        self._num_experts = config.physical_expert_num
         self._ll_num_max_token_per_rank = (
             DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
                 config.ll_num_max_token, config.tp_size, config.quant_config

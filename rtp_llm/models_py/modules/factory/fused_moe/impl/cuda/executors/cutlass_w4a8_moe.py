@@ -237,6 +237,7 @@ class CutlassExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
             self.K,
             self.swap_ab_gemm1,
             self.swap_ab_gemm2,
+            expert_token_counts=None,
         )
         if not per_act_token and expert_map is not None:
             c1.fill_(0)

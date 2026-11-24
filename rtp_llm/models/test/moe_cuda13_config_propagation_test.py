@@ -104,7 +104,9 @@ class Dsv4MoeConfigTest(unittest.TestCase):
                 super().__init__()
                 self.is_decode_forward = None
 
-            def forward(self, x, _input_ids, *, is_decode_forward=False):
+            def forward(
+                self, x, input_ids, expert_load=None, *, is_decode_forward=False
+            ):
                 self.is_decode_forward = is_decode_forward
                 return x
 
@@ -125,6 +127,7 @@ class Dsv4MoeConfigTest(unittest.TestCase):
             x,
             SimpleNamespace(),
             torch.arange(2).view(2, 1),
+            expert_load=None,
         )
 
         self.assertTrue(block.ffn.is_decode_forward)
@@ -431,7 +434,8 @@ class Dsv4MoeConfigTest(unittest.TestCase):
             moe_strategy="auto",
         )
         with self.assertRaisesRegex(
-            ValueError, "do not support EPLB.*logical_experts=16, physical_experts=24"
+            ValueError,
+            "No suitable MOE backend supports this redundant-expert configuration",
         ):
             FusedMoeFactory().create_fused_moe(runtime, {})
 

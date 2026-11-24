@@ -49,7 +49,7 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
 
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
-        self.num_experts = config.expert_num
+        self.num_experts = config.physical_expert_num
         assert self.num_experts % self.ep_size == 0
         self.num_experts_per_partition = self.num_experts // self.ep_size
         self.start_expert_id = self.ep_rank * self.num_experts_per_partition
@@ -72,6 +72,9 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         self._decode_alignment = capabilities.alignment
         self._decode_tiles = capabilities.tuned_tiles
         self._small_moe_gemv = capabilities.small_gemv
+
+    def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
+        return self.w1, self.w2
 
     @property
     def topk_ids_dtype(self) -> torch.dtype:
@@ -111,6 +114,7 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
             if output is not None:
                 return CombineForwardPayload(fused_expert_output=output)
 
+        load_topk_ids = topk_ids.reshape(-1)
         if self.ep_size > 1:
             local_ids = topk_ids - self.start_expert_id
             local_mask = (local_ids >= 0) & (local_ids < self.num_experts_per_partition)
@@ -168,6 +172,8 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
 
         # GEMM1: hidden_states @ w1.T → intermediate1 [M*top_k, 2*inter]
         intermediate1 = torch.empty(M * top_k, self.N, device=device, dtype=dtype)
+        expert_load = payload.expert_load
+        counts = expert_load.expert_token_counts if expert_load is not None else None
         invoke_fused_moe_kernel(
             hidden_states,
             self.w1,
@@ -181,6 +187,11 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
             top_k=top_k,
             config=config1,
             compute_type=compute_type,
+            expert_token_counts=counts,
+            load_topk_ids=load_topk_ids,
+            load_expert_offset=(
+                0 if payload.expert_ids_are_local else self.start_expert_id
+            ),
         )
 
         # Activation: silu_and_mul(intermediate1) → intermediate2 [M*top_k, inter]
@@ -204,6 +215,9 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
             top_k=1,
             config=config2,
             compute_type=compute_type,
+            expert_token_counts=None,
+            load_topk_ids=None,
+            load_expert_offset=0,
         )
 
         # Sum reduce over top_k: out is [M*top_k, K], reshape and sum

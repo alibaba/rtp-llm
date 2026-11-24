@@ -213,7 +213,9 @@ class BatchedDataRouterEpTest(unittest.TestCase):
         fused_moe = moe_defs.FusedMoe(self.router, experts, EXPERT_NUM)
         empty = torch.zeros((0, TOP_K))
         with mock.patch.object(batched_data_router, "all_reduce", lambda t, _: t):
-            out = fused_moe(torch.zeros((0, HIDDEN)), empty, empty.to(torch.int32))
+            out = fused_moe(
+                torch.zeros((0, HIDDEN)), empty, empty.to(torch.int32), expert_load=None
+            )
         experts.execute.assert_not_called()
         self.assertEqual(out.shape, (0, HIDDEN))
 

@@ -15,7 +15,7 @@ import copy
 import logging
 import os
 from functools import lru_cache
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import torch
 
@@ -49,6 +49,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.topology import 
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync import (
     sync_cuda_graph_warmup_ranks,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 from rtp_llm.resident_weights import resident_init_tensors
 from rtp_llm.utils.model_weight import W
 
@@ -85,7 +86,7 @@ def _mega_intermediate_size(cfg) -> int:
     if intermediate % _MEGA_INTERMEDIATE_ALIGNMENT == 0 or (
         _native_mega_intermediate_supported(
             cfg.ep_size,
-            cfg.n_routed_experts,
+            cfg.physical_expert_num,
             cfg.n_activated_experts,
             cfg.dim,
             intermediate,
@@ -226,6 +227,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         return (
             self._prepared_policy is None
             and self._input_packer.name == "fused"
+            and self.cfg.physical_expert_num == self.cfg.n_routed_experts
             and 1 <= self.cfg.n_activated_experts <= 32
         )
 
@@ -331,7 +333,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         cfg = self.cfg
         return dict(
             group=self._mega_group,
-            num_experts=cfg.n_routed_experts,
+            num_experts=cfg.physical_expert_num,
             num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
             num_topk=cfg.n_activated_experts,
             hidden=cfg.dim,
@@ -515,6 +517,9 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         # int8/int32 buffers with no autograd).
         return l1_w, l1_sf, l2_w, l2_sf
 
+    def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
+        return self._mega_l1_w, self._mega_l1_sf, self._mega_l2_w, self._mega_l2_sf
+
     def _resolve_jit_warmup_token_counts(
         self, num_sms: int, deep_gemm=None
     ) -> list[int]:
@@ -536,7 +541,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         if callable(get_block_m):
             block_m_resolver = lambda tokens: get_block_m(
                 cfg.ep_size,
-                cfg.n_routed_experts,
+                cfg.physical_expert_num,
                 max_tokens_per_rank,
                 tokens,
                 cfg.n_activated_experts,
@@ -544,7 +549,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             )
         return generate_mega_moe_jit_token_counts(
             num_ranks=cfg.ep_size,
-            num_experts=cfg.n_routed_experts,
+            num_experts=cfg.physical_expert_num,
             num_experts_per_rank=cfg.n_local_experts,
             num_topk=cfg.n_activated_experts,
             intermediate_hidden=_mega_intermediate_size(cfg),
@@ -589,7 +594,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             self._activation_clamp,
             self._fast_math,
             cfg.ep_size,
-            cfg.n_routed_experts,
+            cfg.physical_expert_num,
             cfg.n_local_experts,
             cfg.n_activated_experts,
             cfg.dim,
@@ -613,7 +618,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
                 format_token_counts(token_counts),
                 max_tokens_per_rank,
                 cfg.ep_size,
-                cfg.n_routed_experts,
+                cfg.physical_expert_num,
                 cfg.n_activated_experts,
                 cfg.dim,
                 cfg.moe_inter_dim,
@@ -720,19 +725,23 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
                 "MegaMoE buffer sizing."
             )
 
-    def _launch(self, y: torch.Tensor, tokens: int, device: torch.device) -> None:
+    def _launch(self, y: torch.Tensor, tokens: int, device: torch.device,
+                expert_load: Optional[ExpertLoadContext] = None) -> None:
         import deep_gemm
 
         sync_cuda_graph_warmup_ranks(
             f"moe.mega_moe.layer{self.cfg.layer_id}.before_deepgemm",
             device,
         )
-        self._run_kernel(y, tokens)
+        self._run_kernel(y, tokens, expert_load)
 
-    def _run_kernel(self, y: torch.Tensor, tokens: int) -> None:
+    def _run_kernel(self, y: torch.Tensor, tokens: int,
+                    expert_load: Optional[ExpertLoadContext] = None) -> None:
         import deep_gemm
 
         kwargs = {"assume_all_topk_valid": True} if self._fp8_routed else {}
+        if expert_load is not None:
+            kwargs["cumulative_local_expert_recv_stats"] = expert_load.expert_token_counts
         getattr(deep_gemm, self._kernel_name)(
             y,
             (self._mega_l1_w, self._mega_l1_sf),
@@ -745,8 +754,8 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             **kwargs,
         )
 
-    def forward(self, x, weights, indices) -> torch.Tensor:
-        return self._forward_impl(x, weights, indices, inputs_prepacked=False)
+    def forward(self, x, weights, indices, expert_load: Optional[ExpertLoadContext] = None) -> torch.Tensor:
+        return self._forward_impl(x, weights, indices, inputs_prepacked=False, expert_load=expert_load)
 
     def _pack_inputs(self, x, weights, indices, tokens: int) -> None:
         self._input_packer.pack(x, weights, indices, self._mega_buf, tokens)
@@ -754,7 +763,8 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
     def _stage_kernel_inputs(self, tokens: int, *, inputs_prepacked: bool) -> None:
         """Recipe hook for shared-expert activation scales."""
 
-    def _forward_impl(self, x, weights, indices, *, inputs_prepacked: bool):
+    def _forward_impl(self, x, weights, indices, *, inputs_prepacked: bool,
+                      expert_load: Optional[ExpertLoadContext] = None):
         tokens = int(x.size(0))
         self._validate_capacity(tokens)
         if not inputs_prepacked:
@@ -765,7 +775,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         # Zero-token EP ranks must still enter the collective as expert hosts.
         # Skipping a rank loses remote expert contributions and hangs its peers.
         y = self._mega_y[:tokens]
-        self._launch(y, tokens, x.device)
+        self._launch(y, tokens, x.device, expert_load)
         return y
 
     def prepacked_input_views(self, tokens: int):
@@ -791,8 +801,8 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             buf.topk_weights[:tokens],
         )
 
-    def forward_prepacked(self, x: torch.Tensor) -> torch.Tensor:
-        return self._forward_impl(x, None, None, inputs_prepacked=True)
+    def forward_prepacked(self, x: torch.Tensor, expert_load: Optional[ExpertLoadContext] = None) -> torch.Tensor:
+        return self._forward_impl(x, None, None, inputs_prepacked=True, expert_load=expert_load)
 
     def _clone_mega_buffer(self):
         return get_or_create_mega_clone_buffer(
@@ -829,6 +839,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         self,
         x: torch.Tensor,
         gate_payload: ExpertGatePayload,
+        expert_load: Optional[ExpertLoadContext] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Route and pack directly into the MegaMoE symmetric buffer."""
 
@@ -858,5 +869,5 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         )
         self._stage_kernel_inputs(tokens, inputs_prepacked=True)
         y = self._mega_y[:tokens]
-        self._launch(y, tokens, x.device)
+        self._launch(y, tokens, x.device, expert_load)
         return y, buf.topk_weights[:tokens], buf.topk_idx[:tokens]

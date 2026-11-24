@@ -83,6 +83,18 @@ class MoeStrategy(ABC):
 
         router_cls = attrs.get_router_class()
         executor_cls = attrs.get_executor_class()
+        eplb_config = getattr(
+            getattr(config, "model_config", None), "eplb_config", None
+        )
+        if (
+            (
+                config.has_redundant_experts
+                or (eplb_config is not None and eplb_config.enable_eplb())
+            )
+            and executor_cls is not None
+            and executor_cls.get_eplb_weights is FusedMoeExpertExecutor.get_eplb_weights
+        ):
+            return False
 
         # for CudaNoQuantEpLowLatencyStrategy/CudaFp8PerBlockEpLowLatencyStrategy has same router and executor,
         # so we need to check Strategy conditions here (like quant_method)

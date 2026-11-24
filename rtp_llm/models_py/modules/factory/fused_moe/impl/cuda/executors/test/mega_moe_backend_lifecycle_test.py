@@ -80,6 +80,7 @@ class MegaMoeLifecycleTest(unittest.TestCase):
                         **vars(model.cfg),
                         "ep_size": 4,
                         "n_routed_experts": 256,
+                        "physical_expert_num": 256,
                         "n_local_experts": 64,
                         "n_activated_experts": 8,
                         "moe_inter_dim": 2048,
@@ -98,6 +99,7 @@ class MegaMoeLifecycleTest(unittest.TestCase):
             hidden_size=8,
             moe_inter_dim=4,
             n_routed_experts=4,
+            physical_expert_num=4,
             n_activated_experts=2,
             ep_size=1,
             ep_rank=0,
@@ -313,7 +315,9 @@ class MegaMoeLifecycleTest(unittest.TestCase):
                     CHUNK_MODULE + ".synchronize_moe_chunk_tokens",
                     return_value=7,
                 ), patch.object(
-                    model, "forward", side_effect=lambda x, *args: x + 1
+                    model,
+                    "forward",
+                    side_effect=lambda x, *args, expert_load=None: x + 1,
                 ) as forward:
                     result = self.fused_moe(model)(
                         hidden, torch.ones(3, 2), torch.zeros(3, 2, dtype=torch.int64)

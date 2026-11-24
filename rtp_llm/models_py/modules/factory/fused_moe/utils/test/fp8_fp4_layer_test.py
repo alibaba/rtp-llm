@@ -46,11 +46,24 @@ class _FakeFusedMoe:
     def __init__(self, events):
         self.events = events
 
-    def forward_gate_pack(self, *, hidden_states, gate_payload, activation):
+    def forward_gate_pack(
+        self,
+        hidden_states,
+        gate_payload,
+        activation,
+        expert_load,
+    ):
         self.events.append("fused_moe.forward_gate_pack")
         return torch.ones_like(hidden_states)
 
-    def __call__(self, *, hidden_states, topk_weights, topk_ids, activation):
+    def __call__(
+        self,
+        hidden_states,
+        topk_weights,
+        topk_ids,
+        activation,
+        expert_load,
+    ):
         self.events.append("fused_moe.forward")
         return torch.ones_like(hidden_states)
 
@@ -73,10 +86,23 @@ class _Fp32Executor(Fp8Fp4ExecutorBase):
     def setup_weights(self, weights):
         pass
 
-    def forward(self, x, topk_weights, topk_ids):
+    def forward(
+        self,
+        x,
+        topk_weights,
+        topk_ids,
+        expert_load,
+    ):
+        self.last_expert_load = expert_load
         return torch.ones_like(x, dtype=torch.float32)
 
-    def forward_gate_pack(self, x, gate_payload):
+    def forward_gate_pack(
+        self,
+        x,
+        gate_payload,
+        expert_load,
+    ):
+        self.last_expert_load = expert_load
         tokens = x.size(0)
         return (
             torch.ones_like(x, dtype=torch.float32),
@@ -118,7 +144,7 @@ class Fp8Fp4MoeLayerSchedulingTest(unittest.TestCase):
             "combine_routed_and_shared",
             side_effect=self._combine(events),
         ):
-            output = layer(x, None)
+            output = layer(x, None, expert_load=None)
 
         self.assertEqual(
             events,
@@ -143,7 +169,7 @@ class Fp8Fp4MoeLayerSchedulingTest(unittest.TestCase):
             "combine_routed_and_shared",
             side_effect=self._combine(events),
         ):
-            layer(x, None)
+            layer(x, None, expert_load=None)
 
         self.assertEqual(
             events,
@@ -162,7 +188,7 @@ class Fp8Fp4MoeLayerSchedulingTest(unittest.TestCase):
         layer = self._layer(events, gate_pack_enabled=True, with_shared=False)
         x = torch.ones((2, 4), dtype=torch.bfloat16)
 
-        layer(x, None)
+        layer(x, None, expert_load=None)
 
         self.assertEqual(
             events,
@@ -180,7 +206,8 @@ class Fp8Fp4ExecutorOutputDtypeTest(unittest.TestCase):
         torch.nn.Module.__init__(self.executor)
         self.x = torch.ones((2, 4), dtype=torch.bfloat16)
 
-    def _execute(self, payload):
+    def _execute(self, payload, expert_load):
+        payload.expert_load = expert_load
         return self.executor.execute(
             payload,
             activation="silu",
@@ -190,6 +217,31 @@ class Fp8Fp4ExecutorOutputDtypeTest(unittest.TestCase):
             extra_expert_args=None,
         ).fused_expert_output
 
+    def test_backend_can_ignore_optional_expert_counts(self):
+        from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
+
+        for gate_pack in (False, True):
+            with self.subTest(gate_pack=gate_pack):
+                context = ExpertLoadContext(torch.zeros(4, dtype=torch.int32))
+                payload = ExpertForwardPayload(
+                    expert_x=self.x,
+                    expert_topk_weights=torch.ones((2, 1), dtype=torch.float32),
+                    expert_topk_ids=torch.zeros((2, 1), dtype=torch.long),
+                    gate_payload=(
+                        ExpertGatePayload(
+                            scores=torch.ones((2, 1), dtype=torch.float32),
+                            topk=1,
+                            score_func="sigmoid",
+                            route_scale=1.0,
+                        )
+                        if gate_pack
+                        else None
+                    ),
+                )
+                torch.testing.assert_close(self._execute(payload, context), self.x)
+                self.assertIs(self.executor.last_expert_load, context)
+                self.assertEqual(context.expert_token_counts.tolist(), [0] * 4)
+
     def test_ordinary_output_restores_router_input_dtype(self):
         output = self._execute(
             ExpertForwardPayload(
@@ -197,7 +249,8 @@ class Fp8Fp4ExecutorOutputDtypeTest(unittest.TestCase):
                 expert_x_origin_dtype=self.x.dtype,
                 expert_topk_weights=torch.ones((2, 1), dtype=torch.float32),
                 expert_topk_ids=torch.zeros((2, 1), dtype=torch.long),
-            )
+            ),
+            None,
         )
 
         self.assertEqual(output.dtype, torch.bfloat16)
@@ -214,7 +267,8 @@ class Fp8Fp4ExecutorOutputDtypeTest(unittest.TestCase):
                     score_func="sigmoid",
                     route_scale=1.0,
                 ),
-            )
+            ),
+            None,
         )
 
         self.assertEqual(output.dtype, torch.bfloat16)

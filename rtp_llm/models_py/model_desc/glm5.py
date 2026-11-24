@@ -39,6 +39,7 @@ from rtp_llm.models_py.modules.hybrid.glm5_cmp import (
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig, RoleType
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext, expert_load_for_layer
 from rtp_llm.utils.model_weight import W
 
 try:
@@ -85,6 +86,7 @@ class Glm5MoeLayer(GenericMoeLayer):
             max_generate_batch_size,
             enable_cuda_graph,
             hw_kernel_config,
+            layer_id=layer_idx,
         )
 
     def _create_fused_moe(
@@ -265,6 +267,7 @@ class Glm5MoeDecoderLayer(nn.Module):
                 max_generate_batch_size,
                 enable_cuda_graph=enable_cuda_graph,
                 hw_kernel_config=hw_kernel_config,
+                layer_id=layer_idx,
             )
 
         # 使用 RMSResNorm 来 fuse residual add 和 layernorm
@@ -382,6 +385,7 @@ class Glm5MoeDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
+        expert_load: Optional[ExpertLoadContext] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run residual add, RMSNorm, then the dense MLP or MoE."""
         # Dense MLP: fuse add + RMSNorm + FP8 quant; up_proj consumes FP8 directly.
@@ -405,13 +409,16 @@ class Glm5MoeDecoderLayer(nn.Module):
                 group_size=128,
                 scale_ue8m0=self.mlp.shared_expert.up_proj.scale_ue8m0,
             )
-            hidden_states = self.mlp(bf16_hs, x_fp8=fp8_hs, x_scale=scale)
+            hidden_states = self.mlp(bf16_hs, x_fp8=fp8_hs, x_scale=scale, expert_load=expert_load)
         # Fallback: use the standard norm path and let MLP/MoE prepare its inputs.
         else:
             hidden_states, residual = self.post_attention_layernorm(
                 hidden_states, residual
             )
-            hidden_states = self.mlp(hidden_states)
+            if isinstance(self.mlp, GenericMoeLayer):
+                hidden_states = self.mlp(hidden_states, expert_load=expert_load)
+            else:
+                hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
     def _forward_cmp(
@@ -496,8 +503,12 @@ class Glm5MoeDecoderLayer(nn.Module):
         prev_topk_indices: Optional[torch.Tensor] = None,
         enable_cmp: bool = False,
         force_reuse_topk_indices: bool = False,
+        expert_load: Optional[ExpertLoadContext] = None,
     ) -> DecodeLayerOutput:
-        if enable_cmp:
+        # CMP's prepacked route has neither the EPLB mapping nor the monitor
+        # write contract. Use the regular MoE path when either is active.
+        eplb_active = isinstance(self.mlp, GenericMoeLayer) and self.mlp.fused_moe.eplb_layer is not None
+        if enable_cmp and expert_load is None and not eplb_active:
             return self._forward_cmp(
                 hidden_states,
                 residual,
@@ -540,7 +551,7 @@ class Glm5MoeDecoderLayer(nn.Module):
                 **quantized_input,
             )
 
-        hidden_states, residual = self._fwd_mlp_or_moe(hidden_states, residual)
+        hidden_states, residual = self._fwd_mlp_or_moe(hidden_states, residual, expert_load=expert_load)
 
         return DecodeLayerOutput(hidden_states, residual, topk_indices)
 
@@ -618,6 +629,7 @@ class Glm5ModelBase(CpMtpHiddenHandoff, GenericMoeModel):
         *,
         force_reuse_topk_indices: bool = False,
         capture: Optional[CaptureContext] = None,
+        expert_token_counts: Optional[torch.Tensor] = None,
     ) -> DecodeLayerOutput:
         default_fmha = (
             fmha_impl["default"] if isinstance(fmha_impl, Mapping) else fmha_impl
@@ -641,7 +653,7 @@ class Glm5ModelBase(CpMtpHiddenHandoff, GenericMoeModel):
             is_decode_forward=is_decode,
             synchronized_tokens=forward_plan[0] if forward_plan is not None else None,
         ):
-            enable_cmp = should_enable_glm5_cmp(
+            enable_cmp = expert_token_counts is None and should_enable_glm5_cmp(
                 self.layers,
                 self.layer_num,
                 hidden_states,
@@ -667,6 +679,7 @@ class Glm5ModelBase(CpMtpHiddenHandoff, GenericMoeModel):
                     kv_cache=caches,
                     prev_topk_indices=prev_topk_indices,
                     enable_cmp=enable_cmp,
+                    expert_load=expert_load_for_layer(expert_token_counts, idx),
                     force_reuse_topk_indices=force_reuse_topk_indices,
                 )
                 hidden_states, residual = result.hidden_states, result.residual
@@ -724,7 +737,10 @@ class Glm5MoeModel(Glm5ModelBase):
         }:
             raise RuntimeError("GLM5 requires default and indexer_kv attention routes")
         capture = self.capture_context(inputs.capture_hidden_states)
-        result = self._forward_decoder_layers(hidden_states, fmha_impl, capture=capture)
+        result = self._forward_decoder_layers(
+            hidden_states, fmha_impl, capture=capture,
+            expert_token_counts=inputs.expert_token_counts,
+        )
         return capture.finalize(result.hidden_states, result.residual)
 
 

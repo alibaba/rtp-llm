@@ -92,7 +92,11 @@ class TestMegaMoEInputPacker(unittest.TestCase):
             torch.nn.Module.__init__(executor)
             executor._input_packer = FusedMegaMoEInputPacker()
             for topk, supported in ((0, False), (1, True), (32, True), (33, False)):
-                executor.cfg = SimpleNamespace(n_activated_experts=topk)
+                executor.cfg = SimpleNamespace(
+                    n_activated_experts=topk,
+                    n_routed_experts=64,
+                    physical_expert_num=64,
+                )
                 with self.subTest(executor=executor_cls, topk=topk):
                     self.assertEqual(executor.supports_gate_pack, supported)
 

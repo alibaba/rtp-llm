@@ -182,6 +182,7 @@ class FusedMoeBatchedTest(TestCase):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation="SiGLU",
+            expert_load=None,
         )
 
         # Compute reference output using torch_sparse_block_forward

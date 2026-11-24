@@ -20,6 +20,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.shared_expert imp
     combine_routed_and_shared,
     get_shared_expert_executor,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 from rtp_llm.models_py.utils.profiler import record_function_range
 from rtp_llm.resident_weights import resident_init_scalar
 from rtp_llm.utils.model_weight import W
@@ -61,10 +62,6 @@ class Fp8Fp4MoeRuntimeConfig:
         shared_fp8_block_size: int = FP8_BLOCK,
         is_decode_role: bool = False,
     ) -> None:
-        if expert_num % max(ep_size, 1) != 0:
-            raise ValueError(
-                f"expert_num={expert_num} must be divisible by ep_size={ep_size}"
-            )
         self.layer_id = int(layer_id)
         self.hidden_size = int(hidden_size)
         self.dim = self.hidden_size
@@ -270,6 +267,7 @@ class Fp8Fp4MoeLayer(nn.Module):
         self,
         x: torch.Tensor,
         input_ids: Optional[torch.Tensor],
+        expert_load: Optional[ExpertLoadContext],
         observer: Optional[Callable[[str, torch.Tensor], None]] = None,
         out: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -328,6 +326,7 @@ class Fp8Fp4MoeLayer(nn.Module):
                     hidden_states=x,
                     gate_payload=gate_payload,
                     activation="silu",
+                    expert_load=expert_load,
                 )
             assert topk_weights is not None and topk_ids is not None
             return self.fused_moe(
@@ -335,6 +334,7 @@ class Fp8Fp4MoeLayer(nn.Module):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 activation="silu",
+                expert_load=expert_load,
             )
 
         if self._shared_executor is None:

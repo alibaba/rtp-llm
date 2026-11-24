@@ -61,3 +61,9 @@ dsv4_py_test(
     ],
     visibility = ["//visibility:public"],
 )
+
+py_test(
+    name = "test_eplb_integration",
+    srcs = ["test_eplb_integration.py"],
+    deps = ["//rtp_llm:testlib"],
+)

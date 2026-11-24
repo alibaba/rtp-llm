@@ -130,6 +130,9 @@ class DraftModelLoadingTest(unittest.TestCase):
 
                 model_cls._apply_kv_cache_config.side_effect = check_draft_role
                 model_cls._post_build_model_config.side_effect = check_draft_role
+                target_config = SimpleNamespace(
+                    num_layers=7, max_seq_len=128, eplb_config=SimpleNamespace()
+                )
                 with patch.object(
                     ModelFactory, "get_model_cls", return_value=model_cls
                 ), patch(
@@ -140,11 +143,13 @@ class DraftModelLoadingTest(unittest.TestCase):
                 ):
                     result = ModelFactory.create_propose_model_config(
                         engine,
-                        SimpleNamespace(num_layers=7, max_seq_len=128),
+                        target_config,
                         ModelArgs(),
                     )
 
                 self.assertIs(result, draft)
+                if sp_type == SpeculativeType.DSPARK:
+                    self.assertIs(result.eplb_config, target_config.eplb_config)
                 check_draft_role(result)
                 build_config.assert_called_once()
                 model_cls._apply_kv_cache_config.assert_called_once()

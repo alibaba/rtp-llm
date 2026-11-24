@@ -19,6 +19,7 @@ class SmallMoeGemvTestFixture:
         cls.module = TritonFusedMoeExecutor.__new__(TritonFusedMoeExecutor)
         for name, value in dict(
             ep_size=1,
+            start_expert_id=0,
             E=512,
             N=160,
             K=2560,

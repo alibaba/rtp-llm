@@ -531,6 +531,9 @@ class ModelFactory:
             f"ckpt_path: {propose_model_config.ckpt_path}, quantization: {propose_model_config.quantization}"
         )
 
+        if sp_config.type == SpeculativeType.DSPARK:
+            propose_model_config.eplb_config = model_config.eplb_config
+
         # Build propose model config (no finalize_scheduler_config for propose model)
         build_model_config(
             model_config=propose_model_config,

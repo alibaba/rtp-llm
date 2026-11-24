@@ -57,6 +57,7 @@ class CommonMegaMoeExecutionTest(unittest.TestCase):
             dim=128,
             moe_inter_dim=16,
             n_routed_experts=4,
+            physical_expert_num=4,
             n_local_experts=2,
             n_activated_experts=2,
             ep_size=2,

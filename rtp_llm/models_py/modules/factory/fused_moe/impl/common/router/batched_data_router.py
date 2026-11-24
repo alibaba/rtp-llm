@@ -58,7 +58,7 @@ class BatchedDataRouter(FusedMoeDataRouter):
         super().__init__(config, quant_config)
 
         self.ep_rank = config.ep_rank
-        self.num_local_experts = config.expert_num // config.ep_size
+        self.num_local_experts = config.physical_expert_num // config.ep_size
 
     def prepare(
         self,

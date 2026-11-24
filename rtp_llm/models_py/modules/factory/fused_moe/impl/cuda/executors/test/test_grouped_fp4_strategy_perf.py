@@ -153,19 +153,19 @@ class GroupedFP4StrategyPerfTest(unittest.TestCase):
 
         x, weights, indices = _make_inputs(tokens, D, E, topk)
         with torch.inference_mode():
-            eager_y = grouped(x, weights, indices)
+            eager_y = grouped(x, weights, indices, expert_load=None)
         torch.cuda.synchronize()
 
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream), torch.inference_mode():
             for _ in range(3):
-                graph_y = grouped(x, weights, indices)
+                graph_y = grouped(x, weights, indices, expert_load=None)
         torch.cuda.current_stream().wait_stream(stream)
 
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph), torch.inference_mode():
-            graph_y = grouped(x, weights, indices)
+            graph_y = grouped(x, weights, indices, expert_load=None)
 
         torch.manual_seed(20260517)
         x.copy_(torch.randn_like(x) * 0.2)
@@ -173,7 +173,7 @@ class GroupedFP4StrategyPerfTest(unittest.TestCase):
         weights.copy_(new_weights / new_weights.sum(dim=-1, keepdim=True))
         indices.copy_(torch.flip(indices, dims=(1,)))
         with torch.inference_mode():
-            replay_eager_y = grouped(x, weights, indices).clone()
+            replay_eager_y = grouped(x, weights, indices, expert_load=None).clone()
         graph.replay()
         torch.cuda.synchronize()
 
@@ -199,8 +199,8 @@ class GroupedFP4StrategyPerfTest(unittest.TestCase):
         x, weights, indices = _make_inputs(tokens, D, E, topk)
 
         with torch.inference_mode():
-            local_eager = local(x, weights, indices).clone()
-            grouped_eager = grouped(x, weights, indices).clone()
+            local_eager = local(x, weights, indices, expert_load=None).clone()
+            grouped_eager = grouped(x, weights, indices, expert_load=None).clone()
         self.assertLess(_relative_mean_error(local_eager, grouped_eager), 0.05)
 
         def capture(executor):
@@ -208,11 +208,11 @@ class GroupedFP4StrategyPerfTest(unittest.TestCase):
             stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(stream), torch.inference_mode():
                 for _ in range(3):
-                    graph_out = executor(x, weights, indices)
+                    graph_out = executor(x, weights, indices, expert_load=None)
             torch.cuda.current_stream().wait_stream(stream)
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph), torch.inference_mode():
-                graph_out = executor(x, weights, indices)
+                graph_out = executor(x, weights, indices, expert_load=None)
             return graph, graph_out
 
         local_graph, local_graph_out = capture(local)
@@ -264,8 +264,8 @@ class GroupedFP4StrategyPerfTest(unittest.TestCase):
         x_check, _, indices_check = _make_inputs(256, D, E, topk)
         weights_check = torch.ones(256, topk, dtype=torch.float32, device="cuda")
         with torch.inference_mode():
-            local_y = local(x_check, weights_check, indices_check)
-            grouped_y = grouped(x_check, weights_check, indices_check)
+            local_y = local(x_check, weights_check, indices_check, expert_load=None)
+            grouped_y = grouped(x_check, weights_check, indices_check, expert_load=None)
         torch.cuda.synchronize()
 
         self.assertEqual(tuple(local_y.shape), (256, D))
@@ -281,15 +281,15 @@ class GroupedFP4StrategyPerfTest(unittest.TestCase):
 
         x, weights, indices = _make_inputs(tokens, D, E, topk)
         with torch.inference_mode():
-            perf_y = grouped(x, weights, indices)
+            perf_y = grouped(x, weights, indices, expert_load=None)
         torch.cuda.synchronize()
         self.assertEqual(tuple(perf_y.shape), (tokens, D))
         self.assertTrue(torch.isfinite(perf_y).all().item())
 
         with torch.inference_mode():
             local_ms, grouped_ms, paired_ratio = _bench_pair(
-                lambda: local(x, weights, indices),
-                lambda: grouped(x, weights, indices),
+                lambda: local(x, weights, indices, expert_load=None),
+                lambda: grouped(x, weights, indices, expert_load=None),
             )
 
         print(

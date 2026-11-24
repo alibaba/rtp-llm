@@ -62,6 +62,9 @@ class MoeAlignTritonTest(unittest.TestCase):
                             topk,
                             config,
                             tl.bfloat16,
+                            expert_token_counts=None,
+                            load_topk_ids=None,
+                            load_expert_offset=0,
                         )
 
                     run(old_config, expected)

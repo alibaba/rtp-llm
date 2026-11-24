@@ -19,7 +19,7 @@ from rtp_llm.config.py_config_modules import (
     ServerConfig,
 )
 from rtp_llm.distribute.worker_info import WorkerInfo
-from rtp_llm.models_py.distributed.rank_layout import Coord, RankLayout
+from rtp_llm.models_py.distributed.rank_layout import RankLayout
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
 
@@ -116,43 +116,6 @@ def get_dp_rpc_addresses(py_env_configs: PyEnvConfigs) -> list[str]:
         py_env_configs.server_config, py_env_configs.distribute_config, pc
     )
     return get_dp_addrs_from_world_info(world_info, pc)
-
-
-def get_eplb_stage_root_addresses(py_env_configs: PyEnvConfigs) -> list[str]:
-    """Resolve DP=0, TP=0 roots for PP EPLB control, in stage order."""
-    pc = py_env_configs.parallelism_config
-    layout = RankLayout.from_parallelism_config(pc)
-    root_ranks = [
-        layout.world_rank_of(Coord(pp=stage)) for stage in range(layout.pp_size)
-    ]
-    world_info = get_world_info(
-        py_env_configs.server_config, py_env_configs.distribute_config, pc
-    )
-    addresses = {
-        member.world_rank: f"{member.ip}:{member.rpc_server_port}"
-        for member in world_info.members
-        if member.world_rank in root_ranks
-    }
-    missing = [rank for rank in root_ranks if rank not in addresses]
-    if missing:
-        master_ip, master_port = get_master(py_env_configs.distribute_config, pc)
-        master_port = int(master_port or py_env_configs.server_config.start_port)
-        store = TCPStore(
-            host_name=master_ip,
-            port=master_port - 1,
-            is_master=False,
-            wait_for_workers=False,
-            timeout=timedelta(seconds=3),
-        )
-        for rank in missing:
-            address = store.get(
-                DistributedServer.REGISTRY_RANK_ADDRESS_KEY + str(rank)
-            ).decode()
-            ip, server_port = split_ip_port(address)
-            # The registered server port already includes the local-rank offset;
-            # its RPC port is the next port in WorkerInfo's layout.
-            addresses[rank] = f"{ip}:{server_port + 1}"
-    return [addresses[rank] for rank in root_ranks]
 
 
 def get_local_world_info(
