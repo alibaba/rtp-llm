@@ -192,6 +192,7 @@ class DeepseekV4ToolChoiceConstraintTest(TestCase):
 
         tag = json.loads(config.structural_tag)
         invoke_info = DeepSeekV4Detector().structure_info()("search")
+        self.assertEqual(tag["type"], "structural_tag")
         self.assertEqual(
             [item["begin"] for item in tag["format"]["content"]["tags"]],
             [invoke_info.begin],
@@ -210,6 +211,7 @@ class DeepseekV4ToolChoiceConstraintTest(TestCase):
 
         tag = json.loads(config.structural_tag)
         get_info = DeepSeekV4Detector().structure_info()
+        self.assertEqual(tag["type"], "structural_tag")
         self.assertEqual(
             [item["begin"] for item in tag["format"]["content"]["tags"]],
             [get_info("get_weather").begin, get_info("search").begin],

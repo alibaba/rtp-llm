@@ -873,6 +873,7 @@ class DeepSeekV4Detector(BaseFormatDetector):
             )
 
         return {
+            "type": "structural_tag",
             "format": {
                 "type": "tag",
                 "begin": f"{self.bot_token}\n",
@@ -884,5 +885,5 @@ class DeepSeekV4Detector(BaseFormatDetector):
                     "stop_after_first": stop_after_first,
                 },
                 "end": f"\n{self.eot_token}",
-            }
+            },
         }

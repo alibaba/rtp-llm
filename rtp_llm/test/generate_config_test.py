@@ -369,6 +369,7 @@ class OpenaiGenerateConfigTest(TestCase):
         self,
         request: ChatCompletionRequest,
         generate_env_config: Optional[GenerateEnvConfig] = None,
+        renderer: Optional[CustomChatRenderer] = None,
     ):
         model_config = ModelConfig()
         model_config.generate_env_config = generate_env_config or GenerateEnvConfig()
@@ -386,7 +387,7 @@ class OpenaiGenerateConfigTest(TestCase):
             tokenizer=self.tokenizer,
             backend_rpc_server_visitor=None,
         )
-        return openai_endpoint._extract_generation_config(request)
+        return openai_endpoint._extract_generation_config(request, renderer=renderer)
 
     def _assert_reasoning_envelope_wraps_json_object(self, config: GenerateConfig):
         """in_think_mode moves the final constraint inside the reasoning tag."""
@@ -742,6 +743,106 @@ class OpenaiGenerateConfigTest(TestCase):
                 ),
                 GenerateConfig(),
             )
+
+    def test_deepseekv4_forced_tool_choice_compiles_with_and_without_thinking(self):
+        from rtp_llm.openai.renderers.deepseekv4_renderer import DeepseekV4Renderer
+
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 1
+        generate_env_config.think_end_token_id = 102
+
+        dsv4_renderer = DeepseekV4Renderer.__new__(DeepseekV4Renderer)
+        dsv4_renderer.tokenizer = self.tokenizer
+        dsv4_renderer.generate_env_config = generate_env_config
+        dsv4_renderer.default_thinking_mode = ThinkingMode.ENABLED
+
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get current weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "search",
+                    "description": "Search docs",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"q": {"type": "string"}},
+                    },
+                },
+            },
+        ]
+
+        # 1. Thinking mode enabled + forced tool_choice ("required" and named)
+        for tool_choice, expected_stop_after_first in (
+            ("required", False),
+            ({"type": "function", "function": {"name": "search"}}, True),
+        ):
+            with self.subTest(thinking=True, tool_choice=tool_choice):
+                request = ChatCompletionRequest(
+                    messages=[],
+                    tools=tools,
+                    tool_choice=tool_choice,
+                    enable_thinking=True,
+                )
+                config = self._extract_openai_generation_config(
+                    request,
+                    generate_env_config=generate_env_config,
+                    renderer=dsv4_renderer,
+                )
+                validate_engine_ready(config)
+                self.assertEqual(config.structural_tag["type"], "structural_tag")
+                elements = config.structural_tag["format"]["elements"]
+                self.assertEqual(len(elements), 2)
+                self.assertEqual(elements[0]["type"], "tag")
+                self.assertEqual(elements[1]["type"], "tag")
+                self.assertEqual(elements[1]["begin"], "<｜DSML｜tool_calls>\n")
+                self.assertIs(
+                    elements[1]["content"]["stop_after_first"],
+                    expected_stop_after_first,
+                )
+
+        # 2. Thinking mode disabled + forced tool_choice
+        request_no_think = ChatCompletionRequest(
+            messages=[],
+            tools=tools,
+            tool_choice="required",
+            enable_thinking=False,
+        )
+        config_no_think = self._extract_openai_generation_config(
+            request_no_think,
+            generate_env_config=generate_env_config,
+            renderer=dsv4_renderer,
+        )
+        validate_engine_ready(config_no_think)
+        self.assertEqual(config_no_think.structural_tag["type"], "structural_tag")
+        self.assertEqual(
+            config_no_think.structural_tag["format"]["begin"], "<｜DSML｜tool_calls>\n"
+        )
+
+        # 3. Conflict with explicit response_format still raises INVALID_PARAMS
+        request_conflict = ChatCompletionRequest(
+            messages=[],
+            tools=tools,
+            tool_choice="required",
+            response_format={"type": "json_object"},
+        )
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self._extract_openai_generation_config(
+                request_conflict,
+                generate_env_config=generate_env_config,
+                renderer=dsv4_renderer,
+            )
+        self.assertEqual(ctx.exception.exception_type, ExceptionType.INVALID_PARAMS)
+        self.assertIn("conflicts with existing grammar", ctx.exception.message)
 
     def test_text_response_format_is_finalized_before_generation(self):
         config = self._generate_config_with_stop_word(response_format={"type": "text"})
