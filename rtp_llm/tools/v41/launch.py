@@ -18,7 +18,9 @@ from rtp_llm.config.v41_runtime import (
     MEGAMOE_DSPARK_ASYNC_FLAGS,
     PPU_STRATEGY,
     V41RuntimeConfig,
+    ZERO_OVERHEAD_ENV,
     env_bool,
+    zero_overhead_flags,
 )
 from rtp_llm.tools.v41.preflight import collect_report
 
@@ -384,7 +386,13 @@ def preset_env(
             },
             separators=(",", ":"),
         )
-    cross_round_overlap = env_bool(env, DSPARK_CROSS_ROUND_OVERLAP_ENV)
+    scheduler_flags = zero_overhead_flags(
+        env, role=role.upper(), speculative="DSPARK" if dspark_gamma else "NONE",
+        graph=shared_decode_graph or shared_grouped_graph,
+        single_host=world_size == int(env["LOCAL_WORLD_SIZE"]),
+        gamma=dspark_gamma, verify_mode=dspark_verify_mode, confidence=dspark_confidence,
+    )
+    cross_round_overlap = env_bool({**env, **scheduler_flags}, DSPARK_CROSS_ROUND_OVERLAP_ENV)
     if DSPARK_CROSS_ROUND_OVERLAP_ENV in env:
         env[DSPARK_CROSS_ROUND_OVERLAP_ENV] = str(int(cross_round_overlap))
     if shared_decode_graph and shared_grouped_graph:
@@ -421,6 +429,8 @@ def preset_env(
             if overlap:
                 env[DSPARK_OVERLAP_ENV] = "1"
                 env.update(DSPARK_OVERLAP_FLAGS)
+                if world_size == 8 and qualified_overlap:
+                    env.setdefault(DSPARK_CROSS_ROUND_OVERLAP_ENV, "1")
                 for key, value in DSPARK_DECODE_DEFAULTS.items():
                     env.setdefault(key, value)
                 if eplb_mode == "NONE":
@@ -449,12 +459,18 @@ def preset_env(
             and "CONCURRENCY_LIMIT" in env
             and int(env["DECODE_CAPTURE_CONFIG"].split(",")[-1]) < positive_integer(env["CONCURRENCY_LIMIT"])):
         raise ValueError("capture batches must cover the per-DP concurrency limit")
+    env.update(scheduler_flags)
     V41RuntimeConfig.from_env(env)
     return env
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog="The MegaMoE Decode Graph with dense DSpARK gamma=3 defaults to the zero-overhead "
+               "scheduler. Only DP8/EP8 has been validated on PPU. "
+               "Set RTP_V41_PPU_ZERO_OVERHEAD_SCHEDULER=0 to disable it.",
+    )
     parser.add_argument("role", choices=("prefill", "decode"))
     parser.add_argument("--checkpoint-path", type=Path, required=True)
     parser.add_argument(
@@ -621,7 +637,7 @@ def main():
                              "RTP_V41_PPU_QUANT_MODE", "RTP_V41_PPU_WEIGHT_AUDIT_DIR",
                              "ENABLE_DEVICE_CACHE", "ENABLE_MEMORY_CACHE", "MEMORY_CACHE_SIZE_MB",
                              "FRONTEND_SERVER_COUNT",
-                             DSPARK_CROSS_ROUND_OVERLAP_ENV)
+                             DSPARK_OVERLAP_ENV, DSPARK_CROSS_ROUND_OVERLAP_ENV, ZERO_OVERHEAD_ENV)
                 if name in env
             },
             **{**options, "fake_balance_expert": env_bool(env, "FAKE_BALANCE_EXPERT")},

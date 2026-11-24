@@ -107,6 +107,7 @@ public:
         (void)keep_graph;
     }
 #endif
+    bool                            supports_guarded_proposal_ = false;
     at::cuda::CUDAGraph             graph_;
     CaptureMemoryHold               mem_hold_;
     rtp_llm::CudaGraphPrepareReplay prepare_replay_;

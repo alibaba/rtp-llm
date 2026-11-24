@@ -83,6 +83,7 @@ struct GraphParams {
     // Shared by eager forwards and every graph bucket; owned by the monitor.
     torch::Tensor expert_token_counts;
     DSparkProposalGraphSampler dspark_proposal_sampler;
+    bool guard_dspark_proposal = false;
 };
 
 class GraphBase {

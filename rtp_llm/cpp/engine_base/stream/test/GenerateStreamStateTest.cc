@@ -220,6 +220,37 @@ TEST_F(GenerateStreamStateTest, testMtpSnapshotJoinsBookkeepingAtCapacityBoundar
     EXPECT_EQ(stream->streamCacheResource().singleBatchNeedBlocks(5, 0), 0);
 }
 
+#if USE_PPU
+TEST_F(GenerateStreamStateTest, testLookaheadReservesNextPagesWithoutAdvancingTheRequest) {
+    auto stream = createStream({1, 2, 3});
+    stream->setReserveStep(0);
+    stream->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+    stream->setIsContextStream(false);
+    const auto options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto physical = torch::ones({1, 1, 2}, options);
+    auto kernel = physical.clone();
+    EXPECT_FALSE(stream->tryGrowLookaheadCacheRow(2, physical, kernel));
+    GenerateStream::MtpAsyncDeviceState state;
+    state.allow_async_cache_reservation = true;
+    state.batch_cache_snapshot_upload = true;
+    state.next_kv_cache_block_id_gpu = physical;
+    state.next_kv_cache_kernel_block_id_gpu = kernel;
+    const auto epoch = stream->setMtpAsyncDeviceState(state);
+    ASSERT_TRUE(stream->tryGrowLookaheadCacheRow(2, physical, kernel));
+    EXPECT_EQ(stream->seqLength(), 3);
+    EXPECT_EQ(stream->getMtpAsyncDeviceState().epoch, epoch);
+    EXPECT_EQ(state.next_kv_cache_block_id_gpu.size(2), 2);
+    EXPECT_EQ(physical.size(2), 3);
+    EXPECT_EQ(kernel.size(2), 3);
+    const auto grown = stream->getMtpAsyncDeviceState();
+    ASSERT_FALSE(grown.cache_snapshot_upload_pending);
+    EXPECT_TRUE(torch::equal(physical.cpu(), grown.cache_snapshot_host_buffers.at(0)));
+    EXPECT_TRUE(torch::equal(kernel.cpu(), grown.cache_snapshot_host_buffers.at(1)));
+    EXPECT_FALSE(stream->tryGrowLookaheadCacheRow(2, physical, kernel));
+}
+#endif
+
 TEST_F(GenerateStreamStateTest, testMtpUpperBoundReservationKeepsEpochAndDeviceMetadata) {
     auto stream = createStream({1, 2, 3});
     stream->setReserveStep(0);

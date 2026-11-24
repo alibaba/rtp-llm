@@ -1293,6 +1293,10 @@ void MtpBatchStreamProcessor::overlayMtpCacheSnapshots(const StreamGroups& strea
             }
         }
         torch::Tensor physical, kernel;
+        static const bool zero_overhead = [] {
+            const char* value = std::getenv("RTP_V41_PPU_ZERO_OVERHEAD_SCHEDULER");
+            return value && std::strcmp(value, "1") == 0;
+        }();
         host_holder.hold(physical_host);
         host_holder.hold(kernel_host);
         if (tryMtpGatherPageSnapshots(physical_host,
@@ -1301,7 +1305,12 @@ void MtpBatchStreamProcessor::overlayMtpCacheSnapshots(const StreamGroups& strea
                                       kernel_rows,
                                       physical,
                                       kernel,
-                                      at::cuda::getCurrentCUDAStream().stream())) {
+                                      at::cuda::getCurrentCUDAStream().stream(),
+                                      is_dspark_ && zero_overhead)) {
+            if (!physical_rows.empty() && physical_rows.front().defined()
+                && physical.data_ptr() == physical_rows.front().data_ptr()) {
+                RTP_LLM_PROFILE_SCOPE("mtp.reuse_ordered_page_snapshots");
+            }
             model_input.kv_cache_block_id        = std::move(physical);
             model_input.kv_cache_kernel_block_id = std::move(kernel);
             return;
@@ -2251,6 +2260,39 @@ MtpBatchStreamProcessor::DSparkRoundState MtpBatchStreamProcessor::buildDSparkRo
     return result;
 }
 
+MtpBatchStreamProcessor::DSparkRoundState MtpBatchStreamProcessor::prepareNextDSparkRound(
+    const DSparkRoundState& round,
+    const torch::Tensor&    accepted_lengths,
+    const torch::Tensor&    accepted_tokens,
+    const torch::Tensor&    verify_positions) const {
+    DSparkRoundState next;
+#if USING_CUDA
+    if (propose_step_ == 3) {
+        auto tensors = tryMtpDSparkNextRound(round.committed_ends,
+                                            accepted_lengths,
+                                            accepted_tokens,
+                                            verify_positions,
+                                            round.engram_windows,
+                                            static_cast<int32_t>(dsparkQueryWidth()),
+                                            dspark_mask_token_id_,
+                                            at::cuda::getCurrentCUDAStream().stream());
+        next.anchors            = std::move(tensors.anchors);
+        next.committed_ends     = std::move(tensors.committed_ends);
+        next.sequence_lengths   = std::move(tensors.sequence_lengths);
+        next.proposal_tokens    = std::move(tensors.proposal_tokens);
+        next.position_bases     = std::move(tensors.position_bases);
+        next.proposal_positions = std::move(tensors.proposal_positions);
+        next.engram_windows     = std::move(tensors.engram_windows);
+    }
+#else
+    (void)round;
+    (void)accepted_lengths;
+    (void)accepted_tokens;
+    (void)verify_positions;
+#endif
+    return next;
+}
+
 void MtpBatchStreamProcessor::prepareDSparkProposeModelInput(const DSparkRoundState& round_state,
                                                              GptModelInputs&         model_input,
                                                              TensorHolder&           host_holder) {
@@ -2269,7 +2311,9 @@ void MtpBatchStreamProcessor::prepareDSparkProposeModelInput(const DSparkRoundSt
         buildDSparkProposeInput(model_input, round_state.anchors, round_state.committed_ends, host_holder);
     }
     model_input.engram_token_windows = torch::Tensor();
-    model_input.combo_position_ids   = expandDSparkPositionIds(round_state.position_bases, dsparkQueryWidth());
+    model_input.combo_position_ids   = round_state.proposal_positions.defined() ?
+                                           round_state.proposal_positions :
+                                           expandDSparkPositionIds(round_state.position_bases, dsparkQueryWidth());
     // The fixed-width proposal CUDA graph uses the framework's multi-token
     // graph geometry. This flag classifies that geometry; forward_propose is
     // still the model-semantic phase selector.

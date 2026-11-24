@@ -31,6 +31,14 @@ _GRAPH_WEIGHT_NAMES = ("weight", "bias", "fn", "base", "scale", "q_weight", "k_w
 _GRAPH_WEIGHT_NAME_SET = frozenset(_GRAPH_WEIGHT_NAMES)
 _MODULE_LOOKUP_HOOKS = frozenset(("__dict__", "__getattribute__", "__getattr__"))
 _STANDARD_MODULE_GETATTR = torch.nn.Module.__getattr__
+_STANDARD_MODULES = torch.nn.Module.modules
+_STANDARD_NAMED_MODULES = torch.nn.Module.named_modules
+
+
+def _native_tensor_metadata():
+    base = torch._C.TensorBase
+    return all(cls.data_ptr is base.data_ptr and cls.shape is base.shape and cls.dtype is base.dtype
+               and cls.__getattribute__ is base.__getattribute__ for cls in (torch.Tensor, torch.nn.Parameter))
 
 
 def graph_lm_head(model, hidden, *, draft=False):
@@ -63,6 +71,15 @@ def _plain_module_weight_lookup(cls):
         if base not in (torch.nn.Module, object) and not _MODULE_LOOKUP_HOOKS.isdisjoint(members):
             return False
     return True
+
+
+def _standard_module_traversal(cls):
+    return (
+        type(cls) is type and issubclass(cls, torch.nn.Module)
+        and cls.modules is _STANDARD_MODULES and cls.named_modules is _STANDARD_NAMED_MODULES
+        and cls.__hash__ is object.__hash__ and cls.__eq__ is object.__eq__
+        and not hasattr(cls, "_modules") and _plain_module_weight_lookup(cls)
+    )
 
 
 def _graph_module_weights(root, *, direct):
@@ -191,9 +208,21 @@ class SharedGraphRuntime:
         self._fast_storage_signature = env_bool(
             os.environ, "RTP_V41_PPU_GRAPH_FAST_STORAGE_SIGNATURE", default=model._is_speculative,
         )
+        self._native_weight_guard = None
+        if (not draft and self._fast_storage_signature
+                and os.environ.get("RTP_V41_PPU_ZERO_OVERHEAD_SCHEDULER") == "1"
+                and _native_tensor_metadata()
+                and torch.nn.Module.__getattr__ is _STANDARD_MODULE_GETATTR
+                and torch.nn.Module.__getattribute__ is object.__getattribute__):
+            from librtp_compute_ops import GraphWeightStorage
+
+            prefix, suffix = self._external_weights()
+            weights = [*prefix, *_graph_module_weights(model.v4, direct=True), *suffix]
+            if all(type(t) in (torch.Tensor, torch.nn.Parameter) for t in weights):
+                self._native_weight_guard = GraphWeightStorage(weights)
         self._pointers = self._storage_signature()
 
-    def _storage_signature(self):
+    def _external_weights(self):
         model = self._model()
         weights = [model.v4.embed.weight, model.v4.norm.weight]
         if optimization_env_value("RTP_V41_PPU_GRAPH_LM_HEAD", "0") == "1":
@@ -201,16 +230,35 @@ class SharedGraphRuntime:
 
             weights.append(model.weight.global_weights[W.lm_head])
         weights.extend(model.shared_weight_views._resident.values())
-        weights.extend(_graph_module_weights(model.v4, direct=self._fast_storage_signature))
+        prefix, weights = weights, []
         for values in self.ops.moe_engine._weights.values():
             weights.extend(values)
         for values in self.ops.moe_engine._processed.values():
             weights.extend(v for v in values if isinstance(v, torch.Tensor))
-        if self.gc_decode is not None:
+        if getattr(self, "gc_decode", None) is not None:
             for pair in self.gc_decode.weights.values():
                 for weight, scale in pair:
                     weights.extend((weight, scale))
-        return tuple((t.data_ptr(), tuple(t.shape), t.dtype) for t in weights)
+        return prefix, weights
+
+    def _storage_signature(self):
+        prefix, suffix = self._external_weights()
+        weights = _graph_module_weights(self._model().v4, direct=self._fast_storage_signature)
+        return tuple((t.data_ptr(), tuple(t.shape), t.dtype) for t in (*prefix, *weights, *suffix))
+
+    def _weight_storage_matches(self):
+        guard = getattr(self, "_native_weight_guard", None)
+        if (guard is not None and _native_tensor_metadata() and torch.nn.Module.__getattr__ is _STANDARD_MODULE_GETATTR
+                and torch.nn.Module.__getattribute__ is object.__getattribute__):
+            prefix, suffix = self._external_weights()
+            root = self._model().v4
+            if guard.matches_module_tree(
+                prefix, root, suffix, _GRAPH_WEIGHT_NAMES, _standard_module_traversal,
+            ):
+                return True
+            if guard.matches(prefix, root.modules(), suffix, _GRAPH_WEIGHT_NAMES, _plain_module_weight_lookup):
+                return True
+        return self._pointers == self._storage_signature()
 
     def validate(self):
         self.engram.validate()
@@ -219,7 +267,7 @@ class SharedGraphRuntime:
                 raise RuntimeError("shared Graph GC MoE workspace changed; recapture required")
         elif self.grouped is None and self.workspace is not self.ops.moe_engine._mega_buffer:
             raise RuntimeError("shared Graph MegaMoE workspace changed; recapture required")
-        if self._pointers != self._storage_signature():
+        if not self._weight_storage_matches():
             raise RuntimeError("shared Graph weight storage changed; recapture required")
         if self.verify_moe_overlap is not None:
             self.verify_moe_overlap.validate()

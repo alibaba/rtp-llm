@@ -8,6 +8,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#if USE_PPU
+#include <chrono>
+#include <cuda.h>
+#include <sys/syscall.h>
+#include <thread>
+#include <unistd.h>
+#endif
 #include <string>
 #include <c10/core/InferenceMode.h>
 #include "kmonitor/client/MetricsReporter.h"
@@ -1313,12 +1320,172 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
     return forward(inputs, state, nullptr);
 }
 
+bool CudaGraphRunner::isGuardedProposalBucket(int64_t batch) {
+    // Paired KV publication supports exact power-of-two batches through 32.
+    return batch > 0 && batch <= 32 && (batch & (batch - 1)) == 0;
+}
+
+#if USE_PPU
+void CudaGraphRunner::joinGuardedProposalSubmission(bool require_replay) {
+    if (proposal_submission_.valid()) {
+        RTP_LLM_PROFILE_SCOPE_DYNAMIC("cuda_graph.join_guarded_draft(worker_tid=%ld,generation=%u,mapped_vote=1)",
+                                      proposal_worker_tid_, proposal_generation_);
+        const bool replayed = proposal_submission_.get();
+        TORCH_CHECK(!require_replay || replayed, "scheduler selected a Draft vetoed by the global KV receipt");
+    }
+}
+
+static bool readGuardedDraftVote(const torch::Tensor& vote, torch::Event& copy_done, uint32_t epoch) {
+    const auto* words = vote.data_ptr<int32_t>();
+    const auto* ready = reinterpret_cast<const uint32_t*>(words + 1);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+    // The GPU system fence orders the D2H of the actual EP result before the ready word.
+    // Poll only this runner's one outstanding receipt. The event reports asynchronous device errors.
+    while (__atomic_load_n(ready, __ATOMIC_ACQUIRE) != epoch) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            copy_done.synchronize();
+            TORCH_CHECK(__atomic_load_n(ready, __ATOMIC_ACQUIRE) == epoch, "guarded Draft receipt was not published");
+            break;
+        }
+        std::this_thread::yield();
+    }
+    return words[0] == 0;
+}
+
+void CudaGraphRunner::initializeGuardedProposalWorker() {
+    if (proposal_worker_) {
+        return;
+    }
+    // Capture runs on the model initialization thread. Inherit its allowed CPU mask
+    // before the Decode loop binds itself to the single engine core.
+    std::promise<long> started;
+    auto tid = started.get_future();
+    proposal_worker_ = std::make_unique<c10::ThreadPool>(1, -1, [&started] { started.set_value(syscall(SYS_gettid)); });
+    proposal_worker_tid_ = tid.get();
+}
+
+bool CudaGraphRunner::replayGuardedProposal(GraphInstance& instance, torch::Tensor host_vote,
+                                           torch::Event vote_ready, uint32_t vote_epoch) {
+    const auto consumer = cuda_graph::graphGetCurrentStream();
+    if (!proposal_stream_) {
+        const auto stream = cuda_graph::graphGetStreamFromPool(true);
+        proposal_gate_ = torch::zeros({1}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+        void* device_ptr = nullptr;
+        C10_CUDA_CHECK(cudaHostGetDevicePointer(&device_ptr, proposal_gate_.data_ptr(), 0));
+        proposal_gate_device_ = reinterpret_cast<uintptr_t>(device_ptr);
+        proposal_consumer_.emplace(cuda_graph::makeGraphEvent());
+        proposal_stream_ = stream;
+    }
+    if (*proposal_stream_ == consumer) {
+        py::gil_scoped_release release;
+        if (!readGuardedDraftVote(host_vote, vote_ready, vote_epoch)) {
+            return false;
+        }
+        instance.graph_.replay();
+        return true;
+    }
+    auto ready = cuda_graph::makeGraphEvent();
+    ready.record(consumer);
+    const auto generation = ++proposal_generation_;
+    const auto worker_stream = *proposal_stream_;
+    const auto gate = static_cast<CUdeviceptr>(proposal_gate_device_);
+    auto* const host_gate = static_cast<uint32_t*>(proposal_gate_.data_ptr());
+    auto task = std::make_shared<std::packaged_task<bool()>>(
+        [worker_stream, gate, host_gate, generation, ready = std::move(ready),
+         vote_ready = std::move(vote_ready), host_vote = std::move(host_vote), vote_epoch, &instance]() mutable {
+            try {
+                cuda_graph::GraphStreamGuard guard(worker_stream);
+                c10::InferenceMode inference(true);
+                ready.block(worker_stream);
+                // Arm the worker before Verify finishes. The ordinary graph does not take the PPU
+                // conditional-launch lock while the engine stages the next target's inputs.
+                const bool replay = readGuardedDraftVote(host_vote, vote_ready, vote_epoch);
+                if (replay) {
+                    instance.graph_.replay();
+                }
+                auto result = cuStreamWriteValue32(worker_stream.stream(), gate, generation, 0);
+                TORCH_CHECK(result == CUDA_SUCCESS, "guarded Draft completion write failed: ", static_cast<int>(result));
+                return replay;
+            } catch (...) {
+                // A failed submission cannot strand later users in the device wait. Retire partial work
+                // before opening the gate; the engine must observe this exception before reusing its output.
+                (void)cudaStreamSynchronize(worker_stream.stream());
+                __atomic_store_n(host_gate, generation, __ATOMIC_SEQ_CST);
+                throw;
+            }
+        });
+    RTP_LLM_PROFILE_SCOPE_DYNAMIC("cuda_graph.async_guarded_draft(worker_tid=%ld,generation=%u,mapped_vote=1)",
+                                  proposal_worker_tid_, generation);
+    auto submitted = task->get_future();
+    proposal_worker_->run([task] { (*task)(); });
+    proposal_submission_ = std::move(submitted);
+    auto result = cuStreamWaitValue32(consumer.stream(), gate, generation, CU_STREAM_WAIT_VALUE_GEQ);
+    if (result != CUDA_SUCCESS) {
+        joinGuardedProposalSubmission();
+        worker_stream.synchronize();
+        TORCH_CHECK(false, "guarded Draft completion wait failed: ", static_cast<int>(result));
+    }
+    proposal_consumer_->record(consumer);
+    return true;
+}
+#endif
+
+bool CudaGraphRunner::supportsGuardedProposal(const CudaGraphState& state) const {
+    const auto selected = graph_instances_.find(state.current_real_graph_bs);
+    return selected != graph_instances_.end() && state.current_batch_size == state.current_real_graph_bs
+           && selected->second.supports_guarded_proposal_;
+}
+
+void CudaGraphRunner::prepareForwardInputs(const PyModelInputs&                inputs,
+                                           CudaGraphState&                     state,
+                                           GraphInstance&                      instance,
+                                           const AttentionInputMetadataParams* metadata) {
+#if USING_CUDA
+    // A changed input layout must never replay the preceding round's pointers.
+    disableCudaGraphPrepareReplay(instance.prepare_replay_);
+    disableCudaGraphPrepareReplay(instance.metadata_replay_);
+    if (metadata && (!instance.metadata_replay_.node || prepared_attention_inputs_.load(std::memory_order_acquire))) {
+        invokeBuildAttentionInputMetadata(*metadata, cuda_graph::graphGetCurrentStream().stream());
+        metadata = nullptr;
+    }
+#else
+    (void)instance;
+    (void)metadata;
+#endif
+    if (prepared_attention_inputs_.load(std::memory_order_acquire)) {
+        prepareInputData(inputs, state);
+    } else {
+        prepareInputs(inputs, state, metadata);
+    }
+}
+
+#if USE_PPU
+void CudaGraphRunner::stageVerifyGraphInputs(const PyModelInputs&                inputs,
+                                             CudaGraphState&                     state,
+                                             const AttentionInputMetadataParams* metadata) {
+    c10::InferenceMode inference_guard(true);
+    RTP_LLM_PROFILE_SCOPE("cuda_graph.stage_verify_inputs");
+    RTP_LLM_CHECK(is_target_verify_ && !is_packed_target_verify_
+                  && state.current_batch_size == state.current_real_graph_bs);
+    RTP_LLM_CHECK(!prepared_attention_inputs_.load(std::memory_order_acquire));
+    // The engine stream already waits for this Draft and owns the previous
+    // Verify's buffers. Bind the next replay there without launching the graph.
+    prepareForwardInputs(inputs, state, graph_instances_.at(state.current_real_graph_bs), metadata);
+    discardPreparedAttentionInputs();
+}
+#endif
+
 PyModelOutputs CudaGraphRunner::forward(const PyModelInputs&                inputs,
                                         CudaGraphState&                     state,
                                         const AttentionInputMetadataParams* metadata,
-                                        const std::function<void()>&        before_replay) {
+                                        const std::function<void()>&        before_replay,
+                                        const torch::Tensor&                proposal_guard,
+                                        bool                                inputs_staged) {
     c10::InferenceMode inference_guard(true);
     PyModelOutputs     outputs;
+#if USE_PPU
+    joinGuardedProposalSubmission();
+#endif
 
     struct PreparedFlagGuard {
         std::atomic<bool>& flag;
@@ -1329,24 +1496,37 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs&                inpu
 
     const auto graph_idx = is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
     auto&      instance  = graph_instances_[graph_idx];
-#if USING_CUDA
-    // An async prepare, an alias fallback, or a different input layout must not
-    // replay the preceding round's pointers. Every forward starts disabled.
-    disableCudaGraphPrepareReplay(instance.prepare_replay_);
-    disableCudaGraphPrepareReplay(instance.metadata_replay_);
-    if (metadata && (!instance.metadata_replay_.node || prepared_attention_inputs_.load(std::memory_order_acquire))) {
-        invokeBuildAttentionInputMetadata(*metadata, cuda_graph::graphGetCurrentStream().stream());
-        metadata = nullptr;
+#if USE_PPU
+    torch::Tensor host_vote;
+    std::optional<torch::Event> vote_ready;
+    if (proposal_guard.defined()) {
+        RTP_LLM_CHECK(supportsGuardedProposal(state));
+        // The ordinary Torch graph can run only after the real EP MAX receipt is zero.
+        // Queue its D2H before preparing inputs so that no prior Draft result is visible on a veto.
+        if (!proposal_vote_.defined()) {
+            proposal_vote_ = torch::zeros({2}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+            void* mapped = nullptr;
+            C10_CUDA_CHECK(cudaHostGetDevicePointer(&mapped, proposal_vote_.data_ptr(), 0));
+            proposal_vote_ready_device_ = reinterpret_cast<uintptr_t>(mapped) + sizeof(int32_t);
+        }
+        host_vote = proposal_vote_;
+        const auto stream = cuda_graph::graphGetCurrentStream();
+        if (proposal_vote_stream_ && *proposal_vote_stream_ != stream) {
+            proposal_vote_stream_->synchronize();
+        }
+        proposal_vote_stream_ = stream;
+        host_vote.narrow(0, 0, 1).copy_(proposal_guard, true);
+        const auto status = cuStreamWriteValue32(stream.stream(), proposal_vote_ready_device_, ++proposal_vote_epoch_, 0);
+        TORCH_CHECK(status == CUDA_SUCCESS, "guarded Draft receipt write failed: ", static_cast<int>(status));
+        vote_ready.emplace(cuda_graph::makeGraphEvent());
+        vote_ready->record(stream);
     }
 #else
-    (void)metadata;
+    (void)proposal_guard;
 #endif
-    // decode or embedding model only
     RTP_LLM_LOG_DEBUG("Replay Start");
-    if (!prepared_attention_inputs_.load(std::memory_order_acquire)) {
-        prepareInputs(inputs, state, metadata);
-    } else {
-        prepareInputData(inputs, state);
+    if (!inputs_staged) {
+        prepareForwardInputs(inputs, state, instance, metadata);
     }
     checkGraphInputStable(inputs, instance.mem_hold_.py_model_inputs_);
     if (before_replay) {
@@ -1388,7 +1568,17 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs&                inpu
                 state.current_real_graph_bs,
                 state.current_real_graph_bs * num_tokens_per_bs_,
                 state.seq_len_sum);
-            replayDecode(state.current_real_graph_bs);
+#if USE_PPU
+            if (vote_ready) {
+                if (!replayGuardedProposal(instance, std::move(host_vote), std::move(*vote_ready), proposal_vote_epoch_)) {
+                    forward_event_.record(cuda_graph::graphGetCurrentStream());
+                    return outputs;
+                }
+            } else
+#endif
+            {
+                replayDecode(state.current_real_graph_bs);
+            }
         }
         outputs.hidden_states =
             graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
@@ -2408,6 +2598,12 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         }
 #if USING_CUDA && ((TORCH_VERSION_MAJOR > 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 9))
         auto& instance = graph_instances_[key];
+#if USE_PPU && CUDART_VERSION >= 13000
+        if (guard_dspark_proposal_ && isGuardedProposalBucket(key)) {
+            instance.supports_guarded_proposal_ = true;
+            initializeGuardedProposalWorker();
+        }
+#endif
         if (instance.mem_hold_.uses_device_metadata_
             && cudaGraphBackendFlag(attn_pyobj, "cuda_graph_preparation_in_graph")) {
             // Keep PyTorch's replay path (including generator bookkeeping).
@@ -2419,6 +2615,8 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             instance.prepare_replay_.exec = instance.metadata_replay_.exec = graph.raw_cuda_graph_exec();
             disableCudaGraphPrepareReplay(instance.prepare_replay_);
             disableCudaGraphPrepareReplay(instance.metadata_replay_);
+        } else if (instance.supports_guarded_proposal_) {
+            graph.instantiate();
         }
 #endif
         // Keep the dirty guard armed after capture_end(). finish_capture_session()

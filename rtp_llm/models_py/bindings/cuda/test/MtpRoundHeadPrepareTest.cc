@@ -53,6 +53,35 @@ protected:
     std::unique_ptr<c10::cuda::CUDAStreamGuard> guard_;
 };
 
+TEST_F(MtpRoundHeadPrepareTest, DSparkNextRoundPreparesPrivateInputsWithUnvalidatedCounts) {
+    const auto opts     = cudaInt32();
+    const auto ends     = torch::tensor({10, 20, 30, 40}, opts);
+    const auto lengths  = torch::tensor({1, 4, 0, 5}, opts);
+    const auto tokens   = torch::arange(16, opts).reshape({4, 4});
+    const auto history  = torch::arange(100, 116, opts).reshape({4, 4});
+    const auto positions = torch::arange(32, opts);
+    constexpr int32_t mask = 99;
+    const auto bases = torch::tensor({{1, 2}, {12, 13}, {16, 17}, {24, 25}}, opts);
+    for (const int64_t width : {3, 4}) {
+        const auto out = tryMtpDSparkNextRound(ends, lengths, tokens, positions, history, width, mask, stream_);
+        ASSERT_TRUE(out.anchors.defined());
+        EXPECT_TRUE(torch::equal(out.committed_ends, torch::tensor({11, 24, 30, 40}, opts)));
+        EXPECT_TRUE(torch::equal(out.sequence_lengths, torch::tensor({12, 25, 31, 41}, opts)));
+        EXPECT_TRUE(torch::equal(out.anchors, torch::tensor({0, 7, mask, mask}, opts)));
+        const auto proposal_tokens = torch::full({4, width}, mask, opts);
+        proposal_tokens.select(1, 0).copy_(out.anchors);
+        EXPECT_TRUE(torch::equal(out.proposal_tokens, proposal_tokens.flatten()));
+        EXPECT_TRUE(torch::equal(out.engram_windows,
+                                 torch::tensor({{0, 100, 101, 102}, {7, 6, 5, 4},
+                                                {108, 109, 110, 111}, {112, 113, 114, 115}}, opts)));
+        EXPECT_TRUE(torch::equal(out.position_bases, bases));
+        const auto proposal_positions = bases.unsqueeze(1) + torch::arange(width, opts).view({1, width, 1});
+        EXPECT_TRUE(torch::equal(out.proposal_positions, proposal_positions.flatten()));
+    }
+    EXPECT_FALSE(tryMtpDSparkNextRound(ends, lengths, tokens.transpose(0, 1), {}, {}, 3, mask, stream_)
+                     .anchors.defined());
+}
+
 TEST_F(MtpRoundHeadPrepareTest, EngramHistoryMatchesTorchForPartialAcceptanceAndStrides) {
     for (auto token_dtype : {torch::kInt32, torch::kInt64}) {
         for (auto length_dtype : {torch::kInt32, torch::kInt64}) {
@@ -168,6 +197,36 @@ TEST_F(MtpRoundHeadPrepareTest, PageSnapshotsMixRaggedDeviceRowsAndPinnedHostSuf
             }
         }
     }
+}
+
+TEST_F(MtpRoundHeadPrepareTest, ReuseCompleteOrderedSnapshotViews) {
+    const auto pinned = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
+    const auto host = torch::zeros({2, 3, 7}, pinned);
+    const auto pageable = torch::zeros({2, 3, 7}, torch::kInt32);
+    const auto physical_backing = torch::arange(42, cudaInt32()).view({2, 3, 7});
+    const auto kernel_backing = physical_backing + 200;
+    std::vector<torch::Tensor> physical_rows, kernel_rows;
+    for (int64_t row = 0; row < 3; ++row) {
+        physical_rows.push_back(physical_backing.narrow(1, row, 1));
+        kernel_rows.push_back(kernel_backing.narrow(1, row, 1));
+    }
+    torch::Tensor physical, kernel;
+    ASSERT_TRUE(
+        tryMtpGatherPageSnapshots(pageable, pageable, physical_rows, kernel_rows, physical, kernel, stream_, true));
+    EXPECT_EQ(physical.data_ptr(), physical_backing.data_ptr());
+    EXPECT_EQ(kernel.data_ptr(), kernel_backing.data_ptr());
+    EXPECT_TRUE(physical.is_contiguous());
+
+    std::swap(physical_rows[0], physical_rows[2]);
+    ASSERT_TRUE(tryMtpGatherPageSnapshots(host, host, physical_rows, kernel_rows, physical, kernel, stream_, true));
+    EXPECT_NE(physical.data_ptr(), physical_backing.data_ptr());
+    EXPECT_TRUE(torch::equal(physical, torch::cat(physical_rows, 1)));
+
+    physical_rows[1] = torch::Tensor();
+    EXPECT_FALSE(
+        tryMtpGatherPageSnapshots(pageable, pageable, physical_rows, kernel_rows, physical, kernel, stream_, true));
+    ASSERT_TRUE(tryMtpGatherPageSnapshots(host, host, physical_rows, kernel_rows, physical, kernel, stream_, true));
+    EXPECT_TRUE(torch::equal(physical.select(1, 1).cpu(), host.select(1, 1)));
 }
 
 TEST_F(MtpRoundHeadPrepareTest, PageSnapshotsRejectUnsupportedInputsBeforeWriting) {

@@ -62,11 +62,18 @@ int MtpExecutor::selectMtpPreviousSeqLenUpperBound(bool pending, int previous_ne
     return pending && previous_next_bound > 0 ? previous_next_bound : host_seq_len;
 }
 
-GptModelOutputs MtpExecutor::forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role) {
+GptModelOutputs MtpExecutor::forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role,
+                                          const std::function<void()>& before_replay) {
     RTP_LLM_CHECK_WITH_INFO(model != nullptr, "model is null before forward");
     if (model_inputs_logger_) {
         model_inputs_logger_->log(inputs, role, model->model_id_);
     }
+#if USE_PPU
+    if (before_replay) {
+        RTP_LLM_CHECK(role == ModelInputsModelRole::TARGET);
+        return dynamic_cast<PyWrappedModel&>(*model).forwardVerifyAfterProposal(inputs, before_replay);
+    }
+#endif
     if (is_dspark_ && role != ModelInputsModelRole::TARGET && inputs.engram_token_windows.defined()) {
         auto draft_inputs                 = inputs;
         draft_inputs.engram_token_windows = torch::Tensor();
@@ -76,6 +83,22 @@ GptModelOutputs MtpExecutor::forwardModel(ModelBase* model, const GptModelInputs
 }
 
 namespace {
+
+#if USE_PPU
+bool isFixedGreedyProposal(const StreamGroups& stream_groups);
+#endif
+
+struct AttentionPrepareGuard {
+    PyWrappedModel* model = nullptr;
+    void discard() {
+        if (model) {
+            std::exchange(model, nullptr)->discardPreparedAttentionInputs();
+        }
+    }
+    ~AttentionPrepareGuard() {
+        discard();
+    }
+};
 
 bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
     const char* env = std::getenv(env_name);
@@ -915,7 +938,9 @@ MtpExecutor::AcceptLenMetricsSnapshot MtpExecutor::consumePendingAcceptLenMetric
         if (pending.ready_event && !pending.ready_event->query()) {
             break;
         }
-        snapshot.total_accept_len += pending.accept_len_sum_cpu.item<int64_t>();
+        if (pending.accept_len_sum_cpu.defined()) {
+            snapshot.total_accept_len += pending.accept_len_sum_cpu.item<int64_t>();
+        }
         snapshot.total_stream_num += pending.total_stream_num;
         snapshot.total_propose_token_num += pending.total_propose_token_num;
         snapshot.total_verify_draft_token_num += pending.total_verify_draft_token_num;
@@ -959,12 +984,10 @@ MtpExecutor::AcceptLenMetricsSnapshot MtpExecutor::consumePendingAcceptLenMetric
                                   counts.str().c_str());
             }
         }
-        if (pending.accept_len_rows_cpu.defined() && pending.accept_len_rows_cpu.numel() > 0) {
+        const auto collect_rows = [&](const auto* rows, int64_t num_rows) {
             // Rebuild priority buckets from the staged per-stream rows. Every row is
             // attributed to a bucket, so the bucket sums always equal the scalar
             // total_accept_len computed from the same tensor.
-            const auto*   rows     = pending.accept_len_rows_cpu.data_ptr<int64_t>();
-            const int64_t num_rows = pending.accept_len_rows_cpu.numel();
             for (int64_t i = 0; i < num_rows; ++i) {
                 int32_t priority = 0;
                 if (i < static_cast<int64_t>(pending.row_priorities.size())) {
@@ -973,6 +996,16 @@ MtpExecutor::AcceptLenMetricsSnapshot MtpExecutor::consumePendingAcceptLenMetric
                     priority = pending.row_priorities.back();
                 }
                 snapshot.accept_len_by_priority[priority] += rows[i];
+            }
+        };
+        if (pending.accept_len_sum_cpu.defined()) {
+            if (pending.accept_len_rows_cpu.defined() && pending.accept_len_rows_cpu.numel() > 0) {
+                collect_rows(pending.accept_len_rows_cpu.data_ptr<int64_t>(), pending.accept_len_rows_cpu.numel());
+            }
+        } else {
+            collect_rows(pending.accept_len_host_counts.data(), pending.accept_len_host_counts.size());
+            for (int32_t count : pending.accept_len_host_counts) {
+                snapshot.total_accept_len += count;
             }
         }
         snapshot.valid = true;
@@ -1017,6 +1050,16 @@ bool MtpExecutor::stageAcceptLenMetrics(const torch::Tensor& accept_len,
     pending.row_priorities = std::move(row_priorities);
 
     if (!accept_len.is_cuda()) {
+        static const bool zero_overhead = readEnvFlagOnce(
+            "RTP_V41_PPU_ZERO_OVERHEAD_SCHEDULER", "ppu-dspark-scheduler", "zero_overhead");
+        if (zero_overhead && accept_len.device().is_cpu() && accept_len.scalar_type() == torch::kInt32
+            && accept_len.is_contiguous() && accept_len.numel() > 0) {
+            // The caller has already established readiness of the sampler packet.
+            // Snapshot its rows without creating intermediate Torch tensors.
+            const auto* rows = accept_len.data_ptr<int32_t>();
+            pending.accept_len_host_counts.assign(rows, rows + accept_len.numel());
+            return true;
+        }
         const auto accept_len_i64   = accept_len.to(torch::kInt64);
         pending.accept_len_sum_cpu  = accept_len_i64.sum().reshape({1});
         pending.accept_len_rows_cpu = accept_len_i64.flatten().clone();
@@ -2119,6 +2162,121 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 +-------------------------------+
 */
 
+bool MtpExecutor::PreparedDSparkRound::matches(const StreamGroups& streams) const {
+    if (!inputs.sequence_lengths.defined() || epochs.size() != static_cast<size_t>(streams.size())) {
+        return false;
+    }
+    const auto rows = streams.allStreams();
+    return std::equal(rows.begin(), rows.end(), epochs.begin(), [](const auto& stream, const auto& cached) {
+        return stream == cached.first.lock() && stream->getMtpAsyncDeviceState().epoch == cached.second;
+    });
+}
+
+#if USE_PPU
+bool MtpExecutor::PreparedDSparkVerify::matchesHistory(const torch::Tensor& history) const {
+    return proposals.defined() && ((!history.defined() && !anchor_history.defined())
+        || (history.defined() && anchor_history.defined() && history.device() == anchor_history.device()
+            && history.scalar_type() == anchor_history.scalar_type() && history.sizes() == anchor_history.sizes()
+            && history.strides() == anchor_history.strides() && history.data_ptr() == anchor_history.data_ptr()));
+}
+
+void MtpExecutor::PreparedDSparkVerify::apply(GptModelInputs& target, torch::Tensor& proposal_tokens) {
+    target.combo_tokens = std::move(input.combo_tokens);
+    target.combo_position_ids = std::move(input.combo_position_ids);
+    target.input_lengths = std::move(input.input_lengths);
+    target.sequence_lengths = std::move(input.sequence_lengths);
+    target.prefix_lengths = std::move(input.prefix_lengths);
+    target.lm_output_indexes = std::move(input.lm_output_indexes);
+    target.last_hidden_states = torch::Tensor();
+    target.engram_token_windows = std::move(input.engram_token_windows);
+    target.is_target_verify = true;
+    proposal_tokens = std::move(proposals);
+}
+
+static bool sameSnapshotView(const torch::Tensor& left, const torch::Tensor& right) {
+    return left.defined() && right.defined() && left.device() == right.device()
+           && left.scalar_type() == right.scalar_type() && left.sizes() == right.sizes()
+           && left.strides() == right.strides() && left.data_ptr() == right.data_ptr();
+}
+
+bool MtpExecutor::GuardedDSparkProposal::matchesPages(const StreamGroups& streams) const {
+    if (!physical.defined() || !kernel.defined() || physical.size(1) != static_cast<int64_t>(streams.size())) {
+        return false;
+    }
+    int64_t row = 0;
+    for (const auto& stream : streams.allStreams()) {
+        const auto device_state = stream->getMtpAsyncDeviceState();
+        if (!sameSnapshotView(device_state.next_kv_cache_block_id_gpu, physical.narrow(1, row, 1))
+            || !sameSnapshotView(device_state.next_kv_cache_kernel_block_id_gpu, kernel.narrow(1, row, 1))) {
+            return false;
+        }
+        ++row;
+    }
+    return true;
+}
+
+bool MtpExecutor::GuardedDSparkProposal::matchesGatheredInput(const StreamGroups& streams) const {
+    if (!gathered_input || streams.isFakeStream() || streams.totalContextBatchSize() != 0
+        || streams.totalBlockUpdateCopyNum() != 0 || !matchesPages(streams)) {
+        return false;
+    }
+    const auto& history = gathered_input->engram_token_windows;
+    int64_t row = 0;
+    for (const auto& stream : streams.decodeStreams()) {
+        const auto state = stream->getMtpAsyncDeviceState();
+        if (state.cache_snapshot_upload_pending || stream->hasError() || stream->generateConfig()->isPrefillOnly()
+            || stream->calculateLoss() || stream->needReturnHiddenStates()
+            || (history.defined() ?
+                    !sameSnapshotView(state.engram_token_window_gpu, history.narrow(0, row, 1)) :
+                    state.engram_token_window_gpu.defined())) {
+            return false;
+        }
+        ++row;
+    }
+    return true;
+}
+
+static torch::Tensor joinLookaheadPageRows(std::vector<torch::Tensor>& rows) {
+    int64_t width = 0;
+    for (const auto& row : rows) {
+        width = std::max(width, row.size(2));
+    }
+    for (auto& row : rows) {
+        if (row.size(2) < width) {
+            row = at::constant_pad_nd(row, {0, width - row.size(2)}, 0);
+        }
+    }
+    return torch::cat(rows, 1);
+}
+
+static bool growLookaheadPageTables(const StreamGroups& streams, GptModelInputs& inputs, int advance) {
+    const auto& requests = streams.allStreams();
+    const auto count = static_cast<int64_t>(requests.size());
+    if (inputs.kv_cache_block_id.size(1) != count || inputs.kv_cache_kernel_block_id.size(1) != count
+        || std::any_of(requests.begin(), requests.end(), [](const auto& stream) {
+               return stream->maxBatchSize() != 1 || stream->hasNumBeams();
+           })) {
+        return false;
+    }
+    std::vector<torch::Tensor> physical, kernel;
+    bool grown = false;
+    for (const auto& stream : requests) {
+        const auto row = static_cast<int64_t>(physical.size());
+        physical.emplace_back(inputs.kv_cache_block_id.narrow(1, row, 1));
+        kernel.emplace_back(inputs.kv_cache_kernel_block_id.narrow(1, row, 1));
+        if (stream->tryGrowLookaheadCacheRow(advance, physical.back(), kernel.back())) {
+            grown = true;
+        }
+    }
+    if (grown) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(assemble_grown_lookahead_pages)");
+        inputs.kv_cache_block_id = joinLookaheadPageRows(physical);
+        inputs.kv_cache_kernel_block_id = joinLookaheadPageRows(kernel);
+    }
+    return grown;
+}
+#endif
+
 absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams,
                                      MtpMetricsCollector&                metrics_collector) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(decode_stream_size=%zu)", streams.size());
@@ -2129,12 +2287,20 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     GptModelOutputs model_output;
     GptModelOutputs draft_prefill_model_output;
 
-    SamplerOutput                         draft_sampler_output;
-    speculative::SpeculativeSamplerOutput speculative_sampler_output;
-    torch::Tensor                         next_history;
-    bool                                  accept_packet_ready = false;
-    MtpTargetLogprobs                     target_logprobs;
-    std::shared_ptr<MtpTargetLogprobs>    early_target_logprobs_finalize_state;
+    SamplerOutput                            draft_sampler_output;
+    speculative::SpeculativeSamplerOutput    speculative_sampler_output;
+    torch::Tensor                            next_history;
+    torch::Tensor                            next_physical_pages, next_kernel_pages;
+    MtpBatchStreamProcessor::DSparkRoundState prepared_next_round;
+    bool                                     accept_packet_ready = false;
+    const auto has_output_counts_for_metrics = [&] {
+        return metrics_reporter_ && dspark_confidence_mode_ == "off"
+               && !draft_sampler_output.confidence_rates.defined()
+               && speculative_sampler_output.accept_len_cpu.defined()
+               && speculative_sampler_output.accept_len_cpu.device().is_cpu();
+    };
+    MtpTargetLogprobs                        target_logprobs;
+    std::shared_ptr<MtpTargetLogprobs>         early_target_logprobs_finalize_state;
 
     // Placeholders shared across draftModelDecode and the post-rejection update.
     torch::Tensor              draft_token_probs_d_t;
@@ -2153,11 +2319,36 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     std::shared_ptr<torch::Event> draft_event;
     std::shared_ptr<torch::Event> device_kv_ready;
     std::function<std::shared_ptr<torch::Event>()> deferred_verify;
+    std::function<void()> before_target_replay;
     int simulated_count = 0;
     bool                          prev_bookkeeping_synced_for_spec_logits = false;
     bool                          spec_logits_async_launched              = false;
     bool                          spec_logits_processor_present           = false;
     const bool                    alignment_only                          = enable_ffn_disaggregate_ && streams.empty();
+#if USE_PPU
+    static const bool zero_overhead = readEnvFlagOnce(
+        "RTP_V41_PPU_ZERO_OVERHEAD_SCHEDULER", "ppu-dspark-scheduler", "zero_overhead");
+    int64_t lookahead_eos = -1;
+    const bool dp_ep_span_world = CudaGraphRunner::dpAndEpSpanWorld(parallelism_config_);
+    const bool guard_this_role = zero_overhead && usePpuCrossRoundOverlap() && usePpuOverlapScheduler()
+                                 && useDeviceInput() && useStreamAsync() && v41_async_cache_reservation_
+                                 && role_type_ == RoleType::DECODE && parallelism_config_.tp_size == 1
+                                 && dp_ep_span_world && parallelism_config_.pp_size == 1
+                                 && !enable_ffn_disaggregate_ && is_dspark_
+                                 && propose_step_ == 3 && !dspark_packed_verify_ && !is_linear_attention_model_
+                                 && dspark_confidence_mode_ == "off";
+    auto* proposal_vote_model = guard_this_role ? dynamic_cast<PyWrappedModel*>(model_.get()) : nullptr;
+    RTP_LLM_CHECK(!guard_this_role || proposal_vote_model);
+    std::optional<GptModelInputs> next_proposal_base;
+    std::optional<GptModelInputs> next_gathered_input;
+    AttentionPrepareGuard prepared_target;
+    bool exact_gathered_input = false;
+    bool local_snapshot_matches = false;
+    bool common_proposal_bucket = true;
+#else
+    constexpr bool guard_this_role = false;
+#endif
+    bool target_buffers_released = false;
 
     // StreamGroups snapshots scheduling metadata. Wait for any mutable
     // bookkeeping/KV-swap state that has not yet reached a safe snapshot.
@@ -2183,13 +2374,20 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             }
         }
     } forward_lease;
-    if (usePpuCrossRoundOverlap() && deferred_ppu_output_) {
-        forward_lease.streams = streams;
-        for (const auto& stream : forward_lease.streams) {
-            stream->incPendingAsyncBookkeeping();
+#if USE_PPU
+    if (proposal_vote_model && ppu_verify_ready_ && deferred_ppu_output_
+        && prepared_dspark_round_.matches(stream_groups) && guarded_dspark_proposal_.matchesGatheredInput(stream_groups)) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(reuse_guarded_gathered_input)");
+        exact_gathered_input = true;
+        // These placeholders were gathered for the same snapshot-only batch.
+        // The predecessor's deferred output holds its pages and has not started.
+        model_input = std::move(*guarded_dspark_proposal_.gathered_input);
+        guarded_dspark_proposal_.gathered_input.reset();
+        for (const auto& stream : stream_groups.decodeStreams()) {
+            stream->step();
         }
-    }
-
+    } else
+#endif
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(gather_model_input)");
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -2199,6 +2397,15 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         RETURN_IF_STATUS_OR_ERROR(model_input_status);
         model_input = std::move(model_input_status.value());
         executor_collector.gather_model_input_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+    }
+    // Engram gathers can join previous bookkeeping when a stream has no device
+    // snapshot yet. Pin this round only after that join, before replay or
+    // dispatch of a deferred output can hand the KV pages to another request.
+    if (usePpuCrossRoundOverlap() && (deferred_ppu_output_ || guard_this_role)) {
+        forward_lease.streams = streams;
+        for (const auto& stream : forward_lease.streams) {
+            stream->incPendingAsyncBookkeeping();
+        }
     }
 #if USE_PPU
     if (is_dspark_) {
@@ -2287,11 +2494,101 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         // TP synchronization broadcasts numeric payloads in canonical tag
         // order; every rank must retain its configured group identities.
         GptModelInputs proposal_input = model_input;
+        std::optional<GptModelOutputs> queued_proposal;
+#if USE_PPU
+        PreparedDSparkVerify queued_verify;
+#endif
         {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_dspark_proposal_and_tp_sync)");
             if (isTpRank0()) {
-                dspark_round_state =
-                    batch_stream_processor_->buildDSparkRoundState(stream_groups, model_input, buffer_holder_);
+                auto prepared = std::exchange(prepared_dspark_round_, {});
+                const bool same_round = prepared.matches(stream_groups);
+#if USE_PPU
+                if (proposal_vote_model) {
+                    auto previous = std::exchange(guarded_dspark_proposal_, {});
+                    // Every EP rank votes once, including idle ranks. A matching prepared round is
+                    // published only after this rank read a successful paired KV receipt. Unanimous
+                    // reuse therefore also proves the preceding device MAX was zero, without
+                    // transferring its result to the host or waiting for a second device event.
+                    const bool reuse = same_round
+                                       && (previous.output.logits.defined() || previous.output.dspark_draft_tokens.defined())
+                                       && (!previous.output.dspark_draft_tokens.defined() || isFixedGreedyProposal(stream_groups))
+                                       && previous.matchesPages(stream_groups);
+                    const int64_t rows = model_input.is_fake_stream ? 0 : stream_groups.size();
+                    const bool can_use_staged_attention = reuse && exact_gathered_input
+                        && previous.verify.install_attention
+                        && previous.verify.matchesHistory(model_input.engram_token_windows);
+                    bool vote_published = false;
+                    if (exact_gathered_input && reuse && !useAsyncPrepare()
+                        && previous.output.dspark_draft_tokens.defined()
+                        && previous.verify.matchesHistory(model_input.engram_token_windows)) {
+                        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(publish_schedule_for_verify)");
+                        vote_published = proposal_vote_model->tryPublishLookaheadSchedule(reuse, rows);
+                    }
+                    if (vote_published && !can_use_staged_attention) {
+                        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_verify_during_schedule_vote)");
+                        // The retained snapshot fixes this rank's Verify metadata. No graph replay
+                        // or KV write happens until the schedule exchange has completed.
+                        try {
+                            proposal_vote_model->releaseBuffers();
+                            target_buffers_released = true;
+                            auto inputs = model_input;
+                            auto verify = previous.verify;
+                            torch::Tensor proposals;
+                            verify.apply(inputs, proposals);
+                            ensureModelInputsOnCuda(inputs, "decode.prepare_verify_during_schedule_vote");
+                            applyCacheStrideToModelInput(inputs, cache_manager_->cacheConfig());
+                            prepared_target.model = proposal_vote_model;
+                            proposal_vote_model->prepareAttentionInputs(
+                                inputs, /*skip_forward_event_sync=*/true, nullptr, /*defer_graph_prepare=*/true);
+                        } catch (const std::exception& error) {
+                            prepared_target.discard();
+                            RTP_LLM_LOG_WARNING("Early DSpARK Verify attention preparation failed: %s", error.what());
+                        }
+                    }
+                    const auto [reuse_agreed, common_bucket] = [&] {
+                        if (vote_published) {
+                            RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(collect_schedule_for_verify)");
+                            return proposal_vote_model->collectLookaheadSchedule();
+                        }
+                        return proposal_vote_model->agreeLookaheadSchedule(reuse, rows);
+                    }();
+                    if (!reuse_agreed || !common_bucket) {
+                        prepared_target.discard();
+                    } else if (can_use_staged_attention) {
+                        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(use_staged_verify_attention)");
+                        std::exchange(previous.verify.install_attention, {})();
+                        prepared_target.model = proposal_vote_model;
+                    }
+                    common_proposal_bucket = common_bucket;
+                    local_snapshot_matches = reuse_agreed;
+                    if (previous.physical.defined()) {
+                        auto* draft = dynamic_cast<PyWrappedModel*>(draft_model_.get());
+                        RTP_LLM_CHECK(draft);
+                        if (reuse_agreed && previous.output.dspark_draft_tokens.defined()) {
+                            before_target_replay = [draft] {
+                                draft->joinGuardedProposalSubmission(/*require_replay=*/true);
+                                RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(consume_guarded_draft_for_verify)");
+                            };
+                        } else {
+                            draft->joinGuardedProposalSubmission(reuse_agreed);
+                        }
+                    }
+                    if (reuse_agreed) {
+                        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(reuse_guarded_draft_graph)");
+                        queued_proposal = std::move(previous.output);
+                        queued_verify = std::move(previous.verify);
+                    }
+                }
+#endif
+                if (same_round) {
+                    RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(reuse_prepared_draft_round)");
+                    dspark_round_state = std::move(prepared.inputs);
+                    dspark_round_state.engram_windows = model_input.engram_token_windows;
+                } else {
+                    dspark_round_state =
+                        batch_stream_processor_->buildDSparkRoundState(stream_groups, model_input, buffer_holder_);
+                }
                 batch_stream_processor_->prepareDSparkProposeModelInput(
                     dspark_round_state, proposal_input, buffer_holder_);
                 ensureModelInputsOnCuda(proposal_input, "decode.prepare_dspark_proposal");
@@ -2304,19 +2601,33 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             ensureModelInputsOnCuda(proposal_input, "decode.dspark_proposal_after_tp_sync");
         }
         batch_size = proposal_input.input_lengths.size(0);
-
-        struct ProposalPrepareGuard {
-            PyWrappedModel* model = nullptr;
-            ~ProposalPrepareGuard() {
-                if (model) {
-                    model->discardPreparedAttentionInputs();
-                }
+#if USE_PPU
+        if (guard_this_role && common_proposal_bucket && CudaGraphRunner::isGuardedProposalBucket(batch_size)
+            && !proposal_input.is_fake_stream && !proposal_input.warmup
+            && !proposal_input.pd_separation && !proposal_input.capture_hidden_states
+            && !proposal_input.need_all_hidden_states
+            && (!proposal_input.multimodal_features || proposal_input.multimodal_features->empty())
+            && (!proposal_input.kv_cache_update_mapping.defined() || !proposal_input.kv_cache_update_mapping.numel())
+            && proposal_input.kv_cache_block_id.defined() && proposal_input.kv_cache_block_id.is_cuda()
+            && proposal_input.kv_cache_block_id.dim() == 3
+            && proposal_input.kv_cache_block_id.size(1) == static_cast<int64_t>(batch_size)
+            && proposal_input.kv_cache_kernel_block_id.defined() && proposal_input.kv_cache_kernel_block_id.is_cuda()
+            && proposal_input.kv_cache_kernel_block_id.dim() == 3
+            && proposal_input.kv_cache_kernel_block_id.size(1) == static_cast<int64_t>(batch_size)) {
+            next_proposal_base = proposal_input;
+            if (local_snapshot_matches && stream_groups.totalContextBatchSize() == 0
+                && stream_groups.totalBlockUpdateCopyNum() == 0 && !model_input.need_all_logits
+                && !model_input.need_all_hidden_states && !model_input.skip_lm_head) {
+                next_gathered_input = model_input;
             }
-        } prepared_proposal;
+        }
+#endif
+
+        AttentionPrepareGuard prepared_proposal;
 #if USE_PPU
         static const bool prepare_proposal_during_publication = readEnvFlagOnce(
             "RTP_V41_PPU_DSPARK_PREPARE_PROPOSAL_DURING_PUBLICATION", "ppu-dspark-propose", "early_metadata");
-        if (prepare_proposal_during_publication && (ppu_verify_publication_.valid() || ppu_verify_ready_)
+        if (!queued_proposal && prepare_proposal_during_publication && (ppu_verify_publication_.valid() || ppu_verify_ready_)
             && role_type_ == RoleType::DECODE && parallelism_config_.tp_size == 1 && !useAsyncPrepare()
             && !proposal_input.warmup && !proposal_input.is_fake_stream && !proposal_input.pd_separation) {
             if (auto* proposal_model = dynamic_cast<PyWrappedModel*>(draft_model_.get())) {
@@ -2338,7 +2649,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 #if USE_PPU
             ppu_verify_abort_guard.model = model_.get();
 #endif
-            releaseAllModelBuffers(prepared_proposal.model);
+            releaseAllModelBuffers(prepared_proposal.model, target_buffers_released);
         };
         std::function<void()> wait_for_proposal_kv;
 #if USE_PPU
@@ -2364,7 +2675,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
         dspark_verify_plan = runDSparkProposal(
             proposal_input, stream_groups, dspark_round_state, draft_sampler_output, model_forward_us,
-            wait_for_proposal_kv);
+            wait_for_proposal_kv, queued_proposal ? &*queued_proposal : nullptr);
 
         {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_dspark_target_and_tp_sync)");
@@ -2390,7 +2701,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                         dspark_verify_plan.draft_budget,
                         buffer_holder_,
                         &draft_sampler_output.token_ids);
-                } else {
+                }
+#if USE_PPU
+                else if (queued_verify.matchesHistory(dspark_round_state.engram_windows)) {
+                    RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(reuse_lookahead_verify_input)");
+                    queued_verify.apply(model_input, draft_sampler_output.token_ids);
+                }
+#endif
+                else {
                     batch_stream_processor_->prepareDSparkTargetVerifyModelInput(dspark_round_state,
                                                                                  model_input,
                                                                                  draft_sampler_output.token_ids,
@@ -2542,7 +2860,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                 model_input.combo_tokens.numel(),
                 model_input.is_packed_target_verify,
                 model_input.is_fake_stream);
-            model_output = runTargetVerifyForward(model_input, stream_groups);
+            model_output = runTargetVerifyForward(model_input, stream_groups, before_target_replay);
         } else {
             model_output = runTargetVerifyForward(model_input, stream_groups);
         }
@@ -2753,14 +3071,26 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                                      && private_draft_commit.staged && dspark_confidence_mode_ == "off"
                                      && !spec_logits_processor_present && !d2t_map_.defined();
             if (cross_round) {
-                use_device_acceptance = std::all_of(streams.begin(), streams.end(), [this](const auto& stream) {
+                use_device_acceptance = std::all_of(streams.begin(), streams.end(), [&](const auto& stream) {
                     const auto& config = *stream->generateConfig();
                     const auto next_seq_length = stream->seqLength() + static_cast<int64_t>(propose_step_) + 1;
                     // The stream checks the minimum on the whole packet before scanning EOS and stop words.
                     const bool stop_scan_unreachable =
                         next_seq_length < static_cast<int64_t>(stream->inputLength()) + config.min_new_tokens;
+                    bool device_stop_safe = stop_scan_unreachable || (config.ignore_eos && config.stop_words_list.empty());
+                    if (!device_stop_safe && zero_overhead) {
+                        // The validation kernel vetoes the whole pair on an accepted EOS.
+                        // Host preview then applies the exact stop/min-length rules before either KV pool is written.
+                        const auto eos = stream->specialTokens().eos_token_id;
+                        device_stop_safe = eos >= 0 && (lookahead_eos < 0 || lookahead_eos == eos)
+                                           && std::all_of(config.stop_words_list.begin(), config.stop_words_list.end(),
+                                                          [eos](const auto& stop) { return stop.size() == 1 && stop[0] == eos; });
+                        if (device_stop_safe) {
+                            lookahead_eos = eos;
+                        }
+                    }
                     return stream->isActive() && !stream->isPerfTest()
-                           && (stop_scan_unreachable || (config.ignore_eos && config.stop_words_list.empty()))
+                           && device_stop_safe
                            && !config.return_logprobs && !stream->hasNumBeams()
                            && stream->currentBatchSize() == 1 && stream->nextBatchSize() == 1
                            && stream->getAllLogitsProcessorPtr().empty()
@@ -2902,12 +3232,30 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             static const bool overlap_verify_epilogue = readEnvFlagOnce(
                 "RTP_V41_PPU_DSPARK_OVERLAP_VERIFY_EPILOGUE", "ppu-dspark-commit", "overlap_verify_epilogue");
             const bool overlap_epilogue = private_draft_commit.staged && use_joint_kv_publish && overlap_verify_epilogue;
-            if (!simulated_count && overlap_epilogue && engram_anchor_windows.defined()) {
+            const bool can_publish_device_acceptance = use_device_acceptance && !simulated_count && overlap_epilogue
+                                                       && speculative_sampler_output.processor_errors.empty();
+            if (zero_overhead && can_publish_device_acceptance && dp_ep_span_world && !is_linear_attention_model_
+                && model_input.kv_cache_block_id.defined() && model_input.kv_cache_block_id.is_cuda()
+                && model_input.kv_cache_kernel_block_id.defined() && model_input.kv_cache_kernel_block_id.is_cuda()) {
+                RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_next_draft_round)");
+                // These allocations are private. Their contents become usable
+                // only after the device acceptance and paired KV checks pass.
+                prepared_next_round = batch_stream_processor_->prepareNextDSparkRound(
+                    dspark_round_state,
+                    speculative_sampler_output.accept_len,
+                    speculative_sampler_output.accept_tokens,
+                    model_input.combo_position_ids);
+            }
+            const auto prepare_history = [&] {
                 // This computes a new buffer. Only publish it to the streams
                 // after the same successful dispatch as in the regular tail.
                 RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_next_engram_window)");
                 next_history = MtpBatchStreamProcessor::advanceEngramTokenWindows(
                     engram_anchor_windows, speculative_sampler_output.accept_tokens, speculative_sampler_output.accept_len);
+            };
+            if (!simulated_count && overlap_epilogue && engram_anchor_windows.defined()
+                && !prepared_next_round.sequence_lengths.defined()) {
+                prepare_history();
             }
             static const bool deferred_verify_stage =
                 readEnvFlagOnce("RTP_V41_PPU_VERIFY_DEFERRED_STAGE", "ppu-dspark-verify", "deferred_stage");
@@ -2930,23 +3278,179 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                     }
                 }
             };
+            AttentionPrepareGuard next_proposal;
+            if (zero_overhead && next_proposal_base && prepared_next_round.sequence_lengths.defined()) {
+                RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_lookahead_before_publication)");
+                // This phase only stages inputs. Reads of live KV and all Draft
+                // collectives remain inside the device-guarded replay.
+                next_proposal.model = dynamic_cast<PyWrappedModel*>(draft_model_.get());
+                RTP_LLM_CHECK(next_proposal.model);
+                auto& inputs = *next_proposal_base;
+                if (growLookaheadPageTables(stream_groups, inputs, static_cast<int>(propose_step_ + 1))) {
+                    // The current Verify owns its original immutable tables. Publish the new rows
+                    // through normal dispatch even if another EP rank vetoes this guarded Draft.
+                    next_physical_pages = inputs.kv_cache_block_id;
+                    next_kernel_pages = inputs.kv_cache_kernel_block_id;
+                }
+                next_proposal.model->releaseBuffers();
+                batch_stream_processor_->prepareDSparkProposeModelInput(prepared_next_round, inputs, buffer_holder_);
+                applyCacheStrideToModelInput(inputs, cache_manager_->getMTPModuleCacheConfig(0));
+                next_proposal.model->prepareAttentionInputs(inputs, true, nullptr, true);
+            }
             if (!simulated_count) {
                 prepare(model_.get(), private_draft_commit, model_input.prefix_lengths);
             }
-            if (use_device_acceptance && !simulated_count && overlap_epilogue
-                && speculative_sampler_output.processor_errors.empty()) {
+            bool proposal_vote_queued = false;
+            const auto enqueue_next_proposal = [&](const torch::Tensor& local_status,
+                                                   const std::function<void()>& publish_kv = {}) {
+                if (!proposal_vote_model) {
+                    return;
+                }
+                if (local_status.defined() && next_proposal_base && prepared_next_round.sequence_lengths.defined()) {
+                    auto& inputs = *next_proposal_base;
+                    bool has_pages = true;
+                    int64_t row = 0;
+                    for (const auto& stream : stream_groups.allStreams()) {
+                        GenerateStream::MtpAsyncDeviceState cache;
+                        cache.next_kv_cache_block_id_gpu = inputs.kv_cache_block_id.narrow(1, row, 1);
+                        cache.next_kv_cache_kernel_block_id_gpu = inputs.kv_cache_kernel_block_id.narrow(1, row, 1);
+                        cache.max_mtp_advance = static_cast<int>(propose_step_ + 1);
+                        cache.next_seq_len_upper_bound = stream->seqLength() + cache.max_mtp_advance;
+                        cache.allow_async_cache_reservation = true;
+                        if (!stream->canReserveMtpCacheWithoutBookkeepingJoin(cache)
+                            || stream->streamCacheResource().singleBatchNeedBlocks(
+                                   cache.next_seq_len_upper_bound, static_cast<int>(stream->reserveStep())) != 0) {
+                            has_pages = false;
+                            break;
+                        }
+                        ++row;
+                    }
+                    if (has_pages) {
+                        auto* proposal_model = dynamic_cast<PyWrappedModel*>(draft_model_.get());
+                        RTP_LLM_CHECK(proposal_model);
+                        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(submit_guarded_draft_graph)");
+                        if (!next_proposal.model) {
+                            proposal_model->releaseBuffers();
+                            batch_stream_processor_->prepareDSparkProposeModelInput(prepared_next_round, inputs, buffer_holder_);
+                            applyCacheStrideToModelInput(inputs, cache_manager_->getMTPModuleCacheConfig(0));
+                        }
+                        GuardedDSparkProposal pending;
+                        pending.physical = inputs.kv_cache_block_id;
+                        pending.kernel = inputs.kv_cache_kernel_block_id;
+                        const bool fold_sampler = isFixedGreedyProposal(stream_groups);
+                        pending.output = proposal_model->tryForwardGuardedProposal(inputs, [&] {
+                            auto voted = proposal_vote_model->queueGuardedProposalVote(local_status);
+                            proposal_vote_queued = true;
+                            return voted;
+                        }, fold_sampler, publish_kv);
+                        if (proposal_vote_queued) {
+                            if (fold_sampler && pending.output.dspark_draft_tokens.defined()) {
+                                RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_lookahead_verify_input)");
+                                // The caller stream waits for the guarded graph. Stage token-dependent
+                                // data into fresh storage; only consume it after the ordinary next-round
+                                // epoch, page, EP and Engram history checks.
+                                pending.verify.anchor_history = prepared_next_round.engram_windows;
+                                batch_stream_processor_->prepareDSparkTargetVerifyModelInput(
+                                    prepared_next_round, pending.verify.input, pending.output.dspark_draft_tokens,
+                                    buffer_holder_, &pending.verify.proposals);
+                                if (next_gathered_input
+                                    && next_gathered_input->kv_cache_block_id.sizes() == pending.physical.sizes()
+                                    && next_gathered_input->kv_cache_kernel_block_id.sizes() == pending.kernel.sizes()) {
+                                    next_gathered_input->kv_cache_block_id = pending.physical;
+                                    next_gathered_input->kv_cache_kernel_block_id = pending.kernel;
+                                    next_gathered_input->engram_token_windows = prepared_next_round.engram_windows;
+                                    pending.gathered_input = std::move(next_gathered_input);
+                                    if (!useAsyncPrepare()) {
+                                        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(stage_next_verify_attention)");
+                                        try {
+                                            auto verify_input = *pending.gathered_input;
+                                            auto prepared_verify = pending.verify;
+                                            torch::Tensor proposals;
+                                            prepared_verify.apply(verify_input, proposals);
+                                            ensureModelInputsOnCuda(verify_input, "decode.stage_next_verify_attention");
+                                            applyCacheStrideToModelInput(verify_input, cache_manager_->cacheConfig());
+                                            pending.verify.install_attention =
+                                                proposal_vote_model->stageGuardedVerifyAttention(verify_input);
+                                        } catch (const std::exception& error) {
+                                            proposal_vote_model->discardPreparedAttentionInputs();
+                                            RTP_LLM_LOG_WARNING("Staging the next DSpARK Verify attention failed: %s",
+                                                                error.what());
+                                        }
+                                    }
+                                }
+                            }
+                            guarded_dspark_proposal_ = std::move(pending);
+                        }
+                    }
+                }
+                if (!proposal_vote_queued) {
+                    RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(skip_guarded_draft_graph)");
+                    proposal_vote_model->queueGuardedProposalVote({});
+                    proposal_vote_queued = true;
+                }
+            };
+            if (can_publish_device_acceptance) {
                 if (auto* target = dynamic_cast<PyWrappedModel*>(model_.get())) {
                     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(publish_device_acceptance_kv)");
                     private_draft_commit.join();
+                    const bool fence_counts = zero_overhead && guard_this_role && has_output_counts_for_metrics();
+                    if (fence_counts) {
+                        // The validated KV receipt can also prove that the sampler's separate
+                        // D2H copy is complete. Order the copy before publishing the receipt.
+                        speculative_sampler_output.transfer_done_event->block(cuda_graph::graphGetCurrentStream());
+                    }
+                    std::shared_ptr<torch::Event> publication_ready;
+                    const auto record_publication = [&publication_ready] {
+                        publication_ready = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+                        publication_ready->record(cuda_graph::graphGetCurrentStream());
+                    };
+                    std::function<void(const torch::Tensor&)> on_publication_enqueued;
+                    PyWrappedModel::ValidatedPublicationHook on_validated;
+                    const auto submit = [&](const torch::Tensor& status, const std::function<void()>& publish_kv) {
+                        enqueue_next_proposal(status, publish_kv);
+                        // The graph path queues both KV copies before recording its input-ready event.
+                        // A rejected shape or missing reservation still owes this round its ordinary publication.
+                        if (publish_kv) {
+                            publish_kv();
+                        }
+                        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(record_device_publication_before_status)");
+                        record_publication();
+                    };
+                    if (prepared_next_round.sequence_lengths.defined() || proposal_vote_model) {
+                        if (proposal_vote_model) {
+                            on_validated = submit;
+                        } else {
+                            on_publication_enqueued = [&](const torch::Tensor& status) { submit(status, {}); };
+                        }
+                    }
                     if (target->tryFinishSpeculativeForwardWithPrivateDraft(*private_draft_commit.model,
                                                                            model_input.request_id,
                                                                            model_input.prefix_lengths,
                                                                            speculative_sampler_output.accept_len,
                                                                            speculative_sampler_output.accept_tokens,
-                                                                           vocab_size_)) {
+                                                                           vocab_size_,
+                                                                           on_publication_enqueued,
+                                                                           lookahead_eos,
+                                                                           on_validated)) {
+                        accept_packet_ready |= fence_counts;
                         private_draft_commit.model = nullptr;
-                        device_kv_ready = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
-                        device_kv_ready->record(cuda_graph::graphGetCurrentStream());
+                        if (!publication_ready) {
+                            record_publication();
+                        }
+                        device_kv_ready = std::move(publication_ready);
+                    }
+                }
+            }
+            if (proposal_vote_model && !proposal_vote_queued) {
+                enqueue_next_proposal({});
+            }
+            if (prepared_next_round.sequence_lengths.defined()) {
+                if (device_kv_ready) {
+                    next_history = prepared_next_round.engram_windows;
+                } else {
+                    prepared_next_round = {};
+                    if (engram_anchor_windows.defined()) {
+                        prepare_history();
                     }
                 }
             }
@@ -3056,12 +3560,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
         // Plain metrics can reuse a completed output packet. A pending copy
         // keeps the existing asynchronous metrics path.
-        const bool use_ready_output_counts = device_kv_ready && metrics_reporter_
-                                             && dspark_confidence_mode_ == "off"
-                                             && !draft_sampler_output.confidence_rates.defined()
-                                             && speculative_sampler_output.accept_len_cpu.defined()
-                                             && speculative_sampler_output.accept_len_cpu.device().is_cpu()
-                                             && speculative_sampler_output.transfer_done_event->query();
+        const bool use_ready_output_counts = device_kv_ready && has_output_counts_for_metrics()
+                                             && (accept_packet_ready || speculative_sampler_output.transfer_done_event->query());
         accept_packet_ready = accept_packet_ready || use_ready_output_counts;
         if ((metrics_reporter_ || dspark_confidence_mode_ != "off") && !use_ready_output_counts) {
             accept_len_ready_event.record(cuda_graph::graphGetCurrentStream());
@@ -3240,8 +3740,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                              speculative_sampler_output,
                              std::move(target_logprobs),
                              dispatch_position_ids,
-                             model_input.kv_cache_block_id,
-                             model_input.kv_cache_kernel_block_id,
+                             next_physical_pages.defined() ? next_physical_pages : model_input.kv_cache_block_id,
+                             next_kernel_pages.defined() ? next_kernel_pages : model_input.kv_cache_kernel_block_id,
                              std::move(draft_prefill_model_output),
                              std::move(draft_prefill_sampler_output),
                              std::move(rejection_event),
@@ -3250,7 +3750,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                              next_history,
                              std::move(deferred_verify),
                              simulated_count,
-                             std::move(device_kv_ready));
+                             std::move(device_kv_ready),
+                             std::move(prepared_next_round));
     forward_lease.dispatched_async = async_dispatch && dispatch_result.ok();
     if (dispatch_result.ok() && dspark_budget_finish
         && std::none_of(speculative_sampler_output.processor_errors.begin(),
@@ -3436,7 +3937,8 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
         });
 }
 
-GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups) {
+GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups,
+                                                     const std::function<void()>& before_replay) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_model_verify)");
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.target_geometry(packed=%d,batch=%ld,query_rows=%ld,fake=%d)",
                                   model_input.is_packed_target_verify,
@@ -3478,7 +3980,7 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
     }
 
     ensureModelInputsOnCuda(model_input, "decode.target_verify_forward");
-    GptModelOutputs model_output = forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET);
+    GptModelOutputs model_output = forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET, before_replay);
     RTP_LLM_LOG_DEBUG("[MTP decode] target model verify forward end");
     model_input.is_target_verify = false;
     return model_output;
@@ -3914,7 +4416,8 @@ MtpExecutor::runDSparkProposal(GptModelInputs&                                  
                                const MtpBatchStreamProcessor::DSparkRoundState& round_state,
                                SamplerOutput&                                   draft_sampler_output,
                                int64_t&                                         model_forward_us,
-                               const std::function<void()>&                     wait_for_kv) {
+                               const std::function<void()>&                     wait_for_kv,
+                               GptModelOutputs*                                 queued_proposal) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.dspark_model_decode(batch_size=%zu)",
                                   proposal_input.input_lengths.size(0));
 
@@ -3955,7 +4458,8 @@ MtpExecutor::runDSparkProposal(GptModelInputs&                                  
                            && dspark_confidence_mode_ == "off" && !d2t_map_.defined()
                            && isFixedGreedyProposal(stream_groups);
 #endif
-    auto propose_output = runDSparkProposeForward(proposal_input, wait_for_kv, use_captured_sampler);
+    auto propose_output = queued_proposal ? std::move(*queued_proposal) :
+                                             runDSparkProposeForward(proposal_input, wait_for_kv, use_captured_sampler);
     bool submit_output_after_sampling = false;
 #if USE_PPU
     static const bool delay_output_during_sampling = readEnvFlagOnce(
@@ -4280,7 +4784,8 @@ absl::Status MtpExecutor::dispatchDecodeOutput(const StreamGroups&              
                                                torch::Tensor&                engram_output,
                                                std::function<std::shared_ptr<torch::Event>()> deferred_verify,
                                                int simulated_accept_len,
-                                               std::shared_ptr<torch::Event> device_kv_ready) {
+                                               std::shared_ptr<torch::Event> device_kv_ready,
+                                               MtpBatchStreamProcessor::DSparkRoundState next_round) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(dispatch_output)");
     absl::Status result;
     if (useStreamAsync() && (!usePpuOverlapScheduler() || deferred_verify || device_kv_ready)) {
@@ -4299,7 +4804,8 @@ absl::Status MtpExecutor::dispatchDecodeOutput(const StreamGroups&              
                                      engram_output,
                                      std::move(deferred_verify),
                                      simulated_accept_len,
-                                     std::move(device_kv_ready));
+                                     std::move(device_kv_ready),
+                                     std::move(next_round));
     } else {
         MergedOutput draft_prefill_output{std::move(draft_prefill_model_output),
                                           std::move(draft_prefill_sampler_output)};
@@ -4318,14 +4824,16 @@ absl::Status MtpExecutor::dispatchDecodeOutput(const StreamGroups&              
     return result;
 }
 
-void MtpExecutor::releaseAllModelBuffers(const ModelBase* prepared_proposal) {
+void MtpExecutor::releaseAllModelBuffers(const ModelBase* prepared_proposal, bool target_buffers_released) {
     // TensorHolder release point (MtpExecutor phase boundary): after the current
     // TP sync/model-input preparation has consumed staged H2D sources, advance
     // the hold window for executor-owned model/sampler staging tensors.
     buffer_holder_.release();
     // PyWrappedModel TensorHolder release points for target/draft model-internal
     // staging buffers.
-    model_->releaseBuffers();
+    if (!target_buffers_released) {
+        model_->releaseBuffers();
+    }
     if (draft_model_ && draft_model_.get() != prepared_proposal) {
         draft_model_->releaseBuffers();
     }
@@ -4968,7 +5476,8 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
                                               torch::Tensor&                               engram_output,
                                               std::function<std::shared_ptr<torch::Event>()> deferred_verify,
                                               int simulated_accept_len,
-                                              std::shared_ptr<torch::Event> device_kv_ready) {
+                                              std::shared_ptr<torch::Event> device_kv_ready,
+                                              MtpBatchStreamProcessor::DSparkRoundState next_round) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(dispatch_output_async)");
 
     const auto& accept_len_gpu_all     = spec_decode_output.accept_len;
@@ -4988,7 +5497,12 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     torch::Tensor prev_seq_len_all;
     torch::Tensor next_seq_len_all;
     torch::Tensor hidden_idx_all;
-    if (accept_len_gpu_all.defined() && batch_size > 0) {
+    const bool use_next_round = device_kv_ready && next_round.sequence_lengths.defined();
+    if (use_next_round) {
+        // Early preparation is restricted to non-linear caches with a
+        // publishable paired snapshot. The linear swap path needs prev/hidden.
+        next_seq_len_all = next_round.sequence_lengths;
+    } else if (accept_len_gpu_all.defined() && batch_size > 0) {
         auto accept_len_i32 = accept_len_gpu_all.to(torch::kInt32);
         next_seq_len_all    = torch::empty({batch_size}, cuda_i32);
         hidden_idx_all      = torch::empty({batch_size}, cuda_i64);
@@ -5089,10 +5603,11 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     if (draft_all_probs_full.defined()) {
         draft_probs_all = draft_all_probs_full.clone();
     }
-    auto next_position_ids_all =
-        is_dspark_ ? advanceDSparkPositionIds(
-                         verify_position_ids, accept_len_gpu_all, batch_size, static_cast<int64_t>(propose_step_ + 1)) :
-                     torch::Tensor();
+    auto next_position_ids_all = next_round.position_bases;
+    if (is_dspark_ && !use_next_round) {
+        next_position_ids_all = advanceDSparkPositionIds(
+            verify_position_ids, accept_len_gpu_all, batch_size, static_cast<int64_t>(propose_step_ + 1));
+    }
 
     torch::Tensor next_kv_cache_block_id;
     torch::Tensor next_kv_cache_kernel_block_id;
@@ -5173,6 +5688,10 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     int64_t probs_batch_off = 0;
     int64_t idx             = 0;
     bool defer_output = deferred_verify || device_kv_ready;
+    PreparedDSparkRound prepared;
+    if (use_next_round) {
+        prepared.epochs.reserve(batch_size);
+    }
     for (auto& stream : all_streams) {
         GenerateStream::MtpAsyncDeviceState state;
         state.accept_len_gpu    = narrowView(accept_len_gpu_all, 0, idx, 1);
@@ -5211,10 +5730,17 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         state.batch_cache_snapshot_upload   = state.allow_async_cache_reservation;
         state.max_mtp_advance               = static_cast<int>(propose_step_ + 1);
         defer_output = defer_output && stream->canReserveMtpCacheWithoutBookkeepingJoin(state);
-        stream->setMtpAsyncDeviceState(std::move(state));
+        const auto epoch = stream->setMtpAsyncDeviceState(std::move(state));
+        if (use_next_round) {
+            prepared.epochs.emplace_back(stream, epoch);
+        }
 
         probs_batch_off += next_batch_size;
         ++idx;
+    }
+    if (use_next_round && defer_output) {
+        prepared.inputs = std::move(next_round);
+        prepared_dspark_round_ = std::move(prepared);
     }
 
     // Publish KV before the worker delivers the corresponding tokens.

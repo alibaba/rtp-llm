@@ -237,10 +237,17 @@ public:
         // Filled together with anchors/lengths by the CUDA round-head kernel.
         // Each round owns its buffer, including when the batch shrinks/reorders.
         torch::Tensor proposal_tokens;
+        torch::Tensor proposal_positions;
+        torch::Tensor sequence_lengths;
     };
     DSparkRoundState buildDSparkRoundState(const StreamGroups&   stream_groups,
                                            const GptModelInputs& model_input,
                                            TensorHolder&         host_holder) const;
+
+    DSparkRoundState prepareNextDSparkRound(const DSparkRoundState& round,
+                                            const torch::Tensor&    accepted_lengths,
+                                            const torch::Tensor&    accepted_tokens,
+                                            const torch::Tensor&    verify_positions) const;
 
     void prepareDSparkProposeModelInput(const DSparkRoundState& round_state,
                                         GptModelInputs&         model_input,

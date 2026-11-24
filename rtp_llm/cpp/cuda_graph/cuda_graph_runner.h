@@ -4,6 +4,10 @@
 #include <atomic>
 #include <exception>
 #include <functional>
+#if USE_PPU
+#include <future>
+#include <c10/core/thread_pool.h>
+#endif
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -78,7 +82,8 @@ public:
         metrics_reporter_(std::move(metrics_reporter)),
         generation_prefill_cuda_graph_max_requests_(graph_params.generation_prefill_cuda_graph_max_requests),
         generation_prefill_cuda_graph_pad_token_id_(graph_params.generation_prefill_cuda_graph_pad_token_id),
-        dspark_proposal_sampler_(graph_params.dspark_proposal_sampler) {
+        dspark_proposal_sampler_(graph_params.dspark_proposal_sampler),
+        guard_dspark_proposal_(graph_params.guard_dspark_proposal) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
@@ -144,6 +149,27 @@ public:
 
     ~CudaGraphRunner() {
         RTP_LLM_LOG_INFO("Release CudaGraphRunner .....");
+#if USE_PPU
+        if (proposal_consumer_) {
+            try {
+                joinGuardedProposalSubmission();
+            } catch (const std::exception& error) {
+                RTP_LLM_LOG_ERROR("Guarded Draft submission failed during teardown: %s", error.what());
+            }
+            try {
+                proposal_consumer_->synchronize();
+            } catch (const std::exception& error) {
+                RTP_LLM_LOG_ERROR("Guarded Draft stream drain failed: %s", error.what());
+            }
+        }
+        if (proposal_vote_stream_) {
+            try {
+                proposal_vote_stream_->synchronize();
+            } catch (const std::exception& error) {
+                RTP_LLM_LOG_ERROR("Guarded Draft receipt stream drain failed: %s", error.what());
+            }
+        }
+#endif
         if (capture_session_may_be_dirty_.load(std::memory_order_acquire)) {
             RTP_LLM_LOG_ERROR("Skip CUDA graph runner drain because capture/session cleanup did not complete; "
                               "the caller must fail model initialization instead of continuing eager execution");
@@ -186,13 +212,28 @@ public:
                 CudaGraphCheckMode   mode = CudaGraphCheckMode::FORWARD) override;
     void replayGraph(int key);
     void replayDecode(int bs);
+#if USE_PPU
+    void joinGuardedProposalSubmission(bool require_replay = false);
+    void stageVerifyGraphInputs(const PyModelInputs& inputs,
+                                CudaGraphState& state,
+                                const AttentionInputMetadataParams* metadata);
+#endif
     void replayPrefill(int seq_len);
     int  getCurrentRealGraphSize(const CudaGraphState& state) const;
     PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
     PyModelOutputs forward(const PyModelInputs&                inputs,
                            CudaGraphState&                     state,
                            const AttentionInputMetadataParams* metadata,
-                           const std::function<void()>&        before_replay = {});
+                           const std::function<void()>&        before_replay = {},
+                           const torch::Tensor&                proposal_guard = {},
+                           bool                                inputs_staged = false);
+    bool supportsGuardedProposal(const CudaGraphState& state) const;
+    static bool dpAndEpSpanWorld(const ParallelismConfig& parallelism) {
+        // Guarded Draft votes span the whole Decode world. Only DP8/EP8 has
+        // been validated on PPU; other DP/EP sizes are pending hardware validation.
+        return parallelism.dp_size == parallelism.world_size && parallelism.ep_size == parallelism.world_size;
+    }
+    static bool isGuardedProposalBucket(int64_t batch);
     void initCapture() override;
 
     bool captureSessionMayBeDirty() const override {
@@ -205,6 +246,10 @@ public:
     static CudaGraphRunner* initializeCapture(std::unique_ptr<CudaGraphRunner> runner);
 
 private:
+    void prepareForwardInputs(const PyModelInputs& inputs,
+                              CudaGraphState& state,
+                              GraphInstance& instance,
+                              const AttentionInputMetadataParams* metadata);
     // Common capture logic for both prefill and decode
     void captureOneGraphInstance(int key, const char* key_type);
     // Common replay and sync check logic
@@ -265,6 +310,22 @@ private:
     bool                    is_packed_target_verify_{false};
     CudaGraphRole           role_{CudaGraphRole::AUTO};
     cuda_graph::GraphStream capture_stream_;
+#if USE_PPU
+    void initializeGuardedProposalWorker();
+    bool replayGuardedProposal(GraphInstance& instance, torch::Tensor host_vote, torch::Event vote_ready, uint32_t vote_epoch);
+    std::future<bool>                      proposal_submission_;
+    std::unique_ptr<c10::ThreadPool>       proposal_worker_;
+    long                                   proposal_worker_tid_ = 0;
+    std::optional<cuda_graph::GraphStream> proposal_stream_;
+    std::optional<torch::Event>            proposal_consumer_;
+    torch::Tensor                          proposal_gate_;
+    uintptr_t                              proposal_gate_device_ = 0;
+    torch::Tensor                          proposal_vote_;
+    std::optional<cuda_graph::GraphStream> proposal_vote_stream_;
+    uintptr_t                              proposal_vote_ready_device_ = 0;
+    uint32_t                               proposal_vote_epoch_ = 0;
+    uint32_t                               proposal_generation_ = 0;
+#endif
     bool                    enable_cuda_graph_debug_mode_{false};
     size_t                  max_bs_{1};
     int                     num_tokens_per_bs_{1};
@@ -297,6 +358,7 @@ private:
     int                                        generation_prefill_cuda_graph_max_requests_{0};
     int                                        generation_prefill_cuda_graph_pad_token_id_{0};
     DSparkProposalGraphSampler                 dspark_proposal_sampler_;
+    bool                                       guard_dspark_proposal_{false};
     torch::Tensor                              generation_prefill_cuda_graph_padding_offset_host_;
     mutable std::atomic<uint64_t>              combo_position_fallback_count_{0};
     static constexpr size_t                    kGenerationPrefillCudaGraphStatusCount =

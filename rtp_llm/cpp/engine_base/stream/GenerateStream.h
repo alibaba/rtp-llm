@@ -799,6 +799,9 @@ public:
     // Called under the stream mutex; cache-key reads and host table updates
     // must not race specUpdate. Preserves every non-table field and the epoch.
     absl::Status reserveMtpCacheFromUpperBound(const MtpAsyncDeviceState& state);
+#if USE_PPU
+    bool tryGrowLookaheadCacheRow(int advance, torch::Tensor& physical, torch::Tensor& kernel);
+#endif
     static void  flushMtpCacheSnapshotUploads(const std::list<std::shared_ptr<GenerateStream>>& streams,
                                               std::optional<torch::Stream> upload_stream = std::nullopt);
     bool         replaceMtpCacheSnapshot(uint64_t                   expected_epoch,

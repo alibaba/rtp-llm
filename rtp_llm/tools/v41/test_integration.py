@@ -22,7 +22,10 @@ from rtp_llm.config.v41_runtime import (
     DSPARK_OVERLAP_FLAGS,
     MEGAMOE_DSPARK_ASYNC_FLAGS,
     V41RuntimeConfig,
+    ZERO_OVERHEAD_ENV,
     select_v41_backend,
+    validate_v41_server_config,
+    zero_overhead_flags,
 )
 from rtp_llm.tools.v41.launch import preset_env
 from rtp_llm.tools.v41.preflight import (
@@ -37,6 +40,77 @@ from rtp_llm.tools.v41.preflight import (
 
 
 class IntegrationTest(unittest.TestCase):
+    def test_zero_overhead_scheduler_profile(self):
+        options = dict(shared_decode_graph=True, dspark_gamma=3)
+        parent = {"RTP_V41_PPU_MOE_BACKEND": "megamoe"}
+        for switch in (None, "0", "1", "true"):
+            with self.subTest(switch=switch):
+                env = dict(parent)
+                if switch is not None:
+                    env[ZERO_OVERHEAD_ENV] = switch
+                decode = preset_env("decode", "/weights", parent=env, **options)
+                normalized = "0" if switch == "0" else "1"
+                self.assertEqual(decode.get(ZERO_OVERHEAD_ENV), normalized)
+                if normalized == "1":
+                    for key in (
+                        DSPARK_OVERLAP_ENV,
+                        DSPARK_CROSS_ROUND_OVERLAP_ENV,
+                        "RTP_V41_PPU_DSPARK_GPU_VERIFY_RECEIPT",
+                        "RTP_V41_PPU_DSPARK_FOLD_PROPOSAL_SAMPLER",
+                        "RTP_V41_PPU_VERIFY_DEFERRED_STAGE",
+                    ):
+                        self.assertEqual(decode[key], "1")
+        env = {**parent, ZERO_OVERHEAD_ENV: "1"}
+        self.assertEqual(
+            zero_overhead_flags(env, role="PREFILL", speculative="DSPARK", graph=False,
+                                single_host=True, gamma=3, verify_mode="dense", confidence="off"),
+            {ZERO_OVERHEAD_ENV: "1"},
+        )
+        for overrides in ({"dspark_gamma": 0}, {"dspark_gamma": 1}, {"shared_decode_graph": False}):
+            with self.assertRaisesRegex(ValueError, ZERO_OVERHEAD_ENV):
+                preset_env("decode", "/weights", parent=env, **{**options, **overrides})
+        with self.assertRaisesRegex(ValueError, "real DSpARK acceptance"):
+            preset_env("decode", "/weights", parent={**env, "RTP_V41_PPU_DSPARK_SIMULATED_ACCEPT_LEN": "3.25"}, **options)
+        with self.assertRaisesRegex(ValueError, "boolean"):
+            preset_env("decode", "/weights", parent={ZERO_OVERHEAD_ENV: "maybe"})
+
+    def test_zero_overhead_scheduler_default_uses_effective_server_config(self):
+        config = NS(
+            model_args=NS(model_type="deepseek_v41", max_seq_len=32768),
+            role_config=NS(role_type="DECODE"),
+            parallelism_config=NS(
+                world_size=8, local_world_size=8, tp_size=1, dp_size=8, ep_size=8,
+                prefill_cp_config=NS(method="DISABLED", prefill_cp_size=1, kv_cache_sharded=False),
+            ),
+            py_hw_kernel_config=NS(enable_cuda_graph=True),
+            sp_config=NS(type="DSPARK", gen_num_per_cycle=3),
+            eplb_config=NS(eplb_mode="NONE", redundant_expert=0),
+            moe_config=NS(use_deepep_low_latency=False, use_deepep_moe=True, use_all_gather=False),
+        )
+        for backend, size, switch, expected in (
+            ("ppu", 8, None, "1"), ("ppu", 8, "0", "0"),
+            ("ppu", 32, None, "1"), ("ppu", 32, "1", "1"), ("cuda", 8, None, None),
+        ):
+            with self.subTest(backend=backend, size=size, switch=switch):
+                config.parallelism_config.world_size = size
+                config.parallelism_config.dp_size = size
+                config.parallelism_config.ep_size = size
+                env = {"RTP_V41_PPU_MOE_BACKEND": "megamoe", "RTP_V41_ENP_SIZE": str(size)}
+                if switch is not None:
+                    env[ZERO_OVERHEAD_ENV] = switch
+                with patch.dict(os.environ, env, clear=True), patch(
+                    "rtp_llm.config.v41_runtime.v41_backend_for_config", return_value=backend
+                ), patch("rtp_llm.models_py.modules.dsv41.backend.get_v41_backend"):
+                    validate_v41_server_config(config)
+                    self.assertEqual(os.environ.get(ZERO_OVERHEAD_ENV), expected)
+                    self.assertEqual(
+                        os.environ.get(DSPARK_CROSS_ROUND_OVERLAP_ENV), "1" if expected == "1" else None
+                    )
+                    if expected == "1":
+                        graph_vote = "1" if size == 8 else "0"
+                        self.assertEqual(os.environ["RTP_V41_PPU_DSPARK_HOST_GRAPH_VOTE"], graph_vote)
+                        self.assertEqual(os.environ["RTP_V41_PPU_DSPARK_EARLY_VERIFY_VOTE"], graph_vote)
+
     def test_host_budget_admits_all_eight_l2_pools(self):
         gib = 1024**3
         metadata = {"engram_table_bytes": 189 * gib}
@@ -220,7 +294,31 @@ class IntegrationTest(unittest.TestCase):
                 configured = preset_env(role, "/weights", parent={"FRONTEND_SERVER_COUNT": "4"})
                 self.assertEqual(configured["FRONTEND_SERVER_COUNT"], "4")
 
-    def test_dspark_cross_round_overlap_is_opt_in_on_both_roles(self):
+    def test_zero_overhead_default_respects_decode_profile_and_legacy_opt_out(self):
+        flags = {"RTP_V41_PPU_MOE_BACKEND": "megamoe"}
+        options = dict(parent=flags, shared_decode_graph=True, dspark_gamma=3)
+        default = preset_env("decode", "/weights", **options)
+        self.assertEqual(default[DSPARK_CROSS_ROUND_OVERLAP_ENV], "1")
+        for env in (
+            preset_env("prefill", "/weights", parent=flags, dspark_gamma=3),
+            preset_env("decode", "/weights", parent=flags, dspark_gamma=3),
+            preset_env("decode", "/weights", **dict(options, dspark_gamma=1)),
+        ):
+            self.assertNotIn(DSPARK_CROSS_ROUND_OVERLAP_ENV, env)
+            self.assertNotIn(ZERO_OVERHEAD_ENV, env)
+
+        flags[DSPARK_CROSS_ROUND_OVERLAP_ENV] = "false"
+        disabled = preset_env("decode", "/weights", **options)
+        self.assertEqual(disabled[DSPARK_CROSS_ROUND_OVERLAP_ENV], "0")
+        self.assertEqual(disabled[DSPARK_OVERLAP_ENV], "1")
+        self.assertNotIn(ZERO_OVERHEAD_ENV, disabled)
+
+        flags[DSPARK_CROSS_ROUND_OVERLAP_ENV] = "1"
+        flags["RTP_V41_PPU_DSPARK_SIMULATED_ACCEPT_LEN"] = "3.25"
+        simulated = preset_env("decode", "/weights", **options)
+        self.assertNotIn(ZERO_OVERHEAD_ENV, simulated)
+
+    def test_dspark_cross_round_overlap_honors_explicit_flags(self):
         for role in ("prefill", "decode"):
             with self.subTest(role=role):
                 flags = {DSPARK_OVERLAP_ENV: "0", "RTP_V41_PPU_MOE_BACKEND": "megamoe"}
@@ -624,6 +722,8 @@ class IntegrationTest(unittest.TestCase):
                 self.assertIn("name:decode_part0,ip:192.0.2.20,port:19090",
                               env["GANG_CONFIG_STRING"])
                 self.assertEqual(runtime.speculative, "DSPARK")
+                self.assertEqual(env[ZERO_OVERHEAD_ENV], "1")
+                self.assertEqual(env[DSPARK_CROSS_ROUND_OVERLAP_ENV], "1")
                 self.assertEqual(env["RTP_V41_PPU_DSPARK_HOST_GRAPH_VOTE"], "0")
                 self.assertEqual(env["RTP_V41_PPU_DSPARK_EARLY_VERIFY_VOTE"], "0")
                 with self.assertRaisesRegex(ValueError, "world_size=EP=ENP=32"):
@@ -642,6 +742,12 @@ class IntegrationTest(unittest.TestCase):
         )
         self.assertEqual(host_env["RTP_V41_PPU_DSPARK_HOST_GRAPH_VOTE"], "1")
         self.assertEqual(host_env["RTP_V41_PPU_DSPARK_EARLY_VERIFY_VOTE"], "1")
+        disabled = preset_env(
+            "decode", "/weights", shared_decode_graph=True,
+            **dict(options, parent={**options["parent"], ZERO_OVERHEAD_ENV: "0"}),
+        )
+        self.assertEqual(disabled[ZERO_OVERHEAD_ENV], "0")
+        self.assertNotIn(DSPARK_CROSS_ROUND_OVERLAP_ENV, disabled)
 
     def test_decode_graph_requires_explicit_megamoe_w4a4(self):
         env = preset_env("decode", "/weights", parent={})
@@ -707,6 +813,8 @@ class IntegrationTest(unittest.TestCase):
             self.assertEqual(main(), 0)
         self.assertIn("RTP_V41_PPU_MOE_BACKEND=megamoe", output.getvalue())
         self.assertIn("SP_TYPE=dspark", output.getvalue())
+        self.assertIn(f"{ZERO_OVERHEAD_ENV}=1", output.getvalue())
+        self.assertIn(f"{DSPARK_CROSS_ROUND_OVERLAP_ENV}=1", output.getvalue())
 
     def test_preflight_uses_effective_graph_selection(self):
         from rtp_llm.tools.v41.launch import main

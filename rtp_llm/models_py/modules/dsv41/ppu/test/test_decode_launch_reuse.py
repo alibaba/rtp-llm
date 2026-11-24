@@ -91,6 +91,59 @@ class DecodeLaunchReuseContracts(unittest.TestCase):
             calls.count(id(model.shared_weight_views._resident["alias"])), 1
         )
 
+    def test_native_guard_rechecks_bindings_and_tensor_metadata(self):
+        from rtp_llm.models_py.modules.dsv41.ppu import graph_runtime
+        try:
+            from librtp_compute_ops import GraphWeightStorage
+        except ImportError:
+            self.skipTest("requires the PPU graph weight guard")
+        runtime, model = self.make_signature_runtime()
+        prefix, suffix = runtime._external_weights()
+        weights = graph_runtime._graph_module_weights(model.v4, direct=True)
+        runtime._native_weight_guard = GraphWeightStorage([*prefix, *weights, *suffix])
+        runtime._pointers = runtime._storage_signature()
+        self.assertTrue(runtime._weight_storage_matches())
+        self.assertTrue(runtime._weight_storage_matches())
+        original = model.v4.projection.weight
+        model.v4.projection.weight = torch.nn.Parameter(torch.ones_like(original))
+        self.assertFalse(runtime._weight_storage_matches())
+        model.v4.projection.weight = original
+        self.assertTrue(runtime._weight_storage_matches())
+        with torch.no_grad():
+            original.set_(original.detach().flatten())
+        self.assertFalse(runtime._weight_storage_matches())
+        with torch.no_grad():
+            original.set_(original.detach().view(4, 4))
+        with patch.object(torch.Tensor, "data_ptr", lambda tensor: 0):
+            self.assertFalse(runtime._weight_storage_matches())
+        model.v4.register_buffer("base", torch.zeros(1))
+        self.assertFalse(runtime._weight_storage_matches())
+
+    def test_native_weight_tree_preserves_registration_order_and_live_bindings(self):
+        from rtp_llm.models_py.modules.dsv41.ppu import graph_runtime
+        try:
+            from librtp_compute_ops import GraphWeightStorage
+        except ImportError:
+            self.skipTest("requires the PPU graph weight guard")
+        runtime, model = self.make_signature_runtime()
+        original = model.v4.projection
+        model.v4.alias = original
+        prefix, suffix = runtime._external_weights()
+        weights = graph_runtime._graph_module_weights(model.v4, direct=True)
+        guard = GraphWeightStorage([*prefix, *weights, *suffix])
+        runtime._native_weight_guard = guard
+        runtime._pointers = runtime._storage_signature()
+        self.assertTrue(guard.matches_module_tree(
+            prefix, model.v4, suffix, graph_runtime._GRAPH_WEIGHT_NAMES, graph_runtime._standard_module_traversal,
+        ))
+        model.v4.projection = torch.nn.Linear(4, 4)
+        self.assertFalse(runtime._weight_storage_matches())
+        model.v4.projection = original
+        self.assertTrue(runtime._weight_storage_matches())
+        with patch.object(original, "named_modules", lambda *args, **kwargs: iter(())):
+            self.assertFalse(runtime._weight_storage_matches())
+        self.assertTrue(runtime._weight_storage_matches())
+
     def test_verify_counter_selection_keeps_eager_and_other_modes_unchanged(self):
         runtime = SharedGraphRuntime.__new__(SharedGraphRuntime)
         native = NS(current=None, pending_verify=None, pending_idle_verify=None)

@@ -155,7 +155,8 @@ protected:
     void
     launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size, bool geometry_ready = false);
     void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input);
-    GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
+    GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups,
+                                           const std::function<void()>& before_replay = {});
     absl::Status    runDecodeAlignmentOnly(GptModelInputs& model_input);
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
                                                          const StreamGroups&   stream_groups) const;
@@ -183,7 +184,8 @@ protected:
                                        const MtpBatchStreamProcessor::DSparkRoundState& round_state,
                                        SamplerOutput&                                   draft_sampler_output,
                                        int64_t&                                         model_forward_us,
-                                       const std::function<void()>&                     wait_for_kv = {});
+                                       const std::function<void()>&                     wait_for_kv = {},
+                                       GptModelOutputs*                                 queued_proposal = nullptr);
     GptModelOutputs  runDraftPrefillForward(GptModelInputs& model_input);
     SpecLogitsVerifyRunner::LaunchResult
          buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
@@ -220,7 +222,8 @@ protected:
                                       torch::Tensor&                               engram_output,
                                       std::function<std::shared_ptr<torch::Event>()>  deferred_verify = {},
                                       int                                            simulated_accept_len = 0,
-                                      std::shared_ptr<torch::Event>                   device_kv_ready = {});
+                                      std::shared_ptr<torch::Event>                   device_kv_ready = {},
+                                      MtpBatchStreamProcessor::DSparkRoundState       next_round = {});
 
     void draftModelDecode(GptModelInputs&             model_input,
                           const StreamGroups&         stream_groups,
@@ -289,7 +292,8 @@ protected:
                                      torch::Tensor&                               engram_output,
                                      std::function<std::shared_ptr<torch::Event>()>  deferred_verify = {},
                                      int                                            simulated_accept_len = 0,
-                                     std::shared_ptr<torch::Event>                   device_kv_ready = {});
+                                     std::shared_ptr<torch::Event>                   device_kv_ready = {},
+                                     MtpBatchStreamProcessor::DSparkRoundState       next_round = {});
 
     // Synchronous dispatch also publishes the same per-stream device state as
     // the async path, using the host seqLength after specUpdate as truth.
@@ -303,7 +307,7 @@ protected:
                                                   int64_t              batch_size,
                                                   int64_t              verify_width);
 
-    void releaseAllModelBuffers(const ModelBase* prepared_proposal = nullptr);
+    void releaseAllModelBuffers(const ModelBase* prepared_proposal = nullptr, bool target_buffers_released = false);
 
 private:
     static torch::Tensor snapshotMutableHostInput(const torch::Tensor& tensor, TensorHolder& holder);
@@ -325,7 +329,8 @@ private:
                                int64_t              schedule_time_us,
                                int64_t              model_forward_us);
 
-    GptModelOutputs forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role);
+    GptModelOutputs forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role,
+                                 const std::function<void()>& before_replay = {});
 
     std::unique_ptr<ModelBase>                                               model_;
     std::unique_ptr<Sampler>                                                 sampler_;
@@ -401,6 +406,7 @@ private:
         torch::Tensor                 accept_len_sum_cpu;
         torch::Tensor                 accept_len_rows_gpu;
         torch::Tensor                 accept_len_rows_cpu;
+        std::vector<int32_t>          accept_len_host_counts;
         torch::Tensor                 confidence_gpu;
         torch::Tensor                 confidence_cpu;
         torch::Tensor                 confidence_lengths_cpu;
@@ -432,6 +438,34 @@ private:
     AsyncRunner spec_bookkeeping_runner_;
     std::shared_future<std::shared_ptr<torch::Event>> ppu_verify_publication_;
     std::shared_ptr<torch::Event> ppu_verify_ready_;
+    struct PreparedDSparkRound {
+        MtpBatchStreamProcessor::DSparkRoundState                       inputs;
+        std::vector<std::pair<std::weak_ptr<GenerateStream>, uint64_t>> epochs;
+
+        bool matches(const StreamGroups& streams) const;
+    };
+    PreparedDSparkRound prepared_dspark_round_;
+#if USE_PPU
+    struct PreparedDSparkVerify {
+        GptModelInputs input;
+        torch::Tensor  proposals;
+        torch::Tensor  anchor_history;
+        std::function<void()> install_attention;
+        bool matchesHistory(const torch::Tensor& history) const;
+        void apply(GptModelInputs& target, torch::Tensor& proposal_tokens);
+    };
+    struct GuardedDSparkProposal {
+        GptModelOutputs               output;
+        PreparedDSparkVerify          verify;
+        std::optional<GptModelInputs> gathered_input;
+        torch::Tensor                 physical;
+        torch::Tensor                 kernel;
+
+        bool matchesPages(const StreamGroups& streams) const;
+        bool matchesGatheredInput(const StreamGroups& streams) const;
+    };
+    GuardedDSparkProposal guarded_dspark_proposal_;
+#endif
     std::function<void()> deferred_ppu_publication_;
     std::function<void()> deferred_ppu_output_;
     std::optional<torch::Stream> ppu_output_copy_stream_;

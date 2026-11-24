@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/utils/utils.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include <algorithm>
+#include <pybind11/functional.h>
 #include <cstdint>
 #include <stdexcept>
 #include <mutex>
@@ -240,13 +241,37 @@ bool PyWrappedModel::tryFinishSpeculativeForwardWithPrivateDraft(PyWrappedModel&
                                                                   const torch::Tensor& prefixes,
                                                                   const torch::Tensor& accepted_rows,
                                                                   const torch::Tensor& accepted_tokens,
-                                                                  int64_t vocab_size) {
+                                                                  int64_t vocab_size,
+                                                                  const std::function<void(const torch::Tensor&)>&
+                                                                      on_publication_enqueued,
+                                                                  int64_t lookahead_eos,
+                                                                  const ValidatedPublicationHook& on_validated) {
     py::gil_scoped_acquire gil;
     if (!py_model_ || !draft.py_model_ || !py::hasattr(py_model_, "try_finish_speculative_forward_with_private_draft")) {
         return false;
     }
     auto publish = py_model_.attr("try_finish_speculative_forward_with_private_draft");
     if (accepted_tokens.defined()) {
+        if (on_validated) {
+            return publish(draft.py_model_, request_ids, prefixes, accepted_rows, accepted_tokens, vocab_size,
+                           py::arg("on_publication_validated") = py::cpp_function(on_validated),
+                           py::arg("lookahead_eos") = lookahead_eos).cast<bool>();
+        }
+        if (lookahead_eos >= 0) {
+            py::object enqueue = on_publication_enqueued ? py::object(py::cpp_function(on_publication_enqueued)) : py::none();
+            return publish(draft.py_model_, request_ids, prefixes, accepted_rows, accepted_tokens, vocab_size,
+                           enqueue, py::arg("lookahead_eos") = lookahead_eos).cast<bool>();
+        }
+        if (on_publication_enqueued) {
+            return publish(draft.py_model_,
+                           request_ids,
+                           prefixes,
+                           accepted_rows,
+                           accepted_tokens,
+                           vocab_size,
+                           py::cpp_function(on_publication_enqueued))
+                .cast<bool>();
+        }
         return publish(draft.py_model_, request_ids, prefixes, accepted_rows, accepted_tokens, vocab_size).cast<bool>();
     }
     return publish(draft.py_model_, request_ids, prefixes, accepted_rows).cast<bool>();
@@ -1076,6 +1101,9 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs,
                                             bool                  defer_graph_prepare) {
     RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs");
     PreparedAttentionInputsGuard prepared_guard(prepared_attention_inputs_);
+#if USE_PPU
+    staged_verify_graph_.reset();
+#endif
     d2d_copies_.clear();
     if (pinned_check_remaining_ > 0) {
         --pinned_check_remaining_;
@@ -1205,14 +1233,105 @@ GptModelOutputs PyWrappedModel::forwardProposalAfterInputPreparation(const GptMo
     RTP_LLM_CHECK(dspark_model_role_ == DSparkModelRole::PROPOSE);
     return forwardImpl(inputs, /*private_draft_stage=*/false, wait_for_kv, identity_lm_rows, use_captured_sampler);
 }
+
+GptModelOutputs PyWrappedModel::tryForwardGuardedProposal(const GptModelInputs&                  inputs,
+                                                         const std::function<torch::Tensor()>& queue_vote,
+                                                         bool                                  use_captured_sampler,
+                                                         const std::function<void()>&           publish_kv) {
+    RTP_LLM_CHECK(dspark_model_role_ == DSparkModelRole::PROPOSE);
+    return forwardImpl(inputs, false, publish_kv, false, use_captured_sampler, queue_vote);
+}
+
+GptModelOutputs PyWrappedModel::forwardVerifyAfterProposal(const GptModelInputs& inputs, const std::function<void()>& join) {
+    RTP_LLM_CHECK(inputs.is_target_verify);
+    return forwardImpl(inputs, false, join);
+}
+
+std::function<void()> PyWrappedModel::stageGuardedVerifyAttention(const GptModelInputs& inputs) {
+    RTP_LLM_CHECK(inputs.is_target_verify && !inputs.is_packed_target_verify && !inputs.pd_separation);
+    prepareAttentionInputs(inputs, /*skip_forward_event_sync=*/true, nullptr, /*defer_graph_prepare=*/true);
+    std::optional<StagedVerifyGraph> staged_graph;
+    if (dspark_model_role_ == DSparkModelRole::NONE
+        && !inputs.is_fake_stream && !inputs.warmup && inputs.combo_tokens.defined() && inputs.combo_tokens.is_cuda()
+        && (!inputs.engram_token_windows.defined() || inputs.engram_token_windows.is_cuda())) {
+        auto* runner = dynamic_cast<CudaGraphRunner*>(selectGraphRunner(attention_inputs_));
+        CudaGraphState state;
+        auto attention = attention_inputs_;
+        attention.is_s_padded = true;
+        PyModelInputs graph_inputs({inputs.combo_tokens,
+                                    inputs.last_hidden_states,
+                                    attention.combo_position_ids,
+                                    torch_ext::PyEmbeddingInputs(),
+                                    torch_ext::PyMultimodalInputs(),
+                                    attention,
+                                    attention_inputs_by_tag_,
+                                    torch_ext::BertEmbeddingInputs()});
+        graph_inputs.engram_token_windows = inputs.engram_token_windows;
+        if (runner && runner->canRun(graph_inputs, state, CudaGraphCheckMode::PREPARE)
+            && state.current_batch_size == state.current_real_graph_bs) {
+            py::gil_scoped_acquire gil;
+            runner->stageVerifyGraphInputs(
+                graph_inputs, state, pending_attention_metadata_.cu_seqlens ? &pending_attention_metadata_ : nullptr);
+            staged_graph = StagedVerifyGraph{runner, state.current_real_graph_bs, inputs.combo_tokens};
+        }
+    }
+    // Keep the staged metadata out of the wrapper's active slot until the next
+    // selected batch and its EP vote are known. No target graph is launched here.
+    discardPreparedAttentionInputs();
+    return [this, attention = std::move(attention_inputs_), tags = std::move(attention_inputs_by_tag_),
+            metadata = std::exchange(pending_attention_metadata_, {}), staged_graph = std::move(staged_graph)]() mutable {
+        attention_inputs_ = std::move(attention);
+        attention_inputs_by_tag_ = std::move(tags);
+        pending_attention_metadata_ = metadata;
+        graph_state_ = CudaGraphState();
+        staged_verify_graph_ = std::move(staged_graph);
+        prepared_attention_inputs_.store(true, std::memory_order_release);
+    };
+}
+
+void PyWrappedModel::joinGuardedProposalSubmission(bool require_replay) {
+    if (auto* runner = dynamic_cast<CudaGraphRunner*>(graph_runner_.get())) {
+        runner->joinGuardedProposalSubmission(require_replay);
+    }
+    for (auto& budget : dspark_budget_graphs_) {
+        if (auto* runner = dynamic_cast<CudaGraphRunner*>(budget.runner.get())) {
+            runner->joinGuardedProposalSubmission(require_replay);
+        }
+    }
+}
+
+torch::Tensor PyWrappedModel::queueGuardedProposalVote(const torch::Tensor& local_status) {
+    py::gil_scoped_acquire gil;
+    auto status = local_status.defined() ? py::cast(local_status) : py::object(py::none());
+    return py_model_.attr("queue_guarded_proposal_vote")(status).cast<torch::Tensor>();
+}
+
+std::pair<bool, bool> PyWrappedModel::agreeLookaheadSchedule(bool reuse, int64_t batch) {
+    py::gil_scoped_acquire gil;
+    return py_model_.attr("agree_lookahead_schedule")(reuse, batch).cast<std::pair<bool, bool>>();
+}
+
+bool PyWrappedModel::tryPublishLookaheadSchedule(bool reuse, int64_t batch) {
+    py::gil_scoped_acquire gil;
+    return py_model_.attr("try_publish_lookahead_schedule")(reuse, batch).cast<bool>();
+}
+
+std::pair<bool, bool> PyWrappedModel::collectLookaheadSchedule() {
+    py::gil_scoped_acquire gil;
+    return py_model_.attr("collect_lookahead_schedule")().cast<std::pair<bool, bool>>();
+}
 #endif
 
 GptModelOutputs PyWrappedModel::forwardImpl(const GptModelInputs&        inputs,
                                             bool                         private_draft_stage,
                                             const std::function<void()>& wait_for_kv,
                                             bool                         identity_lm_rows,
-                                            bool                         use_captured_sampler) {
+                                            bool                         use_captured_sampler,
+                                            const std::function<torch::Tensor()>& guarded_proposal_vote) {
     RTP_LLM_PROFILE_SCOPE("py_model.forward");
+#if USE_PPU
+    auto staged_verify_graph = std::exchange(staged_verify_graph_, std::nullopt);
+#endif
 
     // Establish the cleanup guard before touching inputs: both the performance
     // wrapper and host-buffer retention can throw. A failed async prepare must
@@ -1265,6 +1384,9 @@ GptModelOutputs PyWrappedModel::forwardImpl(const GptModelInputs&        inputs,
         const bool has_multimodal_features =
             inputs.multimodal_features.has_value() && !inputs.multimodal_features->empty();
         if (int(device_props_.enable_layer_micro_batch) && supports_micro_batch_ && !has_multimodal_features) {
+            if (guarded_proposal_vote) {
+                return {};
+            }
             if (wait_for_kv) {
                 wait_for_kv();
             }
@@ -1397,7 +1519,7 @@ GptModelOutputs PyWrappedModel::forwardImpl(const GptModelInputs&        inputs,
         auto*      graph_runner = selectGraphRunner(py_model_inputs.attention_inputs);
         auto&      graph_state  = selectGraphState(py_model_inputs.attention_inputs);
         bool native_graph_work_available = true;
-        if (enable_cuda_graph_) {
+        if (enable_cuda_graph_ && !guarded_proposal_vote) {
             py::gil_scoped_acquire gil;
             if (py::hasattr(py_model_, "prepare_native_graph_step")) {
                 native_graph_work_available =
@@ -1412,6 +1534,19 @@ GptModelOutputs PyWrappedModel::forwardImpl(const GptModelInputs&        inputs,
         }
         const bool can_run_graph = !capture_hidden_states && enable_cuda_graph_ && graph_runner != nullptr
                                    && graph_runner->canRun(py_model_inputs, graph_state);
+        torch::Tensor proposal_guard;
+        if (guarded_proposal_vote) {
+#if USING_CUDA
+            auto* cuda_runner = dynamic_cast<CudaGraphRunner*>(graph_runner);
+            if (!can_run_graph || !cuda_runner || !cuda_runner->supportsGuardedProposal(graph_state)) {
+                pending_attention_metadata_ = {};
+                return {};
+            }
+            proposal_guard = guarded_proposal_vote();
+#else
+            return {};
+#endif
+        }
         if (private_draft_stage && (!can_run_graph || !native_graph_work_available)) {
             // The early path may only write into a captured private journal.
             // Leave eager and idle fallback to the normal post-accept caller.
@@ -1469,11 +1604,22 @@ GptModelOutputs PyWrappedModel::forwardImpl(const GptModelInputs&        inputs,
             auto forward_graph                           = [&]() {
 #if USING_CUDA
                 if (auto* cuda_runner = dynamic_cast<CudaGraphRunner*>(graph_runner)) {
+                    bool inputs_staged = false;
+#if USE_PPU
+                    inputs_staged = staged_verify_graph && staged_verify_graph->runner == cuda_runner
+                                    && staged_verify_graph->bucket == graph_state.current_real_graph_bs
+                                    && staged_verify_graph->input_ids.is_same(py_model_inputs.input_ids);
+                    if (inputs_staged) {
+                        RTP_LLM_PROFILE_SCOPE("py_model.use_staged_verify_graph_inputs");
+                    }
+#endif
                     return cuda_runner->forward(py_model_inputs,
                                                 graph_state,
                                                 pending_attention_metadata_.cu_seqlens ? &pending_attention_metadata_ :
                                                                                          nullptr,
-                                                before_replay);
+                                                before_replay,
+                                                proposal_guard,
+                                                inputs_staged);
                 }
                 invokeBuildAttentionInputMetadata(pending_attention_metadata_,
                                                   cuda_graph::graphGetCurrentStream().stream());
@@ -1496,6 +1642,12 @@ GptModelOutputs PyWrappedModel::forwardImpl(const GptModelInputs&        inputs,
             } else {
                 py_model_outputs = forward_graph();
             }
+#if USE_PPU
+            if (guarded_proposal_vote && !py_model_outputs.hidden_states.defined()) {
+                pending_attention_metadata_ = {};
+                return {};
+            }
+#endif
             if (py::hasattr(py_model_, "note_native_graph_replay")) {
                 py_model_.attr("note_native_graph_replay")();
             }

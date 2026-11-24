@@ -14,6 +14,7 @@
 #include <string>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -88,12 +89,24 @@ public:
                    DSparkProposalGraphSampler dspark_proposal_sampler = {});
     ~PyWrappedModel();
 
+    using ValidatedPublicationHook = std::function<void(const torch::Tensor&, const std::function<void()>&)>;
     GptModelOutputs      forward(const GptModelInputs& inputs) override;
 #if USE_PPU
     GptModelOutputs      forwardProposalAfterInputPreparation(const GptModelInputs&        inputs,
                                                              const std::function<void()>& wait_for_kv,
                                                              bool                        identity_lm_rows,
                                                              bool                        use_captured_sampler);
+    GptModelOutputs tryForwardGuardedProposal(const GptModelInputs&                  inputs,
+                                              const std::function<torch::Tensor()>& queue_vote,
+                                              bool                                  use_captured_sampler,
+                                              const std::function<void()>&           publish_kv = {});
+    torch::Tensor queueGuardedProposalVote(const torch::Tensor& local_status);
+    void joinGuardedProposalSubmission(bool require_replay = false);
+    GptModelOutputs forwardVerifyAfterProposal(const GptModelInputs& inputs, const std::function<void()>& join);
+    std::function<void()> stageGuardedVerifyAttention(const GptModelInputs& inputs);
+    std::pair<bool, bool> agreeLookaheadSchedule(bool reuse, int64_t batch);
+    bool tryPublishLookaheadSchedule(bool reuse, int64_t batch);
+    std::pair<bool, bool> collectLookaheadSchedule();
 #endif
     const torch::Tensor& proposalLogitsBuffer() const {
         return proposal_logits_buffer_;
@@ -111,7 +124,11 @@ public:
                                                                              const torch::Tensor& prefixes,
                                                                              const torch::Tensor& accepted_rows,
                                                                              const torch::Tensor& accepted_tokens = {},
-                                                                             int64_t vocab_size = 0);
+                                                                             int64_t vocab_size = 0,
+                                                                             const std::function<void(const torch::Tensor&)>&
+                                                                                 on_publication_enqueued = {},
+                                                                             int64_t lookahead_eos = -1,
+                                                                             const ValidatedPublicationHook& on_validated = {});
     void                       publishPrivateDraftCommit(const torch::Tensor& request_ids,
                                                          const torch::Tensor& prefixes,
                                                          const torch::Tensor& accepted_rows);
@@ -131,6 +148,9 @@ public:
                                                       bool                  defer_graph_prepare     = false);
     void                       discardPreparedAttentionInputs() noexcept {
         prepared_attention_inputs_.store(false, std::memory_order_release);
+#if USE_PPU
+        staged_verify_graph_.reset();
+#endif
     }
     void                       updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
     std::string                waitCacheStorePublication() override;
@@ -144,7 +164,8 @@ private:
                                 bool                          private_draft_stage,
                                 const std::function<void()>&  wait_for_kv = {},
                                 bool                         identity_lm_rows = false,
-                                bool                         use_captured_sampler = false);
+                                bool                         use_captured_sampler = false,
+                                const std::function<torch::Tensor()>& guarded_proposal_vote = {});
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
 
 private:
@@ -254,6 +275,14 @@ private:
     int                  pinned_check_remaining_{kPinnedCheckForwardCount};
 
     std::atomic<bool> prepared_attention_inputs_{false};
+#if USE_PPU
+    struct StagedVerifyGraph {
+        CudaGraphRunner* runner;
+        int              bucket;
+        torch::Tensor    input_ids;
+    };
+    std::optional<StagedVerifyGraph> staged_verify_graph_;
+#endif
 #if USING_CUDA
     AttentionInputMetadataParams pending_attention_metadata_;
 #endif
@@ -466,6 +495,15 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
         // Create GraphParams from individual config fields
         GraphParams graph_params;
+#if USE_PPU
+        const auto* scheduler = std::getenv("RTP_V41_PPU_ZERO_OVERHEAD_SCHEDULER");
+        const auto& graph_parallelism = params.parallelism_config;
+        graph_params.guard_dspark_proposal = dspark_model_role_ == DSparkModelRole::PROPOSE
+                                             && init_resources.is_decode_role && graph_parallelism.tp_size == 1
+                                             && CudaGraphRunner::dpAndEpSpanWorld(graph_parallelism)
+                                             && graph_parallelism.pp_size == 1
+                                             && scheduler && std::string(scheduler) == "1";
+#endif
         graph_params.dspark_proposal_sampler = std::move(dspark_proposal_sampler);
         graph_params.expert_token_counts          = expert_balancer_.stable_expert_token_counts();
         graph_params.enable_cuda_graph            = params.hw_kernel_config.enable_cuda_graph;

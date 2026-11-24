@@ -17,6 +17,7 @@ MEGAMOE_DSPARK_ASYNC_FLAGS = (
 )
 DSPARK_OVERLAP_ENV = "RTP_V41_PPU_DSPARK_OVERLAP_SCHEDULER"
 DSPARK_CROSS_ROUND_OVERLAP_ENV = "RTP_V41_PPU_DSPARK_CROSS_ROUND_OVERLAP"
+ZERO_OVERHEAD_ENV = "RTP_V41_PPU_ZERO_OVERHEAD_SCHEDULER"
 DSPARK_SIMULATED_ACCEPT_ENV = "RTP_V41_PPU_DSPARK_SIMULATED_ACCEPT_LEN"
 DSPARK_OVERLAP_FLAGS = {
     "RTP_LLM_STREAM_ASYNC": "1",
@@ -90,6 +91,49 @@ def select_v41_backend(device=None, env=None) -> str:
             "select reference explicitly for diagnostic execution"
         )
     return actual
+
+
+def zero_overhead_flags(env, *, role, speculative, graph, single_host, gamma, verify_mode, confidence):
+    """Resolve the V4.1 worker profile before any native flags are cached."""
+    explicit = ZERO_OVERHEAD_ENV in env
+    enabled = env_bool(env, ZERO_OVERHEAD_ENV, default=True)
+    if not enabled or role != "DECODE":
+        return {ZERO_OVERHEAD_ENV: str(int(enabled))} if explicit else {}
+    from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import moe_backend
+
+    if (speculative != "DSPARK" or not graph or gamma != 3
+            or verify_mode != "dense" or confidence != "off" or moe_backend(env) != "megamoe"):
+        if not explicit:
+            return {}
+        raise ValueError(f"{ZERO_OVERHEAD_ENV} requires MegaMoE Decode Graph with dense DSpARK gamma=3 and confidence off")
+    if env.get(DSPARK_SIMULATED_ACCEPT_ENV, "0") != "0":
+        if not explicit:
+            return {}
+        raise ValueError(f"{ZERO_OVERHEAD_ENV} requires real DSpARK acceptance")
+    if not explicit and any(
+        not env_bool(env, key, default=True)
+        for key in (DSPARK_OVERLAP_ENV, DSPARK_CROSS_ROUND_OVERLAP_ENV)
+    ):
+        return {}
+    dense_defaults = {
+        **DSPARK_DENSE_DECODE_DEFAULTS,
+        "RTP_V41_PPU_DSPARK_HOST_GRAPH_VOTE": str(int(single_host)),
+        "RTP_V41_PPU_DSPARK_EARLY_VERIFY_VOTE": str(
+            int(single_host or env.get("RTP_V41_PPU_DSPARK_HOST_GRAPH_VOTE") == "1")
+        ),
+    }
+    return {
+        ZERO_OVERHEAD_ENV: "1",
+        **{key: env.get(key, value) for key, value in dense_defaults.items()},
+        **{key: env.get(key, value) for key, value in DSPARK_DECODE_DEFAULTS.items()},
+        **DSPARK_OVERLAP_FLAGS,
+        DSPARK_OVERLAP_ENV: "1",
+        DSPARK_CROSS_ROUND_OVERLAP_ENV: "1",
+        "RTP_V41_PPU_DSPARK_GPU_VERIFY_RECEIPT": "1",
+        "RTP_V41_PPU_VERIFY_DEFERRED_STAGE": "1",
+        "RTP_V41_PPU_DSPARK_PREPARE_JOINT_PUBLICATION": "1",
+        "RTP_V41_PPU_DSPARK_FOLD_PROPOSAL_SAMPLER": "1",
+    }
 
 
 def v41_backend_for_config():
@@ -277,7 +321,7 @@ class V41RuntimeConfig:
         ).validate(env=env)
 
     @classmethod
-    def from_server(cls, config):
+    def from_server(cls, config, env=None):
         from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import (
             moe_backend,
             moe_precision,
@@ -285,7 +329,7 @@ class V41RuntimeConfig:
 
         p = config.parallelism_config
         cp = p.prefill_cp_config
-        env = os.environ
+        env = os.environ if env is None else env
         shared_eplb = env_bool(env, "RTP_V41_PPU_EPLB")
         shared_grouped_graph = shared_grouped_graph_enabled(env)
         speculative = enum_name(config.sp_config.type)
@@ -346,7 +390,17 @@ def validate_v41_server_config(config):
         return
     if model_type not in ("deepseek_v41", "deepseek_v41_dspark"):
         raise ValueError("V4.1 PPU supports the text target and its DSpark draft only")
-    runtime = V41RuntimeConfig.from_server(config)
+    parallelism = config.parallelism_config
+    flags = zero_overhead_flags(
+        os.environ, role=enum_name(config.role_config.role_type), speculative=enum_name(config.sp_config.type),
+        graph=config.py_hw_kernel_config.enable_cuda_graph,
+        single_host=parallelism.world_size == parallelism.local_world_size,
+        gamma=getattr(config.sp_config, "gen_num_per_cycle", 0),
+        verify_mode=getattr(config.sp_config, "sp_dspark_verify_mode", "dense"),
+        confidence=getattr(config.sp_config, "sp_dspark_confidence_mode", "off"),
+    )
+    runtime = V41RuntimeConfig.from_server(config, env={**os.environ, **flags})
+    os.environ.update(flags)
     logging.info("V4.1 actual topology and strategies: %s", runtime.summary())
     from rtp_llm.models_py.modules.dsv41.backend import get_v41_backend
 

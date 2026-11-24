@@ -944,6 +944,7 @@ class SharedNativeRuntime:
 
     def try_finish_speculative_forward_with_private_draft(
         self, draft, request_ids, prefixes, accepted_rows, accepted_tokens=None, vocab_size=0,
+        *, on_publication_enqueued=None, lookahead_eos=-1, on_publication_validated=None,
     ):
         """Publish both journals from the same acceptance packet."""
         from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import try_publish_verify_pair
@@ -966,6 +967,8 @@ class SharedNativeRuntime:
                 prepared_early = self._prepare_deferred_verify_pair(pending, receipt, prefixes)
             if prepared_early is not None and device_receipt and self._try_publish_queued_verify_pair(
                 draft, pending, receipt, prepared_early[2], request_ids, accepted_rows, accepted_tokens, vocab_size,
+                on_publication_enqueued=on_publication_enqueued, lookahead_eos=lookahead_eos,
+                on_publication_validated=on_publication_validated,
             ):
                 return True
 
@@ -1038,6 +1041,7 @@ class SharedNativeRuntime:
 
     def _try_publish_queued_verify_pair(
         self, draft, pending, receipt, prepared, request_ids, accepted_rows, accepted_tokens, vocab_size,
+        *, on_publication_enqueued=None, lookahead_eos=-1, on_publication_validated=None,
     ):
         from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import VerifyPublicationReceipt
 
@@ -1078,6 +1082,8 @@ class SharedNativeRuntime:
         )
         if not prepared.publish(
             counts, replay_check=verify, accepted_tokens=accepted_tokens, vocab_size=vocab_size,
+            on_publication_enqueued=on_publication_enqueued, lookahead_eos=lookahead_eos,
+            on_publication_validated=on_publication_validated,
         ):
             return False
         # The publication status event follows both receipts and validates the

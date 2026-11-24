@@ -70,6 +70,8 @@ class DeepSeekV41PPUModel(DeepSeekV41Model):
         self.shared_runtime = None
         self.shared_graph_runtime = None
         self._graph_receipt = None
+        self._admitted_verify_batch = None
+        self._pending_local_verify_batch = None
 
     @staticmethod
     def build_weight_consumer(views, layer_id, ops, *, query_only=False, enpm_group=None):
@@ -230,14 +232,78 @@ class DeepSeekV41PPUModel(DeepSeekV41Model):
 
     def try_finish_speculative_forward_with_private_draft(
         self, draft, request_ids, prefixes, accepted_rows, accepted_tokens=None, vocab_size=0,
+        on_publication_enqueued=None, *, lookahead_eos=-1, on_publication_validated=None,
     ):
         return self.shared_runtime.try_finish_speculative_forward_with_private_draft(
             draft, request_ids, prefixes, accepted_rows, accepted_tokens, vocab_size,
+            on_publication_enqueued=on_publication_enqueued, lookahead_eos=lookahead_eos,
+            on_publication_validated=on_publication_validated,
         )
 
     def abort_speculative_forward(self):
+        self._admitted_verify_batch = None
         if self.shared_runtime is not None:
             self.shared_runtime.abort_speculative_forward()
+
+    def queue_guarded_proposal_vote(self, local_status):
+        status = (
+            torch.ones(1, dtype=torch.int32, device=self.shared_runtime.device)
+            if local_status is None else local_status.clone()
+        )
+        work = dist.all_reduce(status, op=dist.ReduceOp.MAX, async_op=True)
+        work.block_current_stream()
+        return status
+
+    def agree_lookahead_schedule(self, reuse, batch):
+        from rtp_llm.models_py.modules.dsv41.ppu.native_model import _native_shutdown_group
+
+        group = _native_shutdown_group()
+        if not hasattr(self, "_local_schedule_vote"):
+            from rtp_llm.models_py.modules.dsv41.ppu.scheduler_vote import create_local_schedule_vote
+
+            self._local_schedule_vote = create_local_schedule_vote(group)
+        if self._local_schedule_vote is not None:
+            admission_batch, rows = self._local_schedule_vote_rows(batch)
+            return self._apply_local_schedule_vote(
+                admission_batch, self._local_schedule_vote.exchange(reuse, rows)
+            )
+
+        # One host collective retires the previous decision and admits the
+        # current shape. A mixed or idle EP group cannot queue a common Draft
+        # graph with matching collective launches later in this round.
+        packet = torch.tensor([int(not reuse), batch, -batch], dtype=torch.int32, device="cpu")
+        dist.all_reduce(packet, op=dist.ReduceOp.MAX, group=group)
+        veto, largest, negative_smallest = packet.tolist()
+        return veto == 0, largest > 0 and largest == -negative_smallest
+
+    def _local_schedule_vote_rows(self, batch):
+        self._admitted_verify_batch = None
+        carry = self._uses_host_graph_vote()
+        rows = batch
+        if carry and (self.shared_runtime._stopped or self.shared_runtime._requested()):
+            rows = 0
+        return batch if carry else None, rows
+
+    def try_publish_lookahead_schedule(self, reuse, batch):
+        # The synchronous path first binds the same mapping on all ranks.
+        vote = getattr(self, "_local_schedule_vote", None)
+        if vote is None:
+            return False
+        admission_batch, rows = self._local_schedule_vote_rows(batch)
+        vote.publish(reuse, rows)
+        self._pending_local_verify_batch = admission_batch
+        return True
+
+    def collect_lookahead_schedule(self):
+        batch, self._pending_local_verify_batch = self._pending_local_verify_batch, None
+        return self._apply_local_schedule_vote(batch, self._local_schedule_vote.collect())
+
+    def _apply_local_schedule_vote(self, batch, result):
+        # Equal nonempty rows also prove no rank requested stop when posting.
+        # Empty, mixed and stopping batches follow the ordinary Verify vote.
+        if result[1]:
+            self._admitted_verify_batch = batch
+        return result
 
     def get_eplb_layers(self):
         if self.v4 is None:
@@ -294,10 +360,11 @@ class DeepSeekV41PPUModel(DeepSeekV41Model):
         )
 
     def start_dspark_verify_host_vote(self, local_proposal_rows):
-        if self._uses_host_graph_vote():
+        if self._admitted_verify_batch is None and self._uses_host_graph_vote():
             self.shared_runtime.start_verify_host_vote(local_proposal_rows)
 
     def prepare_native_graph_step(self, inputs):
+        admitted_verify_batch, self._admitted_verify_batch = self._admitted_verify_batch, None
         if self._graph_receipt is not None:
             self._graph_receipt.flush()
             self._graph_receipt.armed = not bool(inputs.warmup)
@@ -308,6 +375,13 @@ class DeepSeekV41PPUModel(DeepSeekV41Model):
         if self.shared_graph_runtime is not None:
             self.shared_graph_runtime.validate()
         count = 0 if inputs.is_fake_stream else inputs.input_ids.numel()
+        if admitted_verify_batch is not None:
+            from rtp_llm.models_py.modules.dsv41.kv_cache_utils import as_tagged_attention_inputs
+
+            attn = as_tagged_attention_inputs(inputs.attention_inputs)
+            if not attn.is_target_verify or attn.is_packed_target_verify or count != 4 * admitted_verify_batch:
+                raise RuntimeError("dense Verify input changed after scheduler admission")
+            return True
         # Use a model-wide choice so fake and live ranks vote on the same group.
         return self.shared_runtime.vote(count, host=self._uses_host_graph_vote())
 

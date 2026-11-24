@@ -387,7 +387,8 @@ def _kernels():
     ])
     def prepare_verify_pair_from_receipt(
         supplied, target, draft, lengths, receipt, initial_flags, output,
-        accepted_counts, accepted_tokens, vocab_size, generation_floor, table_flags, max_seq_len, live_limit,
+        accepted_counts, accepted_tokens, vocab_size, lookahead_eos: tl.constexpr,
+        generation_floor, table_flags, max_seq_len, live_limit,
         BATCH: tl.constexpr, WIDTH: tl.constexpr, WORD_ROWS: tl.constexpr, FLAG_BLOCK: tl.constexpr,
         WINDOW_WIDTH: tl.constexpr, WINDOW_BLOCK: tl.constexpr, DEVICE_COUNTS: tl.constexpr,
     ):
@@ -398,7 +399,10 @@ def _kernels():
             counts = tl.load(accepted_counts + row)
             columns = tl.arange(0, WIDTH)
             tokens = tl.load(accepted_tokens + row[:, None] * WIDTH + columns[None, :])
-            invalid = ((tokens < 0) | (tokens >= vocab_size)) & (columns[None, :] < counts[:, None])
+            invalid = (tokens < 0) | (tokens >= vocab_size)
+            if lookahead_eos >= 0:
+                invalid |= tokens == lookahead_eos
+            invalid &= columns[None, :] < counts[:, None]
             packet_bad = (counts <= 0) | (counts > WIDTH) | (tl.max(invalid.to(tl.int32), 1) != 0)
         else:
             counts = unpack_verify_counts(row, accepted_counts, WORD_ROWS)
@@ -1016,6 +1020,9 @@ class _JointVerifyWorkspace:
         self.target_plans = self.plans[:target_pools]
         self.draft_plans = self.plans[target_pools:]
         self.ready = torch.cuda.Event()
+        self.status_copy_stream = None
+        self.mapped_receipt = None
+        self.validated = None
         self.backup = None
         self.backup_words = target.backup_words + draft.backup_words
 
@@ -1058,7 +1065,10 @@ class VerifyPublicationReceipt:
     engram_width: int
 
 
-def _wait_for_joint_publication_status(ready, replay_check):
+def _wait_for_joint_publication_status(ready, replay_check, mapped_receipt=None):
+    if mapped_receipt is not None:
+        mapped_receipt.wait()
+        return
     if replay_check is not None and _EARLY_PUBLICATION_WAKE:
         # All publication work is already queued. Wake on the earlier replay
         # receipt so host scheduling can overlap the remaining GPU work.
@@ -1085,11 +1095,18 @@ class _PreparedVerifyPair:
         )
         self.target_pools, self.draft_pools = target[0].plan.shape[0], draft[0].plan.shape[0]
 
-    def publish(self, counts, expected_prefixes=None, *, replay_check=None, accepted_tokens=None, vocab_size=0) -> bool:
+    def publish(
+        self, counts, expected_prefixes=None, *, replay_check=None, accepted_tokens=None,
+        vocab_size=0, on_publication_enqueued=None, lookahead_eos=-1, on_publication_validated=None,
+    ) -> bool:
         """Validate and publish both KV journals on the bound stream."""
         batch, width, rows = self.prefixes.numel(), _VERIFY_PAIR_WIDTH, self.target[0].rows
         word_rows = _VERIFY_PAIR_COUNT_WORD_ROWS
         device_counts = accepted_tokens is not None
+        if on_publication_validated is not None and on_publication_enqueued is not None:
+            raise ValueError("select a single KV publication callback")
+        if (on_publication_enqueued is not None or on_publication_validated is not None) and not device_counts:
+            raise ValueError("publication enqueue callback requires device acceptance")
         if device_counts:
             if replay_check is None or not 0 < vocab_size < (1 << 31):
                 return False
@@ -1156,7 +1173,8 @@ class _PreparedVerifyPair:
                         return False
                     kernels.prepare_verify_pair_from_receipt[(1,)](
                         prefixes, target_prefixes, draft_prefixes, lengths, gpu_receipt, initial_flags, layout,
-                        count_args, accepted_tokens, vocab_size, replay_check.staged_completion, initial_flags.numel(),
+                        count_args, accepted_tokens, vocab_size, lookahead_eos,
+                        replay_check.staged_completion, initial_flags.numel(),
                         replay_check.max_seq_len, replay_check.live_limit,
                         batch, width, word_rows, 1024, replay_check.engram_width,
                         kernels.triton.next_power_of_2(max(1, rows * replay_check.engram_width)),
@@ -1174,9 +1192,25 @@ class _PreparedVerifyPair:
                     layout, target_plans, draft_plans, flags, status, batch, rows, flag_count,
                     target_pools, draft_pools, self.block, num_warps=4,
                 )
-                workspace.host_status.copy_(status, non_blocking=True)
-                workspace.ready.record(stream)
-                if device_counts or any(counts):
+                zero_overhead = os.environ.get("RTP_V41_PPU_ZERO_OVERHEAD_SCHEDULER") == "1"
+                overlap_status = on_publication_validated is not None or (on_publication_enqueued is not None and zero_overhead)
+                if overlap_status:
+                    if workspace.status_copy_stream is None:
+                        workspace.status_copy_stream = torch.cuda.Stream(device=device)
+                        workspace.validated = torch.cuda.Event()
+                    workspace.validated.record(stream)
+                else:
+                    workspace.host_status.copy_(status, non_blocking=True)
+                    workspace.ready.record(stream)
+                writes_enqueued = False
+
+                def enqueue_writes():
+                    nonlocal writes_enqueued
+                    if writes_enqueued:
+                        return
+                    writes_enqueued = True
+                    if not device_counts and not any(counts):
+                        return
                     target_words = target_pub.backup_words
                     backup = workspace.get_backup()
                     _copy_verify_pair(kernels, target_pub, draft_pub, plans, backup, status)
@@ -1197,7 +1231,40 @@ class _PreparedVerifyPair:
                         if rollback_error is not None:
                             raise RuntimeError("joint Verify KV publication rollback failed") from rollback_error
                         raise
-                _wait_for_joint_publication_status(workspace.ready, replay_check)
+                if on_publication_validated is None:
+                    enqueue_writes()
+                if overlap_status:
+                    # Arm the status copy before the submitter prepares and queues
+                    # the next Draft, so the host receipt can overlap that work.
+                    try:
+                        with torch.cuda.stream(workspace.status_copy_stream):
+                            workspace.status_copy_stream.wait_event(workspace.validated)
+                            workspace.host_status.copy_(status, non_blocking=True)
+                            if zero_overhead:
+                                if workspace.mapped_receipt is None:
+                                    from librtp_compute_ops import _PpuPublicationReceipt
+
+                                    workspace.mapped_receipt = _PpuPublicationReceipt()
+                                workspace.mapped_receipt.record()
+                            else:
+                                workspace.ready.record(workspace.status_copy_stream)
+                        if on_publication_validated is not None:
+                            # The submitter can overlap the real EP decision with the two device copies.
+                            # Its Draft stream fences these writes before its first model kernel.
+                            on_publication_validated(status, enqueue_writes)
+                            enqueue_writes()
+                        else:
+                            on_publication_enqueued(status)
+                        _wait_for_joint_publication_status(
+                            workspace.ready, replay_check, workspace.mapped_receipt if zero_overhead else None,
+                        )
+                    except BaseException:
+                        workspace.status_copy_stream.synchronize()
+                        raise
+                else:
+                    if on_publication_enqueued is not None:
+                        on_publication_enqueued(status)
+                    _wait_for_joint_publication_status(workspace.ready, replay_check)
                 outcome = int(workspace.host_status.item())
         if replay_check is not None and outcome:
             # No rows are copied on a nonzero device result. Read the original

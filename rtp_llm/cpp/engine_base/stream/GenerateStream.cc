@@ -1052,6 +1052,33 @@ bool GenerateStream::replaceMtpCacheSnapshot(uint64_t                   expected
     return true;
 }
 
+#if USE_PPU
+bool GenerateStream::tryGrowLookaheadCacheRow(int advance, torch::Tensor& physical, torch::Tensor& kernel) {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    auto state = getMtpAsyncDeviceState();
+    if (!state.epoch || getStatus() != StreamState::RUNNING || !hasMtpCacheSnapshot(state)
+        || state.cache_snapshot_upload_pending || stream_cache_resource_->isResourceReleased()) {
+        return false;
+    }
+    state.next_seq_len_upper_bound = seqLength() + advance;
+    state.max_mtp_advance = advance;
+    if (!canReserveMtpCacheWithoutBookkeepingJoin(state)
+        || !stream_cache_resource_->singleBatchNeedBlocks(state.next_seq_len_upper_bound, static_cast<int>(reserve_step_))) {
+        return false;
+    }
+    // The preceding sampler joined the last host commit. The same SWA retention proof as the
+    // scheduler protects the current GPU readers. Grow only the ordinary next-round reservation.
+    state.batch_cache_snapshot_upload = false;
+    if (!reserveMtpCacheFromUpperBound(state).ok()) {
+        return false;
+    }
+    const auto grown = getMtpAsyncDeviceState();
+    physical = grown.next_kv_cache_block_id_gpu;
+    kernel = grown.next_kv_cache_kernel_block_id_gpu;
+    return true;
+}
+#endif
+
 absl::Status GenerateStream::reserveMtpCacheFromUpperBound(const MtpAsyncDeviceState& state) {
     RTP_LLM_PROFILE_SCOPE("stream.reserve_mtp_cache_from_upper_bound");
     auto status = stream_cache_resource_->incrKVBlock(state.next_seq_len_upper_bound);

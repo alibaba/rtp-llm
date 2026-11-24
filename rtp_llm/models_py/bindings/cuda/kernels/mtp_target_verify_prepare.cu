@@ -22,6 +22,8 @@ namespace {
 
 constexpr int kRowsPerLaunch    = 64;
 constexpr int kPrepareBlockSize = 256;
+constexpr int kDSparkVerifyWidth = 4;
+constexpr int kDSparkMaxPositionFactor = 16;
 
 constexpr int kBudgetMaxBatch  = 128;
 constexpr int kBudgetMaxGamma  = 8;
@@ -289,6 +291,53 @@ int prepareGridSize(int64_t work_items) {
     return static_cast<int>(std::min<int64_t>((work_items + kPrepareBlockSize - 1) / kPrepareBlockSize, 65535));
 }
 
+__global__ void mtpDSparkNextRoundKernel(const int32_t* ends,
+                                        const int32_t* lengths,
+                                        const int32_t* accepted_tokens,
+                                        const int32_t* verify_positions,
+                                        const int32_t* current_engram,
+                                        int32_t*       anchors,
+                                        int32_t*       next_ends,
+                                        int32_t*       next_lengths,
+                                        int32_t*       proposal_tokens,
+                                        int32_t*       position_bases,
+                                        int32_t*       proposal_positions,
+                                        int32_t*       next_engram,
+                                        int32_t        position_factor,
+                                        int32_t        proposal_width,
+                                        int32_t        mask_token) {
+    const int32_t row      = blockIdx.x;
+    const int32_t column   = threadIdx.x;
+    const int32_t length   = lengths[row];
+    const int32_t accepted = length >= 1 && length <= kDSparkVerifyWidth ? length : 0;
+    const int32_t verify_offset   = row * kDSparkVerifyWidth;
+    const int32_t proposal_offset = row * proposal_width;
+    // Invalid lengths are still checked by the paired publication. Scratch
+    // preparation may run before that check, so never read an invalid token.
+    if (column == 0) {
+        const int32_t anchor = accepted ? accepted_tokens[verify_offset + accepted - 1] : mask_token;
+        anchors[row]         = anchor;
+        next_ends[row]       = ends[row] + accepted;
+        next_lengths[row]    = ends[row] + accepted + 1;
+        proposal_tokens[proposal_offset] = anchor;
+    } else if (column < proposal_width) {
+        proposal_tokens[proposal_offset + column] = mask_token;
+    }
+    if (current_engram && column < kDSparkVerifyWidth) {
+        next_engram[verify_offset + column] =
+            column < accepted ? accepted_tokens[verify_offset + accepted - 1 - column] :
+                                current_engram[verify_offset + column - accepted];
+    }
+    if (column < proposal_width * position_factor) {
+        const int32_t axis = column % position_factor;
+        const int32_t base = verify_positions[verify_offset * position_factor + axis] + accepted;
+        proposal_positions[proposal_offset * position_factor + column] = base + column / position_factor;
+        if (column < position_factor) {
+            position_bases[row * position_factor + axis] = base;
+        }
+    }
+}
+
 __global__ void mtpDSparkRoundHeadPrepareKernel(PrepareRows<MtpRoundHeadRow> rows,
                                                 int32_t* __restrict__ anchors,
                                                 int32_t* __restrict__ committed_ends,
@@ -476,6 +525,69 @@ void checkCudaVector(const torch::Tensor& tensor, const char* name, int64_t batc
 }
 
 }  // namespace
+
+MtpDSparkNextRound tryMtpDSparkNextRound(const torch::Tensor& committed_ends,
+                                       const torch::Tensor& accepted_lengths,
+                                       const torch::Tensor& accepted_tokens,
+                                       const torch::Tensor& verify_positions,
+                                       const torch::Tensor& engram_windows,
+                                       int32_t              proposal_width,
+                                       int32_t              mask_token,
+                                       cudaStream_t         stream) {
+    const auto device = at::cuda::current_device();
+    const auto eligible = [device](const torch::Tensor& t) {
+        return t.defined() && t.is_cuda() && t.get_device() == device
+               && t.scalar_type() == torch::kInt32 && t.is_contiguous();
+    };
+    if (!eligible(committed_ends) || committed_ends.dim() != 1 || !eligible(accepted_lengths)
+        || accepted_lengths.sizes() != committed_ends.sizes() || !eligible(accepted_tokens) || mask_token < 0
+        || (proposal_width != 3 && proposal_width != kDSparkVerifyWidth)) {
+        return {};
+    }
+    const int64_t batch = committed_ends.size(0);
+    if (batch <= 0 || batch > kRowsPerLaunch || accepted_tokens.dim() != 2
+        || accepted_tokens.size(0) != batch || accepted_tokens.size(1) != kDSparkVerifyWidth) {
+        return {};
+    }
+    const int64_t verify_rows = batch * kDSparkVerifyWidth;
+    const int64_t proposal_rows = batch * proposal_width;
+    if (engram_windows.defined() && (!eligible(engram_windows) || engram_windows.sizes() != accepted_tokens.sizes())) {
+        return {};
+    }
+    const auto position_count = verify_positions.defined() ? verify_positions.numel() : 0;
+    if (position_count && (!eligible(verify_positions) || position_count % verify_rows != 0
+                           || position_count / verify_rows > kDSparkMaxPositionFactor)) {
+        return {};
+    }
+    const auto factor  = position_count / verify_rows;
+    const auto options = committed_ends.options();
+    MtpDSparkNextRound next;
+    next.anchors          = torch::empty({batch}, options);
+    next.committed_ends   = torch::empty({batch}, options);
+    next.sequence_lengths = torch::empty({batch}, options);
+    next.proposal_tokens  = torch::empty({proposal_rows}, options);
+    if (factor) {
+        next.position_bases      = torch::empty({batch, factor}, options);
+        next.proposal_positions = torch::empty({proposal_rows * factor}, options);
+    }
+    if (engram_windows.defined()) {
+        next.engram_windows = torch::empty({batch, kDSparkVerifyWidth}, options);
+    }
+    const auto data = [](const torch::Tensor& t) { return t.defined() ? t.data_ptr<int32_t>() : nullptr; };
+    mtpDSparkNextRoundKernel<<<batch, kDSparkMaxPositionFactor * kDSparkVerifyWidth, 0, stream>>>(
+        data(committed_ends), data(accepted_lengths), data(accepted_tokens), factor ? data(verify_positions) : nullptr,
+        data(engram_windows), data(next.anchors), data(next.committed_ends), data(next.sequence_lengths),
+        data(next.proposal_tokens), data(next.position_bases), data(next.proposal_positions), data(next.engram_windows),
+        static_cast<int32_t>(factor), proposal_width, mask_token);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    const auto cuda_stream = c10::cuda::getStreamFromExternal(stream, device);
+    for (const auto& source : {committed_ends, accepted_lengths, accepted_tokens, verify_positions, engram_windows}) {
+        if (source.defined() && source.numel() && source.is_cuda()) {
+            c10::cuda::CUDACachingAllocator::recordStream(source.storage().data_ptr(), cuda_stream);
+        }
+    }
+    return next;
+}
 
 MtpDSparkVerifyInputs tryMtpDSparkVerifyPrepare(const torch::Tensor& anchors,
                                                 const torch::Tensor& proposals,
@@ -674,13 +786,14 @@ bool tryMtpGatherPageSnapshots(const torch::Tensor&              physical_host,
                                const std::vector<torch::Tensor>& kernel_snapshots,
                                torch::Tensor&                    physical_output,
                                torch::Tensor&                    kernel_output,
-                               cudaStream_t                      stream) {
+                               cudaStream_t                      stream,
+                               bool                              reuse_ordered_views) {
     const torch::Tensor               hosts[2]     = {physical_host, kernel_host};
     const std::vector<torch::Tensor>* snapshots[2] = {&physical_snapshots, &kernel_snapshots};
     for (int table = 0; table < 2; ++table) {
         const auto& host = hosts[table];
-        if (!host.defined() || !host.device().is_cpu() || (host.numel() > 0 && !host.is_pinned())
-            || host.scalar_type() != torch::kInt32 || host.dim() != 3 || host.stride(2) != 1
+        if (!host.defined() || !host.device().is_cpu() || host.scalar_type() != torch::kInt32
+            || host.dim() != 3 || host.stride(2) != 1
             || snapshots[table]->size() != static_cast<size_t>(host.size(1))) {
             return false;
         }
@@ -697,6 +810,42 @@ bool tryMtpGatherPageSnapshots(const torch::Tensor&              physical_host,
                     || snapshot.size(2) > hosts[table].size(2) || snapshot.stride(2) != 1)) {
                 return false;
             }
+        }
+    }
+    if (reuse_ordered_views) {
+        const auto ordered_view = [](const torch::Tensor& host, const std::vector<torch::Tensor>& rows) {
+            if (host.numel() == 0 || !rows.front().defined()) {
+                return torch::Tensor();
+            }
+            const auto& first = rows.front();
+            const auto width = host.size(2);
+            const auto group_stride = host.size(1) * width;
+            for (size_t row = 0; row < rows.size(); ++row) {
+                const auto& value = rows[row];
+                if (!value.defined() || value.size(2) != width || value.stride(0) != group_stride
+                    || value.storage().unsafeGetStorageImpl() != first.storage().unsafeGetStorageImpl()
+                    || value.storage_offset() != first.storage_offset() + static_cast<int64_t>(row) * width) {
+                    return torch::Tensor();
+                }
+            }
+            return first.as_strided(host.sizes(), {group_stride, width, 1});
+        };
+        auto physical = ordered_view(physical_host, physical_snapshots);
+        auto kernel   = ordered_view(kernel_host, kernel_snapshots);
+        if (physical.defined() && kernel.defined()) {
+            const auto current = at::cuda::getCurrentCUDAStream();
+            c10::cuda::CUDACachingAllocator::recordStream(physical.storage().data_ptr(), current);
+            c10::cuda::CUDACachingAllocator::recordStream(kernel.storage().data_ptr(), current);
+            physical_output = std::move(physical);
+            kernel_output   = std::move(kernel);
+            return true;
+        }
+    }
+    // Ordered device views use only the host shape. Check pinning here, before
+    // a gather kernel can read an uncovered row or suffix from host memory.
+    for (const auto& host : hosts) {
+        if (host.numel() > 0 && !host.is_pinned()) {
+            return false;
         }
     }
     torch::Tensor outputs[2];

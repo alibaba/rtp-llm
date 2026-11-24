@@ -6,6 +6,28 @@
 
 namespace rtp_llm {
 
+struct MtpDSparkNextRound {
+    torch::Tensor anchors;
+    torch::Tensor committed_ends;
+    torch::Tensor sequence_lengths;
+    torch::Tensor proposal_tokens;
+    torch::Tensor position_bases;
+    torch::Tensor proposal_positions;
+    torch::Tensor engram_windows;
+};
+
+// Prepare private gamma=3 inputs from the device sampler packet. The packet
+// has four columns, while the Proposal has three when it samples from anchor.
+// Confirm the packet and KV publication before exposing these tensors.
+MtpDSparkNextRound tryMtpDSparkNextRound(const torch::Tensor& committed_ends,
+                                       const torch::Tensor& accepted_lengths,
+                                       const torch::Tensor& accepted_tokens,
+                                       const torch::Tensor& verify_positions,
+                                       const torch::Tensor& engram_windows,
+                                       int32_t              proposal_width,
+                                       int32_t              mask_token,
+                                       cudaStream_t         stream);
+
 struct MtpDSparkVerifyInputs {
     torch::Tensor tokens, input_lengths, lm_indexes, history, positions, proposals;
 };
@@ -52,7 +74,8 @@ bool tryMtpGatherPageSnapshots(const torch::Tensor&              physical_host,
                                const std::vector<torch::Tensor>& kernel_snapshots,
                                torch::Tensor&                    physical_output,
                                torch::Tensor&                    kernel_output,
-                               cudaStream_t                      stream);
+                               cudaStream_t                      stream,
+                               bool                              reuse_ordered_views = false);
 
 // Fuses flip/cat/index construction/gather for the four-token Engram history.
 // Returns undefined for layouts/dtypes that should use the Torch fallback.

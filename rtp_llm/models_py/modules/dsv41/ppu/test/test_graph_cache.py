@@ -223,6 +223,22 @@ class DecodeGraphMetadataTest(unittest.TestCase):
 class VerifyTableGeometryDeviceTest(unittest.TestCase):
     """Changing page widths must retain exact checks without new JIT variants."""
 
+    @unittest.skipUnless(os.environ.get("RTP_V41_PPU_ZERO_OVERHEAD_SCHEDULER") == "1", "PPU scheduler receipt")
+    def test_local_publication_receipt_orders_d2h(self):
+        from librtp_compute_ops import _PpuPublicationReceipt
+
+        receipt = _PpuPublicationReceipt()
+        streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+        host = torch.empty(1, dtype=torch.int32, pin_memory=True)
+        for generation in range(32):
+            with torch.cuda.stream(streams[generation % 2]):
+                result = torch.full((1,), generation % 5, device="cuda", dtype=torch.int32)
+                host.fill_(-1)
+                host.copy_(result, non_blocking=True)
+                receipt.record()
+            receipt.wait()
+            self.assertEqual(host.item(), generation % 5)
+
     @patch.dict(os.environ, {"RTP_V41_PPU_DSPARK_PRIVATE_DRAFT_KV": "1"})
     def test_private_draft_receipt_is_bound_to_exact_capture(self):
         from rtp_llm.models_py.modules.dsv41.ppu.dspark_model import DeepSeekV41PPUDSparkModel
@@ -255,6 +271,7 @@ class VerifyTableGeometryDeviceTest(unittest.TestCase):
 
     @torch.inference_mode()
     def test_joint_verify_pair_publishes_dense_buckets(self):
+        from rtp_llm.models_py.modules.dsv41.ppu import graph_cache_kernels
         from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import (
             BatchedVerifyPublication,
             VerifyPublicationReceipt,
@@ -364,21 +381,69 @@ class VerifyTableGeometryDeviceTest(unittest.TestCase):
                     device_counts, replay_check=receipt, accepted_tokens=emitted, vocab_size=1024,
                 ))
                 device_counts[0] = 1
-                raw_receipt[0] = 1
-                self.assertFalse(prepared.publish(
-                    device_counts, replay_check=receipt, accepted_tokens=emitted, vocab_size=1024,
-                ))
-                self.assertFalse(bool(target_pool.any() or draft_pool.any()))
-                raw_receipt[0] = 2
-                self.assertTrue(prepared.publish(
-                    device_counts, replay_check=receipt, accepted_tokens=emitted, vocab_size=1024,
-                ))
+                for completion, eos, expected_success in (
+                    (1, -1, False), (2, tokens[0], False), (2, tokens[1], True),
+                ):
+                    raw_receipt[0] = completion
+                    snapshots = []
+                    with patch.dict(os.environ, {"RTP_V41_PPU_ZERO_OVERHEAD_SCHEDULER": "1"}), patch.object(
+                        graph_cache_kernels, "_wait_for_joint_publication_status",
+                        wraps=graph_cache_kernels._wait_for_joint_publication_status,
+                    ) as wait_for_status:
+                        def after_enqueue(status):
+                            wait_for_status.assert_not_called()
+                            self.assertEqual(status.device, device)
+                            self.assertEqual(status.dtype, torch.int32)
+                            self.assertEqual(torch.cuda.current_stream(device), prepared.stream)
+                            snapshots.append((status.clone(), target_pool.clone(), draft_pool.clone()))
+
+                        self.assertEqual(
+                            prepared.publish(
+                                device_counts, replay_check=receipt, accepted_tokens=emitted, vocab_size=1024,
+                                on_publication_enqueued=after_enqueue, lookahead_eos=eos,
+                            ),
+                            expected_success,
+                        )
+                        wait_for_status.assert_called_once()
+                    self.assertEqual(len(snapshots), 1)
+                    status, target_snapshot, draft_snapshot = snapshots[0]
+                    self.assertEqual(status.item() == 0, expected_success)
+                    self.assertEqual(bool(target_snapshot.any() and draft_snapshot.any()), expected_success)
+                    self.assertTrue(torch.equal(target_snapshot, target_pool))
+                    self.assertTrue(torch.equal(draft_snapshot, draft_pool))
                 device_result = (target_pool.clone(), draft_pool.clone())
                 target_pool.zero_()
                 draft_pool.zero_()
                 self.assertTrue(prepared.publish(tuple(device_counts.tolist()), replay_check=receipt))
                 self.assertTrue(torch.equal(device_result[0], target_pool))
                 self.assertTrue(torch.equal(device_result[1], draft_pool))
+
+                for early, eos, success in ((True, -1, True), (True, tokens[0], False), (False, -1, True)):
+                    target_pool.zero_()
+                    draft_pool.zero_()
+                    observed = []
+
+                    def before_write(status, enqueue_writes):
+                        observed.append((status.clone(), target_pool.clone(), draft_pool.clone()))
+                        if early:
+                            enqueue_writes()
+                            enqueue_writes()
+
+                    with patch.object(graph_cache_kernels, "_copy_verify_pair",
+                                      wraps=graph_cache_kernels._copy_verify_pair) as copy_pair:
+                        self.assertEqual(prepared.publish(
+                            device_counts, replay_check=receipt, accepted_tokens=emitted, vocab_size=1024,
+                            on_publication_validated=before_write, lookahead_eos=eos,
+                        ), success)
+                        self.assertEqual(copy_pair.call_count, 2)
+                    (status, before_target, before_draft), = observed
+                    self.assertEqual(int(status.item()) == 0, success)
+                    self.assertFalse(bool(before_target.any() or before_draft.any()))
+                    if success:
+                        self.assertTrue(torch.equal(target_pool, device_result[0]))
+                        self.assertTrue(torch.equal(draft_pool, device_result[1]))
+                    else:
+                        self.assertFalse(bool(target_pool.any() or draft_pool.any()))
 
     @patch.dict(os.environ, {"RTP_V41_PPU_FUSED_DSPARK_COMMIT_METADATA": "1"})
     @torch.inference_mode()

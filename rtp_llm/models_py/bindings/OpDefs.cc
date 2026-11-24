@@ -1,5 +1,16 @@
 #include "OpDefs.h"
 #include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
+#if USE_PPU
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cuda.h>
+#include <c10/cuda/CUDAStream.h>
+#include <thread>
+#include <torch/csrc/autograd/python_variable.h>
+#include <unordered_map>
+#include <unordered_set>
+#endif
 
 namespace torch_ext {
 
@@ -21,6 +32,315 @@ size_t KVCache::getEntriesPerBlock(const std::string& tag) const {
 
 namespace {
 
+#if USE_PPU
+// A second slot lets a rank enter the following vote without overwriting a
+// result another rank is still reading. No rank can complete two votes ahead.
+class PpuScheduleVote {
+public:
+    PpuScheduleVote(pybind11::buffer mapping, uint32_t rank, uint32_t ranks):
+        buffer_(mapping.request(/*writable=*/true)), rank_(rank), ranks_(ranks) {
+        TORCH_CHECK(ranks > 1 && rank < ranks, "invalid PPU schedule vote rank");
+        TORCH_CHECK(buffer_.ndim == 1 && buffer_.itemsize == 1 && buffer_.strides[0] == 1
+                        && size_t(buffer_.size) == size(ranks) && uintptr_t(buffer_.ptr) % alignof(uint64_t) == 0,
+                    "invalid PPU schedule vote mapping");
+    }
+
+    static size_t size(uint32_t ranks) {
+        return 2 * ranks * kSlotBytes;
+    }
+
+    void publish(bool reuse, int64_t rows) {
+        TORCH_CHECK(!pending_, "PPU schedule vote already published");
+        TORCH_CHECK(rows >= 0 && rows <= INT32_MAX, "invalid PPU schedule vote batch");
+        const uint32_t epoch = ++epoch_;
+        TORCH_CHECK(epoch != 0, "PPU schedule vote generation wrapped");
+        const uint64_t prefix = uint64_t(epoch) << 32;
+        const uint64_t local = prefix | (uint64_t(rows) << 1) | uint64_t(!reuse);
+        __atomic_store_n(slots() + rank_ * kSlotWords, local, __ATOMIC_RELEASE);
+        pending_ = true;
+    }
+
+    std::pair<bool, bool> collect() {
+        TORCH_CHECK(pending_, "PPU schedule vote has no published row");
+        auto* const current_slots = slots();
+        const uint64_t local = __atomic_load_n(current_slots + rank_ * kSlotWords, __ATOMIC_RELAXED);
+        const int64_t rows = uint32_t(local) >> 1;
+        const auto start = std::chrono::steady_clock::now();
+        const auto spin_until = start + std::chrono::microseconds(30);
+        const auto deadline = start + std::chrono::seconds(120);
+        bool all_reuse = (local & 1) == 0;
+        bool common_bucket = rows > 0;
+        for (uint32_t rank = 0; rank < ranks_; ++rank) {
+            if (rank == rank_) {
+                continue;
+            }
+            uint64_t value;
+            while ((value = __atomic_load_n(current_slots + rank * kSlotWords, __ATOMIC_ACQUIRE)) >> 32 != epoch_) {
+                const auto now = std::chrono::steady_clock::now();
+                TORCH_CHECK(now < deadline, "PPU schedule vote timed out waiting for rank ", rank,
+                            " in generation ", epoch_);
+                if (now >= spin_until) {
+                    std::this_thread::sleep_for(std::chrono::microseconds(10));
+                }
+            }
+            all_reuse &= (value & 1) == 0;
+            common_bucket &= int64_t(uint32_t(value) >> 1) == rows;
+        }
+        pending_ = false;
+        return {all_reuse, common_bucket};
+    }
+
+    std::pair<bool, bool> exchange(bool reuse, int64_t rows) {
+        publish(reuse, rows);
+        return collect();
+    }
+
+private:
+    uint64_t* slots() {
+        return reinterpret_cast<uint64_t*>(
+            static_cast<char*>(buffer_.ptr) + (epoch_ % 2) * ranks_ * kSlotBytes);
+    }
+
+    static constexpr size_t kSlotBytes = 64;
+    static constexpr size_t kSlotWords = kSlotBytes / sizeof(uint64_t);
+    pybind11::buffer_info buffer_;
+    const uint32_t rank_;
+    const uint32_t ranks_;
+    uint32_t epoch_ = 0;
+    bool pending_ = false;
+};
+
+// One leased publication workspace owns this signal and its copy stream. The
+// device's system fence publishes the preceding local KV status D2H to the CPU.
+class PpuPublicationReceipt {
+public:
+    PpuPublicationReceipt():
+        word_(torch::zeros({1}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true))) {
+        auto result = cuMemHostGetDevicePointer(&device_word_, word_.data_ptr(), 0);
+        TORCH_CHECK(result == CUDA_SUCCESS, "cannot map PPU publication receipt: ", static_cast<int>(result));
+    }
+
+    void record() {
+        if (pending_) {
+            wait();
+        }
+        const auto stream = c10::cuda::getCurrentCUDAStream();
+        const auto next = epoch_ + 1U;
+        const auto result = cuStreamWriteValue32(stream.stream(), device_word_, next, 0);
+        TORCH_CHECK(result == CUDA_SUCCESS, "cannot enqueue PPU publication receipt: ", static_cast<int>(result));
+        epoch_ = next;
+        pending_ = stream;
+    }
+
+    void wait() {
+        if (!pending_) return;
+        const auto* value = reinterpret_cast<const uint32_t*>(word_.data_ptr<int32_t>());
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+        while (__atomic_load_n(value, __ATOMIC_ACQUIRE) != epoch_) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                pending_->synchronize();
+                TORCH_CHECK(__atomic_load_n(value, __ATOMIC_ACQUIRE) == epoch_, "missing PPU publication receipt");
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds(10));
+        }
+        pending_.reset();
+    }
+
+    ~PpuPublicationReceipt() {
+        if (pending_) {
+            (void)cuStreamSynchronize(pending_->stream());
+        }
+    }
+
+private:
+    torch::Tensor word_;
+    CUdeviceptr device_word_{};
+    uint32_t epoch_{};
+    std::optional<c10::cuda::CUDAStream> pending_;
+};
+
+// The PPU graph keeps the addresses observed at capture. Read live module
+// bindings on replay, including replacements that keep the same tensor shape.
+class GraphWeightStorage {
+    struct Entry {
+        PyTypeObject*        python_type;
+        const void*          address;
+        c10::ScalarType      dtype;
+        std::vector<int64_t> sizes;
+    };
+    std::vector<Entry> entries_;
+#if PY_VERSION_HEX < 0x030D0000
+    struct ModuleWeights {
+        std::array<uint64_t, 4> dict_versions{};
+        std::vector<pybind11::weakref> tensors;
+    };
+    std::vector<ModuleWeights> module_weights_;
+    pybind11::object names_;
+    // CPython assigns a process-wide unique version when an exact dictionary changes.
+    // Equal versions keep its values alive. No borrowed tensor is touched after a rebind.
+    static uint64_t dictVersion(PyObject* dict) {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+        return reinterpret_cast<PyDictObject*>(dict)->ma_version_tag;
+#pragma GCC diagnostic pop
+    }
+#endif
+    pybind11::str parameters_{"_parameters"}, buffers_{"_buffers"}, children_{"_modules"};
+    pybind11::str dict_{"__dict__"}, modules_{"modules"}, named_modules_{"named_modules"};
+
+public:
+    explicit GraphWeightStorage(pybind11::list tensors) {
+        for (auto value : tensors) {
+            TORCH_CHECK(THPVariable_Check(value.ptr()), "Graph weight capture requires tensors");
+            const auto& tensor = THPVariable_Unpack(value.ptr());
+            entries_.push_back({Py_TYPE(value.ptr()), tensor.data_ptr(), tensor.scalar_type(), tensor.sizes().vec()});
+        }
+    }
+
+    bool matches(pybind11::list prefix, pybind11::iterable modules, pybind11::list suffix,
+                 pybind11::tuple names, pybind11::function plain_lookup) {
+        return matchesImpl(prefix, suffix, names, plain_lookup, [&](const auto& check_module) {
+            for (auto module : modules) {
+                if (!check_module(module, nullptr)) return false;
+            }
+            return true;
+        });
+    }
+
+    bool matchesModuleTree(pybind11::list prefix, pybind11::object root, pybind11::list suffix,
+                           pybind11::tuple names, pybind11::function standard_traversal) {
+        return matchesImpl(prefix, suffix, names, pybind11::function{}, [&](const auto& check_module) {
+            std::unordered_set<PyTypeObject*> types;
+            std::unordered_set<PyObject*> seen;
+            std::vector<pybind11::object> pending{std::move(root)};
+            while (!pending.empty()) {
+                auto module = std::move(pending.back());
+                pending.pop_back();
+                auto* type = Py_TYPE(module.ptr());
+                if (types.insert(type).second
+                    && !standard_traversal(pybind11::handle(reinterpret_cast<PyObject*>(type))).cast<bool>()) {
+                    return false;
+                }
+                const auto attrs = pybind11::getattr(module, dict_);
+                if (!PyDict_CheckExact(attrs.ptr()) || PyDict_GetItem(attrs.ptr(), modules_.ptr())
+                    || PyDict_GetItem(attrs.ptr(), named_modules_.ptr())) {
+                    return false;
+                }
+                auto* children = PyDict_GetItem(attrs.ptr(), children_.ptr());
+                if (!children || !PyDict_CheckExact(children)) return false;
+                if (!seen.insert(module.ptr()).second) continue;
+                if (!check_module(module, attrs.ptr())) return false;
+
+                const auto first_child = pending.size();
+                Py_ssize_t position = 0;
+                PyObject* key;
+                PyObject* child;
+                while (PyDict_Next(children, &position, &key, &child)) {
+                    if (child != Py_None) {
+                        pending.push_back(pybind11::reinterpret_borrow<pybind11::object>(child));
+                    }
+                }
+                // Match named_modules' depth-first registration order.
+                std::reverse(pending.begin() + first_child, pending.end());
+            }
+            return true;
+        });
+    }
+
+private:
+    template <class Traverse>
+    bool matchesImpl(const pybind11::list& prefix, const pybind11::list& suffix, const pybind11::tuple& names,
+                     const pybind11::function& plain_lookup, const Traverse& traverse) {
+        size_t index = 0;
+        auto check = [&](PyObject* object) {
+            if (!object || !THPVariable_Check(object)) {
+                return true;
+            }
+            const auto& tensor = THPVariable_Unpack(object);
+            if (index == entries_.size()) {
+                return false;
+            }
+            const auto& entry = entries_[index++];
+            return Py_TYPE(object) == entry.python_type && tensor.scalar_type() == entry.dtype && tensor.sizes().equals(entry.sizes)
+                   && tensor.data_ptr() == entry.address;
+        };
+        for (auto value : prefix) {
+            if (!THPVariable_Check(value.ptr()) || !check(value.ptr())) return false;
+        }
+        std::unordered_map<PyTypeObject*, bool> direct;
+#if PY_VERSION_HEX < 0x030D0000
+        if (names_.ptr() != names.ptr()) {
+            module_weights_.clear();
+            names_ = names;
+        }
+        size_t position = 0;
+#endif
+        const auto check_module = [&](pybind11::handle module, PyObject* known_attrs) {
+            pybind11::object attrs;
+            if (known_attrs) {
+                attrs = pybind11::reinterpret_borrow<pybind11::object>(known_attrs);
+            } else {
+                auto* type = Py_TYPE(module.ptr());
+                auto it = direct.find(type);
+                if (it == direct.end()) {
+                    it = direct.emplace(type, plain_lookup(pybind11::handle(reinterpret_cast<PyObject*>(type))).cast<bool>()).first;
+                }
+                attrs = it->second ? pybind11::getattr(module, dict_) : pybind11::none();
+            }
+            auto* dict = attrs.ptr();
+            auto* params = PyDict_CheckExact(dict) ? PyDict_GetItem(dict, parameters_.ptr()) : nullptr;
+            auto* buffers = PyDict_CheckExact(dict) ? PyDict_GetItem(dict, buffers_.ptr()) : nullptr;
+            auto* children = PyDict_CheckExact(dict) ? PyDict_GetItem(dict, children_.ptr()) : nullptr;
+#if PY_VERSION_HEX < 0x030D0000
+            if (position == module_weights_.size()) module_weights_.emplace_back();
+            auto& cached = module_weights_[position++];
+#endif
+            if (params && buffers && children && PyDict_CheckExact(params)
+                && PyDict_CheckExact(buffers) && PyDict_CheckExact(children)) {
+#if PY_VERSION_HEX < 0x030D0000
+                const std::array<uint64_t, 4> versions{
+                    dictVersion(dict), dictVersion(params), dictVersion(buffers), dictVersion(children)};
+                if (versions[0] && versions[1] && versions[2] && versions[3] && cached.dict_versions == versions) {
+                    for (const auto& tensor : cached.tensors) {
+                        auto* value = PyWeakref_GetObject(tensor.ptr());
+                        if (!value || value == Py_None || !check(value)) return false;
+                    }
+                    return true;
+                }
+                cached.tensors.clear();
+                cached.dict_versions = {};
+#endif
+                for (auto name : names) {
+                    auto* value = PyDict_GetItem(dict, name.ptr());
+                    if (!value) value = PyDict_GetItem(params, name.ptr());
+                    if (!value) value = PyDict_GetItem(buffers, name.ptr());
+                    if (!value) value = PyDict_GetItem(children, name.ptr());
+                    if (!check(value)) return false;
+#if PY_VERSION_HEX < 0x030D0000
+                    if (value && THPVariable_Check(value)) cached.tensors.emplace_back(pybind11::handle(value));
+#endif
+                }
+#if PY_VERSION_HEX < 0x030D0000
+                cached.dict_versions = versions;
+#endif
+            } else {
+                for (auto name : names) {
+                    auto value = pybind11::getattr(module, name, pybind11::none());
+                    if (!check(value.ptr())) return false;
+                }
+            }
+            return true;
+        };
+        if (!traverse(check_module)) return false;
+        for (auto value : suffix) {
+            if (!THPVariable_Check(value.ptr()) || !check(value.ptr())) return false;
+        }
+        return index == entries_.size();
+    }
+};
+#endif
+
 void registerCacheGroupType(pybind11::module& m) {
     try {
         auto config_m            = pybind11::module_::import("libth_transformer_config");
@@ -41,6 +361,22 @@ void registerCacheGroupType(pybind11::module& m) {
 
 void registerPyOpDefs(pybind11::module& m) {
     registerCacheGroupType(m);
+#if USE_PPU
+    pybind11::class_<PpuScheduleVote>(m, "_PpuScheduleVote")
+        .def(pybind11::init<pybind11::buffer, uint32_t, uint32_t>())
+        .def_static("size", &PpuScheduleVote::size)
+        .def("publish", &PpuScheduleVote::publish)
+        .def("collect", &PpuScheduleVote::collect, pybind11::call_guard<pybind11::gil_scoped_release>())
+        .def("exchange", &PpuScheduleVote::exchange, pybind11::call_guard<pybind11::gil_scoped_release>());
+    pybind11::class_<PpuPublicationReceipt>(m, "_PpuPublicationReceipt")
+        .def(pybind11::init<>())
+        .def("record", &PpuPublicationReceipt::record)
+        .def("wait", &PpuPublicationReceipt::wait, pybind11::call_guard<pybind11::gil_scoped_release>());
+    pybind11::class_<GraphWeightStorage>(m, "GraphWeightStorage")
+        .def(pybind11::init<pybind11::list>())
+        .def("matches", &GraphWeightStorage::matches)
+        .def("matches_module_tree", &GraphWeightStorage::matchesModuleTree);
+#endif
 
     pybind11::class_<LayerKVCache>(m, "LayerKVCache")
         .def(pybind11::init<>())
