@@ -3522,7 +3522,10 @@ void MtpExecutorTest::runMultiBatchDecode(bool use_mtp_hidden_buffer) {
     EXPECT_EQ(target_model->mtp_hidden_requests, (std::vector<int64_t>{10}));
 }
 
-TEST_F(MtpExecutorTest, testDraftModelDecodeExpandsTargetVerifyPositionIds) {
+class MtpTargetVerifyGeometryTest: public MtpExecutorTest, public ::testing::WithParamInterface<bool> {};
+
+TEST_P(MtpTargetVerifyGeometryTest, DraftModelDecodeExpandsTargetVerifyPositionIds) {
+    const bool fork_target_prepare = GetParam();
     size_t propose_step = 4;
     size_t batch_size   = 2;
     size_t vocab_size   = 4;
@@ -3610,12 +3613,26 @@ TEST_F(MtpExecutorTest, testDraftModelDecodeExpandsTargetVerifyPositionIds) {
 
     components.executor->setDraftModel(std::move(components.fake_draft_model));
     components.executor->setFastTopKSampler(std::move(components.fake_fast_topk_sampler));
+    auto*         target_model = components.fake_target_model.get();
+    torch::Tensor prepared_positions;
+    if (fork_target_prepare) {
+        target_model->enableSpeculativeTargetCommit();
+        target_model->setInputObserver([&](const GptModelInputs& input) {
+            EXPECT_TRUE(input.is_target_verify);
+            EXPECT_EQ(input.combo_tokens.numel(), batch_size * (propose_step + 1));
+            EXPECT_EQ((std::vector<int>{5, 5}), toVec<int>(input.input_lengths));
+            EXPECT_EQ((std::vector<int>{5, 7}), toVec<int>(input.prefix_lengths));
+            EXPECT_EQ(input.sequence_lengths.numel(), 0);
+            prepared_positions = input.combo_position_ids;
+        });
+    }
+    components.executor->setTargetModel(std::move(components.fake_target_model));
 
     std::vector<torch::Tensor> draft_probs_list;
     torch::Tensor              draft_token_ids_t;
     int64_t                    model_forward_us = 0;
     components.executor->draftModelDecode(
-        model_input, stream_groups, draft_probs_list, draft_token_ids_t, model_forward_us);
+        model_input, stream_groups, draft_probs_list, draft_token_ids_t, model_forward_us, fork_target_prepare);
 
     EXPECT_EQ((std::vector<int>{10, 11, 12, 13, 14, 20, 21, 22, 23, 24}), toVec<int>(model_input.combo_tokens));
     EXPECT_EQ((std::vector<int>{5, 5}), toVec<int>(model_input.input_lengths));
@@ -3632,16 +3649,20 @@ TEST_F(MtpExecutorTest, testDraftModelDecodeExpandsTargetVerifyPositionIds) {
     // Multimodal decode retains a B-row mask; target verification consumes
     // B * (gamma + 1) generated text rows and must not reuse that mask.
     model_input.text_tokens_mask = torch::ones({(int64_t)batch_size}, torch::kInt32);
-    components.fake_target_model->setInputs({model_input});
-    components.fake_target_model->setOutputs(
-        {createRandomGptModelOutputs(batch_size * (propose_step + 1), vocab_size, 2)});
-    components.fake_target_model->forward_hook = [](GptModelInputs& inputs) {
+    target_model->setInputs({model_input});
+    target_model->setOutputs({createRandomGptModelOutputs(batch_size * (propose_step + 1), vocab_size, 2)});
+    target_model->forward_hook = [](GptModelInputs& inputs) {
         EXPECT_TRUE(inputs.is_target_verify);
         EXPECT_FALSE(inputs.text_tokens_mask.defined());
     };
-    components.executor->setTargetModel(std::move(components.fake_target_model));
-    components.executor->runTargetVerifyForward(model_input, stream_groups);
+    components.executor->runTargetVerifyForward(model_input, stream_groups, fork_target_prepare);
+    if (fork_target_prepare) {
+        EXPECT_EQ(target_model->prepareAttentionCount(), 1);
+        EXPECT_TRUE(prepared_positions.is_same(model_input.combo_position_ids));
+    }
 }
+
+INSTANTIATE_TEST_SUITE_P(VerifyPrepare, MtpTargetVerifyGeometryTest, ::testing::Bool());
 
 TEST_F(MtpExecutorTest, testDSparkDraftMasksInvalidTemperatureAndUsesProbabilitySampling) {
     constexpr int32_t gamma      = 3;

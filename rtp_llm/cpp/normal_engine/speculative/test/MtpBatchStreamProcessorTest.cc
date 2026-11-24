@@ -2225,6 +2225,83 @@ TEST_F(MtpBatchStreamProcessorTest, testAdvanceLinearCacheBlockTableMatchesEvery
     EXPECT_TRUE(torch::equal(actual, expected));
 }
 
+TEST_F(MtpBatchStreamProcessorTest, MtpPageReservationKeepsGpuSnapshotAlignedWithCpuCommit) {
+    constexpr int block_size    = 8;
+    constexpr int max_accept    = 4;
+    const auto    cache_config  = test::makeSimpleHybridMhaCacheConfig(2, 16, block_size, TYPE_FP16, 1);
+    auto          cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    resource_context.role_type     = RoleType::PDFUSION;
+    ModelConfig model_config;
+    model_config.max_seq_len = 128;
+    model_config.vocab_size  = 16;
+    model_config.num_layers  = 2;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_MTP;
+    sp_config.gen_num_per_cycle = max_accept - 1;
+    MtpBatchStreamProcessor processor(
+        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config, sp_config, false);
+
+    for (const int accepted : {1, max_accept}) {
+        SCOPED_TRACE(accepted);
+        // The upper bound crosses a page. An acceptance of one does not.
+        const int previous_length              = 3 * block_size - 1;
+        auto      query                        = std::make_shared<GenerateInput>();
+        query->input_ids                       = torch::ones({previous_length}, torch::kInt32);
+        query->generate_config                 = std::make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 32;
+        auto stream =
+            std::make_shared<NormalGenerateStream>(query, model_config, RuntimeConfig{}, resource_context, nullptr);
+        stream->setReserveStep(max_accept);
+        auto output    = std::make_shared<SpeculativeExecutorStreamOutput>();
+        output->tokens = torch::zeros({1, 1}, torch::kInt32);
+        stream->setSPOutputBuffer(output);
+        stream->reportEvent(StreamEvents::CanRun);
+        ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+        stream->setIsContextStream(false);
+        ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+
+        const int next_upper_bound = previous_length + max_accept;
+        ASSERT_GT(stream->streamCacheResource().singleBatchNeedBlocks(next_upper_bound, max_accept), 0);
+        std::vector<std::shared_ptr<void>> previous_pages;
+        ASSERT_TRUE(stream->reserveMtpDecodeBlocks(max_accept, previous_pages));
+        EXPECT_EQ(stream->seqLength(), previous_length);
+        EXPECT_EQ(stream->streamCacheResource().singleBatchNeedBlocks(next_upper_bound, max_accept), 0);
+
+        TensorHolder holder;
+        auto [physical, kernel]                          = processor.gatherSingleSequenceCacheTables({stream}, holder);
+        const auto                          cuda_i32     = torch::TensorOptions(torch::kInt32).device(torch::kCUDA);
+        const auto                          prev_lengths = torch::full({1}, previous_length, cuda_i32);
+        const auto                          accept_len   = torch::full({1}, accepted, cuda_i32);
+        const std::vector<CacheGroupType>   groups{CacheGroupType::LINEAR, CacheGroupType::FULL};
+        GenerateStream::MtpAsyncDeviceState state;
+        state.next_seq_len_upper_bound   = next_upper_bound;
+        state.next_kv_cache_block_id_gpu = MtpBatchStreamProcessor::advanceLinearCacheBlockTable(
+            physical, prev_lengths, accept_len, groups, block_size);
+        state.next_kv_cache_kernel_block_id_gpu =
+            MtpBatchStreamProcessor::advanceLinearCacheBlockTable(kernel, prev_lengths, accept_len, groups, block_size);
+        stream->setMtpAsyncDeviceState(state);
+        stream->incPendingAsyncBookkeeping();
+        const bool needs_join = stream->needsAsyncBookkeepingJoinForKvReservation();
+        EXPECT_FALSE(needs_join);
+        if (!needs_join) {
+            EXPECT_EQ(stream->moveToNext(), StreamState::RUNNING);
+        }
+        stream->specUpdate({torch::full({1, accepted}, 2, torch::kInt32),
+                            accepted,
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor()});
+        stream->decPendingAsyncBookkeepingAndMaybeRelease();
+        EXPECT_EQ(stream->seqLength(), previous_length + accepted);
+        auto [host_physical, host_kernel] = processor.gatherSingleSequenceCacheTables({stream}, holder);
+        EXPECT_TRUE(torch::equal(host_physical, state.next_kv_cache_block_id_gpu));
+        EXPECT_TRUE(torch::equal(host_kernel, state.next_kv_cache_kernel_block_id_gpu));
+    }
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testCacheSnapshotOverlayKeepsPhysicalKernelPairAndFreshRows) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;

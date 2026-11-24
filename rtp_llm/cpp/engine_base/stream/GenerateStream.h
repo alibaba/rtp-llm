@@ -821,6 +821,7 @@ public:
     bool canLookAheadNormalDecode(int next_length) const;
     bool tryAcquireNormalDecodeLookahead();
     void reserveNormalDecodeBlocks(std::vector<std::shared_ptr<void>>& previous_decode_pages);
+    bool reserveMtpDecodeBlocks(int max_accept_length, std::vector<std::shared_ptr<void>>& previous_decode_pages);
 
     uint64_t setNormalAsyncDeviceState(NormalAsyncDeviceState state) {
         state.epoch         = ++normal_async_epoch_counter_;

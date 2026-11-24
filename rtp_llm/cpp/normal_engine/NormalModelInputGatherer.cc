@@ -394,6 +394,36 @@ void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolde
 
 NormalModelInputGatherer::NormalModelInputGatherer(const NormalModelInputGathererConfig& config): config_(config) {}
 
+std::pair<torch::Tensor, torch::Tensor>
+NormalModelInputGatherer::gatherSingleSequenceCacheTables(const std::list<GenerateStreamPtr>& streams,
+                                                          TensorHolder&                       host_holder) const {
+    const auto& tags           = config_.kv_cache_group_tags;
+    int64_t     physical_width = 0;
+    int64_t     kernel_width   = 0;
+    for (const auto& stream : streams) {
+        const auto& cache = stream->kvCache().cacheResource(0);
+        for (const auto& tag : tags) {
+            const auto& ids = cache.blockIds(tag);
+            physical_width  = std::max(physical_width, static_cast<int64_t>(ids.blocksNum()));
+            kernel_width = std::max(kernel_width, static_cast<int64_t>(ids.blocksNum() * ids.kernelBlocksPerKvBlock()));
+        }
+    }
+
+    const auto     groups     = static_cast<int64_t>(tags.size());
+    const auto     batch_size = static_cast<int64_t>(streams.size());
+    const auto     pinned_i32 = torch::TensorOptions(torch::kInt32).pinned_memory(true);
+    GptModelInputs tables;
+    tables.kv_cache_group_tags      = tags;
+    tables.kv_cache_block_id        = torch::zeros({groups, batch_size, physical_width}, pinned_i32);
+    tables.kv_cache_kernel_block_id = torch::zeros({groups, batch_size, kernel_width}, pinned_i32);
+    int row                         = 0;
+    for (const auto& stream : streams) {
+        copyKvCacheBlocksToModelInput(tables, stream, stream->kvCache(), 0, row++);
+    }
+    return {publishInt32ToCuda(tables.kv_cache_block_id, host_holder),
+            publishInt32ToCuda(tables.kv_cache_kernel_block_id, host_holder)};
+}
+
 GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamGroups& stream_groups) const {
     const size_t current_tokens_size      = stream_groups.modelExecuteTokenSize();
     const size_t total_batch_size         = stream_groups.totalModelBatchSize();
