@@ -6,6 +6,7 @@ import html
 import json
 import math
 import os
+import re
 import statistics
 import tempfile
 from contextlib import nullcontext
@@ -276,6 +277,90 @@ legacy_latency_derived_v1 identifies historical latency-derived measurements.</p
     )
 
 
+def _pressure_report(snapshot, committed):
+    from rtp_llm.test.perf_test.prefill.continuous_pressure import (
+        _case_results,
+        epoch_linkage,
+    )
+
+    plan, root = snapshot.execution_plan, snapshot.paths.root
+    evidence = None
+    reasons = []
+    observations = []
+    try:
+        pointer = json.loads((root / "results" / "pressure_epoch.json").read_text())[
+            "epoch"
+        ]
+        if not re.fullmatch(r"epochs/[0-9a-f]{32}/pressure", pointer):
+            raise ValueError("invalid measurement epoch path")
+        directory = root / pointer
+        manifest = json.loads((directory / "manifest.json").read_text())
+        summary = json.loads((directory / "summary.json").read_text())
+        reference = json.loads((directory.parent / "epoch_reference.json").read_bytes())
+        expected_link = epoch_linkage(plan, snapshot.manifest, directory.parent)
+        if reference != dict(
+            expected_link, session_id=manifest.get("session_id")
+        ) or not all(manifest.get(k) == v for k, v in reference.items()):
+            raise ValueError(
+                "pressure epoch differs from committed run and session reference"
+            )
+        certificate = None
+        if "remote_service_capture" in manifest:
+            from rtp_llm.test.continuous_pressure.analysis.remote_artifacts import (
+                read_remote_certificate,
+            )
+
+            try:
+                certificate = read_remote_certificate(directory)
+            except (KeyError, ValueError, TypeError, OSError) as error:
+                reasons.append(f"Remote service artifact unverified: {error}")
+        expected = _case_results(plan, directory, manifest, summary, certificate)
+        original = (
+            _case_results(plan, directory, manifest, summary)
+            if certificate
+            else expected
+        )
+        for case, saved in zip(expected, original):
+            if committed.get(case["case_id"]) != saved or case["status"] != "ok":
+                reasons.append("incomplete pressure case " + case["case_id"])
+            observations.append(dict(case_id=case["case_id"], **case["metrics"]))
+        evidence = dict(
+            path=pointer,
+            session_id=manifest.get("session_id"),
+            validity=summary.get("validity"),
+            classification=summary.get("classification"),
+            window=summary.get("window"),
+            remote_service_capture=certificate
+            or manifest.get("remote_service_capture"),
+        )
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        reasons.append(str(error))
+    report = dict(
+        schema_version=REPORT_SCHEMA_VERSION,
+        mode="prefill",
+        measurement_contract="continuous_pressure_v1",
+        report_kind=(
+            "formal"
+            if not reasons
+            and (evidence["validity"] or {}).get("formal_acceptance_valid") is True
+            else "diagnostic"
+        ),
+        complete=not reasons,
+        epoch=evidence,
+        cases=observations,
+        errors=reasons,
+        runs_unit="confirmed measurement-phase requests",
+        epoch_semantics="fresh preparation and measurement for each run or resume",
+    )
+    atomic_write_json(snapshot.paths.reports / "prefill_report.json", report)
+    markup = html.escape(json.dumps(report, indent=2))
+    _atomic_write_text(
+        snapshot.paths.reports / "prefill_report.html",
+        f"<h1>Continuous pressure</h1><pre>{markup}</pre>",
+    )
+    return report
+
+
 def generate_prefill_report(
     root: Union[str, Path], *, acquire_lock: bool = True
 ) -> Dict[str, Any]:
@@ -294,6 +379,8 @@ def generate_prefill_report(
                 "legacy prefill results/cases layout is unsupported; start a new run"
             )
         committed = RunStore(root_path).read_prefill_cases(plan)
+        if plan.resolved_config["workload"].get("pressure"):
+            return _pressure_report(snapshot, committed)
         observations: List[Dict[str, Any]] = []
         excluded: List[Dict[str, str]] = []
         for planned in plan.cases:

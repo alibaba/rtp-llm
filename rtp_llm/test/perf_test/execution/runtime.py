@@ -95,6 +95,9 @@ def build_engine_launch_spec(plan: ExecutionPlan) -> EngineLaunchSpec:
             **FORCED_ENGINE_ENVIRONMENT,
         }
     )
+    if config["workload"].get("pressure"):
+        environment["USE_BATCH_DECODE_SCHEDULER"] = "0"
+        environment["CP_FORCE_SINGLE_PREFILL"] = "0"
     return EngineLaunchSpec(
         argv=argv,
         environment=environment,

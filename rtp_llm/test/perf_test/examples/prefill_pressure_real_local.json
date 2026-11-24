@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "model": {
+    "label": "qwen2.5-7b-prefill",
+    "type": "qwen_2",
+    "checkpoint": "/data/models/Qwen2.5-7B-Instruct",
+    "tokenizer": "/data/models/Qwen2.5-7B-Instruct",
+    "topology": {
+      "tp": 1,
+      "dp": 1,
+      "pp": 1,
+      "ep": 1
+    }
+  },
+  "engine": {
+    "max_seq_len": 131072,
+    "max_batch_tokens": 262144,
+    "concurrency_limit": 16,
+    "args": {
+      "reuse_cache": 1,
+      "enable_memory_cache": 1,
+      "memory_cache_size_mb": 8192,
+      "cp_force_single_prefill": 0,
+      "enable_device_cache": 1
+    },
+    "env": {
+      "TOKENIZERS_PARALLELISM": "false"
+    }
+  },
+  "workload": {
+    "kind": "cache_grid",
+    "max_input_len": 36864,
+    "cache_alignment": 64,
+    "commit_tail_tokens": 64,
+    "compute_steps": [
+      4096
+    ],
+    "batch_sizes": [
+      1
+    ],
+    "measure_runs": 1,
+    "min_compute_len": 4096,
+    "cache_lengths": [
+      32768
+    ],
+    "seed": 1,
+    "pressure": {
+      "evidence_policy": "tree_pressure",
+      "family_schedule": "tiered_rolling",
+      "memory_reuse_ratio": 0.5,
+      "fill_host_max_ratio": 0.8,
+      "profile_steps": 6,
+      "concurrency": 16,
+      "fill_input_tokens": 102400,
+      "rate_control": "adaptive_backlog",
+      "request_rate_min": 50,
+      "request_rate_max": 400,
+      "backlog_low": 64,
+      "backlog_high": 192,
+      "max_outstanding": 256,
+      "cohort_size": 32
+    }
+  },
+  "execution": {
+    "backend": "local",
+    "devices": [
+      0
+    ]
+  },
+  "output": {
+    "result_root": "perf_test_results"
+  },
+  "regression": {},
+  "publish": {}
+}

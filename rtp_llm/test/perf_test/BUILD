@@ -64,6 +64,7 @@ py_library(
         "state.py",
         "storage.py",
     ],
+    deps = ["//rtp_llm/test/continuous_pressure:rtp_adapter"],
     visibility = ["//visibility:public"],
 )
 
@@ -96,6 +97,7 @@ py_library(
         "execution/runtime.py",
         "modes.py",
         "prefill/chart.py",
+        "prefill/continuous_pressure.py",
         "prefill/checkpoint.py",
         "prefill/dashsc_transport.py",
         "prefill/finalize.py",
@@ -110,6 +112,7 @@ py_library(
         ":perf_test_entry_lib",
         ":perf_test_results_lib",
         "//rtp_llm:testlib",
+        "//rtp_llm/test/continuous_pressure:rtp_sdk",
         "//rtp_llm/test/utils:maga_server_manager",
     ] + select({
         "@rtp_llm//:using_cuda13_x86": [requirement_cuda13("plotly")],
@@ -131,6 +134,8 @@ exports_files([
     "examples/decode_grid_local.json",
     "examples/prefill_aone.json",
     "examples/prefill_aone_ci.json",
+    "examples/prefill_pressure_real_local.json",
+    "examples/prefill_pressure_remote_profile_local.json",
     "examples/prefill_local.json",
     "examples/prefill_multi_grid_local.json",
     "examples/qwen35_prefill_test.json",
@@ -346,6 +351,8 @@ filegroup(
         "examples/prefill_aone.json",
         "examples/prefill_aone_ci.json",
         "examples/prefill_local.json",
+        "examples/prefill_pressure_real_local.json",
+        "examples/prefill_pressure_remote_profile_local.json",
         "examples/prefill_shared.json",
         "examples/prefill_multi_grid_local.json",
         "examples/qwen35_prefill_test.json",
