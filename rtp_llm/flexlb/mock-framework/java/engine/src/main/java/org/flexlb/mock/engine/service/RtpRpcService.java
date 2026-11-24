@@ -4,12 +4,10 @@ import io.grpc.BindableService;
 import io.grpc.Status;
 import io.prometheus.client.Collector.MetricFamilySamples;
 import io.prometheus.client.CollectorRegistry;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import org.flexlb.mock.metrics.MetricTags;
 import org.flexlb.mock.metrics.EventMetrics;
-import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
@@ -52,9 +50,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
         this.config = config;
         this.groups = groups;
         this.cache = cache; this.finished = finished;
-        var tags = new HashMap<>(MetricTags.fromEnvironment(System.getenv()));
-        tags.put("dp_rank", "0");
-        metricTags = Map.copyOf(tags);
+        metricTags = Map.copyOf(MetricTags.rtpEngineTags(System.getenv()));
         rpcMetrics = new EventMetrics(config.role().name(), metricTags);
         rpcMetrics.register(rpcRegistry);
         prefill = config.role() == Role.prefill
