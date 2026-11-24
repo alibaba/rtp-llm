@@ -85,6 +85,11 @@ class CudaNoQuantPureDPStrategy(MoeStrategy):
 
     strategy_name = "no_quant_pure_dp"
 
+    def can_handle(self, config: MoEConfigAdapter) -> bool:
+        if not config.batch_invariant:
+            return False
+        return super().can_handle(config)
+
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         checker.check(config.batch_invariant)

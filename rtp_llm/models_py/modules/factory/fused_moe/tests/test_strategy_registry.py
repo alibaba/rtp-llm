@@ -539,6 +539,24 @@ class StrategyRegistryDiagnosticsTest(unittest.TestCase):
         self.assertNotIn(None, public_names)
         self.assertTrue(public_names.issubset(MOE_STRATEGY_CHOICES))
 
+    def test_auto_does_not_probe_batch_invariant_strategy_when_disabled(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        bi_strategy = cuda_strategies.CudaNoQuantPureDPStrategy()
+        normal_strategy = CudaNoQuantCppStrategy()
+        registry = StrategyRegistry()
+        registry.register(bi_strategy)
+        registry.register(normal_strategy)
+        for env in ({}, {"RTP_BATCH_INVARIANT": "0"}):
+            with self.subTest(env=env), patch.dict("os.environ", env, clear=True):
+                config = _config("auto")
+                config.batch_invariant = setup_args([]).py_hw_kernel_config.batch_invariant
+                config.moe_config.use_all_gather = True
+                self.assertFalse(config.batch_invariant)
+                with patch.object(bi_strategy, "get_attributes") as get_attributes:
+                    self.assertIs(registry.get_strategy(config), normal_strategy)
+                get_attributes.assert_not_called()
+
     def test_factory_uses_class_name_when_strategy_name_is_empty(self):
         class UnnamedStrategy:
             strategy_name = None
