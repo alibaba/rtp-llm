@@ -53,6 +53,14 @@ filegroup(
 )
 
 filegroup(
+    name = "flashmla_writer",
+    srcs = select({
+        "//:using_ppu": ["flashmla_writer_a8a0e3ec/flash_mla_cuda.cpython-312-x86_64-linux-gnu.so"],
+        "//conditions:default": [],
+    }),
+)
+
+filegroup(
     name = "libs",
     srcs = [],
     data = [
@@ -69,6 +77,7 @@ filegroup(
     name = "whl_package_libs",
     srcs = [],
     data = [
+        ":flashmla_writer",
         ":marlin_nvfp4",
         ":copy_nvcomp_lib",
         ":copy_hf3fs_libs",

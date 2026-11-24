@@ -100,6 +100,17 @@ private:
     bool                                   track_store_completions_{false};
 };
 
+void materializeDeferredContextTotalKvLength(torch_ext::PyAttentionInputs& attention_inputs) {
+    if (attention_inputs.context_total_kv_length >= 0) {
+        return;
+    }
+    int64_t prefix_sum = 0;
+    if (attention_inputs.prefix_lengths.defined() && attention_inputs.prefix_lengths.numel() > 0) {
+        prefix_sum = attention_inputs.prefix_lengths.sum().item<int64_t>();
+    }
+    attention_inputs.context_total_kv_length = attention_inputs.total_tokens + static_cast<int>(prefix_sum);
+}
+
 }  // namespace
 
 torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tensor) {
@@ -343,7 +354,8 @@ std::optional<std::string> PyWrappedModel::takeDeferredHiddenStateCaptureError()
 }
 
 // Helper function to build PyAttentionInputs from GptModelInputs
-torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptModelInputs& inputs) {
+torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptModelInputs& inputs,
+                                                                    bool defer_context_total_kv_length) {
     RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs");
     torch_ext::PyAttentionInputs py_attn_inputs;
 
@@ -443,15 +455,22 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         // non-monotonic whenever prefix reuse / target verify is active.
         // prefix_lengths here is a source tensor (never a deferred H2D copy),
         // so summing it is safe; item() adds one stream sync on this path.
-        int64_t prefix_sum = 0;
-        if (py_attn_inputs.prefix_lengths.defined() && py_attn_inputs.prefix_lengths.numel() > 0) {
-            prefix_sum = py_attn_inputs.prefix_lengths.sum().item<int64_t>();
+        if (defer_context_total_kv_length) {
+            // Device-only CUDA Graph metadata consumers never read this host
+            // scalar. Keep a sentinel so their replay path can avoid forcing
+            // the device prefix lengths back through a stream synchronize.
+            py_attn_inputs.context_total_kv_length = -1;
+        } else {
+            int64_t prefix_sum = 0;
+            if (py_attn_inputs.prefix_lengths.defined() && py_attn_inputs.prefix_lengths.numel() > 0) {
+                prefix_sum = py_attn_inputs.prefix_lengths.sum().item<int64_t>();
+            }
+            py_attn_inputs.context_total_kv_length = py_attn_inputs.total_tokens + static_cast<int>(prefix_sum);
         }
-        py_attn_inputs.context_total_kv_length = py_attn_inputs.total_tokens + static_cast<int>(prefix_sum);
-        py_attn_inputs.cu_seqlens              = torch::empty({0}, host_i32);
-        py_attn_inputs.cu_seqlens_device       = torch::empty({batch_size + 1}, cuda_i32);
-        py_attn_inputs.cu_kv_seqlens_device    = torch::empty({batch_size + 1}, cuda_i32);
-        py_attn_inputs.padding_offset          = torch::empty({py_attn_inputs.total_tokens}, cuda_i32);
+        py_attn_inputs.cu_seqlens           = torch::empty({0}, host_i32);
+        py_attn_inputs.cu_seqlens_device    = torch::empty({batch_size + 1}, cuda_i32);
+        py_attn_inputs.cu_kv_seqlens_device = torch::empty({batch_size + 1}, cuda_i32);
+        py_attn_inputs.padding_offset       = torch::empty({py_attn_inputs.total_tokens}, cuda_i32);
 #if USING_CUDA
         if (!py_attn_inputs.prefix_lengths.is_cuda()) {
             // A CUDA input length can accompany a host prefix on MTP prefix
@@ -894,7 +913,12 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
     torch_ext::PyAttentionInputs attention_inputs;
     {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(build)");
-        attention_inputs = buildPyAttentionInputs(inputs);
+        torch_ext::PyAttentionInputs selector;
+        selector.is_prefill         = inputs.sequence_lengths.numel() == 0;
+        auto*      candidate_runner = selectGraphRunner(selector);
+        const bool defer_context_total_kv_length =
+            enable_cuda_graph_ && candidate_runner != nullptr && candidate_runner->usesDeviceOnlyAttentionMetadata();
+        attention_inputs = buildPyAttentionInputs(inputs, defer_context_total_kv_length);
         // Fake/warmup streams alias reserved block zero and have no live cache rows.
         attention_inputs.is_s_padded = inputs.warmup || inputs.is_fake_stream;
     }
@@ -935,20 +959,27 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
     // device.  Keep the top-level PyModelInputs field consistent with the
     // nested attention field: CudaGraphRunner validates and copies the
     // top-level tensor during replay preparation.
-    auto  py_model_inputs = PyModelInputs({empty,
-                                           empty,
-                                           attention_inputs_.combo_position_ids,
-                                           torch_ext::PyEmbeddingInputs(),
-                                           torch_ext::PyMultimodalInputs(),
-                                           attention_inputs_,
-                                           attention_inputs_by_tag_,
-                                           torch_ext::BertEmbeddingInputs()});
-    auto* runner          = selectGraphRunner(attention_inputs_);
-    auto& state           = selectGraphState(attention_inputs_);
-    if (moe_forward_allows_graph_ && enable_cuda_graph_ && runner != nullptr
-        && runner->canRun(py_model_inputs, state, CudaGraphCheckMode::PREPARE)) {
+    auto       py_model_inputs = PyModelInputs({empty,
+                                                empty,
+                                                attention_inputs_.combo_position_ids,
+                                                torch_ext::PyEmbeddingInputs(),
+                                                torch_ext::PyMultimodalInputs(),
+                                                attention_inputs_,
+                                                attention_inputs_by_tag_,
+                                                torch_ext::BertEmbeddingInputs()});
+    auto*      runner          = selectGraphRunner(attention_inputs_);
+    auto&      state           = selectGraphState(attention_inputs_);
+    const bool can_prepare_graph =
+        moe_forward_allows_graph_ && enable_cuda_graph_ && runner != nullptr && runner->canRun(py_model_inputs, state, CudaGraphCheckMode::PREPARE);
+    if (can_prepare_graph) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
         runner->prepareAttentionInputs(py_model_inputs, state, skip_forward_event_sync);
+    } else if (attention_inputs_.context_total_kv_length < 0) {
+        materializeDeferredContextTotalKvLength(attention_inputs_);
+        for (auto& [tag, tagged_inputs] : attention_inputs_by_tag_) {
+            (void)tag;
+            tagged_inputs.context_total_kv_length = attention_inputs_.context_total_kv_length;
+        }
     }
     prepared_guard.commit();
 }
@@ -1125,6 +1156,11 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
                               py_model_inputs.attention_inputs.is_target_verify,
                               py_model_inputs.attention_inputs.is_prefill);
+            materializeDeferredContextTotalKvLength(py_model_inputs.attention_inputs);
+            for (auto& [tag, tagged_inputs] : py_model_inputs.attention_inputs_by_tag) {
+                (void)tag;
+                tagged_inputs.context_total_kv_length = py_model_inputs.attention_inputs.context_total_kv_length;
+            }
             held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
             auto outputs     = py_forward_method_(py_model_inputs, held_attn_pyobj_);
             py_model_outputs = outputs.cast<PyModelOutputs>();

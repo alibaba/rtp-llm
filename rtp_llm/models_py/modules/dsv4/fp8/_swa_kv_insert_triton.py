@@ -22,7 +22,6 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
-
 from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
     CPByteSlicedSlotCompaction,
 )
@@ -45,6 +44,7 @@ def _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS: tl.constexpr) -> None:
 def _quantize_and_insert_k_kernel(
     # Inputs
     k_ptr,  # [num_tokens, 512] bf16
+    cache_rope_ptr,
     slot_mapping_ptr,  # [num_tokens] int64; -1 = skip
     # Output (in-place)
     k_cache_ptr,  # [num_blocks, block_size, 584] uint8 (3D)
@@ -62,6 +62,7 @@ def _quantize_and_insert_k_kernel(
     fp8_max: tl.constexpr,  # 448.0
     n_quant_blocks: tl.constexpr,  # 8 (7 real + 1 padding tile-loop iter)
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    USE_CACHE_ROPE: tl.constexpr,
 ):
     """One program per token. Block layout per pool block:
     [0, cache_block_size * 576)             — token data (NoPE+RoPE interleaved)
@@ -137,7 +138,10 @@ def _quantize_and_insert_k_kernel(
     bf16_out_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
     for i in tl.static_range(bf16_dim // 16):
         chunk_offsets = i * 16 + tl.arange(0, 16)
-        bf16_vals = tl.load(input_row_ptr + bf16_input_offset + chunk_offsets)
+        if USE_CACHE_ROPE:
+            bf16_vals = tl.load(cache_rope_ptr + pid * bf16_dim + chunk_offsets)
+        else:
+            bf16_vals = tl.load(input_row_ptr + bf16_input_offset + chunk_offsets)
         tl.store(bf16_out_ptr + chunk_offsets, bf16_vals)
 
 
@@ -155,6 +159,8 @@ def quantize_and_insert_k_cache(
     k: torch.Tensor,  # [num_tokens, 512] bf16
     k_cache: torch.Tensor,  # [num_blocks, block_size, 584] uint8
     slot_mapping: torch.Tensor,  # [num_tokens] int64; -1 = skip
+    *,
+    cache_rope: torch.Tensor | None = None,
 ) -> None:
     """One-launch quantize-and-write into the FP8 SWA pool.
 
@@ -182,6 +188,10 @@ def quantize_and_insert_k_cache(
         slot_mapping = slot_mapping.to(torch.long)
 
     num_tokens = int(slot_mapping.shape[0])
+    if cache_rope is not None:
+        assert cache_rope.shape == (num_tokens, _TOKEN_BF16_DIM)
+        assert cache_rope.device == k.device and cache_rope.dtype == k.dtype
+        assert cache_rope.is_contiguous()
     if num_tokens == 0:
         return
 
@@ -191,6 +201,7 @@ def quantize_and_insert_k_cache(
     grid = (num_tokens,)
     _quantize_and_insert_k_kernel[grid](
         k,
+        cache_rope if cache_rope is not None else k,
         slot_mapping,
         k_cache,
         num_tokens,
@@ -206,6 +217,7 @@ def quantize_and_insert_k_cache(
         fp8_max=_FP8_MAX,
         n_quant_blocks=8,
         TRAP_INVALID_KV_ACCESS=True,
+        USE_CACHE_ROPE=cache_rope is not None,
     )
 
 

@@ -1,10 +1,16 @@
 """Decode preparation on model-owned streams with unchanged math and pools."""
 
 import torch
-
-from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.compute_qkv import decode_compute_kv, decode_compute_q_a, decode_compute_q_b, decode_select_freqs
-from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.output_proj import decode_output_proj
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import CSA_KV, HCA_KV, SWA_KV
+from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.compute_qkv import (
+    decode_compute_kv,
+    decode_compute_q_a,
+    decode_compute_q_b,
+    decode_select_freqs,
+)
+from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.output_proj import (
+    decode_output_proj,
+)
 
 
 def decode_attention_overlap(attn, x, metadata, streams, *, input_quantized=None):
@@ -14,8 +20,9 @@ def decode_attention_overlap(attn, x, metadata, streams, *, input_quantized=None
     Streams are prepared at construction and shared across this model's layers.
     """
     bsz, q_len, _ = x.shape
-    if q_len not in (1, 2, 3, 4):
-        raise ValueError("PPU Decode overlap requires 1/2/3/4 tokens per request")
+    # 5/6 are the DSpARK proposal block and its gamma+1 target verify span.
+    if q_len not in (1, 2, 3, 4, 5, 6):
+        raise ValueError("PPU Decode overlap requires 1..6 tokens per request")
     start_pos = metadata.start_pos[:bsz]
     position_ids = metadata.position_ids[: bsz * q_len]
     attn._ensure_freqs_cis_bound()
@@ -46,7 +53,9 @@ def decode_attention_overlap(attn, x, metadata, streams, *, input_quantized=None
         swa_written = False
         # The fused norm indexes every B*Q row and uses its own rotary phase.
         if attn._decode_qkv_projection is not None:
-            from rtp_llm.models_py.kernels.ppu.attention.ppu_qkv_norm import normalize_decode_qkv
+            from rtp_llm.models_py.kernels.ppu.attention.ppu_qkv_norm import (
+                normalize_decode_qkv,
+            )
 
             raw = (
                 attn._decode_qkv_projection(x)
@@ -55,7 +64,9 @@ def decode_attention_overlap(attn, x, metadata, streams, *, input_quantized=None
                     *input_quantized
                 ).view(bsz, q_len, 1536)
             )
-            from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_linear import PpuFp8Linear
+            from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_linear import (
+                PpuFp8Linear,
+            )
 
             if (
                 getattr(attn, "_fuse_qkv_quant", False)
@@ -76,6 +87,7 @@ def decode_attention_overlap(attn, x, metadata, streams, *, input_quantized=None
                     freqs,
                     attn.eps,
                     quantize_q=True,
+                    scale_ue8m0=True,
                     swa_cache=swa_cache,
                     slot_mapping=swa_slots,
                 )
@@ -122,14 +134,14 @@ def decode_attention_overlap(attn, x, metadata, streams, *, input_quantized=None
         if q_quantized is None:
             q = decode_compute_q_b(attn, qr, freqs)
         else:
-            from rtp_llm.models_py.modules.dsv4.fp8.decode.compute_qkv import (
-                fused_rmsnorm_rope,
+            from rtp_llm.models_py.kernels.ppu.attention.ppu_q_norm_rope import (
+                q_norm_rope,
             )
 
             q = attn.wq_b.forward_quantized(*q_quantized).view(
                 bsz, q_len, attn.n_heads, attn.head_dim
             )
-            q = fused_rmsnorm_rope(q, None, freqs, attn.rope_head_dim, eps=attn.eps)
+            q = q_norm_rope(q, freqs, attn.rope_head_dim, eps=attn.eps)
     finally:
         # Also join partially submitted work before the caller unbinds pools
         # or releases intermediates after an exception.

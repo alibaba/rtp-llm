@@ -39,6 +39,14 @@ bool enqueueIndividually(SchedulerBase& scheduler, const vector<GenerateStreamPt
 
 }  // namespace
 
+TEST(FIFOSchedulerPolicyTest, FakeStreamPollAllowsBusyPolling) {
+    EXPECT_EQ(FIFOScheduler::normalizeFakeStreamPollMs(-1), 0);
+    EXPECT_EQ(FIFOScheduler::normalizeFakeStreamPollMs(0), 0);
+    EXPECT_EQ(FIFOScheduler::normalizeFakeStreamPollMs(1), 1);
+    EXPECT_EQ(FIFOScheduler::normalizeFakeStreamPollMs(100), 100);
+    EXPECT_EQ(FIFOScheduler::normalizeFakeStreamPollMs(101), 100);
+}
+
 class FIFOSchedulerTest: public DeviceTestBase {
 public:
     FIFOSchedulerTest() {}

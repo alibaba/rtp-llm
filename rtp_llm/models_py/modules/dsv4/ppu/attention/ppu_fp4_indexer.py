@@ -2,17 +2,34 @@
 
 import torch
 import torch.nn.functional as F
-
+from rtp_llm.models_py.kernels.ppu.attention.ppu_fp4_indexer_cache import (
+    build_decode_plan,
+    build_plans,
+    gather_k,
+)
+from rtp_llm.models_py.kernels.ppu.attention.ppu_inverse_rope import (
+    inverse_rope_inplace,
+)
+from rtp_llm.models_py.kernels.ppu.jit.ppu_fp4_indexer import (
+    compress4,
+    compress4_decode,
+    norm_rope_store,
+    paged_score,
+    quantize_q,
+    topk_bf16,
+    topk_decode,
+)
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
-from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.compressor import CompressorFP8, _linear_bf16_bf16_fp32
+from rtp_llm.models_py.modules.dsv4.ppu.attention.decode_query import (
+    slice_compressor_query,
+)
+from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.attention import AttentionFP8
+from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.compressor import (
+    CompressorFP8,
+    _linear_bf16_bf16_fp32,
+)
 from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.indexer import IndexerFP8
 from rtp_llm.utils.model_weight import W
-
-from rtp_llm.models_py.kernels.ppu.jit.ppu_fp4_indexer import compress4, compress4_decode, norm_rope_store, paged_score, quantize_q, topk_bf16, topk_decode
-from rtp_llm.models_py.kernels.ppu.attention.ppu_fp4_indexer_cache import build_decode_plan, build_plans, gather_k
-from rtp_llm.models_py.modules.dsv4.ppu.attention.decode_query import slice_compressor_query
-from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.attention import AttentionFP8
-from rtp_llm.models_py.kernels.ppu.attention.ppu_inverse_rope import inverse_rope_inplace
 
 
 class PpuFP4Compressor(CompressorFP8):
@@ -110,7 +127,9 @@ class PpuFP4Compressor(CompressorFP8):
             meta, self._state_block_table, self._state_eb, self._state_tokens_per_block
         )
         if getattr(self, "_fuse_decode_store", False):
-            from rtp_llm.models_py.kernels.ppu.jit.ppu_fp4_indexer import compress4_decode_store
+            from rtp_llm.models_py.kernels.ppu.jit.ppu_fp4_indexer import (
+                compress4_decode_store,
+            )
 
             if compress4_decode_store(
                 self._state_pool_3d,
@@ -260,10 +279,8 @@ class PpuFP4Indexer(IndexerFP8):
         q_producer_stream=None,
         decode_streams=None,
     ):
-        if x.ndim != 3 or x.shape[1] not in (1, 2, 3, 4):
-            raise ValueError(
-                "FP4 Indexer requires Decode or MTP1/MTP2/MTP3 verify queries"
-            )
+        if x.ndim != 3 or x.shape[1] not in (1, 2, 3, 4, 5, 6):
+            raise ValueError("FP4 Indexer requires Decode or a 1..6 row verify block")
         if x.shape[1] == 1:
             return self._forward_decode_step(
                 x,
@@ -305,7 +322,9 @@ class PpuFP4Indexer(IndexerFP8):
             prepared = None
             # For B=1 the original slices are already contiguous views.
             if batch > 1 and getattr(self, "_fuse_query_slices", False):
-                from rtp_llm.models_py.kernels.ppu.attention.ppu_query_slice import prepare_indexer_query
+                from rtp_llm.models_py.kernels.ppu.attention.ppu_query_slice import (
+                    prepare_indexer_query,
+                )
 
                 prepared = prepare_indexer_query(
                     x, queries, start_pos, compressor_meta, index
@@ -360,7 +379,9 @@ class PpuFP4Indexer(IndexerFP8):
             for index in range(0 if fused_compressor else width):
                 prepared = None
                 if batch > 1 and getattr(self, "_fuse_query_slices", False):
-                    from rtp_llm.models_py.kernels.ppu.attention.ppu_query_slice import prepare_indexer_query
+                    from rtp_llm.models_py.kernels.ppu.attention.ppu_query_slice import (
+                        prepare_indexer_query,
+                    )
 
                     prepared = prepare_indexer_query(x, None, start_pos, meta, index)
                 if prepared is None:
@@ -438,7 +459,9 @@ class PpuFP4Indexer(IndexerFP8):
         self._propagate_pool_to_nested()
         try:
             if decode_streams is not None:
-                from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_decode_indexer import prepare_decode_indexer_overlap
+                from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_decode_indexer import (
+                    prepare_decode_indexer_overlap,
+                )
 
                 q, qs, weights = prepare_decode_indexer_overlap(
                     self,
@@ -499,33 +522,8 @@ class PpuFP4Attention(AttentionFP8):
         if self.wo_a is None:
             raise RuntimeError("PPU grouped output projection was not bound")
         output = o.view(B, S, self.n_heads, self.head_dim)
-        if getattr(self.wo_a, "fuse_inverse_rope_quant", False):
-            from rtp_llm.models_py.kernels.ppu.attention.ppu_decode_fused_quant import (
-                inverse_rope_fp8_permute,
-                supports_inverse_rope_fp8_permute,
-            )
-            from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_wo_a import PpuWoAFp8Linear
-
-            if (
-                type(self.wo_a) is PpuWoAFp8Linear
-                and self.wo_a.sglang_layout
-                and self.wo_a.quantization == "v2_row"
-                and supports_inverse_rope_fp8_permute(
-                    output, freqs_cis, self.rope_head_dim, self.n_groups
-                )
-            ):
-                payload, scale = inverse_rope_fp8_permute(
-                    output,
-                    freqs_cis,
-                    self.rope_head_dim,
-                    self.n_groups,
-                    column_major_scales=True,
-                )
-                projected = self.wo_a.forward_permuted(payload, scale)
-                return projected.view(B, S, self.n_groups, self.wo_a.rank)
         inverse_rope_inplace(output, freqs_cis, self.rope_head_dim)
         return self.wo_a(output.reshape(B, S, self.n_groups, -1))
-
 
     def __init__(
         self,
@@ -621,15 +619,20 @@ class PpuFP4Attention(AttentionFP8):
         )
 
     def _forward_decode_body(self, x, attn_metadata):
-        if self._decode_streams is None or (x.shape[1] != 1 and not self._decode_mtp_overlap):
+        if self._decode_streams is None or (
+            x.shape[1] != 1 and not self._decode_mtp_overlap
+        ):
             return super()._forward_decode_body(x, attn_metadata)
-        from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_decode_attention import decode_attention_overlap
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_decode_attention import (
+            decode_attention_overlap,
+        )
 
         return decode_attention_overlap(self, x, attn_metadata, self._decode_streams)
 
-
     def forward_decode_with_hc_pre(self, x, metadata, hc, norm, *, kv_cache=None):
-        from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_linear import PpuFp8Linear
+        from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_linear import (
+            PpuFp8Linear,
+        )
 
         if (
             not getattr(self, "_fuse_qkv_quant", False)
@@ -643,10 +646,11 @@ class PpuFP4Attention(AttentionFP8):
         ):
             return None
         from rtp_llm.models_py.modules.dsv4.fp8.attention import bind_attn_cache
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_decode_attention import (
+            decode_attention_overlap,
+        )
 
-        from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_decode_attention import decode_attention_overlap
-
-        y, post, comb, quantized = hc.pre_norm_quantized(x, norm)
+        y, post, comb, quantized = hc.pre_norm_quantized(x, norm, scale_ue8m0=True)
         with bind_attn_cache(self, kv_cache, metadata.pool_block_tables):
             self._set_compressor_pool_context()
             try:

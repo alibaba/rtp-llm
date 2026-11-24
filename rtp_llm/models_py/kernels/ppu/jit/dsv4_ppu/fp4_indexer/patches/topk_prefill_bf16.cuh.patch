@@ -24,9 +24,7 @@
 +          }
 +        }
 +      }
-@@ -596,0 +614,71 @@
-+    }
-+  }
+@@ -598,0 +616,48 @@
 +
 +  // The real 4K/TP4 workload contains many rows whose valid score range is
 +  // entirely NaN.  Their deterministic result is simply the lowest TopK raw
@@ -75,7 +73,7 @@
 +            }
 +          }
 +          __syncthreads();
-+
+@@ -599,0 +665,23 @@
 +          const uint32_t num_above = smem->match.above_count;
 +          const uint32_t num_equal = smem->match.equal_count;
 +          if (num_above < prefill_bf16::kTopK && num_above + num_equal >= prefill_bf16::kTopK) {
@@ -96,16 +94,20 @@
 +        if (tx == 0) smem->counter_eq = 0u;
 +        __syncthreads();
 +      }
++    }
++  }
++
 @@ -624 +712 @@
 -  // Accumulate histogram via shared-memory atomics
 +  // Accumulate histogram via shared-memory atomics.
-@@ -699,0 +788,5 @@
-+
+@@ -700,0 +789,5 @@
 +  if (num_equal > prefill_bf16::kMaxTies) {
 +    rtp_topk::exact_topk<prefill_bf16::kTopK>(scores, indices, length, _smem);
 +    return;
 +  }
-@@ -776,0 +870,34 @@
++
+@@ -775,0 +869,34 @@
++
 +  // The FP4 indexer pads each short row with one repeated BF16 sentinel.
 +  // At 4K context / TP4 this commonly leaves 500+ identical values in the
 +  // threshold bin. Ranking every member against every other member below is
@@ -139,10 +141,39 @@
 +      return;
 +    }
 +  }
-+
-@@ -923 +1050 @@
+@@ -923 +1050,27 @@
 -__global__ __launch_bounds__(prefill_bf16::kBlockSize, 1) void topk_prefill_bf16_register_kernel(
++SGL_DEVICE void canonical_sort_pf(int32_t* shared) {
++  const int tx = threadIdx.x;
++  int value = tx < prefill_bf16::kTopK ? shared[tx] : 2147483647;
++#pragma unroll
++  for (int size = 2; size <= prefill_bf16::kTopK; size <<= 1) {
++#pragma unroll
++    for (int stride = size >> 1; stride > 0; stride >>= 1) {
++      int other = 2147483647;
++      if (stride < 32) {
++        other = __shfl_xor_sync(0xFFFFFFFF, value, stride);
++      } else {
++        if (tx < prefill_bf16::kTopK) shared[tx] = value;
++        __syncthreads();
++        if (tx < prefill_bf16::kTopK) other = shared[tx ^ stride];
++        __syncthreads();
++      }
++      if (tx < prefill_bf16::kTopK) {
++        const bool take_min = ((tx & size) == 0) == ((tx & stride) == 0);
++        value = take_min ? min(value, other) : max(value, other);
++      }
++    }
++  }
++  if (tx < prefill_bf16::kTopK) shared[tx] = value;
++  __syncthreads();
++}
++
 +__global__ __launch_bounds__(prefill_bf16::kBlockSize, 2) void topk_prefill_bf16_register_kernel(
-@@ -1045 +1172 @@
+@@ -959,0 +1113 @@
++    if constexpr (kTopK == 512) canonical_sort_pf(s_topk_indices);
+@@ -979,0 +1134 @@
++    if constexpr (kTopK == 512) canonical_sort_pf(s_topk_indices);
+@@ -1045 +1200 @@
 -    const auto fptr = std::bit_cast<const void*>(f);
 +    const auto fptr = reinterpret_cast<const void*>(f);

@@ -91,6 +91,9 @@ public:
                                   CudaGraphState&      state,
                                   CudaGraphCheckMode   mode = CudaGraphCheckMode::FORWARD) = 0;
     virtual bool           captureSessionMayBeDirty() const                              = 0;
+    virtual bool           usesDeviceOnlyAttentionMetadata() const {
+        return false;
+    }
     virtual void           prepareAttentionInputs(const PyModelInputs& inputs,
                                                   CudaGraphState&      state,
                                                   bool                 skip_forward_event_sync = false)  = 0;

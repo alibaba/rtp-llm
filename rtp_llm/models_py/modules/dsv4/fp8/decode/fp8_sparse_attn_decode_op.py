@@ -75,6 +75,7 @@ class SparseAttnV4DecodeFp8Op:
         self.n_heads = n_heads
         self.head_dim = head_dim
         self.softmax_scale = softmax_scale
+        self._flash_mla_backend = None
 
     def forward(
         self,
@@ -140,6 +141,9 @@ class SparseAttnV4DecodeFp8Op:
         from rtp_llm.models_py.utils.flash_mla_legacy import (
             flash_mla_with_kvcache,  # type: ignore[import-not-found]
         )
+
+        if self._flash_mla_backend is not None:
+            flash_mla_with_kvcache = self._flash_mla_backend
 
         B, q_len, H, D = q.shape
         # FlashMLA expects 4D q ``(batch_size, seq_len_q, num_heads_q, head_dim)``

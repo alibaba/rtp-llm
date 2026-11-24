@@ -3,7 +3,6 @@
 import importlib
 
 import torch
-
 from rtp_llm.models_py.modules.dsv4.ppu.hc.tilelang_impl import TileLangHCUnit
 
 
@@ -56,7 +55,9 @@ class PpuHCUnit(TileLangHCUnit):
         if fuse_prenorm:
             if not allow_graph or self._backend != "deepgemm_deterministic":
                 raise ValueError("Fused HC reduction requires deterministic Decode")
-            from rtp_llm.models_py.modules.dsv4.ppu.hc.ppu_hc_prenorm import tf32_hc_prenorm_partials
+            from rtp_llm.models_py.modules.dsv4.ppu.hc.ppu_hc_prenorm import (
+                tf32_hc_prenorm_partials,
+            )
 
             self._prenorm_partials = tf32_hc_prenorm_partials
         if options.get("DSV4_MHC_POST_BACKEND", "tilelang") != "tilelang":
@@ -72,7 +73,9 @@ class PpuHCUnit(TileLangHCUnit):
             prefix + ".post_kernel"
         ).mhc_post_fwd
         if self._backend == "deepgemm_deterministic":
-            from rtp_llm.models_py.modules.dsv4.ppu.hc.ppu_hc_prenorm import tf32_hc_prenorm_gemm
+            from rtp_llm.models_py.modules.dsv4.ppu.hc.ppu_hc_prenorm import (
+                tf32_hc_prenorm_gemm,
+            )
 
             self._prenorm_gemm = tf32_hc_prenorm_gemm
         else:
@@ -85,8 +88,13 @@ class PpuHCUnit(TileLangHCUnit):
 
             y, post, comb = self.pre(x, dbg_tag=dbg_tag)
             shape = y.shape
-            y = tp_rms_norm(norm, y.reshape(-1, shape[-1]), tp_size=tp_size,
-                            tp_rank=tp_rank, global_dim=self.dim).view(shape)
+            y = tp_rms_norm(
+                norm,
+                y.reshape(-1, shape[-1]),
+                tp_size=tp_size,
+                tp_rank=tp_rank,
+                global_dim=self.dim,
+            ).view(shape)
             return y, post, comb
         from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 
@@ -169,7 +177,9 @@ class PpuHCUnit(TileLangHCUnit):
             or torch.cuda.is_current_stream_capturing()
         ):
             return None
-        from rtp_llm.models_py.kernels.ppu.hc.ppu_hc_pre_quant import hc_pre_norm_quantized
+        from rtp_llm.models_py.kernels.ppu.hc.ppu_hc_pre_quant import (
+            hc_pre_norm_quantized,
+        )
 
         rows = x.shape[0]
         reduced = torch.empty((1, rows, 24), dtype=torch.float32, device=x.device)
@@ -187,6 +197,7 @@ class PpuHCUnit(TileLangHCUnit):
             self.hc_sinkhorn_iters,
             norm.variance_epsilon,
             column_scales=False,
+            scale_ue8m0=True,
         )
 
     def _pre_operator(
@@ -235,9 +246,8 @@ class PpuHCUnit(TileLangHCUnit):
         return self._fuse_moe_sum and supports_hc_sum(x, residual, post, comb)
 
     def post_moe_sum(self, routed, shared, residual, post, comb):
-        from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
-
         from rtp_llm.models_py.kernels.ppu.hc.ppu_hc_sum import hc_post_sum
+        from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 
         with record_function_range(
             f"dsv4.hc.L{self.layer_id:02d}.{self.name}.post_sum"
@@ -276,12 +286,13 @@ class PpuHCUnit(TileLangHCUnit):
             and norm.variance_epsilon > 0
         )
 
-    def pre_norm_quantized(self, x, norm):
+    def pre_norm_quantized(self, x, norm, *, scale_ue8m0=False):
         if not self.can_fuse_pre_quant(x, norm):
             return None
+        from rtp_llm.models_py.kernels.ppu.hc.ppu_hc_pre_quant import (
+            hc_pre_norm_quantized,
+        )
         from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
-
-        from rtp_llm.models_py.kernels.ppu.hc.ppu_hc_pre_quant import hc_pre_norm_quantized
 
         with torch.inference_mode(), record_function_range(
             f"dsv4.hc.L{self.layer_id:02d}.{self.name}.pre_norm_quant"
@@ -298,4 +309,5 @@ class PpuHCUnit(TileLangHCUnit):
                 self.hc_eps,
                 self.hc_sinkhorn_iters,
                 norm.variance_epsilon,
+                scale_ue8m0=scale_ue8m0,
             )

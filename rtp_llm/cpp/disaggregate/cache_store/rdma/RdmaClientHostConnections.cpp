@@ -94,16 +94,21 @@ RdmaClientHostConnections::newRdmaConnection(const std::shared_ptr<::accl::barex
         client->Connect(::accl::barex::TCP_V4, host_, port_, callback);
     }
 
-    std::shared_ptr<RdmaConnection> rdma_connection;
     for (int i = 0; i < connect_timeout_ms_; i++) {
-        auto rdma_connection = getRdmaConnectionFromConnectionPool(newly_connections_, true);
+        // Other borrowers may return usable QPs while these Connect calls wait.
+        auto rdma_connection = getRdmaConnectionFromConnectionPool(available_connections_, true);
+        if (rdma_connection == nullptr) {
+            rdma_connection = getRdmaConnectionFromConnectionPool(newly_connections_, true);
+        }
         if (rdma_connection != nullptr) {
             return rdma_connection;
         }
         usleep(1000);
     }
 
-    return getRdmaConnectionFromConnectionPool(newly_connections_, false);
+    auto rdma_connection = getRdmaConnectionFromConnectionPool(available_connections_, false);
+    return rdma_connection != nullptr ? rdma_connection :
+                                       getRdmaConnectionFromConnectionPool(newly_connections_, false);
 }
 
 void RdmaClientHostConnections::recycleConnection(const std::shared_ptr<RdmaConnection>& connection) {

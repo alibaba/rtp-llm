@@ -197,6 +197,9 @@ public:
     bool captureSessionMayBeDirty() const override {
         return capture_session_may_be_dirty_.load(std::memory_order_acquire);
     }
+    bool usesDeviceOnlyAttentionMetadata() const override {
+        return device_only_attention_metadata_;
+    }
 
     // Complete capture with one ownership/error path for every graph role. A
     // failed dirty capture intentionally retains the runner until process exit;
@@ -258,6 +261,7 @@ private:
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
     bool                    draft_prefill_uses_request_lanes_{false};
+    bool                    device_only_attention_metadata_{false};
     CudaGraphRole           role_{CudaGraphRole::AUTO};
     cuda_graph::GraphStream capture_stream_;
     bool                    enable_cuda_graph_debug_mode_{false};

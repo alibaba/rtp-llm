@@ -4,6 +4,12 @@ import torch
 
 from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.decode_attn_metadata import RICH_CSA_INDEX_WIDTH, RICH_HCA_INDEX_WIDTH, RICH_SWA_INDEX_WIDTH, RICH_SWA_PAGE, RICH_SCHED_BUCKETS, RICH_CSA_BUCKET, RICH_HCA_BUCKET
 
+# DSpARK proposes a fixed query block of ``gamma`` rows that all attend to the
+# latest window *and* the whole block, so its index width is the window plus
+# ``gamma`` rounded up to the 128 boundary.  With window=128 and gamma=5 that
+# is 256; the valid prefix is still bounded per request by ``topk_length``.
+RICH_SWA_MAX_INDEX_WIDTH = 2 * RICH_SWA_INDEX_WIDTH
+
 
 def _validate_model1_cache_tensor(pool, *, block_size):
     if pool.dtype != torch.uint8 or pool.ndim != 3 or tuple(pool.shape[1:]) != (block_size, 584):
@@ -112,7 +118,7 @@ def validate_swa_pool(*, q, swa_pool_3d, swa_topk_3d, attn_sink, topk_length):
         page=RICH_SWA_PAGE,
         index_width=RICH_SWA_INDEX_WIDTH,
         name="swa",
-        allowed_widths=(RICH_SWA_INDEX_WIDTH,),
+        allowed_widths=(RICH_SWA_INDEX_WIDTH, RICH_SWA_MAX_INDEX_WIDTH),
         allow_ring_extension=True,
     )
     _validate_lengths(topk_length, q=q, name="swa.topk_length")

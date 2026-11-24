@@ -28,6 +28,7 @@ def _qkv_norm(
     CACHE_BLOCKS: tl.constexpr,
     ROWS: tl.constexpr,
     QUANTIZE_Q: tl.constexpr,
+    SCALE_UE8M0: tl.constexpr,
     STRIDE: tl.constexpr,
     QD: tl.constexpr,
     KD: tl.constexpr,
@@ -49,10 +50,16 @@ def _qkv_norm(
             # Preserve the stored QR's BF16 rounding before the v2 quantizer.
             groups = q_value.to(tl.bfloat16).to(tl.float32).reshape(QD // 128, 128)
             amax = tl.maximum(tl.max(tl.abs(groups), 1), 1.0e-4)
-            inv_scale = tl.div_rn(448.0, amax)
+            scale = amax / 448.0
+            if SCALE_UE8M0:
+                bits = scale.to(tl.uint32, bitcast=True)
+                scale = ((bits + 0x007FFFFF) & 0x7F800000).to(tl.float32, bitcast=True)
+                inv_scale = tl.div_rn(1.0, scale)
+            else:
+                inv_scale = tl.div_rn(448.0, amax)
             quant = tl.minimum(tl.maximum(groups * inv_scale[:, None], -448.0), 448.0)
             tl.store(Q_FP8 + row * QD + q_col, quant.reshape(QD))
-            tl.store(Q_SCALE + tl.arange(0, QD // 128) * ROWS + row, amax / 448.0)
+            tl.store(Q_SCALE + tl.arange(0, QD // 128) * ROWS + row, scale)
     else:
         k_col = tl.arange(0, KD)
         base = X + row * STRIDE + QD
@@ -63,15 +70,24 @@ def _qkv_norm(
         pair = tl.arange(0, RD // 2)
         real_col = KD - RD + 2 * pair
         imag_col = real_col + 1
+        # Match the checkpoint inference RMSNorm BF16 output before RoPE.
         real = (
-            tl.load(base + real_col).to(tl.float32)
-            * k_inv
-            * tl.load(WK + real_col).to(tl.float32)
+            (
+                tl.load(base + real_col).to(tl.float32)
+                * k_inv
+                * tl.load(WK + real_col).to(tl.float32)
+            )
+            .to(tl.bfloat16)
+            .to(tl.float32)
         )
         imag = (
-            tl.load(base + imag_col).to(tl.float32)
-            * k_inv
-            * tl.load(WK + imag_col).to(tl.float32)
+            (
+                tl.load(base + imag_col).to(tl.float32)
+                * k_inv
+                * tl.load(WK + imag_col).to(tl.float32)
+            )
+            .to(tl.bfloat16)
+            .to(tl.float32)
         )
         cosine = tl.load(FREQ + row * RD + pair * 2)
         sine = tl.load(FREQ + row * RD + pair * 2 + 1)
@@ -89,17 +105,19 @@ def _qkv_norm(
                 scales = base_cache + BLOCK_SIZE * 576 + pos * 8
                 # Preserve the BF16 boundary and the original UE8M0 scale math.
                 # Cache block stride includes optional TMA padding.
-                values = (k_x * k_inv * k_w).to(tl.bfloat16).reshape(8, 64)
+                values = (
+                    (k_x * k_inv * k_w).to(tl.bfloat16).to(tl.float32).reshape(8, 64)
+                )
                 amax = tl.maximum(tl.max(tl.abs(values), 1), 1.0e-4)
-                exponent = tl.ceil(tl.log2(amax / 448.0))
-                scale = tl.exp2(exponent)
+                # Round the positive normal scale up to a power of two.
+                bits = (amax / 448.0).to(tl.uint32, bitcast=True)
+                scale_bits = (bits + 0x007FFFFF) & 0x7F800000
+                scale = scale_bits.to(tl.float32, bitcast=True)
                 quant = tl.clamp(values / scale[:, None], -448.0, 448.0)
                 encoded = quant.to(tl.float8e4nv).to(tl.uint8, bitcast=True)
                 tl.store(data + k_col, encoded.reshape(KD), k_col < 448)
                 groups = tl.arange(0, 8)
-                encoded_scale = tl.maximum(tl.minimum(exponent + 127.0, 255.0), 0.0).to(
-                    tl.uint8
-                )
+                encoded_scale = (scale_bits >> 23).to(tl.uint8)
                 tl.store(
                     scales + groups, tl.where(groups < 7, encoded_scale, 0).to(tl.uint8)
                 )
@@ -116,6 +134,7 @@ def normalize_decode_qkv(
     eps,
     *,
     quantize_q=False,
+    scale_ue8m0=False,
     swa_cache=None,
     slot_mapping=None
 ):
@@ -126,8 +145,8 @@ def normalize_decode_qkv(
     Optional SWA output writes the packed cache in the KV program, skipping
     slot -1 and preserving the standalone writer's invalid-access checks.
     """
-    if raw.ndim != 3 or raw.shape[1] not in (1, 2, 3, 4) or raw.shape[2] != 1536:
-        raise ValueError("Merged Decode QKV must have shape [B,Q,1536], Q=1/2/3/4")
+    if raw.ndim != 3 or raw.shape[1] not in (1, 2, 3, 4, 5, 6) or raw.shape[2] != 1536:
+        raise ValueError("Merged Decode QKV must have shape [B,Q,1536], Q=1..6")
     batch, queries = raw.shape[:2]
     rows = batch * queries
     tensors = (raw, q_weight, kv_weight, freqs)
@@ -201,6 +220,7 @@ def normalize_decode_qkv(
             CACHE_BLOCKS=swa_cache.shape[0] if write_cache else 0,
             ROWS=rows,
             QUANTIZE_Q=quantize_q,
+            SCALE_UE8M0=scale_ue8m0,
             STRIDE=1536,
             QD=1024,
             KD=512,
