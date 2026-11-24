@@ -1,9 +1,11 @@
 import copy
 import os
+import re
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Union
 from unittest import TestCase, main
 
+from pydantic import ValidationError
 from transformers import AutoTokenizer
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -21,7 +23,7 @@ from rtp_llm.config.response_format_compiler import (
     restore_final_constraint,
     validate_engine_ready,
 )
-from rtp_llm.config.thinking_mode import normalize_think_mode
+from rtp_llm.config.thinking_mode import INT32_MAX, normalize_think_mode
 from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import BaseTokenizer
 from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
     QWenTokenizer,
@@ -409,7 +411,7 @@ class OpenaiGenerateConfigTest(TestCase):
         model_stop_word_list: Optional[List[str]] = None,
         env_stop_word_str: Optional[str] = None,
         env_stop_word_list: Optional[str] = None,
-        req_stop: Optional[Union[str, List[str]]] = None,
+        req_stop: Optional[Union[str, List[Union[str, int]]]] = None,
         req_config_stop_word_str: Optional[List[str]] = None,
         req_config_stop_word_list: Optional[List[List[int]]] = None,
         response_format: Optional[Union[str, Dict[str, Any]]] = None,
@@ -567,22 +569,31 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertEqual(config.max_thinking_tokens, 10)
         self.assertTrue(config.in_think_mode)
 
-    def test_openai_max_completion_tokens_respects_max_tokens_total_cap(self):
+    def test_openai_max_completion_tokens_precedence_over_max_tokens(self):
         generate_env_config = GenerateEnvConfig()
         generate_env_config.think_mode = 1
         generate_env_config.think_end_token_id = 102
-        request = ChatCompletionRequest(
-            messages=[],
-            max_tokens=105,
-            max_completion_tokens=100,
-            thinking_budget=10,
-            enable_thinking=True,
-        )
+        for max_tokens, max_completion_tokens, expected in (
+            (105, 100, 100),
+            (50, 100, 100),
+        ):
+            with self.subTest(
+                max_tokens=max_tokens, max_completion_tokens=max_completion_tokens
+            ):
+                request = ChatCompletionRequest(
+                    messages=[],
+                    max_tokens=max_tokens,
+                    max_completion_tokens=max_completion_tokens,
+                    thinking_budget=10,
+                    enable_thinking=True,
+                )
 
-        config = self._extract_openai_generation_config(request, generate_env_config)
+                config = self._extract_openai_generation_config(
+                    request, generate_env_config
+                )
 
-        self.assertEqual(config.max_new_tokens, 100)
-        self.assertEqual(config.max_thinking_tokens, 10)
+                self.assertEqual(config.max_new_tokens, expected)
+                self.assertEqual(config.max_thinking_tokens, 10)
 
     def test_openai_max_completion_tokens_does_not_add_default_thinking_budget(self):
         generate_env_config = GenerateEnvConfig()
@@ -600,18 +611,15 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertEqual(config.max_thinking_tokens, 32000)
         self.assertTrue(config.in_think_mode)
 
-    def test_openai_max_completion_tokens_non_positive_is_unset(self):
-        request = ChatCompletionRequest(
-            messages=[],
-            max_tokens=64,
-            max_completion_tokens=0,
-        )
-        config = self._extract_openai_generation_config(request)
-        self.assertEqual(config.max_new_tokens, 64)
-
-        request = ChatCompletionRequest(messages=[], max_completion_tokens=-1)
-        config = self._extract_openai_generation_config(request)
-        self.assertEqual(config.max_new_tokens, 32000)
+    def test_openai_max_completion_tokens_non_positive_is_rejected(self):
+        for bad_value in (0, -1, True, 1.5):
+            with self.subTest(max_completion_tokens=bad_value):
+                with self.assertRaises(ValidationError):
+                    ChatCompletionRequest(
+                        messages=[],
+                        max_tokens=64,
+                        max_completion_tokens=bad_value,
+                    )
 
     def test_request_level_thinking_adds_think_end_tokens_when_env_mode_off(self):
         generate_env_config = GenerateEnvConfig()
@@ -1313,6 +1321,262 @@ class OpenaiGenerateConfigTest(TestCase):
         with self.assertLogs(level="WARNING"):
             ids = OpenaiEndpoint._tokenize_request_stop_words(endpoint, ["ab"])
         self.assertEqual(ids, [[97, 98], [32, 97, 98]])
+
+    def test_openai_request_parameter_validation(self):
+        valid = ChatCompletionRequest(
+            messages=[],
+            temperature=0.0,
+            top_p=0.0,
+            top_k=0,
+            presence_penalty=-2.0,
+            frequency_penalty=2.0,
+            repetition_penalty=0.5,
+            seed=9223372036854775807,
+            max_tokens=1,
+            max_completion_tokens=131072,
+            n=50,
+            thinking_budget=-1,
+            clear_thinking=True,
+            partial=False,
+        )
+        self.assertEqual(valid.top_p, 0.0)
+        self.assertEqual(valid.n, 50)
+        self.assertEqual(valid.seed, 9223372036854775807)
+        self.assertTrue(valid.clear_thinking)
+        self.assertFalse(valid.partial)
+        self.assertEqual(valid.thinking_budget, -1)
+        thinking_valid = ChatCompletionRequest(
+            messages=[],
+            enable_thinking=True,
+            thinking_budget=-1,
+        )
+        self.assertEqual(
+            self._extract_openai_generation_config(thinking_valid).max_thinking_tokens,
+            INT32_MAX,
+        )
+
+        invalid_cases = [
+            ("temperature", -0.1, "Temperature should be in [0.0, 2.0]"),
+            ("temperature", 2.1, "Temperature should be in [0.0, 2.0]"),
+            ("temperature", True, "'temperature' must be Float"),
+            ("temperature", "a", "Input should be a valid number"),
+            ("top_p", -0.1, "Range of top_p should be [0.0, 1.0]"),
+            ("top_p", 1.1, "Range of top_p should be [0.0, 1.0]"),
+            ("top_p", False, "'top_p' must be Float"),
+            ("top_p", "a", "Input should be a valid number"),
+            ("top_k", -1, "Range of top_k should be >= 0"),
+            ("top_k", True, "'top_k' must be Integer"),
+            ("top_k", 1.5, "Input should be a valid integer"),
+            (
+                "presence_penalty",
+                -2.1,
+                "Range of presence_penalty should be [-2.0, 2.0]",
+            ),
+            (
+                "presence_penalty",
+                2.1,
+                "Range of presence_penalty should be [-2.0, 2.0]",
+            ),
+            ("presence_penalty", "a", "Input should be a valid number"),
+            (
+                "frequency_penalty",
+                -2.1,
+                "Range of frequency_penalty should be [-2.0, 2.0]",
+            ),
+            (
+                "frequency_penalty",
+                2.1,
+                "Range of frequency_penalty should be [-2.0, 2.0]",
+            ),
+            (
+                "repetition_penalty",
+                0.0,
+                "Range of repetition_penalty should be (0.0, +inf)",
+            ),
+            (
+                "repetition_penalty",
+                -1.0,
+                "Range of repetition_penalty should be (0.0, +inf)",
+            ),
+            (
+                "repetition_penalty",
+                float("inf"),
+                "Range of repetition_penalty should be (0.0, +inf)",
+            ),
+            ("seed", -1, "'seed' must be Integer in [0, 9223372036854775807]"),
+            (
+                "seed",
+                9223372036854775808,
+                "'seed' must be Integer in [0, 9223372036854775807]",
+            ),
+            ("seed", True, "'seed' must be Integer in [0, 9223372036854775807]"),
+            ("seed", 1.5, "Input should be a valid integer"),
+            ("max_tokens", 0, "Range of max_tokens should be [1, +inf)"),
+            ("max_tokens", 10.9999, "Input should be a valid integer"),
+            ("max_tokens", "a", "Input should be a valid integer"),
+            ("max_tokens", True, "'max_tokens' must be Integer"),
+            ("n", 0, "Range of n should be >= 1"),
+            ("n", -1, "Range of n should be >= 1"),
+            ("n", True, "'n' must be Integer"),
+        ]
+        for field, value, expected_msg in invalid_cases:
+            with self.subTest(field=field, value=value):
+                with self.assertRaisesRegex(ValidationError, re.escape(expected_msg)):
+                    ChatCompletionRequest(messages=[], **{field: value})
+
+    def test_openai_cache_control_validation(self):
+        from rtp_llm.openai.api_datatype import ChatMessage, ContentPart
+
+        req = ChatCompletionRequest.model_validate(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "hello",
+                                "cache_control": {"type": "ephemeral"},
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+        self.assertEqual(len(req.messages), 1)
+        part = ContentPart(
+            type="text", text="hello", cache_control={"type": "ephemeral"}
+        )
+        self.assertEqual(part.text, "hello")
+
+        for bad_cc in ({}, {"type": "persistent"}, None, "ephemeral"):
+            with self.subTest(bad_cc=bad_cc):
+                with self.assertRaisesRegex(
+                    ValidationError,
+                    "If cache_control is provided, type is required and must be ephemeral",
+                ):
+                    ChatCompletionRequest.model_validate(
+                        {
+                            "messages": [
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {
+                                            "type": "text",
+                                            "text": "hello",
+                                            "cache_control": bad_cc,
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    )
+                with self.assertRaisesRegex(
+                    ValidationError,
+                    "If cache_control is provided, type is required and must be ephemeral",
+                ):
+                    ChatMessage(
+                        role="user",
+                        content=[
+                            {"type": "text", "text": "hello", "cache_control": bad_cc}
+                        ],
+                    )
+                with self.assertRaisesRegex(
+                    ValidationError,
+                    "If cache_control is provided, type is required and must be ephemeral",
+                ):
+                    ContentPart(type="text", text="hello", cache_control=bad_cc)
+
+    def test_openai_sampling_penalties_and_top_k_clamp(self):
+        request = ChatCompletionRequest(
+            messages=[],
+            top_k=9999999999999,
+            presence_penalty=0.5,
+            frequency_penalty=-0.25,
+            repetition_penalty=1.2,
+            seed=42,
+        )
+        config = self._extract_openai_generation_config(request)
+        self.assertEqual(config.top_k, INT32_MAX)
+        self.assertEqual(config.presence_penalty, 0.5)
+        self.assertEqual(config.frequency_penalty, -0.25)
+        self.assertEqual(config.repetition_penalty, 1.2)
+        self.assertEqual(config.random_seed, 42)
+
+    def test_request_stop_token_ids_and_mixed_stop(self):
+        config = self._generate_config_with_stop_word(req_stop=[30594])
+        self.assertIn([30594], config.stop_words_list)
+        decoded = self.tokenizer.decode([30594])
+        if decoded:
+            self.assertIn(decoded, config.stop_words_str)
+
+        mixed_config = self._generate_config_with_stop_word(
+            req_stop=["req stop word", 30594]
+        )
+        self.assertIn([30594], mixed_config.stop_words_list)
+        self.assertIn([2958, 2936, 3409], mixed_config.stop_words_list)
+        self.assertIn("req stop word", mixed_config.stop_words_str)
+
+        for bad_stop in ([True], [-1]):
+            with self.subTest(bad_stop=bad_stop):
+                with self.assertRaises(ValidationError):
+                    ChatCompletionRequest(messages=[], stop=bad_stop)
+
+    def test_render_chat_rejects_partial_mode_when_thinking_enabled(self):
+        from rtp_llm.openai.api_datatype import ChatMessage, RoleEnum
+
+        model_config = ModelConfig()
+        model_config.generate_env_config = GenerateEnvConfig()
+        model_config.generate_env_config.think_mode = 1
+        model_config.render_config = RenderConfig()
+        model_config.special_tokens = SpecialTokens()
+        model_config.max_seq_len = 1024
+        model_config.template_type = None
+        model_config.model_name = ""
+        model_config.ckpt_path = ""
+
+        openai_endpoint = OpenaiEndpoint(
+            model_config=model_config,
+            misc_config=PyMiscellaneousConfig(),
+            vit_config=VitConfig(),
+            tokenizer=self.tokenizer,
+            backend_rpc_server_visitor=None,
+        )
+
+        msg_partial_req = ChatCompletionRequest(
+            messages=[
+                ChatMessage(role=RoleEnum.user, content="hello"),
+                ChatMessage(role=RoleEnum.assistant, content="prefix", partial=True),
+            ],
+            enable_thinking=True,
+        )
+        with self.assertRaises(FtRuntimeException) as ctx:
+            openai_endpoint.render_chat(msg_partial_req)
+        self.assertEqual(ctx.exception.exception_type, ExceptionType.INVALID_PARAMS)
+        self.assertIn(
+            "Partial mode is not supported when enable_thinking is true",
+            ctx.exception.message,
+        )
+        self.assertEqual(len(msg_partial_req.messages), 2)
+
+        top_partial_req = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+            enable_thinking=True,
+            partial=True,
+        )
+        with self.assertRaises(FtRuntimeException) as top_ctx:
+            openai_endpoint.render_chat(top_partial_req)
+        self.assertEqual(top_ctx.exception.exception_type, ExceptionType.INVALID_PARAMS)
+
+        allowed_req = ChatCompletionRequest(
+            messages=[
+                ChatMessage(role=RoleEnum.user, content="hello"),
+                ChatMessage(role=RoleEnum.assistant, content="prefix", partial=True),
+            ],
+            enable_thinking=False,
+        )
+        rendered = openai_endpoint.render_chat(allowed_req)
+        self.assertTrue(rendered.rendered_prompt.endswith("prefix"))
 
 
 class GrammarMultiSequenceConfigTest(TestCase):

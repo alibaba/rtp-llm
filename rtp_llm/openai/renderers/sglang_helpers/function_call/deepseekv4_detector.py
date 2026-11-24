@@ -100,7 +100,12 @@ class DeepSeekV4Detector(BaseFormatDetector):
     Reference: DeepSeek V3.2 format specification
     """
 
-    def __init__(self, encoding_module=None, thinking_mode: str = "chat"):
+    def __init__(
+        self,
+        encoding_module=None,
+        thinking_mode: str = "chat",
+        parallel_tool_calls: bool = True,
+    ):
         super().__init__()
         self.bot_token = "<｜DSML｜tool_calls>"
         self.eot_token = "</｜DSML｜tool_calls>"
@@ -117,6 +122,7 @@ class DeepSeekV4Detector(BaseFormatDetector):
         self.current_tool_id = -1
         self.encoding_module = encoding_module
         self.thinking_mode = thinking_mode
+        self.parallel_tool_calls = parallel_tool_calls
         self._in_tool_calls_block = False
         self._param_end_tag = "</｜DSML｜parameter>"
         self._invoke_open_re = re.compile(r'<｜DSML｜invoke\s+name="([^"]+)"\s*>')
@@ -368,6 +374,8 @@ class DeepSeekV4Detector(BaseFormatDetector):
                 calls.extend(
                     self.parse_base_json(match_result, tools, start_index=len(calls))
                 )
+                if not self.parallel_tool_calls and calls:
+                    break
 
             if _dsv4_detector_debug_enabled():
                 logger.info(
@@ -394,18 +402,22 @@ class DeepSeekV4Detector(BaseFormatDetector):
             param_type = param_config[param_name].get("type", "string")
         return self._convert_param_value(param_value, param_type)
 
+    def _should_emit_current_tool(self) -> bool:
+        return self.parallel_tool_calls or self.current_tool_id == 0
+
     def _emit_tool_args_fragment(
         self, fragment: str, all_calls: List[ToolCallItem]
     ) -> None:
         if not fragment:
             return
-        all_calls.append(
-            ToolCallItem(
-                tool_index=self.current_tool_id,
-                name=None,
-                parameters=fragment,
+        if self._should_emit_current_tool():
+            all_calls.append(
+                ToolCallItem(
+                    tool_index=self.current_tool_id,
+                    name=None,
+                    parameters=fragment,
+                )
             )
-        )
         self.streamed_args_for_tool[self.current_tool_id] += fragment
 
     def _start_invoke(
@@ -421,13 +433,14 @@ class DeepSeekV4Detector(BaseFormatDetector):
             self.streamed_args_for_tool.append("")
 
         if not self.current_tool_name_sent:
-            all_calls.append(
-                ToolCallItem(
-                    tool_index=self.current_tool_id,
-                    name=func_name,
-                    parameters="",
+            if self._should_emit_current_tool():
+                all_calls.append(
+                    ToolCallItem(
+                        tool_index=self.current_tool_id,
+                        name=func_name,
+                        parameters="",
+                    )
                 )
-            )
             self.current_tool_name_sent = True
 
         self.prev_tool_call_arr[self.current_tool_id] = {

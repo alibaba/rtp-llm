@@ -5,6 +5,7 @@ import logging
 import threading
 import time
 from contextlib import aclosing
+from contextvars import ContextVar
 from typing import (
     Any,
     Awaitable,
@@ -35,6 +36,11 @@ from rtp_llm.anthropic.translator import (
     anthropic_stream_error_event,
     translate_anthropic_request,
     translate_openai_response,
+)
+from rtp_llm.config.exceptions import (
+    ExceptionCategory,
+    ExceptionType,
+    FtRuntimeException,
 )
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.model_config import (
@@ -78,6 +84,9 @@ from rtp_llm.utils.time_util import current_time_ms
 from rtp_llm.utils.util import check_with_info
 
 USAGE_HEADER = "USAGE"
+_USE_HTTP_STATUS_MAPPING: ContextVar[bool] = ContextVar(
+    "_USE_HTTP_STATUS_MAPPING", default=False
+)
 _T = TypeVar("_T")
 
 
@@ -646,7 +655,13 @@ class FrontendServer(object):
         generate_call: Callable[
             [FrontendRequestMetricState], CompleteResponseAsyncGenerator
         ],
+        use_http_status_mapping: Optional[bool] = None,
     ):
+        status_mapping = (
+            _USE_HTTP_STATUS_MAPPING.get()
+            if use_http_status_mapping is None
+            else use_http_status_mapping
+        )
         try:
             rep = await self._infer_impl(req, raw_request, generate_call)
         except BaseException as e:
@@ -654,6 +669,7 @@ class FrontendServer(object):
                 req,
                 e,
                 self._request_metric_tags(req, getattr(raw_request, "headers", None)),
+                use_http_status_mapping=status_mapping,
             )
             # Finish the span here while the real exception is still in hand:
             # the caller only sees the swallowed ORJSONResponse and would
@@ -741,7 +757,11 @@ class FrontendServer(object):
                 request.extra_configs is None or request.extra_configs.aux_info
             )
             request_dict[request_id_field_name] = request_id
-            rep = await self._infer_wrap(request_dict, raw_request, generate_call)
+            token = _USE_HTTP_STATUS_MAPPING.set(True)
+            try:
+                rep = await self._infer_wrap(request_dict, raw_request, generate_call)
+            finally:
+                _USE_HTTP_STATUS_MAPPING.reset(token)
         except BaseException as e:
             if trace_state is not None:
                 # re-raise ends in FastAPI's generic exception handler -> 500
@@ -1306,11 +1326,28 @@ class FrontendServer(object):
         except Exception as e:
             return ORJSONResponse(format_exception(e), status_code=500)
 
+    @staticmethod
+    def _http_status_for_exception(e: BaseException) -> int:
+        if isinstance(e, ConcurrencyException):
+            return 429
+        if isinstance(e, FtRuntimeException):
+            category = ExceptionType(e.exception_type).category
+            if category in (
+                ExceptionCategory.BAD_REQUEST,
+                ExceptionCategory.TOO_LONG,
+                ExceptionCategory.UNSUPPORTED,
+            ):
+                return 400
+            if category == ExceptionCategory.CAPACITY:
+                return 429
+        return 500
+
     def _handle_exception(
         self,
         request: Dict[str, Any],
         e: BaseException,
         metric_tags: Dict[str, str] | None = None,
+        use_http_status_mapping: bool = False,
     ):
         request = request if isinstance(request, dict) else {}
         if request_id_field_name not in request:
@@ -1319,9 +1356,13 @@ class FrontendServer(object):
         metric_tags = dict(metric_tags or self._request_metric_tags(request))
         exception_json = format_exception(e)
         error_code_str = exception_json.get("error_code_str", "")
+        status_code = (
+            self._http_status_for_exception(e) if use_http_status_mapping else 500
+        )
         logging.warning(
-            "Frontend failure: request_id=%s http_status=500 error_code=%s error_name=%s message=%s",
+            "Frontend failure: request_id=%s http_status=%s error_code=%s error_name=%s message=%s",
             request.get(request_id_field_name),
+            status_code,
             exception_json.get("error_code"),
             error_code_str,
             exception_json.get("message"),
@@ -1343,7 +1384,7 @@ class FrontendServer(object):
             )
             self._access_logger.log_exception_access(request, e, exception_json)
 
-        rep = ORJSONResponse(format_client_exception(e), status_code=500)
+        rep = ORJSONResponse(format_client_exception(e), status_code=status_code)
         return rep
 
     async def _call_generate_with_report(

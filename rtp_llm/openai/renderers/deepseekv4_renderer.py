@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from typing_extensions import override
 
@@ -13,10 +13,15 @@ from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     DeltaMessage,
+    ToolCall,
     get_tool_choice_function_name,
 )
 from rtp_llm.openai.renderer_factory_register import register_renderer
-from rtp_llm.openai.renderers.custom_renderer import OutputDelta, RendererParams
+from rtp_llm.openai.renderers.custom_renderer import (
+    OutputDelta,
+    RendererParams,
+    StreamStatus,
+)
 from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
     ReasoningToolBaseRenderer,
     ReasoningToolStreamStatus,
@@ -233,9 +238,10 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
             return None
         valid_efforts = ("low", "medium", "high", "xhigh", "max")
         if effort not in valid_efforts:
-            raise ValueError(
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
                 "'reasoning_effort' must be one of: "
-                "'low', 'medium', 'high', 'xhigh', 'max'"
+                "'low', 'medium', 'high', 'xhigh', 'max'",
             )
         if effort in ("low", "medium"):
             return None
@@ -345,6 +351,24 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
             structural_tag, ensure_ascii=False, separators=(",", ":")
         )
 
+    @staticmethod
+    def _apply_template_kwargs(
+        encode_config: dict[str, Any], kwargs: dict[str, Any]
+    ) -> None:
+        # ChatCompletionRequest uses disabled/adaptive/enabled, while the
+        # DeepSeek encoding script uses chat/thinking. The request mode was
+        # already resolved above, so do not pass its public enum value into
+        # encode_messages as an encoding-level override.
+        encode_config.update(
+            {key: value for key, value in kwargs.items() if key != "thinking_mode"}
+        )
+        if (
+            "drop_thinking" not in kwargs
+            and "clear_thinking" in kwargs
+            and kwargs["clear_thinking"] is not None
+        ):
+            encode_config["drop_thinking"] = bool(kwargs["clear_thinking"])
+
     def _build_prompt(self, request: ChatCompletionRequest) -> str:
         """
         Build prompt string using the DeepSeek V4.0 encoding script.
@@ -422,9 +446,11 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
         # Configure encoding
         # drop_thinking=True: Remove reasoning_content from historical assistant messages
         # add_default_bos_token=True: Always add BOS token since we encode full messages
+        clear_thinking = getattr(request, "clear_thinking", None)
+        drop_thinking = True if clear_thinking is None else bool(clear_thinking)
         encode_config = {
             "thinking_mode": thinking_mode,
-            "drop_thinking": True,
+            "drop_thinking": drop_thinking,
             "add_default_bos_token": True,
             "reasoning_effort": self._normalize_reasoning_effort(
                 request.reasoning_effort
@@ -434,29 +460,15 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
         # Override with custom configs if provided
         # Note: context parameter is not used since RTP-LLM always provides full message history
         if request.chat_template_kwargs:
-            # ChatCompletionRequest uses disabled/adaptive/enabled, while the
-            # DeepSeek encoding script uses chat/thinking. The request mode was
-            # already resolved above, so do not pass its public enum value into
-            # encode_messages as an encoding-level override.
-            encode_config.update(
-                {
-                    key: value
-                    for key, value in request.chat_template_kwargs.items()
-                    if key != "thinking_mode"
-                }
-            )
+            self._apply_template_kwargs(encode_config, request.chat_template_kwargs)
 
         if (
             request.extra_configs
             and request.extra_configs.chat_template_kwargs
             and isinstance(request.extra_configs.chat_template_kwargs, dict)
         ):
-            encode_config.update(
-                {
-                    key: value
-                    for key, value in request.extra_configs.chat_template_kwargs.items()
-                    if key != "thinking_mode"
-                }
+            self._apply_template_kwargs(
+                encode_config, request.extra_configs.chat_template_kwargs
             )
         if request.disable_thinking():
             encode_config["thinking_mode"] = "chat"
@@ -525,9 +537,27 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
             # Pass the encoding module and thinking_mode to detector
             # Detector is created fresh for each request (not singleton)
             return DeepSeekV4Detector(
-                encoding_module=self.encoding_module, thinking_mode=thinking_mode
+                encoding_module=self.encoding_module,
+                thinking_mode=thinking_mode,
+                parallel_tool_calls=(request.parallel_tool_calls is not False),
             )
         return None
+
+    @staticmethod
+    def _filter_parallel_tool_calls(
+        request: ChatCompletionRequest,
+        tool_calls: Optional[List[ToolCall]],
+    ) -> Optional[List[ToolCall]]:
+        if not tool_calls or request.parallel_tool_calls is not False:
+            return tool_calls
+        filtered = [tc for tc in tool_calls if tc.index is None or tc.index == 0]
+        if not filtered:
+            return None
+        if len(filtered) > 1:
+            filtered = filtered[:1]
+        if filtered[0].index is None:
+            filtered[0].index = 0
+        return filtered
 
     def _thinking_mode_for_request(self, request: ChatCompletionRequest) -> str:
         return "thinking" if self.in_think_mode(request) else "chat"
@@ -630,6 +660,7 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
                     content,
                     is_streaming=False,
                 )
+            tool_calls = self._filter_parallel_tool_calls(status.request, tool_calls)
         except Exception as e:
             if _dsv4_renderer_debug_enabled():
                 logging.warning(
@@ -670,6 +701,87 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
             reuse_length=output.aux_info.reuse_len,
         )
 
+    def _compute_think_tokens_at_exit(
+        self,
+        consumed_ids: List[int],
+        prev_consumed_len: int,
+        prev_buffer: str,
+        reasoning_detector: Any,
+    ) -> int:
+        if prev_consumed_len > len(consumed_ids):
+            prev_consumed_len = 0
+            prev_buffer = ""
+        think_end = getattr(reasoning_detector, "think_end_token", "</think>")
+        lookback = max(len(prev_buffer), 1) if prev_buffer else 0
+        window_start = max(0, prev_consumed_len - lookback)
+        window = consumed_ids[window_start:]
+        for idx in range(1, len(window) + 1):
+            decoded = self.tokenizer.decode(window[:idx])
+            end_pos = decoded.find(think_end)
+            dsml_pos = decoded.find(DSML_TOOL_CALLS_MARKER)
+            if end_pos != -1 and (dsml_pos == -1 or end_pos < dsml_pos):
+                return window_start + self._count_tokens(decoded[:end_pos])
+            if dsml_pos != -1:
+                return window_start + self._count_tokens(decoded[:dsml_pos])
+        fallback_marker = (
+            think_end
+            if getattr(reasoning_detector, "_dsv4_after_think", False)
+            else DSML_TOOL_CALLS_MARKER
+        )
+        return max(0, len(consumed_ids) - self._count_tokens(fallback_marker))
+
+    @override
+    async def _update_single_status(
+        self,
+        status: StreamStatus,
+        output: GenerateOutput,
+        max_new_tokens: int,
+        stop_words_str: List[str],
+        stop_word_slice_list: List[str],
+        is_streaming: bool,
+    ) -> OutputDelta:
+        reasoning_detector = (
+            getattr(status.reasoning_parser, "detector", None)
+            if isinstance(status, ReasoningToolStreamStatus)
+            else None
+        )
+        was_in_reasoning = bool(
+            reasoning_detector is not None
+            and getattr(reasoning_detector, "_in_reasoning", False)
+        )
+        prev_consumed_len = len(status.last_output_ids)
+        prev_buffer = (
+            getattr(reasoning_detector, "_buffer", "")
+            if reasoning_detector is not None
+            else ""
+        )
+
+        delta = await super()._update_single_status(
+            status,
+            output,
+            max_new_tokens,
+            stop_words_str,
+            stop_word_slice_list,
+            is_streaming,
+        )
+
+        if is_streaming and reasoning_detector is not None and was_in_reasoning:
+            now_in_reasoning = bool(getattr(reasoning_detector, "_in_reasoning", False))
+            consumed_ids = status.last_output_ids
+            if now_in_reasoning:
+                pending = getattr(reasoning_detector, "_buffer", "")
+                delta.think_tokens = max(
+                    0, len(consumed_ids) - self._count_tokens(pending)
+                )
+            else:
+                delta.think_tokens = self._compute_think_tokens_at_exit(
+                    consumed_ids,
+                    prev_consumed_len,
+                    prev_buffer,
+                    reasoning_detector,
+                )
+        return delta
+
     @override
     async def _process_reasoning_and_tool_calls(
         self,
@@ -682,9 +794,25 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
             if parsed_delta is not None:
                 return parsed_delta
 
-        return await super()._process_reasoning_and_tool_calls(
+        delta = await super()._process_reasoning_and_tool_calls(
             status, output, is_streaming
         )
+        if (
+            delta is not None
+            and isinstance(delta.output_str, DeltaMessage)
+            and delta.output_str.tool_calls
+            and status.request.parallel_tool_calls is False
+        ):
+            delta.output_str.tool_calls = self._filter_parallel_tool_calls(
+                status.request, delta.output_str.tool_calls
+            )
+            if (
+                not delta.output_str.tool_calls
+                and not delta.output_str.reasoning_content
+                and not delta.output_str.content
+            ):
+                return None
+        return delta
 
     def _extract_streaming_reasoning_content(
         self,

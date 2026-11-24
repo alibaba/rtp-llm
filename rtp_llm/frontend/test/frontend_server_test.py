@@ -27,7 +27,11 @@ from rtp_llm.utils.base_model_datatypes import GenerateInput
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
-from rtp_llm.utils.concurrency_controller import init_controller, set_global_controller
+from rtp_llm.utils.concurrency_controller import (
+    ConcurrencyException,
+    init_controller,
+    set_global_controller,
+)
 
 
 class FakePipelinResponse(BaseModel):
@@ -1892,6 +1896,111 @@ class FrontendServerTest(TestCase):
             self.assertNotIn("rtp_llm.request_id", client_span.attributes)
             self.assertEqual(client_span.status.status_code, StatusCode.ERROR)
             self.assertEqual(client_span.attributes["error.type"], "RuntimeError")
+
+    def test_chat_completion_maps_runtime_exceptions_to_http_status(self):
+        original_impl = self.frontend_server._infer_impl
+        original_endpoint = self.frontend_server._openai_endpoint
+        self.frontend_server._openai_endpoint = SimpleNamespace(model_name="test-model")
+
+        cases = [
+            (
+                FtRuntimeException(
+                    ExceptionType.INVALID_PARAMS, "secret/internal/path.py"
+                ),
+                400,
+                "INVALID_PARAMS",
+            ),
+            (
+                FtRuntimeException(
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR, "secret input"
+                ),
+                400,
+                "ERROR_INPUT_FORMAT_ERROR",
+            ),
+            (
+                FtRuntimeException(ExceptionType.LONG_PROMPT_ERROR, "too long"),
+                400,
+                "LONG_PROMPT_ERROR",
+            ),
+            (
+                FtRuntimeException(ExceptionType.UNSUPPORTED_OPERATION, "unsupported"),
+                400,
+                "UNSUPPORTED_OPERATION",
+            ),
+            (
+                FtRuntimeException(ExceptionType.CONCURRENCY_LIMIT_ERROR, "busy"),
+                429,
+                "CONCURRENCY_LIMIT_ERROR",
+            ),
+            (
+                ConcurrencyException("too many concurrent requests"),
+                429,
+                "CONCURRENCY_LIMIT_ERROR",
+            ),
+            (
+                FtRuntimeException(
+                    ExceptionType.EXECUTION_EXCEPTION, "secret/engine/traceback"
+                ),
+                500,
+                "EXECUTION_EXCEPTION",
+            ),
+            (RuntimeError("secret/crash"), 500, "UNKNOWN_ERROR"),
+        ]
+
+        try:
+            for exc, expected_status, expected_code in cases:
+
+                async def _raise(req, raw_request, generate_call, error=exc):
+                    raise error
+
+                self.frontend_server._infer_impl = _raise
+                request = ChatCompletionRequest(
+                    messages=[{"role": "user", "content": "hello"}],
+                )
+                with self.subTest(
+                    exc=type(exc).__name__, expected_status=expected_status
+                ):
+                    response = asyncio.run(
+                        self.frontend_server.chat_completion(request, FakeRawRequest())
+                    )
+                    self.assertEqual(response.status_code, expected_status)
+                    body = json.loads(response.body)
+                    self.assertEqual(body["message"], expected_code)
+                    self.assertTrue(
+                        body["error_code_str"].endswith(f"_{expected_code}")
+                    )
+                    self.assertNotIn("secret", response.body.decode())
+        finally:
+            self.frontend_server._infer_impl = original_impl
+            self.frontend_server._openai_endpoint = original_endpoint
+
+    def test_legacy_inference_preserves_http_500_for_bad_request_and_concurrency(self):
+        original_impl = self.frontend_server._infer_impl
+        try:
+            for exc in (
+                FtRuntimeException(ExceptionType.INVALID_PARAMS, "bad param"),
+                ConcurrencyException("too many requests"),
+            ):
+
+                async def _raise(req, raw_request, generate_call, error=exc):
+                    raise error
+
+                self.frontend_server._infer_impl = _raise
+                with self.subTest(exc=type(exc).__name__):
+                    response = asyncio.run(
+                        self.frontend_server.inference(
+                            req={"prompt": "hi"}, raw_request=FakeRawRequest()
+                        )
+                    )
+                    self.assertEqual(response.status_code, 500)
+                    direct = asyncio.run(
+                        self.frontend_server._infer_wrap(
+                            {request_id_field_name: 1}, FakeRawRequest(), None
+                        )
+                    )
+                    self.assertEqual(direct.status_code, 500)
+        finally:
+            self.frontend_server._infer_impl = original_impl
 
 
 if __name__ == "__main__":

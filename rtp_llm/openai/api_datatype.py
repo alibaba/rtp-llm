@@ -1,3 +1,4 @@
+import math
 import time
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Union
@@ -91,6 +92,64 @@ class AudioURL(BaseModel):
     url: str
 
 
+_INT64_MAX = 9223372036854775807
+
+
+def _validate_cache_control(cache_control: Any) -> None:
+    if not isinstance(cache_control, dict) or cache_control.get("type") != "ephemeral":
+        raise ValueError(
+            "If cache_control is provided, type is required and must be ephemeral"
+        )
+
+
+def _reject_bool_field(value: Any, *, type_error_message: str) -> Any:
+    if isinstance(value, bool):
+        raise ValueError(type_error_message)
+    return value
+
+
+def _validate_float_range(
+    value: Optional[float],
+    *,
+    min_value: Optional[float],
+    max_value: Optional[float],
+    min_inclusive: bool,
+    max_inclusive: bool,
+    error_message: str,
+) -> Optional[float]:
+    if value is None:
+        return None
+    if not math.isfinite(value):
+        raise ValueError(error_message)
+    if min_value is not None:
+        if min_inclusive and value < min_value:
+            raise ValueError(error_message)
+        if not min_inclusive and value <= min_value:
+            raise ValueError(error_message)
+    if max_value is not None:
+        if max_inclusive and value > max_value:
+            raise ValueError(error_message)
+        if not max_inclusive and value >= max_value:
+            raise ValueError(error_message)
+    return value
+
+
+def _validate_int_range(
+    value: Optional[int],
+    *,
+    range_error_message: str,
+    min_value: Optional[int] = None,
+    max_value: Optional[int] = None,
+) -> Optional[int]:
+    if value is None:
+        return None
+    if min_value is not None and value < min_value:
+        raise ValueError(range_error_message)
+    if max_value is not None and value > max_value:
+        raise ValueError(range_error_message)
+    return value
+
+
 class ContentPart(BaseModel):
     type: ContentPartTypeEnum
     text: Optional[str] = None
@@ -99,6 +158,13 @@ class ContentPart(BaseModel):
     video_url: Optional[ImageURL] = None
     audio_url: Optional[AudioURL] = None
     preprocess_config: Optional[MMPreprocessConfigPart] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_content_part_cache_control(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "cache_control" in data:
+            _validate_cache_control(data["cache_control"])
+        return data
 
 
 class ChatMessage(BaseModel):
@@ -110,6 +176,17 @@ class ChatMessage(BaseModel):
     tool_calls: Optional[List[ToolCall]] = None
     partial: Optional[bool] = False
     tool_call_id: Optional[str] = None
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def _validate_content_items(cls, value: Any) -> Any:
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict) and "cache_control" in item:
+                    _validate_cache_control(item["cache_control"])
+                elif hasattr(item, "cache_control"):
+                    _validate_cache_control(getattr(item, "cache_control"))
+        return value
 
 
 # NOTE: according to openai api definition, `function_call` is deprecated, and replaced by `tool_calls`.
@@ -183,7 +260,7 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: Optional[int] = None
     max_completion_tokens: Optional[int] = None
     thinking_budget: Optional[int] = None
-    stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
+    stop: Optional[Union[str, List[Union[str, int]]]] = Field(default_factory=list)
     stream: Optional[bool] = False
     user: Optional[str] = None
     seed: Optional[int] = None
@@ -194,10 +271,11 @@ class ChatCompletionRequest(BaseModel):
     prompt_logprobs: Optional[int] = None
     response_format: Optional[ResponseFormat] = None
     json_format: Optional[bool] = None
+    presence_penalty: Optional[float] = None
+    frequency_penalty: Optional[float] = None
+    repetition_penalty: Optional[float] = None
 
     # ---- These functions are not implemented yet.
-    # presence_penalty: Optional[float] = 0.0
-    # frequency_penalty: Optional[float] = 0.0
     # logit_bias: Optional[Dict[str, float]] = None
 
     # ---- These params are hacked for our framework, not standard.
@@ -215,6 +293,8 @@ class ChatCompletionRequest(BaseModel):
     master_info: Optional[Dict[str, Any]] = None
     chat_template_kwargs: Optional[Dict[str, Any]] = None
     enable_thinking: Optional[bool] = None
+    clear_thinking: Optional[bool] = None
+    partial: Optional[bool] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -236,6 +316,192 @@ class ChatCompletionRequest(BaseModel):
     @classmethod
     def _parse_response_format(cls, value):
         return parse_response_format(value)
+
+    @field_validator("temperature", mode="before")
+    @classmethod
+    def _reject_temperature_bool(cls, value: Any) -> Any:
+        return _reject_bool_field(
+            value, type_error_message="'temperature' must be Float"
+        )
+
+    @field_validator("temperature", mode="after")
+    @classmethod
+    def _validate_temperature(cls, value: Optional[float]) -> Optional[float]:
+        return _validate_float_range(
+            value,
+            min_value=0.0,
+            max_value=2.0,
+            min_inclusive=True,
+            max_inclusive=True,
+            error_message="Temperature should be in [0.0, 2.0]",
+        )
+
+    @field_validator("top_p", mode="before")
+    @classmethod
+    def _reject_top_p_bool(cls, value: Any) -> Any:
+        return _reject_bool_field(value, type_error_message="'top_p' must be Float")
+
+    @field_validator("top_p", mode="after")
+    @classmethod
+    def _validate_top_p(cls, value: Optional[float]) -> Optional[float]:
+        return _validate_float_range(
+            value,
+            min_value=0.0,
+            max_value=1.0,
+            min_inclusive=True,
+            max_inclusive=True,
+            error_message="Range of top_p should be [0.0, 1.0]",
+        )
+
+    @field_validator("presence_penalty", mode="before")
+    @classmethod
+    def _reject_presence_penalty_bool(cls, value: Any) -> Any:
+        return _reject_bool_field(
+            value, type_error_message="'presence_penalty' must be Float"
+        )
+
+    @field_validator("presence_penalty", mode="after")
+    @classmethod
+    def _validate_presence_penalty(cls, value: Optional[float]) -> Optional[float]:
+        return _validate_float_range(
+            value,
+            min_value=-2.0,
+            max_value=2.0,
+            min_inclusive=True,
+            max_inclusive=True,
+            error_message="Range of presence_penalty should be [-2.0, 2.0]",
+        )
+
+    @field_validator("frequency_penalty", mode="before")
+    @classmethod
+    def _reject_frequency_penalty_bool(cls, value: Any) -> Any:
+        return _reject_bool_field(
+            value, type_error_message="'frequency_penalty' must be Float"
+        )
+
+    @field_validator("frequency_penalty", mode="after")
+    @classmethod
+    def _validate_frequency_penalty(cls, value: Optional[float]) -> Optional[float]:
+        return _validate_float_range(
+            value,
+            min_value=-2.0,
+            max_value=2.0,
+            min_inclusive=True,
+            max_inclusive=True,
+            error_message="Range of frequency_penalty should be [-2.0, 2.0]",
+        )
+
+    @field_validator("repetition_penalty", mode="before")
+    @classmethod
+    def _reject_repetition_penalty_bool(cls, value: Any) -> Any:
+        return _reject_bool_field(
+            value, type_error_message="'repetition_penalty' must be Float"
+        )
+
+    @field_validator("repetition_penalty", mode="after")
+    @classmethod
+    def _validate_repetition_penalty(cls, value: Optional[float]) -> Optional[float]:
+        return _validate_float_range(
+            value,
+            min_value=0.0,
+            max_value=None,
+            min_inclusive=False,
+            max_inclusive=False,
+            error_message="Range of repetition_penalty should be (0.0, +inf)",
+        )
+
+    @field_validator("top_k", mode="before")
+    @classmethod
+    def _reject_top_k_bool(cls, value: Any) -> Any:
+        return _reject_bool_field(value, type_error_message="'top_k' must be Integer")
+
+    @field_validator("top_k", mode="after")
+    @classmethod
+    def _validate_top_k(cls, value: Optional[int]) -> Optional[int]:
+        return _validate_int_range(
+            value,
+            range_error_message="Range of top_k should be >= 0",
+            min_value=0,
+        )
+
+    @field_validator("seed", mode="before")
+    @classmethod
+    def _reject_seed_bool(cls, value: Any) -> Any:
+        return _reject_bool_field(
+            value, type_error_message=f"'seed' must be Integer in [0, {_INT64_MAX}]"
+        )
+
+    @field_validator("seed", mode="after")
+    @classmethod
+    def _validate_seed(cls, value: Optional[int]) -> Optional[int]:
+        return _validate_int_range(
+            value,
+            range_error_message=f"'seed' must be Integer in [0, {_INT64_MAX}]",
+            min_value=0,
+            max_value=_INT64_MAX,
+        )
+
+    @field_validator("max_tokens", mode="before")
+    @classmethod
+    def _reject_max_tokens_bool(cls, value: Any) -> Any:
+        return _reject_bool_field(
+            value, type_error_message="'max_tokens' must be Integer"
+        )
+
+    @field_validator("max_tokens", mode="after")
+    @classmethod
+    def _validate_max_tokens(cls, value: Optional[int]) -> Optional[int]:
+        return _validate_int_range(
+            value,
+            range_error_message="Range of max_tokens should be [1, +inf)",
+            min_value=1,
+        )
+
+    @field_validator("max_completion_tokens", mode="before")
+    @classmethod
+    def _reject_max_completion_tokens_bool(cls, value: Any) -> Any:
+        return _reject_bool_field(
+            value, type_error_message="'max_completion_tokens' must be Integer"
+        )
+
+    @field_validator("max_completion_tokens", mode="after")
+    @classmethod
+    def _validate_max_completion_tokens(cls, value: Optional[int]) -> Optional[int]:
+        return _validate_int_range(
+            value,
+            range_error_message="Range of max_completion_tokens should be [1, 131072]",
+            min_value=1,
+        )
+
+    @field_validator("n", mode="before")
+    @classmethod
+    def _reject_n_bool(cls, value: Any) -> Any:
+        return _reject_bool_field(value, type_error_message="'n' must be Integer")
+
+    @field_validator("n", mode="after")
+    @classmethod
+    def _validate_n(cls, value: Optional[int]) -> Optional[int]:
+        return _validate_int_range(
+            value,
+            range_error_message="Range of n should be >= 1",
+            min_value=1,
+        )
+
+    @field_validator("stop", mode="before")
+    @classmethod
+    def _validate_stop(cls, value: Any) -> Any:
+        if value is None or isinstance(value, str):
+            return value
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("stop must be a string or list of strings/integers")
+        for item in value:
+            if isinstance(item, str):
+                continue
+            if isinstance(item, bool) or not isinstance(item, int):
+                raise ValueError("stop items must be strings or integers")
+            if item < 0:
+                raise ValueError("stop token id must be >= 0")
+        return value
 
     @model_validator(mode="after")
     def _check_tool_choice(self) -> "ChatCompletionRequest":

@@ -3,7 +3,7 @@ import itertools
 import json
 import logging
 from functools import partial
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple, Union
 
 from fastapi import Request
 
@@ -243,6 +243,32 @@ class OpenaiEndpoint(object):
                     stop_word_ids.append(list(token_ids))
         return stop_word_ids
 
+    @staticmethod
+    def _split_request_stop(
+        stop: Optional[Union[str, List[Union[str, int]]]],
+    ) -> Tuple[List[str], List[List[int]]]:
+        if stop is None:
+            return [], []
+        items = [stop] if isinstance(stop, str) else list(stop)
+        stop_words: List[str] = []
+        stop_token_ids: List[List[int]] = []
+        for item in items:
+            if isinstance(item, str):
+                stop_words.append(item)
+            elif isinstance(item, int) and not isinstance(item, bool):
+                if item < 0:
+                    raise FtRuntimeException(
+                        ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                        f"stop token id must be >= 0, got {item}",
+                    )
+                stop_token_ids.append([item])
+            else:
+                raise FtRuntimeException(
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                    f"stop items must be strings or integers, got {type(item).__name__}",
+                )
+        return stop_words, stop_token_ids
+
     def _extract_generation_config(
         self,
         request: ChatCompletionRequest,
@@ -277,29 +303,45 @@ class OpenaiEndpoint(object):
         if request.top_p != None:
             config.top_p = request.top_p
         if request.top_k != None:
-            config.top_k = request.top_k
+            config.top_k = min(request.top_k, INT32_MAX)
+        if request.presence_penalty != None:
+            config.presence_penalty = request.presence_penalty
+        if request.frequency_penalty != None:
+            config.frequency_penalty = request.frequency_penalty
+        if request.repetition_penalty != None:
+            config.repetition_penalty = request.repetition_penalty
         if request.n != None:
             config.num_return_sequences = request.n
-        request_stop_words_list = request.stop if request.stop != None else []
-        if isinstance(request_stop_words_list, str):
-            request_stop_words_list = [request_stop_words_list]
-        else:
-            request_stop_words_list = list(request_stop_words_list)
+        request_stop_words_list, request_stop_token_ids = self._split_request_stop(
+            request.stop
+        )
+        decoded_stop_token_strs: List[str] = []
+        if hasattr(self.tokenizer, "decode"):
+            for stop_ids in request_stop_token_ids:
+                decoded = self.tokenizer.decode(stop_ids)
+                if decoded:
+                    decoded_stop_token_strs.append(decoded)
         if getattr(renderer, "parses_user_stop_sequences", False):
             # Recipe applies user stops after parsing reasoning/tool framing.
             # Sending them to the engine would truncate protocol state early.
             request_stop_words_list = []
+            decoded_stop_token_strs = []
             # Even non-streaming HTTP responses need incremental backend
             # output so the recipe parser can stop generation promptly.
             config.is_streaming = True
         request_stop_words_list.extend(config.stop_words_str)
         config.stop_words_str = list(
-            set(self.stop_words_str_list + request_stop_words_list)
+            set(
+                self.stop_words_str_list
+                + request_stop_words_list
+                + decoded_stop_token_strs
+            )
         )
         config.stop_words_list = self._dedup_stop_words_list(
             self.stop_words_id_list
             + self.chat_renderer.tokenize_words(self.stop_words_str_list)
             + self._tokenize_request_stop_words(request_stop_words_list)
+            + request_stop_token_ids
             + config.stop_words_list
         )
         if request.chat_id != None:
@@ -361,12 +403,8 @@ class OpenaiEndpoint(object):
         if config.thinking_mode == ThinkingMode.DISABLED:
             config.max_thinking_tokens = 0
         max_completion_tokens = _positive_int_or_none(request.max_completion_tokens)
-        max_tokens_cap = _positive_int_or_none(request.max_tokens)
         if max_completion_tokens is not None:
-            backend_max_new_tokens = max_completion_tokens
-            if max_tokens_cap is not None:
-                backend_max_new_tokens = min(backend_max_new_tokens, max_tokens_cap)
-            config.max_new_tokens = backend_max_new_tokens
+            config.max_new_tokens = max_completion_tokens
         elif request.max_tokens != None:
             config.max_new_tokens = request.max_tokens
         self._apply_renderer_chat_constraints(renderer, request, config)
@@ -667,6 +705,14 @@ class OpenaiEndpoint(object):
         renderer = (
             self.template_renderer if chat_request.user_template else self.chat_renderer
         )
+        is_partial = bool(chat_request.partial) or (
+            len(chat_request.messages) > 0 and bool(chat_request.messages[-1].partial)
+        )
+        if is_partial and renderer.in_think_mode(chat_request):
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
+                "Partial mode is not supported when enable_thinking is true",
+            )
         prepopulate_str = ""
         if len(chat_request.messages) > 0 and chat_request.messages[-1].partial:
             prepopulate_str = str(chat_request.messages[-1].content)

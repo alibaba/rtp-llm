@@ -316,6 +316,7 @@ class OutputDelta:
     multimodal_lengths: Optional[Dict[int, int]] = None
     extra_outputs: Optional[ChatCompletionExtraOutputs] = None
     output_ids: List[int] = field(default_factory=list)
+    think_tokens: Optional[int] = None
 
 
 @dataclass
@@ -1251,6 +1252,20 @@ class CustomChatRenderer:
             ]
         )
 
+    def _count_tokens(self, text: str) -> int:
+        if not text:
+            return 0
+        encode = getattr(self.tokenizer, "encode", None)
+        if callable(encode):
+            try:
+                return len(encode(text, add_special_tokens=False))
+            except TypeError:
+                return len(encode(text))
+        tokenize = getattr(self.tokenizer, "tokenize", None)
+        if callable(tokenize):
+            return len(tokenize(text))
+        return 0
+
     def _split_reasoning_text_and_content(
         self, item: OutputDelta, think_status: ThinkStatus
     ):
@@ -1291,6 +1306,8 @@ class CustomChatRenderer:
                 think_status.decision_token_ids = []
 
             if output_len == 0:
+                if think_status.enable_think_mode and item.think_tokens is not None:
+                    think_status.think_tokens = item.think_tokens
                 return DeltaMessage(content="")
             update_think_tokens = think_status.in_think_mode
             while processing_index < output_len:
@@ -1327,9 +1344,21 @@ class CustomChatRenderer:
                     think_status.think_buffer = ""
 
             if think_status.enable_think_mode and update_think_tokens:
-                if not think_status.is_streaming:
-                    think_status.think_tokens = item.output_length - len(
-                        self.tokenizer.tokenize(content or "")
+                if item.think_tokens is not None:
+                    think_status.think_tokens = item.think_tokens
+                elif not think_status.in_think_mode:
+                    end_and_content_tokens = self._count_tokens(
+                        self.think_end_tag + (content or "")
+                    )
+                    think_status.think_tokens = max(
+                        think_status.think_tokens,
+                        item.output_length - end_and_content_tokens,
+                    )
+                elif think_status.is_streaming:
+                    pending_tokens = self._count_tokens(think_status.think_buffer)
+                    think_status.think_tokens = max(
+                        think_status.think_tokens,
+                        item.output_length - pending_tokens,
                     )
                 else:
                     think_status.think_tokens = item.output_length
@@ -1339,6 +1368,7 @@ class CustomChatRenderer:
 
         elif isinstance(item.output_str, DeltaMessage):
             message = item.output_str
+            ran_adaptive_split = False
             if (
                 think_status.thinking_mode == ThinkingMode.ADAPTIVE
                 and message.reasoning_content is None
@@ -1348,6 +1378,7 @@ class CustomChatRenderer:
                 # A tool detector may wrap otherwise unparsed text in a
                 # DeltaMessage. Run that text through the same adaptive state
                 # machine while preserving any parsed tool calls.
+                ran_adaptive_split = True
                 item.output_str = message.content
                 try:
                     split_message = self._split_reasoning_text_and_content(
@@ -1374,15 +1405,18 @@ class CustomChatRenderer:
                 think_status.decision_made = True
                 think_status.in_think_mode = False
 
-            if not think_status.is_streaming:
-                think_status.think_tokens = len(
-                    self.tokenizer.tokenize(message.reasoning_content or "")
-                )
-            else:
-                has_content_or_tool_calls = message.content or message.tool_calls
-                has_reasoning = message.reasoning_content
-                if has_reasoning and not has_content_or_tool_calls:
-                    think_status.think_tokens = item.output_length
+            if not ran_adaptive_split:
+                if not think_status.is_streaming:
+                    think_status.think_tokens = self._count_tokens(
+                        message.reasoning_content or ""
+                    )
+                elif item.think_tokens is not None:
+                    think_status.think_tokens = item.think_tokens
+                else:
+                    has_content_or_tool_calls = message.content or message.tool_calls
+                    has_reasoning = message.reasoning_content
+                    if has_reasoning and not has_content_or_tool_calls:
+                        think_status.think_tokens = item.output_length
             return message
 
         else:

@@ -6,8 +6,11 @@ from pathlib import Path
 from unittest import IsolatedAsyncioTestCase, TestCase, main, skipUnless
 from unittest.mock import AsyncMock, Mock
 
-from rtp_llm.config.exceptions import FtRuntimeException
+import torch
+
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode
+from rtp_llm.config.py_config_modules import GenerateEnvConfig
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionResponseStreamChoice,
@@ -19,7 +22,11 @@ from rtp_llm.openai.api_datatype import (
     RoleEnum,
     ToolCall,
 )
-from rtp_llm.openai.renderers.custom_renderer import StreamResponseObject
+from rtp_llm.openai.renderers.custom_renderer import (
+    CustomChatRenderer,
+    RendererParams,
+    StreamResponseObject,
+)
 from rtp_llm.openai.renderers.deepseekv4_renderer import DeepseekV4Renderer
 from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
     ReasoningToolStreamStatus,
@@ -32,7 +39,7 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.deepseekv4_detector i
     DeepSeekV4Detector,
 )
 from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import ReasoningParser
-from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput
+from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
 
 DSV4_ENCODING_PATH = Path(
     os.environ.get(
@@ -390,18 +397,63 @@ class DeepseekV4RendererTest(TestCase):
         self.assertEqual(rendered.rendered_prompt, expected)
 
     def test_invalid_reasoning_effort_uses_dashscope_enum_message(self):
-        request = ChatCompletionRequest(
-            messages=[{"role": "user", "content": "Hello"}],
-            reasoning_effort="minimum",
-            chat_template_kwargs={"thinking_mode": "enabled"},
-        )
+        for effort in ("minimum", "turbo"):
+            with self.subTest(effort=effort):
+                request = ChatCompletionRequest(
+                    messages=[{"role": "user", "content": "Hello"}],
+                    reasoning_effort=effort,
+                    chat_template_kwargs={"thinking_mode": "enabled"},
+                )
 
-        with self.assertRaisesRegex(
-            ValueError,
-            "'reasoning_effort' must be one of: "
-            "'low', 'medium', 'high', 'xhigh', 'max'",
-        ):
-            self.renderer.render_chat(request)
+                with self.assertRaises(FtRuntimeException) as ctx:
+                    self.renderer.render_chat(request)
+                self.assertEqual(
+                    ctx.exception.exception_type, ExceptionType.INVALID_PARAMS
+                )
+                self.assertIn(
+                    "'reasoning_effort' must be one of: "
+                    "'low', 'medium', 'high', 'xhigh', 'max'",
+                    str(ctx.exception),
+                )
+
+    def test_clear_thinking_controls_drop_thinking_in_real_encoding(self):
+        messages = [
+            {"role": "user", "content": "First question"},
+            {
+                "role": "assistant",
+                "content": "First answer",
+                "reasoning_content": "HISTORICAL_REASONING",
+            },
+            {"role": "user", "content": "Second question"},
+        ]
+
+        def _make_req(clear_thinking):
+            if "clear_thinking" in ChatCompletionRequest.model_fields:
+                return ChatCompletionRequest(
+                    messages=messages,
+                    enable_thinking=True,
+                    clear_thinking=clear_thinking,
+                )
+            req = ChatCompletionRequest(messages=messages, enable_thinking=True)
+            object.__setattr__(req, "clear_thinking", clear_thinking)
+            return req
+
+        rendered_default = self.renderer.render_chat(_make_req(None))
+        rendered_true = self.renderer.render_chat(_make_req(True))
+        rendered_false = self.renderer.render_chat(_make_req(False))
+
+        self.assertNotIn("HISTORICAL_REASONING", rendered_default.rendered_prompt)
+        self.assertNotIn("HISTORICAL_REASONING", rendered_true.rendered_prompt)
+        self.assertIn("HISTORICAL_REASONING", rendered_false.rendered_prompt)
+        self.assertEqual(
+            rendered_false.rendered_prompt,
+            _rtp_expected_prompt(
+                self.encoding,
+                messages,
+                thinking_mode="thinking",
+                drop_thinking=False,
+            ),
+        )
 
     def test_extra_config_still_overrides_request_chat_template_kwargs(self):
         messages = [{"role": "user", "content": "Hello"}]
@@ -1300,6 +1352,504 @@ class DeepSeekV4DetectorStreamingTest(TestCase):
             mock.patch.object(renderer, "in_think_mode", return_value=False),
         ):
             self.assertIsNone(renderer._create_reasoning_parser(request))
+
+
+class _WordPieceMockTokenizer:
+    """Tokenizer mapping integer IDs to multi-char tokens, including </think>."""
+
+    eos_token_id = 0
+
+    def __init__(self, special_tokens=None):
+        self._id_to_tok = {0: "<｜end▁of▁sentence｜>"}
+        self._tok_to_id = {"<｜end▁of▁sentence｜>": 0}
+        self._next_id = 100
+        for tok in special_tokens or []:
+            self._register(tok)
+
+    def _register(self, tok: str) -> int:
+        if tok not in self._tok_to_id:
+            tid = self._next_id
+            self._next_id += 1
+            self._tok_to_id[tok] = tid
+            self._id_to_tok[tid] = tok
+        return self._tok_to_id[tok]
+
+    def encode(self, text: str, **kwargs):
+        if not text:
+            return []
+        ids = []
+        i = 0
+        # Longest-first match against registered multi-char tokens, else per char.
+        registered = sorted(self._tok_to_id.keys(), key=len, reverse=True)
+        while i < len(text):
+            matched = None
+            for tok in registered:
+                if tok and text.startswith(tok, i):
+                    matched = tok
+                    break
+            if matched is not None:
+                ids.append(self._tok_to_id[matched])
+                i += len(matched)
+            else:
+                ids.append(self._register(text[i]))
+                i += 1
+        return ids
+
+    def decode(self, token_ids, **kwargs):
+        if isinstance(token_ids, int):
+            token_ids = [token_ids]
+        return "".join(self._id_to_tok[tid] for tid in token_ids)
+
+    def tokenize(self, text: str, **kwargs):
+        return [self._id_to_tok[tid] for tid in self.encode(text)]
+
+
+async def _token_stream(chunks_of_ids, input_len=10):
+    total = 0
+    for idx, step_ids in enumerate(chunks_of_ids):
+        total += len(step_ids)
+        aux = AuxInfo()
+        aux.input_len = input_len
+        aux.output_len = total
+        aux.reuse_len = 0
+        finished = torch.tensor([idx == len(chunks_of_ids) - 1], dtype=torch.bool)
+        yield GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([step_ids], dtype=torch.int),
+                    finished=finished,
+                    aux_info=aux,
+                )
+            ]
+        )
+
+
+def _make_full_dsv4_renderer(
+    encoding_module=None, tokenizer=None, think_end_tag="</think>"
+):
+    env_config = GenerateEnvConfig()
+    env_config.think_mode = 0
+    env_config.think_start_tag = "<think>"
+    env_config.think_end_tag = think_end_tag
+    renderer = DeepseekV4Renderer.__new__(DeepseekV4Renderer)
+    renderer.encoding_module = encoding_module
+    renderer.tokenizer = tokenizer or FakeTokenizer()
+    renderer.think_mode = 0
+    renderer.default_thinking_mode = ThinkingMode.DISABLED
+    renderer.generate_env_config = env_config
+    renderer.think_start_tag = "<think>"
+    renderer.think_end_tag = think_end_tag
+    renderer.model_type = "deepseek_v4"
+    renderer.max_seq_len = 4096
+    renderer.eos_token_id = getattr(renderer.tokenizer, "eos_token_id", 0)
+    renderer.stop_words_id_list = []
+    renderer.stop_words_str_list = []
+    renderer.extra_stop_words = []
+    renderer.extra_stop_word_ids_list = []
+    renderer.render_config = None
+    renderer.ckpt_path = ""
+    return renderer
+
+
+class DeepseekV4PromptControlTest(TestCase):
+    def test_invalid_reasoning_effort_turbo_raises_ft_invalid_params(self):
+        class CaptureEncoding:
+            def encode_messages(self, messages, **kwargs):
+                return "ok"
+
+        renderer = _make_renderer(CaptureEncoding())
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "Hello"}],
+            reasoning_effort="turbo",
+            enable_thinking=True,
+        )
+        with self.assertRaises(FtRuntimeException) as ctx:
+            renderer.render_chat(request)
+        self.assertEqual(ctx.exception.exception_type, ExceptionType.INVALID_PARAMS)
+        self.assertIn(
+            "'reasoning_effort' must be one of: "
+            "'low', 'medium', 'high', 'xhigh', 'max'",
+            str(ctx.exception),
+        )
+
+    def test_clear_thinking_wires_drop_thinking_and_respects_overrides(self):
+        captured_configs = []
+
+        class CaptureEncoding:
+            def encode_messages(self, messages, **kwargs):
+                captured_configs.append(kwargs)
+                return "prompt"
+
+        renderer = _make_renderer(CaptureEncoding())
+        messages = [{"role": "user", "content": "Hello"}]
+
+        def _req(clear_thinking=None, **extra_kw):
+            if "clear_thinking" in ChatCompletionRequest.model_fields:
+                return ChatCompletionRequest(
+                    messages=messages,
+                    enable_thinking=True,
+                    clear_thinking=clear_thinking,
+                    **extra_kw,
+                )
+            req = ChatCompletionRequest(
+                messages=messages, enable_thinking=True, **extra_kw
+            )
+            if clear_thinking is not None:
+                object.__setattr__(req, "clear_thinking", clear_thinking)
+            return req
+
+        renderer.render_chat(_req(None))
+        renderer.render_chat(_req(True))
+        renderer.render_chat(_req(False))
+        renderer.render_chat(_req(False, chat_template_kwargs={"drop_thinking": True}))
+        renderer.render_chat(
+            _req(
+                False,
+                chat_template_kwargs={"drop_thinking": True},
+                extra_configs=GenerateConfig(
+                    chat_template_kwargs={"drop_thinking": False}
+                ),
+            )
+        )
+        renderer.render_chat(_req(None, chat_template_kwargs={"clear_thinking": False}))
+
+        self.assertEqual(
+            [cfg["drop_thinking"] for cfg in captured_configs],
+            [True, True, False, True, False, False],
+        )
+
+
+class DeepseekV4ParallelToolCallsTest(IsolatedAsyncioTestCase):
+    @staticmethod
+    def _multi_dsml_text():
+        return (
+            "Checking.\n"
+            "<｜DSML｜tool_calls>\n"
+            '<｜DSML｜invoke name="get_weather">\n'
+            '<｜DSML｜parameter name="city" string="true">杭州</｜DSML｜parameter>\n'
+            "</｜DSML｜invoke>\n"
+            '<｜DSML｜invoke name="search">\n'
+            '<｜DSML｜parameter name="query" string="true">weather</｜DSML｜parameter>\n'
+            "</｜DSML｜invoke>\n"
+            '<｜DSML｜invoke name="get_weather">\n'
+            '<｜DSML｜parameter name="city" string="true">北京</｜DSML｜parameter>\n'
+            "</｜DSML｜invoke>\n"
+            "</｜DSML｜tool_calls>"
+        )
+
+    def test_auto_tool_choice_with_parallel_false_does_not_conflict_with_thinking(self):
+        renderer = _make_full_dsv4_renderer()
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "Weather?"}],
+            tools=_rtp_two_tools(),
+            tool_choice="auto",
+            parallel_tool_calls=False,
+            enable_thinking=True,
+        )
+        config = GenerateConfig()
+        renderer.apply_chat_completion_constraints(request, config)
+        self.assertIsNone(config.structural_tag)
+
+    async def test_non_streaming_official_parser_enforces_parallel_tool_calls_false(
+        self,
+    ):
+        class OfficialMultiToolEncoding:
+            def parse_message_from_completion_text(self, text, thinking_mode):
+                return {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "Let me check.",
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": '{"city": "杭州"}',
+                            },
+                        },
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "search",
+                                "arguments": '{"query": "weather"}',
+                            },
+                        },
+                    ],
+                }
+
+        renderer = _make_full_dsv4_renderer(encoding_module=OfficialMultiToolEncoding())
+        renderer._generate_log_probs = AsyncMock(return_value=None)
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "Weather?"}],
+            tools=_rtp_two_tools(),
+            tool_choice="auto",
+            parallel_tool_calls=False,
+            enable_thinking=True,
+        )
+        status = ReasoningToolStreamStatus(
+            request,
+            renderer._create_detector(request),
+            renderer._create_reasoning_parser(request),
+        )
+        status.delta_output_string = "dummy"
+        aux = AuxInfo()
+        aux.input_len = 10
+        aux.output_len = 20
+        output = Mock(spec=GenerateOutput)
+        output.aux_info = aux
+
+        delta = await renderer._process_reasoning_and_tool_calls(
+            status, output, is_streaming=False
+        )
+        self.assertIsNotNone(delta)
+        self.assertEqual(len(delta.output_str.tool_calls), 1)
+        self.assertEqual(delta.output_str.tool_calls[0].index, 0)
+        self.assertEqual(delta.output_str.tool_calls[0].function.name, "get_weather")
+        self.assertEqual(
+            json.loads(delta.output_str.tool_calls[0].function.arguments),
+            {"city": "杭州"},
+        )
+        self.assertTrue(status.generating_tool_call)
+
+    async def test_streaming_and_non_streaming_enforce_parallel_tool_calls_false(self):
+        dsml_text = self._multi_dsml_text()
+        for tool_choice in ("auto", None):
+            for is_streaming in (True, False):
+                for parallel_flag in (False, True, None):
+                    with self.subTest(
+                        tool_choice=tool_choice,
+                        is_streaming=is_streaming,
+                        parallel_tool_calls=parallel_flag,
+                    ):
+                        tokenizer = FakeTokenizer()
+                        renderer = _make_full_dsv4_renderer(tokenizer=tokenizer)
+                        request = ChatCompletionRequest(
+                            messages=[{"role": "user", "content": "Weather?"}],
+                            tools=_rtp_two_tools(),
+                            tool_choice=tool_choice,
+                            parallel_tool_calls=parallel_flag,
+                            stream=is_streaming,
+                        )
+                        all_ids = tokenizer.encode(dsml_text)
+                        if is_streaming:
+                            # Split chunks directly across invoke boundaries too.
+                            step_size = 7
+                            chunks = [
+                                all_ids[i : i + step_size]
+                                for i in range(0, len(all_ids), step_size)
+                            ]
+                        else:
+                            chunks = [all_ids]
+
+                        gen_cfg = GenerateConfig(
+                            is_streaming=is_streaming,
+                            thinking_mode=ThinkingMode.DISABLED,
+                        )
+                        responses = [
+                            resp
+                            async for resp in renderer.render_response_stream(
+                                _token_stream(chunks), request, gen_cfg
+                            )
+                        ]
+
+                        content_parts = []
+                        tool_names = {}
+                        tool_args = {}
+                        finish_reasons = []
+                        for resp in responses:
+                            choice = resp.choices[0]
+                            if choice.finish_reason is not None:
+                                finish_reasons.append(choice.finish_reason)
+                            if choice.delta.content:
+                                content_parts.append(choice.delta.content)
+                            for tc in choice.delta.tool_calls or []:
+                                self.assertIsNotNone(tc.index)
+                                if parallel_flag is False:
+                                    self.assertEqual(tc.index, 0)
+                                if tc.function.name:
+                                    tool_names[tc.index] = tc.function.name
+                                if tc.function.arguments:
+                                    tool_args[tc.index] = (
+                                        tool_args.get(tc.index, "")
+                                        + tc.function.arguments
+                                    )
+
+                        combined_content = "".join(content_parts)
+                        self.assertEqual(combined_content, "Checking.\n")
+                        self.assertNotIn("<｜DSML｜", combined_content)
+                        self.assertEqual(finish_reasons[-1], FinisheReason.tool_calls)
+                        if parallel_flag is False:
+                            self.assertEqual(tool_names, {0: "get_weather"})
+                            self.assertEqual(list(tool_args.keys()), [0])
+                            self.assertEqual(json.loads(tool_args[0]), {"city": "杭州"})
+                        else:
+                            self.assertEqual(
+                                tool_names,
+                                {0: "get_weather", 1: "search", 2: "get_weather"},
+                            )
+                            self.assertEqual(json.loads(tool_args[0]), {"city": "杭州"})
+                            self.assertEqual(
+                                json.loads(tool_args[1]), {"query": "weather"}
+                            )
+                            self.assertEqual(json.loads(tool_args[2]), {"city": "北京"})
+
+
+class ThinkTokensAccuracyTest(IsolatedAsyncioTestCase):
+    @staticmethod
+    def _make_custom_renderer(tokenizer, think_end_tag="</think>"):
+        env_config = GenerateEnvConfig()
+        env_config.think_mode = 1
+        env_config.think_start_tag = "<think>"
+        env_config.think_end_tag = think_end_tag
+        return CustomChatRenderer(
+            tokenizer=tokenizer,
+            renderer_params=RendererParams(
+                model_type="qwen",
+                max_seq_len=4096,
+                eos_token_id=tokenizer.eos_token_id,
+                stop_word_ids_list=[],
+            ),
+            generate_env_config=env_config,
+        )
+
+    async def test_custom_renderer_streaming_think_tokens_excludes_end_tag_and_content(
+        self,
+    ):
+        for think_end_tag, end_pieces in (
+            ("</think>", ["</think>"]),
+            ("</think>\n\n", ["</think>", "\n\n"]),
+        ):
+            with self.subTest(think_end_tag=think_end_tag):
+                tokenizer = _WordPieceMockTokenizer(
+                    special_tokens=["</think>", "\n\n", "answer"]
+                )
+                renderer = self._make_custom_renderer(
+                    tokenizer, think_end_tag=think_end_tag
+                )
+                think_tokens = [f"t{i:02d}" for i in range(40)]
+                for tok in think_tokens:
+                    tokenizer._register(tok)
+                think_ids = [tokenizer.encode(t)[0] for t in think_tokens]
+                end_ids = [tokenizer.encode(p)[0] for p in end_pieces]
+                content_ids = tokenizer.encode("answer")
+
+                # Single-token streaming: 40 think tokens, then end tag, then content
+                step_chunks = [[tid] for tid in think_ids + end_ids + content_ids]
+                request = ChatCompletionRequest(
+                    messages=[{"role": "user", "content": "hi"}],
+                    enable_thinking=True,
+                    stream=True,
+                )
+                cfg = GenerateConfig(
+                    is_streaming=True, thinking_mode=ThinkingMode.ENABLED
+                )
+                responses = [
+                    r
+                    async for r in renderer.render_response_stream(
+                        _token_stream(step_chunks), request, cfg
+                    )
+                ]
+                final = responses[-1]
+                self.assertEqual(
+                    final.usage.completion_tokens_details.reasoning_tokens, 40
+                )
+                self.assertEqual(
+                    final.usage.completion_tokens, 40 + len(end_ids) + len(content_ids)
+                )
+
+                # MTP batch crossing </think> + post-think content in one step
+                mtp_chunks = [[tid] for tid in think_ids[:-1]] + [
+                    [think_ids[-1]] + end_ids + content_ids
+                ]
+                mtp_responses = [
+                    r
+                    async for r in renderer.render_response_stream(
+                        _token_stream(mtp_chunks), request, cfg
+                    )
+                ]
+                self.assertEqual(
+                    mtp_responses[-1].usage.completion_tokens_details.reasoning_tokens,
+                    40,
+                )
+
+                # Non-streaming path
+                non_stream_cfg = GenerateConfig(
+                    is_streaming=False, thinking_mode=ThinkingMode.ENABLED
+                )
+                non_stream_resps = [
+                    r
+                    async for r in renderer.render_response_stream(
+                        _token_stream([think_ids + end_ids + content_ids]),
+                        request,
+                        non_stream_cfg,
+                    )
+                ]
+                self.assertEqual(
+                    non_stream_resps[
+                        -1
+                    ].usage.completion_tokens_details.reasoning_tokens,
+                    40,
+                )
+
+    async def test_deepseekv4_streaming_and_mtp_think_tokens_excludes_end_tag(self):
+        tokenizer = _WordPieceMockTokenizer(special_tokens=["</think>", "answer"])
+        renderer = _make_full_dsv4_renderer(
+            tokenizer=tokenizer, think_end_tag="</think>"
+        )
+        think_tokens = [f"r{i:02d}" for i in range(40)]
+        for tok in think_tokens:
+            tokenizer._register(tok)
+        think_ids = [tokenizer.encode(t)[0] for t in think_tokens]
+        end_id = tokenizer.encode("</think>")[0]
+        content_id = tokenizer.encode("answer")[0]
+
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            enable_thinking=True,
+            stream=True,
+        )
+        cfg = GenerateConfig(is_streaming=True, thinking_mode=ThinkingMode.ENABLED)
+
+        for label, chunks in (
+            ("single_token", [[tid] for tid in think_ids + [end_id, content_id]]),
+            (
+                "mtp_last_think_with_end",
+                [[tid] for tid in think_ids[:-1]]
+                + [[think_ids[-1], end_id], [content_id]],
+            ),
+            (
+                "mtp_cross_end_and_content",
+                [[tid] for tid in think_ids[:-1]]
+                + [[think_ids[-1], end_id, content_id]],
+            ),
+            (
+                "non_streaming",
+                [think_ids + [end_id, content_id]],
+            ),
+        ):
+            with self.subTest(label=label):
+                is_stream = label != "non_streaming"
+                run_cfg = GenerateConfig(
+                    is_streaming=is_stream, thinking_mode=ThinkingMode.ENABLED
+                )
+                responses = [
+                    r
+                    async for r in renderer.render_response_stream(
+                        _token_stream(chunks), request, run_cfg
+                    )
+                ]
+                final = responses[-1]
+                self.assertEqual(
+                    final.usage.completion_tokens_details.reasoning_tokens, 40
+                )
+                reasoning_out = "".join(
+                    r.choices[0].delta.reasoning_content or "" for r in responses
+                )
+                content_out = "".join(
+                    r.choices[0].delta.content or "" for r in responses
+                )
+                self.assertEqual(reasoning_out, "".join(think_tokens))
+                self.assertEqual(content_out, "answer")
 
 
 if __name__ == "__main__":
