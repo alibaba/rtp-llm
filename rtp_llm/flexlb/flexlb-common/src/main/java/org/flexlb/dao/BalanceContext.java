@@ -143,6 +143,9 @@ public class BalanceContext {
     /** Victims preempted to place this request; 0 for normal placement. */
     private int victimCount;
 
+    /** Number of times this request was requeued after Decode reservation preemption. */
+    private int decodeRequeueCount;
+
     // ===================== Method ===================//
 
     public BalanceContext() {
@@ -200,6 +203,10 @@ public class BalanceContext {
 
     public void finishRequestTiming() {
         this.totalTimeUs = (System.nanoTime() - serviceStartNanos) / 1_000;
+    }
+
+    public void incrementDecodeRequeueCount() {
+        decodeRequeueCount++;
     }
 
     public void recordCacheQuery(String source, long queryTimeUs) {

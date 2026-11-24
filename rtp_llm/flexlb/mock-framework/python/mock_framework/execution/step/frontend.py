@@ -163,6 +163,32 @@ def count_journal_events(journal: Path, args: PlaybackRequestsArgs) -> int:
     return matched
 
 
+def latest_terminal_outcomes(components: Path) -> dict[str, set[str]]:
+    """Collect terminal outcomes keyed by request_id across every Frontend's latest playback."""
+    outcomes: dict[str, set[str]] = {}
+    found = False
+    for frontend_dir in sorted(components.glob("frontend-*")):
+        journal = _latest_journal(frontend_dir)
+        if journal is None:
+            continue
+        found = True
+        with journal.open("r", encoding="utf-8") as stream:
+            for line in stream:
+                line = line.strip()
+                if not line:
+                    continue
+                event = json.loads(line)
+                if event.get("kind") != "TERMINAL":
+                    continue
+                request_id = event.get("request_id")
+                outcome = event.get("outcome")
+                if request_id is not None and outcome is not None:
+                    outcomes.setdefault(str(request_id), set()).add(str(outcome))
+    if not found:
+        raise ExecutionError("No recorded Frontend playback to inspect")
+    return outcomes
+
+
 @register_step("frontend/query/playback_requests", effect="read", unit="events")
 async def frontend_playback_requests(
     ctx: StepContext, args: PlaybackRequestsArgs

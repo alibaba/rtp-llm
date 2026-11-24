@@ -465,4 +465,22 @@ class PvLogDataTest {
         assertEquals(
                 "BEST_ONLY", new PvLogData(context).getSelectionReasons().get(RoleType.PREFILL));
     }
+
+    @Test
+    void includesDecodeRequeueCountOnlyWhenPositive() throws Exception {
+        BalanceContext context = new BalanceContext();
+        Request request = new Request();
+        request.setRequestId("requeued-victim");
+        context.setRequest(request);
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+
+        var normal = mapper.readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)));
+        assertFalse(normal.has("decodeRequeueCount"));
+
+        context.incrementDecodeRequeueCount();
+        context.incrementDecodeRequeueCount();
+        var requeued = mapper.readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)));
+        assertTrue(requeued.has("decodeRequeueCount"));
+        assertEquals(2, requeued.path("decodeRequeueCount").asInt());
+    }
 }

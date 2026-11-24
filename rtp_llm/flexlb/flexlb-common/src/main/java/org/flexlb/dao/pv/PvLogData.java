@@ -53,6 +53,9 @@ public class PvLogData {
     private String requestState;
     private String realMasterHost;
 
+    @JsonInclude(JsonInclude.Include.NON_DEFAULT)
+    private int decodeRequeueCount;
+
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
     private Map<String, Object> schedulingDiagnostics;
 
@@ -113,6 +116,7 @@ public class PvLogData {
             this.requestTimeMs = request.getRequestTimeMs();
         }
         this.requestBodyBytes = ctx.getRequestBodyBytes();
+        this.decodeRequeueCount = ctx.getDecodeRequeueCount();
         this.decisionGroup = ctx.getDecisionGroup();
         this.routingDecisions =
                 telemetry.routingDecisions().entrySet().stream()

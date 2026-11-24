@@ -98,7 +98,7 @@ phases:
 
 支持 `mode` 的指标动作默认汇总整个区间。比例类指标分别汇总分子和分母，再相除。需要每个采样点都达标时，使用 `mode: series`，数值上下限会逐点检查。缺少样本或分母为零按查询错误处理。具体接口支持的参数和单位查动作源码，指标采样边界见 [指标覆盖](../views/coverage.md#指标口径)。
 
-`prometheus/query` 返回原始样本列表，只能留证不能做阈值断言；要把任意 PromQL 接进 `expect`，用 `prometheus/query_scalar`——它要求查询恰好返回一个有限数值（例如 `max(...)`、`count(...)`、分位数的 `histogram_quantile(...)`），否则按查询错误处理。`frontend/query/playback_requests` 按 `kind`（如 `TERMINAL`/`ISSUED`）、`field`、`equals` 统计最近一次回放落盘的逐请求证据事件数（`frontend-*` 全副本合计），返回值可断言——终态唯一性、错误码分类、重试放大（`duplicate` 标记）都走它。`master/query/engine_count` 返回各 Master 一致的角色目录计数（不一致即报错），用于 D 类清退/发现断言。
+`prometheus/query` 返回原始样本列表，只能留证不能做阈值断言；要把任意 PromQL 接进 `expect`，用 `prometheus/query_scalar`——它要求查询恰好返回一个有限数值（例如 `max(...)`、`count(...)`、分位数的 `histogram_quantile(...)`），否则按查询错误处理。`frontend/query/playback_requests` 按 `kind`（如 `TERMINAL`/`ISSUED`）、`field`、`equals` 统计最近一次回放落盘的逐请求证据事件数（`frontend-*` 全副本合计），返回值可断言——终态唯一性、错误码分类、重试放大（`duplicate` 标记）都走它。`master/query/pv_requests` 扫描各 Master 的 `logs/pv.log*`，按 `schedule_origin`、`success`、`code`、`decode_requeue_count_gte` 过滤统计逐请求调度记录，并支持 `require_frontend_outcome` 按 `request_id` 与 Frontend 最新回放终态交叉核对。`master/query/engine_count` 返回各 Master 一致的角色目录计数（不一致即报错），用于 D 类清退/发现断言。
 
 ## Step 函数规范
 

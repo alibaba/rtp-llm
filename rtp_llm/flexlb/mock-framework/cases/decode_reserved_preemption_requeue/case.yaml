@@ -1,0 +1,98 @@
+id: decode_reserved_preemption_requeue
+name: DECODE_RESERVED 抢占重排
+describe:
+  S4-4：仅开启 DECODE_RESERVED 抢占阶段；低优先级请求在拿到 Decode 预留后滞留于 Prefill 子队列（DECODE_RESERVED 态），高优先级到达时撤回其 Decode 预留并将受害者 requeue 回全局队列而非直接 8429 失败；通过 Master pv.log 与 Frontend requests.jsonl 按 request_id 交叉核对，验证至少 1 条经历 decodeRequeueCount>=1 的请求最终调度与推理均成功。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: traffic
+    describe: 优先级混合流量触发 DECODE_RESERVED 抢占并验证受害者 requeue 后成功完成。
+    timeout: 240s
+    steps:
+      - id: start_frontend
+        describe: uniform 优先级混合流量（40/50 交替）qps 4 打 8s；Decode 3 槽 > Prefill 单批 1 槽（1s/批），使低优先级请求持有 Decode 预留滞留于 Prefill 子队列（DECODE_RESERVED 态），后续高优先级到达触发抢占 requeue。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k-priority-mix.mckidx
+          qps: 4
+          total_concurrency: 32
+          queue_capacity: 64
+          request_timeout: 60s
+          drain_timeout: 60s
+        wait_after: 8s
+      - id: stop_frontend
+        describe: 停止打流并收齐全部在途请求终态。
+        interface: frontend/stop/playback
+        within: 120s
+        wait_after: 2s
+      - id: check_decode_reserved_preempt_metric
+        describe: Master 侧确实发生了 DECODE_RESERVED 抢占。
+        interface: prometheus/query_scalar
+        args:
+          promql: sum(flexlb_auto_tpm_priority_preempt_count_total{stage="decode_reserved"})
+        expect:
+          gte: 1
+      - id: check_no_preempt_error_8429
+        describe: DECODE_RESERVED 抢占走 requeue，不以 8429 失败终结受害者。
+        interface: frontend/query/playback_requests
+        args:
+          kind: TERMINAL
+          field: error_code
+          equals: "8429"
+        expect:
+          eq: 0
+      - id: count_issued
+        describe: 记录总发出请求数。
+        interface: frontend/query/playback_requests
+        args:
+          kind: ISSUED
+      - id: check_all_succeeded
+        describe: 所有已发请求均成功完成（包括被 requeue 的受害者）。
+        interface: frontend/query/playback_requests
+        args:
+          kind: TERMINAL
+          field: outcome
+          equals: success
+        expect:
+          eq:
+            ref: steps.count_issued
+      - id: check_requeued_victim_succeeded
+        describe: 逐请求证据核对：Master pv.log 中存在 decodeRequeueCount>=1 且调度成功的请求，且在 Frontend requests.jsonl 中同 request_id 终态为 success。
+        interface: master/query/pv_requests
+        args:
+          decode_requeue_count_gte: 1
+          success: true
+          require_frontend_outcome: success
+        expect:
+          gte: 1
