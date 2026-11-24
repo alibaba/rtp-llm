@@ -16,7 +16,7 @@ from setproctitle import setproctitle
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 from rtp_llm.config.log_config import setup_logging
-from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.py_config_modules import PyEnvConfigs, resolve_engine_restart_limit
 from rtp_llm.config.server_config_setup import (
     configure_kv_cache_event_host_ip_port,
     finalize_rank_local_deepep_internode,
@@ -425,6 +425,10 @@ def start_backend_server(
     # The debug-load path runs inline; only a spawned manager has a parent guard.
     if expected_parent_pid is not None:
         arm_parent_death_sigkill(expected_parent_pid)
+        if resolve_engine_restart_limit(py_env_configs) > 0:
+            # Lead a process group the ranks inherit, so start_server can kill this
+            # whole generation with one killpg before restarting it.
+            os.setpgid(0, 0)
 
     # Startup window only: turn SIGTERM/SIGINT into an exception so the teardown
     # below runs (a defaulted SIGTERM would kill the process with no cleanup);
