@@ -59,6 +59,8 @@ public:
 
 private:
     struct ReadTaskGroup {
+        int64_t                                    request_id = 0;
+        std::atomic<bool>                          report_drain{false};
         FirstError                                 first_error;
         std::vector<std::string>                   partition_keys;
         std::vector<transfer::IKVCacheRecvTaskPtr> tasks;

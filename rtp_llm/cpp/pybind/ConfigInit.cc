@@ -1278,6 +1278,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("p2p_transfer_not_done_resource_hold_ms",
                        &CacheStoreConfig::p2p_transfer_not_done_resource_hold_ms)
         .def_readwrite("p2p_lease_query_timeout_ms", &CacheStoreConfig::p2p_lease_query_timeout_ms)
+        .def_readwrite("p2p_kv_force_release_timeout_ms", &CacheStoreConfig::p2p_kv_force_release_timeout_ms)
         .def_readwrite("p2p_cancel_broadcast_timeout_ms", &CacheStoreConfig::p2p_cancel_broadcast_timeout_ms)
         .def_readwrite("p2p_cancelled_keys_ttl_ms", &CacheStoreConfig::p2p_cancelled_keys_ttl_ms)
         .def_readwrite("cache_store_tcp_anet_rpc_thread_num", &CacheStoreConfig::cache_store_tcp_anet_rpc_thread_num)
@@ -1313,7 +1314,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.p2p_rdma_enable_h2d_copy,
                                       self.p2p_rdma_staging_total_bytes,
                                       self.p2p_prefill_sender_thread_count,
-                                      self.p2p_prefill_sender_queue_size);
+                                      self.p2p_prefill_sender_queue_size,
+                                      self.p2p_kv_force_release_timeout_ms);
             },
             [](py::tuple t) {
                 if (t.size() == 18) {
@@ -1338,7 +1340,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     return c;
                 }
                 // The 27-, 28-, and 29-field layouts append retired values.
-                if (t.size() != 22 && t.size() != 27 && t.size() != 28 && t.size() != 29) {
+                if (t.size() != 22 && t.size() != 23 && t.size() != 27 && t.size() != 28 && t.size() != 29) {
                     throw std::runtime_error("Invalid CacheStoreConfig state");
                 }
                 CacheStoreConfig c;
@@ -1364,6 +1366,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.p2p_rdma_staging_total_bytes = t[19].cast<int64_t>();
                 c.p2p_prefill_sender_thread_count = t[20].cast<int>();
                 c.p2p_prefill_sender_queue_size = t[21].cast<int>();
+                if (t.size() == 23) {
+                    c.p2p_kv_force_release_timeout_ms = t[22].cast<int>();
+                }
                 return c;
             }));
 

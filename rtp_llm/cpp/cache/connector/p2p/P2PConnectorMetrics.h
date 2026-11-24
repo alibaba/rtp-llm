@@ -57,6 +57,7 @@ public:
     double  decode_scheduler_retained_kv_percent     = -1;
     int64_t decode_scheduler_retained_context_count  = -1;
     int64_t decode_scheduler_oldest_kv_hold_ms       = -1;
+    bool    decode_scheduler_forced_kv_release      = false;
 
     // ---- stream store：资源数量周期采样与单次等待采样 ----
     int64_t stream_store_stream_count        = -1;
@@ -165,6 +166,7 @@ private:
     kmonitor::MutableMetric* decode_scheduler_retained_kv_percent_metric     = nullptr;
     kmonitor::MutableMetric* decode_scheduler_retained_context_count_metric  = nullptr;
     kmonitor::MutableMetric* decode_scheduler_oldest_kv_hold_ms_metric        = nullptr;
+    kmonitor::MutableMetric* decode_scheduler_forced_kv_release_count_metric = nullptr;
 
     // stream store metrics
     kmonitor::MutableMetric* stream_store_stream_count_metric        = nullptr;

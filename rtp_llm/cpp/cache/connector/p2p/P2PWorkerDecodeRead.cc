@@ -236,6 +236,7 @@ P2PWorkerDecodeRead::waitRecvTasksWithReadDeadlinePolicy(const std::shared_ptr<R
     for (const auto& key : task_group->partition_keys) {
         receiver_->stealTask(key);
     }
+    task_group->report_drain.store(true, std::memory_order_release);
     task_group->lease->seal();
     for (const auto& task : task_group->tasks) {
         if (task && !task->done()) {
@@ -285,6 +286,7 @@ ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
 
     const int64_t read_start_time_us               = currentTimeUs();
     auto          task_group                       = std::make_shared<ReadTaskGroup>();
+    task_group->request_id                         = request_id;
     task_group->lease                              = std::make_shared<DecodeTargetWriteLease>();
     int                          total_block_count = 0;
     P2PConnectorMetricsCollector collector;
@@ -477,13 +479,16 @@ bool P2PWorkerDecodeRead::cancelRead(const std::string& unique_key, int64_t requ
                                                             now_ms + ttl_ms;
         const bool                  has_finite_request_deadline =
             request_deadline_ms > 0 && request_deadline_ms != std::numeric_limits<int64_t>::max();
-        auto& expiry = pending_cancel_keys_[unique_key];
+        auto [pending, inserted] = pending_cancel_keys_.try_emplace(unique_key, 0);
+        auto& expiry = pending->second;
         expiry       = std::max(
             expiry, has_finite_request_deadline ? std::max(request_deadline_ms, fallback_deadline) : fallback_deadline);
         schedulePendingCancelExpiryLocked();
         auto                        it = read_tasks_.find(unique_key);
         if (it == read_tasks_.end()) {
-            RTP_LLM_LOG_INFO("cancelRead: queued pending cancel, unique_key: %s", unique_key.c_str());
+            if (inserted) {
+                RTP_LLM_LOG_INFO("cancelRead: queued pending cancel, unique_key: %s", unique_key.c_str());
+            }
             return true;
         }
         task_group = it->second;
@@ -493,7 +498,23 @@ bool P2PWorkerDecodeRead::cancelRead(const std::string& unique_key, int64_t requ
         std::lock_guard<std::mutex> lock(task_group->completion_mutex);
         task_group->first_error.record(
             ErrorInfo(ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED, "Decode recv cancelled key=" + unique_key));
-        task_group->cancelled.store(true);
+        const bool already_cancelled = task_group->cancelled.exchange(true);
+        if (!already_cancelled) {
+            const auto started = task_group->lease->startedOps();
+            const auto finished = task_group->lease->finishedOps();
+            if (started > finished) {
+                task_group->report_drain.store(true, std::memory_order_release);
+            }
+            RTP_LLM_LOG_INFO("P2P Decode cancel observed, request_id=%ld unique_key=%s rank=%d event_time_us=%ld "
+                             "sealed=%d started=%d finished=%d",
+                             task_group->request_id,
+                             unique_key.c_str(),
+                             static_cast<int>(config_.tp_rank),
+                             currentTimeUs(),
+                             task_group->lease->isSealed(),
+                             started,
+                             finished);
+        }
     }
     task_group->completion_cv.notify_all();
     for (const auto& task : task_group->tasks) {
@@ -574,6 +595,16 @@ void P2PWorkerDecodeRead::onRecvTaskDone(const std::string& unique_key,
         return;
     }
     if (it->second.task_group->lease->isStopped()) {
+        if (task_group->report_drain.load(std::memory_order_acquire)) {
+            RTP_LLM_LOG_INFO("P2P Decode lease drained, request_id=%ld unique_key=%s rank=%d event_time_us=%ld "
+                             "started=%d finished=%d",
+                             task_group->request_id,
+                             unique_key.c_str(),
+                             static_cast<int>(config_.tp_rank),
+                             currentTimeUs(),
+                             task_group->lease->startedOps(),
+                             task_group->lease->finishedOps());
+        }
         lease_map_.erase(it);
     }
 }

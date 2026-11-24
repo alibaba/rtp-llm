@@ -2936,13 +2936,20 @@ class CacheStoreArgumentsTest(TestCase):
             [],
             {
                 "CACHE_STORE_RDMA_TRANSFER_WAIT_TIMEOUT_MS": "invalid",
-                "P2P_KV_FORCE_RELEASE_TIMEOUT_MS": "invalid",
             },
         )
         self.assertFalse(hasattr(config, "rdma_transfer_wait_timeout_ms"))
-        self.assertFalse(hasattr(config, "p2p_kv_force_release_timeout_ms"))
         self.assertEqual(config.p2p_transfer_not_done_resource_hold_ms, 10000)
         self.assertEqual(config.p2p_lease_query_timeout_ms, 500)
+
+    def test_p2p_kv_force_release_timeout_cli_and_environment(self):
+        name = "p2p_kv_force_release_timeout_ms"
+        env = {"P2P_KV_FORCE_RELEASE_TIMEOUT_MS": "120000"}
+        self.assertEqual(getattr(self.parse_config([], {}), name), 300000)
+        self.assertEqual(getattr(self.parse_config([], env), name), 120000)
+        self.assertEqual(
+            getattr(self.parse_config([f"--{name}", "60000"], env), name), 60000
+        )
 
 
 class ResidentWeightsArgsTest(TestCase):

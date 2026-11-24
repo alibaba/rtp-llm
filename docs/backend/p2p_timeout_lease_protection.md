@@ -12,7 +12,7 @@ Prefill 向 Decode 的各个 worker 发起 P2P KV 数据传输。TCP 和 RDMA �
 2. RDMA watchdog 先结束超时 RPC。如果回调仍未到达，在 deadline 加 `P2P_TRANSFER_NOT_DONE_RESOURCE_HOLD_MS`（默认 10000ms）后关闭相关 connection。等待完成回调期间，对应 KV 计入滞留量。
 3. `P2PConnectorAsyncReadContextChecker` 在后台继续持有目标资源。取消广播成功后，按 10～100ms 的退避间隔查询全部 rank 的 lease。单轮查询最多等待 500ms，并受 `P2P_LEASE_QUERY_TIMEOUT_MS` 限制。每个请求同时最多执行一个控制任务，不同请求最多并行四个。
 4. 全部 rank 都满足 `sealed && started_ops == finished_ops` 时，立即释放该上下文持有的 KV 引用。
-5. 查询失败、取消失败或仍有未完成任务时，继续持有 KV 并重试。单个请求从进入隔离起满 5 分钟后，即使未确认所有 rank 停写，也会释放 KV 引用并记录 WARN。强制释放依赖先前提交的 RDMA 或 H2D 操作已停止访问这些块。
+5. 查询失败、取消失败或仍有未完成任务时，继续持有 KV 并重试。单个请求从进入隔离起达到 `P2P_KV_FORCE_RELEASE_TIMEOUT_MS` 后，即使未确认所有 rank 停写，也会释放 KV 引用并记录 WARN。默认 300000 毫秒，可用 `--p2p_kv_force_release_timeout_ms` 覆盖。强制释放依赖先前提交的 RDMA 或 H2D 操作已停止访问这些块。
 
 ## 滞留量
 

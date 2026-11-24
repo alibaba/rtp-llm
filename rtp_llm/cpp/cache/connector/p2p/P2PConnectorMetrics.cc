@@ -11,6 +11,8 @@ bool P2PConnectorMetrics::init(kmonitor::MetricsGroupManager* manager) {
                                   "rtp_llm_p2p_connector_decode_scheduler_retained_context_count");
     REGISTER_GAUGE_MUTABLE_METRIC(decode_scheduler_oldest_kv_hold_ms_metric,
                                   "rtp_llm_p2p_connector_decode_scheduler_oldest_kv_hold_ms");
+    REGISTER_QPS_MUTABLE_METRIC(decode_scheduler_forced_kv_release_count_metric,
+                                "rtp_llm_p2p_connector_decode_scheduler_forced_kv_release_count");
     REGISTER_GAUGE_MUTABLE_METRIC(prefill_first_token_to_decode_receive_us_metric,
                                   "rtp_llm_p2p_connector_prefill_first_token_to_decode_receive_us");
     REGISTER_GAUGE_MUTABLE_METRIC(prefill_first_token_to_decode_kv_complete_us_metric,
@@ -144,6 +146,9 @@ bool P2PConnectorMetrics::init(kmonitor::MetricsGroupManager* manager) {
 }
 
 void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, P2PConnectorMetricsCollector* collector) {
+    if (collector->decode_scheduler_forced_kv_release) {
+        RTP_REPORT_MUTABLE_QPS(decode_scheduler_forced_kv_release_count_metric);
+    }
     if (collector->decode_handoff_ready_to_running_us != P2PConnectorMetricsCollector::kMissingHandoffDelta) {
         RTP_REPORT_MUTABLE_METRIC(decode_handoff_ready_to_running_us_metric,
                                   collector->decode_handoff_ready_to_running_us);

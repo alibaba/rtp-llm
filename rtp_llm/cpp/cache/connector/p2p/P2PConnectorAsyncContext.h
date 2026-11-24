@@ -38,11 +38,13 @@ public:
                                  int64_t                                              lease_query_timeout_ms,
                                  bool                                                 no_transfer          = false,
                                  int64_t                                              request_deadline_ms  = 0,
-                                 int64_t                                              transfer_deadline_ms = 0):
+                                 int64_t                                              transfer_deadline_ms = 0,
+                                 int kv_force_release_timeout_ms = CacheStoreConfig::kDefaultP2PKvForceReleaseTimeoutMs):
         resource_(resource),
         unique_key_(std::move(unique_key)),
         collector_(collector),
         lease_query_timeout_ms_(std::max<int64_t>(1, lease_query_timeout_ms)),
+        kv_force_release_timeout_ms_(kv_force_release_timeout_ms),
         no_transfer_(no_transfer),
         request_deadline_ms_(request_deadline_ms),
         transfer_deadline_ms_(transfer_deadline_ms),
@@ -204,6 +206,7 @@ private:
     const std::shared_ptr<P2PConnectorMetricsCollector>    collector_;
 
     const int64_t lease_query_timeout_ms_;
+    const int64_t kv_force_release_timeout_ms_ = CacheStoreConfig::kDefaultP2PKvForceReleaseTimeoutMs;
     const bool    no_transfer_;
     const int64_t request_deadline_ms_;
     const int64_t transfer_deadline_ms_;  // original wire deadline/identity
