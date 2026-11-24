@@ -81,6 +81,8 @@ def multimodal_routing_tokens(
                 expanded_spans.append((output_offset, size))
             row_hashes = list(islice(hash_values, size))
             if semantic_mm_token_id >= 0:
+                # Roll out frontend, prefill and decode together. Older prefill workers
+                # expect a row hash in every image token position.
                 if cache_spans is not None:
                     cache_spans.append((output_offset, row_hashes))
                 output.extend([semantic_mm_token_id] * size)

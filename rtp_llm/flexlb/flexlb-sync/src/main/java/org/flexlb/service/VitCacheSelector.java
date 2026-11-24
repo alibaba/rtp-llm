@@ -251,6 +251,8 @@ public class VitCacheSelector {
             long routed,
             long nowNanos,
             RoutingConfig.VitConfig config) {
+        // Roll out FlexLB and the ViT workers in each routing group together. Older
+        // workers omit mm_inflight_inputs and always rank behind workers with fresh samples.
         if (sample == null
                 || nowNanos - sample.receivedNanos()
                         > TimeUnit.MILLISECONDS.toNanos(config.getLoadMaxAgeMs())) {

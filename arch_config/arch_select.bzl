@@ -139,6 +139,8 @@ def subscribe_deps():
     )
 
 def whl_deps():
+    # Upgrade CUDA 13 FA4, QuACK and CUTLASS DSL together across both architectures,
+    # including the Bazel patch and the wheels installed in the release images.
     return extension_wheel_requirements() + select({
         "@rtp_llm//:using_ppu": [
             "deep-gemm-mega@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/ppu/deep_gemm_mega-2.1.0%2Bppu2.2.0.torch2.11.cu130.r1-cp312-cp312-linux_x86_64.whl#sha256=48039c6fbac4832b8990fdc1ace9ce1b5bfc3a7c4d7fa02a9b5172e01f78c392",
