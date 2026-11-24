@@ -6,6 +6,7 @@ import logging
 import os
 import shlex
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
@@ -35,9 +36,12 @@ def _wait_for_traces(
         ):
             try:
                 for path in paths:
-                    events = json.loads(path.read_text())["traceEvents"]
+                    trace = json.loads(path.read_text())
+                    if phase == "mtp":
+                        _write_mtp_phase_traces(trace, path, steps)
+                        continue
                     _check_trace(
-                        events,
+                        trace["traceEvents"],
                         path,
                         phase,
                         steps,
@@ -51,6 +55,102 @@ def _wait_for_traces(
                 return
         time.sleep(2)
     raise TimeoutError(f"Incomplete {phase} timelines in {directory}: {paths}")
+
+
+def _write_mtp_phase_traces(trace, path: Path, decode_steps: int) -> None:
+    """Keep the original capture and export views with the original timestamps."""
+    events = trace["traceEvents"]
+    cpu_scopes = [
+        event
+        for event in events
+        if event.get("ph") == "X" and event.get("cat") in {"cpu_op", "user_annotation"}
+    ]
+    names = [event["name"] for event in cpu_scopes]
+    prefill = "executor.mtp.prefill_step("
+    if any(
+        names.count(prefill + model + "_model_forward)") != 1
+        for model in ("target", "draft")
+    ):
+        raise RuntimeError(f"Expected one target and draft prefill in {path}")
+    decode_scopes = [
+        event["ts"]
+        for event in cpu_scopes
+        if event["name"].startswith("executor.mtp.decode_step(decode_stream_size=")
+    ]
+    if not decode_scopes:
+        raise RuntimeError(f"Missing MTP decode scope in {path}")
+    first_decode = min(decode_scopes)
+    boundary = next(
+        (
+            event["ts"]
+            for event in cpu_scopes
+            if event["name"] == "engine.normal.step_work"
+            and event["ts"] <= first_decode < event["ts"] + event["dur"]
+        ),
+        first_decode,
+    )
+    launch_phases = {
+        event["args"]["correlation"]: event["ts"] >= boundary
+        for event in events
+        if event.get("cat") in {"cuda_runtime", "cuda_driver"}
+        and "correlation" in event.get("args", {})
+    }
+    views = ([], [])
+    for event in events:
+        if event.get("ph") == "M" or "ts" not in event:
+            for view in views:
+                view.append(event)
+            continue
+        if event.get("cat") == "Trace":
+            continue
+        decode = event["ts"] >= boundary
+        if event.get("cat") in {"kernel", "gpu_kernel", "gpu_memcpy", "gpu_memset"}:
+            decode = launch_phases.get(event.get("args", {}).get("correlation"), decode)
+        views[decode].append(event)
+
+    graphs = sum(
+        event.get("cat") == "cuda_runtime"
+        and event.get("ph") == "X"
+        and event.get("name") == "cudaGraphLaunch"
+        for event in views[1]
+    )
+    if graphs != 4 * decode_steps or any(
+        event.get("name", "").startswith(prefill) for event in views[1]
+    ):
+        raise RuntimeError(f"Unexpected MTP decode trace in {path}: {graphs=}")
+    for phase, view in zip(("prefill", "decode"), views):
+        kernels = Counter(
+            event["name"]
+            for event in view
+            if event.get("cat") in {"kernel", "gpu_kernel"}
+        )
+        if not kernels:
+            raise RuntimeError(f"No {phase} GPU kernels in {path}")
+        if phase == "prefill" and (
+            "_hc_prefill_inject_norm" not in kernels
+            or ("_wr0_" in path.name and "_ple_conv_prefill_tiled" not in kernels)
+        ):
+            raise RuntimeError(f"Missing fused GR or PLE prefill in {path}")
+        if phase == "prefill":
+            # The target has 15 QSA layers and the draft has one. Each scores four windows.
+            expected = {
+                "_prepare_fused_prefill": 15,
+                "indexer_score_unified_sm100": 64,
+                "compress_top_k_sm100": 64,
+                "_qsa_qtoken_prepare": 16,
+                "decode_gen_kernel": 16,
+                "_qtoken_output_gate": 16,
+            }
+            actual = {
+                name: sum(count for kernel, count in kernels.items() if name in kernel)
+                for name in expected
+            }
+            if actual != expected:
+                raise RuntimeError(
+                    f"Unexpected MTP prefill QSA kernels in {path}: {actual}"
+                )
+        name = path.name.replace("-mtp-", f"-mtp-{phase}-", 1)
+        path.with_name(name).write_text(json.dumps({**trace, "traceEvents": view}))
 
 
 def _check_trace(
@@ -105,16 +205,6 @@ def _check_trace(
         for event in events
         if event.get("cat") in {"kernel", "gpu_kernel"}
     ]
-    if phase == "mtp":
-        if (
-            graphs < steps
-            or "_hc_prefill_inject_norm" not in kernel_names
-            or ("_wr0_" in path.name and "_ple_conv_prefill_tiled" not in kernel_names)
-        ):
-            raise RuntimeError(
-                f"Missing MTP graph replay, fused GR, or fused PLE prefill in {path}"
-            )
-        return
     prep = kernel_names.count(f"_prepare_fused_{phase}")
     if phase == "decode":
         score_kernel, topk_kernel, windows = "qsa_score_paged", "qsa_topk_decode", 1
@@ -141,7 +231,6 @@ def _check_trace(
 
 def _check_qtoken(events, path, phase, steps):
     """Separate the real forward from any DP alignment steps in the raw trace."""
-    previous_by_stream = {}
     phase_by_stream = {}
     conversions = launches = gates = 0
     for event in sorted(events, key=lambda event: event.get("ts", 0)):
@@ -152,16 +241,9 @@ def _check_qtoken(events, path, phase, steps):
         if name in {"_prepare_fused_prefill", "_prepare_fused_decode"}:
             phase_by_stream[stream] = name.removeprefix("_prepare_fused_")
         if phase_by_stream.get(stream) == phase:
-            if name == "_qsa_qtoken_prepare":
-                conversions += 1
-                previous = previous_by_stream.get(stream, "")
-                if "deep_gemm::sm100_fp8_fp4_gemm_1d1d_impl" not in previous:
-                    raise RuntimeError(
-                        f"Unexpected operation before QToken prepare in {path}: {previous}"
-                    )
+            conversions += name == "_qsa_qtoken_prepare"
             launches += "decode_gen_kernel" in name
             gates += name == "_qtoken_output_gate"
-        previous_by_stream[stream] = name
     if (conversions, launches, gates) != (15 * steps,) * 3:
         raise RuntimeError(
             f"Unexpected QToken G8 launches in {path}: {conversions=} {launches=} {gates=}"
@@ -191,7 +273,7 @@ def _capture(
     length, batch, new_tokens, steps = {
         "decode": (32768, 32, 16, 3),
         "prefill": (16384, 8, 1, 1),
-        "mtp": (4608, 1, 20, 4),
+        "mtp": (16381, WORLD_SIZE, 64, 6),
     }[phase]
     if decode_lookahead:
         steps = 5
@@ -276,7 +358,7 @@ def _capture(
                 StartProfileRequestPB(
                     trace_name=tag,
                     start_step=0,
-                    num_steps=steps + alignment_steps,
+                    num_steps=steps + alignment_steps + (phase == "mtp"),
                     enable_all_rank=True,
                 ),
                 timeout=30,
@@ -330,13 +412,18 @@ def _capture(
         )
 
     with ThreadPoolExecutor(max_workers=batch) as pool:
-        list(pool.map(prepare_batch(pool, 0), range(batch)))  # JIT warmup
-        metrics = analyze_results(list(pool.map(prepare_batch(pool, 1), range(batch))))
+        if phase != "mtp":
+            list(pool.map(prepare_batch(pool, 0), range(batch)))  # JIT warmup
+            metrics = analyze_results(
+                list(pool.map(prepare_batch(pool, 1), range(batch)))
+            )
         profiled_batch = prepare_batch(pool, 2)
         # TP1 has no TP peers to broadcast to. Arm each DP backend directly.
         with ThreadPoolExecutor(max_workers=WORLD_SIZE) as profile_pool:
             list(profile_pool.map(arm, range(WORLD_SIZE)))
-        list(pool.map(profiled_batch, range(batch)))
+        profiled = list(pool.map(profiled_batch, range(batch)))
+        if phase == "mtp":
+            metrics = analyze_results(profiled)
     _wait_for_traces(
         output / "timelines",
         tag,
@@ -366,7 +453,7 @@ def main() -> None:
         help="Profile cold prefill and 8 requests per rank with 8 new tokens over a 32K prefix.",
     )
     mode.add_argument(
-        "--mtp", action="store_true", help="Profile DP8/EP8 MTP with CUDA Graph."
+        "--mtp", action="store_true", help="Profile MTP prefill and decode (default)."
     )
     mode.add_argument(
         "--decode_lookahead",
@@ -382,6 +469,7 @@ def main() -> None:
         "--output_dir", type=Path, default=os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")
     )
     args = parser.parse_args()
+    mtp = not (args.prefix_cache or args.short_prefix or args.decode_lookahead)
     if args.output_dir is None:
         parser.error("--output_dir is required when invoking this script directly")
     if args.decode_new_tokens is not None and (
@@ -395,6 +483,7 @@ def main() -> None:
     (output / "timelines").mkdir(parents=True, exist_ok=False)
     os.environ["TEST_UNDECLARED_OUTPUTS_DIR"] = str(output)
     os.environ["MAGA_SERVER_WORK_DIR"] = str(output)
+    os.environ.pop("ENABLE_FP32_LM_HEAD", None)
     logging.basicConfig(level=logging.INFO)
 
     from rtp_llm.test.perf_test.qwen4_m11_ple import shared_ple
@@ -403,8 +492,8 @@ def main() -> None:
     server_args = """
         --role_type PDFUSION --frontend_server_count 1
         --world_size 8 --local_world_size 8 --world_rank 0 --tp_size 1 --dp_size 8 --ep_size 8 --pp_size 1
-        --load_method scratch --act_type BF16 --quantization MXFP8 --moe_strategy mega_moe_se --use_deepep_moe 0
-        --vit_separation 2 --enable_fp32_lm_head 0 --fake_balance_expert 0
+        --load_method scratch --act_type BF16 --moe_strategy mega_moe --use_deepep_moe 0
+        --vit_separation 2 --fake_balance_expert 0
         --prefill_chunk_size 0 --seq_size_per_block 128 --kernel_seq_size_per_block 128
         --enable_cuda_graph 1 --warm_up 0 --startup_health_check_timeout 3000
         --frontend_pre_stop_drain_seconds 0 --dash_sc_grpc_pre_stop_drain_seconds 0
@@ -414,11 +503,12 @@ def main() -> None:
     else:
         server_args += " --max_context_batch_size 1 --concurrency_limit 32"
 
-    if args.mtp:
+    if mtp:
+        # Match the draft's token capacity so both models share the MegaMoE buffer.
         server_args += """
-            --max_seq_len 8192 --max_batch_tokens_size 8192 --kv_cache_mem_mb 8192 --linear_pool_blocks 8
+            --max_seq_len 16464 --max_batch_tokens_size 16464 --kv_cache_mem_mb 4352 --linear_pool_blocks 8
             --decode_capture_config 1 --use_batch_decode_scheduler 0
-            --sp_type mtp --sp_model_type qwen4_exp_mtp --sp_act_type BF16 --sp_quantization MXFP8 --gen_num_per_cycle 3
+            --sp_type mtp --sp_model_type qwen4_exp_mtp --sp_act_type BF16 --gen_num_per_cycle 3
         """
         server_args += f" --sp_checkpoint_path {shlex.quote(str(checkpoint))}"
     elif args.short_prefix:
@@ -434,7 +524,7 @@ def main() -> None:
         """
     # Limit recurrent checkpoints to the tail. Each seed ends one page after
     # the shared prefix, so the matching GDN boundary is retained.
-    reuse_cache = args.prefix_cache or args.short_prefix or args.mtp
+    reuse_cache = args.prefix_cache or args.short_prefix or mtp
     server_args += f" --reuse_cache {int(reuse_cache)}"
     if reuse_cache:
         server_args += " --reuse_cache_tail_blocks 4"
@@ -442,11 +532,17 @@ def main() -> None:
         server_env = {
             "BATCH_DECODE_SCHEDULER_WARMUP_TYPE": "0",
             "FT_SERVER_TEST": "1",
-            "GEN_TIMELINE_SYNC": (
-                "0" if args.short_prefix or args.decode_lookahead else "1"
-            ),
+            "GEN_TIMELINE_SYNC": "0",
+            "RTP_BATCH_INVARIANT": "0",
+            "RTP_LLM_STREAM_ASYNC": "1",
+            "RTP_LLM_DEVICE_INPUT": "1",
+            "RTP_LLM_DROP_BROAD_SYNC": "1",
+            "RTP_LLM_TEST_MTP_DECODE_ONLY": str(int(mtp)),
             "OMP_NUM_THREADS": "4",
             "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+            # Override online-quantization settings inherited from the shell.
+            "QUANTIZATION": "",
+            "SP_QUANTIZATION": "",
             "QWEN4_GDN_BACKEND": "flashinfer",
             "QWEN4_PLE_SHARED_TABLE": str(manifest),
             "QWEN4_QSA_FUSED_INDEXER_PREP": "1",
@@ -454,13 +550,7 @@ def main() -> None:
             "QWEN4_QSA_INDEXER_CHUNK_SIZE": "4096",
             "TORCH_CUDA_PROFILER_DIR": str(output / "timelines"),
         }
-        if args.decode_lookahead:
-            server_env.update(
-                RTP_LLM_STREAM_ASYNC="1",
-                RTP_LLM_DEVICE_INPUT="1",
-                RTP_LLM_DROP_BROAD_SYNC="1",
-            )
-        if args.mtp and os.environ.get("QWEN4_PROFILE_VERIFY_GRAPH_EVENT") == "1":
+        if mtp and os.environ.get("QWEN4_PROFILE_VERIFY_GRAPH_EVENT") == "1":
             server_env["QWEN4_PROFILE_VERIFY_GRAPH_EVENT"] = "1"
         (output / "launch.json").write_text(
             json.dumps(
@@ -478,8 +568,8 @@ def main() -> None:
                 timeout=3000,
             ):
                 raise RuntimeError(f"Qwen4 did not start. See {server.log_file_path}")
-            phases = ("mtp",) if args.mtp else ("decode",)
-            if not args.mtp and not args.decode_lookahead:
+            phases = ("mtp",) if mtp else ("decode",)
+            if not mtp and not args.decode_lookahead:
                 phases += ("prefill",)
             # The DP engine can run short decode forwards to keep ranks aligned.
             # Retain those steps in the raw trace and check the one real prefill.

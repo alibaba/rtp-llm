@@ -1,26 +1,30 @@
 # Qwen4 M11 timeline
 
 Use one 8-GPU B300 host and a CUDA 13 RTP-LLM runtime built from this checkout
-with its pinned CUDA 13 dependencies, including FlashInfer 0.7.4. The checkpoint
+with its pinned CUDA 13 dependencies. The checkpoint
 argument points to the mounted `qwen4-max-m11` release `MXFP4-1m-2026-11-02-1`
 with its tokenizer, config, safetensors index, and shards. The driver generates
 prompts using that checkpoint's tokenizer.
 
-| Phase | Global batch | Batch per DP rank | Input tokens | Output tokens | Profiled forwards per rank |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Decode | 32 | 4 | 32768 | 16 | 3 CUDA Graph replays |
-| Cold prefill | 8 | 1 | 16384 | 1 | 1 eager forward |
-| Prefix-hit prefill (optional) | 8 | 1 | 16384 (14336 cached + 2048 new) | 1 | 1 eager forward |
-| Short prefix-hit prefill (optional) | 64 | 8 | 32776 (32768 cached + 8 new) | 1 | 1 eager forward |
-| MTP with CUDA Graph (optional) | 1 | 1 on rank 0 | 4608 | 20 | 4 MTP decode steps |
+The default run uses one TP1/DP8/EP8 `PDFUSION` server with MTP enabled. It
+sends eight 16381-token requests, one per DP rank, and generates 64 tokens per
+request. The driver captures the target and draft prefill once per rank and
+the first six MTP decode steps. Each decode step proposes three tokens and
+replays four CUDA graphs for draft, verification, and draft update. The
+decode view contains no fake prefill.
 
-Both phases run on one TP1/DP8/EP8 `PDFUSION` server, with MXFP8 online quantization,
-FlashInfer GDN and Indexer, QToken-KvBlock G8 attention, and single-launch
-Indexer preparation.
-Prefill runs without chunked prefill. Cold prefill scores in 4096-token windows,
-and prefix-hit prefill scores directly from paged KV in one window. The driver
-runs an unprofiled warmup and measurement before arming all eight ranks for each
-phase.
+The driver sets `RTP_LLM_STREAM_ASYNC=1`, `RTP_LLM_DEVICE_INPUT=1`,
+`RTP_LLM_DROP_BROAD_SYNC=1`, and `GEN_TIMELINE_SYNC=0` in the server launch
+environment. `RTP_BATCH_INVARIANT=0` selects the optimized MTP and CUDA Graph
+paths. The model uses its default LM head precision. The target and
+draft run with online quantization disabled. Dense projections and shared
+experts keep their BF16 checkpoint weights, and `mega_moe` runs the MXFP4
+routed experts through DeepGEMM. The driver aligns target and draft token
+capacities so they share the MegaMoE buffer. The driver requests FlashInfer GDN
+and Indexer and enables single-launch Indexer preparation. The GPU trace records
+the resolved backend for each phase. Prefill runs without chunked prefill, with
+4096-token FlashInfer Indexer scoring windows for cold requests. Prefix-hit
+diagnostics score directly from paged KV.
 
 ## Run from the B300 runtime
 
@@ -43,42 +47,33 @@ CUDA 13 configuration and `--test_timeout=10800`, and make the checkpoint
 accessible to the test worker.
 The target uses the Bazel test GPU lock and writes to the undeclared outputs.
 
-Add `--short_prefix` (Bazel `--test_arg=--short_prefix`) to append a prefill
-batch of eight requests per rank, each adding eight tokens after a 32K cached
-prefix. The driver checks the exact cache hit and keeps up to three
-surrounding decode forwards used for DP alignment in the trace.
+`--mtp` is an alias for the default run. For a separate diagnostic capture
+with MTP disabled, pass one of these options (Bazel `--test_arg`):
 
-Add `--prefix_cache` to the direct command (Bazel `--test_arg=--prefix_cache`)
-to append the prefix-hit case. The driver seeds the cache on each DP rank before
-each prefix-hit batch, then routes the continuation to the same rank. It checks
-that each continuation reports exactly 14336 reused tokens. Decode and cold
-prefill bypass the cache in both modes.
+- `--decode_lookahead` checks that the server submits the next Decode CUDA
+  graph during the previous replay, with batch 32 and a 32K input.
+- `--prefix_cache` adds a prefill with 14336 cached and 2048 new tokens per
+  rank after the ordinary decode and cold prefill cases.
+- `--short_prefix` adds eight prefill requests per rank, each with 32768 cached
+  and eight new tokens. The raw trace retains up to three decode forwards used
+  for DP alignment.
 
-Use `--mtp` (Bazel `--test_arg=--mtp`) to capture the MTP case. The driver
-uses the target checkpoint for the MXFP8 draft, proposes three tokens per
-cycle, and captures decode batch size 1. It checks for CUDA Graph launches,
-cross-layer GR fusion on every rank, and the tiled PLE prefill kernel on rank 0.
-MTP target verification uses its own PLE cache transaction path. The fused
-single-token PLE decode kernels can be inspected in the default decode case.
-Set `QWEN4_PROFILE_VERIFY_GRAPH_EVENT=1` (Bazel `--test_env`) with `--mtp` to
-capture per-kernel timelines with an external event after the first 12 target
-verify layers. The driver records the setting in `launch.json`.
+Set `QWEN4_PROFILE_VERIFY_GRAPH_EVENT=1` (Bazel `--test_env`) to add an external
+event after the first 12 MTP target verify layers.
 
-For either invocation, set `QWEN4_PLE_SHARED_TABLE` (Bazel `--test_env`) to reuse
+Set `QWEN4_PLE_SHARED_TABLE` (Bazel `--test_env`) to reuse
 a matching shared PLE manifest whose backing remains readable throughout the
 test. If unset, the driver stages the roughly 305 GiB PLE table from the checkpoint
 in a Linux memfd and keeps it alive until the server stops. Allow an additional
 96 GiB of available host RAM for the rest of the run.
 
-The output contains 16 raw Chrome Trace JSON files in `timelines/`, unprofiled
-`decode_metrics.json` and `prefill_metrics.json`, and server logs. With
-`--prefix_cache`, it adds eight `-prefix14336` timelines and
-`prefill_prefix_cache_metrics.json`. With `--short_prefix`, it also captures
-eight `-prefix32768` timelines and `prefill_prefix_cache_metrics.json`.
-The driver checks each rank for CUDA Graph replays, Indexer preparation,
-FlashInfer score and TopK, and the QSA preparation, attention, and gate kernels.
-With `--mtp`, the output contains eight MTP traces and `mtp_metrics.json`. Each
-run writes its server arguments and backend environment to `launch.json`.
+The default run writes one raw trace and separate `-mtp-prefill-` and
+`-mtp-decode-` traces per rank in `timelines/`. The phase traces preserve GPU
+kernel timestamps and launch correlations. The driver checks the CUDA Graph
+count, FlashInfer Prefill QSA and Indexer, fused prefill GR on each rank, and
+tiled PLE prefill on rank 0. It writes
+metrics for the profiled requests to `mtp_metrics.json`. Each run records its
+server arguments and backend environment in `launch.json`.
 
 The manual smoke target `//rtp_llm/test/smoke:qwen4_m11_mxfp4_sm10x` also checks
 that a changed continuation hits the seeded page-aligned prefix and generates

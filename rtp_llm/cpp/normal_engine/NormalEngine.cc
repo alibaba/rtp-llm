@@ -1154,8 +1154,30 @@ absl::Status NormalEngine::step() try {
         }
         if (parallelism_config.dp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
-            const bool global_prefill = coordinated && coordinated->plan() == PDFusionPlan::PREFILL;
-            mayAddFakeStream(streams, global_prefill, coordinated != nullptr);
+            bool              global_prefill = coordinated && coordinated->plan() == PDFusionPlan::PREFILL;
+            static const bool mtp_profile    = [] {
+                const auto* flag = std::getenv("RTP_LLM_TEST_MTP_DECODE_ONLY");
+                return flag && std::strcmp(flag, "1") == 0;
+            }();
+            if (mtp_profile) {
+                // The perf driver submits one equal-length request to every rank.
+                // Start with real prefill on all ranks, then use decode collectives only.
+                if (!mtp_profile_prefill_started_) {
+                    if (streams.empty()) {
+                        return absl::OkStatus();
+                    }
+                    RTP_LLM_CHECK_WITH_INFO(!coordinated && sp_config.type == SP_TYPE_MTP
+                                                && pd_sep_config.role_type == RoleType::PDFUSION
+                                                && parallelism_config.tp_size == 1 && parallelism_config.pp_size == 1
+                                                && parallelism_config.dp_size == 8 && parallelism_config.ep_size == 8
+                                                && streams.size() == 1 && streams.front()->isContextStream(),
+                                            "MTP timeline requires one real prefill per DP8/EP8 rank");
+                    mtp_profile_prefill_started_ = true;
+                    global_prefill               = true;
+                }
+                schedule_output.coordinated = true;
+            }
+            mayAddFakeStream(streams, global_prefill, coordinated != nullptr || mtp_profile);
         }
         // TP collectives require empty batches to enter process().
         if (shouldEarlyReturnEmptyBatch(streams.empty(), parallelism_config.tp_size)) {

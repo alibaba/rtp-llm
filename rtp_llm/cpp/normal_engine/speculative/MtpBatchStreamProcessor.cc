@@ -1259,12 +1259,16 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
             }
         }
     }
+    const bool keep_host_metadata = model_input_gatherer_config_.keep_prefill_metadata_on_host
+                                    && model_input.input_lengths.device().is_cpu()
+                                    && model_input.prefix_lengths.device().is_cpu();
     mtp::prepareDraftPrefillAfterTargetPrefill(model_input,
                                                model_output.all_hidden_states,
                                                tail_tokens,
                                                next_position_ids,
                                                position_id_len_factor,
-                                               host_holder);
+                                               host_holder,
+                                               keep_host_metadata);
 }
 
 void MtpBatchStreamProcessor::validatePrefillDSparkCommitInput(const GptModelInputs& model_input) const {
