@@ -18,8 +18,9 @@ except Exception:  # pragma: no cover - CPU-only environments
 
 
 _MAX_BATCH = 64
+_MAX_FORWARD_BATCH = 128
 _BLOCK_SIZE = 256
-_FORWARD_B64_LOOP_UNROLL = 2
+_FORWARD_LOOP_UNROLL = 2
 
 
 if _TRITON_AVAILABLE:
@@ -263,7 +264,7 @@ if _TRITON_AVAILABLE:
         cp_size,
         batch_size,
         BATCH_BLOCK: tl.constexpr,
-        B64_LOOP_UNROLL: tl.constexpr,
+        LOOP_UNROLL: tl.constexpr,
         BLOCK: tl.constexpr,
     ):
         offsets = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(
@@ -285,11 +286,11 @@ if _TRITON_AVAILABLE:
             tl.int64
         )
 
-        if BATCH_BLOCK == 64:
+        if BATCH_BLOCK >= 64:
             for req_idx in tl.range(
                 0,
                 batch_size,
-                loop_unroll_factor=B64_LOOP_UNROLL,
+                loop_unroll_factor=LOOP_UNROLL,
             ):
                 (
                     local_start,
@@ -519,7 +520,7 @@ def try_build_cp_forward_metadata(
     if (
         not cp_metadata_fusion_supported()
         or batch_size <= 0
-        or batch_size > _MAX_BATCH
+        or batch_size > _MAX_FORWARD_BATCH
         or any(not tensor.is_cuda or tensor.dim() != 1 for tensor in tensors)
         or any(tensor.device != lengths.device for tensor in tensors[1:])
         or int(chunk_lengths.numel()) != batch_size
@@ -579,7 +580,7 @@ def try_build_cp_forward_metadata(
         int(cp_size),
         batch_size,
         BATCH_BLOCK=batch_block,
-        B64_LOOP_UNROLL=_FORWARD_B64_LOOP_UNROLL,
+        LOOP_UNROLL=_FORWARD_LOOP_UNROLL,
         BLOCK=_BLOCK_SIZE,
         num_warps=4,
     )

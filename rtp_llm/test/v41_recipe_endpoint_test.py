@@ -53,6 +53,9 @@ class CharacterTokenizer:
 def make_renderer():
     renderer = DeepseekV41Renderer.__new__(DeepseekV41Renderer)
     renderer.tokenizer = CharacterTokenizer()
+    renderer.prompt_tokenizer = SimpleNamespace(
+        encode=lambda prompt: renderer.tokenizer.encode(prompt.text)
+    )
     renderer.think_mode = False
     renderer.generate_env_config = GenerateEnvConfig()
     renderer.think_start_tag = "<think>"

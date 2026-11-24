@@ -1,104 +1,23 @@
-"""CPU contracts for bounded CP4 raw gather, restore and producer lifetime.
+"""Contracts for bounded CP source cohorts and zigzag row restoration."""
 
-Compile complete, unchanged production methods to avoid native/CUDA imports.
-Only collectives, projection and cache/kernel boundaries use CPU substitutes.
-"""
-
-import ast
-import os
-import sys
+import bisect
+import random
 import types
 import unittest
-import weakref
-from contextlib import contextmanager, nullcontext
-from pathlib import Path
-from unittest.mock import Mock, patch
+from contextlib import ExitStack, contextmanager
+from unittest.mock import patch
 
 import torch
-import torch.nn.functional as F
 
-
-def _load_attention():
-    source = Path(__file__).resolve().parents[1] / "attention_v41.py"
-    tree = ast.parse(source.read_text())
-    functions = {
-        "_use_small_cp_x_gather",
-        "_prefill_x_group_plan",
-        "_prefill_raw_x_groups",
-        "_prefill_projected_x_groups",
-        "_prefill_x_tile_plan",
-        "_start_prefill_x_gather_async",
-        "_wait_prefill_x_gather",
-        "rms_norm",
-        "compress_pairs",
-    }
-    constants = {
-        "_PRODUCE_GLOBAL_TILE_ROWS",
-        "_SMALL_CP_X_GATHER_MAX_ROWS",
-        "_CP_X_GROUP_MAX_ROWS",
-        "_CP_X_GROUP_MAX_BYTES",
-    }
-    nodes = [
-        node
-        for node in tree.body
-        if (isinstance(node, ast.FunctionDef) and node.name in functions)
-        or (
-            isinstance(node, ast.Assign)
-            and any(isinstance(t, ast.Name) and t.id in constants for t in node.targets)
-        )
-    ]
-    cls = next(
-        n
-        for n in tree.body
-        if isinstance(n, ast.ClassDef) and n.name == "AttentionV41FP8"
-    )
-    nodes.extend(
-        n
-        for n in cls.body
-        if isinstance(n, ast.FunctionDef) and n.name == "_produce_global"
-    )
-    module = types.ModuleType("attention_cp_raw_cpu")
-    module.__dict__.update(
-        torch=torch,
-        F=F,
-        os=os,
-        INDEXER_KV="index",
-        record_function_range=lambda *args: nullcontext(),
-        prefill_indexer=types.SimpleNamespace(is_supported=lambda *args: False),
-        rope_only=lambda x, *args: x,
-        fp8_roundtrip=lambda x: x,
-    )
-    # The wait annotation is unrelated to the CPU collective substitute.
-    module._V41AsyncXGather = lambda work, event, gathered: types.SimpleNamespace(
-        work=work, completion_event=event, gathered=gathered
-    )
-    exec(
-        compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"),
-        module.__dict__,
-    )
-    return module
-
-
-ATTENTION = _load_attention()
-COMPRESSOR_NAME = "rtp_llm.models_py.modules.dsv41.fp8.compressor"
-
-
-@contextmanager
-def _cpu_compressor(module):
-    # Restore only our injected entry; preserve PyTorch's lazy registrations.
-    previous = sys.modules.get(COMPRESSOR_NAME)
-    sys.modules[COMPRESSOR_NAME] = module
-    try:
-        yield
-    finally:
-        if previous is None:
-            sys.modules.pop(COMPRESSOR_NAME, None)
-        else:
-            sys.modules[COMPRESSOR_NAME] = previous
+from rtp_llm.models_py.distributed import collective_torch
+from rtp_llm.models_py.modules.dsv41 import _cp_collectives
+from rtp_llm.models_py.modules.dsv41 import cp as cp_runtime
+from rtp_llm.models_py.modules.dsv41.fp8 import _v41_cp_async
+from rtp_llm.models_py.modules.dsv41.fp8 import attention_v41 as STREAM
 
 
 def _case(lengths):
-    """Independent zigzag oracle: label every real token, invert rank packing."""
+    """Build CP4 packed rows independently of the source cohort planner."""
     chunks = tuple(2 * ((length + 7) // 8) for length in lengths)
     parts = [[] for _ in range(4)]
     base = 0
@@ -110,576 +29,375 @@ def _case(lengths):
             parts[rank].extend((halves[rank], halves[7 - rank]))
         base += length
     packed = [torch.cat(part) for part in parts]
-    gathered_ids = torch.cat(packed)
     restore = torch.empty(base, dtype=torch.long)
-    valid = gathered_ids >= 0
-    restore[gathered_ids[valid]] = torch.arange(len(gathered_ids))[valid]
-    rows = torch.arange(base)
-    expected = torch.stack([(rows // (128**i)) % 128 for i in range(4)], 1).bfloat16()
+    all_packed = torch.cat(packed)
+    valid = all_packed >= 0
+    restore[all_packed[valid]] = torch.arange(len(all_packed))[valid]
+    raw = torch.arange(base, dtype=torch.long)
+    values = torch.stack([(raw // (128**column)) % 128 for column in range(4)], 1)
+    expected = values.bfloat16()
     local = [
-        expected[p.clamp_min(0)].masked_fill((p < 0)[:, None], -999) for p in packed
+        expected[rows.clamp_min(0)].masked_fill((rows < 0)[:, None], -999)
+        for rows in packed
     ]
     cp = types.SimpleNamespace(
         cp_size=4,
-        cp_rank=0,
-        chunk_length=sum(chunks),
-        padded_seq_len=sum(chunks) * 4,
-        seq_len_full=base,
-        input_lengths_global_host=tuple(lengths),
         chunk_lengths_per_req=chunks,
-        input_lengths_global=torch.tensor(lengths),
+        input_lengths_global_host=tuple(lengths),
+        chunk_length=sum(chunks),
+        padded_seq_len=4 * sum(chunks),
+        seq_len_full=base,
         unpad_restore=restore,
-        gather_restore_positions=None,
-        swa_replay_start=None,
-        prefix_lengths_host=tuple(i % 4 for i in range(len(lengths))),
     )
     return cp, local, expected
 
 
-def _mixed(delta=0):
-    values = (128, 257, 512, 1025, 1537, 2048, 3073, 4096)
-    return [values[(5 * i + i // 7) % 8] + delta for i in range(32)]
-
-
-class CPRawGroupsCPU(unittest.TestCase):
-    def setUp(self):
-        ceiling = patch.object(ATTENTION, "_SMALL_CP_X_GATHER_MAX_ROWS", 65536)
-        ceiling.start()
-        self.addCleanup(ceiling.stop)
-
-    def test_large_batch_gather_keeps_single_request_boundary(self):
-        with patch.object(ATTENTION, "_SMALL_CP_X_GATHER_MAX_ROWS", 131072):
-            for lengths, expected in (
-                ([16384], True),
-                ([65536], True),
-                ([65537], False),
-                ([131072], False),
-                ([32768] * 4, True),
-                ([32768] * 3 + [32769], False),
-            ):
-                cp, _, _ = _case(lengths)
-                self.assertEqual(ATTENTION._use_small_cp_x_gather(cp), expected)
-
-    def test_actual_mixed_boundary_plans_and_cp4_consensus(self):
-        for delta, padded, sizes in (
-            (0, 47344, None),
-            (568, 65520, None),
-            (576, 65776, [61104, 4672]),
-            (2048, 112880, [63928, 48952]),
-        ):
-            cp, local, _ = _case(_mixed(delta))
-            self.assertEqual(cp.padded_seq_len, padded)
-            plans = []
-            for rank in range(4):
-                cp.cp_rank = rank
-                plan = ATTENTION._prefill_x_group_plan(local[rank], cp)
-                plans.append(plan)
-                self.assertEqual(
-                    None if plan is None else [4 * (e - s) for s, e, _, _ in plan],
-                    sizes,
-                )
-            self.assertTrue(all(p == plans[0] for p in plans))
-
-    def test_padded_boundary_and_single_request_limits(self):
-        for lengths, expected in (
-            ([2048] * 31 + [2040], None),
-            ([2048] * 32, None),
-            ([2048] * 31 + [2049], 2),
-            ([65536, 1], 2),
-            ([65537, 1], None),
-            ([131072], None),
-            ([0, 65536, 1], None),
-        ):
-            cp, local, _ = _case(lengths)
-            plan = ATTENTION._prefill_x_group_plan(local[0], cp)
-            self.assertEqual(None if plan is None else len(plan), expected)
-
-    def test_overridden_threshold_preserves_single_shot_and_explicit_disable(self):
-        cp, local, _ = _case(_mixed(576))
-        for ceiling in (0, -1, 131072):
-            with patch.object(ATTENTION, "_SMALL_CP_X_GATHER_MAX_ROWS", ceiling):
-                self.assertIsNone(ATTENTION._prefill_x_group_plan(local[0], cp))
-        with patch.object(ATTENTION, "_SMALL_CP_X_GATHER_MAX_ROWS", 32768):
-            plan = ATTENTION._prefill_x_group_plan(local[0], cp)
-            self.assertTrue(
-                all(4 * (end - start) <= 32768 for start, end, _, _ in plan)
-            )
-
-    def test_missing_or_special_metadata_and_layout_fall_back_without_device_reads(
-        self,
-    ):
-        cp, local, _ = _case(_mixed(576))
-        bad = (
-            ("cp_size", 2),
-            ("input_lengths_global_host", None),
-            ("chunk_lengths_per_req", None),
-            ("chunk_lengths_per_req", (1,)),
-            ("chunk_length", cp.chunk_length + 1),
-            ("seq_len_full", cp.seq_len_full + 1),
-            ("padded_seq_len", cp.padded_seq_len + 8),
-            ("gather_restore_positions", torch.tensor([0])),
-            ("swa_replay_start", 0),
-            ("unpad_restore", None),
-            ("unpad_restore", cp.unpad_restore.int()),
-            ("unpad_restore", cp.unpad_restore[:-1]),
+class CPSourceCohortPlanCPU(unittest.TestCase):
+    def test_single_group_lease_survives_early_and_consumer_exceptions(self):
+        x = torch.arange(4, dtype=torch.bfloat16).view(2, 2)
+        weight = torch.ones((4, 2), dtype=x.dtype)
+        cp = types.SimpleNamespace(
+            cp_size=4, cp_rank=2, chunk_length=2, unpad_restore=torch.arange(8)
         )
-        with patch.object(
-            torch.Tensor, "tolist", side_effect=AssertionError("D2H")
-        ), patch.object(torch.Tensor, "item", side_effect=AssertionError("D2H")):
-            for name, value in bad:
-                with self.subTest(field=name), patch.object(cp, name, value):
-                    self.assertIsNone(ATTENTION._prefill_x_group_plan(local[0], cp))
-            for x in (local[0].float(), local[0][:, ::2], local[0][:-1]):
-                self.assertIsNone(ATTENTION._prefill_x_group_plan(x, cp))
+        window = torch.empty(32, dtype=x.dtype)
+        events = []
 
-    def test_actual_bytes_bound_can_split_wide_hidden_below_row_limit(self):
-        cp, _, _ = _case([20000] * 4)
-        # Meta tensors exercise the real shape/dtype budget without allocating GBs.
-        cp.unpad_restore = cp.unpad_restore.to("meta")
-        for width, groups in ((5120, 2), (12000, 4), (40000, None)):
-            x = torch.empty(
-                (cp.chunk_length, width), dtype=torch.bfloat16, device="meta"
-            )
-            plan = ATTENTION._prefill_x_group_plan(x, cp)
-            self.assertEqual(None if plan is None else len(plan), groups)
-            for l0, l1, r0, r1 in plan or ():
-                live_bytes = (4 * (l1 - l0) + r1 - r0) * width * 2 + 3 * (r1 - r0) * 8
-                self.assertLessEqual(live_bytes, ATTENTION._CP_X_GROUP_MAX_BYTES)
+        @contextmanager
+        def borrow(reference, group, *, numel, dtype):
+            self.assertIs(reference, x)
+            self.assertIs(group, collective_torch.Group.TP)
+            self.assertEqual(numel, window.numel())
+            self.assertEqual(dtype, window.dtype)
+            events.append("borrow")
+            try:
+                yield window
+            finally:
+                events.append("release")
 
-    def _gather(self, cp, local, plan, references=None):
-        calls = []
+        def gather(region, send, group):
+            self.assertIs(group, collective_torch.Group.TP)
+            self.assertEqual(region.data_ptr(), window.data_ptr())
+            self.assertEqual(send.data_ptr(), window.view(8, 4)[4:6].data_ptr())
+            torch.testing.assert_close(send, x @ weight.T)
+            events.append("direct")
 
-        def start(x, actual_cp, tile, buffer, weights=()):
-            if references is not None:
-                self.assertTrue(
-                    all(ref() is None for ref in references),
-                    "Previous group still alive at next allocation",
+        def launch(device, fn, inputs=()):
+            fn()
+            pending = _v41_cp_async.Pending(None, None)
+            pending.wait = lambda: events.append("join")
+            return pending
+
+        for fail_before_consume in (True, False):
+            events.clear()
+            with (
+                self.subTest(fail_before_consume=fail_before_consume),
+                patch.object(STREAM, "prefill_stream_is_capturing", return_value=False),
+                patch.object(_v41_cp_async, "launch", side_effect=launch),
+                patch.object(
+                    _cp_collectives, "projected_gather_buffer", side_effect=borrow
+                ),
+                patch.object(_cp_collectives, "gather_inplace", side_effect=gather),
+                patch.object(STREAM, "_gather_prefill_x_cohort") as fallback,
+                self.assertRaisesRegex(RuntimeError, "injected"),
+                ExitStack() as resources,
+            ):
+                tiles = STREAM._prefill_projected_x_cohorts(
+                    x,
+                    cp,
+                    [(0, 2, 0, 8)],
+                    [weight],
+                    direct_map=True,
+                    resources=resources,
                 )
-            l0, l1, _, _ = plan[len(calls)]
-            self.assertIs(actual_cp, cp)
-            self.assertEqual(tile, (None, 0, 4 * (l1 - l0)))
-            self.assertEqual(weights, ())
-            self.assertEqual(buffer.shape, (tile[2], x.shape[1]))
-            torch.testing.assert_close(x, local[cp.cp_rank][l0:l1], rtol=0, atol=0)
-            buffer.copy_(torch.cat([rank[l0:l1] for rank in local]))
-            calls.append(tile[2])
-            if references is not None:
-                references.append(weakref.ref(buffer))
-            return types.SimpleNamespace(gathered=buffer)
+                resources.callback(tiles.close)
+                if not fail_before_consume:
+                    start, tile, rows, _ = next(tiles)
+                    self.assertEqual((start, rows), (0, 8))
+                    self.assertEqual(tile.data_ptr(), window.data_ptr())
+                    events.append("consume")
+                raise RuntimeError("injected")
+            fallback.assert_not_called()
+            expected = ["borrow", "direct"]
+            if not fail_before_consume:
+                expected += ["join", "consume"]
+            self.assertEqual(events, expected + ["join", "release"])
 
-        return (
-            calls,
-            patch.object(ATTENTION, "_start_prefill_x_gather_async", new=start),
+    def test_multiple_communication_groups_never_borrow_the_window(self):
+        x = torch.arange(8, dtype=torch.bfloat16).view(4, 2)
+        weight = torch.ones((4, 2), dtype=x.dtype)
+        cp = types.SimpleNamespace(
+            cp_size=4, cp_rank=0, chunk_length=4, unpad_restore=torch.arange(16)
+        )
+        cohorts = [(0, 2, 0, 8), (2, 4, 8, 16)]
+
+        def gather(send, _, gathered):
+            for shard in gathered.chunk(4)[1:]:
+                shard.copy_(send)
+
+        with (
+            patch.object(STREAM, "_CP_SOURCE_RECEIVE_BYTES", 64),
+            patch.object(STREAM, "prefill_stream_is_capturing", return_value=False),
+            patch.object(_cp_collectives, "projected_gather_buffer") as borrow,
             patch.object(
-                ATTENTION,
-                "_wait_prefill_x_gather",
-                new=lambda pending: pending.gathered,
-            ),
-        )
-
-    def test_ragged_restore_exact_order_all_ranks_and_multiple_groups(self):
-        for lengths in (_mixed(576), _mixed(2048), [32769, 1, 65535, 3, 65536]):
-            cp, local, expected = _case(lengths)
-            plan = ATTENTION._prefill_x_group_plan(local[0], cp)
-            original_restore = cp.unpad_restore.clone()
-            for rank in range(4):
-                cp.cp_rank = rank
-                calls, start, wait = self._gather(cp, local, plan)
-                with start, wait:
-                    tiles = ATTENTION._prefill_raw_x_groups(local[rank], cp, plan)
-                    owner_segments = iter(ATTENTION._prefill_x_tile_plan(cp))
-                    end = 0
-                    for offset, tile in tiles:
-                        owner, start_row, rows = next(owner_segments)
-                        self.assertEqual(offset, end)
-                        self.assertEqual(len(tile), rows)
-                        torch.testing.assert_close(
-                            tile,
-                            local[owner][start_row : start_row + rows],
-                            rtol=0,
-                            atol=0,
-                        )
-                        end += len(tile)
-                        torch.testing.assert_close(
-                            tile, expected[offset:end], rtol=0, atol=0
-                        )
-                        del tile
-                    self.assertEqual(end, cp.seq_len_full)
-                    self.assertIsNone(next(owner_segments, None))
-                self.assertEqual(len(calls), len(plan))
-            torch.testing.assert_close(
-                cp.unpad_restore, original_restore, rtol=0, atol=0
-            )
-
-    def _owner_projected(self, cp, local, ratio):
-        offset = 0
-        for owner, start, rows in ATTENTION._prefill_x_tile_plan(cp):
-            values = local[owner][start : start + rows].float()
-            # The CPU fixture uses identity value weights and identity/8 gates.
-            yield offset, values if ratio == 1 else torch.cat((values, values / 8), 1)
-            offset += rows
-
-    def _produce(self, cp, x, ratio, tiles=None, references=None, projected=None):
-        starts = torch.tensor(cp.prefix_lengths_host)
-        lengths = cp.input_lengths_global
-        ids = torch.repeat_interleave(torch.arange(len(starts)), lengths)
-        positions = torch.cat([torch.arange(s, s + n) for s, n in zip(starts, lengths)])
-        state = torch.arange(len(starts) * 8).view(-1, 8).float() / 16
-        state_read = Mock(side_effect=lambda *args: state.clone())
-        writes, projection_rows, index_rows = [], [], []
-
-        def write(values, scores, pos, req, ends):
-            writes.append((values.clone(), scores.clone(), pos.clone(), req.clone()))
-            state.fill_(999)
-
-        def linear(raw, weight):
-            projection_rows.append(len(raw))
-            if references is not None and tiles is not None:
-                references.append(
-                    weakref.ref(raw._base if raw._base is not None else raw)
-                )
-            return F.linear(raw.float(), weight.float())
-
-        compressor = types.ModuleType(COMPRESSOR_NAME)
-        compressor._linear_bf16_bf16_fp32 = linear
-        owner = types.SimpleNamespace(
-            global_wkv=torch.eye(4).bfloat16(),
-            global_wgate=torch.eye(4).bfloat16() / 8,
-            global_norm=torch.ones(4).bfloat16(),
-            index_wk=torch.eye(4).bfloat16(),
-            index_k_norm=torch.ones(4).bfloat16(),
-        )
-        shared = {"prefill_chunk_meta": object()}
-        source = types.SimpleNamespace(
-            compress_ratio=ratio,
-            head_dim=4,
-            rope_head_dim=2,
-            eps=1e-6,
-            layer_id=2,
-            freqs_cis=torch.ones(int((starts + lengths).max()) + 1, 1),
-            _cp_ctx=cp,
-            _owner=lambda: owner,
-            _global_region=lambda: "main",
-            _source_pool=lambda *args: None,
-            _read_state=state_read,
-            _write_states=write,
-            _shared_attention=shared,
-        )
-        original_linear = F.linear
-
-        def observe_index(tensor, weight, *args, **kwargs):
-            if weight is owner.index_wk:
-                index_rows.append(len(tensor))
-            return original_linear(tensor, weight, *args, **kwargs)
-
-        with _cpu_compressor(compressor), patch.object(F, "linear", new=observe_index):
-            ATTENTION._produce_global(
-                source,
-                x,
-                positions,
-                ids,
-                starts,
-                lengths,
-                prefill=True,
-                raw_tiles=tiles,
-                projected_tiles=projected,
-            )
-        self.assertEqual(state_read.call_count, int(ratio == 2))
-        self.assertNotIn("prefill_chunk_meta", shared)
-        return shared["global"][2], writes, projection_rows, index_rows
-
-    def test_actual_producer_carry_snapshot_and_raw_group_lifetime(self):
-        # Tiny chunks force pairs across tiles and a group ending on an odd row.
-        cp, local, expected = _case([11, 2, 9, 7])
-        with patch.object(ATTENTION, "_SMALL_CP_X_GATHER_MAX_ROWS", 32), patch.object(
-            ATTENTION, "_PRODUCE_GLOBAL_TILE_ROWS", 3
+                STREAM, "_gather_prefill_x_cohort", side_effect=gather
+            ) as fallback,
+            ExitStack() as resources,
         ):
-            plan = ATTENTION._prefill_x_group_plan(local[0], cp)
-            for ratio in (1, 2):
-                reference = self._produce(
-                    cp,
-                    local[0],
-                    ratio,
-                    projected=self._owner_projected(cp, local, ratio),
-                )
-                references = []
-                calls, start, wait = self._gather(cp, local, plan, references)
-                with start, wait:
-                    raw = ATTENTION._prefill_raw_x_groups(local[0], cp, plan)
-                    actual = self._produce(cp, local[0], ratio, raw, references)
-                self.assertEqual(len(calls), len(plan))
-                self.assertTrue(all(ref() is None for ref in references))
-                torch.testing.assert_close(actual[0], reference[0], rtol=0, atol=0)
-                self.assertEqual(actual[3], reference[3])
-                for column in range(4):
-                    if ratio == 2:
-                        torch.testing.assert_close(
-                            torch.cat([w[column] for w in actual[1]]),
-                            torch.cat([w[column] for w in reference[1]]),
-                            rtol=0,
-                            atol=0,
-                        )
-
-    def test_full_mixed_producer_and_all_gemm_shapes_match_original_owner(self):
-        for delta in (576, 2048):
-            cp, local, _ = _case(_mixed(delta))
-            plan = ATTENTION._prefill_x_group_plan(local[0], cp)
-            for ratio in (1, 2):
-                baseline = self._produce(
-                    cp,
-                    local[0],
-                    ratio,
-                    projected=self._owner_projected(cp, local, ratio),
-                )
-                _, start, wait = self._gather(cp, local, plan)
-                with start, wait:
-                    actual = self._produce(
-                        cp,
-                        local[0],
-                        ratio,
-                        ATTENTION._prefill_raw_x_groups(local[0], cp, plan),
-                    )
-                torch.testing.assert_close(actual[0], baseline[0], rtol=0, atol=0)
-                torch.testing.assert_close(actual[1], baseline[1], rtol=0, atol=0)
-                self.assertEqual(actual[3], baseline[3])
-                self.assertEqual(
-                    actual[2],
-                    [
-                        rows
-                        for _, _, rows in ATTENTION._prefill_x_tile_plan(cp)
-                        for _ in range(ratio)
-                    ],
-                )
-
-    def test_whole_projected_groups_preserve_order_and_release_storage(self):
-        for lengths in ([11, 2, 9, 7], [7, 9, 2, 11], [1, 1, 25, 17]):
-            cp, local, expected = _case(lengths)
-            with patch.object(ATTENTION, "_SMALL_CP_X_GATHER_MAX_ROWS", 32):
-                plan = ATTENTION._prefill_x_group_plan(local[0], cp)
-            self.assertIsNotNone(plan)
-            calls, refs = [], []
-
-            def gather(send, context, tile, buffer, weights=()):
-                self.assertTrue(all(ref() is None for ref in refs))
-                begin, end, _, _ = plan[len(calls)]
-                values = torch.cat([part[begin:end].float() for part in local])
-                buffer.copy_(torch.cat((values, values / 8), 1))
-                calls.append(tile)
-                return types.SimpleNamespace(gathered=buffer)
-
-            compressor = types.ModuleType(COMPRESSOR_NAME)
-            compressor._linear_bf16_bf16_fp32 = lambda x, w: F.linear(
-                x.float(), w.float()
+            tiles = STREAM._prefill_projected_x_cohorts(
+                x, cp, cohorts, [weight], direct_map=True, resources=resources
             )
-            with _cpu_compressor(compressor), patch.object(
-                ATTENTION, "_start_prefill_x_gather_async", side_effect=gather
-            ), patch.object(
-                ATTENTION, "_wait_prefill_x_gather", side_effect=lambda h: h.gathered
-            ):
-                tiles = ATTENTION._prefill_projected_x_groups(
-                    local[0],
-                    cp,
-                    plan,
-                    (torch.eye(4).bfloat16(), torch.eye(4).bfloat16() / 8),
-                    whole_groups=True,
-                )
-                for start, tensor in tiles:
-                    _, _, begin, end = plan[len(refs)]
-                    self.assertEqual(start, begin)
-                    ref = expected[begin:end].float()
-                    torch.testing.assert_close(
-                        tensor, torch.cat((ref, ref / 8), 1), rtol=0, atol=0
-                    )
-                    refs.append(weakref.ref(tensor))
-                    del tensor
-                self.assertEqual(len(calls), len(plan))
-                self.assertTrue(all(ref() is None for ref in refs))
-
-    def test_owner_groups_preserve_segments_packing_and_consumer_lifetime(self):
-        for lengths in ([11, 2, 9, 7], [7, 9, 2, 11], [1, 1, 25, 17]):
-            cp, local, _ = _case(lengths)
-            with patch.object(ATTENTION, "_SMALL_CP_X_GATHER_MAX_ROWS", 32):
-                plan = ATTENTION._prefill_x_group_plan(local[0], cp)
-            self.assertIsNotNone(plan)
-            for rank in range(4):
-                cp.cp_rank = rank
-                for ratio in (1, 2):
-                    weights = (torch.eye(4).bfloat16(),) * ratio
-                    if ratio == 2:
-                        weights = (weights[0], weights[1] / 8)
-                    projected_shapes, gather_calls, packs, refs = [], [], [], []
-
-                    def project(raw, weight):
-                        self.assertTrue(raw.is_contiguous())
-                        projected_shapes.append((len(raw), raw.stride(), weight.shape))
-                        return F.linear(raw.float(), weight.float())
-
-                    def start(send, ctx, tile, buffer, weights=()):
-                        self.assertTrue(all(ref() is None for ref in refs))
-                        l0, l1, _, _ = plan[len(gather_calls)]
-                        expected = torch.cat(
-                            [local[r][l0:l1].float() for r in range(4)]
-                        )
-                        if ratio == 2:
-                            expected = torch.cat((expected, expected / 8), 1)
-                        # Padding is zeroed rather than projected. All selected
-                        # owner rows must agree with independent CP rank packing.
-                        for owner, row, size in ATTENTION._prefill_x_tile_plan(cp):
-                            if owner == rank and l0 <= row < l1:
-                                offset = row - l0
-                                target = expected[
-                                    rank * (l1 - l0)
-                                    + offset : rank * (l1 - l0)
-                                    + offset
-                                    + size
-                                ]
-                                torch.testing.assert_close(
-                                    send[offset : offset + size], target, rtol=0, atol=0
-                                )
-                        buffer.copy_(expected)
-                        gather_calls.append(tile)
-                        return types.SimpleNamespace(gathered=buffer)
-
-                    original_copy = torch._foreach_copy_
-                    original_select = torch.Tensor.index_select
-
-                    def pack(destinations, sources):
-                        packs.append(len(sources))
-                        self.assertTrue(all(t.is_contiguous() for t in sources))
-                        return original_copy(destinations, sources)
-
-                    def select(tensor, *args):
-                        result = original_select(tensor, *args)
-                        refs.append(weakref.ref(result))
-                        return result
-
-                    compressor = types.ModuleType(COMPRESSOR_NAME)
-                    compressor._linear_bf16_bf16_fp32 = project
-                    with _cpu_compressor(compressor), patch.object(
-                        ATTENTION, "_start_prefill_x_gather_async", side_effect=start
-                    ), patch.object(
-                        ATTENTION,
-                        "_wait_prefill_x_gather",
-                        side_effect=lambda h: h.gathered,
-                    ), patch.object(
-                        torch, "_foreach_copy_", side_effect=pack
-                    ), patch.object(
-                        torch.Tensor, "index_select", new=select
-                    ):
-                        actual = []
-                        tiles = ATTENTION._prefill_projected_x_groups(
-                            local[rank], cp, plan, weights
-                        )
-                        try:
-                            for offset, tile in tiles:
-                                actual.append((offset, tile.clone()))
-                                del tile
-                        finally:
-                            tiles.close()
-                    expected = list(self._owner_projected(cp, local, ratio))
-                    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-                    self.assertEqual(
-                        [shape[0] for shape in projected_shapes],
-                        [
-                            n
-                            for owner, _, n in ATTENTION._prefill_x_tile_plan(cp)
-                            if owner == rank
-                            for _ in weights
-                        ],
-                    )
-                    self.assertEqual(sum(packs), len(projected_shapes))
-                    self.assertEqual(len(gather_calls), len(plan))
-                    self.assertTrue(all(ref() is None for ref in refs))
-                    reference = self._produce(
-                        cp,
-                        local[rank],
-                        ratio,
-                        projected=self._owner_projected(cp, local, ratio),
-                    )
-                    gather_calls.clear()
-                    refs.clear()
-                    with patch.object(
-                        ATTENTION, "_start_prefill_x_gather_async", side_effect=start
-                    ), patch.object(
-                        ATTENTION,
-                        "_wait_prefill_x_gather",
-                        side_effect=lambda h: h.gathered,
-                    ), patch.object(
-                        torch.Tensor, "index_select", new=select
-                    ):
-                        tiles = ATTENTION._prefill_projected_x_groups(
-                            local[rank], cp, plan, weights
-                        )
-                        try:
-                            produced = self._produce(
-                                cp, local[rank], ratio, projected=tiles
-                            )
-                        finally:
-                            tiles.close()
-                    torch.testing.assert_close(
-                        produced[:2], reference[:2], rtol=0, atol=0
-                    )
-                    self.assertEqual(produced[3], reference[3])
-                    self.assertTrue(all(ref() is None for ref in refs))
-
-    def test_existing_async_event_chain_is_used_for_every_group(self):
-        # Execute the real transport helper; only CUDA/NCCL APIs are mocked.
-        log = []
-        current = types.SimpleNamespace(
-            wait_event=lambda event: log.append("consume.wait_event")
-        )
-        comm = types.SimpleNamespace(
-            wait_stream=lambda stream: log.append("comm.wait_current")
-        )
-        work = types.SimpleNamespace(wait=lambda: log.append("work.wait"))
-        event = types.SimpleNamespace(record=lambda stream: log.append("event.record"))
-        group = object()
-        collective = types.ModuleType("rtp_llm.models_py.distributed.collective_torch")
-        collective.Group = types.SimpleNamespace(TP="TP")
-        collective._get_group = lambda kind: group
-        parent = types.ModuleType("rtp_llm.models_py.distributed")
-        parent.collective_torch = collective
-
-        def gather(output, local, **kwargs):
-            log.append("all_gather")
-            self.assertIs(kwargs["group"], group)
-            self.assertTrue(kwargs["async_op"])
-            output.copy_(local.repeat(4, 1))
-            return work
-
-        with patch.dict(
-            sys.modules, {parent.__name__: parent, collective.__name__: collective}
-        ), patch.object(
-            ATTENTION, "_get_cp_comm_stream", create=True, return_value=comm
-        ), patch.object(
-            torch.cuda, "current_stream", return_value=current
-        ), patch.object(
-            torch.cuda, "stream", side_effect=lambda stream: nullcontext()
-        ), patch.object(
-            torch.cuda, "Event", return_value=event
-        ), patch.object(
-            torch.distributed, "all_gather_into_tensor", side_effect=gather
-        ):
-            for rows in (3, 7):
-                x = torch.ones(rows, 4).bfloat16()
-                buffer = x.new_empty(rows * 4, 4)
-                handle = ATTENTION._start_prefill_x_gather_async(
-                    x, types.SimpleNamespace(cp_rank=0), (None, 0, rows * 4), buffer
-                )
-                result = ATTENTION._wait_prefill_x_gather(handle)
-                self.assertTrue(torch.equal(result, x.repeat(4, 1)))
+            results = list(tiles)
+        borrow.assert_not_called()
+        self.assertEqual(fallback.call_count, 2)
         self.assertEqual(
-            log,
-            [
-                "comm.wait_current",
-                "all_gather",
-                "work.wait",
-                "event.record",
-                "consume.wait_event",
-                "work.wait",
-            ]
-            * 2,
+            [(start, rows) for start, _, rows, _ in results], [(0, 8), (8, 8)]
         )
+        for i, (_, tile, _, _) in enumerate(results):
+            expected = (x[i * 2 : (i + 1) * 2] @ weight.T).repeat(4, 1)
+            torch.testing.assert_close(tile, expected)
+
+    def test_prefill_gather_handoff_on_collective_and_nccl_paths(self):
+        events = []
+        producer = types.SimpleNamespace(wait_stream=lambda _: events.append("join"))
+        comm = types.SimpleNamespace(
+            wait_stream=lambda _: events.append("producer_ready")
+        )
+        out, group = object(), object()
+        source = types.SimpleNamespace(device="cuda:0")
+
+        @contextmanager
+        def use_stream(stream):
+            self.assertIs(stream, comm)
+            events.append("enter_comm")
+            yield
+            events.append("leave_comm")
+
+        def launch_fast(dst, send, operation_group):
+            self.assertIs(dst, out)
+            self.assertIs(send, source)
+            self.assertIs(operation_group, group)
+            events.append("attempt")
+            return fast_path
+
+        def launch_nccl(dst, send, *, group):
+            self.assertIs(dst, out)
+            self.assertIs(send, source)
+            events.append("nccl")
+
+        for fast_path in (True, False):
+            with self.subTest(fast_path=fast_path):
+                events.clear()
+                with (
+                    patch.object(collective_torch, "_get_group", return_value=group),
+                    patch.object(torch.cuda, "current_stream", return_value=producer),
+                    patch.object(torch.cuda, "stream", side_effect=use_stream),
+                    patch.object(STREAM, "_get_cp_comm_stream", return_value=comm),
+                    patch.object(
+                        STREAM, "try_all_gather_into", side_effect=launch_fast
+                    ),
+                    patch.object(
+                        torch.distributed,
+                        "all_gather_into_tensor",
+                        side_effect=launch_nccl,
+                    ),
+                ):
+                    STREAM._gather_prefill_x_cohort(source, None, out)
+                expected = ["producer_ready", "enter_comm", "attempt"]
+                if not fast_path:
+                    expected.append("nccl")
+                self.assertEqual(events, expected + ["leave_comm", "join"])
+
+    def test_last_hidden_keeps_unique_rank_ownership_with_or_without_provider(self):
+        context = types.SimpleNamespace(
+            cp_size=4,
+            input_lengths_global=torch.tensor([1, 2]),
+            prefix_lengths=torch.tensor([10, 20]),
+            req_id_per_token=torch.tensor([0, 1, 1]),
+            global_positions=torch.tensor([10, 20, 21]),
+            local_is_real=torch.tensor([True, True, False]),
+        )
+        local = torch.tensor([[5.0], [11.0], [19.0]])
+        gathered = torch.tensor(
+            [[5.0], [0.0], [0.0], [23.0], [0.0], [0.0], [0.0], [0.0]]
+        )
+
+        for use_provider in (True, False):
+            with self.subTest(use_provider=use_provider):
+                with (
+                    patch.object(
+                        cp_runtime,
+                        "try_all_gather",
+                        return_value=gathered if use_provider else None,
+                    ) as provider,
+                    patch.object(
+                        cp_runtime, "all_gather", return_value=gathered
+                    ) as fallback,
+                ):
+                    actual = cp_runtime.cp_gather_last_by_request(local, context)
+                torch.testing.assert_close(
+                    provider.call_args.args[0], torch.tensor([[5.0], [0.0]])
+                )
+                torch.testing.assert_close(actual, torch.tensor([[5.0], [23.0]]))
+                self.assertEqual(fallback.call_count, int(not use_provider))
+
+    def test_other_cp_sizes_keep_global_order(self):
+        lengths = (1, 129, 65537, 131071, 10000000)
+        for cp_size in (2, 8):
+            chunks = tuple(
+                2 * ((length + 2 * cp_size - 1) // (2 * cp_size)) for length in lengths
+            )
+            cp = types.SimpleNamespace(
+                cp_size=cp_size,
+                input_lengths_global_host=lengths,
+                chunk_lengths_per_req=chunks,
+                seq_len_full=sum(lengths),
+                chunk_length=sum(chunks),
+            )
+            plan = STREAM._prefill_x_cohort_plan(cp, projected_row_bytes=4096)
+            self.assertEqual(plan[0][2], 0)
+            self.assertEqual(plan[-1][3], sum(lengths))
+            self.assertTrue(all(a[3] == b[2] for a, b in zip(plan, plan[1:])))
+            self.assertTrue(
+                all(
+                    cp_size * (local_end - local_start) * 4096
+                    <= STREAM._CP_SOURCE_RECEIVE_BYTES
+                    for local_start, local_end, _, _ in plan
+                )
+            )
+
+    def test_cohorts_cover_global_order_and_local_sources_with_bounded_memory(self):
+        rng = random.Random(20261105)
+        cases = [
+            (1,),
+            (129,) * 8,
+            (3330, 3331, 3332, 3333, 3334, 3330, 3331, 3332, 3333),
+            (1024,) * 32,
+            (1024,) * 64,
+            (8192,) * 8,
+            (131071,),
+            (131073,),
+            (262144,),
+            (1048576,),
+            (10000000,),
+            (1,) * 1024,
+        ]
+        cases.extend(
+            tuple(rng.randrange(1, 131073) for _ in range(rng.randrange(1, 65)))
+            for _ in range(50)
+        )
+        for lengths in cases:
+            with self.subTest(batch=len(lengths), fresh=sum(lengths)):
+                chunks = tuple(2 * ((n + 7) // 8) for n in lengths)
+                cp = types.SimpleNamespace(
+                    cp_size=4,
+                    input_lengths_global_host=lengths,
+                    chunk_lengths_per_req=chunks,
+                    seq_len_full=sum(lengths),
+                    chunk_length=sum(chunks),
+                )
+                global_ends = []
+                local_starts = []
+                global_cursor = local_cursor = 0
+                for length, chunk in zip(lengths, chunks):
+                    local_starts.append(local_cursor)
+                    global_cursor += length
+                    local_cursor += chunk
+                    global_ends.append(global_cursor)
+                plan = STREAM._prefill_x_cohort_plan(cp, projected_row_bytes=4096)
+                self.assertTrue(plan)
+                self.assertEqual(plan[0][2], 0)
+                self.assertEqual(plan[-1][3], cp.seq_len_full)
+                for index, (
+                    local_start,
+                    local_end,
+                    global_start,
+                    global_end,
+                ) in enumerate(plan):
+                    self.assertGreater(local_end, local_start)
+                    self.assertGreater(global_end, global_start)
+                    self.assertLessEqual(
+                        cp.cp_size * (local_end - local_start) * 4096,
+                        STREAM._CP_SOURCE_RECEIVE_BYTES,
+                    )
+                    if index:
+                        self.assertEqual(global_start, plan[index - 1][3])
+                    positions = [global_start, global_end - 1]
+                    if global_end - global_start > 2:
+                        positions.append((global_start + global_end) // 2)
+                    for position in positions:
+                        request = bisect.bisect_right(global_ends, position)
+                        request_start = global_ends[request - 1] if request else 0
+                        fresh = position - request_start
+                        half = chunks[request] // 2
+                        segment, offset = divmod(fresh, half)
+                        local = local_starts[request] + offset
+                        if segment >= cp.cp_size:
+                            local += half
+                        self.assertTrue(local_start <= local < local_end)
+
+    def test_long_request_keeps_global_order_and_bounded_tiles(self):
+        from rtp_llm.models_py.modules.dsv41.fp8._v41_producer_metadata import (
+            raw_tile_plan,
+        )
+
+        for length in (131073, 159357, 262144, 1048576, 10000000):
+            chunk = 2 * ((length + 7) // 8)
+            cp = types.SimpleNamespace(
+                cp_size=4,
+                input_lengths_global_host=(length,),
+                chunk_lengths_per_req=(chunk,),
+                seq_len_full=length,
+                chunk_length=chunk,
+            )
+            for ratio, row_bytes in ((1, 1024), (2, 4096)):
+                with self.subTest(length=length, ratio=ratio):
+                    plan = STREAM._prefill_x_cohort_plan(
+                        cp, projected_row_bytes=row_bytes
+                    )
+                    self.assertEqual(plan[0][2], 0)
+                    self.assertEqual(plan[-1][3], length)
+                    self.assertTrue(all(a[3] == b[2] for a, b in zip(plan, plan[1:])))
+                    for local_begin, local_end, global_begin, global_end in plan:
+                        self.assertLessEqual(
+                            4 * (local_end - local_begin) * row_bytes,
+                            STREAM._CP_SOURCE_RECEIVE_BYTES,
+                        )
+                    if length == 1048576:
+                        self.assertEqual(len(plan), 16 if ratio == 1 else 56)
+                    source_ranges = list(STREAM._prefill_source_tile_ranges(plan))
+                    self.assertTrue(
+                        all(0 < end - start <= 65536 for start, end in source_ranges)
+                    )
+                    self.assertEqual(source_ranges[0][0], 0)
+                    self.assertEqual(source_ranges[-1][1], length)
+                    self.assertTrue(
+                        all(
+                            a[1] == b[0]
+                            for a, b in zip(source_ranges, source_ranges[1:])
+                        )
+                    )
+                    for rank in range(4):
+                        tiles = list(
+                            raw_tile_plan(
+                                (length,),
+                                (31744,),
+                                ratio,
+                                4,
+                                rank,
+                                256,
+                                ranges=iter(source_ranges),
+                            )
+                        )
+                        self.assertEqual(
+                            [(a, b) for a, b, _ in tiles],
+                            source_ranges,
+                        )
+
+    def test_replay_layout_is_rejected_before_collective(self):
+        cp, _, _ = _case((129, 1024))
+        cp.swa_replay_start = 1
+        with self.assertRaisesRegex(ValueError, "full zigzag"):
+            STREAM._prefill_x_cohort_plan(cp, projected_row_bytes=4096)
 
 
 if __name__ == "__main__":

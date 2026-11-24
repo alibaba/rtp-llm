@@ -10,8 +10,15 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from rtp_llm.models_py.modules.dsv41.vision_residual_add import (
+    apply_vision_residual_rmsnorm,
+)
 
-@lru_cache(32)
+
+# Production traffic sees ~400 distinct image grids per hour. A 32-entry cache
+# thrashes and rebuilds the rotary tables on nearly every image; size it for
+# the observed working set instead.
+@lru_cache(512)
 def _vision_cos_sin(n_h: int, n_w: int, dim: int, theta: float, device: str):
     inv_freq = 1.0 / (
         theta ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim)
@@ -34,13 +41,50 @@ class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim, dtype=torch.float32))
+        # Checkpoint parameters remain BF16. FlashInfer accumulates in FP32
+        # inside the kernel; no per-forward weight conversion is needed.
+        self._rmsnorm_backend = "flashinfer"
+        self.weight = nn.Parameter(torch.ones(dim, dtype=torch.bfloat16))
+
+    def _uses_flashinfer(self, x):
+        return x.is_cuda and not self.training and not torch.is_grad_enabled()
+
+    def _flashinfer_rmsnorm(self, x):
+        from flashinfer.norm import rmsnorm
+
+        if x.dtype != torch.bfloat16 or self.weight.dtype != torch.bfloat16:
+            raise ValueError("FlashInfer vision RMSNorm requires BF16 input and weight")
+        if x.ndim not in (2, 3):
+            raise ValueError("FlashInfer vision RMSNorm requires 2D/3D input")
+        if x.stride(-1) != 1 or self.weight.device != x.device:
+            raise ValueError(
+                "FlashInfer vision RMSNorm requires contiguous last dimension and same-device weight"
+            )
+        # Out-of-place: the residual stream may still own x. Missing optional
+        # dependencies or failed launches are errors, not silent native fallback.
+        # FlashInfer loads BF16 operands and reduces in FP32 inside the kernel.
+        return rmsnorm(x, self.weight, eps=self.eps)
 
     def forward(self, x: torch.Tensor):
+        if self._uses_flashinfer(x):
+            return self._flashinfer_rmsnorm(x)
+        # CPU and autograd retain the ordinary expression. Do not catch
+        # dependency or launch errors after selecting CUDA inference.
         dtype = x.dtype
         x = x.float()
         x = x * torch.rsqrt(x.square().mean(-1, keepdim=True) + self.eps)
         return (self.weight * x).to(dtype)
+
+    def forward_with_residual(self, x, residual):
+        """Preserve both outputs needed by the pre-norm residual block."""
+        if self._uses_flashinfer(x):
+            fused = apply_vision_residual_rmsnorm(
+                x, residual, self.weight, self.eps
+            )
+            if fused is not None:
+                return fused
+        summed = x + residual
+        return summed, self(summed)
 
 
 class PatchEmbed(nn.Module):
@@ -95,7 +139,22 @@ class MLP(nn.Module):
         self.w2 = nn.Linear(inter, dim, bias=False)
 
     def forward(self, x):
+        from rtp_llm.models_py.modules.dsv41.vision_silu_mul_fused import (
+            apply_vision_silu_mul,
+        )
+        from rtp_llm.models_py.modules.dsv41.vision_swiglu import apply_vision_swiglu
+
+        if not self.training:
+            intermediate = apply_vision_swiglu(x, self.w1.weight)
+            if intermediate is not None:
+                return self.w2(intermediate)
+
+        # Unsupported device/shape/dtype and autograd retain the old path.
+        # Supported Quack dependency/launch errors propagate from the helper.
         gate, up = self.w1(x).chunk(2, dim=-1)
+        intermediate = apply_vision_silu_mul(gate, up)
+        if intermediate is not None:
+            return self.w2(intermediate)
         return self.w2(F.silu(gate) * up)
 
 

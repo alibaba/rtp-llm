@@ -1,0 +1,1142 @@
+"""Logical ownership, bounded scratch, and byte-exact owned-row transport."""
+
+import os
+import random
+import tempfile
+import unittest
+from contextlib import contextmanager, nullcontext
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+import triton
+
+from rtp_llm.models_py.distributed import collective_torch
+from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import cp_kv_slot_mapping
+from rtp_llm.models_py.modules.dsv41.attn_type import HCA_KV, INDEXER_KV
+from rtp_llm.models_py.modules.dsv41.fp8 import _v41_fp4_triton as codec
+from rtp_llm.models_py.modules.dsv41.fp8 import _v41_joint_pool as joint
+from rtp_llm.models_py.modules.dsv41.fp8 import _v41_owned_pool as owned
+from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_pools as pools
+
+
+class OwnedPoolHostTest(unittest.TestCase):
+    def test_collective_keeps_local_receive_slice_as_input(self):
+        gathered = torch.empty(12, dtype=torch.uint8)
+        send = gathered[6:9]
+        group = object()
+        for fast_path in (True, False):
+            with self.subTest(fast_path=fast_path):
+                work = Mock()
+                with (
+                    patch.object(collective_torch, "_get_group", return_value=group),
+                    patch.object(dist, "get_world_size", return_value=4),
+                    patch.object(dist, "get_rank", return_value=2),
+                    patch.object(
+                        owned, "try_all_gather_into", return_value=fast_path
+                    ) as attempt,
+                    patch.object(
+                        dist, "all_gather_into_tensor", return_value=work
+                    ) as nccl,
+                ):
+                    owned._collect(gathered, send, 4, 2)
+                attempt.assert_called_once_with(gathered, send, group)
+                if fast_path:
+                    nccl.assert_not_called()
+                    work.wait.assert_not_called()
+                else:
+                    nccl.assert_called_once_with(
+                        gathered, send, group=group, async_op=True
+                    )
+                    work.wait.assert_called_once_with()
+
+    def test_segmented_path_requires_startup_kernels_before_collective(self):
+        layout = (1, 256, 128, 128, 0, torch.int32, torch.int32, 128, 128, 4)
+        with self.assertRaisesRegex(RuntimeError, "startup warmup"):
+            owned.try_gather(
+                None,
+                None,
+                (600_001,),
+                None,
+                None,
+                None,
+                layout,
+                None,
+            )
+
+    def test_try_gather_uses_segmented_plan_after_common_plan_rejects(self):
+        layout = (1, 256, 128, 128, 0, torch.int32, torch.int32, 128, 128, 4)
+        plan = SimpleNamespace(direct_receive_aligned=False)
+        result = object()
+        with (
+            patch.object(owned, "plan_groups", return_value=None) as common,
+            patch.object(
+                owned, "plan_segmented_groups", return_value=plan
+            ) as segmented,
+            patch.object(owned, "_validate_local"),
+            patch.object(owned, "_gather_planned", return_value=result) as gather,
+        ):
+            self.assertIs(
+                owned.try_gather(
+                    None, None, (600_001,), None, None, None, layout, object()
+                ),
+                result,
+            )
+        common.assert_called_once_with((600_001,), cp_size=4, owner_rows=256)
+        segmented.assert_called_once_with((600_001,), cp_size=4, owner_rows=256)
+        self.assertIs(gather.call_args.args[8], plan)
+
+    def test_owned_pool_borrows_only_for_aligned_groups(self):
+        layout = (1, 256, 128, 128, 0, torch.int32, torch.int32, 128, 128, 4)
+        ends = torch.tensor([5120], dtype=torch.int64)
+        region = object()
+        output = object()
+        calls = []
+
+        @contextmanager
+        def borrow(reference, group, *, numel, dtype):
+            self.assertIs(reference, ends)
+            self.assertEqual(numel, 5120 * owned._BYTES)
+            self.assertEqual(dtype, torch.uint8)
+            calls.append("borrow")
+            yield region
+            calls.append("release")
+
+        def gather(*args, borrowed_receive, **kwargs):
+            if borrowed_receive is not None:
+                self.assertIs(borrowed_receive, region)
+                self.assertEqual(calls, ["borrow"])
+            calls.append("restore")
+            return output
+
+        with (
+            patch.object(owned, "_validate_local"),
+            patch.object(owned, "borrowed_gather_buffer", side_effect=borrow),
+            patch.object(owned, "_gather_planned", side_effect=gather),
+        ):
+            self.assertIs(
+                owned.try_gather(
+                    None, None, (5120,), ends, None, None, layout, object()
+                ),
+                output,
+            )
+            self.assertEqual(calls, ["borrow", "restore", "release"])
+            calls.clear()
+            self.assertIs(
+                owned.try_gather(None, None, (1,), ends, None, None, layout, object()),
+                output,
+            )
+            self.assertEqual(calls, ["restore"])
+
+    def test_segmented_plan_covers_mixed_requests_with_bounded_scratch(self):
+        for cp in (1, 2, 4):
+            for ratio in (1, 2):
+                unit = 256 // ratio
+                counts = (0, 17, 600_001, 0, 257, 1_200_003, 1)
+                for tier in (256, 512, 1024):
+                    with (
+                        self.subTest(cp=cp, ratio=ratio, tier=tier),
+                        patch.object(owned, "_MAX_SCRATCH_MB", tier),
+                    ):
+                        plan = owned.plan_segmented_groups(
+                            counts, cp_size=cp, owner_rows=unit
+                        )
+                        self.assertIsNotNone(plan)
+                        self.assertLessEqual(plan.temporary_bytes, tier * 1024**2)
+                        covered = [[] for _ in counts]
+                        for group in plan.groups:
+                            if group.base < 0:
+                                for request in range(group.first, group.stop):
+                                    covered[request].append((0, counts[request]))
+                            else:
+                                self.assertEqual(group.stop, group.first + 1)
+                                self.assertEqual(group.base % (cp * unit), 0)
+                                self.assertEqual(group.base % 256, 0)
+                                self.assertEqual(
+                                    group.local_rows,
+                                    max(
+                                        owned.owned_count(group.count, cp, unit, rank)
+                                        for rank in range(cp)
+                                    ),
+                                )
+                                covered[group.first].append(
+                                    (group.base, group.base + group.count)
+                                )
+                        for count, ranges in zip(counts, covered):
+                            cursor = 0
+                            for begin, end in ranges:
+                                self.assertEqual(begin, cursor)
+                                cursor = end
+                            self.assertEqual(cursor, count)
+
+    def test_segmented_plan_preserves_global_request_ids_across_128(self):
+        counts = (1,) * 128 + (600_001,) + (0,) * 895
+        with patch.object(owned, "_MAX_SCRATCH_MB", 256):
+            plan = owned.plan_segmented_groups(counts, cp_size=4, owner_rows=256)
+        self.assertIsNotNone(plan)
+        self.assertLessEqual(plan.temporary_bytes, 256 * 1024**2)
+        self.assertEqual(plan.groups[0].first, 0)
+        self.assertEqual(plan.groups[0].stop, 128)
+        self.assertTrue(
+            all(
+                group.first == 128 and group.stop == 129
+                for group in plan.groups
+                if group.base >= 0
+            )
+        )
+        self.assertEqual(plan.groups[-1].stop, 1024)
+        self.assertTrue(all(group.stop - group.first <= 128 for group in plan.groups))
+
+    def test_fixed_scratch_budget_covers_production_and_segmented_edges(self):
+        for tier, batch, count, groups in (
+            (256, 16, 32768, 1),
+            (256, 32, 32768, 2),
+            (256, 64, 32768, 4),
+            (512, 32, 32768, 1),
+            (512, 64, 32768, 2),
+            (1024, 64, 32768, 1),
+            (1024, 1024, 2, 8),
+        ):
+            with (
+                self.subTest(tier=tier, batch=batch, count=count),
+                patch.object(owned, "_MAX_SCRATCH_MB", tier),
+            ):
+                plan = owned.plan_groups((count,) * batch, cp_size=4, owner_rows=256)
+                self.assertIsNotNone(plan)
+                self.assertEqual(len(plan.groups), groups)
+                self.assertLessEqual(plan.temporary_bytes, tier * 1024**2)
+        with patch.object(owned, "_MAX_SCRATCH_MB", 256):
+            self.assertIsNone(
+                owned.plan_groups((1_048_576,), cp_size=4, owner_rows=256)
+            )
+            self.assertIsNotNone(
+                owned.plan_segmented_groups((1_048_576,), cp_size=4, owner_rows=256)
+            )
+        with patch.object(owned, "_MAX_SCRATCH_MB", 1024):
+            self.assertIsNotNone(
+                owned.plan_groups((1_048_576,), cp_size=4, owner_rows=256)
+            )
+
+    def test_unsupported_plan_does_not_allocate_consumer_output(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_kv_workspace
+
+        with patch.object(
+            _v41_prefill_kv_workspace,
+            "prepare_global_workspace",
+            side_effect=AssertionError("fallback allocated an unused full KV output"),
+        ):
+            for cp, ends in ((8, (129,)), (4, (1,) * 1025)):
+                layout = (1, 256, 128, 128, 0, torch.int32, torch.int32, 128, 128, cp)
+                self.assertIsNone(
+                    owned.try_gather(
+                        None,
+                        None,
+                        ends,
+                        None,
+                        None,
+                        None,
+                        layout,
+                        None,
+                        swa=object(),
+                        output_stream=object(),
+                    )
+                )
+
+    def test_owned_counts_and_inverse_cover_each_logical_row_once(self):
+        rng = random.Random(481)
+        for cp in (1, 2, 4):
+            for unit in (64, 128, 256):
+                for count in (
+                    0,
+                    1,
+                    63,
+                    64,
+                    127,
+                    128,
+                    129,
+                    255,
+                    256,
+                    257,
+                    1025,
+                    rng.randrange(4096),
+                ):
+                    actual = []
+                    for rank in range(cp):
+                        local_count = owned.owned_count(count, cp, unit, rank)
+                        rows = [j for j in range(count) if j // unit % cp == rank]
+                        self.assertEqual(local_count, len(rows))
+                        for k, row in enumerate(rows):
+                            self.assertEqual(k, row // (unit * cp) * unit + row % unit)
+                        actual.extend(rows)
+                    self.assertEqual(sorted(actual), list(range(count)))
+
+    def test_global_scratch_bound_and_tail_only_padding(self):
+        rng = random.Random(1903)
+        for cp in (1, 2, 4):
+            for batch in (1, 2, 31, 32, 64, 128, 129, 257, 1024):
+                for counts in (
+                    (32768,) * batch,
+                    tuple(rng.randrange(32769) for _ in range(batch)),
+                    (0,) * batch,
+                ):
+                    plan = owned.plan_groups(
+                        counts, cp_size=cp, owner_rows=128, limit=256 * 1024**2
+                    )
+                    self.assertIsNotNone(plan)
+                    self.assertLessEqual(plan.temporary_bytes, 256 * 1024**2)
+                    cursor = 0
+                    for group in plan.groups:
+                        self.assertEqual(group.first, cursor)
+                        self.assertLessEqual(group.stop - group.first, 128)
+                        ns = counts[group.first : group.stop]
+                        self.assertEqual(
+                            group.rows, sum(triton.cdiv(n, 256) * 256 for n in ns)
+                        )
+                        actual_owned = [
+                            sum(owned.owned_count(n, cp, 128, rank) for n in ns)
+                            for rank in range(cp)
+                        ]
+                        self.assertEqual(group.local_rows, max(actual_owned))
+                        cursor = group.stop
+                    self.assertEqual(cursor, batch)
+                    coefficient = 356 * cp + 16
+                    self.assertEqual(
+                        plan.temporary_bytes,
+                        coefficient * plan.max_local_rows + 16 * plan.max_output_rows,
+                    )
+                    self.assertEqual(
+                        plan.index_output_bytes,
+                        68 * sum(group.rows for group in plan.groups),
+                    )
+
+    def test_scratch_includes_inverse_and_independent_group_maxima(self):
+        plan = owned.plan_groups(
+            (1,) * 10 + (2048,), cp_size=4, owner_rows=128, limit=1_200_000
+        )
+        self.assertEqual(len(plan.groups), 2)
+        self.assertGreater(plan.groups[0].rows, plan.groups[1].rows)
+        self.assertLess(plan.groups[0].local_rows, plan.groups[1].local_rows)
+        self.assertEqual(
+            plan.temporary_bytes,
+            (356 * 4 + 16) * plan.groups[1].local_rows + 16 * plan.groups[0].rows,
+        )
+        self.assertLessEqual(plan.temporary_bytes, 1_200_000)
+        for batch, ratio, groups in (
+            (32, 1, (21, 11)),
+            (32, 2, (32,)),
+            (64, 1, (21, 21, 21, 1)),
+            (64, 2, (43, 21)),
+        ):
+            plan = owned.plan_groups(
+                (32768 // ratio,) * batch,
+                cp_size=4,
+                owner_rows=256 // ratio,
+                limit=256 * 1024**2,
+            )
+            self.assertEqual(tuple(g.stop - g.first for g in plan.groups), groups)
+            self.assertLessEqual(plan.temporary_bytes, 256 * 1024**2)
+
+    def test_padded_tiles_remain_in_one_request_for_ragged_and_empty_rows(self):
+        rng = random.Random(137)
+        for counts in (
+            (0, 1, 0, 127, 128, 129, 0, 257, 0),
+            (0,) * 128,
+            (0,) * 127 + (1,),
+            tuple(rng.randrange(1025) for _ in range(128)),
+        ):
+            stops, cursor = [], 0
+            for count in counts:
+                cursor += triton.cdiv(count, 256) * 256
+                stops.append(cursor)
+            for base in range(0, cursor, 128):
+                request = sum(stop <= base for stop in stops)
+                self.assertLess(request, len(counts))
+                self.assertGreater(counts[request], 0)
+                self.assertGreaterEqual(base, stops[request - 1] if request else 0)
+                self.assertLess(base + 127, stops[request])
+
+    def test_common_unsupported_and_oversized_geometry(self):
+        for counts, cp, unit in (
+            ((), 4, 128),
+            ((1,) * 1025, 4, 128),
+            ((-1,), 4, 128),
+            ((1,), 3, 128),
+            ((1,), 4, 0),
+            ((10**9,), 4, 128),
+        ):
+            self.assertIsNone(owned.plan_groups(counts, cp_size=cp, owner_rows=unit))
+
+    def test_cached_plan_uses_complete_geometry_and_copies_list_keys(self):
+        owned._plan_groups_cached.cache_clear()
+        self.addCleanup(owned._plan_groups_cached.cache_clear)
+        counts = [127, 513]
+        plan = owned.plan_groups(counts, cp_size=4, owner_rows=128)
+        self.assertIs(plan, owned.plan_groups(tuple(counts), cp_size=4, owner_rows=128))
+        counts[1] = 514
+        cases = (
+            (tuple(counts), 4, 128, 256 * 1024**2),
+            ((127, 513), 2, 128, 256 * 1024**2),
+            ((127, 513), 4, 64, 256 * 1024**2),
+            ((127, 513), 4, 128, 400000),
+        )
+        for values, cp, unit, limit in cases:
+            actual = owned.plan_groups(values, cp_size=cp, owner_rows=unit, limit=limit)
+            expected = owned._plan_groups_cached.__wrapped__(values, cp, unit, limit)
+            self.assertEqual(actual, expected)
+        self.assertEqual(owned._plan_groups_cached.cache_info().misses, 5)
+        self.assertIs(plan, owned.plan_groups((127, 513), cp_size=4, owner_rows=128))
+
+    def test_cached_plan_rejects_equal_but_invalid_count_types(self):
+        owned._plan_groups_cached.cache_clear()
+        self.addCleanup(owned._plan_groups_cached.cache_clear)
+        owned.plan_groups((1,), cp_size=4, owner_rows=128)
+        before = owned._plan_groups_cached.cache_info()
+        for counts in ((True,), (1.0,), ([],), (-1,), (), (1,) * 1025):
+            self.assertIsNone(owned.plan_groups(counts, cp_size=4, owner_rows=128))
+        self.assertEqual(owned._plan_groups_cached.cache_info(), before)
+        # Preserve existing unusual scalar behavior without retaining it.
+        for cp, limit in ((True, 256 * 1024**2), (1, float(256 * 1024**2))):
+            self.assertEqual(
+                owned.plan_groups((1,), cp_size=cp, owner_rows=128, limit=limit),
+                owned._plan_groups_cached.__wrapped__((1,), cp, 128, limit),
+            )
+        self.assertEqual(owned._plan_groups_cached.cache_info(), before)
+
+    def test_cached_plan_is_bounded_and_contains_only_immutable_host_values(self):
+        from dataclasses import FrozenInstanceError, fields
+
+        owned._plan_groups_cached.cache_clear()
+        self.addCleanup(owned._plan_groups_cached.cache_clear)
+        for i in range(160):
+            plan = owned.plan_groups((i, 129), cp_size=4, owner_rows=128)
+        info = owned._plan_groups_cached.cache_info()
+        self.assertEqual((info.maxsize, info.currsize), (128, 128))
+        owned.plan_groups((0, 129), cp_size=4, owner_rows=128)
+        self.assertEqual(owned._plan_groups_cached.cache_info().misses, info.misses + 1)
+
+        def check(value):
+            if value is None or type(value) in (bool, int):
+                return
+            if type(value) is tuple:
+                for item in value:
+                    check(item)
+                return
+            self.assertIn(type(value), (owned.OwnedPlan, owned.OwnedGroup))
+            self.assertTrue(value.__dataclass_params__.frozen)
+            for field in fields(value):
+                check(getattr(value, field.name))
+
+        check(plan)
+        with self.assertRaises(FrozenInstanceError):
+            plan.groups[0].rows = 0
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class OwnedPoolCudaTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if torch.cuda.get_device_capability()[0] != 10:
+            raise unittest.SkipTest("Blackwell required")
+
+    def fixture(
+        self,
+        counts,
+        cp,
+        ratio,
+        dtypes=(torch.int32, torch.int64),
+        token_blocks=(128, 128),
+        main_storage=(1, 11),
+    ):
+        ends_host = [n * ratio + ratio - 1 for n in counts]
+        ends_backing = torch.zeros(
+            2 * len(counts) + 1, dtype=torch.int64, device="cuda"
+        )
+        ends = ends_backing[1::2]
+        ends.copy_(torch.tensor(ends_host, dtype=torch.int64, device="cuda"))
+        mtpb, itpb = token_blocks
+        owner = 256
+        ranks = []
+        for rank in range(cp):
+            tables, values = {}, []
+            for tag, entries, width, dtype in (
+                (HCA_KV, mtpb // ratio, 288, dtypes[0]),
+                (INDEXER_KV, itpb, 68, dtypes[1]),
+            ):
+                tpb = mtpb if tag == HCA_KV else itpb
+                columns = max(
+                    2,
+                    triton.cdiv(max(ends_host, default=0), owner * cp) * (owner // tpb),
+                )
+                pages = 1 + len(counts) * columns
+                offset, padding = (4, 12) if tag == INDEXER_KV else main_storage
+                backing = torch.randint(
+                    0,
+                    256,
+                    (pages * (entries * width + padding) + offset,),
+                    dtype=torch.uint8,
+                    device="cuda",
+                )
+                pool = backing[offset:].as_strided(
+                    (pages, entries, width), (entries * width + padding, width, 1)
+                )
+                table = torch.zeros(
+                    (len(counts), columns + 2), dtype=dtype, device="cuda"
+                )[:, 1:-1]
+                table.copy_(
+                    torch.arange(1, pages, dtype=dtype, device="cuda").reshape(
+                        len(counts), columns
+                    )
+                )
+                table[::3, ::2] = 0
+                table[1::3, 1::2] = -1
+                tables[tag] = table
+                values.append(pool)
+            attn = SimpleNamespace(
+                _cp_ctx=SimpleNamespace(
+                    cp_size=cp, cp_rank=rank, kv_cache_sharded=cp > 1
+                ),
+                _kv_cache=SimpleNamespace(
+                    get_seq_size_per_block=lambda tag: owner,
+                    get_kernel_seq_size_per_block=lambda tag: (
+                        mtpb if tag == HCA_KV else itpb
+                    ),
+                ),
+                _block_tables_by_type=tables,
+                _global_region=lambda: HCA_KV,
+                _source_entries=lambda tag, pool: pool.shape[1],
+                compress_ratio=ratio,
+                _gather_shards=lambda value: self.fail(
+                    "owned transport used all_reduce"
+                ),
+            )
+            main, index = values
+            self.assertTrue(
+                joint.warmup(
+                    joint.PoolLayout(mtpb, mtpb // ratio, owner, dtypes[0], ratio),
+                    joint.PoolLayout(itpb, itpb, owner, dtypes[1], ratio),
+                    cp_size=cp,
+                    cp_rank=rank,
+                    device=ends.device,
+                )
+            )
+            ranks.append((attn, main, index))
+        return ranks, ends_host, ends
+
+    def slots(self, attn, tag, pool, positions, requests):
+        cp = attn._cp_ctx
+        return cp_kv_slot_mapping(
+            positions,
+            attn._block_tables_by_type[tag],
+            requests,
+            attn._kv_cache.get_kernel_seq_size_per_block(tag),
+            pool.shape[1],
+            attn.compress_ratio,
+            cp.cp_size,
+            cp.cp_rank,
+            owner_tokens_per_block=256,
+        )
+
+    def expected_packet(self, ranks, counts, group):
+        packets = []
+        for attn, main, index in ranks:
+            cp = attn._cp_ctx
+            ratio = attn.compress_ratio
+            u = 256 // ratio
+            logical, requests = [], []
+            for request in range(group.first, group.stop):
+                begin = max(getattr(group, "base", -1), 0)
+                end = begin + (
+                    group.count if getattr(group, "base", -1) >= 0 else counts[request]
+                )
+                selected = [
+                    j for j in range(begin, end) if j // u % cp.cp_size == cp.cp_rank
+                ]
+                logical.extend((j + 1) * ratio - 1 for j in selected)
+                requests.extend([request] * len(selected))
+            pos = torch.tensor(logical, dtype=torch.int64, device="cuda")
+            req = torch.tensor(requests, dtype=torch.int64, device="cuda")
+            q, s = codec.gather_indexer_k_fp4(
+                index, self.slots(attn, INDEXER_KV, index, pos, req)
+            )
+            raw = codec.gather_k_cache_bytes_fp4(
+                main, self.slots(attn, HCA_KV, main, pos, req)
+            )
+            packet = torch.zeros(
+                group.local_rows * 356, dtype=torch.uint8, device="cuda"
+            )
+            pq, ps, pr = joint._views(packet, group.local_rows)
+            pq[: len(logical)].copy_(q)
+            ps[: len(logical)].copy_(s)
+            pr[: len(logical)].copy_(raw)
+            packets.append(packet)
+        return packets
+
+    def expected_outputs(self, ranks, counts):
+        expected = []
+        for request, count in enumerate(counts):
+            ratio = ranks[0][0].compress_ratio
+            pos = (
+                torch.arange(count, dtype=torch.int64, device="cuda") + 1
+            ) * ratio - 1
+            req = torch.full_like(pos, request)
+            qs = torch.zeros((count, 68), dtype=torch.uint8, device="cuda")
+            raw = torch.zeros((count, 288), dtype=torch.uint8, device="cuda")
+            for attn, main, index in ranks:
+                q, s = codec.gather_indexer_k_fp4(
+                    index, self.slots(attn, INDEXER_KV, index, pos, req)
+                )
+                qs[:, :64] += q.view(torch.uint8)
+                qs[:, 64:] += s.view(torch.uint8).reshape(count, 4)
+                raw += codec.gather_k_cache_bytes_fp4(
+                    main, self.slots(attn, HCA_KV, main, pos, req)
+                )
+            expected.append(
+                (
+                    codec.dequantize_k_cache_bytes_fp4(raw),
+                    qs[:, :64].contiguous().view(torch.int8),
+                    qs[:, 64:].contiguous().view(torch.int32).flatten(),
+                )
+            )
+        return expected
+
+    def assert_bits(self, left, right):
+        self.assertEqual(left.dtype, right.dtype)
+        self.assertEqual(left.shape, right.shape)
+        self.assertTrue(
+            torch.equal(
+                left.contiguous().view(torch.uint8),
+                right.contiguous().view(torch.uint8),
+            )
+        )
+
+    def check(
+        self,
+        counts,
+        cp,
+        ratio,
+        *,
+        direct=False,
+        limit=None,
+        dtypes=(torch.int32, torch.int64),
+        token_blocks=(128, 128),
+        main_storage=(1, 11),
+        segmented=False,
+        workspace_offset=0,
+    ):
+        ranks, host, ends = self.fixture(
+            counts, cp, ratio, dtypes, token_blocks, main_storage
+        )
+        original_plan_groups = owned.plan_groups
+
+        def plan_fn(counts, *, cp_size, owner_rows, **_kwargs):
+            return original_plan_groups(
+                counts,
+                cp_size=cp_size,
+                owner_rows=owner_rows,
+                limit=limit or owned._MAX_SCRATCH_MB * 1024**2,
+            )
+
+        plan = (
+            owned.plan_segmented_groups(counts, cp_size=cp, owner_rows=256 // ratio)
+            if segmented
+            else plan_fn(counts, cp_size=cp, owner_rows=256 // ratio)
+        )
+        self.assertIsNotNone(plan)
+        expected_packets = [
+            self.expected_packet(ranks, counts, group) for group in plan.groups
+        ]
+        expected = self.expected_outputs(ranks, counts)
+        for rank, (attn, main, index) in enumerate(ranks):
+            calls, pointers = [], []
+            workspace = None
+            if direct:
+                starts, cursor = [], 3
+                for i, count in enumerate(counts):
+                    starts.append(cursor)
+                    cursor += count + i % 3 + 1
+                workspace = SimpleNamespace(
+                    output=torch.full(
+                        ((cursor + 3) * 512 + workspace_offset,),
+                        7.25,
+                        dtype=torch.bfloat16,
+                        device="cuda",
+                    )[workspace_offset:].view(-1, 512),
+                    global_sizes=tuple(counts),
+                    global_starts=tuple(starts),
+                    device_offsets=torch.tensor(
+                        starts, dtype=torch.int64, device="cuda"
+                    ),
+                    publish=lambda result, index_allocations=None: result,
+                )
+                before = workspace.output.clone()
+
+            def collect(receive, send, size, owner_rank):
+                self.assertEqual(owner_rank, rank)
+                self.assertEqual(
+                    send.data_ptr(), receive.data_ptr() + rank * send.numel()
+                )
+                group_index = len(calls)
+                self.assert_bits(send, expected_packets[group_index][rank])
+                receive.copy_(torch.cat(expected_packets[group_index]))
+                calls.append(group_index)
+                pointers.append(
+                    (
+                        send.untyped_storage().data_ptr(),
+                        receive.untyped_storage().data_ptr(),
+                    )
+                )
+
+            planner_patch = (
+                nullcontext()
+                if segmented
+                else patch.object(owned, "plan_groups", plan_fn)
+            )
+            with (
+                planner_patch,
+                patch.object(owned, "_collect", collect),
+                patch.object(
+                    triton.runtime.jit.JITFunction,
+                    "_do_compile",
+                    side_effect=AssertionError("hot-path JIT"),
+                ),
+            ):
+                actual = pools.try_gather_prefill_pools(
+                    attn, main, index, host, ends, workspace=workspace
+                )
+            self.assertEqual(len(calls), sum(g.local_rows > 0 for g in plan.groups))
+            self.assertLessEqual(len(set(pointers)), 1)
+            for (g, keys), refs in zip(actual, expected):
+                for value, reference in zip((g, keys.quant, keys.scale), refs):
+                    self.assert_bits(value, reference)
+                self.assertEqual(keys.quant.stride(), (64, 1))
+                self.assertEqual(keys.scale.stride(), (1,))
+            if direct:
+                for start, reference in zip(workspace.global_starts, expected):
+                    before[start : start + reference[0].shape[0]].copy_(reference[0])
+                self.assert_bits(workspace.output, before)
+        return ranks, host, ends
+
+    def test_oversized_mixed_batch_uses_segments_and_preserves_output_bits(self):
+        with patch.object(owned, "_MAX_SCRATCH_MB", 256):
+            for long_count in (580_001, 600_001):
+                for ratio in (1, 2):
+                    for direct in (False, True):
+                        with self.subTest(count=long_count, ratio=ratio, direct=direct):
+                            self.check(
+                                (0, 17, long_count, 257, 0),
+                                4,
+                                ratio,
+                                direct=direct,
+                                segmented=True,
+                            )
+
+    def test_fixed_budget_long_mixed_request_preserves_output_bits(self):
+        counts = (0, 17, 600_001, 257, 0)
+        self.assertIsNone(pools._request_groups(counts))
+        self.check(counts, 4, 1, direct=True, segmented=True)
+
+    def test_segmented_other_cp_sizes_preserve_output_bits(self):
+        with patch.object(owned, "_MAX_SCRATCH_MB", 256):
+            for cp, count in ((1, 900_001), (2, 600_001)):
+                with self.subTest(cp=cp):
+                    self.check((17, count, 257), cp, 1, segmented=True)
+
+    def test_all_owners_ratios_and_ragged_layouts(self):
+        for cp in (1, 2, 4):
+            for ratio in (1, 2):
+                with self.subTest(cp=cp, ratio=ratio):
+                    self.check(
+                        (0, 1, 63, 64, 127, 128, 129, 255, 256, 257, 1025),
+                        cp,
+                        ratio,
+                        direct=True,
+                    )
+
+    def test_small_large_batch_and_forced_groups_reuse_scratch(self):
+        for counts in ((257,), (0, 0), tuple(129 + i for i in range(32)), (1,) * 128):
+            with self.subTest(batch=len(counts)):
+                self.check(counts, 4, 2, limit=400000)
+
+    def test_large_batches_use_owned_groups_across_metadata_boundary(self):
+        for batch in (129, 1024):
+            for ratio in (1, 2):
+                with self.subTest(batch=batch, ratio=ratio):
+                    self.check((1,) * batch, 4, ratio, direct=True)
+
+    def test_table_dtypes_and_non_direct_output(self):
+        for dtype in (torch.int32, torch.int64):
+            self.check((1, 257), 2, 1, dtypes=(dtype, dtype))
+
+    def test_independent_main_index_kernel_pages(self):
+        self.check(
+            (0, 31, 32, 33, 63, 64, 65, 127, 128, 129, 1027),
+            4,
+            2,
+            direct=True,
+            token_blocks=(64, 128),
+        )
+
+    def test_word_pack_ragged_owners_and_direct_gaps(self):
+        for cp in (1, 2, 4):
+            for ratio in (1, 2):
+                for direct in (False, True):
+                    with self.subTest(cp=cp, ratio=ratio, direct=direct):
+                        self.check(
+                            (0, 1, 15, 16, 17, 255, 257, 1027),
+                            cp,
+                            ratio,
+                            direct=direct,
+                            token_blocks=(64, 128),
+                            main_storage=(4, 12),
+                        )
+
+    def test_word_alignment_and_byte_fallback_with_group_reuse(self):
+        for storage in ((4, 12), (1, 12), (4, 11), (1, 11)):
+            with self.subTest(offset=storage[0], padding=storage[1]):
+                self.check(
+                    (1, 15, 16, 17, 129, 257),
+                    4,
+                    2,
+                    direct=True,
+                    limit=400000,
+                    main_storage=storage,
+                )
+
+    def test_block_restore_dispatch_respects_workspace_alignment(self):
+        if torch.cuda.get_device_capability() != (10, 3):
+            self.skipTest("SM103 required")
+
+        gather = owned._gather_planned
+        getitem = triton.compiler.CompiledKernel.__getitem__
+        names = []
+
+        def tracked_getitem(kernel, grid):
+            if kernel.name.startswith("_owned_pool_restore"):
+                names.append(kernel.name)
+            return getitem(kernel, grid)
+
+        def tracked_gather(*args, **kwargs):
+            with patch.object(
+                triton.compiler.CompiledKernel, "__getitem__", tracked_getitem
+            ):
+                return gather(*args, **kwargs)
+
+        with (
+            patch.dict(os.environ, {"DSV41_PREFILL_OWNED_BLOCK_RESTORE": "1"}),
+            patch.object(joint, "_READY", {}),
+            patch.object(owned, "_gather_planned", tracked_gather),
+        ):
+            for offset, kernel in (
+                (0, "_owned_pool_restore_block"),
+                (1, "_owned_pool_restore"),
+            ):
+                with self.subTest(offset=offset):
+                    names.clear()
+                    self.check((17, 257), 4, 2, direct=True, workspace_offset=offset)
+                    self.assertEqual(names, [kernel] * 4)
+
+    def test_restore_partial_tiles_and_negative_destinations_preserve_canaries(self):
+        rows, local, cp = 35, 19, 4
+        packet = torch.randint(
+            0, 256, (cp * local * 356 + 4,), dtype=torch.uint8, device="cuda"
+        )[4:]
+        codes = [((i * 7 % local) << 2) | (i % cp) for i in range(rows)]
+        for i in (0, 15, 16, 34):
+            codes[i] = -1
+        destinations = [2 + 2 * i for i in range(rows)]
+        # Cover both missing and present sources paired with a negative target.
+        for i in (0, 1, 16, 17):
+            destinations[i] = -1
+        inverse = torch.tensor(
+            [0, *codes, *destinations], dtype=torch.int64, device="cuda"
+        )[1:]
+        expected_q = torch.zeros((rows, 64), dtype=torch.int8, device="cuda")
+        expected_s = torch.zeros(rows, dtype=torch.int32, device="cuda")
+        raw = torch.zeros((rows, 288), dtype=torch.uint8, device="cuda")
+        packets = [joint._views(p, local) for p in packet.split(local * 356)]
+        for row, encoded in enumerate(codes):
+            if encoded >= 0:
+                q, s, r = packets[encoded & 3]
+                source = encoded >> 2
+                expected_q[row].copy_(q[source])
+                expected_s[row].copy_(s[source])
+                raw[row].copy_(r[source])
+        decoded = codec.dequantize_k_cache_bytes_fp4(raw)
+        for direct in (False, True):
+            with self.subTest(direct=direct):
+                output_rows = 2 * rows + 3 if direct else rows
+                backing = torch.full(
+                    (output_rows + 2, 512), 7.25, dtype=torch.bfloat16, device="cuda"
+                )
+                out = backing[1:-1]
+                expected = backing.clone()
+                for row, encoded in enumerate(codes):
+                    destination = destinations[row] if direct else row
+                    if not direct or (encoded >= 0 and destination >= 0):
+                        expected[1 + destination].copy_(decoded[row])
+                q_backing = torch.full(
+                    (rows * 64 + 8,), 93, dtype=torch.int8, device="cuda"
+                )
+                s_backing = torch.full(
+                    (rows + 2,), -777, dtype=torch.int32, device="cuda"
+                )
+                oq, os = q_backing[4:-4].view(rows, 64), s_backing[1:-1]
+                owned._owned_pool_restore[(rows,)](
+                    packet, inverse, out, oq, os, rows, local, direct, num_warps=4
+                )
+                self.assert_bits(backing, expected)
+                self.assert_bits(oq, expected_q)
+                self.assert_bits(os, expected_s)
+                self.assertEqual(q_backing[:4].cpu().tolist(), [93] * 4)
+                self.assertEqual(q_backing[-4:].cpu().tolist(), [93] * 4)
+                self.assertEqual(s_backing[[0, -1]].cpu().tolist(), [-777, -777])
+
+                if torch.cuda.get_device_capability() == (10, 3):
+                    block_out = torch.full_like(backing, 7.25)
+                    block_q = torch.full(
+                        (rows + 2, 64), 93, dtype=oq.dtype, device="cuda"
+                    )
+                    block_s = torch.full(
+                        (rows + 8,), -777, dtype=os.dtype, device="cuda"
+                    )
+                    owned._owned_pool_restore_block[(triton.cdiv(rows, 8),)](
+                        packet,
+                        inverse,
+                        block_out[1:-1],
+                        block_q[1:-1],
+                        block_s[4:-4],
+                        rows,
+                        local,
+                        direct,
+                        num_warps=2,
+                    )
+                    self.assert_bits(block_out, expected)
+                    self.assert_bits(block_q[1:-1], expected_q)
+                    self.assert_bits(block_s[4:-4], expected_s)
+                    self.assertTrue(torch.all(block_q[[0, -1]] == 93))
+                    self.assertTrue(torch.all(block_s[:4] == -777))
+                    self.assertTrue(torch.all(block_s[-4:] == -777))
+
+    def test_inverse_metadata_matches_owner_rows_padding_and_direct_destinations(self):
+        counts = (0, 1, 0, 127, 128, 129, 0, 257, 1027, 0)
+        for cp in (1, 2, 4):
+            for ratio in (1, 2):
+                ranks, _, ends = self.fixture(counts, cp, ratio)
+                attn, main, index = ranks[0]
+                mt, it = (
+                    attn._block_tables_by_type[tag] for tag in (HCA_KV, INDEXER_KV)
+                )
+                layout = (
+                    ratio,
+                    256,
+                    128,
+                    128,
+                    0,
+                    mt.dtype,
+                    it.dtype,
+                    main.shape[1],
+                    index.shape[1],
+                    cp,
+                )
+                kernels = joint._READY[(ends.device.index, *layout)][5]
+                plan = owned.plan_groups(
+                    counts, cp_size=cp, owner_rows=256 // ratio, limit=1_200_000
+                )
+                self.assertIsNotNone(plan)
+                slots = torch.empty(
+                    2 * plan.max_local_rows + 1, dtype=torch.int64, device="cuda"
+                )[1:]
+                backing = torch.full(
+                    (2 * plan.max_output_rows + 2,),
+                    -777,
+                    dtype=torch.int64,
+                    device="cuda",
+                )
+                inverse = backing[1:-1]
+                starts, cursor = [], 11
+                for count in counts:
+                    starts.append(cursor)
+                    cursor += count + 7
+                offsets = torch.tensor([0, *starts], dtype=torch.int64, device="cuda")[
+                    1:
+                ]
+                for direct in (False, True):
+                    for group in plan.groups:
+                        inverse.fill_(-777)
+                        codes, destinations, before = [], [], [0] * cp
+                        canonical = 0
+                        unit = 256 // ratio
+                        for request in range(group.first, group.stop):
+                            count = counts[request]
+                            for row in range(triton.cdiv(count, 256) * 256):
+                                rank = row // unit % cp
+                                source = (
+                                    before[rank]
+                                    + row // (cp * unit) * unit
+                                    + row % unit
+                                )
+                                codes.append(
+                                    (source << 2) | rank if row < count else -1
+                                )
+                                destinations.append(
+                                    starts[request] + row if direct else canonical + row
+                                )
+                            canonical += triton.cdiv(count, 256) * 256
+                            before = [
+                                value + owned.owned_count(count, cp, unit, rank)
+                                for rank, value in enumerate(before)
+                            ]
+                        with patch.object(
+                            triton.runtime.jit.JITFunction,
+                            "_do_compile",
+                            side_effect=AssertionError("hot-path JIT"),
+                        ):
+                            kernels[4 if direct else 0][
+                                (
+                                    triton.cdiv(max(group.rows, group.local_rows), 128),
+                                    1,
+                                    1,
+                                )
+                            ](
+                                *owned._metadata_args(
+                                    ends,
+                                    mt,
+                                    it,
+                                    slots,
+                                    inverse,
+                                    offsets,
+                                    group.local_rows,
+                                    group.rows,
+                                    group.first,
+                                    group.stop,
+                                    layout,
+                                    direct,
+                                )
+                            )
+                        actual = inverse.cpu().tolist()
+                        self.assertEqual(actual[: group.rows], codes)
+                        self.assertEqual(
+                            actual[group.rows : 2 * group.rows], destinations
+                        )
+                        self.assertEqual(
+                            actual[2 * group.rows :],
+                            [-777] * (len(actual) - 2 * group.rows),
+                        )
+                        self.assertEqual(backing[[0, -1]].cpu().tolist(), [-777, -777])
+
+    def test_cp1_graph_replays_changed_pool_values_on_side_stream(self):
+        counts = (1, 129, 257)
+        for storage in ((4, 12), (1, 11)):
+            with self.subTest(storage=storage):
+                ranks, host, ends = self.fixture(counts, 1, 2, main_storage=storage)
+                attn, main, index = ranks[0]
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                # Fixed host geometry must re-read pool bytes and metadata on replay.
+                graph = torch.cuda.CUDAGraph()
+                with (
+                    torch.cuda.stream(stream),
+                    patch.object(
+                        triton.runtime.jit.JITFunction,
+                        "_do_compile",
+                        side_effect=AssertionError("hot-path JIT"),
+                    ),
+                ):
+                    with torch.cuda.graph(graph, stream=stream):
+                        actual = pools.try_gather_prefill_pools(
+                            attn, main, index, host, ends
+                        )
+                    main.random_(0, 256)
+                    index.random_(0, 256)
+                    attn._block_tables_by_type[HCA_KV][1, 0] = 0
+                    attn._block_tables_by_type[INDEXER_KV][2, 0] = -1
+                    graph.replay()
+                torch.cuda.current_stream().wait_stream(stream)
+                expected = self.expected_outputs(ranks, counts)
+                for (g, keys), refs in zip(actual, expected):
+                    for value, reference in zip((g, keys.quant, keys.scale), refs):
+                        self.assert_bits(value, reference)
+
+    def test_cold_or_invalid_local_state_raises_before_collective(self):
+        ranks, host, ends = self.fixture((3, 5), 4, 1)
+        attn, main, index = ranks[0]
+        with patch.object(owned, "_collect", side_effect=AssertionError("collective")):
+            with patch.dict(joint._READY, {}, clear=True):
+                with self.assertRaisesRegex(RuntimeError, "startup warmup"):
+                    pools.try_gather_prefill_pools(attn, main, index, host, ends)
+            malformed = index.as_strided(
+                index.shape, index.stride(), index.storage_offset() + 1
+            )
+            with patch.object(torch, "empty", side_effect=AssertionError("allocation")):
+                with self.assertRaisesRegex(ValueError, "4-byte aligned"):
+                    pools.try_gather_prefill_pools(attn, main, malformed, host, ends)
+
+    def test_collective_failure_propagates_without_fallback(self):
+        ranks, host, ends = self.fixture((3, 5), 4, 1)
+        with patch.object(
+            owned, "_collect", side_effect=RuntimeError("transport witness")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "transport witness"):
+                pools.try_gather_prefill_pools(*ranks[0], host, ends)
+
+
+def _owned_nccl_worker(rank, rendezvous):
+    torch.cuda.set_device(rank)
+    dist.init_process_group(
+        "nccl", init_method="file://" + rendezvous, rank=rank, world_size=4
+    )
+    try:
+        from rtp_llm.models_py.distributed import collective_torch
+
+        probe = OwnedPoolCudaTest()
+        for counts, ratio, budget in (
+            ((2,) * 1024, 2, 256),
+            ((0, 17, 6001, 257, 0), 1, 1),
+        ):
+            torch.manual_seed(20261101)
+            with patch.object(owned, "_MAX_SCRATCH_MB", budget):
+                common = owned.plan_groups(counts, cp_size=4, owner_rows=256 // ratio)
+                if budget == 1:
+                    probe.assertIsNone(common)
+                    probe.assertIsNotNone(
+                        owned.plan_segmented_groups(
+                            counts, cp_size=4, owner_rows=256 // ratio
+                        )
+                    )
+                else:
+                    probe.assertIsNotNone(common)
+                ranks, host, ends = probe.fixture(counts, 4, ratio)
+                expected = probe.expected_outputs(ranks, counts)
+                attn, main, index = ranks[rank]
+                with patch.object(
+                    collective_torch, "_get_group", return_value=dist.group.WORLD
+                ):
+                    actual = pools.try_gather_prefill_pools(
+                        attn, main, index, host, ends
+                    )
+                for (global_kv, keys), reference in zip(actual, expected):
+                    for value, target in zip(
+                        (global_kv, keys.quant, keys.scale), reference
+                    ):
+                        probe.assert_bits(value, target)
+            dist.barrier()
+    finally:
+        dist.destroy_process_group()
+
+
+@unittest.skipUnless(torch.cuda.device_count() >= 4, "four GPUs required")
+class OwnedPoolNcclTest(unittest.TestCase):
+    def test_common_and_segmented_cp4_transport(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mp.spawn(
+                _owned_nccl_worker,
+                args=(str(Path(tmp) / "rendezvous"),),
+                nprocs=4,
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

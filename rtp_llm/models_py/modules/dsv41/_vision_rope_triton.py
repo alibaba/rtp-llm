@@ -36,10 +36,8 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
-def _vision_qk_rotary_kernel(
-    QK, COS, SIN, OUT, N: tl.constexpr, ROW_STRIDE: tl.constexpr
-):
+@triton.jit(do_not_specialize=["N"])
+def _vision_qk_rotary_kernel(QK, COS, SIN, OUT, N, ROW_STRIDE: tl.constexpr):
     heads = tl.program_id(0) * 2 + tl.arange(0, 2)
     rows = tl.program_id(1) * 8 + tl.arange(0, 8)
     dims = tl.arange(0, 32)
@@ -75,7 +73,11 @@ def _enabled_or_supported(q, k, cos, sin):
         and q.shape == k.shape
         and q.shape[0] > 0
         and q.shape[1:] == (16, 64)
-        and q.stride() == k.stride() == (3072, 64, 1)
+        # view() may canonicalize the unused row stride for a single row.
+        # Inner Q/K layout and the shared-storage offset still have to match;
+        # for multiple rows the kernel requires the original QKV row pitch.
+        and q.stride()[1:] == k.stride()[1:] == (64, 1)
+        and (q.shape[0] == 1 or q.stride(0) == k.stride(0) == 3072)
         and cos.shape == sin.shape == (q.shape[0], 1, 32)
         and cos.dtype == sin.dtype == torch.float32
         and cos.is_contiguous()

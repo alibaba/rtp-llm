@@ -602,8 +602,8 @@ class MMProcessEngineGpuBatchTest(TestCase):
     def tearDown(self):
         vit_emb_cache_.resize_cache(0)
 
-    def _make_engine(self, **vit_overrides):
-        model = FakeModel(FakeBatchMMPart())
+    def _make_engine(self, part=None, **vit_overrides):
+        model = FakeModel(FakeBatchMMPart() if part is None else part)
         vit_config = VitConfig()
         vit_config.gpu_max_batch_size = 8
         # Local preprocess keeps the test in-process and deterministic.
@@ -631,6 +631,30 @@ class MMProcessEngineGpuBatchTest(TestCase):
             [torch.empty(0)] * n,
             [list(_DEFAULT_CONFIG) for _ in range(n)],
         )
+
+    def test_typed_images_receive_cost_estimates_and_split_at_budget(self):
+        from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
+            MMWorkEstimate,
+        )
+
+        class TypedPart(FakeBatchMMPart):
+            def validate_prepared_images(self, images):
+                return images
+
+            def estimate_work(self, data, mm_type=None):
+                return MMWorkEstimate(input_patches=2)
+
+            def get_batch_work_budget(self, max_batch_media):
+                return MMWorkEstimate(input_patches=3)
+
+            def embedding(self, data, **kwargs):
+                value = torch.tensor([[float(data[0])]])
+                return value, value.clone(), value.flatten()
+
+        engine, part = self._make_engine(part=TypedPart())
+        result = engine.submit_v41([7, 3])
+        self.assertEqual([value.item() for value in result.embeddings], [7, 3])
+        self.assertEqual(part.batch_sizes, [1, 1])
 
     def test_gpu_batch_order_and_outputs(self):
         """Single multi-image request: emb/pos/extra preserve input order."""

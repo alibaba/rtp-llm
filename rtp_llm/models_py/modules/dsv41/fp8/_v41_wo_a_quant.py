@@ -1,49 +1,52 @@
-"""Startup-only CUDA JIT for wo_a BF16-round/group32 FP8 output on SM100.
+"""External DeepGEMM wo_a + group32 output quantization for Blackwell.
 
-No compilation, CUDA initialization, or vendor-library import occurs at import.
-Unsupported or unprepared calls return None so the caller retains its BF16 path.
+Requires deep_gemm.epilogue.FP8Group32. Missing API, unsupported input or cold
+CUDA capture falls back to the caller's BF16 path. Import is CUDA-lazy.
 """
 
 from __future__ import annotations
 
 import ctypes
-import fcntl
-import hashlib
 import logging
-import os
-import platform
-import re
-import shutil
-import subprocess
-import tempfile
 import threading
-from pathlib import Path
+from functools import lru_cache
+from typing import NamedTuple
 
 import torch
 
+from rtp_llm.models_py.modules.dsv41._prefill_stream import is_default_eager_prefill
+
 _READY = {}
-_LIBRARIES = {}
 _LOCK = threading.Lock()
-_SOURCES = ("_v41_wo_a_quant.cu", "_v41_wo_a_quant.cuh", "_v41_wo_a_driver.cc")
-# The shim and two schedules depend on this private DeepGEMM ABI. A different
-# implementation falls back until its epilogue/layout has been verified.
-_VENDOR_HASHES = {
-    "impls/sm100_fp8_fp4_gemm_1d1d.cuh": "88dd217719c153b805ee9a791a8c612c078c42a65205a14b7c9ee4f1d0fce110",
-    "epilogue/sm100_store_cd.cuh": "72ea5a5915552004c4b1d5cedd049442476c2cce367985527032f6dcca4a5b10",
-    "epilogue/sm100_store_cd_swap_ab.cuh": "0cc27e0ca66e3be47b1d90974ff7f66efca38c08b783ce16fc5e8f1d8db7010f",
-    "common/math.cuh": "576e9db1a1889087f77b3f74d74d011bf452f16c0e5c030bdd661e961c074ddc",
-}
+
+
+class _PreparedPrefill(NamedTuple):
+    device: torch.device
+    entry: dict
+    stream: torch.cuda.Stream
+
+
+@lru_cache(maxsize=16)
+def _device_geometry(index):
+    prop = torch.cuda.get_device_properties(index)
+    return prop.major, prop.minor, prop.multi_processor_count
 
 
 def _device_supported(device):
     if device.type != "cuda":
         return False
-    prop = torch.cuda.get_device_properties(device)
-    # These two schedules have been validated on the 152-SM SM100 device.
-    return (prop.major, prop.minor, prop.multi_processor_count) == (10, 0, 152)
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    major, _, sms = _device_geometry(index)
+    # The external backend selects the kernel and cluster geometry. Retain the
+    # qualified Blackwell device envelope of the wo_a integration.
+    return major == 10 and sms >= 2 and sms % 2 == 0
 
 
 def _weight_supported(weight, scale):
+    return _weight_layout_supported(weight, scale) and _device_supported(weight.device)
+
+
+def _weight_layout_supported(weight, scale):
     return (
         weight.is_cuda
         and weight.shape == (8, 1024, 4096)
@@ -53,224 +56,211 @@ def _weight_supported(weight, scale):
         and scale.dtype == torch.int32
         and scale.shape == (8, 1024, 32)
         and scale.stride() == (32768, 1, 1024)
-        and all(not t.requires_grad and t.data_ptr() % 16 == 0 for t in (weight, scale))
-        and _device_supported(weight.device)
+        and not weight.requires_grad
+        and not scale.requires_grad
+        and weight.data_ptr() % 16 == 0
+        and scale.data_ptr() % 16 == 0
     )
 
 
-def is_supported(a, weight):
+def _layout_supported(a, weight):
     aq, sa = a
     w, sw = weight
-    if aq.ndim != 3 or not 0 < aq.shape[0] < 2**31 - 128:
+    shape = aq.shape
+    if len(shape) != 3 or not 0 < shape[0] < 2**31 - 128:
         return False
-    m = aq.shape[0]
+    m = shape[0]
     stride = (m + 3) // 4 * 4
     return (
         aq.device == sa.device == w.device
         and aq.dtype == torch.float8_e4m3fn
-        and aq.shape == (m, 8, 4096)
-        and aq.stride() == (4096, m * 4096, 1)
+        and shape == (m, 8, 4096)
+        # DeepGEMM encodes both runtime strides in its A-side TMA map.
+        # The inverse-RoPE quantizer emits group-major [G,M,K]; native mega
+        # attention emits token-major [M,G,K]. Both keep K contiguous and
+        # require no copy or different CUDA specialization. Other padded,
+        # overlapping or broadcast layouts remain outside the contract.
+        and aq.stride() in ((4096, m * 4096, 1), (32768, 4096, 1))
         and sa.dtype == torch.int32
         and sa.shape == (m, 8, 32)
         and sa.stride() == (1, stride * 32, stride)
-        and all(not t.requires_grad and t.data_ptr() % 16 == 0 for t in (aq, sa))
-        and _weight_supported(w, sw)
+        and not aq.requires_grad
+        and not sa.requires_grad
+        and aq.data_ptr() % 16 == 0
+        and sa.data_ptr() % 16 == 0
+        and _weight_layout_supported(w, sw)
     )
 
 
-def _legacy(m, mode):
-    mode = ("auto" if mode is None else mode).strip().lower()
-    return mode == "legacy" or (mode == "auto" and m * 8192 < 4 * 1024 * 1024)
+def is_supported(a, weight):
+    return _layout_supported(a, weight) and _device_supported(weight[0].device)
 
 
-def _dependencies():
-    import deep_gemm
-
-    include = Path(deep_gemm.__file__).resolve().parent / "include"
-    for name, expected in _VENDOR_HASHES.items():
-        path = include / "deep_gemm" / name
-        if (
-            not path.is_file()
-            or hashlib.sha256(path.read_bytes()).hexdigest() != expected
-        ):
-            return None
-    cuda = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
-    nvcc = str(Path(cuda) / "bin/nvcc") if cuda else shutil.which("nvcc")
-    cxx = os.environ.get("CXX") or shutil.which("c++")
-    if not nvcc or not cxx or not Path(nvcc).is_file():
+def _external_api():
+    # Feature detection replaces the private vendor-header SHA/ABI checks.
+    try:
+        import deep_gemm
+    except ImportError:
         return None
-    version = subprocess.check_output([nvcc, "--version"], text=True)
-    release = re.search(r"release (\d+)\.(\d+)", version)
-    if release is None or int(release[1]) < 13:
+    if not (
+        hasattr(getattr(deep_gemm, "epilogue", None), "FP8Group32")
+        and callable(getattr(deep_gemm, "get_jit_config_fingerprint", None))
+    ):
         return None
-    return include, Path(nvcc).resolve().parent.parent, nvcc, cxx
+    return deep_gemm
 
 
-def _build_library(sms, dependencies):
-    include, cuda, nvcc, cxx = dependencies
-    source = Path(__file__).resolve().parent
-    digest = hashlib.sha256(str(sms).encode())
-    # driver.so is host code: shared caches must not mix ARM and x86 builds
-    # even when CUDA, compiler version strings and GPU geometry are identical.
-    digest.update(platform.machine().encode())
-    for name in _SOURCES:
-        digest.update((source / name).read_bytes())
-    # Include all transitive vendor headers in the disk-cache identity.
-    for path in sorted(include.rglob("*")):
-        if path.suffix in (".h", ".hpp", ".cuh"):
-            digest.update(str(path.relative_to(include)).encode())
-            digest.update(path.read_bytes())
-    for compiler in (nvcc, cxx):
-        digest.update(subprocess.check_output([compiler, "--version"]))
-    cache = Path(
-        os.environ.get("DG_JIT_CACHE_DIR")
-        or os.environ.get("DEEP_GEMM_CACHE_DIR")
-        or Path.home() / ".deep_gemm/cache"
-    )
-    cache = cache / "rtp_v41_wo_a" / digest.hexdigest()[:24]
-    cache.mkdir(parents=True, exist_ok=True)
-    library, cubin = cache / "driver.so", cache / "kernel.cubin"
-    with (cache / "build.lock").open("a") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        if not (library.is_file() and cubin.is_file()):
-            with tempfile.TemporaryDirectory(dir=cache) as temporary:
-                tmp = Path(temporary)
-                commands = [
-                    [
-                        nvcc,
-                        str(source / _SOURCES[0]),
-                        "--cubin",
-                        "-o",
-                        str(tmp / cubin.name),
-                        "--gpu-architecture=sm_100f",
-                        "-O3",
-                        "-std=c++20",
-                        "--expt-relaxed-constexpr",
-                        "--expt-extended-lambda",
-                        "--ptxas-options=--register-usage-level=10",
-                        "--ptxas-options=--verbose",
-                        "--diag-suppress=39,161,174,177,186,940",
-                        f"-DV41_NUM_SMS={sms}",
-                        "-I" + str(include),
-                    ],
-                    [
-                        cxx,
-                        str(source / _SOURCES[2]),
-                        "-o",
-                        str(tmp / library.name),
-                        "-shared",
-                        "-fPIC",
-                        "-O2",
-                        "-std=c++17",
-                        "-I" + str(cuda / "include"),
-                        "-L" + str(cuda / "lib64/stubs"),
-                        "-lcuda",
-                    ],
-                ]
-                with (cache / "build.log").open("w") as log:
-                    for command in commands:
-                        completed = subprocess.run(
-                            command, stdout=log, stderr=subprocess.STDOUT
-                        )
-                        if completed.returncode:
-                            raise RuntimeError(
-                                f"V41 wo_a JIT failed; see {cache / 'build.log'}"
-                            )
-                os.replace(tmp / cubin.name, cubin)
-                os.replace(tmp / library.name, library)
-    return library, cubin
+@lru_cache(maxsize=1)
+def _driver():
+    driver = ctypes.CDLL("libcuda.so.1")
+    driver.cuCtxGetCurrent.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+    driver.cuCtxGetCurrent.restype = ctypes.c_int
+    return driver
 
 
-def _load(device):
-    sms = torch.cuda.get_device_properties(device).multi_processor_count
-    if sms not in _LIBRARIES:
-        dependencies = _dependencies()
-        if dependencies is None:
-            logging.info(
-                "V41 wo_a quant epilogue unavailable; retaining BF16 projection"
-            )
-            return None
-        library, cubin = _build_library(sms, dependencies)
-        lib = ctypes.CDLL(str(library))
-        lib.v41_wo_a_init.argtypes = [
-            ctypes.c_char_p,
-            ctypes.c_int,
-            ctypes.POINTER(ctypes.c_void_p),
-        ]
-        lib.v41_wo_a_init.restype = ctypes.c_int
-        lib.v41_wo_a_is_current.argtypes = [ctypes.c_void_p]
-        lib.v41_wo_a_is_current.restype = ctypes.c_int
-        lib.v41_wo_a_launch.argtypes = [ctypes.c_void_p] * 7 + [
-            ctypes.c_uint,
-            ctypes.c_uint64,
-            ctypes.c_uint64,
-            ctypes.c_uint,
-            ctypes.c_void_p,
-        ]
-        lib.v41_wo_a_launch.restype = ctypes.c_int
-        _LIBRARIES[sms] = (lib, cubin)
-    lib, cubin = _LIBRARIES[sms]
-    handle = ctypes.c_void_p()
-    status = lib.v41_wo_a_init(os.fsencode(cubin), device.index, ctypes.byref(handle))
-    if status:
-        raise RuntimeError(f"V41 wo_a module initialization failed: CUDA {status}")
-    return lib, handle
+def _context():
+    current = ctypes.c_void_p()
+    if _driver().cuCtxGetCurrent(ctypes.byref(current)):
+        return None
+    return current.value
 
 
 def _output(m, device):
     q = torch.empty((m, 8192), dtype=torch.float8_e4m3fn, device=device)
-    s = torch.empty((64, (m + 3) // 4 * 4), dtype=torch.int32, device=device).T[:m]
-    return q, s
+    padded_m = (m + 3) // 4 * 4
+    s = torch.empty_strided(
+        (padded_m, 64), (1, padded_m or 1), dtype=torch.int32, device=device
+    )
+    return q, s if padded_m == m else s[:m]
+
+
+def _check_output(out, m, device, inputs):
+    q, sf = out
+    if not (
+        q.shape == (m, 8192)
+        and q.dtype == torch.float8_e4m3fn
+        and q.is_contiguous()
+        and sf.shape == (m, 64)
+        and sf.dtype == torch.int32
+        and sf.stride() == (1, (m + 3) // 4 * 4)
+        and all(
+            t.device == device and not t.requires_grad and t.data_ptr() % 16 == 0
+            for t in out
+        )
+    ):
+        raise ValueError("Invalid wo_a FP8 output or packed group32 scale layout")
+    # Outputs cannot alias inputs (or each other), even through dtype views.
+    storage = [t.untyped_storage().data_ptr() for t in (*inputs, *out)]
+    if storage[-1] in storage[:-1] or storage[-2] in storage[:-2]:
+        raise ValueError("wo_a outputs must not alias inputs or each other")
 
 
 def is_ready(weight, scale):
-    """Check metadata and current context; never compile/load a missing module."""
+    """Never import, load or compile a missing backend from the serving path."""
     entry = _READY.get(weight.device.index)
     if entry is None or not _weight_supported(weight, scale):
         return False
-    return bool(entry[0].v41_wo_a_is_current(entry[1]))
+    with torch.cuda.device(weight.device):
+        return entry["context"] == _context()
 
 
-def try_grouped_quant(a, weight, *, out=None, quant_kernel=None):
-    """Return caller-owned (Q, packed scales), or None; never compile here.
+def prepare_prefill(device):
+    """Prepare one eager prefill on the calling thread's default CUDA stream.
 
-    Inputs are finite. Cold capture and unsupported layouts keep the BF16 path.
-    The existing quantization policy is evaluated on each eager/capture call.
+    The caller may reuse this state only on the verified device, context and
+    stream during this forward, while capture remains inactive.
     """
-    if not is_supported(a, weight):
+    entry = _READY.get(device.index)
+    if device.type != "cuda" or entry is None:
         return None
-    aq, sa = a
-    entry = _READY.get(aq.device.index)
-    if entry is None:
+    if not is_default_eager_prefill(device) or entry["context"] != _context():
         return None
-    lib, handle = entry
-    with torch.cuda.device(aq.device):
-        if not lib.v41_wo_a_is_current(handle):
-            return None
-        mode = _legacy(aq.shape[0], quant_kernel)
-        if out is None:
-            out = _output(aq.shape[0], aq.device)
-        stream = torch.cuda.current_stream(aq.device)
-        status = lib.v41_wo_a_launch(
-            handle,
-            *(t.data_ptr() for t in (*a, *weight, *out)),
-            aq.shape[0],
-            aq.stride(0),
-            aq.stride(1),
-            mode,
-            stream.cuda_stream,
-        )
-        if status:
-            raise RuntimeError(f"V41 wo_a quant epilogue failed: CUDA {status}")
-        # External CUDA launches need allocator lifetime tracking on non-default streams.
-        for tensor in (*a, *weight, *out):
-            tensor.record_stream(stream)
+    return _PreparedPrefill(device, entry, torch.cuda.current_stream(device))
+
+
+def _signature(a, api):
+    # DeepGEMM owns the list of public configuration knobs affecting its JIT.
+    return (a[0].shape[0], a[0].stride(), api.get_jit_config_fingerprint())
+
+
+def _launch(entry, a, weight, out, *, prefill_stream=None):
+    api = entry["api"]
+    api.fp8_einsum(
+        "bhr,hdr->bhd",
+        a,
+        weight,
+        out[0].view(-1, 8, 1024),
+        recipe=(1, 1, 32),
+        epilogue=api.epilogue.FP8Group32(out[1]),
+    )
+    if prefill_stream is None:
+        stream = torch.cuda.current_stream(a[0].device)
+        tensors = (*a, *weight, *out)
+    else:
+        # The prefill operands and fresh outputs stay on their allocation
+        # stream. The weights may have been allocated on another stream.
+        stream = prefill_stream
+        tensors = weight
+    for tensor in tensors:
+        tensor.record_stream(stream)
+
+
+def _try_launch(entry, a, weight, out, *, prefill_stream=None):
+    aq = a[0]
+    signature = _signature(a, entry["api"])
+    missing = signature not in entry["prepared"]
+    if missing and prefill_stream is None and torch.cuda.is_current_stream_capturing():
+        return None
+    if out is None:
+        out = _output(aq.shape[0], aq.device)
+    else:
+        _check_output(out, aq.shape[0], aq.device, (*a, *weight))
+    _launch(entry, a, weight, out, prefill_stream=prefill_stream)
+    if missing:
+        entry["prepared"].add(signature)
     return out
+
+
+def try_grouped_quant(a, weight, *, out=None, prefill=None):
+    """Return FP8 + packed group32 scales, or None for the BF16 fallback.
+
+    Eager calls after startup may JIT additional shapes. CUDA capture only
+    launches signatures already prepared eagerly; it never compiles here.
+    Output quantization always uses legacy, independent of global quant knobs.
+    Inputs must be finite. Outputs are caller-owned and may be reused.
+    Pass prefill state only for an input pair produced, used and released on
+    its verified allocation stream. Caller-supplied outputs use the generic
+    path and retain its validation and allocator tracking.
+    """
+    aq, _ = a
+    device = aq.device
+    if (
+        prefill is not None
+        and out is None
+        and prefill.device == device
+        and is_default_eager_prefill(device)
+    ):
+        if not _layout_supported(a, weight):
+            return None
+        return _try_launch(prefill.entry, a, weight, out, prefill_stream=prefill.stream)
+    entry = _READY.get(device.index)
+    # Warmup publishes an entry only for a supported device. Operand layouts
+    # and storage can still change across calls and weight reloads.
+    if entry is None or not _layout_supported(a, weight):
+        return None
+    with torch.cuda.device(device):
+        if entry["context"] != _context():
+            return None
+        return _try_launch(entry, a, weight, out)
 
 
 @torch.inference_mode()
 def warmup(weight, scale):
-    """Compile/load two fixed kernels once, then launch both with private inputs."""
+    """Prepare all decode M=1..512, both layouts, and prefill anchors.
+
+    Other prefill shapes must run eagerly before capture. A cold signature
+    safely falls back; no startup compilation is hidden inside capture.
+    """
     if not _weight_supported(weight, scale):
         return False
     device = weight.device
@@ -278,26 +268,45 @@ def warmup(weight, scale):
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError("V41 wo_a JIT warmup must precede CUDA graph capture")
         if device.index in _READY:
-            # Retain one warmed context per device; other contexts use BF16.
-            lib, handle = _READY[device.index]
-            return bool(lib.v41_wo_a_is_current(handle))
-        entry = _load(device)
-        if entry is None:
+            return is_ready(weight, scale)
+        api = _external_api()
+        if api is None:
+            logging.info(
+                "[DSV41 WoAQuant] external FP8Group32 unavailable; using BF16 fallback"
+            )
             return False
-        _READY[device.index] = entry
-        try:
-            for m in (128, 256):
-                q = torch.zeros(
-                    (8, m, 4096), dtype=torch.float8_e4m3fn, device=device
-                ).transpose(0, 1)
-                s = (
-                    torch.full((8, 32, m), 0x7F7F7F7F, dtype=torch.int32, device=device)
-                    .transpose(1, 2)
-                    .transpose(0, 1)
+        context = _context()
+        if context is None:
+            return False
+        entry = dict(api=api, context=context, prepared=set())
+        rows = (*range(1, 513), 4096, 12288)
+        # Publish readiness only after all warmup launches have succeeded.
+        for m in rows:
+            aligned = (m + 3) // 4 * 4
+            scale_a = (
+                torch.full(
+                    (8, 32, aligned), 0x7F7F7F7F, device=device, dtype=torch.int32
                 )
-                try_grouped_quant((q, s), (weight, scale))
-            torch.cuda.current_stream(device).synchronize()
-        except BaseException:
-            _READY.pop(device.index, None)
-            raise
+                .transpose(1, 2)[:, :m]
+                .transpose(0, 1)
+            )
+            out = _output(m, device)
+            for token_major in (False, True):
+                q = torch.zeros(
+                    (m, 8, 4096) if token_major else (8, m, 4096),
+                    device=device,
+                    dtype=torch.float8_e4m3fn,
+                )
+                if not token_major:
+                    q = q.transpose(0, 1)
+                a = (q, scale_a)
+                _launch(entry, a, (weight, scale), out)
+                entry["prepared"].add(_signature(a, api))
+        torch.cuda.current_stream(device).synchronize()
+        _READY[device.index] = entry
+        logging.info(
+            "[DSV41 WoAQuant] external DeepGEMM ready device=%s signatures=%d",
+            device,
+            len(entry["prepared"]),
+        )
     return True

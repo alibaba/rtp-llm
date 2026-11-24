@@ -4,9 +4,10 @@ The two-stage organization follows vLLM's V4.1 fused compressor/indexer
 stores, with RTP's FP4 main cache (interleaved 256B e2m1 payload
 and 32B E4M3 group-16 scales per token) and FP4 index cache (planar 64B payload +
 packed-UE8M0 int32 scales per entry). Stage A reads the previous
-speculative state before any state writes. Stage B runs after the unchanged
-BF16 index projection, and commits state. This kernel boundary prevents a
-token CTA from overwriting another CTA's history when the state ring wraps.
+speculative state before any state writes. The index projection uses the native
+WK/cache epilogue when available; Stage B commits state after projection. This
+kernel boundary prevents a token CTA from overwriting another CTA's history
+when the state ring wraps.
 All metadata stays on the device.
 """
 
@@ -22,18 +23,22 @@ from rtp_llm.models_py.modules.dsv41.attn_type import CSA_STATE, INDEXER_KV
 from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import (
     require_pool_tokens_per_block,
 )
+from rtp_llm.models_py.modules.dsv41.fp8._trap_utils import (
+    invalid_kv_access_validation_enabled,
+    trap_invalid_kv_access_enabled,
+)
 from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_triton import (
     _round_e2m1,
     _round_power_of_two_scale,
 )
+from rtp_llm.models_py.modules.dsv41.kv_cache_utils import indexer_region_for_ratio
 
 
 @triton.jit
-def _trap(TRAP_INVALID_KV_ACCESS: tl.constexpr):
-    if TRAP_INVALID_KV_ACCESS:
-        tl.inline_asm_elementwise(
-            "trap; // dummy $0", "=r", [], dtype=tl.int32, is_pure=False, pack=1
-        )
+def _trap():
+    tl.inline_asm_elementwise(
+        "trap; // dummy $0", "=r", [], dtype=tl.int32, is_pure=False, pack=1
+    )
 
 
 @triton.jit
@@ -70,6 +75,34 @@ def _cache_address(
 
 
 @triton.jit
+def _torch_square_sum_512(values, ROWS: tl.constexpr):
+    # Match ATen CUDA Reduce.cuh's contiguous float32 mean: four independent
+    # vector accumulators, then block-x reduction. Its 512-thread configuration
+    # uses 128/64/32 lanes per output for <8 / <16 / >=16 rows respectively.
+    LANES: tl.constexpr = 128 if ROWS < 8 else (64 if ROWS < 16 else 32)
+    lane = tl.arange(0, LANES)
+    sums0 = tl.full((LANES,), 0, tl.float32)
+    sums1 = tl.full((LANES,), 0, tl.float32)
+    sums2 = tl.full((LANES,), 0, tl.float32)
+    sums3 = tl.full((LANES,), 0, tl.float32)
+    squares = values * values
+    for chunk in tl.static_range(128 // LANES):
+        first = (lane + chunk * LANES) * 4
+        sums0 = sums0 + tl.gather(squares, first, 0)
+        sums1 = sums1 + tl.gather(squares, first + 1, 0)
+        sums2 = sums2 + tl.gather(squares, first + 2, 0)
+        sums3 = sums3 + tl.gather(squares, first + 3, 0)
+    partials = ((sums0 + sums1) + sums2) + sums3
+    if LANES == 128:
+        lower = tl.arange(0, 64)
+        partials = tl.gather(partials, lower, 0) + tl.gather(partials, lower + 64, 0)
+    if LANES >= 64:
+        lower = tl.arange(0, 32)
+        partials = tl.gather(partials, lower, 0) + tl.gather(partials, lower + 32, 0)
+    return tl.sum(partials, 0)
+
+
+@triton.jit
 def _compress_norm_main_store_kernel(
     values,
     scores,
@@ -77,13 +110,20 @@ def _compress_norm_main_store_kernel(
     positions,
     requests,
     starts,
+    input_lengths,
     frequencies,
     state,
     state_table,
     main_cache,
     main_table,
+    index_table,
+    index_positions,
+    index_slots,
     latent_out,
     S: tl.constexpr,
+    ROWS: tl.constexpr,
+    VALUE_STRIDE: tl.constexpr,
+    SCORE_STRIDE: tl.constexpr,
     RATIO: tl.constexpr,
     EPS: tl.constexpr,
     STATE_EB: tl.constexpr,
@@ -96,17 +136,26 @@ def _compress_norm_main_store_kernel(
     MAIN_TABLE_STRIDE: tl.constexpr,
     MAIN_CACHE_STRIDE: tl.constexpr,
     MAIN_BLOCKS: tl.constexpr,
+    INDEX_EB: tl.constexpr,
+    INDEX_TPB: tl.constexpr,
+    INDEX_COLS: tl.constexpr,
+    INDEX_TABLE_STRIDE: tl.constexpr,
     STATE_BLOCKS: tl.constexpr,
-    TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    TRAP: tl.constexpr,
 ):
     token = tl.program_id(0).to(tl.int64)
     columns = tl.arange(0, 512)
     position = tl.load(positions + token).to(tl.int64)
     request = tl.load(requests + token).to(tl.int64)
-    current = tl.load(values + token * 512 + columns)
+    current = tl.load(values + token * VALUE_STRIDE + columns)
     if RATIO == 2:
-        current_score = tl.load(scores + token * 512 + columns)
-        if token % S == 0:
+        current_score = tl.load(scores + token * SCORE_STRIDE + columns)
+        first = (
+            token % S == 0
+            if input_lengths is None
+            else position == tl.load(starts + request).to(tl.int64)
+        )
+        if first:
             previous_position = tl.maximum(
                 tl.load(starts + request).to(tl.int64) - 1, 0
             )
@@ -115,16 +164,17 @@ def _compress_norm_main_store_kernel(
                 + request * STATE_STRIDE
                 + (previous_position // STATE_TPB) % STATE_COLS
             ).to(tl.int64)
-            if block >= STATE_BLOCKS:
-                _trap(TRAP_INVALID_KV_ACCESS)
+            if TRAP:
+                if block >= STATE_BLOCKS:
+                    _trap()
             row = block * STATE_EB + previous_position % STATE_EB
             previous = tl.load(state + row * 1024 + columns, block > 0, other=0)
             previous_score = tl.load(
                 state + row * 1024 + 512 + columns, block > 0, other=0
             )
         else:
-            previous = tl.load(values + (token - 1) * 512 + columns)
-            previous_score = tl.load(scores + (token - 1) * 512 + columns)
+            previous = tl.load(values + (token - 1) * VALUE_STRIDE + columns)
+            previous_score = tl.load(scores + (token - 1) * SCORE_STRIDE + columns)
         maximum = tl.maximum(previous_score, current_score)
         # Match torch.softmax's expf and rounded division. Approximate exp2
         # and reciprocal can flip BF16 latent values exactly at a midpoint.
@@ -136,11 +186,27 @@ def _compress_norm_main_store_kernel(
         )
     else:
         pooled = current
-    inverse_rms = tl.rsqrt(tl.sum(pooled * pooled, 0) / 512 + EPS)
+    inverse_rms = tl.rsqrt(_torch_square_sum_512(pooled, ROWS) / 512 + EPS)
     weight = tl.load(norm_weight + columns).to(tl.float32)
     latent = (pooled * inverse_rms * weight).to(tl.bfloat16)
     # wk consumes normalized pre-RoPE BF16 latent, never the main-cache key.
     tl.store(latent_out + token * 512 + columns, latent)
+    # Produce WK's metadata beside the existing global-cache address work.
+    # Logical C2 pages fill only half the physical Indexer cache entries.
+    index_block, index_offset, index_writable = _cache_address(
+        index_table,
+        position,
+        request,
+        INDEX_COLS,
+        INDEX_TABLE_STRIDE,
+        INDEX_TPB,
+        RATIO,
+    )
+    tl.store(index_positions + token, (position // RATIO) * RATIO)
+    tl.store(
+        index_slots + token,
+        tl.where(index_writable, index_block * INDEX_EB + index_offset, -1),
+    )
 
     block, offset, writable = _cache_address(
         main_table,
@@ -152,8 +218,9 @@ def _compress_norm_main_store_kernel(
         RATIO,
     )
     if writable:
-        if block >= MAIN_BLOCKS:
-            _trap(TRAP_INVALID_KV_ACCESS)
+        if TRAP:
+            if block >= MAIN_BLOCKS:
+                _trap()
         rotated = _rope_bf16(latent, frequencies, (position // RATIO) * RATIO, 512)
         # FP4 GLOBAL store: group-16 E4M3 scales, the official compressed-KV
         # quantization. Byte-identical to quantize_and_insert_k_cache_fp4.
@@ -184,6 +251,7 @@ def _index_norm_store_state_kernel(
     positions,
     requests,
     starts,
+    input_lengths,
     frequencies,
     index_cache,
     index_table,
@@ -192,6 +260,8 @@ def _index_norm_store_state_kernel(
     state,
     state_table,
     S: tl.constexpr,
+    VALUE_STRIDE: tl.constexpr,
+    SCORE_STRIDE: tl.constexpr,
     RATIO: tl.constexpr,
     EPS: tl.constexpr,
     INDEX_EB: tl.constexpr,
@@ -205,7 +275,8 @@ def _index_norm_store_state_kernel(
     STATE_STRIDE: tl.constexpr,
     INDEX_BLOCKS: tl.constexpr,
     STATE_BLOCKS: tl.constexpr,
-    TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    TRAP: tl.constexpr,
+    STATE_ONLY: tl.constexpr = False,
 ):
     token = tl.program_id(0).to(tl.int64)
     position = tl.load(positions + token).to(tl.int64)
@@ -219,9 +290,10 @@ def _index_norm_store_state_kernel(
         INDEX_TPB,
         RATIO,
     )
-    if writable:
-        if block >= INDEX_BLOCKS:
-            _trap(TRAP_INVALID_KV_ACCESS)
+    if writable and not STATE_ONLY:
+        if TRAP:
+            if block >= INDEX_BLOCKS:
+                _trap()
         columns = tl.arange(0, 128)
         key = tl.load(projected + token * 128 + columns).to(tl.float32)
         inverse_rms = tl.rsqrt(tl.sum(key * key, 0) / 128 + EPS)
@@ -254,19 +326,26 @@ def _index_norm_store_state_kernel(
         block = tl.load(
             state_table + request * STATE_STRIDE + block_in_sequence % STATE_COLS
         ).to(tl.int64)
-        end = tl.load(starts + request).to(tl.int64) + S
+        length = (
+            S
+            if input_lengths is None
+            else tl.load(input_lengths + request).to(tl.int64)
+        )
+        end = tl.load(starts + request).to(tl.int64) + length
         effective_end = tl.minimum((block_in_sequence + 1) * STATE_TPB, end)
         if (block > 0) & (position + STATE_EB >= effective_end):
-            if block >= STATE_BLOCKS:
-                _trap(TRAP_INVALID_KV_ACCESS)
+            if TRAP:
+                if block >= STATE_BLOCKS:
+                    _trap()
             row = block * STATE_EB + position % STATE_EB
             columns = tl.arange(0, 512)
             tl.store(
-                state + row * 1024 + columns, tl.load(values + token * 512 + columns)
+                state + row * 1024 + columns,
+                tl.load(values + token * VALUE_STRIDE + columns),
             )
             tl.store(
                 state + row * 1024 + 512 + columns,
-                tl.load(scores + token * 512 + columns),
+                tl.load(scores + token * SCORE_STRIDE + columns),
             )
 
 
@@ -278,11 +357,12 @@ def is_supported(attn, x, positions, req_ids, starts) -> bool:
         or x.ndim != 3
         or x.shape[-1] != 5120
         or not x.is_contiguous()
-        or not 0 < x.shape[0] * x.shape[1] <= 64
+        or x.shape[0] * x.shape[1] <= 0
         or attn.compress_ratio not in (1, 2)
         or (attn.head_dim, attn.index_head_dim, attn.rope_head_dim) != (512, 128, 64)
         or attn._block_tables_by_type is None
         or attn._kv_cache is None
+        or invalid_kv_access_validation_enabled()
     ):
         return False
     cp = attn._cp_ctx
@@ -347,7 +427,14 @@ def is_supported(attn, x, positions, req_ids, starts) -> bool:
             or table.stride(1) != 1
         ):
             return False
-        tpb = require_pool_tokens_per_block(attn._kv_cache, region=region)
+        tpb = require_pool_tokens_per_block(
+            attn._kv_cache,
+            region=(
+                indexer_region_for_ratio(attn._kv_cache, attn.compress_ratio)
+                if region == INDEXER_KV
+                else region
+            ),
+        )
         if region == CSA_STATE:
             eb = attn._source_entries(region, pool)
             if (
@@ -377,26 +464,40 @@ def is_supported(attn, x, positions, req_ids, starts) -> bool:
     return True
 
 
-def try_produce_global(attn, x, positions, req_ids, starts) -> bool:
+def try_produce_global(
+    attn, x, positions, req_ids, starts, *, projected=None, input_lengths=None
+) -> bool:
     """Write main/index/state pools, or return False without mutations.
 
-    The caller retains ownership of the shared paged-index descriptor. GEMM
-    inputs, output dtypes and accumulation are unchanged; only their epilogues
-    and metadata arithmetic are fused. Runtime/JIT failures propagate.
+    The caller retains ownership of the shared paged-index descriptor. The
+    native WK projection preserves the materialized BF16 boundary and cache
+    codec. Runtime/JIT failures propagate.
     """
     if not is_supported(attn, x, positions, req_ids, starts):
         return False
+    if input_lengths is not None and (
+        input_lengths.shape != starts.shape
+        or input_lengths.device != starts.device
+        or input_lengths.dtype not in (torch.int32, torch.int64)
+        or not input_lengths.is_contiguous()
+    ):
+        raise ValueError("Packed compressor lengths must match the request prefixes")
     from rtp_llm.models_py.modules.dsv41.fp8.compressor import _linear_bf16_bf16_fp32
 
     batch, span, _ = x.shape
     tokens = batch * span
-    values = _linear_bf16_bf16_fp32(x.view(tokens, -1), attn.global_wkv)
-    scores = (
-        _linear_bf16_bf16_fp32(x.view(tokens, -1), attn.global_wgate)
-        if attn.compress_ratio == 2
-        else values
-    )
+    if projected is None:
+        values = _linear_bf16_bf16_fp32(x.view(tokens, -1), attn.global_wkv)
+        scores = (
+            _linear_bf16_bf16_fp32(x.view(tokens, -1), attn.global_wgate)
+            if attn.compress_ratio == 2
+            else values
+        )
+    else:
+        values, scores = projected
     latent = torch.empty((tokens, 512), device=x.device, dtype=torch.bfloat16)
+    index_positions = torch.empty(tokens, device=x.device, dtype=torch.int64)
+    index_slots = torch.empty_like(index_positions)
     main_region = attn._global_region()
     main = attn._source_pool(main_region)
     main_table = attn._block_tables_by_type[main_region]
@@ -415,6 +516,7 @@ def try_produce_global(attn, x, positions, req_ids, starts) -> bool:
         STATE_COLS=state_table.shape[1],
         STATE_STRIDE=state_table.stride(0),
         STATE_BLOCKS=state.shape[0] // state_eb,
+        TRAP=trap_invalid_kv_access_enabled(),
     )
     _compress_norm_main_store_kernel[(tokens,)](
         values,
@@ -423,13 +525,20 @@ def try_produce_global(attn, x, positions, req_ids, starts) -> bool:
         positions,
         req_ids,
         starts,
+        input_lengths,
         attn.freqs_cis.view(torch.float32),
         state,
         state_table,
         main,
         main_table,
+        index_table,
+        index_positions,
+        index_slots,
         latent,
         S=span,
+        ROWS=tokens,
+        VALUE_STRIDE=values.stride(0),
+        SCORE_STRIDE=scores.stride(0),
         RATIO=attn.compress_ratio,
         EPS=attn.eps,
         MAIN_EB=main.shape[1],
@@ -438,18 +547,30 @@ def try_produce_global(attn, x, positions, req_ids, starts) -> bool:
         MAIN_TABLE_STRIDE=main_table.stride(0),
         MAIN_CACHE_STRIDE=main.stride(0),
         MAIN_BLOCKS=main.shape[0],
+        INDEX_EB=index.shape[1],
+        INDEX_TPB=require_pool_tokens_per_block(
+            attn._kv_cache,
+            region=indexer_region_for_ratio(attn._kv_cache, attn.compress_ratio),
+        ),
+        INDEX_COLS=index_table.shape[1],
+        INDEX_TABLE_STRIDE=index_table.stride(0),
         **state_geometry,
-        TRAP_INVALID_KV_ACCESS=True,
         num_warps=4,
         enable_fp_fusion=False,
     )
-    projected = F.linear(latent, attn.index_wk)
+    native_index = _try_native_indexer_k(
+        attn, latent, index_positions, index_slots, index
+    )
+    if native_index and attn.compress_ratio == 1:
+        return True
+    projected = latent if native_index else F.linear(latent, attn.index_wk)
     _index_norm_store_state_kernel[(tokens,)](
         projected,
         attn.index_k_norm,
         positions,
         req_ids,
         starts,
+        input_lengths,
         attn.freqs_cis.view(torch.float32),
         index,
         index_table,
@@ -458,17 +579,65 @@ def try_produce_global(attn, x, positions, req_ids, starts) -> bool:
         state,
         state_table,
         S=span,
+        VALUE_STRIDE=values.stride(0),
+        SCORE_STRIDE=scores.stride(0),
         RATIO=attn.compress_ratio,
         EPS=attn.eps,
         INDEX_EB=index.shape[1],
-        INDEX_TPB=require_pool_tokens_per_block(attn._kv_cache, region=INDEXER_KV),
+        INDEX_TPB=require_pool_tokens_per_block(
+            attn._kv_cache,
+            region=indexer_region_for_ratio(attn._kv_cache, attn.compress_ratio),
+        ),
         INDEX_COLS=index_table.shape[1],
         INDEX_TABLE_STRIDE=index_table.stride(0),
         INDEX_CACHE_STRIDE=index.stride(0),
         INDEX_BLOCKS=index.shape[0],
+        STATE_ONLY=native_index,
         **state_geometry,
-        TRAP_INVALID_KV_ACCESS=True,
         num_warps=4,
         enable_fp_fusion=False,
     )
+    return True
+
+
+def _try_native_indexer_k(attn, latent, positions, slots, cache):
+    """Use the native WK/cache epilogue; the caller owns compressor state."""
+    import deep_gemm
+
+    if not callable(getattr(deep_gemm, "bf16_indexer_k_rope_fp4", None)):
+        return False
+    from rtp_llm.models_py.modules.dsv41._v41_query_quant import (
+        _NATIVE_PREPARED,
+        _native_signature,
+    )
+
+    norm_mode = "torch"
+    if attn.index_k_norm.dtype == torch.bfloat16:
+        import flashinfer.norm
+
+        # Match the same backend selected by attention_v41.rms_norm.
+        norm_mode = "native" if flashinfer.norm._USE_CUDA_NORM else "cute"
+    with torch.cuda.device(latent.device):
+        capturing = torch.cuda.is_current_stream_capturing()
+        key = _native_signature(
+            deep_gemm,
+            ("indexer_k", norm_mode, attn.index_k_norm.dtype, cache.shape[1]),
+            latent,
+            latent.shape[0],
+        )
+        if capturing and key not in _NATIVE_PREPARED.keys:
+            return False
+        deep_gemm.bf16_indexer_k_rope_fp4(
+            latent,
+            attn.index_wk,
+            attn.index_k_norm,
+            attn.freqs_cis,
+            positions,
+            slots,
+            cache,
+            eps=attn.eps,
+            norm_mode=norm_mode,
+        )
+        if not capturing:
+            _NATIVE_PREPARED.keys.add(key)
     return True

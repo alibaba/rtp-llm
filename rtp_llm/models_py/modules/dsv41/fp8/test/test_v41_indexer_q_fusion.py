@@ -3,7 +3,7 @@
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -21,17 +21,17 @@ def make_case(batch, span, seed=41, weights_dtype=torch.bfloat16):
     return dict(q=q, weights=weights, freqs_cis=freqs, positions=positions)
 
 
-def baseline(case):
+def baseline(case, *, weights_out_dtype=torch.float32):
     """The exact original eight-operation chain, independent of dispatch."""
     q, weights = case["q"], case["weights"]
     weights = weights.float() * (q.shape[-1] * q.shape[-2]) ** -0.5
     freqs = case["freqs_cis"][case["positions"]]
     payload, sf = indexer.prepare_indexer_q(q, weights, freqs)
-    return payload, sf, weights
+    return payload, sf, weights.to(weights_out_dtype)
 
 
-def candidate(case):
-    result = fused.try_fused_indexer_q(**case)
+def candidate(case, *, weights_out_dtype=torch.float32):
+    result = fused.try_fused_indexer_q(**case, weights_out_dtype=weights_out_dtype)
     if result is None:
         raise AssertionError("expected fused Q preparation, got fallback")
     return result
@@ -39,7 +39,7 @@ def candidate(case):
 
 def assert_identical(actual, expected):
     for value, reference, dtype in zip(
-        actual, expected, (torch.int8, torch.int32, torch.float32)
+        actual, expected, (torch.int8, torch.int32, expected[2].dtype)
     ):
         assert value.dtype == dtype
         assert value.shape == reference.shape
@@ -52,6 +52,7 @@ def assert_identical(actual, expected):
 
 def _metadata():
     def tensor(shape, dtype):
+        strides = torch.empty(shape, device="meta").stride()
         return SimpleNamespace(
             device=torch.device("cuda"),
             shape=shape,
@@ -59,6 +60,7 @@ def _metadata():
             dtype=dtype,
             requires_grad=False,
             is_contiguous=lambda: True,
+            stride=lambda dim: strides[dim],
         )
 
     return dict(
@@ -70,6 +72,133 @@ def _metadata():
 
 
 class V41IndexerQFusionCPU(unittest.TestCase):
+    def test_direct_bf16_logits_preserve_native_stride_and_request_local_columns(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _indexer_score as score
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_mqa_layout as layout
+
+        q = torch.zeros(3, 32, 64, dtype=torch.int8)
+        sf = torch.zeros(3, 32, dtype=torch.int32)
+        keys = torch.zeros(1024, 64, dtype=torch.int8)
+        key_sf = torch.zeros(1024, dtype=torch.int32)
+        weights = torch.randn(3, 32).bfloat16()
+        starts = torch.tensor([0, 128, 512], dtype=torch.int32)
+        ends = starts + torch.tensor([0, 81, 199], dtype=torch.int32)
+        # Native padding is intentionally poisoned and must remain unconsumed.
+        result = torch.full((3, 1024), float("nan"), dtype=torch.bfloat16)[:, :256]
+        for extended in (False, True):
+            with self.subTest(extended=extended):
+                operation = Mock(return_value=result)
+                operation.__doc__ = "logits_dtype: torch.dtype" if extended else ""
+                with patch.object(
+                    score, "_deep_gemm", SimpleNamespace(fp8_fp4_mqa_logits=operation)
+                ), patch.object(
+                    layout, "normalize_mqa_logits", side_effect=AssertionError
+                ):
+                    actual = score.fp8_fp4_mqa_indexer_score(
+                        q,
+                        sf,
+                        keys,
+                        key_sf,
+                        weights,
+                        starts,
+                        ends,
+                        max_seqlen_k=256,
+                        return_bf16=True,
+                    )
+                self.assertIs(actual, result)
+                self.assertEqual(actual.stride(), (1024, 1))
+                self.assertIs(operation.call_args.args[2], weights)
+                self.assertIs(operation.call_args.args[3], starts)
+                self.assertEqual(operation.call_args.kwargs["max_seqlen_k"], 256)
+        with self.assertRaisesRegex(ValueError, "request-local width"):
+            score.fp8_fp4_mqa_indexer_score(
+                q, sf, keys, key_sf, weights, starts, ends, return_bf16=True
+            )
+
+    def test_dense_prefill_and_paged_keep_main_bf16_math_across_backend_apis(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _indexer_score as score
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_mqa_layout as layout
+
+        q = torch.zeros(6, 32, 64, dtype=torch.int8)
+        sf = torch.zeros(6, 32, dtype=torch.int32)
+        keys = torch.zeros(256, 64, dtype=torch.int8)
+        key_sf = torch.zeros(256, dtype=torch.int32)
+        weights = torch.randn(6, 32)
+        starts = torch.tensor([0, 7, 13, 30, 80, 130], dtype=torch.int32)
+        ends = starts + 100
+        pool = torch.zeros(5, 128, 68, dtype=torch.uint8)
+        tables = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
+        lengths = torch.tensor([[11, 23, 31], [93, 105, 201]], dtype=torch.int32)
+        for extended in (False, True):
+            with self.subTest(extended=extended):
+                result = torch.empty(6, 256, dtype=torch.bfloat16)
+                normalized = torch.empty(6, 256, dtype=torch.float32)
+                operation = Mock(return_value=result)
+                operation.__doc__ = "logits_dtype: torch.dtype" if extended else ""
+                backend = SimpleNamespace(
+                    fp8_fp4_mqa_logits=operation,
+                    fp8_fp4_paged_mqa_logits=operation,
+                    get_paged_mqa_logits_metadata=Mock(return_value=object()),
+                )
+                with patch.object(score, "_deep_gemm", backend), patch.object(
+                    score, "_get_num_sms", return_value=148
+                ), patch.object(
+                    layout, "normalize_mqa_logits", return_value=normalized
+                ) as normalize:
+                    actual = score.fp8_fp4_mqa_indexer_score(
+                        q, sf, keys, key_sf, weights, starts, ends, clean_logits=True
+                    )
+                    self.assertIs(actual, normalized)
+                    self.assertEqual(actual.dtype, torch.float32)
+                    self.assertEqual(len(operation.call_args.args), 5)
+                    kwargs = operation.call_args.kwargs
+                    self.assertEqual(kwargs["max_seqlen_k"], 256)
+                    torch.testing.assert_close(
+                        operation.call_args.args[2], weights.bfloat16()
+                    )
+                    self.assertEqual(
+                        {k: v for k, v in kwargs.items() if k != "max_seqlen_k"},
+                        (
+                            {"clean_logits": False, "logits_dtype": torch.bfloat16}
+                            if extended
+                            else {}
+                        ),
+                    )
+                    self.assertIs(normalize.call_args.args[0], result)
+                    self.assertFalse(normalize.call_args.kwargs["relative"])
+                    operation.reset_mock()
+                    actual = score.fp8_fp4_paged_indexer_score(
+                        q.view(2, 3, 32, 64),
+                        sf.view(2, 3, 32),
+                        pool,
+                        weights,
+                        tables,
+                        lengths,
+                        128,
+                        256,
+                    )
+                    self.assertIs(actual, normalized)
+                    torch.testing.assert_close(
+                        operation.call_args.args[2], weights.bfloat16()
+                    )
+                    torch.testing.assert_close(
+                        operation.call_args.args[4], tables.repeat_interleave(3, 0)
+                    )
+                    kwargs = operation.call_args.kwargs
+                    torch.testing.assert_close(
+                        kwargs["indices"],
+                        torch.tensor([0, 0, 0, 1, 1, 1], dtype=torch.int32),
+                    )
+                    self.assertEqual(
+                        {k: v for k, v in kwargs.items() if k != "indices"},
+                        (
+                            {"clean_logits": False, "logits_dtype": torch.bfloat16}
+                            if extended
+                            else {}
+                        ),
+                    )
+                    self.assertTrue(normalize.call_args.kwargs["relative"])
+
     def test_default_enabled_and_supported_metadata(self):
         with patch.dict(os.environ, {}, clear=True), patch.object(
             torch.cuda, "get_device_capability", return_value=(10, 3)
@@ -78,6 +207,44 @@ class V41IndexerQFusionCPU(unittest.TestCase):
             case = _metadata()
             case["weights"].dtype = torch.float32
             self.assertTrue(fused.is_supported(**case))
+
+    def test_output_dtype_contract_and_unsupported_dtype(self):
+        with patch.object(torch.cuda, "get_device_capability", return_value=(10, 3)):
+            for dtype in (torch.float32, torch.bfloat16):
+                self.assertTrue(
+                    fused.is_supported(**_metadata(), weights_out_dtype=dtype)
+                )
+        with patch.object(
+            torch.cuda, "get_device_capability", side_effect=AssertionError
+        ):
+            self.assertIsNone(
+                fused.try_fused_indexer_q(
+                    **_metadata(), weights_out_dtype=torch.float16
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "indexer weights"):
+                indexer.prepare_indexer_q_and_weights(
+                    **_metadata(), weights_out_dtype=torch.float16
+                )
+
+    def test_bf16_fallback_rounds_after_fp32_scale(self):
+        q = torch.empty(1, 2, 32, 128, dtype=torch.bfloat16)
+        weights = torch.linspace(-1.01, 1.01, 64).reshape(1, 2, 32)
+        freqs = torch.randn(7, 32, dtype=torch.complex64)
+        positions = torch.tensor([6, -2])
+        payload, sf = object(), object()
+        with patch.object(fused, "is_supported", return_value=False), patch.object(
+            indexer, "prepare_indexer_q", return_value=(payload, sf)
+        ):
+            result = indexer.prepare_indexer_q_and_weights(
+                q, weights, freqs, positions, weights_out_dtype=torch.bfloat16
+            )
+        self.assertIs(result[0], payload)
+        self.assertIs(result[1], sf)
+        self.assertEqual(result[2].dtype, torch.bfloat16)
+        torch.testing.assert_close(
+            result[2], (weights.float() / 64).bfloat16(), rtol=0, atol=0
+        )
 
     def test_unsupported_dtype_and_cpu_short_circuit_without_cuda_queries(self):
         case = _metadata()
@@ -119,7 +286,10 @@ class V41IndexerQFusionCPU(unittest.TestCase):
                     self.assertFalse(fused.is_supported(**case))
             for key in _metadata():
                 case = _metadata()
-                case[key].is_contiguous = lambda: False
+                if key == "q":
+                    case[key].stride = lambda dim: 2
+                else:
+                    case[key].is_contiguous = lambda: False
                 self.assertFalse(fused.is_supported(**case))
             self.assertFalse(fused.is_supported(**_metadata(), rope_head_dim=32))
             case = _metadata()
@@ -165,6 +335,193 @@ class V41IndexerQFusionCUDA(unittest.TestCase):
             self.skipTest("V4.1 fused MXFP4 indexer Q requires SM100 family")
 
     @torch.no_grad()
+    def test_selection_initialization_covers_ragged_widths_and_graph_replay(self):
+        for rows, width, candidate_width in ((1, 1, 0), (7, 37, 19), (131, 512, 2048)):
+            with self.subTest(rows=rows, width=width, candidate_width=candidate_width):
+                case = make_case(rows, 1)
+                # Offset views exercise unaligned output pointers too. The
+                # storage guards prove initialization writes only each output.
+                storage = torch.full(
+                    (rows * width + 2,), 123, device="cuda", dtype=torch.int32
+                )
+                selection = storage[1:-1].view(rows, width)
+                candidates = (
+                    torch.full(
+                        (rows, candidate_width), 456, device="cuda", dtype=torch.int32
+                    )
+                    if candidate_width
+                    else None
+                )
+
+                def run():
+                    return fused.try_fused_indexer_q(
+                        **case,
+                        weights_out_dtype=torch.bfloat16,
+                        selection_out=selection,
+                        candidates_out=candidates,
+                    )
+
+                expected = baseline(case, weights_out_dtype=torch.bfloat16)
+                assert_identical(run(), expected)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    actual = run()
+                selection.fill_(987)
+                if candidates is not None:
+                    candidates.fill_(654)
+                graph.replay()
+                assert_identical(actual, expected)
+                self.assertTrue(bool((selection == -1).all()))
+                self.assertEqual(storage[0].item(), 123)
+                self.assertEqual(storage[-1].item(), 123)
+                if candidates is not None:
+                    self.assertTrue(bool((candidates == -1).all()))
+
+    @torch.no_grad()
+    def test_selection_layout_rejection_does_not_write_other_output(self):
+        case = make_case(7, 1)
+        valid = torch.full((7, 512), 123, device="cuda", dtype=torch.int32)
+        for invalid in (
+            torch.empty((7, 16), dtype=torch.int32),
+            torch.empty((7, 16), dtype=torch.int64, device="cuda"),
+            torch.empty((8, 16), dtype=torch.int32, device="cuda"),
+            torch.empty((7, 32), dtype=torch.int32, device="cuda")[:, ::2],
+        ):
+            self.assertIsNone(
+                fused.try_fused_indexer_q(
+                    **case,
+                    selection_out=valid,
+                    candidates_out=invalid,
+                )
+            )
+            self.assertTrue(bool((valid == 123).all()))
+
+    @torch.no_grad()
+    def test_selection_initialization_uses_only_q_kernel(self):
+        case = make_case(131, 1)
+        selection = torch.empty((131, 512), dtype=torch.int32, device="cuda")
+        candidates = torch.empty((131, 2048), dtype=torch.int32, device="cuda")
+
+        def run():
+            return fused.try_fused_indexer_q(
+                **case,
+                weights_out_dtype=torch.bfloat16,
+                selection_out=selection,
+                candidates_out=candidates,
+            )
+
+        for _ in range(3):
+            run()
+        torch.cuda.synchronize()
+        with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ]
+        ) as profile:
+            run()
+            torch.cuda.synchronize()
+        events = profile.events()
+        self.assertFalse(any(e.name in ("aten::full", "aten::fill_") for e in events))
+        kernels = [e for e in events if e.device_type == torch.autograd.DeviceType.CUDA]
+        self.assertEqual(len(kernels), 1, [e.name for e in kernels])
+        self.assertIn("_fused_indexer_q_rope_fp4_kernel", kernels[0].name)
+
+    @torch.no_grad()
+    def test_grouped_prefill_rows_preserve_outputs_and_selection(self):
+        for tokens in (2048, 16384):
+            with self.subTest(tokens=tokens):
+                case = make_case(tokens, 1)
+                selection = torch.full(
+                    (tokens, 512), 7, dtype=torch.int32, device="cuda"
+                )
+                candidates = torch.full(
+                    (tokens, 2048), 9, dtype=torch.int32, device="cuda"
+                )
+                actual = fused.try_fused_indexer_q(
+                    **case,
+                    weights_out_dtype=torch.bfloat16,
+                    selection_out=selection,
+                    candidates_out=candidates,
+                )
+                assert_identical(
+                    actual, baseline(case, weights_out_dtype=torch.bfloat16)
+                )
+                self.assertTrue(bool((selection == -1).all()))
+                self.assertTrue(bool((candidates == -1).all()))
+                if tokens == 2048:
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        captured = fused.try_fused_indexer_q(
+                            **case,
+                            weights_out_dtype=torch.bfloat16,
+                            selection_out=selection,
+                            candidates_out=candidates,
+                        )
+                    case["q"].mul_(2)
+                    case["positions"].add_(1).remainder_(4096)
+                    selection.fill_(7)
+                    candidates.fill_(9)
+                    graph.replay()
+                    assert_identical(
+                        captured, baseline(case, weights_out_dtype=torch.bfloat16)
+                    )
+                    self.assertTrue(bool((selection == -1).all()))
+                    self.assertTrue(bool((candidates == -1).all()))
+
+    @torch.no_grad()
+    def test_grouped_prefill_q_offsets_cross_int32_boundary(self):
+        # Q has 4096 BF16 elements per token, so token 524288 crosses int32.
+        # Sample the reference to avoid materializing the full eager pipeline.
+        boundary = 1 << 19
+        case = make_case(boundary + 3, 1)
+        indices = torch.tensor([0, boundary - 1, boundary, boundary + 2], device="cuda")
+        sampled = {
+            key: value if key == "freqs_cis" else value.index_select(0, indices)
+            for key, value in case.items()
+        }
+        expected = baseline(sampled, weights_out_dtype=torch.bfloat16)
+        actual = candidate(case, weights_out_dtype=torch.bfloat16)
+        assert_identical(
+            tuple(value.index_select(0, indices) for value in actual), expected
+        )
+
+    @torch.no_grad()
+    def test_grouped_selection_offsets_cross_int32_boundary(self):
+        # An int32 output of width 65536 crosses the element-offset limit at
+        # token 32768. Exercise each optional output separately to bound memory.
+        boundary = 1 << 15
+        tokens, width = boundary + 1, 65536
+        case = make_case(tokens, 1)
+        indices = torch.tensor([0, boundary - 1, boundary], device="cuda")
+        sampled = {
+            key: value if key == "freqs_cis" else value.index_select(0, indices)
+            for key, value in case.items()
+        }
+        expected = baseline(sampled, weights_out_dtype=torch.bfloat16)
+        for output_name in ("selection_out", "candidates_out"):
+            with self.subTest(output_name=output_name):
+                storage = torch.empty(
+                    tokens * width + 2, device="cuda", dtype=torch.int32
+                )
+                storage[0] = storage[-1] = 123
+                output = storage[1:-1].view(tokens, width)
+                output[indices] = 7
+                actual = fused.try_fused_indexer_q(
+                    **case,
+                    weights_out_dtype=torch.bfloat16,
+                    **{output_name: output},
+                )
+                self.assertIsNotNone(actual)
+                assert_identical(
+                    tuple(value.index_select(0, indices) for value in actual), expected
+                )
+                self.assertTrue(bool((output.index_select(0, indices) == -1).all()))
+                self.assertEqual(storage[0].item(), 123)
+                self.assertEqual(storage[-1].item(), 123)
+                del actual, output, storage
+
+    @torch.no_grad()
     def test_real_shapes_and_input_immutability(self):
         for batch, span in (
             (1, 1),
@@ -196,6 +553,59 @@ class V41IndexerQFusionCUDA(unittest.TestCase):
         # shape. Short decode batches seldom hit that BF16/FP4 midpoint.
         case = make_case(16384, 1, seed=41)
         assert_identical(candidate(case), baseline(case))
+
+    @torch.no_grad()
+    def test_bf16_output_matches_original_sparse_cast_byte_exact(self):
+        for batch, span in ((1, 1), (4, 6), (16384, 1)):
+            for input_dtype in (torch.bfloat16, torch.float32):
+                with self.subTest(batch=batch, span=span, input_dtype=input_dtype):
+                    case = make_case(batch, span, weights_dtype=input_dtype)
+                    # Include BF16 midpoints, subnormals and signed zero. The
+                    # reference is the previous FP32 output plus sparse cast.
+                    extremes = torch.tensor(
+                        [
+                            0.0,
+                            -0.0,
+                            1.00390625,
+                            1.01171875,
+                            -1.00390625,
+                            2.0**-120,
+                            2.0**-126,
+                            2.0**-130,
+                            torch.finfo(torch.bfloat16).max,
+                        ],
+                        device="cuda",
+                        dtype=input_dtype,
+                    )
+                    case["weights"].view(-1)[: extremes.numel()].copy_(extremes)
+                    actual = candidate(case, weights_out_dtype=torch.bfloat16)
+                    expected = baseline(case, weights_out_dtype=torch.bfloat16)
+                    assert_identical(actual, expected)
+                    dense = candidate(case)
+                    assert_identical(dense, baseline(case))
+
+    @torch.no_grad()
+    def test_bf16_output_has_one_kernel_and_no_dispatcher_cast(self):
+        case = make_case(16384, 1)
+        for _ in range(3):
+            candidate(case, weights_out_dtype=torch.bfloat16)
+        torch.cuda.synchronize()
+        with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ]
+        ) as profile:
+            result = candidate(case, weights_out_dtype=torch.bfloat16)
+            torch.cuda.synchronize()
+        self.assertEqual(result[2].dtype, torch.bfloat16)
+        events = profile.events()
+        self.assertFalse(
+            any(e.name in ("aten::to", "aten::_to_copy", "aten::copy_") for e in events)
+        )
+        kernels = [e for e in events if e.device_type == torch.autograd.DeviceType.CUDA]
+        self.assertEqual(len(kernels), 1, [e.name for e in kernels])
+        self.assertIn("_fused_indexer_q_rope_fp4_rows_kernel", kernels[0].name)
 
     def test_fp4_midpoints_scale_boundaries_and_signed_zero(self):
         case = make_case(1, 6)
@@ -290,6 +700,31 @@ class V41IndexerQFusionCUDA(unittest.TestCase):
                     graph_new.replay()
                     assert_identical(new, old)
                     assert_identical(new, baseline(case))
+
+    @torch.no_grad()
+    def test_bf16_cuda_graph_replay_reads_current_weights_and_positions(self):
+        for batch, span in ((4, 6), (1024, 1)):
+            with self.subTest(batch=batch, span=span):
+                case = make_case(batch, span, weights_dtype=torch.float32)
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    for _ in range(3):
+                        candidate(case, weights_out_dtype=torch.bfloat16)
+                torch.cuda.current_stream().wait_stream(stream)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=stream):
+                    actual = candidate(case, weights_out_dtype=torch.bfloat16)
+                for replay in range(3):
+                    changed = make_case(
+                        batch, span, seed=191 + replay, weights_dtype=torch.float32
+                    )
+                    for key, value in case.items():
+                        value.copy_(changed[key])
+                    graph.replay()
+                    assert_identical(
+                        actual, baseline(case, weights_out_dtype=torch.bfloat16)
+                    )
 
 
 if __name__ == "__main__":

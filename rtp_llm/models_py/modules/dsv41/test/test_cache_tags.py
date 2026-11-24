@@ -19,6 +19,19 @@ CACHE = _load("v41_cache_contract", Path(__file__).parents[1] / "kv_cache_utils.
 
 
 class CacheTagsTest(unittest.TestCase):
+    def test_indexer_physical_group_follows_ratio_and_cache_schema(self):
+        mixed = SimpleNamespace(group_tags=["indexer_kv", "indexer_kv_c2"])
+        compact_only = SimpleNamespace(group_tags=["indexer_kv_c2"])
+        legacy = SimpleNamespace(group_tags=["indexer_kv"])
+        self.assertEqual(CACHE.indexer_region_for_ratio(mixed, 1), "indexer_kv")
+        self.assertEqual(CACHE.indexer_region_for_ratio(mixed, 2), "indexer_kv_c2")
+        self.assertEqual(
+            CACHE.indexer_region_for_ratio(compact_only, 2), "indexer_kv_c2"
+        )
+        for cache in (legacy, None, SimpleNamespace()):
+            self.assertEqual(CACHE.indexer_region_for_ratio(cache, 2), "indexer_kv")
+        self.assertIn("indexer_kv_c2", CACHE.DSV4_KERNEL_ROW_TAGS)
+
     def test_group_metadata_is_not_silently_taken_from_primary_pool(self):
         swa = torch.tensor([[1, 3], [2, 4]], dtype=torch.int32)
         global_kv = torch.tensor([[7], [9]], dtype=torch.int32)
@@ -67,6 +80,33 @@ class CacheTagsTest(unittest.TestCase):
         )
         self.assertEqual(CACHE.swa_region_for_layer(cache, 0), "swa_kv")
         self.assertEqual(CACHE.swa_region_for_layer(cache, 1), "decoder_swa_kv")
+
+    def test_host_table_lookup_keeps_exact_group_and_never_materializes_a_copy(self):
+        cache = SimpleNamespace(group_tags=["swa_kv", "decoder_swa_kv"])
+        swa = torch.tensor([[1, 3]], dtype=torch.int32)
+        draft = torch.tensor([[7, 9]], dtype=torch.int32)
+        inputs = {
+            "swa_kv": SimpleNamespace(kv_cache_block_id=swa),
+            "decoder_swa_kv": SimpleNamespace(kv_cache_block_id=draft),
+        }
+        self.assertIs(CACHE.host_block_table_for_tag(cache, inputs, "swa_kv"), swa)
+        self.assertIs(
+            CACHE.host_block_table_for_tag(cache, inputs, "decoder_swa_kv"), draft
+        )
+        self.assertIsNone(CACHE.host_block_table_for_tag(cache, inputs, "missing"))
+        inputs["decoder_swa_kv"].kv_cache_block_id = object()
+        self.assertIsNone(
+            CACHE.host_block_table_for_tag(cache, inputs, "decoder_swa_kv")
+        )
+
+    def test_tensor_math_uses_device_mirror_without_losing_host_fallback(self):
+        host = torch.tensor([3, 7], dtype=torch.int32)
+        device = host.clone()
+        inputs = SimpleNamespace(input_lengths=host, input_lengths_device=device)
+        self.assertIs(CACHE.device_attention_metadata(inputs, "input_lengths"), device)
+        inputs.input_lengths_device = torch.empty(0, dtype=torch.int32)
+        self.assertIs(CACHE.device_attention_metadata(inputs, "input_lengths"), host)
+        self.assertIsNone(CACHE.device_attention_metadata(inputs, "prefix_lengths"))
 
     def test_bounded_swa_routing_is_layer_specific(self):
         def get(layer, tag):

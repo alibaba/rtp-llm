@@ -27,7 +27,9 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 
 def _flat_optional(t: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
-    return None if t is None else t.reshape(-1).contiguous()
+    if t is None or (t.ndim == 1 and t.is_contiguous()):
+        return t
+    return t.reshape(-1).contiguous()
 
 
 class _SwaWriteSource(NamedTuple):
@@ -38,6 +40,16 @@ class _SwaWriteSource(NamedTuple):
     block_table: Any
 
 
+def _clear_v41_attention_metadata(shared: Dict) -> None:
+    seen = set()
+    for attn in shared.get("layers", {}).values():
+        meta = getattr(attn, "_prefill_meta_shared", None)
+        workspace = getattr(meta, "workspace", None)
+        if workspace is not None and id(workspace) not in seen:
+            seen.add(id(workspace))
+            workspace.clear_attention_metadata()
+
+
 def release_v41_prefill_shared(shared: Dict, layer_id: Optional[int] = None) -> None:
     """Release prefill tensors after their last consumer, or at forward exit.
 
@@ -46,6 +58,13 @@ def release_v41_prefill_shared(shared: Dict, layer_id: Optional[int] = None) -> 
     The layer registry and paged KV pools are not per-forward scratch.
     """
     if layer_id is None:
+        for key in ("prefill_pool_ready", "prefill_state_ready"):
+            pending = shared.pop(key, None)
+            if pending is not None:
+                # On exceptional exit, protect in-place pool/table reuse as
+                # well as allocator lifetime. This only queues a GPU event wait.
+                pending.wait()
+        _clear_v41_attention_metadata(shared)
         for key in (
             "ced_indexer_projection",
             "global",
@@ -60,35 +79,37 @@ def release_v41_prefill_shared(shared: Dict, layer_id: Optional[int] = None) -> 
             "prefill_kv_workspace",
             "prefill_index_plan",
             "prefill_meta_common",
-            "prefill_producer_host_tables",
         ):
             shared.pop(key, None)
         return
 
-    remaining = [attn for index, attn in shared["layers"].items() if index > layer_id]
-    for key, source_attr, dependent_keys in (
-        (
-            "global",
-            "kv_source_layer_id",
-            ("prefill_chunk_meta", "prefill_kv_workspace"),
-        ),
-        ("topk", "index_source_layer_id", ("prefill_index_plan",)),
+    unused_global = set(shared.get("global", ()))
+    unused_topk = set(shared.get("topk", ()))
+    has_future_index_source = False
+    for index, attn in shared["layers"].items():
+        if index <= layer_id:
+            continue
+        unused_global.discard(getattr(attn, "kv_source_layer_id", None))
+        unused_topk.discard(getattr(attn, "index_source_layer_id", None))
+        has_future_index_source |= bool(getattr(attn, "is_index_source", False))
+        if not unused_global and not unused_topk and has_future_index_source:
+            break
+    for key, unused_sources, dependent_keys in (
+        ("global", unused_global, ("prefill_chunk_meta", "prefill_kv_workspace")),
+        ("topk", unused_topk, ("prefill_index_plan",)),
     ):
         values = shared.get(key, {})
-        if values:
-            unused_sources = set(values)
-            for attn in remaining:
-                unused_sources.discard(getattr(attn, source_attr, None))
-                if not unused_sources:
-                    break
-            for source in tuple(values):
-                if source in unused_sources:
-                    del values[source]
+        for source in unused_sources:
+            del values[source]
         if not values:
             for dependent in dependent_keys:
-                shared.pop(dependent, None)
+                removed = shared.pop(dependent, None)
+                if dependent == "prefill_index_plan" and removed is not None:
+                    # Final views must not extend the plan's existing lifetime
+                    # into the next source group's MQA workspace allocation.
+                    _clear_v41_attention_metadata(shared)
 
-    if not any(getattr(attn, "is_index_source", False) for attn in remaining):
+    if not has_future_index_source:
         for key in (
             "candidates",
             "candidate_mask",
@@ -118,7 +139,8 @@ def build_and_propagate_prefill_meta_fp8(
     workspace: "PrefillWorkspace",
     first_layer: int = 0,
     reuse_write_by_region: Optional[Dict] = None,
-    host_block_ids: Optional[torch.Tensor] = None,
+    host_swa_tables: Optional[Dict[str, torch.Tensor]] = None,
+    stop_layer: Optional[int] = None,
 ) -> Dict:
     """Build the layer-invariant prefill meta once per ``compress_ratio``
     bucket and broadcast each bucket's meta to its layers'
@@ -135,6 +157,10 @@ def build_and_propagate_prefill_meta_fp8(
 
     Only remaining layers are rebuilt after CED changes the query domain.
     Returned write metadata is owned by this forward and is never a global cache.
+
+    ``stop_layer`` excludes buckets represented only at or beyond that layer.
+    Their metadata stays None until the CED compact point rebuilds it. Buckets
+    spanning the boundary still share their pre-boundary representative.
     """
     sp_per_req = _flat_optional(sp_per_req)
     cu_seqlens = _flat_optional(cu_seqlens)
@@ -145,14 +171,15 @@ def build_and_propagate_prefill_meta_fp8(
 
     representatives: Dict[tuple, Any] = {}
     layer_buckets = []
-    for layer in v4.layers[first_layer:]:
+    for index, layer in enumerate(v4.layers[first_layer:], start=first_layer):
         attn = getattr(layer, "attn", None)
         if attn is not None:
             key = (
                 int(attn.compress_ratio),
                 cached_swa_region(v4, kv_cache, attn.layer_id),
             )
-            representatives.setdefault(key, attn)
+            if stop_layer is None or index < stop_layer:
+                representatives.setdefault(key, attn)
             layer_buckets.append((attn, key))
 
     # SWA-only owns the superset metadata (common + SWA Group-1 + Group-2),
@@ -163,8 +190,10 @@ def build_and_propagate_prefill_meta_fp8(
 
     meta_by_ratio: Dict[tuple, "PrefillMeta"] = {}
     reusable_common: Dict[int, "PrefillMeta"] = {}
+    reusable_query: Dict[tuple, "PrefillMeta"] = {}
     reusable_freqs_by_rope_kind: Dict[bool, "PrefillMeta"] = {}
     write_by_region: Dict = {}
+    bind_legacy_freqs = getattr(getattr(v4, "args", None), "v41_config", None) is None
     # V4.1 buckets (ratios 0/2/1) build through ``AttentionV41FP8``'s SWA
     # planner override, which caches the built meta per (rope kind, input
     # identity) in the shared per-forward state. Drop that cache HERE, at the
@@ -176,11 +205,6 @@ def build_and_propagate_prefill_meta_fp8(
     if isinstance(first_shared, dict):
         first_shared.pop("prefill_meta_common", None)
     try:
-        regions = (
-            tuple(str(region) for region in getattr(kv_cache, "group_tags", ()))
-            if ordered_ratios
-            else ()
-        )
         with record_function_range("dsv4.fp8.prefill_meta.build_all_ratios"):
             for key in ordered_ratios:
                 r, swa_region = key
@@ -194,6 +218,7 @@ def build_and_propagate_prefill_meta_fp8(
                     reuse_write = None
                     previous = (reuse_write_by_region or {}).get(swa_region)
                     cp = getattr(attn, "_cp_ctx", None)
+                    query_key = (attn.window_size, id(cp))
                     table = (block_tables_by_type or {}).get(swa_region)
                     if previous is not None and hasattr(attn, "swa_bounded_replay"):
                         old_cp = previous.cp_ctx
@@ -221,17 +246,14 @@ def build_and_propagate_prefill_meta_fp8(
                         if reuse_write is not None
                         else {}
                     )
+                    host_swa_table = (host_swa_tables or {}).get(swa_region)
                     if (
                         hasattr(attn, "swa_bounded_replay")
-                        and isinstance(host_block_ids, torch.Tensor)
-                        and host_block_ids.device.type == "cpu"
-                        and host_block_ids.ndim == 3
-                        and host_block_ids.shape[0] == len(regions)
-                        and swa_region in regions
+                        and isinstance(host_swa_table, torch.Tensor)
+                        and host_swa_table.device.type == "cpu"
+                        and host_swa_table.ndim == 2
                     ):
-                        write_kwargs["host_swa_table"] = host_block_ids[
-                            regions.index(swa_region)
-                        ]
+                        write_kwargs["host_swa_table"] = host_swa_table
                     with record_function_range(f"dsv4.fp8.prefill_meta.ratio_{r}"):
                         meta_by_ratio[key] = attn._build_shared_prefill_meta(
                             x_first_layer,
@@ -245,6 +267,10 @@ def build_and_propagate_prefill_meta_fp8(
                             req_id_per_token=req_id_per_token,
                             max_seqlen_q=max_seqlen_q,
                             reuse_common_meta=reusable_common.get(swa_region),
+                            reuse_query_meta=(
+                                attn.window_size,
+                                reusable_query.get(query_key),
+                            ),
                             reuse_freqs_meta=reusable_freqs_by_rope_kind.get(
                                 compressed_rope
                             ),
@@ -263,6 +289,7 @@ def build_and_propagate_prefill_meta_fp8(
                         ),
                     )
                 reusable_common.setdefault(swa_region, meta_by_ratio[key])
+                reusable_query.setdefault(query_key, meta_by_ratio[key])
                 reusable_freqs_by_rope_kind.setdefault(
                     compressed_rope, meta_by_ratio[key]
                 )
@@ -272,7 +299,8 @@ def build_and_propagate_prefill_meta_fp8(
                 # Each layer owns its own compressor / indexer; freqs_cis must
                 # be bound per-layer (not just on the rep). Cheap idempotent
                 # is-None set.
-                attn._ensure_freqs_cis_bound()
+                if bind_legacy_freqs:
+                    attn._ensure_freqs_cis_bound()
                 attn._set_prefill_meta_shared(meta_by_ratio.get(key))
         return write_by_region
     except BaseException:

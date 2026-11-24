@@ -66,6 +66,7 @@ from rtp_llm.models_py.modules.dsv41.fp8._swa_cp_byte_sliced import (
     CPByteSlicedSlotCompaction,
     build_cp_byte_sliced_slot_compaction,
 )
+from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_kv import swa_kv_norm_rope
 from rtp_llm.models_py.modules.dsv41.fp8.compressor import CompressorFP8, CompressorMeta
 from rtp_llm.models_py.modules.dsv41.fp8.indexer import IndexerFP8
 from rtp_llm.models_py.modules.dsv41.prefill_workspace import PrefillWorkspace
@@ -101,6 +102,7 @@ from rtp_llm.models_py.modules.dsv41.attn_type import (
     HCA_KV,
     HCA_STATE,
     INDEXER_KV,
+    INDEXER_KV_C2,
     INDEXER_STATE,
     SWA_KV,
 )
@@ -113,11 +115,16 @@ _CACHE_TAG_BY_NAME = {
         CSA_KV,
         HCA_KV,
         INDEXER_KV,
+        INDEXER_KV_C2,
         INDEXER_STATE,
         CSA_STATE,
         HCA_STATE,
     )
 }
+
+
+def _use_read_from_pool() -> bool:
+    return os.environ.get("DSV4_READ_FROM_POOL", "1") != "0"
 
 
 def _use_cp_cache_hit_raw_q_merge() -> bool:
@@ -138,6 +145,10 @@ def _force_all_cp_raw_q_merge() -> bool:
 from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import (
     require_pool_tokens_per_block as _dsv4_pool_tokens_per_block,
 )
+
+
+def _prefill_cp_overlap_enabled() -> bool:
+    return os.environ.get("DSV4_PREFILL_CP_OVERLAP", "0") == "1"
 
 
 def _prefill_cp_async_workspace_reads_enabled() -> bool:
@@ -300,6 +311,11 @@ def bind_attn_cache(attn, kv_cache=None, block_tables_by_type=None, cp_ctx=BIND_
         if block_tables_by_type is not None:
             attn._block_tables_by_type = bind_swa_table(
                 block_tables_by_type, attn._swa_cache_region
+            )
+        bind_indexer = getattr(attn, "_bind_indexer_table", None)
+        if callable(bind_indexer) and attn._block_tables_by_type is not None:
+            attn._block_tables_by_type = bind_indexer(
+                attn._block_tables_by_type, attn._kv_cache
             )
         if cp_ctx is not BIND_KEEP:
             attn._cp_ctx = cp_ctx
@@ -555,6 +571,10 @@ class SwaPrefillMeta(NamedTuple):
     cache_slot_mapping: Optional[torch.Tensor] = None
     slot_compaction: Optional[CPByteSlicedSlotCompaction] = None
     cache_compaction: Optional[CPByteSlicedSlotCompaction] = None
+    # V4.1 continuation stores only each request's prefix tail + fresh rows.
+    # All prefix/fresh/attention indices use these same packed origins.
+    packed_row_offsets: Optional[torch.Tensor] = None
+    packed_row_lengths: Optional[Tuple[int, ...]] = None
 
 
 class WorkspaceMeta(NamedTuple):
@@ -684,12 +704,15 @@ class PrefillQKV(NamedTuple):
     buffers, which are dead by then. Consumers enter only after materialization.
     """
 
-    qr: torch.Tensor
+    qr: Optional[torch.Tensor]
     q: Optional[torch.Tensor]
     kv_full: torch.Tensor
+    qr_quantized: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
 
 
 class AttentionFP8(nn.Module):
+    _prefill_cp_overlap_hard_on: bool = False
+
     def __init__(
         self,
         layer_id: int,
@@ -1065,7 +1088,7 @@ class AttentionFP8(nn.Module):
         base = layer_kv.kv_cache_base
         if base is None or base.numel() == 0 or base.dim() != 2:
             return None
-        return base.view(torch.uint8)
+        return base if base.dtype == torch.uint8 else base.view(torch.uint8)
 
     def _swa_cp_byte_sliced(self) -> bool:
         cp_ctx = getattr(self, "_cp_ctx", None)
@@ -1686,6 +1709,8 @@ class AttentionFP8(nn.Module):
         self,
         x: torch.Tensor,
         shared_input_quant: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        *,
+        common: Optional[PrefillMeta] = None,
     ):
         linear = getattr(self, "wq_a_wkv", None)
         if linear is None:
@@ -1790,6 +1815,8 @@ class AttentionFP8(nn.Module):
         x: torch.Tensor,
         attn_metadata: "DSv4DecodeAttnMetadataFP8",
         kv_cache: Optional[Any] = None,
+        *,
+        shared_input_quant=None,
     ) -> torch.Tensor:
         """qwen3-style: ``kv_cache`` (framework KVCache handle) flows in
         as a kwarg. Stashed for the duration of this call so pool views
@@ -1802,7 +1829,15 @@ class AttentionFP8(nn.Module):
                 attn_metadata = attn_metadata.decoder_swa_metadata
             self._set_compressor_pool_context()
             try:
-                return self._forward_decode_body(x, attn_metadata)
+                return self._forward_decode_body(
+                    x,
+                    attn_metadata,
+                    **(
+                        {"shared_input_quant": shared_input_quant}
+                        if shared_input_quant is not None
+                        else {}
+                    ),
+                )
             finally:
                 self._clear_compressor_pool_context()
 
@@ -2204,6 +2239,8 @@ class AttentionFP8(nn.Module):
         """Per-call gate for the CP-overlap orchestrator.
 
         All conditions must hold:
+          * overlap enabled — env ``DSV4_PREFILL_CP_OVERLAP=1`` or a
+            subclass hard-on (``_prefill_cp_overlap_hard_on``);
           * CP is actually active (``cp_size > 1``); no NCCL gather to
             overlap with otherwise;
           * prefill tensors are CUDA-backed — CPU / sync-reference CP
@@ -2214,6 +2251,8 @@ class AttentionFP8(nn.Module):
           * the layer has a compressor (``compress_ratio > 0``) —
             SWA-only layers (ratio == 0) have nothing to overlap.
         """
+        if not (self._prefill_cp_overlap_hard_on or _prefill_cp_overlap_enabled()):
+            return False
         if not common.cp_on or common.cp_ctx is None or common.cp_ctx.cp_size <= 1:
             return False
         if self.compress_ratio == 0:
@@ -2234,9 +2273,9 @@ class AttentionFP8(nn.Module):
         """Whether workspace cache reads may use side-stream async restore.
 
         This shares the main prefill-CP-overlap gate and only applies to the
-        page-rr / KV-cache-sharded path; workspace reads otherwise keep the
-        original synchronous gather/restore/write ordering (also forced by
-        ``DSV4_PREFILL_CP_ASYNC_WORKSPACE_READS=0``).
+        page-rr / KV-cache-sharded path. With ``DSV4_PREFILL_CP_OVERLAP=0``,
+        workspace reads keep the original synchronous gather/restore/write
+        ordering even when ``--prefill_cp_kv_cache_sharded=1`` is set.
         """
         if not _prefill_cp_async_workspace_reads_enabled():
             return False
@@ -2283,7 +2322,7 @@ class AttentionFP8(nn.Module):
         ``csa`` / ``hca`` additionally share the ``[sliding | compressed]``
         kv_cat + sparse_attn epilogue via :meth:`_forward_prefill_compressed`.
 
-        When CP-active, CSA/HCA layers
+        Under ``DSV4_PREFILL_CP_OVERLAP=1`` + CP-active, CSA/HCA layers
         instead dispatch to the overlap orchestrators (which hoist the
         compressor's CP all-gather ahead of the SWA write so they can
         overlap on the default stream vs the CP communication stream). The baseline sequential path
@@ -3016,7 +3055,10 @@ class AttentionFP8(nn.Module):
         wm = workspace_meta
         D = self.head_dim
         B = int(wm.swa_seq_lens.shape[0])
-        if os.environ.get("DSV4_CP_RAW_Q_MERGE_LOG", "0") != "0":
+        if (
+            os.environ.get("DSV4_FORWARD_TENSOR_DEBUG", "0") != "0"
+            or os.environ.get("DSV4_CP_RAW_Q_MERGE_LOG", "0") != "0"
+        ):
             prefix_src = (
                 cp_ctx.prefix_lengths
                 if cp_ctx.prefix_lengths is not None
@@ -3209,9 +3251,11 @@ class AttentionFP8(nn.Module):
         max_seqlen_q: int = 0,
         reuse_common_meta: Optional["PrefillMeta"] = None,
         reuse_freqs_meta: Optional["PrefillMeta"] = None,
+        reuse_query_meta: Optional[Tuple[int, Optional["PrefillMeta"]]] = None,
         reuse_swa_write_meta: Optional["SwaPrefillMeta"] = None,
         host_swa_table: Optional[torch.Tensor] = None,
         swa_write_only: bool = False,
+        swa_query_meta: bool = False,
     ) -> "PrefillMeta":
         """Build the layer-invariant (within compress_ratio bucket) part
         of per-call prefill metadata. All host-side prep work that
@@ -3256,18 +3300,44 @@ class AttentionFP8(nn.Module):
         position_ids = _flat_1d(position_ids)
         req_id_per_token = _flat_1d(req_id_per_token)
         sp_per_req = _flat_1d(sp_per_req)
+        # Query geometry does not depend on the SWA pool region. The broadcast
+        # owns this source for one build only; never reuse slot mappings across
+        # regions or retain input identities beyond this invocation.
+        query_meta = reuse_common_meta
+        if query_meta is None and reuse_query_meta is not None:
+            source_window, source = reuse_query_meta
+            if (
+                source is not None
+                and source_window == win
+                and source.cp_ctx is cp_ctx
+                and source.seqlen == seqlen
+                and source.seqlen_full == seqlen_full
+                and source.device == device
+                and source.batch_size == batch_size
+                and source.sp_int == sp_int
+                and all(
+                    getattr(source, name) is value
+                    for name, value in (
+                        ("sp_per_req", sp_per_req),
+                        ("cu_seqlens", cu_seqlens),
+                        ("input_lengths", input_lengths),
+                        ("prefix_lengths", prefix_lengths),
+                        ("position_ids", position_ids),
+                        ("req_id_per_token", req_id_per_token),
+                    )
+                )
+            ):
+                query_meta = source
         can_reuse_freqs = (
             reuse_freqs_meta is not None
             and reuse_freqs_meta.freqs_cis_source_id == id(self.freqs_cis)
         )
         position_ids_eff: Optional[torch.Tensor] = None
-        if reuse_common_meta is None or not can_reuse_freqs:
+        if query_meta is None or not can_reuse_freqs:
             position_ids_eff = position_ids
             if cp_on:
-                position_ids_eff = _flat_1d(
-                    cp_ctx.global_positions.to(device=device, dtype=torch.long)
-                )
-        if reuse_common_meta is None:
+                position_ids_eff = cp_ctx.global_positions
+        if query_meta is None:
             with record_function_range("dsv4.fp8.meta.varlen.freqs_topk"):
                 freqs_cis = self.freqs_cis.index_select(
                     0,
@@ -3280,42 +3350,27 @@ class AttentionFP8(nn.Module):
                 cu_seqlens_for_k = cu_seqlens
                 if cp_on:
                     if cp_ctx.cu_seqlens_global is not None:
-                        cu_seqlens_for_k = _flat_1d(
-                            cp_ctx.cu_seqlens_global.to(
-                                device=device, dtype=torch.int32
-                            )
-                        )
-                topk_idxs, topk_length_kv_full = (
-                    _swa_ops.compute_window_topk_and_length_varlen(
-                        win,
-                        cu_seqlens_for_k,
-                        position_ids_eff,
-                        prefix_lengths,
-                        req_id_per_token,
-                    )
-                )
+                        cu_seqlens_for_k = cp_ctx.cu_seqlens_global
                 host_prefixes = getattr(cp_ctx, "prefix_lengths_host", None)
                 any_cont = (
                     any((prefix > 0 for prefix in host_prefixes))
                     if host_prefixes is not None
                     else bool((prefix_lengths > 0).any().item())
                 )
-            with record_function_range("dsv4.fp8.meta.swa_varlen"):
-                swa_meta = self._build_swa_prefill_meta_varlen(
-                    seqlen=seqlen,
-                    device=device,
-                    any_cont=any_cont,
-                    batch_size=batch_size,
-                    cu_seqlens=cu_seqlens,
-                    input_lengths=input_lengths,
-                    prefix_lengths=prefix_lengths,
-                    position_ids=position_ids,
-                    req_id_per_token=req_id_per_token,
-                    topk_length_kv_full=topk_length_kv_full,
-                    reuse_write_meta=reuse_swa_write_meta,
-                    host_swa_table=host_swa_table,
-                    write_only=swa_write_only,
-                )
+                # V4.1 continuation reads the prefix tail through combined_indices;
+                # the flat-KV window table is consumed only by all-cold queries.
+                if swa_query_meta and any_cont and self._kv_cache is not None:
+                    topk_idxs = topk_length_kv_full = None
+                else:
+                    topk_idxs, topk_length_kv_full = (
+                        _swa_ops.compute_window_topk_and_length_varlen(
+                            win,
+                            cu_seqlens_for_k,
+                            position_ids_eff,
+                            prefix_lengths,
+                            req_id_per_token,
+                        )
+                    )
             row_seqlens_full = torch.full(
                 (1,), seqlen_full, device=device, dtype=torch.long
             )
@@ -3330,9 +3385,32 @@ class AttentionFP8(nn.Module):
                             device=self.freqs_cis.device, dtype=torch.long
                         ),
                     )
-            topk_idxs = reuse_common_meta.topk_idxs
-            any_cont = reuse_common_meta.any_cont
-            row_seqlens_full = reuse_common_meta.row_seqlens_full
+            topk_idxs = query_meta.topk_idxs
+            any_cont = query_meta.any_cont
+            row_seqlens_full = query_meta.row_seqlens_full
+            topk_length_kv_full = query_meta.swa_meta.topk_length_kv_full
+        if reuse_common_meta is None:
+            with record_function_range("dsv4.fp8.meta.swa_varlen"):
+                swa_meta = self._build_swa_prefill_meta_varlen(
+                    seqlen=seqlen,
+                    device=device,
+                    any_cont=any_cont,
+                    batch_size=batch_size,
+                    cu_seqlens=cu_seqlens,
+                    input_lengths=input_lengths,
+                    prefix_lengths=prefix_lengths,
+                    position_ids=position_ids,
+                    req_id_per_token=req_id_per_token,
+                    topk_length_kv_full=topk_length_kv_full,
+                    reuse_write_meta=reuse_swa_write_meta,
+                    reuse_query_swa_meta=(
+                        query_meta.swa_meta if query_meta is not None else None
+                    ),
+                    host_swa_table=host_swa_table,
+                    write_only=swa_write_only,
+                    swa_query_meta=swa_query_meta,
+                )
+        else:
             source_swa = reuse_common_meta.swa_meta
             swa_meta = SwaPrefillMeta(
                 slot_mapping=source_swa.slot_mapping,
@@ -3963,8 +4041,10 @@ class AttentionFP8(nn.Module):
         req_id_per_token: torch.Tensor,
         topk_length_kv_full: Optional[torch.Tensor] = None,
         reuse_write_meta: Optional[SwaPrefillMeta] = None,
+        reuse_query_swa_meta: Optional[SwaPrefillMeta] = None,
         host_swa_table: Optional[torch.Tensor] = None,
         write_only: bool = False,
+        swa_query_meta: bool = False,
     ) -> SwaPrefillMeta:
         """Varlen path: B>=1, per-request tensor plumbing.
 
@@ -3973,9 +4053,9 @@ class AttentionFP8(nn.Module):
 
           1. **Warmup** (pool unbound): only ``topk_length_kv_full`` set
              (SWA-only); all pool / Group-1 / Group-2 fields are ``None``/0.
-          2. **CSA/HCA layer** (pool bound, ``compress_ratio != 0``):
-             Group-1 write meta only; Group-2 lives on ``WorkspaceMeta``.
-          3. **SWA-only layer** (pool bound, ``compress_ratio == 0``):
+          2. **Write-only layer** (pool bound, compressed V4 or bounded replay):
+             Group-1 write meta only; query metadata lives elsewhere.
+          3. **SWA query layer** (pool bound, SWA-only or requested by V4.1):
              Full meta. ``cache_*`` / ``combined_*`` populated on
              continuation; ``None``/0 on all-cold.
         """
@@ -3988,9 +4068,13 @@ class AttentionFP8(nn.Module):
         position_ids = _flat_1d(position_ids)
         req_id_per_token = _flat_1d(req_id_per_token)
         win = self.window_size
-        is_swa_only = self.compress_ratio == 0 and (not write_only)
+        needs_swa_query_meta = (
+            self.compress_ratio == 0 or swa_query_meta
+        ) and not write_only
         num_tokens = seqlen
-        if topk_length_kv_full is None:
+        if topk_length_kv_full is None and not (
+            swa_query_meta and any_cont and self._kv_cache is not None
+        ):
             sp_per_token = prefix_lengths.to(torch.int32).gather(
                 0, req_id_per_token.to(torch.int64)
             )
@@ -4030,19 +4114,29 @@ class AttentionFP8(nn.Module):
             and (cp_ctx.cu_seqlens_global is not None)
             and (cp_ctx.input_lengths_global is not None)
         )
-        query_start_loc = cu_seqlens.to(device=device, dtype=torch.int32).contiguous()
-        combined_seq_lens = (
-            prefix_lengths.to(torch.int32) + input_lengths.to(torch.int32)
-        ).contiguous()
+        if cp_on_write:
+            # CP writes use global request boundaries; CP queries use positions.
+            query_start_loc = combined_seq_lens = None
+        elif (
+            reuse_query_swa_meta is not None
+            and reuse_query_swa_meta.query_start_loc is not None
+            and reuse_query_swa_meta.combined_seq_lens is not None
+        ):
+            query_start_loc = reuse_query_swa_meta.query_start_loc
+            combined_seq_lens = reuse_query_swa_meta.combined_seq_lens
+        else:
+            query_start_loc = cu_seqlens.to(
+                device=device, dtype=torch.int32
+            ).contiguous()
+            combined_seq_lens = (
+                prefix_lengths.to(torch.int32) + input_lengths.to(torch.int32)
+            ).contiguous()
         if cp_on_write:
             write_B = int(cp_ctx.input_lengths_global.numel())
-            write_query_start_loc = _flat_1d(
-                cp_ctx.cu_seqlens_global.to(device=device, dtype=torch.int32)
-            ).contiguous()
-            write_combined_seq_lens = (
-                prefix_lengths.to(torch.int32)[:write_B]
-                + _flat_1d(cp_ctx.input_lengths_global.to(torch.int32))
-            ).contiguous()
+            write_query_start_loc = cp_ctx.cu_seqlens_global
+            # A host-planned write consumes the existing prefix/length tensors
+            # directly. Build their sum only for GPU fallback or prefix reads.
+            write_combined_seq_lens = None
             write_num_tokens = cp_ctx.seq_len_full
         else:
             write_B = B
@@ -4069,6 +4163,11 @@ class AttentionFP8(nn.Module):
             if planned is not None:
                 slot_mapping, slot_compaction = planned
             else:
+                if write_combined_seq_lens is None:
+                    write_combined_seq_lens = (
+                        prefix_lengths.to(torch.int32)[:write_B]
+                        + _flat_1d(cp_ctx.input_lengths_global.to(torch.int32))
+                    ).contiguous()
                 slot_mapping = _swa_ops.compute_swa_slot_mapping(
                     block_table=bt_swa,
                     query_start_loc=write_query_start_loc,
@@ -4084,7 +4183,7 @@ class AttentionFP8(nn.Module):
                     validation_site="swa.quantize_and_insert_cp_byte.slot_mapping",
                     negative_mode="skip_minus_one",
                 )
-        if not is_swa_only:
+        if not needs_swa_query_meta:
             return SwaPrefillMeta(
                 slot_mapping=slot_mapping,
                 query_start_loc=query_start_loc,
@@ -4101,36 +4200,59 @@ class AttentionFP8(nn.Module):
                 slot_in_flat=None,
                 slot_compaction=slot_compaction,
             )
-        combined_gather_lens = _swa_ops.compute_prefill_gather_lens(
-            seq_lens=write_combined_seq_lens,
-            query_start_loc=write_query_start_loc,
-            num_prefills=write_B,
-            num_decodes=0,
-            window_size=win,
-        )
         host_prefixes = getattr(cp_ctx, "prefix_lengths_host", None)
         host_lengths = getattr(cp_ctx, "input_lengths_global_host", None)
+        packed_row_lengths = None
+        packed_row_offsets = None
         if (
             hasattr(self, "swa_bounded_replay")
             and cp_on_write
             and (host_prefixes is not None)
             and (host_lengths is not None)
         ):
-            combined_gather_len_max = max(
-                (n + min(p, win - 1) for p, n in zip(host_prefixes, host_lengths))
+            # CP continuation builds its index rows from absolute positions.
+            # The per-request gather lengths are only used by the non-CP path.
+            combined_gather_lens = None
+            gather_lengths_host = tuple(
+                n + min(p, win - 1) for p, n in zip(host_prefixes, host_lengths)
             )
+            combined_gather_len_max = max(gather_lengths_host)
+            if swa_query_meta and any_cont:
+                packed_row_lengths = gather_lengths_host
         else:
-            combined_gather_len_max = int(combined_gather_lens.max().item())
+            if write_combined_seq_lens is None:
+                write_combined_seq_lens = (
+                    prefix_lengths.to(torch.int32)[:write_B]
+                    + _flat_1d(cp_ctx.input_lengths_global.to(torch.int32))
+                ).contiguous()
+            combined_gather_lens = _swa_ops.compute_prefill_gather_lens(
+                seq_lens=write_combined_seq_lens,
+                query_start_loc=write_query_start_loc,
+                num_prefills=write_B,
+                num_decodes=0,
+                window_size=win,
+            )
+            if swa_query_meta and any_cont:
+                packed_row_lengths = tuple(combined_gather_lens.detach().tolist())
+                combined_gather_len_max = max(packed_row_lengths)
+            else:
+                combined_gather_len_max = int(combined_gather_lens.max().item())
+        if packed_row_lengths is not None:
+            row_offsets, total_rows = [], 0
+            for length in packed_row_lengths:
+                row_offsets.append(total_rows)
+                total_rows += length
+            if total_rows > torch.iinfo(torch.int32).max:
+                raise ValueError("Packed SWA rows exceed FlashMLA int32 indices")
+            packed_row_offsets = torch.tensor(
+                row_offsets, dtype=torch.int64, device=device
+            )
         M = max(combined_gather_len_max, 1)
         if any_cont:
             cache_seq_lens = prefix_lengths.to(device=device, dtype=torch.int32)[
                 :write_B
             ].contiguous()
-            cache_gather_lens = (
-                torch.clamp_max(prefix_lengths, win - 1)
-                .to(device=device, dtype=torch.int32)[:write_B]
-                .contiguous()
-            )
+            cache_gather_lens = cache_seq_lens.clamp(max=win - 1)
             cache_slot_mapping = None
             planned = None
             if host_swa_table is not None and win == 128 and self._swa_cp_byte_sliced():
@@ -4197,15 +4319,15 @@ class AttentionFP8(nn.Module):
                     N=0,
                     req_id_per_token=req_id_per_token,
                     prefix_lengths=prefix_lengths,
+                    row_offsets=packed_row_offsets,
                 )
                 slot_in_flat = _swa_ops.compute_swa_slot_in_flat_from_cu(
-                    _flat_1d(
-                        cp_ctx.cu_seqlens_global.to(device=device, dtype=torch.int32)
-                    ),
-                    prefix_lengths.to(device=device)[:write_B],
+                    cp_ctx.cu_seqlens_global,
+                    prefix_lengths[:write_B],
                     num_tokens=cp_ctx.seq_len_full,
                     M=M,
                     window_size=win,
+                    row_offsets=packed_row_offsets,
                 )
             else:
                 topk_indices_empty = torch.empty(
@@ -4221,6 +4343,7 @@ class AttentionFP8(nn.Module):
                     topk=0,
                     M=M,
                     N=0,
+                    row_offsets=packed_row_offsets,
                 )
                 slot_in_flat = _swa_ops.compute_swa_slot_in_flat(
                     position_ids.to(device=device),
@@ -4228,6 +4351,7 @@ class AttentionFP8(nn.Module):
                     prefix_lengths.to(device=device),
                     M=M,
                     window_size=win,
+                    row_offsets=packed_row_offsets,
                 )
             prefix_len_max = 1
         else:
@@ -4256,6 +4380,8 @@ class AttentionFP8(nn.Module):
             cache_slot_mapping=cache_slot_mapping,
             slot_compaction=slot_compaction,
             cache_compaction=cache_compaction,
+            packed_row_offsets=packed_row_offsets,
+            packed_row_lengths=packed_row_lengths,
         )
 
     def _prefill_compute_qkv(
@@ -4264,15 +4390,10 @@ class AttentionFP8(nn.Module):
         common: PrefillMeta,
         shared_input_quant: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> PrefillQKV:
-        """Q/KV path — RMSNorm + LoRA Q + KV linears + fused RMSNorm-RoPE.
-
-        Internally uses ``[1, T, ...]`` so ``fused_rmsnorm_rope`` sees the
-        ``(B, S, …)`` layout it expects. Returned tensors keep the 3D
-        shape because downstream pool/compressor helpers rely on it.
-        """
+        """Q/KV path: RMSNorm + LoRA Q + KV linears + fused RMSNorm-RoPE."""
         x_3d = x.unsqueeze(0)
         rd = common.rd
-        fused_qkv = self._try_fused_qr_kv(x_3d, shared_input_quant)
+        fused_qkv = self._try_fused_qr_kv(x_3d, shared_input_quant, common=common)
         if fused_qkv is not None:
             if (
                 shared_input_quant is not None
@@ -4298,50 +4419,56 @@ class AttentionFP8(nn.Module):
         else:
             shared_input_quant = None
 
-        def compute_qr() -> torch.Tensor:
-            with record_function_range("dsv4.fp8.attn.qkv.q_lora_a_norm"):
-                if fused_qkv is not None:
-                    return fused_qkv[0]
+        qr_quantized = None
+        with record_function_range("dsv4.fp8.attn.qkv.q_lora_a_norm"):
+            if fused_qkv is not None:
+                qr = fused_qkv[0]
+                if len(fused_qkv) == 3:
+                    qr_quantized = fused_qkv[2]
+            else:
                 if shared_input_quant is not None:
                     q_proj = self._lin_from_shared_quant(
                         self.wq_a, shared_input_quant, x_3d.shape
                     )
                 else:
                     q_proj = self._lin(self.wq_a, x_3d)
-                return self._rmsnorm_weighted(q_proj, self.q_norm)
+                qr = self._rmsnorm_weighted(q_proj, self.q_norm)
 
-        def compute_kv() -> torch.Tensor:
-            with record_function_range("dsv4.fp8.attn.qkv.kv_proj_rope"):
-                if fused_qkv is not None:
-                    kv_in = fused_qkv[1]
-                elif shared_input_quant is not None:
-                    kv_in = self._lin_from_shared_quant(
-                        self.wkv, shared_input_quant, x_3d.shape
-                    )
-                else:
-                    kv_in = self._lin(self.wkv, x_3d)
-                return fused_rmsnorm_rope(
-                    kv_in, self.kv_norm, common.freqs_cis, rd, eps=self.eps
+        with record_function_range("dsv4.fp8.attn.qkv.kv_proj_rope"):
+            if fused_qkv is not None:
+                kv_in = fused_qkv[1]
+            elif shared_input_quant is not None:
+                kv_in = self._lin_from_shared_quant(
+                    self.wkv, shared_input_quant, x_3d.shape
                 )
+            else:
+                kv_in = self._lin(self.wkv, x_3d)
+            kv = swa_kv_norm_rope(
+                kv_in, self.kv_norm, common.freqs_cis, rd, eps=self.eps
+            ).squeeze(0)
 
-        qr = compute_qr()
-        kv = compute_kv()
         if common.cp_on:
-            with record_function_range("dsv4.fp8.attn.qkv.cp_gather_varlen"):
-                with record_function_range(
-                    "dsv4.fp8.attn.swa_kv_full.cp_gather_varlen"
-                ):
-                    kv_flat = kv.reshape(kv.size(0) * kv.size(1), *kv.shape[2:])
-                    kv_full_flat = cp_all_gather_full_varlen(
-                        kv_flat,
-                        common.cp_ctx,
-                        replay_only=cp_swa_replay_starts(common.cp_ctx) is not None,
-                        profile_name=f"dsv4.cp.all_gather.L{self.layer_id:02d}.swa_kv_full.varlen",
-                    )
-                    kv_full = kv_full_flat.unsqueeze(0)
+            with record_function_range("dsv4.fp8.attn.swa_kv_full.cp_gather_varlen"):
+                kv_full = cp_all_gather_full_varlen(
+                    kv,
+                    common.cp_ctx,
+                    replay_only=cp_swa_replay_starts(common.cp_ctx) is not None,
+                    profile_name=f"dsv4.cp.all_gather.L{self.layer_id:02d}.swa_kv_full.varlen",
+                )
         else:
             kv_full = kv
-        return PrefillQKV(qr=qr.squeeze(0), q=None, kv_full=kv_full.squeeze(0))
+        qr_out = None if qr is None else qr.squeeze(0)
+        qr_quantized_out = (
+            None
+            if qr_quantized is None
+            else (qr_quantized[0].squeeze(0), qr_quantized[1])
+        )
+        return PrefillQKV(
+            qr=qr_out,
+            q=None,
+            kv_full=kv_full,
+            qr_quantized=qr_quantized_out,
+        )
 
     def _materialize_prefill_q(
         self, qkv: PrefillQKV, common: PrefillMeta
@@ -4356,13 +4483,23 @@ class AttentionFP8(nn.Module):
         """
         if qkv.q is not None:
             return qkv
-        qr_3d = qkv.qr.unsqueeze(0)
+        qr_q = getattr(qkv, "qr_quantized", None)
         with record_function_range("dsv4.fp8.attn.qkv.q_lora_b_rope"):
-            seqlen = int(qr_3d.shape[1])
-            q_out = common.workspace.prefill_q(seqlen)
-            q_local_flat = self._lin(
-                self.wq_b, qr_3d, out=q_out.view(seqlen, self.n_heads * self.head_dim)
-            )
+            if qr_q is not None and isinstance(self.wq_b, V41MXFP8Linear):
+                seqlen = int(qr_q[0].shape[0])
+                q_out = common.workspace.prefill_q(seqlen)
+                q_local_flat = self.wq_b.forward_quantized(
+                    *qr_q, out=q_out.view(seqlen, self.n_heads * self.head_dim)
+                )
+            else:
+                qr_3d = qkv.qr.unsqueeze(0)
+                seqlen = int(qr_3d.shape[1])
+                q_out = common.workspace.prefill_q(seqlen)
+                q_local_flat = self._lin(
+                    self.wq_b,
+                    qr_3d,
+                    out=q_out.view(seqlen, self.n_heads * self.head_dim),
+                )
             q_local = q_local_flat.view(1, seqlen, self.n_heads, self.head_dim)
             q_local = fused_rmsnorm_rope(
                 q_local, None, common.freqs_cis, common.rd, eps=self.eps, out=q_local

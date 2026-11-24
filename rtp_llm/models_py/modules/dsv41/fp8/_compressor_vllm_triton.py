@@ -59,6 +59,10 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41.fp8._trap_utils import (
+    trap_invalid_kv_access_enabled,
+)
+
 
 @triton.jit
 def _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS: tl.constexpr) -> None:
@@ -729,7 +733,7 @@ def run_save_partial_states(
         TRITON_BLOCK_SIZE=triton.next_power_of_2(head_size),
         STATE_WIDTH=state_width,
         COMPRESS_RATIO=compress_ratio,
-        TRAP_INVALID_KV_ACCESS=True,
+        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
     )
 
 
@@ -857,7 +861,7 @@ def run_fused_compress_kv_write(
         NUM_STATE_BLOCKS=int(state_cache.shape[0]),
         NUM_KV_BLOCKS=int(kv_cache.shape[0]),
         BATCHED=batched,
-        TRAP_INVALID_KV_ACCESS=True,
+        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
         STATE_RING_ENTRIES=state_ring_entries,
         num_warps=_fused_num_warps(head_dim, compress_ratio, cfg),
     )

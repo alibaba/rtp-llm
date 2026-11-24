@@ -1,6 +1,57 @@
+load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
+load("@arch_config//:arch_select.bzl", "cuda13_x86_test_gpu")
 load("@pip_dsv4_test//:requirements.bzl", test_requirement = "requirement")
+load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_sm100_py_test")
 
 package(default_visibility = ["//visibility:public"])
+
+py_test(
+    name = "test_v41_qb_epilogue",
+    srcs = glob(["*.py"]) + [
+        "//rtp_llm/models_py/modules/dsv41/test:test_v41_front_gemm.py",
+    ],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    tags = ["dsv41_cuda13", "SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    legacy_create_init = 0,
+)
+
+[
+    py_test(
+        name = name + "_sm103",
+        srcs = [
+            name + ".py",
+            "//rtp_llm/test/pytest:pytest_main.py",
+        ],
+        main = "//rtp_llm/test/pytest:pytest_main.py",
+        args = ["--cuda-devices", "1", "$(location :" + name + ".py)"],
+        deps = [
+            "//rtp_llm:testlib",
+            "//rtp_llm/models_py:modules",
+            "//rtp_llm/models_py:tile_kernels_mhc",
+            "//rtp_llm:jit_cache_env",
+            test_requirement("pytest"),
+        ],
+        tags = ["dsv41_cuda13", "SM103_CU13"],
+        exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+        target_compatible_with = select({
+            "@//:using_cuda13_x86": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+        env = {"DSV41_GROUPED_SCORE_GPU_TEST": "1"} if name == "test_v41_grouped_prefill_score" else {},
+        legacy_create_init = 0,
+    )
+    for name in [
+        "test_v41_grouped_prefill_score",
+        "test_v41_owned_pool",
+        "test_v41_prefill_topk",
+    ]
+]
+
 
 _TESTS = [
     "test_v41_attention_pool_warmup",
@@ -12,24 +63,31 @@ _TESTS = [
     "test_attention_v41_request_rows",
     "test_attention_v41_sparse_selection",
     "test_v41_attention_jit_warmup",
-    "test_v41_batched_producer",
-    "test_v41_candidate_topk",
+    "test_v41_candidate_deepselect",
     "test_v41_decode_attention_fusion",
+    "test_v41_decode_device_metadata",
     "test_v41_decode_global",
     "test_v41_decode_indexer",
+    "test_v41_decode_topk",
     "test_v41_decode_preprocessing",
-    "test_v41_decode_qkv_integration",
+    "test_v41_packed_verify",
     "test_v41_deepselect",
     "test_v41_fp4_codec",
-    "test_v41_flash_mla_cache_format",
     "test_v41_fp4_transport",
     "test_v41_global_overlap",
-    "test_v41_grouped_gemm",
+    "test_v41_merge_contracts",
+    "test_v41_host_swa_metadata",
     "test_v41_grouped_prefill_score",
     "test_v41_indexer_q_fusion",
+    "test_v41_mega_attention",
+    "test_v41_merged_qb",
+    "test_v41_mega_wiring",
     "test_v41_joint_pool",
+    "test_v41_owned_pool",
+    "test_v41_cp_async",
     "test_v41_norm_quant",
     "test_v41_prefill_candidates",
+    "test_v41_prefill_deepselect",
     "test_v41_prefill_global",
     "test_v41_prefill_index_plan",
     "test_v41_prefill_indexer",
@@ -44,15 +102,42 @@ _TESTS = [
     "test_v41_qkv_rope_cache",
     "test_v41_selection_oracle",
     "test_v41_sparse_prefill_indexer",
+    "test_v41_sparse_decode",
     "test_v41_swa_codec",
     "test_v41_swa_fresh",
-    "test_v41_wo_a_quant",
+]
+
+
+# The selection chain supports both SM100 ARM and SM100/SM103 x86.
+_X86_TESTS = [
+    "test_v41_attention_pool_warmup",
+    "test_v41_candidate_deepselect",
+    "test_v41_packed_verify",
+    "test_v41_merge_contracts",
+    "test_v41_attention_jit_warmup",
+    "test_v41_owned_pool",
+    "test_v41_cp_async",
+    "test_v41_prefill_kv_workspace",
+    "test_v41_host_swa_metadata",
+    "test_v41_sparse_decode",
+    "test_v41_decode_topk",
+    "test_v41_decode_global",
+    "test_v41_fp4_codec",
+    "test_v41_joint_pool",
+    "test_v41_prefill_candidates",
+    "test_v41_decode_indexer",
+    "test_v41_prefill_deepselect",
+    "test_v41_deepselect",
+    "test_v41_decode_attention_fusion",
 ]
 
 [
     py_test(
         name = name,
-        srcs = glob(["*.py"]) + ["//rtp_llm/test/pytest:pytest_main.py", "//rtp_llm/models_py/modules/dsv4/fp8/test:test_prefill_common_metadata_cuda.py"],
+        srcs = glob(["*.py"]) + [
+            "//rtp_llm/test/pytest:pytest_main.py",
+            "//rtp_llm/models_py/modules/dsv4/fp8/test:test_prefill_common_metadata_cuda.py",
+        ],
         main = "//rtp_llm/test/pytest:pytest_main.py",
         args = ["--cuda-devices", "1", "$(location :" + name + ".py)"],
         deps = [
@@ -62,13 +147,214 @@ _TESTS = [
             "//rtp_llm:jit_cache_env",
             test_requirement("pytest"),
         ],
-        tags = ["dsv41_cuda13", "SM100_ARM_CU13"],
-        exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+        data = [
+            "//rtp_llm/models_py/bindings/cuda/kernels:topk_v3.cu",
+            "//rtp_llm/models_py/bindings/cuda/kernels:topk_v3.cuh",
+        ] if name == "test_v41_attention_jit_warmup" else [],
+        tags = ["dsv41_cuda13", "SM100_ARM_CU13"] + ([cuda13_x86_test_gpu()] if name in _X86_TESTS else []),
+        exec_properties = select({
+            "@//:using_cuda13_x86": {"gpu": cuda13_x86_test_gpu(), "gpu_count": "1"},
+            "//conditions:default": {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+        }),
         target_compatible_with = select({
             "@//:using_cuda13_arm": [],
+            "@//:using_cuda13_x86": [] if name in _X86_TESTS else ["@platforms//:incompatible"],
             "//conditions:default": ["@platforms//:incompatible"],
         }),
+        env = {"RTP_V41_PREFILL_DEEPSELECT_GPU_TEST": "1"} if name == "test_v41_prefill_deepselect" else {},
         legacy_create_init = 0,
     )
-    for name in _TESTS
+    for name in _TESTS if name not in ["test_v41_qkv_rope_cache", "test_v41_global_overlap", "test_attention_v41_cp_raw_groups", "test_v41_prefill_indexer", "test_attention_v41_prefill_selection"]
 ]
+
+
+[
+    cuda13_sm100_py_test(
+        name = name,
+        srcs = [
+            name + ".py",
+            "//rtp_llm/test/pytest:pytest_main.py",
+        ],
+        main = "//rtp_llm/test/pytest:pytest_main.py",
+        args = ["--cuda-devices", "1", "$(location :" + name + ".py)"],
+        deps = [
+            "//rtp_llm:testlib",
+            "//rtp_llm/models_py:modules",
+            test_requirement("pytest"),
+        ],
+        env = {"DSV41_TEST_FUSED_INDEXER_GPU": "1"},
+        tags = ["dsv41_cuda13"],
+        legacy_create_init = 0,
+    )
+    for name in ["test_v41_prefill_indexer", "test_attention_v41_prefill_selection"]
+]
+
+
+cuda13_sm100_py_test(
+    name = "test_attention_v41_cp_raw_groups",
+    srcs = ["test_attention_v41_cp_raw_groups.py", "//rtp_llm/test/pytest:pytest_main.py"],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "1", "$(location :test_attention_v41_cp_raw_groups.py)"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        test_requirement("pytest"),
+    ],
+    tags = ["dsv41_cuda13"],
+    legacy_create_init = 0,
+)
+
+
+cuda13_sm100_py_test(
+    name = "test_attention_v41_cp_mixed_nccl",
+    srcs = [
+        "test_attention_v41_cp_mixed_nccl.py",
+        "test_attention_v41_cp_raw_groups.py",
+        "//rtp_llm/test/pytest:pytest_main.py",
+    ],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "4", "$(location :test_attention_v41_cp_mixed_nccl.py)"],
+    gpu_count = 4,
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/test/utils:test_util",
+        test_requirement("pytest"),
+    ],
+    tags = ["dsv41_cuda13"],
+    legacy_create_init = 0,
+)
+
+
+
+cuda13_sm100_py_test(
+    name = "test_v41_swa_packed",
+    srcs = ["test_v41_swa_packed.py", "//rtp_llm/test/pytest:pytest_main.py"],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "1", "$(location :test_v41_swa_packed.py)"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        test_requirement("pytest"),
+    ],
+    tags = ["dsv41_cuda13"],
+    legacy_create_init = 0,
+)
+
+
+cuda13_sm100_py_test(
+    name = "test_v41_swa_packed_cp4_nccl",
+    srcs = [
+        "test_v41_swa_packed_cp4_nccl.py",
+        "test_v41_swa_packed.py",
+        "//rtp_llm/test/pytest:pytest_main.py",
+    ],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "4", "$(location :test_v41_swa_packed_cp4_nccl.py)"],
+    gpu_count = 4,
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/test/utils:test_util",
+        test_requirement("pytest"),
+    ],
+    tags = ["dsv41_cuda13"],
+    legacy_create_init = 0,
+)
+
+
+cuda13_sm100_py_test(
+    name = "test_v41_decode_qkv_integration",
+    srcs = [
+        "test_v41_decode_qkv_integration.py",
+        "//rtp_llm/models_py/modules/dsv41/test:test_v41_mega_mhc.py",
+        "//rtp_llm/test/pytest:pytest_main.py",
+    ],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "1", "$(location :test_v41_decode_qkv_integration.py)"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py:tile_kernels_mhc",
+        "//rtp_llm:jit_cache_env",
+        test_requirement("pytest"),
+    ],
+    env = {"RTP_V41_REQUIRE_SM10X": "1"},
+    tags = ["dsv41_cuda13"],
+    legacy_create_init = 0,
+)
+
+
+# This target retains fallback coverage with older dependency wheels. Candidate
+# acceptance uses validate_wo_a_quant_wheel.py with a wheel path and SHA256.
+cuda13_sm100_py_test(
+    name = "test_v41_wo_a_quant",
+    srcs = [
+        "test_v41_wo_a_quant.py",
+        "validate_wo_a_quant_wheel.py",
+        "//rtp_llm/test/pytest:pytest_main.py",
+    ],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "1", "$(location :test_v41_wo_a_quant.py)"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py:tile_kernels_mhc",
+        "//rtp_llm:jit_cache_env",
+        test_requirement("pytest"),
+    ],
+    tags = ["dsv41_cuda13"],
+    legacy_create_init = 0,
+)
+
+
+[
+    cuda13_sm100_py_test(
+        name = name,
+        srcs = glob(["*.py"]) + [
+            "//rtp_llm/test/pytest:pytest_main.py",
+            "//rtp_llm/models_py/modules/dsv4/fp8/test:test_prefill_common_metadata_cuda.py",
+        ],
+        main = "//rtp_llm/test/pytest:pytest_main.py",
+        args = ["--cuda-devices", "1", "$(location :" + name + ".py)"],
+        deps = [
+            "//rtp_llm:testlib",
+            "//rtp_llm/models_py:modules",
+            "//rtp_llm/models_py:tile_kernels_mhc",
+            "//rtp_llm:jit_cache_env",
+            test_requirement("pytest"),
+        ],
+        tags = ["dsv41_cuda13"],
+        legacy_create_init = 0,
+    )
+    for name in ["test_v41_deepgemm_producers", "test_v41_qkv_rope_cache", "test_v41_swa_kv", "test_v41_global_overlap", "test_v41_full_projection"]
+]
+
+dsv4_sm100_py_test(
+    name = "test_v41_flash_mla_cache_format",
+    tags = ["dsv41_cuda13"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+    ],
+)
+
+dsv4_sm100_py_test(
+    name = "test_v41_mqa_score_abi",
+    gpu_count = 0,
+    tags = ["dsv41_cuda13"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+    ],
+)
+
+dsv4_sm100_py_test(
+    name = "test_v41_mqa_score_cuda",
+    extra_srcs = ["test_v41_decode_indexer.py"],
+    tags = ["dsv41_cuda13"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+    ],
+)

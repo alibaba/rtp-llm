@@ -1,6 +1,8 @@
 """V4.1 group32 output projection: eager numeric boundary and graph replay."""
 
+import os
 import unittest
+from unittest.mock import patch
 
 import deep_gemm
 import torch
@@ -11,10 +13,12 @@ from rtp_llm.models_py.modules.dsv41._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
 )
 from rtp_llm.models_py.modules.dsv41.fp8._v41_output_projection import (
+    _quantize_projection_input,
     grouped_output_projection,
     is_supported,
     quantization_scale_min,
 )
+from rtp_llm.models_py.modules.dsv41.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.dsv41.rope import apply_rotary_emb
 
 
@@ -67,6 +71,40 @@ def make_inputs(rows, seed=0):
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class V41OutputProjectionTest(unittest.TestCase):
+    def test_prefill_scratch_reuse_matches_private_buffers_and_graph_replay(self):
+        workspace = PrefillWorkspace(
+            torch.device("cuda"),
+            q_rows=128,
+            q_dim=64 * 512,
+            reserve_cp=False,
+            align_bytes=1,
+        )
+        weight = torch.empty((8, 1024, 4096), device="meta")
+        for rows in (1, 3, 17, 128, 17):
+            with self.subTest(rows=rows):
+                o, freqs = make_inputs(rows, rows)
+                original = o.clone()
+                expected = _quantize_projection_input(o, freqs, weight)
+                actual = _quantize_projection_input(o, freqs, weight, workspace)
+                self.assert_quant_equal(expected, actual)
+                torch.testing.assert_close(o, original, rtol=0, atol=0)
+                torch.cuda.synchronize()
+                allocated = torch.cuda.memory_allocated()
+                torch.cuda.reset_peak_memory_stats()
+                _quantize_projection_input(o, freqs, weight, workspace)
+                torch.cuda.synchronize()
+                self.assertEqual(torch.cuda.max_memory_allocated(), allocated)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            captured = _quantize_projection_input(o, freqs, weight, workspace)
+        torch.cuda.current_stream().wait_stream(stream)
+        o.mul_(0.75)
+        expected = _quantize_projection_input(o, freqs, weight)
+        graph.replay()
+        self.assert_quant_equal(expected, captured)
+
     def assert_quant_equal(self, expected, actual):
         for ref, got in zip(expected, actual):
             self.assertEqual(ref.shape, got.shape)
@@ -91,18 +129,19 @@ class V41OutputProjectionTest(unittest.TestCase):
         torch.testing.assert_close(expected[1], actual[1], rtol=0, atol=0)
 
     def test_group32_actual_quantizer_and_layout(self):
-        # The rows sweep crosses the 4Mi-element threshold, so auto exercises
-        # both the legacy and v2 quantizer policies of the scale floor.
-        for rows in (1, 6, 24, 128, 1024):
-            with self.subTest(rows=rows):
-                o, freqs = make_inputs(rows, rows)
-                result = fused_quant(o, freqs)
-                self.assert_quant_boundary_close(eager_quant(o, freqs), result)
-                self.assertEqual(result[0].shape, (rows, 8, 4096))
-                self.assertEqual(result[1].shape, (rows, 8, 32))
-                self.assertEqual(result[0].stride(-1), 1)
-                self.assertEqual(result[1].stride(0), 1)
-                self.assertEqual(result[1].stride(-1), (rows + 3) // 4 * 4)
+        for backend in ("legacy", "v2", "auto"):
+            for rows in (1, 6, 24, 128, 1024):
+                with self.subTest(backend=backend, rows=rows), patch.dict(
+                    os.environ, {"DSV4_FP8_QUANT_KERNEL": backend}
+                ):
+                    o, freqs = make_inputs(rows, rows)
+                    result = fused_quant(o, freqs)
+                    self.assert_quant_boundary_close(eager_quant(o, freqs), result)
+                    self.assertEqual(result[0].shape, (rows, 8, 4096))
+                    self.assertEqual(result[1].shape, (rows, 8, 32))
+                    self.assertEqual(result[0].stride(-1), 1)
+                    self.assertEqual(result[1].stride(0), 1)
+                    self.assertEqual(result[1].stride(-1), (rows + 3) // 4 * 4)
 
     def test_zero_tiny_scale_boundaries(self):
         o, freqs = make_inputs(6, 19)
@@ -115,7 +154,11 @@ class V41OutputProjectionTest(unittest.TestCase):
         o.flatten().copy_(values.repeat((o.numel() + 9) // 10)[: o.numel()])
         o[0].zero_()
         o[1].fill_(1e-35)
-        self.assert_quant_equal(eager_quant(o, freqs), fused_quant(o, freqs))
+        for backend in ("legacy", "v2"):
+            with self.subTest(backend=backend), patch.dict(
+                os.environ, {"DSV4_FP8_QUANT_KERNEL": backend}
+            ):
+                self.assert_quant_equal(eager_quant(o, freqs), fused_quant(o, freqs))
 
     def test_deterministic_cancellation_preserves_eager_rounding(self):
         # Explicit inputs: separate FP32 products land exactly on BF16
@@ -132,11 +175,17 @@ class V41OutputProjectionTest(unittest.TestCase):
             torch.tensor([0.5317438840866089, -0.34328246116638184], device="cuda"),
             torch.tensor([0.8469052314758301, -0.9392322301864624], device="cuda"),
         )
-        expected = eager_quant(o, freqs)
-        self.assertEqual(expected[0].view(torch.uint8)[:, 0, 449].tolist(), [133, 135])
-        for impl in ("legacy", "optimized"):
-            with self.subTest(impl=impl):
-                self.assert_quant_equal(expected, fused_quant(o, freqs, impl=impl))
+        for backend in ("legacy", "v2", "auto"):
+            with patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": backend}):
+                expected = eager_quant(o, freqs)
+                self.assertEqual(
+                    expected[0].view(torch.uint8)[:, 0, 449].tolist(), [133, 135]
+                )
+                for impl in ("legacy", "optimized"):
+                    with self.subTest(backend=backend, impl=impl):
+                        self.assert_quant_equal(
+                            expected, fused_quant(o, freqs, impl=impl)
+                        )
 
     def test_signed_zero_all_input_signs_and_frequency_quadrants(self):
         o = torch.zeros((4, 64, 512), device="cuda", dtype=torch.bfloat16)
@@ -148,30 +197,39 @@ class V41OutputProjectionTest(unittest.TestCase):
             torch.tensor([-0.6, -0.6, 0.6, 0.6], device="cuda")[:, None].expand(4, 32),
             torch.tensor([0.8, -0.8, 0.8, -0.8], device="cuda")[:, None].expand(4, 32),
         )
-        expected = eager_quant(o, freqs)
-        self.assertEqual(set(expected[0].view(torch.uint8).unique().tolist()), {0, 128})
-        for impl in ("legacy", "optimized"):
-            with self.subTest(impl=impl):
-                self.assert_quant_equal(expected, fused_quant(o, freqs, impl=impl))
+        for backend in ("legacy", "v2", "auto"):
+            with patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": backend}):
+                expected = eager_quant(o, freqs)
+                self.assertEqual(
+                    set(expected[0].view(torch.uint8).unique().tolist()), {0, 128}
+                )
+                for impl in ("legacy", "optimized"):
+                    with self.subTest(backend=backend, impl=impl):
+                        self.assert_quant_equal(
+                            expected, fused_quant(o, freqs, impl=impl)
+                        )
 
     def test_noncontiguous_and_batched_freqs(self):
         o, freqs = make_inputs(24, 2)
         storage = torch.zeros(24, 72, 520, device="cuda", dtype=o.dtype)
         sliced = storage[:, :64, :512]
         sliced.copy_(o)
-        self.assert_quant_equal(eager_quant(sliced, freqs), fused_quant(sliced, freqs))
-        batched = o.view(4, 6, 64, 512)
-        self.assert_quant_equal(
-            eager_quant(batched, freqs[:4]), fused_quant(batched, freqs[:4])
-        )
-        self.assert_quant_equal(
-            eager_quant(batched, freqs), fused_quant(batched, freqs)
-        )
+        with patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": "legacy"}):
+            self.assert_quant_equal(
+                eager_quant(sliced, freqs), fused_quant(sliced, freqs)
+            )
+            batched = o.view(4, 6, 64, 512)
+            self.assert_quant_equal(
+                eager_quant(batched, freqs[:4]), fused_quant(batched, freqs[:4])
+            )
+            self.assert_quant_equal(
+                eager_quant(batched, freqs), fused_quant(batched, freqs)
+            )
 
     def test_legacy_triton_group32_and_group128(self):
         o, freqs = make_inputs(6, 6)
-        for group_size in (32, 128):
-            with self.subTest(group_size=group_size):
+        with patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": "legacy"}):
+            for group_size in (32, 128):
                 self.assert_quant_equal(
                     eager_quant(o, freqs, group_size),
                     fused_quant(o, freqs, impl="legacy", group_size=group_size),
@@ -179,7 +237,9 @@ class V41OutputProjectionTest(unittest.TestCase):
 
     def test_graph_replay_changes_inputs_and_freqs(self):
         for rows in (1, 6, 24):
-            with self.subTest(rows=rows):
+            with self.subTest(rows=rows), patch.dict(
+                os.environ, {"DSV4_FP8_QUANT_KERNEL": "legacy"}
+            ):
                 o, freqs = make_inputs(rows, 3)
                 fused_quant(o, freqs)
                 torch.cuda.synchronize()
@@ -202,55 +262,59 @@ class V41OutputProjectionTest(unittest.TestCase):
         ).to(torch.float8_e4m3fn)
         raw_scale = torch.full((8, 1024, 128), 0.0625, device="cuda")
         scale = get_mn_major_tma_aligned_packed_ue8m0_tensor(raw_scale)
-        for rows in (1, 6, 24, 128):
-            o, freqs = make_inputs(rows, 33)
-            self.assertTrue(is_supported(o, freqs, weight, scale))
-            q, s = eager_quant(o, freqs)
-            ref_groups = []
-            for group in range(8):
-                ref = torch.empty(rows, 1024, device="cuda", dtype=o.dtype)
-                # Repack the reference scales because stack changed strides.
-                ref_scale = get_mn_major_tma_aligned_packed_ue8m0_tensor(
-                    raw_scale[group]
+        with patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": "legacy"}):
+            for rows in (1, 6, 24, 128):
+                o, freqs = make_inputs(rows, 33)
+                self.assertTrue(is_supported(o, freqs, weight, scale))
+                q, s = eager_quant(o, freqs)
+                ref_groups = []
+                for group in range(8):
+                    ref = torch.empty(rows, 1024, device="cuda", dtype=o.dtype)
+                    # Repack the reference scales because stack changed strides.
+                    ref_scale = get_mn_major_tma_aligned_packed_ue8m0_tensor(
+                        raw_scale[group]
+                    )
+                    q_group, s_group = q[:, group].contiguous(), s[:, group]
+                    tma = (rows + 3) // 4 * 4
+                    packed = torch.empty(32 * tma, device="cuda", dtype=torch.int32)
+                    s_input = packed.as_strided((rows, 32), (1, tma))
+                    s_input.copy_(s_group)
+                    deep_gemm.fp8_fp4_gemm_nt(
+                        (q_group, s_input),
+                        (weight[group], ref_scale),
+                        ref,
+                        recipe=(1, 1, 32),
+                    )
+                    ref_groups.append(ref)
+                expected = torch.stack(ref_groups, dim=1).flatten(1)
+                actual = grouped_output_projection(o, freqs, weight, scale)
+                torch.testing.assert_close(actual, expected, rtol=0.016, atol=0.001)
+                # CP4/TP4 prefill has two local output groups and 16 heads.
+                tp4 = grouped_output_projection(o[:, :16], freqs, weight[:2], scale[:2])
+                torch.testing.assert_close(
+                    tp4, expected[:, :2048], rtol=0.016, atol=0.001
                 )
-                q_group, s_group = q[:, group].contiguous(), s[:, group]
-                tma = (rows + 3) // 4 * 4
-                packed = torch.empty(32 * tma, device="cuda", dtype=torch.int32)
-                s_input = packed.as_strided((rows, 32), (1, tma))
-                s_input.copy_(s_group)
-                deep_gemm.fp8_fp4_gemm_nt(
-                    (q_group, s_input),
-                    (weight[group], ref_scale),
-                    ref,
-                    recipe=(1, 1, 32),
-                )
-                ref_groups.append(ref)
-            expected = torch.stack(ref_groups, dim=1).flatten(1)
-            actual = grouped_output_projection(o, freqs, weight, scale)
-            torch.testing.assert_close(actual, expected, rtol=0.016, atol=0.001)
-            # CP4/TP4 prefill has two local output groups and 16 heads.
-            tp4 = grouped_output_projection(o[:, :16], freqs, weight[:2], scale[:2])
-            torch.testing.assert_close(tp4, expected[:, :2048], rtol=0.016, atol=0.001)
-            torch.cuda.synchronize()
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                captured = grouped_output_projection(o, freqs, weight, scale)
-            next_o, next_freqs = make_inputs(rows, 44)
-            o.copy_(next_o)
-            freqs.copy_(next_freqs)
-            graph.replay()
-            expected_replay = grouped_output_projection(o, freqs, weight, scale)
-            torch.testing.assert_close(captured, expected_replay, rtol=0, atol=0)
-            self.assertFalse(is_supported(o[:0], freqs[:0], weight, scale))
-            self.assertFalse(is_supported(o.float(), freqs, weight, scale))
-        invalid = torch.empty(4, 6, 64, 512, device="cuda", dtype=torch.bfloat16)
-        self.assertFalse(is_supported(invalid[::2], freqs[:2], weight, scale))
-        self.assertFalse(is_supported(invalid, freqs[:3], weight, scale))
+                torch.cuda.synchronize()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    captured = grouped_output_projection(o, freqs, weight, scale)
+                next_o, next_freqs = make_inputs(rows, 44)
+                o.copy_(next_o)
+                freqs.copy_(next_freqs)
+                graph.replay()
+                expected_replay = grouped_output_projection(o, freqs, weight, scale)
+                torch.testing.assert_close(captured, expected_replay, rtol=0, atol=0)
+                self.assertFalse(is_supported(o[:0], freqs[:0], weight, scale))
+                self.assertFalse(is_supported(o.float(), freqs, weight, scale))
+            invalid = torch.empty(4, 6, 64, 512, device="cuda", dtype=torch.bfloat16)
+            self.assertFalse(is_supported(invalid[::2], freqs[:2], weight, scale))
+            self.assertFalse(is_supported(invalid, freqs[:3], weight, scale))
 
-    def test_quantization_scale_min_auto_boundary(self):
-        # auto switches to the v2 tiny-scale policy at 4Mi elements.
-        self.assertEqual(quantization_scale_min(1023, 4096), 1e-10)
-        self.assertEqual(quantization_scale_min(1024, 4096), 0)
+    def test_quant_backend_dispatch_boundary(self):
+        with patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": "auto"}):
+            self.assertEqual(quantization_scale_min(1023, 4096), 1e-10)
+            self.assertEqual(quantization_scale_min(1024, 4096), 1e-10)
+            self.assertEqual(quantization_scale_min(3072, 4096), 1e-10)
 
 
 if __name__ == "__main__":

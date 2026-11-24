@@ -22,11 +22,15 @@ def _integer_vector(value, rows, device):
     )
 
 
-@triton.jit(do_not_specialize=["ROWS", "BATCH", "PS", "LS", "RS"])
+@triton.jit(
+    do_not_specialize=["ROWS", "BATCH", "PS", "LS", "RS"],
+    do_not_specialize_on_alignment=["physical_offsets"],
+)
 def _chunk_metadata_kernel(
     prefixes,
     lengths,
     requests,
+    physical_offsets,
     output,
     ROWS,
     BATCH,
@@ -36,6 +40,8 @@ def _chunk_metadata_kernel(
     RATIO: tl.constexpr,
     WINDOW: tl.constexpr,
     REPLAY: tl.constexpr,
+    COMPACT_REPLAY: tl.constexpr,
+    PHYSICAL_OFFSETS: tl.constexpr,
 ):
     index = tl.arange(0, 128)
     prefix = tl.load(prefixes + index * PS, index < BATCH, other=0).to(tl.int64)
@@ -44,8 +50,15 @@ def _chunk_metadata_kernel(
     size = prefix + length
     if RATIO == 2:
         size = size >> 1
-    chunk = size + length + tail
-    offset = tl.cumsum(chunk) - chunk
+    swa_length = tl.minimum(length, WINDOW) if COMPACT_REPLAY else length
+    start = prefix + length - swa_length if COMPACT_REPLAY else prefix - tail
+    if PHYSICAL_OFFSETS:
+        # CED may shrink SWA while retaining the producer's larger allocation.
+        # Only physical origins change; logical counts and replay starts do not.
+        offset = tl.load(physical_offsets + index, index < BATCH, other=0)
+    else:
+        chunk = size + swa_length + tail
+        offset = tl.cumsum(chunk) - chunk
     row = tl.program_id(0) * 128 + index
     request = tl.load(requests + row * RS, row < ROWS, other=0).to(tl.int64)
     request = tl.where(request < 0, request + BATCH, request)
@@ -57,11 +70,26 @@ def _chunk_metadata_kernel(
     request = tl.minimum(tl.maximum(request, 0), 127).to(tl.int32)
     tl.store(output + row, tl.gather(offset, request, 0), row < ROWS)
     tl.store(output + ROWS + row, tl.gather(size, request, 0), row < ROWS)
-    tl.store(output + 2 * ROWS + row, tl.gather(prefix - tail, request, 0), row < ROWS)
+    tl.store(output + 2 * ROWS + row, tl.gather(start, request, 0), row < ROWS)
 
 
-def try_chunk_metadata(prefixes, lengths, requests, ratio, window, replay):
-    """Original long-arithmetic chunk offsets, counts and SWA starts in one launch."""
+def try_chunk_metadata(
+    prefixes,
+    lengths,
+    requests,
+    ratio,
+    window,
+    replay,
+    *,
+    compact_replay=False,
+    physical_offsets=None,
+):
+    """Logical lengths plus packed or explicitly retained physical origins.
+
+    Prefix/length integer dtypes may differ. Internal ``physical_offsets`` is
+    a contiguous int64 request vector whose owner has verified KV capacity;
+    this helper only changes offsets, never the logical global/SWA lengths.
+    """
     if not (
         isinstance(prefixes, torch.Tensor)
         and isinstance(lengths, torch.Tensor)
@@ -72,12 +100,20 @@ def try_chunk_metadata(prefixes, lengths, requests, ratio, window, replay):
         and _integer_vector(prefixes, prefixes.numel(), prefixes.device)
         and _integer_vector(lengths, prefixes.numel(), prefixes.device)
         and _integer_vector(requests, requests.numel(), prefixes.device)
-        and prefixes.dtype == lengths.dtype
         and requests.dtype == torch.int64
         and ratio in (1, 2)
         and type(window) is int
         and window > 0
         and type(replay) is bool
+        and type(compact_replay) is bool
+    ):
+        return None
+    if physical_offsets is not None and not (
+        isinstance(physical_offsets, torch.Tensor)
+        and physical_offsets.device == prefixes.device
+        and physical_offsets.dtype == torch.int64
+        and physical_offsets.shape == prefixes.shape
+        and physical_offsets.is_contiguous()
     ):
         return None
     rows = requests.numel()
@@ -87,6 +123,7 @@ def try_chunk_metadata(prefixes, lengths, requests, ratio, window, replay):
             prefixes,
             lengths,
             requests,
+            physical_offsets,
             output,
             rows,
             prefixes.numel(),
@@ -96,6 +133,8 @@ def try_chunk_metadata(prefixes, lengths, requests, ratio, window, replay):
             ratio,
             window,
             replay,
+            compact_replay,
+            physical_offsets is not None,
             num_warps=4,
         )
     return output.unbind(0)
@@ -219,6 +258,69 @@ def try_slot_mapping(
         256,
     )
     return out
+
+
+@triton.jit(do_not_specialize=["TABLE_STRIDE", "COLS", "POOL_ROWS"])
+def _predecessor_state_kernel(
+    prefixes,
+    table,
+    pool,
+    output,
+    PREFIX_STRIDE: tl.constexpr,
+    TABLE_STRIDE,
+    POOL_STRIDE: tl.constexpr,
+    COLS,
+    EB: tl.constexpr,
+    TPB: tl.constexpr,
+    CP: tl.constexpr,
+    RANK: tl.constexpr,
+    POOL_ROWS,
+):
+    request = tl.program_id(0)
+    pos = tl.maximum(tl.load(prefixes + request * PREFIX_STRIDE).to(tl.int64) - 1, 0)
+    column = (pos // TPB) % COLS
+    offset = pos % (EB * CP)
+    owned = offset // EB == RANK
+    block = tl.load(table + request * TABLE_STRIDE + column, owned, other=0).to(
+        tl.int64
+    )
+    slot = block * EB + offset % EB
+    valid = owned & (block > 0)
+    if valid & (slot >= POOL_ROWS):
+        tl.inline_asm_elementwise(
+            "trap; // dummy $0", "=r", [], dtype=tl.int32, is_pure=False, pack=1
+        )
+    width = tl.arange(0, 1024)
+    value = tl.load(
+        pool + tl.where(valid, slot, 0) * POOL_STRIDE + width, valid, other=0
+    )
+    tl.store(output + request * 1024 + width, value)
+
+
+def read_predecessor_states(
+    prefixes, table, pool, entries_per_block, tokens_per_block, cp_size, cp_rank
+):
+    """Read the CP-owned state before the suffix overwrites its ring slot."""
+    output = torch.empty(
+        (prefixes.numel(), 1024), dtype=torch.float32, device=prefixes.device
+    )
+    _predecessor_state_kernel[(prefixes.numel(),)](
+        prefixes,
+        table,
+        pool,
+        output,
+        prefixes.stride(0),
+        table.stride(0),
+        pool.stride(0),
+        table.shape[1],
+        entries_per_block,
+        tokens_per_block,
+        cp_size,
+        cp_rank,
+        pool.shape[0],
+        num_warps=4,
+    )
+    return output
 
 
 @triton.jit(do_not_specialize=["ROWS", "WIDTH"])

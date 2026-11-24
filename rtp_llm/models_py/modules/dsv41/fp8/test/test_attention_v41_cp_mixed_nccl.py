@@ -1,0 +1,239 @@
+"""CP4 bounded source transport through real NCCL and source GEMM."""
+
+import importlib.util
+import json
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+
+_SPEC = importlib.util.spec_from_file_location(
+    "cp_stream_contracts",
+    Path(__file__).with_name("test_attention_v41_cp_raw_groups.py"),
+)
+CONTRACTS = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(CONTRACTS)
+
+MIXED = (503, 159, 3263, 583, 8127, 1940, 5177, 8370, 2913, 131071, 14606, 9695)
+LONG = (131072,)
+LONG_OVER_LIMIT = (262144,)
+ONE_MILLION = (1048576,)
+ONLINE_B8 = (36091,) * 8
+TYPICAL_REUSE = ((983,) * 32, (983,) * 64, (8192,) * 4, (8192,) * 8, (2943,) * 9)
+WIDE = (1, 9, 127, 129) * 32 + (2049,)
+COLD_B1024 = (2,) * 1024
+MIXED_B1024 = (1, 2, 3, 4, 5, 6, 7, 8) * 128
+B129_FRESH257 = (257,) * 129
+# Two bounded AllGather receives and one restored source tile stay below
+# 1 GiB independently of the total number of fresh rows.
+EXPLICIT_LIMIT = 1 * 1024**3
+
+
+def _worker(rank, rendezvous, output_dir, cases):
+    torch.cuda.set_device(rank)
+    dist.init_process_group(
+        "nccl", init_method="file://" + rendezvous, rank=rank, world_size=4
+    )
+    try:
+        from rtp_llm.models_py.distributed import collective_torch
+        from rtp_llm.models_py.modules.dsv41.fp8.attention import _get_cp_comm_stream
+
+        CONTRACTS.STREAM._get_cp_comm_stream = _get_cp_comm_stream
+        summaries = []
+        with patch.object(
+            collective_torch, "_get_group", return_value=dist.group.WORLD
+        ):
+            # A synchronous caller on the compute stream still joins CP work.
+            source = torch.full((2,), rank, device="cuda", dtype=torch.bfloat16)
+            received = torch.empty((8,), device="cuda", dtype=torch.bfloat16)
+            CONTRACTS.STREAM._gather_prefill_x_cohort(source, None, received)
+            torch.testing.assert_close(
+                received,
+                torch.arange(4, device="cuda", dtype=torch.bfloat16).repeat_interleave(
+                    2
+                ),
+            )
+            for lengths in cases:
+                cp, local, raw = CONTRACTS._case(lengths)
+                cp.cp_rank = rank
+                cp.unpad_restore = cp.unpad_restore.to("cuda")
+                x = torch.zeros(
+                    (len(local[rank]), 5120), device="cuda", dtype=torch.bfloat16
+                )
+                x[:, :4] = local[rank].to("cuda")
+                del local
+                for ratio in (1, 2):
+                    weights = []
+                    for column in range(ratio):
+                        weight = torch.zeros(
+                            (512, 5120), device="cuda", dtype=torch.bfloat16
+                        )
+                        weight[:4, :4] = torch.eye(
+                            4, device="cuda", dtype=torch.bfloat16
+                        ) * (1 if column == 0 else 0.5)
+                        weights.append(weight)
+                    expected = torch.zeros(
+                        (len(raw), 512 * ratio), device="cuda", dtype=torch.float32
+                    )
+                    for column in range(ratio):
+                        expected[:, column * 512 : column * 512 + 4] = raw.to(
+                            "cuda"
+                        ).float() * (1 if column == 0 else 0.5)
+                    output = torch.empty_like(expected)
+
+                    def execute(destination, *, direct_map=False):
+                        seen = []
+                        row_bytes = 1024 if ratio == 1 else 4096
+                        cohorts = CONTRACTS.STREAM._prefill_x_cohort_plan(
+                            cp, projected_row_bytes=row_bytes
+                        )
+                        gather_count = 0
+                        original_gather = CONTRACTS.STREAM._gather_prefill_x_cohort
+
+                        def count_gather(send, context, receive):
+                            nonlocal gather_count
+                            gather_count += 1
+                            return original_gather(send, context, receive)
+
+                        with patch.object(
+                            CONTRACTS.STREAM, "_gather_prefill_x_cohort", count_gather
+                        ):
+                            tiles = CONTRACTS.STREAM._prefill_projected_x_cohorts(
+                                x, cp, cohorts, tuple(weights), direct_map=direct_map
+                            )
+                            try:
+                                for start, tile, rows, source_map in tiles:
+                                    seen.append((start, rows))
+                                    if source_map is None:
+                                        destination[start : start + rows].copy_(tile)
+                                    else:
+                                        (
+                                            restore,
+                                            global_start,
+                                            local_start,
+                                            full_rows,
+                                            local_rows,
+                                        ) = source_map
+                                        assert global_start == start
+                                        indices = restore[start : start + rows]
+                                        source = (
+                                            (indices // full_rows) * local_rows
+                                            + indices % full_rows
+                                            - local_start
+                                        ).long()
+                                        destination[start : start + rows].copy_(
+                                            tile.index_select(0, source)
+                                        )
+                                    del tile
+                            finally:
+                                tiles.close()
+                            if lengths == ONLINE_B8:
+                                assert gather_count == (4 if ratio == 2 else 1)
+                        assert seen == [
+                            (start, end - start)
+                            for start, end in CONTRACTS.STREAM._prefill_source_tile_ranges(
+                                cohorts
+                            )
+                        ]
+                        return destination
+
+                    with torch.inference_mode():
+                        torch.cuda.synchronize()
+                        before = torch.cuda.memory_allocated()
+                        torch.cuda.reset_peak_memory_stats()
+                        execute(output)
+                        torch.cuda.synchronize()
+                        peak = torch.cuda.max_memory_allocated() - before
+                        max_peak = torch.tensor(peak, device="cuda")
+                        dist.all_reduce(max_peak, op=dist.ReduceOp.MAX)
+                        assert max_peak.item() <= EXPLICIT_LIMIT, (
+                            lengths,
+                            ratio,
+                            max_peak.item(),
+                        )
+                        torch.testing.assert_close(output, expected, rtol=0, atol=0)
+                        if lengths in (ONLINE_B8, ONE_MILLION):
+                            execute(output, direct_map=True)
+                            torch.testing.assert_close(output, expected, rtol=0, atol=0)
+                        # Different data and compute stream expose stale send,
+                        # receive, or producer-slab reuse across tile boundaries.
+                        compute = torch.cuda.Stream()
+                        compute.wait_stream(torch.cuda.current_stream())
+                        with torch.cuda.stream(compute):
+                            x[:, :4].add_(1)
+                            execute(output)
+                        torch.cuda.current_stream().wait_stream(compute)
+                        torch.cuda.synchronize()
+                        changed = expected.clone()
+                        changed[:, :4].add_(1)
+                        if ratio == 2:
+                            changed[:, 512:516].add_(0.5)
+                        torch.testing.assert_close(output, changed, rtol=0, atol=0)
+                        x[:, :4].sub_(1)
+                        probe = torch.tensor([rank + 1], device="cuda")
+                        dist.all_reduce(probe)
+                        assert probe.item() == 10
+                    summaries.append(
+                        {
+                            "rank": rank,
+                            "shape": list(lengths),
+                            "ratio": ratio,
+                            "rows": len(raw),
+                            "peak_temporary_bytes": peak,
+                            "exact_projection": True,
+                        }
+                    )
+                    del expected, output, weights
+                del x, raw
+        Path(output_dir, f"stream_rank{rank}.json").write_text(
+            json.dumps(summaries, indent=2)
+        )
+        dist.barrier()
+    finally:
+        dist.destroy_process_group()
+
+
+class CPStreamNCCLTest(unittest.TestCase):
+    def _run_cases(self, cases):
+        self.assertTrue(torch.cuda.is_available())
+        self.assertGreaterEqual(torch.cuda.device_count(), 4)
+        output_dir = Path(
+            os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", tempfile.gettempdir())
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TEST_TMPDIR")) as tmp:
+            mp.spawn(
+                _worker,
+                args=(str(Path(tmp) / "rendezvous"), str(output_dir), cases),
+                nprocs=4,
+            )
+
+    def test_mixed_and_long_cp4(self):
+        self._run_cases((MIXED, LONG))
+
+    def test_long_request_beyond_old_limit_cp4(self):
+        self._run_cases((LONG_OVER_LIMIT, ONE_MILLION))
+
+    def test_wide_and_b1024_cp4(self):
+        self._run_cases((WIDE, COLD_B1024))
+
+    def test_online_b8_cp4(self):
+        self._run_cases((ONLINE_B8,))
+
+    def test_typical_reuse_shapes_cp4(self):
+        self._run_cases(TYPICAL_REUSE)
+
+    def test_b129_fresh257_cp4(self):
+        self._run_cases((B129_FRESH257,))
+
+    def test_mixed_b1024_cp4(self):
+        self._run_cases((MIXED_B1024,))
+
+
+if __name__ == "__main__":
+    unittest.main()

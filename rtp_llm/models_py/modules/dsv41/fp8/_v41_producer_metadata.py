@@ -1,5 +1,6 @@
-"""Forward-local integers for unchanged CP owner segments or global raw tiles."""
+"""Forward-local integers for global raw source tiles."""
 
+from bisect import bisect_right
 from dataclasses import dataclass
 
 import torch
@@ -14,7 +15,8 @@ except ModuleNotFoundError as error:
 
 
 _MAX_METADATA_BYTES = 16 * 1024**2
-_RAW_TILE_ROWS = 32768
+_RAW_TILE_ROWS = 65536
+_MAX_REQUESTS = 1024
 
 
 def _slice_rows(tensor, start, end):
@@ -46,15 +48,21 @@ class ProducerMetadata:
     previous_slots: torch.Tensor | None = None
     starts: torch.Tensor | None = None
     lengths: torch.Tensor | None = None
+    cohort_indices: bool = False
 
     def tile(self, start, end):
-        _, first, stop, phase = self.segments[start]
+        planned_end, first, stop, phase = self.segments[start]
+        if planned_end != end:
+            raise ValueError("producer tile does not match its plan")
+        indices = (
+            _slice_rows(self.raw_indices, first, stop)
+            if self.raw_indices is not None
+            else _slice_rows(self.indices[phase], 0, stop - first)
+        )
+        if self.cohort_indices and start % _RAW_TILE_ROWS:
+            indices = (indices - start % _RAW_TILE_ROWS) % _RAW_TILE_ROWS
         return (
-            (
-                _slice_rows(self.raw_indices, first, stop)
-                if self.raw_indices is not None
-                else _slice_rows(self.indices[phase], 0, stop - first)
-            ),
+            indices,
             _slice_rows(self.positions, first, stop),
             _slice_rows(self.requests, first, stop),
             _slice_rows(self.main_slots, first, stop),
@@ -67,12 +75,12 @@ class ProducerMetadata:
         )
 
 
-def _raw_plan(cp, ratio, tile_rows=_RAW_TILE_ROWS):
+def _raw_plan(cp, ratio, tile_rows=_RAW_TILE_ROWS, ranges=None):
     lengths = getattr(cp, "input_lengths_global_host", None)
     starts = getattr(cp, "prefix_lengths_host", None)
     if (
         type(tile_rows) is not int
-        or tile_rows not in (32768, 65536)
+        or tile_rows != _RAW_TILE_ROWS
         or getattr(cp, "cp_size", 0) < 1
         or ratio not in (1, 2)
         or not isinstance(lengths, (tuple, list))
@@ -93,8 +101,14 @@ def _raw_plan(cp, ratio, tile_rows=_RAW_TILE_ROWS):
         return None
     segments = {}
     first = 0
-    for start in range(0, rows, tile_rows):
-        end = min(start + tile_rows, rows)
+    if ranges is None:
+        ranges = (
+            (start, min(start + tile_rows, rows)) for start in range(0, rows, tile_rows)
+        )
+    previous_end = 0
+    for start, end in ranges:
+        if start != previous_end or not start < end <= min(start + tile_rows, rows):
+            return None
         offset = completed = 0
         for prefix, size in zip(starts, lengths):
             left, right = max(start, offset), min(end, offset + size)
@@ -104,7 +118,100 @@ def _raw_plan(cp, ratio, tile_rows=_RAW_TILE_ROWS):
             offset += size
         segments[start] = (end, first, first + completed, 0)
         first += completed
+        previous_end = end
+    if previous_end != rows:
+        return None
     return segments, rows, count
+
+
+def raw_tile_geometry_supported(
+    lengths,
+    prefixes,
+    ratio,
+    cp_size,
+    cp_rank,
+    owner_tokens_per_block,
+    tile_rows=_RAW_TILE_ROWS,
+):
+    return not (
+        not isinstance(lengths, (tuple, list))
+        or not isinstance(prefixes, (tuple, list))
+        or ratio not in (1, 2)
+        or tile_rows != _RAW_TILE_ROWS
+        or len(lengths) != len(prefixes)
+        or not 1 <= len(lengths) <= _MAX_REQUESTS
+        or cp_size < 1
+        or not 0 <= cp_rank < cp_size
+        or owner_tokens_per_block <= 0
+        or owner_tokens_per_block % ratio != 0
+        or any(type(n) is not int or n <= 0 for n in lengths)
+        or any(
+            type(p) is not int or p < 0 or p > 2**63 - 1 - n
+            for p, n in zip(prefixes, lengths)
+        )
+    )
+
+
+def raw_tile_plan(
+    lengths,
+    prefixes,
+    ratio,
+    cp_size,
+    cp_rank,
+    owner_tokens_per_block,
+    tile_rows=_RAW_TILE_ROWS,
+    ranges=None,
+):
+    """Yield raw row tiles and the number of entries written by this rank."""
+    if not raw_tile_geometry_supported(
+        lengths, prefixes, ratio, cp_size, cp_rank, owner_tokens_per_block, tile_rows
+    ):
+        raise ValueError("invalid producer tile geometry")
+    owner_entries = owner_tokens_per_block // ratio
+    cycle = cp_size * owner_entries
+
+    def owned_before(entry):
+        whole, tail = divmod(entry, cycle)
+        return whole * owner_entries + min(
+            owner_entries, max(0, tail - cp_rank * owner_entries)
+        )
+
+    row_ends = [0]
+    owned_ends = [0]
+    for length, prefix in zip(lengths, prefixes):
+        row_ends.append(row_ends[-1] + length)
+        owned_ends.append(
+            owned_ends[-1]
+            + owned_before((prefix + length) // ratio)
+            - owned_before(prefix // ratio)
+        )
+
+    def count_before(row):
+        request = bisect_right(row_ends, row) - 1
+        if request == len(lengths):
+            return owned_ends[-1]
+        prefix = prefixes[request]
+        return (
+            owned_ends[request]
+            + owned_before((prefix + row - row_ends[request]) // ratio)
+            - owned_before(prefix // ratio)
+        )
+
+    if ranges is None:
+        ranges = (
+            (start, min(start + tile_rows, row_ends[-1]))
+            for start in range(0, row_ends[-1], tile_rows)
+        )
+    previous_end = 0
+    for start, end in ranges:
+        if start != previous_end or not start < end <= min(
+            start + tile_rows, row_ends[-1]
+        ):
+            raise ValueError("source tile ranges must cover the rows in order")
+        yield start, end, count_before(end) - count_before(start)
+        previous_end = end
+    if previous_end != row_ends[-1]:
+        raise ValueError("source tile ranges must cover the rows in order")
 
 
 def _slot_layouts_supported(layouts, ratio, batch, device):
@@ -146,11 +253,61 @@ def _slot_layouts_supported(layouts, ratio, batch, device):
             return False
     return (
         len({(x.cp_size, x.cp_rank) for x in layouts}) == 1
+        and len({x.owner_tokens_per_block for x in layouts[:2]}) == 1
         and len({x.table.dtype for x in layouts}) == 1
     )
 
 
+def restore_projected_cohort(
+    gathered, restore, global_start, local_start, full_local_rows, local_rows, rows
+):
+    """Restore one rank-major CP cohort to global token order."""
+    if triton is None:
+        raise RuntimeError("Triton is required for CP source restoration")
+    width = gathered.shape[1]
+    output = torch.empty((rows, width), device=gathered.device, dtype=gathered.dtype)
+    if rows:
+        _restore_projected_cohort_kernel[(rows,)](
+            gathered,
+            restore,
+            output,
+            global_start,
+            local_start,
+            full_local_rows,
+            local_rows,
+            rows,
+            width,
+            triton.next_power_of_2(width),
+            num_warps=4,
+        )
+    return output
+
+
 if triton is not None:
+
+    @triton.jit
+    def _restore_projected_cohort_kernel(
+        gathered,
+        restore,
+        output,
+        global_start,
+        local_start,
+        full_local_rows,
+        local_rows,
+        rows,
+        WIDTH: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        col = tl.arange(0, BLOCK)
+        index = tl.load(restore + global_start + row, row < rows, other=0)
+        source = (
+            (index // full_local_rows) * local_rows
+            + index % full_local_rows
+            - local_start
+        ) * WIDTH
+        value = tl.load(gathered + source + col, (row < rows) & (col < WIDTH), other=0)
+        tl.store(output + row * WIDTH + col, value, (row < rows) & (col < WIDTH))
 
     @triton.jit
     def _raw_slot(
@@ -189,6 +346,192 @@ if triton is not None:
             valid &= (pos + 1) % RATIO == 0
         block = tl.load(table + req * stride + column, valid, other=0).to(tl.int64)
         return tl.where(valid & (block > 0), block * EB + offset, -1)
+
+    @triton.jit(
+        do_not_specialize=[
+            "BATCH",
+            "ROW_START",
+            "ROWS",
+            "ENTRIES",
+            "SS",
+            "LS",
+            "MC",
+            "IC",
+            "SC",
+            "MS",
+            "IS",
+            "TS",
+        ],
+        do_not_specialize_on_alignment=[
+            "starts",
+            "lengths",
+            "scratch",
+            "main_table",
+            "index_table",
+            "state_table",
+        ],
+    )
+    def _fused_raw_tile_metadata_kernel(
+        starts,
+        lengths,
+        scratch,
+        main_table,
+        index_table,
+        state_table,
+        BATCH,
+        ROW_START,
+        ROWS,
+        ENTRIES,
+        SS,
+        LS,
+        MC,
+        IC,
+        SC,
+        MS,
+        IS,
+        TS,
+        M: tl.constexpr,
+        I: tl.constexpr,
+        S: tl.constexpr,
+        RATIO: tl.constexpr,
+        CAPACITY: tl.constexpr,
+        REQUEST_BLOCK: tl.constexpr,
+        REQUEST_STEPS: tl.constexpr,
+    ):
+        lane = tl.arange(0, 128)
+        request_lane = tl.arange(0, REQUEST_BLOCK)
+        prefix = tl.load(starts + request_lane * SS, request_lane < BATCH, other=0).to(
+            tl.int64
+        )
+        size = tl.load(lengths + request_lane * LS, request_lane < BATCH, other=0).to(
+            tl.int64
+        )
+        row_end = tl.cumsum(size)
+        row_begin = row_end - size
+        left = tl.maximum(row_begin, ROW_START)
+        right = tl.minimum(row_end, ROW_START + ROWS)
+        first_entry = (prefix + left - row_begin) // RATIO
+        last_entry = (prefix + right - row_begin) // RATIO
+        owner_entries = M[2] // RATIO
+        cycle = owner_entries * M[3]
+        first_owned = (first_entry // cycle) * owner_entries + tl.minimum(
+            tl.maximum(first_entry % cycle - M[4] * owner_entries, 0), owner_entries
+        )
+        last_owned = (last_entry // cycle) * owner_entries + tl.minimum(
+            tl.maximum(last_entry % cycle - M[4] * owner_entries, 0), owner_entries
+        )
+        owned_count = tl.where(right > left, last_owned - first_owned, 0)
+        owned_end = tl.cumsum(owned_count)
+        owned_begin = owned_end - owned_count
+        pid = tl.program_id(0)
+        entry_blocks = tl.cdiv(ENTRIES, 128)
+
+        if pid < entry_blocks:
+            local_entry = pid * 128 + lane
+            lo = tl.full((128,), 0, tl.int32)
+            hi = tl.full((128,), REQUEST_BLOCK, tl.int32)
+            for _ in range(REQUEST_STEPS):
+                mid = (lo + hi) // 2
+                stop = tl.gather(owned_end, tl.minimum(mid, REQUEST_BLOCK - 1), 0)
+                advance = (mid < REQUEST_BLOCK) & (local_entry >= stop)
+                lo = tl.where(advance, mid + 1, lo)
+                hi = tl.where(advance, hi, mid)
+            request = tl.minimum(lo, REQUEST_BLOCK - 1)
+            ordinal = (
+                tl.gather(first_owned, request, 0)
+                + local_entry
+                - tl.gather(owned_begin, request, 0)
+            )
+            entry = (
+                (ordinal // owner_entries) * cycle
+                + M[4] * owner_entries
+                + ordinal % owner_entries
+            )
+            position = (entry + 1) * RATIO - 1
+            row = (
+                tl.gather(row_begin, request, 0)
+                + position
+                - tl.gather(prefix, request, 0)
+            )
+            local_row = row - ROW_START
+            valid = local_entry < ENTRIES
+            main = _raw_slot(
+                position,
+                request,
+                main_table,
+                valid,
+                MC,
+                MS,
+                0,
+                M[0],
+                M[1],
+                M[2],
+                M[3],
+                M[4],
+                RATIO,
+                False,
+                False,
+            )
+            index = _raw_slot(
+                position,
+                request,
+                index_table,
+                valid,
+                IC,
+                IS,
+                0,
+                I[0],
+                I[1],
+                I[2],
+                I[3],
+                I[4],
+                RATIO,
+                False,
+                False,
+            )
+            tl.store(scratch + 2 * CAPACITY + local_entry, local_row, valid)
+            tl.store(scratch + 3 * CAPACITY + local_entry, position, valid)
+            tl.store(scratch + 4 * CAPACITY + local_entry, request, valid)
+            tl.store(scratch + 5 * CAPACITY + local_entry, main, valid)
+            tl.store(scratch + 6 * CAPACITY + local_entry, index, valid)
+        else:
+            local_row = ((pid - entry_blocks) * 128 + lane).to(tl.int64)
+            row = ROW_START + local_row
+            lo = tl.full((128,), 0, tl.int32)
+            hi = tl.full((128,), REQUEST_BLOCK, tl.int32)
+            for _ in range(REQUEST_STEPS):
+                mid = (lo + hi) // 2
+                stop = tl.gather(row_end, tl.minimum(mid, REQUEST_BLOCK - 1), 0)
+                advance = (mid < REQUEST_BLOCK) & (row >= stop)
+                lo = tl.where(advance, mid + 1, lo)
+                hi = tl.where(advance, hi, mid)
+            request = tl.minimum(lo, REQUEST_BLOCK - 1)
+            position = (
+                tl.gather(prefix, request, 0) + row - tl.gather(row_begin, request, 0)
+            )
+            valid = local_row < ROWS
+            tl.store(scratch + local_row, position, valid)
+            tl.store(scratch + CAPACITY + local_row, request, valid)
+            if RATIO == 2:
+                end = tl.gather(prefix, request, 0) + tl.gather(size, request, 0)
+                state = _raw_slot(
+                    position,
+                    request,
+                    state_table,
+                    valid,
+                    SC,
+                    TS,
+                    end,
+                    S[0],
+                    S[1],
+                    S[2],
+                    S[3],
+                    S[4],
+                    RATIO,
+                    True,
+                    True,
+                )
+                tl.store(scratch + 7 * CAPACITY + local_row, state, valid)
 
     @triton.jit(
         do_not_specialize=[
@@ -457,14 +800,15 @@ def prepare_raw(
     *,
     tile_rows=_RAW_TILE_ROWS,
     slot_layouts=None,
+    ranges=None,
 ):
     """Metadata for global raw tiles, including request crossings.
 
-    Host mirrors must describe the supplied GPU lengths/prefixes, as for prepare().
+    Host mirrors must describe the supplied GPU lengths/prefixes.
     Returns the same tile() tuple; never repartitions GEMMs or compressor rows.
     One integer launch builds compact boundaries/relative indices/sequence ends;
     existing slot callbacks run once per region. No H2D row table or retained cache.
-    tile_rows must match the producer's slices and be 32768 (default) or 65536.
+    Each tile spans at most 65536 rows; supplied ranges cover all rows in order.
     Warm reachable tile sizes, ratios and slot layouts before graph capture.
     Positive-stride int64 vectors are supported; unsupported inputs return None
     before allocation or launch.
@@ -474,7 +818,7 @@ def prepare_raw(
     tables share int32 or int64 dtype. Fused pointers do not specialize on
     alignment. Each descriptor retains its own physical entries/page geometry.
     """
-    plan = _raw_plan(cp, ratio, tile_rows)
+    plan = _raw_plan(cp, ratio, tile_rows, ranges)
     if plan is None or triton is None or not isinstance(positions, torch.Tensor):
         return None
     segments, rows, count = plan
@@ -521,7 +865,15 @@ def prepare_raw(
         if required > _MAX_METADATA_BYTES:
             return None
         return _prepare_fused_raw(
-            plan, positions, requests, starts, lengths, ratio, slot_layouts, tile_rows
+            plan,
+            positions,
+            requests,
+            starts,
+            lengths,
+            ratio,
+            slot_layouts,
+            tile_rows,
+            ranges is not None,
         )
     boundaries = torch.empty((3, count), device=positions.device, dtype=torch.int64)
     indices, boundary_pos, boundary_req = boundaries.unbind(0)
@@ -570,11 +922,20 @@ def prepare_raw(
         state_slots,
         seq_ends,
         indices,
+        cohort_indices=ranges is not None,
     )
 
 
 def _prepare_fused_raw(
-    plan, positions, requests, starts, lengths, ratio, layouts, tile_rows
+    plan,
+    positions,
+    requests,
+    starts,
+    lengths,
+    ratio,
+    layouts,
+    tile_rows,
+    cohort_indices,
 ):
     segments, rows, count = plan
     batch, device = starts.numel(), positions.device
@@ -658,105 +1019,84 @@ def _prepare_fused_raw(
         previous,
         small_long[1],
         small_long[2],
+        cohort_indices,
     )
 
 
-def prepare(cp, positions, requests, starts, lengths, ratio, tiles, slots, regions):
-    """Prepare once, without reading GPU scalars or changing float boundaries.
-
-    ``tiles`` is the original host owner-tile plan, including its split tails.
-    Main/index mappings use compact right endpoints; state mappings retain all
-    fresh rows and the original per-request sequence ends. Slot writes still
-    execute separately for every old segment, including ring overwrite order.
-    """
-    host_lengths = getattr(cp, "input_lengths_global_host", None)
-    host_starts = getattr(cp, "prefix_lengths_host", None)
+def prepare_fused_tile(starts, lengths, ratio, slot_layouts, tile, scratch):
+    """Generate one bounded source tile's row and pool metadata."""
+    if triton is None:
+        raise RuntimeError("Triton is required for fused source tile metadata")
+    row_start, row_end, entries = tile
+    rows = row_end - row_start
     if (
-        cp is None
-        or cp.cp_size < 1
-        or ratio not in (1, 2)
-        or host_lengths is None
-        or host_starts is None
-        or not 2 <= len(host_lengths) <= 128
-        or len(host_starts) != len(host_lengths)
-        or any(n <= 0 for n in host_lengths)
-        or any(p < 0 for p in host_starts)
+        starts.ndim != 1
+        or lengths.shape != starts.shape
+        or starts.dtype != torch.int64
+        or lengths.dtype not in (torch.int32, torch.int64)
+        or starts.device != lengths.device
+        or not starts.is_cuda
+        or not _slot_layouts_supported(slot_layouts, ratio, len(starts), starts.device)
+        or scratch.dtype != torch.int64
+        or scratch.device != starts.device
+        or scratch.shape != (8, _RAW_TILE_ROWS)
+        or not scratch.is_contiguous()
+        or not 0 < rows <= _RAW_TILE_ROWS
+        or not 0 <= entries <= rows
+        or row_start < 0
     ):
-        return None
-    rows = sum(host_lengths)
-    if any(
-        not isinstance(t, torch.Tensor)
-        or t.shape != (n,)
-        or t.dtype != torch.int64
-        or t.device != positions.device
-        or not t.is_contiguous()
-        for t, n in (
-            (positions, rows),
-            (requests, rows),
-            (starts, len(host_lengths)),
-            (lengths, len(host_lengths)),
+        raise ValueError("invalid fused source tile")
+    m, i = slot_layouts[:2]
+    state = slot_layouts[2] if ratio == 2 else m
+    request_block = max(128, triton.next_power_of_2(len(starts)))
+
+    def constants(layout):
+        return (
+            layout.entries_per_block,
+            layout.tokens_per_block,
+            layout.owner_tokens_per_block,
+            layout.cp_size,
+            layout.cp_rank,
         )
-    ):
-        return None
-    segments = {}
-    request, request_start, token, count, max_rows = 0, 0, 0, 0, 0
-    for _, _, size in tiles:
-        if request >= len(host_lengths) or size <= 0:
-            return None
-        request_end = request_start + host_lengths[request]
-        if token + size > request_end:
-            return None
-        phase = (ratio - 1 - (host_starts[request] + token - request_start)) % ratio
-        completed = (size + ratio - 1 - phase) // ratio
-        segments[token] = (token + size, count, count + completed, phase)
-        token += size
-        count += completed
-        max_rows = max(max_rows, size)
-        if token == request_end:
-            request += 1
-            request_start = token
-    if token != rows or request != len(host_lengths) or not segments or count == 0:
-        return None
-    # Includes all owned vectors/templates and sequence ends, not caller inputs.
-    required = 8 * (
-        (4 * count + rows if ratio == 2 else 2 * rows) + max_rows + len(host_lengths)
+
+    _fused_raw_tile_metadata_kernel[
+        (triton.cdiv(entries, 128) + triton.cdiv(rows, 128),)
+    ](
+        starts,
+        lengths,
+        scratch,
+        m.table,
+        i.table,
+        state.table,
+        len(starts),
+        row_start,
+        rows,
+        entries,
+        starts.stride(0),
+        lengths.stride(0),
+        m.table.shape[1],
+        i.table.shape[1],
+        state.table.shape[1],
+        m.table.stride(0),
+        i.table.stride(0),
+        state.table.stride(0),
+        constants(m),
+        constants(i),
+        constants(state),
+        ratio,
+        _RAW_TILE_ROWS,
+        request_block,
+        request_block.bit_length(),
+        num_warps=4,
     )
-    if required > _MAX_METADATA_BYTES:
-        return None
-    if ratio == 2:
-        offset, spans = 0, []
-        for prefix, length in zip(host_starts, host_lengths):
-            spans.append(slice(offset + 1 - prefix % 2, offset + length, 2))
-            offset += length
-        boundary_pos = torch.cat([positions[span] for span in spans])
-        boundary_req = torch.cat([requests[span] for span in spans])
-    else:
-        boundary_pos, boundary_req = positions, requests
-    indices = tuple(
-        torch.arange(phase, max_rows, ratio, dtype=torch.int64, device=positions.device)
-        for phase in range(ratio)
-    )
-    seq_ends = starts + lengths
-    main_slots = slots(regions[0], boundary_pos, boundary_req)
-    index_slots = slots(regions[1], boundary_pos, boundary_req)
-    state_slots = (
-        slots(regions[2], positions, requests, state_end=seq_ends)
-        if ratio == 2
-        else None
-    )
-    if (
-        main_slots is None
-        or index_slots is None
-        or (ratio == 2 and state_slots is None)
-    ):
-        return None
-    return ProducerMetadata(
-        segments,
-        indices,
-        boundary_pos,
-        boundary_req,
-        main_slots,
-        index_slots,
+    state_slots = scratch[7, :rows] if ratio == 2 else None
+    return (
+        scratch[0, :rows],
+        scratch[1, :rows],
+        scratch[2, :entries],
+        scratch[3, :entries],
+        scratch[4, :entries],
+        scratch[5, :entries],
+        scratch[6, :entries],
         state_slots,
-        seq_ends,
     )

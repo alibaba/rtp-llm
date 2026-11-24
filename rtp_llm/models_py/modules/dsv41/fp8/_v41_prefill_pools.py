@@ -8,12 +8,17 @@ import triton.language as tl
 
 from rtp_llm.models_py.modules.dsv41.attn_type import INDEXER_KV
 
-# Excludes the returned keys, which the original per-request path also retains.
+# Excludes final BF16 KV and earlier groups' retained index outputs. Those
+# model outputs also exist in the original path; this bounds current scratch.
+# Joint direct output keeps packet (356), index outputs (68), and three int64
+# slot planes (24) alive through dequant. Use this common bound for every rank
+# and both output layouts, never choose collective groups from local readiness.
 _MAX_TEMP_BYTES = 256 * 1024 * 1024
-_BYTES_PER_ROW = 288 + 64 + 4 + 8 * 8
+_BYTES_PER_ROW = 288 + 64 + 4 + 64 + 4 + 3 * 8
 _MAX_ROWS = _MAX_TEMP_BYTES // _BYTES_PER_ROW
 _KEY_ALIGNMENT = 256
-_MAX_REQUESTS = 128
+_MAX_REQUESTS = 1024
+_REQUESTS_PER_GROUP = 128
 
 
 def _trim_rows(tensor, count):
@@ -77,7 +82,7 @@ def _request_groups(counts):
     groups = []
     first, rows = 0, 0
     for index, count in enumerate(padded):
-        if rows + count > _MAX_ROWS:
+        if rows + count > _MAX_ROWS or index - first == _REQUESTS_PER_GROUP:
             groups.append((first, index, rows))
             first, rows = index, 0
         rows += count
@@ -85,7 +90,17 @@ def _request_groups(counts):
     return groups
 
 
-def try_gather_prefill_pools(attn, main_pool, index_pool, ends, seq_ends):
+def try_gather_prefill_pools(
+    attn,
+    main_pool,
+    index_pool,
+    ends,
+    seq_ends,
+    *,
+    workspace=None,
+    swa=None,
+    output_stream=None,
+):
     """Return the existing [(BF16 global keys, FP4 index keys)] representation.
 
     Each logical slot has one CP owner. Other ranks contribute zero bytes, so
@@ -94,21 +109,17 @@ def try_gather_prefill_pools(attn, main_pool, index_pool, ends, seq_ends):
     """
     cp = attn._cp_ctx
     if (
-        len(ends) < 2
+        len(ends) < 1
         or cp is None
-        or cp.cp_size <= 1
-        or not cp.kv_cache_sharded
+        or cp.cp_size < 1
+        or (cp.cp_size > 1 and not cp.kv_cache_sharded)
         or attn.compress_ratio not in (1, 2)
         or len(ends) > _MAX_REQUESTS
     ):
         return None
     counts = tuple(end // attn.compress_ratio for end in ends)
-    padded_counts = tuple(
-        (count + _KEY_ALIGNMENT - 1) // _KEY_ALIGNMENT * _KEY_ALIGNMENT
-        for count in counts
-    )
     groups = _request_groups(counts)
-    if groups is None:
+    if any(count < 0 for count in counts):
         return None
     if (
         main_pool.device.type != "cuda"
@@ -116,15 +127,29 @@ def try_gather_prefill_pools(attn, main_pool, index_pool, ends, seq_ends):
     ):
         return None
 
-    # Joint CP4 is qualified at batch >=32; smaller batches stay on this path.
-    if len(ends) >= 32:
-        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_joint_pool
+    from rtp_llm.models_py.modules.dsv41.fp8 import _v41_joint_pool
 
-        joint = _v41_joint_pool.try_gather(
-            attn, main_pool, index_pool, ends, seq_ends, groups=groups
-        )
-        if joint is not None:
-            return joint
+    joint = _v41_joint_pool.try_gather(
+        attn,
+        main_pool,
+        index_pool,
+        ends,
+        seq_ends,
+        groups=groups,
+        workspace=workspace,
+        swa=swa,
+        output_stream=output_stream,
+    )
+    if joint is not None:
+        return joint
+
+    if groups is None:
+        return None
+
+    padded_counts = tuple(
+        (count + _KEY_ALIGNMENT - 1) // _KEY_ALIGNMENT * _KEY_ALIGNMENT
+        for count in counts
+    )
 
     if (
         main_pool.dtype != torch.uint8

@@ -32,7 +32,7 @@ class PrefillPoolsHostTest(unittest.TestCase):
         empty = request[:0]
         self.assertIs(pools._trim_rows(empty, 0), empty)
 
-    def test_joint_dispatch_starts_at_qualified_batch_boundary(self):
+    def test_joint_dispatch_covers_small_and_large_batches(self):
         from rtp_llm.models_py.modules.dsv41.fp8 import _v41_joint_pool as joint
 
         attn = SimpleNamespace(
@@ -41,19 +41,15 @@ class PrefillPoolsHostTest(unittest.TestCase):
         )
         pool = SimpleNamespace(device=torch.device("cuda:0"), dtype=torch.uint8)
         result = object()
-        for batch in (2, 6, 31, 32):
+        for batch in (1, 2, 6, 31, 32, 64, 128, 129, 1024):
             with self.subTest(batch=batch), patch.object(
                 torch.cuda, "get_device_capability", return_value=(10, 0)
             ), patch.object(joint, "try_gather", return_value=result) as attempt:
                 actual = pools.try_gather_prefill_pools(
                     attn, pool, pool, [1] * batch, None
                 )
-                if batch < 32:
-                    attempt.assert_not_called()
-                    self.assertIsNone(actual)
-                else:
-                    attempt.assert_called_once()
-                    self.assertIs(actual, result)
+                attempt.assert_called_once()
+                self.assertIs(actual, result)
 
     def test_budget_boundary_preserves_whole_requests(self):
         limit = pools._MAX_ROWS
@@ -78,6 +74,14 @@ class PrefillPoolsHostTest(unittest.TestCase):
     def test_zero_rows_keep_request_order(self):
         self.assertEqual(pools._request_groups((0, 0)), [(0, 2, 0)])
 
+    def test_production_batch_is_split_into_metadata_sized_groups(self):
+        for batch in (129, 257, 1024):
+            groups = pools._request_groups((1,) * batch)
+            self.assertEqual(groups[0][0], 0)
+            self.assertEqual(groups[-1][1], batch)
+            self.assertTrue(all(stop - first <= 128 for first, stop, _ in groups))
+            self.assertEqual(sum(stop - first for first, stop, _ in groups), batch)
+
     def test_ragged_boundaries_are_aligned_with_bounded_padding(self):
         for counts in ((1, 128), (2, 128), (3, 128), (128, 129, 132), (1, 0)):
             groups = pools._request_groups(counts)
@@ -101,9 +105,7 @@ class PrefillPoolsHostTest(unittest.TestCase):
             )
 
         for reason in (
-            "one_request",
             "no_cp",
-            "one_rank",
             "unsharded",
             "ratio",
             "cpu",
@@ -153,8 +155,8 @@ class PrefillPoolsHostTest(unittest.TestCase):
             elif reason == "metadata_stride":
                 seq_ends.stride.return_value = 0
             elif reason == "batch_limit":
-                ends = [4] * 129
-                seq_ends.shape = (129,)
+                ends = [4] * 1025
+                seq_ends.shape = (1025,)
             capability = (9, 0) if reason == "architecture" else (10, 0)
             with self.subTest(reason=reason), patch.object(
                 torch.cuda, "get_device_capability", return_value=capability
@@ -176,6 +178,8 @@ class PrefillPoolsCudaTest(unittest.TestCase):
             (0, 1, 255, 256, 257),
             tuple((i * 137) % 1031 for i in range(128)),
             (0, 0),
+            (1,) * 129,
+            (1,) * 1024,
         ):
             for ratio in (1, 2):
                 data = torch.tensor(
@@ -188,7 +192,13 @@ class PrefillPoolsCudaTest(unittest.TestCase):
                 )
                 backing[1::2] = data
                 for ends in (data, backing[1::2]):
-                    for first, stop in ((0, len(counts)), (1, len(counts))):
+                    ranges = [
+                        (first, stop)
+                        for first, stop, _ in pools._request_groups(counts)
+                    ]
+                    if len(counts) <= 128:
+                        ranges.append((1, len(counts)))
+                    for first, stop in ranges:
                         sizes = ends[first:stop] // ratio
                         padded = (sizes + 255) // 256 * 256
                         rows = sum((c + 255) // 256 * 256 for c in counts[first:stop])
@@ -377,6 +387,8 @@ class PrefillPoolsCudaTest(unittest.TestCase):
                             )
 
     def test_three_splits_have_no_gpu_activity_or_allocation(self):
+        import gc
+
         counts = (0, 1, 2, 3, 33, 65, 127, 129)
         parents = (
             torch.empty(sum(counts), 512, dtype=torch.bfloat16, device="cuda"),
@@ -389,6 +401,9 @@ class PrefillPoolsCudaTest(unittest.TestCase):
 
         for _ in range(10):
             split()
+        # Prior graph/mock tests can retain tensor cycles until profiler starts
+        # Python GC. Drain them before measuring this view-only operation.
+        gc.collect()
         torch.cuda.synchronize()
         allocated = torch.cuda.memory_allocated()
         with torch.profiler.profile(

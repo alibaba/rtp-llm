@@ -163,7 +163,7 @@ class V41ImageRendererTest(TestCase):
                 torch.equal(trans_tensor(destination.patches), source.patches)
             )
 
-    def test_text_remains_renderable_and_resize_override_fails(self):
+    def test_text_remains_renderable_and_resize_hints_are_ignored(self):
         request = ChatCompletionRequest.model_validate(
             {
                 "messages": [
@@ -201,8 +201,65 @@ class V41ImageRendererTest(TestCase):
                 ]
             }
         )
-        with self.assertRaisesRegex(FtRuntimeException, "fixed by the model config"):
-            self.renderer.prepare_v41_inputs(request)
+        original = request.model_dump()
+        actual = self.renderer.render_chat(request)
+        baseline = request.model_dump()
+        baseline["messages"][0]["content"][0]["preprocess_config"] = None
+        expected = self.renderer.render_chat(
+            ChatCompletionRequest.model_validate(baseline)
+        )
+        self.assertEqual(actual.rendered_prompt, expected.rendered_prompt)
+        self.assertEqual(actual.input_ids, expected.input_ids)
+        self.assertEqual(len(actual.multimodal_inputs), 1)
+        self.assertEqual(
+            actual.multimodal_inputs[0].url, expected.multimodal_inputs[0].url
+        )
+        self.assertEqual(actual.multimodal_inputs[0].mm_type, MMUrlType.IMAGE)
+        self.assertEqual(request.model_dump(), original)
+
+    def test_normal_render_does_not_decode_pixels(self):
+        url = data_url((17, 23, 42))
+        request = ChatCompletionRequest.model_validate(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": url}},
+                        ],
+                    }
+                ],
+            }
+        )
+        with patch(
+            "PIL.Image.open", side_effect=AssertionError("frontend decoded pixels")
+        ):
+            result = self.renderer.render_chat(request)
+        self.assertEqual(result.input_ids.count(self.renderer.image_token_id), 1)
+        self.assertEqual(
+            base64.b64decode(result.multimodal_inputs[0].url.split(",", 1)[1]),
+            base64.b64decode(url.split(",", 1)[1]),
+        )
+
+    def test_normal_render_rejects_placeholder_mismatch_without_loading_image(self):
+        request = ChatCompletionRequest.model_validate(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": data_url((1, 2, 3))},
+                            },
+                        ],
+                    }
+                ],
+            }
+        )
+        with patch.object(self.renderer.tokenizer, "encode", return_value=[17, 18]):
+            with self.assertRaisesRegex(FtRuntimeException, "placeholder count"):
+                self.renderer.render_chat(request)
 
     def test_invalid_image_bytes_are_request_errors(self):
         png = base64.b64decode(data_url((1, 2, 3)).split(",", 1)[1])

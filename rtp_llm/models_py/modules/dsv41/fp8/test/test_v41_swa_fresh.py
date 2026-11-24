@@ -10,6 +10,7 @@ from unittest.mock import patch
 import torch
 from torch.utils._python_dispatch import TorchDispatchMode
 
+from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_kv_workspace as workspace
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_swa_triton as codec
 
 
@@ -23,7 +24,7 @@ def load_attention():
         if isinstance(n, ast.ClassDef) and n.name == "AttentionV41FP8"
     )
     names = {
-        "_can_fuse_swa_fresh",
+        "_prepare_swa_fresh_store",
         "_swa_prefill_workspace",
         "_swa_prefill_concat",
         "_prefill_write_swa_fp8_paged",
@@ -40,9 +41,9 @@ def load_attention():
     env = dict(
         torch=torch,
         swa_codec=codec,
+        prefill_kv_workspace=workspace,
         SWA_KV="swa",
         record_function_range=lambda *a: nullcontext(),
-        _use_small_cp_x_gather=lambda cp: False,
     )
     exec(
         compile(
@@ -109,6 +110,64 @@ def write(keys, raw, slots, compaction, dest, out, rank=0):
 
 
 class SwaWorkspaceViewTest(unittest.TestCase):
+    def test_shared_global_consumer_prepares_only_its_swa(self):
+        Attention = load_attention()
+        for layer_id in range(3, 8):
+            owner = Attention()
+            owner.layer_id = layer_id
+            owner.swa_bounded_replay = False
+            owner.compress_ratio = 2
+            owner.is_kv_source = False
+            common = object()
+            qkv = SimpleNamespace(kv_full=object())
+            swa, starts = object(), object()
+            calls = []
+            owner._begin_forward = lambda: calls.append("begin")
+            owner._prefill_common_setup = lambda *args: common
+            owner._prefill_compute_qkv = lambda *args, **kw: qkv
+            owner._prepare_swa_fresh_store = lambda *args: None
+            owner._swa_prefill_workspace = lambda *args, **kw: (
+                calls.append("read") or swa,
+                starts,
+            )
+            owner._prefill_write_swa_fp8_paged = lambda *args: calls.append("write")
+            result = owner._prefill_produce(torch.empty(0), None)
+            self.assertEqual(calls, ["begin", "read", "write"])
+            self.assertEqual(result, (common, qkv, swa, starts, None))
+
+    def test_swa_only_produce_reads_continuation_before_write(self):
+        Attention = load_attention()
+        for layer_id in (0, 1):
+            for any_cont in (False, True):
+                with self.subTest(layer_id=layer_id, any_cont=any_cont):
+                    owner = Attention()
+                    owner.layer_id = layer_id
+                    owner.swa_bounded_replay = False
+                    owner.compress_ratio = 0
+                    owner._kv_cache = object()
+                    common = SimpleNamespace(any_cont=any_cont)
+                    qkv = SimpleNamespace(kv_full=object())
+                    workspace = object()
+                    calls = []
+                    owner._begin_forward = lambda: calls.append("begin")
+                    owner._prefill_common_setup = lambda *args: common
+                    owner._prefill_compute_qkv = lambda *args, **kw: qkv
+                    owner._swa_prefill_concat = lambda *args: (
+                        calls.append("read") or workspace
+                    )
+                    owner._prefill_write_swa_fp8_paged = lambda *args: calls.append(
+                        "write"
+                    )
+                    result = owner._prefill_produce(torch.empty(0), None)
+                    self.assertEqual(
+                        calls,
+                        ["begin", "read", "write"] if any_cont else ["begin", "write"],
+                    )
+                    self.assertEqual(
+                        result,
+                        (common, qkv, None, None, workspace if any_cont else None),
+                    )
+
     def test_ragged_views_preserve_offsets_strides_and_aliasing(self):
         owner = load_attention()()
         owner.swa_bounded_replay = False
@@ -181,6 +240,16 @@ class SwaFreshGpuTest(unittest.TestCase):
         self.assertFalse(
             codec.is_supported_fresh_store(k, raw, slots, 136, 0, 4, comp, dst[::2])
         )
+
+    def test_prepared_empty_write_does_not_launch(self):
+        k, raw, slots, comp, dst, out = fixture(
+            lengths=(0,), prefixes=(1,), all_negative=True
+        )
+        store = codec.prepare_fresh_store(k, raw, slots, 136, 0, 4, comp, dst)
+        self.assertIsNotNone(store)
+        with patch.object(codec, "_quantize_and_insert_swa_kernel") as kernel:
+            store(out)
+        kernel.__getitem__.assert_not_called()
 
     def test_graph_changed_bits_slots_and_side_stream(self):
         k, raw, slots, comp, dst, out = fixture()
@@ -256,7 +325,7 @@ class SwaFreshGpuTest(unittest.TestCase):
                 a._prefill_compute_qkv = lambda *args, **kw: qkv
                 events = []
                 before = raw.clone()
-                original = codec.quantize_and_insert_k_cache_cp_byte_sliced
+                original = codec._store_cp_direct
                 full = torch.zeros((1, 72192), device="cuda", dtype=torch.uint8)
                 verify_prefix = True
 
@@ -279,11 +348,17 @@ class SwaFreshGpuTest(unittest.TestCase):
 
                 with patch.object(
                     codec, "dequantize_and_gather_k_cache_slots_cp_byte_sliced", gather
-                ), patch.object(
-                    codec, "quantize_and_insert_k_cache_cp_byte_sliced", writer
-                ):
+                ), patch.object(codec, "_store_cp_direct", writer), patch.object(
+                    codec,
+                    "_cp_addressing_supported",
+                    wraps=codec._cp_addressing_supported,
+                ) as addressing, patch.object(
+                    codec, "_valid_keys", wraps=codec._valid_keys
+                ) as keys:
                     result = a._prefill_produce(k, None)
                 self.assertEqual(events, ["prefix", "write"])
+                self.assertEqual(addressing.call_count, 1)
+                self.assertEqual(keys.call_count, 1)
                 offset = 0
                 for sw, p, n in zip(result[2], [127, 0, 5], [139, 37, 1]):
                     self.assertTrue(torch.equal(sw[:p], torch.zeros_like(sw[:p])))
@@ -317,7 +392,7 @@ class SwaFreshGpuTest(unittest.TestCase):
                         self.assertTrue(torch.all(sw[p:].view(torch.int16) == 0x7F81))
                     # Force a rejected capability gate and exercise the original
                     # zero/index_copy/write route with identical valid outputs.
-                    with patch.object(a, "_can_fuse_swa_fresh", return_value=False):
+                    with patch.object(a, "_prepare_swa_fresh_store", return_value=None):
                         legacy = a._prefill_produce(k, None)
                     for got, want in zip(captured[2], legacy[2]):
                         self.assertTrue(
@@ -329,10 +404,10 @@ class SwaFreshGpuTest(unittest.TestCase):
                 ):
                     old = getattr(a, name)
                     setattr(a, name, value)
-                    self.assertFalse(a._can_fuse_swa_fresh(qkv, common))
+                    self.assertFalse(a._prepare_swa_fresh_store(qkv, common))
                     setattr(a, name, old)
                 cp.swa_replay_start = 0
-                self.assertFalse(a._can_fuse_swa_fresh(qkv, common))
+                self.assertFalse(a._prepare_swa_fresh_store(qkv, common))
 
 
 if __name__ == "__main__":

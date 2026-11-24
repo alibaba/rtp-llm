@@ -50,6 +50,11 @@ FP4_GLOBAL_ENTRY_BYTES = 288  # 256B e2m1 payload + 32B E4M3 scales
 FP4_INDEXER_HEAD_DIM = 128
 FP4_INDEXER_GROUP = 32
 FP4_INDEXER_ENTRY_BYTES = 68  # 64B e2m1 payload + 4B packed UE8M0 scales
+FP4_ROWS_PER_CTA = 16
+
+
+def _words_aligned(*items):
+    return all(int(x) % 4 == 0 for x in items)
 
 
 @triton.jit
@@ -182,6 +187,30 @@ def _fp4_global_dequant_kernel(
     tl.store(out_row, values.to(OUT_DTYPE))
 
 
+@triton.jit
+def _fp4_global_dequant_words(base, valid, R: tl.constexpr):
+    """Decode R independent 4-byte-aligned GLOBAL row pointers in registers."""
+    base = base.to(tl.pointer_type(tl.int32))
+    words = tl.load(
+        base[:, None] + tl.arange(0, 64)[None, :], valid[:, None], other=0
+    ).to(tl.uint32)
+    codes = (
+        ((words[:, :, None] >> (tl.arange(0, 8)[None, None, :] * 4)) & 15)
+        .to(tl.int32)
+        .reshape(R, 32, 16)
+    )
+    scales = tl.load(
+        base[:, None] + 64 + tl.arange(0, 8)[None, :], valid[:, None], other=0
+    ).to(tl.uint32)
+    scale_bytes = (
+        (scales[:, :, None] >> (tl.arange(0, 4)[None, None, :] * 8)) & 255
+    ).to(tl.uint8)
+    scale_values = (
+        scale_bytes.reshape(R, 32).to(tl.float8e4nv, bitcast=True).to(tl.float32)
+    )
+    return (_e2m1_to_float(codes) * scale_values[:, :, None]).reshape(R, 512)
+
+
 def quantize_and_insert_k_cache_fp4(
     k: torch.Tensor,  # [T, 512] bf16, contiguous
     k_cache: torch.Tensor,  # [num_blocks, block_size, 288] uint8
@@ -236,6 +265,28 @@ def _fp4_global_gather_bytes_kernel(
     base = cache_ptr + block_idx.to(tl.int64) * block_stride.to(tl.int64)
     byte_offset = offset * ROW_BYTES + cols
     tl.store(out_row, tl.load(base + byte_offset, mask=mask, other=0), mask=mask)
+
+
+@triton.jit
+def _fp4_global_gather_bytes_rows_kernel(
+    cache, slots, out, N, EB: tl.constexpr, stride, R: tl.constexpr
+):
+    # Pool bases/strides and output must be 4-byte aligned. Copy 64+8 words.
+    rows = tl.program_id(0).to(tl.int64) * R + tl.arange(0, R)
+    valid = rows < N
+    slot = tl.load(slots + rows, valid, other=-1).to(tl.int64)
+    present = valid & (slot >= 0)
+    slot = tl.maximum(slot, 0)
+    base = (cache + slot // EB * stride.to(tl.int64) + slot % EB * 288).to(
+        tl.pointer_type(tl.int32)
+    )
+    dst = out.to(tl.pointer_type(tl.int32)) + rows[:, None] * 72
+    cols = tl.arange(0, 64)
+    payload = tl.load(base[:, None] + cols[None, :], present[:, None], other=0)
+    tl.store(dst + cols[None, :], payload, valid[:, None])
+    scols = tl.arange(0, 8)
+    scales = tl.load(base[:, None] + 64 + scols[None, :], present[:, None], other=0)
+    tl.store(dst + 64 + scols[None, :], scales, valid[:, None])
 
 
 def dequantize_k_cache_slots_fp4(
@@ -431,6 +482,30 @@ def _fp4_indexer_gather_kernel(
     )
     tl.store(payload_ptr + pid * (D // 2) + tl.arange(0, D // 2), payload.to(tl.int8))
     tl.store(sf_ptr + pid, sf)
+
+
+@triton.jit
+def _fp4_indexer_gather_rows_kernel(
+    cache, slots, payload, scales, N, EB: tl.constexpr, stride, R: tl.constexpr
+):
+    # INDEX_K pages are planar; each entry has 16 payload words and one scale.
+    rows = tl.program_id(0).to(tl.int64) * R + tl.arange(0, R)
+    valid = rows < N
+    slot = tl.load(slots + rows, valid, other=-1).to(tl.int64)
+    present = valid & (slot >= 0)
+    slot = tl.maximum(slot, 0)
+    base = (cache + slot // EB * stride.to(tl.int64)).to(tl.pointer_type(tl.int32))
+    offset = slot % EB
+    cols = tl.arange(0, 16)
+    words = tl.load(
+        base[:, None] + offset[:, None] * 16 + cols[None, :],
+        present[:, None],
+        other=0,
+    )
+    dst = payload.to(tl.pointer_type(tl.int32)) + rows[:, None] * 16
+    tl.store(dst + cols[None, :], words, valid[:, None])
+    sf = tl.load(base + EB * 16 + offset, present, other=0)
+    tl.store(scales + rows, sf, valid)
 
 
 @triton.jit(do_not_specialize=["N", "block_stride", "num_cache_blocks"])

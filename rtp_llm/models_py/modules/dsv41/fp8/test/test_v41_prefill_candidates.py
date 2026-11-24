@@ -1,5 +1,6 @@
-"""Exact prefill candidate selection, packed flags, and graph replay tests."""
+"""Prefill TopK values, candidate validity, packed flags, and graph replay."""
 
+import itertools
 import os
 import unittest
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_candidates as fused
 
 def reference_select(logits, visible, block_size, topk_blocks):
     """Frozen old attention_v41.select_candidate_blocks, including sorted=True."""
+    logits = logits.float()  # Old dense BF16 logits were normalized to FP32.
     nblocks = (logits.shape[1] + block_size - 1) // block_size
     padded = F.pad(
         logits, (0, nblocks * block_size - logits.shape[1]), value=-torch.inf
@@ -26,6 +28,34 @@ def reference_select(logits, visible, block_size, topk_blocks):
     return torch.where(values > -torch.inf, ids, -1).int()
 
 
+def assert_candidate_values(case, actual, expected, logits, visible, block_size):
+    """Exact TopK values and validity; cutoff ties may choose different IDs."""
+    rows, width = logits.shape
+    blocks = (width + block_size - 1) // block_size
+    scores = F.pad(logits.float(), (0, blocks * block_size - width), value=-torch.inf)
+    scores = scores.view(rows, blocks, block_size).amax(-1)
+    newest = ((visible - 1).clamp_min(0) // block_size).long()
+    scores.scatter_(
+        1, newest[:, None], torch.where(visible > 0, torch.inf, -torch.inf)[:, None]
+    )
+    valid = actual >= 0
+    case.assertTrue(((actual == -1) | (valid & (actual < blocks))).all().item())
+    values = scores.gather(1, actual.clamp_min(0).long()).masked_fill(
+        ~valid, -torch.inf
+    )
+    ref = scores.gather(1, expected.clamp_min(0).long()).masked_fill(
+        expected < 0, -torch.inf
+    )
+    torch.testing.assert_close(
+        values.sort(-1).values, ref.sort(-1).values, rtol=0, atol=0
+    )
+    torch.testing.assert_close(valid.sum(-1), (expected >= 0).sum(-1), rtol=0, atol=0)
+    ordered = actual.masked_fill(~valid, blocks).sort(-1).values
+    case.assertFalse(
+        ((ordered[:, 1:] == ordered[:, :-1]) & (ordered[:, 1:] != blocks)).any().item()
+    )
+
+
 def reference_mask(logits, candidates, block_size):
     nblocks = (logits.shape[1] + block_size - 1) // block_size
     allowed = torch.zeros(
@@ -37,9 +67,9 @@ def reference_mask(logits, candidates, block_size):
     return logits.masked_fill_(~allowed[:, columns], -torch.inf)
 
 
-def make_case(rows, width, seed=41):
+def make_case(rows, width, seed=41, dtype=torch.float32):
     torch.manual_seed(seed)
-    storage = torch.randn(rows, width + 256, device="cuda")
+    storage = torch.randn(rows, width + 256, device="cuda", dtype=dtype)
     logits = storage[:, :width]
     visible_storage = torch.randint(0, width + 1, (rows * 2,), device="cuda")
     visible = visible_storage[::2]
@@ -72,6 +102,13 @@ def metadata(rows=17, width=32768):
 
 
 class V41PrefillCandidatesCPU(unittest.TestCase):
+    def test_bf16_and_fp32_use_the_same_candidate_contract(self):
+        for dtype in (torch.float32, torch.bfloat16):
+            logits, visible = metadata(width=32769)
+            logits.dtype = dtype
+            with self.subTest(dtype=dtype):
+                self.assertTrue(fused.is_supported(logits, visible, 8, 2048))
+
     def test_default_gate_and_unsupported_block_size(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertTrue(fused.is_supported(*metadata(), 8, 2048))
@@ -82,7 +119,7 @@ class V41PrefillCandidatesCPU(unittest.TestCase):
 
     def test_layout_dtype_shape_and_grad_gates(self):
         for field, value in (
-            ("dtype", torch.bfloat16),
+            ("dtype", torch.float16),
             ("ndim", 3),
             ("shape", (0, 32768)),
             ("shape", (17, 0)),
@@ -141,11 +178,13 @@ class V41PrefillCandidatesCUDA(unittest.TestCase):
             dtype=torch.int32,
             device="cuda",
         )
-        for block in (1, 2, 4, 8, 16, 32):
+        for block, dtype in itertools.product(
+            (1, 2, 4, 8, 16, 32), (torch.float32, torch.bfloat16)
+        ):
             width = 521 * block - 1
             torch.manual_seed(33000 + block)
             raw = patterns[torch.randint(len(patterns), (4, width + 17), device="cuda")]
-            raw = raw.view(torch.float32)[:, :width]
+            raw = raw.view(torch.float32).to(dtype)[:, :width]
             ends = torch.tensor(
                 [0, 1, width - 3, width], device="cuda", dtype=torch.int32
             )
@@ -153,7 +192,9 @@ class V41PrefillCandidatesCUDA(unittest.TestCase):
                 torch.arange(width, device="cuda")[None] >= ends[:, None], -torch.inf
             )
             nblocks = (width + block - 1) // block
-            expected = F.pad(clean, (0, nblocks * block - width), value=-torch.inf)
+            expected = F.pad(
+                clean.float(), (0, nblocks * block - width), value=-torch.inf
+            )
             expected = expected.reshape(4, nblocks, block).amax(-1)
             expected.scatter_(
                 1,
@@ -161,7 +202,7 @@ class V41PrefillCandidatesCUDA(unittest.TestCase):
                 torch.where(ends > 0, torch.inf, -torch.inf)[:, None],
             )
             for fused_epilogue in (False, True):
-                with self.subTest(block=block, fused=fused_epilogue):
+                with self.subTest(block=block, dtype=dtype, fused=fused_epilogue):
                     tokens = torch.arange(512, device="cuda", dtype=torch.int32)[
                         None
                     ].repeat(4, 1)
@@ -170,7 +211,7 @@ class V41PrefillCandidatesCUDA(unittest.TestCase):
                     )
                     output = torch.empty_like(expected)
                     source = raw if fused_epilogue else clean
-                    fused._prefill_candidate_pool_kernel[(4, (nblocks + 127) // 128)](
+                    fused._prefill_candidate_pool_kernel[(4, (nblocks + 255) // 256)](
                         source,
                         ends,
                         output,
@@ -179,7 +220,7 @@ class V41PrefillCandidatesCUDA(unittest.TestCase):
                         1,
                         block,
                         nblocks,
-                        128,
+                        256,
                         MASK_TAIL=fused_epilogue,
                         token_indices=tokens if fused_epilogue else None,
                         token_ends=ends if fused_epilogue else None,
@@ -197,11 +238,15 @@ class V41PrefillCandidatesCUDA(unittest.TestCase):
     def test_publication_filter_graph_replay_matches_masked_reference(self):
         from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_topk as topk
 
-        for width in (1033, 32769):
+        for width, dtype in itertools.product(
+            (1033, 32769), (torch.float32, torch.bfloat16)
+        ):
             for bitmap in (False, True):
-                with self.subTest(width=width, bitmap=bitmap):
+                with self.subTest(width=width, bitmap=bitmap, dtype=dtype):
                     torch.manual_seed(33001)
-                    logits = torch.randn(4, width + 17, device="cuda")[:, :width]
+                    logits = torch.randn(4, width + 17, device="cuda", dtype=dtype)[
+                        :, :width
+                    ]
                     ends = torch.full((4,), width, device="cuda", dtype=torch.int32)
                     bounds = (torch.zeros_like(ends), ends)
                     tokens = torch.empty(4, 512, device="cuda", dtype=torch.int32)
@@ -313,16 +358,13 @@ class V41PrefillCandidatesCUDA(unittest.TestCase):
                         expected = F.pad(
                             expected, (0, 2048 - expected.shape[1]), value=-1
                         )
-                        self.assertTrue(
-                            torch.equal(
-                                candidates.sort(-1).values, expected.sort(-1).values
-                            )
+                        assert_candidate_values(
+                            self, candidates, expected, clean, ends, 8
                         )
                         if bitmap:
-                            self.assertTrue(torch.equal(candidates, expected))
                             self.assertTrue(
                                 torch.equal(
-                                    flags, fused.build_flags(expected, width, 8)
+                                    flags, fused.build_flags(candidates, width, 8)
                                 )
                             )
 
@@ -334,27 +376,250 @@ class V41PrefillCandidatesCUDA(unittest.TestCase):
         actual, flags = result
         self.assertEqual(actual.dtype, torch.int32)
         self.assertEqual(flags.dtype, torch.int32)
-        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        assert_candidate_values(self, actual, expected, before, visible, block)
         rebuilt = fused.build_flags(actual, logits.shape[1], block)
         torch.testing.assert_close(rebuilt, flags, rtol=0, atol=0)
         unordered, unused_flags = fused.select_candidates(
             logits, visible, block, k, build_bitmap=False
         )
         self.assertIsNone(unused_flags)
-        torch.testing.assert_close(
-            unordered.sort(dim=-1).values, expected.sort(dim=-1).values, rtol=0, atol=0
-        )
+        assert_candidate_values(self, unordered, expected, before, visible, block)
         torch.testing.assert_close(
             fused.build_flags(unordered, logits.shape[1], block), flags, rtol=0, atol=0
         )
         torch.testing.assert_close(
-            logits.view(torch.int32), before.view(torch.int32), rtol=0, atol=0
+            logits.view(torch.uint8), before.view(torch.uint8), rtol=0, atol=0
         )
-        reference = reference_mask(before, expected, block)
+        reference = reference_mask(before, actual, block)
         self.assertTrue(fused.mask_candidates(logits, flags, block))
         torch.testing.assert_close(
-            logits.view(torch.int32), reference.view(torch.int32), rtol=0, atol=0
+            logits.view(torch.uint8), reference.view(torch.uint8), rtol=0, atol=0
         )
+
+    @torch.no_grad()
+    def test_native_topk_publishes_in_place_when_output_is_contiguous(self):
+        if not fused.candidate_topk.is_available("prefill", torch.device("cuda")):
+            self.skipTest("native TopK v3 is unavailable on this device")
+        logits = torch.randn(4, 32776, device="cuda", dtype=torch.bfloat16)
+        visible = torch.tensor([0, 1, 16385, 32776], device="cuda", dtype=torch.int32)
+        out = torch.empty((4, 2048), device="cuda", dtype=torch.int32)
+        with patch.object(
+            fused.candidate_topk, "select", wraps=fused.candidate_topk.select
+        ) as native:
+            actual, _ = fused.select_candidates(
+                logits, visible, 8, 2048, out=out, build_bitmap=False, mask_tail=True
+            )
+        self.assertIs(native.call_args.kwargs["out"], out)
+        self.assertIs(actual, out)
+        masked = logits.masked_fill(
+            torch.arange(logits.shape[1], device="cuda")[None] >= visible[:, None],
+            -torch.inf,
+        )
+        assert_candidate_values(
+            self, actual, reference_select(masked, visible, 8, 2048), masked, visible, 8
+        )
+
+    @torch.no_grad()
+    def test_v3_default_dispatch_causal_lengths_slices_and_fallback(self):
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        for bitmap in (False, True):
+            logits = torch.randn(6, 32776, device="cuda", dtype=torch.bfloat16)
+            visible = torch.tensor([0, 1, 16383, 16384, 16385, 32776], device="cuda")
+            clean = logits.masked_fill(
+                torch.arange(logits.shape[1], device="cuda")[None] >= visible[:, None],
+                -torch.inf,
+            )
+            expected = reference_select(clean, visible, 8, 2048)
+            storage = torch.full((8, 2067), 123, device="cuda", dtype=torch.int32)
+            out = storage[1:7, 1:2066]
+            with patch.dict(os.environ, {}, clear=False), patch.object(
+                rtp_llm_ops, "topk_v3", wraps=rtp_llm_ops.topk_v3
+            ) as native:
+                os.environ.pop("DSV41_PREFILL_CANDIDATE_TOPK_V3", None)
+                ids, flags = fused.select_candidates(
+                    logits,
+                    visible,
+                    8,
+                    2048,
+                    out=out,
+                    build_bitmap=bitmap,
+                    mask_tail=True,
+                )
+                self.assertEqual(
+                    native.call_count,
+                    int(fused.candidate_topk.is_available("prefill", logits.device)),
+                )
+            assert_candidate_values(self, ids[:, :2048], expected, clean, visible, 8)
+            self.assertTrue((ids[:, 2048:] == -1).all().item())
+            for guard in (storage[:1], storage[7:], storage[:, :1], storage[:, 2066:]):
+                self.assertTrue((guard == 123).all().item())
+            if bitmap:
+                torch.testing.assert_close(
+                    flags, fused.build_flags(ids, logits.shape[1], 8)
+                )
+            for disable in (True, False):
+                with patch.dict(
+                    os.environ,
+                    {"DSV41_PREFILL_CANDIDATE_TOPK_V3": "0" if disable else "1"},
+                ), patch.object(
+                    fused.candidate_topk, "_TOPK_V3_OK", disable
+                ), patch.object(
+                    rtp_llm_ops,
+                    "topk_v3",
+                    side_effect=AssertionError("must retain fallback"),
+                ):
+                    fallback, _ = fused.select_candidates(
+                        clean, visible, 8, 2048, build_bitmap=bitmap
+                    )
+                assert_candidate_values(self, fallback, expected, clean, visible, 8)
+                if bitmap:
+                    torch.testing.assert_close(fallback, expected, rtol=0, atol=0)
+
+    @torch.no_grad()
+    def test_v3_graph_updates_short_long_lengths_and_clears_bitmap(self):
+        logits = torch.randn(6, 32768, device="cuda")
+        visible = torch.full((6,), 13000, device="cuda", dtype=torch.int64)
+        for bitmap in (False, True):
+            with patch.dict(os.environ, {"DSV41_PREFILL_CANDIDATE_TOPK_V3": "1"}):
+                out = torch.empty((6, 2048), device="cuda", dtype=torch.int32)
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    fused.select_candidates(
+                        logits,
+                        visible,
+                        8,
+                        2048,
+                        out=out,
+                        mask_tail=True,
+                        build_bitmap=bitmap,
+                    )
+                stream.synchronize()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=stream):
+                    ids, flags = fused.select_candidates(
+                        logits,
+                        visible,
+                        8,
+                        2048,
+                        out=out,
+                        mask_tail=True,
+                        build_bitmap=bitmap,
+                    )
+                for length in (32768, 0, 16384, 16385, 13000, 1):
+                    logits.normal_()
+                    logits[:, 8:16] = float("nan")
+                    visible.fill_(length)
+                    graph.replay()
+                    clean = logits.masked_fill(
+                        torch.arange(logits.shape[1], device="cuda")[None]
+                        >= visible[:, None],
+                        -torch.inf,
+                    )
+                    expected = reference_select(clean, visible, 8, 2048)
+                    assert_candidate_values(self, ids, expected, clean, visible, 8)
+                    if bitmap:
+                        torch.testing.assert_close(
+                            flags, fused.build_flags(ids, logits.shape[1], 8)
+                        )
+
+    @torch.no_grad()
+    def test_device_gate_and_warmup_preserve_torch_on_unsupported_arch(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import (
+            _v41_attention_jit_warmup as warmup,
+        )
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        logits, visible = make_case(3, 8192)
+        expected = reference_select(logits, visible, 8, 2048)
+        for capability in ((8, 9), (9, 0)):
+            with self.subTest(capability=capability), patch.object(
+                torch.cuda, "get_device_capability", return_value=capability
+            ) as capability_query, patch.object(
+                rtp_llm_ops, "topk_v3", side_effect=AssertionError("unsupported native")
+            ):
+                actual, _ = fused.select_candidates(logits, visible, 8, 2048)
+                torch.testing.assert_close(actual, expected)
+                warmup._warm_candidate_topk(logits.device)
+                self.assertTrue(capability_query.call_count > 0)
+                for call in capability_query.call_args_list:
+                    self.assertEqual(call.args[0], logits.device)
+
+    @torch.no_grad()
+    def test_short_prefill_uses_native_output(self):
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        logits, visible = make_case(3, 8192)
+        with patch.object(rtp_llm_ops, "topk_v3", wraps=rtp_llm_ops.topk_v3) as native:
+            actual, _ = fused.select_candidates(logits, visible, 8, 2048)
+        self.assertEqual(
+            native.call_count,
+            int(fused.candidate_topk.is_available("prefill", logits.device)),
+        )
+        expected = reference_select(logits, visible, 8, 2048)
+        assert_candidate_values(self, actual, expected, logits, visible, 8)
+
+    @torch.no_grad()
+    def test_dense_nan_blocks_preserve_torch_filter_contract(self):
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        for dtype in (torch.float32, torch.bfloat16):
+            logits = torch.ones(2, 4096 * 8, device="cuda", dtype=dtype)
+            logits[:, : 3000 * 8] = torch.nan
+            logits[1, : 3000 * 8] = -torch.nan
+            logits[:, 3000 * 8 : 3001 * 8] = torch.inf
+            visible = torch.full((2,), logits.shape[1], device="cuda")
+            expected = reference_select(logits, visible, 8, 2048)
+            self.assertTrue((expected == -1).all().item())
+            for bitmap in (False, True):
+                with patch.object(
+                    rtp_llm_ops, "topk_v3", wraps=rtp_llm_ops.topk_v3
+                ) as native:
+                    actual, flags = fused.select_candidates(
+                        logits, visible, 8, 2048, build_bitmap=bitmap
+                    )
+                self.assertEqual(
+                    native.call_count,
+                    int(fused.candidate_topk.is_available("prefill", logits.device)),
+                )
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                if bitmap:
+                    self.assertEqual(torch.count_nonzero(flags).item(), 0)
+
+    @torch.no_grad()
+    def test_native_long_inf_ties_fill_every_candidate(self):
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        if not fused.candidate_topk.is_available("prefill", torch.device("cuda")):
+            self.skipTest("native TopK v3 is unavailable on this device")
+        for rows, blocks in ((1, 131072), (16, 32768)):
+            with self.subTest(rows=rows, blocks=blocks):
+                scores = torch.full((rows, blocks), torch.inf, device="cuda")
+                lengths = torch.full((rows,), blocks, device="cuda", dtype=torch.int32)
+                raw = torch.full((rows, 2048), -2, device="cuda", dtype=torch.int32)
+                rtp_llm_ops.topk_v3(
+                    scores,
+                    lengths,
+                    raw,
+                    fused.candidate_topk._get_topk_workspace(scores.device),
+                    2048,
+                    blocks,
+                )
+                self.assertTrue(((raw >= 0) & (raw < blocks)).all().item())
+                ordered = raw.sort(-1).values
+                self.assertTrue((ordered[:, 1:] != ordered[:, :-1]).all().item())
+                logits = torch.full((rows, blocks * 8), torch.inf, device="cuda")
+                visible = torch.full((rows,), logits.shape[1], device="cuda")
+                expected = reference_select(logits, visible, 8, 2048)
+                with patch.object(
+                    rtp_llm_ops, "topk_v3", wraps=rtp_llm_ops.topk_v3
+                ) as native:
+                    actual, _ = fused.select_candidates(
+                        logits, visible, 8, 2048, build_bitmap=False
+                    )
+                self.assertEqual(native.call_count, 1)
+                assert_candidate_values(self, actual, expected, logits, visible, 8)
 
     @torch.no_grad()
     def test_real_chunk_shapes(self):
@@ -364,14 +629,12 @@ class V41PrefillCandidatesCUDA(unittest.TestCase):
 
     @torch.no_grad()
     def test_boundaries_nan_infinity_ties_and_partial_blocks(self):
-        for width, block, k in (
-            (1, 1, 3),
-            (37, 8, 7),
-            (2059, 8, 257),
-            (32769, 8, 2048),
+        for (width, block, k), dtype in itertools.product(
+            ((1, 1, 3), (37, 8, 7), (2059, 8, 257), (32769, 8, 2048)),
+            (torch.float32, torch.bfloat16),
         ):
-            with self.subTest(width=width):
-                logits, visible = make_case(11, width)
+            with self.subTest(width=width, dtype=dtype):
+                logits, visible = make_case(11, width, dtype=dtype)
                 visible[:] = width
                 visible[0] = 0
                 logits[0] = -torch.inf
@@ -495,10 +758,9 @@ class V41PrefillCandidatesCUDA(unittest.TestCase):
                     logits, visible, 8, 2048, build_bitmap=False
                 )
                 self.assertIsNone(flags)
-                torch.testing.assert_close(
-                    actual.sort(1).values, reference.sort(1).values, rtol=0, atol=0
-                )
-                old_plan = sparse.prepare_plan(reference, visible, width)
+                assert_candidate_values(self, actual, reference, logits, visible, 8)
+                # Compare plans/scores for the same chosen set under permutations.
+                old_plan = sparse.prepare_plan(actual.sort(1).values, visible, width)
                 new_plan = sparse.prepare_plan(actual, visible, width)
                 for name in ("sparse_indices", "end", "row_ks", "row_ke"):
                     torch.testing.assert_close(
@@ -527,6 +789,7 @@ class V41PrefillCandidatesCUDA(unittest.TestCase):
                 )
 
     @torch.no_grad()
+    @patch.dict(os.environ, {"DSV41_PREFILL_CANDIDATE_TOPK_V3": "0"})
     def test_runtime_count_fixed_output_does_not_recompile(self):
         def compiled_count():
             return sum(len(cache) for cache, *_ in kernel.device_caches.values())

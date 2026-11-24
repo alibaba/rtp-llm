@@ -101,6 +101,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 import torch
 
 from rtp_llm.models_py.modules.dsv41 import _profiler
+from rtp_llm.models_py.modules.dsv41._prefill_stream import prefill_stream_is_capturing
 from rtp_llm.models_py.modules.dsv41.cp import (
     build_cp_context_for_forward,
     cp_gather_last_by_request,
@@ -114,7 +115,8 @@ from rtp_llm.models_py.modules.dsv41.kv_cache_utils import (
     as_tagged_attention_inputs,
     build_block_tables_batched,
     create_tagged_cache_store_writer,
-    host_block_tables,
+    device_attention_metadata,
+    host_block_table_for_tag,
 )
 from rtp_llm.models_py.modules.dsv41.prefill.ced import CEDPlan, permits_ced
 from rtp_llm.models_py.modules.dsv41.prefill_workspace import (
@@ -124,6 +126,7 @@ from rtp_llm.models_py.modules.dsv41.prefill_workspace import (
 from rtp_llm.models_py.modules.factory.attention.common import (
     create_write_cache_store_impl,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import expert_load_for_layer
 from rtp_llm.ops import ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
@@ -210,6 +213,36 @@ def _prefill_fast_path_layer_calls(
     return layer_calls
 
 
+def _prefill_post_boundaries(v4, layer_calls) -> Tuple[Optional[bool], ...]:
+    """None selects the ordinary block. A fast block may defer to a linked fast successor."""
+    cached = getattr(v4, "_dsv41_prefill_post_boundaries", None)
+    if cached is not None and cached[0] is layer_calls:
+        return cached[1]
+
+    from rtp_llm.models_py.modules.dsv41.block import Block
+    from rtp_llm.models_py.modules.dsv41.hc.decode_transition import (
+        has_delayed_post_connection,
+    )
+
+    fast_body = Block._forward_prefill_fast_fp8
+    boundaries = [
+        False if getattr(call, "__func__", None) is fast_body else None
+        for call in layer_calls
+    ]
+    for i in range(len(boundaries) - 1):
+        if boundaries[i] is None or boundaries[i + 1] is None:
+            continue
+        layer, successor = v4.layers[i], v4.layers[i + 1]
+        boundaries[i] = (
+            type(layer) is Block
+            and type(successor) is Block
+            and has_delayed_post_connection(layer, successor)
+        )
+    result = tuple(boundaries)
+    v4._dsv41_prefill_post_boundaries = (layer_calls, result)
+    return result
+
+
 def _prefill_fast_path_enabled(
     v4: "V4Transformer",
     prepare_hidden_fn: Optional[Any],
@@ -224,6 +257,22 @@ def _prefill_fast_path_enabled(
     if layer_calls is None:
         layer_calls = _prefill_fast_path_layer_calls(v4)
     return layer_calls is not None
+
+
+def _int64_on_device(source: torch.Tensor, device: torch.device) -> torch.Tensor:
+    """H2D with dtype conversion that keeps the copy asynchronous.
+
+    ``source.to(device=..., dtype=torch.int64)`` converts the dtype on the host
+    first, and that intermediate is unpinned, so the H2D that follows is a
+    blocking pageable copy even when ``source`` is pinned. Allocating the
+    destination on the device and converting inside ``copy_`` keeps the pinned
+    source and the transfer asynchronous.
+    """
+    if source.is_cuda:
+        return source.to(dtype=torch.int64)
+    out = torch.empty(source.shape, dtype=torch.int64, device=device)
+    out.copy_(source, non_blocking=True)
+    return out
 
 
 def _build_positions_from_lengths(
@@ -243,8 +292,8 @@ def _build_positions_from_lengths(
     (``input_lengths`` / ``prefix_lengths``) during capture. Keep the
     body tensor-only so capture does not synchronize on scalar reads.
     """
-    input_lengths = input_lengths.to(device=device, dtype=torch.int64)
-    prefix_lengths = prefix_lengths.to(device=device, dtype=torch.int64)
+    input_lengths = _int64_on_device(input_lengths, device)
+    prefix_lengths = _int64_on_device(prefix_lengths, device)
     batch_size = int(input_lengths.numel())
     if total_tokens is None:
         total_tokens = int(input_lengths.sum().item())
@@ -319,6 +368,7 @@ def forward_layers(
     positions: torch.Tensor,  # [T_total] int64 — per-token global absolute pos
     cu_seqlens: torch.Tensor,  # [B+1] int64 — request boundaries
     block_tables_by_type: Optional[Dict[int, torch.Tensor]],
+    expert_token_counts: Optional[torch.Tensor],
     attn_inputs: Optional[PyAttentionInputs] = None,
     prepare_hidden_fn: Optional[Any] = None,
     allow_ced: bool = False,
@@ -384,6 +434,10 @@ def forward_layers(
             idx_w=v4._prefill_ws_idx_w,
             align_bytes=(64 << 20) if v41 else (1 << 30),
         )
+        if v41:
+            from rtp_llm.models_py.modules.dsv41.fp8 import _v41_wo_a_quant
+
+            ws.wo_a_prefill = _v41_wo_a_quant.prepare_prefill(input_ids.device)
 
     # Build + propagate CP context once per prefill step. Under CP the
     # caller hands us a per-rank chunk slice (T_local = chunk_length),
@@ -402,11 +456,13 @@ def forward_layers(
                 cp_rank,
                 int(input_ids.size(0)),
                 input_ids.device,
-                prefix_lengths=getattr(attn_inputs, "prefix_lengths", None),
+                prefix_lengths=device_attention_metadata(attn_inputs, "prefix_lengths"),
                 prefix_lengths_host=getattr(
                     cp_info, "prefill_prefix_lengths_cpu", None
                 ),
-                chunk_lengths_device=getattr(attn_inputs, "input_lengths", None),
+                chunk_lengths_device=device_attention_metadata(
+                    attn_inputs, "input_lengths"
+                ),
                 kv_cache_sharded=bool(getattr(v4, "_kv_cache_sharded", False)),
             )
     with _profiler.record_function_range("dsv4.prefill.propagate_cp_context"):
@@ -434,7 +490,16 @@ def forward_layers(
     with _profiler.record_function_range("dsv4.prefill.embedding"):
         if prepare_hidden_fn is None:
             h = v4.embed(input_ids)  # [T_total, dim]
-            h = h.unsqueeze(-2).repeat(1, v4.hc_mult, 1)  # [T_total, hc, dim]
+            if (
+                not torch.is_grad_enabled() and h.is_cuda and (h.dtype == torch.bfloat16) and h.is_contiguous() and (h.ndim == 2) and (h.shape[0] > 0) and (h.shape[1] == 5120) and (v4.hc_mult == 4) and (not prefill_stream_is_capturing())
+            ):
+                from rtp_llm.models_py.modules.dsv41.prefill._hc_expand_triton import (
+                    expand_hc,
+                )
+
+                h = expand_hc(h)
+            else:
+                h = h.unsqueeze(-2).repeat(1, v4.hc_mult, 1)  # [T_total, hc, dim]
         else:
             h = prepare_hidden_fn(input_ids=input_ids, positions=positions)
     image_token_mask = getattr(v4, "_image_token_mask", None)
@@ -445,6 +510,17 @@ def forward_layers(
             input_ids,
         )
 
+    from rtp_llm.models_py.modules.dsv41.moe.routing_metadata import (
+        prepare_model_gate_routing_metadata,
+    )
+
+    # Tokens already use the rank-local CP order and visual sentinel ids.
+    # Keep these values local: the next request or graph capture must rebuild
+    # them from its own input-id buffer, even when the allocation is reused.
+    routing_metadata = prepare_model_gate_routing_metadata(v4, input_ids)
+    routing_kwargs = (
+        {"routing_metadata": routing_metadata} if routing_metadata is not None else {}
+    )
     capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
     capture_aux = bool(capture_ids)
 
@@ -452,12 +528,44 @@ def forward_layers(
     use_prefill_fast_path = _prefill_fast_path_enabled(
         v4, prepare_hidden_fn, prefill_fast_layer_calls
     )
+    post_boundaries: Tuple[Optional[bool], ...] = ()
+    defer_posts = False
     if not use_prefill_fast_path:
         prefill_fast_layer_calls = None
+    else:
+        from rtp_llm.models_py.modules.dsv41.hc.decode_transition import (
+            PendingDecodePost,
+            cross_layer_mhc_enabled,
+        )
+        from rtp_llm.models_py.modules.dsv41.hc.v41_mega_mhc import try_fused_post_pre
+
+        post_boundaries = _prefill_post_boundaries(v4, prefill_fast_layer_calls)
+        defer_posts = cross_layer_mhc_enabled()
     record_range_ctx = (
         _profiler.disable_record_function_ranges
-        if use_prefill_fast_path and not _profiler._torch_profiler_enabled()
+        if use_prefill_fast_path
+        and (not _profiler._torch_profiler_enabled() or _profiler.is_light_timeline())
         else nullcontext
+    )
+    # CED rebuilds tail metadata at L21. Its plan is first consumed at L20,
+    # so build it after the preceding layers have queued their GPU work.
+    ced_tail = None
+    ced_requested = (
+        allow_ced and _env_flag('DSV41_CED') and (shared_prefill is not None) and (len(v4.layers) > 20)
+    )
+    if ced_requested and v4.swa_bounded_replay:
+        lengths_host = getattr(cp_ctx, "input_lengths_global_host", None)
+        # Bounded replay keeps min(n, 128) rows per request; a full window
+        # cannot compact, so skip the CED plan and build both SWA regions up front.
+        if lengths_host and max(lengths_host) <= 128:
+            ced_requested = False
+    host_swa_tables = (
+        {
+            tag: host_block_table_for_tag(kv_cache, attn_inputs, tag)
+            for tag in ("swa_kv", "decoder_swa_kv")
+        }
+        if v4.fp8_kv_cache
+        else {}
     )
     # FP8 KV-cache: hoist host-side prefill metadata once per ratio bucket
     # and broadcast to every layer's ``AttentionFP8._prefill_meta_shared``.
@@ -478,12 +586,8 @@ def forward_layers(
                 # each rank-local request chunk is therefore not necessarily the
                 # request's absolute start position. Use CP metadata instead of
                 # deriving request ids from rank-local cu_seqlens.
-                sp_per_req = cp_ctx.prefix_lengths.to(
-                    device=positions.device, dtype=torch.int64
-                ).contiguous()
-                req_id_per_token = cp_ctx.req_id_per_token.to(
-                    device=positions.device, dtype=torch.int32
-                ).contiguous()
+                sp_per_req = cp_ctx.prefix_lengths
+                req_id_per_token = cp_ctx.req_id_per_token
             elif cu_seqlens is not None and cu_seqlens.numel() >= 2:
                 starts = cu_seqlens[:-1].to(device=positions.device, dtype=torch.int64)
                 sp_per_req = (
@@ -510,10 +614,10 @@ def forward_layers(
             prefix_lengths: Optional[torch.Tensor] = None
             max_seqlen_q = 0
             if attn_inputs is not None:
-                il = getattr(attn_inputs, "input_lengths", None)
+                il = device_attention_metadata(attn_inputs, "input_lengths")
                 if il is not None and il.numel() > 0:
                     input_lengths = il.to(
-                        device=positions.device, dtype=torch.int32
+                        device=positions.device, dtype=torch.int32, non_blocking=True
                     ).contiguous()
                     max_seqlen_q = (
                         max(cp_ctx.chunk_lengths_per_req)
@@ -521,10 +625,10 @@ def forward_layers(
                         and cp_ctx.chunk_lengths_per_req is not None
                         else int(input_lengths.max().item())
                     )
-                pl = getattr(attn_inputs, "prefix_lengths", None)
+                pl = device_attention_metadata(attn_inputs, "prefix_lengths")
                 if pl is not None and pl.numel() > 0:
                     prefix_lengths = pl.to(
-                        device=positions.device, dtype=torch.int32
+                        device=positions.device, dtype=torch.int32, non_blocking=True
                     ).contiguous()
             # The workspace was allocated at function entry, before
             # embedding could fragment its cached address range.  It remains a
@@ -544,36 +648,14 @@ def forward_layers(
                 req_id_per_token=req_id_per_token,
                 max_seqlen_q=max_seqlen_q,
                 workspace=ws,
-                host_block_ids=host_block_tables(kv_cache, attn_inputs),
+                stop_layer=21 if ced_requested else None,
+                host_swa_tables=host_swa_tables,
             )
 
     layer_forward_range = _profiler.make_layer_forward_range()
-    ced_tail = None
     original_cp_ctx = cp_ctx
     try:
-        if shared_prefill is not None and _env_flag("RTP_V41_BATCHED_PRODUCER"):
-            host_tables = host_block_tables(kv_cache, attn_inputs)
-            if (
-                kv_cache is not None
-                and isinstance(host_tables, torch.Tensor)
-                and host_tables.device.type == "cpu"
-                and host_tables.ndim == 3
-            ):
-                shared_prefill["prefill_producer_host_tables"] = (
-                    tuple(kv_cache.group_tags),
-                    host_tables,
-                )
-        if allow_ced and _env_flag("DSV41_CED"):
-            if shared_prefill is not None:
-                ced_tail = CEDPlan.create(
-                    v4,
-                    cp_ctx,
-                    attn_inputs,
-                    kv_cache,
-                    prepare_hidden_fn=prepare_hidden_fn,
-                    bounded_replay=v4.swa_bounded_replay,
-                )
-        ced_in_l20 = ced_tail is not None and ced_tail.can_split_l20(v4)
+        ced_in_l20 = False
         with record_range_ctx():
             # Two callable chains intentionally coexist:
             #   * normal ``Block.forward`` keeps debug checks and fallback layouts;
@@ -585,13 +667,86 @@ def forward_layers(
                 if prefill_fast_layer_calls is not None
                 else v4.layers
             )
+            engram_prefetch = getattr(v4, "_engram_lookup_prefetch", None)
             for layer_idx, layer_call in enumerate(layer_calls):
+                if layer_idx == 19 and ced_requested:
+                    ced_tail = CEDPlan.create(
+                        v4,
+                        cp_ctx,
+                        attn_inputs,
+                        kv_cache,
+                        prepare_hidden_fn=prepare_hidden_fn,
+                        bounded_replay=v4.swa_bounded_replay,
+                    )
+                    ced_in_l20 = ced_tail is not None and ced_tail.can_split_l20(v4)
+                    if (
+                        ced_in_l20
+                        and ced_tail.early_indexer
+                        and cp_ctx.cp_size == 4
+                        and use_prefill_fast_path
+                    ):
+                        ced_tail.start_early_admission(
+                            v4.layers[20],
+                            h.residual if isinstance(h, PendingDecodePost) else h,
+                            kv_cache,
+                            block_tables_by_type,
+                        )
+                    if ced_tail is None and v4.fp8_kv_cache:
+                        build_and_propagate_prefill_meta_fp8(
+                            v4,
+                            (
+                                h.output
+                                if use_prefill_fast_path
+                                and isinstance(h, PendingDecodePost)
+                                else h
+                            ),
+                            sp_int_for_meta,
+                            kv_cache,
+                            block_tables_by_type,
+                            sp_per_req=sp_per_req,
+                            cu_seqlens=cu_seqlens,
+                            batch_size=batch_size,
+                            input_lengths=input_lengths,
+                            prefix_lengths=prefix_lengths,
+                            position_ids=positions,
+                            req_id_per_token=req_id_per_token,
+                            max_seqlen_q=max_seqlen_q,
+                            workspace=ws,
+                            first_layer=21,
+                            reuse_write_by_region=prefill_write_by_region,
+                            host_swa_tables=host_swa_tables,
+                        )
+                if engram_prefetch is not None:
+                    engram_prefetch.before_layer(layer_idx)
+                prepared_attn = None
+                if use_prefill_fast_path and isinstance(h, PendingDecodePost):
+                    next_layer = v4.layers[layer_idx]
+                    prepared_attn = try_fused_post_pre(
+                        h.output,
+                        h.residual,
+                        h.post,
+                        h.comb,
+                        h.previous,
+                        next_layer.attn_hc,
+                        next_layer.attn_norm,
+                        use_prepared=True,
+                        reuse_residual=(
+                            h.residual.numel() * h.residual.element_size() > 1 << 30
+                        ),
+                    )
+                    h = h.materialize() if prepared_attn is None else prepared_attn[0]
+                expert_load = expert_load_for_layer(expert_token_counts, layer_idx)
                 if layer_idx == 21 and ced_tail is not None:
                     with _profiler.record_function_range("dsv41.ced.compact"):
                         if not ced_in_l20:
                             h, input_ids = ced_tail.compact(
                                 v4, h, input_ids, shared_prefill
                             )
+                        if routing_metadata is not None:
+                            routing_metadata = prepare_model_gate_routing_metadata(
+                                v4, input_ids
+                            )
+                            routing_kwargs = {"routing_metadata": routing_metadata}
                         cp_ctx = ced_tail.context
                         logging.debug(
                             "V4.1 CED compacted: bounded=%s cp=%d rows=%d->%d local_rows=%d",
@@ -622,9 +777,11 @@ def forward_layers(
                             workspace=ws,
                             first_layer=21,
                             reuse_write_by_region=prefill_write_by_region,
-                            host_block_ids=host_block_tables(kv_cache, attn_inputs),
+                            host_swa_tables=host_swa_tables,
                         )
                         prefill_write_by_region = None
+                if layer_idx in capture_ids:
+                    v4.capture_aux_hidden(layer_idx, h)
                 with layer_forward_range(layer_idx):
                     with (
                         ced_tail.candidate_publication(shared_prefill)
@@ -639,8 +796,29 @@ def forward_layers(
                                 ced_tail,
                                 kv_cache=kv_cache,
                                 block_tables_by_type=block_tables_by_type,
+                                expert_load=expert_load,
                             )
+                            if ced_tail.early_indexer_fallback:
+                                ced_in_l20 = False
                         else:
+                            call_kwargs = routing_kwargs
+                            if (
+                                use_prefill_fast_path
+                                and post_boundaries[layer_idx] is not None
+                            ):
+                                preserve = layer_idx + 1 in capture_ids or (
+                                    ced_tail is not None and layer_idx in (19, 20)
+                                )
+                                defer = (
+                                    defer_posts
+                                    and post_boundaries[layer_idx]
+                                    and not preserve
+                                )
+                                call_kwargs = {
+                                    **routing_kwargs,
+                                    "_prepared_attn": prepared_attn,
+                                    "_defer_ffn_post": defer,
+                                }
                             h = layer_call(
                                 h,  # [T, hc, dim]
                                 input_ids,  # [T]
@@ -648,11 +826,11 @@ def forward_layers(
                                 cu_seqlens,  # [B+1]
                                 kv_cache=kv_cache,
                                 block_tables_by_type=block_tables_by_type,
+                                **call_kwargs,
+                                expert_load=expert_load,
                             )  # [T, hc, dim]
                     if shared_prefill is not None:
                         release_v41_prefill_shared(shared_prefill, layer_idx)
-                    if layer_idx in capture_ids:
-                        v4.capture_aux_hidden(layer_idx, h)
                     if write_cache_store_impl is not None:
                         write_cache_store_impl(layer_idx)
     finally:
@@ -690,6 +868,7 @@ def forward_layers(
     with record_range_ctx():
         h = v4._hc_head_reduce(h)  # [T, dim]
         h = v4.norm(h)  # [T, dim]
+
     # The per-forward ``PrefillWorkspace`` (prefill-Q + optional CP
     # gather/restore scratch) is a local of this function: it drops here on
     # return, returning ~16 GiB to the caching allocator so the MTP draft
@@ -743,17 +922,23 @@ def forward_prefill(
 
     cu_seqlens = attn.cu_seqlens
     device_cu = attn.cu_seqlens_device
-    capturing = input_ids.is_cuda and torch.cuda.is_current_stream_capturing()
-    if (capturing or cu_seqlens is None or cu_seqlens.numel() < 2) and (
-        device_cu is not None and device_cu.numel() >= 2
+    if (
+        device_cu is not None
+        and device_cu.numel() >= 2
+        and device_cu.device == input_ids.device
     ):
         cu_seqlens = device_cu
     lengths = attn.input_lengths_device
     if lengths is None or lengths.numel() == 0:
         lengths = attn.input_lengths
-    cu_seqlens = _resolve_prefill_cu_seqlens(
-        cu_seqlens, lengths, input_ids.device if capturing else torch.device("cpu")
-    )
+    # Eager prefill and graph capture consume the same device boundaries. The
+    # native host mirror remains available for host-only shape decisions; do
+    # not send already-uploaded boundaries back to CPU between target kernels.
+    if cu_seqlens is not None and cu_seqlens.numel() >= 2:
+        cu_seqlens = cu_seqlens.to(input_ids.device, non_blocking=True)
+    elif lengths is not None:
+        lengths = lengths.to(input_ids.device, non_blocking=True)
+    cu_seqlens = _resolve_prefill_cu_seqlens(cu_seqlens, lengths, input_ids.device)
     positions = inputs.combo_position_ids
     # warmup / cudagraph capture path doesn't populate position_ids —
     # synthesize from (prefix_lengths, input_lengths). Prefer ``_d`` (GPU)
@@ -790,15 +975,24 @@ def forward_prefill(
 
     block_tables_by_type = build_block_tables_batched(kv_cache, attn)
 
-    hidden = forward_layers(
-        v4,
-        kv_cache,
-        input_ids,
-        positions,
-        cu_seqlens,
-        block_tables_by_type,
-        attn_inputs=attn,
-        prepare_hidden_fn=prepare_hidden_fn,
-        allow_ced=permits_ced(inputs),
-    )  # [T_total, dim]
+    # Share mHC stream setup across the prefill layers and use the target's
+    # registered CP workspace only on the eager stream.
+    from rtp_llm.models_py.modules.dsv41._cp_collectives import prefill_cp_collectives
+    from rtp_llm.models_py.modules.dsv41.hc.v41_mega_mhc import prefill_mhc_stream
+
+    with (
+        prefill_mhc_stream(input_ids.device, reuse_capture=prepare_hidden_fn is None) if input_ids.is_cuda else nullcontext()
+    ) as eager, prefill_cp_collectives(v4, input_ids.device, eager):
+        hidden = forward_layers(
+            v4,
+            kv_cache,
+            input_ids,
+            positions,
+            cu_seqlens,
+            block_tables_by_type,
+            attn_inputs=attn,
+            prepare_hidden_fn=prepare_hidden_fn,
+            allow_ced=permits_ced(inputs),
+            expert_token_counts=inputs.expert_token_counts,
+        )  # [T_total, dim]
     return PyModelOutputs(hidden)

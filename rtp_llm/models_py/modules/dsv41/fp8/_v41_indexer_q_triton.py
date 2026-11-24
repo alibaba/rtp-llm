@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-FileCopyrightText: Copyright Alibaba Group Holding Limited
-"""V4.1 indexer Q: gather RoPE, MXFP4 quantization and FP32 head weights.
+"""V4.1 indexer Q: gather RoPE, MXFP4 quantization and scaled head weights.
 
 Adapted from vLLM's per-(token, head) MXFP4 Triton fusion in
 vllm/models/deepseek_v4/common/ops/fused_indexer_q.py. One launch reads
@@ -10,6 +10,9 @@ Necessary RTP differences: complex64 interleaved frequency storage, the
 existing CUDA complex-multiply FMA order, the exact existing quantizer, and
 one combined 1/64 weight multiplier (not two separately rounded factors).
 Those operations reuse RTP helpers. FP4 block scales remain separate.
+Native dense/sparse prefill scoring consumes BF16 weights; compatibility
+consumers may request FP32. The output pointer dtype fuses the consumer's
+final rounding into the same launch without changing FP32 scale arithmetic.
 """
 
 from __future__ import annotations
@@ -53,7 +56,12 @@ def _fused_indexer_q_rope_fp4_kernel(
     payload_ptr,
     sf_ptr,
     weights_out_ptr,
+    selection_ptr,
+    candidates_ptr,
+    q_token_stride,
     MAX_POSITION: tl.constexpr,
+    SELECTION_WIDTH: tl.constexpr,
+    CANDIDATE_WIDTH: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     token = row // 32
@@ -66,7 +74,7 @@ def _fused_indexer_q_rope_fp4_kernel(
             "trap; // dummy $0", "=r", [], dtype=tl.int32, is_pure=False, pack=1
         )
         return
-    q = tl.load(q_ptr + row * 128 + tl.arange(0, 128))
+    q = tl.load(q_ptr + token * q_token_stride + (row % 32) * 128 + tl.arange(0, 128))
     # This helper matches eager CUDA complex multiplication, including the
     # explicit FMA and the BF16 rounding before the FP4 block reduction.
     rotated = _indexer_rope_bf16(q, frequencies_ptr, position).to(tl.float32)
@@ -80,6 +88,119 @@ def _fused_indexer_q_rope_fp4_kernel(
     tl.store(sf_bytes + tl.arange(0, 4), scale_bytes)
     weight = tl.load(weights_ptr + row).to(tl.float32)
     tl.store(weights_out_ptr + row, weight * (1.0 / 64.0))
+    # The selector may write only a short causal prefix or skip CP padding.
+    # Initialize every output column here, sharing the existing Q launch.
+    # Heads own adjacent column ranges, including non-multiple-of-32 widths.
+    if SELECTION_WIDTH:
+        _initialize_selection_row(selection_ptr, token, row % 32, SELECTION_WIDTH)
+    if CANDIDATE_WIDTH:
+        _initialize_selection_row(candidates_ptr, token, row % 32, CANDIDATE_WIDTH)
+
+
+@triton.jit
+def _fused_indexer_q_rope_fp4_rows_kernel(
+    q_ptr,
+    weights_ptr,
+    frequencies_ptr,
+    positions_ptr,
+    payload_ptr,
+    sf_ptr,
+    weights_out_ptr,
+    selection_ptr,
+    candidates_ptr,
+    q_token_stride,
+    MAX_POSITION: tl.constexpr,
+    SELECTION_WIDTH: tl.constexpr,
+    CANDIDATE_WIDTH: tl.constexpr,
+):
+    # Four adjacent heads share one CTA and one position read. The caller's
+    # 32-head contract makes the row count divisible by four.
+    # Promote before multiplying: long Q and selection offsets can exceed int32.
+    row = tl.program_id(0).to(tl.int64) * 4 + tl.arange(0, 4)
+    token = row // 32
+    head = row % 32
+    position = tl.load(positions_ptr + token).to(tl.int64)
+    position = tl.where(position < 0, position + MAX_POSITION, position)
+    if tl.sum((position < 0) | (position >= MAX_POSITION), 0) > 0:
+        tl.inline_asm_elementwise(
+            "trap; // dummy $0", "=r", [], dtype=tl.int32, is_pure=False, pack=1
+        )
+        return
+    column = tl.arange(0, 128)
+    q = tl.load(
+        q_ptr + token[:, None] * q_token_stride + head[:, None] * 128 + column[None, :]
+    ).to(tl.float32)
+    real = tl.gather(q, tl.broadcast_to((column & ~1)[None, :], (4, 128)), axis=1)
+    imag = tl.gather(q, tl.broadcast_to((column | 1)[None, :], (4, 128)), axis=1)
+    rotary = column >= 64
+    angle = tl.maximum((column - 64) // 2, 0)
+    cosine = tl.load(
+        frequencies_ptr + position[:, None] * 64 + angle[None, :] * 2,
+        rotary[None, :],
+        other=1,
+    )
+    sine = tl.load(
+        frequencies_ptr + position[:, None] * 64 + angle[None, :] * 2 + 1,
+        rotary[None, :],
+        other=0,
+    )
+    even = column % 2 == 0
+    product = tl.where(even[None, :], imag, real) * sine
+    product_bits = product.to(tl.uint32, bitcast=True)
+    signed_product = (product_bits ^ tl.where(even[None, :], 0x80000000, 0)).to(
+        tl.float32, bitcast=True
+    )
+    rotated = tl.fma(tl.where(even[None, :], real, imag), cosine, signed_product)
+    rotated = tl.where(rotary[None, :], rotated, q).to(tl.bfloat16).to(tl.float32)
+    groups = rotated.reshape((4, 4, 32))
+    maximum = tl.maximum(tl.max(tl.abs(groups), axis=2), 6.0 * (2.0**-126))
+    scale, scale_bytes = _round_power_of_two_scale(maximum, 1.0 / 6.0)
+    normalized = tl.minimum(tl.maximum(tl.div_rn(groups, scale[:, :, None]), -6.0), 6.0)
+    payload = _pack_e2m1_payload(normalized.reshape((512,)), 512).reshape((4, 64))
+    tl.store(payload_ptr + row[:, None] * 64 + tl.arange(0, 64)[None, :], payload)
+    sf_bytes = (sf_ptr + row[:, None]).to(tl.pointer_type(tl.uint8))
+    tl.store(sf_bytes + tl.arange(0, 4)[None, :], scale_bytes)
+    weight = tl.load(weights_ptr + row).to(tl.float32)
+    tl.store(weights_out_ptr + row, weight * (1.0 / 64.0))
+    if SELECTION_WIDTH:
+        _initialize_selection_rows(selection_ptr, token, head, SELECTION_WIDTH)
+    if CANDIDATE_WIDTH:
+        _initialize_selection_rows(candidates_ptr, token, head, CANDIDATE_WIDTH)
+
+
+@triton.jit
+def _initialize_selection_row(output, token, head, WIDTH: tl.constexpr):
+    CHUNK: tl.constexpr = triton.cdiv(WIDTH, 32)
+    offsets = tl.arange(0, triton.next_power_of_2(CHUNK))
+    columns = head * CHUNK + offsets
+    tl.store(
+        output + token * WIDTH + columns, -1, (offsets < CHUNK) & (columns < WIDTH)
+    )
+
+
+@triton.jit
+def _initialize_selection_rows(output, token, head, WIDTH: tl.constexpr):
+    CHUNK: tl.constexpr = triton.cdiv(WIDTH, 32)
+    offsets = tl.arange(0, triton.next_power_of_2(CHUNK))
+    columns = head[:, None] * CHUNK + offsets[None, :]
+    tl.store(
+        output + token[:, None] * WIDTH + columns,
+        -1,
+        (offsets[None, :] < CHUNK) & (columns < WIDTH),
+    )
+
+
+def _selection_output_supported(output, q):
+    return output is None or (
+        output.device == q.device
+        and output.dtype == torch.int32
+        and output.ndim == 2
+        and output.shape[0] == q.shape[0] * q.shape[1]
+        and 0 < output.shape[1] <= 65536
+        and output.is_contiguous()
+        and not output.is_conj()
+        and not output.is_neg()
+    )
 
 
 def is_supported(
@@ -88,17 +209,26 @@ def is_supported(
     freqs_cis: torch.Tensor,
     positions: torch.Tensor,
     rope_head_dim: int = 64,
+    *,
+    weights_out_dtype: torch.dtype = torch.float32,
 ) -> bool:
-    """Only the production BF16/32-head/MXFP4 decode contract is fused."""
+    """Only the production BF16/32-head/MXFP4 query contract is fused."""
     if (
-        q.device.type != "cuda"
+        weights_out_dtype not in (torch.float32, torch.bfloat16)
+        or q.device.type != "cuda"
         or q.ndim != 4
         or q.shape[2:] != (32, 128)
         or q.shape[0] < 1
         or q.shape[1] < 1
         or q.dtype != torch.bfloat16
-        or not q.is_contiguous()
+        or q.stride(-1) != 1
+        or q.stride(-2) != 128
         or rope_head_dim != 64
+    ):
+        return False
+    token_stride = q.stride(1) if q.shape[1] > 1 else q.stride(0)
+    if token_stride < 4096 or (
+        q.shape[0] > 1 and q.shape[1] > 1 and q.stride(0) != q.shape[1] * token_stride
     ):
         return False
     if (
@@ -128,19 +258,48 @@ def try_fused_indexer_q(
     freqs_cis: torch.Tensor,
     positions: torch.Tensor,
     rope_head_dim: int = 64,
+    *,
+    weights_out_dtype: torch.dtype = torch.float32,
+    selection_out: torch.Tensor | None = None,
+    candidates_out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
-    """Return (int8 Q, packed-int32 SF, FP32 weights), or None to fall back.
+    """Return (int8 Q, packed-int32 SF, scaled weights), or None to fall back.
 
     Weights are the unscaled BF16/FP32 projection. Frequencies are the complete
     complex64 lookup table, positions contain one index for each B*S token.
+    ``weights_out_dtype`` must match the scoring consumer: BF16 for native
+    prefill, FP32 for compatibility callers. Scaling always runs in FP32,
+    then the final store rounds once to the requested dtype.
+    Optional selection buffers are initialized to -1 in the same launch. Pass
+    only newly produced candidates, never candidates reused by another layer.
+    Unsupported output layouts return None without writing either output.
     Inputs are never modified. Execution/compilation errors are not swallowed.
     """
-    if not is_supported(q, weights, freqs_cis, positions, rope_head_dim):
+    if not is_supported(
+        q,
+        weights,
+        freqs_cis,
+        positions,
+        rope_head_dim,
+        weights_out_dtype=weights_out_dtype,
+    ):
+        return None
+    if not all(
+        _selection_output_supported(output, q)
+        for output in (selection_out, candidates_out)
+    ):
         return None
     payload = torch.empty(*q.shape[:-1], 64, dtype=torch.int8, device=q.device)
     sf = torch.empty(q.shape[:-1], dtype=torch.int32, device=q.device)
-    scaled_weights = torch.empty(q.shape[:-1], dtype=torch.float32, device=q.device)
-    _fused_indexer_q_rope_fp4_kernel[(q.numel() // 128,)](
+    scaled_weights = torch.empty(q.shape[:-1], dtype=weights_out_dtype, device=q.device)
+    rows = q.numel() // 128
+    grouped = q.shape[1] == 1 and rows >= 65536
+    kernel = (
+        _fused_indexer_q_rope_fp4_rows_kernel
+        if grouped
+        else _fused_indexer_q_rope_fp4_kernel
+    )
+    kernel[(rows // 4 if grouped else rows,)](
         q,
         weights,
         torch.view_as_real(freqs_cis),
@@ -148,8 +307,13 @@ def try_fused_indexer_q(
         payload,
         sf,
         scaled_weights,
+        selection_out,
+        candidates_out,
+        q.stride(1) if q.shape[1] > 1 else q.stride(0),
         freqs_cis.shape[0],
-        num_warps=4,
+        selection_out.shape[1] if selection_out is not None else 0,
+        candidates_out.shape[1] if candidates_out is not None else 0,
+        num_warps=1 if grouped else 4,
         enable_fp_fusion=False,
     )
     return payload, sf, scaled_weights

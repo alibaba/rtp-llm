@@ -4,16 +4,6 @@ Wraps ``deep_gemm.fp8_paged_mqa_logits`` so it can drop into the indexer
 decode loop in place of the bf16 ``v4_indexer_score`` Triton kernel
 when the cache is FP8 packed (132B/slot).
 
-Device/block contract (shared with dsv4): the FP8 paged/prefill dispatch
-below calls the same predicates that dsv4's production dispatch uses —
-:func:`deepgemm_supports_block_kv`, :func:`supports_paged_mqa_logits` and
-:func:`supports_mqa_logits` are imported from
-``rtp_llm.models_py.modules.dsv4.fp8._indexer_score`` rather than copied.
-Unlike dsv4, dsv41 has **no Triton fallback** for these two entry points, so
-an unsupported device/block combination raises a diagnosable ``RuntimeError``
-(carrying the device capability and ``block_kv``) instead of hard-failing
-inside DeepGEMM. The FP4 variants below keep their own gates.
-
 End-to-end shape contract:
 
   q_fp8       [B, next_n, H, D]            float8_e4m3fn  (per-(t,h) quant)
@@ -36,15 +26,12 @@ Caller is responsible for FP8 quantizing Q via
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
+from functools import lru_cache
 from typing import Optional
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
-    deepgemm_supports_block_kv,
-    supports_mqa_logits,
-    supports_paged_mqa_logits,
-)
 from rtp_llm.models_py.modules.dsv41.fp8._indexer_quant_triton import (
     INDEXER_ENTRY_BYTES,
     INDEXER_HEAD_DIM,
@@ -104,6 +91,35 @@ def has_fp8_fp4_paged_mqa_logits() -> bool:
 # ---------------------------------------------------------------------------
 
 
+@lru_cache(maxsize=2)
+def _mqa_accepts_logits_dtype(operation) -> bool:
+    """Older pinned wheels expose an explicit output dtype; newer ones use BF16.
+
+    Pybind publishes its keyword signature in __doc__. Resolve this once per
+    operation without initializing CUDA or probing a live kernel launch.
+    """
+    return "logits_dtype:" in (operation.__doc__ or "")
+
+
+def balanced_mqa_schedule_builder():
+    operation = getattr(_deep_gemm, "fp8_fp4_mqa_logits", None)
+    if "schedule_meta:" in (getattr(operation, "__doc__", None) or ""):
+        return getattr(_deep_gemm, "get_mqa_logits_metadata", None)
+    return None
+
+
+def balanced_mqa_schedule(builder, starts, ends, kv_rows, heads, cache):
+    key = (id(starts), id(ends), kv_rows, heads)
+    cached = cache.get(key) if cache is not None else None
+    if cached is not None:
+        return cached[2]
+    schedule = builder(starts, ends, kv_rows, heads)
+    if cache is not None:
+        # Keep the bound objects alive for the identity key.
+        cache[key] = (starts, ends, schedule)
+    return schedule
+
+
 def fp8_fp4_mqa_indexer_score(
     q_payload: torch.Tensor,  # [M, H, 64] int8
     q_sf: torch.Tensor,  # [M, H] int32
@@ -115,26 +131,60 @@ def fp8_fp4_mqa_indexer_score(
     *,
     clean_logits: bool = True,
     max_seqlen_k: int = 0,
+    return_bf16: bool = False,
+    balance_kv_tiles: bool = False,
+    schedule_cache: dict | None = None,
 ) -> torch.Tensor:
     """MX-mode FP4 prefill indexer logits via DeepGEMM.
 
     Both scale factors use DeepGEMM's packed-UE8M0 int32 form (group 32 along
     the head dim), matching the V4.1-Flash official indexer quantization.
+
+    ``return_bf16`` exposes request-local logits with their native row stride.
+    The caller must consume only ``end - start`` entries per row: padding is
+    unwritten. The default retains the fully masked FP32 compatibility ABI.
     """
     from ._v41_mqa_layout import normalize_mqa_logits
 
     # Upstream SM100 now consumes BF16 head weights and emits request-relative
     # BF16 logits. Selectors keep their FP32 tensor ABI, but no longer rely on
-    # the removed clean_logits argument or uninitialized tail values.
+    # the removed clean_logits argument or uninitialized tail values. The
+    # extended API forbids clean_logits for request-relative output. Bounded
+    # selectors can read it directly; compatibility callers still normalize.
+    if return_bf16 and max_seqlen_k <= 0:
+        raise ValueError("BF16 MQA logits require an explicit request-local width")
     width = max_seqlen_k if max_seqlen_k > 0 else k_payload.shape[0]
-    scores = _deep_gemm.fp8_fp4_mqa_logits(
+    operation = _deep_gemm.fp8_fp4_mqa_logits
+    options = (
+        {"clean_logits": False, "logits_dtype": torch.bfloat16}
+        if _mqa_accepts_logits_dtype(operation)
+        else {}
+    )
+    starts = cu_seqlen_ks.contiguous()
+    ends = cu_seqlen_ke.contiguous()
+    build_schedule = (
+        balanced_mqa_schedule_builder() if balance_kv_tiles and return_bf16 else None
+    )
+    if build_schedule is not None:
+        options["schedule_meta"] = balanced_mqa_schedule(
+            build_schedule,
+            starts,
+            ends,
+            k_payload.shape[0],
+            q_payload.shape[1],
+            schedule_cache,
+        )
+    scores = operation(
         (q_payload.contiguous(), q_sf.contiguous()),
         (k_payload.contiguous(), k_sf.contiguous()),
         weights.to(torch.bfloat16).contiguous(),
-        cu_seqlen_ks.contiguous(),
-        cu_seqlen_ke.contiguous(),
-        width,
+        starts,
+        ends,
+        max_seqlen_k=width,
+        **options,
     )
+    if return_bf16:
+        return scores
     return normalize_mqa_logits(
         scores, cu_seqlen_ks, cu_seqlen_ke, width, relative=max_seqlen_k > 0
     )
@@ -172,6 +222,16 @@ def _get_num_sms(device: torch.device) -> int:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class PagedMQAMetadata:
+    """Prepared per-query DG inputs, shared only within a compatible forward."""
+
+    lengths: torch.Tensor
+    tables: torch.Tensor
+    request_ids: torch.Tensor
+    schedule: torch.Tensor
+
+
 def fp8_fp4_paged_indexer_score(
     q_payload: torch.Tensor,  # [B, next_n, H, 64] int8 packed e2m1
     q_sf: torch.Tensor,  # [B, next_n, H] int32 packed UE8M0
@@ -181,11 +241,15 @@ def fp8_fp4_paged_indexer_score(
     context_lens: torch.Tensor,  # [B, next_n] int32 — live K length per row
     block_size: int,  # entries per cache block (= pool.shape[1])
     max_ctx_len: int,  # output T dim (physical capacity)
+    *,
+    return_bf16: bool = False,
+    metadata: PagedMQAMetadata | None = None,
 ) -> torch.Tensor:
     """MX-mode FP4 paged indexer logits via DeepGEMM.
 
     Both scale factors use DeepGEMM's packed-UE8M0 int32 form (group 32 along
     the head dim), matching the V4.1-Flash official indexer quantization.
+    Prepared metadata bypasses expansion and scheduling, not score computation.
     """
     from ._v41_mqa_layout import normalize_mqa_logits
 
@@ -193,17 +257,29 @@ def fp8_fp4_paged_indexer_score(
     # Expand only the small block-table metadata for speculative next_n.
     batch, next_n, heads, packed_dim = q_payload.shape
     rows = batch * next_n
-    request_ids = torch.arange(
-        batch, dtype=torch.int32, device=q_payload.device
-    ).repeat_interleave(next_n)
     q = q_payload.reshape(rows, 1, heads, packed_dim).contiguous()
     sf = q_sf.reshape(rows, 1, heads).contiguous()
-    lengths = context_lens.reshape(rows, 1).to(torch.int32).contiguous()
-    tables = block_table.repeat_interleave(next_n, dim=0).contiguous()
-    schedule = _deep_gemm.get_paged_mqa_logits_metadata(
-        lengths, block_size, _get_num_sms(q_payload.device), indices=request_ids
+    if metadata is None:
+        request_ids = torch.arange(
+            batch, dtype=torch.int32, device=q_payload.device
+        ).repeat_interleave(next_n)
+        lengths = context_lens.reshape(rows, 1).to(torch.int32).contiguous()
+        tables = block_table.repeat_interleave(next_n, dim=0).contiguous()
+        schedule = _deep_gemm.get_paged_mqa_logits_metadata(
+            lengths, block_size, _get_num_sms(q_payload.device), indices=request_ids
+        )
+    else:
+        lengths = metadata.lengths
+        tables = metadata.tables
+        request_ids = metadata.request_ids
+        schedule = metadata.schedule
+    operation = _deep_gemm.fp8_fp4_paged_mqa_logits
+    options = (
+        {"clean_logits": False, "logits_dtype": torch.bfloat16}
+        if _mqa_accepts_logits_dtype(operation)
+        else {}
     )
-    scores = _deep_gemm.fp8_fp4_paged_mqa_logits(
+    scores = operation(
         (q, sf),
         kv_pool_uint8.unsqueeze(2),
         weights.to(torch.bfloat16).contiguous(),
@@ -212,61 +288,13 @@ def fp8_fp4_paged_indexer_score(
         schedule,
         max_ctx_len,
         indices=request_ids,
+        **options,
     )
+    if return_bf16:
+        return scores
     ends = lengths.view(-1)
     return normalize_mqa_logits(
         scores, torch.zeros_like(ends), ends, max_ctx_len, relative=True
-    )
-
-
-def _device_capability_str(device) -> str:
-    """Device capability for diagnostics; never raises while reporting."""
-    try:
-        major, minor = torch.cuda.get_device_capability(device)
-        return f"({major}, {minor})"
-    except Exception as exc:  # CPU tensor / no CUDA runtime in this process
-        return f"<unavailable for {device}: {exc}>"
-
-
-def _deepgemm_version_str() -> str:
-    return getattr(_deep_gemm, "__version__", None) or "<not importable>"
-
-
-def _raise_paged_contract_error(device, block_size: int) -> None:
-    """Reject a paged call dsv41 cannot serve, with triage-ready context.
-
-    dsv41 has no Triton fallback, so an unsupported device/block combination
-    must be reported here instead of surfacing as a DeepGEMM-internal assert.
-    The shared predicate answers *whether* the path is servable; this helper
-    explains *why not* using the device capability and ``block_kv``.
-    """
-    capability = _device_capability_str(device)
-    if not deepgemm_supports_block_kv(device, block_size):
-        reason = (
-            f"block_kv={block_size} is outside DeepGEMM's paged metadata "
-            "contract for this device (64 is SM90/SM100-only, 32 is SM100-only)"
-        )
-    else:
-        reason = (
-            "the installed DeepGEMM wheel rejects the group-128 legacy paged "
-            "call on this device (see dsv4 supports_paged_mqa_logits)"
-        )
-    raise RuntimeError(
-        "dsv41 fp8_paged_indexer_score: DeepGEMM paged MQA logits unavailable "
-        f"for device capability {capability}, block_kv={block_size} "
-        f"(deep_gemm={_deepgemm_version_str()}). {reason}. dsv41 has no Triton "
-        "fallback for this path."
-    )
-
-
-def _raise_mqa_contract_error(device) -> None:
-    """Reject a non-paged prefill call dsv41 cannot serve (no fallback)."""
-    raise RuntimeError(
-        "dsv41 fp8_mqa_indexer_score: DeepGEMM fp8_mqa_logits unavailable for "
-        f"device capability {_device_capability_str(device)}, block_kv=n/a "
-        f"(non-paged path; deep_gemm={_deepgemm_version_str()}). The installed "
-        "wheel rejects the group-128 legacy call on this device (see dsv4 "
-        "supports_mqa_logits). dsv41 has no Triton fallback for this path."
     )
 
 
@@ -286,20 +314,7 @@ def fp8_paged_indexer_score(
     whatever DeepGEMM writes (use ``clean_logits=True`` if the
     downstream topk needs ``-inf`` there; default False to save the
     extra mask).
-
-    Device/block contract: the call is served only when the shared
-    :func:`supports_paged_mqa_logits` (dsv4) accepts this device and
-    ``block_size``. dsv41 deliberately has **no Triton fallback**, so any
-    other combination raises ``RuntimeError`` naming the device capability
-    and ``block_kv`` — never a raw DeepGEMM assert.
     """
-    if not q_fp8.is_cuda:
-        raise RuntimeError(
-            "dsv41 fp8_paged_indexer_score requires a CUDA tensor, got "
-            f"{q_fp8.device}, block_kv={block_size}"
-        )
-    if not supports_paged_mqa_logits(q_fp8.device, block_size):
-        _raise_paged_contract_error(q_fp8.device, block_size)
     # DeepGEMM kv_cache shape: [num_blocks, block_size, 1, D+4] uint8.
     # Our pool is a flat [total_slots, 132] view; reshape into the 4D
     # layout (no copy — just a metadata change).
@@ -359,19 +374,7 @@ def fp8_mqa_indexer_score(
     ``clean_logits=False`` matches what we want — entries past
     ``cu_seqlen_ke[m]`` are left untouched; the topk-with-causal-mask path
     in :class:`Indexer.forward` re-applies its own ``q_pos`` causal cap.
-
-    Device contract: the call is served only when the shared
-    :func:`supports_mqa_logits` (dsv4) accepts this device/wheel. dsv41 has
-    **no Triton fallback** here, so any other combination raises
-    ``RuntimeError`` naming the device capability (``block_kv`` does not
-    apply to the non-paged path).
     """
-    if not q_fp8.is_cuda:
-        raise RuntimeError(
-            f"dsv41 fp8_mqa_indexer_score requires a CUDA tensor, got {q_fp8.device}"
-        )
-    if not supports_mqa_logits(q_fp8.device):
-        _raise_mqa_contract_error(q_fp8.device)
     return _deep_gemm.fp8_mqa_logits(
         q_fp8.contiguous(),
         (k_quant.contiguous(), k_scale.contiguous()),

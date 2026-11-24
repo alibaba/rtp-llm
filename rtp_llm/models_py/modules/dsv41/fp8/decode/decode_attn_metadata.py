@@ -125,6 +125,14 @@ class DSv4DecodeAttnMetadataFP8:
 
     # ---- Cuda graph: reserved for Phase 3 (forbid_realloc, fixed addr) ----
     is_cuda_graph: bool = False
+    # Packed target rows keep a static execution shape, but real request
+    # boundaries come from these lengths and decode_cu_seq_per_req.
+    is_packed: bool = False
+    input_lengths: Optional[torch.Tensor] = None
+    # Request-major validity, shared by all S queries of a request. CUDA Graph
+    # preparation rewrites every entry before every replay at a stable address.
+    # This is selection-only metadata, never a replacement for KV/MTP lengths.
+    valid_requests: Optional[torch.Tensor] = None  # bool [capture_B]
 
     # ------------------------------------------------------------------
     # Paged-decode metadata (paged BlockPool read/write).
@@ -404,9 +412,14 @@ def get_or_build_sched_meta(
 
 
 def _pool_compress_ratio(attn_type: int) -> int:
-    from rtp_llm.models_py.modules.dsv41.attn_type import CSA_KV, HCA_KV, INDEXER_KV
+    from rtp_llm.models_py.modules.dsv41.attn_type import (
+        CSA_KV,
+        HCA_KV,
+        INDEXER_KV,
+        INDEXER_KV_C2,
+    )
 
-    if attn_type == CSA_KV:
+    if attn_type in (CSA_KV, INDEXER_KV_C2):
         return 2
     if attn_type in (HCA_KV, INDEXER_KV):
         return 1
@@ -502,8 +515,16 @@ def _update_compressor_state_slot_mappings(
             continue
         entries_per_block = paged_pool_entries_per_block[at]
         tokens_per_block = meta.paged_pool_tokens_per_block[at]
+        table = meta.pool_block_tables[at][:bs]
+        if table.is_cuda:
+            from ._fused_prepare_meta_triton import fill_state_pool_slots
+
+            if fill_state_pool_slots(
+                table, positions, req_idx, out, entries_per_block, tokens_per_block
+            ):
+                continue
         mapped = _compute_state_pool_slot_mapping(
-            meta.pool_block_tables[at][:bs],
+            table,
             positions,
             req_idx,
             entries_per_block,
@@ -666,8 +687,17 @@ def _build_start_pos_from_attention_inputs(
     device: torch.device,
     max_seq_len: int,
     q_len: int,
+    *,
+    require_device_metadata: bool = False,
 ) -> torch.Tensor:
-    """Derive DSv4 decode first-token positions from framework attention inputs."""
+    """Derive positions from the framework's stream-ordered device mirrors.
+
+    CUDA graph preparation may deliberately leave the host mirrors stale.
+    Its caller requires device metadata so a missing mirror cannot silently
+    fall back to a stale host value. Eager callers retain the host-only input
+    contract; that fallback stays synchronous because its source can be a
+    mutable, framework-owned pinned buffer.
+    """
     if isinstance(attention_inputs, torch.Tensor):
         start_pos = attention_inputs
     else:
@@ -679,9 +709,31 @@ def _build_start_pos_from_attention_inputs(
         # sentinel values, so prefix_lengths is the only valid first-token
         # position source for those q_len > 1 paths.
         if is_target_verify or (is_prefill and q_len > 1):
-            start_pos = attention_inputs.prefix_lengths
+            start_pos = getattr(attention_inputs, "prefix_lengths", None)
+            mirror_name = "prefix_lengths_device"
+            mirror_offset = 0
         else:
-            start_pos = attention_inputs.sequence_lengths
+            start_pos = getattr(attention_inputs, "sequence_lengths", None)
+            mirror_name = "sequence_lengths_plus_1_device"
+            mirror_offset = 1
+
+        mirror = getattr(attention_inputs, mirror_name, None)
+        mirror_on_device = (
+            isinstance(mirror, torch.Tensor)
+            and mirror.is_cuda
+            and device.type == "cuda"
+            and (device.index is None or mirror.device.index == device.index)
+            and mirror.ndim == 1
+        )
+        if mirror_on_device:
+            start_pos = mirror - mirror_offset if mirror_offset else mirror
+        elif require_device_metadata:
+            raise ValueError(f"CUDA graph decode requires device {mirror_name}")
+
+    if require_device_metadata and (
+        not isinstance(start_pos, torch.Tensor) or not start_pos.is_cuda
+    ):
+        raise ValueError("CUDA graph decode requires device start positions")
 
     start_pos = start_pos.to(device=device, dtype=torch.int32)
     # Cuda-graph capture/warmup can hand us sentinel prefix lengths near
@@ -1003,6 +1055,7 @@ def allocate_decode_metadata_fp8(
         topk_total_by_ratio=topk_total_by_ratio,
         compressed_offset=window_size,
         is_cuda_graph=True,
+        valid_requests=torch.zeros(B, dtype=torch.bool, device=device),
         pool_block_tables=pool_block_tables,
         paged_pool_tokens_per_block=paged_tokens_from_specs,
         pool_write_slot_mappings=pool_write_slot_mappings,
@@ -1030,6 +1083,8 @@ def update_decode_metadata_in_place_fp8(
     paged_pool_entries_per_block: Optional[Dict[int, int]] = None,
     paged_pool_tokens_per_block: Optional[Dict[int, int]] = None,
     capture_full_width_lengths: bool = False,
+    require_device_metadata: bool = False,
+    valid_request_count: Optional[int | torch.Tensor] = None,
 ) -> None:
     """Recompute every metadata buffer IN PLACE for new attention inputs.
 
@@ -1062,22 +1117,27 @@ def update_decode_metadata_in_place_fp8(
         device,
         meta.max_seq_len,
         q_len,
+        require_device_metadata=require_device_metadata,
     )
     bs = int(start_pos.shape[0])
-    position_ids_2d = _build_position_ids_2d(start_pos, q_len, device)
-    position_ids_flat = position_ids_2d.reshape(-1).contiguous()
-    meta.position_ids[: bs * q_len].copy_(position_ids_flat)
-    if meta.position_ids_long is not None:
-        meta.position_ids_long[: bs * q_len].copy_(position_ids_flat.to(torch.long))
-    if meta.decode_seq_start_per_req is not None:
-        meta.decode_seq_start_per_req[:bs].copy_(start_pos)
-    meta.topk_buffer_compressed[:bs].fill_(-1)
+    live_requests = bs if valid_request_count is None else valid_request_count
+    if bs > meta.start_pos.numel() or (
+        not isinstance(live_requests, torch.Tensor) and not 0 <= live_requests <= bs
+    ):
+        raise ValueError(
+            "Decode valid request count must fit the prepared/captured batch"
+        )
 
     from rtp_llm.models_py.modules.dsv41.fp8.decode._fused_prepare_meta_triton import (
         fused_update_decode_meta_pure,
     )
 
-    fused_update_decode_meta_pure(meta, start_pos, meta.max_seq_len)
+    fused_update_decode_meta_pure(
+        meta,
+        start_pos,
+        meta.max_seq_len,
+        valid_request_count=live_requests,
+    )
 
     # opt_flash_mla: derive FlashMLA topk_length / extra_topk_length from the
     # just-filled compressed_lens + start_pos, in place (graph-stable buffers).
@@ -1104,18 +1164,23 @@ def update_decode_metadata_in_place_fp8(
         # Snapshot block_table content into the metadata's stable buffer
         # (forbid_realloc-friendly: just `.copy_` the prefix). Skip pools
         # without a metadata buffer (e.g. SWA-only layers don't carry CSA).
-        for at, src_bt in paged_block_tables.items():
-            dst_bt = meta.pool_block_tables.get(at)
-            if dst_bt is None:
-                continue
-            n_rows = min(src_bt.shape[0], dst_bt.shape[0])
-            n_cols = min(src_bt.shape[1], dst_bt.shape[1])
-            # Zero stale rows beyond current bs to avoid carrying old block
-            # ids (defensive — graph reads only [:bs] anyway).
-            dst_bt[bs:].zero_()
-            dst_bt[:n_rows, :n_cols].copy_(src_bt[:n_rows, :n_cols])
-            if n_cols < dst_bt.shape[1]:
-                dst_bt[:n_rows, n_cols:].zero_()
+        from ._fused_prepare_meta_triton import try_snapshot_block_tables
+
+        if not try_snapshot_block_tables(
+            meta.pool_block_tables, paged_block_tables, bs
+        ):
+            for at, src_bt in paged_block_tables.items():
+                dst_bt = meta.pool_block_tables.get(at)
+                if dst_bt is None:
+                    continue
+                n_rows = min(src_bt.shape[0], dst_bt.shape[0])
+                n_cols = min(src_bt.shape[1], dst_bt.shape[1])
+                # Zero stale rows beyond current bs to avoid carrying old block
+                # ids (defensive — graph reads only [:bs] anyway).
+                dst_bt[bs:].zero_()
+                dst_bt[:n_rows, :n_cols].copy_(src_bt[:n_rows, :n_cols])
+                if n_cols < dst_bt.shape[1]:
+                    dst_bt[:n_rows, n_cols:].zero_()
 
         from rtp_llm.models_py.modules.dsv41.fp8.decode._fused_prepare_meta_triton import (
             fused_phase2b_pool_slot_mapping,
@@ -1523,6 +1588,7 @@ def build_decode_metadata_fp8(
         topk_total_by_ratio=topk_total_by_ratio,
         compressed_offset=window_size,
         is_cuda_graph=False,
+        valid_requests=torch.ones(B, dtype=torch.bool, device=device),
         pool_block_tables=pool_block_tables,
         paged_pool_tokens_per_block=paged_pool_tokens_per_block_resolved,
         pool_write_slot_mappings=pool_write_slot_mappings,

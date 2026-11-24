@@ -16,12 +16,20 @@ from rtp_llm.models_py.modules.dsv41.fp8.indexer import _TOPK_V3_OK, _get_topk_w
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
+def supports_bf16() -> bool:
+    """The finite selector entry also identifies native BF16 input support."""
+    return _TOPK_V3_OK and hasattr(rtp_llm_ops, "dsv41_topk_v3_finite")
+
+
 def is_supported(logits: torch.Tensor, visible: torch.Tensor, topk: int = 512) -> bool:
     return (
         _TOPK_V3_OK
         and torch.version.hip is None
         and logits.is_cuda
-        and logits.dtype == torch.float32
+        and (
+            logits.dtype == torch.float32
+            or (logits.dtype == torch.bfloat16 and supports_bf16())
+        )
         and logits.ndim == 2
         and logits.shape[0] > 0
         and topk == 512
@@ -78,7 +86,9 @@ def _select_tokens(
     out=None,
     filter_finite=True,
 ) -> torch.Tensor:
-    """Use native v3 selection, which canonicalizes both NaN signs."""
+    """Select native BF16 or FP32 scores without a full-matrix conversion."""
+    from . import _v41_prefill_deepselect as deepselect
+
     rows, width = logits.shape
     if bounds is None:
         ends = torch.empty((rows,), device=logits.device, dtype=torch.int32)
@@ -87,6 +97,11 @@ def _select_tokens(
         )
     else:
         ends = bounds[1]
+    selected = deepselect.try_select_tokens(
+        logits, ends, out=out, filter_finite=filter_finite
+    )
+    if selected is not None:
+        return selected
     output = (
         out
         if out is not None
@@ -135,7 +150,7 @@ def try_select_tokens(
             and tensor.dtype == torch.int32
             and tensor.shape == (logits.shape[0],)
             and tensor.is_contiguous()
-            for tensor in bounds
+            for tensor in (bounds[1:] if bounds[0] is None else bounds)
         )
     ):
         return None

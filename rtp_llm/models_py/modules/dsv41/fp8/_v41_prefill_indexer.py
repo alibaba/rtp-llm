@@ -19,6 +19,9 @@ from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_triton import (
     FP4_INDEXER_HEAD_DIM,
     quantize_rows_fp4,
 )
+from rtp_llm.models_py.modules.dsv41.fp8._v41_grouped_prefill_score import (
+    _MAX_LOGITS_BYTES,
+)
 
 
 @dataclass(frozen=True)
@@ -51,18 +54,20 @@ def is_supported(device: torch.device, num_heads: int, head_dim: int) -> bool:
 
 
 def logits_chunk_rows(num_keys: int) -> int:
-    """Bound logical FP32 logits to 256 MiB, with at most 4096 queries.
+    """Bound logical FP32 logits to the shared score budget, with at most 4096 queries.
 
     DeepGEMM additionally pads its row stride by up to 511 keys and aligns
     query rows to its small Q tile. This is independent of the head dimension;
     no [queries, heads, keys] temporary is materialized. The 4096-row query
     batch is the batched source scan: four times fewer scorer launches,
     topk calls and per-chunk glue than the 512-row cap at 16K+ contexts,
-    with the same 256 MiB logits bound.
+    with the same score budget.
     """
     if num_keys == 0:
         return 512
-    return max(1, min(4096, (256 * 1024 * 1024) // (4 * num_keys)))
+    if 4 * num_keys > _MAX_LOGITS_BYTES:
+        raise ValueError("score budget cannot hold one FP32 logits row")
+    return min(4096, _MAX_LOGITS_BYTES // (4 * num_keys))
 
 
 def quantize_indexer_q(q: torch.Tensor):
@@ -212,7 +217,15 @@ def _use_clean_logits_only(device: torch.device) -> bool:
 
 
 def score_indexer_chunk(
-    q_payload, q_sf, k_payload, k_sf, weights, visible, *, bounds=None
+    q_payload,
+    q_sf,
+    k_payload,
+    k_sf,
+    weights,
+    visible,
+    *,
+    bounds=None,
+    return_bf16=False,
 ):
     """Fused dot/ReLU/head reduction; keep causal padding at negative infinity."""
     from ._indexer_score import fp8_fp4_mqa_indexer_score
@@ -220,7 +233,10 @@ def score_indexer_chunk(
     count = k_payload.shape[0]
     if q_payload.shape[0] == 0 or count == 0:
         return torch.empty(
-            q_payload.shape[0], count, dtype=torch.float32, device=q_payload.device
+            q_payload.shape[0],
+            count,
+            dtype=torch.bfloat16 if return_bf16 else torch.float32,
+            device=q_payload.device,
         )
     if bounds is None:
         ends = visible.to(torch.int32).clamp(0, count).contiguous()
@@ -240,11 +256,12 @@ def score_indexer_chunk(
         starts,
         ends,
         clean_logits=True,
-        # Wrapper restores the ordinary [M,K] layout and masks causal tails
-        # from upstream's request-relative BF16 score output.
-        max_seqlen_k=0,
+        # Direct consumers use request-local columns and explicit row bounds.
+        # Preserve the masked FP32 compatibility result for other callers.
+        max_seqlen_k=count if return_bf16 else 0,
+        return_bf16=return_bf16,
     )
-    if not _use_clean_logits_only(q_payload.device):
+    if not return_bf16 and not _use_clean_logits_only(q_payload.device):
         logits.masked_fill_(
             torch.arange(count, device=logits.device)[None] >= ends[:, None],
             -torch.inf,

@@ -6,10 +6,185 @@ from unittest.mock import Mock, patch
 
 import torch
 
+from rtp_llm.ops import RoleType
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
 
 
 class NativePrefillInputsTest(unittest.TestCase):
+    def test_prefill_mtp_hidden_storage_grows_with_live_rows(self):
+        from rtp_llm.models_py.model_desc.deepseek_v41_base_model import (
+            Dsv4MtpHiddenBufferSpec,
+            Dsv4SharedRuntimeBufferStore,
+        )
+
+        class Subscriber(torch.nn.Module):
+            def _bind_runtime_buffers(self, buffer):
+                self.register_buffer("_mtp_hidden_buffer", buffer, persistent=False)
+
+        Dsv4SharedRuntimeBufferStore._reset_for_test()
+        try:
+            Dsv4SharedRuntimeBufferStore.enable_mtp_hidden()
+            store = Dsv4SharedRuntimeBufferStore.get_or_create(
+                torch.device("cpu"),
+                torch.bfloat16,
+                Dsv4MtpHiddenBufferSpec(token_capacity=0, hc_dim=3),
+            )
+            first, second = Subscriber(), Subscriber()
+            store.bind(first)
+            store.bind(second)
+            self.assertEqual(tuple(first._mtp_hidden_buffer.shape), (0, 3))
+
+            store.ensure_mtp_hidden_capacity(4)
+            old = first._mtp_hidden_buffer
+            old[0].fill_(7)
+            store.ensure_mtp_hidden_capacity(3)
+            self.assertIs(first._mtp_hidden_buffer, old)
+            store.ensure_mtp_hidden_capacity(8)
+            self.assertEqual(tuple(first._mtp_hidden_buffer.shape), (8, 3))
+            self.assertEqual(
+                first._mtp_hidden_buffer.data_ptr(),
+                second._mtp_hidden_buffer.data_ptr(),
+            )
+            self.assertNotEqual(first._mtp_hidden_buffer.data_ptr(), old.data_ptr())
+            self.assertTrue(torch.equal(old[0], torch.full((3,), 7)))
+        finally:
+            Dsv4SharedRuntimeBufferStore._reset_for_test()
+
+    def test_v41_prefill_does_not_reserve_max_configured_mtp_rows(self):
+        from rtp_llm.models_py.model_desc.deepseek_v41_base_model import (
+            DeepSeekV4Model,
+            Dsv4SharedRuntimeBufferStore,
+        )
+
+        transformer = SimpleNamespace(
+            layers=[SimpleNamespace(attn=SimpleNamespace(n_heads=16))],
+            _bind_prefill_workspace_dims=Mock(),
+        )
+        owner = SimpleNamespace(
+            v4=transformer,
+            _v4_args=SimpleNamespace(
+                v41_config=object(), dim=5120, hc_mult=4, head_dim=512
+            ),
+            _capture_aux_hidden_layer_ids=(1, 14, 39),
+            _is_speculative=False,
+            _is_decode_role=False,
+            py_hw_kernel_config=SimpleNamespace(enable_cuda_graph=False),
+            parallelism_config=SimpleNamespace(role_type=RoleType.PREFILL),
+            _prefill_cp_size=4,
+            _resolve_prefill_q_token_capacity=lambda: 16777216,
+            _resolve_prefill_ws_gather_widths=lambda: (5120, 512),
+            _resolve_mtp_hidden_token_capacity=Mock(
+                side_effect=AssertionError("static Prefill capacity used")
+            ),
+        )
+        store = SimpleNamespace(bind=Mock())
+        with patch.object(
+            Dsv4SharedRuntimeBufferStore, "mtp_hidden_requested", return_value=True
+        ), patch.object(
+            Dsv4SharedRuntimeBufferStore, "get_or_create", return_value=store
+        ) as create:
+            DeepSeekV4Model._bind_runtime_buffers(owner, torch.device("cpu"))
+        spec = create.call_args.kwargs["mtp_hidden"]
+        self.assertEqual((spec.token_capacity, spec.hc_dim), (0, 15360))
+        store.bind.assert_called_once_with(transformer)
+
+        owner.parallelism_config.role_type = RoleType.PDFUSION
+        owner._resolve_mtp_hidden_token_capacity = Mock(return_value=64)
+        with patch.object(
+            Dsv4SharedRuntimeBufferStore, "mtp_hidden_requested", return_value=True
+        ), patch.object(
+            Dsv4SharedRuntimeBufferStore, "get_or_create", return_value=store
+        ) as create:
+            DeepSeekV4Model._bind_runtime_buffers(owner, torch.device("cpu"))
+        spec = create.call_args.kwargs["mtp_hidden"]
+        self.assertEqual((spec.token_capacity, spec.hc_dim), (64, 15360))
+        self.assertFalse(owner._lazy_mtp_hidden_prefill)
+
+        owner.parallelism_config.role_type = RoleType.PREFILL
+        owner.py_hw_kernel_config.enable_cuda_graph = True
+        with patch.object(
+            Dsv4SharedRuntimeBufferStore, "mtp_hidden_requested", return_value=True
+        ), patch.object(
+            Dsv4SharedRuntimeBufferStore, "get_or_create", return_value=store
+        ) as create:
+            DeepSeekV4Model._bind_runtime_buffers(owner, torch.device("cpu"))
+        spec = create.call_args.kwargs["mtp_hidden"]
+        self.assertEqual((spec.token_capacity, spec.hc_dim), (64, 15360))
+        self.assertFalse(owner._lazy_mtp_hidden_prefill)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_eager_prefill_keeps_native_device_boundaries(self):
+        from rtp_llm.models_py.modules.dsv41.prefill import forward
+
+        attention = PyAttentionInputs()
+        attention.is_prefill = True
+        attention.input_lengths = torch.tensor([2, 3], dtype=torch.int32)
+        attention.prefix_lengths = torch.tensor([0, 9], dtype=torch.int32)
+        attention.cu_seqlens = torch.tensor([0, 2, 5], dtype=torch.int32)
+        attention.cu_seqlens_device = attention.cu_seqlens.cuda()
+        inputs = PyModelInputs()
+        inputs.input_ids = torch.tensor(
+            [1, 2, 3, 4, 5], dtype=torch.int32, device="cuda"
+        )
+        inputs.combo_position_ids = torch.tensor([0, 1, 9, 10, 11], device="cuda")
+        inputs.attention_inputs = {"swa_kv": attention}
+        model = SimpleNamespace(set_cp_info=Mock())
+        result = torch.zeros(5, 4, device="cuda")
+        with patch.object(forward, "forward_layers", return_value=result) as layers:
+            forward.forward_prefill(model, None, None, inputs)
+        self.assertEqual(
+            layers.call_args.args[4].data_ptr(), attention.cu_seqlens_device.data_ptr()
+        )
+        self.assertEqual(layers.call_args.args[4].device, inputs.input_ids.device)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "native model imports need CUDA")
+    def test_device_metadata_capability_after_v41_subclass_configuration(self):
+        from rtp_llm.models_py.model_desc import deepseek_v41_base_model as base
+        from rtp_llm.models_py.model_desc.deepseek_v41_dspark_model import (
+            DeepSeekV41DSparkModel,
+        )
+        from rtp_llm.models_py.model_desc.deepseek_v41_model import DeepSeekV41Model
+
+        config = SimpleNamespace(
+            num_layers=3,
+            vocab_size=17,
+            capture_aux_hidden_layer_ids=[],
+            gen_num_per_cycle=8,
+            inter_size=0,
+            ckpt_path="unused",
+            dspark_noise_token_id=1,
+            dspark_target_layer_ids=[37, 38, 39],
+            dspark_markov_rank=2,
+            deepseek_v41_config={
+                "dspark_n_routed_experts": 4,
+                "dspark_num_experts_per_tok": 2,
+            },
+        )
+        for model_class in (
+            base.DeepSeekV4Model,
+            DeepSeekV41Model,
+            DeepSeekV41DSparkModel,
+        ):
+            for fp8 in (False, True):
+                with self.subTest(model=model_class.__name__, fp8=fp8):
+                    args = base.V4Args(
+                        n_layers=3,
+                        compress_ratios=[0, 0, 0],
+                        fp8_kv_cache=fp8,
+                    )
+                    self.assertIsNone(args.v41_config)
+                    # Run the real base and subclass constructors. V4.1's
+                    # configure_v41 runs after the base constructor returns;
+                    # caching the capability in the base therefore loses it.
+                    with patch.object(
+                        base, "_args_from_model_config", return_value=args
+                    ):
+                        model = model_class(config, None, None, None, 4)
+                    self.assertEqual(
+                        model.supports_device_only_attention_metadata,
+                        fp8 and model_class is not base.DeepSeekV4Model,
+                    )
+
     @unittest.skipUnless(
         torch.cuda.is_available(), "native attention factory needs CUDA"
     )
@@ -31,6 +206,10 @@ class NativePrefillInputsTest(unittest.TestCase):
                 inputs = PyModelInputs()
                 inputs.input_ids = torch.tensor([1, 2, 3, 4, 5], dtype=torch.int32)
                 inputs.attention_inputs = {"swa_kv": attention}
+                if explicit:
+                    inputs.expert_token_counts = torch.zeros(
+                        (2, 3), dtype=torch.int32, device="cuda"
+                    )
                 expected = torch.tensor([0, 1, 9, 10, 11])
                 if explicit:
                     inputs.combo_position_ids = expected
@@ -41,6 +220,13 @@ class NativePrefillInputsTest(unittest.TestCase):
                     output = forward.forward_prefill(model, None, None, inputs)
                 torch.testing.assert_close(layers.call_args.args[3].long(), expected)
                 self.assertEqual(layers.call_args.args[4].tolist(), [0, 2, 5])
+                passed_counts = layers.call_args.kwargs["expert_token_counts"]
+                if explicit:
+                    self.assertEqual(
+                        passed_counts.data_ptr(), inputs.expert_token_counts.data_ptr()
+                    )
+                else:
+                    self.assertIsNone(passed_counts)
                 self.assertEqual(tuple(output.hidden_states.shape), (5, 4))
 
     @unittest.skipUnless(torch.cuda.is_available(), "native model imports need CUDA")
@@ -56,7 +242,8 @@ class NativePrefillInputsTest(unittest.TestCase):
         )
         owner = SimpleNamespace(
             v4=transformer,
-            _v4_args=SimpleNamespace(n_heads=64, head_dim=512),
+            _v4_args=SimpleNamespace(n_heads=64, head_dim=512, v41_config=None),
+            parallelism_config=SimpleNamespace(role_type=RoleType.PREFILL),
             _prefill_cp_size=1,
             _resolve_prefill_q_token_capacity=lambda: 128,
         )

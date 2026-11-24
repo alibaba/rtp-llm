@@ -36,7 +36,9 @@ def _fused():
     return importlib.import_module(_FUSED_MODULE)
 
 
-def _layout_owner(device, ratio, batch, *, ring_entries=_STATE_EB):
+def _layout_owner(
+    device, ratio, batch, *, ring_entries=_STATE_EB, compact_indexer=False
+):
     main_region = CSA_KV if ratio == 2 else HCA_KV
     pages = _MAX_SEQ_LEN // _KV_TPB
     # Permute physical ids independently across regions to catch pool mixups.
@@ -56,7 +58,7 @@ def _layout_owner(device, ratio, batch, *, ring_entries=_STATE_EB):
             dtype=torch.uint8,
         ),
         INDEXER_KV: torch.full(
-            (batch * pages + 1, _KV_TPB, 68),
+            (batch * pages + 1, _KV_TPB // ratio if compact_indexer else _KV_TPB, 68),
             0x7F,
             device=device,
             dtype=torch.uint8,
@@ -87,17 +89,23 @@ def _layout_owner(device, ratio, batch, *, ring_entries=_STATE_EB):
         _rope_max_seq_len=_MAX_SEQ_LEN,
         _cp_ctx=None,
         _kv_cache=SimpleNamespace(
-            group_tags=tuple(tables),
+            group_tags=tuple(
+                "indexer_kv_c2" if compact_indexer and tag == INDEXER_KV else tag
+                for tag in tables
+            ),
             get_kernel_seq_size_per_block=lambda tag: _KV_TPB,
             get_seq_size_per_block=lambda tag: _STATE_TPB,
             get_entries_per_block=lambda tag: (
-                ring_entries if tag == CSA_STATE else pools[tag].shape[1]
+                ring_entries
+                if tag == CSA_STATE
+                else pools[INDEXER_KV if tag == "indexer_kv_c2" else tag].shape[1]
             ),
         ),
         _block_tables_by_type=tables,
         _shared_attention={"global": {}, "topk": {}},
         _test_pools=pools,
         _test_ring_entries=ring_entries,
+        _test_compact_indexer=compact_indexer,
     )
     owner._source_pool = lambda region: pools[region]
     owner._source_entries = lambda region, pool: (
@@ -108,10 +116,19 @@ def _layout_owner(device, ratio, batch, *, ring_entries=_STATE_EB):
     return owner
 
 
-def _case(device, ratio, batch, span, *, seed=4141, norm_dtype=torch.float32):
+def _case(
+    device,
+    ratio,
+    batch,
+    span,
+    *,
+    seed=4141,
+    norm_dtype=torch.float32,
+    compact_indexer=False,
+):
     # CPU-only construction keeps fixture randomness independent of capture.
     generator = torch.Generator(device="cpu").manual_seed(seed)
-    owner = _layout_owner(device, ratio, batch)
+    owner = _layout_owner(device, ratio, batch, compact_indexer=compact_indexer)
     for name in ("global_wkv", "global_wgate"):
         setattr(
             owner,
@@ -136,7 +153,11 @@ def _case(device, ratio, batch, span, *, seed=4141, norm_dtype=torch.float32):
     x = torch.randn(batch, span, 5120, generator=generator).to(
         device=device, dtype=torch.bfloat16
     )
-    starts = torch.tensor([127, 255, 7, 508][:batch], device=device, dtype=torch.int64)
+    # Preserve the boundary fixtures and vary ring phases for larger batches.
+    start_values = [127, 255, 7, 508][:batch]
+    if batch > 4:
+        start_values += [(11 + 53 * i) % 499 for i in range(4, batch)]
+    starts = torch.tensor(start_values, device=device, dtype=torch.int64)
     req_ids = torch.arange(batch, device=device).repeat_interleave(span)
     positions = (starts[:, None] + torch.arange(span, device=device)).flatten()
     return SimpleNamespace(
@@ -151,6 +172,7 @@ def _clone_case(case):
         owner.compress_ratio,
         case.x.shape[0],
         ring_entries=owner._test_ring_entries,
+        compact_indexer=owner._test_compact_indexer,
     )
     for region, pool in owner._test_pools.items():
         cloned._test_pools[region].copy_(pool)
@@ -382,8 +404,11 @@ class V41DecodeGlobalCPU(unittest.TestCase):
         self.assertEqual(len(set(slots[12:].tolist())), 8)
         owner._block_tables_by_type[CSA_STATE][0, 0] = 0
         owner._block_tables_by_type[CSA_STATE][1, 1] = -1
+        pool = owner._source_pool(CSA_STATE)
+        before = pool.clone()
         got = owner._read_state(torch.tensor([7, 257]), torch.tensor([0, 1]))
         torch.testing.assert_close(got, torch.zeros(2, 1024), rtol=0, atol=0)
+        torch.testing.assert_close(pool, before, rtol=0, atol=0)
 
     def test_cpu_gate_returns_false_without_mutating_pools(self):
         case = _case("cpu", 2, 1, 6)
@@ -404,6 +429,50 @@ class V41DecodeGlobalCUDA(unittest.TestCase):
         if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10:
             self.skipTest("SM100 CUDA required")
         torch.manual_seed(41041)
+        environment = patch.dict(
+            os.environ,
+            {
+                "DSV4_TRAP_INVALID_KV_ACCESS": "1",
+                "DSV4_VALIDATE_INVALID_KV_ACCESS": "0",
+            },
+        )
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    @torch.inference_mode()
+    def test_compact_ratio2_producer_graph_writes_exact_physical_cache_bytes(self):
+        old = _case("cuda", 2, 4, 6, compact_indexer=True)
+        new = _clone_case(old)
+        self.assertEqual(new.owner._test_pools[INDEXER_KV].shape[1], 64)
+        initial = _snapshot(old)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                _candidate(new)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            _candidate(new)
+        for region, pool in initial.items():
+            new.owner._test_pools[region].copy_(pool)
+        for round_id, starts in enumerate(
+            ([127, 255, 7, 508], [128, 256, 8, 509], [129, 258, 9, 510])
+        ):
+            before = _snapshot(old)
+            for case in (old, new):
+                _set_starts(case, starts)
+                if round_id == 1:
+                    for table in case.owner._block_tables_by_type.values():
+                        table[2, 0] = 0
+                        table[3, -1] = -1
+            replacement = torch.randn_like(old.x)
+            old.x.copy_(replacement)
+            new.x.copy_(replacement)
+            _reference(old)
+            graph.replay()
+            torch.cuda.synchronize()
+            _assert_result(self, old, new, before)
 
     @torch.inference_mode()
     def test_ratio_batch_span_matrix_all_cache_bytes(self):
@@ -423,43 +492,93 @@ class V41DecodeGlobalCUDA(unittest.TestCase):
                         _assert_result(self, old, new, initial)
 
     @torch.inference_mode()
-    def test_padded_main_and_table_row_strides_with_trap(self):
+    def test_mtp_verify_token_count_all_cache_bytes(self):
         for ratio in (1, 2):
-            with self.subTest(ratio=ratio):
-                old = _case("cuda", ratio, 2, 6)
+            for batch, span in ((11, 6), (32, 6)):
+                with self.subTest(ratio=ratio, batch=batch, span=span):
+                    old = _case("cuda", ratio, batch, span)
+                    new = _clone_case(old)
+                    initial = _snapshot(old)
+                    _reference(old)
+                    _candidate(new)
+                    _assert_result(self, old, new, initial)
+
+    @torch.inference_mode()
+    def test_mtp_verify_shape_speculative_rejection_tail(self):
+        for accepted in (0, 5):
+            with self.subTest(accepted=accepted):
+                old = _case("cuda", 2, 32, 6)
                 new = _clone_case(old)
-                backings = []
-                for case in (old, new):
-                    region = case.owner._global_region()
-                    pool = case.owner._test_pools[region]
-                    width = pool.shape[1] * 288
-                    backing = torch.full(
-                        (pool.shape[0], width + 256),
-                        0xA5,
-                        dtype=torch.uint8,
-                        device="cuda",
-                    )
-                    padded = backing.as_strided(pool.shape, (width + 256, 288, 1))
-                    padded.copy_(pool)
-                    case.owner._test_pools[region] = padded
-                    backings.append((backing[:, width:], 0xA5))
-                    for region, table in case.owner._block_tables_by_type.items():
-                        backing = torch.full(
-                            (table.shape[0], table.shape[1] + 3),
-                            -999,
-                            dtype=table.dtype,
-                            device="cuda",
-                        )
-                        padded = backing[:, : table.shape[1]]
-                        padded.copy_(table)
-                        case.owner._block_tables_by_type[region] = padded
-                        backings.append((backing[:, table.shape[1] :], -999))
                 initial = _snapshot(old)
                 _reference(old)
                 _candidate(new)
                 _assert_result(self, old, new, initial)
-                for padding, sentinel in backings:
-                    self.assertTrue(bool((padding == sentinel).all()))
+                initial = _snapshot(old)
+                next_starts = (old.starts + accepted).tolist()
+                for case in (old, new):
+                    _set_starts(case, next_starts)
+                replacement = torch.randn_like(old.x)
+                old.x.copy_(replacement)
+                new.x.copy_(replacement)
+                _reference(old)
+                _candidate(new)
+                _assert_result(self, old, new, initial)
+
+    @torch.inference_mode()
+    def test_large_batches_write_expected_slots(self):
+        for ratio in (1, 2):
+            for batch, span in ((65, 1), (193, 1), (64, 6), (1024, 6)):
+                with self.subTest(ratio=ratio, batch=batch, span=span):
+                    old = _case("cuda", ratio, batch, span)
+                    # Isolate dispatch/address coverage from RMSNorm rounding.
+                    old.x.zero_()
+                    old.owner._test_pools[CSA_STATE][_STATE_EB:].zero_()
+                    new = _clone_case(old)
+                    initial = _snapshot(old)
+                    _reference(old)
+                    _candidate(new)
+                    _assert_result(self, old, new, initial, allow_signed_zero=True)
+
+    @torch.inference_mode()
+    def test_padded_main_and_table_row_strides_both_trap_modes(self):
+        for ratio in (1, 2):
+            for trap in ("0", "1"):
+                with self.subTest(ratio=ratio, trap=trap):
+                    old = _case("cuda", ratio, 2, 6)
+                    new = _clone_case(old)
+                    backings = []
+                    for case in (old, new):
+                        region = case.owner._global_region()
+                        pool = case.owner._test_pools[region]
+                        width = pool.shape[1] * 288
+                        backing = torch.full(
+                            (pool.shape[0], width + 256),
+                            0xA5,
+                            dtype=torch.uint8,
+                            device="cuda",
+                        )
+                        padded = backing.as_strided(pool.shape, (width + 256, 288, 1))
+                        padded.copy_(pool)
+                        case.owner._test_pools[region] = padded
+                        backings.append((backing[:, width:], 0xA5))
+                        for region, table in case.owner._block_tables_by_type.items():
+                            backing = torch.full(
+                                (table.shape[0], table.shape[1] + 3),
+                                -999,
+                                dtype=table.dtype,
+                                device="cuda",
+                            )
+                            padded = backing[:, : table.shape[1]]
+                            padded.copy_(table)
+                            case.owner._block_tables_by_type[region] = padded
+                            backings.append((backing[:, table.shape[1] :], -999))
+                    initial = _snapshot(old)
+                    with patch.dict(os.environ, {"DSV4_TRAP_INVALID_KV_ACCESS": trap}):
+                        _reference(old)
+                        _candidate(new)
+                    _assert_result(self, old, new, initial)
+                    for padding, sentinel in backings:
+                        self.assertTrue(bool((padding == sentinel).all()))
 
     @torch.inference_mode()
     def test_unallocated_pages_out_of_table_and_norm_dtype(self):
@@ -525,11 +644,12 @@ class V41DecodeGlobalCUDA(unittest.TestCase):
 
     @torch.inference_mode()
     def test_graph_updates_device_inputs_page_tables_and_rejected_positions(self):
-        for ratio in (1, 2):
-            with self.subTest(ratio=ratio):
-                old = _case("cuda", ratio, 4, 6)
+        for ratio, batch in ((1, 4), (2, 4), (1, 32), (2, 32)):
+            with self.subTest(ratio=ratio, batch=batch):
+                old = _case("cuda", ratio, batch, 6)
                 new = _clone_case(old)
                 initial = _snapshot(old)
+                extra_starts = old.starts[4:].tolist()
                 stream = torch.cuda.Stream()
                 stream.wait_stream(torch.cuda.current_stream())
                 with torch.cuda.stream(stream):
@@ -552,7 +672,10 @@ class V41DecodeGlobalCUDA(unittest.TestCase):
                 for round_id, starts in enumerate(rounds):
                     before = _snapshot(old)
                     for case in (old, new):
-                        _set_starts(case, starts)
+                        _set_starts(
+                            case,
+                            starts + [start + round_id for start in extra_starts],
+                        )
                         if round_id == 1:
                             # Device table changes must be read on replay,
                             # including zero/negative unallocated sentinels.
@@ -583,15 +706,33 @@ class V41DecodeGlobalCUDA(unittest.TestCase):
                 del graph
 
     @torch.inference_mode()
+    def test_large_batch_runs_without_the_old_token_limit(self):
+        helper = _fused()
+        for ratio in (1, 2):
+            with self.subTest(ratio=ratio):
+                case = _case("cuda", ratio, 193, 1)
+                args = (case.owner, case.x, case.positions, case.req_ids, case.starts)
+                self.assertTrue(helper.is_supported(*args))
+                old = _clone_case(case)
+                before = _snapshot(case)
+                _reference(old)
+                _candidate(case)
+                _assert_result(self, old, case, before)
+                # Removing the row cap must not relax the layout checks.
+                case.owner.index_head_dim = 64
+                self.assertFalse(helper.is_supported(*args))
+
+    @torch.inference_mode()
     def test_unsupported_inputs_do_not_write_pools(self):
         base = _case("cuda", 2, 1, 6)
         for label in (
             "missing_cache",
+            "validation_debug",
             "long_span",
             "sharded",
             "wrong_dtype",
             "wrong_width",
-            "too_many_tokens",
+            "empty_tokens",
         ):
             with self.subTest(label=label):
                 case = _clone_case(base)
@@ -609,11 +750,24 @@ class V41DecodeGlobalCUDA(unittest.TestCase):
                     case.x = case.x.float()
                 elif label == "wrong_width":
                     case.x = case.x[..., :256].contiguous()
-                elif label == "too_many_tokens":
-                    case.x = case.x[:, :1].expand(65, 1, 5120).contiguous()
+                elif label == "empty_tokens":
+                    case.x = case.x[:0]
+                    case.positions = case.positions[:0]
+                    case.req_ids = case.req_ids[:0]
+                    case.starts = case.starts[:0]
                 before = _snapshot(case)
                 helper = _fused()
-                with patch.object(
+                with patch.dict(
+                    os.environ,
+                    {
+                        "DSV4_TRAP_INVALID_KV_ACCESS": (
+                            "0" if label == "validation_debug" else "1"
+                        ),
+                        "DSV4_VALIDATE_INVALID_KV_ACCESS": (
+                            "1" if label == "validation_debug" else "0"
+                        ),
+                    },
+                ), patch.object(
                     helper, "_compress_norm_main_store_kernel"
                 ) as stage_a, patch.object(
                     helper, "_index_norm_store_state_kernel"

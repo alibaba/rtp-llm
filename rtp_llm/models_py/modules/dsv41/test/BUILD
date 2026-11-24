@@ -1,36 +1,157 @@
+load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
 load("@pip_dsv4_test//:requirements.bzl", test_requirement = "requirement")
+load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_sm100_py_test")
 
 package(default_visibility = ["//visibility:public"])
 
-# CPU-only contract tests: no CUDA context, no GPU launches (docstrings and
-# code audited; CUDA references are mocks only). They drop the SM100 GPU pin
-# and run on the ARM CPU pool via the cuda13_arm default exec properties, with
-# GPU_COUNT=0 so the device_resource wrapper skips CUDA probes and GPU locks.
-# The SM100_ARM_CU13 tag is kept on purpose: lane selection uses a positive
-# tag filter, while worker routing comes from exec_properties only.
-_CPU_ONLY_TESTS = [
-    "test_cache_specs",
-    "test_cache_tags",
-    "test_deep_gemm_scratch",
+[
+    py_test(
+        name = "test_v41_native_cache_specs" + suffix,
+        main = "test_v41_native_cache_specs.py",
+        srcs = ["test_v41_native_cache_specs.py"],
+        deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+        data = ["//rtp_llm/cpp/cache/test:cache_config_creator_py_test"],
+        tags = ["dsv41_cuda13", gpu],
+        env = {"GPU_COUNT": "0"},
+        # The native cache-config executable links the CUDA driver.
+        exec_properties = {"gpu": gpu, "gpu_count": "1"},
+        legacy_create_init = 0,
+        target_compatible_with = select({
+            config: [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+    )
+    for suffix, config, gpu in [
+        ("", "@//:using_cuda13_x86", "L20_CU13"),
+        ("_arm", "@//:using_cuda13_arm", "SM100_ARM_CU13"),
+    ]
+]
+
+[
+    py_test(
+        name = name + "_cpu",
+        srcs = [name + ".py"],
+        main = name + ".py",
+        deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+        tags = ["dsv41_cuda13"],
+        env = {"GPU_COUNT": "0"},
+        legacy_create_init = 0,
+    )
+    for name in ["test_cache_specs", "test_cache_tags"]
+]
+
+[
+    cuda13_sm100_py_test(
+        name = name,
+        srcs = ["test_v41_cp_collectives.py"],
+        main = "test_v41_cp_collectives.py",
+        gpu_count = gpu_count,
+        deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+        env = {"DSV41_CP_TEST_WORLD_SIZE": str(gpu_count)},
+        tags = ["dsv41_cuda13"],
+        legacy_create_init = 0,
+    )
+    for name, gpu_count in [
+        ("test_v41_cp_collectives_cp2", 2),
+        ("test_v41_cp_collectives", 4),
+        ("test_v41_cp_collectives_cp8", 8),
+    ]
+]
+
+cuda13_sm100_py_test(
+    name = "test_engram_scale_shards",
+    srcs = glob(["*.py"]) + ["//rtp_llm/test/pytest:pytest_main.py"],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "3", "$(location :test_engram_scale_shards.py)"],
+    gpu_count = 3,
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py:tile_kernels_mhc",
+        "//rtp_llm:jit_cache_env",
+        test_requirement("pytest"),
+    ],
+    tags = ["dsv41_cuda13"],
+    legacy_create_init = 0,
+)
+
+py_test(
+    name = "test_prefill_positions_upload",
+    srcs = ["test_prefill_positions_upload.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    tags = ["dsv41_cuda13", "SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "test_v41_front_gemm",
+    srcs = ["test_v41_front_gemm.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    tags = ["dsv41_cuda13", "SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+_ENGRAM_SM100_TESTS = [
     "test_engram",
-    "test_flash_mla_heads",
-    "test_v41_delayed_hc",
-    "test_v41_mega_mhc_compact",
+    "test_engram_cpu",
+    "test_engram_cpu_deadline",
+    "test_engram_cpu_native_packed",
+    "test_engram_cuda",
+    "test_engram_packed",
+    "test_engram_prefetch",
+    "test_engram_decode_schedule",
+    "test_engram_quantized_slice",
 ]
 
 _TESTS = [
+    "test_cp_metadata_high_batch",
+    "test_dspark_commit_wkv",
+    "mega_moe_static_buf_test",
+    "test_dspark_cuda_graph_contract",
+    "test_engram_cpu",
+    "test_engram_cpu_deadline",
+    "test_engram_cpu_native_packed",
+    "test_engram_packed",
+    "test_engram_prefetch",
+    "test_gate_routing_metadata",
+    "test_hc_expand",
+    "test_mega_gate",
+    "test_mega_input_pack",
+    "test_mega_se_input_pack",
+    "test_mhc_moe_inputs",
+    "test_mhc_lazy_backward",
+    "test_prefill_workspace",
+    "test_strategy_select",
+    "test_silu_mul_bf16",
+
     "test_native_prefill_inputs",
     "test_mxfp8_dense",
+    "test_deep_gemm_scratch",
+    "test_cache_specs",
+    "test_cache_tags",
     "test_ced",
     "test_dsv41_kernel_jit_warmup",
+    "test_engram",
     "test_engram_cuda",
+    "test_flash_mla_heads",
     "test_v41_cross_layer_mhc",
+    "test_v41_aux_capture_mhc",
     "test_v41_decode_rope_metadata",
+    "test_v41_delayed_hc",
     "test_v41_delayed_hc_cuda_graph",
     "test_v41_fused_inv_rope_fp8_quant",
     "test_v41_fused_qkv",
     "test_v41_hc_jit_warmup",
     "test_v41_mega_mhc",
+    "test_v41_mega_mhc_compact",
     "test_v41_mhc_prenorm",
     "test_v41_query_quant",
 ]
@@ -56,31 +177,7 @@ _TESTS = [
         }),
         legacy_create_init = 0,
     )
-    for name in _TESTS
-]
-
-[
-    py_test(
-        name = name,
-        srcs = glob(["*.py"]) + ["//rtp_llm/test/pytest:pytest_main.py"],
-        main = "//rtp_llm/test/pytest:pytest_main.py",
-        args = ["$(location :" + name + ".py)"],
-        deps = [
-            "//rtp_llm:testlib",
-            "//rtp_llm/models_py:modules",
-            "//rtp_llm/models_py:tile_kernels_mhc",
-            "//rtp_llm:jit_cache_env",
-            test_requirement("pytest"),
-        ],
-        env = {"GPU_COUNT": "0"},
-        tags = ["dsv41_cuda13", "SM100_ARM_CU13"],
-        target_compatible_with = select({
-            "@//:using_cuda13_arm": [],
-            "//conditions:default": ["@platforms//:incompatible"],
-        }),
-        legacy_create_init = 0,
-    )
-    for name in _CPU_ONLY_TESTS
+    for name in _TESTS if name not in ["test_prefill_workspace", "test_strategy_select", "test_gate_routing_metadata", "test_v41_aux_capture_mhc", "test_v41_cross_layer_mhc", "test_v41_mega_mhc", "test_mega_gate", "test_mhc_moe_inputs", "test_v41_query_quant", "test_silu_mul_bf16", "test_dsv41_kernel_jit_warmup", "test_v41_decode_rope_metadata", "test_v41_mhc_prenorm", "test_v41_hc_jit_warmup", "test_mhc_lazy_backward", "test_v41_mega_mhc_compact"] + _ENGRAM_SM100_TESTS
 ]
 
 py_test(
@@ -95,4 +192,44 @@ py_test(
         "@//:using_cuda13_arm": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
+)
+
+[
+    cuda13_sm100_py_test(
+        name = name,
+        srcs = glob(["*.py"]) + ["//rtp_llm/test/pytest:pytest_main.py"],
+        main = "//rtp_llm/test/pytest:pytest_main.py",
+        args = ["--cuda-devices", "1", "$(location :" + name + ".py)"],
+        deps = [
+            "//rtp_llm:testlib",
+            "//rtp_llm/models_py:modules",
+            "//rtp_llm/models_py:tile_kernels_mhc",
+            "//rtp_llm:jit_cache_env",
+            test_requirement("pytest"),
+        ],
+        tags = ["dsv41_cuda13"],
+        legacy_create_init = 0,
+    )
+    for name in ["test_v41_hc_jit_warmup", "test_mhc_lazy_backward", "test_v41_mega_mhc_compact", "test_v41_mhc_prenorm", "test_v41_decode_rope_metadata", "test_silu_mul_bf16", "test_prefill_workspace", "test_strategy_select", "test_gate_routing_metadata", "test_v41_aux_capture_mhc", "test_v41_cross_layer_mhc", "test_v41_mega_mhc", "test_mega_gate", "test_private_gate_pack_eplb", "test_mhc_moe_inputs", "test_fake_balance_expert", "test_v41_query_quant", "test_dsv41_kernel_jit_warmup", "test_engram_decode_prefetch", "test_engram_quantized"] + _ENGRAM_SM100_TESTS
+]
+
+dsv4_sm100_py_test(
+    name = "test_eplb_contract",
+    gpu_count = 0,
+    tags = ["dsv41_cuda13"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+    ],
+)
+
+dsv4_sm100_py_test(
+    name = "test_eplb_mega",
+    gpu_count = 2,
+    tags = ["dsv41_cuda13"],
+    extra_srcs = ["//rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test:mega_moe_routed_only_execution_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+    ],
 )

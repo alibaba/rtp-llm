@@ -11,7 +11,9 @@ expects:
   exact same kernel launches with frozen pointers — the only way to
   get different behavior across replays is to update the buffers
   ``forward`` reads from BEFORE replay. That update is
-  ``prepare_cuda_graph(attn_inputs)``.
+  ``prepare_cuda_graph(attn_inputs, valid_request_count=...)``. This backend
+  opts in to the runner's live request count; padded tensor shapes alone
+  cannot distinguish live requests from CUDA Graph padding.
 
 This impl is **DSv4-specific** and intentionally does not inherit
 ``MlaImplBase`` because DSv4's attention does not use the standard MLA
@@ -19,8 +21,8 @@ FMHA pipeline (custom CSA / HCA / SWA + TileLang sparse attention).
 The impl only carries:
 
   * Pre-allocated ``DSv4DecodeAttnMetadataFP8`` (sized for the captured BS).
-  * A ``prepare_cuda_graph(attn_inputs)`` method that updates the
-    metadata in place from the framework attention inputs.
+  * A ``prepare_cuda_graph`` method that updates metadata and selection
+    validity in place, without changing the original MTP/KV-write lengths.
 
 ``DeepSeekV4Model._forward_decode`` reads the metadata off the impl
 when one is supplied; otherwise it builds inline (Phase 2 eager path).
@@ -71,15 +73,28 @@ class DSv4DecodeFmhaImplConfigFP8:
     # doesn't hand one in). Static for the allocator's lifetime, so
     # snapshot-at-construct is safe.
     group_tags: List[int] = field(default_factory=list)
+    packed_target_verify: bool = False
 
 
 class DSv4DecodeFmhaImplFP8:
     """CUDA-graph-friendly DSv4 decode "FMHA impl".
 
-    Owns persistent metadata buffers; ``prepare_cuda_graph`` updates them
-    in place across replays so the captured graph reads fresh values
-    from stable addresses.
+    Owns persistent metadata buffers. The model graph updates them from
+    stable device inputs before executing its layers.
     """
+
+    # CudaGraphRunner can leave captured host mirrors untouched for this
+    # backend. Preparation consumes only device lengths / block tables, and
+    # replay reads the persistent device buffers built from them. The runner
+    # preserves stream dependencies and padding of those device inputs.
+    cuda_graph_uses_device_metadata = True
+    cuda_graph_uses_valid_request_count = True
+    # CudaGraphRunner supplies this callback only during target-verify capture.
+    _cuda_graph_engram_forked = None
+
+    @property
+    def cuda_graph_preparation_in_graph(self) -> bool:
+        return self._metadata_in_graph
 
     def __init__(
         self,
@@ -89,7 +104,16 @@ class DSv4DecodeFmhaImplFP8:
     ) -> None:
         self.config = config
         self.device = device
-        self.metadata: DSv4DecodeAttnMetadataFP8 = allocate_decode_metadata_fp8(
+        allocator = allocate_decode_metadata_fp8
+        allocation_kwargs = {}
+        if config.packed_target_verify:
+            from .packed_metadata import allocate_packed_decode_metadata
+
+            allocator = allocate_packed_decode_metadata
+            allocation_kwargs["paged_block_tables"] = self._extract_paged_block_tables(
+                attn_inputs
+            )
+        self.metadata: DSv4DecodeAttnMetadataFP8 = allocator(
             max_batch_size=config.max_batch_size,
             q_len=config.q_len,
             window_size=config.window_size,
@@ -99,6 +123,7 @@ class DSv4DecodeFmhaImplFP8:
             index_topk=config.index_topk,
             device=device,
             paged_pool_specs=config.paged_pool_specs,
+            **allocation_kwargs,
         )
         self._paged_entries_per_block: Dict[int, int] = {
             at: spec[0] for at, spec in config.paged_pool_specs.items()
@@ -106,6 +131,10 @@ class DSv4DecodeFmhaImplFP8:
         self._paged_tokens_per_block: Dict[int, int] = {
             at: spec[1] for at, spec in config.paged_pool_specs.items()
         }
+        self.cuda_graph_valid_request_count_device = torch.full(
+            (), self.metadata.start_pos.numel(), dtype=torch.int32, device=device
+        )
+        self._metadata_in_graph = False
         self.prepare(attn_inputs, forbid_realloc=True)
 
     def support_cuda_graph(self) -> bool:
@@ -136,6 +165,11 @@ class DSv4DecodeFmhaImplFP8:
         ``opt_flash_mla/design/01_cuda_graph_sched_meta_freeze.md``.
         """
         paged_block_tables = self._extract_paged_block_tables(attn_inputs)
+        if self.config.packed_target_verify:
+            self._prepare_packed(
+                attn_inputs, paged_block_tables, capture_full_width_lengths=True
+            )
+            return
         update_decode_metadata_in_place_fp8(
             self.metadata,
             as_tagged_attention_inputs(attn_inputs),
@@ -146,19 +180,58 @@ class DSv4DecodeFmhaImplFP8:
             capture_full_width_lengths=True,
         )
 
-    def prepare_cuda_graph(self, attn_inputs: Any) -> None:
-        """Called by ``CudaGraphRunner::prepareInputs`` between every
-        replay.
+    def prepare_cuda_graph(
+        self, attn_inputs: Any, *, valid_request_count: int | torch.Tensor | None = None
+    ) -> None:
+        """Refresh standalone metadata or the captured graph's live-row input."""
+        resources = getattr(self.metadata, "_engram_decode_tables", None)
+        if resources is not None:
+            resources.validate()
+        if valid_request_count is None:
+            raise ValueError(
+                "CUDA Graph replay requires the live request count from the matching C++ runner"
+            )
+        count = self.cuda_graph_valid_request_count_device
+        if isinstance(valid_request_count, torch.Tensor):
+            if not (
+                valid_request_count.numel() == 1
+                and valid_request_count.dtype == torch.int32
+                and valid_request_count.device == count.device
+                and valid_request_count.is_contiguous()
+            ):
+                raise ValueError(
+                    "Decode live request count must be one contiguous device int32"
+                )
+        elif not 0 <= valid_request_count <= self.metadata.start_pos.numel():
+            raise ValueError("Decode valid request count must fit the captured batch")
+        if not self._metadata_in_graph:
+            self._update_replay_metadata(attn_inputs, valid_request_count)
+        # The C++ runner passes this same storage after its fused fill, so the
+        # normal replay path needs no additional copy or kernel launch here.
+        if isinstance(valid_request_count, torch.Tensor):
+            if valid_request_count.data_ptr() != count.data_ptr():
+                count.copy_(valid_request_count.reshape(()))
+        else:
+            count.fill_(valid_request_count)
 
-        Writes the REAL per-request effective lengths
-        (``capture_full_width_lengths=False``, the default): the captured
-        FlashMLA kernel reads these for per-query masking so the sparse decode
-        only scans ``min(window, seq_len)`` / ``seq_len // ratio`` instead of
-        the full capture width, while the frozen (full-width) tile schedule from
-        :meth:`prepare` stays a safe superset. See
-        ``opt_flash_mla/design/01_cuda_graph_sched_meta_freeze.md``.
-        """
+    def prepare_in_graph(self, attn_inputs: Any) -> None:
+        # Keep the full-width warmup schedule; replay reads a device count
+        # written by the runner's existing preparation node before this model.
+        if torch.cuda.is_current_stream_capturing():
+            self._update_replay_metadata(
+                attn_inputs, self.cuda_graph_valid_request_count_device
+            )
+            self._metadata_in_graph = True
+
+    def _update_replay_metadata(
+        self, attn_inputs: Any, valid_request_count: int | torch.Tensor
+    ) -> None:
         paged_block_tables = self._extract_paged_block_tables(attn_inputs)
+        if self.config.packed_target_verify:
+            self._prepare_packed(
+                attn_inputs, paged_block_tables, valid_request_count=valid_request_count
+            )
+            return
         update_decode_metadata_in_place_fp8(
             self.metadata,
             as_tagged_attention_inputs(attn_inputs),
@@ -166,4 +239,18 @@ class DSv4DecodeFmhaImplFP8:
             paged_block_tables=paged_block_tables,
             paged_pool_entries_per_block=self._paged_entries_per_block,
             paged_pool_tokens_per_block=self._paged_tokens_per_block,
+            require_device_metadata=True,
+            valid_request_count=valid_request_count,
+        )
+
+    def _prepare_packed(self, attn_inputs, block_tables, **kwargs):
+        from .packed_metadata import update_packed_decode_metadata
+
+        update_packed_decode_metadata(
+            self.metadata,
+            as_tagged_attention_inputs(attn_inputs),
+            block_tables,
+            self._paged_entries_per_block,
+            self._paged_tokens_per_block,
+            **kwargs,
         )

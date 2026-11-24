@@ -31,6 +31,7 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._prefill_stream import prefill_stream_is_capturing
 from rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_indexer import PrefillIndexerKeys
 
 MAX_CHUNK_ROWS = 4096
@@ -369,8 +370,8 @@ def prepare_plan(
             return None
     stream = torch.cuda.current_stream(candidates.device)
     stream_key = (stream.device.index, stream.cuda_stream)
-    capturing = torch.cuda.is_current_stream_capturing()
-    if capturing and stream_key not in _WARMED_STREAMS:
+    cold_stream = stream_key not in _WARMED_STREAMS
+    if cold_stream and prefill_stream_is_capturing():
         return None
     rows, count = candidates.shape
     batched = lookup or row_key_offsets is not None
@@ -435,7 +436,7 @@ def prepare_plan(
         block_size,
         use_unaligned_ks=True,
     )
-    if not capturing:
+    if cold_stream:
         _WARMED_STREAMS.add(stream_key)
     return SparsePrefillPlan(
         row_ks, row_ke, indices, sparse_end, metadata, key_count, block_size, offsets
@@ -452,8 +453,9 @@ def score(
     """Compute BF16 sparse logits; padding outside plan.end is not a valid score.
 
     FP4 payload and packed group-32 UE8M0 scales are consumed unchanged.
-    Head weights are converted to BF16 (not multiplied by Q scales). This
-    precision change follows vLLM's sparse contract and is intentional.
+    Head weights use BF16 (not multiplied by Q scales), usually emitted
+    directly by fused Q preparation. Legacy FP32 callers retain the explicit
+    conversion; the sparse precision contract remains unchanged.
     """
     if not (
         isinstance(plan, SparsePrefillPlan)
@@ -472,7 +474,7 @@ def score(
     return _get_deep_gemm().fp8_fp4_sparse_mqa_logits(
         (q_payload, q_sf),
         (keys.quant, keys.scale),
-        weights.to(torch.bfloat16),
+        weights if weights.dtype == torch.bfloat16 else weights.to(torch.bfloat16),
         plan.metadata,
         plan.sparse_indices.shape[1],
         plan.block_size,
@@ -791,10 +793,8 @@ def try_batched_sparse(
     if not deepselect.is_available(q.device):
         return False
     stream = torch.cuda.current_stream(q.device)
-    if (
-        torch.cuda.is_current_stream_capturing()
-        and (stream.device.index, stream.cuda_stream) not in _WARMED_STREAMS
-    ):
+    stream_key = (stream.device.index, stream.cuda_stream)
+    if stream_key not in _WARMED_STREAMS and prefill_stream_is_capturing():
         return False
     prepared_groups = []
     for pieces, slab, offsets in groups:

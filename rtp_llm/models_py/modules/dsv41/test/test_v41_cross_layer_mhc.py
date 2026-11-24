@@ -2,10 +2,13 @@
 
 import os
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.modules.dsv41 import _prefill_stream
 from rtp_llm.models_py.modules.dsv41.block import Block
 from rtp_llm.models_py.modules.dsv41.hc import decode_transition as transition
 from rtp_llm.models_py.modules.dsv41.hc.delayed import DelayedHCHead, DelayedHCUnit
@@ -13,7 +16,91 @@ from rtp_llm.models_py.modules.dsv41.hc.delayed import DelayedHCHead, DelayedHCU
 _ENV = {"DSV41_FUSED_CROSS_LAYER_MHC": "1", "DSV41_MEGA_MHC": "1"}
 
 
+class PrefillStreamTest(unittest.TestCase):
+    def test_only_the_proven_thread_device_and_stream_borrow_eager(self):
+        check = _prefill_stream.prefill_stream_is_capturing
+        main = (0, 0, 1)
+        device = torch.device("cuda:0")
+        eager = _prefill_stream.is_default_eager_prefill
+        with patch.object(
+            _prefill_stream, "_current_stream", return_value=main
+        ) as current, patch.object(
+            torch.cuda, "is_current_stream_capturing", return_value=True
+        ) as capture:
+            self.assertTrue(check())
+            self.assertFalse(eager(device))
+            with _prefill_stream.default_eager_prefill(True):
+                self.assertFalse(check())
+                self.assertTrue(eager(device))
+                self.assertFalse(eager(torch.device("cuda:1")))
+                with ThreadPoolExecutor(1) as worker:
+                    self.assertTrue(worker.submit(check).result())
+                    self.assertFalse(worker.submit(eager, device).result())
+                for other in ((0, 1, 1), (17, 0, 1)):
+                    current.return_value = other
+                    self.assertTrue(check())
+                    self.assertFalse(eager(device))
+                current.return_value = main
+                with self.assertRaisesRegex(ValueError, "nested"):
+                    with _prefill_stream.default_eager_prefill(False):
+                        self.assertTrue(check())
+                        raise ValueError("nested")
+                self.assertFalse(check())
+            self.assertTrue(check())
+            self.assertEqual(capture.call_count, 6)
+        with patch.object(_prefill_stream, "_current_stream", None), patch.object(
+            torch.cuda, "is_current_stream_capturing", return_value=True
+        ):
+            with _prefill_stream.default_eager_prefill(True):
+                self.assertTrue(check())
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_real_capture_on_a_side_stream_inside_default_prefill(self):
+        from rtp_llm.models_py.modules.dsv41.hc.v41_mega_mhc import prefill_mhc_stream
+
+        device = torch.device("cuda", torch.cuda.current_device())
+        main = torch.cuda.default_stream(device)
+        side = torch.cuda.Stream(device=device)
+        out = torch.zeros(1, device=device)
+        graph = torch.cuda.CUDAGraph()
+        check = _prefill_stream.prefill_stream_is_capturing
+        with torch.cuda.stream(main), prefill_mhc_stream(device, reuse_capture=True):
+            with patch.object(
+                torch.cuda,
+                "is_current_stream_capturing",
+                wraps=torch.cuda.is_current_stream_capturing,
+            ) as native:
+                self.assertFalse(check())
+                native.assert_not_called()
+                with torch.cuda.stream(side):
+                    self.assertFalse(check())
+                native.assert_called_once_with()
+                native.reset_mock()
+                if torch.cuda.device_count() > 1:
+                    other = (device.index + 1) % torch.cuda.device_count()
+                    with torch.cuda.device(other):
+                        self.assertFalse(check())
+                    native.assert_called_once_with()
+            with torch.cuda.stream(side), prefill_mhc_stream(
+                device, reuse_capture=True
+            ):
+                self.assertFalse(check())
+                with torch.cuda.graph(graph, stream=side):
+                    self.assertTrue(check())
+                    with prefill_mhc_stream(device, reuse_capture=True):
+                        self.assertTrue(check())
+                    out.add_(1)
+            self.assertFalse(check())
+        graph.replay()
+        torch.cuda.synchronize(device)
+        self.assertEqual(out.item(), 1)
+
+
 class ReferenceNorm(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("weight", torch.ones(8))
+
     def forward(self, x):
         value = x.float()
         return (value * torch.rsqrt(value.square().mean(-1, keepdim=True) + 1e-6)).to(
@@ -22,12 +109,18 @@ class ReferenceNorm(torch.nn.Module):
 
 
 class TestAttention(torch.nn.Module):
+    def can_fuse_prefill_attn_norm_input_quant(self, *_args):
+        return False
+
+    def forward(self, x, _positions, **_kwargs):
+        return x * 0.25
+
     def forward_decode(self, x, _metadata, kv_cache=None):
         return x * 0.25
 
 
 class TestFFN(torch.nn.Module):
-    def forward(self, x, input_ids):
+    def forward(self, x, input_ids, expert_load):
         return (
             x.float() * 0.125 + input_ids.reshape(*x.shape[:-1], 1).float() * 0.01
         ).to(x.dtype)
@@ -92,6 +185,7 @@ def run_blocks(blocks, hidden, input_ids, captures=(), attn_fn=None):
             next_layer=blocks[index + 1] if index + 1 < len(blocks) else None,
             preserve_output=index in captures,
             attn_fn=attn_fn,
+            expert_load=None,
         )
         if index in captures:
             assert isinstance(hidden, torch.Tensor)
@@ -100,7 +194,19 @@ def run_blocks(blocks, hidden, input_ids, captures=(), attn_fn=None):
     return hidden, DelayedHCHead(blocks[-1].ffn_hc).head(hidden), *captured
 
 
-def reference_transition(output, residual, post, comb, previous, next_hc, norm):
+def reference_transition(
+    output,
+    residual,
+    post,
+    comb,
+    previous,
+    next_hc,
+    norm,
+    *,
+    output_fp8=False,
+    use_prepared=False,
+):
+    assert not output_fp8
     residual = previous.post(output, residual, post, comb)
     x, post, comb = next_hc.pre(residual)
     normalized = norm(x.reshape(-1, x.shape[-1])).reshape(x.shape)
@@ -108,6 +214,73 @@ def reference_transition(output, residual, post, comb, previous, next_hc, norm):
 
 
 class CrossLayerMHCCPUTest(unittest.TestCase):
+    def test_prefill_fast_prepared_transition_matches_materialized_path(self):
+        ids = torch.arange(10)
+        positions = ids.clone()
+        cu_seqlens = torch.tensor([0, 10])
+        hidden = torch.randn(10, 4, 8, dtype=torch.bfloat16)
+        baseline = make_blocks(count=2)
+        candidate = make_blocks(count=2)
+        for block in (*baseline, *candidate):
+            block._cp_sync_after_attn_done = True
+        first = baseline[0]._forward_prefill_fast_fp8(
+            hidden, ids, positions, cu_seqlens, expert_load=None
+        )
+        expected = baseline[1]._forward_prefill_fast_fp8(
+            first, ids, positions, cu_seqlens, expert_load=None
+        )
+        pending = candidate[0]._forward_prefill_fast_fp8(
+            hidden, ids, positions, cu_seqlens, expert_load=None, _defer_ffn_post=True
+        )
+        self.assertIsInstance(pending, transition.PendingDecodePost)
+        prepared = reference_transition(
+            pending.output,
+            pending.residual,
+            pending.post,
+            pending.comb,
+            pending.previous,
+            candidate[1].attn_hc,
+            candidate[1].attn_norm,
+        )
+        actual = candidate[1]._forward_prefill_fast_fp8(
+            prepared[0],
+            ids,
+            positions,
+            cu_seqlens,
+            expert_load=None,
+            _prepared_attn=prepared,
+        )
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(
+            candidate[1].attn_hc.pre_mix_out,
+            baseline[1].attn_hc.pre_mix_out,
+            rtol=0,
+            atol=0,
+        )
+
+    def test_prefill_fast_engram_matches_regular_path_and_defers_post(self):
+        ids = torch.arange(10)
+        hidden = torch.randn(10, 4, 8, dtype=torch.bfloat16)
+        baseline = make_blocks(count=2, engram_layers=(1,))
+        candidate = make_blocks(count=2, engram_layers=(1,))
+        candidate[1].attn.v41_config = {}
+        with patch("rtp_llm.models_py.modules.dsv41.block.AttentionFP8", TestAttention):
+            self.assertIsNotNone(candidate[1].prefill_fast_callable())
+        for block in (*baseline, *candidate):
+            block._cp_sync_after_attn_done = True
+        args = (ids, ids.clone(), torch.tensor([0, 10]))
+        expected = baseline[1].forward(
+            baseline[0].forward(hidden, *args, expert_load=None),
+            *args,
+            expert_load=None,
+        )
+        first = candidate[0]._forward_prefill_fast_fp8(hidden, *args, expert_load=None)
+        pending = candidate[1]._forward_prefill_fast_fp8(
+            first, *args, expert_load=None, _defer_ffn_post=True
+        )
+        self.assertIsInstance(pending, transition.PendingDecodePost)
+        torch.testing.assert_close(pending.materialize(), expected, rtol=0, atol=0)
+
     def setUp(self):
         env = patch.dict(os.environ, _ENV)
         env.start()
@@ -135,6 +308,69 @@ class CrossLayerMHCCPUTest(unittest.TestCase):
             )
         return fused.call_count
 
+    def test_prequantized_input_reaches_attention_and_preserves_fallback(self):
+        quantized = (torch.empty(3, 2, 8), torch.empty(6, 1))
+        seen = []
+
+        class QuantizedAttention(TestAttention):
+            def forward_decode(
+                self, x, metadata, kv_cache=None, shared_input_quant=None
+            ):
+                seen.append(shared_input_quant)
+                return super().forward_decode(x, metadata, kv_cache)
+
+        blocks = make_blocks()
+        for block in blocks:
+            block.attn = QuantizedAttention()
+
+        def backend(*args, output_fp8=False, use_prepared=False):
+            self.assertTrue(use_prepared)
+            self.assertTrue(output_fp8)
+            return (*reference_transition(*args), quantized)
+
+        with patch.object(
+            transition, "_can_quantize_attention_input", return_value=True
+        ), patch.object(transition, "try_fused_post_pre", side_effect=backend):
+            got = run_blocks(blocks, self.hidden, self.ids)
+        self.assertIsNone(seen[0])
+        self.assertIs(seen[1], quantized)
+        self.assertIs(seen[2], quantized)
+        with patch.dict(os.environ, {"DSV41_FUSED_CROSS_LAYER_MHC": "0"}):
+            expected = run_blocks(make_blocks(), self.hidden, self.ids)
+        for value, ref in zip(got, expected):
+            torch.testing.assert_close(value, ref, rtol=0, atol=0)
+
+    def test_fp8_gate_preserves_overrides_and_non_native_attention(self):
+        layer = make_blocks()[0]
+        self.assertFalse(
+            transition._can_quantize_attention_input(layer, self.hidden, lambda x: x)
+        )
+        self.assertFalse(
+            transition._can_quantize_attention_input(layer, self.hidden, None)
+        )
+
+    def test_native_fp8_is_independent_of_standalone_quant_backend(self):
+        from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
+
+        layer = make_blocks()[0]
+        layer.attn = AttentionV41FP8.__new__(AttentionV41FP8)
+        torch.nn.Module.__init__(layer.attn)
+        layer.attn.q_norm = torch.ones(8)
+        layer.attn.q_lora_rank = 8
+        with patch(
+            "rtp_llm.models_py.modules.dsv41._v41_fused_qkv.is_supported",
+            return_value=True,
+        ):
+            for backend in ("auto", "legacy", "v2", "v3"):
+                with self.subTest(backend=backend), patch.dict(
+                    os.environ, {"DSV4_FP8_QUANT_KERNEL": backend}
+                ):
+                    self.assertTrue(
+                        transition._can_quantize_attention_input(
+                            layer, self.hidden, None
+                        )
+                    )
+
     def test_two_transitions_and_final_delayed_head(self):
         self.assertEqual(self.compare(backend=reference_transition), 2)
 
@@ -156,7 +392,11 @@ class CrossLayerMHCCPUTest(unittest.TestCase):
         )
 
     def test_unsupported_backend_materializes_original_post(self):
-        self.assertEqual(self.compare(backend=lambda *args: None), 2)
+        self.assertEqual(self.compare(backend=lambda *args, **kwargs: None), 2)
+
+    def test_post_is_materialized_before_an_engram_layer(self):
+        left, right = make_blocks(count=2, engram_layers=(1,))
+        self.assertFalse(transition.can_defer_decode_post(left, right, False))
 
     def test_pending_values_do_not_escape_a_forward(self):
         blocks = make_blocks()
@@ -171,7 +411,28 @@ class CrossLayerMHCCPUTest(unittest.TestCase):
         for got, ref in zip(second, expected):
             torch.testing.assert_close(got, ref, rtol=0, atol=0)
 
-    def test_enable_gate_predecessor_and_debug_guards(self):
+    def test_prefill_post_boundaries_follow_cached_layer_calls(self):
+        from rtp_llm.models_py.modules.dsv41.prefill.forward import (
+            _prefill_post_boundaries,
+        )
+
+        layers = make_blocks(count=5, engram_layers=(3,))
+        model = SimpleNamespace(layers=layers)
+        calls = tuple(layer._forward_prefill_fast_fp8 for layer in layers)
+        with patch.dict(os.environ, {"DSV41_FUSED_CROSS_LAYER_MHC": "0"}):
+            plan = _prefill_post_boundaries(model, calls)
+        self.assertEqual(plan, (True, True, False, True, False))
+        self.assertIs(_prefill_post_boundaries(model, calls), plan)
+
+        # A replacement dispatch table may contain an ordinary callable, and a
+        # rebuilt layer stack may have different predecessor links.
+        layers[2].attn_hc.set_previous(layers[0].ffn_hc)
+        calls = (*calls[:4], layers[4])
+        self.assertEqual(
+            _prefill_post_boundaries(model, calls), (True, False, False, False, None)
+        )
+
+    def test_enable_gate_and_predecessor_guards(self):
         left, right, _ = make_blocks()
         self.assertTrue(transition.can_defer_decode_post(left, right, False))
         self.assertFalse(transition.can_defer_decode_post(left, right, True))
@@ -185,7 +446,12 @@ class CrossLayerMHCCPUTest(unittest.TestCase):
     def test_backend_error_propagates_without_materializing_post(self):
         blocks = make_blocks()
         pending = transition.forward_decode_layer(
-            blocks[0], self.hidden, None, self.ids, next_layer=blocks[1]
+            blocks[0],
+            self.hidden,
+            None,
+            self.ids,
+            next_layer=blocks[1],
+            expert_load=None,
         )
         self.assertIsInstance(pending, transition.PendingDecodePost)
         with patch.object(
@@ -194,17 +460,54 @@ class CrossLayerMHCCPUTest(unittest.TestCase):
             side_effect=RuntimeError("backend failure"),
         ), patch.object(pending.previous, "post", wraps=pending.previous.post) as post:
             with self.assertRaisesRegex(RuntimeError, "backend failure"):
-                transition.forward_decode_layer(blocks[1], pending, None, self.ids)
+                transition.forward_decode_layer(
+                    blocks[1], pending, None, self.ids, expert_load=None
+                )
             post.assert_not_called()
 
-    def test_custom_block_keeps_original_call_signature(self):
+    def test_monitor_context_follows_each_decode_call_through_fused_boundary(self):
+        blocks = make_blocks(count=2)
+        received = []
+
+        class RecordingFFN(TestFFN):
+            def forward(self, x, input_ids, expert_load):
+                received.append(expert_load)
+                return super().forward(x, input_ids, expert_load=expert_load)
+
+        for block in blocks:
+            block.ffn = RecordingFFN()
+        contexts = [object() for _ in range(4)]
+        with patch.object(
+            transition, "try_fused_post_pre", side_effect=reference_transition
+        ):
+            for step in range(2):
+                hidden = self.hidden
+                for index, block in enumerate(blocks):
+                    hidden = transition.forward_decode_layer(
+                        block,
+                        hidden,
+                        None,
+                        self.ids,
+                        next_layer=blocks[1] if index == 0 else None,
+                        expert_load=contexts[step * 2 + index],
+                    )
+        self.assertEqual(received, contexts)
+        for block in blocks:
+            self.assertFalse(hasattr(block.ffn, "expert_load_recorder"))
+
+    def test_custom_block_receives_disabled_monitor_context(self):
         class CustomBlock:
-            def forward_decode(self, hidden, metadata, input_ids, kv_cache=None):
+            def forward_decode(
+                self, hidden, metadata, input_ids, expert_load, kv_cache=None
+            ):
+                self.expert_load = expert_load
                 return hidden + 1
 
+        block = CustomBlock()
         result = transition.forward_decode_layer(
-            CustomBlock(), self.hidden, None, self.ids
+            block, self.hidden, None, self.ids, expert_load=None
         )
+        self.assertIsNone(block.expert_load)
         torch.testing.assert_close(result, self.hidden + 1, rtol=0, atol=0)
 
 
@@ -216,7 +519,7 @@ class CrossLayerMHCCudaTest(unittest.TestCase):
             raise unittest.SkipTest("mega_mhc requires Blackwell")
 
     def setUp(self):
-        env = patch.dict(os.environ, {**_ENV})
+        env = patch.dict(os.environ, {**_ENV, "MOEDBG": "0"})
         env.start()
         self.addCleanup(env.stop)
 

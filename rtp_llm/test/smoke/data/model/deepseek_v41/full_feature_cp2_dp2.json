@@ -117,9 +117,7 @@
         305,
         270,
         41273,
-        515,
-        3530,
-        294,
+        16765,
         6394,
         14,
         17942,
@@ -130,7 +128,7 @@
         1
       ]
     ],
-    "response": " long and the archive was full of books, maps, and letters.",
+    "response": " long and the archive stores books, maps, and letters.",
     "input_len": 783,
     "prefill_reuse_len": 0
   },
@@ -156,9 +154,7 @@
         305,
         270,
         41273,
-        515,
-        3530,
-        294,
+        16765,
         6394,
         14,
         17942,
@@ -169,7 +165,7 @@
         1
       ]
     ],
-    "response": " long and the archive was full of books, maps, and letters.",
+    "response": " long and the archive stores books, maps, and letters.",
     "input_len": 783,
     "prefill_reuse_len": 0
   },
@@ -197,11 +193,18 @@
         41273,
         515,
         3530,
+        294,
+        6394,
+        14,
+        17942,
+        14,
+        305,
+        9263,
         16,
         1
       ]
     ],
-    "response": " long and the archive was full.",
+    "response": " long and the archive was full of books, maps, and letters.",
     "input_len": 783,
     "prefill_reuse_len": 512
   },
@@ -229,11 +232,18 @@
         41273,
         515,
         3530,
+        294,
+        6394,
+        14,
+        17942,
+        14,
+        305,
+        9263,
         16,
         1
       ]
     ],
-    "response": " long and the archive was full.",
+    "response": " long and the archive was full of books, maps, and letters.",
     "input_len": 783,
     "prefill_reuse_len": 512
   },
@@ -259,9 +269,7 @@
         305,
         270,
         41273,
-        515,
-        3530,
-        294,
+        16765,
         6394,
         14,
         17942,
@@ -272,7 +280,7 @@
         1
       ]
     ],
-    "response": " long and the archive was full of books, maps, and letters.",
+    "response": " long and the archive stores books, maps, and letters.",
     "input_len": 783,
     "prefill_reuse_len": 0
   }

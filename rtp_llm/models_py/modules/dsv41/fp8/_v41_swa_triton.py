@@ -15,11 +15,20 @@ codec, or selected as a fallback for an already allocated 584B cache.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from contextlib import nullcontext
+from functools import partial
+from typing import TYPE_CHECKING, Callable, Optional
 
 import torch
 import triton
 import triton.language as tl
+
+from rtp_llm.models_py.modules.dsv41._cp_collectives import (
+    borrowed_all_gather,
+    try_all_gather_into,
+)
+from rtp_llm.models_py.modules.dsv41._prefill_stream import prefill_stream_is_capturing
+from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_kv import quantize_swa_row
 
 if TYPE_CHECKING:
     from rtp_llm.models_py.modules.dsv41.fp8._swa_cp_byte_sliced import (
@@ -97,11 +106,8 @@ def _quantize_and_insert_swa_kernel(
         values = original.to(tl.float32)
     else:
         values = tl.load(kv + row * input_stride.to(tl.int64) + columns).to(tl.float32)
-    groups = values.reshape((16, 32))
-    maximum = tl.maximum(tl.max(tl.abs(groups), 1), 1e-4)
-    exponent = tl.ceil(tl.log2(maximum * (1.0 / 448.0)))
-    scaled = tl.clamp(groups * tl.exp2(-exponent)[:, None], -448.0, 448.0)
-    payload = scaled.to(tl.float8e4nv).to(tl.uint8, bitcast=True).reshape((512,))
+    quantized, encoded, _ = quantize_swa_row(values)
+    payload = quantized.to(tl.uint8, bitcast=True)
     payload_byte = position * 528 + columns
     if CP_BYTES:
         begin = rank.to(tl.int64) * local_bytes
@@ -112,7 +118,6 @@ def _quantize_and_insert_swa_kernel(
         )
     else:
         tl.store(base + payload_byte, payload)
-    encoded = tl.clamp(exponent + 127.0, 0.0, 255.0).to(tl.uint8)
     scale_byte = position * 528 + 512 + tl.arange(0, 16)
     if CP_BYTES:
         tl.store(
@@ -197,6 +202,7 @@ def _gather_swa_kernel(
     compact_blocks=0,
     local_bytes=0,
     RANK_MAJOR: tl.constexpr = False,
+    out_row_offsets=None,
 ):
     batch = tl.program_id(0).to(tl.int64)
     column = tl.program_id(1).to(tl.int64)
@@ -209,10 +215,13 @@ def _gather_swa_kernel(
     values = _load_swa_row(
         pool, slot, block_stride, ENTRIES, compact_blocks, local_bytes, RANK_MAJOR
     )
+    batch_start = batch * out_stride0.to(tl.int64)
+    if out_row_offsets is not None:
+        batch_start = tl.load(out_row_offsets + batch).to(tl.int64) * out_stride1.to(
+            tl.int64
+        )
     output = (
-        out
-        + batch * out_stride0.to(tl.int64)
-        + (offset.to(tl.int64) + column) * out_stride1.to(tl.int64)
+        out + batch_start + (offset.to(tl.int64) + column) * out_stride1.to(tl.int64)
     )
     tl.store(output + tl.arange(0, 512), values)
 
@@ -263,18 +272,41 @@ def dequantize_swa_k_cache(
     return out
 
 
+def _normalize_gather_row_offsets(out, row_offsets, batch):
+    if row_offsets is None:
+        return None
+    if not (
+        out.ndim == 2
+        and out.shape[1] == HEAD_DIM
+        and out.stride(1) == 1
+        and out.stride(0) >= HEAD_DIM
+        and isinstance(row_offsets, torch.Tensor)
+        and row_offsets.device == out.device
+        and row_offsets.dtype in (torch.int32, torch.int64)
+        and row_offsets.shape == (batch,)
+    ):
+        raise ValueError("Packed SWA gather needs a row matrix and per-request offsets")
+    return row_offsets.contiguous()
+
+
 def dequantize_and_gather_k_cache_slots(
     out: torch.Tensor,
     k_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
     gather_lens: Optional[torch.Tensor],
     offset: int,
+    *,
+    out_row_offsets: Optional[torch.Tensor] = None,
 ) -> None:
     """Gather ``[B, W]`` slots into strided ``out[:, offset:offset+W, :]``.
 
-    Rows outside each request's gather length are left untouched. Lengths
-    remain on device, including during CUDA graph capture and replay.
+    With ``out_row_offsets``, output is a packed matrix and each request
+    starts at its explicit row offset. Rows outside its gather length are
+    untouched. Lengths and offsets stay on device during graph replay.
     """
+    out_row_offsets = _normalize_gather_row_offsets(
+        out, out_row_offsets, slot_mapping.shape[0]
+    )
     if slot_mapping.numel():
         _gather_swa_kernel[tuple(slot_mapping.shape)](
             k_cache,
@@ -285,15 +317,24 @@ def dequantize_and_gather_k_cache_slots(
             slot_mapping.stride(0),
             slot_mapping.stride(1),
             out.stride(0),
-            out.stride(1),
+            out.stride(0) if out_row_offsets is not None else out.stride(1),
             offset,
             ENTRIES=k_cache.shape[1],
+            out_row_offsets=out_row_offsets,
             num_warps=4,
         )
 
 
 def _gather_swa_rank_major(
-    out, gathered, slots, lengths, offset, compact_blocks, local_bytes, entries
+    out,
+    gathered,
+    slots,
+    lengths,
+    offset,
+    compact_blocks,
+    local_bytes,
+    entries,
+    out_row_offsets=None,
 ):
     """Decode private or all-gathered CP4 bytes; this helper has no collective."""
     if slots.numel():
@@ -306,12 +347,13 @@ def _gather_swa_rank_major(
             slots.stride(0),
             slots.stride(1),
             out.stride(0),
-            out.stride(1),
+            out.stride(0) if out_row_offsets is not None else out.stride(1),
             offset,
             ENTRIES=entries,
             compact_blocks=compact_blocks,
             local_bytes=local_bytes,
             RANK_MAJOR=True,
+            out_row_offsets=out_row_offsets,
             num_warps=4,
         )
 
@@ -382,6 +424,57 @@ def is_supported_fresh_store(
     )
 
 
+def _store_cp_direct(
+    k,
+    k_cache_raw,
+    compact_slots,
+    unique_blocks,
+    full_entries_per_block,
+    cp_rank,
+    fresh_slots,
+    fresh_out,
+):
+    rows = k.shape[0]
+    if not rows:
+        return
+    _quantize_and_insert_swa_kernel[(rows,)](
+        k,
+        k_cache_raw,
+        compact_slots,
+        k.stride(0),
+        k_cache_raw.stride(0),
+        ENTRIES=full_entries_per_block,
+        unique_blocks=unique_blocks,
+        rank=cp_rank,
+        local_bytes=k_cache_raw.shape[1],
+        CP_BYTES=True,
+        fresh_out=fresh_out,
+        fresh_slots=fresh_slots,
+        STORE_FRESH=fresh_out is not None,
+        num_warps=4,
+    )
+
+
+def prepare_fresh_store(
+    k, raw, slots, full_entries_per_block, cp_rank, cp_size, compaction, fresh_slots
+) -> Optional[Callable[[torch.Tensor], None]]:
+    """Bind this write's checked inputs before the caller reads the prefix."""
+    if not is_supported_fresh_store(
+        k, raw, slots, full_entries_per_block, cp_rank, cp_size, compaction, fresh_slots
+    ):
+        return None
+    return partial(
+        _store_cp_direct,
+        k,
+        raw,
+        compaction.compact_slots,
+        compaction.unique_blocks,
+        full_entries_per_block,
+        cp_rank,
+        fresh_slots,
+    )
+
+
 def quantize_and_insert_k_cache_cp_byte_sliced(
     k: torch.Tensor,
     k_cache_raw: torch.Tensor,
@@ -398,13 +491,13 @@ def quantize_and_insert_k_cache_cp_byte_sliced(
 
     Qualified CP4 layouts store only this rank's bytes directly. Other layouts
     retain the local-slice staging path; no writer all-gather is required.
-    Optional fresh output is a disjoint contiguous BF16 [B, M, 512] workspace.
+    Optional fresh output is a disjoint contiguous BF16 workspace, rectangular
+    [B, M, 512] or packed [sum(request_rows), 512].
     Only fresh_slots rows are written, with original BF16 bits preserved.
     """
     unique_blocks = compaction.unique_blocks
     if slot_mapping.numel() == 0 or (unique_blocks.numel() == 0 and fresh_out is None):
         return
-    local_bytes = k_cache_raw.shape[1]
     if (
         _cp_addressing_supported(
             k_cache_raw,
@@ -419,23 +512,18 @@ def quantize_and_insert_k_cache_cp_byte_sliced(
             for t in (k, compaction.compact_slots, unique_blocks)
         )
     ):
-        _quantize_and_insert_swa_kernel[(slot_mapping.numel(),)](
+        _store_cp_direct(
             k,
             k_cache_raw,
             compaction.compact_slots,
-            k.stride(0),
-            k_cache_raw.stride(0),
-            ENTRIES=full_entries_per_block,
-            unique_blocks=unique_blocks,
-            rank=cp_rank,
-            local_bytes=local_bytes,
-            CP_BYTES=True,
-            fresh_out=fresh_out,
-            fresh_slots=fresh_slots,
-            STORE_FRESH=fresh_out is not None,
-            num_warps=4,
+            unique_blocks,
+            full_entries_per_block,
+            cp_rank,
+            fresh_slots,
+            fresh_out,
         )
         return
+    local_bytes = k_cache_raw.shape[1]
     full_stride = local_bytes * cp_size
     full_raw = torch.empty(
         (unique_blocks.numel(), full_stride),
@@ -465,7 +553,7 @@ def _try_all_gather_cp4_bytes(local: torch.Tensor) -> Optional[torch.Tensor]:
         or not local.is_contiguous()
         or local.numel() == 0
         or torch.version.hip is not None
-        or torch.cuda.is_current_stream_capturing()
+        or prefill_stream_is_capturing()
         or not torch.distributed.is_initialized()
     ):
         return None
@@ -483,7 +571,8 @@ def _try_all_gather_cp4_bytes(local: torch.Tensor) -> Optional[torch.Tensor]:
         dtype=local.dtype,
     )
     # The same collective overwrites every receive byte, on the caller's stream.
-    torch.distributed.all_gather_into_tensor(gathered, local, group=group)
+    if not try_all_gather_into(gathered, local, group):
+        torch.distributed.all_gather_into_tensor(gathered, local, group=group)
     return gathered
 
 
@@ -497,8 +586,13 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     cp_rank: int,
     cp_size: int,
     compaction: CPByteSlicedSlotCompaction,
+    *,
+    out_row_offsets: Optional[torch.Tensor] = None,
 ) -> None:
     """All-gather byte slices and decode qualified rank-major storage directly."""
+    out_row_offsets = _normalize_gather_row_offsets(
+        out, out_row_offsets, slot_mapping.shape[0]
+    )
     if slot_mapping.numel() == 0:
         return
     unique_blocks = compaction.unique_blocks
@@ -526,31 +620,42 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         else:
             from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 
-            gathered = _try_all_gather_cp4_bytes(local) if rank_major else None
-            if gathered is None:
-                gathered = all_gather(local, group=Group.TP)
-            if rank_major and gathered.is_contiguous():
-                _gather_swa_rank_major(
-                    out,
-                    gathered,
-                    compaction.compact_slots,
-                    gather_lens,
-                    offset,
-                    unique_blocks.numel(),
-                    local_bytes,
-                    full_entries_per_block,
-                )
-                return
-            full_raw = (
-                gathered.view(cp_size, unique_blocks.numel(), local_bytes)
-                .permute(1, 0, 2)
-                .reshape(unique_blocks.numel(), cp_size * local_bytes)
-                .contiguous()
+            scope = (
+                borrowed_all_gather(local, Group.TP) if rank_major else nullcontext()
             )
+            with scope as gathered:
+                if gathered is None:
+                    gathered = _try_all_gather_cp4_bytes(local) if rank_major else None
+                    if gathered is None:
+                        gathered = all_gather(local, group=Group.TP)
+                if rank_major and gathered.is_contiguous():
+                    _gather_swa_rank_major(
+                        out,
+                        gathered,
+                        compaction.compact_slots,
+                        gather_lens,
+                        offset,
+                        unique_blocks.numel(),
+                        local_bytes,
+                        full_entries_per_block,
+                        out_row_offsets=out_row_offsets,
+                    )
+                    return
+                full_raw = (
+                    gathered.view(cp_size, unique_blocks.numel(), local_bytes)
+                    .permute(1, 0, 2)
+                    .reshape(unique_blocks.numel(), cp_size * local_bytes)
+                    .contiguous()
+                )
     full_view = full_raw.as_strided(
         (unique_blocks.numel(), full_entries_per_block, ENTRY_BYTES),
         (full_raw.shape[1], ENTRY_BYTES, 1),
     )
     dequantize_and_gather_k_cache_slots(
-        out, full_view, compaction.compact_slots, gather_lens, offset
+        out,
+        full_view,
+        compaction.compact_slots,
+        gather_lens,
+        offset,
+        out_row_offsets=out_row_offsets,
     )

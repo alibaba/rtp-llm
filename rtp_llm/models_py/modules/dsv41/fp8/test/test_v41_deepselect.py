@@ -192,6 +192,192 @@ class DeepSelectCudaTest(unittest.TestCase):
                 torch.empty((2, 512), device="cuda", dtype=torch.int32),
             )
 
+    def assert_dense_selection(self, logits, ends, output, *, filter_finite):
+        """Compare against the same BF16 values cast losslessly to FP32."""
+        scores = logits.float()
+        bounds = ends.clamp(0, logits.shape[1])
+        columns = torch.arange(logits.shape[1], device=logits.device)
+        reference_scores = scores.masked_fill(
+            columns[None] >= bounds[:, None], -torch.inf
+        )
+        expected_values = reference_scores.topk(512, dim=-1).values
+        if filter_finite:
+            actual_values = scores.gather(1, output.long().clamp_min(0))
+            self.assertTrue(
+                ((output == -1) | ((output >= 0) & (output < bounds[:, None])))
+                .all()
+                .item()
+            )
+            self.assertTrue((actual_values.isfinite() | (output == -1)).all().item())
+            expected_values = expected_values.masked_fill(
+                ~expected_values.isfinite(), -torch.inf
+            )
+            actual_values = actual_values.masked_fill(output < 0, -torch.inf)
+            torch.testing.assert_close(
+                (output >= 0).sum(-1),
+                expected_values.isfinite().sum(-1),
+                rtol=0,
+                atol=0,
+            )
+        else:
+            # Raw callers must filter before publishing. Bounds still initialize
+            # every slot, and NaNs consume legal selected slots instead of
+            # invalidating the complete row as in the sparse entry point.
+            self.assertTrue(
+                ((output == -1) | ((output >= 0) & (output < bounds[:, None])))
+                .all()
+                .item()
+            )
+            torch.testing.assert_close(
+                (output >= 0).sum(-1), bounds.clamp_max(512).long(), rtol=0, atol=0
+            )
+            actual_values = scores.gather(1, output.long().clamp_min(0)).masked_fill(
+                output < 0, -torch.inf
+            )
+            actual_values = torch.where(actual_values.isnan(), torch.inf, actual_values)
+            expected_values = torch.where(
+                expected_values.isnan(), torch.inf, expected_values
+            )
+        ordered = output.masked_fill(output < 0, logits.shape[1]).sort(-1).values
+        self.assertFalse(
+            ((ordered[:, 1:] == ordered[:, :-1]) & (ordered[:, 1:] != logits.shape[1]))
+            .any()
+            .item()
+        )
+        torch.testing.assert_close(
+            actual_values.sort(-1).values,
+            expected_values.sort(-1).values,
+            rtol=0,
+            atol=0,
+        )
+
+    def test_dense_nan_inf_ties_short_and_strided(self):
+        for rows, width in ((7, 512), (7, 1024), (173, 16384), (173, 32768)):
+            with self.subTest(rows=rows, width=width):
+                torch.manual_seed(512 + width)
+                backing = torch.randn(
+                    (rows, width + 512), device="cuda", dtype=torch.bfloat16
+                )
+                logits = backing[:, 8 : width + 8]
+                ends = (
+                    torch.tensor(
+                        [
+                            -(2**31),
+                            -1,
+                            0,
+                            1,
+                            17,
+                            511,
+                            512,
+                            513,
+                            width - 1,
+                            width,
+                            2**31 - 1,
+                        ],
+                        device="cuda",
+                        dtype=torch.int32,
+                    )
+                    .repeat((rows + 10) // 11)[:rows]
+                    .contiguous()
+                )
+                if rows == 7:
+                    ends.copy_(
+                        torch.tensor(
+                            [0, 1, 17, 511, 512, 513, width],
+                            device="cuda",
+                            dtype=torch.int32,
+                        )
+                    )
+                logits[:, 0] = torch.nan
+                logits[:, 1] = -torch.nan
+                logits[:, 2] = torch.inf
+                logits[:, 3] = -torch.inf
+                # Exercise NaNs both in the initial window and permuted scan.
+                logits[:, width // 2] = torch.nan
+                logits[:, -1] = -torch.nan
+                if rows > 7:
+                    logits[11].fill_(torch.nan)
+                    logits[12].fill_(-torch.nan)
+                    logits[13].fill_(torch.inf)
+                    logits[14].fill_(-torch.inf)
+                    logits[15].fill_(-3)
+                    logits[16].zero_()
+                    logits[17, :700] = torch.finfo(torch.bfloat16).max
+                    logits[17, 700:1400] = torch.finfo(torch.bfloat16).min
+                    ends[11:18] = width
+                    # NaNs outside a short/long row's end must not affect it.
+                    logits[18:20].zero_()
+                    ends[18:20] = torch.tensor(
+                        [17, 600], device="cuda", dtype=torch.int32
+                    )
+                    logits[18, 17:] = torch.nan
+                    logits[19, 600:] = torch.nan
+                before = logits.clone()
+                out_storage = torch.full(
+                    (rows, 528), 12345, device="cuda", dtype=torch.int32
+                )
+                output = out_storage[:, 8:520]
+                for filtering in (True, False):
+                    rtp_llm_ops.deepselect_bf16_dense(logits, ends, output, filtering)
+                    self.assert_dense_selection(
+                        logits, ends, output, filter_finite=filtering
+                    )
+                    self.assertTrue((out_storage[:, :8] == 12345).all().item())
+                    self.assertTrue((out_storage[:, 520:] == 12345).all().item())
+                torch.testing.assert_close(
+                    logits, before, rtol=0, atol=0, equal_nan=True
+                )
+
+    def test_dense_and_sparse_nan_contracts_remain_distinct(self):
+        logits = (
+            torch.arange(16384, device="cuda", dtype=torch.float32)
+            .repeat(3, 1)
+            .to(torch.bfloat16)
+        )
+        logits[0, 100] = torch.nan
+        logits[1, -1] = -torch.nan
+        logits[2, 4] = torch.nan
+        ends = torch.tensor([16384, 16384, 17], device="cuda", dtype=torch.int32)
+        sparse = selector.try_select_sparse_tokens(logits, ends)
+        dense = torch.empty((3, 512), device="cuda", dtype=torch.int32)
+        rtp_llm_ops.deepselect_bf16_dense(logits, ends, dense, True)
+        self.assertTrue((sparse[:2] == -1).all().item())
+        self.assertEqual(sparse[2, 4].item(), 4)
+        self.assertTrue(((dense[:2] >= 0).sum(-1) == 511).all().item())
+        self.assertEqual((dense[2] >= 0).sum().item(), 16)
+        self.assert_dense_selection(logits, ends, dense, filter_finite=True)
+
+    def test_dense_cuda_graph_replay_uses_updated_scores_and_bounds(self):
+        logits = torch.randn((7, 16384), device="cuda", dtype=torch.bfloat16)
+        ends = torch.full((7,), 16384, device="cuda", dtype=torch.int32)
+        output = torch.empty((7, 512), device="cuda", dtype=torch.int32)
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            for _ in range(3):
+                rtp_llm_ops.deepselect_bf16_dense(logits, ends, output, True)
+        torch.cuda.current_stream().wait_stream(side)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            rtp_llm_ops.deepselect_bf16_dense(logits, ends, output, True)
+        for lengths in ([0, 17, 511, 512, 513, 16000, 2**31 - 1], [600] * 7):
+            ends.copy_(torch.tensor(lengths, device="cuda", dtype=torch.int32))
+            logits.neg_()
+            logits[:, 3] = torch.nan
+            graph.replay()
+            self.assert_dense_selection(logits, ends, output, filter_finite=True)
+
+    def test_dense_native_rejects_bad_dtype_and_aliasing(self):
+        logits = torch.empty((2, 1024), device="cuda", dtype=torch.bfloat16)
+        ends = torch.full((2,), 1024, device="cuda", dtype=torch.int32)
+        output = torch.empty((2, 512), device="cuda", dtype=torch.int32)
+        with self.assertRaises(RuntimeError):
+            rtp_llm_ops.deepselect_bf16_dense(logits.float(), ends, output, True)
+        with self.assertRaises(RuntimeError):
+            rtp_llm_ops.deepselect_bf16_dense(
+                logits, ends, logits.view(torch.int32), True
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,7 @@ decode impl.
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -31,6 +32,7 @@ from rtp_llm.models_py.modules.dsv41.attn_type import (
     HCA_KV,
     HCA_STATE,
     INDEXER_KV,
+    INDEXER_KV_C2,
     INDEXER_STATE,
     SWA_KV,
 )
@@ -42,6 +44,10 @@ from rtp_llm.models_py.modules.dsv41.kv_cache_utils import (
     as_tagged_attention_inputs,
     swa_region_for_layer,
 )
+from rtp_llm.models_py.modules.dsv41.moe.routing_metadata import (
+    prepare_model_gate_routing_metadata,
+)
+from rtp_llm.models_py.utils.expert_load_monitor import expert_load_for_layer
 
 
 def _dsv4_kernel_tokens_per_block(kv_cache: Any) -> int:
@@ -111,6 +117,7 @@ def build_paged_pool_specs(
     # the layers that own it.
     specs: Dict[int, Tuple[int, int, int]] = {}
     saved_kv: Dict[int, Any] = {}
+    layer_tags: Dict[int, set[str]] = {}
     present_tags = set(map(str, getattr(kv_cache, "group_tags", ())))
     has_decoder_swa = DECODER_SWA_KV in present_tags
     try:
@@ -123,6 +130,7 @@ def build_paged_pool_specs(
             DECODER_SWA_KV,
             HCA_KV,
             INDEXER_KV,
+            INDEXER_KV_C2,
             CSA_KV,
             CSA_STATE,
             HCA_STATE,
@@ -132,6 +140,13 @@ def build_paged_pool_specs(
                 continue
             for layer in v4.layers:
                 attn = layer.attn
+                if attn.layer_id not in layer_tags:
+                    layer_tags[attn.layer_id] = {
+                        cache.tag
+                        for cache in kv_cache.get_layer_cache_groups(attn.layer_id)
+                    }
+                if attn_type not in layer_tags[attn.layer_id]:
+                    continue
                 if id(attn) not in saved_kv:
                     saved_kv[id(attn)] = (
                         attn,
@@ -171,6 +186,7 @@ def build_metadata_eager(
     paged_pool_specs: Dict[int, Tuple[int, int, int]],
     kv_cache: Optional[Any] = None,
     fp8_kv_cache: bool = False,
+    total_tokens: Optional[int] = None,
 ) -> Optional[Any]:  # DSv4DecodeAttnMetadata | None
     """Build ``DSv4DecodeAttnMetadata`` inline from framework attn inputs.
 
@@ -183,24 +199,37 @@ def build_metadata_eager(
     caller can short-circuit to an empty ``PyModelOutputs``.
 
     Per-request first-token position is read from ``attn.sequence_lengths``
-    (normal decode) or ``attn.prefix_lengths`` (target verify). The FP8
-    branch passes ``attn`` straight through and lets
+    (normal decode) or ``attn.prefix_lengths`` (target verify). For dense
+    verification, the FP8 branch passes ``attn`` straight through and lets
     :func:`build_decode_metadata_fp8` derive + clamp ``start_pos``
     internally via :func:`_build_start_pos_from_attention_inputs`; the
     BF16 branch builds + clamps ``start_pos`` here before calling the
     legacy :func:`build_decode_metadata`. Both clamp to
     ``[0, max_seq_len - q_len]`` so the whole ``[start_pos, start_pos + q_len)``
-    window stays within KV/compressed pool capacity.
+    window stays within KV/compressed pool capacity. Packed verification uses
+    each request's actual prefix and query length; its ``q_len`` is only the
+    average ``total_tokens / bs`` used for the packed buffer view.
     """
     # Target verify is a multi-token decode. C++ MtpExecutor (see
-    # MtpExecutor.cc:879-958) clears ``sequence_lengths`` and stashes the
+    # MtpExecutor.cc) clears ``sequence_lengths`` and stashes the
     # prior decode positions into ``prefix_lengths``; ``input_lengths``
-    # carries the uniform verify width = ``gen_num_per_cycle + 1``.
+    # carries gamma+1 for dense verification, or each selected prefix length+1
+    # for packed verification.
     is_target_verify = bool(getattr(attn, "is_target_verify", False))
+    packed_verify = bool(getattr(attn, "is_packed_target_verify", False))
     if is_target_verify:
         input_lengths_d = attn.input_lengths
-        q_len = int(input_lengths_d[0]) if input_lengths_d.numel() > 0 else 1
         bs = int(attn.prefix_lengths.shape[0])
+        if packed_verify:
+            if not fp8_kv_cache or not getattr(v4_args, "v41_config", None):
+                raise ValueError("Packed target verification requires V4.1 FP8 decode")
+            if not bs or total_tokens is None or total_tokens <= 0 or total_tokens % bs:
+                raise ValueError(
+                    "Packed target rows must have an integral average width"
+                )
+            q_len = total_tokens // bs
+        else:
+            q_len = int(input_lengths_d[0]) if input_lengths_d.numel() > 0 else 1
     else:
         q_len = 1
         bs = int(attn.sequence_lengths.shape[0])
@@ -228,6 +257,35 @@ def build_metadata_eager(
         paged_tokens_per_block[tag] = int(spec[1])
 
     if fp8_kv_cache:
+        if packed_verify:
+            from rtp_llm.models_py.modules.dsv41.fp8.decode.packed_metadata import (
+                allocate_packed_decode_metadata,
+                update_packed_decode_metadata,
+            )
+
+            meta = allocate_packed_decode_metadata(
+                max_batch_size=bs,
+                q_len=q_len,
+                window_size=int(v4_args.window_size),
+                head_dim=int(v4_args.head_dim),
+                max_seq_len=max_s,
+                compress_ratios=decode_metadata_compress_ratios(v4_args),
+                index_topk=int(v4_args.index_topk),
+                device=device,
+                paged_pool_specs=paged_pool_specs,
+                paged_block_tables=paged_block_tables,
+            )
+            meta.is_cuda_graph = False
+            if meta.decoder_swa_metadata is not None:
+                meta.decoder_swa_metadata.is_cuda_graph = False
+            update_packed_decode_metadata(
+                meta,
+                attn,
+                paged_block_tables,
+                paged_entries_per_block,
+                paged_tokens_per_block,
+            )
+            return meta
         from rtp_llm.models_py.modules.dsv41.fp8.decode.decode_attn_metadata import (
             build_decode_metadata_fp8,
         )
@@ -280,6 +338,7 @@ def forward_layers(
     kv_cache: Optional[Any],
     input_ids: torch.Tensor,  # [T_total]
     attn_metadata: Any,  # DSv4DecodeAttnMetadata
+    expert_token_counts: Optional[torch.Tensor],
     prepare_hidden_fn: Optional[Any] = None,
 ) -> torch.Tensor:
     """qwen3-style decode per-layer loop. Same body shape as the prefill
@@ -297,28 +356,31 @@ def forward_layers(
     q_len = attn_metadata.q_len_per_req
     input_ids = input_ids.reshape(-1)
 
+
     if prepare_hidden_fn is None:
         h = v4.embed(input_ids).view(B, q_len, -1)  # [B, q_len, dim]
         h = h.unsqueeze(2).repeat(1, 1, v4.hc_mult, 1)  # [B, q_len, hc, dim]
     else:
         h = prepare_hidden_fn(input_ids=input_ids, meta=attn_metadata)
     capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
+    routing_metadata = prepare_model_gate_routing_metadata(v4, input_ids)
     layer_forward_range = _profiler.make_layer_forward_range()
-    for layer_idx, layer in enumerate(v4.layers):
-        with layer_forward_range(layer_idx):
-            h = forward_decode_layer(
-                layer,
-                h,
-                attn_metadata,
-                input_ids,
-                next_layer=(
-                    v4.layers[layer_idx + 1] if layer_idx + 1 < len(v4.layers) else None
-                ),
-                preserve_output=layer_idx in capture_ids,
-                kv_cache=kv_cache,
-            )
-            if layer_idx in capture_ids:
-                v4.capture_aux_hidden(layer_idx, h)
+    from rtp_llm.models_py.modules.dsv41._engram_decode_prefetch import (
+        DecodeEngramPrefetch,
+    )
+
+    # Target verify may already have forked L1 at graph entry. Its outer
+    # forward owns the plan through both metadata preparation and these layers.
+    verify_prefetch = getattr(v4, "_engram_lookup_prefetch", None)
+    prefetch = verify_prefetch or DecodeEngramPrefetch(v4, attn_metadata)
+    try:
+        for layer_idx, layer in enumerate(v4.layers):
+            prefetch.before_layer(layer_idx)
+            with layer_forward_range(layer_idx):
+                h = forward_decode_layer(layer, h, attn_metadata, input_ids, next_layer=v4.layers[layer_idx + 1] if layer_idx + 1 < len(v4.layers) else None, preserve_output=False, kv_cache=kv_cache, routing_metadata=routing_metadata, capture_input=partial(v4.capture_aux_hidden, layer_idx) if layer_idx in capture_ids else None, expert_load=expert_load_for_layer(expert_token_counts, layer_idx))
+    finally:
+        if verify_prefetch is None:
+            prefetch.close()
     if v4._mtp_hidden_buffer is not None:
         if capture_ids:
             # DSpARK mode: the buffer already holds this forward's aux rows
@@ -352,11 +414,10 @@ def forward_decode(
     Two metadata paths:
 
     * **CUDA-graph path** (``fmha_impl`` is a ``DSv4DecodeFmhaImpl``): read
-      ``fmha_impl.metadata`` as-is. It was populated either in
-      ``DSv4DecodeFmhaImpl.__init__`` (initial dtype-check forward) or by
-      C++ ``prepare_cuda_graph`` before each replay. Reading
-      ``attn.sequence_lengths`` here during stream capture would trigger a
-      CPU→CUDA copy that's illegal inside a graph.
+      ``fmha_impl.metadata`` from persistent buffers. FP8 capture includes
+      metadata preparation from the runner's device mirrors at graph entry;
+      other implementations prepare it before replay. Host sequence lengths
+      must never be copied during capture.
     * **Eager path**: build :class:`DSv4DecodeAttnMetadata` inline via
       :func:`build_metadata_eager`.
 
@@ -397,6 +458,8 @@ def forward_decode(
     input_ids = input_ids.reshape(-1)
 
     if isinstance(fmha_impl, _graph_impl_types):
+        if hasattr(fmha_impl, "prepare_in_graph"):
+            fmha_impl.prepare_in_graph(attn)
         meta = fmha_impl.metadata
     else:
         paged_specs = build_paged_pool_specs(
@@ -409,6 +472,7 @@ def forward_decode(
             paged_specs,
             kv_cache=kv_cache,
             fp8_kv_cache=bool(getattr(v4, "fp8_kv_cache", False)),
+            total_tokens=int(input_ids.numel()),
         )
         if meta is None:
             # Empty batch (B == 0) — short-circuit with zero-row hidden.
@@ -425,6 +489,7 @@ def forward_decode(
         input_ids,
         meta,
         prepare_hidden_fn=prepare_hidden_fn,
+        expert_token_counts=inputs.expert_token_counts,
     )  # [B, q_len, dim]
     hidden = h.reshape(B * q_len, v4_args.dim)  # packed [T_total, dim]
     return PyModelOutputs(hidden)

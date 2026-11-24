@@ -64,7 +64,13 @@ def _mhc_fn_normw_merge_bwd(
     return _mhc_fn_normw_merge_bwd_
 
 
-@tilelang.jit(pass_configs=_PASS_CONFIGS)
+@tilelang.jit(
+    pass_configs={
+        **_PASS_CONFIGS,
+        # Avoid idle producer warps waiting on reused barrier phases (TileLang #3470).
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+    }
+)
 def _mhc_pre_norm_fn_fwd_mul(
     mhc_mult3: int,
     n_rms_group: int,
@@ -80,8 +86,9 @@ def _mhc_pre_norm_fn_fwd_mul(
     def _mhc_pre_norm_fn_fwd_mul_kernel(
         x: T.Tensor[(num_tokens, n_rms_group * rms_group_size), T.bfloat16],
         fn: T.Tensor[(mhc_mult3, n_rms_group * rms_group_size), T.float32],
-        out: T.Tensor[(num_tokens, n_rms_group, mhc_mult3), T.float32],
-        sqrsum: T.Tensor[(num_tokens, n_rms_group), T.float32],
+        # Split-major partials match the norm reducer; S=1 keeps its byte layout.
+        out: T.Tensor[(n_rms_group, num_tokens, mhc_mult3), T.float32],
+        sqrsum: T.Tensor[(n_rms_group, num_tokens), T.float32],
     ) -> None:
         _ = mhc_mult3
         with T.Kernel(T.ceildiv(num_tokens, token_block), n_rms_group) as (
@@ -128,10 +135,10 @@ def _mhc_pre_norm_fn_fwd_mul(
             sqrsum_l = T.alloc_fragment(token_block, T.float32)
             T.reduce_sum(sqrsum_part, sqrsum_l)
             for i in T.Parallel(token_block):
-                sqrsum[pid_x * token_block + i, pid_y] = sqrsum_l[i]
+                sqrsum[pid_y, pid_x * token_block + i] = sqrsum_l[i]
             for i, j in T.Parallel(token_block, 32):
                 if j < 24:
-                    out[pid_x * token_block + i, pid_y, j] = out_frag[i, j]
+                    out[pid_y, pid_x * token_block + i, j] = out_frag[i, j]
 
     return _mhc_pre_norm_fn_fwd_mul_kernel
 
