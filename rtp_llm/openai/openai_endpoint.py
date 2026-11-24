@@ -96,8 +96,11 @@ class OpenaiEndpoint(object):
 
         self.stop_words_id_list = self.special_tokens.stop_words_id_list
 
+        renderer_model_type = model_config.model_type
+        if renderer_model_type == "glm_5" and model_config.mm_model_config.is_multimodal:
+            renderer_model_type = "glm5_4_mock_vit"
         render_params = RendererParams(
-            model_type=model_config.model_type,
+            model_type=renderer_model_type,
             max_seq_len=self.max_seq_len,
             eos_token_id=self.eos_token_id,
             stop_word_ids_list=self.stop_words_id_list,

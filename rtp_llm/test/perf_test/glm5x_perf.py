@@ -3,8 +3,10 @@
 from contextlib import contextmanager
 from typing import List
 
-from rtp_llm.test.perf_test.batch_perf_impl import BatchPerfImpl
-from rtp_llm.test.perf_test.dataclass import ResponseInfo
+from rtp_llm.test.perf_test.batch_perf_impl import (
+    BatchPerfImpl,
+    require_all_requests_succeeded,
+)
 
 
 def normalize_model_paths(argv: List[str]) -> List[str]:
@@ -33,21 +35,11 @@ def normalize_model_paths(argv: List[str]) -> List[str]:
     ]
 
 
-def validate_responses(responses: List[ResponseInfo], expected: int) -> None:
-    """Never report GLM5.x throughput for an incomplete/failed request batch."""
-    successes = sum(bool(response.success) for response in responses)
-    if len(responses) != expected or successes != expected:
-        raise RuntimeError(
-            f"GLM5.x perf request batch failed: {successes}/{expected} requests "
-            f"succeeded ({len(responses)} responses received)"
-        )
-
-
 @contextmanager
 def validation_policy():
     """Install policy only within the dedicated GLM perf process, then restore it."""
     previous = BatchPerfImpl.__dict__["response_validator"]
-    BatchPerfImpl.response_validator = staticmethod(validate_responses)
+    BatchPerfImpl.response_validator = staticmethod(require_all_requests_succeeded)
     try:
         yield
     finally:

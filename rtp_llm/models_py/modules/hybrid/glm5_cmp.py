@@ -89,6 +89,14 @@ class _StreamEvents:
     indexer_complete: torch.cuda.Event
 
 
+@dataclass
+class _PackedWeights:
+    """Lazy, read-only kernel inputs for coordinators with tied weights."""
+
+    router: torch.Tensor | None = None
+    head_gate: torch.Tensor | None = None
+
+
 class Glm5Cmp:
     """Coordinate GLM5 CUDA Graph, multistream, and PDL (CMP) execution.
 
@@ -108,6 +116,7 @@ class Glm5Cmp:
         input_layernorm: Any,
         mlp: Any,
         post_attention_layernorm: Any,
+        packed_weights: _PackedWeights | None = None,
     ) -> None:
         self.layer_idx = int(layer_idx)
         self.config = config
@@ -119,7 +128,9 @@ class Glm5Cmp:
         self._is_moe_layer = self.layer_idx in config.moe_layer_index
         self._router_weight = None
         self._events: _StreamEvents | None = None
-        self._packed_head_gate_weight: torch.Tensor | None = None
+        self._packed_weights = (
+            _PackedWeights() if packed_weights is None else packed_weights
+        )
         self._draft_prefill_clone = False
         self.disable_attention_post_moe_pre = not getattr(
             self.self_attn, "fuse_kernels_enabled", True
@@ -220,7 +231,9 @@ class Glm5Cmp:
             return
 
         if self.is_moe_layer:
-            self._router_weight = self._prepare_router_weight(self.mlp)
+            if self._packed_weights.router is None:
+                self._packed_weights.router = self._prepare_router_weight(self.mlp)
+            self._router_weight = self._packed_weights.router
             self._moe_prepack_disabled_reason = (
                 self._static_moe_prepack_disabled_reason()
             )
@@ -311,6 +324,28 @@ class Glm5Cmp:
         # so materialize that layout once and share it across graph clones.
         return weight if weight.is_contiguous() else weight.contiguous()
 
+    def _get_packed_head_gate_weight(self, ops: Any) -> torch.Tensor:
+        packed_weight = self._packed_weights.head_gate
+        if packed_weight is None:
+            if _is_capturing():
+                raise RuntimeError("warm up head-gate weight packing before capture")
+            weight = self.self_attn.indexer.weights_proj.weight
+            packed_weight = ops.pack_head_gate_weight(weight.float().contiguous())
+            self._packed_weights.head_gate = packed_weight
+        return packed_weight
+
+    def clone_for_layer_repeat(self, layer_idx: int, self_attn: Any) -> Glm5Cmp:
+        return type(self)(
+            layer_idx=layer_idx,
+            config=self.config,
+            parallelism_config=self.parallelism_config,
+            self_attn=self_attn,
+            input_layernorm=self.input_layernorm,
+            mlp=self.mlp,
+            post_attention_layernorm=self.post_attention_layernorm,
+            packed_weights=self._packed_weights,
+        )
+
     def clone_for_cuda_graph(
         self,
         *,
@@ -328,7 +363,7 @@ class Glm5Cmp:
         clone._is_moe_layer = self._is_moe_layer
         clone._router_weight = self._router_weight
         clone._events = None
-        clone._packed_head_gate_weight = self._packed_head_gate_weight
+        clone._packed_weights = self._packed_weights
         clone._draft_prefill_clone = bool(draft_prefill)
         clone.disable_attention_post_moe_pre = self.disable_attention_post_moe_pre
         clone._disabled_reason = self._disabled_reason
@@ -533,14 +568,7 @@ class Glm5Cmp:
             hidden_states.device
         )
         indexer = attention.indexer
-        if self._packed_head_gate_weight is None:
-            if _is_capturing():
-                raise RuntimeError("warm up head-gate weight packing before capture")
-            # Pack the FP32 Head-Gate projection weight once for the CUDA
-            # kernel layout; this performs no per-token computation.
-            self._packed_head_gate_weight = ops.pack_head_gate_weight(
-                indexer.weights_proj.weight.float().contiguous()
-            )
+        packed_head_gate_weight = self._get_packed_head_gate_weight(ops)
         if indexer_fmha_impl is None or indexer_kv_cache is None:
             raise RuntimeError(
                 "CMP Indexer requires its independent attention/cache route"
@@ -626,7 +654,7 @@ class Glm5Cmp:
                 qkv_scale,
                 out=projected,
                 head_gate_norm=norm_out,
-                head_gate_weight=self._packed_head_gate_weight,
+                head_gate_weight=packed_head_gate_weight,
                 gate_output=gate_output,
             )
             # Split Q/KV-A, RMSNorm and quantize Q/latent-KV, apply K-PE RoPE,

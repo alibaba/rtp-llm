@@ -268,3 +268,9 @@ py_library(
     visibility = ["//visibility:public"],
     deps = ["//rtp_llm:testlib"],
 )
+
+py_test(
+    name = "glm5_layer_repeat_model_test",
+    srcs = ["glm5_layer_repeat_model_test.py"],
+    deps = py_test_deps + ["//rtp_llm:testlib"],
+)

@@ -421,6 +421,11 @@ class ModelFactory:
 
         # Set eplb_config
         if eplb_config is not None:
+            if (
+                getattr(model_config, "_glm5_layer_source_ids", None)
+                and eplb_config.enable_eplb()
+            ):
+                raise ValueError("Repeated GLM5 weights do not support dynamic EPLB")
             model_config.eplb_config = eplb_config
 
         logging.info("model_config: %s", model_config.to_string())
@@ -440,6 +445,11 @@ class ModelFactory:
             engine_config: EngineConfig to update
             model_config: ModelConfig containing model information
         """
+        if (
+            getattr(model_config, "_glm5_layer_source_ids", None)
+            and engine_config.parallelism_config.pp_size > 1
+        ):
+            raise ValueError("Repeated GLM5 layers require pipeline parallelism size 1")
         finalize_pp_partition(engine_config.parallelism_config, model_config.num_layers)
 
         # Finalize scheduler config based on ModelConfig (only once, for main model)

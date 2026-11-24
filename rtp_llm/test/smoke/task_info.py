@@ -1,7 +1,9 @@
+import os
+import re
 from typing import Any, Dict, List, Optional, Union
 
 import prettytable as pt
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from smoke.common_def import QueryStatus
 
 
@@ -21,6 +23,20 @@ class TaskInfo(BaseModel):
     update_lora_infos: Optional[List[LoraUpdateInfo]] = None
     taskinfo_rel_path: str = ""
     grammar_constraint_only: bool = False
+
+    @field_validator("model_path")
+    @classmethod
+    def resolve_model_path(cls, value: str) -> str:
+        # An exact placeholder lets manual smoke cases use a locally generated
+        # checkpoint without embedding a workstation path in the fixture.
+        variable = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", value)
+        if variable is None:
+            return value
+        name = variable.group(1)
+        checkpoint = os.environ.get(name)
+        if not checkpoint:
+            raise ValueError(f"Set {name} to the smoke test's checkpoint path")
+        return checkpoint
 
 
 class TaskStates(BaseModel):

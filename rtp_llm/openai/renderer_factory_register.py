@@ -100,6 +100,9 @@ def _register_builtin_lazy_renderers() -> None:
         ["glm4_moe", "glm_5"], "rtp_llm.openai.renderers.chatglm45_renderer"
     )
     register_lazy_renderer(
+        ["glm5_4_mock_vit"], "rtp_llm.openai.renderers.glm54_mock_vit_renderer"
+    )
+    register_lazy_renderer(
         ["glm47_moe", "glm4_moe_lite"], "rtp_llm.openai.renderers.chatglm47_renderer"
     )
     register_lazy_renderer(

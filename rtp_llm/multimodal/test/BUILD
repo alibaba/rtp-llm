@@ -37,6 +37,12 @@ py_test(
 )
 
 py_test(
+    name = "glm54_mock_vit_test",
+    srcs = ["glm54_mock_vit_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "multimodal_process_engine_test",
     srcs = [
         "multimodal_process_engine_test.py",

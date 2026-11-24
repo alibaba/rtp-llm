@@ -6,6 +6,7 @@ import torch
 from torch import nn
 
 from rtp_llm.config.mega_moe import MegaMoeExecutionPolicy
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer, GenericMoeModel
 from rtp_llm.models_py.model_desc.generic_moe_mtp import GenericMoeMTPModel
 from rtp_llm.models_py.model_desc.glm5 import (
@@ -153,14 +154,12 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
                 self.calls += 1
                 return (hidden + residual) / 2, residual
 
-        config = SimpleNamespace(
-            num_layers=2,
-            vocab_size=8,
-            hidden_size=4,
-            layernorm_eps=1e-6,
-            hidden_state_capture_layer_ids=layer_ids,
-            capture_aux_hidden_layer_ids=[],
-        )
+        config = ModelConfig()
+        config.num_layers = 2
+        config.vocab_size = 8
+        config.hidden_size = 4
+        config.layernorm_eps = 1e-6
+        config.hidden_state_capture_layer_ids = layer_ids
         embedding = nn.Embedding(8, 4)
         with torch.no_grad():
             embedding.weight.copy_(torch.arange(32).reshape(8, 4))

@@ -129,8 +129,8 @@ class TpsBinarySearchRunner:
             else:
                 hi = mid_idx - 1
 
-        if best_bs > 0 and BatchPerfImpl.response_validator is not None:
-            # Revalidate the selected point with the specialized strict policy.
+        if best_bs > 0 and BatchPerfImpl.get_response_validator() is not None:
+            # Revalidate the selected point with the strict response policy.
             # This also validates warmup/profile batches before publishing throughput.
             ok, best_tpot, sr = self._test_bs(
                 best_bs, queries_fn(best_bs), label, validate_responses=True

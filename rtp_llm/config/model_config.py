@@ -338,8 +338,12 @@ class ModelConfig(CppModelConfig):
         return self.mm_model_config.is_multimodal
 
     def eval_model_weight_size(self) -> float:
+        weight_layers = getattr(self, "_glm5_checkpoint_num_layers", self.num_layers)
+        weight_moe_layers = getattr(
+            self, "_glm5_checkpoint_moe_layers", self.moe_layer_index
+        )
         non_expert_size, expert_size = self.eval_model_weight_size_parts(
-            self.num_layers, len(self.moe_layer_index), 2
+            weight_layers, len(weight_moe_layers), 2
         )
         return non_expert_size + expert_size
 
@@ -547,9 +551,13 @@ class ModelConfig(CppModelConfig):
             Total parameter count
         """
         vocab_size = self.vocab_size
+        weight_layers = getattr(self, "_glm5_checkpoint_num_layers", self.num_layers)
+        weight_moe_layers = getattr(
+            self, "_glm5_checkpoint_moe_layers", self.moe_layer_index
+        )
         param_count = (
             self.word_emb_param_count(vocab_size) * 2
-            + self.layer_weight_param_count(self.num_layers, len(self.moe_layer_index))
+            + self.layer_weight_param_count(weight_layers, len(weight_moe_layers))
             + self.hidden_size
         )
 
@@ -1332,6 +1340,12 @@ def build_model_config(
     model_config.output_vocab_ids = []
     model_config.output_vocab_padded_size = 0
     model_config.enable_output_vocab_pruning = model_args.enable_output_vocab_pruning
+
+    if getattr(model_config, "_glm5_loop_layer_range", None) is not None:
+        from rtp_llm.utils.glm5_layer_repeat import configure_glm5_layer_repeat
+
+        # Hidden-state capture overrides address the logical execution stack.
+        configure_glm5_layer_repeat(model_config)
 
     # JSON model overrides are applied first; the dedicated operational switch
     # is the final override when it was explicitly supplied by CLI or env.

@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import os
 import time
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
@@ -20,6 +21,61 @@ def _effective_profile_steps(is_decode: bool, decode_test_length: int) -> int:
     # profiler armed and prevents trace export before the test server exits.
     profile_steps = int(os.environ.get("PERF_PROFILE_NUM_STEPS", "3"))
     return min(decode_test_length, profile_steps) if is_decode else 1
+
+
+def _validate_finished_measurement(
+    response: Dict[str, Any], is_decode: bool, generate_config: Dict[str, Any]
+) -> None:
+    if (
+        not isinstance(response, dict)
+        or response.get("finished") is not True
+        or not isinstance(response.get("response"), str)
+    ):
+        raise ValueError("expected a completed single-request response")
+
+    aux_info = response.get("aux_info")
+    if not isinstance(aux_info, dict):
+        raise ValueError("missing auxiliary metrics")
+    input_len = aux_info.get("input_len")
+    output_len = aux_info.get("output_len")
+    min_output_len = max(2 if is_decode else 1, generate_config["min_new_tokens"])
+    max_output_len = generate_config["max_new_tokens"]
+    if type(input_len) is not int or input_len <= 0:
+        raise ValueError(f"invalid input length: {input_len!r}")
+    if (
+        type(output_len) is not int
+        or not min_output_len <= output_len <= max_output_len
+    ):
+        raise ValueError(
+            f"output length {output_len!r} is outside [{min_output_len}, {max_output_len}]"
+        )
+
+    wait_time = aux_info.get("wait_time")
+    first_token_time = aux_info.get("first_token_cost_time")
+    cost_time = aux_info.get("cost_time")
+    timings = (wait_time, first_token_time, cost_time)
+    if any(
+        type(value) not in (int, float) or not math.isfinite(value) for value in timings
+    ):
+        raise ValueError(f"invalid wait, first-token, or total timings: {timings!r}")
+    if not 0 <= wait_time <= first_token_time <= cost_time:
+        raise ValueError(f"invalid wait, first-token, or total timings: {timings!r}")
+    measured_time = (
+        cost_time - first_token_time if is_decode else first_token_time - wait_time
+    )
+    if measured_time <= 0:
+        raise ValueError("response contains no positive timing for the measured phase")
+
+
+def require_all_requests_succeeded(
+    responses: List[ResponseInfo], expected: int
+) -> None:
+    succeeded = sum(response.success for response in responses)
+    if len(responses) != expected or succeeded != expected:
+        raise RuntimeError(
+            f"perf request batch failed: {succeeded}/{expected} requests succeeded "
+            f"({len(responses)} responses received)"
+        )
 
 
 def _wait_for_trace_flush(log_path: str, offset: int, budget_s: int) -> int:
@@ -67,6 +123,7 @@ def _curl_server_single_worker(
     profile: bool = False,
     generate_config: Optional[Dict[str, Any]] = None,
     profile_trace_name: str = "",
+    validate_measurement: bool = False,
 ) -> ResponseInfo:
     gen_config: Dict[str, Any] = {
         "max_new_tokens": decode_test_length if is_decode else 1,
@@ -107,9 +164,14 @@ def _curl_server_single_worker(
             logging.warning(f"request failed: {response.content}")
             return ResponseInfo({}, False)
         logging.debug(response.text)
-        return ResponseInfo(response.json())
+        payload = response.json()
+        if validate_measurement:
+            _validate_finished_measurement(payload, is_decode, gen_config)
+        return ResponseInfo(payload)
     except Exception as e:
-        logging.warning(f" request exception: {e}")
+        logging.warning(
+            "perf request %d failed (trace=%s): %s", i, profile_trace_name, e
+        )
         return ResponseInfo({}, False)
 
 
@@ -123,6 +185,7 @@ def _curl_server_batch_worker(
     profile: bool = False,
     generate_config: Optional[Dict[str, Any]] = None,
     profile_trace_name: str = "",
+    validate_measurement: bool = False,
 ) -> List[ResponseInfo]:
     """Concurrently send requests, each with its own query string."""
     with ThreadPoolExecutor(max_workers=len(request_indices)) as executor:
@@ -139,6 +202,7 @@ def _curl_server_batch_worker(
                 profile,
                 generate_config,
                 profile_trace_name,
+                validate_measurement,
             )
             futures.append(future)
         return [f.result() for f in futures]
@@ -148,6 +212,16 @@ class BatchPerfImpl(object):
     # Optional process-local validation policy, installed by a specialized entry.
     # The default leaves existing perf behavior unchanged.
     response_validator: Optional[Callable[[List[ResponseInfo], int], None]] = None
+
+    @classmethod
+    def get_response_validator(
+        cls,
+    ) -> Optional[Callable[[List[ResponseInfo], int], None]]:
+        if cls.response_validator is not None:
+            return cls.response_validator
+        if os.environ.get("PERF_REQUIRE_ALL_REQUESTS_SUCCESS") == "1":
+            return require_all_requests_succeeded
+        return None
 
     def __init__(
         self,
@@ -370,6 +444,7 @@ class BatchPerfImpl(object):
         raise Exception(f"failed to set concurrency after retries: {last_error}")
 
     def _curl_server_responses(self, profile: bool = False) -> List[ResponseInfo]:
+        validator = type(self).get_response_validator()
         request_batches: List[List[int]] = []
         for i in range(0, self.batch_size, self.max_requests_per_process):
             batch_indices = list(
@@ -392,6 +467,7 @@ class BatchPerfImpl(object):
                     profile,
                     self.generate_config,
                     self.profile_trace_name if profile else "",
+                    validator is not None,
                 )
             )
 
@@ -399,10 +475,8 @@ class BatchPerfImpl(object):
         for future in futures:
             all_responses.extend(future.result())
 
-        validator = type(self).response_validator
         if self.validate_responses and validator is not None:
             validator(all_responses, self.batch_size)
-
         return all_responses
 
     def _curl_server(self, profile: bool = False) -> TestResultMetrics:

@@ -40,10 +40,21 @@ class Glm5(DeepSeekV2):
             config.index_skip_topk_offset = architecture.get("index_skip_topk_offset")
             config.index_topk_pattern = architecture.get("index_topk_pattern")
             config.indexer_types = architecture.get("indexer_types")
+            if cls is Glm5:
+                config._glm5_loop_layer_range = architecture.get("glm5_loop_layer_range")
+            if cls is Glm5 and architecture.get("glm54_mock_vit") is True:
+                from rtp_llm.multimodal.multimodal_mixins.glm5_3_flash.glm54_mock_vit import (
+                    configure_glm54_mock_vit,
+                )
+
+                configure_glm54_mock_vit(config, architecture, ckpt_path)
         return config
 
     @classmethod
     def _post_build_model_config(cls, model_config: ModelConfig) -> None:
+        from rtp_llm.utils.glm5_layer_repeat import configure_glm5_layer_repeat
+
+        configure_glm5_layer_repeat(model_config)
         if model_config.kv_cache_spec_descs:
             return
         super()._post_build_model_config(model_config)

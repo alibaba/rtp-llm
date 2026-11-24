@@ -432,6 +432,20 @@ class OpenaiComparer(BaseComparer):
             )
 
         usage = getattr(actual_result, "usage", None)
+        if "expected_image_tokens" in health_config:
+            details = getattr(usage, "prompt_tokens_details", None)
+            image_tokens = (
+                getattr(details, "image_tokens", None) or 0
+                if usage is not None
+                else None
+            )
+            expected = health_config["expected_image_tokens"]
+            if image_tokens != expected:
+                diffs.append(
+                    self._format_expect_actual(
+                        "health image token count", expected, image_tokens
+                    )
+                )
         for field in ("prompt_tokens", "completion_tokens", "total_tokens"):
             min_key = f"min_{field}"
             if min_key not in health_config:

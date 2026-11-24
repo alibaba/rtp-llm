@@ -1,3 +1,4 @@
+import copy
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -19,6 +20,7 @@ from rtp_llm.models_py.modules import (
     Embedding,
     FMHAImplBase,
     MlaAttention,
+    MultimodalEmbeddingInjector,
     RMSResNorm,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
@@ -39,6 +41,7 @@ from rtp_llm.models_py.modules.hybrid.glm5_cmp import (
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig, RoleType
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
+from rtp_llm.utils.glm5_layer_repeat import build_execution_layers
 from rtp_llm.utils.model_weight import W
 
 try:
@@ -378,6 +381,31 @@ class Glm5MoeDecoderLayer(nn.Module):
         )
         return clone
 
+    def clone_for_layer_repeat(self, layer_idx: int) -> "Glm5MoeDecoderLayer":
+        """Share initialized weights, but give attention its own logical KV ID."""
+
+        def shallow_module(module):
+            clone = copy.copy(module)
+            # nn.Module's shallow copy otherwise shares its child registry;
+            # replacing self_attn would also overwrite the source layer.
+            clone._modules = module._modules.copy()
+            clone._parameters = module._parameters.copy()
+            clone._buffers = module._buffers.copy()
+            return clone
+
+        clone = shallow_module(self)
+        clone.layer_idx = layer_idx
+        clone.self_attn = shallow_module(self.self_attn)
+        clone.self_attn.layer_idx = layer_idx
+        if self.self_attn.indexer is not None:
+            clone.self_attn.indexer = shallow_module(self.self_attn.indexer)
+            clone.self_attn.indexer.layer_idx = layer_idx
+        # Keep transformed MoE/linear weights and communication resources shared.
+        # CMP scheduling events belong to the logical layer, even with tied weights.
+        if self.cmp is not None:
+            clone.cmp = self.cmp.clone_for_layer_repeat(layer_idx, clone.self_attn)
+        return clone
+
     def _fwd_mlp_or_moe(
         self,
         hidden_states: torch.Tensor,
@@ -576,22 +604,25 @@ class Glm5ModelBase(CpMtpHiddenHandoff, GenericMoeModel):
 
     def _initialize_decoder_layers(self) -> None:
         self.layers = nn.ModuleList(
-            Glm5MoeDecoderLayer(
+            build_execution_layers(
                 self.config,
-                self.parallelism_config,
-                self.weight.weights[idx],
-                self.weight.global_weights,
-                idx,
-                self.moe_config,
-                self.max_generate_batch_size,
-                enable_cuda_graph=(
-                    self.py_hw_kernel_config.enable_cuda_graph
-                    if self.py_hw_kernel_config is not None
-                    else False
+                lambda idx: Glm5MoeDecoderLayer(
+                    self.config,
+                    self.parallelism_config,
+                    self.weight.weights[idx],
+                    self.weight.global_weights,
+                    idx,
+                    self.moe_config,
+                    self.max_generate_batch_size,
+                    enable_cuda_graph=(
+                        self.py_hw_kernel_config.enable_cuda_graph
+                        if self.py_hw_kernel_config is not None
+                        else False
+                    ),
+                    hw_kernel_config=self.py_hw_kernel_config,
                 ),
-                hw_kernel_config=self.py_hw_kernel_config,
+                lambda source, idx: source.clone_for_layer_repeat(idx),
             )
-            for idx in range(self.layer_num)
         )
 
     def prepare_moe_forward(self, tokens: int, is_prefill: bool) -> bool:
@@ -702,6 +733,11 @@ class Glm5MoeModel(Glm5ModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        self.multimodal_embedding_injector = (
+            MultimodalEmbeddingInjector()
+            if model_config.mm_model_config.is_multimodal
+            else None
+        )
         self._init_capture_context(
             self._capture_canonical_layer,
             self._capture_canonical_final,
@@ -715,7 +751,7 @@ class Glm5MoeModel(Glm5ModelBase):
         return hidden_states
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        hidden_states = self.embed_tokens(inputs.input_ids)
+        hidden_states = self.embedding(inputs)
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         if not isinstance(fmha_impl, Mapping) or set(fmha_impl) != {

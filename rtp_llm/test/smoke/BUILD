@@ -1,6 +1,25 @@
 load(":defs.bzl", "SMOKE_FRAMEWORK_DEPS", "custom_smoke_test", "smoke_test")
 package(default_visibility = ["//visibility:public"])
 
+smoke_test(
+    name = "glm54_mock_vit_cu13",
+    task_info = "data/model/glm5/glm54_mock_vit_cu13.json",
+    smoke_args = (
+        "--act_type BF16 --use_local 1 --use_local_preprocess 1 " +
+        "--tp_size 1 --world_size 4 --dp_size 4 --ep_size 4 " +
+        "--max_seq_len 4096 --seq_size_per_block 64 --kernel_seq_size_per_block 64 " +
+        "--fp8_kv_cache 1 --kv_cache_mem_mb 4096 --warm_up 0 " +
+        "--concurrency_limit 1 --max_context_batch_size 1 --reuse_cache 0 " +
+        "--enable_cuda_graph 0 --load_method fastsafetensors " +
+        "--quantization FP8_PER_BLOCK --moe_strategy mega_moe " +
+        "--use_all_gather 0 --use_deepep_moe 0 --use_deepep_low_latency 0"
+    ),
+    envs = ["PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"],
+    env_inherit = ["GLM54_MOCK_CHECKPOINT"],
+    data = ["data/model/llava/1.jpg"],
+    gpu_type = ["SM103_CU13"],
+)
+
 # Framework source files for cross-package smoke tests.
 # Used as data dep (not srcs/deps) so internal smoke targets can merge their
 # own smoke/ children through smoke.__path__ without duplicating runner srcs.

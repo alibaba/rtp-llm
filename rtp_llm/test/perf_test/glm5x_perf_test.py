@@ -1,8 +1,12 @@
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from rtp_llm.test.perf_test.batch_perf_impl import BatchPerfImpl
+from rtp_llm.test.perf_test.batch_perf_impl import (
+    BatchPerfImpl,
+    _curl_server_single_worker,
+)
 from rtp_llm.test.perf_test.dataclass import ResponseInfo
 from rtp_llm.test.perf_test.dataset import extract_arg
 from rtp_llm.test.perf_test.glm5x_perf import normalize_model_paths, validation_policy
@@ -50,6 +54,67 @@ class Glm5xPerfTest(unittest.TestCase):
                 with self.subTest(responses=responses), self.assertRaises(RuntimeError):
                     self.collect(responses)
             self.assertEqual(len(self.collect([True, True])), 2)
+
+    def test_strict_worker_requires_a_completed_measurement(self):
+        aux_info = {
+            "input_len": 64,
+            "output_len": 4,
+            "wait_time": 1.0,
+            "first_token_cost_time": 3.0,
+            "cost_time": 8.0,
+        }
+        completed = {"response": "result", "finished": True, "aux_info": aux_info}
+        http_reply = SimpleNamespace(status_code=200, text="", json=lambda: completed)
+
+        def send(body, is_decode=True, **kwargs):
+            http_reply.json = lambda: body
+            return _curl_server_single_worker(
+                0, 8000, "prompt", is_decode, 4, 10, **kwargs
+            )
+
+        with patch(
+            "rtp_llm.test.perf_test.batch_perf_impl.requests.post",
+            return_value=http_reply,
+        ):
+            result = send(completed, validate_measurement=True)
+            self.assertTrue(result.success)
+            self.assertEqual(result.output_len, 4)
+            self.assertAlmostEqual(result.decode_time_per_token, 5 / 3)
+            for response in (
+                {},
+                {**completed, "finished": False},
+                {**completed, "aux_info": {}},
+                {**completed, "aux_info": {**aux_info, "input_len": 0}},
+                {**completed, "aux_info": {**aux_info, "output_len": 3}},
+                {**completed, "aux_info": {**aux_info, "output_len": 5}},
+                {**completed, "aux_info": {**aux_info, "cost_time": 3.0}},
+                {**completed, "aux_info": {**aux_info, "cost_time": float("nan")}},
+            ):
+                with self.subTest(response=response):
+                    self.assertFalse(send(response, validate_measurement=True).success)
+
+            prefill = {
+                **completed,
+                "aux_info": {**aux_info, "output_len": 1, "cost_time": 3.0},
+            }
+            self.assertTrue(
+                send(prefill, is_decode=False, validate_measurement=True).success
+            )
+            self.assertTrue(send({}).success)
+
+    def test_environment_policy_only_raises_for_reporting(self):
+        with patch.dict(os.environ, {"PERF_REQUIRE_ALL_REQUESTS_SUCCESS": "1"}), patch(
+            "rtp_llm.test.perf_test.batch_perf_impl.ProcessPoolExecutor"
+        ):
+            runner = BatchPerfImpl(8000, 1, 1, "prompt", validate_responses=False)
+            runner.executor.submit.return_value.result.return_value = [
+                ResponseInfo({}, False)
+            ]
+            self.assertFalse(runner._curl_server_responses()[0].success)
+            self.assertIs(runner.executor.submit.call_args.args[-1], True)
+            runner.validate_responses = True
+            with self.assertRaisesRegex(RuntimeError, "0/1 requests succeeded"):
+                runner._curl_server_responses()
 
     def test_tps_failed_probe_shrinks_search_and_validates_winner(self):
         calls = []

@@ -1,9 +1,11 @@
 import copy
 import json
 import unittest
+from unittest.mock import patch
 
 from smoke.common_def import QueryStatus, SmokeException, Tracer
 from smoke.openai_comparer import OpenaiComparer
+from smoke.task_info import TaskInfo
 
 from rtp_llm.config.generate_config import RoleAddr
 from rtp_llm.utils.base_model_datatypes import AuxInfo
@@ -13,7 +15,7 @@ REPLAYED = "replayed"
 FALLBACK = "input_tokens_exceed_capture_limit"
 
 
-class OpenaiComparerGraphStatusTest(unittest.TestCase):
+class OpenaiComparerTest(unittest.TestCase):
     def setUp(self):
         # The OpenAI graph smoke goldens require the status via compare_config,
         # without specifying result.aux_info (which contains runtime metrics).
@@ -145,6 +147,52 @@ class OpenaiComparerGraphStatusTest(unittest.TestCase):
         self.comparer._compare_aux_info(AuxInfo(reuse_len=0), AuxInfo(reuse_len=8), diffs)
         self.assertTrue(any("reuse_len" in diff for diff in diffs))
 
+    def test_health_checks_image_tokens_without_comparing_other_usage_fields(self):
+        expected = self._parse(self.golden)
+        for image_tokens, expected_tokens, success in (
+            (None, 0, True),
+            (None, 486, False),
+            (485, 486, False),
+            (486, 486, True),
+            (486, 0, False),
+        ):
+            with self.subTest(image_tokens=image_tokens, expected=expected_tokens):
+                self.comparer.qr_info["compare_config"] = {
+                    "skip_usage": True,
+                    "output_health_check": {"expected_image_tokens": expected_tokens},
+                }
+                payload = copy.deepcopy(self.golden)
+                if image_tokens is not None:
+                    payload["usage"]["prompt_tokens_details"] = {
+                        "image_tokens": image_tokens
+                    }
+                if success:
+                    self.comparer.compare_result(expected, self._parse(payload))
+                else:
+                    with self.assertRaisesRegex(SmokeException, "health image token count"):
+                        self.comparer.compare_result(expected, self._parse(payload))
+
+
+class TaskInfoCheckpointPathTest(unittest.TestCase):
+    def test_resolves_exact_environment_placeholder(self):
+        with patch.dict("os.environ", {"TEST_MODEL_CHECKPOINT": "/fixture/model"}):
+            task = TaskInfo(
+                model_type="glm_5",
+                model_path="${TEST_MODEL_CHECKPOINT}",
+                query_result=[],
+            )
+        self.assertEqual(task.model_path, "/fixture/model")
+
+    def test_rejects_unset_placeholder_and_preserves_literal_paths(self):
+        with patch.dict("os.environ", {"TEST_MODEL_CHECKPOINT": ""}):
+            with self.assertRaisesRegex(ValueError, "Set TEST_MODEL_CHECKPOINT"):
+                TaskInfo(
+                    model_type="glm_5",
+                    model_path="${TEST_MODEL_CHECKPOINT}",
+                    query_result=[],
+                )
+        task = TaskInfo(model_type="glm_5", model_path="oss://model", query_result=[])
+        self.assertEqual(task.model_path, "oss://model")
 
 if __name__ == "__main__":
     unittest.main()

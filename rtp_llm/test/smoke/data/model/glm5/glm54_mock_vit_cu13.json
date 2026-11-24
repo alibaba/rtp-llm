@@ -1,0 +1,70 @@
+{
+    "model_type": "glm_5",
+    "model_path": "${GLM54_MOCK_CHECKPOINT}",
+    "endpoint": "/v1/chat/completions",
+    "query_result": [
+        {
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Describe this image briefly."
+                    }
+                ],
+                "enable_thinking": false,
+                "max_tokens": 8,
+                "temperature": 0.0,
+                "stream": false
+            },
+            "result": {},
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "output_health_check": {
+                    "min_prompt_tokens": 1,
+                    "expected_image_tokens": 0,
+                    "min_completion_tokens": 2,
+                    "min_content_chars": 1,
+                    "required_finish_reason": "length",
+                    "forbidden_substrings": ["</think>"]
+                }
+            }
+        },
+        {
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "data/model/llava/1.jpg"}
+                            },
+                            {
+                                "type": "text",
+                                "text": "Describe this image briefly."
+                            }
+                        ]
+                    }
+                ],
+                "enable_thinking": false,
+                "max_tokens": 8,
+                "temperature": 0.0,
+                "stream": false
+            },
+            "result": {},
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "output_health_check": {
+                    "min_prompt_tokens": 486,
+                    "expected_image_tokens": 486,
+                    "min_completion_tokens": 2,
+                    "min_content_chars": 0,
+                    "required_finish_reason": "length",
+                    "forbidden_substrings": ["</think>"]
+                }
+            }
+        }
+    ]
+}
