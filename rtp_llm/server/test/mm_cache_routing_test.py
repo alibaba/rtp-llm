@@ -1,6 +1,7 @@
 import asyncio
 import struct
 import unittest
+from array import array
 from concurrent import futures
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -225,6 +226,48 @@ class MMCacheRoutingTest(unittest.TestCase):
         )
         self.assertEqual(result, [10, -1, 2, 20])
         self.assertIsNone(length)
+
+    def test_long_text_ranges_around_multiple_media(self):
+        prefix = [10] * 17001
+        middle = [20] * 16503
+        suffix = [30] * 8761
+        source = prefix + [99] + middle + [99] + suffix
+        keys = ["a", "b"]
+        for compact in (False, True):
+            for complete in (False, True):
+                with self.subTest(compact=compact, complete=complete):
+                    metadata_keys = keys if complete else keys[:1]
+                    values, length = multimodal_routing_tokens(
+                        source,
+                        [[99]],
+                        False,
+                        keys,
+                        metadata(metadata_keys, [[-7], [-8]]),
+                        50000,
+                        compact=compact,
+                    )
+                    expected = prefix + [-7] + middle
+                    if complete:
+                        expected += [-8] + suffix
+                    self.assertEqual(list(values), expected)
+                    self.assertEqual(length, len(expected) if complete else None)
+
+    def test_compact_expansion_accepts_other_token_sequences(self):
+        tokens = (1, 99, 2)
+        sequences = [tokens] + [array(code, tokens) for code in ("i", "q", "I", "h")]
+        for source in sequences:
+            with self.subTest(source=source):
+                values, length = multimodal_routing_tokens(
+                    source,
+                    [[99]],
+                    False,
+                    ["a"],
+                    metadata(["a"], [[-7]]),
+                    100,
+                    compact=True,
+                )
+                self.assertEqual(list(values), [1, -7, 2])
+                self.assertEqual(length, 3)
 
     def test_expanded_locations_cover_video_segments_and_repeated_media(self):
         data = metadata(["video"], [[-1, 99, 3]])
