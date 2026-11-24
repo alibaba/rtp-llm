@@ -1,7 +1,6 @@
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/utils/Exception.h"
 
 namespace rtp_llm::test {
@@ -36,20 +35,7 @@ void expectBlockSizeBytesIfSupported(const MLAKVCacheSpec& spec, size_t expected
     EXPECT_EQ(spec.block_size_bytes(), expected_elems * dtype_size);
 }
 
-class MLAKVCacheSpecTest: public ::testing::Test {
-protected:
-    void SetUp() override {
-        old_core_dump_on_exception_                  = StaticConfig::user_ft_core_dump_on_exception;
-        StaticConfig::user_ft_core_dump_on_exception  = false;
-    }
-    void TearDown() override {
-        StaticConfig::user_ft_core_dump_on_exception  = old_core_dump_on_exception_;
-    }
-private:
-    bool old_core_dump_on_exception_;
-};
-
-TEST_F(MLAKVCacheSpecTest, Bf16LayoutDoesNotDependOnSparseMode) {
+TEST(MLAKVCacheSpecTest, Bf16LayoutDoesNotDependOnSparseMode) {
     auto dense_spec  = makeMlaSpec(DataType::TYPE_BF16, false);
     auto sparse_spec = makeMlaSpec(DataType::TYPE_BF16, true);
 
@@ -58,7 +44,7 @@ TEST_F(MLAKVCacheSpecTest, Bf16LayoutDoesNotDependOnSparseMode) {
     EXPECT_EQ(sparse_spec->block_size_bytes(), expected_bytes);
 }
 
-TEST_F(MLAKVCacheSpecTest, DenseFp8UsesNativeLayout) {
+TEST(MLAKVCacheSpecTest, DenseFp8UsesNativeLayout) {
     auto spec = makeMlaSpec(DataType::TYPE_FP8_E4M3, false);
 
     constexpr size_t expected_elems = 512 + 512 / 128 * 4 + 64 * 2;
@@ -66,7 +52,7 @@ TEST_F(MLAKVCacheSpecTest, DenseFp8UsesNativeLayout) {
     expectBlockSizeBytesIfSupported(*spec, expected_elems);
 }
 
-TEST_F(MLAKVCacheSpecTest, SparseFp8UsesPlatformLayout) {
+TEST(MLAKVCacheSpecTest, SparseFp8UsesPlatformLayout) {
     auto spec = makeMlaSpec(DataType::TYPE_FP8_E4M3, true);
 
 #if USING_ROCM
@@ -80,9 +66,15 @@ TEST_F(MLAKVCacheSpecTest, SparseFp8UsesPlatformLayout) {
     expectBlockSizeBytesIfSupported(*spec, expected_elems);
 }
 
-TEST_F(MLAKVCacheSpecTest, DenseFp8RejectsUnalignedLoraRankForAllFp8Dtypes) {
+TEST(MLAKVCacheSpecTest, UnalignedFp8LoraRankPreservesPlatformBehavior) {
+#if USING_ROCM
     EXPECT_THROW(makeMlaSpec(DataType::TYPE_FP8_E4M3, false, 100), rtp_llm::RTPException);
     EXPECT_THROW(makeMlaSpec(DataType::TYPE_FP8_E8M0, false, 100), rtp_llm::RTPException);
+#else
+    for (const auto dtype : {DataType::TYPE_FP8_E4M3, DataType::TYPE_FP8_E8M0}) {
+        EXPECT_EQ(makeMlaSpec(dtype, false, 100)->block_size(), 100u + 2u * 64);
+    }
+#endif
 }
 
 }  // namespace

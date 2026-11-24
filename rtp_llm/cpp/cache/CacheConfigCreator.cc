@@ -23,6 +23,15 @@ namespace rtp_llm {
 
 namespace {
 
+bool isRocmAtomQwen4(const ModelConfig& model) {
+#if USING_ROCM
+    return model.model_type == "atom_qwen4_exp" || model.model_type == "atom_qwen4_exp_mtp";
+#else
+    (void)model;
+    return false;
+#endif
+}
+
 bool modelHasMultipleCacheGroups(const ModelConfig& model_config) {
     std::set<std::string> tags;
     for (const auto& layer_descs : model_config.kv_cache_spec_descs) {
@@ -265,7 +274,7 @@ void validateDescs(const ModelConfig& model_config, uint32_t kernel_tokens_per_b
                                         desc.compression_ratio,
                                         kernel_tokens_per_block);
                 const bool qwen4_atom_indexer =
-                    (model_config.model_type == "atom_qwen4_exp" || model_config.model_type == "atom_qwen4_exp_mtp")
+                    isRocmAtomQwen4(model_config)
                     && desc.tag == "indexer_kv" && desc.compression_ratio == 4;
                 if (desc.compression_ratio > 1 && !qwen4_atom_indexer) {
                     RTP_LLM_CHECK_WITH_INFO(
@@ -494,7 +503,11 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
     validateAttentionMetadata(model_config);
     const auto ctx =
         makeSpecBuildContext(model_config, parallelism_config, seq_size, kernel_seq_size, gen_num_per_cycle);
-    const auto descs = resolveLinearStateLayout(model_config, parallelism_config, kv_cache_config, ctx);
+    std::optional<LayerKVCacheSpecDescs> resolved;
+    if (isRocmAtomQwen4(model_config)) {
+        resolved.emplace(resolveLinearStateLayout(model_config, parallelism_config, kv_cache_config, ctx));
+    }
+    const auto& descs = resolved ? *resolved : model_config.kv_cache_spec_descs;
     const auto specs = CacheConfigCreator::buildLayerSpecsFromDescs(descs, ctx, model_config.num_layers);
 
     CacheConfig config;
@@ -600,7 +613,7 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
     config.reuse_cache_tail_blocks = kv_cache_config.reuse_cache_tail_blocks;
     {
         auto groups = config.topology().groups();
-        const bool fusion_request_state = parallelism_config.role_type == RoleType::PDFUSION
+        const bool fusion_request_state = isRocmAtomQwen4(model_config) && parallelism_config.role_type == RoleType::PDFUSION
                                           && (kv_cache_config.linear_ssm_double_buffer || kv_cache_config.linear_ssm_replay);
         for (auto& group : groups) {
             const uint32_t override_blocks =
@@ -702,7 +715,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
         draft_model_config == nullptr
             || (sp_config->gen_num_per_cycle >= 0 && sp_config->gen_num_per_cycle <= std::numeric_limits<int>::max()),
         "draft proposal token count must fit a non-negative int");
-    if (kv_cache_config.linear_ssm_double_buffer || kv_cache_config.linear_ssm_replay) {
+    if (isRocmAtomQwen4(model_config) && (kv_cache_config.linear_ssm_double_buffer || kv_cache_config.linear_ssm_replay)) {
         RTP_LLM_CHECK_WITH_INFO(sp_config && sp_config->type == SP_TYPE_MTP && is_mtp && !is_eagle
                                     && sp_config->tree_decode_config.empty() && draft_model_config != nullptr,
                                 "split linear SSM requires a chained MTP target/draft configuration");
@@ -722,12 +735,16 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
         draft_options.linear_ssm_replay        = false;
         auto draft       = createBasicConfig(
             draft_model, parallelism_config, draft_options, gen_num_per_cycle, /*global_layer_begin=*/0);
-        if (is_mtp && !is_eagle && !isBlockDraftType(sp_config->type)) {
-            RTP_LLM_CHECK_WITH_INFO(gen_num_per_cycle > 0, "draft cache configuration requires at least one module");
+        int modules = is_mtp && !is_eagle && !isBlockDraftType(sp_config->type) ? gen_num_per_cycle : 1;
+        RTP_LLM_CHECK_WITH_INFO(modules > 0, "draft cache configuration requires at least one module");
+        if (isRocmAtomQwen4(model_config)) {
+            // ATOM reuses draft module zero across proposal steps.
+            modules = 1;
         }
-        // The executor and PD transfer use only draft module 0. Proposal width
-        // still sizes speculative state; it does not count active draft models.
-        config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, /*module_index=*/0, config.layer_num));
+        config.mtp_sub_configs.reserve(static_cast<size_t>(modules));
+        for (int module = 0; module < modules; ++module) {
+            config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, module, config.layer_num));
+        }
     }
     resolvePoolBlockWeights(config, kv_cache_config.kv_cache_pool_block_weights, parallelism_config.pp_size);
     return config;

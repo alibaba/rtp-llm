@@ -13,6 +13,7 @@ namespace {
 
 ModelConfig model() {
     ModelConfig cfg;
+    cfg.model_type = "atom_qwen4_exp";
     cfg.num_layers                                     = 2;
     cfg.max_seq_len                                    = 16384;
     cfg.data_type                                      = DataType::TYPE_BF16;

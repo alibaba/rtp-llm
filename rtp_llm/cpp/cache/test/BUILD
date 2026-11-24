@@ -163,7 +163,6 @@ cc_test(
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/cache:kv_cache_specs",
-        "//rtp_llm/cpp/config:static_config",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),
@@ -282,8 +281,12 @@ cc_test(
     srcs = ["RequestStateCacheManagerTest.cc"],
     copts = test_copts,
     deps = test_deps + [":block_pool_test_helper", ":block_tree_cache_allocator_test_helper"],
-    exec_properties = {"gpu": "H20_CU13"},
-    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+    tags = ["rocm"],
+    target_compatible_with = select({
+        "@//:using_rocm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
 )
 
 cc_test(
