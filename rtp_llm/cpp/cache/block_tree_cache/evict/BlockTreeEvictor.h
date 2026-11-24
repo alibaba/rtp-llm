@@ -158,14 +158,18 @@ private:
                      EvictionBatchContext* eviction_batch_context = nullptr,
                      EvictionVictimTrigger trigger                = EvictionVictimTrigger::FORCE_DROP,
                      DropScope             scope                  = DropScope::CASCADE);
-    // Caller holds the cache mutex. Select and immediately reserve a demote
-    // batch in one ordered pass; return aligned descriptors and timing snapshots.
+    // Caller holds the cache mutex. Select and reserve a batch for eviction to a
+    // lower tier in one ordered pass. Return descriptors and timings in the same order.
     // Target allocation, submission and rollback happen after this call returns.
-    PreparedVictims chooseAndReserveVictims(size_t group_set_id, Tier source_tier, size_t max_victim_count);
-    // Check demote protections before deciding whether a heap entry is stale.
+    PreparedVictims
+    chooseAndReserveVictims(size_t group_set_id, Tier source_tier, Tier target_tier, size_t max_victim_count);
+    // Check transfer eviction protections before deciding whether a heap entry is stale.
     std::optional<EvictionVictimSkipReason>
-    demoteRejectionReason(TreeNode* node, size_t group_set_id, Tier tier, const GroupSet& group_set) const;
-    bool canReclaimDeviceDrop(TreeNode* node, size_t group_set_id, EvictionBatchContext* eviction_batch_context, DropScope scope) const;
+    transferEvictionRejectionReason(TreeNode* node, size_t group_set_id, Tier tier, const GroupSet& group_set) const;
+    bool canReclaimDeviceDrop(TreeNode*             node,
+                              size_t                group_set_id,
+                              EvictionBatchContext* eviction_batch_context,
+                              DropScope             scope) const;
     void logZeroDeviceReclaimLocked(size_t group_set_id,
                                     size_t member_group_id,
                                     size_t required_blocks,

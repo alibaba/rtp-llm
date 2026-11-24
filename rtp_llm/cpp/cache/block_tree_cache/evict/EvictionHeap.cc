@@ -22,7 +22,7 @@ bool EvictionHeap::EntryLess::operator()(const EvictionEntry& a, const EvictionE
 
 EvictionHeap::EvictionHeap(EvictionPolicy policy): policy_(policy) {}
 
-EvictionHeap::RejectedPrefixScope::RejectedPrefixScope(EvictionHeap& heap,
+EvictionHeap::RejectedPrefixScope::RejectedPrefixScope(EvictionHeap&                        heap,
                                                        const std::unordered_set<TreeNode*>& rejected):
     heap_(heap), rejected_(rejected) {
     RTP_LLM_CHECK_WITH_INFO(!heap_.isSkippingRejectedPrefix(), "nested rejected-prefix selection on the same heap");
@@ -33,49 +33,19 @@ EvictionHeap::RejectedPrefixScope::~RejectedPrefixScope() noexcept {
     heap_.rejected_prefix_scope_ = nullptr;
 }
 
-void EvictionHeap::RejectedPrefixScope::onAdmission(const_iterator position) {
+void EvictionHeap::updateRejectedPrefixOnAdmission(const_iterator position) {
+    auto&                scope = *rejected_prefix_scope_;
+    auto&                fence = scope.fence_;
     const EvictionEntry& entry = *position;
     // A non-rejected insertion or reorder inside the prefix only invalidates
     // it from that position onward. The predecessor is still proved rejected.
-    // R deliberately has the same pointer-identity semantics as chooseDropVictim.
-    if (fence_.has_value() && !EntryLess{}(*fence_, entry) && rejected_.count(entry.node) == 0) {
-        if (position == heap_.ordered_.cbegin()) {
-            fence_.reset();
+    if (fence.has_value() && !EntryLess{}(*fence, entry) && scope.rejected_.count(entry.node) == 0) {
+        if (position == ordered_.cbegin()) {
+            fence.reset();
         } else {
-            fence_ = *std::prev(position);
+            fence = *std::prev(position);
         }
     }
-}
-
-void EvictionHeap::RejectedPrefixScope::onErase(TreeNode* node) noexcept {
-    // Keep the comparator's pointer tie-breaker live. Other erasures preserve
-    // the proof, but deleting the boundary rebuilds it on the next lookup.
-    if (fence_.has_value() && fence_->node == node) {
-        fence_.reset();
-    }
-}
-
-std::optional<EvictionEntry>
-EvictionHeap::RejectedPrefixScope::best(const std::function<bool(TreeNode*)>& can_evict) {
-    // EntryLess uses every copied key, including the live boundary's pointer
-    // tie-breaker. Erasing that boundary invalidates it before node destruction.
-    const auto start     = fence_.has_value() ? heap_.ordered_.upper_bound(*fence_) : heap_.ordered_.begin();
-    const auto end       = heap_.ordered_.end();
-    auto       candidate = start;
-    for (; candidate != end; ++candidate) {
-        if (can_evict(candidate->node)) {
-            break;
-        }
-    }
-    // The predicate records every rejection. The preceding entry is the
-    // last one rejected, including when the scan reached the end.
-    if (candidate != start) {
-        fence_ = *std::prev(candidate);
-    }
-    if (candidate == end) {
-        return std::nullopt;
-    }
-    return *candidate;
 }
 
 EvictionEntry EvictionHeap::makeEntry(TreeNode* node, const CandidateMeta& meta) const {
@@ -117,7 +87,7 @@ void EvictionHeap::upsert(TreeNode* node, const CandidateMeta& meta) {
         throw;
     }
     if (rejected_prefix_scope_ != nullptr) {
-        rejected_prefix_scope_->onAdmission(ordered_it);
+        updateRejectedPrefixOnAdmission(ordered_it);
     }
 }
 
@@ -132,7 +102,7 @@ bool EvictionHeap::updateIfPresent(TreeNode* node, const CandidateMeta& meta) {
     assert(result.inserted);
     index_it->second = result.position;
     if (rejected_prefix_scope_ != nullptr) {
-        rejected_prefix_scope_->onAdmission(result.position);
+        updateRejectedPrefixOnAdmission(result.position);
     }
     return true;
 }
@@ -142,7 +112,11 @@ void EvictionHeap::erase(TreeNode* node) {
     if (it == index_.end())
         return;
     if (rejected_prefix_scope_ != nullptr) {
-        rejected_prefix_scope_->onErase(node);
+        // Invalidate the copied pointer tie-breaker before the boundary can be destroyed.
+        auto& fence = rejected_prefix_scope_->fence_;
+        if (fence.has_value() && fence->node == node) {
+            fence.reset();
+        }
     }
     ordered_.erase(it->second);
     index_.erase(it);
@@ -171,13 +145,34 @@ void EvictionHeap::rememberRejectedPrefixBefore(TreeNode*                       
     }
 }
 
-EvictionHeap::RejectedPrefixScope*
-EvictionHeap::rejectedPrefixFor(const std::unordered_set<TreeNode*>& rejected, bool expect_rejected_prefix) const {
-    auto* scope = rejected_prefix_scope_;
-    RTP_LLM_CHECK_WITH_INFO(
-        expect_rejected_prefix == (scope != nullptr) && (scope == nullptr || &scope->rejected_ == &rejected),
-        "rejected-prefix scope does not match the eviction batch");
-    return scope;
+std::optional<EvictionEntry> EvictionHeap::bestForDrop(const std::function<bool(TreeNode*)>&     can_evict,
+                                                       const std::unordered_set<TreeNode*>&      rejected,
+                                                       const std::optional<RejectedPrefixScope>& batch_scope) {
+    auto*       scope          = rejected_prefix_scope_;
+    const auto* expected_scope = batch_scope ? &*batch_scope : nullptr;
+    RTP_LLM_CHECK_WITH_INFO(scope == expected_scope && (scope == nullptr || &scope->rejected_ == &rejected),
+                            "rejected-prefix scope does not match the eviction batch");
+    if (scope == nullptr) {
+        return best(can_evict);
+    }
+    auto&      fence     = scope->fence_;
+    const auto start     = fence.has_value() ? ordered_.upper_bound(*fence) : ordered_.begin();
+    const auto end       = ordered_.end();
+    auto       candidate = start;
+    for (; candidate != end; ++candidate) {
+        if (can_evict(candidate->node)) {
+            break;
+        }
+    }
+    // The predicate records every rejection. This includes the last entry
+    // examined when no candidate qualifies.
+    if (candidate != start) {
+        fence = *std::prev(candidate);
+    }
+    if (candidate == end) {
+        return std::nullopt;
+    }
+    return *candidate;
 }
 
 bool EvictionHeap::contains(TreeNode* node) const {

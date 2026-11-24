@@ -2686,9 +2686,9 @@ TEST(BlockTreeLoaderTest, ReplacedLoadCannotChangeNewEvictionState) {
             std::optional<TransferDescriptor> next;
             {
                 std::lock_guard<std::mutex> lock(env->cache->mutex_);
-                auto prepared = evictor.chooseAndReserveVictims(0, Tier::DEVICE, 1);
+                auto                        prepared = evictor.chooseAndReserveVictims(0, Tier::DEVICE, Tier::HOST, 1);
                 ASSERT_EQ(prepared.descriptors.size(), 1u);
-                next = std::move(prepared.descriptors.front());
+                next                = std::move(prepared.descriptors.front());
                 next->target_blocks = {env->groups[0]->allocateSingleBlock(Tier::HOST, BlockTreeRefType::EVICT)};
                 ASSERT_FALSE(isNullBlockIdx(next->target_blocks.front()));
             }
@@ -2742,7 +2742,7 @@ TEST(BlockTreeLoaderTest, NonOwnerPrefixDoesNotPublishOwnerDeviceSuffix) {
             ASSERT_TRUE(Peer::evictOneForGroupSetForTest(*env->cache, 0, Tier::HOST));
             Peer::waitForTaskPoolIdleForTest(*env->cache);
             std::lock_guard<std::mutex> lock(env->cache->mutex_);
-            auto prepared = env->cache->evictor_.chooseAndReserveVictims(0, Tier::HOST, 1);
+            auto prepared = env->cache->evictor_.chooseAndReserveVictims(0, Tier::HOST, Tier::DISK, 1);
             ASSERT_EQ(prepared.descriptors.size(), 1u);
             eviction = std::move(prepared.descriptors.front());
             ASSERT_EQ(eviction->node->cache_key, env->keys.front());

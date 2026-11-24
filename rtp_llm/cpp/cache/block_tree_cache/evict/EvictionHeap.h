@@ -43,19 +43,13 @@ public:
     public:
         RejectedPrefixScope(EvictionHeap& heap, const std::unordered_set<TreeNode*>& rejected);
         ~RejectedPrefixScope() noexcept;
-        RejectedPrefixScope(const RejectedPrefixScope&) = delete;
+        RejectedPrefixScope(const RejectedPrefixScope&)            = delete;
         RejectedPrefixScope& operator=(const RejectedPrefixScope&) = delete;
-        RejectedPrefixScope(RejectedPrefixScope&&) = delete;
-        RejectedPrefixScope& operator=(RejectedPrefixScope&&) = delete;
-
-        // Every false result must leave the node in the monotonic rejection set.
-        // The predicate cannot mutate heap membership or metadata.
-        std::optional<EvictionEntry> best(const std::function<bool(TreeNode*)>& can_evict);
+        RejectedPrefixScope(RejectedPrefixScope&&)                 = delete;
+        RejectedPrefixScope& operator=(RejectedPrefixScope&&)      = delete;
 
     private:
         friend class EvictionHeap;
-        void onAdmission(const_iterator position);
-        void onErase(TreeNode* node) noexcept;
         EvictionHeap&                        heap_;
         const std::unordered_set<TreeNode*>& rejected_;
         std::optional<EvictionEntry>         fence_;
@@ -80,10 +74,12 @@ public:
     void rememberRejectedPrefixBefore(TreeNode*                            victim,
                                       const std::unordered_set<TreeNode*>& rejected,
                                       std::optional<RejectedPrefixScope>&  scope);
-    // Match the batch by rejection set identity. Reject overlapping batches
-    // and a prefix-enabled batch sent to a heap without its scope.
-    RejectedPrefixScope* rejectedPrefixFor(const std::unordered_set<TreeNode*>& rejected,
-                                           bool expect_rejected_prefix) const;
+    // Select under the cache mutex using only the prefix registered for this
+    // batch. Every false result must leave the node in the rejection set.
+    // The predicate cannot mutate heap membership or metadata.
+    std::optional<EvictionEntry> bestForDrop(const std::function<bool(TreeNode*)>&     can_evict,
+                                             const std::unordered_set<TreeNode*>&      rejected,
+                                             const std::optional<RejectedPrefixScope>& batch_scope);
     // Ordered read-only traversal under the cache mutex. Advance before erasing
     // the current entry; no other entry may be erased, inserted or reordered.
     // Iterators must not survive unlock, rollback or a cascading direct drop.
@@ -113,6 +109,7 @@ public:
 private:
     // Build the ordered entry (primary/secondary keys) from meta per policy.
     EvictionEntry makeEntry(TreeNode* node, const CandidateMeta& meta) const;
+    void          updateRejectedPrefixOnAdmission(const_iterator position);
 
     EvictionPolicy                                      policy_;
     OrderedSet                                          ordered_;
