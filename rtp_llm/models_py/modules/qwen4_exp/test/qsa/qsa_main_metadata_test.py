@@ -73,6 +73,36 @@ class QsaMainMetadataTest(unittest.TestCase):
         self.assertIsNot(fallback.kv_lens, visible)
         torch.testing.assert_close(fallback.kv_lens, visible + 1, rtol=0, atol=0)
 
+    def test_target_preflight_masks_by_main_cache_before_sharing(self):
+        owner, source, cache, selected = self.fixture()
+        inputs = owner.attn_inputs
+        inputs.is_s_padded = True
+        table = inputs.kv_cache_kernel_block_id_device
+        table[1].zero_()
+        visible = try_target_metadata(inputs.prefix_lengths_device, 4, 4)[0]
+        visible[2].zero_()  # Inactive on the side cache even with live main blocks.
+        runtime = SimpleNamespace(
+            main_cache=cache,
+            main_inputs=inputs,
+            _target_verify_plan=SimpleNamespace(visible_lengths=visible),
+            validate_before_projection=Mock(),
+            metadata_cache={},
+        )
+        masked = []
+        for _ in range(3):
+            fmha_validation.validate_qsa_before_side_write(
+                owner, runtime, object(), source
+            )
+            masked.append(
+                fmha_inputs._prepare_paged_inputs(
+                    owner, source, cache, selected
+                ).kv_lens
+            )
+        self.assertTrue(all(t is masked[0] for t in masked))
+        expected = visible.clone()
+        expected[1].zero_()
+        torch.testing.assert_close(masked[0], expected)
+
     def test_foreign_or_invalid_metadata_rejected_before_any_writer(self):
         owner, source, cache, selected = self.fixture()
         good = try_target_metadata(owner.attn_inputs.prefix_lengths.cuda(), 4, 4)[0]
