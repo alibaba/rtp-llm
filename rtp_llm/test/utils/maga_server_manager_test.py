@@ -105,12 +105,13 @@ class MagaServerManagerTest(unittest.TestCase):
                 # Stop must complete while health is blocked, without holding its lock.
                 self.assertTrue(stop_result.result(timeout=5))
                 self.assertIsNone(self.manager.server_pid)
-                parent.terminate.assert_called_once_with()
+                parent.terminate.assert_not_called()
             finally:
                 release_health.set()
             self.assertFalse(wait_result.result(timeout=5))
 
-        process.poll.assert_called_once_with()
+        self.assertEqual(2, process.poll.call_count)
+        process.poll.assert_called_with()
         self.assertEqual(self.manager.exit_code, -signal.SIGTERM)
         self.assertIn("pid=4242 killed by SIGTERM", "\n".join(logs.output))
         self.assertNotIn("still alive", "\n".join(logs.output))

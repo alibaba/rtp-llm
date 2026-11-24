@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "model": {
+    "label": "qwen2.5-0.5b-decode-aone-gang",
+    "type": "qwen_2",
+    "checkpoint": "Qwen/Qwen2.5-0.5B-Instruct",
+    "tokenizer": "Qwen/Qwen2.5-0.5B-Instruct",
+    "topology": {
+      "tp": 2,
+      "dp": 1,
+      "pp": 1,
+      "ep": 1
+    }
+  },
+  "engine": {
+    "max_seq_len": 4097,
+    "max_batch_tokens": 8192,
+    "concurrency_limit": 2,
+    "args": {},
+    "env": {}
+  },
+  "workload": {
+    "kind": "grid",
+    "input_lengths": [
+      128
+    ],
+    "output_lengths": [
+      8
+    ],
+    "batch": {
+      "strategy": "fixed",
+      "sizes": [
+        1
+      ]
+    },
+    "measure_runs": 1,
+    "warmup_runs": 0,
+    "generate_config": {
+      "top_k": 1
+    },
+    "profiling": {
+      "enabled": false
+    }
+  },
+  "execution": {
+    "backend": "aone",
+    "resource": "daily",
+    "gpu_type": "H20_CU13",
+    "max_parallel": 2,
+    "gpus_per_machine": 1
+  },
+  "output": {
+    "result_root": "perf_test_results"
+  },
+  "regression": {},
+  "publish": {}
+}

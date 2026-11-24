@@ -268,6 +268,13 @@ cc_binary(
 )
 
 exports_files(["cc_test_wrapper.sh"])
+exports_files([
+    "docs/benchmark/benchmark.md",
+    "docs/build/en/_sources/benchmark/benchmark.md",
+    "docs/build/en/benchmark/benchmark.html",
+    "docs/build/zh_CN/_sources/benchmark/benchmark.md",
+    "docs/build/zh_CN/benchmark/benchmark.html",
+])
 
 py_runtime(
     name = "python310",

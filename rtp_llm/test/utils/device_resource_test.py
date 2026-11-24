@@ -199,6 +199,7 @@ class GpuLockEntryTest(unittest.TestCase):
                     "WORLD_SIZE": world_size,
                     "CUDA_VISIBLE_DEVICES": "1,2",
                     "HIP_VISIBLE_DEVICES": "3",
+                    "RTP_LLM_GPU_LOCKED_DEVICES": "7,8",
                 }
                 with patch.dict(os.environ, env):
                     with patch.object(sys, "argv", ["gpu_lock", "cpu-test", "arg"]):
@@ -218,18 +219,29 @@ class GpuLockEntryTest(unittest.TestCase):
                             )
                             self.assertEqual(os.environ["CUDA_VISIBLE_DEVICES"], "")
                             self.assertEqual(os.environ["HIP_VISIBLE_DEVICES"], "")
+                            self.assertNotIn("RTP_LLM_GPU_LOCKED_DEVICES", os.environ)
 
     def test_cpu_target_preserves_command_failure(self):
-        with patch.dict(os.environ, {"GPU_COUNT": "0"}):
-            with patch(
+        for gpu_count in ("0", "1"):
+            with self.subTest(gpu_count=gpu_count), patch.dict(
+                os.environ,
+                {"GPU_COUNT": gpu_count, "RTP_LLM_GPU_LOCKED_DEVICES": "7,8"},
+            ), patch(
+                "rtp_llm.test.utils.device_resource.get_cuda_info", return_value=None
+            ), patch(
                 "rtp_llm.test.utils.device_resource.subprocess.Popen",
                 return_value=self._fake_popen(23),
             ):
                 self.assertEqual(main(), 23)
+                self.assertNotIn("RTP_LLM_GPU_LOCKED_DEVICES", os.environ)
 
     def test_gpu_target_still_probes_and_locks_requested_devices(self):
         jit_setup = MagicMock()
-        env = {"GPU_COUNT": "1", "WORLD_SIZE": "2"}
+        env = {
+            "GPU_COUNT": "1",
+            "WORLD_SIZE": "2",
+            "RTP_LLM_GPU_LOCKED_DEVICES": "7,8",
+        }
         with patch.dict(os.environ, env):
             with patch.dict(sys.modules, {"jit_sys_path_setup": jit_setup}):
                 with patch(
@@ -251,6 +263,7 @@ class GpuLockEntryTest(unittest.TestCase):
                     jit_setup.setup_jit_cache.assert_called_once_with()
                     resource.return_value.__exit__.assert_called_once()
                     self.assertEqual(os.environ["CUDA_VISIBLE_DEVICES"], "1,3")
+                    self.assertEqual(os.environ["RTP_LLM_GPU_LOCKED_DEVICES"], "1,3")
 
 
 class CudaProbeReuseTest(unittest.TestCase):

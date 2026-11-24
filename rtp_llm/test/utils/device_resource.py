@@ -14,6 +14,10 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from filelock import FileLock, Timeout
 
+# Internal allocation receipt consumed by perf launchers. Keep the wrapper
+# independent of perf libraries, and leave ordinary smoke visibility unchanged.
+_GPU_LOCKED_DEVICES_ENV = "RTP_LLM_GPU_LOCKED_DEVICES"
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
@@ -1004,6 +1008,9 @@ def _run_test_command(device_resource: Optional[DeviceResource] = None) -> int:
 
 
 def main():
+    # A receipt is valid only for this invocation's actual lock acquisition.
+    # CPU and no-GPU fallbacks must never forward a previous allocation.
+    os.environ.pop(_GPU_LOCKED_DEVICES_ENV, None)
     # CPU-only targets must not initialize CUDA or acquire GPU locks.
     if os.environ.get("GPU_COUNT") == "0":
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
@@ -1030,6 +1037,7 @@ def main():
         else:
             env_name = "CUDA_VISIBLE_DEVICES"
         os.environ[env_name] = ",".join(gpu_resource.gpu_ids)
+        os.environ[_GPU_LOCKED_DEVICES_ENV] = os.environ[env_name]
         return _run_test_command(gpu_resource)
 
 

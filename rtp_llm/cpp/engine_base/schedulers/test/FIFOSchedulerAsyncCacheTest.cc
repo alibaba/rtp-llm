@@ -14,6 +14,7 @@
 #define private public
 #define protected public
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
+#include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
@@ -78,8 +79,8 @@ protected:
         runtime_config.max_generate_batch_size                           = max_generate_batch_size;
         runtime_config.fifo_scheduler_config.max_batch_tokens_size       = 8192;
         runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams = max_inited_kv_cache_streams;
-        PDSepConfig         pd_sep_config;
-        ParallelismConfig   parallelism_config;
+        PDSepConfig       pd_sep_config;
+        ParallelismConfig parallelism_config;
         return std::make_shared<FIFOScheduler>(
             runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager_);
     }
@@ -92,7 +93,7 @@ protected:
         runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
         PDSepConfig pd_sep_config;
         pd_sep_config.role_type = RoleType::PDFUSION;
-        ParallelismConfig   parallelism_config;
+        ParallelismConfig parallelism_config;
         return std::make_shared<PDFusionRatioScheduler>(
             runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager_);
     }
@@ -195,6 +196,146 @@ protected:
     size_t                                                          free_calls_{0};
     size_t                                                          insert_calls_{0};
 };
+
+namespace {
+
+std::shared_ptr<LoadAsyncContext> makePendingBatchDecodeLoad() {
+    auto coordinator = std::make_shared<LoadContextCoordinator>(
+        [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
+    auto context = coordinator->create({}, {}, /*matched_blocks=*/0);
+    context->setSettlementReadyCallback([](const std::shared_ptr<LoadAsyncContext>&) {});
+    if (!coordinator->registerContext(context)) {
+        throw std::runtime_error("failed to register batch decode load");
+    }
+    return context;
+}
+
+}  // namespace
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testBatchDecodeAllocationTimeoutDoesNotFailLoadingPeer) {
+    // Keep one allocator reserve block: with two free blocks only the one-token peer fits.
+    auto holder = createStream(std::vector<int>(36, 1), false, false, 0, {}, RoleType::PREFILL);
+    holder->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(holder->moveToNext(), StreamState::RUNNING);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 2);
+
+    auto blocked = createStream({2, 3, 4, 5, 6}, false, false, 0, {}, RoleType::PREFILL);
+    auto loading = createStream({5}, false, false, 0, {}, RoleType::PREFILL);
+    auto context = makePendingBatchDecodeLoad();
+    installReadinessAllocator([&](const MallocInfo& info) -> std::shared_ptr<AsyncContext> {
+        return info.request_id == loading->streamId() ? context : nullptr;
+    });
+
+    RuntimeConfig runtime_config;
+    runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 2;
+    auto                 now           = std::chrono::steady_clock::time_point{};
+    int                  loading_polls = 0;
+    BatchDecodeScheduler scheduler(runtime_config, cache_manager_, nullptr, 0, std::chrono::seconds(30), [&] {
+        now += std::chrono::seconds(31);
+        if (loading->getStatus() == StreamState::LOADING_CACHE && ++loading_polls == 3) {
+            EXPECT_TRUE(context->settle(true));
+        }
+        return now;
+    });
+    ASSERT_TRUE(scheduler.enqueue(blocked).ok());
+    ASSERT_TRUE(scheduler.enqueue(loading).ok());
+
+    auto result = scheduler.schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result->streams.size(), 1);
+    EXPECT_EQ(result->streams.front(), loading);
+    EXPECT_EQ(blocked->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(blocked->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+    EXPECT_EQ(blocked->curBlocksNum(), 0);
+    EXPECT_EQ(loading->getStatus(), StreamState::RUNNING);
+    EXPECT_FALSE(loading->hasError());
+    EXPECT_EQ(loading->curBlocksNum(), 1);
+    EXPECT_EQ(scheduler.onflightStreams(), 1);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testBatchDecodeGivesNextAllocationItsOwnRetryBudget) {
+    auto holder = createStream(std::vector<int>(38, 1), false, false, 0, {}, RoleType::PREFILL);
+    holder->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(holder->moveToNext(), StreamState::RUNNING);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 1);
+    auto blocked = createStream({2, 3, 4}, false, false, 0, {}, RoleType::PREFILL);
+    auto peer    = createStream({5, 6, 7}, false, false, 0, {}, RoleType::PREFILL);
+
+    RuntimeConfig runtime_config;
+    runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 2;
+    auto                 now              = std::chrono::steady_clock::time_point{};
+    int                  peer_clock_ticks = 0;
+    BatchDecodeScheduler scheduler(runtime_config, cache_manager_, nullptr, 0, std::chrono::seconds(2), [&] {
+        now += std::chrono::seconds(1);
+        // The first read establishes the peer's deadline. Release external resources
+        // after its first failed allocation, while its independent retry budget remains.
+        if (peer->hasEvent(StreamEvents::CanRun) && ++peer_clock_ticks == 2) {
+            holder->reportEvent(StreamEvents::GenerateDone);
+            EXPECT_EQ(holder->moveToNext(), StreamState::FINISHED);
+        }
+        return now;
+    });
+    ASSERT_TRUE(scheduler.enqueue(blocked).ok());
+    ASSERT_TRUE(scheduler.enqueue(peer).ok());
+    auto result = scheduler.schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result->streams.size(), 1);
+    EXPECT_EQ(result->streams.front(), peer);
+    EXPECT_EQ(blocked->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+    EXPECT_EQ(peer->getStatus(), StreamState::RUNNING);
+    EXPECT_FALSE(peer->hasError());
+    EXPECT_EQ(peer->curBlocksNum(), 2);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testBatchDecodeDoesNotChargeCacheIOToAllocationWait) {
+    auto stream  = createStream({1, 2, 3}, false, false, 0, {}, RoleType::PREFILL);
+    auto context = makePendingBatchDecodeLoad();
+    installReadinessAllocator([&](const MallocInfo&) { return context; });
+
+    RuntimeConfig runtime_config;
+    runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 1;
+    auto                 now           = std::chrono::steady_clock::time_point{};
+    int                  loading_polls = 0;
+    BatchDecodeScheduler scheduler(runtime_config, cache_manager_, nullptr, 0, std::chrono::seconds(30), [&] {
+        now += std::chrono::seconds(31);
+        if (stream->getStatus() == StreamState::LOADING_CACHE && ++loading_polls == 3) {
+            EXPECT_TRUE(context->settle(true));
+        }
+        return now;
+    });
+    ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    auto result = scheduler.schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result->streams.size(), 1);
+    EXPECT_EQ(result->streams.front(), stream);
+    EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
+    EXPECT_FALSE(stream->hasError());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testBatchDecodeKeepsRequestTimeoutDuringCacheLoad) {
+    auto stream  = createStream({1, 2, 3}, false, false, 0, {}, RoleType::PREFILL);
+    auto context = makePendingBatchDecodeLoad();
+    installReadinessAllocator([&](const MallocInfo&) { return context; });
+
+    RuntimeConfig runtime_config;
+    runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 1;
+    auto                 now = std::chrono::steady_clock::time_point{};
+    BatchDecodeScheduler scheduler(runtime_config, cache_manager_, nullptr, 0, std::chrono::seconds(30), [&] {
+        if (stream->getStatus() == StreamState::LOADING_CACHE) {
+            stream->generateConfig()->timeout_ms = 1;
+            stream->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds() - 100 * 1000);
+        }
+        return now;
+    });
+    ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    auto result = scheduler.schedule();
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result->streams.empty());
+    EXPECT_EQ(stream->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+    EXPECT_EQ(stream->curBlocksNum(), 0);
+    EXPECT_EQ(scheduler.onflightStreams(), 0);
+}
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_NoReuseCache_DirectlyRunning) {
     auto scheduler = createScheduler();
