@@ -6,9 +6,17 @@
 
 1. 在 `cases/<case_id>/` 添加 `case.yaml`。基础收发参考 [Basic](../cases/basic/case.yaml)，故障恢复参考 [Master HA](../cases/master_ha_failover/case.yaml)，吞吐和延迟门禁参考 [性能回归](../cases/performance_regression/case.yaml)。
 2. 把本 Case 的角色配置放在 `configs/`，用 `config: configs/master.yaml` 等本地相对路径引用。借用其他 Case 的配置时先复制到本目录。少量参数可内联，空配置用 `config: {}`。
-3. 流量数据放在共享的 `data/traffic/`，在 `frontend/start/playback.args.requests_file` 引用 `.mckidx`。以 `data/` 开头的路径按共享根解析，默认是框架目录，可用 `--shared-root` 指定。其他相对路径从 Case 目录解析。Frontend 共用同一份数据，各自按索引读取。[回放格式](architecture.md#共享索引回放输入)
+3. 在 `frontend/start/playback.args.requests_file` 引用 `.mckidx`，按实验目标选数据、安排预热和基线窗口。[流量数据与预热](#流量数据与预热)
 4. 按实验目的划分 Phase。用已有接口描述操作和可观测的通过条件。使用默认大盘时省略 `view`，自定义大盘才显式声明路径。[默认大盘](../views/README.md)
 5. 提交前在框架目录运行 `uv run --locked mock-case compile cases/<case_id>/case.yaml`。编译检查 YAML、组件配置、接口参数和引用。再按 README 运行完整 Case，核对门禁和请求证据。
+
+## 流量数据与预热
+
+共享流量数据放在 `data/traffic/`。以 `data/` 开头的路径按共享根解析，默认是框架目录，可用 `--shared-root` 指定。其他相对路径从 Case 目录解析。Frontend 共用同一份文件，各自按索引读取。[回放格式](architecture.md#共享索引回放输入)
+
+1. **分析原始流量。** 从文件开头按到达顺序累计已见前缀。假设缓存全局共享、容量无限，按实验的缓存块大小估算每个窗口的理论命中率，即可复用前缀 token 总量除以输入 token 总量。
+2. **界定预热点。** 看理论命中率的窗口曲线。当前缀命中率结束持续爬升，连续几个窗口保持在相近水平时，把确认收敛的文件时刻作为预热点。选数据时给基线、伸缩和恢复留足后续流量。
+3. **把预热点用到 Case。** 将预热点的文件时刻换算成回放墙钟时刻，用 `wait_after` 把基线窗口安排在预热点之后的原速阶段，再执行伸缩。例如 `replay_speed: 1.0`、`warmup.duration: 120s`、`warmup.rate_scale: 0.25` 时，前 120 秒墙钟只消费文件前 30 秒，之后的文件时刻换算为墙钟时刻要加 90 秒。调整等待时间时核对 Step 的 `within` 和 Phase 的 `timeout`。预热、测量和伸缩共用一次顺序回放。
 
 ## YAML 规范
 
