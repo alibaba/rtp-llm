@@ -809,8 +809,8 @@ class V41SwaWriteReuseDispatchTest(unittest.TestCase):
                 layers = [_make_attn(0 if i == 0 else 1, i, shared) for i in range(40)]
                 mapping = [{} for _ in layers]
                 for i, attn in enumerate(layers):
-                    attn.swa_bounded_replay = i >= 21
-                    region = DECODER_SWA_KV if i >= 21 else SWA_KV
+                    attn.swa_bounded_replay = i >= 20
+                    region = DECODER_SWA_KV if i >= 20 else SWA_KV
                     mapping[i][region] = ids.index(region)
                 cache = _tagged_cache(
                     group_tags=regions, layer_region_to_group_id=mapping
@@ -853,10 +853,11 @@ class V41SwaWriteReuseDispatchTest(unittest.TestCase):
                             region: host[ids.index(region)] for region in ids
                         },
                         workspace=None,
+                        stop_layer=21,
                         **_inputs(),
                     )
                     self.assertEqual(
-                        {region for _, region in calls}, {SWA_KV, DECODER_SWA_KV}
+                        calls, [(0, SWA_KV), (1, SWA_KV), (20, DECODER_SWA_KV)]
                     )
                     calls.clear()
                     build_and_propagate_prefill_meta_fp8(
@@ -911,7 +912,7 @@ class V41SwaWriteReuseDispatchTest(unittest.TestCase):
                 layers = [_make_attn(0 if i == 0 else 1, i, shared) for i in range(40)]
                 mapping = [{} for _ in layers]
                 for i in range(40):
-                    mapping[i][SWA_KV if i < 21 else DECODER_SWA_KV] = int(i >= 21)
+                    mapping[i][SWA_KV if i < 20 else DECODER_SWA_KV] = int(i >= 20)
                 cache = _tagged_cache(
                     group_tags=(SWA_KV, DECODER_SWA_KV),
                     layer_region_to_group_id=mapping,
@@ -932,7 +933,7 @@ class V41SwaWriteReuseDispatchTest(unittest.TestCase):
                     prefix_lengths_host=(1000,),
                 )
                 for a in layers:
-                    a.swa_bounded_replay = a.layer_id >= 21
+                    a.swa_bounded_replay = a.layer_id >= 20
                     a._cp_ctx = cp
                 model = SimpleNamespace(
                     layers=[SimpleNamespace(attn=a) for a in layers]
@@ -962,9 +963,14 @@ class V41SwaWriteReuseDispatchTest(unittest.TestCase):
                         cache,
                         tables,
                         workspace=object(),
+                        stop_layer=21,
                         **_inputs(),
                     )
                     self.assertEqual(set(previous), {SWA_KV, DECODER_SWA_KV})
+                    self.assertEqual(calls[-1], (20, None))
+                    self.assertEqual(
+                        previous[DECODER_SWA_KV].slot_mapping.tolist(), [1]
+                    )
                     self.assertFalse(hasattr(previous[DECODER_SWA_KV], "workspace"))
                     new_cp = SimpleNamespace(**vars(cp))
                     if changed == "table":

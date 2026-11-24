@@ -738,7 +738,7 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                     lengths.storage_offset(),
                     requests.storage_offset(),
                     replay,
-                    call.kwargs["compact_replay"],
+                    call.kwargs["replay_tokens"] != 0,
                     physical is not None,
                 )
             )

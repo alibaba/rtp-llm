@@ -8,6 +8,7 @@ from bisect import bisect_left
 import torch
 
 from .._prefill_stream import prefill_stream_is_capturing
+from ..cp import cp_swa_replay_starts
 
 
 def _try_publish_with_tokens(
@@ -160,8 +161,11 @@ def try_select_batched(
     publishing = candidates is not None and publish_candidates
     # Grouped rows can be split or compacted by CED; use the request count.
     small_batch = len(globals_by_req) <= 4
+    # DeepInfer's compact boundary uses the dense scorer without schedule metadata.
+    compact_l20 = attn.layer_id == 20 and cp_swa_replay_starts(cp) is not None
     schedule_builder = (
-        os.environ.get("DSV41_PREFILL_INDEXER_BALANCED_SCORE") == "1"
+        os.environ.get("DSV41_PREFILL_INDEXER_BALANCED_SCORE", "1") == "1"
+        and not compact_l20
         and return_bf16
         and (attn.layer_id, attn.compress_ratio) in ((2, 2), (8, 2), (14, 2), (20, 1))
         and torch.cuda.get_device_capability(q_payload.device) == (10, 3)

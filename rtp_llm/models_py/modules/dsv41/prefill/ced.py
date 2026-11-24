@@ -1,11 +1,9 @@
 """V4.1 decoder prefill compaction with an optional bounded replay domain.
 
-L0--L20 retain the complete fresh input and decoder global KV. L21--L39
-only evaluate the dependency windows of allocated SWA checkpoints and the
-request end. The original cache geometry and wire format stay unchanged.
-In opt-in bounded replay, only the final 128 rows are evaluated, with SWA
-truncated to that domain. Those approximate decoder/draft pools are private
-live state, excluded from prefix caching by the native cache policy.
+L20 writes decoder global KV for the complete fresh input. Exact CED
+compacts L21--L39 to the dependency windows of allocated SWA checkpoints.
+Bounded replay compacts queries from L20 to the sliding window plus the
+Decode backtracking budget when supported. L20--L39 rebuild their SWA in live pools excluded from prefix reuse.
 Query rows are redistributed within CP; fresh KV is scattered back before
 ordinary cache writes. No omitted row may be exposed as a prompt output.
 
@@ -37,7 +35,6 @@ from rtp_llm.models_py.modules.dsv41.kv_cache_utils import as_attention_inputs_b
 
 _TAIL_TOKENS = 3072
 _MIN_TOKENS = 32768
-_MIN_L20_SPLIT_TOKENS = 65536
 _DERIVED_KEYS = (
     "prefill_chunk_meta",
     "prefill_kv_workspace",
@@ -772,10 +769,11 @@ class CEDPlan:
     ):
         # Host metadata and the request gate are broadcast by the engine to all
         # TP ranks. No extra device->host voting in the prefill critical path.
+        keep_tokens = v4.args.swa_replay_tokens if bounded_replay else _MIN_TOKENS
         if (
             not isinstance(cp_ctx, CPContext)
             or cp_ctx.cp_size < 1
-            or cp_ctx.seq_len_full < (128 if bounded_replay else _MIN_TOKENS)
+            or cp_ctx.seq_len_full < keep_tokens
             or not cp_ctx.global_positions.is_cuda
             or prepare_hidden_fn is not None
             or kv_cache is None
@@ -830,7 +828,8 @@ class CEDPlan:
         ):
             return None
         group_id = groups[0]
-        base = kv_cache.get_layer_cache(21, regions[group_id]).kv_cache_base
+        swa_layer = 20 if bounded_replay else 21
+        base = kv_cache.get_layer_cache(swa_layer, regions[group_id]).kv_cache_base
         # V4.1 SWA is a byte-sliced 528-byte entry across CP ranks. The native
         # descriptor includes speculative lookahead in the actual ring stride.
         if base is None or base.ndim != 2 or base.numel() == 0:
@@ -852,7 +851,7 @@ class CEDPlan:
         if bounded_replay:
             # Only live decode state is produced. Native cache policy must
             # exclude these decoder/draft SWA pools from prefix reuse.
-            starts = tuple(max(n - 128, 0) for n in lengths)
+            starts = tuple(max(n - keep_tokens, 0) for n in lengths)
             selected = _bounded_replay_selected(lengths, starts)
         else:
             selected = checkpoint_positions(
@@ -863,7 +862,7 @@ class CEDPlan:
                 ring_entries,
             )
         # Exact CED avoids transport for dense checkpoints. Approximate replay
-        # uses the same 128-row domain even immediately above that boundary.
+        # keeps the configured tail even immediately above that boundary.
         if selected.numel() == cp_ctx.seq_len_full or (
             not bounded_replay and selected.numel() * 2 >= cp_ctx.seq_len_full
         ):
@@ -907,8 +906,6 @@ class CEDPlan:
 
     def can_split_l20(self, v4):
         """Keep Stage0 publication/compaction if a split interface is absent."""
-        if self.original_context.seq_len_full < _MIN_L20_SPLIT_TOKENS:
-            return False
         block = v4.layers[20]
         interfaces = (
             cp_swa_replay_starts(self.context) is not None
@@ -1006,10 +1003,8 @@ class CEDPlan:
         return residual, post, comb, input_ids
 
     def l20_query_metadata(self, common, freqs_table):
-        """Replace only query fields; L20 keeps exact SWA/global visibility."""
-        query_context = replace(
-            self.context, swa_replay_start=None, swa_replay_starts_host=None
-        )
+        """Use the compact SWA domain while retaining full global KV metadata."""
+        query_context = self.context
         rows = query_context.chunk_length
         slices, start = [], 0
         for count in query_context.chunk_lengths_per_req:

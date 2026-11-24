@@ -13,6 +13,7 @@ from rtp_llm.distribute.distributed_server import DistributedServer, get_world_i
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
+from rtp_llm.ops import SpeculativeType
 from rtp_llm.server.server_args.hw_kernel_group_args import (
     validate_hw_kernel_group_args,
 )
@@ -97,7 +98,8 @@ class BackendManager(object):
             engine_config.parallelism_config,
             world_info,
         )
-        # Build main model_config
+        # Resolve the draft budget before building the model's cache descriptors.
+        sp_config = engine_config.sp_config
         model_config = ModelFactory.create_model_config(
             model_args=self.py_env_configs.model_args,
             lora_config=self.py_env_configs.lora_config,
@@ -109,6 +111,11 @@ class BackendManager(object):
             render_config=self.py_env_configs.render_config,
             eplb_config=self.py_env_configs.eplb_config,
             vit_config=self.py_env_configs.vit_config,
+            gen_num_per_cycle=(
+                sp_config.gen_num_per_cycle
+                if sp_config.type != SpeculativeType.NONE
+                else 0
+            ),
         )
         # Let engine_config finalize based on model_config (e.g. scheduler config)
         ModelFactory.update_engine_config_from_model_config(

@@ -586,9 +586,8 @@ def forward_layers(
     )
     if ced_requested and v4.swa_bounded_replay:
         lengths_host = getattr(cp_ctx, "input_lengths_global_host", None)
-        # Bounded replay keeps min(n, 128) rows per request; a full window
-        # cannot compact, so skip the CED plan and build both SWA regions up front.
-        if lengths_host and max(lengths_host) <= 128:
+        # Build both SWA regions up front if every request is already short.
+        if lengths_host and max(lengths_host) <= v4.args.swa_replay_tokens:
             ced_requested = False
     host_swa_tables = (
         {

@@ -456,7 +456,7 @@ def _warm_chunk_metadata(meta, ratio, window, device):
                         ratio,
                         window,
                         replay,
-                        compact_replay=compact_replay,
+                        replay_tokens=window if compact_replay else 0,
                         physical_offsets=offsets,
                     ),
                     "chunk metadata",

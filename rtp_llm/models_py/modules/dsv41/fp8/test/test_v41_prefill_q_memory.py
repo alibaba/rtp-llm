@@ -355,7 +355,7 @@ class PrefillQMemoryTest(unittest.TestCase):
                 owner._try_fused_qr_kv(x, common=common)
         self.assertEqual(captured, [("auto", False), ("auto", True)])
 
-    def test_ced_l20_compaction_preserves_fp8_only_tma_layout(self):
+    def test_ced_l20_forwards_compact_fp8_only_tma_layout(self):
         from contextlib import nullcontext
 
         from rtp_llm.models_py.modules.dsv41 import block as block_mod
@@ -377,14 +377,28 @@ class PrefillQMemoryTest(unittest.TestCase):
                     for c in range(packs):
                         sf[r, c] = r * 100 + c
                 idx = torch.tensor(keep_idx, dtype=torch.long)
+                t_c = len(keep_idx)
+                compact_q8 = q8.view(torch.uint8).index_select(0, idx).view(q8.dtype)
+                stride = (t_c + 3) // 4 * 4 or 1
+                compact_sf = torch.empty_strided(
+                    (t_c, packs), (1, stride), dtype=sf.dtype
+                )
+                compact_sf.copy_(sf.index_select(0, idx))
                 qkv = PrefillQKV(
                     qr=None,
                     q=None,
-                    kv_full=torch.zeros(rows, 8),
-                    qr_quantized=(q8, sf),
+                    kv_full=torch.zeros(t_c, 8),
+                    qr_quantized=(compact_q8, compact_sf),
                 )
                 seen_qkv = []
                 common = SimpleNamespace(cp_ctx=None)
+                replay_context = object()
+
+                def produce(x, pos, *, l20_plan, l20_query_x):
+                    self.assertIs(l20_plan.context, replay_context)
+                    self.assertEqual(l20_query_x.shape[0], len(keep_idx))
+                    return common, qkv, None, None, None
+
                 attn = SimpleNamespace(
                     _shared_attention={},
                     freqs_cis=torch.ones(rows, 1, dtype=torch.complex64),
@@ -392,7 +406,7 @@ class PrefillQMemoryTest(unittest.TestCase):
                     can_fuse_prefill_attn_norm_input_quant=lambda *args: False,
                     _set_compressor_pool_context=lambda: None,
                     _clear_compressor_pool_context=lambda: None,
-                    _prefill_produce=lambda x, pos, sq: (common, qkv, None, None, None),
+                    _prefill_produce=produce,
                     _prefill_query=lambda x, meta, qkv_arg, swa, starts, *, indexer_weights=None: (
                         seen_qkv.append(qkv_arg)
                         or torch.zeros(len(keep_idx), dim, dtype=torch.bfloat16)
@@ -406,6 +420,7 @@ class PrefillQMemoryTest(unittest.TestCase):
                     early_indexer=False,
                     early_indexer_fallback=False,
                     original_context=SimpleNamespace(chunk_length=rows),
+                    context=replay_context,
                     exchange=exchange,
                     compact_l20=lambda blk, r, p, c, ids: (
                         r.index_select(0, idx),
@@ -454,6 +469,7 @@ class PrefillQMemoryTest(unittest.TestCase):
                     )
                 self.assertEqual(len(seen_qkv), 1)
                 compacted = seen_qkv[0]
+                self.assertIs(compacted, qkv)
                 self.assertIsNone(compacted.qr)
                 self.assertIsNotNone(compacted.qr_quantized)
                 c_q8, c_sf = compacted.qr_quantized

@@ -188,6 +188,7 @@ def _model():
             n_layers=40,
             ep_size=4,
             window_size=128,
+            swa_replay_tokens=128,
             dim=5120,
             hc_mult=4,
             n_hash_layers=0,
@@ -645,7 +646,7 @@ class CedCreationTest(_SingleThreadTest):
                         )
                     self.assertIsNotNone(plan)
                     cache.get_layer_cache.assert_called_once_with(
-                        21, _CED.DECODER_SWA_KV
+                        20, _CED.DECODER_SWA_KV
                     )
                     self.assertEqual(plan.context.swa_replay_start, length - 128)
                     self.assertEqual(
@@ -2794,26 +2795,42 @@ class CedEncoderSplitTest(_SingleThreadTest):
                 self.assertIsNone(workspace._attention_metadata)
                 self.assertNotIn("prefill_index_plan", shared)
 
-    def test_split_minimum_counts_fresh_rows_before_model_checks_or_uploads(self):
-        for fresh in (129, 16384, 32768, 65535):
-            for prefix in (0, 131072):
-                plan, _ = _plan(
-                    fresh,
-                    0,
-                    torch.arange(fresh - 128, fresh),
-                    prefix,
-                    candidate_publication=True,
-                )
-                with mock.patch.object(
-                    plan,
-                    "_prepare_router_projection",
-                    side_effect=AssertionError("short prefill prepared maps"),
-                ):
-                    # No model interface or mHC capability may be consulted.
-                    self.assertFalse(plan.can_split_l20(object()))
-                self.assertIsNone(plan._router_groups)
-                with plan.candidate_publication(shared := {}):
-                    self.assertIn("ced_candidate_rows", shared)
+    def test_small_batches_can_split_l20(self):
+        block = types.SimpleNamespace(
+            forward_prefill_ced_l20=mock.Mock(),
+            attn=types.SimpleNamespace(
+                _prefill_produce=mock.Mock(), _prefill_query=mock.Mock()
+            ),
+            attn_hc=types.SimpleNamespace(pre_mix_out=None),
+            ffn_hc=object(),
+            ffn_norm=object(),
+            ffn=types.SimpleNamespace(
+                gate=types.SimpleNamespace(_project_scores=F.linear),
+                _should_chunk=mock.Mock(return_value=False),
+            ),
+        )
+        model = types.SimpleNamespace(layers=[None] * 20 + [block])
+        supports_mhc = types.SimpleNamespace(
+            can_preserve_compact_mhc=mock.Mock(return_value=True)
+        )
+        with mock.patch.dict(
+            sys.modules,
+            {"rtp_llm.models_py.modules.dsv41.hc.v41_mega_mhc": supports_mhc},
+        ):
+            for fresh in (129, 16384, 32768, 65535):
+                with self.subTest(fresh=fresh):
+                    plan, _ = _plan(
+                        fresh,
+                        0,
+                        torch.arange(fresh - 128, fresh),
+                        131072,
+                        candidate_publication=True,
+                    )
+                    with mock.patch.object(
+                        plan, "_prepare_router_projection"
+                    ) as prepare:
+                        self.assertTrue(plan.can_split_l20(model))
+                        prepare.assert_called_once_with(block.ffn)
 
     def test_unavailable_split_interface_retains_stage0_plan(self):
         supports_mhc = mock.Mock(return_value=True)
@@ -3263,12 +3280,21 @@ class CedEncoderSplitTest(_SingleThreadTest):
                 _clear_compressor_pool_context=lambda: events.append("clear"),
             )
 
-            def produce(x, positions, quant):
+            def produce(x, positions, *, l20_plan, l20_query_x):
                 events.append("producer")
                 self.assertEqual(x.shape[0], 256)
                 self.assertIs(attn._cp_ctx, plan.original_context)
+                self.assertIs(l20_plan, plan)
+                torch.testing.assert_close(l20_query_x, expected_norm[rows])
                 self.assertTrue(torch.equal(x, expected_norm))
-                return common, QKV(x.clone(), None, fullkv), [fullkv], [0], None
+                start = l20_plan.context.swa_replay_start
+                return (
+                    plan.l20_query_metadata(common, freqs),
+                    QKV(x[rows], None, fullkv[start:]),
+                    [fullkv[start:]],
+                    [start],
+                    None,
+                )
 
             def query(x, meta, qkv, swa, starts, *, indexer_weights):
                 events.append("query")
@@ -3278,12 +3304,13 @@ class CedEncoderSplitTest(_SingleThreadTest):
                 self.assertTrue(torch.equal(meta.freqs_cis, common.freqs_cis[rows]))
                 self.assertIs(meta.workspace, common.workspace)
                 self.assertIs(meta.prefix_lengths, common.prefix_lengths)
-                self.assertIsNone(meta.cp_ctx.swa_replay_start)
+                self.assertEqual(meta.cp_ctx.swa_replay_start, 896)
                 self.assertIs(attn._cp_ctx, meta.cp_ctx)
                 self.assertTrue(torch.equal(a.pre_mix_out, original_mix[rows]))
                 self.assertIsNone(f.pre_mix_out)
-                self.assertIs(qkv.kv_full, fullkv)
-                self.assertIs(swa[0], fullkv)
+                torch.testing.assert_close(qkv.kv_full, fullkv[-128:])
+                torch.testing.assert_close(swa[0], fullkv[-128:])
+                self.assertEqual(starts, [896])
                 self.assertIs(attn._shared_attention["global"][20], global_state)
                 self.assertEqual(
                     attn._shared_attention["ced_indexer_projection"],
@@ -3520,6 +3547,54 @@ class BoundedSwaConsumerTest(_SingleThreadTest):
             )
         # Writer receives compact KV and slices both original/compacted slots.
         self.assertIs(owner._prefill_write_swa_fp8_paged.call_args.args[1], qkv.kv_full)
+
+    def test_l20_projects_only_the_ragged_replay_tail_and_writes_full_source(self):
+        owner = _swa_owner(True)
+        owner.layer_id = 20
+        owner.is_kv_source = True
+        owner.freqs_cis = object()
+        lengths = [65, 385, 129]
+        prefixes = [511, 1024, 16384]
+        starts = [0, 251, 0]
+        full = torch.arange(sum(lengths) * 2).reshape(-1, 2)
+        retained = torch.cat((full[:65], full[316:450], full[450:]))
+        ctx = types.SimpleNamespace(
+            swa_replay_starts_host=tuple(starts),
+            input_lengths_global_host=tuple(lengths),
+            prefix_lengths_host=tuple(prefixes),
+        )
+        Meta = namedtuple(
+            "Meta", "cp_on cp_ctx input_lengths prefix_lengths batch_size swa_meta"
+        )
+        full_common = Meta(
+            False, None, torch.tensor(lengths), torch.tensor(prefixes), 3, object()
+        )
+        compact_common = full_common._replace(cp_ctx=ctx, swa_meta=None)
+        plan = types.SimpleNamespace(
+            l20_query_metadata=mock.Mock(return_value=compact_common),
+        )
+        qkv = types.SimpleNamespace(kv_full=retained)
+        owner._prefill_common_setup = mock.Mock(return_value=full_common)
+        owner._prefill_compute_qkv = mock.Mock(return_value=qkv)
+        owner._produce_global = mock.Mock()
+
+        common, _, buffers, positions, _ = owner._prefill_produce(
+            full, object(), l20_plan=plan, l20_query_x=retained
+        )
+        self.assertIs(common, compact_common)
+        owner._prefill_compute_qkv.assert_called_once_with(retained, compact_common)
+        write, values = owner._prefill_write_swa_fp8_paged.call_args.args
+        self.assertIs(write.cp_ctx, ctx)
+        self.assertIs(write.swa_meta, full_common.swa_meta)
+        self.assertIs(values, retained)
+        self.assertIs(owner._produce_global.call_args.args[0], full)
+        self.assertIs(
+            owner._produce_global.call_args.args[4], full_common.input_lengths
+        )
+        self.assertEqual(positions, [511, 1275, 16384])
+        for actual, expected in zip(buffers, (full[:65], full[316:450], full[450:])):
+            torch.testing.assert_close(actual, expected)
+        owner._swa_prefill_concat.assert_not_called()
 
     def test_noncompacted_bounded_path_never_reads_decoder_prefix_cache(self):
         for length in (128, 256):
@@ -3838,7 +3913,7 @@ def _exercise_l20_transport(rank, device, group):
         torch.testing.assert_close(
             query.freqs_cis, _compact_oracle(freqs, selected, rank), rtol=0, atol=0
         )
-        assert query.cp_ctx.swa_replay_start is None
+        assert query.cp_ctx.swa_replay_start == length - 128
         assert plan.context.swa_replay_start == length - 128
         assert query.prefix_lengths is common.prefix_lengths
         assert query.seqlen_full == length

@@ -29,6 +29,7 @@ def model_config(draft=False):
     config.is_deepseek_v41 = True
     config.attn_config.head_num = 1
     config.attn_config.size_per_head = 512
+    config.attn_config.sliding_window = 128
     config.attn_config.tokens_per_block = 128
     config.attn_config.kernel_tokens_per_block = 128
     config.attn_config.layer_compress_ratios = [0] if draft else [0, 2, 0, 1, 0]
@@ -52,7 +53,9 @@ class Dsv41KvCacheConfigTest(TestCase):
         # The C++ mirror models the legacy indexer layout; compact is the default.
         for compact, bounded in itertools.product((False, True), repeat=2):
             for draft in (False, True):
-                with self.subTest(compact=compact, bounded=bounded, draft=draft), patch.dict(
+                with self.subTest(
+                    compact=compact, bounded=bounded, draft=draft
+                ), patch.dict(
                     os.environ,
                     {
                         "DSV41_SWA_BOUNDED_REPLAY": str(int(bounded)),
@@ -62,19 +65,23 @@ class Dsv41KvCacheConfigTest(TestCase):
                 ):
                     config = model_config(draft)
                     config.attn_config.tokens_per_block = 256
-                    config.attn_config.sliding_window = 128
+                    config.gen_num_per_cycle = 5
                     if draft:
                         config.num_layers = 3
                         config.attn_config.layer_compress_ratios = [0, 0, 0]
                     DeepSeekV41._apply_kv_cache_config(config, KVCacheConfig())
                     self.assertEqual(config.attn_config.tokens_per_block, 256)
                     self.assertEqual(config.attn_config.kernel_tokens_per_block, 128)
-                    self.assertEqual(config.cache_min_replay_tokens, 128 if bounded else 1)
+                    self.assertEqual(
+                        config.cache_min_replay_tokens, 134 if bounded else 1
+                    )
                     self.assertEqual(
                         config.cache_key_hash_seed,
-                        (0x4453563431494232 if bounded else 0x4453563431494632)
-                        if compact
-                        else (0x4453563431494231 if bounded else 0x4453563431494631),
+                        (
+                            (0x4453563431494432 if bounded else 0x4453563431494632)
+                            if compact
+                            else (0x4453563431494431 if bounded else 0x4453563431494631)
+                        ),
                     )
                     tags = [
                         [desc.tag for desc in layer]
@@ -93,7 +100,7 @@ class Dsv41KvCacheConfigTest(TestCase):
                                 "csa_state",
                             ],
                             ["swa_kv"],
-                            ["swa_kv", "hca_kv", "indexer_kv"],
+                            [tail_tag, "hca_kv", "indexer_kv"],
                             [tail_tag],
                         ]
                     )
@@ -124,36 +131,48 @@ class Dsv41KvCacheConfigTest(TestCase):
                                 self.assertEqual(desc.entry_dtype, DataType.TYPE_UINT8)
                                 continue
                             state = tag == "csa_state"
-                            self.assertEqual(desc.cache_type, KVCacheSpecType.OPAQUE_STATE)
+                            self.assertEqual(
+                                desc.cache_type, KVCacheSpecType.OPAQUE_STATE
+                            )
                             self.assertTrue(desc.is_state_cache)
                             self.assertEqual(
-                                desc.entry_count_mode, OpaqueBlockEntryCountMode.STATE_RING
+                                desc.entry_count_mode,
+                                OpaqueBlockEntryCountMode.STATE_RING,
                             )
                             self.assertEqual(desc.entry_elems, 1024 if state else 528)
                             self.assertEqual(
                                 desc.entry_dtype,
                                 DataType.TYPE_FP32 if state else DataType.TYPE_UINT8,
                             )
-                            self.assertEqual(desc.compression_ratio, 2 if state else 128)
+                            ring_base = 129 if tag == "decoder_swa_kv" else 128
+                            self.assertEqual(
+                                desc.compression_ratio, 2 if state else ring_base
+                            )
                             self.assertEqual(desc.state_ring_overlap, 0)
                             self.assertTrue(desc.state_ring_include_gen_num_per_cycle)
                             self.assertEqual(
                                 desc.block_stride_bytes_alignment, 0 if state else 16896
                             )
-                            self.assertEqual(desc.block_stride_alignment_min_entries, 128)
+                            self.assertEqual(
+                                desc.block_stride_alignment_min_entries, 128
+                            )
                             self.assertTrue(desc.cp.scale_seq_size)
                             self.assertTrue(desc.cp.align_payload)
                             self.assertEqual(
                                 desc.cp.prefill_slice_layout,
-                                CpPrefillSliceLayout.PAYLOAD
-                                if state
-                                else CpPrefillSliceLayout.BLOCK_STRIDE,
+                                (
+                                    CpPrefillSliceLayout.PAYLOAD
+                                    if state
+                                    else CpPrefillSliceLayout.BLOCK_STRIDE
+                                ),
                             )
                             self.assertEqual(
                                 desc.cp.slice,
-                                CpBlockSliceMode.PAYLOAD_BYTES
-                                if state
-                                else CpBlockSliceMode.EQUAL_BYTES,
+                                (
+                                    CpBlockSliceMode.PAYLOAD_BYTES
+                                    if state
+                                    else CpBlockSliceMode.EQUAL_BYTES
+                                ),
                             )
                             self.assertEqual(
                                 desc.reuse.enable_prefix_reuse,
@@ -192,7 +211,9 @@ class Dsv41KvCacheConfigTest(TestCase):
                         lora_config=configs.lora_config,
                         kv_cache_config=configs.kv_cache_config,
                         profiling_debug_logging_config=configs.profiling_debug_logging_config,
+                        gen_num_per_cycle=5,
                     )
+                self.assertEqual(config.cache_min_replay_tokens, 134)
                 by_tag = descriptors(config)
                 self.assertEqual(capacity(by_tag["swa_kv"]), 768)
                 self.assertEqual(capacity(by_tag["csa_state"]), 768)

@@ -335,6 +335,8 @@ class ModelFactory:
         render_config: Optional[Any] = None,
         eplb_config: Optional[Any] = None,
         vit_config: Optional[VitConfig] = None,
+        *,
+        gen_num_per_cycle: int = 0,
     ) -> ModelConfig:
         """Create ModelConfig from configuration objects.
 
@@ -370,6 +372,7 @@ class ModelFactory:
             quantization_config=quantization_config,
             vit_config=vit_config,
         )
+        model_config.gen_num_per_cycle = gen_num_per_cycle
         model_cls._apply_kv_cache_config(model_config, kv_cache_config)
         model_cls._post_build_model_config(model_config)
 
@@ -506,6 +509,7 @@ class ModelFactory:
             profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
             embedding_config=None,  # Propose model doesn't need embedding_config
         )
+        propose_model_config.gen_num_per_cycle = sp_config.gen_num_per_cycle
         propose_model_cls._apply_kv_cache_config(
             propose_model_config, engine_config.kv_cache_config
         )

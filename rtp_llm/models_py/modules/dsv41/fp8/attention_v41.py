@@ -598,7 +598,7 @@ class AttentionV41FP8(AttentionFP8):
         self.swa_bounded_replay = (
             bool(kv_sources)
             and bounded_replay_enabled()
-            and self.layer_id > max(kv_sources)
+            and self.layer_id >= max(kv_sources)
         )
         # Store a plain dict: registering source modules would create cycles.
         self._shared_attention = shared_attention
@@ -2389,7 +2389,7 @@ class AttentionV41FP8(AttentionFP8):
             prefixes = self._host_prefill_prefixes(common)
             replay_starts = cp_swa_replay_starts(common.cp_ctx)
             if replay_starts is not None:
-                sizes = [min(n, self.window_size) for n in lengths_host]
+                sizes = [n - start for n, start in zip(lengths_host, replay_starts)]
                 return prefill_kv_workspace.split_swa_rows(qkv.kv_full, sizes), [
                     p + s for p, s in zip(prefixes, replay_starts)
                 ]
@@ -2503,7 +2503,8 @@ class AttentionV41FP8(AttentionFP8):
 
             from ._v41_prefill_metadata import try_chunk_metadata
 
-            compact_replay = cp_swa_replay_starts(common.cp_ctx) is not None
+            replay_starts = cp_swa_replay_starts(common.cp_ctx)
+            replay_tokens = max(swa.sizes) if replay_starts is not None else 0
             meta = try_chunk_metadata(
                 common.prefix_lengths,
                 (
@@ -2515,7 +2516,7 @@ class AttentionV41FP8(AttentionFP8):
                 self.compress_ratio,
                 self.window_size,
                 self.swa_bounded_replay,
-                compact_replay=compact_replay,
+                replay_tokens=replay_tokens,
                 physical_offsets=physical_offsets,
             )
             if meta is not None:
@@ -2568,7 +2569,7 @@ class AttentionV41FP8(AttentionFP8):
                 )
                 sizes = (prefixes + lengths) // self.compress_ratio
                 swa_lengths = (
-                    lengths.clamp(max=self.window_size) if compact_replay else lengths
+                    lengths.clamp(max=replay_tokens) if replay_tokens else lengths
                 )
                 chunk_sizes = sizes + swa_lengths + tails
                 offsets_d = (
@@ -2578,7 +2579,7 @@ class AttentionV41FP8(AttentionFP8):
                 )
                 starts_d = (
                     prefixes + lengths - swa_lengths
-                    if compact_replay
+                    if replay_tokens
                     else prefixes - tails
                 )
             meta = (
@@ -2593,11 +2594,13 @@ class AttentionV41FP8(AttentionFP8):
         prepared = self._prefill_produce(x, positions, shared_input_quant)
         return self._prefill_query(x, *prepared)
 
-    def _prefill_produce(self, x, positions, shared_input_quant=None):
+    def _prefill_produce(
+        self, x, positions, shared_input_quant=None, *, l20_plan=None, l20_query_x=None
+    ):
         """Finish all source writes and prefix snapshots in the original CP domain."""
         self._begin_forward()
         if self.swa_bounded_replay and self.layer_id == 21:
-            # L20 has exact cached SWA; decoder replay starts a new SWA domain.
+            # Drop L20 source-query metadata before the decoder consumers.
             self._shared_attention.pop("prefill_chunk_meta", None)
             self._shared_attention.pop("prefill_index_plan", None)
         common = self._prefill_common_setup(x, positions)
@@ -2628,10 +2631,24 @@ class AttentionV41FP8(AttentionFP8):
 
         with ExitStack() as resources:
             return self._prefill_produce_source(
-                x, common, shared_input_quant, resources
+                x,
+                common,
+                shared_input_quant,
+                resources,
+                l20_plan=l20_plan,
+                l20_query_x=l20_query_x,
             )
 
-    def _prefill_produce_source(self, x, common, shared_input_quant, resources):
+    def _prefill_produce_source(
+        self,
+        x,
+        common,
+        shared_input_quant,
+        resources,
+        *,
+        l20_plan=None,
+        l20_query_x=None,
+    ):
         previous_state = None
         projected_tiles = None
         source_cohorts = None
@@ -2713,16 +2730,27 @@ class AttentionV41FP8(AttentionFP8):
             # Forward's finally block joins this even if QKV preparation raises
             # before the compressor consumes the snapshot.
             self._shared_attention["prefill_state_ready"] = previous_state
-        qkv = self._prefill_compute_qkv(
-            x, common, shared_input_quant=shared_input_quant
-        )
-        # Read old SWA tails before writes wrap over them in long prefill chunks.
-        fresh_store = self._prepare_swa_fresh_store(qkv, common)
-        swa, swa_starts = self._swa_prefill_workspace(
-            qkv, common, fresh_store=fresh_store
-        )
-        if fresh_store is None:
-            self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
+        if l20_plan is None:
+            query_common = common
+            qkv = self._prefill_compute_qkv(
+                x, query_common, shared_input_quant=shared_input_quant
+            )
+            # Read old SWA tails before writes can wrap over their pool slots.
+            fresh_store = self._prepare_swa_fresh_store(qkv, query_common)
+            swa, swa_starts = self._swa_prefill_workspace(
+                qkv, query_common, fresh_store=fresh_store
+            )
+            if fresh_store is None:
+                self._prefill_write_swa_fp8_paged(query_common, qkv.kv_full)
+        else:
+            # Full metadata still owns Main/Indexer writes and SWA slot IDs.
+            # Project Q-A/SWA from the compact rows, just like later consumers.
+            query_common = l20_plan.l20_query_metadata(common, self.freqs_cis)
+            qkv = self._prefill_compute_qkv(l20_query_x, query_common)
+            swa, swa_starts = self._swa_prefill_workspace(qkv, query_common)
+            self._prefill_write_swa_fp8_paged(
+                query_common._replace(swa_meta=common.swa_meta), qkv.kv_full
+            )
         starts = common.prefix_lengths
         lengths = (
             common.cp_ctx.input_lengths_global if common.cp_on else common.input_lengths
@@ -2777,7 +2805,7 @@ class AttentionV41FP8(AttentionFP8):
             previous_state=previous_state,
         )
         del x_full
-        return common, qkv, swa, swa_starts, None
+        return query_common, qkv, swa, swa_starts, None
 
     def _prefill_query(
         self,

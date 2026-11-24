@@ -72,6 +72,8 @@ def build_v41_kv_cache_spec_descs(
         "swa_kv", "sliding_window_kv", 528, DataType.TYPE_UINT8
     )
     decoder_swa.tag = "decoder_swa_kv"
+    # The native ring adds the proposal count. Reserve the verification row too.
+    decoder_swa.compression_ratio += 1
     decoder_swa.block_stride_bytes_alignment = 16896
     reuse = CacheReusePolicyDesc()
     reuse.enable_prefix_reuse = False
@@ -80,7 +82,7 @@ def build_v41_kv_cache_spec_descs(
         for desc in (state, swa, decoder_swa):
             _use_host_pinned_memory(desc)
     sources = set(source_layers)
-    decoder_start = max(sources) + 1 if sources else 0
+    decoder_start = max(sources) if sources else 0
     descs = []
     for layer_id in range(layer_num):
         ratio = ratios[layer_id] if layer_id < len(ratios) else 0
@@ -156,11 +158,15 @@ def configure_v41_kv_cache(model_config, kv_cache_config=None):
         decoder_blocks,
     )
     model_config.kv_cache_spec_descs = descs
-    model_config.cache_min_replay_tokens = 128 if bounded else 1
+    model_config.cache_min_replay_tokens = (
+        int(attn.sliding_window) + int(model_config.gen_num_per_cycle) + 1
+        if bounded
+        else 1
+    )
     # Token-interleaved FlashMLA bytes must never alias the old planar format.
-    # Full/bounded replay and compact/legacy index pages need independent keys.
+    # L20 moved between SWA pools; keep the new bounded layout isolated.
     model_config.cache_key_hash_seed = (
-        (0x4453563431494232 if bounded else 0x4453563431494632)
+        (0x4453563431494432 if bounded else 0x4453563431494632)
         if compact_indexer
-        else (0x4453563431494231 if bounded else 0x4453563431494631)
+        else (0x4453563431494431 if bounded else 0x4453563431494631)
     )

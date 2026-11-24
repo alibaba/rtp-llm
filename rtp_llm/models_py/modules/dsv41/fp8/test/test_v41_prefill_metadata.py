@@ -25,7 +25,7 @@ class PrefillMetadataTest(unittest.TestCase):
                 [0, 31, 16387, 31744, 511], device="cuda", dtype=prefix_dtype
             )
             n = torch.tensor(
-                [1, 127, 128, 1024, 259], device="cuda", dtype=length_dtype
+                [1, 129, 134, 1024, 259], device="cuda", dtype=length_dtype
             )
             req = torch.tensor([4, 2, 0, 3, 1, -1, -5], device="cuda")
             for ratio in (1, 2):
@@ -33,7 +33,7 @@ class PrefillMetadataTest(unittest.TestCase):
 
                     def reference():
                         prefixes, lengths = p.long(), n.long()
-                        swa_lengths = lengths.clamp(max=128)
+                        swa_lengths = lengths.clamp(max=134)
                         tails = (
                             torch.zeros_like(prefixes)
                             if replay
@@ -49,7 +49,7 @@ class PrefillMetadataTest(unittest.TestCase):
 
                     def actual():
                         return fused.try_chunk_metadata(
-                            p, n, req, ratio, 128, replay, compact_replay=True
+                            p, n, req, ratio, 128, replay, replay_tokens=134
                         )
 
                     for got, expected in zip(actual(), reference()):
@@ -109,7 +109,7 @@ class PrefillMetadataTest(unittest.TestCase):
                                 ratio,
                                 128,
                                 replay,
-                                compact_replay=compact,
+                                replay_tokens=128 if compact else 0,
                                 physical_offsets=origins,
                             )
                             prefix, length = p.long(), n.long()
@@ -149,7 +149,7 @@ class PrefillMetadataTest(unittest.TestCase):
 
         def run():
             return fused.try_chunk_metadata(
-                p, n, req, 2, 128, True, compact_replay=True, physical_offsets=origins
+                p, n, req, 2, 128, True, replay_tokens=128, physical_offsets=origins
             )
 
         run()

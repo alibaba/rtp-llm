@@ -815,7 +815,7 @@ def cp_all_gather_full_varlen(
     treats this as a single virtual sequence (matching the existing
     non-CP B>1 behaviour documented in
     ``prefill/forward.py::forward_layers``).
-    ``replay_only`` keeps each request's final min(length, 128) KV rows compact.
+    ``replay_only`` keeps each request's retained tail KV rows compact.
     Its caller must select original write slots and retain absolute positions.
     """
     profile_name = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.varlen"

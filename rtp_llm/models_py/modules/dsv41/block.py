@@ -676,11 +676,14 @@ class Block(nn.Module):
         attn_pre, ffn_pre, attn_post, ffn_post = self._prefill_fast_hc_impls()
         residual = x
         x_pre, post, comb = attn_pre(x)
-        shared_quant = None
         if self.attn.can_fuse_prefill_attn_norm_input_quant(
             x_pre, self.attn_norm.weight.data
         ):
-            x_pre, shared_quant = self.attn.prefill_fused_attn_norm_input_quant(
+            from rtp_llm.models_py.modules.dsv41.fp8._v41_norm_quant import (
+                rmsnorm_inplace,
+            )
+
+            x_pre = rmsnorm_inplace(
                 x_pre, self.attn_norm.weight.data, self.attn_norm.variance_epsilon
             )
         else:
@@ -688,47 +691,16 @@ class Block(nn.Module):
         with bind_attn_cache(self.attn, kv_cache, block_tables_by_type):
             self.attn._set_compressor_pool_context()
             try:
+                query_x = plan.exchange.compact(x_pre)
                 common, qkv, swa, swa_starts, _ = self.attn._prefill_produce(
-                    x_pre, positions, shared_quant
-                )
-                del shared_quant
-                # Match the full source GEMM shape, then exchange only its
-                # per-head weights instead of the normalized hidden rows.
-                weight = self.attn.index_weights
-                indexer_weights = (
-                    F.linear(x_pre, weight)
-                    if plan.exchange.send_sizes and any(plan.exchange.send_sizes)
-                    else x_pre.new_empty((x_pre.shape[0], weight.shape[0]))
+                    x_pre, positions, l20_plan=plan, l20_query_x=query_x
                 )
                 del x_pre
+                indexer_weights = F.linear(query_x, self.attn.index_weights)
+                del query_x
                 residual, post, comb, input_ids = plan.compact_l20(
                     self, residual, post, comb, input_ids
                 )
-                indexer_weights = plan.exchange.compact(indexer_weights)
-                compact_qr = None if qkv.qr is None else plan.exchange.compact(qkv.qr)
-                compact_qr_q = None
-                if getattr(qkv, "qr_quantized", None) is not None:
-                    q8, sf = qkv.qr_quantized
-                    c_q8 = plan.exchange.compact(q8.view(torch.uint8)).view(q8.dtype)
-                    c_sf_rm = plan.exchange.compact(sf.contiguous())
-                    t_c = c_sf_rm.shape[0]
-                    padded_t = (t_c + 3) // 4 * 4
-                    c_sf = torch.empty_strided(
-                        (padded_t, c_sf_rm.shape[1]),
-                        (1, padded_t or 1),
-                        device=c_sf_rm.device,
-                        dtype=c_sf_rm.dtype,
-                    )
-                    if padded_t != t_c:
-                        c_sf = c_sf[:t_c]
-                    if t_c:
-                        c_sf.copy_(c_sf_rm)
-                    compact_qr_q = (c_q8, c_sf)
-                if hasattr(qkv, "qr_quantized"):
-                    qkv = qkv._replace(qr=compact_qr, qr_quantized=compact_qr_q)
-                else:
-                    qkv = qkv._replace(qr=compact_qr)
-                common = plan.l20_query_metadata(common, self.attn.freqs_cis)
                 with bind_attn_cache(self.attn, cp_ctx=common.cp_ctx):
                     attn_out = self.attn._prefill_query(
                         None,

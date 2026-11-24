@@ -114,6 +114,7 @@ class GroupedCEDDispatchCPU(unittest.TestCase):
             (8, 2, "1", (10, 3), False, True, True),
             (14, 2, "1", (10, 3), False, True, True),
             (20, 1, "1", (10, 3), False, True, True),
+            (20, 1, None, (10, 3), False, True, True),
             (20, 1, "0", (10, 3), False, True, False),
             (20, 1, "1", (10, 0), False, True, False),
             (20, 1, "1", (10, 3), True, True, False),
@@ -124,10 +125,20 @@ class GroupedCEDDispatchCPU(unittest.TestCase):
             prefix_lengths=torch.tensor([1024]),
             input_lengths_global=torch.tensor([256]),
         )
-        for case, batch in itertools.product(cases, range(1, 6)):
+        for case, batch, compact in itertools.product(
+            cases, range(1, 6), (False, True)
+        ):
             layer, ratio, flag, arch, capture, abi, expected = case
+            cp.swa_replay_start = 1 if compact else None
+            expected = expected and not (layer == 20 and compact)
             with self.subTest(
-                layer=layer, flag=flag, arch=arch, capture=capture, abi=abi, batch=batch
+                layer=layer,
+                flag=flag,
+                arch=arch,
+                capture=capture,
+                abi=abi,
+                batch=batch,
+                compact=compact,
             ):
                 calls = []
 
@@ -144,12 +155,12 @@ class GroupedCEDDispatchCPU(unittest.TestCase):
                     index_topk=512,
                 )
                 with ExitStack() as stack:
-                    stack.enter_context(
-                        patch.dict(
-                            os.environ,
-                            {"DSV41_PREFILL_INDEXER_BALANCED_SCORE": flag},
-                        )
-                    )
+                    env_name = "DSV41_PREFILL_INDEXER_BALANCED_SCORE"
+                    stack.enter_context(patch.dict(os.environ))
+                    if flag is None:
+                        os.environ.pop(env_name, None)
+                    else:
+                        os.environ[env_name] = flag
                     stack.enter_context(
                         patch.object(topk, "supports_bf16", return_value=True)
                     )
@@ -490,12 +501,14 @@ class GroupedCEDDispatchCPU(unittest.TestCase):
                 ), patch.object(
                     grouped, "_mask_tail_kernel"
                 ), patch.object(
+                    torch.cuda, "get_device_capability", return_value=(10, 0)
+                ), patch.object(
                     topk, "try_select_tokens", side_effect=select
                 ):
                     self.assertTrue(
                         batched.try_select_batched(
                             owner,
-                            SimpleNamespace(is_cuda=True),
+                            SimpleNamespace(is_cuda=True, device="cuda"),
                             None,
                             None,
                             [None] * 2,
@@ -587,12 +600,14 @@ class GroupedCEDDispatchCPU(unittest.TestCase):
         ), patch.object(plan, "_bounds", return_value=bounds), patch.object(
             scorer, "fp8_fp4_mqa_indexer_score", side_effect=score
         ), patch.object(
+            torch.cuda, "get_device_capability", return_value=(10, 0)
+        ), patch.object(
             topk, "try_select_tokens", select
         ):
             self.assertTrue(
                 batched.try_select_batched(
                     owner,
-                    SimpleNamespace(is_cuda=True),
+                    SimpleNamespace(is_cuda=True, device="cuda"),
                     None,
                     None,
                     [None] * 2,

@@ -88,7 +88,9 @@ class CacheSpecsTest(unittest.TestCase):
         descs = SPECS.build_v41_kv_cache_spec_descs(
             5, [0, 2, 2, 1, 1], [1, 3], 512, bounded_replay=True
         )
-        self.assertEqual(descs[3][0].tag, "swa_kv")
+        self.assertEqual(descs[2][0].tag, "swa_kv")
+        self.assertIs(descs[3][0], descs[4][0])
+        self.assertEqual([d.tag for d in descs[3][1:]], ["hca_kv", "indexer_kv"])
         self.assertEqual(descs[4][0].tag, "decoder_swa_kv")
         self.assertFalse(descs[4][0].reuse.enable_prefix_reuse)
         self.assertEqual(descs[4][0].entry_elems, 528)
@@ -108,9 +110,11 @@ class CacheSpecsTest(unittest.TestCase):
                     layer_compress_ratios=[0, 2],
                     v41_kv_source_layer_ids=[1],
                     size_per_head=512,
+                    sliding_window=128,
                 ),
                 kv_cache_spec_descs=[],
                 is_mtp=False,
+                gen_num_per_cycle=5,
                 num_layers=2,
                 hybrid_attention_config=SimpleNamespace(),
             )
@@ -120,7 +124,7 @@ class CacheSpecsTest(unittest.TestCase):
                 SPECS.configure_v41_kv_cache(config)
             seeds.append(config.cache_key_hash_seed)
             self.assertNotIn(config.cache_key_hash_seed, (0, 0x4453563431525031))
-            self.assertEqual(config.cache_min_replay_tokens, 128 if enabled else 1)
+            self.assertEqual(config.cache_min_replay_tokens, 134 if enabled else 1)
         self.assertNotEqual(*seeds)
 
     def test_compact_and_legacy_indexer_caches_cannot_share_reuse_keys(self):
@@ -135,9 +139,11 @@ class CacheSpecsTest(unittest.TestCase):
                     layer_compress_ratios=[2],
                     v41_kv_source_layer_ids=[0],
                     size_per_head=512,
+                    sliding_window=128,
                 ),
                 kv_cache_spec_descs=[],
                 is_mtp=False,
+                gen_num_per_cycle=5,
                 num_layers=1,
                 hybrid_attention_config=SimpleNamespace(),
             )
@@ -146,7 +152,7 @@ class CacheSpecsTest(unittest.TestCase):
             ):
                 SPECS.configure_v41_kv_cache(config)
             seeds.append(config.cache_key_hash_seed)
-        self.assertEqual(seeds, [0x4453563431494231, 0x4453563431494232])
+        self.assertEqual(seeds, [0x4453563431494431, 0x4453563431494432])
 
     def test_all_draft_layers_share_nonreusable_swa_spec(self):
         descs = SPECS.build_v41_kv_cache_spec_descs(

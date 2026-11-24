@@ -173,6 +173,22 @@ class V41NormQuantTest(unittest.TestCase):
                 for mode in ("legacy", "v2", "auto"):
                     self.check(x, weight, mode=mode)
 
+    def test_norm_only_matches_fused_inplace_at_l20_threshold(self):
+        x = torch.randn(32768, 5120, device="cuda", dtype=torch.bfloat16)
+        w = torch.randn(5120, device="cuda", dtype=torch.bfloat16)
+        for mode in ("legacy", "v2"):
+            with self.subTest(mode=mode):
+                fused = x.clone()
+                candidate.rmsnorm_group32_quant(x, w, quant_kernel=mode, out_norm=fused)
+                actual = x.clone()
+                with patch.object(
+                    candidate._v41_norm_quant_kernel,
+                    "_do_compile",
+                    side_effect=AssertionError("cold compile"),
+                ):
+                    self.assertIs(candidate.rmsnorm_inplace(actual, w, 1e-6), actual)
+                self.assertBytesEqual((actual,), (fused,), "L20 BF16 norm")
+
     def test_shapes_modes_and_padding(self):
         for m in [0, 1, 32, 33, 819, 820, 1021, 1664, 4096, 8192, 32768]:
             x = torch.randn(m, 5120, device="cuda", dtype=torch.bfloat16)

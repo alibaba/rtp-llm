@@ -247,6 +247,7 @@ def _args_from_model_config(
         o_groups=attn_config.o_groups,
         o_lora_rank=attn_config.o_lora_rank,
         window_size=attn_config.sliding_window,
+        swa_replay_tokens=int(model_config.cache_min_replay_tokens),
         compress_ratios=list(attn_config.layer_compress_ratios)[
             : model_config.num_layers
         ],

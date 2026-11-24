@@ -23,7 +23,7 @@ def _integer_vector(value, rows, device):
 
 
 @triton.jit(
-    do_not_specialize=["ROWS", "BATCH", "PS", "LS", "RS"],
+    do_not_specialize=["ROWS", "BATCH", "PS", "LS", "RS", "REPLAY_TOKENS"],
     do_not_specialize_on_alignment=["physical_offsets"],
 )
 def _chunk_metadata_kernel(
@@ -40,7 +40,7 @@ def _chunk_metadata_kernel(
     RATIO: tl.constexpr,
     WINDOW: tl.constexpr,
     REPLAY: tl.constexpr,
-    COMPACT_REPLAY: tl.constexpr,
+    REPLAY_TOKENS,
     PHYSICAL_OFFSETS: tl.constexpr,
 ):
     index = tl.arange(0, 128)
@@ -50,8 +50,8 @@ def _chunk_metadata_kernel(
     size = prefix + length
     if RATIO == 2:
         size = size >> 1
-    swa_length = tl.minimum(length, WINDOW) if COMPACT_REPLAY else length
-    start = prefix + length - swa_length if COMPACT_REPLAY else prefix - tail
+    swa_length = tl.where(REPLAY_TOKENS > 0, tl.minimum(length, REPLAY_TOKENS), length)
+    start = tl.where(REPLAY_TOKENS > 0, prefix + length - swa_length, prefix - tail)
     if PHYSICAL_OFFSETS:
         # CED may shrink SWA while retaining the producer's larger allocation.
         # Only physical origins change; logical counts and replay starts do not.
@@ -81,7 +81,7 @@ def try_chunk_metadata(
     window,
     replay,
     *,
-    compact_replay=False,
+    replay_tokens=0,
     physical_offsets=None,
 ):
     """Logical lengths plus packed or explicitly retained physical origins.
@@ -105,7 +105,8 @@ def try_chunk_metadata(
         and type(window) is int
         and window > 0
         and type(replay) is bool
-        and type(compact_replay) is bool
+        and type(replay_tokens) is int
+        and replay_tokens >= 0
     ):
         return None
     if physical_offsets is not None and not (
@@ -133,7 +134,7 @@ def try_chunk_metadata(
             ratio,
             window,
             replay,
-            compact_replay,
+            replay_tokens,
             physical_offsets is not None,
             num_warps=4,
         )
