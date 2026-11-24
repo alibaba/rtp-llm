@@ -22,6 +22,10 @@ class IsolatedMetadataTest(unittest.TestCase):
                 {"csa_state": (8, 256, 2)},
             )
 
+        from rtp_llm.models_py.modules.dsv4.fp8.decode._fused_prepare_meta_triton import (
+            fused_copy_pool_block_tables as real_block_table_copy,
+        )
+
         reference, candidate = allocate(), allocate()
         positions = torch.tensor([255, 256], dtype=torch.int32)
         tables = {"csa_state": torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)}
@@ -37,6 +41,7 @@ class IsolatedMetadataTest(unittest.TestCase):
             prefix + "_fused_prepare_meta_triton": SimpleNamespace(
                 fused_update_decode_meta_pure=Mock(),
                 fused_phase2b_pool_slot_mapping=Mock(),
+                fused_copy_pool_block_tables=real_block_table_copy,
             ),
             prefix + "paged_topk_translator": SimpleNamespace(
                 translate_local_to_global_slots=Mock(),
