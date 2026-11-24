@@ -80,14 +80,19 @@ inline cudaError_t GetRadixTopKDeviceProps(int device, int* num_sms, int* max_sm
 
 template <typename Kernel>
 inline cudaError_t SetMaxDynamicSharedMemorySize(Kernel kernel, size_t smem_size) {
+  thread_local int cached_device = -1;
   thread_local const void* cached_kernel = nullptr;
   thread_local size_t cached_smem = 0;
-  if (cached_kernel == reinterpret_cast<const void*>(kernel) && cached_smem == smem_size) {
+  int current_device = -1;
+  FLASHINFER_CUDA_CALL(cudaGetDevice(&current_device));
+  if (cached_device == current_device && cached_kernel == reinterpret_cast<const void*>(kernel)
+      && cached_smem == smem_size) {
     return cudaSuccess;
   }
   cudaError_t err =
       cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
   if (err == cudaSuccess) {
+    cached_device = current_device;
     cached_kernel = reinterpret_cast<const void*>(kernel);
     cached_smem = smem_size;
   }
