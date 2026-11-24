@@ -1,0 +1,107 @@
+--- a/atom/models/qwen4_exp.py
++++ b/atom/models/qwen4_exp.py
+@@ -3,6 +3,8 @@
+ from typing import Any, ClassVar
+ 
+ import numpy as np
++import os
++
+ import torch
+ from aiter import QuantType, dtypes
+ from aiter.dist.communication_op import tensor_model_parallel_all_reduce
+@@ -487,6 +489,11 @@
+     ) -> None:
+         super().__init__()
+         self.quantized_inputs = False
++        self._try_joint_ba = False
++        if torch.version.hip and os.getenv("RTP_LLM_ROCM_GDN_VERIFY_INPUT") == "1":
++            from atom.plugin.prepare import is_rtpllm
++            self._try_joint_ba = (is_rtpllm() and torch.cuda.is_available()
++                                  and torch.cuda.get_device_properties(torch.cuda.current_device()).gcnArchName.split(":")[0] == "gfx942")
+         if quant_config is not None:
+             qkv, z, b, a = (
+                 quant_config.get_layer_quant_config(f"{prefix}.in_proj_{projection}")
+@@ -627,6 +634,15 @@
+             allow_aiter_flydsl=True,
+         )
+ 
++    def joint_ba_verify(self, rows):
++        if not self._try_joint_ba or rows not in (4, 8) or not self.quantized_inputs:
++            return False
++        from atom.model_ops.qwen38_moe_dispatch import rtp_single_verify
++        return (rtp_single_verify.get() and self.in_proj_ba.weight.shape == (48, 2560)
++                and self.in_proj_ba.weight.dtype == torch.bfloat16
++                and self.in_proj_ba.weight.is_contiguous()
++                and self.in_proj_qkvz.params_dtype == torch.float8_e4m3fnuz)
++
+     def forward(
+         self,
+         hidden_states: torch.Tensor,
+@@ -637,6 +653,10 @@
+         num_tokens = hidden_states.shape[0]
+         v_heads = self.num_v_heads // self.tp_size
+         if self.quantized_inputs:
++            ba = None
++            if quantized is None and self.joint_ba_verify(num_tokens) and hidden_states.is_contiguous():
++                from atom.model_ops.qwen4_exp.gdn_verify_input import quant_and_ba
++                quantized, ba = quant_and_ba(hidden_states, self.in_proj_ba.weight)
+             qkvz = (
+                 self.in_proj_qkvz(hidden_states)
+                 if quantized is None
+@@ -645,7 +665,9 @@
+             mixed_qkv, z = qkvz.split(
+                 [self.conv_dim // self.tp_size, self.value_dim // self.tp_size], dim=-1
+             )
+-            b, a = self.in_proj_ba(hidden_states).chunk(2, dim=-1)
++            if ba is None:
++                ba = self.in_proj_ba(hidden_states)
++            b, a = ba.chunk(2, dim=-1)
+         else:
+             projected = self.in_proj_qkvzba(hidden_states)
+             mixed_qkv, z, b, a = projected.split(
+@@ -854,6 +876,9 @@
+         # `Qwen4ExpModel._sequence_parallel`) the consumer quantizes the
+         # gathered rows itself, as the unsharded path does at that size.
+         quant_dtype = None if sp is not None else self._attn_input_quant_dtype()
++        if (quant_dtype is not None and self.layer_type == "linear_attention"
++                and self.linear_attn.joint_ba_verify(hidden_states.shape[0])):
++            quant_dtype = None
+         if quant_dtype is None:
+             mixed, (hidden_states, raw) = self.attn_hyper_connection.mix_fused(
+                 hidden_states, pending
+--- /dev/null
++++ b/atom/model_ops/qwen4_exp/gdn_verify_input.py
+@@ -0,0 +1,33 @@
++"""Quantize the GDN input and compute the BF16 B/A gates in one small-batch launch."""
++import torch
++import triton
++import triton.language as tl
++
++
++@triton.jit
++def _quant_and_ba_kernel(X, Weight, Quant, Scale, BA, B: tl.constexpr):
++    tile = tl.program_id(0)
++    row = tl.program_id(1)
++    k = tl.arange(0, 4096)
++    x = tl.load(X + row * 2560 + k, k < 2560, 0.).to(tl.float32)
++    if tile == 48 // B:
++        scale = tl.max(tl.abs(x), 0) * (1. / 240.)
++        inv = tl.where(scale > 0., 1. / scale, 0.)
++        # Preserve AITER's FNUZ bytes for zero rows as well as their zero scale.
++        q = tl.where(scale == 0., -240., tl.maximum(-240., tl.minimum(240., x * inv)))
++        tl.store(Quant + row * 2560 + k, q, k < 2560)
++        tl.store(Scale + row, scale)
++    else:
++        n = tile * B + tl.arange(0, B)
++        w = tl.load(Weight + n[:, None] * 2560 + k[None, :], k[None, :] < 2560, 0.).to(tl.float32)
++        tl.store(BA + row * 48 + n, tl.sum(w * x[None, :], 1))
++
++
++def quant_and_ba(x, weight):
++    rows = x.shape[0]
++    q = torch.empty_like(x, dtype=torch.float8_e4m3fnuz)
++    scale = x.new_empty((rows, 1), dtype=torch.float32)
++    ba = x.new_empty((rows, 48))
++    block, warps = (1, 8) if rows == 4 else (2, 4)
++    _quant_and_ba_kernel[(48 // block + 1, rows)](x, weight, q, scale, ba, block, num_warps=warps)
++    return (q, scale), ba
