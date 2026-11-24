@@ -1,7 +1,6 @@
 """Symmetric collectives for eager DeepSeek V4.1 CP prefill."""
 
 import logging
-import os
 import socket
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -244,7 +243,6 @@ def initialize_prefill_cp_collectives(owner, device, *, cp_size, cp_rank):
     if hasattr(owner, "_dsv41_cp_collectives"):
         return
     workspace = None
-    admission_group = None
     if device.type == "cuda" and torch.version.hip is None and dist.is_initialized():
         with torch.cuda.device(device):
             group = _get_group(Group.TP)
@@ -252,13 +250,6 @@ def initialize_prefill_cp_collectives(owner, device, *, cp_size, cp_rank):
                 cp_size in SUPPORTED_CP_SIZES
                 and group.size() == dist.get_world_size() == cp_size
             ):
-                if (
-                    os.environ.get("DSV41_CED_EARLY_INDEXER", "0") == "1"
-                    and dist.is_gloo_available()
-                ):
-                    admission_group = dist.new_group(
-                        ranks=dist.get_process_group_ranks(group), backend="gloo"
-                    )
                 device = torch.device("cuda", torch.cuda.current_device())
                 workspace = _initialize(group, device, cp_rank=cp_rank)
                 if workspace is not None:
@@ -272,7 +263,6 @@ def initialize_prefill_cp_collectives(owner, device, *, cp_size, cp_rank):
                         workspace.projected.buffer.nbytes if workspace.projected else 0,
                     )
     owner._dsv41_cp_collectives = workspace
-    owner._dsv41_ced_admission_group = admission_group
 
 
 @contextmanager

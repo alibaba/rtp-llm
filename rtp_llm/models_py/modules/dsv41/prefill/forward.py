@@ -710,18 +710,6 @@ def forward_layers(
                         bounded_replay=v4.swa_bounded_replay,
                     )
                     ced_in_l20 = ced_tail is not None and ced_tail.can_split_l20(v4)
-                    if (
-                        ced_in_l20
-                        and ced_tail.early_indexer
-                        and cp_ctx.cp_size == 4
-                        and use_prefill_fast_path
-                    ):
-                        ced_tail.start_early_admission(
-                            v4.layers[20],
-                            h.residual if isinstance(h, PendingDecodePost) else h,
-                            kv_cache,
-                            block_tables_by_type,
-                        )
                     if ced_tail is None and v4.fp8_kv_cache:
                         build_and_propagate_prefill_meta_fp8(
                             v4,
@@ -829,8 +817,6 @@ def forward_layers(
                                 block_tables_by_type=block_tables_by_type,
                                 expert_load=expert_load,
                             )
-                            if ced_tail.early_indexer_fallback:
-                                ced_in_l20 = False
                         else:
                             call_kwargs = routing_kwargs
                             if (

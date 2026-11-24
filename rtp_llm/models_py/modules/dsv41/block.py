@@ -6,7 +6,6 @@ twice — once for Attention and once for MoE FFN.
 
 import logging
 import os
-from contextlib import nullcontext
 from typing import Callable, Dict, Optional, Tuple
 
 import torch
@@ -693,94 +692,62 @@ class Block(nn.Module):
                     x_pre, positions, shared_quant
                 )
                 del shared_quant
-                references = (
-                    plan.prepare_early_indexer(self.attn, self.ffn, x_pre)
-                    if plan.early_indexer
-                    else None
+                # Match the full source GEMM shape, then exchange only its
+                # per-head weights instead of the normalized hidden rows.
+                weight = self.attn.index_weights
+                indexer_weights = (
+                    F.linear(x_pre, weight)
+                    if plan.exchange.send_sizes and any(plan.exchange.send_sizes)
+                    else x_pre.new_empty((x_pre.shape[0], weight.shape[0]))
                 )
-                if plan.early_indexer_fallback:
-                    with plan.candidate_publication(self.attn._shared_attention):
-                        attn_out = self.attn._prefill_query(
-                            x_pre, common, qkv, swa, swa_starts
-                        )
+                del x_pre
+                residual, post, comb, input_ids = plan.compact_l20(
+                    self, residual, post, comb, input_ids
+                )
+                indexer_weights = plan.exchange.compact(indexer_weights)
+                compact_qr = None if qkv.qr is None else plan.exchange.compact(qkv.qr)
+                compact_qr_q = None
+                if getattr(qkv, "qr_quantized", None) is not None:
+                    q8, sf = qkv.qr_quantized
+                    c_q8 = plan.exchange.compact(q8.view(torch.uint8)).view(q8.dtype)
+                    c_sf_rm = plan.exchange.compact(sf.contiguous())
+                    t_c = c_sf_rm.shape[0]
+                    padded_t = (t_c + 3) // 4 * 4
+                    c_sf = torch.empty_strided(
+                        (padded_t, c_sf_rm.shape[1]),
+                        (1, padded_t or 1),
+                        device=c_sf_rm.device,
+                        dtype=c_sf_rm.dtype,
+                    )
+                    if padded_t != t_c:
+                        c_sf = c_sf[:t_c]
+                    if t_c:
+                        c_sf.copy_(c_sf_rm)
+                    compact_qr_q = (c_q8, c_sf)
+                if hasattr(qkv, "qr_quantized"):
+                    qkv = qkv._replace(qr=compact_qr, qr_quantized=compact_qr_q)
                 else:
-                    # Match the full source GEMM shape, then exchange only its
-                    # per-head weights instead of the normalized hidden rows.
-                    weight = self.attn.index_weights
-                    indexer_weights = (
-                        F.linear(x_pre, weight)
-                        if plan.exchange.send_sizes and any(plan.exchange.send_sizes)
-                        else x_pre.new_empty((x_pre.shape[0], weight.shape[0]))
+                    qkv = qkv._replace(qr=compact_qr)
+                common = plan.l20_query_metadata(common, self.attn.freqs_cis)
+                with bind_attn_cache(self.attn, cp_ctx=common.cp_ctx):
+                    attn_out = self.attn._prefill_query(
+                        None,
+                        common,
+                        qkv,
+                        swa,
+                        swa_starts,
+                        indexer_weights=indexer_weights,
                     )
-                    del x_pre
-                    residual, post, comb, input_ids = plan.compact_l20(
-                        self, residual, post, comb, input_ids
-                    )
-                    indexer_weights = plan.exchange.compact(indexer_weights)
-                    compact_qr = (
-                        None if qkv.qr is None else plan.exchange.compact(qkv.qr)
-                    )
-                    compact_qr_q = None
-                    if getattr(qkv, "qr_quantized", None) is not None:
-                        q8, sf = qkv.qr_quantized
-                        c_q8 = plan.exchange.compact(q8.view(torch.uint8)).view(
-                            q8.dtype
-                        )
-                        c_sf_rm = plan.exchange.compact(sf.contiguous())
-                        t_c = c_sf_rm.shape[0]
-                        padded_t = (t_c + 3) // 4 * 4
-                        c_sf = torch.empty_strided(
-                            (padded_t, c_sf_rm.shape[1]),
-                            (1, padded_t or 1),
-                            device=c_sf_rm.device,
-                            dtype=c_sf_rm.dtype,
-                        )
-                        if padded_t != t_c:
-                            c_sf = c_sf[:t_c]
-                        if t_c:
-                            c_sf.copy_(c_sf_rm)
-                        compact_qr_q = (c_q8, c_sf)
-                    if hasattr(qkv, "qr_quantized"):
-                        qkv = qkv._replace(qr=compact_qr, qr_quantized=compact_qr_q)
-                    else:
-                        qkv = qkv._replace(qr=compact_qr)
-                    common = plan.l20_query_metadata(common, self.attn.freqs_cis)
-                    shared = self.attn._shared_attention
-                    if references is not None:
-                        shared["ced_l20_references"] = references
-                    try:
-                        with bind_attn_cache(self.attn, cp_ctx=common.cp_ctx):
-                            attn_out = self.attn._prefill_query(
-                                None,
-                                common,
-                                qkv,
-                                swa,
-                                swa_starts,
-                                indexer_weights=indexer_weights,
-                            )
-                    finally:
-                        shared.pop("ced_l20_references", None)
-                    del indexer_weights
+                del indexer_weights
                 del qkv, swa
             finally:
                 self.attn._clear_compressor_pool_context()
-        # Stage0 can preserve its normal prepared MegaMoE inputs on fallback.
-        moe_inputs = (
-            self.ffn.prepare_mhc_inputs(attn_out)
-            if plan.early_indexer_fallback and type(self.ffn) is MoE
-            else None
-        )
         fused = self._try_mega_mhc(
             attn_out,
             residual,
             post,
             comb,
-            original_tokens=(
-                None
-                if plan.early_indexer_fallback
-                else plan.original_context.chunk_length
-            ),
-            **({"moe_inputs": moe_inputs} if moe_inputs is not None else {}),
+            original_tokens=plan.original_context.chunk_length,
         )
         x = attn_post(attn_out, residual, post, comb) if fused is None else fused[0]
         self._sync_after_first_cp_prefill_attention()
@@ -790,19 +757,8 @@ class Block(nn.Module):
             x_pre = _prefill_fast_norm(self.ffn_norm, x_pre)
         else:
             _, x_pre, post, comb = fused
-        if plan.early_indexer_fallback:
-            routing = nullcontext()
-        elif plan.early_indexer:
-            routing = plan.original_native_routing(self.ffn)
-        else:
-            routing = plan.router_projection(self.ffn)
-        with routing:
-            if fused is not None and moe_inputs is not None:
-                ffn_out = self.ffn(
-                    x_pre, input_ids, expert_load=expert_load, mhc_inputs=moe_inputs
-                )
-            else:
-                ffn_out = self.ffn(x_pre, input_ids, expert_load=expert_load)
+        with plan.router_projection(self.ffn):
+            ffn_out = self.ffn(x_pre, input_ids, expert_load=expert_load)
         return ffn_post(ffn_out, residual, post, comb), input_ids
 
     def forward(

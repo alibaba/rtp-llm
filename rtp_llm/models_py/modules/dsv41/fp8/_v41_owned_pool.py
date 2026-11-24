@@ -39,7 +39,6 @@ _MAX_SCRATCH_MB = int(os.environ.get("DSV41_OWNED_POOL_MAX_SCRATCH_MB", "256"))
 if _MAX_SCRATCH_MB not in (256, 512, 1024):
     raise ValueError("DSV41_OWNED_POOL_MAX_SCRATCH_MB must be 256, 512 or 1024")
 _TILE = tl.constexpr(codec.FP4_ROWS_PER_CTA)
-_RESTORE_ROWS = tl.constexpr(8)
 
 
 @dataclass(frozen=True)
@@ -420,49 +419,6 @@ def _owned_pool_restore(
         tl.store(out + row * 512 + channels, 0)
 
 
-@triton.jit(do_not_specialize=["ROWS", "LOCAL"])
-def _owned_pool_restore_block(
-    packet, inverse, out, oq, os, ROWS, LOCAL, DIRECT: tl.constexpr
-):
-    row = tl.program_id(0).to(tl.int64) * _RESTORE_ROWS + tl.arange(0, _RESTORE_ROWS)
-    real = row < ROWS
-    encoded = tl.load(inverse + row, real, other=-1)
-    valid = encoded >= 0
-    address = tl.maximum(encoded, 0)
-    base = packet + (address & 3) * LOCAL * 356
-    source = address >> 2
-    columns = tl.arange(0, 64)
-    q = tl.load(
-        base[:, None] + source[:, None] * 64 + columns[None, :],
-        valid[:, None],
-        other=0,
-    )
-    s = tl.load(
-        (base + LOCAL * 64).to(tl.pointer_type(tl.int32)) + source, valid, other=0
-    )
-    tl.store(
-        oq + row[:, None] * 64 + columns[None, :],
-        q.to(tl.int8, bitcast=True),
-        real[:, None],
-    )
-    tl.store(os + row, s, real)
-    if DIRECT:
-        destination = tl.load(inverse + ROWS + row, valid, other=-1)
-        write = valid & (destination >= 0)
-    else:
-        destination = row
-        write = real
-    main = codec._fp4_global_dequant_words(
-        base + LOCAL * 68 + source * 288, valid & write, _RESTORE_ROWS
-    )
-    channels = tl.arange(0, 512)
-    tl.store(
-        out + destination[:, None] * 512 + channels[None, :],
-        main.to(tl.bfloat16),
-        write[:, None],
-    )
-
-
 def _metadata_args(
     ends,
     mt,
@@ -614,23 +570,6 @@ def warmup(layout, device, gather_fn):
         kernel = _owned_pool_metadata.warmup(*args, grid=(1,), num_warps=4)
         kernel[(2, 1, 1)](*args)
         compiled.append(kernel)
-    if (
-        cp == 4
-        and os.environ.get("DSV41_PREFILL_OWNED_BLOCK_RESTORE") == "1"
-        and torch.cuda.get_device_capability(device) == (10, 3)
-    ):
-        # Specialize stores for aligned outputs while retaining the scalar
-        # kernel's minimum packet and inverse alignment.
-        inverse[:256].fill_(-1)
-        out = torch.empty((256, 512), dtype=torch.bfloat16, device=device)
-        q = torch.empty((256, 64), dtype=torch.int8, device=device)
-        s = torch.empty(256, dtype=torch.int32, device=device)
-        grid = (triton.cdiv(256, _RESTORE_ROWS.value), 1, 1)
-        for direct in (False, True):
-            args = (packet, inverse, out, q, s, 256, 256, direct)
-            kernel = _owned_pool_restore_block.warmup(*args, grid=grid, num_warps=2)
-            kernel[grid](*args)
-            compiled.append(kernel)
     return tuple(compiled)
 
 
@@ -827,16 +766,7 @@ def _gather_planned(
         if rows:
             with record_function_range("dsv41.prefill.pool.owned.restore"):
                 direct = workspace is not None
-                restore = 2 + direct
-                programs = rows
-                if (
-                    len(kernels) > 8
-                    and receive.data_ptr() % 4 == 0
-                    and all(x.data_ptr() % 16 == 0 for x in (out, oq, os))
-                ):
-                    restore = 8 + direct
-                    programs = triton.cdiv(rows, _RESTORE_ROWS.value)
-                kernels[restore][(programs, 1, 1)](
+                kernels[2 + direct][(rows, 1, 1)](
                     receive,
                     inverse,
                     out,

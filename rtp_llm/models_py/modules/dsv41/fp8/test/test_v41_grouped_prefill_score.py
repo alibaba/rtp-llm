@@ -39,6 +39,14 @@ def key_views(widths, slab_counts, device="cpu"):
 
 
 class GroupedCEDDispatchCPU(unittest.TestCase):
+    def test_group_without_retained_rows_skips_candidate_publication(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_batched_prefill_select
+
+        actual = _v41_batched_prefill_select._try_publish_with_tokens(
+            {"ced_candidate_rows": ()}, None, None, slice(0, 1), None, None, 8, 2048
+        )
+        self.assertEqual(actual, (True, None))
+
     def test_balanced_schedule_admission(self):
         from rtp_llm.models_py.modules.dsv41.fp8 import _indexer_score as scorer
         from rtp_llm.models_py.modules.dsv41.fp8 import (
@@ -71,15 +79,7 @@ class GroupedCEDDispatchCPU(unittest.TestCase):
                     calls.append(kwargs)
                     return iter(())
 
-                native_calls = []
-
-                def submit(out, builder):
-                    native_calls.append(builder)
-                    return False
-
-                plan = SimpleNamespace(
-                    groups=groups, split_rows=lambda _: (), try_native_topk=submit
-                )
+                plan = SimpleNamespace(groups=groups, split_rows=lambda _: ())
                 owner = SimpleNamespace(
                     _shared_attention={},
                     _cp_ctx=cp,
@@ -91,12 +91,7 @@ class GroupedCEDDispatchCPU(unittest.TestCase):
                     stack.enter_context(
                         patch.dict(
                             os.environ,
-                            {
-                                "DSV41_PREFILL_INDEXER_BALANCED_SCORE": flag,
-                                "DSV41_PREFILL_INDEXER_NATIVE_GROUPED_TOPK": (
-                                    "0" if layer == 14 else "1"
-                                ),
-                            },
+                            {"DSV41_PREFILL_INDEXER_BALANCED_SCORE": flag},
                         )
                     )
                     stack.enter_context(
@@ -141,9 +136,6 @@ class GroupedCEDDispatchCPU(unittest.TestCase):
                     )
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(calls[0].get("balance_kv_tiles", False), expected)
-                self.assertEqual(
-                    bool(native_calls), expected and ratio == 2 and layer != 14
-                )
 
     def test_compact_consumers_reuse_full_key_counts_and_invalidate_replaced_cp(self):
         from rtp_llm.models_py.modules.dsv41.fp8 import (
@@ -2050,67 +2042,6 @@ class GroupedScoreCudaTest(unittest.TestCase):
                 atol=0,
             )
             self.assertTrue(torch.equal(logits.contiguous().view(torch.uint8), before))
-
-    def test_native_grouped_k512_matches_ordered_selectors(self):
-        from rtp_llm.models_py.modules.dsv41.fp8 import (
-            _v41_prefill_deepselect as deepselect,
-        )
-        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_topk as topk
-        from rtp_llm.models_py.modules.dsv41.fp8.indexer import _get_topk_workspace
-        from rtp_llm.ops.compute_ops import rtp_llm_ops
-
-        native = getattr(rtp_llm_ops, "dsv41_submit_grouped_k512", None)
-        if native is None or torch.cuda.get_device_capability() != (10, 3):
-            self.skipTest("requires the SM103 grouped K512 binding")
-        device = torch.device("cuda")
-        spec = ((3, 1024), (4, 1033))
-        q = torch.arange(7, device=device, dtype=torch.int8).reshape(7, 1, 1)
-        scales = torch.ones((7, 1), device=device, dtype=torch.int32)
-        weights = torch.ones((7, 1), device=device, dtype=torch.bfloat16)
-        out = torch.empty((7, 512), device=device, dtype=torch.int32)
-        expected = torch.empty_like(out)
-        groups = []
-        logits = {}
-        offset = 0
-        with patch.dict(os.environ, {"DSV41_PREFILL_DEEPSELECT": "1"}):
-            for rows, width in spec:
-                stop = offset + rows
-                values = (
-                    torch.arange(width, device=device).remainder(9).to(torch.bfloat16)
-                )
-                logits[width] = values.repeat(rows, 1)
-                logits[width][-1, 1] = torch.inf
-                bounds = torch.tensor(
-                    [0, 513] + [width] * (rows - 2), device=device, dtype=torch.int32
-                )
-                starts = torch.zeros_like(bounds)
-                self.assertIsNotNone(
-                    topk.try_select_tokens(
-                        logits[width],
-                        bounds,
-                        bounds=(None, bounds),
-                        out=expected[offset:stop],
-                    )
-                )
-                groups.append((q, scales, starts, bounds, bounds, starts, stop, width))
-                offset = stop
-
-            observed = []
-
-            def score(query, key, weight, starts, ends, *, max_seqlen_k, schedule_meta):
-                observed.append((query[0].shape[0], max_seqlen_k))
-                return logits[max_seqlen_k]
-
-            workspace = _get_topk_workspace(device)
-            enabled = deepselect.is_available(device, torch.bfloat16)
-            out.fill_(-2)
-            with self.assertRaisesRegex(RuntimeError, "does not cover the output"):
-                native(score, q, scales, weights, out, workspace, groups[:1], enabled)
-            self.assertEqual(observed, [])
-            self.assertTrue(torch.all(out == -2))
-            native(score, q, scales, weights, out, workspace, groups, enabled)
-        self.assertEqual(observed, list(spec))
-        torch.testing.assert_close(out, expected, rtol=0, atol=0)
 
     def test_mask_overwrites_poison_and_slab_join_has_no_device_work(self):
         logits = torch.full((8, 1024), float("nan"), device="cuda")

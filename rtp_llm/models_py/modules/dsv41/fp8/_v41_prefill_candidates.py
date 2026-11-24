@@ -347,7 +347,6 @@ def select_candidates(
     mask_tail: bool = False,
     token_indices: torch.Tensor | None = None,
     token_ends: torch.Tensor | None = None,
-    select_blocks=None,
 ) -> tuple[torch.Tensor, torch.Tensor | None] | None:
     """Return candidate IDs and bitmap, or None before launching on fallback.
 
@@ -435,8 +434,7 @@ def select_candidates(
         # Native TopK requires a contiguous exact-K output. Reuse the final
         # candidate buffer when it has that layout; publication filters in place.
         native_out = out if out.shape == (rows, 2048) and out.is_contiguous() else None
-        select = candidate_topk.select if select_blocks is None else select_blocks
-        indices = select(scores, block_lengths, out=native_out)
+        indices = candidate_topk.select(scores, block_lengths, out=native_out)
         values = scores
     else:
         values, indices = scores.topk(count, dim=-1, largest=True, sorted=build_bitmap)

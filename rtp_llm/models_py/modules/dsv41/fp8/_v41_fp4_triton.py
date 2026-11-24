@@ -187,30 +187,6 @@ def _fp4_global_dequant_kernel(
     tl.store(out_row, values.to(OUT_DTYPE))
 
 
-@triton.jit
-def _fp4_global_dequant_words(base, valid, R: tl.constexpr):
-    """Decode R independent 4-byte-aligned GLOBAL row pointers in registers."""
-    base = base.to(tl.pointer_type(tl.int32))
-    words = tl.load(
-        base[:, None] + tl.arange(0, 64)[None, :], valid[:, None], other=0
-    ).to(tl.uint32)
-    codes = (
-        ((words[:, :, None] >> (tl.arange(0, 8)[None, None, :] * 4)) & 15)
-        .to(tl.int32)
-        .reshape(R, 32, 16)
-    )
-    scales = tl.load(
-        base[:, None] + 64 + tl.arange(0, 8)[None, :], valid[:, None], other=0
-    ).to(tl.uint32)
-    scale_bytes = (
-        (scales[:, :, None] >> (tl.arange(0, 4)[None, None, :] * 8)) & 255
-    ).to(tl.uint8)
-    scale_values = (
-        scale_bytes.reshape(R, 32).to(tl.float8e4nv, bitcast=True).to(tl.float32)
-    )
-    return (_e2m1_to_float(codes) * scale_values[:, :, None]).reshape(R, 512)
-
-
 def quantize_and_insert_k_cache_fp4(
     k: torch.Tensor,  # [T, 512] bf16, contiguous
     k_cache: torch.Tensor,  # [num_blocks, block_size, 288] uint8

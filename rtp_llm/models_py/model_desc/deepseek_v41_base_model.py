@@ -707,9 +707,6 @@ class DeepSeekV4Model(GptModelBase):
         finally:
             torch.set_default_dtype(prev_dtype)
         self.v4._dsv41_cp_collectives = getattr(self, "_dsv41_cp_collectives", None)
-        self.v4._dsv41_ced_admission_group = getattr(
-            self, "_dsv41_ced_admission_group", None
-        )
         if self._captures_aux_hidden:
             self.v4.set_aux_hidden_capture_layer_ids(self._capture_aux_hidden_layer_ids)
         for layer in self.v4.layers:

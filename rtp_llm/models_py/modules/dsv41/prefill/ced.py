@@ -751,10 +751,6 @@ class CEDPlan:
     exchange: _RowExchange
     indexer_groups: Tuple
     _capture_ids: Tuple[int, ...]
-    admission_group: Any = None
-    early_indexer: bool = field(default=False, init=False)
-    early_indexer_fallback: bool = field(default=False, init=False)
-    _early_admission: Optional[Tuple] = field(default=None, init=False, repr=False)
     _router_groups: Optional[Tuple] = field(default=None, init=False)
     _router_chunk_rows: Optional[int] = field(default=None, init=False)
     _router_gate_groups: Optional[Tuple] = field(default=None, init=False)
@@ -894,7 +890,6 @@ class CEDPlan:
             exchange,
             indexer_groups,
             tuple(v4.capture_aux_hidden_layer_ids),
-            admission_group=getattr(v4, "_dsv41_ced_admission_group", None),
         )
 
     @contextmanager
@@ -912,11 +907,7 @@ class CEDPlan:
 
     def can_split_l20(self, v4):
         """Keep Stage0 publication/compaction if a split interface is absent."""
-        early = self.original_context.seq_len_full < _MIN_L20_SPLIT_TOKENS
-        if early and not (
-            os.environ.get("DSV41_CED_EARLY_INDEXER", "0") == "1"
-            and self.context.chunk_length < self.original_context.chunk_length
-        ):
+        if self.original_context.seq_len_full < _MIN_L20_SPLIT_TOKENS:
             return False
         block = v4.layers[20]
         interfaces = (
@@ -953,172 +944,8 @@ class CEDPlan:
             compact_tokens=self.context.chunk_length,
         ):
             return False
-        if early:
-            if self.admission_group is None or block.ffn._should_chunk(
-                self.original_context.chunk_length
-            ):
-                return False
-            config = block.attn.v41_config or {}
-            candidate_span = config.get("candidate_block_size", 0) * config.get(
-                "candidate_topk_blocks", 0
-            )
-            original = self.original_context
-            visible = max(
-                (
-                    prefix + count
-                    for prefix, count in zip(
-                        original.prefix_lengths_host or (),
-                        original.input_lengths_global_host or (),
-                    )
-                ),
-                default=0,
-            )
-            if candidate_span <= 0 or visible <= candidate_span:
-                return False
-            self.early_indexer = True
-        else:
-            self._prepare_router_projection(block.ffn)
+        self._prepare_router_projection(block.ffn)
         return True
-
-    def _can_use_original_routing(self, ffn, x):
-        from rtp_llm.models_py.modules.dsv41.moe.mega_gate import can_use_mega_gate
-
-        group = self.exchange.group
-        cfg = ffn._strategy.cfg
-        # EPLB's replica hash uses the original expert rank and row number.
-        eplb = ffn.eplb_layer
-        peer_ranks = torch.distributed.get_process_group_ranks(group)
-        return (
-            ffn._use_gate_pack()
-            and ffn._strategy.fake_balance_expert is None
-            and (
-                eplb is None
-                or (
-                    peer_ranks == list(range(cfg.ep_size))
-                    and cfg.ep_rank == self.original_context.cp_rank
-                )
-            )
-            and can_use_mega_gate(x, ffn.gate)
-        )
-
-    def start_early_admission(self, block, hidden, kv_cache, tables):
-        """Overlap the CPU agreement with L19 and L20 source production."""
-        from rtp_llm.models_py.modules.dsv41.fp8._v41_batched_prefill_select import (
-            prepare_owned_references,
-        )
-        from rtp_llm.models_py.modules.dsv41.fp8._v41_joint_pool import (
-            prepare_owned_layout,
-        )
-        from rtp_llm.models_py.modules.dsv41.fp8.attention import bind_attn_cache
-
-        cp = self.original_context
-        attn = block.attn
-        references = None
-        if (
-            isinstance(hidden, torch.Tensor)
-            and hidden.ndim == 3
-            and hidden.shape[0] == cp.chunk_length
-            and hidden.is_contiguous()
-            and hidden.device == cp.global_positions.device
-            and cp.kv_cache_sharded
-            and kv_cache is not None
-            and tables is not None
-            and attn.compress_ratio == 1
-            and attn.kv_source_layer_id == attn.layer_id
-            and cp.prefix_lengths_host
-            and cp.input_lengths_global_host
-        ):
-            # The L20 HC pre-mix and norm produce one dense row per token.
-            # Only metadata is inspected by the routing capability predicate.
-            projection_view = hidden.view(-1, hidden.shape[-1])[: cp.chunk_length]
-            if self._can_use_original_routing(block.ffn, projection_view):
-                widths = tuple(
-                    p + n
-                    for p, n in zip(
-                        cp.prefix_lengths_host,
-                        cp.input_lengths_global_host,
-                        strict=True,
-                    )
-                )
-                with bind_attn_cache(attn, kv_cache, tables, cp):
-                    groups = prepare_owned_layout(attn, widths, hidden.device)
-                if groups is not None:
-                    references = prepare_owned_references(attn, self, widths, groups)
-        ready = torch.tensor(references is not None, device="cpu", dtype=torch.int32)
-        work = torch.distributed.all_reduce(
-            ready,
-            op=torch.distributed.ReduceOp.MIN,
-            group=self.admission_group,
-            async_op=True,
-        )
-        self._early_admission = (ready, work, references)
-
-    def prepare_early_indexer(self, attn, ffn, x):
-        if self._early_admission is not None:
-            ready, work, references = self._early_admission
-            self._early_admission = None
-            work.wait()
-            self.early_indexer_fallback = not bool(ready.item())
-            return references if not self.early_indexer_fallback else None
-
-        from rtp_llm.models_py.modules.dsv41.fp8._v41_batched_prefill_select import (
-            prepare_retained_references,
-        )
-
-        references = (
-            prepare_retained_references(attn, self)
-            if self._can_use_original_routing(ffn, x)
-            else None
-        )
-        # Host metadata decides the branch. Keep the vote off the NCCL
-        # communicator and its queued CP data work.
-        ready = torch.tensor(references is not None, device="cpu", dtype=torch.int32)
-        torch.distributed.all_reduce(
-            ready, op=torch.distributed.ReduceOp.MIN, group=self.admission_group
-        )
-        self.early_indexer_fallback = not bool(ready.item())
-        return references if not self.early_indexer_fallback else None
-
-    @contextmanager
-    def original_native_routing(self, ffn):
-        """Retain native arithmetic and EPLB with the current DeepGEMM ABI."""
-        from rtp_llm.models_py.modules.dsv41.moe.mega_gate import mega_gate
-
-        def route(x):
-            gate = ffn.gate
-            eplb = ffn.eplb_layer
-            weights = x.new_zeros((x.shape[0], gate.topk), dtype=torch.float32)
-            indices = x.new_full((x.shape[0], gate.topk), -1, dtype=torch.int64)
-            peers = (
-                peer for peer, count in enumerate(self.exchange.receive_sizes) if count
-            )
-            for owner, (compact_rows, source_rows) in zip(
-                peers, self.indexer_groups, strict=True
-            ):
-                full_x = x.new_zeros((self.original_context.chunk_length, x.shape[1]))
-                full_x.index_copy_(0, source_rows, x.index_select(0, compact_rows))
-                owner_weights, owner_ids = mega_gate(
-                    full_x,
-                    gate,
-                    owner,
-                    to_physical_map=(
-                        eplb.logical_to_physical if eplb is not None else None
-                    ),
-                    logical_count=eplb.logical_count if eplb is not None else None,
-                )
-                weights.index_copy_(
-                    0, compact_rows, owner_weights.index_select(0, source_rows)
-                )
-                indices.index_copy_(
-                    0, compact_rows, owner_ids.index_select(0, source_rows)
-                )
-            return weights, indices
-
-        ffn._ced_native_routing = route
-        try:
-            yield
-        finally:
-            del ffn._ced_native_routing
 
     def _prepare_router_projection(self, ffn):
         """Prepare only eligible Stage1 maps during the pre-L0 admission check."""

@@ -2146,16 +2146,9 @@ class AttentionV41FP8(AttentionFP8):
                     candidate_size=candidate_size,
                     candidate_blocks=candidate_blocks,
                     req_ids=req_ids,
-                    **(
-                        {"retained_references": references}
-                        if (references := shared.get("ced_l20_references")) is not None
-                        else {}
-                    ),
                 ):
                     shared["topk"] = {self.layer_id: out}
                     return out
-            if shared.get("ced_l20_references") is not None:
-                raise RuntimeError("CED retained score layout rejected after admission")
             single_request = len(globals_by_req) == 1
             for b, (_, keys) in enumerate(globals_by_req):
                 # Production queries are packed in request order. Host slices

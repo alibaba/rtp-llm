@@ -491,40 +491,6 @@ def _resolve_layout(attn, main, index):
     )
 
 
-def prepare_owned_layout(attn, widths, device):
-    """Describe ordinary owned slabs before any cache writes or gather."""
-    from . import _v41_owned_pool as owned
-    from . import _v41_prefill_indexer as indexer
-
-    main = attn._source_pool(attn._global_region())
-    index = attn._source_pool(INDEXER_KV)
-    if (
-        main is None
-        or index is None
-        or main.device != device
-        or not indexer.is_supported(
-            device, attn.index_n_heads, attn._owner().index_wk.shape[0]
-        )
-    ):
-        return None
-    resolved = _resolve_layout(attn, main, index)
-    if resolved is None:
-        return None
-    mt, it, layout = resolved
-    kernels = _READY.get((device.index, *layout))
-    if kernels is None or kernels[5] is None:
-        return None
-    ratio, owner, *_, cp = layout
-    plan = owned.plan_groups(widths, cp_size=cp, owner_rows=owner // ratio)
-    if plan is None:
-        return None
-    try:
-        owned._validate_storage(main, index, device, mt, it, len(widths), layout)
-    except ValueError:
-        return None
-    return plan.groups
-
-
 def try_gather(
     attn,
     main,

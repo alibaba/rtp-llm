@@ -2176,41 +2176,6 @@ def _l20_common(ctx, freqs):
 
 
 class CedRouterProjectionTest(_SingleThreadTest):
-    def test_native_route_uses_original_peer_rows_and_invalid_padding(self):
-        plan, _ = _plan(129, 0, torch.arange(1, 129))
-        plan.exchange.receive_sizes = (1, 0, 1, 0)
-        plan.indexer_groups = (
-            (torch.tensor([2]), torch.tensor([5])),
-            (torch.tensor([0]), torch.tensor([9])),
-        )
-        x = torch.tensor([[13.0], [17.0], [19.0]])
-        physical = torch.tensor([[31]], dtype=torch.int32)
-        count = torch.tensor([1], dtype=torch.int32)
-        ffn = types.SimpleNamespace(
-            gate=types.SimpleNamespace(topk=1),
-            eplb_layer=types.SimpleNamespace(
-                logical_to_physical=physical, logical_count=count
-            ),
-        )
-
-        def native(full, gate, owner, *, to_physical_map, logical_count):
-            self.assertIs(gate, ffn.gate)
-            self.assertIs(to_physical_map, physical)
-            self.assertIs(logical_count, count)
-            self.assertEqual(full.shape[0], plan.original_context.chunk_length)
-            ids = (owner * 100 + torch.arange(full.shape[0]))[:, None]
-            return full, ids
-
-        name = "rtp_llm.models_py.modules.dsv41.moe.mega_gate"
-        with mock.patch.dict(
-            sys.modules, {name: types.SimpleNamespace(mega_gate=native)}
-        ):
-            with plan.original_native_routing(ffn):
-                weights, ids = ffn._ced_native_routing(x)
-        torch.testing.assert_close(weights, torch.tensor([[13.0], [0.0], [19.0]]))
-        torch.testing.assert_close(ids, torch.tensor([[209], [-1], [5]]))
-        self.assertFalse(hasattr(ffn, "_ced_native_routing"))
-
     @staticmethod
     def _ffn(gate, rows_per_chunk=16384, enabled=True):
         return types.SimpleNamespace(
@@ -2829,27 +2794,6 @@ class CedEncoderSplitTest(_SingleThreadTest):
                 self.assertIsNone(workspace._attention_metadata)
                 self.assertNotIn("prefill_index_plan", shared)
 
-    def test_early_admission_waits_before_reading_peer_vote(self):
-        for accepted in (True, False):
-            with self.subTest(accepted=accepted):
-                plan, _ = _plan(129, 0, torch.arange(1, 129))
-                references = ((32, 32768, True),)
-                ready = torch.ones((), dtype=torch.int32)
-
-                def complete():
-                    ready.fill_(accepted)
-
-                work = mock.Mock()
-                work.wait.side_effect = complete
-                plan._early_admission = (ready, work, references)
-                self.assertEqual(
-                    plan.prepare_early_indexer(None, None, None),
-                    references if accepted else None,
-                )
-                work.wait.assert_called_once_with()
-                self.assertIsNone(plan._early_admission)
-                self.assertEqual(plan.early_indexer_fallback, not accepted)
-
     def test_split_minimum_counts_fresh_rows_before_model_checks_or_uploads(self):
         for fresh in (129, 16384, 32768, 65535):
             for prefix in (0, 131072):
@@ -3432,75 +3376,6 @@ class CedEncoderSplitTest(_SingleThreadTest):
                     ).bfloat16(),
                 )
             )
-
-    def test_l20_veto_keeps_stage0_prepared_megamoe(self):
-        path = Path(_CED.__file__).parent.parent / "block.py"
-        block_class = next(
-            n
-            for n in ast.parse(path.read_text()).body
-            if isinstance(n, ast.ClassDef) and n.name == "Block"
-        )
-        method = next(
-            n
-            for n in block_class.body
-            if isinstance(n, ast.FunctionDef) and n.name == "forward_prefill_ced_l20"
-        )
-        x, ids, positions = object(), object(), object()
-        ffn, attn = mock.Mock(), mock.Mock()
-        attn.can_fuse_prefill_attn_norm_input_quant.return_value = False
-        attn._prefill_produce.return_value = (None,) * 5
-        plan = mock.Mock(early_indexer=True, early_indexer_fallback=False)
-        plan.original_context.chunk_length = 256
-        plan.candidate_publication.return_value = nullcontext()
-
-        def veto(*args):
-            plan.early_indexer_fallback = True
-
-        plan.prepare_early_indexer.side_effect = veto
-        hc_pre = mock.Mock(return_value=(x, None, None))
-        hc_post = mock.Mock(return_value=x)
-        block = types.SimpleNamespace(
-            attn=attn,
-            attn_norm=mock.Mock(),
-            ffn=ffn,
-            _prefill_fast_hc_impls=lambda: (hc_pre, hc_pre, hc_post, hc_post),
-            _try_mega_mhc=mock.Mock(return_value=(x, x, None, None)),
-            _sync_after_first_cp_prefill_attention=mock.Mock(),
-        )
-        scope = dict(
-            Optional=Optional,
-            ExpertLoadContext=ExpertLoadContext,
-            MoE=type(ffn),
-            nullcontext=nullcontext,
-            _prefill_fast_norm=lambda norm, value: value,
-        )
-        exec(
-            compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"),
-            scope,
-        )
-        with mock.patch.dict(
-            sys.modules,
-            {
-                "rtp_llm.models_py.modules.dsv41.fp8.attention": types.SimpleNamespace(
-                    bind_attn_cache=lambda *args, **kwargs: nullcontext()
-                )
-            },
-        ):
-            result = scope["forward_prefill_ced_l20"](
-                block, x, ids, positions, plan, None
-            )
-        prepared = ffn.prepare_mhc_inputs.return_value
-        block._try_mega_mhc.assert_called_once_with(
-            attn._prefill_query.return_value,
-            x,
-            None,
-            None,
-            original_tokens=None,
-            moe_inputs=prepared,
-        )
-        ffn.assert_called_once_with(x, ids, expert_load=None, mhc_inputs=prepared)
-        plan.compact_l20.assert_not_called()
-        self.assertEqual(result, (x, ids))
 
 
 class BoundedSwaConsumerTest(_SingleThreadTest):
