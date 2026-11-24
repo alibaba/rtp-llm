@@ -20,9 +20,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self.server.visits.append(self.path)
-        if self.path == "/slow":
-            self.server.slow_started.set()
-            self.server.release.wait(2)
+        if self.path in self.server.gates:
+            started, release = self.server.gates[self.path]
+            started.set()
+            release.wait(10)
             try:
                 self.reply(200, b"slow")
             except (OSError, BrokenPipeError):
@@ -54,8 +55,9 @@ class MediaNetworkTest(unittest.TestCase):
     def setUp(self):
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.server.visits = []
-        self.server.slow_started = threading.Event()
-        self.server.release = threading.Event()
+        self.server.gates = {
+            path: (threading.Event(), threading.Event()) for path in ("/slow", "/hold")
+        }
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
@@ -112,13 +114,70 @@ class MediaNetworkTest(unittest.TestCase):
         slow.url = f"http://127.0.0.1:{self.server.server_port}/slow"
         pending = self.net.submit(slow)
         try:
-            self.assertTrue(self.server.slow_started.wait(1))
+            self.assertTrue(self.server.gates["/slow"][0].wait(2))
             self.assertEqual(self.fetch("/binary")[2], b"\x00\xffbinary")
             pending.cancel()
         finally:
-            self.server.release.set()
+            self.server.gates["/slow"][1].set()
         self.assertIs(self.net.next(), pending)
         self.assertEqual(pending.result()[1], "cancelled")
+
+    def test_keepalive_reused_across_workers(self):
+        peers = []
+
+        class Origin(Handler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self):
+                peers.append(self.client_address)
+                self.reply(200, self.path.encode())
+
+        origin = ThreadingHTTPServer(("127.0.0.1", 0), Origin)
+        self.addCleanup(origin.server_close)
+        threading.Thread(target=origin.serve_forever, daemon=True).start()
+        self.addCleanup(origin.shutdown)
+
+        def hold(path):
+            started, release = self.server.gates[path]
+            self.addCleanup(release.set)
+            req = native.Request()
+            req.url = f"http://127.0.0.1:{self.server.server_port}{path}"
+            job = self.net.submit(req)
+            self.assertTrue(started.wait(3))
+            return job
+
+        def fetch_image(path):
+            url = f"http://127.0.0.1:{origin.server_port}{path}"
+            self.assertEqual(
+                self.fetch(path, url=url)[:4], (200, "", path.encode(), False)
+            )
+
+        # Occupy opposite workers so two different workers must fetch from origin.
+        first = hold("/slow")
+        fetch_image("/first")
+        second = hold("/hold")
+        self.server.gates["/slow"][1].set()
+        self.assertIs(self.net.next(), first)
+        fetch_image("/second")
+        self.server.gates["/hold"][1].set()
+        self.assertIs(self.net.next(), second)
+        self.assertEqual(len(peers), 2)
+        self.assertEqual(peers[0], peers[1])
+
+    def test_close_cancels_active_transfers_and_drains_queue(self):
+        jobs = []
+        for path in ("/slow", "/hold", "/queued"):
+            req = native.Request()
+            req.url = f"http://127.0.0.1:{self.server.server_port}{path}"
+            jobs.append(self.net.submit(req))
+        for started, release in self.server.gates.values():
+            self.addCleanup(release.set)
+            self.assertTrue(started.wait(3))
+        self.net.close()
+        self.assertCountEqual([self.net.next() for _ in jobs], jobs)
+        self.assertIsNone(self.net.next())
+        self.assertEqual([job.result()[1] for job in jobs], ["cancelled"] * len(jobs))
+        self.assertNotIn("/queued", self.server.visits)
 
     def test_media_literal_policy_and_proxy(self):
         self.assertEqual(
@@ -139,6 +198,7 @@ class MediaNetworkTest(unittest.TestCase):
         except OSError as error:
             self.skipTest(f"IPv6 loopback unavailable: {error}")
         server.visits = []
+        server.gates = {}
         self.addCleanup(server.server_close)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.shutdown)

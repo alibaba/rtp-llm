@@ -603,7 +603,11 @@ def init_vit_group_args(parser, vit_config):
         bind_to=(vit_config, "vit_source_download_concurrency"),
         type=int,
         default=0,
-        help="Source download threads per ViT process; 0 shares the default I/O pool",
+        help=(
+            "Source download concurrency per ViT engine. On the native network path this also "
+            "sizes the shared connection cache; 0 uses the preprocessing worker count. "
+            "On the Python path 0 shares the default I/O pool."
+        ),
     )
 
     for name, parser, default, description in (

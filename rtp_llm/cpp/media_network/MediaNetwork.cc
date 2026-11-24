@@ -16,6 +16,7 @@
 #include <string_view>
 #include <strings.h>
 #include <deque>
+#include <future>
 #include <list>
 #include <map>
 #include <memory>
@@ -285,7 +286,94 @@ void validate_proxied_media_host(const Endpoint& dest, Job& job) {
     if (!lookup.found)
         throw Failure("dns");
 }
-void exchange(CURL* curl, Job& job, const Policy& policy, const std::string& proxy) {
+// Only the I/O thread drives the multi handle. Workers lend it their configured
+// easy handles for one transfer; the multi handle retains connections between transfers.
+class CurlConnectionPool {
+public:
+    explicit CurlConnectionPool(long capacity): multi_(curl_multi_init(), curl_multi_cleanup) {
+        if (!multi_ || curl_multi_setopt(multi_.get(), CURLMOPT_MAXCONNECTS, capacity) != CURLM_OK)
+            throw Failure("curl connection pool initialization failed");
+        io_ = std::thread([this] { drive(); });
+    }
+    ~CurlConnectionPool() {
+        stop();
+    }
+
+    CURLcode perform(CURL* easy) {
+        std::future<CURLcode> result;
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            if (stopping_)
+                return CURLE_FAILED_INIT;
+            result = pending_.try_emplace(easy).first->second.get_future();
+        }
+        curl_multi_wakeup(multi_.get());
+        return result.get();
+    }
+
+    void stop() {
+        if (!io_.joinable())
+            return;
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            stopping_ = true;
+        }
+        curl_multi_wakeup(multi_.get());
+        io_.join();
+    }
+
+private:
+    using Transfers = std::map<CURL*, std::promise<CURLcode>>;
+    void drive() {
+        Transfers active;
+        for (;;) {
+            {
+                std::lock_guard<std::mutex> lock(mu_);
+                if (stopping_)
+                    break;
+                while (!pending_.empty()) {
+                    auto transfer = pending_.extract(pending_.begin());
+                    if (curl_multi_add_handle(multi_.get(), transfer.key()) == CURLM_OK)
+                        active.insert(std::move(transfer));
+                    else
+                        transfer.mapped().set_value(CURLE_FAILED_INIT);
+                }
+            }
+            int running = 0;
+            if (curl_multi_perform(multi_.get(), &running) != CURLM_OK)
+                break;
+            int remaining = 0;
+            while (auto* msg = curl_multi_info_read(multi_.get(), &remaining)) {
+                if (msg->msg == CURLMSG_DONE) {
+                    auto transfer = active.extract(msg->easy_handle);
+                    auto result   = msg->data.result;
+                    curl_multi_remove_handle(multi_.get(), transfer.key());
+                    transfer.mapped().set_value(result);
+                }
+            }
+            if (curl_multi_poll(multi_.get(), nullptr, 0, active.empty() ? 60000 : 1000, nullptr) != CURLM_OK)
+                break;
+        }
+
+        std::lock_guard<std::mutex> lock(mu_);
+        stopping_ = true;
+        for (auto& [easy, result] : active) {
+            curl_multi_remove_handle(multi_.get(), easy);
+            result.set_value(CURLE_FAILED_INIT);
+        }
+        for (auto& pending : pending_)
+            pending.second.set_value(CURLE_FAILED_INIT);
+        pending_.clear();
+    }
+
+    std::unique_ptr<CURLM, decltype(&curl_multi_cleanup)> multi_;
+    std::mutex                                            mu_;
+    Transfers                                             pending_;
+    bool                                                  stopping_ = false;
+    std::thread                                           io_;
+};
+
+void exchange(CurlConnectionPool& connections, CURL* curl, Job& job, const Policy& policy, const std::string& proxy) {
     auto&       req   = job.req;
     std::string url   = req.media ? rewrite(req.url, policy) : req.url;
     const auto  first = endpoint(url, policy, req.media);
@@ -300,7 +388,7 @@ void exchange(CURL* curl, Job& job, const Policy& policy, const std::string& pro
             throw Failure("cancelled");
         if (ms <= 0)
             throw Failure("timeout");
-        curl_easy_reset(curl);  // Keep worker-owned connections; replace all request state.
+        curl_easy_reset(curl);
         Transfer   transfer{job};
         HeaderList headers;
         for (const auto& [name, value] : (proxy.empty() ? req.headers : req.proxy_headers)) {
@@ -342,7 +430,7 @@ void exchange(CURL* curl, Job& job, const Policy& policy, const std::string& pro
             curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req.body.data());
             curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, req.method.c_str());
         }
-        auto rc = curl_easy_perform(curl);
+        auto rc = connections.perform(curl);
         if (job.canceled.load())
             throw Failure("cancelled");
         if (transfer.large)
@@ -389,6 +477,7 @@ public:
         static const auto init = curl_global_init(CURL_GLOBAL_DEFAULT);
         if (init != CURLE_OK)
             throw Failure("curl initialization failed");
+        connections_ = std::make_unique<CurlConnectionPool>(workers);
         try {
             for (int i = 0; i < workers; ++i)
                 workers_.emplace_back([this] { work(); });
@@ -439,9 +528,11 @@ public:
                 job->canceled = true;
         }
         cv_.notify_all();
+        connections_->stop();
         for (auto& worker : workers_)
             if (worker.joinable())
                 worker.join();
+        connections_.reset();
         done_cv_.notify_all();
     }
 
@@ -482,12 +573,12 @@ private:
                 if (!req.proxy.empty())
                     ++job.proxy_attempts;
                 try {
-                    exchange(curl, job, policy_, req.proxy);
+                    exchange(*connections_, curl, job, policy_, req.proxy);
                 } catch (const Failure& e) {
                     if (req.proxy.empty() || std::string(e.what()) != "transport")
                         throw;
                     ++job.fallbacks;
-                    exchange(curl, job, policy_, "");
+                    exchange(*connections_, curl, job, policy_, "");
                 }
                 return;
             } catch (const Failure& e) {
@@ -577,6 +668,7 @@ private:
     std::condition_variable                                     cv_, done_cv_;
     std::deque<std::shared_ptr<Job>>                            queue_, done_;
     std::unordered_set<std::shared_ptr<Job>>                    running_;
+    std::unique_ptr<CurlConnectionPool>                         connections_;
     std::vector<std::thread>                                    workers_;
     std::list<Entry>                                            lru_;
     std::unordered_map<std::string, std::list<Entry>::iterator> entries_;
