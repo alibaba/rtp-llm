@@ -160,8 +160,13 @@ bounds allow. Use `SINGLE` when every decision must contain exactly one request.
 A request the worker cannot take yet because of KV pressure or engine
 backpressure remains QUEUE-owned. There is no SLO-budget batching policy.
 
-`router.roles.decode.availability.maxKvUsagePercent` defaults to `90` and must
-be in `[1, 100]`; zero and negative values are invalid.
+Decode dispatch requires all enabled `router.roles.decode.availability` limits
+to pass. Set any field to `-1` to disable that limit. `maxKvUsagePercent`
+defaults to `90` and accepts values from 1 to 100 when enabled.
+`maxEngineRequests` defaults to `64` and counts Engine-facing requests and
+outstanding dispatch permits. `maxRunningStreamSize` defaults to `-1`.
+When enabled, it checks the latest Worker-reported running stream count
+before dispatch. A count equal to the limit blocks further dispatch to that Worker.
 
 PRIORITY can preempt eligible lower-priority owners under the configured
 victim-stage policy. For separate Prefill and Decode, a request becomes
