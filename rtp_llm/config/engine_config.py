@@ -288,8 +288,8 @@ def configure_batch_invariant_model(
     engine_config: EngineConfig, model_config: "ModelConfig"
 ) -> None:
     """Validate the supported CUDA eager configuration before loading weights."""
-    hw = engine_config.hw_kernel_config
-    if not hw.batch_invariant:
+    hw = getattr(engine_config, "hw_kernel_config", None)
+    if getattr(hw, "batch_invariant", False) is not True:
         return
 
     parallel = engine_config.parallelism_config
