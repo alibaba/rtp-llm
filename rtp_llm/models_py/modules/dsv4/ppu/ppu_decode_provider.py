@@ -45,22 +45,40 @@ class PpuDecodeProvider(PpuModuleProvider):
             from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_mega_moe import (
                 PpuMegaMoEFP4Strategy,
                 PpuMegaMoEFP8Strategy,
+                PpuMegaMoEW4A8Strategy,
             )
 
-            exact = (
-                self._mega_mode == "plain"
+            plain = self._mega_mode == "plain"
+            exact_w4a8 = (
+                plain
+                and self._exact_backend == "w4a8"
+                and PpuMegaMoEW4A8Strategy.can_handle(cfg)
+                and PpuMegaMoEW4A8Strategy.package_is_available(
+                    self._mega_fp8_module_name
+                )
+            )
+            exact_routea = (
+                plain
+                and not exact_w4a8
                 and PpuMegaMoEFP8Strategy.can_handle(cfg)
                 and PpuMegaMoEFP8Strategy.package_is_available(
                     self._mega_fp8_module_name
                 )
             )
-            strategy_type = PpuMegaMoEFP8Strategy if exact else PpuMegaMoEFP4Strategy
+            exact = exact_w4a8 or exact_routea
+            strategy_type = (
+                PpuMegaMoEW4A8Strategy
+                if exact_w4a8
+                else (PpuMegaMoEFP8Strategy if exact_routea else PpuMegaMoEFP4Strategy)
+            )
             strategy_kwargs = {} if exact else strategy_kwargs
             strategy_kwargs["resources"] = self._mega_resources
             strategy_kwargs["module_name"] = (
                 self._mega_fp8_module_name if exact else self._mega_module_name
             )
-            if not exact:
+            if exact_w4a8:
+                strategy_kwargs["max_tokens"] = self._w4a8_max_tokens
+            elif not exact:
                 strategy_kwargs["streamed"] = self._mega_streamed
         return strategy_type(cfg, **strategy_kwargs)
 
@@ -130,6 +148,25 @@ class PpuDecodeProvider(PpuModuleProvider):
             raise ValueError("MegaMoE overlap modes require the MegaMoE backend")
         self._mega_streamed = self._mega_mode == "streamed"
         self._shared_staged = self._mega_mode == "staged"
+        exact_backend = self.execution_options.get(
+            "DSV4_PPU_MEGAMOE_EXACT_BACKEND", "w4a8"
+        )
+        if exact_backend not in ("w4a8", "routea"):
+            raise ValueError("DSV4_PPU_MEGAMOE_EXACT_BACKEND must be w4a8 or routea")
+        self._exact_backend = exact_backend
+        w4a8_max_tokens = self.execution_options.get(
+            "DSV4_PPU_MEGAMOE_W4A8_MAX_TOKENS", "96"
+        )
+        try:
+            self._w4a8_max_tokens = int(w4a8_max_tokens)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "DSV4_PPU_MEGAMOE_W4A8_MAX_TOKENS must be a positive integer"
+            ) from None
+        if self._w4a8_max_tokens <= 0:
+            raise ValueError(
+                "DSV4_PPU_MEGAMOE_W4A8_MAX_TOKENS must be a positive integer"
+            )
         self._mega_resources = None
         self._mega_module_name = "deep_gemm_mega"
         self._mega_fp8_module_name = "deep_gemm_route_a"

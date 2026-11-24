@@ -14,6 +14,7 @@ from rtp_llm.models_py.modules.dsv4.ppu.manifest import DECODE_EXECUTION_OPTIONS
 from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_mega_moe import (
     PpuMegaMoEFP4Strategy,
     PpuMegaMoEFP8Strategy,
+    PpuMegaMoEW4A8Strategy,
     PpuMegaMoEResources,
     promote_mxfp4_to_fp8,
 )
@@ -63,6 +64,87 @@ class MegaMoEContractTest(unittest.TestCase):
             mega_moe_pre_dispatch_ue8m0=Mock(),
             fp8_fp8_mega_moe_fp32=Mock(),
         )
+
+    @staticmethod
+    def _w4a8_module():
+        capability = {
+            "output_dtype": "float32",
+            "preweighted": True,
+            "weight_dtype": "mxfp4_k32_ue8m0",
+            "route_weight_stage": "before_l2_quant",
+            "g1_rounding": "bf16",
+            "activation_quantization": "block128_ue8m0_eps1e-4",
+            "input_activation_scale": "block128_ue8m0_fp32_storage",
+            "g2_activation_scale": "block128_ue8m0_fp32_storage",
+        }
+        return SimpleNamespace(
+            MEGA_MOE_CAPABILITIES={"fp8_fp4_mega_moe_fp32": capability},
+            get_symm_buffer_for_mega_moe=Mock(),
+            transform_weights_for_w4a8_mega_moe=Mock(),
+            mega_moe_pre_dispatch_ue8m0=Mock(),
+            fp8_fp4_mega_moe_fp32=Mock(),
+        )
+
+    def test_w4a8_requires_the_full_capability_contract(self):
+        module = self._w4a8_module()
+        self.assertTrue(PpuMegaMoEW4A8Strategy.package_has_exact_capability(module))
+        module.MEGA_MOE_CAPABILITIES["fp8_fp4_mega_moe_fp32"]["weight_dtype"] = "fp8"
+        self.assertFalse(PpuMegaMoEW4A8Strategy.package_has_exact_capability(module))
+        module = self._w4a8_module()
+        module.fp8_fp4_mega_moe_fp32 = None
+        self.assertFalse(PpuMegaMoEW4A8Strategy.package_has_exact_capability(module))
+        self.assertFalse(
+            PpuMegaMoEW4A8Strategy.package_has_exact_capability(self._exact_module())
+        )
+
+    def test_w4a8_forward_pads_routes_and_uses_exact_kernel(self):
+        strategy = object.__new__(PpuMegaMoEW4A8Strategy)
+        torch.nn.Module.__init__(strategy)
+        strategy.cfg = self.cfg
+        strategy._max_tokens = 96
+        strategy._sym = SimpleNamespace(
+            x=object(), x_sf=object(), topk_idx=object(), topk_weights=object()
+        )
+        strategy._resources = Mock()
+        for name in ("_w13", "_s13", "_inv13", "_w2", "_s2", "_inv2"):
+            setattr(strategy, name, object())
+        strategy._mega = self._w4a8_module()
+        padded_ids = torch.zeros((2, 8), dtype=torch.int64)
+        padded_weights = torch.ones((2, 8), dtype=torch.float32)
+        with patch(
+            "rtp_llm.models_py.kernels.ppu.attention.ppu_topk_padding.pad_inactive_routes",
+            return_value=(padded_ids, padded_weights),
+        ) as padding:
+            result = strategy(
+                torch.zeros((2, 4096), dtype=torch.bfloat16),
+                torch.ones((2, 6), dtype=torch.float32),
+                torch.zeros((2, 6), dtype=torch.int32),
+            )
+        self.assertEqual(result.dtype, torch.float32)
+        self.assertEqual(padding.call_args.args[0].dtype, torch.int64)
+        self.assertEqual(padding.call_args.args[2], 8)
+        published = strategy._mega.mega_moe_pre_dispatch_ue8m0.call_args.args[1]
+        self.assertEqual(published.shape, (2, 8))
+        self.assertEqual(published.dtype, torch.int64)
+        call = strategy._mega.fp8_fp4_mega_moe_fp32.call_args
+        self.assertEqual(len(call.args[1]), 3)
+        self.assertEqual(len(call.args[2]), 3)
+        self.assertFalse(call.kwargs["fast_math"])
+
+    def test_w4a8_rejects_inputs_above_the_token_cap(self):
+        strategy = object.__new__(PpuMegaMoEW4A8Strategy)
+        torch.nn.Module.__init__(strategy)
+        strategy.cfg = self.cfg
+        strategy._max_tokens = 96
+        strategy._sym = object()
+        strategy._resources = Mock()
+        strategy._mega = self._w4a8_module()
+        with self.assertRaisesRegex(ValueError, "W4A8_MAX_TOKENS"):
+            strategy(
+                torch.zeros((97, 4096), dtype=torch.bfloat16),
+                torch.ones((97, 8), dtype=torch.float32),
+                torch.zeros((97, 8), dtype=torch.int64),
+            )
 
     def test_exact_routea_requires_the_full_capability_contract(self):
         module = self._exact_module()
@@ -153,6 +235,11 @@ class MegaMoEContractTest(unittest.TestCase):
                 with (
                     self.subTest(available=available, ep=ep, tp=tp, dim=dim),
                     patch.object(
+                        PpuMegaMoEW4A8Strategy,
+                        "package_is_available",
+                        return_value=False,
+                    ),
+                    patch.object(
                         PpuMegaMoEFP8Strategy,
                         "package_is_available",
                         return_value=available,
@@ -183,6 +270,95 @@ class MegaMoEContractTest(unittest.TestCase):
                         fallback.call_args.kwargs["expected_m_policy"], provider._moe_hint
                     )
                     exact.assert_not_called()
+
+    def test_provider_prefers_w4a8_then_routea_then_legacy(self):
+        options = {**DECODE_EXECUTION_OPTIONS, "DSV4_PPU_DECODE_MOE_BACKEND": "megamoe"}
+        provider = PpuDecodeProvider(options)
+        with (
+            patch.object(
+                PpuMegaMoEW4A8Strategy, "package_is_available", return_value=True
+            ),
+            patch.object(PpuMegaMoEW4A8Strategy, "__init__", return_value=None) as w4a8,
+            patch.object(PpuMegaMoEFP8Strategy, "__init__", return_value=None) as routea,
+            patch.object(PpuMegaMoEFP4Strategy, "__init__", return_value=None) as legacy,
+        ):
+            strategy = provider._build_moe_strategy(self.cfg)
+        self.assertIsInstance(strategy, PpuMegaMoEW4A8Strategy)
+        self.assertEqual(w4a8.call_args.kwargs["module_name"], "deep_gemm_route_a")
+        self.assertEqual(w4a8.call_args.kwargs["max_tokens"], 96)
+        routea.assert_not_called()
+        legacy.assert_not_called()
+        with (
+            patch.object(
+                PpuMegaMoEW4A8Strategy, "package_is_available", return_value=False
+            ),
+            patch.object(
+                PpuMegaMoEFP8Strategy, "package_is_available", return_value=True
+            ),
+            patch.object(PpuMegaMoEW4A8Strategy, "__init__", return_value=None) as w4a8,
+            patch.object(PpuMegaMoEFP8Strategy, "__init__", return_value=None) as routea,
+            patch.object(PpuMegaMoEFP4Strategy, "__init__", return_value=None) as legacy,
+        ):
+            strategy = provider._build_moe_strategy(self.cfg)
+        self.assertIsInstance(strategy, PpuMegaMoEFP8Strategy)
+        self.assertEqual(routea.call_args.kwargs["module_name"], "deep_gemm_route_a")
+        w4a8.assert_not_called()
+        legacy.assert_not_called()
+        with (
+            patch.object(
+                PpuMegaMoEW4A8Strategy, "package_is_available", return_value=False
+            ),
+            patch.object(
+                PpuMegaMoEFP8Strategy, "package_is_available", return_value=False
+            ),
+            patch.object(PpuMegaMoEW4A8Strategy, "__init__", return_value=None) as w4a8,
+            patch.object(PpuMegaMoEFP8Strategy, "__init__", return_value=None) as routea,
+            patch.object(PpuMegaMoEFP4Strategy, "__init__", return_value=None) as legacy,
+        ):
+            strategy = provider._build_moe_strategy(self.cfg)
+        self.assertIsInstance(strategy, PpuMegaMoEFP4Strategy)
+        self.assertEqual(legacy.call_args.kwargs["module_name"], "deep_gemm_mega")
+        w4a8.assert_not_called()
+        routea.assert_not_called()
+
+    def test_provider_exact_backend_switch_can_force_routea(self):
+        options = {
+            **DECODE_EXECUTION_OPTIONS,
+            "DSV4_PPU_DECODE_MOE_BACKEND": "megamoe",
+            "DSV4_PPU_MEGAMOE_EXACT_BACKEND": "routea",
+        }
+        provider = PpuDecodeProvider(options)
+        with (
+            patch.object(
+                PpuMegaMoEW4A8Strategy, "package_is_available", return_value=True
+            ),
+            patch.object(
+                PpuMegaMoEFP8Strategy, "package_is_available", return_value=True
+            ),
+            patch.object(PpuMegaMoEW4A8Strategy, "__init__", return_value=None) as w4a8,
+            patch.object(PpuMegaMoEFP8Strategy, "__init__", return_value=None) as routea,
+        ):
+            strategy = provider._build_moe_strategy(self.cfg)
+        self.assertIsInstance(strategy, PpuMegaMoEFP8Strategy)
+        routea.assert_called_once()
+        w4a8.assert_not_called()
+
+    def test_provider_validates_exact_backend_and_w4a8_cap(self):
+        options = {**DECODE_EXECUTION_OPTIONS, "DSV4_PPU_DECODE_MOE_BACKEND": "megamoe"}
+        self.assertEqual(PpuDecodeProvider(options)._exact_backend, "w4a8")
+        self.assertEqual(
+            PpuDecodeProvider(
+                {**options, "DSV4_PPU_MEGAMOE_W4A8_MAX_TOKENS": "48"}
+            )._w4a8_max_tokens,
+            48,
+        )
+        with self.assertRaisesRegex(ValueError, "w4a8 or routea"):
+            PpuDecodeProvider({**options, "DSV4_PPU_MEGAMOE_EXACT_BACKEND": "fp4"})
+        for value in ("0", "-1", "abc"):
+            with self.assertRaisesRegex(ValueError, "positive integer"):
+                PpuDecodeProvider(
+                    {**options, "DSV4_PPU_MEGAMOE_W4A8_MAX_TOKENS": value}
+                )
 
     def test_provider_defers_selection_until_ep_config_is_available(self):
         provider = PpuDecodeProvider(DECODE_EXECUTION_OPTIONS)

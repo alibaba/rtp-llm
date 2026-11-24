@@ -645,3 +645,165 @@ class PpuMegaMoEFP8Strategy(PpuDeepEPFP4Strategy):
             fast_math=True,
         )
         return y
+
+
+class PpuMegaMoEW4A8Strategy(PpuDeepEPFP4Strategy):
+    """EP8 exact W4A8: MXFP4 experts with Route A's UE8M0 activation contract.
+
+    Bit-exactness against Route A comes from keeping the activation side
+    identical (1x128 E4M3 + UE8M0 eps 1e-4, per-K128 FP32 rescale) while the
+    B side consumes the checkpoint nibbles directly; MXFP4 values are exactly
+    representable in E4M3, so every product is unchanged.
+    """
+
+    name = "ppu_mega_moe_w4a8_fp32"
+
+    @classmethod
+    def can_handle(cls, cfg):
+        return (
+            super().can_handle(cfg)
+            and cfg.ep_size == 8
+            and cfg.tp_size == 1
+            and (
+                cfg.dim,
+                cfg.moe_inter_dim,
+                cfg.n_routed_experts,
+                cfg.n_activated_experts,
+            )
+            == (4096, 2048, 256, 6)
+        )
+
+    @staticmethod
+    def package_has_exact_capability(module):
+        capability = getattr(module, "MEGA_MOE_CAPABILITIES", {}).get(
+            "fp8_fp4_mega_moe_fp32"
+        )
+        required = (
+            "get_symm_buffer_for_mega_moe",
+            "transform_weights_for_w4a8_mega_moe",
+            "mega_moe_pre_dispatch_ue8m0",
+            "fp8_fp4_mega_moe_fp32",
+        )
+        return (
+            isinstance(capability, dict)
+            and all(
+                capability.get(key) == value
+                for key, value in _W4A8_FP32_CAPABILITY.items()
+            )
+            and all(callable(getattr(module, name, None)) for name in required)
+        )
+
+    @classmethod
+    def package_is_available(cls, module_name="deep_gemm_route_a"):
+        if module_name != "deep_gemm_route_a":
+            return False
+        try:
+            module = importlib.import_module(module_name)
+        except (ImportError, OSError):
+            return False
+        return cls.package_has_exact_capability(module)
+
+    def __init__(
+        self,
+        cfg,
+        *,
+        resources,
+        module_name="deep_gemm_route_a",
+        max_tokens=96,
+        **kwargs,
+    ):
+        if kwargs:
+            raise TypeError(f"Unexpected exact W4A8 options: {sorted(kwargs)}")
+        super().__init__(cfg, output_dtype=torch.float32)
+        if module_name != "deep_gemm_route_a":
+            raise ValueError("Exact W4A8 package must be the isolated Route A build")
+        self._mega = importlib.import_module(module_name)
+        if not self.package_has_exact_capability(self._mega):
+            raise RuntimeError("MegaMoE package lacks the exact W4A8/FP32 capability")
+        self._max_tokens = int(max_tokens)
+        if self._max_tokens <= 0:
+            raise ValueError("W4A8 MegaMoE token cap must be positive")
+        self._resources = resources
+        self._sym = None
+
+    def setup_weights(self, layer_weights):
+        w13, s13, w2, s2 = take_raw_routed_mxfp4_weights(self.cfg, layer_weights)
+        pair13, pair2 = self._mega.transform_weights_for_w4a8_mega_moe(
+            (w13, s13.view(torch.uint8)), (w2, s2.view(torch.uint8))
+        )
+        for suffix, value in zip(
+            ("w13", "s13", "inv13", "w2", "s2", "inv2"), (*pair13, *pair2)
+        ):
+            if isinstance(value, torch.Tensor):
+                self.register_buffer(f"_{suffix}", value, persistent=False)
+            else:
+                setattr(self, f"_{suffix}", value)
+
+    def build_shared_expert(self, expert_weights, swiglu_limit):
+        from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_shared_expert import (
+            PpuMegaMoEFP8SharedExpert,
+        )
+
+        return PpuMegaMoEFP8SharedExpert(
+            self.cfg, expert_weights, swiglu_limit=swiglu_limit, module=self._mega
+        )
+
+    def require_staged_shared(self):
+        raise RuntimeError("W4A8 MegaMoE does not support staged shared execution")
+
+    def forward(
+        self,
+        x,
+        weights,
+        indices,
+        *,
+        active_token_mask=None,
+        after_gemm1=None,
+    ):
+        from rtp_llm.models_py.kernels.ppu.attention.ppu_topk_padding import (
+            pad_inactive_routes,
+        )
+
+        if after_gemm1 is not None:
+            raise ValueError("W4A8 MegaMoE does not support staged shared execution")
+        if x.shape[0] > self._max_tokens:
+            raise ValueError(
+                "W4A8 MegaMoE input exceeds DSV4_PPU_MEGAMOE_W4A8_MAX_TOKENS="
+                f"{self._max_tokens}"
+            )
+        if self._sym is None:
+            wrapper = self._bind_wrapper()
+            self._sym = self._resources.bind(
+                self.cfg, wrapper, self._mega, mma_type="fp8xfp4"
+            )
+        # The exact kernel was qualified with int64 global expert ids; keep the
+        # inactive -1/0 lanes from pad_inactive_routes untouched.
+        route_ids = indices if indices.dtype == torch.int64 else indices.to(torch.int64)
+        if route_ids.shape[1] != 8 or active_token_mask is not None:
+            route_ids, route_weights = pad_inactive_routes(
+                route_ids, weights, 8, active_token_mask
+            )
+        else:
+            route_weights = weights
+        self._mega.mega_moe_pre_dispatch_ue8m0(
+            x.contiguous(),
+            route_ids.contiguous(),
+            route_weights.contiguous(),
+            self._sym.x,
+            self._sym.x_sf,
+            self._sym.topk_idx,
+            self._sym.topk_weights,
+            x.shape[0],
+        )
+        y = torch.empty_like(x, dtype=torch.float32)
+        self._mega.fp8_fp4_mega_moe_fp32(
+            y,
+            (self._w13, self._s13, self._inv13),
+            (self._w2, self._s2, self._inv2),
+            self._sym,
+            activation_clamp=(
+                self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
+            ),
+            fast_math=False,
+        )
+        return y
