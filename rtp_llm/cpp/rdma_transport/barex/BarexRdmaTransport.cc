@@ -11,6 +11,7 @@
 #include <unordered_set>
 
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDACachingAllocator.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAFunctions.h>
 #include <torch/cuda.h>
@@ -27,6 +28,8 @@
 #include "aios/network/rdma/accl/RdmaMempoolFactory.h"
 #include "autil/NetUtil.h"
 
+#include "rtp_llm/cpp/rdma_transport/barex/GpuAllocationRetry.h"
+#include "rtp_llm/cpp/rdma_transport/barex/ReadCompletionState.h"
 #include "rtp_llm/cpp/rdma_transport/RdmaTransport.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -42,23 +45,6 @@ constexpr uint32_t kReadAttempts = 2;
 constexpr uint64_t kMinGpuAllocBytes = 64UL * 1024;
 constexpr auto kConnectionRetryBackoff = std::chrono::seconds(1);
 
-using RdmaAllocFn = std::function<::accl::barex::BarexResult()>;
-using RdmaShrinkFn = std::function<::accl::barex::BarexResult(float)>;
-
-::accl::barex::BarexResult allocWithOomShrinkRetry(const RdmaAllocFn& alloc, const RdmaShrinkFn& shrink) {
-    auto result = alloc();
-    if (result != ::accl::barex::BAREX_ERR_OOM) {
-        return result;
-    }
-    shrink(0.5F);
-    result = alloc();
-    if (result != ::accl::barex::BAREX_ERR_OOM) {
-        return result;
-    }
-    shrink(1.0F);
-    return alloc();
-}
-
 uint64_t alignUp(uint64_t value, uint64_t alignment) {
     return (value + alignment - 1) / alignment * alignment;
 }
@@ -70,7 +56,7 @@ uint64_t alignUp(uint64_t value, uint64_t alignment) {
     auto alloc = [&]() { return pool->AllocLimitBuffer(memory, size, ::accl::barex::GPU, /*nic_id=*/-1, device_id); };
     auto shrink = [&](float ratio) {
         const auto before = pool->Stats(::accl::barex::GPU);
-        RTP_LLM_LOG_WARNING("tensor rdma GPU allocation hit pool OOM; shrinking %.0f%% of free buckets "
+        RTP_LLM_LOG_WARNING("tensor rdma GPU allocation OOM; shrinking %.0f%% of free buckets "
                             "(total=%lu busy=%lu free=%lu)",
                             ratio * 100.0F,
                             before.total_bytes,
@@ -85,7 +71,25 @@ uint64_t alignUp(uint64_t value, uint64_t alignment) {
                             after.free_bytes);
         return result;
     };
-    return allocWithOomShrinkRetry(alloc, shrink);
+    auto reclaim = [&]() noexcept {
+        try {
+            at::cuda::CUDAGuard device_guard(device_id);
+            RTP_LLM_LOG_WARNING("tensor rdma GPU allocation still physical OOM after pool shrink; "
+                                "releasing unused Torch cache before one final retry, device=%d size=%lu",
+                                device_id,
+                                size);
+            // The raw Barex cudaMalloc cannot enter Torch's allocator fallback.
+            // Reclaim only its unused cache, and only on the allocation slow path.
+            c10::cuda::CUDACachingAllocator::emptyCache();
+            return true;
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("tensor rdma Torch cache reclamation failed: %s", e.what());
+        } catch (...) {
+            RTP_LLM_LOG_WARNING("tensor rdma Torch cache reclamation failed with an unknown exception");
+        }
+        return false;
+    };
+    return detail::allocWithOomShrinkRetry(alloc, shrink, reclaim);
 }
 
 TensorDataType toRdmaDtype(torch::ScalarType type) {
@@ -167,12 +171,7 @@ private:
     bool* release_deferred_;
 };
 
-struct ReadState {
-    struct ChunkResult {
-        bool done{false};
-        bool ok{false};
-    };
-
+struct ReadState: detail::ReadCompletionState {
     ReadState(std::shared_ptr<::accl::barex::XSimpleMempool> pool, int device_id):
         pool(std::move(pool)), device_id(device_id) {}
 
@@ -184,13 +183,8 @@ struct ReadState {
     }
 
     std::shared_ptr<::accl::barex::XSimpleMempool> pool;
-    int device_id;
-    ::accl::barex::memp_t memory{};
-    std::mutex mutex;
-    std::condition_variable cv;
-    std::vector<ChunkResult> chunks;
-    size_t completed{0};
-    std::shared_ptr<std::atomic<bool>> completion_confirmed{std::make_shared<std::atomic<bool>>(false)};
+    int                                            device_id;
+    ::accl::barex::memp_t                          memory{};
 };
 
 }  // namespace
@@ -772,24 +766,11 @@ bool BarexRdmaRuntime::readOne(const RdmaDescriptor& descriptor,
 
             result = paths[i].channel->ReadBatch(
                 reads,
-                [candidate, i](::accl::barex::Status status) {
-                    std::lock_guard<std::mutex> lock(candidate->mutex);
-                    if (candidate->chunks[i].done) {
-                        return;
-                    }
-                    candidate->chunks[i].done = true;
-                    candidate->chunks[i].ok = status.IsOk();
-                    ++candidate->completed;
-                    if (candidate->completed == candidate->chunks.size()) {
-                        candidate->completion_confirmed->store(true, std::memory_order_release);
-                    }
-                    candidate->cv.notify_one();
-                },
+                [candidate, i](::accl::barex::Status status) { candidate->completeChunk(i, status.IsOk()); },
                 false);
             if (result != ::accl::barex::BAREX_SUCCESS) {
                 RTP_LLM_LOG_WARNING("tensor rdma read: ReadBatch submission failed, qp=%zu result=%d", i, result);
-                // A failed submit is not a completion receipt. A provider may
-                // have submitted part of the work; only its callback can retire it.
+                candidate->rejectBeforeSubmission(i, result);
                 invalidateConnection(rdma_ip, rdma_port, paths[i].connection);
             }
             offset += chunk_bytes;

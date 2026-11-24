@@ -15,7 +15,7 @@ cc_library(
         "//:using_rdma": ["BarexRdmaTransport.cc"],
         "//conditions:default": [],
     }),
-    hdrs = ["BarexRdmaTransport.h"],
+    hdrs = ["BarexRdmaTransport.h", "GpuAllocationRetry.h", "ReadCompletionState.h"],
     # accl-barex links tnet on x86; arm builds disable it.
     copts = select({
         "//:using_cuda12_arm": ["-DDISABLE_TNET=1"],
