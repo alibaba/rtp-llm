@@ -8,7 +8,7 @@ from torch.distributed import TCPStore
 from rtp_llm.async_decoder_engine.embedding.embedding_engine import EmbeddingCppEngine
 from rtp_llm.async_decoder_engine.rpc_engine import LanguageCppEngine
 from rtp_llm.ops.rtp_llm.rtp_llm_op import RtpLLMOp
-from rtp_llm.ops import RoleType, ensure_engine_ops_loaded
+from rtp_llm.ops import RoleType
 from rtp_llm.server.backend_manager import BackendManager
 
 
@@ -193,29 +193,6 @@ class BackendManagerShutdownTest(unittest.TestCase):
             unmount.assert_called_once_with()
         engine.drain.assert_called_once_with()
         engine.close_rpc.assert_not_called()
-
-    def test_cpp_stop_runs_shutdown_callback_once(self):
-        ensure_engine_ops_loaded()
-        from rtp_llm.ops import RtpLLMOp as CppRtpLLMOp
-
-        op = CppRtpLLMOp()
-        callback = Mock()
-        op.stop(callback)
-        op.stop(callback)
-        callback.assert_called_once()
-        self.assertGreater(callback.call_args.args[0], 0)
-
-    def test_cpp_stop_propagates_shutdown_callback_failure(self):
-        ensure_engine_ops_loaded()
-        from rtp_llm.ops import RtpLLMOp as CppRtpLLMOp
-
-        op = CppRtpLLMOp()
-        callback = Mock(side_effect=RuntimeError("shutdown callback failed"))
-        with self.assertRaisesRegex(RuntimeError, "shutdown callback failed"):
-            op.stop(callback)
-        callback.assert_called_once()
-        self.assertGreater(callback.call_args.args[0], 0)
-        op.stop()
 
     def test_followers_keep_worker_rpc_until_all_leaders_drain(self):
         for world_size in (2, 4):

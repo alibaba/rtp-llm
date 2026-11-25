@@ -1,4 +1,5 @@
 load("@arch_config//:arch_select.bzl", get_triton_deps = "triton_deps", "internal_deps")
+load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
 
 py_test(
     name = "backend_rpc_server_visitor_test",
@@ -111,9 +112,16 @@ py_test(
 py_test(
     name = "backend_manager_shutdown_test",
     srcs = ["backend_manager_shutdown_test.py"],
+    env = {"GPU_COUNT": "0"},
     deps = [
         "//rtp_llm:testlib",
         "//rtp_llm:torch",
         "//rtp_llm/server:server",
     ],
+)
+
+cuda13_sm100_py_test(
+    name = "rtp_llm_op_shutdown_test",
+    srcs = ["rtp_llm_op_shutdown_test.py"],
+    deps = ["//rtp_llm:testlib"],
 )
