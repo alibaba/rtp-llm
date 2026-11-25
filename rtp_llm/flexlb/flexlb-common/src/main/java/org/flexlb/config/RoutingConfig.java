@@ -61,6 +61,8 @@ public final class RoutingConfig {
         private double outlierFactor = 1.5;
         /** Time above the pool's congestion threshold before declaring a hotspot. */
         private long sustainedPressureMs = 0L;
+        /** Maximum source workers selected per pool in a one-second window. Zero includes all hotspots. */
+        private int sourceTopK = 5;
         /** Additional uncached Prefill tokens allowed per thousand baseline compute tokens. */
         private int maxExtraComputePermille = 10;
         /** Minimum outstanding-request threshold for the fleet-relative comparison. */

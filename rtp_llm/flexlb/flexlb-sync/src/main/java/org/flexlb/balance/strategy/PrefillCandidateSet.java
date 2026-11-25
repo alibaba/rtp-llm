@@ -71,7 +71,7 @@ final class PrefillCandidateSet {
     }
 
     void setHotspots(PrefillHotspots.Snapshot hotspots) { this.hotspots = hotspots; }
-    boolean isHotspot(int index) { return hotspots.isHot(endpoints[index]); }
+    boolean isHotspot(int index) { return hotspots.isRedirectSource(endpoints[index]); }
     boolean mayRedirect(int source, int target) {
         return hotspots.mayRedirect(endpoints[source], endpoints[target], workloads[target]);
     }

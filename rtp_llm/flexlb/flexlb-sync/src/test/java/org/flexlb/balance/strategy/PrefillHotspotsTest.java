@@ -7,6 +7,7 @@ import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.OptionalLong;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -130,6 +131,51 @@ class PrefillHotspotsTest {
         assertFalse(sampled.mayRedirect(source.endpoint(), target.endpoint(), withPlans));
         var afterAdmission = new PrefillTokenWorkload.Snapshot(4000, 0, 0, 0, 20);
         assertFalse(sampled.mayRedirect(source.endpoint(), target.endpoint(), afterAdmission));
+    }
+
+    @Test
+    void windowRanksQueuedComputeAndKeepsOnlyItsTopTwoSources() {
+        config.setSourceTopK(2);
+        var first = entry("a", 60, 5000);
+        var second = entry("b", 60, 6000);
+        var third = entry("c", 1, 9000);
+        var idle = entry("idle", 0, 0);
+        var pool = List.of(third, second, first, idle, entry("d", 0, 0), entry("e", 0, 0), entry("f", 0, 0));
+        when(first.endpoint().queuedComputeTokens()).thenReturn(OptionalLong.of(5000));
+        when(second.endpoint().queuedComputeTokens()).thenReturn(OptionalLong.empty()); // falls back to 6000
+        when(third.endpoint().queuedComputeTokens()).thenReturn(OptionalLong.of(4500));
+        var initial = sample(pool, null, 0);
+        assertTrue(mayRedirect(initial, first, idle));
+        assertTrue(mayRedirect(initial, second, idle));
+        assertFalse(mayRedirect(initial, third, idle));
+        // The third worker is light on requests but hot on compute. It cannot receive work.
+        assertFalse(mayRedirect(initial, first, third));
+
+        when(first.endpoint().observedRequestCount()).thenReturn(0L);
+        when(first.endpoint().pendingTokenWork()).thenReturn(0L);
+        when(third.endpoint().queuedComputeTokens()).thenReturn(OptionalLong.of(9000));
+        var mid = sample(pool, null, 900);
+        assertFalse(mayRedirect(mid, first, idle)); // cooled, even though selected for this window
+        assertFalse(mayRedirect(mid, third, idle)); // no mid-window promotion
+        assertTrue(mayRedirect(mid, second, idle));
+        var next = sample(pool, null, 1000);
+        assertTrue(mayRedirect(next, third, idle));
+        assertTrue(mayRedirect(next, second, idle));
+    }
+
+    @Test
+    void tiedSourcesUseStableAddressesAndSeparateWindowsPerGroup() {
+        config.setSourceTopK(1);
+        var a = entry("a", 30, 5000);
+        var b = entry("b", 30, 5000);
+        var idle = entry("idle", 0, 0);
+        var pool = List.of(b, a, idle, entry("d", 0, 0), entry("e", 0, 0));
+        assertTrue(sample(pool, "g1", 0).isRedirectSource(a.endpoint()));
+        assertTrue(sample(List.of(b, idle), "g2", 10).isRedirectSource(b.endpoint()));
+        var replacement = entry("a", 30, 5000);
+        var changed = List.of(replacement, b, idle, pool.get(3), pool.get(4));
+        assertFalse(sample(changed, "g1", 100).isRedirectSource(replacement.endpoint()));
+        assertTrue(sample(changed, "g1", 1000).isRedirectSource(replacement.endpoint()));
     }
 
     private static boolean mayRedirect(PrefillHotspots.Snapshot sample, PrefillRoutingEntry source,

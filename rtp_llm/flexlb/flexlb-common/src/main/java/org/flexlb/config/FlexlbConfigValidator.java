@@ -344,6 +344,7 @@ final class FlexlbConfigValidator {
                     "must be at least 1.0");
             nonNegative(hotspotRelease.getSustainedPressureMs(),
                     "router.roles.prefill.hotspotRelease.sustainedPressureMs");
+            nonNegative(hotspotRelease.getSourceTopK(), "router.roles.prefill.hotspotRelease.sourceTopK");
             range(hotspotRelease.getMaxExtraComputePermille(), 0, 1000,
                     "router.roles.prefill.hotspotRelease.maxExtraComputePermille");
             nonNegative(hotspotRelease.getSetpointFloor(),

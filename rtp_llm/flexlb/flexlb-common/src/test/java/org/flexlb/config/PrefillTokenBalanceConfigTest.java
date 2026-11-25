@@ -44,6 +44,9 @@ class PrefillTokenBalanceConfigTest {
                 .getRouter().getRoles().getPrefill().getHotspotRelease();
         assertEquals(true, defaults.isEnabled());
         assertEquals(1.5, defaults.getOutlierFactor());
+        assertEquals(0, defaults.getSourceTopK());
+        assertEquals(2, hotspotParse("{\"sourceTopK\":2}").getSourceTopK());
+        assertThrows(ConfigValidationException.class, () -> hotspotParse("{\"sourceTopK\":-1}"));
         assertEquals(0L, defaults.getSustainedPressureMs());
         assertEquals(10, defaults.getMaxExtraComputePermille());
         assertEquals(5, hotspotParse("{\"maxExtraComputePermille\":5}").getMaxExtraComputePermille());
