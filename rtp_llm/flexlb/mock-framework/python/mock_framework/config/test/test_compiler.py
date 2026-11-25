@@ -21,7 +21,12 @@ def test_shipped_cases_compile_and_reference_existing_inputs(path, registry):
     for phase in case.phases:
         for step in phase.steps:
             if step.definition.name == "frontend/start/playback":
-                assert (case.shared_root / step.args["requests_file"]).is_file()
+                source = Path(step.args["requests_file"])
+                if source.parts[0] == "data":
+                    assert (case.shared_root / source).is_file()
+                # Case-local cached inputs are provisioned outside the checkout.
+                elif source.parts[0] != ".cache":
+                    assert (case.directory / source).is_file()
 
 
 def test_compiles_without_java_catalog_and_read_can_have_no_assertion(
@@ -227,6 +232,24 @@ def test_component_config_file_rejects_missing_empty_or_remote_paths(
 ):
     case_data["environment"]["prefill"]["config"] = path
     with pytest.raises(ConfigError):
+        compile_data(case_data)
+
+
+@pytest.mark.parametrize("reference", ["sibling", "absolute", "symlink"])
+def test_component_config_rejects_paths_outside_its_case(
+    reference, case_data, compile_data, tmp_path, tmp_path_factory
+):
+    outside = tmp_path_factory.mktemp("other_case") / "prefill.yaml"
+    outside.write_text("a_b_c: 128\n")
+    if reference == "sibling":
+        config = f"../{outside.parent.name}/{outside.name}"
+    elif reference == "absolute":
+        config = str(outside)
+    else:
+        config = "prefill.yaml"
+        (tmp_path / config).symlink_to(outside)
+    case_data["environment"]["prefill"]["config"] = config
+    with pytest.raises(ConfigError, match=r"prefill\.config: .*Case directory"):
         compile_data(case_data)
 
 

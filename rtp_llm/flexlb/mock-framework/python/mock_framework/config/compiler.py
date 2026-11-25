@@ -9,6 +9,7 @@ from typing import Any
 
 from ..execution.step.step import Expect, Reference, Step
 from ..execution.step.step_registry import StepRegistry
+from ..role_config_path import resolve_role_config_path
 from .master_config import validate_master_config
 from .validation import (
     ConfigError,
@@ -352,12 +353,10 @@ def _compile_deployment(raw, role):
 
 def _load_role_config(raw, role, directory):
     if isinstance(raw, str):
-        value = text(raw, f"{role}.config")
-        if "://" in value or directory is None:
-            raise ConfigError(
-                f"{role}.config: expected a local file relative to the Case directory"
-            )
-        source = (Path(directory) / value).resolve()
+        try:
+            source = resolve_role_config_path(raw, directory, f"{role}.config")
+        except ValueError as error:
+            raise ConfigError(str(error)) from error
         try:
             raw = load_yaml(source)
         except ConfigError as error:

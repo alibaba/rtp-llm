@@ -11,6 +11,13 @@ repos:
     # Formatters
   - repo: local
     hooks:
+      - id: mock-case-local-config
+        name: Check Mock Case configuration stays in its own directory
+        entry: python rtp_llm/flexlb/mock-framework/scripts/check_case_config_paths.py
+        language: python
+        additional_dependencies: [PyYAML==6.0.3]
+        pass_filenames: false
+        always_run: true
       - id: mock-master-config-format
         name: Check Mock Master config format
         entry: python rtp_llm/flexlb/tools/check_mock_master_config.py
