@@ -21,6 +21,28 @@ from rtp_llm.utils.backend_registry import register_backend_hook
 
 
 class Glm5EnvironmentArgumentsTest(TestCase):
+    def test_independent_glm5_rollbacks_and_service_limits(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        with patch.dict(os.environ, {
+            "RTP_LLM_FUSED_ROUTER_PAD": "0",
+            "RTP_LLM_GLM5_CMP_MOE_DUAL_STREAM": "0",
+            "RTP_LLM_INDEXER_NATIVE_MTP": "0",
+            "RTP_LLM_GRPC_KEEPALIVE_TIME_MS": "1234",
+            "RTP_LLM_GRPC_KEEPALIVE_TIMEOUT_MS": "-1",
+            "RTP_LLM_PREFILL_CORE_TIMEOUT_S": "4.5",
+        }, clear=True):
+            config = setup_args([])
+            hw = pickle.loads(pickle.dumps(config.py_hw_kernel_config))
+            self.assertTrue(hw.glm5_eh_fusion)
+            self.assertFalse(hw.fused_router_pad)
+            self.assertFalse(hw.glm5_cmp_moe_dual_stream)
+            self.assertFalse(pickle.loads(pickle.dumps(config.fmha_config)).indexer_native_mtp)
+            server = config.server_config
+            self.assertEqual(server.grpc_keepalive_time_ms, 1234)
+            self.assertEqual(server.grpc_keepalive_timeout_ms, 5000)
+            self.assertEqual(server.prefill_core_timeout_s, 4.5)
+
     def test_registered_flags_cli_override_env_and_survive_pickle(self):
         from rtp_llm.server.server_args.server_args import setup_args
 

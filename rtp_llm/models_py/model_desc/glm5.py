@@ -77,7 +77,9 @@ class Glm5MoeLayer(GenericMoeLayer):
             parallelism_config.role_type != RoleType.DECODE
             and parallelism_config.prefill_cp_config.is_enabled()
         )
-        self.fuse_router_pad = fuse_kernels_enabled(hw_kernel_config)
+        self.fuse_router_pad = fuse_kernels_enabled(hw_kernel_config) and (
+            hw_kernel_config is None or hw_kernel_config.fused_router_pad
+        )
         self.gate_chunk_rows = (
             8192 if config.model_type == "glm_5" and cp_prefill_enabled else 0
         )
@@ -95,6 +97,7 @@ class Glm5MoeLayer(GenericMoeLayer):
         if (
             parallelism_config.role_type == RoleType.DECODE
             and parallelism_config.get_attn_tp_size() == 1 and self.ffn_tp_size == 1
+            and (hw_kernel_config is None or hw_kernel_config.glm5_cmp_moe_dual_stream)
             and moe_config.moe_strategy in ("mega_moe", "mega_moe_fp8")
             and self.shared_expert is not None and self.shared_expert_gate is None
         ):

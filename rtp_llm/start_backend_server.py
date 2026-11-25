@@ -364,6 +364,7 @@ def multi_rank_start(
             config.prefill_stall_thresholds,
             config.prefill_core_dir,
             config.prefill_gpu_core,
+            config.prefill_core_timeout_s,
         )
     try:
         _create_rank_processes(

@@ -13,6 +13,14 @@
 
 namespace rtp_llm {
 
+struct RpcKeepaliveConfig {
+    int time_ms = 10000;
+    int timeout_ms = 5000;
+};
+
+void configureRpcKeepalive(RpcKeepaliveConfig config);
+RpcKeepaliveConfig rpcKeepaliveConfig();
+
 enum class HiddenStateCaptureDtype : int32_t {
     BF16     = 0,
     FP8_E4M3 = 1,
@@ -135,6 +143,7 @@ enum class FMHAType {
 
 struct FMHAConfig {
     bool deterministic_gemm                  = false;
+    bool indexer_native_mtp = true;
     bool enable_flashinfer_trtllm_gen        = true;
     bool enable_flashinfer_trt_fmha_v2       = true;
     bool enable_paged_flashinfer_trt_fmha_v2 = true;
@@ -350,6 +359,9 @@ struct HWKernelConfig {
     bool             glm5_cp_opt                     = false;
     bool             enable_glm5_cmp                 = false;
     bool             indexer_fused_topk              = false;
+    bool glm5_eh_fusion = true;
+    bool glm5_cmp_moe_dual_stream = true;
+    bool fused_router_pad = true;
     std::string      to_string() const;
 };
 

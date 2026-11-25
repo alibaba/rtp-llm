@@ -459,7 +459,7 @@ class PrefillWatchdog:
 
     @classmethod
     def from_config(
-        cls, thresholds: str, core_dir: str, gpu_core: bool
+        cls, thresholds: str, core_dir: str, gpu_core: bool, timeout_s: float = _DEFAULT_TIMEOUT_S
     ) -> Optional["PrefillWatchdog"]:
         try:
             deadlines = _parse_thresholds(thresholds)
@@ -467,7 +467,10 @@ class PrefillWatchdog:
                 return None
             if sys.platform != "linux" or sys.byteorder != "little":
                 raise ValueError("Prefill watchdog requires little-endian Linux")
-            return cls(deadlines, Path(core_dir), _DEFAULT_TIMEOUT_S, gpu_core=gpu_core)
+            timeout_s = float(timeout_s)
+            if not (0 < timeout_s <= 60):
+                raise ValueError("Prefill debugger timeout must be in (0, 60] seconds")
+            return cls(deadlines, Path(core_dir), timeout_s, gpu_core=gpu_core)
         except (OSError, ValueError) as exc:
             _LOG.warning("Prefill watchdog disabled: %s", exc)
             return None

@@ -7,6 +7,14 @@ def init_fmha_group_args(parser, fmha_config):
     ##############################################################################################################
     fmha_group = parser.add_argument_group("FMHA")
     fmha_group.add_argument(
+        "--indexer_native_mtp",
+        env_name="RTP_LLM_INDEXER_NATIVE_MTP",
+        bind_to=(fmha_config, "indexer_native_mtp"),
+        type=str2bool,
+        default=True,
+        help="Use native multi-query MTP indexer metadata when supported.",
+    )
+    fmha_group.add_argument(
         "--deterministic_gemm",
         env_name="DETERMINISTIC_GEMM",
         bind_to=(fmha_config, "deterministic_gemm"),

@@ -48,6 +48,9 @@ class ServerConfig:
     def __init__(self):
         self.prefill_stall_thresholds: str = ""
         self.prefill_core_dir: str = "/tmp/rtp_llm_prefill_cores"
+        self.grpc_keepalive_time_ms: int = 10000
+        self.grpc_keepalive_timeout_ms: int = 5000
+        self.prefill_core_timeout_s: float = 10.0
         self.prefill_gpu_core: bool = False
         self.frontend_metrics_enable = False
         self.frontend_server_count = 4

@@ -72,6 +72,7 @@ class GenericMoeMTPModel(Glm5ModelBase):
             and parallelism_config.role_type == RoleType.DECODE
             and parallelism_config.get_attn_tp_size() == 1
             and fuse_kernels_enabled(py_hw_kernel_config)
+            and (py_hw_kernel_config is None or py_hw_kernel_config.glm5_eh_fusion)
             else None
         )
         self.fc = LinearFactory.create_linear_from_weights(

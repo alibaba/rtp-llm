@@ -462,6 +462,7 @@ class GrammarConfig:
 class FMHAConfig:
     absorb_opt_len: int
     deterministic_gemm: bool
+    indexer_native_mtp: bool
     disable_flashinfer_hybrid_prefill: bool
     disable_flashinfer_native: bool
     enable_flashinfer_trtllm_gen: bool
@@ -627,6 +628,9 @@ class HWKernelConfig:
     enable_cuda_graph: bool
     enable_cuda_graph_debug_mode: bool
     indexer_fused_topk: bool
+    glm5_eh_fusion: bool
+    glm5_cmp_moe_dual_stream: bool
+    fused_router_pad: bool
     enable_fuse_kernels: bool
     enable_glm5_cmp: bool
     enable_stable_scatter_add: bool

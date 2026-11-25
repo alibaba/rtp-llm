@@ -437,6 +437,8 @@ class SparseMlaFp8Op(SparseMlaOp):
 class SparseMlaImpl(MlaImplBase):
     """Wraps a SparseMlaOp / SparseMlaFp8Op with rope, KV write, and absorbed BMMs."""
 
+    _indexer_native_mtp = True
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -522,6 +524,7 @@ class SparseMlaImpl(MlaImplBase):
         # create_params is a hook subclasses (e.g. SparseMlaCpImpl) override
         # to attach CP-specific state after the base prepare(). Keep the call
         # — do not inline.
+        self._indexer_native_mtp = fmha_config is None or fmha_config.indexer_native_mtp
         self.create_params(attn_inputs)
 
     def configure_fusion(self, hw_kernel_config) -> None:
@@ -575,7 +578,8 @@ class SparseMlaImpl(MlaImplBase):
             next_n = 1
             host = attn_inputs.input_lengths
             if (
-                _paged_mqa_context_lens_dim == 2
+                self._indexer_native_mtp
+                and _paged_mqa_context_lens_dim == 2
                 and _is_multi_token_decode(attn_inputs)
                 and isinstance(host, torch.Tensor)
                 and host.numel() > 0

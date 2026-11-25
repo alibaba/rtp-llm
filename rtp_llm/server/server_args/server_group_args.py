@@ -1,4 +1,30 @@
+import logging
+from functools import partial
+
 from rtp_llm.server.server_args.util import str2bool
+
+
+def _keepalive_ms(value, *, default):
+    try:
+        milliseconds = int(value)
+        if 0 < milliseconds <= 2**31 - 1:
+            return milliseconds
+    except (ValueError, TypeError):
+        pass
+    logging.warning("Invalid gRPC keepalive value %r, using %d ms", value, default)
+    return default
+
+
+_keepalive_interval = partial(_keepalive_ms, default=10000)
+_keepalive_timeout = partial(_keepalive_ms, default=5000)
+
+
+def _watchdog_timeout(value):
+    try:
+        return float(value)
+    except ValueError:
+        # The watchdog validates the deadline and disables diagnostics locally.
+        return float("nan")
 
 
 def init_server_group_args(parser, server_config, distribute_config):
@@ -6,6 +32,30 @@ def init_server_group_args(parser, server_config, distribute_config):
     # Server Configuration
     ##############################################################################################################
     server_group = parser.add_argument_group("Server Configuration")
+    server_group.add_argument(
+        "--grpc_keepalive_time_ms",
+        env_name="RTP_LLM_GRPC_KEEPALIVE_TIME_MS",
+        bind_to=(server_config, "grpc_keepalive_time_ms"),
+        type=_keepalive_interval,
+        default=10000,
+        help="RPC client keepalive interval in milliseconds.",
+    )
+    server_group.add_argument(
+        "--grpc_keepalive_timeout_ms",
+        env_name="RTP_LLM_GRPC_KEEPALIVE_TIMEOUT_MS",
+        bind_to=(server_config, "grpc_keepalive_timeout_ms"),
+        type=_keepalive_timeout,
+        default=5000,
+        help="RPC client keepalive timeout in milliseconds.",
+    )
+    server_group.add_argument(
+        "--prefill_core_timeout_s",
+        env_name="RTP_LLM_PREFILL_CORE_TIMEOUT_S",
+        bind_to=(server_config, "prefill_core_timeout_s"),
+        type=_watchdog_timeout,
+        default=10.0,
+        help="Maximum duration of a Prefill watchdog debugger operation in seconds.",
+    )
     server_group.add_argument(
         "--prefill_stall_thresholds",
         env_name="RTP_LLM_PREFILL_STALL_THRESHOLDS",

@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "autil/EnvUtil.h"
 #include <limits>
+#include <mutex>
 #include <map>
 #include <sstream>
 #include <algorithm>
@@ -10,6 +11,21 @@
 #include <regex>
 
 namespace rtp_llm {
+
+namespace {
+std::mutex rpc_keepalive_mutex;
+RpcKeepaliveConfig rpc_keepalive;
+}
+
+void configureRpcKeepalive(RpcKeepaliveConfig config) {
+    std::lock_guard<std::mutex> lock(rpc_keepalive_mutex);
+    rpc_keepalive = config;
+}
+
+RpcKeepaliveConfig rpcKeepaliveConfig() {
+    std::lock_guard<std::mutex> lock(rpc_keepalive_mutex);
+    return rpc_keepalive;
+}
 
 // NcclCommConfig
 std::string NcclCommConfig::to_string() const {
