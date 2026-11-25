@@ -153,17 +153,11 @@ void CudaGraphRunner::capturePrefill() {
 std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
     // MTP draft prefill: capture at multiples of num_tokens_per_bs_
     if (isMtpDraftPrefillCudaGraph()) {
-        std::vector<int> result;
-        for (int i = 1; i <= max_bs_; ++i) {
-            result.push_back(i * num_tokens_per_bs_);
+        auto buckets = getDecodeBatchSizesToCapture();
+        for (int& batch : buckets) {
+            batch *= num_tokens_per_bs_;
         }
-        RTP_LLM_LOG_INFO(
-            "Draft model prefill: capture seq_lens at %d intervals, %zu total (max_bs=%d, num_tokens_per_bs=%d)",
-            num_tokens_per_bs_,
-            result.size(),
-            max_bs_,
-            num_tokens_per_bs_);
-        return result;
+        return buckets;
     }
 
     // Embedding model prefill: use Python-provided capture seq_lens

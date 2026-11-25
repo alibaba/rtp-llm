@@ -1860,7 +1860,7 @@ void CudaGraphRunner::initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int 
             inputs.bert_embedding_inputs.combo_tokens_type_ids = torch::zeros({max_num_token}, options_cuda_int32);
             inputs.bert_embedding_inputs.token_type_embedding  = token_type_embedding_;
         }
-    } else {
+    } else if (position_encoding_.defined() || token_type_embedding_.defined()) {
         inputs.bert_embedding_inputs.combo_position_ids    = torch::zeros({max_seq_len_ * max_bs}, options_cuda_int32);
         inputs.bert_embedding_inputs.position_encoding     = position_encoding_;
         inputs.bert_embedding_inputs.combo_tokens_type_ids = torch::zeros({max_seq_len_ * max_bs}, options_cuda_int32);
