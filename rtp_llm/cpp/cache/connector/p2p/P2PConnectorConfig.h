@@ -28,6 +28,7 @@ struct P2PConnectorSchedulerConfig {
     std::string                          pipeline_layout;
     int64_t                  p2p_lease_query_timeout_ms                   = 500;
     int64_t                  p2p_kv_force_release_timeout_ms = CacheStoreConfig::kDefaultP2PKvForceReleaseTimeoutMs;
+    int64_t                  rdma_disconnect_grace_ms = -1;
     int64_t                  p2p_cancel_broadcast_timeout_ms              = 1000;
     int64_t                     p2p_cancelled_keys_ttl_ms    = 3600 * 1000;
     std::shared_ptr<const CacheTopology> topology;
@@ -58,6 +59,9 @@ struct P2PConnectorSchedulerConfig {
         config.p2p_lease_query_timeout_ms = cache_store_config.p2p_lease_query_timeout_ms;
         config.p2p_kv_force_release_timeout_ms = cache_store_config.p2p_kv_force_release_timeout_ms;
         const auto disconnect_grace_ms = cache_store_config.p2p_transfer_not_done_resource_hold_ms;
+        if (config.role_type == RoleType::DECODE && cache_store_config.cache_store_rdma_mode) {
+            config.rdma_disconnect_grace_ms = std::max<int64_t>(0, disconnect_grace_ms);
+        }
         if (config.role_type == RoleType::DECODE && cache_store_config.cache_store_rdma_mode
             && config.p2p_kv_force_release_timeout_ms > 0
             && config.p2p_kv_force_release_timeout_ms < disconnect_grace_ms) {

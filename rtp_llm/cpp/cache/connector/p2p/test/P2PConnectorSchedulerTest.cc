@@ -1794,16 +1794,31 @@ TEST(P2PRetainedKvTest, ReleasesExpiredLeaseWithoutPhysicalStopConfirmation) {
     expired->markKickoffUnconfirmed({ErrorCode::GENERATE_TIMEOUT, "late kickoff error"});
     const auto hold_start_us = expired->lease_hold_start_us_.load();
     constexpr int64_t timeout_us = 5 * 60 * 1000 * 1000LL;
-    EXPECT_EQ(expired->nextWakeupMs(false), (hold_start_us + timeout_us + 999) / 1000);
-    EXPECT_FALSE(expired->expireLeaseHoldIfNeeded(hold_start_us + timeout_us - 1));
+    const auto release_at_ms = (hold_start_us + timeout_us + 999) / 1000;
+    EXPECT_EQ(expired->nextWakeupMs(false), release_at_ms);
+    EXPECT_FALSE(expired->expireLeaseHoldIfNeeded(release_at_ms * 1000 - 1));
     EXPECT_TRUE(expired->resourceHoldPending());
     EXPECT_TRUE(expired->resource_);
-    EXPECT_TRUE(expired->expireLeaseHoldIfNeeded(hold_start_us + timeout_us));
+    EXPECT_TRUE(expired->expireLeaseHoldIfNeeded(release_at_ms * 1000));
     EXPECT_FALSE(expired->resourceHoldPending());
     EXPECT_FALSE(expired->resource_);
     EXPECT_FALSE(expired->lease_all_ranks_stopped_.load());
     EXPECT_EQ(expired->nextWakeupMs(false), std::numeric_limits<int64_t>::max());
-    EXPECT_FALSE(expired->expireLeaseHoldIfNeeded(hold_start_us + timeout_us + 1));
+    EXPECT_FALSE(expired->expireLeaseHoldIfNeeded(release_at_ms * 1000 + 1));
+}
+
+TEST(P2PRetainedKvTest, EarlyQuarantineWaitsForRdmaDisconnectDeadline) {
+    const auto deadline = currentTimeMs() + 60000;
+    constexpr int64_t grace_ms = 10000;
+    P2PConnectorAsyncReadContext context(
+        std::make_shared<KVCacheResource>(), "early-hold", nullptr, 1, false, deadline, deadline, 10000, 1, grace_ms);
+    context.markKickoffUnconfirmed({ErrorCode::GENERATE_TIMEOUT, "test lease hold"});
+    const auto release_at_ms = context.transfer_stop_at_ms_ + grace_ms;
+    EXPECT_EQ(context.nextWakeupMs(false), release_at_ms);
+    EXPECT_FALSE(context.expireLeaseHoldIfNeeded(release_at_ms * 1000 - 1));
+    EXPECT_TRUE(context.resourceHoldPending());
+    EXPECT_TRUE(context.expireLeaseHoldIfNeeded(release_at_ms * 1000));
+    EXPECT_FALSE(context.resourceHoldPending());
 }
 
 TEST(P2PRetainedKvTest, CapacityIncludesAllDecodePipelineStages) {

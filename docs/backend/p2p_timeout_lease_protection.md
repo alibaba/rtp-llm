@@ -14,7 +14,7 @@ Prefill 向 Decode 的各个 worker 发起 P2P KV 数据传输。TCP 和 RDMA �
 4. 全部 rank 都满足 `sealed && started_ops == finished_ops` 时，立即释放该上下文持有的 KV 引用。
 5. 查询失败、取消失败或仍有未完成任务时，继续持有 KV 并重试。单个请求从进入隔离起达到 `P2P_KV_FORCE_RELEASE_TIMEOUT_MS` 后，即使未确认所有 rank 停写，也会释放 KV 引用并记录 WARN。默认 300000 毫秒，可用 `--p2p_kv_force_release_timeout_ms` 覆盖。强制释放依赖先前提交的 RDMA 或 H2D 操作已停止访问这些块。
 
-RDMA Decode 会将低于 `P2P_TRANSFER_NOT_DONE_RESOURCE_HOLD_MS` 的正数强制释放阈值提高到该宽限期，并记录配置值和生效值。隔离计时从进入隔离开始，断连宽限从传输 deadline 开始。此下限约束的是两项配置的时长。
+RDMA Decode 会将低于 `P2P_TRANSFER_NOT_DONE_RESOURCE_HOLD_MS` 的正数强制释放阈值提高到该宽限期，并记录配置值和生效值。强制释放取两个时刻中较晚的一个，分别是隔离开始加生效阈值、传输 deadline 加断连宽限期。到达该时刻仍无法证明 DMA 已停写。
 
 ## 滞留量
 

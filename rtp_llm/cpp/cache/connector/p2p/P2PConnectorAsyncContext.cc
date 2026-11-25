@@ -191,12 +191,23 @@ void P2PConnectorAsyncReadContext::releaseLeaseHoldLocked(bool all_ranks_stopped
     lease_hold_pending_.store(false, std::memory_order_release);
 }
 
+int64_t P2PConnectorAsyncReadContext::forceReleaseAtMs(int64_t hold_start_us) const {
+    const auto add_duration = [](int64_t start, int64_t duration) {
+        return start + std::min(duration, std::numeric_limits<int64_t>::max() - start);
+    };
+    const auto hold_start_ms = hold_start_us / 1000 + (hold_start_us % 1000 != 0);
+    const auto quarantine_end_ms = add_duration(hold_start_ms, kv_force_release_timeout_ms_);
+    if (rdma_disconnect_grace_ms_ < 0 || transfer_stop_at_ms_ <= 0) {
+        return quarantine_end_ms;
+    }
+    return std::max(quarantine_end_ms, add_duration(transfer_stop_at_ms_, rdma_disconnect_grace_ms_));
+}
+
 bool P2PConnectorAsyncReadContext::expireLeaseHoldIfNeeded(int64_t now_us) {
     DoneNotifier                done_notifier{*this};
     std::lock_guard<std::mutex> lock(state_mutex_);
     const auto                  hold_start_us = lease_hold_start_us_.load();
-    if (!resourceHoldPending() || hold_start_us <= 0 || now_us < hold_start_us
-        || (now_us - hold_start_us) / 1000 < kv_force_release_timeout_ms_) {
+    if (!resourceHoldPending() || hold_start_us <= 0 || now_us / 1000 < forceReleaseAtMs(hold_start_us)) {
         return false;
     }
     const auto released_blocks = resource_ ? resource_->debugString() : std::string{};
@@ -691,10 +702,7 @@ int64_t P2PConnectorAsyncReadContext::nextWakeupMs(bool allow_control) const {
     if (resourceHoldPending()) {
         const auto hold_start_us = lease_hold_start_us_.load();
         if (hold_start_us > 0) {
-            const auto hold_start_ms = hold_start_us / 1000 + (hold_start_us % 1000 != 0);
-            if (kv_force_release_timeout_ms_ <= next - hold_start_ms) {
-                next = hold_start_ms + kv_force_release_timeout_ms_;
-            }
+            next = std::min(next, forceReleaseAtMs(hold_start_us));
         }
         if (lease_query_timeout_ms_ > 0 && allow_control && calls_ready_.load(std::memory_order_acquire)
             && cancel_confirmed_.load()) {
