@@ -440,17 +440,29 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 
     if (context_batch_size > 0 && py_attn_inputs.input_lengths.is_cuda()) {
         py_attn_inputs.total_tokens = inputs.combo_tokens.defined() ? static_cast<int>(inputs.combo_tokens.numel()) : 0;
-        // Must match cu_kv_seqlens_device's definition (input_lengths +
-        // prefix_lengths): the CUDA graph padding fill copies this scalar into
-        // the cu_kv_seqlens tail, and a prefix-less value makes the array
-        // non-monotonic whenever prefix reuse / target verify is active.
-        // prefix_lengths here is a source tensor (never a deferred H2D copy),
-        // so summing it is safe; item() adds one stream sync on this path.
-        int64_t prefix_sum = 0;
-        if (py_attn_inputs.prefix_lengths.defined() && py_attn_inputs.prefix_lengths.numel() > 0) {
-            prefix_sum = py_attn_inputs.prefix_lengths.sum().item<int64_t>();
+#if USING_CUDA
+        if (py_attn_inputs.is_target_verify || py_attn_inputs.is_draft_extend) {
+            // On CUDA, target_verify and draft_extend CUDA graph fills read
+            // cu_kv_seqlens_device[context_batch_size] directly on GPU via
+            // addCudaGraphPrepareFillRegionFromDevice, and ragged prefill top-k
+            // (indexer_op._compute_topk_ragged_prefill) is never executed on these
+            // phases. Avoid the D2H cudaStreamSynchronize from sum().item().
+            py_attn_inputs.context_total_kv_length = py_attn_inputs.total_tokens;
+        } else
+#endif
+        {
+            // Must match cu_kv_seqlens_device's definition (input_lengths +
+            // prefix_lengths): the CUDA graph padding fill copies this scalar into
+            // the cu_kv_seqlens tail, and a prefix-less value makes the array
+            // non-monotonic whenever prefix reuse / target verify is active.
+            // prefix_lengths here is a source tensor (never a deferred H2D copy),
+            // so summing it is safe; item() adds one stream sync on this path.
+            int64_t prefix_sum = 0;
+            if (py_attn_inputs.prefix_lengths.defined() && py_attn_inputs.prefix_lengths.numel() > 0) {
+                prefix_sum = py_attn_inputs.prefix_lengths.sum().item<int64_t>();
+            }
+            py_attn_inputs.context_total_kv_length = py_attn_inputs.total_tokens + static_cast<int>(prefix_sum);
         }
-        py_attn_inputs.context_total_kv_length = py_attn_inputs.total_tokens + static_cast<int>(prefix_sum);
         py_attn_inputs.cu_seqlens              = torch::empty({0}, host_i32);
         py_attn_inputs.cu_seqlens_device       = torch::empty({batch_size + 1}, cuda_i32);
         py_attn_inputs.cu_kv_seqlens_device    = torch::empty({batch_size + 1}, cuda_i32);

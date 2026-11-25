@@ -229,6 +229,7 @@ private:
     CaptureMemoryHold createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count);
     void              initKernelInternalMemory();
     py::object        prepareFmhaImpl(const PyModelInputs& inputs, bool is_cuda_graph);
+    void              bindGraphFmhaImpl(int key);
     void              logCudaGraphPoolMemory(const char* phase);
     void              setPositionEncoding(torch::Tensor position_encoding) override;
     void              setTokenTypeEmbedding(torch::Tensor token_type_embedding) override;

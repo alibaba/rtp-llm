@@ -2415,6 +2415,86 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 )
                 torch.testing.assert_close(output.mtp_target_hidden_states, expected)
 
+    def test_decode_requires_host_attention_inputs_gates_host_mirrors(self) -> None:
+        class _HostFlagImpl:
+            def __init__(self, requires_host: bool) -> None:
+                self._requires_host = requires_host
+
+            def prepare_cuda_graph(self, attn_inputs) -> None:
+                pass
+
+            def requires_host_attention_inputs(self) -> bool:
+                return self._requires_host
+
+        class _DecodeHostMirrorProbeModel:
+            def __init__(self, mode: str) -> None:
+                self.mode = mode
+                self.captured_host_seq_tensors: list[torch.Tensor] = []
+
+            def prepare_fmha_impl(
+                self,
+                inputs: PyModelInputs,
+                is_cuda_graph: bool = False,
+                cuda_graph_selection_mode: Optional[str] = None,
+            ):
+                if self.mode == "device_only":
+                    return _HostFlagImpl(False)
+                if self.mode == "host_required":
+                    return _HostFlagImpl(True)
+                if self.mode == "dict_all_device":
+                    return {"full": _HostFlagImpl(False), "aux": _HostFlagImpl(False)}
+                return {"full": _HostFlagImpl(False), "aux": _HostFlagImpl(True)}
+
+            def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+                full = inputs.attention_inputs["full"]
+                self.captured_host_seq_tensors.append(full.sequence_lengths)
+                # Read device-side length so replay works in both modes.
+                seq_plus_1 = full.sequence_lengths_plus_1_device[0].to(
+                    inputs.input_hiddens.dtype
+                )
+                return PyModelOutputs(inputs.input_hiddens + seq_plus_1)
+
+        for mode, expect_host_mirror in (
+            ("device_only", False),
+            ("host_required", True),
+            ("dict_all_device", False),
+            ("dict_mixed", True),
+        ):
+            with self.subTest(mode=mode):
+                model = _DecodeHostMirrorProbeModel(mode)
+                runner = CudaGraphRunner()
+                runner.init_decode(
+                    model,
+                    HIDDEN_SIZE,
+                    64,
+                    KERNEL_BLOCK_TABLE_WIDTH,
+                    [2],
+                    GROUP_TAGS,
+                )
+                captured_seq = model.captured_host_seq_tensors[-1]
+
+                replay_inputs = _build_decode_inputs(
+                    GROUP_TAGS, {"full": 3, "aux": 5}, batch_size=2
+                )
+                replay_inputs.attention_inputs["full"].sequence_lengths.copy_(
+                    torch.tensor([77, 88], dtype=torch.int32)
+                )
+                replay_inputs.attention_inputs[
+                    "full"
+                ].sequence_lengths_plus_1_device.copy_(
+                    torch.tensor([11, 22], dtype=torch.int32, device="cuda")
+                )
+                self.assertTrue(runner.canRun(replay_inputs))
+                out = runner.forward(replay_inputs)
+                torch.cuda.synchronize()
+                torch.testing.assert_close(
+                    out.hidden_states, replay_inputs.input_hiddens + 11
+                )
+                if expect_host_mirror:
+                    self.assertEqual(captured_seq.tolist(), [77, 88])
+                else:
+                    self.assertNotEqual(captured_seq.tolist(), [77, 88])
+
 
 if __name__ == "__main__":
     unittest.main()

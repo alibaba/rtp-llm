@@ -279,7 +279,39 @@ BlockTableCopyGeometry blockTableCopyGeometry(const torch::Tensor& src, const to
     return {src.size(0), std::min<int64_t>(src.size(1), dst.size(1))};
 }
 
+bool attnImplRequiresHostInputs(const py::object& attn_pyobj) {
+    py::gil_scoped_acquire gil;
+    if (!attn_pyobj || attn_pyobj.is_none()) {
+        return true;
+    }
+    auto check_single = [](const py::object& obj) -> bool {
+        if (!obj || obj.is_none() || !py::hasattr(obj, "requires_host_attention_inputs")) {
+            return true;
+        }
+        return obj.attr("requires_host_attention_inputs")().cast<bool>();
+    };
+    if (py::isinstance<py::dict>(attn_pyobj)) {
+        auto dict = attn_pyobj.cast<py::dict>();
+        if (dict.empty()) {
+            return true;
+        }
+        for (auto item : dict) {
+            if (check_single(py::reinterpret_borrow<py::object>(item.second))) {
+                return true;
+            }
+        }
+        return false;
+    }
+    return check_single(attn_pyobj);
+}
+
 }  // namespace
+
+void CudaGraphRunner::bindGraphFmhaImpl(int key) {
+    auto& instance                         = graph_instances_[key];
+    instance.mem_hold_.attn_pyobj_         = prepareFmhaImpl(instance.mem_hold_.py_model_inputs_, true);
+    instance.needs_host_attention_inputs_  = attnImplRequiresHostInputs(instance.mem_hold_.attn_pyobj_);
+}
 
 py::object CudaGraphRunner::prepareFmhaImpl(const PyModelInputs& inputs, bool is_cuda_graph) {
     if (isGenerationPrefillCudaGraph()) {
@@ -494,6 +526,12 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     auto&      py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
     auto       attn_pyobj       = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
     const bool has_tagged_cache = !inputs.attention_inputs_by_tag.empty();
+#if USING_CUDA || USING_ROCM
+    const bool needs_host_mirrors = graph_instances_[graph_idx].needs_host_attention_inputs_
+                                    || isGenerationPrefillCudaGraph() || isEmbeddingStylePrefillCudaGraph();
+#else
+    const bool needs_host_mirrors = true;
+#endif
     const int  selected_graph_batch_size =
         is_prefill_cuda_graph_mode_ ? static_cast<int>(py_model_inputs_.attention_inputs.input_lengths.numel()) :
                                        state.current_real_graph_bs;
@@ -773,7 +811,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     }
 #endif
 
-    if (!has_tagged_cache) {
+    if (!has_tagged_cache && needs_host_mirrors) {
         // The host mirror must be cleared with the device block table. fillParams
         // walks every graph-batch row and may dereference padding rows when a
         // backend keeps input_lengths uniform for graph-stable cu_seqlens. Without
@@ -880,7 +918,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                     "CUDA graph capture has no attention input for tag=%s",
                                     tag.c_str());
             auto& dst_inputs = dst_it->second;
-            if (dst_inputs.kv_cache_kernel_block_id.defined() && !dst_inputs.kv_cache_kernel_block_id.is_cuda()) {
+            if (needs_host_mirrors && dst_inputs.kv_cache_kernel_block_id.defined()
+                && !dst_inputs.kv_cache_kernel_block_id.is_cuda()) {
                 dst_inputs.kv_cache_kernel_block_id.zero_();
             }
             tryAddStridedD2DCopy(src_inputs.kv_cache_kernel_block_id_device,
@@ -898,7 +937,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // NOTE: we do H2H after D2D copies to let GPU finish the D2D copies as soon as possible,
     // so that the GPU can start the kernel launch as soon as possible.
 
-    {
+    if (needs_host_mirrors) {
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(host_mirror_copy)");
 
         // H2H copies (common to both modes)
@@ -1075,7 +1114,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
 
     // Keep the host mirrors consistent with the device-side replay contract.
     // CUDA/HIP device tails were already prepared by the single fused launch above.
-    if (has_padded_rows && is_target_verify_) {
+    if (needs_host_mirrors && has_padded_rows && is_target_verify_) {
         py_model_inputs_.attention_inputs.prefix_lengths.slice(0, state.current_batch_size, selected_graph_batch_size)
             .fill_(0);
         py_model_inputs_.attention_inputs.input_lengths.slice(0, state.current_batch_size, selected_graph_batch_size)
@@ -1106,7 +1145,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             .slice(0, state.current_batch_size, selected_graph_batch_size)
             .fill_(num_tokens_per_bs_);
 #endif
-    } else if (has_padded_rows && is_prefill_cuda_graph_mode_ && !isGenerationPrefillCudaGraph()) {
+    } else if (needs_host_mirrors && has_padded_rows && is_prefill_cuda_graph_mode_
+               && !isGenerationPrefillCudaGraph()) {
         py_model_inputs_.attention_inputs.prefix_lengths.slice(0, state.current_batch_size, selected_graph_batch_size)
             .fill_(0);
         py_model_inputs_.attention_inputs.input_lengths.slice(0, state.current_batch_size, selected_graph_batch_size)

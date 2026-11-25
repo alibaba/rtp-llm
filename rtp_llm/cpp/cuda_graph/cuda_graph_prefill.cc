@@ -123,8 +123,7 @@ void CudaGraphRunner::capturePrefill() {
         refreshTaggedAttentionInputs(inputs);
         const int output_capacity = isGenerationPrefillCudaGraph() ? seq_len : capture_batch_size * num_tokens_per_bs_;
         graph_instances_[seq_len].mem_hold_ = createCaptureMemoryHold(inputs, output_capacity);
-        graph_instances_[seq_len].mem_hold_.attn_pyobj_ =
-            prepareFmhaImpl(graph_instances_[seq_len].mem_hold_.py_model_inputs_, true);
+        bindGraphFmhaImpl(seq_len);
         // Fixed-lane MTP draft prefill keeps its output at fixed graph capacity.
         // Other paths produce the real flattened seq_len and must keep their
         // metadata shapes aligned.

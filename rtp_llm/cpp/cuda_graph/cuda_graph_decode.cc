@@ -77,8 +77,7 @@ void CudaGraphRunner::captureDecode() {
         refreshTaggedAttentionInputs(inputs);
 
         graph_instances_[bs].mem_hold_ = createCaptureMemoryHold(inputs, bs * num_tokens_per_bs_);
-        graph_instances_[bs].mem_hold_.attn_pyobj_ =
-            prepareFmhaImpl(graph_instances_[bs].mem_hold_.py_model_inputs_, true);
+        bindGraphFmhaImpl(bs);
         captureDecodeOneBatchSize(bs);
         cuda_graph::finish_capture_session();
         replayAndSyncCheck(bs, "batch size");

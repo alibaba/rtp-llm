@@ -91,6 +91,7 @@ public:
 #endif
     at::cuda::CUDAGraph graph_;
     CaptureMemoryHold   mem_hold_;
+    bool                needs_host_attention_inputs_{true};
 };
 
 class CudaGraphStreamLife {
