@@ -145,6 +145,7 @@ class SelectTopkOp:
     def forward(self, router_logits: torch.Tensor, expert_ids: torch.Tensor, expert_scales: torch.Tensor) -> None:
         ...
 class SparseMlaParams(FlashInferMlaAttnParams):
+    schedule_next_n: int
     schedule_metadata: torch.Tensor
     def __init__(self) -> None:
         ...

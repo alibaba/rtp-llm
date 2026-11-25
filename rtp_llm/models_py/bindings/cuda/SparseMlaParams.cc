@@ -717,6 +717,7 @@ void registerPySparseMlaParams(pybind11::module& m) {
         .def_readonly("target_verify_total_tokens", &SparseMlaParams::multi_token_decode_total_tokens_)
         .def_readonly("prefill_tokens_per_batch", &SparseMlaParams::prefill_tokens_per_batch_)
         .def_readonly("prefill_max_kv_len", &SparseMlaParams::prefill_max_kv_len)
+        .def_readwrite("schedule_next_n", &SparseMlaParams::schedule_next_n)
         .def_readwrite("schedule_metadata", &SparseMlaParams::schedule_metadata)
         .def(
             "fill_cp_plan_params",

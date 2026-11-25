@@ -659,6 +659,7 @@ void setVerifyPairInputs(GptModelInputs& model_input,
     model_input.sequence_lengths   = emptyInt32OnCuda({0});
     model_input.last_hidden_states = torch::Tensor();
     model_input.prefix_lengths     = toCudaInt32(model_input.prefix_lengths, host_holder).contiguous();
+    model_input.uniform_verify_lengths = true;
     model_input.input_lengths      = fullInt32OnCuda({static_cast<int64_t>(batch_size)}, score_len);
     model_input.lm_output_indexes  = makeCudaInt32Range(static_cast<int64_t>(batch_size * score_len));
 }
@@ -952,6 +953,23 @@ void MtpBatchStreamProcessor::overlayMtpCacheSnapshots(const StreamGroups& strea
 
     if (buckets.empty()) {
         return;
+    }
+    if (buckets.size() == 1) {
+        const auto& bucket = buckets.begin()->second;
+        // A bucket is filled in batch order. If it covers every row there are
+        // no fresh host rows to upload and no scatter indices to materialize.
+        if (model_input.kv_cache_block_id.defined() && model_input.kv_cache_kernel_block_id.defined()
+            && model_input.kv_cache_block_id.dim() == 3 && model_input.kv_cache_kernel_block_id.dim() == 3
+            && static_cast<int64_t>(bucket.rows.size()) == model_input.kv_cache_block_id.size(1)
+            && model_input.kv_cache_block_id.size(1) == model_input.kv_cache_kernel_block_id.size(1)
+            && bucket.physical_tables.front().size(0) == model_input.kv_cache_block_id.size(0)
+            && bucket.kernel_tables.front().size(0) == model_input.kv_cache_kernel_block_id.size(0)
+            && bucket.physical_tables.front().size(2) == model_input.kv_cache_block_id.size(2)
+            && bucket.kernel_tables.front().size(2) == model_input.kv_cache_kernel_block_id.size(2)) {
+            model_input.kv_cache_block_id        = torch::cat(bucket.physical_tables, 1);
+            model_input.kv_cache_kernel_block_id = torch::cat(bucket.kernel_tables, 1);
+            return;
+        }
     }
     // Generic gathering produces pinned host tables. Move the complete mixed
     // batch once, preserving freshly admitted host rows, then replace only the

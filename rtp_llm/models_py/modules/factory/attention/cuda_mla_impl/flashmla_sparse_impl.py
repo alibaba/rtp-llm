@@ -9,6 +9,7 @@ Two operators:
 """
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -28,8 +29,6 @@ try:
 
             _FLASH_MLA_AVAILABLE = True
 except (ImportError, AttributeError, ValueError) as e:
-    import logging
-
     logging.warning(f"flash_mla not available: {e}. Requires CUDA >= 12.9")
 
 from rtp_llm.models_py.modules.factory.attention import common
@@ -569,10 +568,43 @@ class SparseMlaImpl(MlaImplBase):
             return
         from rtp_llm.models_py.modules.base.cuda.indexer_op import (
             _get_paged_mqa_logits_metadata_compat,
+            _paged_mqa_context_lens_dim,
+            _physical_block_table,
         )
 
+        if not forbid_realloc:
+            next_n = 1
+            host = getattr(attn_inputs, "input_lengths", None)
+            if (
+                _paged_mqa_context_lens_dim == 2
+                and _is_multi_token_decode(attn_inputs)
+                and os.environ.get("RTP_LLM_INDEXER_NATIVE_MTP", "1") != "0"
+                and isinstance(host, torch.Tensor)
+                and host.numel() > 0
+            ):
+                width, remainder = divmod(lengths.numel(), host.numel())
+                fixed = getattr(attn_inputs, "uniform_verify_lengths", False)
+                # Draft-extend capture can replay with ragged request lengths.
+                allow = not getattr(attn_inputs, "is_cuda_graph", False) or getattr(
+                    attn_inputs, "is_target_verify", False
+                )
+                block_table = _physical_block_table(attn_inputs)
+                if (
+                    allow
+                    and block_table.shape[0] == host.numel()
+                    and width > 1
+                    and not remainder
+                    and (
+                        fixed
+                        or (host.device.type == "cpu" and bool((host == width).all()))
+                    )
+                ):
+                    next_n = width
+            self.fmha_params.schedule_next_n = next_n
+        next_n = self.fmha_params.schedule_next_n
+        planned_lengths = lengths.reshape(-1, next_n) if next_n > 1 else lengths
         new_schedule = _get_paged_mqa_logits_metadata_compat(
-            lengths, self.seq_size_per_block, deep_gemm.get_num_sms()
+            planned_lengths, self.seq_size_per_block, deep_gemm.get_num_sms()
         )
 
         current = getattr(self.fmha_params, "schedule_metadata", None)

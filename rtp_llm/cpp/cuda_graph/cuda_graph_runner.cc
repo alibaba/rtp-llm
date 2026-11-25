@@ -145,6 +145,22 @@ bool streamAsyncReplayPrepEnabled() {
     return enabled;
 }
 
+bool groupedIndexerSchedule(py::handle impl) {
+    if (!impl || impl.is_none()) {
+        return false;
+    }
+    if (py::isinstance<py::dict>(impl)) {
+        for (auto entry : py::reinterpret_borrow<py::dict>(impl)) {
+            if (groupedIndexerSchedule(entry.second)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    auto params = py::getattr(impl, "fmha_params", py::none());
+    return py::getattr(params, "schedule_next_n", py::int_(1)).cast<int>() > 1;
+}
+
 void callPrepareCudaGraph(py::object attn_pyobj, PyModelInputs& inputs) {
     if (!attn_pyobj || attn_pyobj.is_none()) {
         return;
@@ -1409,6 +1425,17 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs&  inputs,
         return false;
     }
 
+    if (graph_it->second.requires_uniform_verify_lengths && !inputs.attention_inputs.uniform_verify_lengths) {
+        const auto& lengths = inputs.attention_inputs.input_lengths;
+        if (lengths.device().is_cuda() || lengths.scalar_type() != torch::kInt32 || !lengths.is_contiguous()) {
+            return false;
+        }
+        const auto* rows = lengths.data_ptr<int32_t>();
+        if (!std::all_of(rows, rows + lengths.numel(), [this](auto n) { return n == num_tokens_per_bs_; })) {
+            return false;
+        }
+    }
+
     if (isGenerationPrefillCudaGraph()) {
         const auto& captured_bert_inputs = graph_it->second.mem_hold_.py_model_inputs_.bert_embedding_inputs;
         const auto  dynamic_ids_match    = [mode, &state](const torch::Tensor& src, const torch::Tensor& dst) {
@@ -2090,6 +2117,7 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         RTP_LLM_LOG_ERROR("WarmUp forward failed for %s %d: %s", key_type, key, e.what());
         throw;
     }
+    graph_instances_[key].requires_uniform_verify_lengths = is_target_verify_ && groupedIndexerSchedule(attn_pyobj);
     RTP_LLM_LOG_INFO("WarmUp for %s %d successfully.", key_type, key);
 
     {

@@ -3410,6 +3410,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         }
 #endif
 
+        model_input.uniform_verify_lengths = true;
         model_input.input_lengths  = std::move(input_lengths);
         model_input.prefix_lengths = spec_prefix_lengths;
         model_input.combo_tokens   = draft_token_ids_t.reshape({(int64_t)(batch_size * (propose_step_ + 1))});
@@ -3688,8 +3689,9 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
 
     torch::Tensor next_kv_cache_block_id;
     torch::Tensor next_kv_cache_kernel_block_id;
-    if (is_linear_attention_model_ && useDeviceInput() && kv_cache_block_id.defined() && kv_cache_block_id.is_cuda()
-        && kv_cache_kernel_block_id.defined() && kv_cache_kernel_block_id.is_cuda()) {
+    if ((is_linear_attention_model_ || useDropBroadSync()) && cache_manager_ && useDeviceInput()
+        && kv_cache_block_id.defined() && kv_cache_block_id.is_cuda() && kv_cache_kernel_block_id.defined()
+        && kv_cache_kernel_block_id.is_cuda()) {
         RTP_LLM_CHECK_WITH_INFO(kv_cache_block_id.dim() == 3 && kv_cache_block_id.size(1) == batch_size,
                                 "MTP physical cache snapshot source must be [group,batch,blocks], batch=%ld",
                                 batch_size);
@@ -3704,7 +3706,21 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         }
         const auto block_size  = static_cast<int>(cache_config.seq_size_per_block);
         const auto table_width = std::min(kv_cache_block_id.size(2), kv_cache_kernel_block_id.size(2));
-        if (hasLinearCacheSnapshotCapacity(all_streams, table_width, static_cast<int>(propose_step_ + 1), block_size)) {
+        if (!is_linear_attention_model_) {
+            // FULL groups (including indexer_kv) are immutable while the scheduler has
+            // sufficient reserve. Its existing growth/remap path invalidates the snapshot.
+            if (!group_types.empty() && static_cast<int64_t>(group_types.size()) == kv_cache_block_id.size(0)
+                && kv_cache_kernel_block_id.size(0) == kv_cache_block_id.size(0)
+                && std::all_of(
+                    group_types.begin(), group_types.end(), [](auto type) { return type == CacheGroupType::FULL; })
+                && std::all_of(all_streams.begin(), all_streams.end(), [](const auto& stream) {
+                       return stream->maxBatchSize() == 1 && !stream->hasNumBeams() && !stream->isFakeStream();
+                   })) {
+                next_kv_cache_block_id        = kv_cache_block_id.clone();
+                next_kv_cache_kernel_block_id = kv_cache_kernel_block_id.clone();
+            }
+        } else if (hasLinearCacheSnapshotCapacity(
+                       all_streams, table_width, static_cast<int>(propose_step_ + 1), block_size)) {
             auto accept_i32        = accept_len_gpu_all.to(torch::kInt32);
             next_kv_cache_block_id = MtpBatchStreamProcessor::advanceLinearCacheBlockTable(
                 kv_cache_block_id, prev_seq_len_all, accept_i32, group_types, block_size);

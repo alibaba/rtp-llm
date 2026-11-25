@@ -47,7 +47,11 @@ def _get_paged_mqa_logits_metadata_compat(
     """Prepare a schedule before the logits call has resolved the vendor ABI."""
     flat = context_lens.reshape(-1).contiguous()
     cached_dim = _paged_mqa_context_lens_dim
-    lengths = flat if cached_dim == 1 else flat.view(-1, 1)
+    lengths = (
+        flat
+        if cached_dim == 1
+        else (context_lens if context_lens.ndim == 2 else flat.view(-1, 1))
+    )
     # Metadata acceptance alone does not establish the logits ABI. Only the
     # complete logits call below may publish _paged_mqa_context_lens_dim.
     try:
@@ -847,18 +851,7 @@ class IndexerOp(nn.Module):
                 )
             # The attention planner already owns the token-to-request map.
             # Draft-extend lengths can vary and include empty padded requests.
-            host_lengths = getattr(attention_inputs, "input_lengths", None)
-            if (
-                _paged_mqa_context_lens_dim == 2
-                and q_fp8.is_cuda and is_sm10x()
-                and os.environ.get("RTP_LLM_INDEXER_NATIVE_MTP", "1") != "0"
-                and not torch.cuda.is_current_stream_capturing()
-                and isinstance(host_lengths, torch.Tensor) and host_lengths.device.type == "cpu"
-                and host_lengths.numel() == block_table.shape[0] and host_lengths.numel() > 0
-            ):
-                rows, remainder = divmod(num_tokens, host_lengths.numel())
-                if rows > 1 and not remainder and bool((host_lengths == rows).all()):
-                    native_next_n = rows
+            native_next_n = getattr(fmha_params, "schedule_next_n", 1)
             if native_next_n == 1:
                 block_table = torch.index_select(block_table, 0, batch_indices)
             kvlen_2d = lengths.reshape(-1, native_next_n)
@@ -878,7 +871,13 @@ class IndexerOp(nn.Module):
         # SM10x can also run CUDA12 wheels with the older 1D context ABI.
         # Keep the shared shape probe while reusing graph-owned metadata.
         logits = _fp8_paged_mqa_logits_compat(
-            q_fp8.reshape(-1, native_next_n, self.index_n_heads, self.index_head_dim) if native_next_n > 1 else q_fp8.unsqueeze(1),
+            (
+                q_fp8.reshape(
+                    -1, native_next_n, self.index_n_heads, self.index_head_dim
+                )
+                if native_next_n > 1
+                else q_fp8.unsqueeze(1)
+            ),
             kv_cache_fp8.view(dtype=torch.uint8),
             weights,
             kvlen_2d,
@@ -886,7 +885,7 @@ class IndexerOp(nn.Module):
             self.blocksize,
             max_seq_len,
             schedule_metadata=(
-                schedule_metadata if native_next_n == 1 and has_schedule_metadata and is_sm10x() else None
+                schedule_metadata if has_schedule_metadata and is_sm10x() else None
             ),
         )
 
