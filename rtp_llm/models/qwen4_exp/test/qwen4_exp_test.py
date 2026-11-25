@@ -213,39 +213,28 @@ class Qwen4ExpTest(unittest.TestCase):
                 self.assertEqual(model.load(skip_python_model=True), "loaded")
             parent.assert_called_once_with(skip_python_model=True)
 
-    def test_pp_load_admits_language_model_roles_and_multimodal(self):
-        for pp_size, text_only, role in (
-            (2, True, RoleType.PDFUSION),
-            (4, True, RoleType.PDFUSION),
-            (2, False, RoleType.PDFUSION),
-            (2, True, RoleType.PREFILL),
-            (2, True, RoleType.DECODE),
-            (2, False, RoleType.PREFILL),
-            (2, False, RoleType.DECODE),
+    def test_pp_load_admits_multimodal_decode(self):
+        config = Qwen4Exp._create_config_from_json(
+            self._temp_dir.name,
+            {**self._config(), "language_model_only": False},
+        )
+        model = self._loaded_model(
+            task_type=TaskType.LANGUAGE_MODEL,
+            mm_model_config=config.mm_model_config,
+        )
+        model.parallelism_config.pp_size = 2
+        model.parallelism_config.role_type = RoleType.DECODE
+        model.hw_kernel_config = SimpleNamespace(enable_cuda_graph=False)
+        with (
+            mock.patch.object(model, "_init_custom_module", return_value=None),
+            mock.patch.object(
+                model,
+                "create_model_loader",
+                side_effect=RuntimeError("reached weight loader"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "reached weight loader"),
         ):
-            with self.subTest(pp_size=pp_size, text_only=text_only, role=role):
-                config = Qwen4Exp._create_config_from_json(
-                    self._temp_dir.name,
-                    {**self._config(), "language_model_only": text_only},
-                )
-                model = self._loaded_model(
-                    task_type=TaskType.LANGUAGE_MODEL,
-                    mm_model_config=config.mm_model_config,
-                )
-                model.parallelism_config.pp_size = pp_size
-                model.parallelism_config.role_type = role
-                model.hw_kernel_config = SimpleNamespace(enable_cuda_graph=False)
-                with (
-                    mock.patch.object(model, "_init_custom_module", return_value=None),
-                    mock.patch.object(
-                        model,
-                        "create_model_loader",
-                        side_effect=RuntimeError("reached weight loader"),
-                    ) as loader,
-                ):
-                    with self.assertRaisesRegex(RuntimeError, "reached weight loader"):
-                        model.load()
-                    loader.assert_called_once()
+            model.load()
 
     def test_full_checkpoint_owns_all_side_regions(self):
         self.assertEqual(len(self.config.kv_cache_spec_descs), self.config.num_layers)

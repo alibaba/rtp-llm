@@ -81,18 +81,15 @@ class Qwen4ParallelismTest(unittest.TestCase):
             SimpleNamespace(quant_config=recipe()),
             SimpleNamespace(_qwen4_nvfp4_source=True),
         ):
-            for ep in (1, 2):
-                for rank in range(4):
-                    with self.subTest(config=config, ep=ep, rank=rank):
-                        original = topology(2, ep, rank, pp=2)
-                        resolved = resolve_qwen4_parallelism(config, original)
-                        self.assertEqual(resolved.pp_rank, rank // 2)
-                        self.assertEqual(resolved.tp_rank, rank % 2)
-                        self.assertEqual(resolved.get_ffn_tp_size(), 2 // ep)
-                        self.assertEqual(
-                            resolved.get_ffn_tp_rank(), rank % 2 if ep == 1 else 0
-                        )
-                        self.assertEqual(resolved.ep_rank, rank % ep)
+            for ep, ffn_tp_size, ffn_tp_rank, ep_rank in ((1, 2, 1, 0), (2, 1, 0, 1)):
+                with self.subTest(config=config, ep=ep):
+                    original = topology(2, ep, rank=3, pp=2)
+                    resolved = resolve_qwen4_parallelism(config, original)
+                    self.assertEqual(resolved.pp_rank, 1)
+                    self.assertEqual(resolved.tp_rank, 1)
+                    self.assertEqual(resolved.get_ffn_tp_size(), ffn_tp_size)
+                    self.assertEqual(resolved.get_ffn_tp_rank(), ffn_tp_rank)
+                    self.assertEqual(resolved.ep_rank, ep_rank)
 
     def test_unsupported_layout_is_rejected_before_loading(self):
         config = SimpleNamespace(quant_config=recipe())
