@@ -167,7 +167,7 @@ bool samplingRuntimeReady(int64_t vocab_size = 0) {
         std::string   failure;
         try {
             failure = pybind11::module_::import("rtp_llm.models_py.sampling.runtime")
-                          .attr("warmup")(requested_vocab, true)
+                          .attr("warmup")(requested_vocab)
                           .cast<std::string>();
         } catch (pybind11::error_already_set& error) {
             if (!error.matches(PyExc_ImportError)) {
@@ -327,41 +327,39 @@ pybind11::capsule registerDeferredGraphPlan(const pybind11::object& owner,
     return storeDeferredPlan(deferredGraphPlans(), key, std::move(plan));
 }
 
-std::optional<DeferredPlanKey> deferredSamplingLayout(const RejectionSamplingParams& params, bool capacity_bucket) {
+bool supportsDeferredPlan(const RejectionSamplingParams& params) {
     const auto& logits = params.target_logits_d;
-    if (!logits.is_cuda() || logits.dim() != 3 || logits.scalar_type() != torch::kFloat32 || !logits.is_contiguous()) {
-        return std::nullopt;
+    if (!params.draft_probs_point_mass || params.cum_log_probs.defined() || !logits.is_cuda() || logits.dim() != 3
+        || logits.scalar_type() != torch::kFloat32 || !logits.is_contiguous()) {
+        return false;
     }
     const auto batch = logits.size(0);
     const auto rows  = logits.size(1);
-    const auto vocab = logits.size(2);
     if (batch < 8 || batch > 128 || rows < 2 || rows > 9) {
-        return std::nullopt;
+        return false;
     }
-    bool forced = false;
-    if (!params.force_accept.empty()) {
-        if (params.force_accept.size() != static_cast<size_t>(batch)) {
-            return std::nullopt;
-        }
-        forced = params.force_accept.front();
-        if (std::any_of(params.force_accept.begin(), params.force_accept.end(), [forced](bool value) {
-                return value != forced;
-            })) {
-            return std::nullopt;
-        }
+    const auto& forced = params.force_accept;
+    if (!forced.empty()
+        && (forced.size() != static_cast<size_t>(batch)
+            || std::find(forced.begin(), forced.end(), !forced.front()) != forced.end())) {
+        return false;
     }
     const auto device  = logits.get_device();
     auto       matches = [device](const torch::Tensor& tensor, at::ScalarType dtype, c10::IntArrayRef shape) {
         return tensor.defined() && tensor.is_cuda() && tensor.get_device() == device && tensor.scalar_type() == dtype
                && tensor.sizes() == shape && tensor.is_contiguous();
     };
-    const bool has_cap = params.acceptance_cap.defined();
-    if (!matches(params.draft_token_ids_d, torch::kInt32, {batch, rows - 1})
-        || !matches(params.do_sample_d, torch::kBool, {batch})
-        || !matches(params.output_token_ids_d, torch::kInt32, {batch, rows})
-        || !matches(params.output_accepted_token_num_d, torch::kInt32, {batch})
-        || (has_cap && !matches(params.acceptance_cap, torch::kInt32, {batch}))
-        || at::cuda::current_device() != device) {
+    return matches(params.draft_token_ids_d, torch::kInt32, {batch, rows - 1})
+           && matches(params.do_sample_d, torch::kBool, {batch})
+           && matches(params.output_token_ids_d, torch::kInt32, {batch, rows})
+           && matches(params.output_accepted_token_num_d, torch::kInt32, {batch})
+           && (!params.acceptance_cap.defined() || matches(params.acceptance_cap, torch::kInt32, {batch}));
+}
+
+std::optional<DeferredPlanKey> deferredSamplingLayout(const RejectionSamplingParams& params, bool capacity_bucket) {
+    const auto& logits = params.target_logits_d;
+    const auto  device = logits.get_device();
+    if (at::cuda::current_device() != device) {
         return std::nullopt;
     }
     const auto              stream = at::cuda::getCurrentCUDAStream(device);
@@ -371,14 +369,17 @@ std::optional<DeferredPlanKey> deferredSamplingLayout(const RejectionSamplingPar
     if (capture_status != cudaStreamCaptureStatusNone) {
         return std::nullopt;
     }
-    int64_t bucket = batch;
+    const auto batch  = logits.size(0);
+    const bool forced = !params.force_accept.empty() && params.force_accept.front();
+    int64_t    bucket = batch;
     if (capacity_bucket) {
         bucket = 8;
         while (bucket < batch) {
             bucket *= 2;
         }
     }
-    return DeferredPlanKey{device, reinterpret_cast<uint64_t>(stream.stream()), forced, bucket, rows, vocab, has_cap};
+    return DeferredPlanKey{device, reinterpret_cast<uint64_t>(stream.stream()), forced, bucket, logits.size(1),
+                           logits.size(2), params.acceptance_cap.defined()};
 }
 
 bool tryReplayDeferredGraph(const RejectionSamplingParams& params,
@@ -859,21 +860,20 @@ void processLogits(const GreedyParams& params, const torch::Tensor& device_token
 
 }  // anonymous namespace
 
+static float normalizeDeferredTopP(float value) {
+    return std::abs(value) < 1e-7f || std::abs(value - 1.0f) < 1e-7f ? 1.0f : value;
+}
+
 static GreedyOutput tryCompactDeferredSampling(const GreedyParams& params, float temperature = 1.0f) {
     const auto batch_size = params.logits.size(0);
-    if (batch_size == 0)
-        return {};
     const auto* requested_k = params.top_k.data_ptr<int32_t>();
     const auto* requested_p = params.top_p.data_ptr<float>();
-    const auto  normalize_p = [](float value) {
-        return std::abs(value) < 1e-7f || std::abs(value - 1.0f) < 1e-7f ? 1.0f : value;
-    };
-    const float compact_p = normalize_p(requested_p[0]);
+    const float compact_p = normalizeDeferredTopP(requested_p[0]);
     if (params.allow_compact_deferred_output && requested_k[0] >= 2 && requested_k[0] <= 1024
         && std::all_of(
             requested_k, requested_k + batch_size, [requested_k](int32_t value) { return value == requested_k[0]; })
-        && std::all_of(requested_p, requested_p + batch_size, [compact_p, normalize_p](float value) {
-               return normalize_p(value) == compact_p;
+        && std::all_of(requested_p, requested_p + batch_size, [compact_p](float value) {
+               return normalizeDeferredTopP(value) == compact_p;
            })) {
         torch::Tensor log_normalizer;
         auto          compact = torch_ext::deferred_compact_topk_topp(
@@ -921,7 +921,7 @@ static GreedyOutput prepareDeferredTarget(const GreedyParams& params) {
         // the normalization below does before applying any filters.
         if (requested_k[row] != 1
             && !((requested_k[row] <= 0 || requested_k[row] >= vocab)
-                 && (std::abs(requested_p[row]) < 1e-7f || std::abs(requested_p[row] - 1.0f) < 1e-7f))) {
+                 && normalizeDeferredTopP(requested_p[row]) == 1.0f)) {
             unfiltered = false;
             break;
         }
@@ -929,10 +929,7 @@ static GreedyOutput prepareDeferredTarget(const GreedyParams& params) {
     if (unfiltered) {
         return GreedyOutput{torch::Tensor(), true};
     }
-    const auto normalize_p = [](float value) {
-        return std::abs(value) < 1e-7f || std::abs(value - 1.0f) < 1e-7f ? 1.0f : value;
-    };
-    const float compact_p = normalize_p(requested_p[0]);
+    const float compact_p = normalizeDeferredTopP(requested_p[0]);
     auto        prepared  = tryCompactDeferredSampling(params);
     if (prepared.deferred_token_sampling)
         return prepared;
@@ -940,7 +937,7 @@ static GreedyOutput prepareDeferredTarget(const GreedyParams& params) {
         && std::all_of(requested_k, requested_k + batch_size, [](int32_t value) { return value == 1024; })
         && std::all_of(requested_p,
                        requested_p + batch_size,
-                       [compact_p, normalize_p](float value) { return normalize_p(value) == compact_p; })
+                       [compact_p](float value) { return normalizeDeferredTopP(value) == compact_p; })
         && torch_ext::deferred_topk_topp_filter(params.logits, compact_p)) {
         return GreedyOutput{torch::Tensor(), true};
     }
@@ -957,9 +954,6 @@ static GreedyOutput prepareDeferredTarget(const GreedyParams& params) {
     std::transform(p, p + batch_size, p, [](float value) { return std::abs(value) < 1e-7f ? 1.0f : value; });
     const bool no_k = std::all_of(k, k + batch_size, [vocab](int32_t value) { return value <= 0 || value >= vocab; });
     const bool no_p = std::all_of(p, p + batch_size, [](float value) { return std::abs(value - 1.0f) < 1e-7f; });
-    if (no_k && no_p) {
-        return GreedyOutput{torch::Tensor(), true};
-    }
     auto probs_t = torch::softmax(params.logits, -1);
     auto output  = torch::empty_like(probs_t);
     if (no_k) {
@@ -1244,7 +1238,7 @@ void rejectionSampling(const RejectionSamplingParams& params) {
                 params.generator, batch_size, std::max<int64_t>(32, ((rows + 3) / 4) * 4), prefix);
         }
         pybind11::gil_scoped_acquire gil;
-        if (params.draft_probs_point_mass && !params.cum_log_probs.defined()) {
+        if (supportsDeferredPlan(params)) {
             const auto seeds_h     = state_h.select(0, 0);
             const auto positions_h = state_h.select(0, 1);
             if (trySubmitDeferredKernels(params, seeds_h, positions_h)

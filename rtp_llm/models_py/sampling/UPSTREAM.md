@@ -2,11 +2,13 @@
 
 Source: vLLM commit `af261bab7f717b6ece30f5ed3213c43974e4a6c4`.
 
-- `vllm_gumbel.py` comes from `vllm/v1/worker/gpu/sample/gumbel.py`, with local
-  Triton and `draft_logits_row` imports. RTP extends `gumbel_noised_argmax` with
-  `RETURN_KEY=False`. The default returns the winning lane as in vLLM. The compact
-  verifier sets it to true to return the original vocabulary ID and chooses the
-  lowest valid ID on an exact tie, regardless of the order of compact candidates.
+- `vllm_gumbel.py` adapts `vllm/v1/worker/gpu/sample/gumbel.py` for ordinary
+  sampling. The block kernel reads the request's temperature, seed and position
+  directly. RTP omits vLLM's optional draft-cache writes and standalone temperature
+  kernel. The fused temperature option, draft noise salt and FP32/FP64 sampling
+  remain available. RTP adds `RETURN_KEY` to `gumbel_noised_argmax` so the compact
+  verifier can return the original vocabulary ID, breaking ties by the lowest
+  valid ID. The default still returns the winning lane.
 - `draft_logits.py`: the `draft_logits_row` function is copied unchanged from
   `vllm/v1/worker/gpu/spec_decode/draft_logits.py`.
 

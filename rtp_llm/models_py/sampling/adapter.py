@@ -47,7 +47,6 @@ def rejection_sample_logits(
         from rtp_llm.models_py.sampling.rejection_graph import try_replay
 
         if try_replay(
-            _rejection_sample_logits_eager,
             target_logits,
             draft_ids,
             seeds,

@@ -51,13 +51,11 @@ public:
     using Base::NUM_TMA_LOAD_BUFS;
     using Base::TMA_PREFETCH_DEPTH;
     using Base::RECONSTRUCT_THRESHOLD;
-    using Base::PERM_ADD_BASE;
     using Base::PERM_MUL_PRIME;
     using Base::PLACEHOLDER_PAIR;
     using Base::NUM_RECONSTRUCT_BUCKETS;
 
-    static constexpr uint32_t PLACEHOLDER  = 0xff800000;  // -INF
-    static constexpr uint32_t NEG_INF_BITS = 0xFF800000;
+    static constexpr uint32_t NEG_INF_BITS = Base::PLACEHOLDER_U32;
     // RTP: preserve all finite FP32 bits while giving both signs of NaN the
     // +inf ordering used for token TopK selection.
     static __device__ __forceinline__ uint32_t canonicalize_nan(uint32_t bits) {
@@ -416,7 +414,7 @@ public:
                     uint32_t box_end =
                         ku::ceil_div(num_local_tail_elems, (uint32_t)NUM_ELEMS_PER_SEG) * NUM_ELEMS_PER_SEG;
                     for (uint32_t e = num_local_tail_elems + threadIdx.x; e < box_end; e += NUM_THREADS) {
-                        init_buf[Base::sw_elem(e)] = __uint_as_float(PLACEHOLDER);
+                        init_buf[Base::sw_elem(e)] = __uint_as_float(NEG_INF_BITS);
                     }
                     __syncthreads();
                 }

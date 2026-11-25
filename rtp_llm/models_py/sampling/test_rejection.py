@@ -144,7 +144,6 @@ class DirectOutputTest(unittest.TestCase):
                 lengths = torch.full((batch,), -777, device="cuda", dtype=torch.int32)
                 self.assertTrue(
                     rejection_graph.try_replay(
-                        adapter._rejection_sample_logits_eager,
                         logits,
                         ids,
                         seeds,
@@ -190,7 +189,6 @@ class DirectOutputTest(unittest.TestCase):
             lengths = torch.empty(16, device="cuda", dtype=torch.int32)
             self.assertTrue(
                 rejection_graph.try_replay(
-                    adapter._rejection_sample_logits_eager,
                     logits,
                     ids,
                     seeds,
@@ -226,16 +224,15 @@ class DirectOutputTest(unittest.TestCase):
                 tokens = torch.empty((16, 6), device="cuda", dtype=torch.int32)
                 lengths = torch.empty(16, device="cuda", dtype=torch.int32)
                 args = (logits, ids, seeds, seeds, sample, None, None, tokens, lengths)
-                compute = adapter._rejection_sample_logits_eager
-                expected, counts = compute(
+                expected, counts = adapter._rejection_sample_logits_eager(
                     logits, None, ids, seeds, seeds, sample, clean_output=True
                 )
                 # Finish old entries so eviction cannot intentionally fall back.
                 torch.cuda.synchronize()
-                self.assertTrue(rejection_graph.try_replay(compute, *args))
+                self.assertTrue(rejection_graph.try_replay(*args))
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph, stream=stream):
-                    self.assertFalse(rejection_graph.try_replay(compute, *args))
+                    self.assertFalse(rejection_graph.try_replay(*args))
                     adapter.rejection_sample_logits(
                         logits,
                         None,

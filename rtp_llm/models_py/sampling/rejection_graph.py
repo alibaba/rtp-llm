@@ -17,12 +17,12 @@ _release_native_guard: Callable | None = None
 
 
 class _Entry:
-    def __init__(self, inputs, forced, compute, stream, key):
+    def __init__(self, inputs, forced, stream, key, required_bytes):
         from rtp_llm.models_py.sampling.adapter import _rejection_sample_logits_eager
 
         self.stream = stream
-        self.key = key[:7]
-        self.native_eligible = compute is _rejection_sample_logits_eager
+        self.key = key
+        self.bytes = required_bytes
         self.native_plan = None
         capture_stream = torch.cuda.Stream(device=stream.device)
         capture_stream.wait_stream(stream)
@@ -47,7 +47,7 @@ class _Entry:
             )[:8]
 
             def run():
-                compute(
+                _rejection_sample_logits_eager(
                     logits,
                     None,
                     ids,
@@ -82,18 +82,9 @@ class _Entry:
             else None
         )
         self.ready_event = self.ready.cuda_event
-        self.bytes = (
-            self.inputs[0].untyped_storage().nbytes()
-            + sum(t.numel() * t.element_size() for t in self.inputs[1:])
-            + (8 << 20)
-        )
 
     def replay(self, inputs, tokens, lengths):
-        if (
-            self.native_eligible
-            and _native_replay is not None
-            and self.graph_exec is not None
-        ):
+        if _native_replay is not None and self.graph_exec is not None:
             if self.native_plan is None and _register_native_plan is not None:
                 self.native_plan = _register_native_plan(
                     self,
@@ -130,7 +121,6 @@ class _Entry:
 
 
 def try_replay(
-    compute: Callable,
     logits: torch.Tensor,
     ids: torch.Tensor,
     seeds: torch.Tensor,
@@ -193,7 +183,6 @@ def try_replay(
         rows,
         vocab,
         cap is not None,
-        compute,
     )
     if not _lock.acquire(blocking=False):
         return False
@@ -220,7 +209,7 @@ def try_replay(
                 if not _entries[old].ready.query():
                     return False
                 used -= _entries.pop(old).bytes
-            _entries[key] = _Entry(inputs, forced_value, compute, stream, key)
+            _entries[key] = _Entry(inputs, forced_value, stream, key, required)
         entry = _entries[key]
         _entries.move_to_end(key)
         entry.replay(inputs, tokens, lengths)

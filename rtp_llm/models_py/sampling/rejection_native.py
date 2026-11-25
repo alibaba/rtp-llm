@@ -113,8 +113,7 @@ def _stage(
 
 class _Plan:
     def __init__(self, key):
-        device, stream, forced, capacity, rows, vocab, has_cap = key[:7]
-        self.key = key
+        device, _, forced, capacity, rows, vocab, has_cap = key[:7]
         self.buffers = []
 
         def empty(shape, dtype=torch.float32):
@@ -276,8 +275,7 @@ class _CompactPlan:
             _compact_rejection_kernel,
         )
 
-        device, stream, forced, capacity, rows, vocab, has_cap, dense_vocab, has_logz = key
-        self.key = key
+        device, _, forced, capacity, rows, _, has_cap, dense_vocab, has_logz = key
         self.buffers = []
 
         def empty(size, dtype):
