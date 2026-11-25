@@ -270,8 +270,10 @@ class NativePreparationClient:
         if self._encoder is None:
             self._encoder = MsgpackEncoder()
             self._decoder = MsgpackDecoder(EngineCoreRequest)
+        # Forwarding uses map encoding; this same-node RPC expects native arrays.
+        native_request = EngineCoreRequest(**msgspec.structs.asdict(request))
         payload = msgspec.msgpack.encode({
-            "frames": [bytes(frame) for frame in self._encoder.encode(request)],
+            "frames": [bytes(frame) for frame in self._encoder.encode(native_request)],
             "schedule_batch_id": schedule_batch_id, "local_batch_id": local_batch_id,
         })
         address, peer = await self._select_peer()

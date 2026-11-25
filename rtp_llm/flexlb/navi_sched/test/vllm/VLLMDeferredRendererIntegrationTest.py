@@ -342,6 +342,13 @@ class DeferredRendererTestBase(unittest.IsolatedAsyncioTestCase):
         request.client_index = 71
         return request
 
+    def forward_wire_roundtrip(self, request):
+        from _navi_prepare_test.VLLMForwardProtocol import (
+            forward_request_type, forward_request_fields,
+        )
+        frames = MsgpackEncoder().encode(forward_request_fields(request))
+        return MsgpackDecoder(forward_request_type(EngineCoreRequest)).decode(frames)
+
     def wire_roundtrip(self, request):
         frames = [bytes(frame) for frame in MsgpackEncoder().encode(request)]
         return MsgpackDecoder(EngineCoreRequest).decode(msgspec.msgpack.decode(
@@ -349,7 +356,7 @@ class DeferredRendererTestBase(unittest.IsolatedAsyncioTestCase):
         ))
 
     @asynccontextmanager
-    async def local_preparation_server(self):
+    async def local_preparation_server(self, *, api_worker_discovery=True):
         import uvicorn
         from fastapi import FastAPI
 
@@ -363,7 +370,9 @@ class DeferredRendererTestBase(unittest.IsolatedAsyncioTestCase):
         listener.listen(128)
         with mock.patch.dict(os.environ, {
             "VLLM_NAVI_SCHED_DEFER_RENDER": "1",
-            "VLLM_NAVI_SCHED_SERVER_PORT": str(listener.getsockname()[1]),
+            "VLLM_NAVI_SCHED_SERVER_PORT": (
+                str(listener.getsockname()[1]) if api_worker_discovery else "0"
+            ),
         }):
             preparation.configure_native_preparation(app)
         server = uvicorn.Server(uvicorn.Config(app, log_level="error", access_log=False))
@@ -461,7 +470,7 @@ class DeferredRendererTest(DeferredRendererTestBase):
             [self.messages(1)], self.chat_params, self.tok_params
         )
         prototype = self.request(preview[0])
-        requests = [self.wire_roundtrip(prototype) for _ in range(512)]
+        requests = [self.forward_wire_roundtrip(prototype) for _ in range(512)]
         for index, request in enumerate(requests):
             request.request_id = "rpc-burst-%d" % index
         with mock.patch.object(deferred, "NativeRenderContinuation", Continuation):
@@ -1380,11 +1389,13 @@ class MediaContinuationAssertions:
         )
         self.assertEqual([], self.http_requests, "entry must not fetch media")
         prediction = self.wire_roundtrip(self.request(preview[0]))
-        request = self.wire_roundtrip(prediction)
+        request = self.forward_wire_roundtrip(prediction)
         self.assertIsNotNone(request.navi_sched_render_call)
         self.assertEqual(expected_modalities, {f.modality for f in request.mm_features})
         self.assertTrue(all(f.data is None for f in request.mm_features))
-        await self.target.resume_async([request])
+        async with self.local_preparation_server(api_worker_discovery=False) as client:
+            results = await client.resume_async([request])
+        self.assertIs(results[0], request)
         self.assertIsNone(request.navi_sched_render_call)
         self.assertTrue(self.http_requests, "execution must fetch URL media")
         _, normal = await self.native.render_chat_async(
@@ -1441,6 +1452,13 @@ class MediaContinuationAssertions:
         )
         mapping.finish(71)
         self.assertEqual({}, mapping._owners)
+
+
+class QwenNativePreparationTest(QwenDeferredRendererTest):
+    # Exercise the same socket burst with a processor available on both runtimes.
+    test_preparation_rpc_burst_waits_without_losing_requests = (
+        DeferredRendererTest.test_preparation_rpc_burst_waits_without_losing_requests
+    )
 
 
 class VideoDeferredRendererTest(MediaContinuationAssertions, QwenDeferredRendererTest):
