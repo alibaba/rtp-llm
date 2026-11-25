@@ -293,6 +293,7 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         config.enable_fuse_kernels = False
         config.glm5_cp_opt = False
         config.enable_glm5_cmp = True
+        config.indexer_fused_topk = True
 
         restored = pickle.loads(pickle.dumps(config))
 
@@ -308,6 +309,11 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         self.assertFalse(restored.enable_fuse_kernels)
         self.assertFalse(restored.glm5_cp_opt)
         self.assertTrue(restored.enable_glm5_cmp)
+        self.assertTrue(restored.indexer_fused_topk)
+        previous = _new_hw_kernel_config()
+        previous.__setstate__(config.__getstate__()[:15])
+        self.assertFalse(previous.indexer_fused_topk)
+        self.assertTrue(previous.enable_glm5_cmp)
         self.assertTrue(restored.enable_dynamic_decode_backend)
         self.assertEqual(
             restored.dyn_decode_gate_thresholds, config.dyn_decode_gate_thresholds
@@ -380,7 +386,7 @@ class HWKernelConfigPickleTest(unittest.TestCase):
                 self.assertFalse(restored.enable_dynamic_decode_backend)
 
     def test_unsupported_tuple_sizes_are_rejected(self):
-        for size in (6, 14, 16, 19, 20):
+        for size in (6, 14, 17, 19, 20):
             with self.subTest(size=size), self.assertRaisesRegex(
                 RuntimeError, "Invalid state"
             ):
@@ -407,10 +413,21 @@ class RuntimeConfigPickleTest(unittest.TestCase):
     def test_output_dispatcher_worker_count_round_trip(self):
         config = RuntimeConfig()
         config.output_dispatcher_worker_count = 3
+        config.prefill_progress_slot = "/tmp/rank0.slot"
+        config.torch_cuda_pool_prealloc_mb = 0
+        config.torch_cuda_pool_prealloc_safety_mb = 2048
 
         restored = pickle.loads(pickle.dumps(config))
 
         self.assertEqual(restored.output_dispatcher_worker_count, 3)
+        self.assertEqual(restored.prefill_progress_slot, "")
+        self.assertEqual(restored.torch_cuda_pool_prealloc_mb, 0)
+        self.assertEqual(restored.torch_cuda_pool_prealloc_safety_mb, 2048)
+        previous = RuntimeConfig.__new__(RuntimeConfig)
+        previous.__setstate__(config.__getstate__()[:14])
+        self.assertEqual(previous.output_dispatcher_worker_count, 3)
+        self.assertEqual(previous.torch_cuda_pool_prealloc_mb, -1)
+        self.assertEqual(previous.torch_cuda_pool_prealloc_safety_mb, 8192)
 
     def test_previous_formats_default_to_serial_dispatch(self):
         config = RuntimeConfig()

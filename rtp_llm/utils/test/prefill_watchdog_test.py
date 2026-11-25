@@ -77,38 +77,31 @@ class PrefillWatchdogTest(unittest.TestCase):
         self._poll_at(2)
 
     def test_default_disabled_and_invalid_threshold_disabled(self):
-        with mock.patch.dict(os.environ, {watchdog.THRESHOLDS_ENV: ""}):
-            self.assertIsNone(watchdog.PrefillWatchdog.from_env())
-        with (
-            mock.patch.dict(os.environ, {watchdog.THRESHOLDS_ENV: "layer=nan"}),
-            self.assertLogs(watchdog.__name__, "WARNING"),
-        ):
-            self.assertIsNone(watchdog.PrefillWatchdog.from_env())
-        with mock.patch.dict(
-            os.environ, {watchdog.THRESHOLDS_ENV: " prepare = 5,layer=20 "}
-        ):
-            enabled = watchdog.PrefillWatchdog.from_env()
-            self.assertIsNotNone(enabled)
-            self.addCleanup(enabled.close)
+        self.assertIsNone(
+            watchdog.PrefillWatchdog.from_config("", str(self.output), False)
+        )
+        with self.assertLogs(watchdog.__name__, "WARNING"):
+            self.assertIsNone(
+                watchdog.PrefillWatchdog.from_config(
+                    "layer=nan", str(self.output), False
+                )
+            )
+        enabled = watchdog.PrefillWatchdog.from_config(
+            " prepare = 5,layer=20 ", str(self.output), False
+        )
+        self.assertIsNotNone(enabled)
+        self.addCleanup(enabled.close)
 
     def test_gpu_capture_is_opt_in_to_enabled_watchdog(self):
         for thresholds, gpu_option, expected in (
-            ("", "1", None),
-            ("layer=2", "", False),
-            ("layer=2", "0", False),
-            ("layer=2", "1", True),
+            ("", True, None),
+            ("layer=2", False, False),
+            ("layer=2", True, True),
         ):
-            with (
-                self.subTest(thresholds=thresholds, gpu_option=gpu_option),
-                mock.patch.dict(
-                    os.environ,
-                    {
-                        watchdog.THRESHOLDS_ENV: thresholds,
-                        watchdog.GPU_CORE_ENV: gpu_option,
-                    },
-                ),
-            ):
-                monitor = watchdog.PrefillWatchdog.from_env()
+            with self.subTest(thresholds=thresholds, gpu_option=gpu_option):
+                monitor = watchdog.PrefillWatchdog.from_config(
+                    thresholds, str(self.output), gpu_option
+                )
                 if expected is None:
                     self.assertIsNone(monitor)
                 else:

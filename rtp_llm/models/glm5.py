@@ -38,7 +38,7 @@ class Glm5Weight(DeepSeekV2Weight):
         weights = super()._get_hf_layer_weight_info(layer_id)
         if dsa_layer_has_indexer(self.model_config, layer_id):
             if (
-                getattr(self.model_config, "indexer_types", None)
+                self.model_config.indexer_types
                 and self.model_config.attn_config.indexer_head_dim == 128
                 and type(self._quant_config) is Fp8BlockWiseQuantConfig
                 and self._quant_config.is_quanted()
@@ -252,7 +252,7 @@ class Glm5Mtp(Glm5):
         ):
             return ()
 
-        loader = getattr(target_model, "model_weights_loader", None)
+        loader = target_model.model_weights_loader
         merged_lora = (
             loader.get_load_config().merge_lora
             if loader is not None
@@ -268,18 +268,20 @@ class Glm5Mtp(Glm5):
         ):
             return ()
 
-        for name in (
-            "vocab_size",
-            "hidden_size",
-            "data_type",
-            "tie_word_embeddings",
-            "enable_fp32_lm_head",
-            "normalize_lm_head_weight",
-            "logit_scale",
-        ):
-            value = getattr(target, name)
-            if value is None or value != getattr(draft, name):
-                return ()
+        def weight_layout(config):
+            return (
+                config.vocab_size,
+                config.hidden_size,
+                config.data_type,
+                config.tie_word_embeddings,
+                config.enable_fp32_lm_head,
+                config.normalize_lm_head_weight,
+                config.logit_scale,
+            )
+
+        layout = weight_layout(target)
+        if None in layout or layout != weight_layout(draft):
+            return ()
         return (W.embedding, W.lm_head)
 
     @classmethod

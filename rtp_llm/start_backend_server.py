@@ -33,7 +33,7 @@ from rtp_llm.utils.concurrency_controller import (
 from rtp_llm.utils.oom_diag import install_oom_dump
 from rtp_llm.utils.process_lifecycle import arm_parent_death_sigkill
 from rtp_llm.ops import RoleType
-from rtp_llm.utils.prefill_watchdog import SLOT_ENV as _PREFILL_PROGRESS_SLOT_ENV, PrefillWatchdog
+from rtp_llm.utils.prefill_watchdog import PrefillWatchdog
 from rtp_llm.utils.process_manager import ProcessManager
 from rtp_llm.utils.util import copy_gemm_config
 
@@ -78,10 +78,12 @@ def local_rank_start(
     pipe_writer=None,
     expected_parent_pid: Optional[int] = None,
     service_draining=None,
+    prefill_progress_slot: Optional[str] = None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     if expected_parent_pid is not None:
         arm_parent_death_sigkill(expected_parent_pid)
+    py_env_configs.runtime_config.prefill_progress_slot = prefill_progress_slot or ""
     _install_hot_hook_runtime(f"backend_rank_{world_rank}", py_env_configs)
     backend_manager = None
     logging.info(f"[PROCESS_START]Start local rank process")
@@ -213,6 +215,12 @@ def _create_rank_processes(
 
     parent_pid = os.getpid()
     for world_rank in range(pc.world_rank, pc.world_rank + local_world_size):
+        slot_path = None
+        if prefill_watchdog is not None:
+            try:
+                slot_path = prefill_watchdog.create_slot(world_rank)
+            except OSError as error:
+                logging.warning("Cannot monitor Prefill rank %s: %s", world_rank, error)
         reader, writer = ctx.Pipe(duplex=False)
         rank_pipe_readers.append(reader)
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_device_list)
@@ -226,28 +234,14 @@ def _create_rank_processes(
                 writer,
                 parent_pid,
                 service_draining,
+                slot_path,
             ),
             name=f"rank-{world_rank}",
         )
         processes.append(proc)
-        previous_slot = os.environ.pop(_PREFILL_PROGRESS_SLOT_ENV, None)
-        slot_path = None
         try:
-            if prefill_watchdog is not None:
-                try:
-                    slot_path = prefill_watchdog.create_slot(world_rank)
-                except OSError as error:
-                    logging.warning(
-                        "Cannot monitor Prefill rank %s: %s", world_rank, error
-                    )
-                if slot_path is not None:
-                    os.environ[_PREFILL_PROGRESS_SLOT_ENV] = os.fspath(slot_path)
             proc.start()
         finally:
-            if previous_slot is None:
-                os.environ.pop(_PREFILL_PROGRESS_SLOT_ENV, None)
-            else:
-                os.environ[_PREFILL_PROGRESS_SLOT_ENV] = previous_slot
             writer.close()
         if prefill_watchdog is not None:
             try:
@@ -365,7 +359,12 @@ def multi_rank_start(
         and py_env_configs.role_config.role_type == RoleType.PREFILL
         and py_env_configs.model_args.model_type == "glm_5"
     ):
-        prefill_watchdog = PrefillWatchdog.from_env()
+        config = py_env_configs.server_config
+        prefill_watchdog = PrefillWatchdog.from_config(
+            config.prefill_stall_thresholds,
+            config.prefill_core_dir,
+            config.prefill_gpu_core,
+        )
     try:
         _create_rank_processes(
             global_controller,

@@ -415,9 +415,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         local_tokens = sum(chunk_lengths_list)
 
         # CPU tensors required by fill_cp_plan_params
-        def host_indices(host_name, device_name):
-            mirror = getattr(self.cp_info, host_name, None)
-            original = getattr(self.cp_info, device_name)
+        def host_indices(mirror, original):
             if (
                 isinstance(mirror, torch.Tensor)
                 and mirror.device.type == "cpu"
@@ -427,10 +425,12 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             return original.cpu()
 
         padding_mask_cpu = host_indices(
-            "prefill_qkv_padding_mask_cpu", "prefill_qkv_padding_mask"
+            self.cp_info.prefill_qkv_padding_mask_cpu,
+            self.cp_info.prefill_qkv_padding_mask,
         )
         kv_restore_cpu = host_indices(
-            "prefill_qkv_restore_indice_cpu", "prefill_qkv_restore_indice"
+            self.cp_info.prefill_qkv_restore_indice_cpu,
+            self.cp_info.prefill_qkv_restore_indice,
         )
 
         mla_params.fill_cp_plan_params(
@@ -670,7 +670,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         assert self.mla_params is not None and self.block_table is not None
         batch_size = int(self.block_table.shape[0])
         indptr = self.mla_params.prefill_ragged_kv_len_indptr_d[: batch_size + 1]
-        host_indptr = getattr(self.mla_params, "prefill_ragged_kv_len_indptr_h", None)
+        host_indptr = self.mla_params.prefill_ragged_kv_len_indptr_h
         if (
             not self.use_cuda_graph
             and isinstance(host_indptr, torch.Tensor)
@@ -998,6 +998,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         cp_cfg = getattr(parallelism_config, "prefill_cp_config", None)
+        self._prepared_kv = None
         self._cp_rank = int(getattr(parallelism_config, "tp_rank", 0))
         self._cp_size = int(getattr(parallelism_config, "tp_size", 1))
         # Build the optional direct-NCCL communicator before the first hot
@@ -1294,7 +1295,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
                 q.size(0), self.num_heads, self.kv_lora_rank
             )
 
-        prepared_kv = getattr(self, "_prepared_kv", None)
+        prepared_kv = self._prepared_kv
         original_q_len = None
         local_ids = self.fmha_impl.total_local_ids
         if (

@@ -1,7 +1,5 @@
 """Fork/join for independent inference branches, including CUDA Graph replay."""
 
-import os
-
 from typing import Callable, Optional, Sequence, Tuple, TypeVar
 
 import torch
@@ -16,13 +14,6 @@ class CmpMoeStreams:
     ready inputs. The main branch retains the caller stream (and collectives).
     Instances may be reused by graph clones that execute sequentially.
     """
-
-    @classmethod
-    def from_env(cls):
-        """Resolve once at model construction; off allocates no helper or stream."""
-        if os.environ.get("RTP_LLM_GLM5_CMP_MOE_DUAL_STREAM", "1") != "1":
-            return None
-        return cls()
 
     def __init__(self) -> None:
         self._stream: Optional[torch.cuda.Stream] = None

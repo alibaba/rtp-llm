@@ -1,6 +1,5 @@
 """CUDA-specific indexer operations for DeepSeek-V3.2 DSA mechanism."""
 
-import os
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -302,6 +301,7 @@ class IndexerOp(nn.Module):
         is_neox_style: bool = True,
         stable_topk: bool = False,
         enable_fuse_kernels: bool = True,
+        indexer_fused_topk: bool = False,
     ):
         """
         Initialize IndexerOp.
@@ -317,6 +317,7 @@ class IndexerOp(nn.Module):
             scale_fmt: FP8 quantization format (default: "ue8m0")
         """
         super().__init__()
+        self.indexer_fused_topk = indexer_fused_topk
         self.index_n_heads = index_n_heads
         self.index_head_dim = index_head_dim
         self.index_topk = index_topk
@@ -408,7 +409,7 @@ class IndexerOp(nn.Module):
 
     def _write_prefill_topk(self, indices, offsets, output):
         canonicalize = self._prefill_topk_backend == "topk_v3_tie_break"
-        if indices.is_cuda and os.environ.get("RTP_INDEXER_FUSED_TOPK", "0") == "1":
+        if indices.is_cuda and self.indexer_fused_topk:
             from .indexer_launch_fusion import try_write_topk
 
             if try_write_topk(indices, offsets, output, canonicalize):
@@ -856,7 +857,7 @@ class IndexerOp(nn.Module):
                 )
             # The attention planner already owns the token-to-request map.
             # Draft-extend lengths can vary and include empty padded requests.
-            native_next_n = getattr(fmha_params, "schedule_next_n", 1)
+            native_next_n = fmha_params.schedule_next_n
             if native_next_n == 1:
                 block_table = torch.index_select(block_table, 0, batch_indices)
             kvlen_2d = lengths.reshape(-1, native_next_n)

@@ -36,6 +36,7 @@ class IndexerPagedContractTest(unittest.TestCase):
                     kvlen_d=lengths, expanded_seq_lens=lengths
                 )
                 inputs = SimpleNamespace(
+                    input_lengths=torch.empty(0, dtype=torch.int32),
                     is_prefill=phase != "decode",
                     is_target_verify=phase == "target_verify",
                     is_draft_extend=phase == "draft_extend",
@@ -88,6 +89,7 @@ class IndexerPagedContractTest(unittest.TestCase):
                 inputs = SimpleNamespace(
                     is_prefill=True,
                     is_cuda_graph=True,
+                    uniform_verify_lengths=False,
                     is_target_verify=target,
                     is_draft_extend=not target,
                     input_lengths=torch.tensor(widths),
@@ -315,7 +317,7 @@ class IndexerPagedContractTest(unittest.TestCase):
         self.call_indexer(
             module,
             SimpleNamespace(is_prefill=True),
-            SimpleNamespace(full_rope_pos_ids=torch.arange(4)),
+            SimpleNamespace(full_rope_pos_ids=torch.arange(4), kv_cache_sharded=False),
         )
         module._fused_forward_prefill_cp.assert_called_once()
         module._fused_forward_decode.assert_not_called()
@@ -437,6 +439,7 @@ class IndexerPagedContractTest(unittest.TestCase):
         lengths = torch.arange(1, rows + 1, dtype=torch.int32)
         params = SimpleNamespace(
             expanded_seq_lens=lengths,
+            schedule_next_n=1,
             batch_indice_d=torch.arange(2, dtype=torch.int32).repeat_interleave(
                 tokens_per_request
             ),
@@ -494,6 +497,7 @@ class IndexerPagedContractTest(unittest.TestCase):
         mapping = torch.tensor([0, 0, 0, 1, 1, 2, 2, 2, 2, 2], dtype=torch.int32)
         lengths = torch.arange(10, dtype=torch.int32) + 64
         params = SimpleNamespace(
+            schedule_next_n=1,
             batch_indice_d=mapping,
             expanded_seq_lens=lengths,
             schedule_metadata=torch.ones(1, dtype=torch.int32),

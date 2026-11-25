@@ -240,6 +240,7 @@ std::string HWKernelConfig::to_string() const {
         << "enable_decode_cascade_attention: " << enable_decode_cascade_attention << "\n"
         << "disable_dpc_random: " << disable_dpc_random << "\n"
         << "rocm_disable_custom_ag: " << rocm_disable_custom_ag << "\n"
+        << "indexer_fused_topk: " << indexer_fused_topk << "\n"
         << "enable_fuse_kernels: " << enable_fuse_kernels << ", glm5_cp_opt: " << glm5_cp_opt
         << ", enable_glm5_cmp: " << enable_glm5_cmp;
     return oss.str();
@@ -450,6 +451,8 @@ std::string RuntimeConfig::to_string() const {
     std::ostringstream oss;
     oss << "max_generate_batch_size: " << max_generate_batch_size << "\n"
         << "max_block_size_per_item: " << max_block_size_per_item << "\n"
+        << "torch_cuda_pool_prealloc_mb: " << torch_cuda_pool_prealloc_mb << "\n"
+        << "torch_cuda_pool_prealloc_safety_mb: " << torch_cuda_pool_prealloc_safety_mb << "\n"
         << "reserve_runtime_mem_mb: " << reserve_runtime_mem_mb << "\n"
         << "warm_up: " << warm_up << "\n"
         << "warm_up_with_loss: " << warm_up_with_loss << "\n"

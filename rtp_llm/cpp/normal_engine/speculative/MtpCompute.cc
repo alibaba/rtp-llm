@@ -586,7 +586,6 @@ void prepareDSparkProposeInput(GptModelInputs&            draft_input,
     draft_input.engram_token_windows    = torch::Tensor();
     draft_input.last_hidden_states      = torch::Tensor();
     draft_input.prefix_lengths          = toCudaInt32(committed_ends, host_holder).contiguous();
-    draft_input.uniform_verify_lengths  = true;
     draft_input.input_lengths           = buffers.input_lengths.narrow(0, 0, batch_size);
     draft_input.sequence_lengths        = torch::empty({0}, cuda_i32);
     draft_input.sequence_lengths_plus_1 = torch::Tensor();

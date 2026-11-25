@@ -626,6 +626,7 @@ class HWKernelConfig:
     deterministic_attn: bool
     enable_cuda_graph: bool
     enable_cuda_graph_debug_mode: bool
+    indexer_fused_topk: bool
     enable_fuse_kernels: bool
     enable_glm5_cmp: bool
     enable_stable_scatter_add: bool
@@ -1630,6 +1631,9 @@ class RuntimeConfig:
     max_block_size_per_item: int
     max_generate_batch_size: int
     model_name: str
+    prefill_progress_slot: str
+    torch_cuda_pool_prealloc_mb: int
+    torch_cuda_pool_prealloc_safety_mb: int
     reserve_runtime_mem_mb: int
     specify_gpu_arch: str
     use_batch_decode_scheduler: bool

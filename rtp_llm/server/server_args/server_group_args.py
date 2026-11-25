@@ -7,6 +7,30 @@ def init_server_group_args(parser, server_config, distribute_config):
     ##############################################################################################################
     server_group = parser.add_argument_group("Server Configuration")
     server_group.add_argument(
+        "--prefill_stall_thresholds",
+        env_name="RTP_LLM_PREFILL_STALL_THRESHOLDS",
+        bind_to=(server_config, "prefill_stall_thresholds"),
+        type=str,
+        default="",
+        help="Prefill watchdog deadlines in seconds, e.g. prepare=5,layer=20. Empty disables monitoring.",
+    )
+    server_group.add_argument(
+        "--prefill_core_dir",
+        env_name="RTP_LLM_PREFILL_CORE_DIR",
+        bind_to=(server_config, "prefill_core_dir"),
+        type=str,
+        default="/tmp/rtp_llm_prefill_cores",
+        help="Output directory for Prefill watchdog core dumps.",
+    )
+    server_group.add_argument(
+        "--prefill_gpu_core",
+        env_name="RTP_LLM_PREFILL_GPU_CORE",
+        bind_to=(server_config, "prefill_gpu_core"),
+        type=str2bool,
+        default=False,
+        help="Also capture GPU cores when the Prefill watchdog detects a stall.",
+    )
+    server_group.add_argument(
         "--frontend_metrics_enable",
         env_name="RTP_LLM_FRONTEND_METRICS_ENABLE",
         bind_to=(server_config, "frontend_metrics_enable"),

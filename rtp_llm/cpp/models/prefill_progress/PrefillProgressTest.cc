@@ -32,7 +32,10 @@ TEST(PrefillProgressTest, PublishesStagesAndClearsOnExit) {
     TestSlot slot;
     ASSERT_GE(slot.fd, 0);
     ASSERT_EQ(ftruncate(slot.fd, sizeof(uint64_t)), 0);
-    ASSERT_EQ(setenv("RTP_LLM_PREFILL_PROGRESS_SLOT", slot.path, 1), 0);
+    EXPECT_FALSE(PrefillProgressScope::enabled());
+    PrefillProgressScope::initialize("");
+    EXPECT_FALSE(PrefillProgressScope::enabled());
+    PrefillProgressScope::initialize(slot.path);
     ASSERT_TRUE(PrefillProgressScope::enabled());
 
     {
@@ -83,7 +86,6 @@ TEST(PrefillProgressTest, PublishesStagesAndClearsOnExit) {
         check(PrefillPhase::PREPARE);
     }
     EXPECT_EQ(slot.read(), uint64_t{0});
-    EXPECT_EQ(unsetenv("RTP_LLM_PREFILL_PROGRESS_SLOT"), 0);
 }
 
 }  // namespace

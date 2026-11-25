@@ -1,7 +1,6 @@
 #include "rtp_llm/cpp/models/prefill_progress/PrefillProgress.h"
 
 #include <atomic>
-#include <cstdlib>
 #include <endian.h>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -22,12 +21,7 @@ constexpr uint64_t kTidMask       = (uint64_t{1} << 22) - 1;
 constexpr uint64_t kSequenceMask  = (uint64_t{1} << 28) - 1;
 static_assert(__atomic_always_lock_free(sizeof(uint64_t), nullptr));
 
-uint64_t* mapProgressSlot() noexcept {
-    const char* path = std::getenv("RTP_LLM_PREFILL_PROGRESS_SLOT");
-    if (path == nullptr || *path == '\0') {
-        return nullptr;
-    }
-
+uint64_t* mapProgressSlot(const char* path) noexcept {
     // The parent creates the file before spawning the rank. Never create or resize it here.
     const int fd = open(path, O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0) {
@@ -48,14 +42,14 @@ thread_local PrefillProgressScope* active_scope = nullptr;
 
 struct PrefillProgressSlot {
     ~PrefillProgressSlot() {
-        if (record) {
-            munmap(record, sizeof(*record));
+        if (auto* mapped = record.load()) {
+            munmap(mapped, sizeof(*mapped));
         }
     }
 
-    uint64_t* const  record   = mapProgressSlot();
-    std::atomic_flag occupied = ATOMIC_FLAG_INIT;
-    uint64_t         sequence = 0;
+    std::atomic<uint64_t*> record{nullptr};
+    std::atomic_flag       occupied = ATOMIC_FLAG_INIT;
+    uint64_t               sequence = 0;
 };
 
 namespace {
@@ -67,12 +61,24 @@ PrefillProgressSlot& progressSlot() noexcept {
 
 }  // namespace
 
+void PrefillProgressScope::initialize(const char* slot_path) noexcept {
+    if (!slot_path || !*slot_path || enabled()) {
+        return;
+    }
+    if (auto* mapped = mapProgressSlot(slot_path)) {
+        uint64_t* empty = nullptr;
+        if (!progressSlot().record.compare_exchange_strong(empty, mapped)) {
+            munmap(mapped, sizeof(*mapped));
+        }
+    }
+}
+
 PrefillProgressScope::PrefillProgressScope(bool eligible) noexcept {
     if (!eligible || active_scope) {
         return;
     }
     auto& slot = progressSlot();
-    if (!slot.record) {
+    if (!slot.record.load()) {
         return;
     }
     const thread_local long tid = syscall(SYS_gettid);
@@ -90,13 +96,13 @@ PrefillProgressScope::~PrefillProgressScope() {
     if (!slot_) {
         return;
     }
-    __atomic_store_n(slot_->record, uint64_t{0}, __ATOMIC_RELEASE);
+    __atomic_store_n(slot_->record.load(std::memory_order_relaxed), uint64_t{0}, __ATOMIC_RELEASE);
     active_scope = nullptr;
     slot_->occupied.clear(std::memory_order_release);
 }
 
 bool PrefillProgressScope::enabled() noexcept {
-    return progressSlot().record != nullptr;
+    return progressSlot().record.load() != nullptr;
 }
 
 bool PrefillProgressScope::active() noexcept {
@@ -119,7 +125,7 @@ void PrefillProgressScope::publish(PrefillPhase phase, uint64_t layer) noexcept 
     slot_->sequence = (slot_->sequence + 1) & kSequenceMask;
     const uint64_t encoded =
         (slot_->sequence << kSequenceShift) | thread_id_bits_ | (layer << kLayerShift) | static_cast<uint64_t>(phase);
-    __atomic_store_n(slot_->record, htole64(encoded), __ATOMIC_RELEASE);
+    __atomic_store_n(slot_->record.load(std::memory_order_relaxed), htole64(encoded), __ATOMIC_RELEASE);
 }
 
 }  // namespace rtp_llm

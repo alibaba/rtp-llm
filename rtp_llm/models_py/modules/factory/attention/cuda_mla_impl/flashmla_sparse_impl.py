@@ -9,7 +9,6 @@ Two operators:
 """
 
 import logging
-import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -574,20 +573,17 @@ class SparseMlaImpl(MlaImplBase):
 
         if not forbid_realloc:
             next_n = 1
-            host = getattr(attn_inputs, "input_lengths", None)
+            host = attn_inputs.input_lengths
             if (
                 _paged_mqa_context_lens_dim == 2
                 and _is_multi_token_decode(attn_inputs)
-                and os.environ.get("RTP_LLM_INDEXER_NATIVE_MTP", "1") != "0"
                 and isinstance(host, torch.Tensor)
                 and host.numel() > 0
             ):
                 width, remainder = divmod(lengths.numel(), host.numel())
-                fixed = getattr(attn_inputs, "uniform_verify_lengths", False)
+                fixed = attn_inputs.uniform_verify_lengths
                 # Draft-extend capture can replay with ragged request lengths.
-                allow = not getattr(attn_inputs, "is_cuda_graph", False) or getattr(
-                    attn_inputs, "is_target_verify", False
-                )
+                allow = not attn_inputs.is_cuda_graph or attn_inputs.is_target_verify
                 block_table = _physical_block_table(attn_inputs)
                 if (
                     allow

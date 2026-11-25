@@ -102,9 +102,7 @@ class Glm5MtpIndexerStateTest(unittest.TestCase):
         embeddings = torch.arange(12).reshape(3, 4).float()
         result = self.model._mask_position_zero_embeddings(
             embeddings,
-            SimpleNamespace(
-                fmha_params=SimpleNamespace(positions_d=torch.tensor([0, 5, 0]))
-            ),
+            torch.tensor([0, 5, 0]),
         )
         expected = embeddings.clone()
         expected[[0, 2]] = 0

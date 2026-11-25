@@ -154,6 +154,7 @@ py_test(
         "fuser_test.py",
     ],
     deps = [
+        "//rtp_llm:jit_cache_manager_lib",
         "//rtp_llm:utils",
     ],
 )

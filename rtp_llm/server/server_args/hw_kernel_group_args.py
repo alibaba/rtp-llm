@@ -258,6 +258,14 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     )
 
     hw_kernel_group.add_argument(
+        "--indexer_fused_topk",
+        env_name="RTP_INDEXER_FUSED_TOPK",
+        bind_to=(hw_kernel_config, "indexer_fused_topk"),
+        type=str2bool,
+        default=False,
+        help="Fuse the sparse Indexer prefill Top-K output write on supported CUDA inputs.",
+    )
+    hw_kernel_group.add_argument(
         "--glm5_cp_opt",
         env_name="GLM5_CP_OPT",
         bind_to=(hw_kernel_config, "glm5_cp_opt"),

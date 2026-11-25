@@ -1877,8 +1877,7 @@ void CudaGraphRunner::setInputEmbeddingScalar(float input_embedding_scalar) {
 void CudaGraphRunner::initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token) {
     auto options_cuda_int32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
     if (isGenerationPrefillCudaGraph()) {
-        // Only generation-prefill uses optional, total-token-sized buffers.
-        // Keep the legacy embedding/decode allocation contract unchanged.
+        // Generation prefill sizes each optional ID buffer by total tokens.
         if (position_encoding_.defined() && position_encoding_.numel() > 0) {
             inputs.bert_embedding_inputs.combo_position_ids = torch::zeros({max_num_token}, options_cuda_int32);
             inputs.bert_embedding_inputs.position_encoding  = position_encoding_;
@@ -1887,7 +1886,8 @@ void CudaGraphRunner::initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int 
             inputs.bert_embedding_inputs.combo_tokens_type_ids = torch::zeros({max_num_token}, options_cuda_int32);
             inputs.bert_embedding_inputs.token_type_embedding  = token_type_embedding_;
         }
-    } else if (position_encoding_.defined() || token_type_embedding_.defined()) {
+    } else if (isEmbeddingStylePrefillCudaGraph() || position_encoding_.defined() || token_type_embedding_.defined()) {
+        // Legacy embedding graphs expose both ID buffers even without BERT weights.
         inputs.bert_embedding_inputs.combo_position_ids    = torch::zeros({max_seq_len_ * max_bs}, options_cuda_int32);
         inputs.bert_embedding_inputs.position_encoding     = position_encoding_;
         inputs.bert_embedding_inputs.combo_tokens_type_ids = torch::zeros({max_seq_len_ * max_bs}, options_cuda_int32);

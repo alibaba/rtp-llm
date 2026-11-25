@@ -1052,6 +1052,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("disable_dpc_random", &HWKernelConfig::disable_dpc_random)
         .def_readwrite("rocm_disable_custom_ag", &HWKernelConfig::rocm_disable_custom_ag)
         .def_readwrite("enable_fuse_kernels", &HWKernelConfig::enable_fuse_kernels)
+        .def_readwrite("indexer_fused_topk", &HWKernelConfig::indexer_fused_topk)
         .def_readwrite("glm5_cp_opt", &HWKernelConfig::glm5_cp_opt)
         .def_readwrite("enable_glm5_cmp", &HWKernelConfig::enable_glm5_cmp)
         .def("to_string", &HWKernelConfig::to_string)
@@ -1071,11 +1072,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.dyn_decode_gate_thresholds,
                                       self.enable_fuse_kernels,
                                       self.glm5_cp_opt,
-                                      self.enable_glm5_cmp);
+                                      self.enable_glm5_cmp,
+                                      self.indexer_fused_topk);
             },
             [](py::tuple t) {
                 if (t.size() != 5 && t.size() != 7 && t.size() != 8 && t.size() != 9 && t.size() != 10 && t.size() != 11
-                    && t.size() != 12 && t.size() != 13 && t.size() != 15)
+                    && t.size() != 12 && t.size() != 13 && t.size() != 15 && t.size() != 16)
                     throw std::runtime_error("Invalid state!");
                 HWKernelConfig c;
                 try {
@@ -1105,13 +1107,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                             c.glm5_cp_opt     = t[11].cast<bool>();
                             c.enable_glm5_cmp = t[12].cast<bool>();
                         }
-                    } else if (t.size() == 12 || t.size() == 15) {
+                    } else if (t.size() == 12 || t.size() >= 15) {
                         c.enable_dynamic_decode_backend = t[10].cast<bool>();
                         c.dyn_decode_gate_thresholds    = t[11].cast<std::optional<std::string>>();
-                        if (t.size() == 15) {
+                        if (t.size() >= 15) {
                             c.enable_fuse_kernels = t[12].cast<bool>();
                             c.glm5_cp_opt         = t[13].cast<bool>();
                             c.enable_glm5_cmp     = t[14].cast<bool>();
+                        }
+                        if (t.size() == 16) {
+                            c.indexer_fused_topk = t[15].cast<bool>();
                         }
                     }
                 } catch (const std::exception& e) {
@@ -1742,6 +1747,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     // Register RuntimeConfig - only expose its own members, not sub-config members
     py::class_<RuntimeConfig> runtime_config(m, "RuntimeConfig");
     runtime_config.def(py::init<>())
+        .def_readwrite("prefill_progress_slot", &RuntimeConfig::prefill_progress_slot)
+        .def_readwrite("torch_cuda_pool_prealloc_mb", &RuntimeConfig::torch_cuda_pool_prealloc_mb)
+        .def_readwrite("torch_cuda_pool_prealloc_safety_mb", &RuntimeConfig::torch_cuda_pool_prealloc_safety_mb)
         .def_readwrite("max_generate_batch_size", &RuntimeConfig::max_generate_batch_size)
         .def_readwrite("max_block_size_per_item", &RuntimeConfig::max_block_size_per_item)
         .def_readwrite("reserve_runtime_mem_mb", &RuntimeConfig::reserve_runtime_mem_mb)
@@ -1779,10 +1787,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.worker_addrs,
                                       self.specify_gpu_arch,
                                       self.model_warm_up,
-                                      self.output_dispatcher_worker_count);
+                                      self.output_dispatcher_worker_count,
+                                      self.torch_cuda_pool_prealloc_mb,
+                                      self.torch_cuda_pool_prealloc_safety_mb);
             },
             [](py::tuple t) {
-                if (t.size() != 12 && t.size() != 13 && t.size() != 14)
+                if (t.size() != 12 && t.size() != 13 && t.size() != 14 && t.size() != 16)
                     throw std::runtime_error("Invalid state!");
                 RuntimeConfig c;
                 try {
@@ -1803,6 +1813,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     }
                     if (t.size() >= 14) {
                         c.output_dispatcher_worker_count = t[13].cast<int>();
+                    }
+                    if (t.size() == 16) {
+                        c.torch_cuda_pool_prealloc_mb        = t[14].cast<int64_t>();
+                        c.torch_cuda_pool_prealloc_safety_mb = t[15].cast<int64_t>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("RuntimeConfig unpickle error: ") + e.what());

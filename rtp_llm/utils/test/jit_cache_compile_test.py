@@ -76,6 +76,7 @@ class JitCacheCompileTest(unittest.TestCase):
             (root / "remote").mkdir()
             config = SimpleNamespace(
                 manage_jit_cache=True,
+                local_jit_dir="",
                 remote_jit_dir=str(root / "remote"),
                 jit_cache_setup_timeout_s=30,
             )

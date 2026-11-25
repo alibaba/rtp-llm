@@ -20,13 +20,13 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
+#include "rtp_llm/cpp/models/prefill_progress/PrefillProgress.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/DevicePin.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/utils/TorchCudaOom.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
-#include "autil/EnvUtil.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include <c10/core/InferenceMode.h>
@@ -175,13 +175,13 @@ private:
 #if USING_CUDA
 constexpr size_t kMiB = 1024 * 1024;
 
-void preallocateTorchCudaPoolForPrefill(RoleType role_type, int device_id) {
+void preallocateTorchCudaPoolForPrefill(RoleType role_type, int device_id, const RuntimeConfig& config) {
     if (role_type != RoleType::PREFILL) {
         return;
     }
 
-    const int64_t max_mb    = autil::EnvUtil::getEnv("TORCH_CUDA_POOL_PREALLOC_MB", int64_t(-1));
-    const int64_t safety_mb = autil::EnvUtil::getEnv("TORCH_CUDA_POOL_PREALLOC_SAFETY_MB", int64_t(8192));
+    const int64_t max_mb    = config.torch_cuda_pool_prealloc_mb;
+    const int64_t safety_mb = config.torch_cuda_pool_prealloc_safety_mb;
     RTP_LLM_CHECK_WITH_INFO(max_mb >= -1 && safety_mb >= 0, "invalid Torch CUDA pool preallocation config");
     if (max_mb == 0) {
         return;
@@ -260,6 +260,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     step_profiler_(params.profiling_debug_logging_config.torch_cuda_profiler_dir,
                    params.parallelism_config.world_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
+    PrefillProgressScope::initialize(runtime_config.prefill_progress_slot.c_str());
     // As in PyWrappedModel, failed construction must release Python references under the GIL.
     auto cleanup_on_failure = [](NormalEngine* engine) noexcept {
         if (engine->custom_output_selector_) {
@@ -1175,7 +1176,7 @@ absl::Status NormalEngine::startLoop() {
     // Run after KV cache, executor, scheduler and system-prompt initialization,
     // but before the engine loop can accept work. The temporary torch::Tensor is
     // released into the same CUDACachingAllocator used by Prefill model forwards.
-    preallocateTorchCudaPoolForPrefill(pd_sep_config.role_type, getDeviceId());
+    preallocateTorchCudaPoolForPrefill(pd_sep_config.role_type, getDeviceId(), runtime_config);
 #endif
     RTP_LLM_LOG_INFO("start normal engine loop");
     running_     = true;

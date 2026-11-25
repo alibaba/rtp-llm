@@ -61,6 +61,58 @@ class Glm5EnvironmentArgumentsTest(TestCase):
             self.assertFalse(config.py_hw_kernel_config.glm5_cp_opt)
             self.assertFalse(config.py_hw_kernel_config.enable_glm5_cmp)
 
+    def test_prefill_runtime_options_use_registered_cli_and_env(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        def options(config):
+            return (
+                config.py_hw_kernel_config.indexer_fused_topk,
+                config.runtime_config.torch_cuda_pool_prealloc_mb,
+                config.runtime_config.torch_cuda_pool_prealloc_safety_mb,
+                config.server_config.prefill_stall_thresholds,
+                config.server_config.prefill_core_dir,
+                config.server_config.prefill_gpu_core,
+            )
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                options(setup_args([])),
+                (False, -1, 8192, "", "/tmp/rtp_llm_prefill_cores", False),
+            )
+        env = {
+            "RTP_INDEXER_FUSED_TOPK": "1",
+            "TORCH_CUDA_POOL_PREALLOC_MB": "1024",
+            "TORCH_CUDA_POOL_PREALLOC_SAFETY_MB": "4096",
+            "RTP_LLM_PREFILL_STALL_THRESHOLDS": "layer=20",
+            "RTP_LLM_PREFILL_CORE_DIR": "/tmp/watchdog-env",
+            "RTP_LLM_PREFILL_GPU_CORE": "1",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(
+                options(setup_args([])),
+                (True, 1024, 4096, "layer=20", "/tmp/watchdog-env", True),
+            )
+            config = setup_args(
+                [
+                    "--indexer_fused_topk",
+                    "0",
+                    "--torch_cuda_pool_prealloc_mb",
+                    "0",
+                    "--torch_cuda_pool_prealloc_safety_mb",
+                    "2048",
+                    "--prefill_stall_thresholds",
+                    "prepare=3",
+                    "--prefill_core_dir",
+                    "/tmp/watchdog-cli",
+                    "--prefill_gpu_core",
+                    "0",
+                ]
+            )
+            self.assertEqual(
+                options(config),
+                (False, 0, 2048, "prepare=3", "/tmp/watchdog-cli", False),
+            )
+
     def test_old_worker_config_state_defaults_new_options_off(self):
         from rtp_llm.ops import FMHAConfig
 

@@ -20,18 +20,11 @@ from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
-THRESHOLDS_ENV = "RTP_LLM_PREFILL_STALL_THRESHOLDS"
-SLOT_ENV = "RTP_LLM_PREFILL_PROGRESS_SLOT"
-CORE_DIR_ENV = "RTP_LLM_PREFILL_CORE_DIR"
-CORE_TIMEOUT_ENV = "RTP_LLM_PREFILL_CORE_TIMEOUT_S"
-GPU_CORE_ENV = "RTP_LLM_PREFILL_GPU_CORE"
-
 _PHASES = ("idle", "prepare", "layer", "graph", "tail", "gpu_wait", "gpu_done")
 _CONFIG_PHASES = _PHASES[1:-1]
 _WORD = struct.Struct("<Q")
 _MIN_FREE_BYTES = 128 * 1024 * 1024
 _DEFAULT_TIMEOUT_S = 10.0
-_MAX_TIMEOUT_S = 60.0
 _KILL_REAP_GRACE_S = 1.0
 _CUDA_GDB = "/usr/local/cuda/bin/cuda-gdb"
 _GPU_CORE_READABLE = "Prefill GPU core opened successfully"
@@ -465,20 +458,16 @@ class PrefillWatchdog:
     """
 
     @classmethod
-    def from_env(cls) -> Optional["PrefillWatchdog"]:
+    def from_config(
+        cls, thresholds: str, core_dir: str, gpu_core: bool
+    ) -> Optional["PrefillWatchdog"]:
         try:
-            thresholds = _parse_thresholds(os.getenv(THRESHOLDS_ENV, ""))
-            if not thresholds:
+            deadlines = _parse_thresholds(thresholds)
+            if not deadlines:
                 return None
             if sys.platform != "linux" or sys.byteorder != "little":
                 raise ValueError("Prefill watchdog requires little-endian Linux")
-            timeout = float(os.getenv(CORE_TIMEOUT_ENV, str(_DEFAULT_TIMEOUT_S)))
-            if not math.isfinite(timeout) or not 0 < timeout <= _MAX_TIMEOUT_S:
-                raise ValueError(f"{CORE_TIMEOUT_ENV} must be in (0, {_MAX_TIMEOUT_S}]")
-            core_dir = Path(os.getenv(CORE_DIR_ENV, "/tmp/rtp_llm_prefill_cores"))
-            return cls(
-                thresholds, core_dir, timeout, gpu_core=os.getenv(GPU_CORE_ENV) == "1"
-            )
+            return cls(deadlines, Path(core_dir), _DEFAULT_TIMEOUT_S, gpu_core=gpu_core)
         except (OSError, ValueError) as exc:
             _LOG.warning("Prefill watchdog disabled: %s", exc)
             return None

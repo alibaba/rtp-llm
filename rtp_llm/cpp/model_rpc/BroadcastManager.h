@@ -12,6 +12,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -104,7 +105,7 @@ public:
         const std::string fatal_error = fatal_on_error && fatal_failure_seen_ ? failureSummaryNoLock() : std::string{};
         lock.unlock();
         if (!fatal_error.empty()) {
-            RTP_LLM_FAIL("%s", fatal_error.c_str());
+            RTP_LLM_FAIL("%s", errorForLog(fatal_error).c_str());
         }
         return true;
     }
@@ -259,6 +260,31 @@ public:
     }
 
 private:
+    // Peer-supplied text is untrusted. Format only the log copy, leaving RPC status intact.
+    static std::string errorForLog(std::string_view message) {
+        constexpr size_t           max_size = 4096;
+        constexpr std::string_view redacted = "<redacted>";
+        std::string                text(message.substr(0, max_size));
+        for (std::string_view prefix : {"OSS_ACCESS_ID=", "OSS_ACCESS_KEY=", "Bearer ", "bearer ", "sk-"}) {
+            size_t pos = 0;
+            while ((pos = text.find(prefix, pos)) != std::string::npos) {
+                const size_t begin = pos + prefix.size();
+                const size_t end   = text.find_first_of("& \t\r\n\"'\\,;}", begin);
+                text.replace(begin, end == std::string::npos ? end : end - begin, redacted);
+                pos = begin + redacted.size();
+            }
+        }
+        if (text.size() > max_size) {
+            text.resize(max_size);
+        }
+        for (char& c : text) {
+            if (static_cast<unsigned char>(c) < 32 || c == 127) {
+                c = ' ';
+            }
+        }
+        return text;
+    }
+
     // Called under wait_done_mutex_. Only local-cache transfer RPCs are logged;
     // completion-query polling must not generate one line per poll. These are
     // client observations, not proof that the worker admitted or finished I/O.
@@ -284,12 +310,24 @@ private:
                                                                    .count() :
                                                                0;
                 // Do not read gRPC-owned status until a successful CQ event.
-                const int  grpc_code    = cq_received && cq_ok ? static_cast<int>(ctx->status.error_code()) : -1;
-                const auto grpc_message = cq_received && cq_ok ? ctx->status.error_message() : std::string{};
+                const bool  have_status = cq_received && cq_ok;
+                const int   grpc_code   = have_status ? static_cast<int>(ctx->status.error_code()) : -1;
+                std::string grpc_message;
+                std::string failure_details;
+                if (have_status && !ctx->status.ok()) {
+                    grpc_message    = errorForLog(ctx->status.error_message());
+                    failure_details = " " + rpc_tag_;
+                    if (ctx->client_context) {
+                        const auto debug = ctx->client_context->debug_error_string();
+                        if (!debug.empty()) {
+                            failure_details += " grpc_debug=[" + errorForLog(debug) + "]";
+                        }
+                    }
+                }
                 RTP_LLM_LOG_INFO(
                     "transfer_lifecycle event=%s trace=%llu request=%lld rank=%zu addr=%s "
                     "mono_us=%lld deadline_wall_us=%lld cq_received=%d cq_ok=%d grpc_code=%d "
-                    "grpc_message=\"%s\" dispatch_error=\"%s\"",
+                    "grpc_message=\"%s\" dispatch_error=\"%s\"%s",
                     event,
                     static_cast<unsigned long long>(request.transfer_trace_id()),
                     static_cast<long long>(request.has_transfer_request_id() ? request.transfer_request_id() : -1),
@@ -301,7 +339,8 @@ private:
                     cq_ok,
                     grpc_code,
                     grpc_message.c_str(),
-                    dispatch_error ? dispatch_error : "");
+                    dispatch_error ? errorForLog(dispatch_error).c_str() : "",
+                    failure_details.c_str());
             } catch (...) {
                 // Diagnostics cannot change RPC dispatch or completion.
             }
@@ -428,7 +467,7 @@ private:
                         RTP_LLM_LOG_WARNING("broadcast rpc failed, rank=%zu err=%d(%s) addr=%s %s",
                                             rank,
                                             ctx->status.error_code(),
-                                            ctx->status.error_message().c_str(),
+                                            errorForLog(ctx->status.error_message()).c_str(),
                                             ctx->server_addr.c_str(),
                                             rpc_tag_.c_str());
                         grpc_status_failure_seen_ = true;
@@ -474,7 +513,7 @@ private:
                                                 static_cast<int>(ctx->status.error_code()),
                                                 static_cast<int>(error.code()),
                                                 ErrorCodeToString(error.code()).c_str(),
-                                                error.ToString().c_str());
+                                                errorForLog(error.ToString()).c_str());
                         }
                     }
                 } catch (...) {
@@ -751,8 +790,10 @@ private:
                 result->markSubmitted(rank);
             } catch (const std::exception& error) {
                 if (fatal_on_error) {
-                    RTP_LLM_FAIL(
-                        "broadcast rpc dispatch failed, rank=%d err=%s %s", rank, error.what(), rpc_tag.c_str());
+                    RTP_LLM_FAIL("broadcast rpc dispatch failed, rank=%d err=%s %s",
+                                 rank,
+                                 ResultT::errorForLog(error.what()).c_str(),
+                                 rpc_tag.c_str());
                 }
                 if (failure_policy == DispatchFailurePolicy::kContinue) {
                     result->finishDispatchFailure(rank, "broadcast RPC dispatch failed");

@@ -771,6 +771,7 @@ class ModelConfig(CppModelConfig):
         """Initialize ModelConfig with quant_algo member and default values."""
         super().__init__(*args, **kwargs)
         # Additional Python-only fields
+        self.indexer_types: Optional[list[str]] = None
         self.is_mtp: bool = False
         self.is_deepseek_v41: bool = False
         self.deepseek_v41_config = None

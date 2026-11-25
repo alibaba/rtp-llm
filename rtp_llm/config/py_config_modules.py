@@ -46,6 +46,9 @@ class ServerConfig:
     """Port layout: base = start_port + rank_id * worker_info_port_num."""
 
     def __init__(self):
+        self.prefill_stall_thresholds: str = ""
+        self.prefill_core_dir: str = "/tmp/rtp_llm_prefill_cores"
+        self.prefill_gpu_core: bool = False
         self.frontend_metrics_enable = False
         self.frontend_server_count = 4
         self.vit_server_count = 1

@@ -234,7 +234,7 @@ class Glm5Cmp:
             indexer = self.self_attn.indexer
             indexer_k_projection = (
                 get_weight_and_scale_from_linear(indexer.wk)
-                if getattr(indexer, "packed_index_weight", None) is None
+                if indexer.packed_index_weight is None
                 else None
             )
             indexer_q_projection = get_weight_and_scale_from_linear(

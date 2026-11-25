@@ -273,7 +273,7 @@ class MlaAttention(nn.Module):
         fmha_impl = default_fmha_impl
         kv_cache = default_kv_cache
         input_shape = hidden_states.shape[:-1]
-        overlap_kv = kv_cache is not None and getattr(fmha_impl, "overlap_kv_projections", False)
+        overlap_kv = kv_cache is not None and fmha_impl.overlap_kv_projections
         q_c = None
         q_c_fp8 = None
         q_c_scale = None

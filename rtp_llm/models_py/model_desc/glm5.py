@@ -96,7 +96,7 @@ class Glm5MoeLayer(GenericMoeLayer):
             and moe_config.moe_strategy in ("mega_moe", "mega_moe_fp8")
             and self.shared_expert is not None and self.shared_expert_gate is None
         ):
-            self._cmp_moe_streams = CmpMoeStreams.from_env()
+            self._cmp_moe_streams = CmpMoeStreams()
 
     def _create_fused_moe(
         self,
@@ -756,7 +756,12 @@ class Glm5MoeModel(Glm5ModelBase):
         }:
             raise RuntimeError("GLM5 requires default and indexer_kv attention routes")
         capture = self.capture_context(inputs.capture_hidden_states)
-        result = self._forward_decoder_layers(hidden_states, fmha_impl, capture=capture, layer_progress=getattr(inputs, "prefill_layer_progress", None))
+        result = self._forward_decoder_layers(
+            hidden_states,
+            fmha_impl,
+            capture=capture,
+            layer_progress=inputs.prefill_layer_progress,
+        )
         return capture.finalize(result.hidden_states, result.residual)
 
 

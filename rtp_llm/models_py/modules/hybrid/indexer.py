@@ -162,6 +162,8 @@ class Indexer(nn.Module):
             is_neox_style=self.is_neox_style,
             stable_topk=stable_topk,
             enable_fuse_kernels=self._fuse_kernels_enabled,
+            indexer_fused_topk=hw_kernel_config is not None
+            and hw_kernel_config.indexer_fused_topk,
         )
 
     def _prefill_cp_enabled(self) -> bool:
@@ -290,7 +292,7 @@ class Indexer(nn.Module):
         )
         slot_mapping = (
             cp_params.sharded_slot_mapping
-            if bool(getattr(cp_params, "kv_cache_sharded", False))
+            if cp_params.kv_cache_sharded
             else fmha_params.slot_mapping
         )
         self.indexer_op.quant_k_cp_only(
@@ -347,7 +349,7 @@ class Indexer(nn.Module):
             assert cp_params is not None
             slot_mapping = (
                 cp_params.sharded_slot_mapping
-                if bool(getattr(cp_params, "kv_cache_sharded", False))
+                if cp_params.kv_cache_sharded
                 else fmha_params.slot_mapping
             )
             return self.indexer_op.quant_q_k_cp(
@@ -388,20 +390,16 @@ class Indexer(nn.Module):
                 cp_params.precomputed_ke,
                 cp_params.precomputed_lengths,
                 cp_params.precomputed_topk_off,
-                bool(getattr(cp_params, "kv_cache_sharded", False)),
-                int(getattr(cp_params, "cp_size", 1)),
-                int(getattr(cp_params, "cp_rank", 0)),
+                cp_params.kv_cache_sharded,
+                cp_params.cp_size,
+                cp_params.cp_rank,
                 prepared_keys=prepared_keys,
                 kv_owner_tokens_per_block=self._kv_owner_tokens_per_block,
-                indexer_cp_plan=getattr(cp_params, "indexer_cp_plan", None),
-                indexer_cp_local_cu=getattr(cp_params, "indexer_cp_local_cu", None),
-                indexer_copy_dst_idx=getattr(cp_params, "indexer_copy_dst_idx", None),
-                indexer_src_for_padded=getattr(
-                    cp_params, "indexer_src_for_padded", None
-                ),
-                total_local_ids_is_identity=bool(
-                    getattr(cp_params, "total_local_ids_is_identity", False)
-                ),
+                indexer_cp_plan=cp_params.indexer_cp_plan,
+                indexer_cp_local_cu=cp_params.indexer_cp_local_cu,
+                indexer_copy_dst_idx=cp_params.indexer_copy_dst_idx,
+                indexer_src_for_padded=cp_params.indexer_src_for_padded,
+                total_local_ids_is_identity=cp_params.total_local_ids_is_identity,
             )
         return self.indexer_op._get_topk_ragged(
             q_fp8, weights, kv_cache, fmha_params, attention_inputs
@@ -480,8 +478,8 @@ class Indexer(nn.Module):
 
         if (
             self._is_sparse_prefill_cp(attention_inputs)
-            and getattr(cp_params, "kv_cache_sharded", False)
-            and getattr(cp_params, "cp_size", 1) > 1
+            and cp_params.kv_cache_sharded
+            and cp_params.cp_size > 1
             and pynccl_cp.enabled()
             and hidden_states.is_cuda
             and not torch.cuda.is_current_stream_capturing()

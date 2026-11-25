@@ -1,6 +1,5 @@
 """Optional integer postprocessing for the FP8 indexer."""
 
-import os
 
 import torch
 import triton
@@ -106,9 +105,7 @@ def try_write_topk(
     canonicalize: bool,
 ) -> bool:
     """Write the original Torch canonicalization/offset result into a disjoint view."""
-    if os.environ.get("RTP_INDEXER_FUSED_TOPK", "0") != "1" or not topk_is_supported(
-        indices, offsets, out
-    ):
+    if not topk_is_supported(indices, offsets, out):
         return False
     if not indices.numel():
         return True

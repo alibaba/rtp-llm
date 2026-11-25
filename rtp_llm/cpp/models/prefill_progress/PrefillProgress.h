@@ -24,6 +24,7 @@ public:
     PrefillProgressScope(const PrefillProgressScope&)            = delete;
     PrefillProgressScope& operator=(const PrefillProgressScope&) = delete;
 
+    static void initialize(const char* slot_path) noexcept;
     static bool enabled() noexcept;
     static bool active() noexcept;
     static void mark(PrefillPhase phase) noexcept;

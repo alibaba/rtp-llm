@@ -1495,6 +1495,7 @@ class ManagerTest(JitCacheTestBase):
 class BackendTest(JitCacheTestBase):
     def make_configs(self, remote="", world_size=1):
         configs = mock.Mock()
+        configs.jit_config.local_jit_dir = ""
         configs.jit_config.remote_jit_dir = remote
         configs.jit_config.jit_cache_setup_timeout_s = 5
         configs.jit_config.manage_jit_cache = True
@@ -1669,7 +1670,8 @@ class BackendTest(JitCacheTestBase):
                 )
             )
             stack.enter_context(mock.patch.object(backend, "_send_pipe_status", status))
-            backend.local_rank_start(None, configs, pipe_writer=object())
+            backend.local_rank_start(None, configs, pipe_writer=object(), prefill_progress_slot="/tmp/rank0.slot")
+        self.assertEqual(configs.runtime_config.prefill_progress_slot, "/tmp/rank0.slot")
         self.assertEqual(status.call_args[0][1], "success")
         self.assertEqual(events, ["device", "tuning", "backend"])
         handlers[backend.signal.SIGTERM](backend.signal.SIGTERM, None)
@@ -1696,7 +1698,9 @@ class BackendTest(JitCacheTestBase):
 
     @staticmethod
     def _fake_create(proc):
-        def fake(_gc, _cfg, _ctx, processes, readers, service_draining=None):
+        def fake(
+            _gc, _cfg, _ctx, processes, readers, service_draining=None, prefill_watchdog=None
+        ):
             processes.append(proc)
             readers.append(mock.Mock())
 

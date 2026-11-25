@@ -349,6 +349,7 @@ struct HWKernelConfig {
     bool             enable_fuse_kernels             = true;
     bool             glm5_cp_opt                     = false;
     bool             enable_glm5_cmp                 = false;
+    bool             indexer_fused_topk              = false;
     std::string      to_string() const;
 };
 
@@ -542,6 +543,11 @@ struct RuntimeConfig {
     std::vector<std::string> worker_addrs;
 
     std::string specify_gpu_arch = "";
+
+    int64_t torch_cuda_pool_prealloc_mb        = -1;
+    int64_t torch_cuda_pool_prealloc_safety_mb = 8192;
+    // The worker sets its own slot after spawn. It must not be inherited through a config pickle.
+    std::string prefill_progress_slot;
 
     std::string to_string() const;
 };
