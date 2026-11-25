@@ -1,18 +1,33 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Hopper two-kernel delayed-mHC boundary adapted from vLLM.
+"""Hopper small-M (``1 <= M <= 64``) delayed-mHC boundary.
 
-The first TileLang kernel folds the delayed post mapping into the next
-coefficient projection.  The existing RTP TileLang epilogue then reduces the
-split partials, runs Sinkhorn, performs the delayed readout and writes the
-BF16 layer input.  The caller applies the established RMSNorm implementation.
+In delayed mHC (``use_pre_mix_in=True``), ``previous_pre`` is already known
+before the post-mapping kernel runs.  Fusing the delayed readout
+``collapsed = bf16(sum_hc previous_pre[hc] * new_residual[hc])`` directly into
+the post/projection pass removes the 4x5120 ``residual_out`` re-read from the
+epilogue kernel.
 
-Adapted from vLLM at 0c81a0371f586cc50a0daad6d216fbac21cf1a2d,
+Three SM90 regimes cover ``1 <= M <= 64``:
+
+- ``1 <= M < 16``: vectorized split-10 two-kernel SIMT path (``tile_n=4``,
+  128 threads, 4-element vector loads) + zero-barrier 4-thread fast-math
+  Sinkhorn / FlashInfer-matching 64-thread RMSNorm epilogue.
+- ``16 <= M <= 24``: zero-barrier single-N-tile (``tile_n=24``) split-40
+  one-warp SIMT kernel eliminating redundant residual reads + cooperative
+  epilogue.
+- ``24 < M <= 64``: coalesced post+collapse kernel + DeepGEMM native Hopper
+  TF32 split-80 projection (reading the 1.97 MB weight once via TMA/WGMMA) +
+  cooperative 8-warp epilogue (falling back to the split-10 SIMT kernel when
+  DeepGEMM is unavailable or explicitly disabled).
+
+Originally adapted from vLLM at 0c81a0371f586cc50a0daad6d216fbac21cf1a2d,
 ``vllm/model_executor/kernels/mhc/tilelang_kernels.py`` (Apache-2.0).
 """
 
 import importlib
 import math
+import os
 
 import tilelang
 import torch
@@ -27,20 +42,42 @@ prepare_tf32_rne_weight = importlib.import_module(
     "rtp_llm.models_py.3rdparty.tile_kernels.mhc.norm_fn_kernel"
 ).prepare_tf32_rne_weight
 
-_mhc_pre_big_fuse_with_norm = importlib.import_module(
+_mhc_pre_collapsed_norm = importlib.import_module(
     "rtp_llm.models_py.modules.dsv41.hc.mhc_sm90_vllm_prenorm"
-).mhc_pre_big_fuse_with_norm_tilelang
+).mhc_pre_collapsed_norm_tilelang
 
 HC = 4
 DIM = 5120
 MIX = 24
-SPLITS = 8
+SPLITS = 10
 THREADS = 128
-# Largest token count the fused two-kernel seam still beats the standalone
-# chain at. Measured on SM90 (L20Z): 1.24x at 64 rows, 0.84x at 128, with the
-# crossover at ~92 rows; 64 is also the largest decode CUDA-graph bucket.
+VEC = 4
+
+# Single-N-tile (zero redundant residual reads, zero block barriers) regime.
+_MID_MIN_TOKENS = 16
+_MID_MAX_TOKENS = 24
+_MID_SPLITS = 40
+_MID_THREADS = 32
+_MID_VEC = 4
+
+# DeepGEMM TF32 split-K projection regime for 24 < M <= 64.
+_DG_SPLITS = 80
+_POST_COLLAPSED_SPLITS = 10
+_POST_COLLAPSED_THREADS = 128
+_POST_COLLAPSED_VEC = 4
+
+# Epilogue launches grid=(M, 2) with 256 threads per CTA (<=128 CTAs at M=64).
+_EPILOGUE_THREADS = 256
+
+# Largest token count owned by the small-M SM90 backend (64 is also the largest
+# decode CUDA-graph bucket; 64 < M <= 512 is owned by largebs_three_kernel).
 MAX_TOKENS = 64
-_WARMED_STREAMS: set[tuple[int, int]] = set()
+
+_EXPLICIT_TILELANG_BACKENDS = frozenset(
+    ("tilelang_single", "tilelang", "single", "tilelang_splitk", "splitk")
+)
+
+_WARMED_STREAMS: set[tuple] = set()
 
 
 def prepare_sm90_tf32_rne_weight(fn: torch.Tensor) -> torch.Tensor:
@@ -54,6 +91,21 @@ def prepare_sm90_tf32_rne_weight(fn: torch.Tensor) -> torch.Tensor:
     return prepare_tf32_rne_weight(fn)
 
 
+def _has_deepgemm() -> bool:
+    from rtp_llm.models_py.modules.dsv41.hc.v41_prenorm import _has_prenorm_gemm
+
+    return _has_prenorm_gemm()
+
+
+def _use_deepgemm_med(tokens: int) -> bool:
+    if tokens <= _MID_MAX_TOKENS:
+        return False
+    requested = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
+    if requested in _EXPLICIT_TILELANG_BACKENDS:
+        return False
+    return _has_deepgemm()
+
+
 _PASS_CONFIGS = {
     tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
     tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
@@ -61,22 +113,35 @@ _PASS_CONFIGS = {
 }
 
 
-def _build_post_projection(tile_n: int, combine: bool):
-    """Build the fused post-mapping plus split-projection kernel.
+def _build_post_projection(
+    tile_n: int,
+    combine: bool,
+    *,
+    splits: int = SPLITS,
+    threads: int = THREADS,
+    vec: int = VEC,
+):
+    """Build the fused post-mapping + delayed-collapse + split-projection kernel.
 
     ``combine`` selects how the sublayer output element is obtained.  The plain
     variant loads the materialized BF16 tensor.  The deferred-combine variant
     rebuilds ``bf16(routed + shared)`` from the two BF16 operands: the FP32 sum
     is rounded once to BF16 and widened back, which is bit-for-bit the value
     ``_add_cast_kernel`` had stored, so the standalone combine kernel and its
-    round trip through memory disappear.  Skipping that intermediate round trip
-    is *not* equivalent -- both BF16 addends lose up to one ULP -- which is why
-    the fold is only exact inside a consumer that can redo the rounding.
+    round trip through memory disappear.
+
+    ``projection_tile == 0`` also writes ``residual_out``, the rounded BF16
+    ``collapsed_out``, and the per-split ``square_partials`` while
+    ``new_residual`` is still in registers.
     """
     num_tokens = T.dynamic("num_tokens")
-    hidden_per_split = DIM // SPLITS
-    hidden_iters = hidden_per_split // THREADS
-    num_warps = THREADS // 32
+    assert DIM % splits == 0
+    hidden_per_split = DIM // splits
+    step_h = threads * vec
+    assert hidden_per_split % step_h == 0
+    hidden_iters = hidden_per_split // step_h
+    num_warps = threads // 32
+    assert MIX % tile_n == 0
     num_projection_tiles = MIX // tile_n
 
     @T.prim_func
@@ -84,102 +149,223 @@ def _build_post_projection(tile_n: int, combine: bool):
         comb_mix: T.Tensor[(num_tokens, HC, HC), T.float32],
         residual_in: T.Tensor[(num_tokens, HC, DIM), T.bfloat16],
         post_mix: T.Tensor[(num_tokens, HC), T.float32],
+        previous_pre: T.Tensor[(num_tokens, HC), T.float32],
         routed_in: T.Tensor[(num_tokens, DIM), T.bfloat16],
         shared_in: T.Tensor[(num_tokens, DIM), T.bfloat16],
         weight: T.Tensor[(MIX, HC, DIM), T.float32],
-        partials: T.Tensor[(SPLITS, num_tokens, MIX), T.float32],
-        square_partials: T.Tensor[(SPLITS, num_tokens), T.float32],
+        partials: T.Tensor[(splits, num_tokens, MIX), T.float32],
+        square_partials: T.Tensor[(splits, num_tokens), T.float32],
         residual_out: T.Tensor[(num_tokens, HC, DIM), T.bfloat16],
+        collapsed_out: T.Tensor[(num_tokens, DIM), T.bfloat16],
     ) -> None:
         with T.Kernel(
-            num_tokens, num_projection_tiles, SPLITS, threads=THREADS
+            num_tokens, num_projection_tiles, splits, threads=threads
         ) as (token, projection_tile, split):
             tid = T.get_thread_binding()
             warp = tid // 32
             lane = tid % 32
-            warp_sums = T.alloc_shared((num_warps, tile_n + 1), T.float32)
-            post_shared = T.alloc_shared((HC,), T.float32)
-            comb_shared = T.alloc_shared((HC, HC), T.float32)
-            post_local = T.alloc_local((HC,), T.float32)
-            comb_local = T.alloc_local((HC, HC), T.float32)
-            accum = T.alloc_local((tile_n,), T.float32)
-            square = T.alloc_local((1,), T.float32)
-            new_residual = T.alloc_local((HC,), T.float32)
 
-            T.clear(accum)
-            T.clear(square)
-            hidden_start = split * hidden_per_split
-            T.copy(post_mix[token, 0], post_shared)
-            T.copy(comb_mix[token, 0, 0], comb_shared)
+            post_local = T.alloc_local((HC,), T.float32)
+            pre_local = T.alloc_local((HC,), T.float32)
+            comb_local = T.alloc_local((HC, HC), T.float32)
             for dst in T.unroll(HC):
-                post_local[dst] = post_shared[dst]
+                post_local[dst] = post_mix[token, dst]
+                pre_local[dst] = previous_pre[token, dst]
             for src in T.unroll(HC):
                 for dst in T.unroll(HC):
-                    comb_local[src, dst] = comb_shared[src, dst]
+                    comb_local[src, dst] = comb_mix[token, src, dst]
+
+            accum = T.alloc_local((tile_n,), T.float32)
+            square = T.alloc_local((1,), T.float32)
+            T.clear(accum)
+            T.clear(square)
+
+            hidden_start = split * hidden_per_split
+            x_vec = T.alloc_local((vec,), T.bfloat16)
+            s_vec = T.alloc_local((vec,), T.bfloat16)
+            r_vec = T.alloc_local((HC, vec), T.bfloat16)
+            nr_vec = T.alloc_local((HC, vec), T.bfloat16)
+            c_vec = T.alloc_local((vec,), T.bfloat16)
+            w_vec = T.alloc_local((vec,), T.float32)
 
             for iteration in T.serial(hidden_iters):
-                hidden = hidden_start + iteration * THREADS + tid
+                h_base = hidden_start + iteration * step_h + tid * vec
+                for v in T.vectorized(vec):
+                    x_vec[v] = routed_in[token, h_base + v]
                 if combine:
-                    # The retired add+cast kernel's exact value.
-                    x = T.bfloat16(
-                        T.float32(routed_in[token, hidden])
-                        + T.float32(shared_in[token, hidden])
-                    )
-                else:
-                    x = routed_in[token, hidden]
-                for dst in T.unroll(HC):
-                    new_residual[dst] = post_local[dst] * x
-                    for src in T.unroll(HC):
-                        new_residual[dst] += (
-                            comb_local[src, dst] * residual_in[token, src, hidden]
+                    for v in T.vectorized(vec):
+                        s_vec[v] = shared_in[token, h_base + v]
+                for src in T.unroll(HC):
+                    for v in T.vectorized(vec):
+                        r_vec[src, v] = residual_in[token, src, h_base + v]
+
+                for v in T.unroll(vec):
+                    if combine:
+                        # The retired add+cast kernel's exact BF16 value.
+                        xv = T.float32(
+                            T.bfloat16(T.float32(x_vec[v]) + T.float32(s_vec[v]))
                         )
-                    # RTP's established boundary projects the materialized BF16
-                    # residual.  Preserve that contract inside the fused kernel.
-                    new_residual[dst] = T.bfloat16(new_residual[dst])
+                    else:
+                        xv = T.float32(x_vec[v])
+                    c_acc = T.alloc_var(T.float32, init=0.0)
+                    for dst in T.unroll(HC):
+                        nr = T.alloc_var(T.float32, init=post_local[dst] * xv)
+                        for src in T.unroll(HC):
+                            nr += comb_local[src, dst] * T.float32(r_vec[src, v])
+                        # RTP's established boundary projects the materialized
+                        # BF16 residual. Preserve that contract inline.
+                        nr_bf16 = T.bfloat16(nr)
+                        nr_vec[dst, v] = nr_bf16
+                        if projection_tile == 0:
+                            nr_f = T.float32(nr_bf16)
+                            square[0] += nr_f * nr_f
+                            c_acc += pre_local[dst] * nr_f
+                    if projection_tile == 0:
+                        # Keep the BF16 boundary before delayed input RMSNorm.
+                        c_vec[v] = T.bfloat16(c_acc)
 
                 if projection_tile == 0:
                     for dst in T.unroll(HC):
-                        residual_out[token, dst, hidden] = new_residual[dst]
-                        square[0] += new_residual[dst] * new_residual[dst]
+                        for v in T.vectorized(vec):
+                            residual_out[token, dst, h_base + v] = nr_vec[dst, v]
+                    for v in T.vectorized(vec):
+                        collapsed_out[token, h_base + v] = c_vec[v]
 
-                for output in T.unroll(tile_n):
-                    for lane_hc in T.unroll(HC):
-                        accum[output] += (
-                            weight[projection_tile * tile_n + output, lane_hc, hidden]
-                            * new_residual[lane_hc]
-                        )
+                for lane_hc in T.unroll(HC):
+                    for output in T.unroll(tile_n):
+                        n_idx = projection_tile * tile_n + output
+                        for v in T.vectorized(vec):
+                            w_vec[v] = weight[n_idx, lane_hc, h_base + v]
+                        for v in T.unroll(vec):
+                            accum[output] += w_vec[v] * T.float32(nr_vec[lane_hc, v])
 
-            for output in T.unroll(tile_n):
-                accum[output] = T.warp_reduce_sum(accum[output])
-            if projection_tile == 0:
-                square[0] = T.warp_reduce_sum(square[0])
-            if lane == 0:
+            if num_warps == 1:
                 for output in T.unroll(tile_n):
-                    warp_sums[warp, output] = accum[output]
+                    val = T.warp_reduce_sum(accum[output])
+                    if lane == 0:
+                        partials[
+                            split, token, projection_tile * tile_n + output
+                        ] = val
                 if projection_tile == 0:
-                    warp_sums[warp, tile_n] = square[0]
-            T.sync_threads()
+                    sq_val = T.warp_reduce_sum(square[0])
+                    if lane == 0:
+                        square_partials[split, token] = sq_val
+            else:
+                warp_sums = T.alloc_shared((num_warps, tile_n + 1), T.float32)
+                for output in T.unroll(tile_n):
+                    accum[output] = T.warp_reduce_sum(accum[output])
+                if projection_tile == 0:
+                    square[0] = T.warp_reduce_sum(square[0])
+                if lane == 0:
+                    for output in T.unroll(tile_n):
+                        warp_sums[warp, output] = accum[output]
+                    if projection_tile == 0:
+                        warp_sums[warp, tile_n] = square[0]
+                T.sync_threads()
 
-            if warp == 0:
-                if lane < tile_n:
-                    value = T.alloc_var(T.float32, init=0.0)
-                    for source_warp in T.unroll(num_warps):
-                        value += warp_sums[source_warp, lane]
-                    partials[
-                        split, token, projection_tile * tile_n + lane
-                    ] = value
-                if projection_tile == 0 and lane == 0:
-                    value = T.alloc_var(T.float32, init=0.0)
-                    for source_warp in T.unroll(num_warps):
-                        value += warp_sums[source_warp, tile_n]
-                    square_partials[split, token] = value
+                if warp == 0:
+                    if lane < tile_n:
+                        value = T.alloc_var(T.float32, init=0.0)
+                        for source_warp in T.unroll(num_warps):
+                            value += warp_sums[source_warp, lane]
+                        partials[
+                            split, token, projection_tile * tile_n + lane
+                        ] = value
+                    if projection_tile == 0 and lane == 0:
+                        sq_val = T.alloc_var(T.float32, init=0.0)
+                        for source_warp in T.unroll(num_warps):
+                            sq_val += warp_sums[source_warp, tile_n]
+                        square_partials[split, token] = sq_val
 
     return mhc_fused_post_projection
 
 
+def _build_post_collapsed(
+    combine: bool,
+    *,
+    splits: int = _POST_COLLAPSED_SPLITS,
+    threads: int = _POST_COLLAPSED_THREADS,
+    vec: int = _POST_COLLAPSED_VEC,
+):
+    """Build the coalesced post-mapping + delayed-collapse kernel for DeepGEMM."""
+    num_tokens = T.dynamic("num_tokens")
+    assert DIM % splits == 0
+    hidden_per_split = DIM // splits
+    step_h = threads * vec
+    assert hidden_per_split % step_h == 0
+    hidden_iters = hidden_per_split // step_h
+
+    @T.prim_func
+    def mhc_post_collapsed(
+        comb_mix: T.Tensor[(num_tokens, HC, HC), T.float32],
+        residual_in: T.Tensor[(num_tokens, HC, DIM), T.bfloat16],
+        post_mix: T.Tensor[(num_tokens, HC), T.float32],
+        previous_pre: T.Tensor[(num_tokens, HC), T.float32],
+        routed_in: T.Tensor[(num_tokens, DIM), T.bfloat16],
+        shared_in: T.Tensor[(num_tokens, DIM), T.bfloat16],
+        residual_out: T.Tensor[(num_tokens, HC, DIM), T.bfloat16],
+        collapsed_out: T.Tensor[(num_tokens, DIM), T.bfloat16],
+    ) -> None:
+        with T.Kernel(num_tokens, splits, threads=threads) as (token, split):
+            tid = T.get_thread_binding()
+
+            post_local = T.alloc_local((HC,), T.float32)
+            pre_local = T.alloc_local((HC,), T.float32)
+            comb_local = T.alloc_local((HC, HC), T.float32)
+            for dst in T.unroll(HC):
+                post_local[dst] = post_mix[token, dst]
+                pre_local[dst] = previous_pre[token, dst]
+            for src in T.unroll(HC):
+                for dst in T.unroll(HC):
+                    comb_local[src, dst] = comb_mix[token, src, dst]
+
+            x_vec = T.alloc_local((vec,), T.bfloat16)
+            s_vec = T.alloc_local((vec,), T.bfloat16)
+            r_vec = T.alloc_local((HC, vec), T.bfloat16)
+            nr_vec = T.alloc_local((HC, vec), T.bfloat16)
+            c_vec = T.alloc_local((vec,), T.bfloat16)
+
+            hidden_start = split * hidden_per_split
+            for iteration in T.serial(hidden_iters):
+                h_base = hidden_start + iteration * step_h + tid * vec
+                for v in T.vectorized(vec):
+                    x_vec[v] = routed_in[token, h_base + v]
+                if combine:
+                    for v in T.vectorized(vec):
+                        s_vec[v] = shared_in[token, h_base + v]
+                for src in T.unroll(HC):
+                    for v in T.vectorized(vec):
+                        r_vec[src, v] = residual_in[token, src, h_base + v]
+
+                for v in T.unroll(vec):
+                    if combine:
+                        xv = T.float32(
+                            T.bfloat16(T.float32(x_vec[v]) + T.float32(s_vec[v]))
+                        )
+                    else:
+                        xv = T.float32(x_vec[v])
+                    c_acc = T.alloc_var(T.float32, init=0.0)
+                    for dst in T.unroll(HC):
+                        nr = T.alloc_var(T.float32, init=post_local[dst] * xv)
+                        for src in T.unroll(HC):
+                            nr += comb_local[src, dst] * T.float32(r_vec[src, v])
+                        nr_bf16 = T.bfloat16(nr)
+                        nr_vec[dst, v] = nr_bf16
+                        c_acc += pre_local[dst] * T.float32(nr_bf16)
+                    c_vec[v] = T.bfloat16(c_acc)
+
+                for dst in T.unroll(HC):
+                    for v in T.vectorized(vec):
+                        residual_out[token, dst, h_base + v] = nr_vec[dst, v]
+                for v in T.vectorized(vec):
+                    collapsed_out[token, h_base + v] = c_vec[v]
+
+    return mhc_post_collapsed
+
+
 @tilelang.jit(pass_configs=_PASS_CONFIGS)
 def _mhc_fused_post_projection(tile_n: int):
-    """Fuse post mapping and split projection for low-token decode."""
+    """Fuse post mapping, delayed collapse, and split projection."""
     return _build_post_projection(tile_n, combine=False)
 
 
@@ -187,6 +373,32 @@ def _mhc_fused_post_projection(tile_n: int):
 def _mhc_fused_post_projection_combine(tile_n: int):
     """Same kernel, consuming the deferred ``bf16(routed + shared)`` operands."""
     return _build_post_projection(tile_n, combine=True)
+
+
+@tilelang.jit(pass_configs=_PASS_CONFIGS)
+def _mhc_fused_post_projection_mid(combine: bool):
+    """Single-N-tile (N=24) one-warp zero-barrier kernel for ``16 <= M <= 24``."""
+    return _build_post_projection(
+        MIX,
+        combine=combine,
+        splits=_MID_SPLITS,
+        threads=_MID_THREADS,
+        vec=_MID_VEC,
+    )
+
+
+@tilelang.jit(pass_configs=_PASS_CONFIGS)
+def _mhc_post_collapsed(combine: bool):
+    """Coalesced post + collapse kernel feeding DeepGEMM for ``24 < M <= 64``."""
+    return _build_post_collapsed(combine=combine)
+
+
+def _regime_key(tokens: int) -> int:
+    if tokens < _MID_MIN_TOKENS:
+        return 0
+    if tokens <= _MID_MAX_TOKENS:
+        return 1
+    return 2 if _use_deepgemm_med(tokens) else 3
 
 
 def run(
@@ -218,58 +430,104 @@ def run(
         raise ValueError(
             f"vLLM SM90 two-kernel mHC requires 1..{MAX_TOKENS} tokens, got {tokens}"
         )
-    # Group independent projection outputs without changing the reduction
-    # order. Fewer repeated residual reads help the larger decode buckets.
-    tile_n = 2 if tokens < 16 else (6 if tokens < 32 else 12)
+
     residual_out = torch.empty_like(residual)
-    partials = torch.empty(
-        (SPLITS, tokens, MIX), dtype=torch.float32, device=x.device
-    )
-    square_partials = torch.empty(
-        (SPLITS, tokens), dtype=torch.float32, device=x.device
-    )
+    collapsed = torch.empty((tokens, DIM), dtype=torch.bfloat16, device=x.device)
     next_pre = torch.empty((tokens, HC), dtype=torch.float32, device=x.device)
     next_post = torch.empty_like(next_pre)
     next_comb = torch.empty((tokens, HC * HC), dtype=torch.float32, device=x.device)
     normalized = torch.empty((tokens, DIM), dtype=torch.bfloat16, device=x.device)
 
-    if combine is None:
-        _mhc_fused_post_projection(tile_n)(
+    routed_arg = x if combine is None else combine[0]
+    shared_arg = x if combine is None else combine[1]
+    is_combine = combine is not None
+
+    if _MID_MIN_TOKENS <= tokens <= _MID_MAX_TOKENS:
+        p_splits = _MID_SPLITS
+        partials = torch.empty(
+            (p_splits, tokens, MIX), dtype=torch.float32, device=x.device
+        )
+        square_partials = torch.empty(
+            (p_splits, tokens), dtype=torch.float32, device=x.device
+        )
+        _mhc_fused_post_projection_mid(is_combine)(
             comb,
             residual,
             post,
-            x,
-            x,  # unused by the plain specialization
+            previous_pre,
+            routed_arg,
+            shared_arg,
             weight.view(MIX, HC, DIM),
             partials,
             square_partials,
             residual_out,
+            collapsed,
+        )
+    elif _use_deepgemm_med(tokens):
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import tf32_hc_prenorm_gemm
+
+        p_splits = _DG_SPLITS
+        partials = torch.empty(
+            (p_splits, tokens, MIX), dtype=torch.float32, device=x.device
+        )
+        square_partials = torch.empty(
+            (p_splits, tokens), dtype=torch.float32, device=x.device
+        )
+        _mhc_post_collapsed(is_combine)(
+            comb,
+            residual,
+            post,
+            previous_pre,
+            routed_arg,
+            shared_arg,
+            residual_out,
+            collapsed,
+        )
+        tf32_hc_prenorm_gemm(
+            residual_out.view(tokens, HC * DIM),
+            weight.view(MIX, HC * DIM),
+            partials,
+            square_partials,
+            p_splits,
         )
     else:
-        routed, shared = combine
-        _mhc_fused_post_projection_combine(tile_n)(
+        p_splits = SPLITS
+        tile_n = 4 if tokens < _MID_MIN_TOKENS else 12
+        partials = torch.empty(
+            (p_splits, tokens, MIX), dtype=torch.float32, device=x.device
+        )
+        square_partials = torch.empty(
+            (p_splits, tokens), dtype=torch.float32, device=x.device
+        )
+        kernel = (
+            _mhc_fused_post_projection_combine(tile_n)
+            if is_combine
+            else _mhc_fused_post_projection(tile_n)
+        )
+        kernel(
             comb,
             residual,
             post,
-            routed,
-            shared,
+            previous_pre,
+            routed_arg,
+            shared_arg,
             weight.view(MIX, HC, DIM),
             partials,
             square_partials,
             residual_out,
+            collapsed,
         )
-    _mhc_pre_big_fuse_with_norm(
+
+    _mhc_pre_collapsed_norm(
         partials,
         square_partials,
         scale,
         base,
-        residual_out,
+        collapsed,
+        norm_weight,
+        next_pre,
         next_post,
         next_comb,
-        normalized,
-        norm_weight,
-        previous_pre,
-        next_pre,
         normalized,
         hidden_size=DIM,
         rms_eps=hc_norm_eps,
@@ -278,20 +536,17 @@ def run(
         hc_post_mult_value=2.0,
         sinkhorn_repeat=sinkhorn_repeat,
         norm_eps=rmsnorm_eps,
-        n_splits=SPLITS,
-        mhc_mult=HC,
-        use_pre_mix_in=True,
-        save_pre_mix=True,
+        n_splits=p_splits,
+        hc_mult=HC,
+        threads=_EPILOGUE_THREADS,
         rms_numel=HC * DIM,
-        split_mode="fused",
-        write_aux=False,
     )
     return residual_out, normalized, next_pre, next_post, next_comb
 
 
-def _stream_key(device: torch.device) -> tuple[int, int]:
+def _stream_key(device: torch.device, tokens: int, combine: bool) -> tuple:
     stream = torch.cuda.current_stream(device)
-    return stream.device.index, stream.cuda_stream
+    return stream.device.index, stream.cuda_stream, _regime_key(tokens), combine
 
 
 def try_vllm_two_kernel_post_pre(
@@ -386,7 +641,8 @@ def try_vllm_two_kernel_post_pre(
         return None
     with torch.cuda.device(device):
         capturing = torch.cuda.is_current_stream_capturing()
-        if capturing and _stream_key(device) not in _WARMED_STREAMS:
+        skey = _stream_key(device, tokens, combine is not None)
+        if capturing and skey not in _WARMED_STREAMS:
             return None
         new_residual, normalized, new_pre, new_post, new_comb = run(
             attn_out.view(tokens, DIM),
@@ -413,7 +669,7 @@ def try_vllm_two_kernel_post_pre(
             ),
         )
         if not capturing:
-            _WARMED_STREAMS.add(_stream_key(device))
+            _WARMED_STREAMS.add(skey)
     next_hc.pre_mix_out = new_pre.view(*leading, HC)
     return (
         new_residual.view(*leading, HC, DIM),
