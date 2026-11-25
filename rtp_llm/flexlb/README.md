@@ -211,6 +211,21 @@ without a gRPC exception. Existing health counters and generation cleanup remain
 independent of these diagnostics. Prometheus deployments must append
 `flexlb_app_status_failure_detail` to their existing metric-whitelist prefixes.
 
+Master reports `app.flexlb.prefill.queued.compute.tokens` per `role` and
+`engineIp` on the scheduler metrics interval (default 2 s). It estimates how
+many uncached input tokens are waiting to start Prefill on each worker. A
+request enters the gauge when assigned work is accepted locally and stays in
+it through handoff and worker queueing. A running or finished request leaves
+the gauge. Requests waiting for their first assignment in the global queue
+have no worker to charge. Endpoints sharing a role and IP contribute to one
+host total. Worker phases come from the latest successful status observation
+and can lag during a polling outage. A known empty queue reports zero. An
+incomplete worker observation that prevents estimating the backlog reports
+`NaN`.
+To expose this gauge in Prometheus, include
+`flexlb_app_flexlb_prefill_queued_compute_tokens` in
+`flexlb.monitor.metric-whitelist`. Compare workers within the same Master.
+
 Outbound `EngineGrpcClient` failures are counted once per logical RPC by
 `app.grpc.call.failure` (QPS, PRECISE), only after the final failure. A successful
 read-only retry reports success only; its first failure produces no failure metric

@@ -3,13 +3,15 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 
-import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -22,6 +24,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -126,7 +129,7 @@ class RequestOrchestratorsTest {
                 lifecycle, registry, reporter, admissionReporter).report();
 
         verify(lifecycle, never()).liveRequestCount();
-        verify(registry, never()).snapshotPrefillEndpoints();
+        verify(registry, never()).prefillRoutingSnapshot(any());
         verify(registry, never()).snapshotDecodeEndpoints();
     }
 
@@ -141,11 +144,14 @@ class RequestOrchestratorsTest {
         PrefillEndpoint failingPrefill = mock(PrefillEndpoint.class);
         PrefillEndpoint healthyPrefill = mock(PrefillEndpoint.class);
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
-        Map<String, PrefillEndpoint> prefill = new LinkedHashMap<>();
-        prefill.put("p1", failingPrefill);
-        prefill.put("p2", healthyPrefill);
+        when(failingPrefill.getIp()).thenReturn("host1");
+        when(healthyPrefill.getIp()).thenReturn("host2");
+        when(failingPrefill.queuedComputeTokens()).thenThrow(new IllegalStateException("unavailable"));
+        when(healthyPrefill.queuedComputeTokens()).thenReturn(OptionalLong.of(19));
         when(lifecycle.liveRequestCount()).thenReturn(7);
-        when(registry.snapshotPrefillEndpoints()).thenReturn(prefill);
+        when(registry.prefillRoutingSnapshot(RoleType.PREFILL)).thenReturn(List.of(
+                new EndpointRegistry.PrefillRoutingEntry("p1", failingPrefill),
+                new EndpointRegistry.PrefillRoutingEntry("p2", healthyPrefill)));
         when(registry.snapshotDecodeEndpoints()).thenReturn(Map.of("d1", decode));
         doThrow(new RuntimeException("metrics unavailable"))
                 .when(failingPrefill).reportBatchMetrics(reporter);
@@ -157,9 +163,46 @@ class RequestOrchestratorsTest {
         verify(failingPrefill).reportBatchMetrics(reporter);
         verify(healthyPrefill).reportBatchMetrics(reporter);
         verify(decode).reportBatchMetrics(reporter);
+        verify(reporter).reportPrefillQueuedComputeTokens(RoleType.PREFILL, "host1", Double.NaN);
+        verify(reporter).reportPrefillQueuedComputeTokens(RoleType.PREFILL, "host2", 19);
         verify(admissionReporter).reportPrefillQueueDepth("p1", 0);
         verify(admissionReporter).reportPrefillQueueDepth("p2", 0);
         verify(decode).reportAdmissionMetrics(admissionReporter);
+    }
+
+    @Test
+    void reportsComputePerRoleAndIpIncludingIdleUnknownAndRetiredHosts() {
+        var registry = mock(EndpointRegistry.class);
+        var reporter = mock(BatchSchedulerReporter.class);
+        var admission = mock(RequestSchedulerReporter.class);
+        var runtime = new SchedulerRuntime(mock(RequestRegistry.class), registry, reporter, admission);
+        var first = mock(PrefillEndpoint.class);
+        var second = mock(PrefillEndpoint.class);
+        var fusion = mock(PrefillEndpoint.class);
+        when(first.getIp()).thenReturn("shared");
+        when(second.getIp()).thenReturn("shared");
+        when(fusion.getIp()).thenReturn("shared");
+        when(first.queuedComputeTokens()).thenReturn(OptionalLong.of(20));
+        when(second.queuedComputeTokens()).thenReturn(OptionalLong.of(30), OptionalLong.empty());
+        when(fusion.queuedComputeTokens()).thenReturn(OptionalLong.of(0));
+        var pair = List.of(new EndpointRegistry.PrefillRoutingEntry("shared:1", first),
+                new EndpointRegistry.PrefillRoutingEntry("shared:2", second));
+        when(registry.prefillRoutingSnapshot(RoleType.PREFILL)).thenReturn(pair)
+                .thenReturn(pair).thenReturn(List.of(pair.get(0))).thenReturn(List.of());
+        when(registry.prefillRoutingSnapshot(RoleType.PDFUSION)).thenReturn(
+                List.of(new EndpointRegistry.PrefillRoutingEntry("shared:3", fusion)));
+
+        for (int i = 0; i < 5; i++) {
+            runtime.report();
+        }
+
+        verify(reporter).reportPrefillQueuedComputeTokens(RoleType.PREFILL, "shared", 50);
+        verify(reporter).reportPrefillQueuedComputeTokens(RoleType.PREFILL, "shared", 20);
+        // One unknown constituent in sample 2, then the last endpoint retired in sample 4.
+        verify(reporter, times(2)).reportPrefillQueuedComputeTokens(RoleType.PREFILL, "shared", Double.NaN);
+        verify(reporter, times(5)).reportPrefillQueuedComputeTokens(RoleType.PDFUSION, "shared", 0);
+        verify(fusion, never()).reportBatchMetrics(any());
+        verify(admission, never()).reportPrefillQueueDepth("shared:3", 0);
     }
 
     private static SchedulerRuntime runtime(

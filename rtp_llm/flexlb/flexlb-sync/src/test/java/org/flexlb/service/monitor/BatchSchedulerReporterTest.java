@@ -1,9 +1,14 @@
 package org.flexlb.service.monitor;
 
+import io.micrometer.prometheus.PrometheusConfig;
+import io.micrometer.prometheus.PrometheusMeterRegistry;
+import org.flexlb.config.WhitelistMetricsFilterConfig;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
+import org.flexlb.metric.MicrometerFlexMonitor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -17,9 +22,11 @@ import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_DISPATC
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_MAX_AGE_MS;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_TTL_EXPIRED_QPS;
+import static org.flexlb.constant.MetricConstant.PREFILL_QUEUED_COMPUTE_TOKENS;
 import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.eq;
@@ -123,6 +130,31 @@ class BatchSchedulerReporterTest {
         verify(monitor).register(INFLIGHT_MAX_AGE_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register(INFLIGHT_TTL_EXPIRED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         verify(monitor).register(DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).register(PREFILL_QUEUED_COMPUTE_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+    }
+
+    @Test
+    void prometheusExposesPerWorkerQueuedComputeAndUnknownValues() {
+        String series = "flexlb_app_flexlb_prefill_queued_compute_tokens";
+        var whitelist = new WhitelistMetricsFilterConfig(series);
+        var registry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        try {
+            whitelist.init();
+            registry.config().meterFilter(whitelist.whitelistMetricsFilter());
+            var exporter = new BatchSchedulerReporter(new MicrometerFlexMonitor(registry));
+            exporter.init();
+            exporter.reportPrefillQueuedComputeTokens(RoleType.PREFILL, "p", 12);
+            exporter.reportPrefillQueuedComputeTokens(RoleType.PDFUSION, "f", Double.NaN);
+
+            String scrape = registry.scrape();
+            assertTrue(scrape.lines().anyMatch(line -> line.startsWith(series + "{")
+                    && line.contains("engineIp=\"p\"") && line.contains("role=\"PREFILL\"") && line.endsWith(" 12.0")));
+            assertTrue(scrape.lines().anyMatch(line -> line.startsWith(series + "{")
+                    && line.contains("engineIp=\"f\"") && line.contains("role=\"PDFUSION\"") && line.endsWith(" NaN")));
+        } finally {
+            registry.close();
+            MicrometerFlexMonitor.setAllowedMetrics(null);
+        }
     }
 
     @Test

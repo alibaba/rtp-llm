@@ -17,7 +17,6 @@ import org.flexlb.util.PriorityNormalizer;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
@@ -430,6 +429,8 @@ public final class PrefillState {
         private Reservation reservation;
         /** Outstanding uncached tokens accepted for this entry; released once at removal. */
         private long tokenWork;
+        /** Last real per-request Engine phase, including members of a partially running batch. */
+        private WorkerStatus.TaskObservation lastObservedTask;
         private RequestEntry(ScheduledRequest item) {
             this(item, QueueMembership.WAITING);
         }
@@ -609,6 +610,7 @@ public final class PrefillState {
     /** Derived immutable work; ACTIVE queue mutations leave committed work unchanged. */
     private WorkCapture committedWorkCapture;
     private long unknownEngineRequestCount;
+    private ActiveObservations latestActivity;
     private int batchLeasesInUse;
     private long routeLeasesInUse;
     private volatile long occupiedRouteSlots;
@@ -638,6 +640,68 @@ public final class PrefillState {
 
     public long pendingTokenWork() {
         return tokenWorkload.pendingTokens();
+    }
+
+    /** Estimated uncached tokens still waiting, including local handoffs awaiting Engine feedback. */
+    public OptionalLong queuedComputeTokens() {
+        lock.lock();
+        try {
+            ActiveObservations activity = latestActivity;
+            if (activity == null) {
+                return OptionalLong.empty();
+            }
+            long tokens = 0L;
+            long detailedWaiting = 0L;
+            long detailedRunning = 0L;
+            boolean unidentifiedHandoff = false;
+            for (var task : activity.owned.values()) {
+                if (task.phase() == null) {
+                    return OptionalLong.empty();
+                } else if (task.phase() == TaskPhase.RUNNING) {
+                    detailedRunning++;
+                } else {
+                    detailedWaiting++;
+                }
+            }
+            for (var task : activity.foreign.values()) {
+                RequestEntry local = requests.get(task.requestId());
+                if (task.phase() == null || local != null && !matchesObservedBatch(local, task.batchId())) {
+                    return OptionalLong.empty();
+                }
+                if (task.phase() == TaskPhase.RUNNING) {
+                    detailedRunning++;
+                    continue;
+                }
+                detailedWaiting++;
+                if (local != null) {
+                    continue;
+                }
+                if (task.inputLength() <= 0L || task.prefixLength() < 0L
+                        || task.prefixLength() > task.inputLength()) {
+                    return OptionalLong.empty();
+                }
+                tokens = saturatedAdd(tokens, task.inputLength() - task.prefixLength());
+            }
+            if (activity.reportedWaiting > detailedWaiting) {
+                return OptionalLong.empty();
+            }
+            for (RequestEntry entry : requests.values()) {
+                // A local admission may have arrived since the last Engine observation.
+                var previouslyForeign = activity.foreign.get(entry.requestId);
+                var lastTask = previouslyForeign == null ? entry.lastObservedTask : previouslyForeign;
+                if (lastTask != null && lastTask.phase() == TaskPhase.RUNNING) {
+                    continue;
+                }
+                unidentifiedHandoff |= !entry.isActive() && previouslyForeign == null
+                        && (lastTask == null || lastTask != activity.owned.get(entry.requestId));
+                tokens = saturatedAdd(tokens, entry.tokenWork);
+            }
+            // Scalar-only running tasks matter when they could be one of our assumed in-flight requests.
+            return unidentifiedHandoff && activity.reportedRunning > detailedRunning
+                    ? OptionalLong.empty() : OptionalLong.of(tokens);
+        } finally {
+            lock.unlock();
+        }
     }
 
     /** Attach the Engine waiting-queue admission gate before the endpoint starts serving. */
@@ -1309,16 +1373,9 @@ public final class PrefillState {
                     new IdentityHashMap<>();
             IdentityHashMap<BatchWork, Phase> batchPhases =
                     new IdentityHashMap<>();
-            long nextUnknown =
-                    prepareActiveObservationsUnderLock(
-                            engine.runningTaskList(),
-                            Map.of(),
-                            saturatedAdd(
-                                    Math.max(0L, engine.waitingQueryLen()),
-                                    Math.max(0L, engine.runningQueryLen())),
-                            individualPhases,
-                            batchPhases,
-                            facts);
+            ActiveObservations activity = prepareActiveObservationsUnderLock(
+                    engine, Map.of(), observation.finishedTasks(), individualPhases, batchPhases, facts);
+            long nextUnknown = activity.unknownCount;
             schedulingInputsChanged = nextUnknown != unknownEngineRequestCount;
             for (var observed : individualPhases.entrySet()) {
                 schedulingInputsChanged |= observed.getKey().individualPhase != observed.getValue();
@@ -1330,6 +1387,7 @@ public final class PrefillState {
             }
             capacityReleased = nextUnknown < unknownEngineRequestCount;
             unknownEngineRequestCount = nextUnknown;
+            publishActivityUnderLock(activity);
             capacityReleased |= observeEngineQueueReleaseUnderLock(
                     engine, observation.statusVersion(), nowMs);
             if (schedulingInputsChanged) {
@@ -1434,29 +1492,40 @@ public final class PrefillState {
         }
     }
 
-    private long prepareActiveObservationsUnderLock(
-            Map<String, WorkerStatus.TaskObservation> activeTasks,
+    private record ActiveObservations(long unknownCount, long reportedWaiting, long reportedRunning,
+                                      Map<Long, WorkerStatus.TaskObservation> owned,
+                                      Map<Long, WorkerStatus.TaskObservation> foreign) {
+    }
+
+    private void publishActivityUnderLock(ActiveObservations activity) {
+        requireLock();
+        activity.owned.forEach((id, task) -> requests.get(id).lastObservedTask = task);
+        latestActivity = activity;
+    }
+
+    private ActiveObservations prepareActiveObservationsUnderLock(
+            WorkerStatus.EngineObservation engine,
             Map<Long, TerminalObservation> terminals,
-            long reportedActive,
+            Map<String, WorkerStatus.TaskObservation> finishedTasks,
             IdentityHashMap<RequestEntry, Phase> individualPhases,
             IdentityHashMap<BatchWork, Phase> batchPhases,
             List<WorkerStatusFact> activeFacts) {
         requireLock();
-        Set<Long> unknownDetailed = new HashSet<>();
-        Set<Long> knownObserved = new HashSet<>();
-        for (WorkerStatus.TaskObservation task : activeTasks.values()) {
+        Map<Long, WorkerStatus.TaskObservation> unknownDetailed = new HashMap<>();
+        Map<Long, WorkerStatus.TaskObservation> knownObserved = new HashMap<>();
+        for (WorkerStatus.TaskObservation task : engine.runningTaskList().values()) {
             if (terminals.containsKey(task.requestId())) {
                 continue;
             }
             RequestEntry entry = requests.get(task.requestId());
             if (entry == null || !matchesObservedBatch(entry, task.batchId())) {
                 if (!task.isPriorityCancelOverlayOnly()) {
-                    unknownDetailed.add(task.requestId());
+                    unknownDetailed.put(task.requestId(), task);
                 }
                 continue;
             }
             if (!task.isPriorityCancelOverlayOnly()) {
-                knownObserved.add(task.requestId());
+                knownObserved.put(entry.requestId, task);
                 if (activeFacts != null && !entry.isActive()) {
                     activeFacts.add(WorkerStatusFact.active(entry.committedItem));
                 }
@@ -1475,9 +1544,21 @@ public final class PrefillState {
                         PrefillState::strongerEnginePhase);
             }
         }
-        long scalarUnknown = Math.max(
-                0L, reportedActive - knownObserved.size());
-        return Math.max(unknownDetailed.size(), scalarUnknown);
+        long reportedActive = saturatedAdd(Math.max(0L, engine.waitingQueryLen()),
+                Math.max(0L, engine.runningQueryLen()));
+        long unknownCount = Math.max(unknownDetailed.size(), reportedActive - knownObserved.size());
+        // A finished delta can overlap the same poll's active list. Ignore that exact attempt
+        // for queue estimates, including when another Master admitted it.
+        if (!unknownDetailed.isEmpty()) {
+            for (var finished : finishedTasks.values()) {
+                var active = unknownDetailed.get(finished.requestId());
+                if (active != null && active.batchId() == finished.batchId()) {
+                    unknownDetailed.remove(finished.requestId());
+                }
+            }
+        }
+        return new ActiveObservations(unknownCount, engine.waitingQueryLen(), engine.runningQueryLen(),
+                knownObserved, unknownDetailed);
     }
 
     private StatusReconciliation reconcileEngineStatus(
@@ -1518,15 +1599,11 @@ public final class PrefillState {
                     changedBatches.add(reduction);
                 }
             }
-            long reportedActive = saturatedAdd(
-                    Math.max(0L, engine.waitingQueryLen()),
-                    Math.max(0L, engine.runningQueryLen()));
             IdentityHashMap<RequestEntry, Phase> individualPhases =
                     new IdentityHashMap<>();
-            long nextUnknown =
-                    prepareActiveObservationsUnderLock(
-                            activeTasks, terminals, reportedActive,
-                            individualPhases, batchPhases, null);
+            ActiveObservations activity = prepareActiveObservationsUnderLock(
+                    engine, terminals, finishedTasks, individualPhases, batchPhases, null);
+            long nextUnknown = activity.unknownCount;
             IdentityHashMap<BatchWork, Long> predictions = new IdentityHashMap<>();
             prepareBatchPredictionsUnderLock(
                     changedBatches, terminals, batchPhases, repredictor, predictions);
@@ -1562,6 +1639,7 @@ public final class PrefillState {
             });
             capacityReleased |= nextUnknown < unknownEngineRequestCount;
             unknownEngineRequestCount = nextUnknown;
+            publishActivityUnderLock(activity);
             capacityReleased |= observeEngineQueueReleaseUnderLock(
                     engine, statusVersion, nowMs);
             // Status reduction changes counts after invalidating the old work revision.
@@ -1761,6 +1839,7 @@ public final class PrefillState {
             batchLeasesInUse = 0;
             routeLeasesInUse = 0L;
             unknownEngineRequestCount = 0L;
+            latestActivity = null;
             committedWorkCapture = null;
             recordMutationUnderLock();
         } finally {

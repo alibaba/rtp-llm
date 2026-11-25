@@ -30,6 +30,7 @@ import static org.flexlb.constant.MetricConstant.INFLIGHT_BATCH_COUNT;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_MAX_AGE_MS;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_REQUEST_COUNT;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_TTL_EXPIRED_QPS;
+import static org.flexlb.constant.MetricConstant.PREFILL_QUEUED_COMPUTE_TOKENS;
 import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
@@ -89,6 +90,7 @@ public class BatchSchedulerReporter {
 
         // Batcher queue size — per-engine pending batch request count (FlexLB batcher queue depth)
         monitor.register(BATCHER_QUEUE_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(PREFILL_QUEUED_COMPUTE_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         // Decode total load and inflight KV reserved — per decode worker (FlexLB scheduler view)
         monitor.register(DECODE_TOTAL_LOAD, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -244,6 +246,11 @@ public class BatchSchedulerReporter {
                 "role", RoleType.PREFILL.name(),
                 "engineIp", "scheduler");
         monitor.report(SCHEDULER_INFLIGHT_SIZE, tags, size);
+    }
+
+    /** Sum across live endpoints with this role and IP, NaN when the machine sample is unavailable. */
+    public void reportPrefillQueuedComputeTokens(RoleType role, String engineIp, double tokens) {
+        monitor.report(PREFILL_QUEUED_COMPUTE_TOKENS, FlexMetricTags.ofEngine(engineIp, "role", role.name()), tokens);
     }
 
     /**

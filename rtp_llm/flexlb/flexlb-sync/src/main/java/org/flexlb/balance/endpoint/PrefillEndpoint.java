@@ -399,6 +399,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return reportPendingTokenWork ? prefillState.pendingTokenWork() : 0L;
     }
 
+    /** Sample queued and in-flight Prefill compute using the latest Engine task observation. */
+    public OptionalLong queuedComputeTokens() {
+        return prefillState.queuedComputeTokens();
+    }
+
     /**
      * Admit on the selected generation using its current canonical occupancy
      * and bound dispatcher policy. The pin preserves generation identity while

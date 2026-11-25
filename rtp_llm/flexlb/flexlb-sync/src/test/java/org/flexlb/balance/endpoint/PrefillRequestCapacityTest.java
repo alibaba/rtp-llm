@@ -271,6 +271,35 @@ class PrefillRequestCapacityTest {
     }
 
     @Test
+    void queuedComputeUsesHeartbeatDetailAndRejectsUnmeasuredWaiting() {
+        var waiting = new WorkerStatus.TaskObservation(7, 30L, 0L, 100L, 0L, 0L, 0L, 0L, 0L, "", 0L,
+                TaskPhase.RECEIVED, 0L, PriorityPreemptionProgress.NONE);
+        var overlay = new WorkerStatus.TaskObservation(8, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, "", 0L,
+                TaskPhase.PENDING, 0L, PriorityPreemptionProgress.CANCELING);
+        heartbeat(Map.of("waiting", waiting, "same request", waiting, "overlay", overlay), 0L);
+        assertEquals(70L, state.queuedComputeTokens().orElseThrow(), "detail-only worker and control overlay");
+        heartbeat(Map.of("waiting", waiting), 2L);
+        assertTrue(state.queuedComputeTokens().isEmpty(), "one waiting request has no detail");
+        var noLength = new WorkerStatus.TaskObservation(9, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, "", 0L,
+                TaskPhase.RECEIVED, 0L, PriorityPreemptionProgress.NONE);
+        heartbeat(Map.of("missing input", noLength), 1L);
+        assertTrue(state.queuedComputeTokens().isEmpty());
+        heartbeat(Map.of(), 0L, 2L);
+        assertEquals(0L, state.queuedComputeTokens().orElseThrow(), "pure running needs no token estimate");
+
+        ScheduledRequest local = item(1);
+        when(local.seqLen()).thenReturn(100L);
+        when(local.hitCache()).thenReturn(90L);
+        var registration = reserve(local, 4L).reservation();
+        try (var handoff = commit(local, registration)) { }
+        assertTrue(state.queuedComputeTokens().isEmpty(), "unidentified running may include the committed handoff");
+        heartbeat(Map.of(), 0L);
+        assertEquals(10L, state.queuedComputeTokens().orElseThrow());
+        heartbeat(Map.of("local", observed(1)), 0L, 1L);
+        assertEquals(0L, state.queuedComputeTokens().orElseThrow());
+    }
+
+    @Test
     void fullStatusPublishesUnknownCapacityBeforeEndpointNotification() {
         var observation = mock(WorkerStatus.StatusObservation.class);
         var engine = mock(WorkerStatus.EngineObservation.class);
@@ -303,10 +332,15 @@ class PrefillRequestCapacityTest {
     }
 
     private void heartbeat(Map<String, WorkerStatus.TaskObservation> tasks, long reportedActive) {
+        heartbeat(tasks, reportedActive, 0L);
+    }
+
+    private void heartbeat(Map<String, WorkerStatus.TaskObservation> tasks, long reportedWaiting, long reportedRunning) {
         var observation = mock(WorkerStatus.StatusObservation.class);
         var engine = mock(WorkerStatus.EngineObservation.class);
         when(engine.runningTaskList()).thenReturn(tasks);
-        when(engine.waitingQueryLen()).thenReturn(reportedActive);
+        when(engine.waitingQueryLen()).thenReturn(reportedWaiting);
+        when(engine.runningQueryLen()).thenReturn(reportedRunning);
         when(observation.engine()).thenReturn(engine);
         when(observation.runningTasks()).thenReturn(tasks);
         state.reconcileHeartbeat(observation);

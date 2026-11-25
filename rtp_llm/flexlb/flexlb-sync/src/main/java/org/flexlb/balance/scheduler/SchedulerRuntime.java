@@ -3,6 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.util.Logger;
@@ -11,8 +12,14 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
+import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.OptionalLong;
+import java.util.Set;
 
 /** Owns scheduler maintenance, metrics traversal, and ordered shutdown. */
 @Component
@@ -25,6 +32,8 @@ final class SchedulerRuntime {
     private final BatchSchedulerReporter reporter;
     private final RequestSchedulerReporter admissionReporter;
     private final Runnable closePlacement;
+    /** Gauges survive removal from the endpoint directory and need one final unavailable sample. */
+    private final Map<RoleType, Set<String>> computeGaugeIps = new EnumMap<>(RoleType.class);
 
     SchedulerRuntime(
             RequestRegistry requests,
@@ -71,7 +80,8 @@ final class SchedulerRuntime {
             return;
         }
         reportSchedulerInflight();
-        reportPrefillEndpoints();
+        reportPrefillEndpoints(RoleType.PREFILL);
+        reportPrefillEndpoints(RoleType.PDFUSION);
         reportDecodeEndpoints();
     }
 
@@ -91,34 +101,58 @@ final class SchedulerRuntime {
         }
     }
 
-    private void reportPrefillEndpoints() {
-        final Map<String, PrefillEndpoint> endpoints;
+    private void reportPrefillEndpoints(RoleType role) {
+        List<EndpointRegistry.PrefillRoutingEntry> directory;
         try {
-            endpoints = this.endpoints.snapshotPrefillEndpoints();
+            directory = endpoints.prefillRoutingSnapshot(role);
         } catch (RuntimeException failure) {
-            warnIsolated(
-                    "Failed to snapshot Prefill endpoints for metrics",
-                    failure);
-            return;
+            warnIsolated("Failed to snapshot " + role + " endpoints for metrics", failure);
+            directory = List.of(); // No usable sample for previously published IPs in this role.
         }
-        for (Map.Entry<String, PrefillEndpoint> entry : endpoints.entrySet()) {
-            try {
-                entry.getValue().reportBatchMetrics(reporter);
-            } catch (RuntimeException failure) {
-                warnIsolated(
-                        "Failed to report Prefill endpoint metrics: endpoint="
-                                + entry.getKey(),
-                        failure);
+
+        Map<String, Double> tokensByIp = new HashMap<>();
+        for (var entry : directory) {
+            PrefillEndpoint endpoint = entry.endpoint();
+            if (role == RoleType.PREFILL) {
+                reportPrefillSchedulingMetrics(entry.address(), endpoint);
             }
+            String ip = endpoint.getIp();
+            double tokens = Double.NaN;
             try {
-                admissionReporter.reportPrefillQueueDepth(
-                        entry.getKey(), entry.getValue().queuedRequestCount());
+                OptionalLong queued = endpoint.queuedComputeTokens();
+                if (queued.isPresent()) {
+                    tokens = queued.getAsLong();
+                }
             } catch (RuntimeException failure) {
-                warnIsolated(
-                        "Failed to report Prefill admission metrics: endpoint="
-                                + entry.getKey(),
-                        failure);
+                warnIsolated("Failed to sample queued compute on " + entry.address(), failure);
             }
+            // Ports on the same host share the engineIp label. A missing constituent makes the sum unknown.
+            tokensByIp.merge(ip, tokens, Double::sum);
+        }
+        Set<String> published = computeGaugeIps.computeIfAbsent(role, ignored -> new HashSet<>());
+        published.addAll(tokensByIp.keySet());
+        published.removeIf(ip -> {
+            boolean retired = !tokensByIp.containsKey(ip);
+            try {
+                reporter.reportPrefillQueuedComputeTokens(role, ip, tokensByIp.getOrDefault(ip, Double.NaN));
+                return retired;
+            } catch (RuntimeException failure) {
+                warnIsolated("Failed to report queued compute on " + ip, failure);
+                return false;
+            }
+        });
+    }
+
+    private void reportPrefillSchedulingMetrics(String address, PrefillEndpoint endpoint) {
+        try {
+            endpoint.reportBatchMetrics(reporter);
+        } catch (RuntimeException failure) {
+            warnIsolated("Failed to report Prefill endpoint metrics: endpoint=" + address, failure);
+        }
+        try {
+            admissionReporter.reportPrefillQueueDepth(address, endpoint.queuedRequestCount());
+        } catch (RuntimeException failure) {
+            warnIsolated("Failed to report Prefill admission metrics: endpoint=" + address, failure);
         }
     }
 

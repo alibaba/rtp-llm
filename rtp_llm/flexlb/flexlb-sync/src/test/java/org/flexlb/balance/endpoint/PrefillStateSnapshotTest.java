@@ -354,6 +354,35 @@ class PrefillStateSnapshotTest {
         }
     }
 
+    @Test
+    void queuedComputeTracksEachBatchMemberAcrossHandoffRunningAndRequeue() {
+        ScheduledRequest a = item(1), b = item(2), queued = item(3);
+        when(a.hitCache()).thenReturn(70L);
+        when(b.hitCache()).thenReturn(20L);
+        when(queued.hitCache()).thenReturn(50L);
+        assertTrue(state.queuedComputeTokens().isEmpty(), "await the first worker observation");
+        reconcile(Map.of(), Map.of(), unused -> 0L);
+        commitBatch(List.of(a, b), 300L);
+        enqueue(queued);
+        assertEquals(160L, state.queuedComputeTokens().orElseThrow(), "local wait and committed handoff");
+        var bWaiting = task(2, TaskPhase.KV_ALLOCATED, 0, 0);
+        var aRunning = task(1, TaskPhase.RUNNING, 0, 0);
+        reconcile(Map.of(), Map.of("1", aRunning, "2", bWaiting), unused -> 0L);
+        assertEquals(130L, state.queuedComputeTokens().orElseThrow(), "only one member started");
+        reconcile(Map.of(), Map.of("2", bWaiting), unused -> 0L);
+        assertEquals(130L, state.queuedComputeTokens().orElseThrow(), "retain the last confirmed phase");
+        var wrongBatch = task(2, TaskPhase.RECEIVED, 0, 0);
+        wrongBatch.setBatchId(99L);
+        reconcile(Map.of(), Map.of("2", wrongBatch), unused -> 0L);
+        assertTrue(state.queuedComputeTokens().isEmpty(), "conflicting attempt identity");
+        reconcile(Map.of(), Map.of("1", task(1, TaskPhase.RECEIVED, 0, 0)), unused -> 0L);
+        assertEquals(160L, state.queuedComputeTokens().orElseThrow(), "explicit worker requeue");
+        assertTrue(state.terminalizeCommittedItem(a.execution()));
+        assertEquals(130L, state.queuedComputeTokens().orElseThrow(), "local settlement cannot revive the last observation");
+        reconcile(Map.of("2", task(2, null, 0, 200)), Map.of("2", bWaiting), unused -> 0L);
+        assertEquals(50L, state.queuedComputeTokens().orElseThrow());
+    }
+
     private void reconcile(Map<String, TaskInfo> finished, Map<String, TaskInfo> active,
                            ToLongFunction<List<RequestExecution>> repredictor) {
         WorkerStatusResponse response = new WorkerStatusResponse();

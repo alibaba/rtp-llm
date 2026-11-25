@@ -183,6 +183,9 @@ public class MetricConstant {
      */
     public static final String BATCHER_QUEUE_SIZE = "app.flexlb.batcher.queue.size";
 
+    /** Uncached compute tokens waiting for Prefill per role and engine IP. */
+    public static final String PREFILL_QUEUED_COMPUTE_TOKENS = "app.flexlb.prefill.queued.compute.tokens";
+
     /**
      * Engine finished task list size
      */
