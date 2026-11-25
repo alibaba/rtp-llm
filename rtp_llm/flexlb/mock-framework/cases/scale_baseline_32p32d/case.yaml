@@ -1,0 +1,328 @@
+id: scale_baseline_32p32d
+name: 多规模端到端基线 32P/32D
+describe: 控制变量规模梯度基线：32P/32D/2F（QUEUE+PRIORITY+NON_BATCH，maxCollectionWaitMs=0，单 P 线性公式 100+50*batchSize、inflight=8，单 P 理论上限
+  ~16 req/s），按 0.25x/0.60x/0.90x/1.35x 四档负载测量容量拐点、Prefill/Decode 吞吐、TTFT 与 Master 调度延迟。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 32
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 32
+    config: configs/decode.yaml
+  frontend:
+    deployment:
+      replicas: 2
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: '4923373599811257905'
+phases:
+- id: startup
+  describe: 确认唯一主 Master 并等待全部 P/D 发现传播。
+  timeout: 180s
+  steps:
+  - id: check_master_leader
+    describe: 只有一个主 Master。
+    interface: master/list/addresses
+    args:
+      is_leader: true
+    expect:
+      count: 1
+    wait_after: 15s
+- id: load_low_025x
+  describe: 规模 32P/32D 下负载档位 low_025x（128 QPS）。
+  timeout: 240s
+  steps:
+  - id: start_low_025x
+    describe: 档位 low_025x：以 128 QPS 稳定打流 20s。
+    interface: frontend/start/playback
+    args:
+      requests_file: data/traffic/uniform-2k.mckidx
+      qps: 128
+      total_concurrency: 2048
+      queue_capacity: 4096
+      request_timeout: 20s
+      drain_timeout: 60s
+    wait_after: 20s
+  - id: record_qps_low_025x
+    describe: 记录 low_025x 实际发出 QPS。
+    interface: frontend/query/qps
+    args:
+      range:
+      - -10s
+      - 0s
+    expect:
+      gte: 108.8
+      lte: 147.2
+  - id: record_ttft_mean_low_025x
+    describe: 记录 low_025x TTFT 均值。
+    interface: frontend/query/ttft
+    args:
+      range:
+      - -10s
+      - 0s
+      statistic: mean
+  - id: record_ttft_p95_low_025x
+    describe: 记录 low_025x TTFT P95。
+    interface: frontend/query/ttft
+    args:
+      range:
+      - -10s
+      - 0s
+      statistic: p95
+  - id: record_prefill_tps_low_025x
+    describe: 记录 low_025x 集群 Prefill TPS。
+    interface: engine/query/prefill_tps
+    args:
+      range:
+      - -10s
+      - 0s
+  - id: record_decode_tps_low_025x
+    describe: 记录 low_025x 集群 Decode TPS。
+    interface: engine/query/decode_tps
+    args:
+      range:
+      - -10s
+      - 0s
+  - id: record_queue_low_025x
+    describe: 记录 low_025x 排队深度。
+    interface: prometheus/query_scalar
+    args:
+      promql: sum(flexlb_app_flexlb_batcher_queue_size) or vector(0)
+  - id: stop_low_025x
+    describe: 停止 low_025x 打流并排空。
+    interface: frontend/stop/playback
+    within: 120s
+  - id: check_success_low_025x
+    describe: 记录/校验 low_025x 成功率。
+    interface: frontend/query/success_rate
+    args:
+      range:
+      - -60s
+      - 0s
+    expect:
+      gte: 0.99
+- id: load_mid_060x
+  describe: 规模 32P/32D 下负载档位 mid_060x（304 QPS）。
+  timeout: 240s
+  steps:
+  - id: start_mid_060x
+    describe: 档位 mid_060x：以 304 QPS 稳定打流 20s。
+    interface: frontend/start/playback
+    args:
+      requests_file: data/traffic/uniform-2k.mckidx
+      qps: 304
+      total_concurrency: 4864
+      queue_capacity: 9728
+      request_timeout: 20s
+      drain_timeout: 60s
+    wait_after: 20s
+  - id: record_qps_mid_060x
+    describe: 记录 mid_060x 实际发出 QPS。
+    interface: frontend/query/qps
+    args:
+      range:
+      - -10s
+      - 0s
+    expect:
+      gte: 258.4
+      lte: 349.6
+  - id: record_ttft_mean_mid_060x
+    describe: 记录 mid_060x TTFT 均值。
+    interface: frontend/query/ttft
+    args:
+      range:
+      - -10s
+      - 0s
+      statistic: mean
+  - id: record_ttft_p95_mid_060x
+    describe: 记录 mid_060x TTFT P95。
+    interface: frontend/query/ttft
+    args:
+      range:
+      - -10s
+      - 0s
+      statistic: p95
+  - id: record_prefill_tps_mid_060x
+    describe: 记录 mid_060x 集群 Prefill TPS。
+    interface: engine/query/prefill_tps
+    args:
+      range:
+      - -10s
+      - 0s
+  - id: record_decode_tps_mid_060x
+    describe: 记录 mid_060x 集群 Decode TPS。
+    interface: engine/query/decode_tps
+    args:
+      range:
+      - -10s
+      - 0s
+  - id: record_queue_mid_060x
+    describe: 记录 mid_060x 排队深度。
+    interface: prometheus/query_scalar
+    args:
+      promql: sum(flexlb_app_flexlb_batcher_queue_size) or vector(0)
+  - id: stop_mid_060x
+    describe: 停止 mid_060x 打流并排空。
+    interface: frontend/stop/playback
+    within: 120s
+  - id: check_success_mid_060x
+    describe: 记录/校验 mid_060x 成功率。
+    interface: frontend/query/success_rate
+    args:
+      range:
+      - -60s
+      - 0s
+    expect:
+      gte: 0.99
+- id: load_high_090x
+  describe: 规模 32P/32D 下负载档位 high_090x（460 QPS）。
+  timeout: 240s
+  steps:
+  - id: start_high_090x
+    describe: 档位 high_090x：以 460 QPS 稳定打流 20s。
+    interface: frontend/start/playback
+    args:
+      requests_file: data/traffic/uniform-2k.mckidx
+      qps: 460
+      total_concurrency: 7360
+      queue_capacity: 14720
+      request_timeout: 20s
+      drain_timeout: 60s
+    wait_after: 20s
+  - id: record_qps_high_090x
+    describe: 记录 high_090x 实际发出 QPS。
+    interface: frontend/query/qps
+    args:
+      range:
+      - -10s
+      - 0s
+    expect:
+      gte: 391.0
+      lte: 529.0
+  - id: record_ttft_mean_high_090x
+    describe: 记录 high_090x TTFT 均值。
+    interface: frontend/query/ttft
+    args:
+      range:
+      - -10s
+      - 0s
+      statistic: mean
+  - id: record_ttft_p95_high_090x
+    describe: 记录 high_090x TTFT P95。
+    interface: frontend/query/ttft
+    args:
+      range:
+      - -10s
+      - 0s
+      statistic: p95
+  - id: record_prefill_tps_high_090x
+    describe: 记录 high_090x 集群 Prefill TPS。
+    interface: engine/query/prefill_tps
+    args:
+      range:
+      - -10s
+      - 0s
+  - id: record_decode_tps_high_090x
+    describe: 记录 high_090x 集群 Decode TPS。
+    interface: engine/query/decode_tps
+    args:
+      range:
+      - -10s
+      - 0s
+  - id: record_queue_high_090x
+    describe: 记录 high_090x 排队深度。
+    interface: prometheus/query_scalar
+    args:
+      promql: sum(flexlb_app_flexlb_batcher_queue_size) or vector(0)
+  - id: stop_high_090x
+    describe: 停止 high_090x 打流并排空。
+    interface: frontend/stop/playback
+    within: 120s
+  - id: check_success_high_090x
+    describe: 记录/校验 high_090x 成功率。
+    interface: frontend/query/success_rate
+    args:
+      range:
+      - -60s
+      - 0s
+- id: load_over_135x
+  describe: 规模 32P/32D 下负载档位 over_135x（690 QPS）。
+  timeout: 240s
+  steps:
+  - id: start_over_135x
+    describe: 档位 over_135x：以 690 QPS 稳定打流 20s。
+    interface: frontend/start/playback
+    args:
+      requests_file: data/traffic/uniform-2k.mckidx
+      qps: 690
+      total_concurrency: 11040
+      queue_capacity: 22080
+      request_timeout: 20s
+      drain_timeout: 60s
+    wait_after: 20s
+  - id: record_qps_over_135x
+    describe: 记录 over_135x 实际发出 QPS。
+    interface: frontend/query/qps
+    args:
+      range:
+      - -10s
+      - 0s
+    expect:
+      gte: 586.5
+      lte: 793.5
+  - id: record_ttft_mean_over_135x
+    describe: 记录 over_135x TTFT 均值。
+    interface: frontend/query/ttft
+    args:
+      range:
+      - -10s
+      - 0s
+      statistic: mean
+  - id: record_ttft_p95_over_135x
+    describe: 记录 over_135x TTFT P95。
+    interface: frontend/query/ttft
+    args:
+      range:
+      - -10s
+      - 0s
+      statistic: p95
+  - id: record_prefill_tps_over_135x
+    describe: 记录 over_135x 集群 Prefill TPS。
+    interface: engine/query/prefill_tps
+    args:
+      range:
+      - -10s
+      - 0s
+  - id: record_decode_tps_over_135x
+    describe: 记录 over_135x 集群 Decode TPS。
+    interface: engine/query/decode_tps
+    args:
+      range:
+      - -10s
+      - 0s
+  - id: record_queue_over_135x
+    describe: 记录 over_135x 排队深度。
+    interface: prometheus/query_scalar
+    args:
+      promql: sum(flexlb_app_flexlb_batcher_queue_size) or vector(0)
+  - id: stop_over_135x
+    describe: 停止 over_135x 打流并排空。
+    interface: frontend/stop/playback
+    within: 120s
+  - id: check_success_over_135x
+    describe: 记录/校验 over_135x 成功率。
+    interface: frontend/query/success_rate
+    args:
+      range:
+      - -60s
+      - 0s
