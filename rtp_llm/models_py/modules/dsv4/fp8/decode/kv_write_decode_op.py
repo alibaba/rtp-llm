@@ -161,17 +161,15 @@ def write_kv_to_pool(
             view of the framework BlockPool (built inline by
             ``Attention._pool_view``). Modified in place.
         mask_negative: when False (e.g. SWA which always emits a valid
-            slot), use unconditional ``index_copy_`` — the fast path.
-            When True (CSA/HCA boundary writes), use the safe-redirect
-            + delta-encode + atomic-add trick from
-            :func:`write_compressed_k_decode` to handle ``-1`` slots
-            without a CUDA-graph-hostile boolean mask / D2H sync.
+            slot), scatters every row unconditionally. When True (CSA/HCA
+            boundary writes), skips ``-1`` slots in-kernel via Triton
+            ``row_scatter`` on CUDA (no ``nonzero`` / D2H sync) or compacts
+            valid rows on CPU.
 
     CUDA-graph safety:
-      * No host scalar reads, no boolean indexing.
-      * `slot_mapping` may legally be -1 — the safe-redirect path turns
-        these into delta=0 writes against slot 0; multiple -1 redirects
-        sum to 0, so they're harmless.
+      * No host scalar reads, no boolean indexing, no ``nonzero()`` sync.
+      * `slot_mapping` may legally be -1 — ``row_scatter(..., mask_negative=True)``
+        skips negative slots inside the kernel.
       * Empty inputs short-circuit to a no-op (matches ``write_*`` above).
     """
     if k_state.numel() == 0 or slot_mapping.numel() == 0:
@@ -180,36 +178,6 @@ def write_kv_to_pool(
     if k_state.dtype != pool_view.dtype:
         k_state = k_state.to(pool_view.dtype)
 
-    slot_long = (
-        slot_mapping.to(torch.long)
-        if slot_mapping.dtype != torch.long
-        else slot_mapping
-    )
+    from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import row_scatter
 
-    if not mask_negative:
-        # SWA path: every slot is valid — single index_copy_, fastest.
-        pool_view.index_copy_(0, slot_long, k_state)
-        return
-
-    # Compressed-K / boundary write: -1 entries must be skipped, but we
-    # cannot use boolean masking (CUDA-graph hostile). Reuse the
-    # compressed-write trick: redirect -1 to slot 0, delta=0 there.
-    valid = slot_long >= 0
-    safe_slot = torch.where(valid, slot_long, torch.zeros_like(slot_long))
-    if not (
-        pool_view.is_cuda
-        and torch.cuda.is_available()
-        and torch.cuda.is_current_stream_capturing()
-    ):
-        valid_idx = valid.nonzero(as_tuple=False).flatten()
-        if valid_idx.numel() > 0:
-            pool_view.index_copy_(
-                0,
-                slot_long.index_select(0, valid_idx),
-                k_state.index_select(0, valid_idx),
-            )
-        return
-
-    existing = pool_view.index_select(0, safe_slot)
-    source = torch.where(valid.unsqueeze(-1), k_state, existing)
-    pool_view.index_copy_(0, safe_slot, source)
+    row_scatter(pool_view, slot_mapping, k_state, mask_negative=mask_negative)

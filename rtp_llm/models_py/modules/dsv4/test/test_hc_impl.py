@@ -257,6 +257,91 @@ class TestHCImpl(unittest.TestCase):
         # in-place and fresh-buffer results must be bit-identical
         torch.testing.assert_close(out_alias, out_fresh, atol=0, rtol=0)
 
+    def test_fused_mhc_pre_norm_gate_rejects_cpu_and_overrides(self) -> None:
+        from rtp_llm.models_py.modules.base.cuda.norm import RMSNorm
+        from rtp_llm.models_py.modules.dsv4.hc import can_use_fused_mhc_pre_norm
+
+        hc, dim = 4, 256
+        fn, base, scale = _weights(hc, dim)
+        unit = TileLangHCUnit(
+            fn,
+            base,
+            scale,
+            dim=dim,
+            hc_mult=hc,
+            hc_sinkhorn_iters=3,
+            norm_eps=1e-6,
+            hc_eps=1e-6,
+        )
+        norm = RMSNorm(torch.ones(dim, dtype=torch.bfloat16), eps=1e-6)
+        x = torch.randn(4, hc, dim, dtype=torch.bfloat16)
+        self.assertFalse(can_use_fused_mhc_pre_norm(x, unit, norm))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_fused_mhc_pre_norm_matches_separate_tilelang_and_rmsnorm(self) -> None:
+        from rtp_llm.models_py.modules.base.cuda.norm import RMSNorm
+        from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_fp8_quant_triton import (
+            rmsnorm_fp8_quant_ue8m0,
+        )
+        from rtp_llm.models_py.modules.dsv4.hc import (
+            can_use_fused_mhc_pre_norm,
+            fused_mhc_pre_norm,
+            fused_mhc_pre_norm_quant,
+        )
+
+        major, _ = torch.cuda.get_device_capability()
+        if major != 10:
+            self.skipTest("requires SM100/SM103 for tf32_hc_prenorm_gemm")
+
+        for shape in ((17, 4, 4096), (8, 1, 4, 4096), (5, 4, 3072)):
+            with self.subTest(shape=shape):
+                dim = shape[-1]
+                fn, base, scale = _weights(4, dim, device="cuda")
+                unit = TileLangHCUnit(
+                    fn,
+                    base,
+                    scale,
+                    dim=dim,
+                    hc_mult=4,
+                    hc_sinkhorn_iters=10,
+                    norm_eps=1e-6,
+                    hc_eps=1e-6,
+                )
+                w = torch.randn(dim, device="cuda", dtype=torch.bfloat16) * 0.5 + 1.0
+                norm = RMSNorm(w, eps=1e-6)
+                x = torch.randn(*shape, device="cuda", dtype=torch.bfloat16)
+                with torch.inference_mode():
+                    if not can_use_fused_mhc_pre_norm(x, unit, norm):
+                        self.skipTest("tf32_hc_prenorm_gemm unavailable in DeepGEMM")
+                    x_pre_ref, post_ref, comb_ref = unit.pre(x)
+                    if x_pre_ref.dim() > 2:
+                        b, s, d = x_pre_ref.shape
+                        x_norm_ref = norm(x_pre_ref.reshape(b * s, d)).view(b, s, d)
+                    else:
+                        x_norm_ref = norm(x_pre_ref)
+                    x_norm_got, post_got, comb_got = fused_mhc_pre_norm(x, unit, norm)
+
+                torch.testing.assert_close(post_got, post_ref, atol=1e-4, rtol=1e-4)
+                torch.testing.assert_close(comb_got, comb_ref, atol=1e-4, rtol=1e-4)
+                torch.testing.assert_close(x_norm_got, x_norm_ref, atol=2e-2, rtol=2e-2)
+
+                if len(shape) == 3 and dim % 128 == 0:
+                    with torch.inference_mode():
+                        nq_ref, q_ref, s_ref = rmsnorm_fp8_quant_ue8m0(
+                            x_pre_ref.clone(), w, eps=1e-6
+                        )
+                        nq_got, q_post, q_comb, (q_got, s_got) = (
+                            fused_mhc_pre_norm_quant(x, unit, norm)
+                        )
+                    torch.testing.assert_close(q_post, post_ref, atol=1e-4, rtol=1e-4)
+                    torch.testing.assert_close(q_comb, comb_ref, atol=1e-4, rtol=1e-4)
+                    torch.testing.assert_close(nq_got, nq_ref, atol=2e-2, rtol=2e-2)
+                    torch.testing.assert_close(
+                        q_got.float(), q_ref.float(), atol=1.0, rtol=5e-2
+                    )
+                    self.assertEqual(tuple(s_got.shape), tuple(s_ref.shape))
+                    self.assertEqual(tuple(s_got.stride()), tuple(s_ref.stride()))
+
 
 if __name__ == "__main__":
     unittest.main()

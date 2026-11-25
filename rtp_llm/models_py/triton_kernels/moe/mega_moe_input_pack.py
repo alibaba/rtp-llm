@@ -232,20 +232,222 @@ if triton is not None:
             packed,
             mask=row_mask,
         )
+        return packed
 
-    @triton.jit(do_not_specialize=["M"])
+    @triton.jit
+    def _stage_shared_l1_sf_block(
+        packed,
+        out_shared_l1_sf_ptr,
+        offs_m,
+        row_mask,
+        pid_m_blk,
+        pid_blk,
+        M,
+        se_block_m,
+        se_aligned_block_m,
+        required_destination_rows,
+        grid_m,
+        shared_sf_stride_m,
+        shared_sf_stride_k,
+    ):
+        se_blk = se_block_m.to(tl.int64)
+        se_aligned_blk = se_aligned_block_m.to(tl.int64)
+        s_m = shared_sf_stride_m.to(tl.int64)
+        col_offset = pid_blk.to(tl.int64) * shared_sf_stride_k.to(tl.int64)
+
+        within_block = offs_m % se_blk
+        dest_rows = (
+            (offs_m // se_blk) * se_aligned_blk
+            + (within_block // 128) * 128
+            + (within_block % 32) * 4
+            + (within_block % 128) // 32
+        )
+        tl.store(
+            out_shared_l1_sf_ptr + dest_rows * s_m + col_offset,
+            packed,
+            mask=row_mask,
+        )
+
+        # Clear padding/hole rows in [0, required_destination_rows) so reused
+        # buffers across CUDA Graph replays contain no stale scales.
+        req_rows = required_destination_rows.to(tl.int64)
+        grid_m_i64 = grid_m.to(tl.int64)
+        M_i64 = M.to(tl.int64)
+        n_chunks = tl.cdiv(req_rows, grid_m_i64 * 128)
+        offs_128 = tl.arange(0, 128).to(tl.int64)
+        zero_128 = tl.zeros((128,), dtype=tl.int32)
+        for chunk_idx in range(n_chunks):
+            d_row = (pid_m_blk + chunk_idx.to(tl.int64) * grid_m_i64) * 128 + offs_128
+            valid_dest = d_row < req_rows
+            local_dest = d_row % se_aligned_blk
+            row_in_128 = local_dest % 128
+            row_in_block = (
+                (local_dest // 128) * 128 + (row_in_128 % 4) * 32 + (row_in_128 // 4)
+            )
+            src_row = (d_row // se_aligned_blk) * se_blk + row_in_block
+            is_hole_or_tail = valid_dest & (
+                (row_in_block >= se_blk) | (src_row >= M_i64)
+            )
+            tl.store(
+                out_shared_l1_sf_ptr + d_row * s_m + col_offset,
+                zero_128,
+                mask=is_hole_or_tail,
+            )
+
+    @triton.jit
+    def _gate_pack_nonhash_row(
+        row,
+        scores_ptr,
+        bias_row,
+        bias_is_finite,
+        out_weights_ptr,
+        out_indices_ptr,
+        offs_e,
+        e_mask,
+        k_offs,
+        k_mask_base,
+        M,
+        K: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+        scores_stride_m: tl.constexpr,
+        out_weights_stride_m: tl.constexpr,
+        out_indices_stride_m: tl.constexpr,
+        route_scale: tl.constexpr,
+        norm_eps: tl.constexpr,
+    ):
+        row_mask = row < M
+        scores = tl.load(
+            scores_ptr + row * scores_stride_m + offs_e,
+            mask=row_mask & e_mask,
+            other=0.0,
+        ).to(tl.float32)
+        score_is_finite = tl.abs(scores) < float("inf")
+        bad_value = row_mask & e_mask & (~score_is_finite | ~bias_is_finite)
+        row_is_finite = tl.sum(bad_value.to(tl.int32), axis=0) == 0
+        scores = tl.where(score_is_finite, scores, 0.0)
+
+        threshold = tl.full([1], 20.0, dtype=tl.float32)
+        softplus = tl.where(scores > threshold, scores, tl.log(1.0 + tl.exp(scores)))
+        active = tl.sqrt(softplus)
+        biased = tl.where(e_mask, active + bias_row, -float("inf"))
+        cur = biased
+        selected_weights = tl.zeros((BLOCK_K,), dtype=tl.float32)
+
+        for k in tl.static_range(K):
+            idx = tl.argmax(cur, axis=0)
+            weight = tl.sum(tl.where(offs_e == idx, active, 0.0), axis=0)
+            safe_idx = tl.where(row_is_finite, idx, k)
+            tl.store(
+                out_indices_ptr + row * out_indices_stride_m + k,
+                safe_idx.to(tl.int64),
+                mask=row_mask,
+            )
+            selected_weights = tl.where(k_offs == k, weight, selected_weights)
+            cur = tl.where(offs_e == idx, -float("inf"), cur)
+
+        k_mask = row_mask & k_mask_base
+        denom = tl.sum(tl.where(k_mask_base, selected_weights, 0.0), axis=0)
+        weights = selected_weights / (denom + norm_eps) * route_scale
+        weights = tl.where(row_is_finite, weights, route_scale / K)
+        tl.store(
+            out_weights_ptr + row * out_weights_stride_m + k_offs,
+            weights,
+            mask=k_mask,
+        )
+
+    @triton.jit
+    def _gate_pack_hash_row(
+        row,
+        scores_ptr,
+        input_ids_ptr,
+        tid2eid_ptr,
+        out_weights_ptr,
+        out_indices_ptr,
+        k_offs,
+        k_mask_base,
+        M,
+        K: tl.constexpr,
+        scores_stride_m: tl.constexpr,
+        input_ids_stride: tl.constexpr,
+        tid2eid_stride_m: tl.constexpr,
+        tid2eid_stride_k: tl.constexpr,
+        out_weights_stride_m: tl.constexpr,
+        out_indices_stride_m: tl.constexpr,
+        route_scale: tl.constexpr,
+        norm_eps: tl.constexpr,
+    ):
+        row_mask = row < M
+        token_id = tl.load(
+            input_ids_ptr + row * input_ids_stride,
+            mask=row_mask,
+            other=0,
+        ).to(tl.int64)
+        k_mask = row_mask & k_mask_base
+        idx = tl.load(
+            tid2eid_ptr + token_id * tid2eid_stride_m + k_offs * tid2eid_stride_k,
+            mask=k_mask,
+            other=0,
+        ).to(tl.int64)
+        selected = tl.load(
+            scores_ptr + row * scores_stride_m + idx,
+            mask=k_mask,
+            other=0.0,
+        ).to(tl.float32)
+        selected_is_finite = tl.abs(selected) < float("inf")
+        row_is_finite = tl.sum((k_mask & ~selected_is_finite).to(tl.int32), axis=0) == 0
+        selected = tl.where(selected_is_finite, selected, 0.0)
+        threshold = tl.full([1], 20.0, dtype=tl.float32)
+        softplus = tl.where(
+            selected > threshold,
+            selected,
+            tl.log(1.0 + tl.exp(selected)),
+        )
+        weights = tl.sqrt(softplus)
+        denom = tl.sum(tl.where(k_mask, weights, 0.0), axis=0) + norm_eps
+        weights = weights / denom * route_scale
+        weights = tl.where(row_is_finite, weights, route_scale / K)
+        tl.store(
+            out_indices_ptr + row * out_indices_stride_m + k_offs,
+            idx,
+            mask=k_mask,
+        )
+        tl.store(
+            out_weights_ptr + row * out_weights_stride_m + k_offs,
+            weights,
+            mask=k_mask,
+        )
+
+    @triton.jit(
+        do_not_specialize=[
+            "M",
+            "se_block_m",
+            "se_aligned_block_m",
+            "required_destination_rows",
+            "grid_m",
+            "shared_sf_stride_m",
+            "shared_sf_stride_k",
+        ]
+    )
     def _mega_moe_gate_pack_nonhash_kernel(
         x_ptr,
         scores_ptr,
         bias_ptr,
         out_fp8_ptr,
         out_sf_ptr,
+        out_shared_l1_sf_ptr,
         out_weights_ptr,
         out_indices_ptr,
         M,
+        se_block_m,
+        se_aligned_block_m,
+        required_destination_rows,
+        grid_m,
+        shared_sf_stride_m,
+        shared_sf_stride_k,
         N: tl.constexpr,
         E: tl.constexpr,
         K: tl.constexpr,
+        NUM_K_BLOCKS: tl.constexpr,
         x_stride_m: tl.constexpr,
         scores_stride_m: tl.constexpr,
         out_stride_m: tl.constexpr,
@@ -259,12 +461,14 @@ if triton is not None:
         BLOCK_M: tl.constexpr,
         BLOCK_E: tl.constexpr,
         BLOCK_K: tl.constexpr,
+        STAGE_SHARED_SF: tl.constexpr,
     ):
         pid_m_blk = tl.program_id(0).to(tl.int64)
         pid_blk = tl.program_id(1)
         offs_m = pid_m_blk * BLOCK_M + tl.arange(0, BLOCK_M).to(tl.int64)
+        row_mask = offs_m < M
 
-        _pack_x_block(
+        packed = _pack_x_block(
             x_ptr,
             out_fp8_ptr,
             out_sf_ptr,
@@ -279,61 +483,91 @@ if triton is not None:
             fp8_max,
             BLOCK_M,
         )
+        if STAGE_SHARED_SF:
+            _stage_shared_l1_sf_block(
+                packed,
+                out_shared_l1_sf_ptr,
+                offs_m,
+                row_mask,
+                pid_m_blk,
+                pid_blk,
+                M,
+                se_block_m,
+                se_aligned_block_m,
+                required_destination_rows,
+                grid_m,
+                shared_sf_stride_m,
+                shared_sf_stride_k,
+            )
 
-        if pid_blk == 0:
-            offs_e = tl.arange(0, BLOCK_E)
-            e_mask = offs_e < E
+        offs_e = tl.arange(0, BLOCK_E)
+        e_mask = offs_e < E
+        k_offs = tl.arange(0, BLOCK_K)
+        k_mask_base = k_offs < K
+        if NUM_K_BLOCKS >= BLOCK_M:
+            if pid_blk < BLOCK_M:
+                bias_row = tl.load(bias_ptr + offs_e, mask=e_mask, other=0.0).to(
+                    tl.float32
+                )
+                bias_is_finite = tl.abs(bias_row) < float("inf")
+                bias_row = tl.where(bias_is_finite, bias_row, 0.0)
+                _gate_pack_nonhash_row(
+                    pid_m_blk * BLOCK_M + pid_blk.to(tl.int64),
+                    scores_ptr,
+                    bias_row,
+                    bias_is_finite,
+                    out_weights_ptr,
+                    out_indices_ptr,
+                    offs_e,
+                    e_mask,
+                    k_offs,
+                    k_mask_base,
+                    M,
+                    K,
+                    BLOCK_K,
+                    scores_stride_m,
+                    out_weights_stride_m,
+                    out_indices_stride_m,
+                    route_scale,
+                    norm_eps,
+                )
+        else:
             bias_row = tl.load(bias_ptr + offs_e, mask=e_mask, other=0.0).to(tl.float32)
             bias_is_finite = tl.abs(bias_row) < float("inf")
             bias_row = tl.where(bias_is_finite, bias_row, 0.0)
-            k_offs = tl.arange(0, BLOCK_K)
-            k_mask_base = k_offs < K
-
-            for row_i in tl.static_range(BLOCK_M):
-                row = pid_m_blk * BLOCK_M + row_i
-                row_mask = row < M
-                scores = tl.load(
-                    scores_ptr + row * scores_stride_m + offs_e,
-                    mask=row_mask & e_mask,
-                    other=0.0,
-                ).to(tl.float32)
-                score_is_finite = tl.abs(scores) < float("inf")
-                bad_value = row_mask & e_mask & (~score_is_finite | ~bias_is_finite)
-                row_is_finite = tl.sum(bad_value.to(tl.int32), axis=0) == 0
-                scores = tl.where(score_is_finite, scores, 0.0)
-
-                threshold = tl.full([1], 20.0, dtype=tl.float32)
-                softplus = tl.where(
-                    scores > threshold, scores, tl.log(1.0 + tl.exp(scores))
-                )
-                active = tl.sqrt(softplus)
-                biased = tl.where(e_mask, active + bias_row, -float("inf"))
-                cur = biased
-                selected_weights = tl.zeros((BLOCK_K,), dtype=tl.float32)
-
-                for k in tl.static_range(K):
-                    idx = tl.argmax(cur, axis=0)
-                    weight = tl.sum(tl.where(offs_e == idx, active, 0.0), axis=0)
-                    safe_idx = tl.where(row_is_finite, idx, k)
-                    tl.store(
-                        out_indices_ptr + row * out_indices_stride_m + k,
-                        safe_idx.to(tl.int64),
-                        mask=row_mask,
-                    )
-                    selected_weights = tl.where(k_offs == k, weight, selected_weights)
-                    cur = tl.where(offs_e == idx, -float("inf"), cur)
-
-                k_mask = row_mask & k_mask_base
-                denom = tl.sum(tl.where(k_mask_base, selected_weights, 0.0), axis=0)
-                weights = selected_weights / (denom + norm_eps) * route_scale
-                weights = tl.where(row_is_finite, weights, route_scale / K)
-                tl.store(
-                    out_weights_ptr + row * out_weights_stride_m + k_offs,
-                    weights,
-                    mask=k_mask,
+            for row_i in range(pid_blk, BLOCK_M, NUM_K_BLOCKS):
+                _gate_pack_nonhash_row(
+                    pid_m_blk * BLOCK_M + row_i.to(tl.int64),
+                    scores_ptr,
+                    bias_row,
+                    bias_is_finite,
+                    out_weights_ptr,
+                    out_indices_ptr,
+                    offs_e,
+                    e_mask,
+                    k_offs,
+                    k_mask_base,
+                    M,
+                    K,
+                    BLOCK_K,
+                    scores_stride_m,
+                    out_weights_stride_m,
+                    out_indices_stride_m,
+                    route_scale,
+                    norm_eps,
                 )
 
-    @triton.jit(do_not_specialize=["M"])
+    @triton.jit(
+        do_not_specialize=[
+            "M",
+            "se_block_m",
+            "se_aligned_block_m",
+            "required_destination_rows",
+            "grid_m",
+            "shared_sf_stride_m",
+            "shared_sf_stride_k",
+        ]
+    )
     def _mega_moe_gate_pack_hash_kernel(
         x_ptr,
         scores_ptr,
@@ -341,12 +575,20 @@ if triton is not None:
         tid2eid_ptr,
         out_fp8_ptr,
         out_sf_ptr,
+        out_shared_l1_sf_ptr,
         out_weights_ptr,
         out_indices_ptr,
         M,
+        se_block_m,
+        se_aligned_block_m,
+        required_destination_rows,
+        grid_m,
+        shared_sf_stride_m,
+        shared_sf_stride_k,
         N: tl.constexpr,
         E: tl.constexpr,
         K: tl.constexpr,
+        NUM_K_BLOCKS: tl.constexpr,
         x_stride_m: tl.constexpr,
         scores_stride_m: tl.constexpr,
         input_ids_stride: tl.constexpr,
@@ -362,12 +604,14 @@ if triton is not None:
         fp8_max: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_K: tl.constexpr,
+        STAGE_SHARED_SF: tl.constexpr,
     ):
         pid_m_blk = tl.program_id(0).to(tl.int64)
         pid_blk = tl.program_id(1)
         offs_m = pid_m_blk * BLOCK_M + tl.arange(0, BLOCK_M).to(tl.int64)
+        row_mask = offs_m < M
 
-        _pack_x_block(
+        packed = _pack_x_block(
             x_ptr,
             out_fp8_ptr,
             out_sf_ptr,
@@ -382,56 +626,68 @@ if triton is not None:
             fp8_max,
             BLOCK_M,
         )
+        if STAGE_SHARED_SF:
+            _stage_shared_l1_sf_block(
+                packed,
+                out_shared_l1_sf_ptr,
+                offs_m,
+                row_mask,
+                pid_m_blk,
+                pid_blk,
+                M,
+                se_block_m,
+                se_aligned_block_m,
+                required_destination_rows,
+                grid_m,
+                shared_sf_stride_m,
+                shared_sf_stride_k,
+            )
 
-        if pid_blk == 0:
-            k_offs = tl.arange(0, BLOCK_K)
-            k_mask_base = k_offs < K
-
-            for row_i in tl.static_range(BLOCK_M):
-                row = pid_m_blk * BLOCK_M + row_i
-                row_mask = row < M
-                token_id = tl.load(
-                    input_ids_ptr + row * input_ids_stride,
-                    mask=row_mask,
-                    other=0,
-                ).to(tl.int64)
-                k_mask = row_mask & k_mask_base
-                idx = tl.load(
-                    tid2eid_ptr
-                    + token_id * tid2eid_stride_m
-                    + k_offs * tid2eid_stride_k,
-                    mask=k_mask,
-                    other=0,
-                ).to(tl.int64)
-                selected = tl.load(
-                    scores_ptr + row * scores_stride_m + idx,
-                    mask=k_mask,
-                    other=0.0,
-                ).to(tl.float32)
-                selected_is_finite = tl.abs(selected) < float("inf")
-                row_is_finite = (
-                    tl.sum((k_mask & ~selected_is_finite).to(tl.int32), axis=0) == 0
+        k_offs = tl.arange(0, BLOCK_K)
+        k_mask_base = k_offs < K
+        if NUM_K_BLOCKS >= BLOCK_M:
+            if pid_blk < BLOCK_M:
+                _gate_pack_hash_row(
+                    pid_m_blk * BLOCK_M + pid_blk.to(tl.int64),
+                    scores_ptr,
+                    input_ids_ptr,
+                    tid2eid_ptr,
+                    out_weights_ptr,
+                    out_indices_ptr,
+                    k_offs,
+                    k_mask_base,
+                    M,
+                    K,
+                    scores_stride_m,
+                    input_ids_stride,
+                    tid2eid_stride_m,
+                    tid2eid_stride_k,
+                    out_weights_stride_m,
+                    out_indices_stride_m,
+                    route_scale,
+                    norm_eps,
                 )
-                selected = tl.where(selected_is_finite, selected, 0.0)
-                threshold = tl.full([1], 20.0, dtype=tl.float32)
-                softplus = tl.where(
-                    selected > threshold,
-                    selected,
-                    tl.log(1.0 + tl.exp(selected)),
-                )
-                weights = tl.sqrt(softplus)
-                denom = tl.sum(tl.where(k_mask, weights, 0.0), axis=0) + norm_eps
-                weights = weights / denom * route_scale
-                weights = tl.where(row_is_finite, weights, route_scale / K)
-                tl.store(
-                    out_indices_ptr + row * out_indices_stride_m + k_offs,
-                    idx,
-                    mask=k_mask,
-                )
-                tl.store(
-                    out_weights_ptr + row * out_weights_stride_m + k_offs,
-                    weights,
-                    mask=k_mask,
+        else:
+            for row_i in range(pid_blk, BLOCK_M, NUM_K_BLOCKS):
+                _gate_pack_hash_row(
+                    pid_m_blk * BLOCK_M + row_i.to(tl.int64),
+                    scores_ptr,
+                    input_ids_ptr,
+                    tid2eid_ptr,
+                    out_weights_ptr,
+                    out_indices_ptr,
+                    k_offs,
+                    k_mask_base,
+                    M,
+                    K,
+                    scores_stride_m,
+                    input_ids_stride,
+                    tid2eid_stride_m,
+                    tid2eid_stride_k,
+                    out_weights_stride_m,
+                    out_indices_stride_m,
+                    route_scale,
+                    norm_eps,
                 )
 
 
@@ -675,6 +931,50 @@ def _gate_pack_block_m(tokens: int) -> int:
     return 8 if tokens >= 2048 else (4 if tokens >= 1024 else 2)
 
 
+def _resolve_shared_l1_sf_args(
+    out_shared_l1_sf: torch.Tensor | None,
+    shared_l1_block_m: int | None,
+    *,
+    tokens: int,
+    dim: int,
+    device: torch.device,
+) -> tuple[bool, int, int, int]:
+    if out_shared_l1_sf is None and shared_l1_block_m is None:
+        return False, 128, 128, 0
+    if out_shared_l1_sf is None or shared_l1_block_m is None:
+        raise ValueError(
+            "out_shared_l1_sf and shared_l1_block_m must both be set or both be None"
+        )
+    block_m = int(shared_l1_block_m)
+    if block_m <= 0:
+        raise ValueError(f"shared_l1_block_m must be positive, got {block_m}")
+    if not out_shared_l1_sf.is_cuda or out_shared_l1_sf.device != device:
+        raise ValueError(
+            f"out_shared_l1_sf must be on {device}, got {out_shared_l1_sf.device}"
+        )
+    if out_shared_l1_sf.dtype != torch.int32:
+        raise TypeError(f"out_shared_l1_sf must be int32, got {out_shared_l1_sf.dtype}")
+    if out_shared_l1_sf.dim() != 2:
+        raise ValueError(
+            f"out_shared_l1_sf must be 2D, got {tuple(out_shared_l1_sf.shape)}"
+        )
+    if out_shared_l1_sf.size(1) != dim // 128:
+        raise ValueError(
+            f"out_shared_l1_sf width mismatch: expected {dim // 128}, "
+            f"got {out_shared_l1_sf.size(1)}"
+        )
+    aligned_block_m = ((block_m + 127) // 128) * 128
+    required_destination_rows = (
+        ((tokens + block_m - 1) // block_m) * aligned_block_m if tokens > 0 else 0
+    )
+    if required_destination_rows > out_shared_l1_sf.size(0):
+        raise ValueError(
+            "shared FP8 input scale buffer is too small: "
+            f"required_rows={required_destination_rows}/{out_shared_l1_sf.size(0)}"
+        )
+    return True, block_m, aligned_block_m, required_destination_rows
+
+
 def fused_pack_mega_moe_gate_inputs(
     x: torch.Tensor,
     scores: torch.Tensor,
@@ -690,11 +990,15 @@ def fused_pack_mega_moe_gate_inputs(
     bias: torch.Tensor | None = None,
     input_ids: torch.Tensor | None = None,
     tid2eid: torch.Tensor | None = None,
+    out_shared_l1_sf: torch.Tensor | None = None,
+    shared_l1_block_m: int | None = None,
 ) -> None:
     """Fuse sqrt-softplus routing with MegaMoE activation/input packing.
 
     Hash routing is selected by supplying both ``input_ids`` and ``tid2eid``;
-    score routing is selected by supplying ``bias``.  The API intentionally
+    score routing is selected by supplying ``bias``.  When both
+    ``out_shared_l1_sf`` and ``shared_l1_block_m`` are supplied, DeepGEMM's
+    shared-L1 FP8 scale staging is fused inline.  The API intentionally
     contains no model-specific configuration or weight names.
     """
 
@@ -711,6 +1015,20 @@ def fused_pack_mega_moe_gate_inputs(
         raise ValueError(
             f"MegaMoE gate-pack only supports sqrtsoftplus, got {score_func!r}"
         )
+    stage_shared_sf, se_block_m, se_aligned_block_m, req_dest_rows = (
+        _resolve_shared_l1_sf_args(
+            out_shared_l1_sf,
+            shared_l1_block_m,
+            tokens=tokens,
+            dim=dim,
+            device=x.device,
+        )
+    )
+    shared_sf_ptr = out_shared_l1_sf if stage_shared_sf else out_sf
+    assert shared_sf_ptr is not None
+    shared_sf_stride_m = int(shared_sf_ptr.stride(0))
+    shared_sf_stride_k = int(shared_sf_ptr.stride(1))
+
     is_hash = input_ids is not None or tid2eid is not None
     if is_hash:
         if input_ids is None or tid2eid is None:
@@ -729,11 +1047,15 @@ def fused_pack_mega_moe_gate_inputs(
                 f"got {tuple(tid2eid.shape)}"
             )
         if tokens == 0:
+            if stage_shared_sf and out_shared_l1_sf is not None:
+                out_shared_l1_sf.zero_()
             return
         block_m = _gate_pack_block_m(tokens)
         block_k = triton.next_power_of_2(int(topk))
         fp8_max = torch.finfo(torch.float8_e4m3fn).max
-        grid = (triton.cdiv(tokens, block_m), triton.cdiv(dim, 128))
+        num_k_blocks = triton.cdiv(dim, 128)
+        grid_m = triton.cdiv(tokens, block_m)
+        grid = (grid_m, num_k_blocks)
         _mega_moe_gate_pack_hash_kernel[grid](
             x,
             scores,
@@ -741,12 +1063,20 @@ def fused_pack_mega_moe_gate_inputs(
             tid2eid,
             out_fp8,
             out_sf,
+            shared_sf_ptr,
             out_weights,
             out_indices,
             tokens,
+            se_block_m,
+            se_aligned_block_m,
+            req_dest_rows,
+            grid_m,
+            shared_sf_stride_m,
+            shared_sf_stride_k,
             dim,
             experts,
             int(topk),
+            num_k_blocks,
             x.stride(0),
             scores.stride(0),
             input_ids.stride(0),
@@ -762,6 +1092,7 @@ def fused_pack_mega_moe_gate_inputs(
             fp8_max,
             BLOCK_M=block_m,
             BLOCK_K=block_k,
+            STAGE_SHARED_SF=stage_shared_sf,
             num_warps=4,
         )
         return
@@ -776,23 +1107,35 @@ def fused_pack_mega_moe_gate_inputs(
             f"got {tuple(bias.shape)} {bias.dtype}"
         )
     if tokens == 0:
+        if stage_shared_sf and out_shared_l1_sf is not None:
+            out_shared_l1_sf.zero_()
         return
     block_m = _gate_pack_block_m(tokens)
     block_k = triton.next_power_of_2(int(topk))
     fp8_max = torch.finfo(torch.float8_e4m3fn).max
-    grid = (triton.cdiv(tokens, block_m), triton.cdiv(dim, 128))
+    num_k_blocks = triton.cdiv(dim, 128)
+    grid_m = triton.cdiv(tokens, block_m)
+    grid = (grid_m, num_k_blocks)
     _mega_moe_gate_pack_nonhash_kernel[grid](
         x,
         scores,
         bias,
         out_fp8,
         out_sf,
+        shared_sf_ptr,
         out_weights,
         out_indices,
         tokens,
+        se_block_m,
+        se_aligned_block_m,
+        req_dest_rows,
+        grid_m,
+        shared_sf_stride_m,
+        shared_sf_stride_k,
         dim,
         experts,
         int(topk),
+        num_k_blocks,
         x.stride(0),
         scores.stride(0),
         out_fp8.stride(0),
@@ -806,5 +1149,6 @@ def fused_pack_mega_moe_gate_inputs(
         BLOCK_M=block_m,
         BLOCK_E=triton.next_power_of_2(experts),
         BLOCK_K=block_k,
+        STAGE_SHARED_SF=stage_shared_sf,
         num_warps=4,
     )

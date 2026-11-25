@@ -24,6 +24,8 @@ from rtp_llm.models_py.modules.dsv4.fp8._compressor_consts import (
     INDEXER_HEAD_DIM,
     KV_ENTRY_BYTES,
     KV_HEAD_DIM,
+    KV_SCALES_PER_TOKEN,
+    KV_TOKEN_DATA_SIZE,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     CompressorFP8,
@@ -565,6 +567,153 @@ def test_decode_strided_kv_score_matches_contiguous_path() -> None:
     print("  [decode stride] strided kv/score match contiguous reference")
 
 
+def test_hca_per_token(seqlen: int = 256) -> None:
+    """HCA: head_dim=512, ratio=128, overlap=False (tiled online softmax)."""
+    torch.manual_seed(7)
+    head_dim, rope_head_dim, ratio = KV_HEAD_DIM, 64, 128
+    coff = 1 + (ratio == 4)
+    dim = 128
+    cmp = _build_compressor(
+        dim=dim,
+        head_dim=head_dim,
+        rope_head_dim=rope_head_dim,
+        compress_ratio=ratio,
+    )
+    state_pool_3d, kv_pool_3d, state_bt = _bind_pools(
+        cmp, seqlen=seqlen, head_dim=head_dim, coff=coff, compress_ratio=ratio
+    )
+    sp = 0
+    x = torch.randn(1, seqlen, dim, dtype=torch.bfloat16, device=DEVICE) * 0.1
+    cmp.forward(x, sp, workspace=_WS)
+    torch.cuda.synchronize()
+    _state_write_check(
+        cmp,
+        x,
+        state_pool_3d,
+        state_bt,
+        sp=sp,
+        ratio=ratio,
+        head_dim=head_dim,
+        coff=coff,
+    )
+    _kv_boundary_check(
+        kv_pool_3d,
+        seqlen=seqlen,
+        sp=sp,
+        ratio=ratio,
+        kv_eb=TOKENS_PER_STATE_BLOCK // ratio,
+    )
+    print(f"  [hca  prefill] sp={sp} S={seqlen} OK")
+
+
+def test_cp_non_owned_early_exit() -> None:
+    """Negative kv_slots skip KV write cleanly while owned boundary tokens match."""
+    from rtp_llm.models_py.modules.dsv4.fp8._compressor_vllm_triton import (
+        run_fused_compress_kv_write,
+        run_save_partial_states,
+    )
+
+    torch.manual_seed(17)
+    head_dim, rope_head_dim, ratio = KV_HEAD_DIM, 64, 4
+    coff = 2
+    seqlen = 32
+    cmp = _build_compressor(
+        dim=64, head_dim=head_dim, rope_head_dim=rope_head_dim, compress_ratio=ratio
+    )
+    state_pool_3d, kv_pool_3d, state_bt = _bind_pools(
+        cmp, seqlen=seqlen, head_dim=head_dim, coff=coff, compress_ratio=ratio
+    )
+    x = torch.randn(seqlen, 64, dtype=torch.bfloat16, device=DEVICE) * 0.1
+    fused = _linear_bf16_bf16_fp32(x, cmp._wkv_wgate_fused)
+    out_dim = coff * head_dim
+    kv_flat, score_flat = fused[:, :out_dim], fused[:, out_dim:]
+    positions = torch.arange(seqlen, dtype=torch.int64, device=DEVICE)
+    meta = build_prefill_metadata(cmp, 0, 1, seqlen, torch.device(DEVICE))
+    run_save_partial_states(
+        kv_flat,
+        score_flat,
+        cmp.ape,
+        meta.positions,
+        state_pool_3d,
+        meta.state_slots,
+        compress_ratio=ratio,
+    )
+    # Full baseline
+    kv_pool_ref = torch.zeros_like(kv_pool_3d)
+    run_fused_compress_kv_write(
+        state_pool_3d,
+        meta.token_to_req,
+        meta.positions,
+        meta.state_slots,
+        state_bt,
+        cmp.norm.weight,
+        cmp.norm_eps,
+        cmp._cos_sin_cache,
+        kv_pool_ref,
+        meta.kv_slots,
+        kv_flat,
+        score_flat,
+        cmp.ape,
+        0,
+        head_dim=head_dim,
+        rope_head_dim=rope_head_dim,
+        compress_ratio=ratio,
+        overlap=True,
+        state_tokens_per_block=TOKENS_PER_STATE_BLOCK,
+        may_use_cache=False,
+    )
+    # Mask odd boundaries to -1 (simulate sharded CP non-owned ranks).
+    kv_slots_sharded = meta.kv_slots.clone()
+    is_odd_boundary = ((positions + 1) % ratio == 0) & (((positions // ratio) % 2) == 1)
+    kv_slots_sharded[is_odd_boundary] = -1
+    run_fused_compress_kv_write(
+        state_pool_3d,
+        meta.token_to_req,
+        meta.positions,
+        meta.state_slots,
+        state_bt,
+        cmp.norm.weight,
+        cmp.norm_eps,
+        cmp._cos_sin_cache,
+        kv_pool_3d,
+        kv_slots_sharded,
+        kv_flat,
+        score_flat,
+        cmp.ape,
+        0,
+        head_dim=head_dim,
+        rope_head_dim=rope_head_dim,
+        compress_ratio=ratio,
+        overlap=True,
+        state_tokens_per_block=TOKENS_PER_STATE_BLOCK,
+        may_use_cache=False,
+    )
+    kv_eb = kv_pool_3d.shape[1]
+    blk = kv_pool_3d[1].reshape(-1)
+    ref_blk = kv_pool_ref[1].reshape(-1)
+    scale_base = kv_eb * KV_TOKEN_DATA_SIZE
+    for cp in range(seqlen // ratio):
+        tok_data = blk[cp * KV_TOKEN_DATA_SIZE : (cp + 1) * KV_TOKEN_DATA_SIZE]
+        tok_scale = blk[
+            scale_base
+            + cp * KV_SCALES_PER_TOKEN : scale_base
+            + (cp + 1) * KV_SCALES_PER_TOKEN
+        ]
+        ref_data = ref_blk[cp * KV_TOKEN_DATA_SIZE : (cp + 1) * KV_TOKEN_DATA_SIZE]
+        ref_scale = ref_blk[
+            scale_base
+            + cp * KV_SCALES_PER_TOKEN : scale_base
+            + (cp + 1) * KV_SCALES_PER_TOKEN
+        ]
+        if cp % 2 == 1:
+            assert not tok_data.any().item(), f"skipped cp={cp} data must remain zero"
+            assert not tok_scale.any().item(), f"skipped cp={cp} scale must remain zero"
+        else:
+            assert torch.equal(tok_data, ref_data), f"owned cp={cp} data mismatch"
+            assert torch.equal(tok_scale, ref_scale), f"owned cp={cp} scale mismatch"
+    print("  [cp   early-exit] masked non-owned slots skipped OK")
+
+
 def test_state_pool_clear_pool_context() -> None:
     """clear_pool_context drops both pool refs and forward becomes no-op."""
     cmp = _build_compressor(
@@ -585,7 +734,9 @@ if __name__ == "__main__":
         raise SystemExit("CUDA required for CompressorFP8 UT")
     print("== State + KV per-token writes ==")
     test_csa_per_token()
+    test_hca_per_token()
     test_indexer_per_token()
+    test_cp_non_owned_early_exit()
     test_decode_vectorized()
     test_indexer_decode_long_position_uses_cyclic_state_blocks()
     test_csa_decode_long_position_uses_cyclic_state_blocks()

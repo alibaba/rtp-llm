@@ -57,9 +57,7 @@ def device_metadata_tensor(attention_inputs: Any, name: str) -> Optional[torch.T
     to the host field keeps eager and unit-test callers compatible, while the
     preferred path avoids introducing a host-to-device copy inside capture.
     """
-    device_value = optional_tensor(
-        getattr(attention_inputs, f"{name}_device", None)
-    )
+    device_value = optional_tensor(getattr(attention_inputs, f"{name}_device", None))
     if device_value is not None:
         return device_value
     return optional_tensor(getattr(attention_inputs, name, None))
@@ -255,7 +253,7 @@ class DSparkProposerMixin:
         )
         if lengths_source is None:
             lengths_source = input_lengths
-        batch_size = int(input_lengths.numel()) if input_lengths is not None else 0
+        batch_size = int(lengths_source.numel()) if lengths_source is not None else 0
         hidden = optional_tensor(getattr(inputs, "input_hiddens", None))
 
         def _empty_outputs() -> PyModelOutputs:

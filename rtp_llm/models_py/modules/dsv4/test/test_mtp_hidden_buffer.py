@@ -243,6 +243,38 @@ class MtpHiddenBufferTest(unittest.TestCase):
         self.assertNotIn("_mtp_last_hidden_buffer", module.state_dict())
         self.assertIn("_mtp_last_hidden_buffer", module._buffers)
 
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_cuda_write_mtp_buffers_triton_copy_preserves_storage(self) -> None:
+        module = torch.nn.Module()
+        module.register_buffer(
+            "_mtp_hidden_buffer",
+            torch.full((6, 4096), -9.0, device="cuda", dtype=torch.bfloat16),
+            persistent=False,
+        )
+        module.register_buffer(
+            "_mtp_last_hidden_buffer",
+            torch.full((6, 4096), -9.0, device="cuda", dtype=torch.bfloat16),
+            persistent=False,
+        )
+        module._mtp_hidden_valid_tokens = 0
+        module._mtp_last_hidden_valid_tokens = 0
+
+        hidden_ptr = module._mtp_hidden_buffer.data_ptr()
+        last_ptr = module._mtp_last_hidden_buffer.data_ptr()
+        flat = torch.randn(3, 4096, device="cuda", dtype=torch.bfloat16)
+
+        V4Transformer._write_mtp_hidden_buffer(module, flat, is_cuda_graph=False)
+        V4Transformer._write_mtp_last_hidden_buffer(module, flat)
+
+        self.assertEqual(module._mtp_hidden_buffer.data_ptr(), hidden_ptr)
+        self.assertEqual(module._mtp_last_hidden_buffer.data_ptr(), last_ptr)
+        torch.testing.assert_close(module._mtp_hidden_buffer[:3], flat, atol=0, rtol=0)
+        torch.testing.assert_close(
+            module._mtp_last_hidden_buffer[:3], flat, atol=0, rtol=0
+        )
+        self.assertTrue(torch.all(module._mtp_hidden_buffer[3:] == -9.0))
+        self.assertTrue(torch.all(module._mtp_last_hidden_buffer[3:] == -9.0))
+
 
 if __name__ == "__main__":
     unittest.main()

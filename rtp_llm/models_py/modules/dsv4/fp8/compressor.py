@@ -66,9 +66,11 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     _CP_ROLE_INDEXER,
     _CP_ROLE_MAIN,
     CPContext,
+    CPCudaAsyncGatherHandle,
     cp_all_gather_full_async,
     cp_should_gather,
     cp_wait_gather_full,
+    cp_wait_gather_raw,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._compressor_consts import (
     INDEXER_ENTRY_BYTES,
@@ -426,6 +428,7 @@ class _CompressorPending:
     out_dim: int
     profile_label: Optional[str] = None
     restored_buf: Optional[torch.Tensor] = None
+    unpad_restore: Optional[torch.Tensor] = None
 
 
 class _CompressorNorm(nn.Module):
@@ -817,10 +820,12 @@ class CompressorFP8(PoolBackedModule):
 
     def _launch(
         self,
-        kv_flat: torch.Tensor,  # [N, coff*head_dim] fp32
-        score_flat: torch.Tensor,  # [N, coff*head_dim] fp32
+        kv_flat: torch.Tensor,  # [N, coff*head_dim] fp32 (or padded rank-major with unpad_restore)
+        score_flat: torch.Tensor,  # [N, coff*head_dim] fp32 (or padded rank-major with unpad_restore)
         meta: CompressorMeta,
         seq_start: Optional[int] = None,
+        *,
+        unpad_restore: Optional[torch.Tensor] = None,
     ) -> None:
         """Launch the two vLLM kernels (state write + boundary KV write).
 
@@ -833,6 +838,11 @@ class CompressorFP8(PoolBackedModule):
 
         Pass ``None`` to disable the raw path (decode: ``kv_flat`` is
         indexed by ``req_idx``, not by absolute position offset).
+
+        When ``unpad_restore`` is provided on the CP raw prefill path, both
+        kernels gather directly from rank-major ``kv_flat / score_flat`` via
+        ``unpad_restore`` so ``cp_restore`` does not need to materialize a full
+        restored buffer.
 
         All slot-mapping math is consumed from ``meta`` — this method only
         does kernel launches. Designed to stay branch-light so it composes
@@ -863,6 +873,7 @@ class CompressorFP8(PoolBackedModule):
                 self._state_pool_3d,
                 meta.state_slots,
                 compress_ratio=self.compress_ratio,
+                unpad_restore=unpad_restore,
             )
 
         # Decode path passes seq_start=None: disable the raw branch so the
@@ -876,6 +887,7 @@ class CompressorFP8(PoolBackedModule):
             and meta.cu_seq_per_req is not None
         )
         raw_disabled = (seq_start is None) and not use_varlen_raw
+        may_use_cache = bool(raw_disabled or meta.has_prefix)
         state_cache_for_read = self._state_pool_3d
         state_block_table_for_read = self._state_block_table
         if _cp_sliced_state_read_needed(meta, self._cp_ctx, raw_disabled):
@@ -923,6 +935,8 @@ class CompressorFP8(PoolBackedModule):
                 seq_start_per_req=meta.seq_start_per_req if use_varlen_raw else None,
                 cu_seq_per_req=meta.cu_seq_per_req if use_varlen_raw else None,
                 state_tokens_per_block=self._state_tokens_per_block,
+                may_use_cache=may_use_cache,
+                unpad_restore=unpad_restore,
             )
 
     # ----------------------------------------------------------------------
@@ -1049,6 +1063,38 @@ class CompressorFP8(PoolBackedModule):
             restored_buf=None,
         )
 
+    def _wait_cp_gather(
+        self, handle: Any
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Fence CP gather; skip cp_restore when compressor kernels read raw."""
+        if (
+            type(self)._launch is CompressorFP8._launch
+            and isinstance(handle, CPCudaAsyncGatherHandle)
+            and not handle.cp_ctx.unpad_restore_is_prefix
+            and handle.cp_ctx.unpad_restore.device == handle.gathered.device
+        ):
+            return cp_wait_gather_raw(handle), handle.cp_ctx.unpad_restore
+        return cp_wait_gather_full(handle), None
+
+    def _call_launch(
+        self,
+        kv_flat: torch.Tensor,
+        score_flat: torch.Tensor,
+        meta: CompressorMeta,
+        seq_start: Optional[int],
+        unpad_restore: Optional[torch.Tensor],
+    ) -> None:
+        if unpad_restore is not None:
+            self._launch(
+                kv_flat,
+                score_flat,
+                meta,
+                seq_start=seq_start,
+                unpad_restore=unpad_restore,
+            )
+        else:
+            self._launch(kv_flat, score_flat, meta, seq_start=seq_start)
+
     def wait_prefill_gather(self, pending: Optional[_CompressorPending]) -> None:
         """Fence the split prefill CP gather without writing the FP8 pool.
 
@@ -1064,7 +1110,9 @@ class CompressorFP8(PoolBackedModule):
                 f"dsv4.fp8.compressor.prefill.{pending.profile_label}.cp_wait_kv_score"
             )
         with record_function_range(wait_range):
-            pending.fused_flat = cp_wait_gather_full(pending.fused_gather_handle)
+            pending.fused_flat, pending.unpad_restore = self._wait_cp_gather(
+                pending.fused_gather_handle
+            )
             pending.fused_gather_handle = None
 
     def finish_prefill(self, pending: Optional[_CompressorPending]) -> None:
@@ -1100,13 +1148,26 @@ class CompressorFP8(PoolBackedModule):
                 positions, b_idx = _build_prefill_positions(
                     pending.sp, pending.bsz, pending.seqlen, device
                 )
+                seq_starts = torch.full(
+                    (pending.bsz,), pending.sp, dtype=torch.long, device=device
+                )
+                cu_seqs = (
+                    torch.arange(pending.bsz + 1, dtype=torch.long, device=device)
+                    * pending.seqlen
+                )
                 meta = self.prepare_metadata(
-                    positions, b_idx, has_prefix=pending.sp > 0
+                    positions,
+                    b_idx,
+                    has_prefix=pending.sp > 0,
+                    seq_start_per_req=seq_starts,
+                    cu_seq_per_req=cu_seqs,
                 )
 
         seq_start = None if meta.is_batched else pending.sp
         with record_function_range("dsv4.fp8.compressor.prefill.launch"):
-            self._launch(kv_flat, score_flat, meta, seq_start=seq_start)
+            self._call_launch(
+                kv_flat, score_flat, meta, seq_start, pending.unpad_restore
+            )
 
     # ----------------------------------------------------------------------
     # Forward (prefill)
@@ -1166,6 +1227,7 @@ class CompressorFP8(PoolBackedModule):
         cp_ctx = self._cp_ctx
         cp_gather = cp_should_gather(cp_ctx, start_pos)
         fused_gather_handle = None
+        unpad_restore: Optional[torch.Tensor] = None
         if cp_gather:
             assert cp_ctx is not None
             gather_stream = (
@@ -1200,7 +1262,7 @@ class CompressorFP8(PoolBackedModule):
             )
             assert fused_gather_handle is not None
             with record_function_range("dsv4.fp8.compressor.prefill.cp_wait_kv_score"):
-                fused_flat = cp_wait_gather_full(fused_gather_handle)
+                fused_flat, unpad_restore = self._wait_cp_gather(fused_gather_handle)
 
         with record_function_range("dsv4.fp8.compressor.prefill.split_kv_score"):
             assert fused_flat.dim() == 2, (
@@ -1232,7 +1294,7 @@ class CompressorFP8(PoolBackedModule):
         # request. Legacy scalar metadata keeps the old ``seq_start`` path.
         seq_start = None if meta.is_batched else sp
         with record_function_range("dsv4.fp8.compressor.prefill.launch"):
-            self._launch(kv_flat, score_flat, meta, seq_start=seq_start)
+            self._call_launch(kv_flat, score_flat, meta, seq_start, unpad_restore)
         return None
 
     # ----------------------------------------------------------------------

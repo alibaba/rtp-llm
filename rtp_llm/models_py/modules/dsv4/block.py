@@ -18,7 +18,12 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention import (
     AttentionFP8,
     CommitOnlyAttentionFP8,
 )
-from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
+from rtp_llm.models_py.modules.dsv4.hc import (
+    build_hc_unit,
+    can_use_fused_mhc_pre_norm,
+    fused_mhc_pre_norm,
+    fused_mhc_pre_norm_quant,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     ChunkedFp8Fp4MoeLayer,
 )
@@ -298,6 +303,36 @@ class Block(nn.Module):
             self._prefill_fast_hc_impls_cached = impls
         return impls
 
+    def _prefill_fast_hc_pre_norm(
+        self,
+        x: torch.Tensor,
+        *,
+        hc_unit,
+        hc_pre_impl: Callable,
+        norm: nn.Module,
+    ):
+        if hc_pre_impl == hc_unit._pre_impl and can_use_fused_mhc_pre_norm(
+            x, hc_unit, norm
+        ):
+            return fused_mhc_pre_norm(x, hc_unit, norm)
+        x_pre, post, comb = hc_pre_impl(x)
+        x_pre = _prefill_fast_norm(norm, x_pre)
+        return x_pre, post, comb
+
+    def _hc_pre_norm_profiled(self, x: torch.Tensor, hc_unit, norm: nn.Module):
+        if can_use_fused_mhc_pre_norm(x, hc_unit, norm):
+            layer = f"L{hc_unit.layer_id:02d}" if hc_unit.layer_id >= 0 else "Lxx"
+            name = hc_unit.name or "unit"
+            with _profiler.record_function_range(f"dsv4.hc.{layer}.{name}.pre_norm"):
+                return fused_mhc_pre_norm(x, hc_unit, norm)
+        x_pre, post, comb = hc_unit.pre(x)
+        if x_pre.dim() > 2:
+            bsz, q_len, dim_ = x_pre.shape
+            x_pre = norm(x_pre.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
+        else:
+            x_pre = norm(x_pre)
+        return x_pre, post, comb
+
     def prefill_fast_callable(self):
         if not isinstance(self.attn, AttentionFP8):
             return None
@@ -309,8 +344,9 @@ class Block(nn.Module):
     def prefill_fast_attn_pre(self, x: torch.Tensor):
         attn_hc_pre, _, _, _ = self._prefill_fast_hc_impls()
         residual = x
-        x_pre, post, comb = attn_hc_pre(x)
-        x_pre = _prefill_fast_norm(self.attn_norm, x_pre)
+        x_pre, post, comb = self._prefill_fast_hc_pre_norm(
+            x, hc_unit=self.attn_hc, hc_pre_impl=attn_hc_pre, norm=self.attn_norm
+        )
         return residual, x_pre, post, comb
 
     def prefill_fast_attn_body(
@@ -343,8 +379,9 @@ class Block(nn.Module):
     def prefill_fast_ffn_pre(self, x: torch.Tensor):
         _, ffn_hc_pre, _, _ = self._prefill_fast_hc_impls()
         residual = x
-        x_pre, post, comb = ffn_hc_pre(x)
-        x_pre = _prefill_fast_norm(self.ffn_norm, x_pre)
+        x_pre, post, comb = self._prefill_fast_hc_pre_norm(
+            x, hc_unit=self.ffn_hc, hc_pre_impl=ffn_hc_pre, norm=self.ffn_norm
+        )
         return residual, x_pre, post, comb
 
     def prefill_fast_ffn_body(
@@ -394,11 +431,8 @@ class Block(nn.Module):
         else:
             # Attention path
             residual = x
-            x_pre, post, comb = self.attn_hc.pre(x)
-            # Framework RMSNorm wants 2D. Attention keeps the original 3D shape.
-            bsz, q_len, dim_ = x_pre.shape
-            x_pre = self.attn_norm(x_pre.reshape(bsz * q_len, dim_)).view(
-                bsz, q_len, dim_
+            x_pre, post, comb = self._hc_pre_norm_profiled(
+                x, self.attn_hc, self.attn_norm
             )
             if attn_fn is not None:
                 attn_out = attn_fn(x_pre)
@@ -410,9 +444,7 @@ class Block(nn.Module):
 
         # FFN path — MoE has no per-step state, reuse existing forward
         residual = x
-        x_pre, post, comb = self.ffn_hc.pre(x)
-        bsz, q_len, dim_ = x_pre.shape
-        x_pre = self.ffn_norm(x_pre.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
+        x_pre, post, comb = self._hc_pre_norm_profiled(x, self.ffn_hc, self.ffn_norm)
         ffn_out = self.ffn(x_pre, input_ids, is_decode_forward=True)
         x = self.ffn_hc.post(ffn_out, residual, post, comb)
         return x
@@ -480,14 +512,29 @@ class Block(nn.Module):
         ) = self._prefill_fast_hc_impls()
 
         residual = x
-        x_pre, post, comb = attn_hc_pre(x)
-        if self.attn.can_fuse_prefill_attn_norm_input_quant(
-            x_pre, self.attn_norm.weight.data
+        can_reuse_qkv_quant = (
+            isinstance(self.attn, AttentionFP8)
+            and "can_fuse_prefill_attn_norm_input_quant" not in self.attn.__dict__
+            and "prefill_fused_attn_norm_input_quant" not in self.attn.__dict__
+            and "forward_with_shared_input_quant" not in self.attn.__dict__
+            and type(self.attn).can_fuse_prefill_attn_norm_input_quant
+            is AttentionFP8.can_fuse_prefill_attn_norm_input_quant
+            and type(self.attn).prefill_fused_attn_norm_input_quant
+            is AttentionFP8.prefill_fused_attn_norm_input_quant
+            and type(self.attn).forward_with_shared_input_quant
+            is AttentionFP8.forward_with_shared_input_quant
+            and self.attn._can_reuse_qkv_input_quant()
+            and bool(getattr(self.attn.wq_a, "scale_ue8m0", False))
+        )
+        if (
+            can_reuse_qkv_quant
+            and attn_hc_pre == self.attn_hc._pre_impl
+            and can_use_fused_mhc_pre_norm(
+                x, self.attn_hc, self.attn_norm, quant_ue8m0=True
+            )
         ):
-            x_pre, shared_input_quant = self.attn.prefill_fused_attn_norm_input_quant(
-                x_pre,
-                self.attn_norm.weight.data,
-                self.attn_norm.variance_epsilon,
+            x_pre, post, comb, shared_input_quant = fused_mhc_pre_norm_quant(
+                x, self.attn_hc, self.attn_norm
             )
             attn_out = self.attn.forward_with_shared_input_quant(
                 x_pre,
@@ -496,20 +543,52 @@ class Block(nn.Module):
                 kv_cache=kv_cache,
                 block_tables_by_type=block_tables_by_type,
             )
-        else:
-            x_pre = _prefill_fast_norm(self.attn_norm, x_pre)
+        elif (
+            not can_reuse_qkv_quant
+            and attn_hc_pre == self.attn_hc._pre_impl
+            and can_use_fused_mhc_pre_norm(x, self.attn_hc, self.attn_norm)
+        ):
+            x_pre, post, comb = fused_mhc_pre_norm(x, self.attn_hc, self.attn_norm)
             attn_out = self.attn(
                 x_pre,
                 positions,
                 kv_cache=kv_cache,
                 block_tables_by_type=block_tables_by_type,
             )
+        else:
+            x_pre, post, comb = attn_hc_pre(x)
+            if self.attn.can_fuse_prefill_attn_norm_input_quant(
+                x_pre, self.attn_norm.weight.data
+            ):
+                x_pre, shared_input_quant = (
+                    self.attn.prefill_fused_attn_norm_input_quant(
+                        x_pre,
+                        self.attn_norm.weight.data,
+                        self.attn_norm.variance_epsilon,
+                    )
+                )
+                attn_out = self.attn.forward_with_shared_input_quant(
+                    x_pre,
+                    positions,
+                    shared_input_quant,
+                    kv_cache=kv_cache,
+                    block_tables_by_type=block_tables_by_type,
+                )
+            else:
+                x_pre = _prefill_fast_norm(self.attn_norm, x_pre)
+                attn_out = self.attn(
+                    x_pre,
+                    positions,
+                    kv_cache=kv_cache,
+                    block_tables_by_type=block_tables_by_type,
+                )
         x = attn_hc_post(attn_out, residual, post, comb)
         self._sync_after_first_cp_prefill_attention()
 
         residual = x
-        x_pre, post, comb = ffn_hc_pre(x)
-        x_pre = _prefill_fast_norm(self.ffn_norm, x_pre)
+        x_pre, post, comb = self._prefill_fast_hc_pre_norm(
+            x, hc_unit=self.ffn_hc, hc_pre_impl=ffn_hc_pre, norm=self.ffn_norm
+        )
         ffn_out = self.ffn(x_pre, input_ids)
         return ffn_hc_post(ffn_out, residual, post, comb)
 
@@ -537,8 +616,9 @@ class Block(nn.Module):
         """
         # Attention path
         residual = x
-        x_pre, post, comb = self.attn_hc.pre(x)  # [T, dim], [T, hc, 1], [T, hc, hc]
-        x_pre = self.attn_norm(x_pre)  # [T, dim]
+        x_pre, post, comb = self._hc_pre_norm_profiled(
+            x, self.attn_hc, self.attn_norm
+        )  # [T, dim], [T, hc, 1], [T, hc, hc]
 
         # AttentionFP8 is flat-native: takes [T, dim] + per-token positions,
         # no padding / per-request scalars. The runtime kv-cache dtype flag can
@@ -608,8 +688,9 @@ class Block(nn.Module):
 
         # FFN path
         residual = x
-        x_pre, post, comb = self.ffn_hc.pre(x)  # [T, dim], ...
-        x_pre = self.ffn_norm(x_pre)  # [T, dim]
+        x_pre, post, comb = self._hc_pre_norm_profiled(
+            x, self.ffn_hc, self.ffn_norm
+        )  # [T, dim], ...
         ffn_in_ids = (
             input_ids
             if input_ids is not None

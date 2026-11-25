@@ -209,6 +209,197 @@ def quantize_and_insert_k_cache(
     )
 
 
+@triton.jit(
+    do_not_specialize=[
+        "N",
+        "D",
+        "M_dst",
+        "src_stride_row",
+        "src_stride_col",
+        "dst_stride_row",
+        "dst_stride_col",
+        "slot_stride",
+    ]
+)
+def _row_scatter_kernel(
+    dst_ptr,
+    slots_ptr,
+    src_ptr,
+    N,
+    D,
+    M_dst,
+    src_stride_row,
+    src_stride_col,
+    dst_stride_row,
+    dst_stride_col,
+    slot_stride,
+    BLOCK_D: tl.constexpr,
+    MASK_NEGATIVE: tl.constexpr,
+    CONTIGUOUS_COLS: tl.constexpr,
+    TRAP_INVALID_KV_ACCESS: tl.constexpr,
+):
+    """Vectorized 2D row scatter: ``dst[slots[r]] = src[r]`` for ``0 <= r < N``.
+
+    One program handles ``(row, col_tile)``. Negative slots are skipped
+    in-kernel when ``MASK_NEGATIVE`` is enabled without host sync.
+    """
+    pid_n = tl.program_id(0).to(tl.int64)
+    pid_d = tl.program_id(1)
+    if pid_n >= N:
+        return
+
+    slot = tl.load(slots_ptr + pid_n * slot_stride.to(tl.int64)).to(tl.int64)
+    if MASK_NEGATIVE:
+        if slot < 0:
+            return
+    if slot < 0 or slot >= M_dst:
+        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+        return
+
+    col_offs = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
+    col_mask = col_offs < D
+
+    src_row_ptr = src_ptr + pid_n * src_stride_row.to(tl.int64)
+    dst_row_ptr = dst_ptr + slot * dst_stride_row.to(tl.int64)
+
+    if CONTIGUOUS_COLS:
+        vals = tl.load(src_row_ptr + col_offs, mask=col_mask)
+        tl.store(dst_row_ptr + col_offs, vals, mask=col_mask)
+    else:
+        vals = tl.load(
+            src_row_ptr + col_offs.to(tl.int64) * src_stride_col.to(tl.int64),
+            mask=col_mask,
+        )
+        tl.store(
+            dst_row_ptr + col_offs.to(tl.int64) * dst_stride_col.to(tl.int64),
+            vals,
+            mask=col_mask,
+        )
+
+
+def _can_reinterpret_row_width(t: torch.Tensor, target_bytes: int) -> bool:
+    elem_bytes = t.element_size()
+    if target_bytes <= elem_bytes or (target_bytes % elem_bytes) != 0:
+        return False
+    if t.stride(1) != 1:
+        return False
+    if (int(t.shape[1]) * elem_bytes) % target_bytes != 0:
+        return False
+    if (int(t.stride(0)) * elem_bytes) % target_bytes != 0:
+        return False
+    if (int(t.storage_offset()) * elem_bytes) % target_bytes != 0:
+        return False
+    return (t.data_ptr() % target_bytes) == 0
+
+
+def _reinterpret_for_scatter(
+    dst: torch.Tensor,
+    src: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Widen aligned contiguous-column rows to 64/32/16-bit integer words."""
+    if dst.stride(1) == 1 and src.stride(1) == 1:
+        for word_dtype, word_bytes in (
+            (torch.int64, 8),
+            (torch.int32, 4),
+            (torch.int16, 2),
+        ):
+            if _can_reinterpret_row_width(
+                dst, word_bytes
+            ) and _can_reinterpret_row_width(src, word_bytes):
+                return dst.view(word_dtype), src.view(word_dtype)
+    if dst.element_size() == 1 and dst.dtype != torch.uint8:
+        return dst.view(torch.uint8), src.view(torch.uint8)
+    return dst, src
+
+
+def row_scatter(
+    dst: torch.Tensor,
+    slots: torch.Tensor,
+    src: torch.Tensor,
+    *,
+    mask_negative: bool = False,
+    trap_invalid_kv_access: bool = True,
+) -> None:
+    """In-place 2D row scatter ``dst[slots[r]] = src[r]``.
+
+    Replaces native ``dst.index_copy_(0, slots, src)`` on CUDA with a wide
+    vectorized Triton scatter that avoids ``int64`` slot-cast allocations,
+    ``.contiguous()`` row-slice copies, and ``nonzero()`` host syncs.
+    """
+    assert dst.dim() == 2 and src.dim() == 2, (
+        f"row_scatter expects 2D tensors, got dst={tuple(dst.shape)} "
+        f"src={tuple(src.shape)}"
+    )
+    assert (
+        dst.shape[1] == src.shape[1]
+    ), f"row_scatter width mismatch: dst={tuple(dst.shape)} src={tuple(src.shape)}"
+    assert (
+        dst.dtype == src.dtype
+    ), f"row_scatter dtype mismatch: dst={dst.dtype} src={src.dtype}"
+    slots_1d = slots.reshape(-1)
+    n_rows = int(src.shape[0])
+    d_cols = int(src.shape[1])
+    assert (
+        int(slots_1d.numel()) == n_rows
+    ), f"row_scatter slot/row mismatch: slots={int(slots_1d.numel())} rows={n_rows}"
+    if n_rows == 0 or d_cols == 0:
+        return
+
+    if not (dst.is_cuda and src.is_cuda and slots_1d.is_cuda):
+        slot_long = (
+            slots_1d.to(torch.long) if slots_1d.dtype != torch.long else slots_1d
+        )
+        if not mask_negative:
+            dst.index_copy_(0, slot_long, src)
+            return
+        valid = slot_long >= 0
+        valid_idx = valid.nonzero(as_tuple=False).flatten()
+        if valid_idx.numel() > 0:
+            dst.index_copy_(
+                0,
+                slot_long.index_select(0, valid_idx),
+                src.index_select(0, valid_idx),
+            )
+        return
+
+    dst_w, src_w = _reinterpret_for_scatter(dst, src)
+    d_eff = int(src_w.shape[1])
+    m_dst = int(dst_w.shape[0])
+    if d_eff <= 64:
+        block_d = 64
+        num_warps = 2
+    elif d_eff <= 128:
+        block_d = 128
+        num_warps = 2
+    elif d_eff <= 256:
+        block_d = 256
+        num_warps = 4
+    else:
+        block_d = 512
+        num_warps = 4
+
+    contiguous_cols = dst_w.stride(1) == 1 and src_w.stride(1) == 1
+    grid = (n_rows, triton.cdiv(d_eff, block_d))
+    _row_scatter_kernel[grid](
+        dst_w,
+        slots_1d,
+        src_w,
+        N=n_rows,
+        D=d_eff,
+        M_dst=m_dst,
+        src_stride_row=int(src_w.stride(0)),
+        src_stride_col=int(src_w.stride(1)),
+        dst_stride_row=int(dst_w.stride(0)),
+        dst_stride_col=int(dst_w.stride(1)),
+        slot_stride=int(slots_1d.stride(0)),
+        BLOCK_D=block_d,
+        MASK_NEGATIVE=mask_negative,
+        CONTIGUOUS_COLS=contiguous_cols,
+        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access,
+        num_warps=num_warps,
+    )
+
+
 def quantize_and_insert_k_cache_cp_byte_sliced(
     k: torch.Tensor,
     k_cache_raw: torch.Tensor,
@@ -263,6 +454,8 @@ def quantize_and_insert_k_cache_cp_byte_sliced(
         full_view,
         compact_slots,
     )
-    k_cache_raw.index_copy_(
-        0, unique_blocks, full_raw[:, slice_start:slice_end].contiguous()
+    row_scatter(
+        k_cache_raw,
+        unique_blocks,
+        full_raw[:, slice_start:slice_end],
     )

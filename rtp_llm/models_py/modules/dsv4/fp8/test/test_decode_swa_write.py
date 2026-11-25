@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import unittest
+from unittest import mock
 
 import torch
 
@@ -18,6 +19,9 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
 )
 from rtp_llm.models_py.modules.dsv4.fp8.decode.fp8_kv_quant_decode_op import (
     read_model1_kv_slot_bytes,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.decode.kv_write_decode_op import (
+    write_kv_to_pool,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.decode.write_swa import decode_write_swa_fp8
 
@@ -130,9 +134,10 @@ class DecodeSwaWriteTest(unittest.TestCase):
                     )
                     * 0.1
                 )
-                slot_mapping = torch.arange(
-                    bsz, dtype=torch.int64, device=self.device
-                ) + BLOCK_SIZE
+                slot_mapping = (
+                    torch.arange(bsz, dtype=torch.int64, device=self.device)
+                    + BLOCK_SIZE
+                )
                 if bsz >= 8:
                     slot_mapping[1] = -1
                     slot_mapping[-2] = -1
@@ -152,6 +157,64 @@ class DecodeSwaWriteTest(unittest.TestCase):
                         torch.all(skipped_bytes == 0x5A),
                         msg="slot_mapping=-1 should leave the skipped slot untouched",
                     )
+
+
+class WriteKvToPoolScatterTest(unittest.TestCase):
+
+    def setUp(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA not available")
+        self.device = torch.device("cuda")
+        torch.manual_seed(17)
+
+    def test_write_kv_to_pool_mask_negative_and_dtypes(self):
+        for dtype, dim, slot_dtype, mask_negative in (
+            (torch.bfloat16, 512, torch.int32, False),
+            (torch.uint8, 584, torch.int64, False),
+            (torch.uint8, 132, torch.int32, True),
+            (torch.bfloat16, 512, torch.int32, True),
+            (torch.float32, 128, torch.int64, True),
+        ):
+            with self.subTest(
+                dtype=dtype,
+                dim=dim,
+                slot_dtype=slot_dtype,
+                mask_negative=mask_negative,
+            ):
+                pool_rows = 32
+                pool = torch.full((pool_rows, dim), 7, dtype=dtype, device=self.device)
+                ref = pool.clone()
+                if dtype == torch.uint8:
+                    src = torch.randint(
+                        0, 255, (6, dim), dtype=dtype, device=self.device
+                    )
+                else:
+                    src = torch.randn((6, dim), dtype=dtype, device=self.device)
+                if mask_negative:
+                    slots = torch.tensor(
+                        [2, -1, 17, -1, 0, 29],
+                        dtype=slot_dtype,
+                        device=self.device,
+                    )
+                else:
+                    slots = torch.tensor(
+                        [2, 5, 17, 11, 0, 29],
+                        dtype=slot_dtype,
+                        device=self.device,
+                    )
+
+                with mock.patch.object(
+                    torch.Tensor,
+                    "nonzero",
+                    side_effect=AssertionError("unexpected nonzero sync on CUDA"),
+                ):
+                    write_kv_to_pool(src, slots, pool, mask_negative=mask_negative)
+                torch.cuda.synchronize()
+
+                valid = slots >= 0
+                if valid.any():
+                    ref.index_copy_(0, slots[valid].to(torch.long), src[valid])
+                self.assertTrue(torch.equal(pool, ref))
 
 
 if __name__ == "__main__":

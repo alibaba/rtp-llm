@@ -229,6 +229,90 @@ def test_rejects_negative_cp_size():
     raise AssertionError("expected ValueError for cp_size=0")
 
 
+def test_triton_gather_cuda_parity_if_available():
+    """Verify CP Triton 2D/1D gathers and complex freqs_cis against ATen on CUDA."""
+    if not torch.cuda.is_available():
+        return
+    device = torch.device("cuda")
+    torch.manual_seed(20261125)
+    # 1) _cp_restore_gathered_full_2d across bf16/fp16/fp32 and unaligned widths.
+    for H, dtype in (
+        (512, torch.bfloat16),
+        (512, torch.float16),
+        (1024, torch.float32),
+        (2048, torch.float32),
+        (13, torch.bfloat16),  # exercises byte fallback path
+    ):
+        cp_size = 4
+        chunk_len = 35
+        seq_len_full = 123
+        gathered = torch.randn(cp_size * chunk_len, H, dtype=dtype, device=device)
+        restore = torch.randperm(cp_size * chunk_len, dtype=torch.long, device=device)[
+            :seq_len_full
+        ]
+        ctx = CP.CPContext(
+            cp_size=cp_size,
+            cp_rank=0,
+            chunk_length=chunk_len,
+            padded_seq_len=cp_size * chunk_len,
+            seq_len_full=seq_len_full,
+            relative_positions=torch.empty(0, dtype=torch.long, device=device),
+            prefix_length=0,
+            global_positions=torch.empty(0, dtype=torch.long, device=device),
+            local_is_real=torch.empty(0, dtype=torch.bool, device=device),
+            unpad_restore=restore,
+            seq_len_total=seq_len_full,
+            cp_info=object(),
+            unpad_restore_is_prefix=False,
+        )
+        ref = gathered.index_select(0, restore)
+        got = CP._cp_restore_gathered_full_2d(gathered, ctx)
+        assert torch.equal(got, ref), f"2D restore mismatch for H={H}, dtype={dtype}"
+        out_buf = torch.empty_like(ref)
+        got_out = CP._cp_restore_gathered_full_2d(gathered, ctx, out=out_buf)
+        assert got_out.data_ptr() == out_buf.data_ptr()
+        assert torch.equal(got_out, ref)
+
+    # 2) cp_freqs_cis_local (complex64)
+    freqs = torch.complex(
+        torch.randn(128, 32, device=device), torch.randn(128, 32, device=device)
+    )
+    global_pos = torch.randint(0, 150, (64,), dtype=torch.int64, device=device)
+    ctx_f = CP.CPContext(
+        cp_size=2,
+        cp_rank=0,
+        chunk_length=64,
+        padded_seq_len=128,
+        seq_len_full=64,
+        relative_positions=torch.empty(0, dtype=torch.long, device=device),
+        prefix_length=0,
+        global_positions=global_pos,
+        local_is_real=torch.empty(0, dtype=torch.bool, device=device),
+        unpad_restore=torch.arange(64, dtype=torch.long, device=device),
+        seq_len_total=64,
+        cp_info=object(),
+        unpad_restore_is_prefix=True,
+    )
+    got_f = CP.cp_freqs_cis_local(freqs, ctx_f)
+    ref_f = freqs.index_select(0, global_pos.clamp_max(freqs.size(0) - 1))
+    assert torch.equal(got_f, ref_f), "cp_freqs_cis_local complex64 mismatch"
+
+    # 3) _gather_1d with int32 and int64 indices
+    src_1d = torch.randint(0, 1000, (17,), dtype=torch.int64, device=device)
+    idx_1d = torch.randint(0, 17, (300,), dtype=torch.int32, device=device)
+    assert torch.equal(CP._gather_1d(src_1d, idx_1d), src_1d.gather(0, idx_1d.long()))
+
+    # 4) cp_gather_request_pool_blocks with strided outer dim
+    raw_backing = torch.randn(20, 4, 300, dtype=torch.float32, device=device)
+    strided_pool = raw_backing[:, :, :256]  # stride(0) padded vs inner [4, 256]
+    bt_req = torch.tensor([5, 1, 9, 3], dtype=torch.int32, device=device)
+    got_pool = CP.cp_gather_request_pool_blocks(
+        strided_pool, bt_req, total_logical_blocks=4, cp_size=1, cp_rank=0
+    )
+    ref_pool = strided_pool.index_select(0, bt_req.long()).contiguous()
+    assert torch.equal(got_pool, ref_pool), "strided pool block gather mismatch"
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in list(globals().items()):

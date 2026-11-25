@@ -38,8 +38,13 @@ import torch
 from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
     build_cp_byte_sliced_slot_compaction,
 )
+from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import row_scatter
 from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8 as Attention
-from rtp_llm.models_py.modules.dsv4.fp8.attention import WorkspaceMeta
+from rtp_llm.models_py.modules.dsv4.fp8.attention import (
+    CsaPrefillMeta,
+    HcaPrefillMeta,
+    WorkspaceMeta,
+)
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import CSA_KV, HCA_KV, SWA_KV
 
 _SWA_FP8_ENTRY_BYTES = 584
@@ -706,7 +711,7 @@ class WorkspaceOverlayScatterTest(unittest.TestCase):
             .contiguous()
         )
         workspace = torch.zeros((B, m.M, D), dtype=torch.bfloat16, device=self.device)
-        workspace.view(B * m.M, D).index_copy_(0, m.new_k_slot_in_flat, kv_full)
+        row_scatter(workspace.view(B * m.M, D), m.new_k_slot_in_flat, kv_full)
         return workspace, kv_full
 
     def test_b1_scatter_matches_legacy_slice(self) -> None:
@@ -774,6 +779,25 @@ class WorkspaceOverlayScatterTest(unittest.TestCase):
         self.assertTrue(torch.equal(ws[1, 21:29, :], kv_full[5:13]))
         self.assertTrue(torch.all(ws[1, :21, :] == 0))
 
+    def test_row_scatter_overlay_matches_index_copy_bf16_512(self) -> None:
+        stub = _make_stub(win=8, compress_ratio=4, n_reqs=2)
+        m = _build_meta_varlen(stub, [0, 32], [8, 6], with_dense_cmp_topk=False)
+        B, T, D = 2, 14, 512
+        kv_full = torch.randn((T, D), dtype=torch.bfloat16, device=self.device)
+        for slot_dtype in (torch.int64, torch.int32):
+            with self.subTest(slot_dtype=slot_dtype):
+                ws_triton = torch.zeros(
+                    (B, m.M, D), dtype=torch.bfloat16, device=self.device
+                )
+                ws_ref = torch.zeros_like(ws_triton)
+                slots = m.new_k_slot_in_flat.to(dtype=slot_dtype)
+                row_scatter(ws_triton.view(B * m.M, D), slots, kv_full)
+                ws_ref.view(B * m.M, D).index_copy_(0, slots.to(torch.long), kv_full)
+                torch.cuda.synchronize()
+                self.assertTrue(
+                    torch.equal(ws_triton.view(torch.int16), ws_ref.view(torch.int16))
+                )
+
 
 # =========================================================================
 # Per-builder coverage: _build_compressor_meta, _build_csa_prefill_meta,
@@ -782,10 +806,6 @@ class WorkspaceOverlayScatterTest(unittest.TestCase):
 # indexer.prepare. We stub the compressor + indexer to capture call args
 # and assert each builder threads varlen kwargs correctly.
 # =========================================================================
-from rtp_llm.models_py.modules.dsv4.fp8.attention import (  # noqa: E402
-    AttentionFP8 as Attention,
-)
-from rtp_llm.models_py.modules.dsv4.fp8.attention import CsaPrefillMeta, HcaPrefillMeta
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (  # noqa: E402
     CSA_STATE,
     HCA_STATE,

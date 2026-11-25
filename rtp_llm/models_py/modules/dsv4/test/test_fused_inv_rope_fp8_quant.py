@@ -164,6 +164,110 @@ def test_correctness_fp8_and_scale():
         assert s_max <= 1, f"scale byte diff {s_max} > 1 exp (boundary ok)"
 
 
+def test_group_heads_tma_padding_and_multi_step_correctness():
+    """Optimized grouped-head kernel matches legacy across heads_per_cta=(1,2,4,8),
+    prefill non-multiple-of-4 M (TMA scale zero padding), q_len_per_b > 1, and
+    oversized reused scale_buf."""
+    torch.manual_seed(99)
+    n_heads, head_dim, rope_dim = 64, 512, 64
+    nope_dim = head_dim - rope_dim
+    n_groups = 8
+    heads_per_group = n_heads // n_groups
+
+    cases = [
+        ((1, 17, n_heads, head_dim), 17, "prefill_M17"),
+        ((3, 5, n_heads, head_dim), 3, "batched_S5"),
+        ((1, 257, n_heads, head_dim), 257, "prefill_M257"),
+    ]
+    for shape, freq_rows, label in cases:
+        o = torch.randn(*shape, dtype=torch.bfloat16, device="cuda") * 0.3
+        ang = torch.rand(freq_rows, rope_dim // 2, device="cuda") * 6.28
+        freqs = torch.polar(torch.ones_like(ang), ang).to(torch.complex64)
+        fp8_ref, scale_ref = fused_inv_rope_fp8_quant(
+            o,
+            freqs,
+            n_groups=n_groups,
+            heads_per_group=heads_per_group,
+            nope_dim=nope_dim,
+            rope_head_dim=rope_dim,
+            impl="optimized",
+            heads_per_cta=1,
+        )
+        fp8_leg, scale_leg = fused_inv_rope_fp8_quant(
+            o,
+            freqs,
+            n_groups=n_groups,
+            heads_per_group=heads_per_group,
+            nope_dim=nope_dim,
+            rope_head_dim=rope_dim,
+            impl="legacy",
+        )
+        for hpc in (1, 2, 4, 8):
+            fp8_opt, scale_opt = fused_inv_rope_fp8_quant(
+                o,
+                freqs,
+                n_groups=n_groups,
+                heads_per_group=heads_per_group,
+                nope_dim=nope_dim,
+                rope_head_dim=rope_dim,
+                impl="optimized",
+                heads_per_cta=hpc,
+            )
+            # Optimized paths (hpc=1,2,4,8) share exact IEEE bit-ceil scale
+            # math and register RoPE, so they must be bit-identical.
+            assert torch.equal(
+                fp8_opt.contiguous().view(torch.uint8),
+                fp8_ref.contiguous().view(torch.uint8),
+            ), f"{label} hpc={hpc} fp8 mismatch vs hpc=1"
+            assert torch.equal(
+                scale_opt.contiguous().view(torch.int32),
+                scale_ref.contiguous().view(torch.int32),
+            ), f"{label} hpc={hpc} scale mismatch vs hpc=1"
+
+            # Legacy uses tl.math.exp2(ceil(log2(.))) so rare power-of-2
+            # boundaries can differ by 1 exponent (same contract as perf test).
+            fp8_diff = (
+                fp8_opt.contiguous().view(torch.uint8).to(torch.int16)
+                - fp8_leg.contiguous().view(torch.uint8).to(torch.int16)
+            ).abs()
+            scale_diff = (
+                scale_opt.contiguous().view(torch.uint8).to(torch.int16)
+                - scale_leg.contiguous().view(torch.uint8).to(torch.int16)
+            ).abs()
+            assert (fp8_diff == 0).float().mean().item() >= 0.95
+            assert (scale_diff == 0).float().mean().item() >= 0.99
+            assert scale_diff.max().item() <= 1
+
+    # Reused oversized TMA scale_buf (M=5 inside tma_M=32) must zero [M:tma_M].
+    M, cap_M = 5, 32
+    d_per_group = heads_per_group * head_dim
+    fp8_buf = torch.empty(
+        (n_groups, cap_M, d_per_group), dtype=torch.float8_e4m3fn, device="cuda"
+    )
+    scale_buf = torch.full(
+        (n_groups * heads_per_group * cap_M,), -1, dtype=torch.int32, device="cuda"
+    ).as_strided(
+        (n_groups, cap_M, heads_per_group),
+        (heads_per_group * cap_M, 1, cap_M),
+    )
+    o = torch.randn(1, M, n_heads, head_dim, dtype=torch.bfloat16, device="cuda") * 0.3
+    ang = torch.rand(M, rope_dim // 2, device="cuda") * 6.28
+    freqs = torch.polar(torch.ones_like(ang), ang).to(torch.complex64)
+    fused_inv_rope_fp8_quant(
+        o,
+        freqs,
+        n_groups=n_groups,
+        heads_per_group=heads_per_group,
+        nope_dim=nope_dim,
+        rope_head_dim=rope_dim,
+        fp8_buf=fp8_buf,
+        scale_buf=scale_buf,
+    )
+    assert (
+        scale_buf[:, M:, :] == 0
+    ).all(), "TMA padding tail in scale_buf must be zeroed"
+
+
 def test_end_to_end_via_einsum():
     """Part B: fused + fp8_einsum ≡ eager + fp8_einsum (bf16 outputs)."""
     torch.manual_seed(7)
@@ -284,6 +388,7 @@ def bench_decode():
 if __name__ == "__main__":
     print("== Correctness (direct fp8 + scale) ==")
     test_correctness_fp8_and_scale()
+    test_group_heads_tma_padding_and_multi_step_correctness()
     print("\n== Correctness (end-to-end via fp8_einsum) ==")
     test_end_to_end_via_einsum()
     print("\n== Benchmark (decode B sweep) ==")

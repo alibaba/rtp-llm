@@ -754,6 +754,12 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
     def _stage_kernel_inputs(self, tokens: int, *, inputs_prepacked: bool) -> None:
         """Recipe hook for shared-expert activation scales."""
 
+    def _shared_fp8_scale_stage_target(
+        self, tokens: int
+    ) -> tuple[torch.Tensor, int] | None:
+        """Optional destination buffer and tile size for inline gate-pack staging."""
+        return None
+
     def _forward_impl(self, x, weights, indices, *, inputs_prepacked: bool):
         tokens = int(x.size(0))
         self._validate_capacity(tokens)
@@ -841,6 +847,12 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         )
 
         buf = self._mega_buf
+        shared_stage = self._shared_fp8_scale_stage_target(tokens)
+        if shared_stage is None:
+            out_shared_l1_sf = None
+            shared_l1_block_m = None
+        else:
+            out_shared_l1_sf, shared_l1_block_m = shared_stage
         fused_pack_mega_moe_gate_inputs(
             x,
             gate_payload.scores,
@@ -855,8 +867,11 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             bias=gate_payload.bias,
             input_ids=gate_payload.input_ids,
             tid2eid=gate_payload.tid2eid,
+            out_shared_l1_sf=out_shared_l1_sf,
+            shared_l1_block_m=shared_l1_block_m,
         )
-        self._stage_kernel_inputs(tokens, inputs_prepacked=True)
+        if shared_stage is None:
+            self._stage_kernel_inputs(tokens, inputs_prepacked=True)
         y = self._mega_y[:tokens]
         self._launch(y, tokens, x.device)
         return y, buf.topk_weights[:tokens], buf.topk_idx[:tokens]

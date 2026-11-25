@@ -318,6 +318,214 @@ class MegaMoeGatePackEquivTest(unittest.TestCase):
     def test_hash_nonfinite_inputs_use_finite_fallback(self):
         self._check_nonfinite_fallback(hash_routing=True)
 
+    def test_parallel_and_strided_routing_high_token_counts(self):
+        for hash_routing in (False, True):
+            for dim in (512, 4096):
+                with self.subTest(hash_routing=hash_routing, dim=dim):
+                    self._check(
+                        tokens=2049,
+                        hash_routing=hash_routing,
+                        dim=dim,
+                        experts=256,
+                        topk=6,
+                    )
+
+    def test_inline_shared_l1_fp8_scale_staging_matches_standalone(self):
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.shared_fp8_scale import (
+            stage_shared_fp8_input_scales,
+        )
+        from rtp_llm.models_py.triton_kernels.moe.mega_moe_input_pack import (
+            fused_pack_mega_moe_gate_inputs,
+        )
+
+        device = "cuda:0"
+        dim, experts, topk = 4096, 256, 6
+        packed_k = dim // 128
+        capacity_rows = 8192
+
+        for hash_routing in (False, True):
+            with self.subTest(hash_routing=hash_routing):
+                torch.manual_seed(23)
+                got_shared_sf = torch.empty_strided(
+                    (capacity_rows, packed_k),
+                    (1, capacity_rows),
+                    dtype=torch.int32,
+                    device=device,
+                )
+
+                for tokens, se_block_m in ((257, 192), (33, 16), (0, 16)):
+                    got_shared_sf.fill_(7654321)
+                    x = (
+                        torch.randn(tokens, dim, device=device, dtype=torch.bfloat16)
+                        * 0.3
+                    )
+                    scores = torch.randn(
+                        tokens, experts, device=device, dtype=torch.bfloat16
+                    )
+                    buf = _make_buf(tokens, dim, topk, sentinel=True)
+                    extra = {}
+                    if hash_routing:
+                        vocab = 64
+                        extra["input_ids"] = torch.randint(
+                            vocab, (tokens,), device=device, dtype=torch.int64
+                        )
+                        extra["tid2eid"] = torch.stack(
+                            [
+                                torch.randperm(experts, device=device)[:topk]
+                                for _ in range(vocab)
+                            ]
+                        ).contiguous()
+                    else:
+                        extra["bias"] = (
+                            torch.randn(experts, device=device, dtype=torch.float32)
+                            * 0.1
+                        )
+
+                    fused_pack_mega_moe_gate_inputs(
+                        x,
+                        scores,
+                        buf.x,
+                        buf.x_sf,
+                        buf.topk_idx,
+                        buf.topk_weights,
+                        topk=topk,
+                        score_func="sqrtsoftplus",
+                        route_scale=2.5,
+                        out_shared_l1_sf=got_shared_sf,
+                        shared_l1_block_m=se_block_m,
+                        **extra,
+                    )
+
+                    ref_shared_sf = torch.empty_like(got_shared_sf)
+                    ref_shared_sf.fill_(7654321)
+                    stage_shared_fp8_input_scales(
+                        buf.x_sf, ref_shared_sf, tokens, se_block_m
+                    )
+
+                    if tokens == 0:
+                        self.assertEqual(torch.count_nonzero(got_shared_sf).item(), 0)
+                    else:
+                        aligned_blk = ((se_block_m + 127) // 128) * 128
+                        active_rows = (
+                            (tokens + se_block_m - 1) // se_block_m
+                        ) * aligned_blk
+                        torch.testing.assert_close(
+                            got_shared_sf[:active_rows],
+                            ref_shared_sf[:active_rows],
+                            rtol=0,
+                            atol=0,
+                        )
+                        self.assertTrue(
+                            torch.all(got_shared_sf[active_rows:] == 7654321).item()
+                        )
+
+                # Shrinking batch reuse without buffer refill must overwrite [0:active_rows] cleanly.
+                got_shared_sf.fill_(7654321)
+                for shrink_tokens, shrink_block_m in ((257, 192), (33, 16)):
+                    x_s = (
+                        torch.randn(
+                            shrink_tokens, dim, device=device, dtype=torch.bfloat16
+                        )
+                        * 0.3
+                    )
+                    scores_s = torch.randn(
+                        shrink_tokens, experts, device=device, dtype=torch.bfloat16
+                    )
+                    buf_s = _make_buf(shrink_tokens, dim, topk, sentinel=True)
+                    extra_s = {}
+                    if hash_routing:
+                        vocab = 64
+                        extra_s["input_ids"] = torch.randint(
+                            vocab, (shrink_tokens,), device=device, dtype=torch.int64
+                        )
+                        extra_s["tid2eid"] = torch.stack(
+                            [
+                                torch.randperm(experts, device=device)[:topk]
+                                for _ in range(vocab)
+                            ]
+                        ).contiguous()
+                    else:
+                        extra_s["bias"] = (
+                            torch.randn(experts, device=device, dtype=torch.float32)
+                            * 0.1
+                        )
+                    fused_pack_mega_moe_gate_inputs(
+                        x_s,
+                        scores_s,
+                        buf_s.x,
+                        buf_s.x_sf,
+                        buf_s.topk_idx,
+                        buf_s.topk_weights,
+                        topk=topk,
+                        score_func="sqrtsoftplus",
+                        route_scale=2.5,
+                        out_shared_l1_sf=got_shared_sf,
+                        shared_l1_block_m=shrink_block_m,
+                        **extra_s,
+                    )
+                    if shrink_tokens == 33:
+                        ref_shrink = torch.empty_like(got_shared_sf)
+                        ref_shrink.fill_(7654321)
+                        stage_shared_fp8_input_scales(
+                            buf_s.x_sf, ref_shrink, shrink_tokens, shrink_block_m
+                        )
+                        shrink_aligned = ((shrink_block_m + 127) // 128) * 128
+                        shrink_active = (
+                            (shrink_tokens + shrink_block_m - 1) // shrink_block_m
+                        ) * shrink_aligned
+                        torch.testing.assert_close(
+                            got_shared_sf[:shrink_active],
+                            ref_shrink[:shrink_active],
+                            rtol=0,
+                            atol=0,
+                        )
+
+    def test_inline_shared_l1_scale_validation_errors(self):
+        from rtp_llm.models_py.triton_kernels.moe.mega_moe_input_pack import (
+            fused_pack_mega_moe_gate_inputs,
+        )
+
+        device = "cuda:0"
+        tokens, dim, experts, topk = 4, 256, 64, 2
+        x = torch.zeros((tokens, dim), device=device, dtype=torch.bfloat16)
+        scores = torch.zeros((tokens, experts), device=device, dtype=torch.bfloat16)
+        bias = torch.zeros((experts,), device=device, dtype=torch.float32)
+        out = _make_buf(tokens, dim, topk)
+
+        with self.assertRaisesRegex(ValueError, "must both be set"):
+            fused_pack_mega_moe_gate_inputs(
+                x,
+                scores,
+                out.x,
+                out.x_sf,
+                out.topk_idx,
+                out.topk_weights,
+                topk=topk,
+                score_func="sqrtsoftplus",
+                route_scale=1.0,
+                bias=bias,
+                out_shared_l1_sf=torch.empty(
+                    (128, dim // 128), device=device, dtype=torch.int32
+                ),
+            )
+        with self.assertRaisesRegex(ValueError, "too small"):
+            fused_pack_mega_moe_gate_inputs(
+                x,
+                scores,
+                out.x,
+                out.x_sf,
+                out.topk_idx,
+                out.topk_weights,
+                topk=topk,
+                score_func="sqrtsoftplus",
+                route_scale=1.0,
+                bias=bias,
+                out_shared_l1_sf=torch.empty(
+                    (64, dim // 128), device=device, dtype=torch.int32
+                ),
+                shared_l1_block_m=16,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

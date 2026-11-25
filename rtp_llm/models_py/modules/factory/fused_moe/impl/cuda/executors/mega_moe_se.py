@@ -267,6 +267,17 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
             self._block_m(tokens),
         )
 
+    def _shared_fp8_scale_stage_target(
+        self, tokens: int
+    ) -> tuple[torch.Tensor, int] | None:
+        if (
+            type(self)._stage_kernel_inputs
+            is not MegaMoeSEExecutor._stage_kernel_inputs
+            or "_stage_kernel_inputs" in self.__dict__
+        ):
+            return None
+        return self._mega_buf.shared_l1_acts_sf, self._block_m(tokens)
+
     def _run_kernel(self, y, tokens):
         import deep_gemm
 

@@ -77,32 +77,62 @@ def _fused_rmsnorm_rope_kernel(
         y = y * w
 
     out_row = out_ptr + pid * out_stride_n
-    nope_mask = d_mask & (d_off < NOPE_OFFSET)
-    tl.store(out_row + d_off, y, mask=nope_mask)
+    if RD == 0:
+        tl.store(out_row + d_off, y, mask=d_mask)
+    else:
+        EVEN_NOPE: tl.constexpr = (NOPE_OFFSET % 2) == 0
+        if EVEN_NOPE:
+            NUM_PAIRS: tl.constexpr = BLOCK_D // 2
+            NOPE_PAIRS: tl.constexpr = NOPE_OFFSET // 2
+            pair_off = tl.arange(0, NUM_PAIRS)
+            rope_pair_local = pair_off - NOPE_PAIRS
+            is_rope_pair = (rope_pair_local >= 0) & (rope_pair_local < RD_HALF)
+            cs_idx = tl.where(is_rope_pair, rope_pair_local, 0)
 
-    pair_off = tl.arange(0, RD_HALF)
-    real_off = NOPE_OFFSET + 2 * pair_off
-    imag_off = real_off + 1
+            freq_base = (
+                freqs_ri_ptr + freq_idx * freqs_stride_b + cs_idx * freqs_stride_k
+            )
+            cos = tl.load(freq_base, mask=is_rope_pair, other=1.0)
+            sin = tl.load(freq_base + 1, mask=is_rope_pair, other=0.0)
+            if INVERSE:
+                sin = -sin
 
-    real = tl.load(x_row + real_off).to(tl.float32) * inv
-    imag = tl.load(x_row + imag_off).to(tl.float32) * inv
-    if HAS_WEIGHT:
-        w_real = tl.load(w_ptr + real_off).to(tl.float32)
-        w_imag = tl.load(w_ptr + imag_off).to(tl.float32)
-        real = real * w_real
-        imag = imag * w_imag
+            y_even, y_odd = tl.split(tl.reshape(y, (NUM_PAIRS, 2)))
+            rot_even = y_even * cos - y_odd * sin
+            rot_odd = y_even * sin + y_odd * cos
+            new_even = tl.where(is_rope_pair, rot_even, y_even)
+            new_odd = tl.where(is_rope_pair, rot_odd, y_odd)
+            out_y = tl.interleave(new_even, new_odd)
+            tl.store(out_row + d_off, out_y, mask=d_mask)
+        else:
+            nope_mask = d_mask & (d_off < NOPE_OFFSET)
+            tl.store(out_row + d_off, y, mask=nope_mask)
 
-    freq_base = freqs_ri_ptr + freq_idx * freqs_stride_b + pair_off * freqs_stride_k
-    cos = tl.load(freq_base)
-    sin = tl.load(freq_base + 1)
-    if INVERSE:
-        sin = -sin
+            pair_off = tl.arange(0, RD_HALF)
+            real_off = NOPE_OFFSET + 2 * pair_off
+            imag_off = real_off + 1
 
-    new_real = real * cos - imag * sin
-    new_imag = real * sin + imag * cos
+            real = tl.load(x_row + real_off).to(tl.float32) * inv
+            imag = tl.load(x_row + imag_off).to(tl.float32) * inv
+            if HAS_WEIGHT:
+                w_real = tl.load(w_ptr + real_off).to(tl.float32)
+                w_imag = tl.load(w_ptr + imag_off).to(tl.float32)
+                real = real * w_real
+                imag = imag * w_imag
 
-    tl.store(out_row + real_off, new_real)
-    tl.store(out_row + imag_off, new_imag)
+            freq_base = (
+                freqs_ri_ptr + freq_idx * freqs_stride_b + pair_off * freqs_stride_k
+            )
+            cos = tl.load(freq_base)
+            sin = tl.load(freq_base + 1)
+            if INVERSE:
+                sin = -sin
+
+            new_real = real * cos - imag * sin
+            new_imag = real * sin + imag * cos
+
+            tl.store(out_row + real_off, new_real)
+            tl.store(out_row + imag_off, new_imag)
 
 
 @triton.jit
@@ -142,34 +172,32 @@ def _fused_rmsnorm_rope_group_heads_kernel(
     inv = tl.rsqrt(var + EPS)
     y = x * inv[:, None]
     if HAS_WEIGHT:
-        w = tl.load(w_ptr + d_off, mask=d_off < D, other=0.0).to(tl.float32)
+        w = tl.load(w_ptr + d_off, mask=d_mask, other=0.0).to(tl.float32)
         y = y * w[None, :]
 
-    nope_mask = d_mask & (d_off < NOPE_OFFSET)
-    tl.store(out_rows + d_off[None, :], y, mask=nope_mask[None, :])
+    if RD == 0:
+        tl.store(out_rows + d_off[None, :], y, mask=d_mask[None, :])
+    else:
+        NUM_PAIRS: tl.constexpr = BLOCK_D // 2
+        NOPE_PAIRS: tl.constexpr = NOPE_OFFSET // 2
+        pair_off = tl.arange(0, NUM_PAIRS)
+        rope_pair_local = pair_off - NOPE_PAIRS
+        is_rope_pair = (rope_pair_local >= 0) & (rope_pair_local < RD_HALF)
+        cs_idx = tl.where(is_rope_pair, rope_pair_local, 0)
 
-    pair_off = tl.arange(0, RD_HALF)
-    real_off = NOPE_OFFSET + 2 * pair_off
-    imag_off = real_off + 1
+        freq_base = freqs_ri_ptr + freq_idx * freqs_stride_b + cs_idx * freqs_stride_k
+        cos = tl.load(freq_base, mask=is_rope_pair, other=1.0)
+        sin = tl.load(freq_base + 1, mask=is_rope_pair, other=0.0)
+        if INVERSE:
+            sin = -sin
 
-    real = tl.load(x_rows + real_off[None, :]).to(tl.float32) * inv[:, None]
-    imag = tl.load(x_rows + imag_off[None, :]).to(tl.float32) * inv[:, None]
-    if HAS_WEIGHT:
-        w_real = tl.load(w_ptr + real_off).to(tl.float32)
-        w_imag = tl.load(w_ptr + imag_off).to(tl.float32)
-        real = real * w_real[None, :]
-        imag = imag * w_imag[None, :]
-
-    freq_base = freqs_ri_ptr + freq_idx * freqs_stride_b + pair_off * freqs_stride_k
-    cos = tl.load(freq_base)
-    sin = tl.load(freq_base + 1)
-    if INVERSE:
-        sin = -sin
-
-    new_real = real * cos[None, :] - imag * sin[None, :]
-    new_imag = real * sin[None, :] + imag * cos[None, :]
-    tl.store(out_rows + real_off[None, :], new_real)
-    tl.store(out_rows + imag_off[None, :], new_imag)
+        y_even, y_odd = tl.split(tl.reshape(y, (GROUP_HEADS, NUM_PAIRS, 2)))
+        rot_even = y_even * cos[None, :] - y_odd * sin[None, :]
+        rot_odd = y_even * sin[None, :] + y_odd * cos[None, :]
+        new_even = tl.where(is_rope_pair[None, :], rot_even, y_even)
+        new_odd = tl.where(is_rope_pair[None, :], rot_odd, y_odd)
+        out_y = tl.interleave(new_even, new_odd)
+        tl.store(out_rows + d_off[None, :], out_y, mask=d_mask[None, :])
 
 
 def fused_rmsnorm_rope(
@@ -261,17 +289,21 @@ def fused_rmsnorm_rope(
             selected_group_heads = 8 if N_freq >= group_heads8_min_freq else 4
     if selected_group_heads not in (1, 2, 4, 8):
         raise ValueError(
-            f"invalid group_heads={selected_group_heads}; "
-            "expected 1, 2, 4, or 8"
+            f"invalid group_heads={selected_group_heads}; " "expected 1, 2, 4, or 8"
         )
     can_group_heads = (
         selected_group_heads in (2, 4, 8)
         and not inplace
         and freq_stride_n % selected_group_heads == 0
+        and (freq_stride_n // selected_group_heads) <= 65535
         and D <= 512
+        and (D - RD) % 2 == 0
     )
     if can_group_heads:
         grid = (N_freq, freq_stride_n // selected_group_heads)
+        group_num_warps = (
+            8 if (BLOCK_D > 512 or selected_group_heads * BLOCK_D >= 4096) else 4
+        )
         _fused_rmsnorm_rope_group_heads_kernel[grid](
             x_flat,
             w,
@@ -291,7 +323,7 @@ def fused_rmsnorm_rope(
             HAS_WEIGHT=has_weight,
             BLOCK_D=BLOCK_D,
             GROUP_HEADS=selected_group_heads,
-            num_warps=4 if BLOCK_D <= 512 else 8,
+            num_warps=group_num_warps,
         )
     else:
         _fused_rmsnorm_rope_kernel[(N,)](

@@ -437,6 +437,266 @@ def _test_decode(head_dim: int, *, tag: str) -> None:
     _assert_eq(tag, "decode", target_pos, ref_kv, ref_sc, got_kv, got_sc)
 
 
+# ============================================================================ #
+# Scenario 4: HCA tiled online-softmax (ratio=128) + MAY_USE_CACHE + unpad     #
+# ============================================================================ #
+def _run_pytorch_hca_reference(
+    kv_flat: torch.Tensor,
+    score_flat: torch.Tensor,
+    ape: torch.Tensor,
+    positions: torch.Tensor,
+    rms_w: torch.Tensor,
+    cos_sin: torch.Tensor,
+    *,
+    ratio: int = 128,
+    head_dim: int = 512,
+    rope_dim: int = 64,
+    eps: float = 1e-6,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """FP32 PyTorch reference for HCA boundary tokens -> packed FP8/BF16 + UE8M0."""
+    ts, sd = _TOKEN_STRIDE[head_dim], _SCALE_DIM[head_dim]
+    nope_dim = head_dim - rope_dim
+    n_b = int(kv_flat.shape[0]) // ratio
+    kv_out = torch.zeros((n_b, ts), dtype=torch.uint8, device="cuda")
+    sc_out = torch.zeros((n_b, sd), dtype=torch.uint8, device="cuda")
+    score_with_ape = score_flat.float() + ape[positions % ratio].float()
+    kv_f = kv_flat.float()
+    rms_w_f = rms_w.float()
+    for b in range(n_b):
+        pos = (b + 1) * ratio - 1
+        lo = pos - ratio + 1
+        w = torch.softmax(score_with_ape[lo : pos + 1], dim=0)
+        comp = (kv_f[lo : pos + 1] * w).sum(dim=0)
+        normed = comp * torch.rsqrt((comp * comp).mean() + eps) * rms_w_f
+        # Nope FP8 (7 x 64 blocks)
+        q_in = normed.bfloat16().float()[:nope_dim].view(7, 64)
+        absmax = torch.clamp(q_in.abs().max(dim=1).values, min=1e-4)
+        exp = torch.ceil(torch.log2(absmax / 448.0))
+        scaled = torch.clamp(q_in * torch.exp2(-exp)[:, None], -448.0, 448.0)
+        q_u8 = scaled.to(torch.float8_e4m3fn).view(torch.uint8).reshape(-1)
+        kv_out[b, :nope_dim] = q_u8
+        sc_out[b, :7] = torch.clamp(exp + 127.0, 0.0, 255.0).to(torch.uint8)
+        # RoPE BF16
+        rope_part = normed[nope_dim:].view(rope_dim // 2, 2)
+        cpos = (pos // ratio) * ratio
+        cv = cos_sin[cpos, : rope_dim // 2]
+        sv = cos_sin[cpos, rope_dim // 2 :]
+        ev, od = rope_part[:, 0], rope_part[:, 1]
+        r_ev = ev * cv - od * sv
+        r_od = od * cv + ev * sv
+        rope_bf16 = torch.stack([r_ev, r_od], dim=1).reshape(-1).bfloat16()
+        kv_out[b, nope_dim:] = rope_bf16.view(torch.uint8)
+    return kv_out, sc_out
+
+
+def _test_hca_tiled_may_use_cache_and_unpad() -> None:
+    """Verify HCA ratio=128 tiled online-softmax, may_use_cache=False, and unpad_restore."""
+    head_dim, ratio, rope_dim = 512, 128, 64
+    N = 384  # 3 HCA boundaries at 127, 255, 383
+    n_b = N // ratio
+    g = torch.Generator(device="cuda").manual_seed(202611)
+    kv_flat = (
+        torch.randn(N, head_dim, dtype=torch.float32, device="cuda", generator=g) * 0.2
+    )
+    score_flat = (
+        torch.randn(N, head_dim, dtype=torch.float32, device="cuda", generator=g) * 0.5
+    )
+    ape = (
+        torch.randn(ratio, head_dim, dtype=torch.float32, device="cuda", generator=g)
+        * 0.1
+    )
+    rms_w = torch.ones(head_dim, dtype=torch.bfloat16, device="cuda")
+    cos_sin = _identity_cos_sin(head_dim, N + 16)
+    positions = torch.arange(N, dtype=torch.int64, device="cuda")
+    token_to_req = torch.zeros(N, dtype=torch.int32, device="cuda")
+    kv_slots = torch.where(
+        ((positions + 1) % ratio) == 0,
+        1 * n_b
+        + torch.cumsum(((positions + 1) % ratio == 0).to(torch.int64), dim=0)
+        - 1,
+        torch.full_like(positions, -1),
+    )
+    slots_unused = torch.full_like(positions, -1)
+
+    # 1) may_use_cache=False with state_cache=None, block_table=None vs PyTorch ref
+    kv_cache_nocache = _alloc_kv_cache(head_dim, n_b)
+    run_fused_compress_kv_write(
+        None,
+        token_to_req,
+        positions,
+        slots_unused,
+        None,
+        rms_w,
+        1e-6,
+        cos_sin,
+        kv_cache_nocache,
+        kv_slots,
+        kv_flat,
+        score_flat,
+        ape,
+        0,
+        disable_raw_path=False,
+        head_dim=head_dim,
+        rope_head_dim=rope_dim,
+        compress_ratio=ratio,
+        overlap=False,
+        state_tokens_per_block=PAGE,
+        may_use_cache=False,
+    )
+
+    ref_kv, ref_sc = _run_pytorch_hca_reference(
+        kv_flat, score_flat, ape, positions, rms_w, cos_sin
+    )
+    for b in range(n_b):
+        got_kv, got_sc = _read_kv_slot(kv_cache_nocache, b, head_dim, n_b)
+        assert torch.equal(
+            got_sc, ref_sc[b]
+        ), f"HCA scale mismatch at b={b}: {got_sc} vs {ref_sc[b]}"
+        # Compare dequantized nope FP8 + RoPE BF16 within 1 FP8/BF16 ULP of FP32 ref.
+        exp = got_sc[:7].to(torch.int32) - 127
+        scales = torch.pow(2.0, exp.float()).repeat_interleave(64)
+        got_nope = got_kv[:448].view(torch.float8_e4m3fn).float() * scales
+        ref_nope = ref_kv[b, :448].view(torch.float8_e4m3fn).float() * scales
+        max_nope_diff = (got_nope - ref_nope).abs().max().item()
+        assert (
+            max_nope_diff <= 0.15 * scales.max().item()
+        ), f"HCA nope diff {max_nope_diff}"
+        got_rope = got_kv[448:].view(torch.bfloat16).float()
+        ref_rope = ref_kv[b, 448:].view(torch.bfloat16).float()
+        max_rope_diff = (got_rope - ref_rope).abs().max().item()
+        assert max_rope_diff <= 2e-2, f"HCA rope diff {max_rope_diff}"
+
+    # 2) may_use_cache=True must match may_use_cache=False bit-for-bit on raw path.
+    n_logical = (N + PAGE - 1) // PAGE
+    state_cache = torch.zeros(
+        (n_logical + 1, PAGE, 2 * head_dim), dtype=torch.float32, device="cuda"
+    )
+    bt = torch.arange(1, n_logical + 1, dtype=torch.int32, device="cuda").view(1, -1)
+    state_slots = _build_state_slots(positions, bt.to(torch.int64))
+    run_save_partial_states(
+        kv_flat,
+        score_flat,
+        ape,
+        positions,
+        state_cache,
+        state_slots,
+        compress_ratio=ratio,
+    )
+    kv_cache_cache = _alloc_kv_cache(head_dim, n_b)
+    run_fused_compress_kv_write(
+        state_cache,
+        token_to_req,
+        positions,
+        state_slots,
+        bt,
+        rms_w,
+        1e-6,
+        cos_sin,
+        kv_cache_cache,
+        kv_slots,
+        kv_flat,
+        score_flat,
+        ape,
+        0,
+        disable_raw_path=False,
+        head_dim=head_dim,
+        rope_head_dim=rope_dim,
+        compress_ratio=ratio,
+        overlap=False,
+        state_tokens_per_block=PAGE,
+        may_use_cache=True,
+    )
+    assert torch.equal(
+        kv_cache_nocache._flat_backing, kv_cache_cache._flat_backing  # type: ignore[attr-defined]
+    ), "HCA may_use_cache=True diverged from may_use_cache=False"
+
+    # 3) unpad_restore direct rank-major read must match restored reference bit-for-bit.
+    padded_N = N + 32
+    perm = torch.randperm(padded_N, dtype=torch.long, device="cuda", generator=g)[:N]
+    kv_padded = torch.randn(
+        padded_N, head_dim, dtype=torch.float32, device="cuda", generator=g
+    )
+    score_padded = torch.randn(
+        padded_N, head_dim, dtype=torch.float32, device="cuda", generator=g
+    )
+    kv_padded[perm] = kv_flat
+    score_padded[perm] = score_flat
+    state_unpad = torch.zeros_like(state_cache)
+    run_save_partial_states(
+        kv_padded,
+        score_padded,
+        ape,
+        positions,
+        state_unpad,
+        state_slots,
+        compress_ratio=ratio,
+        unpad_restore=perm,
+    )
+    assert torch.equal(
+        state_unpad, state_cache
+    ), "HCA save_partial_states unpad_restore mismatch"
+    kv_cache_unpad = _alloc_kv_cache(head_dim, n_b)
+    run_fused_compress_kv_write(
+        None,
+        token_to_req,
+        positions,
+        slots_unused,
+        None,
+        rms_w,
+        1e-6,
+        cos_sin,
+        kv_cache_unpad,
+        kv_slots,
+        kv_padded,
+        score_padded,
+        ape,
+        0,
+        disable_raw_path=False,
+        head_dim=head_dim,
+        rope_head_dim=rope_dim,
+        compress_ratio=ratio,
+        overlap=False,
+        state_tokens_per_block=PAGE,
+        may_use_cache=False,
+        unpad_restore=perm,
+    )
+    assert torch.equal(
+        kv_cache_unpad._flat_backing, kv_cache_nocache._flat_backing  # type: ignore[attr-defined]
+    ), "HCA unpad_restore KV write mismatch"
+
+    # 4) Decode (disable_raw_path=True) for boundary at 255 from state_cache.
+    pos_dec = torch.tensor([255], dtype=torch.int64, device="cuda")
+    kv_dec = _alloc_kv_cache(head_dim, 1)
+    dummy = torch.zeros((1, head_dim), dtype=torch.float32, device="cuda")
+    run_fused_compress_kv_write(
+        state_cache,
+        token_to_req[:1],
+        pos_dec,
+        _build_state_slots(pos_dec, bt.to(torch.int64)),
+        bt,
+        rms_w,
+        1e-6,
+        cos_sin,
+        kv_dec,
+        torch.tensor([1], dtype=torch.int64, device="cuda"),
+        dummy,
+        dummy,
+        ape,
+        N,
+        disable_raw_path=True,
+        head_dim=head_dim,
+        rope_head_dim=rope_dim,
+        compress_ratio=ratio,
+        overlap=False,
+        state_tokens_per_block=PAGE,
+        may_use_cache=True,
+    )
+    got_dec_kv, got_dec_sc = _read_kv_slot(kv_dec, 0, head_dim, 1)
+    exp_kv, exp_sc = _read_kv_slot(kv_cache_nocache, 1, head_dim, n_b)
+    _assert_eq("hca", "decode", 255, exp_kv, exp_sc, got_dec_kv, got_dec_sc)
+    print("[hca]     tiled online-softmax + may_use_cache + unpad OK")
+
+
 def main():
     assert torch.cuda.is_available(), "CUDA required"
     for hd in (128, 512):
@@ -444,6 +704,7 @@ def main():
         _test_long_prefill(hd, tag=tag)
         _test_prefix_reuse(hd, tag=tag)
         _test_decode(hd, tag=tag)
+    _test_hca_tiled_may_use_cache_and_unpad()
     print("OK")
 
 

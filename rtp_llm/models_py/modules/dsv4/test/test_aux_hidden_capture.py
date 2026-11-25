@@ -93,6 +93,31 @@ class AuxHiddenCaptureTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             transformer.set_aux_hidden_capture_layer_ids((4,))
 
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_cuda_bfloat16_mean_copy_matches_torch_reference(self) -> None:
+        transformer = _capture_harness(row_width=2 * 4096)
+        transformer._mtp_hidden_buffer = transformer._mtp_hidden_buffer.to(
+            device="cuda", dtype=torch.bfloat16
+        )
+        transformer.set_aux_hidden_capture_layer_ids((2, 0))
+
+        prefill_h = torch.randn(5, 4, 4096, device="cuda", dtype=torch.bfloat16)
+        decode_h = torch.randn(3, 2, 4, 4096, device="cuda", dtype=torch.bfloat16)
+        transformer.capture_aux_hidden(0, prefill_h)
+        buf = transformer._mtp_hidden_buffer
+        torch.testing.assert_close(
+            buf[:5, 4096:8192], prefill_h.mean(dim=-2), atol=1e-3, rtol=1e-3
+        )
+        transformer._mtp_hidden_buffer.fill_(float("nan"))
+        transformer.capture_aux_hidden(2, decode_h)
+        torch.testing.assert_close(
+            buf[:6, 0:4096],
+            decode_h.mean(dim=-2).reshape(6, 4096),
+            atol=1e-3,
+            rtol=1e-3,
+        )
+        self.assertTrue(torch.isnan(buf[6:]).all())
+
 
 if __name__ == "__main__":
     unittest.main()

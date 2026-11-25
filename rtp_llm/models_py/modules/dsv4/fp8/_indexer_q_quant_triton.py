@@ -46,27 +46,32 @@ def _indexer_q_fp8_fold_kernel(
     BSH,  # B*S*H — rows
     D: tl.constexpr,  # head_dim = 128
     fp8_max: tl.constexpr,
+    BLOCK_R: tl.constexpr = 8,
 ):
-    """One program per (b, s, h) row. Each row is one 128-elem vector;
-    fits in registers, no inner-D tiling needed."""
+    """BLOCK_R rows per program for coalesced 128-bit loads and lower CTA overhead."""
     pid = tl.program_id(0).to(tl.int64)
-    if pid >= BSH:
-        return
+    rows = pid * BLOCK_R + tl.arange(0, BLOCK_R)
+    row_mask = rows < BSH
 
     d_off = tl.arange(0, D)
-    q = tl.load(q_ptr + pid * D + d_off).to(tl.float32)
+    q = tl.load(
+        q_ptr + rows[:, None] * D + d_off[None, :],
+        mask=row_mask[:, None],
+        other=0.0,
+    ).to(tl.float32)
 
-    absmax = tl.max(tl.abs(q), axis=0)
+    absmax = tl.max(tl.abs(q), axis=1)
     scale = tl.maximum(absmax / fp8_max, 1e-12)
 
-    q_fp8 = (q / scale).to(tl.float8e4nv)
+    q_fp8 = (q / scale[:, None]).to(tl.float8e4nv)
     tl.store(
-        (q_fp8_ptr + pid * D + d_off).to(tl.pointer_type(tl.uint8)),
+        (q_fp8_ptr + rows[:, None] * D + d_off[None, :]).to(tl.pointer_type(tl.uint8)),
         q_fp8.to(tl.uint8, bitcast=True),
+        mask=row_mask[:, None],
     )
 
-    w = tl.load(w_ptr + pid).to(tl.float32)
-    tl.store(w_fold_ptr + pid, w * scale)
+    w = tl.load(w_ptr + rows, mask=row_mask, other=0.0).to(tl.float32)
+    tl.store(w_fold_ptr + rows, w * scale, mask=row_mask)
 
 
 def indexer_q_fp8_quant_fold(
@@ -94,7 +99,8 @@ def indexer_q_fp8_quant_fold(
     if BSH == 0:
         return q_fp8, w_fold
 
-    _indexer_q_fp8_fold_kernel[(BSH,)](
+    block_r = 8
+    _indexer_q_fp8_fold_kernel[(triton.cdiv(BSH, block_r),)](
         q_bf16,
         weights,
         q_fp8,
@@ -102,6 +108,7 @@ def indexer_q_fp8_quant_fold(
         BSH=BSH,
         D=D,
         fp8_max=FP8_E4M3_MAX,
+        BLOCK_R=block_r,
         num_warps=4,
     )
     return q_fp8, w_fold
@@ -131,24 +138,26 @@ def _indexer_q_rope_fp8_fold_kernel(
     d_off = tl.arange(0, D)
     q = tl.load(q_ptr + pid * D + d_off).to(tl.float32)
 
-    is_rope = d_off >= ROPE_START
-    rope_local = d_off - ROPE_START
-    partner_off = ROPE_START + (rope_local ^ 1)
-    partner = tl.load(q_ptr + pid * D + partner_off, mask=is_rope, other=0.0).to(
-        tl.float32
-    )
+    NUM_PAIRS: tl.constexpr = D // 2
+    NOPE_PAIRS: tl.constexpr = ROPE_START // 2
+    pair_off = tl.arange(0, NUM_PAIRS)
+    rope_pair_local = pair_off - NOPE_PAIRS
+    is_rope_pair = (rope_pair_local >= 0) & (rope_pair_local < RD_HALF)
+    cs_idx = tl.where(is_rope_pair, rope_pair_local, 0)
 
-    pair_idx = tl.maximum(rope_local >> 1, 0)
     freq_idx = pid // freq_stride_n
-    freq_base = freqs_ri_ptr + freq_idx * freqs_stride_b + pair_idx * freqs_stride_k
-    cos = tl.load(freq_base, mask=is_rope, other=1.0)
-    sin = tl.load(freq_base + 1, mask=is_rope, other=0.0)
+    freq_base = freqs_ri_ptr + freq_idx * freqs_stride_b + cs_idx * freqs_stride_k
+    cos = tl.load(freq_base, mask=is_rope_pair, other=1.0)
+    sin = tl.load(freq_base + 1, mask=is_rope_pair, other=0.0)
 
-    is_even = (rope_local & 1) == 0
-    q_rot_even = q * cos - partner * sin
-    q_rot_odd = q * cos + partner * sin
-    q_rot = tl.where(is_even, q_rot_even, q_rot_odd)
-    q = tl.where(is_rope, q_rot, q)
+    # Rotate RoPE pairs in registers without a second global q_ptr read; NoPE
+    # pairs pass through bit-exact via tl.where before interleave.
+    q_even, q_odd = tl.split(tl.reshape(q, (NUM_PAIRS, 2)))
+    rot_even = q_even * cos - q_odd * sin
+    rot_odd = q_odd * cos + q_even * sin
+    new_even = tl.where(is_rope_pair, rot_even, q_even)
+    new_odd = tl.where(is_rope_pair, rot_odd, q_odd)
+    q = tl.interleave(new_even, new_odd)
     # Old path stores the RoPE result back to a BF16 q tensor, then the
     # quant-fold kernel reloads it.  Preserve that boundary rounding so the
     # fused path keeps the same FP8/scale contract as closely as possible.
@@ -167,11 +176,78 @@ def _indexer_q_rope_fp8_fold_kernel(
     tl.store(w_fold_ptr + pid, w * scale)
 
 
+@triton.jit(do_not_specialize=["freq_stride_n"])
+def _indexer_q_rope_fp8_fold_group_heads_kernel(
+    q_ptr,  # [B*S, H, D] bf16, pre-RoPE
+    w_ptr,  # [B*S, H]    bf16/fp32
+    freqs_ri_ptr,  # [N_freq, RD/2, 2] float32 view_as_real(complex freqs)
+    q_fp8_ptr,  # [B*S, H, D] fp8e4nv (uint8 view)
+    w_fold_ptr,  # [B*S, H]    fp32
+    freq_stride_n,
+    freqs_stride_b,
+    freqs_stride_k,
+    D: tl.constexpr,
+    RD: tl.constexpr,
+    RD_HALF: tl.constexpr,
+    ROPE_START: tl.constexpr,
+    fp8_max: tl.constexpr,
+    GROUP_HEADS: tl.constexpr,
+):
+    """Grouped-head RoPE + FP8 quant + scale fold.
+
+    Processes ``GROUP_HEADS`` heads sharing a single frequency slot per CTA so
+    ``cos``/``sin`` are loaded once, Q is loaded/stored via coalesced 128-bit
+    vector transactions, and RoPE runs purely in registers.
+    """
+    freq_idx = tl.program_id(0).to(tl.int64)
+    head_tile = tl.program_id(1).to(tl.int64)
+    row_start = freq_idx * freq_stride_n + head_tile * GROUP_HEADS
+
+    h_off = tl.arange(0, GROUP_HEADS)
+    d_off = tl.arange(0, D)
+    rows = row_start + h_off
+    q = tl.load(q_ptr + rows[:, None] * D + d_off[None, :]).to(tl.float32)
+
+    NUM_PAIRS: tl.constexpr = D // 2
+    NOPE_PAIRS: tl.constexpr = ROPE_START // 2
+    pair_off = tl.arange(0, NUM_PAIRS)
+    rope_pair_local = pair_off - NOPE_PAIRS
+    is_rope_pair = (rope_pair_local >= 0) & (rope_pair_local < RD_HALF)
+    cs_idx = tl.where(is_rope_pair, rope_pair_local, 0)
+
+    freq_base = freqs_ri_ptr + freq_idx * freqs_stride_b + cs_idx * freqs_stride_k
+    cos = tl.load(freq_base, mask=is_rope_pair, other=1.0)
+    sin = tl.load(freq_base + 1, mask=is_rope_pair, other=0.0)
+
+    q_even, q_odd = tl.split(tl.reshape(q, (GROUP_HEADS, NUM_PAIRS, 2)))
+    rot_even = q_even * cos[None, :] - q_odd * sin[None, :]
+    rot_odd = q_odd * cos[None, :] + q_even * sin[None, :]
+    new_even = tl.where(is_rope_pair[None, :], rot_even, q_even)
+    new_odd = tl.where(is_rope_pair[None, :], rot_odd, q_odd)
+    q = tl.interleave(new_even, new_odd)
+    # Preserve exact BF16 boundary rounding from separate RoPE + quant-fold.
+    q = q.to(tl.bfloat16).to(tl.float32)
+
+    absmax = tl.max(tl.abs(q), axis=1)
+    scale = tl.maximum(absmax / fp8_max, 1e-12)
+
+    q_fp8 = (q / scale[:, None]).to(tl.float8e4nv)
+    tl.store(
+        (q_fp8_ptr + rows[:, None] * D + d_off[None, :]).to(tl.pointer_type(tl.uint8)),
+        q_fp8.to(tl.uint8, bitcast=True),
+    )
+
+    w = tl.load(w_ptr + rows).to(tl.float32)
+    tl.store(w_fold_ptr + rows, w * scale)
+
+
 def indexer_q_rope_fp8_quant_fold(
     q_bf16: torch.Tensor,  # [B, S, H, D] bf16, D=128, pre-RoPE
     weights: torch.Tensor,  # [B, S, H] bf16 or fp32
     freqs_cis: torch.Tensor,  # complex [N_freq, RD/2]
     rope_head_dim: int,
+    *,
+    group_heads: int | None = None,
 ):
     """Fused RoPE + per-(token, head) FP8 quant + scale fold.
 
@@ -209,21 +285,66 @@ def indexer_q_rope_fp8_quant_fold(
     freqs_ri = torch.view_as_real(freqs_flat)
     freq_stride_n = BSH // n_freq
 
-    _indexer_q_rope_fp8_fold_kernel[(BSH,)](
-        q_bf16,
-        weights,
-        freqs_ri,
-        q_fp8,
-        w_fold,
-        BSH=BSH,
-        freq_stride_n=freq_stride_n,
-        freqs_stride_b=freqs_ri.stride(0),
-        freqs_stride_k=freqs_ri.stride(1),
-        D=D,
-        RD=rope_head_dim,
-        RD_HALF=rope_head_dim // 2,
-        ROPE_START=D - rope_head_dim,
-        fp8_max=FP8_E4M3_MAX,
-        num_warps=4,
+    if group_heads is not None:
+        if group_heads not in (1, 2, 4, 8, 16):
+            raise ValueError(
+                f"invalid group_heads={group_heads}; expected 1, 2, 4, 8, or 16"
+            )
+        selected_group_heads = group_heads
+    else:
+        selected_group_heads = 1
+        if D == INDEXER_HEAD_DIM:
+            for candidate in (16, 8, 4, 2):
+                if candidate == 16 and BSH < 65536:
+                    continue
+                if (
+                    freq_stride_n % candidate == 0
+                    and (freq_stride_n // candidate) <= 65535
+                ):
+                    selected_group_heads = candidate
+                    break
+
+    can_group_heads = (
+        selected_group_heads > 1
+        and D == INDEXER_HEAD_DIM
+        and freq_stride_n % selected_group_heads == 0
+        and (freq_stride_n // selected_group_heads) <= 65535
     )
+    if can_group_heads:
+        grid = (n_freq, freq_stride_n // selected_group_heads)
+        _indexer_q_rope_fp8_fold_group_heads_kernel[grid](
+            q_bf16,
+            weights,
+            freqs_ri,
+            q_fp8,
+            w_fold,
+            freq_stride_n=freq_stride_n,
+            freqs_stride_b=freqs_ri.stride(0),
+            freqs_stride_k=freqs_ri.stride(1),
+            D=D,
+            RD=rope_head_dim,
+            RD_HALF=rope_head_dim // 2,
+            ROPE_START=D - rope_head_dim,
+            fp8_max=FP8_E4M3_MAX,
+            GROUP_HEADS=selected_group_heads,
+            num_warps=4,
+        )
+    else:
+        _indexer_q_rope_fp8_fold_kernel[(BSH,)](
+            q_bf16,
+            weights,
+            freqs_ri,
+            q_fp8,
+            w_fold,
+            BSH=BSH,
+            freq_stride_n=freq_stride_n,
+            freqs_stride_b=freqs_ri.stride(0),
+            freqs_stride_k=freqs_ri.stride(1),
+            D=D,
+            RD=rope_head_dim,
+            RD_HALF=rope_head_dim // 2,
+            ROPE_START=D - rope_head_dim,
+            fp8_max=FP8_E4M3_MAX,
+            num_warps=4,
+        )
     return q_fp8, w_fold

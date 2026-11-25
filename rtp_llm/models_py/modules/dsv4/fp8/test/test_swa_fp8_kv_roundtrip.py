@@ -49,8 +49,10 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
     start_dequantize_and_gather_k_cache_slots_cp_byte_sliced,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
+    _row_scatter_kernel,
     quantize_and_insert_k_cache,
     quantize_and_insert_k_cache_cp_byte_sliced,
+    row_scatter,
 )
 
 HEAD_DIM = 512
@@ -924,11 +926,9 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
                 linear = torch.arange(batch * width, device=self.device).view(
                     batch, width
                 )
-                read_slots = (
-                    block_ids[linear.remainder(block_ids.numel())]
-                    * entries_per_block
-                    + (linear * 17 + 3).remainder(entries_per_block)
-                )
+                read_slots = block_ids[
+                    linear.remainder(block_ids.numel())
+                ] * entries_per_block + (linear * 17 + 3).remainder(entries_per_block)
                 gather_lens = torch.tensor(lens, dtype=torch.int32, device=self.device)
                 for batch_idx, gather_len in enumerate(lens):
                     if gather_len:
@@ -1035,6 +1035,96 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
                 cp_size=cp_size,
                 compaction=None,
             )
+
+
+class RowScatterTritonTest(unittest.TestCase):
+
+    def setUp(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required")
+        self.device = torch.device("cuda")
+        torch.manual_seed(29)
+
+    def test_row_scatter_strided_byte_sliced_fp8_and_zero_rows(self):
+        # Strided byte-sliced uint8 rows > 4096 bytes (matches CP byte-sliced insert).
+        cp_size = 2
+        local_slice_bytes = 18688
+        full_raw = torch.randint(
+            0,
+            255,
+            (5, local_slice_bytes * cp_size),
+            dtype=torch.uint8,
+            device=self.device,
+        )
+        dst = torch.full(
+            (12, local_slice_bytes), 0x3C, dtype=torch.uint8, device=self.device
+        )
+        ref = dst.clone()
+        slots = torch.tensor([9, 1, 7, 3, 11], dtype=torch.int64, device=self.device)
+        src_slice = full_raw[:, local_slice_bytes:]
+        row_scatter(dst, slots, src_slice)
+        ref.index_copy_(0, slots, src_slice.contiguous())
+        torch.cuda.synchronize()
+        self.assertTrue(torch.equal(dst, ref))
+
+        # float8_e4m3fn contiguous & unaligned widths + mask_negative.
+        for width in (512, 13):
+            fp8_dst = torch.zeros(
+                (10, width), dtype=torch.float8_e4m3fn, device=self.device
+            )
+            fp8_ref = fp8_dst.clone()
+            fp8_src = torch.randn(
+                (4, width), dtype=torch.bfloat16, device=self.device
+            ).to(torch.float8_e4m3fn)
+            masked_slots = torch.tensor(
+                [4, -1, 8, -1], dtype=torch.int32, device=self.device
+            )
+            row_scatter(fp8_dst, masked_slots, fp8_src, mask_negative=True)
+            valid = masked_slots >= 0
+            fp8_ref.view(torch.uint8).index_copy_(
+                0, masked_slots[valid].to(torch.long), fp8_src[valid].view(torch.uint8)
+            )
+            torch.cuda.synchronize()
+            self.assertTrue(
+                torch.equal(fp8_dst.view(torch.uint8), fp8_ref.view(torch.uint8))
+            )
+
+        # Zero-row no-op.
+        empty_src = torch.empty((0, 512), dtype=torch.bfloat16, device=self.device)
+        empty_slots = torch.empty((0,), dtype=torch.int32, device=self.device)
+        bf16_dst = torch.ones((4, 512), dtype=torch.bfloat16, device=self.device)
+        row_scatter(bf16_dst, empty_slots, empty_src)
+        torch.cuda.synchronize()
+        self.assertTrue(torch.all(bf16_dst == 1))
+
+    def test_row_scatter_large_slice_no_recompile(self):
+        _row_scatter_kernel.device_caches.clear()
+        for num_blocks, num_rows, local_slice_bytes in (
+            (10, 3, 4672),
+            (25, 7, 4704),
+        ):
+            full_raw = torch.randint(
+                0,
+                255,
+                (num_rows, local_slice_bytes * 2),
+                dtype=torch.uint8,
+                device=self.device,
+            )
+            dst = torch.zeros(
+                (num_blocks, local_slice_bytes), dtype=torch.uint8, device=self.device
+            )
+            slots = torch.arange(num_rows, dtype=torch.int64, device=self.device)
+            row_scatter(dst, slots, full_raw[:, local_slice_bytes:])
+            torch.cuda.synchronize()
+            if num_blocks == 10:
+                first_count = sum(
+                    len(cache)
+                    for cache, *_ in _row_scatter_kernel.device_caches.values()
+                )
+        second_count = sum(
+            len(cache) for cache, *_ in _row_scatter_kernel.device_caches.values()
+        )
+        self.assertEqual(first_count, second_count)
 
 
 if __name__ == "__main__":

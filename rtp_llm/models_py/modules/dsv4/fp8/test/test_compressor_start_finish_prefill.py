@@ -369,6 +369,172 @@ class CompressorFP8StartFinishPrefillTest(unittest.TestCase):
         cmp.finish_prefill(None)
         cmp.finish_prefill(None)
 
+    def test_direct_raw_gather_skips_cp_restore_and_is_bit_equal(self):
+        """Real CPCudaAsyncGatherHandle bypasses _cp_restore_gathered_full_2d."""
+        from rtp_llm.models_py.modules.dsv4.cp import (
+            CPCudaAsyncGatherHandle,
+            cp_wait_gather_full,
+        )
+
+        cmp_direct = _build_compressor(
+            dim=self.dim,
+            head_dim=self.head_dim,
+            compress_ratio=self.compress_ratio,
+            device=self.device,
+            bind_pool=True,
+        )
+        cmp_ref = _build_compressor(
+            dim=self.dim,
+            head_dim=self.head_dim,
+            compress_ratio=self.compress_ratio,
+            device=self.device,
+            bind_pool=True,
+        )
+        freqs_cis = torch.ones(
+            64,
+            max(1, cmp_direct.rope_head_dim // 2),
+            dtype=torch.complex64,
+            device=self.device,
+        )
+        cmp_direct.init_rope_cache(freqs_cis)
+        cmp_ref.init_rope_cache(freqs_cis)
+        with torch.no_grad():
+            cmp_ref._wkv_wgate_fused.copy_(cmp_direct._wkv_wgate_fused)
+            cmp_ref.ape.copy_(cmp_direct.ape)
+            cmp_ref.norm.weight.copy_(cmp_direct.norm.weight)
+
+        cp_ctx = CPContext(
+            cp_size=2,
+            cp_rank=0,
+            chunk_length=4,
+            padded_seq_len=8,
+            seq_len_full=8,
+            relative_positions=torch.arange(4, dtype=torch.long, device=self.device),
+            prefix_length=0,
+            global_positions=torch.arange(4, dtype=torch.long, device=self.device),
+            local_is_real=torch.ones(4, dtype=torch.bool, device=self.device),
+            unpad_restore=torch.tensor(
+                [0, 4, 1, 5, 2, 6, 3, 7], dtype=torch.long, device=self.device
+            ),
+            seq_len_total=8,
+            cp_info=object(),
+            input_lengths_global=torch.tensor(
+                [8], dtype=torch.int32, device=self.device
+            ),
+            cu_seqlens_global=torch.tensor(
+                [0, 8], dtype=torch.int32, device=self.device
+            ),
+            unpad_restore_is_prefix=False,
+        )
+        state_eb = 256
+        kv_eb = 256 // self.compress_ratio
+        for cmp in (cmp_direct, cmp_ref):
+            state_view = torch.zeros(
+                2 * state_eb, 2 * self.out_dim, dtype=torch.float32, device=self.device
+            )
+            state_bt = torch.ones(1, 1, dtype=torch.int32, device=self.device)
+            kv_pool = torch.zeros(
+                2, kv_eb, INDEXER_ENTRY_BYTES, dtype=torch.uint8, device=self.device
+            )
+            kv_bt = torch.ones(1, 1, dtype=torch.int32, device=self.device)
+            cmp.set_pool_context(
+                kv_pool_view=kv_pool,
+                kv_block_table=kv_bt,
+                kv_eb=kv_eb,
+                state_pool_view=state_view,
+                state_block_table=state_bt,
+                state_eb=state_eb,
+                state_tokens_per_block=state_eb,
+                kv_tokens_per_block=state_eb,
+            )
+            cmp.set_cp_ctx(cp_ctx)
+
+        positions = torch.arange(8, dtype=torch.long, device=self.device)
+        b_idx = torch.zeros(8, dtype=torch.long, device=self.device)
+        seq_starts = torch.tensor([0], dtype=torch.long, device=self.device)
+        cu_seqs = torch.tensor([0, 8], dtype=torch.long, device=self.device)
+        meta_direct = cmp_direct.prepare_metadata(
+            positions,
+            b_idx,
+            has_prefix=False,
+            is_batched=True,
+            seq_start_per_req=seq_starts,
+            cu_seq_per_req=cu_seqs,
+        )
+        meta_ref = cmp_ref.prepare_metadata(
+            positions,
+            b_idx,
+            has_prefix=False,
+            is_batched=True,
+            seq_start_per_req=seq_starts,
+            cu_seq_per_req=cu_seqs,
+        )
+
+        gathered_raw = torch.randn(
+            8, 2 * self.out_dim, dtype=torch.float32, device=self.device
+        )
+
+        class _DummyWork:
+            def wait(self) -> None:
+                return None
+
+        ws = PrefillWorkspace(
+            self.device,
+            q_rows=8,
+            q_dim=2 * self.out_dim,
+            reserve_cp=True,
+            cp_rows=8,
+            idx_w=2 * self.out_dim,
+            align_bytes=256,
+        )
+        x_local = torch.randn(4, self.dim, dtype=torch.bfloat16, device=self.device)
+        stream = torch.cuda.current_stream(self.device)
+
+        def _make_handle():
+            ev = torch.cuda.Event()
+            ev.record(stream)
+            return CPCudaAsyncGatherHandle(
+                cp_ctx=cp_ctx,
+                gathered=gathered_raw,
+                work=_DummyWork(),
+                stream=stream,
+                completion_event=ev,
+                local_2d=torch.empty(
+                    4, 2 * self.out_dim, dtype=torch.float32, device=self.device
+                ),
+                profile_name="test.cp",
+                workspace=ws,
+                cp_role=_CP_ROLE_INDEXER,
+            )
+
+        with (
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8.compressor.cp_all_gather_full_async",
+                side_effect=lambda *a, **kw: _make_handle(),
+            ),
+            patch(
+                "rtp_llm.models_py.modules.dsv4.cp._cp_restore_gathered_full_2d",
+                side_effect=AssertionError(
+                    "cp_restore should be skipped for direct gather"
+                ),
+            ),
+        ):
+            pending = cmp_direct.start_prefill(
+                x_local, 0, meta=meta_direct, workspace=ws
+            )
+            cmp_direct.finish_prefill(pending)
+
+        ref_restored = cp_wait_gather_full(_make_handle())
+        cmp_ref._launch(
+            ref_restored[:, : self.out_dim],
+            ref_restored[:, self.out_dim :],
+            meta_ref,
+            seq_start=None,
+        )
+        torch.cuda.synchronize()
+        self.assertTrue(torch.equal(cmp_direct._state_pool_3d, cmp_ref._state_pool_3d))
+        self.assertTrue(torch.equal(cmp_direct._kv_pool_view, cmp_ref._kv_pool_view))
+
 
 if __name__ == "__main__":
     unittest.main()

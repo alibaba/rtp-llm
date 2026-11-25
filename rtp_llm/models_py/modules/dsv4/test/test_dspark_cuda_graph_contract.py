@@ -257,6 +257,7 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         self.assertIsNotNone(metadata)
         self.assertEqual(metadata.sched_meta_cache, {})
         self.assertTrue(metadata.support_cuda_graph())
+        self.assertFalse(metadata.requires_host_attention_inputs())
         metadata.prepare_cuda_graph(None)
 
     def test_commit_write_uses_request_ids_positions_and_committed_ends(self) -> None:
@@ -463,6 +464,83 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
                     self.assertTrue(
                         torch.equal(regular_writer.call_args.kwargs["kv"], gathered_kv)
                     )
+
+    def test_commit_and_propose_steps_work_without_host_length_fields(self) -> None:
+        model = _dspark_harness(gamma=2)
+        model._dspark_aux_feature_dim = 4
+        model._dspark_hidden_dim = 4
+        model._dspark_query_width = 2
+        model._dspark_noise_token_id = 9
+        model.combine_hidden_states = lambda x: x
+
+        committed_calls = []
+
+        def fake_commit(
+            main_x, req, positions, committed_ends, inputs, commit_ctx=None
+        ):
+            committed_calls.append(
+                (req.clone(), positions.clone(), committed_ends.clone(), commit_ctx)
+            )
+
+        model.commit_feature_rows = fake_commit
+
+        commit_attn = SimpleNamespace(
+            input_lengths=None,
+            input_lengths_device=torch.tensor([2, 1], dtype=torch.int32),
+            prefix_lengths=None,
+            prefix_lengths_device=torch.tensor([4, 6], dtype=torch.int32),
+            context_parallel_info=None,
+        )
+        commit_inputs = SimpleNamespace(
+            input_ids=torch.zeros(3, dtype=torch.int32),
+            input_hiddens=torch.ones((3, 4), dtype=torch.bfloat16),
+            attention_inputs=commit_attn,
+        )
+        commit_out = model.run_commit_step(commit_inputs, torch.device("cpu"))
+        self.assertEqual(tuple(commit_out.hidden_states.shape), (3, 4))
+        self.assertEqual(len(committed_calls), 1)
+        req, positions, committed_ends, commit_ctx = committed_calls[0]
+        self.assertEqual(req.tolist(), [0, 0, 1])
+        self.assertEqual(positions.tolist(), [4, 5, 6])
+        self.assertEqual(committed_ends.tolist(), [6, 7])
+        self.assertIsNone(commit_ctx)
+
+        propose_calls = []
+
+        def fake_forward_query(
+            query_ids,
+            query_positions,
+            prefix_lengths,
+            active_requests,
+            inputs,
+            fmha_impl,
+        ):
+            propose_calls.append(
+                (query_ids.clone(), query_positions.clone(), prefix_lengths.clone())
+            )
+            return torch.zeros(
+                (query_ids.shape[0], query_ids.shape[1], 4), dtype=torch.bfloat16
+            )
+
+        model.forward_query_block = fake_forward_query
+        model.compute_draft_hidden_states = lambda h: h.reshape(-1, 4)
+        propose_attn = SimpleNamespace(
+            prefix_lengths=None,
+            prefix_lengths_device=torch.tensor([6, 0], dtype=torch.int32),
+        )
+        propose_inputs = SimpleNamespace(
+            input_ids=torch.tensor([11, 0, 22, 0], dtype=torch.int32),
+            attention_inputs=propose_attn,
+        )
+        propose_out = model.run_propose_step(
+            propose_inputs, fmha_impl=None, device=torch.device("cpu")
+        )
+        self.assertEqual(tuple(propose_out.hidden_states.shape), (4, 4))
+        self.assertEqual(len(propose_calls), 1)
+        q_ids, q_pos, pref = propose_calls[0]
+        self.assertEqual(q_ids.tolist(), [[11, 9], [22, 9]])
+        self.assertEqual(q_pos.tolist(), [[6, 7], [0, 1]])
+        self.assertEqual(pref.tolist(), [6, 0])
 
 
 if __name__ == "__main__":

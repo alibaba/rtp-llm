@@ -32,6 +32,16 @@ from typing import TYPE_CHECKING, Any, Optional, Tuple, Union
 
 import torch
 
+try:
+    import triton
+    import triton.language as tl
+
+    _TRITON_AVAILABLE = True
+except ImportError:
+    triton = None  # type: ignore[assignment]
+    tl = None  # type: ignore[assignment]
+    _TRITON_AVAILABLE = False
+
 from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
@@ -43,6 +53,235 @@ if TYPE_CHECKING:
     from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 
 _DEFAULT_CP_PROFILE_NAME = "dsv4.cp.all_gather"
+
+
+if _TRITON_AVAILABLE:
+
+    @triton.jit(
+        do_not_specialize=[
+            "M_out",
+            "K",
+            "stride_src0",
+            "stride_out0",
+        ]
+    )
+    def _triton_gather_rows_kernel(
+        src_ptr,
+        out_ptr,
+        indices_ptr,
+        M_out,
+        K,
+        stride_src0,
+        stride_out0,
+        stride_idx,
+        BLOCK_M: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+        STRIDE_UNIT: tl.constexpr,
+    ):
+        """Vectorized 2D row gather: ``out[m, :] = src[indices[m], :]``."""
+        pid_m = tl.program_id(0).to(tl.int64)
+        pid_k = tl.program_id(1).to(tl.int64)
+
+        row_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        m_mask = row_m < M_out
+        src_row = tl.load(indices_ptr + row_m * stride_idx, mask=m_mask, other=0).to(
+            tl.int64
+        )
+
+        if STRIDE_UNIT > 1:
+            col_k = tl.max_contiguous(
+                tl.multiple_of(pid_k * BLOCK_K + tl.arange(0, BLOCK_K), [STRIDE_UNIT]),
+                [BLOCK_K],
+            )
+            k_mask = (col_k // STRIDE_UNIT) < (K // STRIDE_UNIT)
+            s_src0 = stride_src0.to(tl.int64) * STRIDE_UNIT
+            s_out0 = stride_out0.to(tl.int64) * STRIDE_UNIT
+            src_off = tl.max_contiguous(
+                tl.multiple_of(
+                    src_row[:, None] * s_src0 + col_k[None, :], [1, STRIDE_UNIT]
+                ),
+                [1, BLOCK_K],
+            )
+            out_off = tl.max_contiguous(
+                tl.multiple_of(
+                    row_m[:, None] * s_out0 + col_k[None, :], [1, STRIDE_UNIT]
+                ),
+                [1, BLOCK_K],
+            )
+        else:
+            col_k = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
+            k_mask = col_k < K
+            src_off = src_row[:, None] * stride_src0.to(tl.int64) + col_k[None, :]
+            out_off = row_m[:, None] * stride_out0.to(tl.int64) + col_k[None, :]
+
+        tile_mask = m_mask[:, None] & k_mask[None, :]
+        vals = tl.load(src_ptr + src_off, mask=tile_mask, other=0)
+        tl.store(out_ptr + out_off, vals, mask=tile_mask)
+
+    @triton.jit(do_not_specialize=["N", "stride_src"])
+    def _triton_gather_1d_kernel(
+        src_ptr,
+        indices_ptr,
+        out_ptr,
+        N,
+        stride_src,
+        stride_idx,
+        BLOCK_N: tl.constexpr,
+    ):
+        """1D gather: ``out[i] = src[indices[i]]``."""
+        pid = tl.program_id(0).to(tl.int64)
+        offsets = pid * BLOCK_N + tl.arange(0, BLOCK_N)
+        mask = offsets < N
+        idx = tl.load(indices_ptr + offsets * stride_idx, mask=mask, other=0).to(
+            tl.int64
+        )
+        vals = tl.load(src_ptr + idx * stride_src.to(tl.int64), mask=mask, other=0)
+        tl.store(out_ptr + offsets, vals, mask=mask)
+
+
+def _as_2d_gather_view(t: torch.Tensor, target_dtype: torch.dtype) -> torch.Tensor:
+    """Reinterpret a dim-1-contiguous 2D tensor as 2D ``target_dtype`` without copying."""
+    if t.is_complex():
+        real = torch.view_as_real(t)
+        real_2d = torch.as_strided(
+            real,
+            (int(t.shape[0]), int(t.shape[1]) * 2),
+            (int(t.stride(0)) * 2, 1),
+        )
+        return real_2d.view(target_dtype)
+    return t.view(target_dtype)
+
+
+def _triton_gather_rows_2d(
+    src: torch.Tensor,
+    indices: torch.Tensor,
+    *,
+    out: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Gather rows ``src[indices]`` for 2D tensors using Triton on CUDA.
+
+    Falls back to ``torch.index_select`` on non-CUDA devices, non-unit inner
+    strides, or when Triton is unavailable.
+    """
+    M_out = int(indices.shape[0])
+    H = int(src.shape[1])
+    if out is None:
+        out = torch.empty((M_out, H), dtype=src.dtype, device=src.device)
+    if M_out == 0 or H == 0:
+        return out
+    if (
+        not _TRITON_AVAILABLE
+        or not src.is_cuda
+        or not indices.is_cuda
+        or src.stride(1) != 1
+        or out.stride(1) != 1
+    ):
+        torch.index_select(
+            src,
+            0,
+            indices.to(device=src.device, dtype=torch.long),
+            out=out,
+        )
+        return out
+
+    elem_bytes = src.element_size()
+    byte_cols = H * elem_bytes
+    src_stride_bytes = int(src.stride(0)) * elem_bytes
+    out_stride_bytes = int(out.stride(0)) * elem_bytes
+    src_off_bytes = src.storage_offset() * elem_bytes
+    out_off_bytes = out.storage_offset() * elem_bytes
+
+    def _is_aligned(align: int) -> bool:
+        return (
+            byte_cols % align == 0
+            and src_stride_bytes % align == 0
+            and out_stride_bytes % align == 0
+            and src.data_ptr() % align == 0
+            and out.data_ptr() % align == 0
+            and src_off_bytes % align == 0
+            and out_off_bytes % align == 0
+        )
+
+    if _is_aligned(16):
+        src_view = _as_2d_gather_view(src, torch.int64)
+        out_view = _as_2d_gather_view(out, torch.int64)
+        K = byte_cols // 8
+        stride_src0 = src_stride_bytes // 16
+        stride_out0 = out_stride_bytes // 16
+        stride_unit = 2
+    elif _is_aligned(8):
+        src_view = _as_2d_gather_view(src, torch.int64)
+        out_view = _as_2d_gather_view(out, torch.int64)
+        K = byte_cols // 8
+        stride_src0 = src_stride_bytes // 8
+        stride_out0 = out_stride_bytes // 8
+        stride_unit = 1
+    elif _is_aligned(4):
+        src_view = _as_2d_gather_view(src, torch.int32)
+        out_view = _as_2d_gather_view(out, torch.int32)
+        K = byte_cols // 4
+        stride_src0 = src_stride_bytes // 4
+        stride_out0 = out_stride_bytes // 4
+        stride_unit = 1
+    else:
+        src_view = _as_2d_gather_view(src, torch.uint8)
+        out_view = _as_2d_gather_view(out, torch.uint8)
+        K = byte_cols
+        stride_src0 = src_stride_bytes
+        stride_out0 = out_stride_bytes
+        stride_unit = 1
+
+    if K <= 64:
+        block_m, block_k = 16, 64
+    elif K <= 128:
+        block_m, block_k = 8, 128
+    else:
+        block_m, block_k = 4, 256
+
+    grid = (triton.cdiv(M_out, block_m), triton.cdiv(K, block_k))
+    _triton_gather_rows_kernel[grid](
+        src_view,
+        out_view,
+        indices,
+        M_out,
+        K,
+        stride_src0,
+        stride_out0,
+        int(indices.stride(0)),
+        BLOCK_M=block_m,
+        BLOCK_K=block_k,
+        STRIDE_UNIT=stride_unit,
+        num_warps=4,
+    )
+    return out
+
+
+def _gather_1d(src: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+    """Gather 1D elements ``src[indices]`` via Triton on CUDA, else ATen."""
+    N = int(indices.numel())
+    if N == 0:
+        return src.new_empty((0,))
+    if (
+        not _TRITON_AVAILABLE
+        or not src.is_cuda
+        or not indices.is_cuda
+        or src.is_complex()
+    ):
+        return src.gather(0, indices.to(device=src.device, dtype=torch.long))
+    out = torch.empty((N,), dtype=src.dtype, device=src.device)
+    block_n = 256
+    grid = (triton.cdiv(N, block_n),)
+    _triton_gather_1d_kernel[grid](
+        src,
+        indices,
+        out,
+        N,
+        int(src.stride(0)),
+        int(indices.stride(0)),
+        BLOCK_N=block_n,
+        num_warps=4,
+    )
+    return out
 
 
 # CP gather roles — which workspace buffer backs a given compressor gather.
@@ -282,15 +521,20 @@ class CudaAsyncCPGatherImpl:
             cp_role=cp_role,
         )
 
-    def wait(self, handle: Any) -> torch.Tensor:
+    def wait_raw(self, handle: Any) -> torch.Tensor:
+        """Wait for an async CP gather and return rank-major ``[T_padded, H]``."""
         if not isinstance(handle, CPCudaAsyncGatherHandle):
             raise TypeError(
-                f"CudaAsyncCPGatherImpl.wait expected CPCudaAsyncGatherHandle, got {type(handle)!r}"
+                f"CudaAsyncCPGatherImpl.wait_raw expected CPCudaAsyncGatherHandle, got {type(handle)!r}"
             )
         current_stream = torch.cuda.current_stream(handle.gathered.device)
         with record_function_range(f"{handle.profile_name}.wait_host"):
             current_stream.wait_event(handle.completion_event)
             handle.work.wait()
+        return handle.gathered
+
+    def wait(self, handle: Any) -> torch.Tensor:
+        gathered = self.wait_raw(handle)
         # Restore destination: the per-forward workspace restore scratch
         # (non-prefix path) instead of a fresh per-layer ``index_select``
         # output. The prefix fast-path returns a view of ``gathered`` and
@@ -299,16 +543,14 @@ class CudaAsyncCPGatherImpl:
         if not handle.cp_ctx.unpad_restore_is_prefix:
             assert handle.workspace is not None
             rows = handle.cp_ctx.seq_len_full
-            dim = handle.gathered.size(1)
-            dtype = handle.gathered.dtype
+            dim = gathered.size(1)
+            dtype = gathered.dtype
             if handle.cp_role == _CP_ROLE_MAIN:
                 out_buf = handle.workspace.cp_restore_main(rows, dim, dtype)
             else:
                 out_buf = handle.workspace.cp_restore_idx(rows, dim, dtype)
         with record_function_range(f"{handle.profile_name}.restore"):
-            full = _cp_restore_gathered_full_2d(
-                handle.gathered, handle.cp_ctx, out=out_buf
-            )
+            full = _cp_restore_gathered_full_2d(gathered, handle.cp_ctx, out=out_buf)
         # Compressor gather/restore buffers come from the per-forward
         # ``PrefillWorkspace`` union — they are reused across layers (never
         # freed mid-forward) and cross-layer reuse is serialized by the
@@ -627,7 +869,7 @@ def build_cp_context(
         # so restore rows must be selected with the full concat padding mask.
         unpad_restore = restore_indices[padding_mask == 1].to(torch.long)
         seq_len_full = int(unpad_restore.shape[0])
-    prefix_per_token = prefix_lengths.gather(0, req_id_per_token.to(torch.long))
+    prefix_per_token = _gather_1d(prefix_lengths, req_id_per_token)
     global_positions = (prefix_per_token + local_positions).contiguous()
     prefix_length = prefix_lengths_host[0] if prefix_lengths_host else 0
     if input_lengths_global_host is not None:
@@ -741,10 +983,9 @@ def _cp_restore_gathered_full_2d(
                     f"out buffer device {out.device} != gathered.device "
                     f"{gathered.device}"
                 )
-            torch.index_select(gathered, 0, cp_ctx.unpad_restore, out=out)
-            full = out
+            full = _triton_gather_rows_2d(gathered, cp_ctx.unpad_restore, out=out)
         else:
-            full = gathered.index_select(0, cp_ctx.unpad_restore)
+            full = _triton_gather_rows_2d(gathered, cp_ctx.unpad_restore)
     if full.size(0) != cp_ctx.seq_len_full:
         raise ValueError(
             f"CP restored rows({full.size(0)}) != cp_ctx.seq_len_full({cp_ctx.seq_len_full})"
@@ -811,6 +1052,13 @@ def cp_wait_gather_full(handle: Any) -> torch.Tensor:
     if isinstance(handle, CPCudaAsyncGatherHandle):
         return CudaAsyncCPGatherImpl().wait(handle)
     raise TypeError(f"unsupported CP gather handle type: {type(handle)!r}")
+
+
+def cp_wait_gather_raw(handle: Any) -> torch.Tensor:
+    """Wait for a deferred async CP gather and return raw rank-major ``[T_padded, H]``."""
+    if isinstance(handle, CPCudaAsyncGatherHandle):
+        return CudaAsyncCPGatherImpl().wait_raw(handle)
+    raise TypeError(f"unsupported raw CP gather handle type: {type(handle)!r}")
 
 
 def _cp_all_gather_into_empty(tensor: torch.Tensor, group: Group) -> torch.Tensor:
@@ -899,7 +1147,7 @@ def cp_gather_last_by_request(
         device=device, dtype=torch.long
     ).reshape(-1)[:B]
     target_positions = prefixes + input_lengths - 1
-    target_per_token = target_positions.gather(0, req_ids)
+    target_per_token = _gather_1d(target_positions, req_ids)
 
     global_positions = cp_ctx.global_positions.to(device=device, dtype=torch.long)
     local_is_real = cp_ctx.local_is_real.to(device=device)
@@ -940,6 +1188,8 @@ def cp_freqs_cis_local(
     # away, but must not index past the end.
     max_s = freqs_cis.size(0)
     pos = pos.clamp_max(max_s - 1)
+    if freqs_cis.dim() == 2:
+        return _triton_gather_rows_2d(freqs_cis, pos)
     return freqs_cis.index_select(0, pos)
 
 
@@ -1017,7 +1267,7 @@ def combine_topk_swa_indices_cp_varlen(
     req = req_id_per_token.to(device=device, dtype=torch.int64)
     prefix = prefix_lengths.to(device=device, dtype=torch.int64)
     gp = global_positions.to(device=device, dtype=torch.int64)
-    sp_b = prefix.gather(0, req)
+    sp_b = _gather_1d(prefix, req)
     P_b = torch.clamp_max(sp_b, window_size - 1)
     gather_start = sp_b - P_b
 
@@ -1352,9 +1602,34 @@ def cp_gather_request_pool_blocks(
         )
 
     # Pack owned blocks contiguously.
-    local_owned = local_pool.index_select(
-        0, local_block_table_for_req.to(device=local_pool.device, dtype=torch.long)
-    ).contiguous()
+    block_shape = local_pool.shape[1:]
+    flat_cols = 1
+    for d in block_shape:
+        flat_cols *= int(d)
+    idx_dev = (
+        local_block_table_for_req
+        if local_block_table_for_req.device == local_pool.device
+        else local_block_table_for_req.to(device=local_pool.device)
+    )
+    inner_contig = True
+    expected_stride = 1
+    for size, stride in zip(reversed(block_shape), reversed(local_pool.stride()[1:])):
+        if size > 1 and stride != expected_stride:
+            inner_contig = False
+            break
+        expected_stride *= size
+
+    if local_pool.is_cuda and inner_contig and flat_cols > 0:
+        pool_2d = torch.as_strided(
+            local_pool,
+            (int(local_pool.shape[0]), flat_cols),
+            (int(local_pool.stride(0)), 1),
+        )
+        local_owned = _triton_gather_rows_2d(pool_2d, idx_dev).view((L, *block_shape))
+    else:
+        local_owned = local_pool.index_select(
+            0, idx_dev.to(dtype=torch.long)
+        ).contiguous()
 
     # NCCL all_gather. Each rank contributes [L, *block_shape] -> output is
     # [cp_size * L, *block_shape] rank-major.

@@ -190,78 +190,76 @@ def _fused_inv_rope_fp8_quant_group_heads(
     g = tl.program_id(1).to(tl.int64)
     head_tile = tl.program_id(2).to(tl.int64)
     head_base = head_tile * HEADS_PER_CTA
+    h_idx = head_base + tl.arange(0, HEADS_PER_CTA)
 
-    for head_step in tl.static_range(HEADS_PER_CTA):
-        head_in_group = head_base + head_step
-        scale_addr = (
-            scale_ptr
-            + g * scale_stride_group
-            + pid_token
-            + head_in_group * scale_stride_k
+    scale_tok_base = scale_ptr + g * scale_stride_group + pid_token
+    if pid_token >= num_tokens:
+        tl.store(
+            scale_tok_base + h_idx * scale_stride_k,
+            tl.zeros((HEADS_PER_CTA,), dtype=tl.int32),
         )
-        if pid_token >= num_tokens:
-            tl.store(scale_addr, tl.zeros((), dtype=tl.int32))
-        else:
-            global_head = g * heads_per_group + head_in_group
-            input_base = (
-                o_ptr + pid_token * o_stride_token + global_head * o_stride_head
-            )
+        return
 
-            HEAD_DIM: tl.constexpr = CHUNKS_PER_HEAD * QUANT_GROUP_SIZE
-            offsets = tl.arange(0, HEAD_DIM)
-            x = tl.load(input_base + offsets).to(tl.float32)
+    HEAD_DIM: tl.constexpr = CHUNKS_PER_HEAD * QUANT_GROUP_SIZE
+    NUM_PAIRS: tl.constexpr = HEAD_DIM // 2
+    rope_abs_start: tl.constexpr = (CHUNKS_PER_HEAD - 1) * QUANT_GROUP_SIZE + ROPE_START
+    NOPE_PAIRS: tl.constexpr = rope_abs_start // 2
+    HALF_ROPE: tl.constexpr = (HEAD_DIM - rope_abs_start) // 2
 
-            rope_abs_start: tl.constexpr = (
-                (CHUNKS_PER_HEAD - 1) * QUANT_GROUP_SIZE + ROPE_START
-            )
-            is_rope = offsets >= rope_abs_start
-            rope_local = offsets - rope_abs_start
-            x_partner = tl.load(
-                input_base + (offsets ^ 1), mask=is_rope, other=0.0
-            ).to(tl.float32)
+    # Hoist batch lookup & cos/sin loads once per CTA across all HEADS_PER_CTA.
+    pair_off = tl.arange(0, NUM_PAIRS)
+    rope_pair_local = pair_off - NOPE_PAIRS
+    is_rope_pair = (rope_pair_local >= 0) & (rope_pair_local < HALF_ROPE)
+    cs_idx = tl.where(is_rope_pair, rope_pair_local, 0)
 
-            cs_idx = tl.maximum(rope_local >> 1, 0)
-            b_idx = pid_token // q_len_per_b
-            freq_base = freqs_ri_ptr + b_idx * freqs_stride_b + cs_idx * freqs_stride_k
-            cos_v = tl.load(freq_base, mask=is_rope, other=1.0)
-            sin_v = tl.load(freq_base + 1, mask=is_rope, other=0.0)
+    b_idx = pid_token // q_len_per_b
+    freq_base = freqs_ri_ptr + b_idx * freqs_stride_b + cs_idx * freqs_stride_k
+    cos_v = tl.load(freq_base, mask=is_rope_pair, other=1.0)
+    sin_v = tl.load(freq_base + 1, mask=is_rope_pair, other=0.0)
 
-            x_add = x * cos_v + x_partner * sin_v
-            x_sub = x * cos_v - x_partner * sin_v
-            is_even = (rope_local & 1) == 0
-            x = tl.where(is_rope, tl.where(is_even, x_add, x_sub), x)
+    offsets = tl.arange(0, HEAD_DIM)
+    o_tok_base = (
+        o_ptr + pid_token * o_stride_token + g * heads_per_group * o_stride_head
+    )
+    x = tl.load(o_tok_base + h_idx[:, None] * o_stride_head + offsets[None, :]).to(
+        tl.float32
+    )
 
-            x_2d = tl.reshape(tl.abs(x), (CHUNKS_PER_HEAD, QUANT_GROUP_SIZE))
-            block_absmax = tl.maximum(tl.max(x_2d, axis=1), eps)
-            scale_raw = block_absmax * (1.0 / fp8_max)
-            scale_raw_bits = scale_raw.to(tl.int32, bitcast=True)
-            exp = ((scale_raw_bits >> 23) & 0xFF) + (
-                (scale_raw_bits & 0x7FFFFF) != 0
-            )
-            exp = tl.minimum(tl.maximum(exp, 1), 254)
-            scale_bits = exp << 23
-            scales = scale_bits.to(tl.float32, bitcast=True)
+    # Inverse RoPE in registers without a second global x_partner load.
+    x_even, x_odd = tl.split(tl.reshape(x, (HEADS_PER_CTA, NUM_PAIRS, 2)))
+    rot_even = x_even * cos_v[None, :] + x_odd * sin_v[None, :]
+    rot_odd = x_odd * cos_v[None, :] - x_even * sin_v[None, :]
+    new_even = tl.where(is_rope_pair[None, :], rot_even, x_even)
+    new_odd = tl.where(is_rope_pair[None, :], rot_odd, x_odd)
+    x = tl.interleave(new_even, new_odd)
 
-            scales_exp = tl.reshape(
-                tl.broadcast_to(
-                    tl.reshape(scales, (CHUNKS_PER_HEAD, 1)),
-                    (CHUNKS_PER_HEAD, QUANT_GROUP_SIZE),
-                ),
-                (HEAD_DIM,),
-            )
-            x_quant = tl.clamp(x / scales_exp, -fp8_max, fp8_max).to(tl.float8e4nv)
+    # Per-128-column FP8 quant + UE8M0 power-of-2 scale packing.
+    x_3d = tl.reshape(tl.abs(x), (HEADS_PER_CTA, CHUNKS_PER_HEAD, QUANT_GROUP_SIZE))
+    block_absmax = tl.maximum(tl.max(x_3d, axis=2), eps)
+    scale_raw = block_absmax * (1.0 / fp8_max)
+    scale_raw_bits = scale_raw.to(tl.int32, bitcast=True)
+    exp = ((scale_raw_bits >> 23) & 0xFF) + ((scale_raw_bits & 0x7FFFFF) != 0)
+    exp = tl.minimum(tl.maximum(exp, 1), 254)
+    scales = (exp << 23).to(tl.float32, bitcast=True)
 
-            fp8_base = (
-                fp8_ptr
-                + g * fp8_stride_group
-                + pid_token * fp8_stride_token
-                + head_in_group * HEAD_DIM
-            )
-            tl.store(fp8_base + offsets, x_quant)
+    scales_exp = tl.reshape(
+        tl.broadcast_to(
+            tl.reshape(scales, (HEADS_PER_CTA, CHUNKS_PER_HEAD, 1)),
+            (HEADS_PER_CTA, CHUNKS_PER_HEAD, QUANT_GROUP_SIZE),
+        ),
+        (HEADS_PER_CTA, HEAD_DIM),
+    )
+    x_quant = tl.clamp(x / scales_exp, -fp8_max, fp8_max).to(tl.float8e4nv)
 
-            block_offsets = tl.arange(0, CHUNKS_PER_HEAD)
-            packed_val = tl.sum(exp << (block_offsets * 8))
-            tl.store(scale_addr, packed_val)
+    fp8_tok_base = fp8_ptr + g * fp8_stride_group + pid_token * fp8_stride_token
+    tl.store(
+        fp8_tok_base + h_idx[:, None] * HEAD_DIM + offsets[None, :],
+        x_quant,
+    )
+
+    block_offsets = tl.arange(0, CHUNKS_PER_HEAD)
+    packed_val = tl.sum(exp << (block_offsets[None, :] * 8), axis=1)
+    tl.store(scale_tok_base + h_idx * scale_stride_k, packed_val)
 
 
 def _alloc_output_buffers(
@@ -355,9 +353,7 @@ def fused_inv_rope_fp8_quant(
         elif freq_rows == B:
             q_len_per_b = S
         else:
-            raise AssertionError(
-                f"freq rows must be B={B} or M={M}; got {freq_rows}"
-            )
+            raise AssertionError(f"freq rows must be B={B} or M={M}; got {freq_rows}")
     else:
         assert o.dim() == 3
         M, H, D = o.shape
@@ -396,6 +392,8 @@ def fused_inv_rope_fp8_quant(
     fp8_work, scale_work = _alloc_output_buffers(
         M, n_groups, d_per_group, packed_sf_k, o.device, fp8_buf, scale_buf
     )
+    if M == 0:
+        return fp8_work.transpose(0, 1), scale_work.transpose(0, 1)
     tma_M = scale_work.stride(2)
 
     selected_impl = (impl if impl is not None else "optimized").lower()
@@ -443,7 +441,7 @@ def fused_inv_rope_fp8_quant(
             )
         if heads_per_group % selected_heads_per_cta != 0:
             selected_heads_per_cta = 1
-        selected_num_warps = 2
+        selected_num_warps = min(8, max(2, (selected_heads_per_cta * D) // 512))
         freqs_ri = torch.view_as_real(freqs_cis_per_b)
         grid = (tma_M, n_groups, heads_per_group // selected_heads_per_cta)
         _fused_inv_rope_fp8_quant_group_heads[grid](
@@ -473,8 +471,7 @@ def fused_inv_rope_fp8_quant(
         )
     else:
         raise ValueError(
-            f"invalid impl={selected_impl!r}; "
-            "expected legacy|optimized"
+            f"invalid impl={selected_impl!r}; " "expected legacy|optimized"
         )
     # Transpose (0, 1) so the consumer sees [M, G, …]:
     #   fp8  : [M, G, d]          stride (d, M*d, 1)   — contiguous-like on inner

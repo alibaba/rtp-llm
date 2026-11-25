@@ -18,13 +18,13 @@ from pathlib import Path
 import torch
 
 try:
+    from rtp_llm.models_py.modules.dsv4._rope_only_triton import rope_only_inplace
     from rtp_llm.models_py.modules.dsv4.fp8._indexer_q_quant_triton import (
         FP8_E4M3_MAX,
         INDEXER_HEAD_DIM,
         indexer_q_fp8_quant_fold,
         indexer_q_rope_fp8_quant_fold,
     )
-    from rtp_llm.models_py.modules.dsv4._rope_only_triton import rope_only_inplace
 except Exception as exc:
     if "libth_transformer_config.so" not in str(exc):
         raise
@@ -41,7 +41,9 @@ except Exception as exc:
     _q_mod = _load_module(
         "dsv4_indexer_q_quant_triton", _FP8_DIR / "_indexer_q_quant_triton.py"
     )
-    _rope_mod = _load_module("dsv4_rope_only_triton", _DSV4_DIR / "_rope_only_triton.py")
+    _rope_mod = _load_module(
+        "dsv4_rope_only_triton", _DSV4_DIR / "_rope_only_triton.py"
+    )
     FP8_E4M3_MAX = _q_mod.FP8_E4M3_MAX
     INDEXER_HEAD_DIM = _q_mod.INDEXER_HEAD_DIM
     indexer_q_fp8_quant_fold = _q_mod.indexer_q_fp8_quant_fold
@@ -198,6 +200,53 @@ def test_fused_rope_quant_matches_old_batched_decode_shape():
     _assert_fused_rope_quant_matches_old(q, w, freqs, rope_head_dim)
 
 
+def test_fused_rope_quant_group_heads_bit_exact_and_fallbacks():
+    """Grouped-head kernels (gh=4,8,16) match scalar gh=1 bit-for-bit, and
+    non-divisible head counts / non-64 rope dims fall back cleanly."""
+    torch.manual_seed(5)
+    # 1) Exact parity across group_heads=1,4,8,16 on standard [1, 17, 64, 128]
+    q = (
+        torch.randn(1, 17, 64, INDEXER_HEAD_DIM, dtype=torch.bfloat16, device="cuda")
+        * 0.25
+    )
+    w = torch.randn(1, 17, 64, dtype=torch.bfloat16, device="cuda")
+    freqs = _make_freqs(17, 64)
+    ref_fp8, ref_w = indexer_q_rope_fp8_quant_fold(q, w, freqs, 64, group_heads=1)
+    for gh in (2, 4, 8, 16):
+        cand_fp8, cand_w = indexer_q_rope_fp8_quant_fold(
+            q, w, freqs, 64, group_heads=gh
+        )
+        assert torch.equal(
+            cand_fp8.view(torch.uint8), ref_fp8.view(torch.uint8)
+        ), f"group_heads={gh} fp8 mismatch vs group_heads=1"
+        assert torch.equal(
+            cand_w, ref_w
+        ), f"group_heads={gh} w_fold mismatch vs group_heads=1"
+
+    # 2) Large prefill shape exercising auto group_heads=16 (BSH >= 65536)
+    q_big = (
+        torch.randn(1, 1024, 64, INDEXER_HEAD_DIM, dtype=torch.bfloat16, device="cuda")
+        * 0.25
+    )
+    w_big = torch.randn(1, 1024, 64, dtype=torch.bfloat16, device="cuda")
+    freqs_big = _make_freqs(1024, 64)
+    auto_fp8, auto_w = indexer_q_rope_fp8_quant_fold(q_big, w_big, freqs_big, 64)
+    s1_fp8, s1_w = indexer_q_rope_fp8_quant_fold(
+        q_big, w_big, freqs_big, 64, group_heads=1
+    )
+    assert torch.equal(auto_fp8.view(torch.uint8), s1_fp8.view(torch.uint8))
+    assert torch.equal(auto_w, s1_w)
+
+    # 3) Non-divisible H=7 fallback + alternative rope_head_dim=32
+    q_odd_h = (
+        torch.randn(2, 5, 7, INDEXER_HEAD_DIM, dtype=torch.bfloat16, device="cuda")
+        * 0.25
+    )
+    w_odd_h = torch.randn(2, 5, 7, dtype=torch.bfloat16, device="cuda")
+    freqs_odd_h = _make_freqs(10, 32)
+    _assert_fused_rope_quant_matches_old(q_odd_h, w_odd_h, freqs_odd_h, 32)
+
+
 if __name__ == "__main__":
     print("== Correctness ==")
     test_quant_round_trip()
@@ -206,4 +255,5 @@ if __name__ == "__main__":
     test_zero_input()
     test_fused_rope_quant_matches_old_prefill_shape()
     test_fused_rope_quant_matches_old_batched_decode_shape()
+    test_fused_rope_quant_group_heads_bit_exact_and_fallbacks()
     print("\nOK")

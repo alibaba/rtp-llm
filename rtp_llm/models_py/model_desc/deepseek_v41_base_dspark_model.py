@@ -254,6 +254,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             sched_meta_cache={},
             prepare_cuda_graph=lambda _attention_inputs: None,
             support_cuda_graph=lambda: True,
+            requires_host_attention_inputs=lambda: False,
         )
 
     def _load_extra_weights(self, weights: ModelWeights) -> None:

@@ -49,7 +49,18 @@ def ref_rmsnorm_rope(
     if weight is not None:
         y = y * weight.float()
     out = y.to(x.dtype)
-    apply_rotary_emb_batched(out[..., -rd:], freqs_cis_per_b, inverse=inverse)
+    rope_view = out[..., -rd:]
+    n_freq = freqs_cis_per_b.shape[0]
+    if rope_view.shape[0] == n_freq:
+        apply_rotary_emb_batched(rope_view, freqs_cis_per_b, inverse=inverse)
+    else:
+        rope_tmp = (
+            rope_view.reshape(n_freq, 1, rope_view.size(2), rd).contiguous()
+            if rope_view.ndim == 4
+            else rope_view.reshape(n_freq, 1, rd).contiguous()
+        )
+        apply_rotary_emb_batched(rope_tmp, freqs_cis_per_b, inverse=inverse)
+        rope_view.copy_(rope_tmp.reshape(rope_view.shape))
     return out
 
 
@@ -240,6 +251,40 @@ def test_inverse_rope_path_correctness():
     assert d.max() <= 2e-2
 
 
+def test_prefill_d512_q_and_edge_dims_correctness():
+    """DSv4 prefill Q shape [1, T, 64, 512] with aliased out=, weights,
+    non-power-of-2 even D=384, and odd D=129 fallback."""
+    torch.manual_seed(77)
+    T, H, D, rd, eps = 19, 64, 512, 64, 1e-6
+    q = torch.randn(1, T, H, D, dtype=torch.bfloat16, device="cuda") * 0.5
+    freqs = _build_freqs_prefill(T, rd)
+    ref = ref_rmsnorm_rope(q, None, freqs, rd, eps=eps)
+    for gh in (1, 2, 4, 8):
+        cand = q.clone()
+        out = fused_rmsnorm_rope(
+            cand, None, freqs, rd, eps=eps, out=cand, group_heads=gh
+        )
+        assert out.data_ptr() == cand.data_ptr()
+        d = (out.float() - ref.float()).abs().max().item()
+        assert d <= 2e-2, f"prefill D=512 gh={gh} out-alias diff {d}"
+
+    # Weighted multi-head grouped path + non-power-of-2 even D=384
+    x_even = torch.randn(2, 3, 8, 384, dtype=torch.bfloat16, device="cuda") * 0.5
+    w_even = torch.randn(384, dtype=torch.bfloat16, device="cuda").abs() + 0.5
+    f_even = _make_freqs(6, 64)
+    ref_even = ref_rmsnorm_rope(x_even, w_even, f_even, 64, eps=eps)
+    cand_even = fused_rmsnorm_rope(x_even, w_even, f_even, 64, eps=eps, group_heads=4)
+    assert (cand_even.float() - ref_even.float()).abs().max().item() <= 5e-2
+
+    # Odd D=129 fallback (EVEN_NOPE=False)
+    x_odd = torch.randn(3, 5, 129, dtype=torch.bfloat16, device="cuda") * 0.5
+    w_odd = torch.randn(129, dtype=torch.bfloat16, device="cuda").abs() + 0.5
+    f_odd = _make_freqs(15, 64)
+    ref_odd = ref_rmsnorm_rope(x_odd, w_odd, f_odd, 64, eps=eps)
+    cand_odd = fused_rmsnorm_rope(x_odd, w_odd, f_odd, 64, eps=eps)
+    assert (cand_odd.float() - ref_odd.float()).abs().max().item() <= 5e-2
+
+
 def _build_freqs_prefill(T: int, rd: int) -> torch.Tensor:
     """Prefill uses per-position freqs broadcast across the batch dim.
     Here B=T for the batched API (one freqs_cis row per token)."""
@@ -357,6 +402,7 @@ if __name__ == "__main__":
     test_prefill_attention_inplace_matches_out_of_place()
     test_group_heads_correctness()
     test_inverse_rope_path_correctness()
+    test_prefill_d512_q_and_edge_dims_correctness()
     print("\n== Benchmark (T sweep: covers decode + prefill paths) ==")
     q_res, kv_res = bench_token_sweep()
     # Hard perf assertion: fused must beat the eager baseline at every T.

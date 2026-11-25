@@ -20,7 +20,11 @@ from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4.block import Block
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, build_cp_context
-from rtp_llm.models_py.modules.dsv4.hc import build_hc_head
+from rtp_llm.models_py.modules.dsv4.hc import (
+    build_hc_head,
+    copy_2d_buffer,
+    mhc_mean_copy,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     synchronized_moe_chunk_plan,
 )
@@ -363,9 +367,9 @@ class V4Transformer(nn.Module):
             "DSpARK aux capture requires the shared MTP hidden buffer; "
             "the target model must request it before binding runtime buffers"
         )
-        pooled = hidden.mean(dim=-2)
-        flat = pooled.reshape(-1, pooled.size(-1))
-        rows, dim = flat.shape
+        hc_mult = int(hidden.size(-2))
+        dim = int(hidden.size(-1))
+        rows = int(hidden.numel() // max(hc_mult * dim, 1))
         assert (segment + 1) * dim <= buf.size(1), (
             f"aux segment overflow: segment={segment} dim={dim} "
             f"row_width={buf.size(1)}"
@@ -373,7 +377,7 @@ class V4Transformer(nn.Module):
         assert rows <= buf.size(
             0
         ), f"_mtp_hidden_buffer overflow: T={rows} > cap={buf.size(0)}"
-        buf[:rows, segment * dim : (segment + 1) * dim].copy_(flat)
+        mhc_mean_copy(hidden, buf, col_offset=segment * dim, rows=rows, dim=dim)
 
     def _note_aux_hidden_rows(self, rows: int, is_cuda_graph: bool) -> None:
         """Row accounting for the per-layer aux writes of one forward.
@@ -449,7 +453,7 @@ class V4Transformer(nn.Module):
             f"_mtp_hidden_buffer overflow: T={T} > "
             f"cap={self._mtp_hidden_buffer.size(0)}"
         )
-        self._mtp_hidden_buffer[:T].copy_(flat)
+        copy_2d_buffer(flat, self._mtp_hidden_buffer, rows=int(T))
         if not is_cuda_graph:
             self._mtp_hidden_valid_tokens = int(T)
 
@@ -461,7 +465,7 @@ class V4Transformer(nn.Module):
         assert T <= buf.size(
             0
         ), f"_mtp_last_hidden_buffer overflow: T={T} > cap={buf.size(0)}"
-        buf[:T].copy_(flat)
+        copy_2d_buffer(flat, buf, rows=int(T))
         self._mtp_last_hidden_valid_tokens = int(T)
 
     def set_cp_info(

@@ -69,6 +69,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
     CPByteSlicedSlotCompaction,
     build_cp_byte_sliced_slot_compaction,
 )
+from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import row_scatter
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, CompressorMeta
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
@@ -3238,8 +3239,10 @@ class AttentionFP8(nn.Module):
             # path free of casts / gathers / per-request slicing.
             with record_function_range("dsv4.fp8.attn.workspace.overlay_new_k"):
                 kv_bf16 = qkv.kv_full.to(torch.bfloat16).reshape(-1, D)
-                workspace.view(B * wm.M, D).index_copy_(
-                    0, wm.new_k_slot_in_flat, kv_bf16
+                row_scatter(
+                    workspace.view(B * wm.M, D),
+                    wm.new_k_slot_in_flat,
+                    kv_bf16,
                 )
                 # Free the kv_full storage before combine_topk + flash_mla_sparse_fwd.
                 # After the overlay, kv_full has no remaining consumer in this
@@ -3680,8 +3683,10 @@ class AttentionFP8(nn.Module):
             + P_per_req.index_select(0, req_full)
             + local_pos
         ).contiguous()
-        workspace.view(B * local_M, D).index_copy_(
-            0, new_k_slots, qkv.kv_full.to(torch.bfloat16).reshape(-1, D)
+        row_scatter(
+            workspace.view(B * local_M, D),
+            new_k_slots,
+            qkv.kv_full.to(torch.bfloat16).reshape(-1, D),
         )
 
         q_full = cp_all_gather_full_varlen(qkv.q, cp_ctx)
@@ -5618,12 +5623,12 @@ class AttentionFP8(nn.Module):
         kv_bf16 = qkv.kv_full.to(torch.bfloat16)
         # ``meta.slot_in_flat`` is pre-baked in ``_build_swa_prefill_meta_varlen``
         # (= ``req_id * M + min(prefix, win-1) + local_pos``). Single
-        # ``index_copy_`` here — no per-layer casts / gathers / arith.
+        # vectorized ``row_scatter`` here — no per-layer casts / gathers / arith.
         assert (
             meta.slot_in_flat is not None
         ), "via_concat varlen path expects pre-baked slot_in_flat in swa_meta"
         with record_function_range("dsv4.fp8.attn.swa_concat.overlay_new_k"):
-            workspace.view(B * meta.M, D).index_copy_(0, meta.slot_in_flat, kv_bf16)
+            row_scatter(workspace.view(B * meta.M, D), meta.slot_in_flat, kv_bf16)
         # Free kv_full storage before flash_mla_sparse_fwd. After the
         # overlay nothing else reads it on this path; the NamedTuple ref
         # would otherwise keep it alive through the sparse-attn workspace
