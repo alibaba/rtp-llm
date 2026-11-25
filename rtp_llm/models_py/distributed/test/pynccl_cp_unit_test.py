@@ -163,6 +163,36 @@ class PyncclCPUnitTest(unittest.TestCase):
         first_lib.window_deregister.assert_called_once_with(first_comm, first_window)
         second_lib.window_deregister.assert_called_once_with(second_comm, second_window)
 
+    def test_destroy_aborts_overlap_without_blocking_on_a_local_stream(self):
+        lib = MagicMock()
+        regular, first, second = object(), object(), object()
+        overlap_stream = MagicMock()
+        lib.abort_comm.side_effect = [RuntimeError("peer failed"), None]
+        with patch.dict(
+            pynccl_cp._COMMS,
+            {("pg", 0): (lib, regular)},
+            clear=True,
+        ), patch.dict(
+            pynccl_cp._KV_OVERLAP_COMMS,
+            {("pg", 0): (lib, first), ("pg", 1): (lib, second)},
+            clear=True,
+        ), patch.dict(
+            pynccl_cp._KV_OVERLAP_STREAMS,
+            {("pg", 0): overlap_stream},
+            clear=True,
+        ), self.assertLogs(
+            level="WARNING"
+        ):
+            pynccl_cp.destroy()
+            self.assertFalse(pynccl_cp._COMMS)
+            self.assertFalse(pynccl_cp._KV_OVERLAP_COMMS)
+            self.assertFalse(pynccl_cp._KV_OVERLAP_STREAMS)
+        overlap_stream.synchronize.assert_not_called()
+        self.assertEqual(
+            [call.args[0] for call in lib.abort_comm.call_args_list], [first, second]
+        )
+        lib.destroy_comm.assert_called_once_with(regular)
+
     def test_master_switch_controls_optimization_stack(self):
         with patch.object(pynccl_cp, "_OPT_ENABLED", True):
             self.assertTrue(pynccl_cp.enabled())
