@@ -375,14 +375,12 @@ TEST(BlockTransferRequestConverterTest, DecodeRejectsEmptyRequest) {
     EXPECT_TRUE(descriptors.empty());
 }
 
-TEST(BlockTransferRequestConverterTest, DecodeSkipsGroupSetAbsentFromThisRankOnlyWhenAllowed) {
+TEST(BlockTransferRequestConverterTest, DecodeRejectsUnknownGroupSet) {
     MemoryOperationRequestPB request;
     appendDeviceToHostItem(request, "missing");
 
     std::vector<TransferDescriptor> descriptors;
     EXPECT_FALSE(BlockTransferRequestConverter::decodeTransfer(request, descriptors, groupSets()));
-    EXPECT_TRUE(BlockTransferRequestConverter::decodeTransfer(
-        request, descriptors, groupSets(), /*allow_absent_group_sets=*/true));
     EXPECT_TRUE(descriptors.empty());
 }
 
@@ -391,8 +389,7 @@ TEST(BlockTransferRequestConverterTest, DecodeRejectsPartialGroupSetMembership) 
     appendDeviceToHostItem(request, "group1");
 
     std::vector<TransferDescriptor> descriptors;
-    EXPECT_FALSE(BlockTransferRequestConverter::decodeTransfer(
-        request, descriptors, groupSets(), /*allow_absent_group_sets=*/true));
+    EXPECT_FALSE(BlockTransferRequestConverter::decodeTransfer(request, descriptors, groupSets()));
     EXPECT_TRUE(descriptors.empty());
 }
 
@@ -406,8 +403,7 @@ TEST(BlockTransferRequestConverterTest, DecodeContinuesPastPartialOverlapToUniqu
         1, source->topologyPtr(), {"group1"}, {source->devicePools()[0]}, source->hostPool(), source->diskPool());
 
     std::vector<TransferDescriptor> descriptors;
-    ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(
-        request, descriptors, {partial, exact}, /*allow_absent_group_sets=*/true));
+    ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(request, descriptors, {partial, exact}));
     ASSERT_EQ(descriptors.size(), 1u);
     EXPECT_EQ(descriptors.front().group_set_id, 1u);
 }
@@ -422,35 +418,36 @@ TEST(BlockTransferRequestConverterTest, DecodeRejectsMultipleExactGroupSetMatche
         1, source->topologyPtr(), {"group1"}, {source->devicePools()[0]}, source->hostPool(), source->diskPool());
 
     std::vector<TransferDescriptor> descriptors;
-    EXPECT_FALSE(BlockTransferRequestConverter::decodeTransfer(
-        request, descriptors, {first, second}, /*allow_absent_group_sets=*/true));
+    EXPECT_FALSE(BlockTransferRequestConverter::decodeTransfer(request, descriptors, {first, second}));
     EXPECT_TRUE(descriptors.empty());
 }
 
-TEST(BlockTransferRequestConverterTest, DecodeKeepsMatchedItemsWhenSkippingAbsentGroupSets) {
+TEST(BlockTransferRequestConverterTest, DecodeRejectsBatchContainingUnknownGroupSet) {
     MemoryOperationRequestPB request;
     ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(
         request, makeTransferTask({TransferDescriptor::deviceToHost(0, {1}, 2)}), groupSets()));
     appendDeviceToHostItem(request, "missing");
 
     std::vector<TransferDescriptor> descriptors;
-    ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(
-        request, descriptors, groupSets(), /*allow_absent_group_sets=*/true));
-    ASSERT_EQ(descriptors.size(), 1u);
-    EXPECT_EQ(descriptors.front().group_set_id, 0u);
+    EXPECT_FALSE(BlockTransferRequestConverter::decodeTransfer(request, descriptors, groupSets()));
+    EXPECT_TRUE(descriptors.empty());
 }
 
-TEST(BlockTransferRequestConverterTest, DecodePreservesOriginalItemIndicesWhenSkippingAbsentGroupSets) {
+TEST(BlockTransferRequestConverterTest, DecodePreservesOriginalItemIndicesWhenSkippingEmptyGroupSets) {
+    auto        groups = makeGroupSets();
+    const auto& empty  = groups.back();
+    const auto  stage  = CacheTopology::create(empty->topologyPtr()->groups(), {{0, {"group0", "group5"}}});
+    empty->initialize(empty->groupSetId(), stage, empty->groupTags(), {});
     MemoryOperationRequestPB request;
-    appendDeviceToHostItem(request, "missing");
+    appendDeviceToHostItem(request, "group6");
     appendDeviceToHostItem(request, "group0");
-    appendDeviceToHostItem(request, "missing");
+    appendDeviceToHostItem(request, "group6");
     appendDeviceToHostItem(request, "group5");
 
     std::vector<TransferDescriptor> descriptors;
     std::vector<size_t>             item_indices;
     ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(
-        request, descriptors, groupSets(), /*allow_absent_group_sets=*/true, &item_indices));
+        request, descriptors, groups, &item_indices));
     ASSERT_EQ(descriptors.size(), 2u);
     EXPECT_EQ(item_indices, (std::vector<size_t>{1, 3}));
     EXPECT_EQ(descriptors[0].group_set_id, 0u);
@@ -465,7 +462,7 @@ TEST(BlockTransferRequestConverterTest, DecodeFailureDoesNotAppendDescriptorsOrI
     std::vector<size_t>             item_indices{9};
 
     EXPECT_FALSE(BlockTransferRequestConverter::decodeTransfer(
-        request, descriptors, groupSets(), /*allow_absent_group_sets=*/true, &item_indices));
+        request, descriptors, groupSets(), &item_indices));
     ASSERT_EQ(descriptors.size(), 1u);
     EXPECT_EQ(descriptors.front().source_blocks, (BlockIndicesType{1}));
     EXPECT_EQ(item_indices, (std::vector<size_t>{9}));

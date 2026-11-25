@@ -33,6 +33,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionQuery.h"
@@ -1183,6 +1184,34 @@ TEST_F(KVCacheManagerTest, ProductionHybridConfigUsesHybridPoolWithDistinctPhysi
         }
     }
     EXPECT_EQ(linear_group_set_memberships, 1u);
+}
+
+TEST_F(KVCacheManagerTest, DecodeConnectorReportsOnlyLocallyBackedGroupsIncludingDraftLayers) {
+    PDSepConfig pd_sep;
+    pd_sep.role_type = RoleType::DECODE;
+    pd_sep.cache_store_rdma_mode = false;
+    RuntimeConfig runtime;
+    runtime.worker_grpc_addrs = {"127.0.0.1:12345"};
+    const auto draft = makeSimpleLinearCacheConfig(1, 4, 2, DataType::TYPE_INT8);
+    for (const bool with_draft : {false, true}) {
+        SCOPED_TRACE(with_draft);
+        auto config = makeSimpleMhaCacheConfig(1, 4, 2, DataType::TYPE_INT8);
+        config.setTopology({config.group("default"), draft.group("linear")}, config.topology().layers());
+        if (with_draft) {
+            config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, 0, config.layer_num));
+        }
+        config.finalizeBlockNums(4, RuntimeConfig{});
+        auto manager = std::make_shared<KVCacheManager>(
+            config, false, nullptr, KVCacheConfig{}, ParallelismConfig{}, runtime, SpeculativeExecutionConfig{}, pd_sep);
+        ASSERT_TRUE(manager->init());
+        const auto& bytes = manager->p2p_connector_->config_.scheduler_config.physical_block_bytes_by_group;
+        EXPECT_EQ(bytes.at("default"), config.blockSizeBytesForGroup("default"));
+        if (with_draft) {
+            EXPECT_EQ(bytes.at("linear"), draft.blockSizeBytesForGroup("linear"));
+        } else {
+            EXPECT_EQ(bytes.count("linear"), 0u);
+        }
+    }
 }
 
 TEST_F(KVCacheManagerTest, DSV4IndependentPoolsUseGpuBacking) {
@@ -2427,20 +2456,43 @@ public:
     std::shared_ptr<TransferBufferSafety> last_proof;
 };
 
-TEST_F(KVCacheManagerTest, ExecuteFunctionSkipsAbsentGroupSetOnlyWithPP) {
+static std::shared_ptr<KVCacheManager> makeStageTransferManager(int pp_size) {
+    auto              cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig     kv_cache_config;
+    ParallelismConfig parallelism_config;
+    kv_cache_config.enable_memory_cache  = true;
+    kv_cache_config.memory_cache_size_mb = 1;
+    parallelism_config.pp_size           = pp_size;
+    parallelism_config.pp_rank           = pp_size > 1 ? 1 : 0;
+    parallelism_config.world_size        = pp_size;
+    parallelism_config.world_rank        = parallelism_config.pp_rank;
+    if (pp_size > 1) {
+        const auto peer = makeSimpleLinearCacheConfig(1, 4, 2, DataType::TYPE_INT8);
+        cache_config.setTopology({cache_config.group("default"), peer.group("linear")},
+                                 cache_config.topology().layers());
+    }
+    auto plan = planBlockTreeCacheLayout(cache_config, kv_cache_config);
+    plan->block_nums.emplace();
+    for (const auto& group : cache_config.groups()) {
+        plan->block_nums->host.emplace(group.policy.group_type, 4);
+    }
+    return std::make_shared<KVCacheManager>(cache_config,
+                                            false,
+                                            nullptr,
+                                            kv_cache_config,
+                                            parallelism_config,
+                                            RuntimeConfig{},
+                                            SpeculativeExecutionConfig{},
+                                            PDSepConfig{},
+                                            CacheStoreConfig{},
+                                            false,
+                                            plan);
+}
+
+TEST_F(KVCacheManagerTest, ExecuteFunctionSkipsDeclaredGroupWithoutLocalLayersAndRejectsUnknownTag) {
     for (const int pp_size : {1, 2}) {
         SCOPED_TRACE(::testing::Message() << "pp_size=" << pp_size);
-        auto              cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
-        KVCacheConfig     kv_cache_config;
-        ParallelismConfig parallelism_config;
-        kv_cache_config.enable_memory_cache  = true;
-        kv_cache_config.memory_cache_size_mb = 1;
-        parallelism_config.pp_size           = pp_size;
-        parallelism_config.pp_rank           = pp_size > 1 ? 1 : 0;
-        parallelism_config.world_size        = pp_size;
-        parallelism_config.world_rank        = parallelism_config.pp_rank;
-        auto manager =
-            std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config, parallelism_config);
+        auto manager = makeStageTransferManager(pp_size);
         ASSERT_TRUE(manager->init());
         manager->stopFrozenTaskRecovery();
         auto engine                                      = std::make_shared<RecordingBatchTransferEngine>();
@@ -2453,10 +2505,10 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionSkipsAbsentGroupSetOnlyWithPP) {
         mem_request->set_transfer_trace_id(3101);
         for (const int block_id : {1, 2}) {
             auto* item = mem_request->add_copy_items();
-            item->add_group_tags("absent_group");
+            item->add_group_tags("linear");
             item->set_mem_block(block_id);
             auto* block = item->add_group_blocks();
-            block->set_tag("absent_group");
+            block->set_tag("linear");
             block->set_block_id(block_id);
         }
         FunctionResponsePB response;
@@ -2481,17 +2533,8 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionSkipsAbsentGroupSetOnlyWithPP) {
     }
 }
 
-TEST_F(KVCacheManagerTest, ExecuteFunctionPreservesWireErrorsAcrossAbsentPPGroupSets) {
-    auto              cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
-    KVCacheConfig     kv_cache_config;
-    ParallelismConfig parallelism_config;
-    kv_cache_config.enable_memory_cache  = true;
-    kv_cache_config.memory_cache_size_mb = 1;
-    parallelism_config.pp_size           = 2;
-    parallelism_config.pp_rank           = 1;
-    parallelism_config.world_size        = 2;
-    parallelism_config.world_rank        = 1;
-    auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config, parallelism_config);
+TEST_F(KVCacheManagerTest, ExecuteFunctionPreservesWireErrorsAcrossEmptyPPGroupSets) {
+    auto manager = makeStageTransferManager(2);
     ASSERT_TRUE(manager->init());
     manager->stopFrozenTaskRecovery();
     auto engine                                      = std::make_shared<RecordingBatchTransferEngine>();
@@ -2507,17 +2550,17 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionPreservesWireErrorsAcrossAbsentPPGroup
     const auto second = request.mem_request().copy_items(1);
     auto*      memory = request.mutable_mem_request();
     memory->clear_copy_items();
-    const auto append_absent = [&] {
+    const auto append_empty = [&] {
         auto* item = memory->add_copy_items();
         item->CopyFrom(first);
-        item->set_group_tags(0, "absent_group");
-        item->mutable_group_blocks(0)->set_tag("absent_group");
+        item->set_group_tags(0, "linear");
+        item->mutable_group_blocks(0)->set_tag("linear");
     };
-    append_absent();
+    append_empty();
     memory->add_copy_items()->CopyFrom(first);
-    append_absent();
+    append_empty();
     memory->add_copy_items()->CopyFrom(second);
-    append_absent();
+    append_empty();
 
     for (const bool failed : {false, true}) {
         memory->set_transfer_trace_id(failed ? 3103 : 3102);

@@ -100,12 +100,20 @@ TEST(PPTopologyValidatorTest, LeadingStageRequiresAtLeastOneCacheGroup) {
     EXPECT_NE(result.error.find("stage 0 cache snapshot has no cache groups"), std::string::npos);
 }
 
-TEST(PPTopologyValidatorTest, SameTypePartialOverlapFailsUntilPerRankProjectionIsImplemented) {
-    auto result =
-        validatePPTopology({makeSameTypeSnapshot({"csa_kv", "indexer_kv"}, 100), makeSameTypeSnapshot({"csa_kv"}, 90)});
+TEST(PPTopologyValidatorTest, SameTypePartialBackingKeepsBothLogicalGroups) {
+    auto stage0                        = makeSameTypeSnapshot({"csa_kv", "indexer_kv"}, 100);
+    auto stage1                        = makeSameTypeSnapshot({"csa_kv", "indexer_kv"}, 90);
+    stage0.groups[1].has_local_backing = false;
+    stage0.groups[1].block_num         = 0;
+    auto result                        = validatePPTopology({stage0, stage1});
+    ASSERT_TRUE(result.ok) << result.error;
+    EXPECT_EQ(result.agreed.block_num_overrides.at("csa_kv"), 90u);
+    EXPECT_EQ(result.agreed.block_num_overrides.at("indexer_kv"), 90u);
+
+    stage1.groups.pop_back();
+    result = validatePPTopology({stage0, stage1});
     ASSERT_FALSE(result.ok);
-    EXPECT_NE(result.error.find("has 1 of 2 group-set members"), std::string::npos);
-    EXPECT_NE(result.error.find("partial group-set overlap is not supported yet"), std::string::npos);
+    EXPECT_NE(result.error.find("do not match stage 0"), std::string::npos);
 }
 
 TEST(PPTopologyValidatorTest, SameTypeFullOverlapIgnoresLocalTagOrder) {
@@ -114,11 +122,14 @@ TEST(PPTopologyValidatorTest, SameTypeFullOverlapIgnoresLocalTagOrder) {
     ASSERT_TRUE(result.ok) << result.error;
 }
 
-TEST(PPTopologyValidatorTest, ReorderedTagsAndSubsetKeepStage0Order) {
+TEST(PPTopologyValidatorTest, ReorderedTagsAndPartialBackingKeepStage0Order) {
     auto reordered = makeHybridSnapshot(80, 30);
     std::swap(reordered.groups[0], reordered.groups[1]);
 
-    auto result = validatePPTopology({makeHybridSnapshot(100, 50), reordered, makeFullSnapshot(70, 4, 2)});
+    auto full_only                        = makeHybridSnapshot(70, 0);
+    full_only.groups[1].has_local_backing = false;
+    full_only.block_tree.group_sets.pop_back();
+    auto result = validatePPTopology({makeHybridSnapshot(100, 50), reordered, full_only});
     ASSERT_TRUE(result.ok) << result.error;
     ASSERT_EQ(result.canonical_groups.size(), 2u);
     EXPECT_EQ(result.canonical_groups[0].tag, "full");
@@ -128,19 +139,19 @@ TEST(PPTopologyValidatorTest, ReorderedTagsAndSubsetKeepStage0Order) {
     EXPECT_EQ(result.agreed.block_num_overrides.at("linear"), 30u);
 }
 
-TEST(PPTopologyValidatorTest, NonStage0OwnedTagFails) {
+TEST(PPTopologyValidatorTest, TagUndeclaredOnStage0Fails) {
     StageCacheSnapshot other = makeFullSnapshot(80);
     other.groups[0].tag      = "swa";
     auto result              = validatePPTopology({makeHybridSnapshot(100, 50), other});
     ASSERT_FALSE(result.ok);
     EXPECT_NE(result.error.find("[swa]"), std::string::npos);
     EXPECT_NE(result.error.find("absent from stage 0"), std::string::npos);
-    EXPECT_NE(result.error.find("must own every cache group"), std::string::npos);
+    EXPECT_NE(result.error.find("stage 1 declares logical cache group"), std::string::npos);
 }
 
-TEST(PPTopologyValidatorTest, LinearWithoutFullPasses) {
-    StageCacheSnapshot linear_only;
-    linear_only.groups                = {makeGroupSnapshot("linear", CacheGroupType::LINEAR, 50)};
+TEST(PPTopologyValidatorTest, LinearBackingWithoutFullBackingPasses) {
+    auto linear_only                        = makeHybridSnapshot(0, 50);
+    linear_only.groups[0].has_local_backing = false;
     linear_only.block_tree.group_sets = {{"linear", 4096}};
     auto result                       = validatePPTopology({makeHybridSnapshot(100, 50), linear_only});
     ASSERT_TRUE(result.ok) << result.error;
@@ -179,7 +190,7 @@ TEST(PPTopologyValidatorTest, CacheKeyTokenStrideMismatchFails) {
 TEST(PPTopologyValidatorTest, ZeroBlockNumFails) {
     auto result = validatePPTopology({makeFullSnapshot(100), makeFullSnapshot(0)});
     ASSERT_FALSE(result.ok);
-    EXPECT_NE(result.error.find("0 KV blocks"), std::string::npos);
+    EXPECT_NE(result.error.find("invalid local block capacity 0"), std::string::npos);
 }
 
 TEST(PPTopologyValidatorTest, DuplicateTagFails) {
@@ -208,9 +219,8 @@ TEST(PPTopologyValidatorTest, CaptureLocalStageBuildsSnapshot) {
     cache_config.layer_num          = 2;
     cache_config.seq_size_per_block = 4;
     cache_config.fromGroupedSpecs({spec}, {{0, 1}}, {CacheGroupType::FULL}, {"default"});
-    cache_config.finalizeBlockNums(42, RuntimeConfig{});
 
-    auto snapshot = StageCacheSnapshot::captureLocalStage(cache_config, {{{"default", 4096}}, 1024 * 1024, 0});
+    auto snapshot = StageCacheSnapshot::captureLocalStage(cache_config, 42, {{{"default", 4096}}, 1024 * 1024, 0});
     ASSERT_EQ(snapshot.groups.size(), 1u);
     EXPECT_EQ(snapshot.groups[0].tag, "default");
     EXPECT_EQ(snapshot.groups[0].type, CacheGroupType::FULL);
@@ -242,7 +252,9 @@ TEST(PPTopologyValidatorTest, CanonicalGroupsAndAgreedInputsUsePerTagMinima) {
 }
 
 TEST(PPTopologyValidatorTest, SnapshotSerializeRoundTrip) {
-    auto original                         = makeHybridSnapshot(120, 45);
+    auto original                        = makeHybridSnapshot(120, 0);
+    original.groups[1].has_local_backing = false;
+    original.block_tree.group_sets.pop_back();
     original.groups[1].explicit_block_num = 45;
     original.block_tree.host_budget_bytes = 1024 * 1024;
     original.block_tree.disk_budget_bytes = 2 * 1024 * 1024;
@@ -255,6 +267,7 @@ TEST(PPTopologyValidatorTest, SnapshotSerializeRoundTrip) {
         EXPECT_EQ(decoded.groups[i].tag, original.groups[i].tag);
         EXPECT_EQ(decoded.groups[i].type, original.groups[i].type);
         EXPECT_EQ(decoded.groups[i].block_tree_group_member, original.groups[i].block_tree_group_member);
+        EXPECT_EQ(decoded.groups[i].has_local_backing, original.groups[i].has_local_backing);
         EXPECT_EQ(decoded.groups[i].seq_size_per_block, original.groups[i].seq_size_per_block);
         EXPECT_EQ(decoded.groups[i].kernel_seq_size_per_block, original.groups[i].kernel_seq_size_per_block);
         EXPECT_EQ(decoded.groups[i].cache_key_token_stride, original.groups[i].cache_key_token_stride);
@@ -284,7 +297,7 @@ TEST(PPTopologyValidatorTest, SnapshotSerializeRoundTrip) {
 
     EXPECT_THROW(StageCacheSnapshot::deserialize(""), std::exception);
     EXPECT_THROW(StageCacheSnapshot::deserialize("a|1|4|4|4|1|0"), std::exception);
-    EXPECT_THROW(StageCacheSnapshot::deserialize("full|1|1|4|2|4|1,2|0|p|full|4096|1024|0|1"), std::exception);
+    EXPECT_THROW(StageCacheSnapshot::deserialize("full|1|1|4|2|4|1,2|0|p|full|4096|1|1024|0|1"), std::exception);
 }
 
 TEST(PPTopologyValidatorTest, SwaGroupPasses) {
@@ -388,7 +401,10 @@ TEST(PPTopologyValidatorTest, TierCountsUseAgreedDeviceBlocksAndSeparateBudgets)
 
 TEST(PPTopologyValidatorTest, TierCountsRespectStageStridesAndMissingGroupSets) {
     auto stage0                                 = makeTierSnapshot(40, 10);
-    auto stage1                                 = makeFullSnapshot(30, 4, 2, 8192);
+    auto stage1                                 = makeTierSnapshot(30, 0);
+    stage1.groups[1].has_local_backing          = false;
+    stage1.block_tree.group_sets.pop_back();
+    stage1.block_tree.group_sets[0].pool_stride = 8192;
     stage0.block_tree.group_sets[1].pool_stride = 8192;
     stage0.block_tree.host_budget_bytes = stage1.block_tree.host_budget_bytes = 120 * 4096;
 
@@ -397,6 +413,24 @@ TEST(PPTopologyValidatorTest, TierCountsRespectStageStridesAndMissingGroupSets) 
     EXPECT_EQ(result.agreed.block_tree.host.at(CacheGroupType::FULL), 60u);
     EXPECT_EQ(result.agreed.block_tree.host.at(CacheGroupType::SWA), 24u);
     EXPECT_TRUE(result.agreed.block_tree.disk.empty());
+}
+
+TEST(PPTopologyValidatorTest, DiskEvictionChargeAveragesOnlyWritingStages) {
+    auto stage0 = makeTierSnapshot(10, 10);
+    stage0.block_tree.disk_budget_bytes = 120 * 4096;
+    auto stage1 = stage0;
+    auto stage2 = stage0;
+    stage0.groups[1].has_local_backing = false;
+    stage0.groups[1].block_num = 0;
+    stage0.block_tree.group_sets.pop_back();
+    stage2.block_tree.group_sets[0].pool_stride = 8192;
+    stage2.block_tree.group_sets[1].pool_stride = 8192;
+
+    const auto result = validatePPTopology({stage0, stage1, stage2});
+    ASSERT_TRUE(result.ok) << result.error;
+    const auto& bytes = result.agreed.disk_eviction_block_bytes;
+    EXPECT_EQ(bytes.at(CacheGroupType::FULL), 5462u);  /** ceil((4096 + 4096 + 8192) / 3) */
+    EXPECT_EQ(bytes.at(CacheGroupType::SWA), 6144u);   /** (4096 + 8192) / 2 */
 }
 
 TEST(PPTopologyValidatorTest, TierWeightsUseEachStageFirstMemberWithUnequalPools) {

@@ -1284,12 +1284,11 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
     }
     std::vector<TransferDescriptor> descriptors;
     std::vector<size_t>             wire_item_indices;
-    const bool                      allow_absent_group_sets = parallelism_config_.pp_size > 1;
+    const bool                      is_pp = parallelism_config_.pp_size > 1;
     if (!BlockTransferRequestConverter::decodeTransfer(request.mem_request(),
                                                        descriptors,
                                                        block_tree_cache_->groupSets(),
-                                                       allow_absent_group_sets,
-                                                       allow_absent_group_sets ? &wire_item_indices : nullptr)) {
+                                                       is_pp ? &wire_item_indices : nullptr)) {
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: invalid grouped transfer request");
         return true;
     }
@@ -1317,9 +1316,8 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
     transfer_task.setWorkflow(request.mem_request().transfer_workflow_id(), request.mem_request().transfer_parent_id());
     auto         status          = block_tree_cache_->executeTransfer(std::move(transfer_task));
     const size_t wire_item_count = static_cast<size_t>(request.mem_request().copy_items_size());
-    if (allow_absent_group_sets && wire_item_indices.size() != wire_item_count) {
-        // A PP stage can omit whole group sets. Restore the original wire order
-        // so skipped items remain no-ops without shifting another item's error.
+    if (is_pp && wire_item_indices.size() != wire_item_count) {
+        /** Restore wire positions for the GroupSets without local payload. */
         status.expandBlockErrors(wire_item_indices.size());
         if (status.block_errors.size() != wire_item_indices.size()) {
             status = {ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "invalid local block transfer result"),
@@ -1597,7 +1595,10 @@ bool KVCacheManager::initP2PConnector() {
     if (decode) {
         for (const auto& group : config_.topology().groups()) {
             // Capacity includes all allocated KV and scales, including extra draft modules.
-            (*startup.mutable_decode_block_bytes())[group.tag] = config_.blockSizeBytesForGroup(group.tag);
+            const auto bytes = config_.blockSizeBytesForGroup(group.tag);
+            if (bytes > 0) {
+                (*startup.mutable_decode_block_bytes())[group.tag] = bytes;
+            }
         }
     }
     P2PPipelineLayoutPB           pipeline;

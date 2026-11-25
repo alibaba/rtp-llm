@@ -10,13 +10,13 @@
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/WarmUpResult.h"
-#include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 
 namespace rtp_llm {
 
 struct BlockTreeCrcWorkspacePlan;
+struct StageLayerRange;
 
 struct KVCacheBlockBudget {
     size_t explicit_pool_reserve_bytes = 0;
@@ -71,22 +71,17 @@ public:
                 sizingSignature(const CacheConfig& config, uint32_t baseline = 0, bool is_ffn_service = false);
     static void validateSizingSignatures(const int32_t* signatures, size_t rank_count);
 
-    // Unified desc->spec conversion. Callers provide the runtime build context;
-    // descs remain read-only.
-    static LayerKVCacheSpecs buildLayerSpecsFromDescs(const LayerKVCacheSpecDescs& layer_descs,
-                                                      const SpecBuildContext&      ctx,
-                                                      int64_t                      expected_layer_num);
-
-    static ModelConfig stageScopedModelConfig(const ModelConfig&       model_config,
-                                              const ParallelismConfig& parallelism_config,
-                                              bool                     is_draft_model = false);
-
 private:
+    static CacheConfig createMainModelCacheConfig(const ModelConfig&       model_config,
+                                                  const ParallelismConfig& parallelism_config,
+                                                  const KVCacheConfig&     kv_cache_config,
+                                                  int                      gen_num_per_cycle);
+
     static CacheConfig createBasicConfig(const ModelConfig&       model_config,
                                          const ParallelismConfig& parallelism_config,
                                          const KVCacheConfig&     kv_cache_config,
                                          int                      gen_num_per_cycle,
-                                         uint32_t                 global_layer_begin);
+                                         const StageLayerRange&   range);
 };
 
 }  // namespace rtp_llm
