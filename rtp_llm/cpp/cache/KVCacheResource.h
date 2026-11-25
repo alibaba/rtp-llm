@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/cache/LinearPrefillPlan.h"
 
 namespace rtp_llm {
 
@@ -53,6 +54,13 @@ public:
     // Cache the cyclic execution mapping and copy it without changing ownership or reserve IDs.
     void copyCyclicKernelBlocks(size_t prompt_tail, size_t bank_count, BlockIdxType* destination) const;
 
+    void setLinearPrefillPlan(std::shared_ptr<const LinearPrefillPlan> plan);
+    const std::shared_ptr<const LinearPrefillPlan>& linearPrefillPlan() const { return linear_prefill_plan_; }
+    bool copyLinearPrefillKernelBlocks(int64_t prefix_tokens, int64_t query_tokens, BlockIdxType* destination) const;
+    void advanceLinearPrefillChunk(int64_t end_tokens);
+    void completeLinearPrefillChunk(int64_t prefix_tokens, int64_t completed_tokens);
+    bool canPublishLinearPrefillBlock(size_t position) const;
+
     size_t kernelBlocksPerKvBlock() const;
 
     // Remove and return the last physical block ID.
@@ -95,6 +103,9 @@ private:
     mutable size_t           cyclic_bank_count_          = 0;
     // A null slot below this watermark is retired, not an unallocated checkpoint.
     size_t reclaimed_prefix_blocks_ = 0;
+    std::shared_ptr<const LinearPrefillPlan> linear_prefill_plan_;
+    int64_t                                 linear_prefill_readable_tokens_  = 0;
+    int64_t                                 linear_prefill_completed_tokens_ = 0;
 };
 
 // Build the complete identity/row pair before publishing it through a const owner view.
@@ -206,6 +217,12 @@ public:
     bool canPublishLinearReplayBlock(std::string_view tag, size_t position) const {
         const auto it = linear_replay_prefix_limits_.find(std::string(tag));
         return it == linear_replay_prefix_limits_.end() || position < it->second;
+    }
+    // Cache-tree eligibility is stricter than retaining a PD/transfer source.
+    // In particular, a non-aligned tail must be held even though it is not a
+    // reusable complete CP checkpoint.
+    bool canPublishLinearPrefillBlock(std::string_view tag, size_t position) const {
+        return blockIds(tag).canPublishLinearPrefillBlock(position);
     }
     size_t linearReplayPrefixLimit(std::string_view tag) const {
         const auto it = linear_replay_prefix_limits_.find(std::string(tag));

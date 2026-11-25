@@ -105,6 +105,9 @@ struct MallocInfo {
 
     // Initial chunk admission reserves fixed sparse banks for this maximum grant.
     int max_chunk_tokens = 0;
+    // Nonzero only for an eligible P-side request. Freeze the original prompt
+    // boundary before generation or padding can grow the working sequence.
+    int linear_prefill_prompt_tokens = 0;
 
     // Reserve every intervening destination up to the length bound without
     // pruning pages that an unfinished decode round may still use.

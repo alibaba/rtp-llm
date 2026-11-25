@@ -335,7 +335,7 @@ bool TransferWorkLoop::plan(Entry& entry) {
 }
 
 size_t TransferWorkLoop::stagingIndex(const Entry& entry) const {
-    return group(entry)->groupType() == CacheGroupType::SWA ? 1 : 0;
+    return diskLoadStagingLane(group(entry)->groupType());
 }
 
 bool TransferWorkLoop::acquireStaging(Entry& entry, bool waiting) {
@@ -372,7 +372,7 @@ void TransferWorkLoop::releaseStaging(Entry& entry) {
 
 void TransferWorkLoop::retryStaging() {
     // Preserve FIFO within each pool, while a blocked FULL waiter must not
-    // prevent SWA from using its independent capacity (and vice versa).
+    // prevent SWA or LINEAR from using their shared capacity (and vice versa).
     std::array<bool, 2> blocked{};
     for (auto* waiting = staging_.waiting.head; waiting;) {
         auto* next = waiting->next;

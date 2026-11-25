@@ -115,6 +115,8 @@ public:
 
     // Returns false when the ordinary kernel block table should be used.
     bool copyChunkKernelBlocks(int batch, const std::string& tag, int32_t* dst) const;
+    void advanceLinearPrefillChunk(int end_tokens);
+    void completeLinearPrefillChunk(int prefix_tokens, int chunk_len);
 
     // Rebuild KV block ownership for beam/multiple-return sequences.
     // This records copy mappings; caller must execute them via
@@ -195,6 +197,7 @@ public:
 
 private:
     LinearCachePolicy linearCachePolicy(int target_batch_size) const;
+    int               linearPrefillPromptTokens(bool reuse_cache) const;
     void         clearCacheReuseState();
     void         recordCacheReuseMallocResult(const MallocResult& result);
     void         publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);

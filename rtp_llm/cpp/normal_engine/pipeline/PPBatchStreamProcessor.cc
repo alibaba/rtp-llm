@@ -1247,13 +1247,18 @@ PPExecutionSnapshot PPBatchStreamProcessor::captureExecution(const StreamGroups&
         // Match StreamGroups' cache accounting before commitSubmittedChunks advances the live stream.
         const int reuse_length_for_tps =
             stream->chunkedPrefillEnabled() && stream->hasAdvancedChunk() ? 0 : stream->reuseLength();
+        const bool chunk_window = stream->useChunkWindow();
+        const int  chunk_prefix = chunk_window ? stream->prefixLength() : 0;
+        const int  chunk_length = chunk_window ? stream->currentChunkLen() : 0;
         snapshot.streams.push_back({stream,
                                     stream->isContextStream(),
                                     stream->isMiddleChunk(),
                                     reuse_length_for_tps,
                                     stream->currentBatchSize(),
                                     static_cast<int>(stream->currentExecuteTokenSize()),
-                                    stream->priority()});
+                                    stream->priority(),
+                                    chunk_prefix,
+                                    chunk_length});
     }
     return snapshot;
 }
@@ -1265,8 +1270,11 @@ void PPBatchStreamProcessor::dispatchExecutionResult(const PPExecutionSnapshot& 
     for (size_t stream_idx = 0; stream_idx < snapshot.streams.size(); ++stream_idx) {
         const auto& execution = snapshot.streams[stream_idx];
         const auto& stream    = execution.stream;
+        const auto& error = result.request_errors[stream_idx];
+        if (!error.hasError() && execution.chunk_length > 0) {
+            stream->completeLinearPrefillChunk(execution.chunk_prefix, execution.chunk_length);
+        }
         if (execution.is_middle_chunk) {
-            const auto& error = result.request_errors[stream_idx];
             if (error.hasError()) {
                 stream->reportError(error.code(), error.ToString());
             }

@@ -516,6 +516,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                        &KVCacheConfig::block_tree_disk_evict_high_watermark_ratio)
         .def_readwrite("reuse_cache_tail_blocks", &KVCacheConfig::reuse_cache_tail_blocks)
         .def_readwrite("linear_pool_blocks", &KVCacheConfig::linear_pool_blocks)
+        .def_readwrite("lower_tier_linear_pool_avg_prompt_tokens", &KVCacheConfig::lower_tier_linear_pool_avg_prompt_tokens)
+        .def_readwrite("linear_pool_avg_prompt_tokens", &KVCacheConfig::linear_pool_avg_prompt_tokens)
         .def_readwrite("swa_pool_blocks", &KVCacheConfig::swa_pool_blocks)
         .def_readwrite("enable_linear_cache_reclaim", &KVCacheConfig::enable_linear_cache_reclaim)
         .def_readwrite("kv_cache_pool_block_weights", &KVCacheConfig::kv_cache_pool_block_weights)
@@ -587,7 +589,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      25,
+                                      27,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -669,7 +671,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       // the per-pool block weights at the tail so indices 0-78
                                       // stay identical to main's v23.
                                       self.enable_linear_cache_reclaim,
-                                      self.kv_cache_pool_block_weights);
+                                      self.kv_cache_pool_block_weights,
+                                      self.lower_tier_linear_pool_avg_prompt_tokens,
+                                      self.linear_pool_avg_prompt_tokens);
             },
             [](py::tuple t) {
                 // Pickle version ladder after merging main #1643 (dsv41 btc):
@@ -681,8 +685,26 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 //       at the tail (size 80), keeping main's indices untouched;
                 // v25 = v24 + kv_cache_pool_block_weights appended at the tail
                 //       (size 81).
+                // v26 = v25 + lower_tier_linear_pool_avg_prompt_tokens (size 82).
+                // v27 = v26 + linear_pool_avg_prompt_tokens (size 83).
                 // Each step strips its tail fields and steps the version down so
                 // both families' older states keep decoding through main's ladder.
+                const py::tuple linear_sizing_state = t;
+                const int input_version = t.size() >= 2 && py::isinstance<py::int_>(t[1]) ? t[1].cast<int>() : 0;
+                const bool has_v27_linear_sizing = input_version == 27 && t.size() == 83;
+                const bool has_v26_linear_sizing = input_version == 26 && t.size() == 82;
+                // The earlier cache-only stack used v24/v25 for sizing.
+                // Its first added field is an int; #1546 writes a bool there.
+                const bool has_legacy_linear_sizing =
+                    ((input_version == 24 && t.size() == 80) || (input_version == 25 && t.size() == 81))
+                    && py::isinstance<py::int_>(t[79]) && !py::isinstance<py::bool_>(t[79]);
+                if (has_v27_linear_sizing || has_v26_linear_sizing) {
+                    t    = t[py::slice(0, 81, 1)].cast<py::tuple>();
+                    t[1] = py::int_(25);
+                } else if (has_legacy_linear_sizing) {
+                    t    = t[py::slice(0, 79, 1)].cast<py::tuple>();
+                    t[1] = py::int_(23);
+                }
                 const py::tuple pool_weights_v25_state = t;
                 const bool      has_v25_pool_weights_field =
                     t.size() == 81 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 25;
@@ -793,6 +815,21 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         || c.block_tree_frozen_force_release_timeout_ms > std::numeric_limits<int>::max()) {
                         throw std::runtime_error(
                             "invalid KVCacheConfig frozen recovery timing: expected force release timeout in [0, INT_MAX]");
+                    }
+                }
+
+                if (has_v27_linear_sizing || has_v26_linear_sizing || has_legacy_linear_sizing) {
+                    const int sizing_offset = has_legacy_linear_sizing ? 79 : 81;
+                    c.lower_tier_linear_pool_avg_prompt_tokens = linear_sizing_state[sizing_offset].cast<int>();
+                }
+                if (has_v27_linear_sizing || (has_legacy_linear_sizing && input_version == 25)) {
+                    const int sizing_offset = has_legacy_linear_sizing ? 80 : 82;
+                    c.linear_pool_avg_prompt_tokens = linear_sizing_state[sizing_offset].cast<int>();
+                    if (c.linear_pool_avg_prompt_tokens < -1) {
+                        throw std::runtime_error("invalid KVCacheConfig LINEAR pool prompt tokens");
+                    }
+                    if (c.linear_pool_avg_prompt_tokens == 0) {
+                        c.linear_pool_avg_prompt_tokens = -1;
                     }
                 }
 
@@ -2120,6 +2157,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("dtype", &KVCacheSpecDesc::dtype)
         .def_readwrite("is_state_cache", &KVCacheSpecDesc::is_state_cache)
         .def_readwrite("tp_transfer_mode", &KVCacheSpecDesc::tp_transfer_mode)
+        .def_readwrite("prefill_borrow_tail", &KVCacheSpecDesc::prefill_borrow_tail)
         .def_readwrite("entry_elems", &KVCacheSpecDesc::entry_elems)
         .def_readwrite("entry_dtype", &KVCacheSpecDesc::entry_dtype)
         .def_readwrite("entry_count_mode", &KVCacheSpecDesc::entry_count_mode)

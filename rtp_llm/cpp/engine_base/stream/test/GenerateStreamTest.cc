@@ -556,6 +556,29 @@ TEST_F(GenerateStreamTest, mtpProbabilitiesUseLastActuallyCommittedPosition) {
     }
 }
 
+TEST_F(GenerateStreamTest, lateMtpVerifyDoesNotAppendAfterGenerateDone) {
+    auto stream              = createMtpProbabilityStream(/*streaming=*/true);
+    auto config              = stream->generateConfig();
+    config->return_all_probs = ReturnAllProbsMode::NONE;
+    config->max_new_tokens   = 8;
+    config->stop_words_list  = {{1, 2}};
+
+    StreamSpecUpdateInfo terminal{torch::tensor({{1, 2}}, torch::kInt32), 2, {}, {}, {}};
+    stream->specUpdate(terminal);
+    ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+    ASSERT_EQ(stream->getStatus(), StreamState::RUNNING);
+    ASSERT_EQ(stream->seqLength(), 3);
+    auto output = stream->nextOutput(100);
+    ASSERT_TRUE(output.ok()) << output.status().ToString();
+    ASSERT_TRUE(output.value().generate_outputs.at(0).finished);
+    ASSERT_FALSE(stream->hasOutput());
+
+    StreamSpecUpdateInfo late{torch::tensor({{3}}, torch::kInt32), 1, {}, {}, {}};
+    stream->specUpdate(late);
+    EXPECT_EQ(stream->seqLength(), 3);
+    EXPECT_FALSE(stream->hasOutput());
+}
+
 TEST_F(GenerateStreamTest, mtpProbabilitiesRespectOutputQueueCapacity) {
     auto                 stream = std::dynamic_pointer_cast<NormalGenerateStream>(createMtpProbabilityStream(true));
     StreamSpecUpdateInfo first{torch::tensor({{1}}, torch::kInt32), 1, {}, {}, {}};

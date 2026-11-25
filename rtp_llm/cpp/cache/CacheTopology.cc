@@ -29,6 +29,12 @@ size_t GroupBase::kernelBlocksPerKvBlock() const {
     return std::max<size_t>(1, physical / kernel);
 }
 
+bool GroupBase::supportsBorrowedLinearPrefill(size_t base_page_tokens) const {
+    return policy.prefill_borrow_tail && policy.group_type == CacheGroupType::LINEAR
+           && policy.enable_prefix_reuse && seqSizePerBlock() == base_page_tokens
+           && kernelBlocksPerKvBlock() == 1;
+}
+
 size_t GroupBase::kvBlockStrideBytes() const {
     RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "CacheTopology tag=%s has null spec", tag.c_str());
     return spec->block_size_bytes();

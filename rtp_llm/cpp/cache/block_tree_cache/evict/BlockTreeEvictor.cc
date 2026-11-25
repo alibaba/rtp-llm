@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/CacheLockGuard.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/CompletionStage.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/LinearTransferTrace.h"
 
 #include <algorithm>
 #include <chrono>
@@ -624,6 +625,15 @@ void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const Eviction
                     auto update = TransferStageTimer::scope(
                         stage_context, "completion_tree_update", "business_completion", success);
                     completeEvict(task->descriptors());
+                    if (linear_prefill_trace::enabled()) {
+                        const auto descriptors = task->descriptors();
+                        for (size_t i = 0; i < descriptors.size(); ++i) {
+                            const auto& transferred = descriptors[i];
+                            if (!skip_eviction_metrics[i] && transferred.target_tier != Tier::NONE) {
+                                traceCompletedLinearTransfer(tree_->groupSets(), transferred, transferred.node->cache_key);
+                            }
+                        }
+                    }
                 }
                 {
                     auto cleanup =

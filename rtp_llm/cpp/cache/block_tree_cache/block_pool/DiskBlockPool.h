@@ -89,6 +89,7 @@ public:
     size_t             readBytes() const;
     size_t             writeBytes() const;
     uint64_t           blockOffset(BlockIdxType block) const;
+    // Diagnostic name used at creation. The backing file is unlinked during init.
     const std::string& filePath() const;
 
     std::string debugString() const override;

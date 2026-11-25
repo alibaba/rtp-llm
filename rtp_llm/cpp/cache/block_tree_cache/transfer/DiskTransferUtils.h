@@ -1,9 +1,16 @@
 #pragma once
 
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
 namespace rtp_llm {
+
+// FULL pages have their own load staging lane. SWA and LINEAR share the
+// second lane, sized to cover the larger disk record.
+inline size_t diskLoadStagingLane(CacheGroupType group_type) {
+    return group_type == CacheGroupType::SWA || group_type == CacheGroupType::LINEAR ? 1 : 0;
+}
 
 inline const char* blockIOStatusName(BlockIOStatus status) {
     switch (status) {

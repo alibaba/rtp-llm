@@ -317,6 +317,7 @@ public:
     bool isMiddleChunk() const;    // chunked + context + !last → no sample / no output row
     bool hasPendingChunk() const;  // remaining context window, read consistently with result updates
     void advanceChunk();           // reuse_length_ += currentChunkLen()
+    void completeLinearPrefillChunk(int prefix_tokens, int chunk_len);
     bool hasAdvancedChunk() const {
         return chunk_advanced_;
     }

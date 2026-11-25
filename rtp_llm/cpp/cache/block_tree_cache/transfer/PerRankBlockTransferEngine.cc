@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyGeometry.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DiskTransferUtils.h"
 
 #include <exception>
 #include <iterator>
@@ -36,7 +37,7 @@ std::shared_ptr<TransferAsyncContext> invalidTransferContext(const TransferTask&
         std::move(result), task.descriptors().size(), task.completionProof());
 }
 
-// Each load owner has private FULL/default and SWA pools with equal byte budgets.
+// Each load owner has private FULL and SWA/LINEAR pools with equal byte budgets.
 // Its reference block count is a share of the rank-wide SWA block budget.
 std::array<std::shared_ptr<HostStagingBlockPool>, 2> makeLoadStaging(const std::vector<GroupSetPtr>& groups,
                                                                      size_t                          block_count,
@@ -57,7 +58,7 @@ std::array<std::shared_ptr<HostStagingBlockPool>, 2> makeLoadStaging(const std::
         if (required > std::numeric_limits<size_t>::max() - 4095)
             throw std::overflow_error("async disk staging stride overflow");
         const size_t stride = ((required + 4095) / 4096) * 4096;
-        const size_t lane   = group->groupType() == CacheGroupType::SWA ? 1 : 0;
+        const size_t lane   = diskLoadStagingLane(group->groupType());
         strides[lane]       = std::max(strides[lane], stride);
         max_stride          = std::max(max_stride, stride);
     }
@@ -77,7 +78,7 @@ std::array<std::shared_ptr<HostStagingBlockPool>, 2> makeLoadStaging(const std::
             RTP_LLM_LOG_ERROR("async staging pool too small: rank=%ld worker=%zu class=%s capacity=%zu batch_limit=%zu",
                               world_rank,
                               worker_index,
-                              lane == 0 ? "FULL" : "SWA",
+                              lane == 0 ? "FULL" : "SWA/LINEAR",
                               capacity,
                               batch_limit);
             throw std::invalid_argument("async staging pool capacity must be >= max_descriptors_per_batch");

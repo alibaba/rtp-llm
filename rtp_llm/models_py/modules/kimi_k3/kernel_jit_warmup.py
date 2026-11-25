@@ -58,6 +58,8 @@ def _warmup_replay(model) -> None:
             if replay_cache is None:
                 continue
             decoder = attention.decode
+            native = getattr(attention, "_native_target_verify", None)
+            use_native = native is not None and native.bind(cache)
             kv = cache.kv_cache_base.reshape(cache.kv_cache_base.shape[0], -1)
             state = decoder._get_ssm_states(kv)
             conv = decoder._get_conv_states(kv)
@@ -78,6 +80,7 @@ def _warmup_replay(model) -> None:
                 decoder.gate_lower_bound,
                 str(device),
                 attention.fa_width,
+                native.eps if use_native else None,
                 str(attention.input.weight.dtype),
                 tuple(attention.input.weight.shape),
                 str(attention.f_b.weight.dtype),
@@ -94,6 +97,8 @@ def _warmup_replay(model) -> None:
             # Metadata group rows can be aligned or unaligned to 16 bytes.
             # Prepare both classes so pool deduplication is independent of group id.
             cases = [(1, steps) for steps in range(1, max_steps + 1)] + [(2, 1)]
+            if use_native and native.steps <= max_steps:
+                cases.append((2, native.steps))
             for unaligned, (batch, steps) in (
                 (unaligned, case) for unaligned in (False, True) for case in cases
             ):
@@ -111,6 +116,8 @@ def _warmup_replay(model) -> None:
                 fused = fused[
                     ..., : 4 * attention.width + attention.fa_width + attention.heads
                 ]
+                if use_native and steps == native.steps:
+                    native(fused, cache, inputs)
                 qkv, _, fa, beta = fused.split(
                     (
                         3 * attention.width,

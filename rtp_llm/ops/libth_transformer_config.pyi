@@ -753,6 +753,8 @@ class KVCacheConfig:
     kv_cache_mem_mb: int
     reuse_cache_tail_blocks: int
     linear_pool_blocks: int
+    lower_tier_linear_pool_avg_prompt_tokens: int
+    linear_pool_avg_prompt_tokens: int
     swa_pool_blocks: int
     enable_linear_cache_reclaim: bool
     kv_cache_pool_block_weights: str
@@ -1045,6 +1047,7 @@ class KVCacheSpecDesc:
     cache_type: KVCacheSpecType
     dtype: DataType
     is_state_cache: bool
+    prefill_borrow_tail: bool
     entry_elems: int
     entry_dtype: DataType
     entry_count_mode: OpaqueBlockEntryCountMode

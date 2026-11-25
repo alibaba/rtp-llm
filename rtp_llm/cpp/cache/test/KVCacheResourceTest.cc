@@ -14,6 +14,81 @@ namespace test {
 
 namespace {
 
+TEST(BlockIdsPrefillPlanTest, ExecutionAliasesNeverChangeOwnershipOrPublishTemporaryContents) {
+    auto plan = std::make_shared<LinearPrefillPlan>(12 * 1024 + 128, 128, 1024, 5);
+    BlockIds ids;
+    ids.resize(97);
+    int physical = 10;
+    for (const auto position : plan->newPositions()) {
+        ids.setAt(position, physical++);
+    }
+    ids.setLinearPrefillPlan(plan);
+    const auto ownership = ids.blocks();
+    BlockIndicesType execution(97);
+    int64_t prefix = 0;
+    for (int round = 1; prefix < plan->promptTokens(); ++round) {
+        const auto query = std::min<int64_t>(2048, plan->promptTokens() - prefix);
+        ASSERT_TRUE(ids.copyLinearPrefillKernelBlocks(prefix, query, execution.data()));
+        EXPECT_EQ(ids.blocks(), ownership);
+        if (round == 2) {
+            EXPECT_EQ(execution[15], ownership[96]); // Read temporary C2 from T.
+            EXPECT_EQ(execution[31], ownership[96]); // Write C4 back to T.
+        }
+        if (round == 5) {
+            EXPECT_EQ(execution[63], ownership[63]); // Read P1 / C8, not stale T.
+            EXPECT_EQ(execution[71], ownership[71]);
+            EXPECT_EQ(execution[79], ownership[79]);
+            EXPECT_EQ(execution[96], NULL_BLOCK_IDX);
+        }
+        EXPECT_FALSE(ids.canPublishLinearPrefillBlock(96));
+        ids.advanceLinearPrefillChunk(prefix + query);
+        ids.completeLinearPrefillChunk(prefix, prefix + query);
+        prefix += query;
+    }
+    for (const auto position : plan->checkpointPositions()) {
+        EXPECT_TRUE(ids.canPublishLinearPrefillBlock(position));
+    }
+    EXPECT_FALSE(ids.canPublishLinearPrefillBlock(96)); // Non-aligned tail is PD-only.
+    EXPECT_EQ(ids.blocks(), ownership);
+}
+
+TEST(BlockIdsPrefillPlanTest, SubmittedStateAdvancesReadBoundaryWithoutPublishingUnfinishedCheckpoints) {
+    auto plan = std::make_shared<LinearPrefillPlan>(6144, 128, 1024, 3);
+    BlockIds ids;
+    ids.resize(48);
+    int physical = 10;
+    for (const auto position : plan->newPositions()) {
+        ids.setAt(position, physical++);
+    }
+    ids.setLinearPrefillPlan(plan);
+    const auto ownership = ids.blocks();
+    BlockIndicesType execution(48);
+
+    ASSERT_TRUE(ids.copyLinearPrefillKernelBlocks(0, 2048, execution.data()));
+    ids.advanceLinearPrefillChunk(2048);
+    ASSERT_TRUE(ids.copyLinearPrefillKernelBlocks(2048, 2048, execution.data()));
+    ids.advanceLinearPrefillChunk(4096);
+    ASSERT_TRUE(ids.copyLinearPrefillKernelBlocks(4096, 2048, execution.data()));
+    ids.advanceLinearPrefillChunk(6144);
+
+    // Submitted rounds are readable by later rounds, but checkpoints stay unpublishable until completion.
+    for (const auto position : plan->checkpointPositions()) {
+        EXPECT_FALSE(ids.canPublishLinearPrefillBlock(position));
+    }
+    EXPECT_ANY_THROW(ids.completeLinearPrefillChunk(2048, 4096));
+    ids.completeLinearPrefillChunk(0, 2048);
+    EXPECT_FALSE(ids.canPublishLinearPrefillBlock(31));
+    ids.completeLinearPrefillChunk(2048, 4096);
+    EXPECT_TRUE(ids.canPublishLinearPrefillBlock(31));
+    EXPECT_FALSE(ids.canPublishLinearPrefillBlock(39));
+    EXPECT_FALSE(ids.canPublishLinearPrefillBlock(47));
+    ids.completeLinearPrefillChunk(4096, 6144);
+    for (const auto position : plan->checkpointPositions()) {
+        EXPECT_TRUE(ids.canPublishLinearPrefillBlock(position));
+    }
+    EXPECT_EQ(ids.blocks(), ownership);
+}
+
 GroupBase makeResourceGroup(std::string tag, CacheGroupType type) {
     auto spec                       = std::make_shared<MHAKVCacheSpec>();
     spec->tag                       = tag;

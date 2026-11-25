@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -42,7 +43,15 @@ struct AllocatedBlocks {
 };
 
 std::string groupTypeName(CacheGroupType group_type) {
-    return group_type == CacheGroupType::FULL ? "Full" : "Swa";
+    switch (group_type) {
+        case CacheGroupType::FULL:
+            return "Full";
+        case CacheGroupType::SWA:
+            return "Swa";
+        case CacheGroupType::LINEAR:
+            return "Linear";
+    }
+    throw std::invalid_argument("unsupported cache group type");
 }
 
 std::vector<uint8_t> makePattern(size_t pattern_id) {
@@ -362,12 +371,57 @@ TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, ThreeTierRoundTripsDistinc
     EXPECT_EQ(readDiskStride(env.disk_pool, disk_blocks.after), disk_after);
 }
 
-INSTANTIATE_TEST_SUITE_P(FullAndSwa,
+INSTANTIATE_TEST_SUITE_P(FullSwaAndLinear,
                          PerRankBlockTransferEngineDataCorrectnessTest,
-                         ::testing::Values(CacheGroupType::FULL, CacheGroupType::SWA),
+                         ::testing::Values(CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::LINEAR),
                          [](const ::testing::TestParamInfo<CacheGroupType>& info) {
                              return groupTypeName(info.param);
                          });
+
+TEST(PerRankBlockTransferEngineMixedGroupTest, LargerLinearStateSharesSwaStaging) {
+    TempDirGuard                       temp_dir("mixed_linear_disk_staging");
+    const std::array<CacheGroupType, 3> types{CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::LINEAR};
+    const std::array<size_t, 3>         payloads{256, 128, 65536};
+    std::vector<GroupSetPtr>           groups;
+    for (size_t id = 0; id < types.size(); ++id) {
+        auto policy                = defaultCacheGroupPolicy(types[id]);
+        policy.enable_prefix_reuse = true;
+        if (types[id] == CacheGroupType::SWA) {
+            policy.sliding_window_size = 2;
+        }
+        auto topology    = makeTestTopology({makeTestGroupBase(policy, {0}, payloads[id])});
+        auto device_pool = makeTestDevicePool({{payloads[id], 0}}, 2, "mixed_device_" + std::to_string(id));
+        auto disk_pool   = makeDiskPool(payloads[id], 2, temp_dir.path, nullptr, "mixed_disk_" + std::to_string(id));
+        groups.push_back(makeTestGroupSet(id, std::move(topology), {"group0"}, {device_pool}, nullptr, disk_pool));
+    }
+    auto engine = std::make_shared<PerRankBlockTransferEngine>(
+        groups, true, /*staging_block_count=*/8, /*max_descriptors_per_batch=*/4, /*transfer_worker_count=*/1);
+    BlockTransferDispatcher dispatcher(engine);
+    for (size_t id : {2u, 1u, 0u}) {
+        SCOPED_TRACE(groupTypeName(types[id]));
+        const auto& group        = groups[id];
+        const auto& device_pool  = group->devicePools().front();
+        const auto  device_block = poolMalloc(*device_pool);
+        const auto  disk_block   = poolMalloc(*group->diskPool());
+        ASSERT_NE(device_block, NULL_BLOCK_IDX);
+        ASSERT_NE(disk_block, NULL_BLOCK_IDX);
+        const auto buffer = device_pool->convertIndexToBuffer(0, device_block).front();
+        std::vector<uint8_t> expected(group->diskPool()->strideBytes());
+        for (size_t offset = 0; offset < payloads[id]; ++offset) {
+            expected[offset] = static_cast<uint8_t>((offset * 29 + id * 53) % 251 + 1);
+        }
+        ASSERT_EQ(group->diskPool()->write(disk_block, expected.data(), expected.size()), BlockIOStatus::OK);
+        ASSERT_EQ(cudaMemset(buffer.addr, 0, payloads[id]), cudaSuccess);
+        ASSERT_NO_FATAL_FAILURE(expectTransferSuccess(
+            dispatcher, {makeDescriptor(Tier::DISK, Tier::DEVICE, {device_block}, NULL_BLOCK_IDX, disk_block, id)}));
+        std::vector<uint8_t> actual(payloads[id]);
+        ASSERT_EQ(cudaMemcpy(actual.data(), buffer.addr, actual.size(), cudaMemcpyDeviceToHost), cudaSuccess);
+        expected.resize(payloads[id]);
+        EXPECT_EQ(actual, expected);
+        block_transfer_engine_test::releasePoolBlock(*device_pool, device_block);
+        block_transfer_engine_test::releasePoolBlock(*group->diskPool(), disk_block);
+    }
+}
 
 }  // namespace
 }  // namespace rtp_llm

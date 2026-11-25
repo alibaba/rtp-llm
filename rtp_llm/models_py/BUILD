@@ -248,12 +248,14 @@ py_library(
         "@//:using_cuda13_x86": flashinfer + deep + [
             "//rtp_llm:flashinfer-cubin",
             "//rtp_llm:nvidia-cutlass-dsl",
+            "//rtp_llm/models_py/triton_kernels:native_kda_replay",
         ] + [
             cuda13_x86_requirement(name) for name in kda_prefill
         ],
         "@//:using_cuda13_arm": flashinfer + deep + [
             "//rtp_llm:flashinfer-cubin",
             "//rtp_llm:nvidia-cutlass-dsl",
+            "//rtp_llm/models_py/triton_kernels:native_kda_replay",
         ] + [
             cuda13_arm_requirement(name) for name in kda_prefill
         ],

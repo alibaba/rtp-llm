@@ -20,7 +20,12 @@ namespace rtp_llm {
 
 class CoordinatorCacheManager;
 
-using RequiredPositions = std::unordered_set<size_t>;
+struct RequiredPositions: public std::unordered_set<size_t> {
+    using std::unordered_set<size_t>::unordered_set;
+    // An exact Prefill plan suppresses the generic ordinary-tail allocation.
+    // Required load destinations can still be added to this set.
+    bool exact = false;
+};
 
 struct NeedBlocksInfo {
     int common_blocks = 0;  // shared blocks across batches

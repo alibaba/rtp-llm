@@ -298,3 +298,9 @@ py_test(
     srcs = ["dsa_indexing_test.py"],
     data = ["//rtp_llm:utils/dsa_indexing.py"],
 )
+
+py_test(
+    name = "numa_test",
+    srcs = ["numa_test.py"],
+    deps = ["//rtp_llm:numa"],
+)

@@ -16,12 +16,32 @@ struct BlockTreeGroupSetSizing {
     size_t      pool_stride = 0;
 };
 
+struct LowerTierLinearPoolRatio {
+    uint32_t full_pages    = 0;
+    uint32_t linear_states = 0;
+
+    uint64_t linearUsableBlocks(uint64_t full_usable_blocks) const {
+        const auto scaled = full_usable_blocks * linear_states;
+        return scaled / full_pages + (scaled % full_pages != 0);
+    }
+};
+
+struct LowerTierLinearPoolRequest {
+    int    prompt_tokens     = -1;
+    int    reuse_tail_blocks = 0;
+    size_t full_page_tokens  = 0;  // Filled only by the leading PP stage or by a single-stage engine.
+};
+
+LowerTierLinearPoolRatio resolveLowerTierLinearPoolRatio(const LowerTierLinearPoolRequest& request);
+
 struct BlockTreeCacheSizing {
     std::vector<BlockTreeGroupSetSizing> group_sets;
     size_t                               host_budget_bytes = 0;
     size_t                               disk_budget_bytes = 0;
     // 1.0 retains device-proportional HOST sizing; non-default values split usable FULL/SWA slots.
     double host_swa_block_ratio = 1.0;
+    LowerTierLinearPoolRatio   linear_ratio;    // Resolved locally for a single-stage engine.
+    LowerTierLinearPoolRequest linear_request;  // Resolved after gathering PP stage snapshots.
 };
 
 using TierBlockNumOverrides = std::unordered_map<CacheGroupType, size_t>;
@@ -41,6 +61,16 @@ std::vector<size_t> computeHostUsableBlockCounts(size_t                         
                                                  const std::vector<size_t>&         strides,
                                                  const std::vector<CacheGroupType>& types,
                                                  double                             swa_full_ratio);
+
+// Fit all group sets against one tier's budget and return physical counts,
+// including each pool's reserved block zero.
+std::vector<size_t> computeLocalTierBlockCounts(size_t                             capacity_bytes,
+                                               const std::vector<size_t>&         device_block_counts,
+                                               const std::vector<size_t>&         pool_strides,
+                                               const std::vector<CacheGroupType>& types,
+                                               LowerTierLinearPoolRatio           linear_ratio,
+                                               double                             swa_full_ratio = 1.0,
+                                               size_t                             reference_full_device_blocks = 0);
 
 /**
  * Final physical block counts: DEVICE per tag, HOST/DISK per GroupSet type.

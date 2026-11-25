@@ -57,6 +57,15 @@ bool blockNumFitsBudget(uint32_t block_num, size_t total_budget_bytes, const KVC
 
     // Main #1574 keeps SWA pool blocks at the same baseline count (tail
     // retention is a runtime concern), so no SWA downsampling here.
+    if (budget.linear_prefill_block_bytes > 0) {
+        const auto linear_blocks = budget.linear_prefill_pool_ratio.physicalBlocks(block_num);
+        if (linear_blocks > LinearPrefillPoolRatio::kMaxPhysicalBlocks / budget.max_linear_prefill_weight
+            || linear_blocks > remaining / budget.linear_prefill_block_bytes) {
+            return false;
+        }
+        remaining -= static_cast<size_t>(linear_blocks) * budget.linear_prefill_block_bytes;
+    }
+
     return budget.swa_block_bytes == 0 || static_cast<size_t>(block_num) <= remaining / budget.swa_block_bytes;
 }
 
@@ -72,6 +81,7 @@ void addBudgetBytes(size_t& total, size_t bytes, size_t count = 1) {
 KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
     KVCacheBlockBudget budget;
     budget.max_baseline_block_num = config.maxBaselineBlockNum();
+    budget.linear_prefill_pool_ratio = config.linear_prefill_pool_ratio;
     addBudgetBytes(budget.explicit_pool_reserve_bytes, config.linear_replay.reserve_bytes);
     for (size_t gid = 0; gid < config.topology().groups().size(); ++gid) {
         const auto& group          = config.topology().groups()[gid];
@@ -106,6 +116,12 @@ KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
             if (policy.charge_to_paged_budget) {
                 addBudgetBytes(budget.explicit_pool_reserve_bytes, group_bytes, policy.explicit_block_num);
             }
+            continue;
+        }
+        if (config.usesLinearPrefillPoolRatio(group)) {
+            const auto weight = config.blockWeight(group.tag);
+            budget.max_linear_prefill_weight = std::max(budget.max_linear_prefill_weight, weight);
+            addBudgetBytes(budget.linear_prefill_block_bytes, group_bytes, weight);
             continue;
         }
         switch (policy.group_type) {
@@ -169,6 +185,55 @@ void resolvePoolBlockWeights(CacheConfig& config, const std::string& json, int64
         RTP_LLM_CHECK_WITH_INFO(sub != nullptr, "MTP cache configuration is null while resolving pool weights");
         sub->pool_block_weights = config.pool_block_weights;
     }
+}
+
+void configureLinearPrefillPoolRatio(CacheConfig&             config,
+                                     const ModelConfig&       model_config,
+                                     const ParallelismConfig& parallelism_config,
+                                     const KVCacheConfig&     options) {
+    const auto tokens = options.linear_pool_avg_prompt_tokens;
+    RTP_LLM_CHECK_WITH_INFO(tokens == -1 || tokens > 0, "LINEAR_POOL_AVG_PROMPT_TOKENS must be -1 or positive");
+    if (tokens == -1 || parallelism_config.role_type != RoleType::PREFILL || options.linear_pool_blocks > 0) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(options.reuse_cache && config.reuse_cache_tail_blocks < std::numeric_limits<int>::max(),
+                            "LINEAR_POOL_AVG_PROMPT_TOKENS requires REUSE_CACHE and a finite REUSE_CACHE_TAIL_BLOCKS");
+
+    const auto cp_size        = config.local_kv_cache_sharded ? parallelism_config.tp_size : 1;
+    const auto max_page_span  = static_cast<size_t>(std::numeric_limits<int>::max());
+    RTP_LLM_CHECK_WITH_INFO(cp_size > 0 && config.seq_size_per_block <= max_page_span / cp_size,
+                            "LINEAR_POOL_AVG_PROMPT_TOKENS requires a valid CP page span");
+    const auto page_tokens = config.seq_size_per_block * static_cast<uint64_t>(cp_size);
+    const auto& groups = config.topology().groups();
+    const bool has_full_pages = std::any_of(groups.begin(), groups.end(), [&](const GroupBase& group) {
+        return group.policy.group_type == CacheGroupType::FULL
+               && group.policy.memory_placement == CacheMemoryPlacement::DEVICE
+               && group.policy.explicit_block_num == 0 && group.seqSizePerBlock() == config.seq_size_per_block
+               && (!config.local_kv_cache_sharded || group.policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN);
+    });
+    RTP_LLM_CHECK_WITH_INFO(has_full_pages && model_config.max_seq_len > 0,
+                            "LINEAR_POOL_AVG_PROMPT_TOKENS requires a shared full KV pool and a positive max_seq_len");
+
+    const auto reference_pages  = 1 + (tokens - 1) / page_tokens;
+    const auto reference_states = static_cast<uint64_t>(config.reuse_cache_tail_blocks) + 1;
+    const auto max_prompt_pages  = 1 + (model_config.max_seq_len - 1) / page_tokens;
+    config.linear_prefill_pool_ratio = {
+        static_cast<uint32_t>(reference_pages),
+        static_cast<uint32_t>(reference_states),
+        // A cold prompt can use at most one state per CP page it occupies.
+        static_cast<uint32_t>(std::min(reference_states, max_prompt_pages)),
+    };
+    RTP_LLM_CHECK_WITH_INFO(std::any_of(groups.begin(), groups.end(), [&](const GroupBase& group) {
+                                return config.usesLinearPrefillPoolRatio(group);
+                            }),
+                            "LINEAR_POOL_AVG_PROMPT_TOKENS requires an automatic LINEAR pool with tail borrowing");
+    RTP_LLM_LOG_INFO("Prefill LINEAR pool sizing: avg_prompt_tokens=%d cp_page_tokens=%lu reference_pages=%u "
+                     "reference_states=%u min_states=%u",
+                     tokens,
+                     static_cast<unsigned long>(page_tokens),
+                     config.linear_prefill_pool_ratio.reference_pages,
+                     config.linear_prefill_pool_ratio.reference_states,
+                     config.linear_prefill_pool_ratio.min_states);
 }
 
 std::pair<uint32_t, uint32_t> resolveSeqSizes(const ModelConfig& model_config, const KVCacheConfig& kv_cache_config) {
@@ -398,7 +463,7 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
 }  // namespace
 
 uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlockBudget& budget) {
-    if (budget.paged_block_bytes == 0 && budget.swa_block_bytes == 0) {
+    if (budget.paged_block_bytes == 0 && budget.swa_block_bytes == 0 && budget.linear_prefill_block_bytes == 0) {
         return budget.explicit_pool_reserve_bytes <= total_budget_bytes ? 1u : 0u;
     }
 
@@ -584,6 +649,8 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
         }
     }
     resolvePoolBlockWeights(config, kv_cache_config.kv_cache_pool_block_weights, parallelism_config.pp_size);
+
+    configureLinearPrefillPoolRatio(config, model_config, parallelism_config, kv_cache_config);
     return config;
 }
 
@@ -726,6 +793,8 @@ uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&            
     RTP_LLM_CHECK_WITH_INFO(block_num <= config.maxBaselineBlockNum(),
                             "cache baseline=%u exceeds weighted pool int32 block ID bounds",
                             block_num);
+    RTP_LLM_CHECK_WITH_INFO(config.linear_prefill_pool_ratio.reference_pages == 0 || block_num > 1,
+                            "KV cache budget cannot fit a usable Prefill full KV page and LINEAR state");
     const auto kv_cache_seq_len = static_cast<uint64_t>(block_num) * config.seq_size_per_block;
     RTP_LLM_LOG_INFO("cache layout created: baseline_blocks=%u, baseline_token_span=%lu, draft_modules=%zu",
                      block_num,
@@ -785,6 +854,9 @@ CacheConfigCreator::sizingSignature(const CacheConfig& config, uint32_t baseline
     // Main #1574's tail-retention knob replaces the old linear_step sizing
     // input in the cross-rank sizing signature.
     number(static_cast<uint64_t>(config.reuse_cache_tail_blocks));
+    number(config.linear_prefill_pool_ratio.reference_pages);
+    number(config.linear_prefill_pool_ratio.reference_states);
+    number(config.linear_prefill_pool_ratio.min_states);
     number(config.groups().size());
     for (const auto& group : config.groups()) {
         number(group.tag.size());

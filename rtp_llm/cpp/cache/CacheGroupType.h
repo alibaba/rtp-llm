@@ -66,6 +66,9 @@ struct CacheGroupPolicy {
     int sliding_window_size = 0;
     // Share one state bank across logical blocks during chunked prefill.
     bool shared_chunk_state = false;
+    // Opt-in from models whose Prefill kernels support a borrowed state tail.
+    // Finite Last-N and the Prefill role are checked per request.
+    bool prefill_borrow_tail = false;
 
     std::string policyFingerprint() const {
         std::ostringstream oss;
@@ -74,6 +77,9 @@ struct CacheGroupPolicy {
             << static_cast<int>(memory_placement) << ':' << active_tail_blocks << ':' << (validate_tail_blocks ? 1 : 0)
             << ':' << static_cast<int>(cp_mapping) << ':' << static_cast<int>(cp_slice) << ':' << sliding_window_size
             << ':' << (shared_chunk_state ? 1 : 0);
+        if (prefill_borrow_tail) {
+            oss << ":borrow_tail";
+        }
         return oss.str();
     }
 };

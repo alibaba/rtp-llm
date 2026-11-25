@@ -88,7 +88,9 @@ public:
                                     bool                           enable_reuse_cache,
                                     int                            target_batch_size,
                                     LinearCachePolicy  linear_cache_policy = LinearCachePolicy::KEEP_HISTORY,
-                                    const std::string& pool_tag            = {}) const;
+                                    const std::string& pool_tag            = {},
+
+                                    int                            linear_prefill_prompt_tokens = 0) const;
 
     MallocResult malloc(const MallocInfo& malloc_info);
     bool         abortPendingLoad(const std::shared_ptr<AsyncContext>& context);

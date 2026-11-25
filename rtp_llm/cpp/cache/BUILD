@@ -2,6 +2,21 @@ load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "linear_prefill_plan",
+    hdrs = ["LinearPrefillPlan.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "linear_prefill_trace",
+    hdrs = ["LinearPrefillTrace.h"],
+    copts = copts(),
+    deps = ["//rtp_llm/cpp/utils:core_utils"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cache_async_context",
     srcs = ["AsyncContext.cc"],
     hdrs = [
@@ -312,6 +327,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":pool_metrics",
+        ":linear_prefill_trace",
         ":cp_slot_mapper",
         ":device_block_pool_config_helper",
         ":coordinator_cache_manager_hdr",
@@ -335,6 +351,7 @@ cc_library(
     deps = [
         ":cache_config",
         ":cache_group_type",
+        ":linear_prefill_plan",
         "//rtp_llm/cpp/utils:core_utils",
     ],
 )
@@ -455,4 +472,12 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [":cache_types", "//rtp_llm/cpp/utils:core_utils"],
+)
+
+cc_library(
+    name = "numa_memory_policy",
+    srcs = ["NumaMemoryPolicy.cc"],
+    hdrs = ["NumaMemoryPolicy.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
 )
