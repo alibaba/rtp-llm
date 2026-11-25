@@ -166,6 +166,10 @@ triggered the hotspot. If the selected peer can accept the request within
 the extra compute budget, Master redirects the new placement.
 Requests already in the endpoint's local queue keep their assignment.
 
+With `targetPolicy=MIN_PENDING_COMPUTE`, Master ranks eligible receivers by
+outstanding and planned compute tokens, breaking ties by cache hit. The shared
+extra compute budget and pacing still apply.
+
 With `targetPolicy=MIN_PENDING_COMPUTE_WITHIN_ONE_BLOCK`, Master considers
 only eligible peers within one request cache block of the pool's best effective
 hit. An unknown request block size permits zero loss. Among those peers it

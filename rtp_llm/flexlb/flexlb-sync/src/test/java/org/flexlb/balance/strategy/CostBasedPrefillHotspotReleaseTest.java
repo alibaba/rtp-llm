@@ -411,6 +411,9 @@ class CostBasedPrefillHotspotReleaseTest {
             when(candidates.workload(1).plannedTokens()).thenReturn(80L);
             when(candidates.workload(4).pendingTokens()).thenReturn(80L);
             assertEquals(1, ranking.select(candidates, RoleType.PREFILL, "g", request).index());
+            policy.setTargetPolicy(org.flexlb.config.RoutingConfig.HotspotTargetPolicy.MIN_PENDING_COMPUTE);
+            assertEquals(3, ranking.select(candidates, RoleType.PREFILL, "g", request).index(),
+                    "the lightest eligible receiver may lose more than one block");
             policy.setTargetPolicy(MIN_PENDING_COMPUTE_WITHIN_ONE_BLOCK);
             var selected = ranking.select(candidates, RoleType.PREFILL, "g", request);
             assertEquals(2, selected.index(), "a loss of exactly one block is allowed, one more token is excluded");

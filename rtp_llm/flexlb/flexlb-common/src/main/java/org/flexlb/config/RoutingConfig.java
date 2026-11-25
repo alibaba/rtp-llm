@@ -71,6 +71,7 @@ public final class RoutingConfig {
 
     public enum HotspotTargetPolicy {
         ROUTING_STRATEGY,
+        MIN_PENDING_COMPUTE,
         MIN_PENDING_COMPUTE_WITHIN_ONE_BLOCK
     }
 

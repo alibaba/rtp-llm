@@ -101,8 +101,8 @@ final class PrefillCandidateRanking {
 
         BitSet targets = redirectTargets(survivors, source, direct);
         if (targets.isEmpty()) { return fallback.noTarget(source, "NO_ELIGIBLE_TARGET"); }
-        if (release.getTargetPolicy() == MIN_PENDING_COMPUTE_WITHIN_ONE_BLOCK) {
-            return selectWithinOneBlock(survivors, roleType, group, request.getCacheKeyBlockSize(), targets, source, fallback);
+        if (release.getTargetPolicy() != RoutingConfig.HotspotTargetPolicy.ROUTING_STRATEGY) {
+            return selectLeastCompute(survivors, roleType, group, minimumReceiverHit(survivors, release, request), targets, source, fallback);
         }
 
         leaders.and(targets);
@@ -144,9 +144,14 @@ final class PrefillCandidateRanking {
 
     private record TtftChoice(int index, String reason) { }
 
-    private Choice selectWithinOneBlock(PrefillCandidateSet candidates, RoleType role, String group,
-                                       long blockSize, BitSet targets, int source, Choice fallback) {
-        long minimumHit = candidates.maximumCacheHit - Math.max(0L, blockSize);
+    private static long minimumReceiverHit(PrefillCandidateSet candidates, RoutingConfig.HotspotReleaseConfig release,
+                                           Request request) {
+        return release.getTargetPolicy() == MIN_PENDING_COMPUTE_WITHIN_ONE_BLOCK
+                ? candidates.maximumCacheHit - Math.max(0L, request.getCacheKeyBlockSize()) : 0L;
+    }
+
+    private Choice selectLeastCompute(PrefillCandidateSet candidates, RoleType role, String group,
+                                       long minimumHit, BitSet targets, int source, Choice fallback) {
         long bestHit = -1L;
         long leastWork = 0L;
         for (int i = targets.nextSetBit(0); i >= 0; i = targets.nextSetBit(i + 1)) {
@@ -187,8 +192,8 @@ final class PrefillCandidateRanking {
         if (release.isEnabled() && survivors.isHotspot(selected)) {
             BitSet targets = redirectTargets(survivors, selected, direct);
             if (targets.isEmpty()) { return ordinary.noTarget(selected, "NO_ELIGIBLE_TARGET"); }
-            if (release.getTargetPolicy() == MIN_PENDING_COMPUTE_WITHIN_ONE_BLOCK) {
-                return selectWithinOneBlock(survivors, role, group, request.getCacheKeyBlockSize(), targets, selected, ordinary);
+            if (release.getTargetPolicy() != RoutingConfig.HotspotTargetPolicy.ROUTING_STRATEGY) {
+                return selectLeastCompute(survivors, role, group, minimumReceiverHit(survivors, release, request), targets, selected, ordinary);
             }
             int alternate = rankByTtft(survivors, targets, role, group, seqLen, affinity, true, redirectRotation).index();
             return ordinary.redirectTo(selected, alternate);
