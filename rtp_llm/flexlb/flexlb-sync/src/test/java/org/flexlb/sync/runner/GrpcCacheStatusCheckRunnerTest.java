@@ -17,9 +17,12 @@ import org.mockito.Mockito;
 
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.RejectedExecutionException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -87,7 +90,55 @@ class GrpcCacheStatusCheckRunnerTest {
 
         assertEquals(1000, status.getCacheStatus().getAvailableKvCache());
         assertEquals(2000, status.getCacheStatus().getTotalKvCache());
+        var diagnostics = status.latestCachePollDiagnostics();
+        assertEquals(WorkerStatus.PollOutcome.APPLIED, diagnostics.outcome());
+        assertTrue(diagnostics.acquiredUs() <= diagnostics.rpcStartedUs());
+        assertTrue(diagnostics.rpcStartedUs() <= diagnostics.rpcCompletedUs());
+        assertTrue(diagnostics.rpcCompletedUs() <= diagnostics.applicationStartedUs());
+        assertTrue(diagnostics.applicationStartedUs() <= diagnostics.finishedUs());
         verifyNoInteractions(localKvCacheAwareManager);
+    }
+
+    @Test
+    void rejectedCacheApplicationReleasesPollLease() {
+        WorkerStatus status = workerStatus();
+        when(engineGrpcService.getCacheStatusAsync(
+                        anyString(),
+                        anyInt(),
+                        eq(status),
+                        anyLong(),
+                        anyLong(),
+                        eq(RoleType.PREFILL)))
+                .thenReturn(
+                        CompletableFuture.completedFuture(
+                                EngineRpcService.CacheStatusPB.getDefaultInstance()));
+
+        new GrpcCacheStatusCheckRunner(
+                        "test-model",
+                        status.getLogicalIpPort(),
+                        "test-site",
+                        RoleType.PREFILL,
+                        status,
+                        status.tryBeginCachePoll(),
+                        directory(status),
+                        engineHealthReporter,
+                        engineGrpcService,
+                        localKvCacheAwareManager,
+                        cacheIntervalService,
+                        20,
+                        false,
+                        ignored -> {
+                            throw new RejectedExecutionException("test queue is full");
+                        })
+                .run();
+
+        var diagnostics = status.latestCachePollDiagnostics();
+        assertEquals(WorkerStatus.PollOutcome.APPLICATION_REJECTED, diagnostics.outcome());
+        assertEquals(0L, diagnostics.applicationStartedUs());
+        verifyNoInteractions(localKvCacheAwareManager);
+        try (var nextPoll = status.tryBeginCachePoll()) {
+            assertNotNull(nextPoll);
+        }
     }
 
     @Test

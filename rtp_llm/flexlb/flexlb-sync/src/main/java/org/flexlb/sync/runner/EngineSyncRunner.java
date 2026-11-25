@@ -392,6 +392,7 @@ public class EngineSyncRunner implements Runnable {
                 statusCheckExecutor.submit(grpcWorkerStatusRunner);
                 handedOff = true;
             } catch (RejectedExecutionException e) {
+                statusPollLease.completeDiagnostics(WorkerStatus.PollOutcome.SUBMISSION_REJECTED);
                 logger.debug(
                         "Status check rejected for worker: {}, reset flag for retry", workerIpPort);
             } finally {
@@ -432,6 +433,7 @@ public class EngineSyncRunner implements Runnable {
                 cachePollExecutor.submit(grpcCacheStatusCheckRunner);
                 handedOff = true;
             } catch (RejectedExecutionException e) {
+                cachePollLease.completeDiagnostics(WorkerStatus.PollOutcome.SUBMISSION_REJECTED);
                 logger.debug(
                         "Cache check rejected for worker: {}, reset flag for retry", workerIpPort);
             } finally {

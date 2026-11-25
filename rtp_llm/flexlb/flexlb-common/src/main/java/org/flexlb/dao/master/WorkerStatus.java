@@ -5,6 +5,8 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.KvCacheGroupMode;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -51,6 +53,8 @@ public class WorkerStatus {
     private final AtomicLong cacheLastUpdateTime = new AtomicLong(-1L);
     private final AtomicReference<PollLease> statusPollLease = new AtomicReference<>();
     private final AtomicReference<PollLease> cachePollLease = new AtomicReference<>();
+    private volatile PollLease latestStatusPoll;
+    private volatile PollLease latestCachePoll;
     private final AtomicLong vitRoutedInputs = new AtomicLong();
 
     private volatile VitLoad vitLoad;
@@ -611,6 +615,16 @@ public class WorkerStatus {
         requirePollLease(lease, PollKind.CACHE, cachePollLease);
     }
 
+    public PollDiagnostics latestStatusPollDiagnostics() {
+        PollLease latest = latestStatusPoll;
+        return latest == null ? null : latest.diagnostics();
+    }
+
+    public PollDiagnostics latestCachePollDiagnostics() {
+        PollLease latest = latestCachePoll;
+        return latest == null ? null : latest.diagnostics();
+    }
+
     /** Get the HTTP IP:PORT address. */
     public String getIpPort() {
         return workerIdentity.getPhysicalIpPort();
@@ -685,6 +699,11 @@ public class WorkerStatus {
         if (retiring || healthRetirementClaimed) {
             lease.close();
             return null;
+        }
+        if (kind == PollKind.STATUS) {
+            latestStatusPoll = lease;
+        } else {
+            latestCachePoll = lease;
         }
         return lease;
     }
@@ -1078,10 +1097,50 @@ public class WorkerStatus {
         }
     }
 
+    /**
+     * Identifies the independent status and cache polls and limits warning frequency for each.
+     */
     private enum PollKind {
         STATUS,
-        CACHE
+        CACHE;
+
+        private static final long DIAGNOSTIC_LOG_INTERVAL_US = 1_000_000L;
+
+        private final AtomicLong nextDiagnosticLogUs = new AtomicLong();
+
+        private boolean claimDiagnosticLog(long nowUs) {
+            long next = nextDiagnosticLogUs.get();
+            return (next == 0L || nowUs >= next)
+                    && nextDiagnosticLogUs.compareAndSet(next, nowUs + DIAGNOSTIC_LOG_INTERVAL_US);
+        }
     }
+
+    /**
+     * Final diagnostic result. It has no effect on worker health or cache acknowledgment.
+     */
+    public enum PollOutcome {
+        APPLIED,
+        APPLICATION_BUSY,
+        GENERATION_CHANGED,
+        FULL_SNAPSHOT_NEEDED,
+        WORKER_NOT_ALIVE,
+        INVALID_RESPONSE,
+        RPC_FAILED,
+        APPLICATION_FAILED,
+        SUBMISSION_REJECTED,
+        APPLICATION_REJECTED
+    }
+
+    /**
+     * Diagnostic timestamps from the monotonic clock. Zero marks an unreached stage.
+     */
+    public record PollDiagnostics(
+            long acquiredUs,
+            long rpcStartedUs,
+            long rpcCompletedUs,
+            long applicationStartedUs,
+            long finishedUs,
+            PollOutcome outcome) {}
 
     private record VitLoad(long reportedInputs, long routedAtPollStart, long receivedNanos) {}
 
@@ -1091,9 +1150,22 @@ public class WorkerStatus {
      * a later poll which acquired the same logical slot.
      */
     public static final class PollLease implements AutoCloseable {
+        private static final Logger POLL_LOGGER = LoggerFactory.getLogger("syncLogger");
+
+        private static final long SLOW_POLL_US = 500_000L;
+
         private final WorkerStatus owner;
         private final PollKind kind;
         private final AtomicReference<PollLease> slot;
+
+        private final long acquiredUs = System.nanoTime() / 1000;
+
+        private volatile long rpcStartedUs;
+        private volatile long rpcCompletedUs;
+        private volatile long applicationStartedUs;
+        private volatile long finishedUs;
+
+        private volatile PollOutcome outcome;
 
         private PollLease(WorkerStatus owner, PollKind kind, AtomicReference<PollLease> slot) {
             this.owner = owner;
@@ -1101,9 +1173,66 @@ public class WorkerStatus {
             this.slot = slot;
         }
 
+        public void recordRpcStarted(long nowUs) {
+            rpcStartedUs = nowUs;
+        }
+
+        public void recordRpcCompleted(long nowUs) {
+            rpcCompletedUs = nowUs;
+        }
+
+        public void recordApplicationStarted() {
+            applicationStartedUs = System.nanoTime() / 1000;
+        }
+
+        public void completeDiagnostics(PollOutcome result) {
+            long nowUs = System.nanoTime() / 1000;
+            finishedUs = nowUs;
+            outcome = result;
+            long totalUs = nowUs - acquiredUs;
+            boolean abnormal =
+                    switch (result) {
+                        case APPLIED, APPLICATION_BUSY, GENERATION_CHANGED, FULL_SNAPSHOT_NEEDED ->
+                                false;
+                        default -> true;
+                    };
+            if ((abnormal || totalUs >= SLOW_POLL_US)
+                    && POLL_LOGGER.isWarnEnabled()
+                    && kind.claimDiagnosticLog(nowUs)) {
+                POLL_LOGGER.warn(
+                        "worker_poll kind={} role={} worker={} generation={} outcome={} "
+                                + "total_us={} runner_wait_us={} rpc_us={} apply_wait_us={} apply_us={}",
+                        kind,
+                        owner.getRole(),
+                        owner.getLogicalIpPort(),
+                        owner.getGenerationId(),
+                        result,
+                        totalUs,
+                        elapsed(acquiredUs, rpcStartedUs),
+                        elapsed(rpcStartedUs, rpcCompletedUs),
+                        elapsed(rpcCompletedUs, applicationStartedUs),
+                        elapsed(applicationStartedUs, nowUs));
+            }
+        }
+
         @Override
         public void close() {
             slot.compareAndSet(this, null);
+        }
+
+        private static long elapsed(long startUs, long endUs) {
+            return startUs == 0L || endUs == 0L ? -1L : endUs - startUs;
+        }
+
+        private PollDiagnostics diagnostics() {
+            PollOutcome result = outcome;
+            return new PollDiagnostics(
+                    acquiredUs,
+                    rpcStartedUs,
+                    rpcCompletedUs,
+                    applicationStartedUs,
+                    result == null ? 0L : finishedUs,
+                    result);
         }
     }
 }
