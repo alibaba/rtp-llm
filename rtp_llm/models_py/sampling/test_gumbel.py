@@ -72,15 +72,53 @@ class GumbelSourceTest(unittest.TestCase):
             "from rtp_llm.models_py.sampling.draft_logits import draft_logits_row",
         )
         local = Path(vllm_gumbel.__file__)
-        self.assertEqual(local.read_text(), expected)
+        source = local.read_text().replace("    RETURN_KEY: tl.constexpr = False,\n", "", 1)
+        # Remove only the compact-ID branch, keeping the upstream return statement.
+        start = source.index("    if RETURN_KEY:\n")
+        dense = "\n    else:\n    "
+        end = source.index(dense, start) + len(dense)
+        self.assertEqual(
+            ast.dump(ast.parse(source[:start] + source[end:])),
+            ast.dump(ast.parse(expected)),
+        )
         self.assertEqual(
             ast.dump(draft_function(local.with_name("draft_logits.py"))),
             ast.dump(draft_function(root / "spec_decode/draft_logits.py")),
         )
 
 
+@triton.jit
+def _compact_winner(scores, keys, output, temp, seed, pos):
+    lane = tl.arange(0, 4)
+    token_ids = tl.load(keys + lane)
+    values = tl.load(scores + lane)
+    _, token = vllm_gumbel.gumbel_noised_argmax(
+        values, token_ids, token_ids >= 0, seed, pos, temp,
+        IS_DRAFTING=False, USE_FP64=False, APPLY_TEMPERATURE=False, RETURN_KEY=True,
+    )
+    tl.store(output, token)
+
+
 @unittest.skipUnless(torch.cuda.is_available(), "NOT_RUN: CUDA unavailable")
 class GumbelTest(unittest.TestCase):
+    def test_compact_winner_matches_original_vocab_after_permutation(self) -> None:
+        ids = torch.tensor([191, 33, 290, -1], device="cuda", dtype=torch.int32)
+        scores = torch.tensor([4.0, 4.0, 3.0, -torch.inf], device="cuda")
+        dense = torch.full((1, 512), -torch.inf, device="cuda")
+        dense[0, ids[:3].long()] = scores[:3]
+        seed = torch.tensor([11], device="cuda")
+        position = torch.tensor([5], device="cuda")
+        mapping = torch.zeros(1, dtype=torch.int32, device="cuda")
+        result = torch.empty_like(seed)
+        for temp in (0.0, 1.0):
+            expected = vllm_gumbel.gumbel_sample(
+                dense, mapping, torch.tensor([temp], device="cuda"), seed, position, False, False
+            )
+            self.assertEqual(expected.item(), 33 if temp == 0.0 else 290)
+            for order in ([0, 1, 2, 3], [3, 2, 1, 0]):
+                _compact_winner[(1,)](scores[order], ids[order], result, temp, 11, 5)
+                self.assertTrue(torch.equal(result, expected))
+
     def test_exact_upstream_fp32_and_fp64(self) -> None:
         upstream = reference_module()
         for batch, vocab in [(1, 1), (7, 257), (32, 4097), (4, 154883)]:

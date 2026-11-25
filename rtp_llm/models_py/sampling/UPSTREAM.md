@@ -2,9 +2,11 @@
 
 Source: vLLM commit `af261bab7f717b6ece30f5ed3213c43974e4a6c4`.
 
-- `vllm_gumbel.py`: copied from
-  `vllm/v1/worker/gpu/sample/gumbel.py`; only the Triton and
-  `draft_logits_row` imports are changed to local imports.
+- `vllm_gumbel.py` comes from `vllm/v1/worker/gpu/sample/gumbel.py`, with local
+  Triton and `draft_logits_row` imports. RTP extends `gumbel_noised_argmax` with
+  `RETURN_KEY=False`. The default returns the winning lane as in vLLM. The compact
+  verifier sets it to true to return the original vocabulary ID and chooses the
+  lowest valid ID on an exact tie, regardless of the order of compact candidates.
 - `draft_logits.py`: the `draft_logits_row` function is copied unchanged from
   `vllm/v1/worker/gpu/spec_decode/draft_logits.py`.
 
