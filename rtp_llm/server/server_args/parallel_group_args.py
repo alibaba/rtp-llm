@@ -1,12 +1,20 @@
 import argparse
 import json
 
+import torch
+
 from rtp_llm.ops import CPAllGatherImpl, CPRotateMethod
 from rtp_llm.server.server_args.util import (
     str2_cp_all_gather_impl,
     str2_cp_rotate_method,
     str2bool,
 )
+
+
+def default_local_world_size(world_size: int) -> int:
+    if world_size > 1 and torch.cuda.is_available():
+        return max(1, min(torch.cuda.device_count(), world_size))
+    return world_size
 
 
 def parse_pp_stage_layer_counts(raw_value: str):
@@ -107,8 +115,8 @@ def init_parallel_group_args(
         env_name="LOCAL_WORLD_SIZE",
         bind_to=(parallelism_config, "local_world_size"),
         type=int,
-        default=1,
-        help="在多节点分布式设置中，当前节点（Node）上使用的GPU设备数量。未设置时默认 1，多进程时由配置阶段按 min(cuda 数, world_size) 推导。",
+        default=None,
+        help="当前节点使用的 GPU 数量。未指定时按可见 GPU 数量与 WORLD_SIZE 的较小值推导。",
     )
     parallel_group.add_argument(
         "--cp_rotate_method",

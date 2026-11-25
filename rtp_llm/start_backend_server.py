@@ -150,24 +150,6 @@ def local_rank_start(
         raise
 
 
-def _get_local_world_size(py_env_configs: PyEnvConfigs) -> int:
-    """Calculate local world size based on environment and hardware"""
-    world_size = py_env_configs.parallelism_config.world_size
-    local_world_size = min(torch.cuda.device_count(), world_size)
-    if "LOCAL_WORLD_SIZE" in os.environ:
-        logging.info(
-            f"multi rank starts with local world size specified in env: {os.environ['LOCAL_WORLD_SIZE']}"
-        )
-        local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
-    else:
-        logging.info(
-            f"multi rank starts with default local world size: {local_world_size}, "
-            f"device count = {torch.cuda.device_count()}, world size = {world_size}"
-        )
-    os.environ["LOCAL_WORLD_SIZE"] = str(local_world_size)
-    return local_world_size
-
-
 def _get_cuda_device_list() -> List[str]:
     """Get CUDA device list from environment or hardware detection"""
     cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
@@ -204,12 +186,11 @@ def _create_rank_processes(
     mid-loop abort still leaves every spawned object in the caller's list; teardown
     guards proc.pid to skip any that never started."""
     pc = py_env_configs.parallelism_config
-    local_world_size = _get_local_world_size(py_env_configs)
     cuda_device_list = _get_cuda_device_list()
     _validate_dp_configuration(py_env_configs)
 
     parent_pid = os.getpid()
-    for world_rank in range(pc.world_rank, pc.world_rank + local_world_size):
+    for world_rank in range(pc.world_rank, pc.world_rank + pc.local_world_size):
         reader, writer = ctx.Pipe(duplex=False)
         rank_pipe_readers.append(reader)
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_device_list)
@@ -459,13 +440,11 @@ def start_backend_server(
             service_draining=service_draining,
         )
 
-    if (
-        pc.world_size % torch.cuda.device_count() != 0
-        and pc.world_size > torch.cuda.device_count()
-    ):
-        raise Exception(
-            f"result: {pc.world_size % torch.cuda.device_count()} \
-            not support WORLD_SIZE {pc.world_size} for {torch.cuda.device_count()} local gpu"
+    device_count = torch.cuda.device_count()
+    local_world_size = 1 if pc.world_size == 1 else pc.local_world_size
+    if local_world_size > device_count:
+        raise ValueError(
+            f"LOCAL_WORLD_SIZE={local_world_size} exceeds the {device_count} visible GPUs"
         )
 
     manager = None
@@ -476,7 +455,7 @@ def start_backend_server(
             manager = start_from_config(py_env_configs.jit_config)
         except Exception:  # cold start; a signal instead unwinds to the finally
             logging.exception("JIT_CACHE_FAIL_OPEN: setup failed; cold start")
-        if torch.cuda.device_count() > 1 and pc.world_size > 1:
+        if local_world_size > 1:
             return multi_rank_start(
                 global_controller,
                 py_env_configs,

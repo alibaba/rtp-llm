@@ -298,15 +298,6 @@ def set_parallelism_config(
         parallelism_config: ParallelismConfig to update in place
         world_rank: World rank to apply (local_rank = world_rank % local_world_size, etc.). Default 0.
     """
-    world_size = parallelism_config.world_size
-    need_local = world_size > 1 and parallelism_config.local_world_size == 1
-    if need_local:
-        if torch.cuda.is_available():
-            n = min(torch.cuda.device_count(), world_size)
-        else:
-            n = world_size
-        parallelism_config.local_world_size = max(n, 1)
-
     # Resolve and validate parallelism configuration.
     # ep_size default is 0, which triggers automatic derivation.
     # Three supported modes:
@@ -696,6 +687,6 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
         ll_num_max_token=ll_num_max_token,
     )
 
-    # Set local ip if not already set (e.g. for world_info / distributed_server)
+    # Set the local IP used by workers and host registration.
     if not py_env_configs.server_config.ip:
         py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())

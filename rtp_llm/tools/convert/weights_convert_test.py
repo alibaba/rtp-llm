@@ -1,6 +1,6 @@
 import os
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import torch
 
@@ -18,8 +18,29 @@ from rtp_llm.tools.convert.weights_convert_utils import (
 
 
 class WeightsConvertParallelismTest(unittest.TestCase):
+    def _converter(self, env_params=None):
+        with (
+            patch.object(weights_convert, "parse_model_basic_info"),
+            patch.object(
+                weights_convert, "fetch_remote_file_to_local", return_value="/model"
+            ),
+            patch.object(weights_convert.ModelFactory, "get_model_cls"),
+        ):
+            return WeightConverter("/model", "test_model", env_params or {})
+
+    def test_local_width_is_bound_at_converter_entry(self):
+        with patch.dict(
+            os.environ,
+            {"WORLD_SIZE": "4", "TP_SIZE": "4", "LOCAL_WORLD_SIZE": "2"},
+            clear=True,
+        ):
+            inherited = self._converter()
+            overridden = self._converter({"LOCAL_WORLD_SIZE": "1"})
+            os.environ["LOCAL_WORLD_SIZE"] = "4"
+            self.assertEqual(inherited._build_parallelism_config().local_world_size, 2)
+            self.assertEqual(overridden._build_parallelism_config().local_world_size, 1)
+
     def test_explicit_world_size_covers_all_conversion_ranks(self):
-        converter = WeightConverter.__new__(WeightConverter)
         for rank in range(4):
             with self.subTest(rank=rank), patch.dict(
                 os.environ,
@@ -32,7 +53,7 @@ class WeightsConvertParallelismTest(unittest.TestCase):
                 },
                 clear=True,
             ):
-                config = converter._build_parallelism_config()
+                config = self._converter()._build_parallelism_config()
                 self.assertEqual(config.world_size, 4)
                 self.assertEqual(
                     (
@@ -45,7 +66,6 @@ class WeightsConvertParallelismTest(unittest.TestCase):
                 )
 
     def test_missing_world_size_defaults_to_tp_times_dp(self):
-        converter = WeightConverter.__new__(WeightConverter)
         for tp_size, dp_size in ((1, 1), (4, 1), (2, 2)):
             world_size = tp_size * dp_size
             for rank in range(world_size):
@@ -59,7 +79,7 @@ class WeightsConvertParallelismTest(unittest.TestCase):
                     },
                     clear=True,
                 ):
-                    config = converter._build_parallelism_config()
+                    config = self._converter()._build_parallelism_config()
                     self.assertEqual(config.world_size, world_size)
                     self.assertEqual(
                         (
@@ -72,7 +92,6 @@ class WeightsConvertParallelismTest(unittest.TestCase):
                     )
 
     def test_explicit_world_size_rejects_out_of_range_rank(self):
-        converter = WeightConverter.__new__(WeightConverter)
         with patch.dict(
             os.environ,
             {
@@ -87,15 +106,13 @@ class WeightsConvertParallelismTest(unittest.TestCase):
             with self.assertRaisesRegex(
                 ValueError, r"world_rank 4 out of range \[0, 4\)"
             ):
-                converter._build_parallelism_config()
+                self._converter()._build_parallelism_config()
 
     def test_convert_without_world_size_covers_all_ranks(self):
         for tp_size, dp_size in ((4, 1), (2, 2)):
-            converter = WeightConverter.__new__(WeightConverter)
-            converter.env_params = {"TP_SIZE": str(tp_size), "DP_SIZE": str(dp_size)}
-            converter.model_path = "/model"
-            converter.model_type = "test_model"
-            converter.model_cls = Mock()
+            converter = self._converter(
+                {"TP_SIZE": str(tp_size), "DP_SIZE": str(dp_size)}
+            )
             with (
                 self.subTest(tp=tp_size, dp=dp_size),
                 patch.dict(os.environ, {}, clear=True),

@@ -29,6 +29,7 @@ from rtp_llm.ops import (
     ParallelismConfig,
     ProfilingDebugLoggingConfig,
 )
+from rtp_llm.server.server_args.parallel_group_args import default_local_world_size
 from rtp_llm.tools.api.model_basic_info_analyzer import (
     parse_ft_model_type,
     parse_model_basic_info,
@@ -60,6 +61,9 @@ class WeightConverter:
 
         self.model_path: str | None = fetch_remote_file_to_local(model_path)
         self.env_params = env_params
+        # The converter accepts overrides through --env_params and inherits launcher defaults.
+        local_size = env_params.get("LOCAL_WORLD_SIZE", os.getenv("LOCAL_WORLD_SIZE"))
+        self.local_world_size = int(local_size) if local_size is not None else None
 
         assert self.model_path
         if not model_type:
@@ -174,16 +178,13 @@ class WeightConverter:
         pc.pp_size = 1
         pc.world_size = _env_int("WORLD_SIZE", pc.tp_size * pc.dp_size)
         pc.world_rank = _env_int("WORLD_RANK", 0)
-        pc.local_world_size = _env_int("LOCAL_WORLD_SIZE", 1)
+        pc.local_world_size = (
+            self.local_world_size
+            if self.local_world_size is not None
+            else default_local_world_size(pc.world_size)
+        )
         pc.ep_size = _env_int("EP_SIZE", 0)
 
-        if pc.world_size > 1 and pc.local_world_size == 1:
-            n = (
-                torch.cuda.device_count()
-                if torch.cuda.is_available()
-                else pc.world_size
-            )
-            pc.local_world_size = max(min(n, pc.world_size), 1)
         if pc.ep_size == 1:
             assert (
                 pc.tp_size >= 1
@@ -221,16 +222,6 @@ class WeightConverter:
         env_params["TP_RANK"] = tp_rank
         for env_key, env_value in env_params.items():
             os.environ[env_key] = str(env_value)
-        try:
-            cuda_device_list = [str(i) for i in range(torch.cuda.device_count())]
-            if len(cuda_device_list) > 0:
-                env_params.update(
-                    {"LOCAL_WORLD_SIZE": min(len(cuda_device_list), self.world_size)}
-                )
-                os.environ["LOCAL_WORLD_SIZE"] = str(env_params["LOCAL_WORLD_SIZE"])
-        except Exception as _:
-            logging.info(f"no GPU device, load to mem")
-
         # Get quantization from env_params (compatibility logic)
         quantization = env_params.get("QUANTIZATION", "")
         if not quantization:

@@ -321,6 +321,26 @@ class KVCacheEventHostIdentityTest(TestCase):
 
 
 class SingleGpuBackendRankTest(TestCase):
+    def test_local_world_size_is_finalized_when_args_are_bound(self):
+        for env, args, expected in (
+            ({}, ["--local_world_size", "1"], 1),
+            ({"LOCAL_WORLD_SIZE": "1"}, [], 1),
+            ({"LOCAL_WORLD_SIZE": "3"}, ["--local_world_size", "2"], 2),
+            ({}, [], 4),
+        ):
+            with (
+                self.subTest(env=env, args=args),
+                patch.dict(os.environ, {**_PINNED_DEVICES, **env}, clear=True),
+                patch("torch.cuda.is_available", return_value=True),
+                patch("torch.cuda.device_count", return_value=4),
+            ):
+                configs = setup_args(["--world_size", "12", "--tp_size", "12", *args])
+                pc = configs.parallelism_config
+                self.assertEqual(pc.local_world_size, expected)
+                set_parallelism_config(pc, world_rank=5)
+                self.assertEqual(pc.local_world_size, expected)
+                self.assertEqual(pc.local_rank, 5 % expected)
+
     def _start_rank(self, tp_size: int, dp_size: int, world_rank: int):
         py_env_configs = PyEnvConfigs()
         parallelism_config = py_env_configs.parallelism_config

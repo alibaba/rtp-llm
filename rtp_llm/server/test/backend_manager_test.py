@@ -1,12 +1,12 @@
 import threading
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
 from rtp_llm.config.collective_config import CollectiveConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import set_parallelism_config
-from rtp_llm.ops import NcclCommConfig
+from rtp_llm.distribute.worker_info import WorldInfo
 from rtp_llm.server import backend_manager
 from rtp_llm.server.backend_manager import BackendManager
 
@@ -47,10 +47,9 @@ class BackendManagerStartupTest(unittest.TestCase):
         configs.py_hw_kernel_config.glm5_cp_opt = True
         configs.all_reduce_backend = "nccl"
         configs.all_reduce_large_prefill = False
-        server = MagicMock()
-        comm_config = NcclCommConfig()
-        server.get_nccl_comm_config.return_value = comm_config
-        server.get_nccl_init_port.return_value = 29501
+        configs.distribute_config.world_info = WorldInfo(
+            host_addresses=("127.0.0.1:31000",), collective_master=("127.0.0.2", 29512)
+        )
         from rtp_llm.models_py.distributed import pynccl_cp
 
         def check_cp_configuration(*args, **kwargs):
@@ -59,7 +58,6 @@ class BackendManagerStartupTest(unittest.TestCase):
         with (
             patch.object(pynccl_cp, "_OPT_ENABLED", False),
             patch.object(backend_manager, "AccessLogger"),
-            patch.object(backend_manager, "DistributedServer", return_value=server),
             patch.object(backend_manager.kmonitor, "init"),
             patch.object(
                 backend_manager,
@@ -68,7 +66,12 @@ class BackendManagerStartupTest(unittest.TestCase):
             ) as initialize,
             patch.object(
                 backend_manager,
-                "get_world_info",
+                "update_worker_addrs",
+                wraps=backend_manager.update_worker_addrs,
+            ) as update,
+            patch.object(
+                backend_manager.ModelFactory,
+                "create_model_config",
                 side_effect=RuntimeError("stop before model loading"),
             ),
         ):
@@ -77,11 +80,23 @@ class BackendManagerStartupTest(unittest.TestCase):
                 manager.start()
         initialize.assert_called_once_with(
             configs.parallelism_config,
-            nccl_comm_config=comm_config,
+            nccl_comm_config=manager._topology.get_nccl_comm_config(),
             nccl_init_port=29501,
             backend="nccl",
             collective_config=CollectiveConfig("nccl", False),
             timeout=configs.distribute_config.dist_comm_timeout,
+        )
+        self.assertIs(
+            manager._topology.world_info, configs.distribute_config.world_info
+        )
+        self.assertEqual(manager._topology.world_info.master, ("127.0.0.1", 31000))
+        self.assertEqual(
+            initialize.call_args.kwargs["nccl_comm_config"].nccl_ip, "127.0.0.2"
+        )
+        stride = configs.server_config.worker_info_port_num
+        self.assertEqual(
+            update.call_args.args[0].worker_grpc_addrs,
+            ["127.0.0.1:31001", f"127.0.0.1:{31001 + stride}"],
         )
 
 
@@ -209,7 +224,7 @@ class BackendManagerDeepEPTest(unittest.TestCase):
             with self.subTest(strategy=strategy):
                 manager = BackendManager.__new__(BackendManager)
                 manager.py_env_configs = Mock()
-                manager._distributed_server = Mock()
+                manager._topology = Mock()
                 manager._mark_serving_when_ready = Mock()
                 config = Mock()
                 config.parallelism_config.world_size = 4
@@ -226,7 +241,6 @@ class BackendManagerDeepEPTest(unittest.TestCase):
                         EngineConfig=Mock(create=Mock(return_value=config)),
                         ModelFactory=factory,
                         init_distributed_environment=Mock(),
-                        get_world_info=Mock(),
                         update_worker_addrs=Mock(),
                         validate_hw_kernel_group_args=Mock(),
                     ),

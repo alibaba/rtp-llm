@@ -182,8 +182,11 @@ class PortManager:
 
     @staticmethod
     def is_port_available(port: int) -> bool:
-        with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
+        family = socket.AF_INET6 if socket.has_dualstack_ipv6() else socket.AF_INET
+        with closing(socket.socket(family, socket.SOCK_STREAM)) as sock:
             try:
+                if family == socket.AF_INET6:
+                    sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
                 sock.bind(("", port))
                 return True
             except socket.error:
@@ -207,6 +210,14 @@ class PortsContext:
     def __enter__(self):
         self.ports, self.locks = self.manager.get_consecutive_ports(self.num_ports)
         return self.ports
+
+    @classmethod
+    def reserve_for_test(cls, test_case, num_ports: int = 1):
+        """Hold the port locks until unittest finishes this test's cleanups."""
+        context = cls(num_ports=num_ports)
+        ports = context.__enter__()
+        test_case.addCleanup(context.__exit__, None, None, None)
+        return ports
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self.locks:

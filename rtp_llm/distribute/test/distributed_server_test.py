@@ -1,513 +1,275 @@
 import json
-import multiprocessing
 import os
 import socket
-import threading
-import time
 import unittest
-from multiprocessing import Process
-from types import SimpleNamespace
-from unittest import TestCase
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from copy import copy
+from datetime import timedelta
+from multiprocessing import get_context
+from pathlib import Path
 from unittest.mock import patch
 
-import torch
+import torch.distributed as dist
+from torch.distributed import DistStoreError
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import set_parallelism_config
-
-torch.cuda.set_device = lambda x: None
-
-from typing import Any, Dict
-
-import rtp_llm.distribute.distributed_server as ds
-from rtp_llm.config.server_config_setup import setup_and_configure_server
-from rtp_llm.distribute.distributed_server import get_world_info
-from rtp_llm.distribute.test.fake_model import FakeModel
-from rtp_llm.frontend.frontend_server import FrontendWorker
-from rtp_llm.model_factory_register import register_model
-from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
-from rtp_llm.server.server_args.server_args import setup_args
+from rtp_llm.distribute.distributed_server import (
+    DistributedServer,
+    get_local_workers,
+    get_master,
+)
+from rtp_llm.distribute.host_bootstrap import prepare_host
+from rtp_llm.distribute.worker_topology import WorkerTopology
+from rtp_llm.test.utils.port_util import PortsContext
 
 
-def fake_init(self, *args, **kwargs):
-    self.model_config = None
-    self.tokenizer = None
-    self.model_cls = None
-    self.pipeline = None
-    self.backend_rpc_server_visitor = None
-
-
-FrontendWorker.__init__ = fake_init
-OpenaiEndpoint.__init__ = fake_init
-
-
-class FakeStore:
-    def __init__(self):
-        self._data: Dict[str, bytes] = {}
-
-    def set(self, key: str, value: str):
-        self._data[key] = value.encode("utf-8")
-
-    def get(self, key: str) -> bytes:
-        if key not in self._data:
-            raise RuntimeError(f"Key {key} not found")
-        return self._data[key]
-
-
-def test_get_ip_with_ip():
-    assert ds.get_ip("127.0.0.1") == "127.0.0.1"
-
-
-def init_server(
-    py_env_configs: PyEnvConfigs,
-    rank: int,
-    world_size: int,
-    stop_event: threading.Event,
-):
-
-    py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
-    set_parallelism_config(
-        py_env_configs.parallelism_config, rank
+def _validate_worker_partition(config, port, counts):
+    pc = config.parallelism_config
+    dist.init_process_group(
+        backend="gloo",
+        init_method=f"tcp://127.0.0.1:{port}",
+        world_size=pc.world_size,
+        rank=pc.world_rank,
+        timeout=timedelta(seconds=15),
     )
-    py_env_configs.server_config.set_local_rank(
-        py_env_configs.parallelism_config.local_rank
-    )
-    py_env_configs.distribute_config.set_local_rank(
-        py_env_configs.parallelism_config.local_rank
-    )
-    ds.DistributedServer(py_env_configs, rank, world_size)
-    while not stop_event.is_set():
-        time.sleep(1)
+    try:
+        store = dist.distributed_c10d._get_default_store()
+        group_timeout = store.timeout
+        error = None
+        if counts is not None:
+            pc.pp_stage_layer_counts = counts
+            try:
+                WorkerTopology(config).validate_pp_partition_consistency(pc)
+            except RuntimeError as exc:
+                error = str(exc)
+        if store.timeout != group_timeout:
+            raise AssertionError("PP validation changed the process group's timeout")
+        dist.barrier()
+        return error
+    finally:
+        dist.destroy_process_group()
 
 
-def regist_server(
-    py_env_configs: PyEnvConfigs,
-    rank: int,
-    world_size: int,
-    stop_event: threading.Event,
-):
-    py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
-    set_parallelism_config(
-        py_env_configs.parallelism_config, rank
-    )
-    py_env_configs.server_config.set_local_rank(
-        py_env_configs.parallelism_config.local_rank
-    )
-    py_env_configs.distribute_config.set_local_rank(
-        py_env_configs.parallelism_config.local_rank
-    )
-    server = ds.DistributedServer(py_env_configs, rank, world_size)
-    server.regist()
-    while not stop_event.is_set():
-        time.sleep(1)
-
-
-def start_server(
-    py_env_configs: PyEnvConfigs,
-    rank: int,
-    world_size: int,
-):
-    py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
-    set_parallelism_config(
-        py_env_configs.parallelism_config, rank
-    )
-    py_env_configs.server_config.set_local_rank(
-        py_env_configs.parallelism_config.local_rank
-    )
-    py_env_configs.distribute_config.set_local_rank(
-        py_env_configs.parallelism_config.local_rank
-    )
-    server = ds.DistributedServer(py_env_configs, rank, world_size)
-    server.start(py_env_configs)
-    while True:
-        time.sleep(1)
-
-
-class TestGetWorldInfo(TestCase):
-
-    @patch.dict(
-        "os.environ",
-        {
-            "TP_SIZE": "2",
-            "PP_SIZE": "1",
-            "WORLD_SIZE": "2",
-            "WORLD_RANK": "0",
-            "LOCAL_WORLD_SIZE": "2",
-            "START_PORT": "20000",
-            "WORKER_INFO_PORT_NUM": "8",
-            "MODEL_TYPE": "fake_model",
-        },
-        clear=True,
-    )
-    def test_single_node(self):
-        py_env_configs: PyEnvConfigs = setup_args()
-        from rtp_llm.config.server_config_setup import (
-            fetch_model_files_to_local,
-            setup_default_args,
-        )
-
-        setup_default_args(py_env_configs)
-        fetch_model_files_to_local(py_env_configs)
-        setup_and_configure_server(py_env_configs)
-        py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
-
-        world_info = get_world_info(
-            py_env_configs.server_config,
-            py_env_configs.distribute_config,
-            py_env_configs.parallelism_config,
-        )
-        self.assertTrue(world_info.initialized)
-        self.assertEqual(len(world_info.members), 2)
-        self.assertEqual(world_info.members[0].server_port, 20000)
-        self.assertEqual(world_info.members[1].server_port, 20008)
-
-
-class PPPartitionConsistencyTest(unittest.TestCase):
-    @staticmethod
-    def _config(world_rank=0, world_size=4, pp_size=2):
-        return SimpleNamespace(
-            pp_size=pp_size,
-            world_rank=world_rank,
-            world_size=world_size,
-            pp_stage_layer_counts=[2, 3] if pp_size > 1 else [],
-        )
-
-    @staticmethod
-    def _server():
-        server = ds.DistributedServer.__new__(ds.DistributedServer)
-        server.store = FakeStore()
-        return server
-
-    def test_rank_publishes_and_validates_all_snapshots(self):
-        server = self._server()
-        for rank in (0, 1, 3):
-            server.store.set(
-                server.PP_PARTITION_SNAPSHOT_KEY + str(rank),
-                json.dumps([2, 3]),
-            )
-
-        server.validate_pp_partition_consistency(self._config(world_rank=2))
-
-        snapshot = json.loads(
-            server.store.get(server.PP_PARTITION_SNAPSHOT_KEY + "2").decode("utf-8")
-        )
-        self.assertEqual(snapshot, [2, 3])
-
-    def test_missing_rank_snapshot_becomes_bounded_store_failure(self):
-        server = self._server()
-        with self.assertRaisesRegex(RuntimeError, "world_rank=1"):
-            server.validate_pp_partition_consistency(
-                self._config(world_size=2)
-            )
-
-    def test_single_stage_does_not_touch_store(self):
-        server = self._server()
-        server.validate_pp_partition_consistency(
-            self._config(world_size=1, pp_size=1)
-        )
-        self.assertEqual(server.store._data, {})
-
-
+@patch.dict(os.environ)
 class DistributedServerTest(unittest.TestCase):
-    def __init__(self, *args, **kwargs):
-        self.maxDiff = None
-        super().__init__(*args, **kwargs)
-
-        def test_get_master_from_json(self):
-            gang_info_json: Dict[str, Any] = {
-                "worker_part0": {"ip": "10.0.0.1"},
-                "worker_part1": {"ip": "10.0.0.2"},
-            }
-            ip, port = ds.get_master_from_json(gang_info_json)
-            assert ip == "10.0.0.1"
-            assert port == ""
-
-        def test_get_master_from_json_no_part0(self):
-            gang_info_json: Dict[str, Any] = {
-                "worker_part1": {"ip": "10.0.0.2"},
-            }
-            ip, port = ds.get_master_from_json(gang_info_json)
-            assert ip == ""
-            assert port == ""
-
-        def test_get_master_from_test_env(self):
-            env_str = "name:worker_part1,ip:10.0.0.2;name:worker_part0,ip:10.0.0.1"
-            ip, port = ds.get_master_from_test_env(env_str)
-            assert ip == "10.0.0.1"
-            assert port == ""
-
-        def test_get_master_from_test_env_not_found(self):
-            env_str = "name:worker_part1,ip:10.0.0.2"
-            ip, port = ds.get_master_from_test_env(env_str)
-            assert ip == ""
-            assert port == ""
-
-        @patch.dict(
-            "os.environ",
-            {
-                "DISTRIBUTE_CONFIG_FILE": "rtp_llm/distribute/test/testdata/parallel.json",
-                "TP_SIZE": "2",
-                "PP_SIZE": "1",
-                "WORLD_SIZE": "2",
-                "WORLD_RANK": "0",
-                "LOCAL_WORLD_SIZE": "1",
-                "MODEL_TYPE": "fake_model",
-            },
-            clear=True,
-        )
-        def test_get_master_use_distribute_config_file(self):
-            py_env_configs: PyEnvConfigs = setup_args()
-            setup_and_configure_server(py_env_configs)
-
-            ip, port = ds.get_master(
-                py_env_configs.distribute_config,
-                py_env_configs.parallelism_config,
+    def hosts(self, local_size=2, pp_size=1):
+        (store_port,) = PortsContext.reserve_for_test(self)
+        base = store_port + 1
+        configs = []
+        for i in range(2):
+            cfg = PyEnvConfigs()
+            pc = cfg.parallelism_config
+            pc.world_size = local_size * 2
+            pc.local_world_size = local_size
+            pc.tp_size = local_size
+            pc.pp_size = pp_size
+            pc.dp_size = 2 // pp_size
+            pc.ep_size = 0
+            set_parallelism_config(pc, i * local_size)
+            sc = cfg.server_config
+            sc.ip = f"127.0.0.{i + 1}"
+            sc.start_port = base
+            sc.worker_info_port_num = 10
+            cfg.distribute_config.dist_comm_timeout = 2
+            cfg.distribute_config.gang_timeout_min = 5 / 60
+            cfg.distribute_config.gang_config_string = (
+                f"name:worker_part0,ip:127.0.0.1,port:{base}"
             )
-            assert ip == "11.161.48.116"
-            assert port == "10000"
+            configs.append(cfg)
+        return configs
 
-        @patch.dict(
-            "os.environ",
-            {
-                "GANG_CONFIG_STRING": "name:worker_part0,ip:10.0.0.123",
-                "TP_SIZE": "2",
-                "PP_SIZE": "1",
-                "WORLD_SIZE": "2",
-                "WORLD_RANK": "0",
-                "LOCAL_WORLD_SIZE": "1",
-                "MODEL_TYPE": "fake_model",
-            },
-            clear=True,
-        )
-        def test_get_master_use_gang_config_string(self):
-            py_env_configs: PyEnvConfigs = setup_args()
-            setup_and_configure_server(py_env_configs)
-            ip, port = ds.get_master(
-                py_env_configs.distribute_config,
-                py_env_configs.parallelism_config,
-            )
-            assert ip == "10.0.0.123"
-            assert port == ""
-
-        @patch.dict(
-            "os.environ",
-            {
-                "LEADER_ADDRESS": "10.0.0.5",
-                "TP_SIZE": "2",
-                "PP_SIZE": "1",
-                "WORLD_SIZE": "2",
-                "WORLD_RANK": "0",
-                "LOCAL_WORLD_SIZE": "1",
-                "MODEL_TYPE": "fake_model",
-            },
-            clear=True,
-        )
-        def test_get_master_use_leader_address(self):
-            py_env_configs: PyEnvConfigs = setup_args()
-            setup_and_configure_server(py_env_configs)
-
-            ip, port = ds.get_master(
-                py_env_configs.distribute_config,
-                py_env_configs.parallelism_config,
-            )
-            assert ip == "10.0.0.5"
-            assert port == ""
-
-        @patch.dict(
-            "os.environ",
-            {
-                "GANG_ANNOCATION_PATH": "rtp_llm/distribute/test/testdata/annocation",
-                "TP_SIZE": "2",
-                "PP_SIZE": "1",
-                "WORLD_SIZE": "2",
-                "WORLD_RANK": "0",
-                "LOCAL_WORLD_SIZE": "1",
-                "MODEL_TYPE": "fake_model",
-            },
-            clear=True,
-        )
-        def test_get_master_use_c2_file(self):
-            py_env_configs: PyEnvConfigs = setup_args()
-            setup_and_configure_server(py_env_configs)
-            ip, port = ds.get_master(
-                py_env_configs.distribute_config,
-                py_env_configs.parallelism_config,
-            )
-            # 具体 IP 取决于 annocation 文件的内容，这里只检查非空
-            assert isinstance(ip, str)
-            assert ip == "33.115.125.211"
-            assert port == ""
-
-        @patch.dict(
-            "os.environ",
-            {
-                "WORLD_SIZE": "1",
-                "WORLD_RANK": "0",
-                "LOCAL_WORLD_SIZE": "1",
-                "MODEL_TYPE": "fake_model",
-            },
-            clear=True,
-        )
-        def test_get_master_single_machine(self):
-            py_env_configs: PyEnvConfigs = setup_args()
-            setup_and_configure_server(py_env_configs)
-
-            ip, port = ds.get_master(
-                py_env_configs.distribute_config,
-                py_env_configs.parallelism_config,
-            )
-            assert ip == socket.gethostbyname(socket.gethostname())
-            assert port == ""
-
-        @patch.dict(
-            "os.environ",
-            {
-                "DISTRIBUTE_CONFIG_FILE": "rtp_llm/distribute/test/testdata/parallel.json",
-                "MODEL_TYPE": "fake_model",
-            },
-            clear=True,
-        )
-        def test_get_master_from_file(self):
-            py_env_configs: PyEnvConfigs = setup_args()
-            setup_and_configure_server(py_env_configs)
-            ip, port = ds.get_master_from_file()
-            assert ip == "11.161.48.116"
-            assert port == "10000"
-
-        @patch.dict(
-            "os.environ",
-            {
-                "GANG_ANNOCATION_PATH": "rtp_llm/distribute/test/testdata/annocation",
-                "MODEL_TYPE": "fake_model",
-            },
-            clear=True,
-        )
-        def test_get_master_from_c2(self):
-            py_env_configs: PyEnvConfigs = setup_args()
-            setup_and_configure_server(py_env_configs)
-            ip, port = ds.get_master_from_c2()
-            assert ip == "33.115.125.211"
-            assert port == ""
-
-        @patch.dict(
-            "os.environ",
-            {
-                "TP_SIZE": "2",
-                "PP_SIZE": "1",
-                "WORLD_SIZE": "2",
-                "WORLD_RANK": "0",
-                "LOCAL_WORLD_SIZE": "2",
-                "WORKER_INFO_PORT_NUM": "7",
-                "START_PORT": "20000",
-                "MODEL_TYPE": "fake_model",
-            },
-            clear=True,
-        )
-        def test_distributed_server_safe_store_set_get(self):
-            py_env_configs: PyEnvConfigs = setup_args()
-            setup_and_configure_server(py_env_configs)
-            stop_event = threading.Event()
-
-            t = threading.Thread(
-                target=init_server, args=(py_env_configs, 1, 2, stop_event)
-            )
-            t.start()
-            py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
-            set_parallelism_config(
-                py_env_configs.parallelism_config,
+    def prepare(self, configs):
+        with ThreadPoolExecutor(max_workers=len(configs)) as pool:
+            results = list(pool.map(prepare_host, configs))
+        self.assertEqual(results, [True] * len(configs))
+        with socket.socket() as client:
+            self.assertNotEqual(
+                client.connect_ex(
+                    ("127.0.0.1", configs[0].server_config.start_port - 1)
+                ),
                 0,
             )
-            py_env_configs.server_config.set_local_rank(
-                py_env_configs.parallelism_config.local_rank
+
+    def test_host_layout_rejects_zero_or_nondividing_local_size(self):
+        config = PyEnvConfigs()
+        config.parallelism_config.world_size = 4
+        for local_size in (0, 3):
+            config.parallelism_config.local_world_size = local_size
+            with (
+                self.subTest(local_size=local_size),
+                self.assertRaisesRegex(ValueError, "Invalid host layout"),
+            ):
+                DistributedServer(config)
+
+    def test_two_hosts_register_two_records_for_eight_ranks(self):
+        configs = self.hosts(local_size=4)
+        configs[1].server_config.start_port += 200
+        servers = [DistributedServer(config) for config in configs]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(DistributedServer.start, servers))
+            for index, config in enumerate(configs):
+                sc = config.server_config
+                self.assertEqual(
+                    servers[index].store.timeout,
+                    timedelta(minutes=config.distribute_config.gang_timeout_min),
+                )
+                self.assertEqual(
+                    json.loads(servers[0].store.get(f"startup_host/{index}")),
+                    {
+                        "layout": [8, 4],
+                        "address": f"{sc.ip}:{sc.start_port}",
+                    },
+                )
+            self.assertFalse(servers[0].store.check(["startup_host/2"]))
+
+    def test_workers_expand_all_eight_addresses_after_store_closes(self):
+        configs = self.hosts(local_size=4)
+        configs[1].server_config.start_port += 200
+        for config in configs:
+            config.server_config.worker_info_port_num = 17
+        self.prepare(configs)
+        expected = []
+        for config in configs:
+            sc = copy(config.server_config)
+            for slot in range(4):
+                sc.set_local_rank(slot)
+                expected.append((sc.ip, sc.server_port))
+        for rank in range(8):
+            cfg = configs[rank // 4]
+            pc = cfg.parallelism_config
+            set_parallelism_config(pc, rank)
+            worker = WorkerTopology(cfg)
+            worker.validate_pp_partition_consistency(pc)
+            world = worker.world_info
+            self.assertIs(world, cfg.distribute_config.world_info)
+            self.assertEqual(len(world.host_addresses), 2)
+            members = world.members(cfg)
+            self.assertEqual([(m.ip, m.server_port) for m in members], expected)
+            self.assertEqual(members[0].world_rank, 0)
+            self.assertEqual(
+                (members[rank].world_rank, members[rank].local_rank), (rank, rank % 4)
             )
-            py_env_configs.distribute_config.set_local_rank(
-                py_env_configs.parallelism_config.local_rank
-            )
-            server = ds.DistributedServer(
-                py_env_configs,
-                rank=0,
-                world_size=2,
+            self.assertEqual(
+                worker.get_nccl_init_port(), configs[0].server_config.start_port - 11
             )
 
-            server.safe_store_set("foo", "bar")
-            assert server.safe_store_get("foo") == "bar"
-            stop_event.set()
+    def test_missing_host_times_out_before_workers_start(self):
+        root, _ = self.hosts()
+        root.distribute_config.gang_timeout_min = 1 / 60
+        with self.assertRaises(DistStoreError):
+            prepare_host(root)
+        self.assertIsNone(root.distribute_config.world_info)
 
-        def test_split_ip_port_valid(self):
-            ip, port = ds.split_ip_port("1.2.3.4:1234")
-            assert ip == "1.2.3.4"
-            assert port == 1234
+    def test_registration_error_releases_the_startup_store(self):
+        root, _ = self.hosts()
+        server = DistributedServer(root)
+        with (
+            patch("rtp_llm.distribute.distributed_server.TCPStore") as store,
+            patch.object(
+                server, "bootstrap", side_effect=ValueError("registration failed")
+            ),
+            self.assertRaisesRegex(ValueError, "registration failed"),
+            server.rendezvous(),
+        ):
+            self.fail("registration failed before the final exchange")
+        store.assert_called_once()
+        self.assertIsNone(server.store)
 
-        def test_split_ip_port_invalid_no_colon(self):
-            ip, port = ds.split_ip_port("1.2.3.4")
-            assert ip == ""
-            assert port == 0
+    def test_single_host_multi_rank_uses_local_addresses_without_a_store(self):
+        config = PyEnvConfigs()
+        pc = config.parallelism_config
+        pc.world_size = pc.local_world_size = 4
+        config.server_config.ip = "127.0.0.1"
+        port = config.server_config.start_port
+        with (
+            patch("rtp_llm.distribute.distributed_server.TCPStore") as store,
+            patch("socket.gethostname", return_value="127.0.0.42"),
+            DistributedServer(config).rendezvous() as server,
+        ):
+            store.assert_not_called()
+            self.assertEqual(server.world_info.host_addresses, (f"127.0.0.1:{port}",))
+            self.assertEqual(server.world_info.collective_master, ("127.0.0.42", port))
 
-        def test_split_ip_port_invalid_port_not_digit(self):
-            ip, port = ds.split_ip_port("1.2.3.4:abc")
-            assert ip == ""
-            assert port == 0
+    def test_multi_rank_worker_requires_prepared_world(self):
+        root, _ = self.hosts()
+        with self.assertRaises(RuntimeError):
+            WorkerTopology(root)
 
-        def test_split_ip_port_empty_ip(self):
-            ip, port = ds.split_ip_port(":1234")
-            assert ip == ""
-            assert port == 0
-
-        @patch.dict(
-            "os.environ",
-            {
-                "TP_SIZE": "2",
-                "PP_SIZE": "1",
-                "WORLD_SIZE": "2",
-                "WORLD_RANK": "0",
-                "LOCAL_WORLD_SIZE": "2",
-                "WORKER_INFO_PORT_NUM": "7",
-                "START_PORT": "20000",
-                "GANG_TIMEOUT_MIN": "1",
-                "GANG_SLEEP_TIME": "0",
-                "MODEL_TYPE": "fake_model",
-            },
-            clear=True,
+    def test_single_rank_worker_needs_no_host_rendezvous(self):
+        cfg = PyEnvConfigs()
+        cfg.server_config.ip = "127.0.0.1"
+        pc = cfg.parallelism_config
+        pc.local_world_size = 4
+        with patch("rtp_llm.distribute.distributed_server.TCPStore") as store:
+            self.assertTrue(prepare_host(cfg))
+            worker = WorkerTopology(cfg)
+            self.assertIs(worker.world_info, cfg.distribute_config.world_info)
+            cfg.distribute_config.world_info = None
+            self.assertEqual(WorkerTopology(cfg).world_info, worker.world_info)
+            store.assert_not_called()
+        world = worker.world_info
+        (member,) = world.members(cfg)
+        self.assertEqual((member.world_rank, member.local_rank), (0, 0))
+        self.assertEqual(
+            (member.ip, member.server_port), ("127.0.0.1", cfg.server_config.start_port)
         )
-        def test_distributed_server_regist_and_bootstrap(self):
-            py_env_configs: PyEnvConfigs = setup_args()
-            setup_and_configure_server(py_env_configs)
-            stop_event = threading.Event()
+        self.assertEqual(world.master, (member.ip, member.server_port))
+        worker.validate_pp_partition_consistency(pc)
 
-            # rank1
-            stop_event = threading.Event()
-            t = threading.Thread(
-                target=regist_server, args=(py_env_configs, 1, 2, stop_event)
+    def validate_partitions(self, peer_counts):
+        configs = self.hosts(local_size=1, pp_size=2)
+        self.prepare(configs)
+        if peer_counts is None:
+            configs[0].distribute_config.dist_comm_timeout = 1
+        (port,) = PortsContext.reserve_for_test(self)
+        with ProcessPoolExecutor(
+            max_workers=2, mp_context=get_context("spawn")
+        ) as pool:
+            return list(
+                pool.map(
+                    _validate_worker_partition,
+                    configs,
+                    (port, port),
+                    ([2, 3], peer_counts),
+                )
             )
-            t.start()
 
-            # rank0
-            py_env_configs_0: PyEnvConfigs = setup_args()
-            setup_and_configure_server(py_env_configs_0)
-            stop_event = threading.Event()
-            py_env_configs_0.server_config.ip = socket.gethostbyname(
-                socket.gethostname()
-            )
-            set_parallelism_config(
-                py_env_configs_0.parallelism_config,
-                0,
-            )
-            py_env_configs_0.server_config.set_local_rank(
-                py_env_configs_0.parallelism_config.local_rank
-            )
-            py_env_configs_0.distribute_config.set_local_rank(
-                py_env_configs_0.parallelism_config.local_rank
-            )
-            server0 = ds.DistributedServer(
-                py_env_configs_0,
-                rank=0,
-                world_size=2,
-            )
-            server0.bootstrap()
+    def test_matching_pp_partitions_on_all_workers(self):
+        self.assertEqual(self.validate_partitions([2, 3]), [None, None])
 
-            assert len(server0._world_info.members) == 2
-            assert server0._world_info.master is not None
-            stop_event.set()
+    def test_all_workers_reject_mismatched_pp_partitions(self):
+        for error in self.validate_partitions([3, 2]):
+            self.assertRegex(error, "inconsistent PP layer partitions")
+
+    def test_missing_pp_worker_times_out_during_partition_validation(self):
+        root_error, _ = self.validate_partitions(None)
+        self.assertRegex(root_error, "PP partition snapshot from world_rank=1")
+
+    def test_local_view_without_a_backend_uses_local_port_stride(self):
+        cfg = self.hosts()[0]
+        members = get_local_workers(cfg)
+        self.assertEqual(
+            [m.server_port for m in members],
+            [cfg.server_config.start_port, cfg.server_config.start_port + 10],
+        )
+
+    def test_discovery_sources_resolve_original_master(self):
+        root, _ = self.hosts()
+        dc, pc = root.distribute_config, root.parallelism_config
+        data = Path(__file__).with_name("testdata")
+        dc.distribute_config_file = str(data / "parallel.json")
+        self.assertEqual(get_master(dc, pc), ("11.161.48.116", "10000"))
+        dc.distribute_config_file = ""
+        self.assertEqual(
+            get_master(dc, pc), ("127.0.0.1", str(root.server_config.start_port))
+        )
+        dc.gang_config_string = ""
+        dc.leader_address = "127.0.0.2"
+        self.assertEqual(get_master(dc, pc), ("127.0.0.2", ""))
+        dc.leader_address = ""
+        dc.gang_annocation_path = str(data / "annocation")
+        self.assertEqual(get_master(dc, pc), ("33.115.125.211", ""))
 
 
 if __name__ == "__main__":

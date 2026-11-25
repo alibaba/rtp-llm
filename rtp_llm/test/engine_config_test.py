@@ -24,8 +24,8 @@ class EngineConfigTest(TestCase):
         config.dp_rank = 0
         return config
 
-    def _world_info(self):
-        members = [
+    def _members(self):
+        return [
             SimpleNamespace(
                 world_rank=0,
                 ip="127.0.0.1",
@@ -41,7 +41,6 @@ class EngineConfigTest(TestCase):
                 rpc_server_port=13010,
             ),
         ]
-        return SimpleNamespace(members=members)
 
     def test_update_worker_addrs_formats_by_role_and_orders_by_rank(self):
         legacy = ["127.0.0.1:12000:12100", "127.0.0.2:12010:12110"]
@@ -53,9 +52,11 @@ class EngineConfigTest(TestCase):
         ):
             with self.subTest(role=role):
                 runtime = RuntimeConfig()
-                world = self._world_info()
-                world.members.reverse()
-                update_worker_addrs(runtime, self._parallelism_config(), world, role_type=role)
+                members = self._members()
+                members.reverse()
+                update_worker_addrs(
+                    runtime, self._parallelism_config(), members, role_type=role
+                )
                 self.assertEqual(runtime.worker_addrs, expected)
                 self.assertEqual(
                     runtime.worker_grpc_addrs, ["127.0.0.1:13000", "127.0.0.2:13010"]
@@ -63,76 +64,70 @@ class EngineConfigTest(TestCase):
 
     def test_update_worker_addrs_rejects_p2p_port_outside_worker_block(self):
         runtime_config = RuntimeConfig()
-        world_info = SimpleNamespace(
-            members=[
-                SimpleNamespace(
-                    world_rank=0,
-                    ip="127.0.0.1",
-                    server_port=12000,
-                    _worker_info_port_num=3,
-                    cache_store_listen_port=12002,
-                    cache_store_rdma_listen_port=12004,
-                    rpc_server_port=12001,
-                )
-            ]
-        )
+        members = [
+            SimpleNamespace(
+                world_rank=0,
+                ip="127.0.0.1",
+                server_port=12000,
+                _worker_info_port_num=3,
+                cache_store_listen_port=12002,
+                cache_store_rdma_listen_port=12004,
+                rpc_server_port=12001,
+            )
+        ]
 
         with self.assertRaisesRegex(ValueError, "reserved port block"):
             update_worker_addrs(
                 runtime_config,
                 self._parallelism_config(),
-                world_info,
+                members,
                 role_type=RoleType.PREFILL,
             )
 
     def test_update_worker_addrs_rejects_p2p_port_conflict(self):
         runtime_config = RuntimeConfig()
-        world_info = SimpleNamespace(
-            members=[
-                SimpleNamespace(
-                    world_rank=0,
-                    ip="127.0.0.1",
-                    cache_store_listen_port=12000,
-                    cache_store_rdma_listen_port=12001,
-                    rpc_server_port=13000,
-                )
-            ]
-        )
+        members = [
+            SimpleNamespace(
+                world_rank=0,
+                ip="127.0.0.1",
+                cache_store_listen_port=12000,
+                cache_store_rdma_listen_port=12001,
+                rpc_server_port=13000,
+            )
+        ]
 
         with self.assertRaisesRegex(ValueError, "cache_store_rdma_listen_port"):
             update_worker_addrs(
                 runtime_config,
                 self._parallelism_config(),
-                world_info,
+                members,
                 role_type=RoleType.PREFILL,
             )
 
     def test_update_worker_addrs_rejects_duplicate_p2p_port_on_same_ip(self):
         runtime_config = RuntimeConfig()
-        world_info = SimpleNamespace(
-            members=[
-                SimpleNamespace(
-                    world_rank=0,
-                    ip="127.0.0.1",
-                    cache_store_listen_port=12000,
-                    cache_store_rdma_listen_port=12100,
-                    rpc_server_port=13000,
-                ),
-                SimpleNamespace(
-                    world_rank=1,
-                    ip="127.0.0.1",
-                    cache_store_listen_port=12000,
-                    cache_store_rdma_listen_port=12110,
-                    rpc_server_port=13010,
-                ),
-            ]
-        )
+        members = [
+            SimpleNamespace(
+                world_rank=0,
+                ip="127.0.0.1",
+                cache_store_listen_port=12000,
+                cache_store_rdma_listen_port=12100,
+                rpc_server_port=13000,
+            ),
+            SimpleNamespace(
+                world_rank=1,
+                ip="127.0.0.1",
+                cache_store_listen_port=12000,
+                cache_store_rdma_listen_port=12110,
+                rpc_server_port=13010,
+            ),
+        ]
 
         with self.assertRaisesRegex(ValueError, "duplicate p2p_transfer_port"):
             update_worker_addrs(
                 runtime_config,
                 self._parallelism_config(),
-                world_info,
+                members,
                 role_type=RoleType.PREFILL,
             )
 

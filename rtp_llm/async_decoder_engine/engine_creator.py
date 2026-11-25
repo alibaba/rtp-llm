@@ -18,7 +18,6 @@ def create_engine(
     model: "BaseModel",
     engine_config: "EngineConfig",
     alog_conf_path: str,
-    world_info=None,
     propose_model: Optional["ProposeModel"] = None,
 ) -> "BaseEngine":
     """
@@ -28,7 +27,6 @@ def create_engine(
         model: The BaseModel instance
         engine_config: EngineConfig instance containing runtime and parallelism configs
         alog_conf_path: Path to the alog configuration file
-        world_info: Distributed world info (e.g., from get_world_info())
         propose_model: Optional propose model for speculative decoding
         mm_process_engine: Optional MMProcessEngine instance for multimodal processing in EmbeddingCppEngine
 

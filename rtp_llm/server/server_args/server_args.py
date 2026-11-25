@@ -41,7 +41,10 @@ from rtp_llm.server.server_args.master_group_args import init_master_group_args
 from rtp_llm.server.server_args.misc_group_args import init_misc_group_args
 from rtp_llm.server.server_args.model_group_args import init_model_group_args
 from rtp_llm.server.server_args.moe_group_args import init_moe_group_args
-from rtp_llm.server.server_args.parallel_group_args import init_parallel_group_args
+from rtp_llm.server.server_args.parallel_group_args import (
+    default_local_world_size,
+    init_parallel_group_args,
+)
 from rtp_llm.server.server_args.pd_separation_group_args import (
     init_pd_separation_group_args,
 )
@@ -545,6 +548,9 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
 
     # 解析参数（会自动应用所有配置绑定）
     parsed_args = parser.parse_args(args)
+    pc = py_env_configs.parallelism_config
+    if parsed_args.local_world_size is None:
+        pc.local_world_size = default_local_world_size(pc.world_size)
     py_env_configs.server_config.validate_allocator_dump_config()
     kv_cache_config = py_env_configs.kv_cache_config
     server_address, vipserver_domain = normalize_kvcm_address(

@@ -260,6 +260,17 @@ def has_overlap_kmp(a: str, b: str) -> bool:
     return prefix[-1] > 0
 
 
+def split_ip_port(addr: str) -> tuple[str, int]:
+    """Split a registered host:port address, returning ("", 0) if malformed."""
+    addr = addr.strip()
+    host, _, port = addr.rpartition(":")
+    if host and port.isdigit():
+        return host, int(port)
+    if addr:
+        logging.warning("error address: %s", addr)
+    return "", 0
+
+
 def wait_sever_done(
     server_process, port: int, timeout: int = 1600, health_check_path: str = "/health"
 ):

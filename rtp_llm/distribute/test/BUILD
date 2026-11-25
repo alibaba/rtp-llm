@@ -1,4 +1,13 @@
 py_test(
+    name = "startup_rank_selection_test",
+    srcs = ["startup_rank_selection_test.py"],
+    data = ["//rtp_llm:sdk"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "0"},
+    timeout = "short",
+)
+
+py_test(
     name = "eplb_control_test",
     srcs = ["eplb_control_test.py"],
     deps = ["//rtp_llm:testlib"],
@@ -20,19 +29,9 @@ filegroup(
     ]),
 )
 
-# Needs 2 visible devices, no interconnect and in fact no GPU compute: the test
-# stubs torch.cuda.set_device out (distributed_server_test.py:18) and registers a
-# FakeModel, so the 2 ranks only exercise gang/world-info registration over
-# localhost sockets. This target carries no architecture-specific tag; dropping
-# the old explicit GPU pin lets the ut-sm8x job
-# default (--remote_default_exec_properties=gpu=A10) take effect. Passed on sm86
-# (8x RTX 3090). A10 CI workers expose 4 GPUs, so gpu_count 2 is satisfiable.
 py_test(
     name = "distributed_server_test",
-    srcs = [
-        "distributed_server_test.py",
-        "fake_model.py",
-    ],
+    srcs = ["distributed_server_test.py"],
     data = [
         ":testdata",
         "//rtp_llm:sdk",
@@ -41,12 +40,5 @@ py_test(
         "//rtp_llm:testlib",
     ],
     timeout = 'short',
-    flaky = True,
-    imports = ["aios/kmonitor/python_client"],
-    exec_properties = {
-        "gpu": "L20_CU13",
-        "gpu_count": "2",
-    },
-    env = {"GPU_COUNT": "2"},
-    tags = ["L20_CU13"],
+    env = {"GPU_COUNT": "0"},
 )
