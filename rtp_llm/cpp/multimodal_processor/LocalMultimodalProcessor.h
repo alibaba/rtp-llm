@@ -10,10 +10,11 @@ public:
     using MultimodalProcessor::MultimodalProcessor;
 
 private:
-    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                                      std::string                                 ip_port    = "",
-                                                      int64_t                                     request_id = 0,
-                                                      grpc::ServerContext* server_context = nullptr) {
+    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput>& mm_inputs,
+                                                      const std::string&,
+                                                      int64_t              request_id,
+                                                      grpc::ServerContext* server_context,
+                                                      std::optional<bool>  input_inspection_enabled) override {
         if (mm_inputs.size() == 0) {
             return MultimodalOutput();
         } else if (!mm_process_engine_.is_none()) {
@@ -55,7 +56,9 @@ private:
                     mm_preprocess_configs,
                     request_id,
                     dashScopeMetadata(server_context, "x-dashscope-uid"),
-                    dashScopeMetadata(server_context, "x-dashscope-service"));
+                    dashScopeMetadata(server_context, "x-dashscope-service"),
+                    dashScopeMetadata(server_context, "x-dashscope-request-id"),
+                    input_inspection_enabled.has_value() ? py::cast(*input_inspection_enabled) : py::none());
                 auto mm_embedding_vec = convertPyObjectToVec(res.attr("embeddings"));
 
                 MultimodalOutput           mm_embedding_res;
@@ -111,7 +114,7 @@ private:
                 return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, error_msg);
             }
         } else {
-            return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "no mm process engine!");
+            return ErrorInfo(ErrorCode::MM_EMPTY_ENGINE_ERROR, "no mm process engine!");
         }
     }
 };

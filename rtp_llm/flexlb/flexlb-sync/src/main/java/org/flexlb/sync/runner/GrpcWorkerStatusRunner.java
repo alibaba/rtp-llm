@@ -134,9 +134,25 @@ public class GrpcWorkerStatusRunner implements Runnable {
                             syncRequestTimeoutMs,
                             roleType)
                     .thenApply(
-                            response ->
-                                    EngineStatusConverter.convertToStatusObservation(
-                                            workerStatus, response))
+                            response -> {
+                                var observed =
+                                        EngineStatusConverter.convertToStatusObservation(
+                                                workerStatus, response);
+                                if (roleType == RoleType.VIT
+                                        && observed.engine().role() == RoleType.VIT
+                                        && response.getStatusVersion() > 0
+                                        && response.getStatusVersion()
+                                                >= workerStatus
+                                                        .appliedStatusCursor()
+                                                        .statusVersion()) {
+                                    workerStatus.recordVitLoad(
+                                            pollLease,
+                                            response.getAlive() && response.hasMmInflightInputs()
+                                                    ? response.getMmInflightInputs().getValue()
+                                                    : null);
+                                }
+                                return observed;
+                            })
                     .handleAsync(
                             (observation, failure) -> {
                                 try {

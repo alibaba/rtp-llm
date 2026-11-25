@@ -17,6 +17,8 @@ CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
 from rtp_llm.config.log_config import setup_logging
+from rtp_llm.config.mm_download_domains import blocked_download_domains
+from rtp_llm.config.oss_download import export_oss_internal_region_allowlist
 from rtp_llm.config.py_config_modules import PyEnvConfigs, resolve_engine_restart_limit
 from rtp_llm.config.server_config_setup import (
     load_gpu_nic_affinity,
@@ -426,6 +428,8 @@ def _start_vit_server_impl(
         started_processes: successfully started children for failure cleanup
         service_draining: shared draining Event forwarded to each VIT child
     """
+    from rtp_llm.multimodal.greennet_hook import get_greennet_provider
+    from rtp_llm.multimodal.multimodal_util import url_data_cache_
     from rtp_llm.multimodal.vit_proxy_start_server import vit_proxy_start_server
     from rtp_llm.multimodal.vit_start_server import vit_start_server
     from rtp_llm.server.vit_proxy_server import resolve_min_healthy_workers
@@ -496,6 +500,10 @@ def _start_vit_server_impl(
                     f"max={max_rdma_port}"
                 )
 
+        url_cache_handle = url_data_cache_.share(
+            py_env_configs.vit_config.url_cache_item_num
+        )
+        verdict_cache_handle = get_greennet_provider().share_verdict_cache()
         for i in range(vit_server_count):
             internal_grpc_port = base_grpc_port + i * 2 + 1
             internal_http_port = base_grpc_port + i * 2 + 2
@@ -518,7 +526,11 @@ def _start_vit_server_impl(
                     True,  # is_proxy_mode (proxy 模式下的 worker 进程)
                     worker_rdma_port,
                 ),
-                kwargs={"service_draining": service_draining},
+                kwargs={
+                    "url_cache_handle": url_cache_handle,
+                    "verdict_cache_handle": verdict_cache_handle,
+                    "service_draining": service_draining,
+                },
                 name=f"vit_worker_{i}",
             )
             start_vit_process(process)
@@ -887,6 +899,10 @@ def main():
 
 def start_server(py_env_configs: PyEnvConfigs):
     logging.info(f"[PROCESS_START]Start server")
+    blocked_download_domains()  # Validate the inherited policy before spawning workers.
+    export_oss_internal_region_allowlist(
+        py_env_configs.vit_config.oss_internal_region_allowlist
+    )
     configure_warmup(
         py_env_configs.runtime_config.warm_up,
         py_env_configs.runtime_config.model_warm_up,

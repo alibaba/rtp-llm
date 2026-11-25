@@ -24,7 +24,11 @@ from uvicorn.loops.auto import auto_loop_setup
 
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
-from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
+from rtp_llm.config.uvicorn_config import configure_uvicorn_logging
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import StatusVersionPB
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
+    MultimodalRpcServiceStub,
+)
 from rtp_llm.server.vit_proxy_server import (
     VitProxyServer,
     resolve_default_rpc_timeout_seconds,
@@ -323,11 +327,12 @@ def start_http_server(
     sock.listen()
     fd = sock.fileno()
 
+    configure_uvicorn_logging()
     config = Config(
         app,
         fd=fd,
         loop=loop,
-        log_config=get_uvicorn_logging_config(),
+        log_config=None,
         timeout_keep_alive=timeout_keep_alive,
         h11_max_incomplete_event_size=1024 * 1024,
     )

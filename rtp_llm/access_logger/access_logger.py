@@ -227,6 +227,8 @@ class MMAccessLogger(AccessLogger):
         exception: Optional[BaseException] = None,
         response: Optional[Any] = None,
         request_id: int = 0,
+        external_request_id: str = "",
+        upload_log=None,
     ) -> None:
         if logger is None:
             return
@@ -236,32 +238,82 @@ class MMAccessLogger(AccessLogger):
             time.strftime("%Y-%m-%d %H:%M:%S", local_time)
             + f".{int((current_time % 1) * 1000):03d}"
         )
-        logger.info(
-            dump_json(
-                {
-                    "id": request_id,
-                    "query": [mm_input.to_string() for mm_input in request],
-                    "log_time": log_time,
-                    "exception": exception,
-                    "response": response,
-                }
-            )
-        )
+        record = {
+            "id": request_id,
+            "external_request_id": external_request_id or str(request_id),
+            "query": [mm_input.to_string() for mm_input in request],
+            "log_time": log_time,
+            "exception": str(exception) if exception is not None else None,
+            "response": response,
+        }
+        if upload_log is None or upload_log[0] is None or upload_log[1] is None:
+            logger.info(dump_json(record))
+            return
+
+        inspection, urls = upload_log
+
+        def write_result(_):
+            # Snapshot the ordinary result at embedding completion, and emit it
+            # once the worker/parent has finished publishing its upload URLs.
+            nonlocal record
+            if urls:
+                if len(record["query"]) == 1:
+                    record["greennet_oss_url"] = urls[0]
+                else:
+                    record["greennet_oss_urls"] = [
+                        urls.get(i) for i in range(len(record["query"]))
+                    ]
+            try:
+                logger.info(dump_json(record))
+            finally:
+                record = None
+                urls.clear()
+
+        inspection.add_done_callback(write_result)
 
     def log_query_access(
-        self, mm_inputs: List[MultimodalInput], request_id: int = 0
+        self,
+        mm_inputs: List[MultimodalInput],
+        request_id: int = 0,
+        external_request_id: str = "",
     ) -> None:
-        self.log(self.query_logger, mm_inputs, request_id=request_id)
+        self.log(
+            self.query_logger,
+            mm_inputs,
+            request_id=request_id,
+            external_request_id=external_request_id,
+        )
 
     def log_exception_access(
         self,
         mm_inputs: List[MultimodalInput],
         exception: BaseException,
         request_id: int = 0,
+        external_request_id: str = "",
+        upload_log=None,
     ) -> None:
-        self.log(self.logger, mm_inputs, exception=exception, request_id=request_id)
+        self.log(
+            self.logger,
+            mm_inputs,
+            exception=exception,
+            upload_log=upload_log,
+            request_id=request_id,
+            external_request_id=external_request_id,
+        )
 
     def log_success_access(
-        self, mm_inputs: List[MultimodalInput], response: Any, request_id: int = 0
+        self,
+        mm_inputs: List[MultimodalInput],
+        response: Any,
+        request_id: int = 0,
+        external_request_id: str = "",
+        upload_log=None,
     ) -> None:
-        self.log(self.logger, mm_inputs, response=response, request_id=request_id)
+        self.log(
+            self.logger,
+            mm_inputs,
+            response=response,
+            upload_log=upload_log,
+            request_id=request_id,
+            external_request_id=external_request_id,
+        )

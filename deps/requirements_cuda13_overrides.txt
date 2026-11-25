@@ -14,3 +14,6 @@ nvidia-nccl-cu13==2.30.4
 nvidia-nvshmem-cu13==3.5.19
 # CCCL 13.2.86 matches the CUDA 13.2 toolkit the cu13 stack is built against
 nvidia-cuda-cccl==13.2.86
+# FA4 b21 pins 4.6.0.dev0, but QuACK 0.6.5 requires >=4.7.
+# Use the screened compatible API together with the FA4 packed-sub patch.
+nvidia-cutlass-dsl==4.7.1

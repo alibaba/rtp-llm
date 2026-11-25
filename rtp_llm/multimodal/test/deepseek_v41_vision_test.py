@@ -1,408 +1,158 @@
+"""DeepSeek-V4.1 vision tests using only backend-private runtime images."""
+
 import hashlib
 import importlib.util
 import json
 import os
+import unittest
 from pathlib import Path
 from types import SimpleNamespace
-import unittest
-from unittest import TestCase, main
-from unittest.mock import patch
+from unittest import TestCase
+from unittest.mock import Mock
 
 import torch
 from safetensors import safe_open
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from rtp_llm.config.dsv41_config import V41Config
-from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
-    TEXT,
-    V41ImageInput,
-    V41ImageProcessorConfig,
-    V41PreparedInputs,
-    image_token_types,
-)
-from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_vision import (
-    DeepSeekV41VisionEmbedding,
-)
 from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_vision import (
     RMSNorm,
     _vision_cos_sin,
     apply_rotary,
 )
+from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 VISION_SHA256 = "5d49edc196a4ef22384abe76d35a40098cbe1e74b586c8f66a2edff4f076b26c"
+from rtp_llm.multimodal.multimodal_mixins.deepseek_v41 import (
+    deepseek_v41_vision as vision_module,
+)
+from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
+    num_image_tokens,
+)
+from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_vision import (
+    DeepSeekV41VisionEmbedding,
+)
 
 
-class V41PreparedValidationTest(TestCase):
-    def setUp(self):
-        self.adapter = object.__new__(DeepSeekV41VisionEmbedding)
-        torch.nn.Module.__init__(self.adapter)
-        self.adapter.processor_config = V41ImageProcessorConfig()
-
-    def record(self, start=1):
-        return {
-            "start": start,
-            "n_vit_h": 3,
-            "n_vit_w": 6,
-            "patches": torch.zeros(18, 3, 14, 14, dtype=torch.bfloat16),
-            "types": image_token_types(1, 2).to(torch.int32),
-            "content_sha256": "a" * 64,
-            "processor_identity": self.adapter.processor_config.identity,
+def tiny_config():
+    return V41Config.from_dict(
+        {
+            "text_config": {
+                "hidden_size": 8,
+                "vocab_size": 129280,
+                "max_position_embeddings": 128,
+            },
+            "vision_config": {
+                "hidden_size": 8,
+                "intermediate_size": 16,
+                "num_attention_heads": 2,
+                "num_hidden_layers": 1,
+                "patch_size": 14,
+                "downsample_ratio": 3,
+                "rope_theta": 10000.0,
+                "max_image_tokens": 1024,
+                "min_pixels": 295936,
+            },
+            "quantization_config": {},
+            "dtype": "bfloat16",
+            "bos_token_id": 0,
+            "eos_token_id": 1,
+            "pad_token_id": 2,
+            "image_token_id": 129264,
         }
+    )
 
-    def test_valid_records_preserve_payload_and_allow_empty_request(self):
-        records = [self.record(), self.record(8)]
-        with patch.object(
-            self.adapter, "encode_image", return_value=torch.ones(5, 8)
-        ) as encode:
-            outputs = self.adapter.encode_prepared_images(records)
-            self.assertEqual(len(outputs), 2)
-            for record, call in zip(records, encode.call_args_list):
-                image = call.args[0]
-                self.assertIs(image.patches, record["patches"])
-                self.assertEqual(image.start, record["start"])
-                self.assertEqual(image.types.dtype, torch.int64)
-                self.assertTrue(torch.equal(image.types, record["types"]))
-            encode.reset_mock()
-            self.assertEqual(self.adapter.encode_prepared_images([]), [])
-            encode.assert_not_called()
 
-    def test_invalid_later_record_rejects_whole_request_before_encoding(self):
-        for invalid in (
-            "grid",
-            "shape",
-            "dtype",
-            "identity",
-            "types_dtype",
-            "types_shape",
-            "types_value",
-            "overlap",
-            "negative_start",
-            "oversized_grid",
-        ):
-            with self.subTest(invalid=invalid):
-                record = self.record(8)
-                if invalid == "grid":
-                    record["n_vit_h"] = 0
-                elif invalid == "shape":
-                    record["patches"] = record["patches"][:-1]
-                elif invalid == "dtype":
-                    record["patches"] = record["patches"].float()
-                elif invalid == "identity":
-                    record["processor_identity"] = "other"
-                elif invalid == "types_dtype":
-                    record["types"] = record["types"].float()
-                elif invalid == "types_shape":
-                    record["types"] = record["types"].unsqueeze(0)
-                elif invalid == "types_value":
-                    record["types"][1] = 4
-                elif invalid == "overlap":
-                    record["start"] = 2
-                elif invalid == "negative_start":
-                    record["start"] = -1
-                else:
-                    record["n_vit_h"] = record["n_vit_w"] = 10**9
-                with patch.object(self.adapter, "encode_image") as encode:
-                    with self.assertRaises(ValueError):
-                        self.adapter.encode_prepared_images([self.record(), record])
-                    encode.assert_not_called()
+def runtime_image(value=0.25):
+    return vision_module._RuntimeImage(
+        patches=torch.full((9, 3, 14, 14), value, dtype=torch.bfloat16),
+        n_vit_h=3,
+        n_vit_w=3,
+    )
 
-    def test_token_cap_checked_before_allocating_types(self):
-        record = self.record()
-        record["n_vit_h"] = record["n_vit_w"] = 192
-        with patch(
-            "rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_vision.image_token_types"
-        ) as allocate_types, patch.object(self.adapter, "encode_image") as encode:
-            with self.assertRaisesRegex(ValueError, "token limit"):
-                self.adapter.encode_prepared_images([record])
-            allocate_types.assert_not_called()
-            encode.assert_not_called()
 
-    def test_valid_record_runs_real_cpu_vision(self):
-        config = V41Config.from_dict(
-            {
-                "text_config": {
-                    "hidden_size": 8,
-                    "vocab_size": 129280,
-                    "max_position_embeddings": 128,
-                },
-                "vision_config": {
-                    "hidden_size": 8,
-                    "intermediate_size": 16,
-                    "num_attention_heads": 2,
-                    "num_hidden_layers": 1,
-                    "patch_size": 14,
-                    "downsample_ratio": 3,
-                    "rope_theta": 10000.0,
-                    "max_image_tokens": 1024,
-                    "min_pixels": 295936,
-                },
-                "quantization_config": {},
-                "dtype": "bfloat16",
-                "bos_token_id": 0,
-                "eos_token_id": 1,
-                "pad_token_id": 2,
-                "image_token_id": 129264,
-            }
-        )
-        adapter = DeepSeekV41VisionEmbedding(config, device="cpu").eval()
+class DeepSeekV41VisionBackendTest(unittest.TestCase):
+    def make_adapter(self):
+        adapter = DeepSeekV41VisionEmbedding(tiny_config(), device="cpu").eval()
         with torch.no_grad():
             for parameter in adapter.parameters():
                 parameter.fill_(0.125)
-        record = self.record()
-        record["processor_identity"] = adapter.processor_config.identity
-        output = adapter.encode_prepared_images([record])[0]
-        expected = adapter.encode_image(V41ImageInput(**record))
-        self.assertEqual(tuple(output.shape), (5, 8))
-        self.assertTrue(torch.isfinite(output).all())
-        torch.testing.assert_close(output, expected, rtol=0, atol=0)
+        return adapter
 
-    def test_empty_hash_bypasses_cache_without_aliasing(self):
-        # An empty content_sha256 is accepted by the RPC/prepared-input checks;
-        # two different images at the same grid/processor must NOT alias via the
-        # encode cache, and nothing with an untrusted identity is stored.
-        config = V41Config.from_dict(
-            {
-                "text_config": {
-                    "hidden_size": 8,
-                    "vocab_size": 129280,
-                    "max_position_embeddings": 128,
-                },
-                "vision_config": {
-                    "hidden_size": 8,
-                    "intermediate_size": 16,
-                    "num_attention_heads": 2,
-                    "num_hidden_layers": 1,
-                    "patch_size": 14,
-                    "downsample_ratio": 3,
-                    "rope_theta": 10000.0,
-                    "max_image_tokens": 1024,
-                    "min_pixels": 295936,
-                },
-                "quantization_config": {},
-                "dtype": "bfloat16",
-                "bos_token_id": 0,
-                "eos_token_id": 1,
-                "pad_token_id": 2,
-                "image_token_id": 129264,
-            }
+    def test_legacy_prepared_rpc_and_embedded_inputs_share_encoder(self):
+        from rtp_llm.config.exceptions import FtRuntimeException
+        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
+        from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
+
+        image = runtime_image()
+        adapter = self.make_adapter()
+        engine = object.__new__(MMProcessEngine)
+        engine.mm_part = adapter
+        engine._scheduler = SimpleNamespace(max_request_images=2)
+        engine.vit_config = SimpleNamespace(mm_timeout_ms=10000)
+        engine._greennet_enabled = Mock(return_value=False)
+        engine.inc_query_num = Mock()
+        engine.dec_query_num = Mock()
+
+        def compute(items, deadline):
+            self.assertTrue(all(item.deadline == deadline for item in items))
+            return (
+                [adapter.embedding(item.preprocess_result)[0] for item in items],
+                [],
+                [],
+            )
+
+        engine._compute_embeddings = Mock(side_effect=compute)
+        request = MultimodalInputsPB()
+        request.v41_inputs.schema_version = 1
+        record = request.v41_inputs.images.add(
+            start=0,
+            n_vit_h=3,
+            n_vit_w=3,
+            types=[0, 1, 2, 3],
+            processor_identity="3cf6582d615644280bdd12f95137eb53f08089e784145851435222cd43587843",
         )
-        torch.manual_seed(1234)
-        adapter = DeepSeekV41VisionEmbedding(config, device="cpu").eval()
-        with torch.no_grad():
-            for parameter in adapter.named_parameters():
-                parameter[1].copy_(torch.randn_like(parameter[1]))
-        patches_one = torch.randn(
-            18, 3, 14, 14, generator=torch.Generator().manual_seed(11)
-        ).to(torch.bfloat16)
-        patches_two = torch.randn(
-            18, 3, 14, 14, generator=torch.Generator().manual_seed(22)
-        ).to(torch.bfloat16)
-        one = dict(self.record(), patches=patches_one, content_sha256="")
-        one["processor_identity"] = adapter.processor_config.identity
-        two = dict(self.record(start=8), patches=patches_two, content_sha256="")
-        two["processor_identity"] = adapter.processor_config.identity
+        record.patches.data_type = record.patches.BF16
+        record.patches.shape.extend(image.patches.shape)
+        record.patches.bf16_data = image.patches.view(torch.uint8).numpy().tobytes()
+        result = engine.get_prepared_v41_result(request, 10000, None)
+        torch.testing.assert_close(result.embeddings[0], adapter.embedding(image)[0])
 
-        forwards = []
-        hook = adapter.vision.register_forward_hook(lambda *args: forwards.append(1))
-        try:
-            first = adapter.encode_image(V41ImageInput(**one))
-            second = adapter.encode_image(V41ImageInput(**two))
-        finally:
-            hook.remove()
-
-        self.assertEqual(len(forwards), 2)
-        self.assertFalse(torch.equal(first, second))
-        self.assertEqual(len(adapter._encode_cache), 0)
-        self.assertEqual(len(adapter._encode_cache_order), 0)
-
-        # Same untrusted input recomputes every call (reference-test contract).
-        recomputed = adapter.encode_image(V41ImageInput(**one))
-        self.assertIsNot(recomputed, first)
-        torch.testing.assert_close(recomputed, first, rtol=0, atol=0)
-        self.assertEqual(len(adapter._encode_cache), 0)
-
-    def test_empty_hash_leaves_valid_hash_hits_untouched(self):
-        # The bypass must not break fast hits for trusted identities, the
-        # disabled cache, or LRU eviction.
-        config = V41Config.from_dict(
-            {
-                "text_config": {
-                    "hidden_size": 8,
-                    "vocab_size": 129280,
-                    "max_position_embeddings": 128,
-                },
-                "vision_config": {
-                    "hidden_size": 8,
-                    "intermediate_size": 16,
-                    "num_attention_heads": 2,
-                    "num_hidden_layers": 1,
-                    "patch_size": 14,
-                    "downsample_ratio": 3,
-                    "rope_theta": 10000.0,
-                    "max_image_tokens": 1024,
-                    "min_pixels": 295936,
-                },
-                "quantization_config": {},
-                "dtype": "bfloat16",
-                "bos_token_id": 0,
-                "eos_token_id": 1,
-                "pad_token_id": 2,
-                "image_token_id": 129264,
-            }
+        # The embedded C++ caller sends CPU tensors, including a token-type vector.
+        embedded = dict(
+            start=0,
+            n_vit_h=3,
+            n_vit_w=3,
+            types=torch.tensor([0, 1, 2, 3]),
+            patches=image.patches,
+            processor_identity=record.processor_identity,
         )
-        torch.manual_seed(1234)
-        adapter = DeepSeekV41VisionEmbedding(config, device="cpu").eval()
-        with torch.no_grad():
-            for parameter in adapter.named_parameters():
-                parameter[1].copy_(torch.randn_like(parameter[1]))
-        patches = torch.randn(
-            18, 3, 14, 14, generator=torch.Generator().manual_seed(11)
-        ).to(torch.bfloat16)
-        trusted = dict(self.record(), patches=patches, content_sha256="c" * 64)
-        trusted["processor_identity"] = adapter.processor_config.identity
-        other = dict(self.record(start=8), patches=patches, content_sha256="d" * 64)
-        other["processor_identity"] = adapter.processor_config.identity
-
-        first = adapter.encode_image(V41ImageInput(**trusted))
-        second = adapter.encode_image(V41ImageInput(**trusted))
-        self.assertIs(second, first)
-        adapter.encode_image(V41ImageInput(**other))
-        self.assertEqual(len(adapter._encode_cache), 2)
-
-        adapter._encode_cache_capacity = 1
-        adapter._encode_cache.clear()
-        adapter._encode_cache_order.clear()
-        adapter.encode_image(V41ImageInput(**trusted))
-        adapter.encode_image(V41ImageInput(**other))
-        self.assertEqual(len(adapter._encode_cache), 1)
-        self.assertEqual(list(adapter._encode_cache.keys())[0][1], "d" * 64)
-
-    def test_identical_images_hit_encode_cache_and_preserve_values(self):
-        config = V41Config.from_dict(
-            {
-                "text_config": {
-                    "hidden_size": 8,
-                    "vocab_size": 129280,
-                    "max_position_embeddings": 128,
-                },
-                "vision_config": {
-                    "hidden_size": 8,
-                    "intermediate_size": 16,
-                    "num_attention_heads": 2,
-                    "num_hidden_layers": 1,
-                    "patch_size": 14,
-                    "downsample_ratio": 3,
-                    "rope_theta": 10000.0,
-                    "max_image_tokens": 1024,
-                    "min_pixels": 295936,
-                },
-                "quantization_config": {},
-                "dtype": "bfloat16",
-                "bos_token_id": 0,
-                "eos_token_id": 1,
-                "pad_token_id": 2,
-                "image_token_id": 129264,
-            }
+        torch.testing.assert_close(
+            engine.submit_v41([embedded]).embeddings[0], result.embeddings[0]
         )
-        adapter = DeepSeekV41VisionEmbedding(config, device="cpu").eval()
-        with torch.no_grad():
-            for parameter in adapter.parameters():
-                parameter.fill_(0.125)
-        record = self.record()
-        record["processor_identity"] = adapter.processor_config.identity
-        first = adapter.encode_image(V41ImageInput(**record))
-        second = adapter.encode_image(V41ImageInput(**record))
-        self.assertIs(second, first)
-        torch.testing.assert_close(second, first, rtol=0, atol=0)
-        adapter._encode_cache.clear()
-        adapter._encode_cache_order.clear()
-        recomputed = adapter.encode_image(V41ImageInput(**record))
-        torch.testing.assert_close(recomputed, first, rtol=0, atol=0)
+        engine._compute_embeddings.reset_mock()
+        with self.assertRaises(FtRuntimeException):
+            engine.submit_v41([embedded, {**embedded, "start": 1}])
+        record.types[0] = 99
+        with self.assertRaises(FtRuntimeException):
+            engine.get_prepared_v41_result(request, 10000, None)
+        record.types[0] = 0
+        engine._greennet_enabled.return_value = True
+        with self.assertRaisesRegex(FtRuntimeException, "original image"):
+            engine.get_prepared_v41_result(request, 10000, True)
+        engine._compute_embeddings.assert_not_called()
 
-    def test_distinct_content_and_identity_do_not_collide(self):
-        config = V41Config.from_dict(
-            {
-                "text_config": {
-                    "hidden_size": 8,
-                    "vocab_size": 129280,
-                    "max_position_embeddings": 128,
-                },
-                "vision_config": {
-                    "hidden_size": 8,
-                    "intermediate_size": 16,
-                    "num_attention_heads": 2,
-                    "num_hidden_layers": 1,
-                    "patch_size": 14,
-                    "downsample_ratio": 3,
-                    "rope_theta": 10000.0,
-                    "max_image_tokens": 1024,
-                    "min_pixels": 295936,
-                },
-                "quantization_config": {},
-                "dtype": "bfloat16",
-                "bos_token_id": 0,
-                "eos_token_id": 1,
-                "pad_token_id": 2,
-                "image_token_id": 129264,
-            }
-        )
-        adapter = DeepSeekV41VisionEmbedding(config, device="cpu").eval()
-        with torch.no_grad():
-            for parameter in adapter.parameters():
-                parameter.fill_(0.125)
-        base = self.record()
-        base["processor_identity"] = adapter.processor_config.identity
-        different = self.record()
-        different["processor_identity"] = adapter.processor_config.identity
-        different["content_sha256"] = "b" * 64
-        left = adapter.encode_image(V41ImageInput(**base))
-        right = adapter.encode_image(V41ImageInput(**different))
-        self.assertIsNot(right, left)
-        self.assertEqual(
-            adapter._encode_cache_order[-1],
-            adapter._encode_cache_key(V41ImageInput(**different)),
-        )
-        self.assertEqual(len(adapter._encode_cache), 2)
+    def test_real_cpu_forward_returns_complete_canonical_span(self):
+        adapter = self.make_adapter()
+        image = runtime_image()
 
-    def test_cache_capacity_zero_disables_caching(self):
-        config = V41Config.from_dict(
-            {
-                "text_config": {
-                    "hidden_size": 8,
-                    "vocab_size": 129280,
-                    "max_position_embeddings": 128,
-                },
-                "vision_config": {
-                    "hidden_size": 8,
-                    "intermediate_size": 16,
-                    "num_attention_heads": 2,
-                    "num_hidden_layers": 1,
-                    "patch_size": 14,
-                    "downsample_ratio": 3,
-                    "rope_theta": 10000.0,
-                    "max_image_tokens": 1024,
-                    "min_pixels": 295936,
-                },
-                "quantization_config": {},
-                "dtype": "bfloat16",
-                "bos_token_id": 0,
-                "eos_token_id": 1,
-                "pad_token_id": 2,
-                "image_token_id": 129264,
-            }
-        )
-        adapter = DeepSeekV41VisionEmbedding(config, device="cpu").eval()
-        adapter._encode_cache_capacity = 0
-        with torch.no_grad():
-            for parameter in adapter.parameters():
-                parameter.fill_(0.125)
-        record = self.record()
-        record["processor_identity"] = adapter.processor_config.identity
-        first = adapter.encode_image(V41ImageInput(**record))
-        second = adapter.encode_image(V41ImageInput(**record))
-        self.assertIsNot(second, first)
-        torch.testing.assert_close(second, first, rtol=0, atol=0)
-        self.assertEqual(len(adapter._encode_cache), 0)
+        result = adapter.encode_image(image)
+
+        self.assertEqual(tuple(result.shape), (num_image_tokens(1, 1), 8))
+        self.assertTrue(torch.isfinite(result).all())
+        self.assertTrue(torch.equal(result[0], adapter.image_start))
+        self.assertTrue(torch.equal(result[-2], adapter.image_newline))
+        self.assertTrue(torch.equal(result[-1], adapter.image_end))
 
 
 class V41VisionEmbeddingTest(TestCase):
@@ -488,7 +238,7 @@ class V41VisionEmbeddingTest(TestCase):
         )
 
     @torch.inference_mode()
-    def test_framework_binding_preserves_storage_and_fp32_norms(self):
+    def test_framework_binding_preserves_storage_and_bf16_norms(self):
         installed = {
             "v41." + name: tensor for name, tensor in self.adapter.state_dict().items()
         }
@@ -498,16 +248,10 @@ class V41VisionEmbeddingTest(TestCase):
             self.assertEqual(value.data_ptr(), installed["v41." + name].data_ptr())
         for module in bound.vision.modules():
             if isinstance(module, RMSNorm):
-                self.assertEqual(module.weight.dtype, torch.float32)
+                self.assertEqual(module.weight.dtype, torch.bfloat16)
         with sdpa_kernel(SDPBackend.MATH):
-            image = V41ImageInput(
-                0,
-                torch.zeros(18, 3, 14, 14, dtype=torch.bfloat16),
-                3,
-                6,
-                image_token_types(1, 2),
-                "",
-                bound.processor_config.identity,
+            image = vision_module._RuntimeImage(
+                torch.zeros(18, 3, 14, 14, dtype=torch.bfloat16), 3, 6
             )
             torch.testing.assert_close(
                 bound.encode_image(image),
@@ -532,15 +276,7 @@ class V41VisionEmbeddingTest(TestCase):
                         dtype=torch.bfloat16,
                     )
                     llm_h, llm_w = (height + 2) // 3, (width + 2) // 3
-                    image = V41ImageInput(
-                        5,
-                        patches,
-                        height,
-                        width,
-                        image_token_types(llm_h, llm_w),
-                        "",
-                        self.adapter.processor_config.identity,
-                    )
+                    image = vision_module._RuntimeImage(patches, height, width)
                     calls = []
                     hook = self.adapter.vision.register_forward_hook(
                         lambda *args: calls.append(1)
@@ -561,32 +297,11 @@ class V41VisionEmbeddingTest(TestCase):
                     expected = torch.cat(parts)
                     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
                     self.assertTrue(torch.isfinite(actual).all().item())
-                    prepared = V41PreparedInputs(
-                        "",
-                        (0,) * 5 + (129264,) * image.length + (1,) * 3,
-                        (TEXT,) * 5 + tuple(image.types.tolist()) + (TEXT,) * 3,
-                        (image,),
-                    )
-                    embeddings = torch.zeros(
-                        len(prepared.token_ids),
-                        actual.shape[1],
-                        dtype=torch.bfloat16,
-                        device="cuda",
-                    )
-                    calls = []
-                    hook = self.adapter.vision.register_forward_hook(
-                        lambda *args: calls.append(1)
-                    )
-                    try:
-                        result = self.adapter.inject_embeddings(embeddings, prepared)
-                    finally:
-                        hook.remove()
-                    self.assertEqual(len(calls), 1)
-                    torch.testing.assert_close(
-                        result[5 : 5 + image.length], expected, rtol=0, atol=0
-                    )
-                    self.assertEqual(torch.count_nonzero(result[:5]).item(), 0)
-                    self.assertEqual(torch.count_nonzero(result[-3:]).item(), 0)
+                    # The normal mixin returns the complete ordered span; token
+                    # placement is covered by CanonicalMultimodalProcessorTest.
+                    outputs = self.adapter.batched_embedding([image], [MMUrlType.IMAGE])
+                    self.assertEqual(len(outputs), 1)
+                    torch.testing.assert_close(outputs[0][0], expected, rtol=0, atol=0)
 
     def test_inference_weights_bind_outside_inference_mode_without_copy(self):
         with torch.inference_mode():
@@ -602,14 +317,8 @@ class V41VisionEmbeddingTest(TestCase):
         for name, value in bound.state_dict().items():
             self.assertEqual(value.data_ptr(), installed["v41." + name].data_ptr())
             self.assertEqual(value.dtype, installed["v41." + name].dtype)
-        image = V41ImageInput(
-            0,
-            torch.zeros(18, 3, 14, 14, dtype=torch.bfloat16),
-            3,
-            6,
-            image_token_types(1, 2),
-            "",
-            bound.processor_config.identity,
+        image = vision_module._RuntimeImage(
+            torch.zeros(18, 3, 14, 14, dtype=torch.bfloat16), 3, 6
         )
         with sdpa_kernel(SDPBackend.MATH):
             torch.testing.assert_close(
@@ -627,7 +336,7 @@ class V41VisionEmbeddingTest(TestCase):
         )
         for module in self.adapter.vision.modules():
             if isinstance(module, RMSNorm):
-                self.assertEqual(module.weight.dtype, torch.float32)
+                self.assertEqual(module.weight.dtype, torch.bfloat16)
         self.assertEqual(self.adapter.image_start.dtype, torch.bfloat16)
 
     @torch.inference_mode()
@@ -674,4 +383,4 @@ class V41VisionEmbeddingTest(TestCase):
 
 
 if __name__ == "__main__":
-    main()
+    unittest.main()

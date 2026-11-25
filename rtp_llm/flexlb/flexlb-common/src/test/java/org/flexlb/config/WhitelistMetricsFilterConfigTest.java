@@ -114,8 +114,13 @@ class WhitelistMetricsFilterConfigTest {
         Meter.Id jvm = registry.counter("jvm.test.metric").getId();
         assertEquals(MeterFilterReply.DENY, filter.accept(inflightBatch));
         assertEquals(MeterFilterReply.NEUTRAL, filter.accept(jvm));
+        assertTrue(
+                WhitelistMetricsFilterConfig.matches(
+                        WhitelistMetricsFilterConfig.parseWhitelist(
+                                WhitelistMetricsFilterConfig.DEFAULT_METRIC_WHITELIST),
+                        "app.vit.cache.affinity.images"));
         assertEquals(
-                6,
+                7,
                 WhitelistMetricsFilterConfig.parseWhitelist(
                                 WhitelistMetricsFilterConfig.DEFAULT_METRIC_WHITELIST)
                         .size());

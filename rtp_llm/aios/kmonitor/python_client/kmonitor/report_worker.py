@@ -100,7 +100,10 @@ class ReportWorker(object):
                 reported_data = metric.fetch_reported_data()
                 for data_point in reported_data:
                     event = self.render_event(
-                        metric_name, timestamp, data_point, dynamic_tags
+                        data_point.metric_name or metric_name,
+                        timestamp,
+                        data_point,
+                        dynamic_tags,
                     )
                     events.append(event)
         return events

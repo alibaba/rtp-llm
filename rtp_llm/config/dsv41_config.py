@@ -6,6 +6,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+V41_LOW_DETAIL_SIZE = (512, 512)
+
+
+def v41_image_detail_size(detail: str | None) -> tuple[int, int]:
+    """Map the API detail level to MMPreprocessConfig's width and height."""
+    if detail == "low":
+        return V41_LOW_DETAIL_SIZE
+    if detail in (None, "auto", "high", "original"):
+        return (-1, -1)
+    raise ValueError("image detail must be low, high, original, or auto")
+
 
 @dataclass(frozen=True)
 class V41Config:

@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 import grpc
 import grpc.aio
 from google.protobuf.message import DecodeError
+from google.protobuf.wrappers_pb2 import BoolValue
 
 from rtp_llm.config.exceptions import (
     AdmissionRejectReason,
@@ -17,6 +18,7 @@ from rtp_llm.config.exceptions import (
     FtRuntimeException,
 )
 from rtp_llm.config.generate_config import RoleAddr, RoleType
+from rtp_llm.config.mm_download_domains import check_download_urls
 from rtp_llm.config.py_config_modules import MasterConfig
 from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
     CANCEL_REASON_CLIENT_CANCELLED,
@@ -40,10 +42,13 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
 from rtp_llm.server.host_service import HostService
 from rtp_llm.server.mm_cache_metadata import MAX_METADATA_BYTES, metadata_from_proto
-from rtp_llm.server.request_headers import dashscope_greennet_metadata
+from rtp_llm.server.request_headers import (
+    dashscope_greennet_metadata,
+    extract_input_inspection_enabled,
+)
 from rtp_llm.server.worker_status import _coerce_role_type
 from rtp_llm.telemetry import attributes as trace_attrs
-from rtp_llm.telemetry import start_client_span
+from rtp_llm.telemetry import internal_span, start_client_span
 from rtp_llm.utils.base_model_datatypes import GenerateInput
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 
@@ -155,6 +160,34 @@ def _admission_reject_reason_from_response(response) -> AdmissionRejectReason:
     except (TypeError, ValueError):
         route_logger.error("Unknown FlexLB admission rejection reason: %r", raw_reason)
         return AdmissionRejectReason.INVALID
+
+
+def vit_hash_deadline(input: GenerateInput) -> float:
+    configured_timeout = input.generate_config.mm_timeout_ms
+    if not configured_timeout or configured_timeout <= 0:
+        configured_timeout = max(
+            (
+                i.mm_preprocess_config.mm_timeout_ms
+                for i in input.mm_inputs
+                if i.mm_preprocess_config.mm_timeout_ms > 0
+            ),
+            default=120000,
+        )
+    limits = [configured_timeout]
+    for name in ("ttft_timeout_ms", "timeout_ms"):
+        limit = getattr(input.generate_config, name, None)
+        if limit and limit > 0:
+            limits.append(limit)
+    return time.monotonic() + min(limits) / 1000.0
+
+
+def remaining_vit_hash_time(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise FtRuntimeException(
+            ExceptionType.GENERATE_TIMEOUT, "ViT hash acquisition timed out"
+        )
+    return remaining
 
 
 class MasterClient:
@@ -541,7 +574,12 @@ class MasterClient:
         return 50
 
     async def get_vit_cache_metadata(
-        self, address: RoleAddr, keys: List[str], input: Optional[GenerateInput] = None
+        self,
+        address: RoleAddr,
+        keys: List[str],
+        input: Optional[GenerateInput] = None,
+        *,
+        deadline: Optional[float] = None,
     ):
         """Probe hashes, then submit only missing media when routing requires them.
 
@@ -549,26 +587,22 @@ class MasterClient:
         clear the ViT affinity pin and use the legacy embedding route. Required
         hash acquisition errors and timeouts still fail the request.
         """
-        started = time.monotonic()
         unique_keys = list(dict.fromkeys(keys))
+        probe = MultimodalHashRequestPB(keys=unique_keys)
         probe_timeout = DEFAULT_REQUEST_TIMEOUT_SEC
         if input is not None:
+            inspection_enabled = extract_input_inspection_enabled(input.headers)
+            probe.request_id = input.request_id
+            probe.timeout_ms = max(0, input.generate_config.timeout_ms or 0)
+            probe.defer_inspection = inspection_enabled is not False
+            if inspection_enabled is not None:
+                probe.input_inspection_enabled.value = inspection_enabled
+            # The first hash probe carries only keys, even on a warm hit.
+            check_download_urls(item.url for item in input.mm_inputs)
             input.greennet_verified_vit = None
-            configured_timeout = input.generate_config.mm_timeout_ms
-            if not configured_timeout or configured_timeout <= 0:
-                configured_timeout = max(
-                    (
-                        i.mm_preprocess_config.mm_timeout_ms
-                        for i in input.mm_inputs
-                        if i.mm_preprocess_config.mm_timeout_ms > 0
-                    ),
-                    default=120000,
-                )
-            limits = [configured_timeout]
-            for name in ("ttft_timeout_ms", "timeout_ms"):
-                limit = getattr(input.generate_config, name, None)
-                if limit and limit > 0:
-                    limits.append(limit)
+            input.deferred_inspection = None
+            if deadline is None:
+                deadline = vit_hash_deadline(input)
             try:
                 configured_probe_ms = int(
                     os.environ.get(
@@ -577,14 +611,27 @@ class MasterClient:
                 )
             except ValueError:
                 configured_probe_ms = DEFAULT_VIT_HASH_PROBE_TIMEOUT_MS
-            probe_timeout = min(max(1, configured_probe_ms), min(limits)) / 1000.0
-        metadata = await self._get_vit_metadata(
-            address,
-            MultimodalHashRequestPB(keys=unique_keys),
-            probe_timeout,
-            headers=input.headers if input is not None else None,
-            fallback_on_unimplemented=input is not None,
-        )
+            probe_timeout = min(
+                max(1, configured_probe_ms) / 1000.0, remaining_vit_hash_time(deadline)
+            )
+        with internal_span(
+            "rtp_llm.vit.hash_probe",
+            **{
+                trace_attrs.REQUEST_ID: (
+                    str(input.request_id) if input is not None else ""
+                ),
+                "rtp_llm.vit.key_count": len(unique_keys),
+                "rtp_llm.rpc.timeout_ms": probe_timeout * 1000,
+            },
+        ):
+            metadata = await self._get_vit_metadata(
+                address,
+                probe,
+                probe_timeout,
+                headers=input.headers if input is not None else None,
+                fallback_on_unimplemented=input is not None,
+                request_id=input.request_id if input is not None else None,
+            )
         if metadata is _HASH_RPC_UNSUPPORTED:
             route_logger.info(
                 "ViT hash RPC unavailable at %s:%s; using legacy multimodal routing",
@@ -606,7 +653,16 @@ class MasterClient:
                 "hash_hit", entries.get(key, {}).get("hit", False)
             )
         }
+        ticket = (metadata or {}).get("inspection_ticket") or ""
+        if ticket:
+            missing.update(
+                key
+                for key in unique_keys
+                if not entries.get(key, {}).get("greennet_passed")
+            )
         if not missing:
+            if ticket:
+                input.deferred_inspection = (address.ip, address.grpc_port, ticket)
             self._record_greennet_approval(input, address, unique_keys, entries)
             return metadata
 
@@ -614,35 +670,58 @@ class MasterClient:
 
         # The cache-hit probe carries no URLs. On a miss serialize each distinct
         # missing input once, without copying image/video data into embeddings.
-        inputs = MultimodalInputsPB(request_id=input.request_id)
-        submitted = set()
-        for key, item in zip(
-            keys, iter_multimodal_inputs(input, input.generate_config)
+        with internal_span(
+            "rtp_llm.vit.prepare_missing_inputs",
+            **{
+                trace_attrs.REQUEST_ID: str(input.request_id),
+                "rtp_llm.vit.missing_key_count": len(missing),
+            },
         ):
-            if key in missing and key not in submitted:
-                inputs.multimodal_inputs.add().CopyFrom(item)
-                submitted.add(key)
-        if submitted != missing:
-            raise FtRuntimeException(
-                ExceptionType.MM_PROCESS_ERROR, "Missing ViT submission inputs"
+            inputs = MultimodalInputsPB(
+                request_id=input.request_id, inspection_ticket=ticket
             )
-        remaining = min(limits) / 1000.0 - (time.monotonic() - started)
-        if remaining <= 0:
-            raise FtRuntimeException(
-                ExceptionType.GENERATE_TIMEOUT, "ViT hash acquisition timed out"
+            region = input.headers.get("region")
+            if region:
+                # Request-level: one value for every multimodal input submitted below.
+                inputs.region = region
+            input_inspection_enabled = extract_input_inspection_enabled(input.headers)
+            if input_inspection_enabled is not None:
+                inputs.input_inspection_enabled.CopyFrom(
+                    BoolValue(value=input_inspection_enabled)
+                )
+            submitted = set()
+            for key, item in zip(
+                keys, iter_multimodal_inputs(input, input.generate_config)
+            ):
+                if key in missing and key not in submitted:
+                    inputs.multimodal_inputs.add().CopyFrom(item)
+                    submitted.add(key)
+            if submitted != missing:
+                raise FtRuntimeException(
+                    ExceptionType.MM_PROCESS_ERROR, "Missing ViT submission inputs"
+                )
+        remaining = remaining_vit_hash_time(deadline)
+        with internal_span(
+            "rtp_llm.vit.hash_fill",
+            **{
+                trace_attrs.REQUEST_ID: str(input.request_id),
+                "rtp_llm.vit.missing_key_count": len(missing),
+                "rtp_llm.rpc.timeout_ms": remaining * 1000,
+            },
+        ):
+            filled = await self._get_vit_metadata(
+                address,
+                MultimodalHashRequestPB(
+                    keys=[key for key in unique_keys if key in missing],
+                    inputs=inputs,
+                    timeout_ms=max(1, int(remaining * 1000)),
+                ),
+                remaining,
+                required=True,
+                headers=input.headers,
+                fallback_on_unimplemented=True,
+                request_id=input.request_id,
             )
-        filled = await self._get_vit_metadata(
-            address,
-            MultimodalHashRequestPB(
-                keys=[key for key in unique_keys if key in missing],
-                inputs=inputs,
-                timeout_ms=max(1, int(remaining * 1000)),
-            ),
-            remaining,
-            required=True,
-            headers=input.headers,
-            fallback_on_unimplemented=True,
-        )
         if filled is _HASH_RPC_UNSUPPORTED:
             return None
         if metadata and filled.get("worker_instance") != metadata.get(
@@ -651,6 +730,13 @@ class MasterClient:
             raise FtRuntimeException(
                 ExceptionType.ROUTE_ERROR, "ViT restarted during hash acquisition"
             )
+        if ticket:
+            if filled.get("inspection_ticket") != ticket:
+                raise FtRuntimeException(
+                    ExceptionType.MM_PROCESS_ERROR,
+                    "ViT inspection ticket changed during hash fill",
+                )
+            input.deferred_inspection = (address.ip, address.grpc_port, ticket)
         entries.update({e["key"]: e for e in filled.get("entries", [])})
         if any(
             not entries.get(key, {}).get(
@@ -683,16 +769,42 @@ class MasterClient:
         required=False,
         headers=None,
         fallback_on_unimplemented=False,
+        request_id=None,
     ):
         started = time.monotonic()
         try:
-            channel = await self._vit_channels.get(f"{address.ip}:{address.grpc_port}")
-            response = await MultimodalRpcServiceStub(channel).GetMultimodalHashes(
-                request,
-                timeout=timeout_sec,
-                metadata=dashscope_greennet_metadata(headers),
+            with internal_span(
+                "rtp_llm.vit.channel_acquire",
+                **{
+                    trace_attrs.REQUEST_ID: str(request_id),
+                    "server.address": address.ip,
+                    "server.port": address.grpc_port,
+                },
+            ):
+                channel = await self._vit_channels.get(
+                    f"{address.ip}:{address.grpc_port}"
+                )
+            from rtp_llm.telemetry.vit_rpc import (
+                INTERNAL_REQUEST_ID_METADATA_KEY,
+                vit_client_span,
             )
-            return metadata_from_proto(response)
+
+            metadata = list(dashscope_greennet_metadata(headers))
+            if request_id not in (None, "", 0):
+                metadata.append((INTERNAL_REQUEST_ID_METADATA_KEY, str(request_id)))
+            with vit_client_span(
+                "GetMultimodalHashes",
+                f"{address.ip}:{address.grpc_port}",
+                request,
+                metadata,
+            ) as metadata:
+                response = await MultimodalRpcServiceStub(channel).GetMultimodalHashes(
+                    request,
+                    timeout=timeout_sec,
+                    metadata=metadata,
+                )
+            with internal_span("rtp_llm.vit.metadata_decode"):
+                return metadata_from_proto(response)
         except grpc.RpcError as error:
             if (
                 fallback_on_unimplemented
@@ -717,7 +829,8 @@ class MasterClient:
                         break
                 raise FtRuntimeException(code, message) from error
             route_logger.warning(
-                "ViT hash probe unavailable, address=%s:%s, status=%s",
+                "ViT hash probe unavailable, request_id=%s, address=%s:%s, status=%s",
+                request_id,
                 address.ip,
                 address.grpc_port,
                 error.code(),
@@ -733,10 +846,14 @@ class MasterClient:
                 raise FtRuntimeException(
                     code, f"ViT hash acquisition failed: {type(error).__name__}"
                 ) from error
-            route_logger.warning("ViT hash probe failed: %s", error)
+            route_logger.warning(
+                "ViT hash probe failed, request_id=%s: %s", request_id, error
+            )
             return None
         finally:
             route_logger.debug(
-                "ViT hash RPC elapsed_ms=%.3f",
+                "ViT hash RPC request_id=%s required=%s elapsed_ms=%.3f",
+                request_id,
+                required,
                 (time.monotonic() - started) * 1000,
             )

@@ -146,6 +146,8 @@ class _FakeWorkItem:
         self.mm_timeout_ms = timeout_ms
         self.embedding_result: Optional[Any] = None
         self.need_check_cache = False
+        self.defer_feature_hashes = True
+        self.feature_hashes = None
         self.cache_key = None
         self.work_estimate = (
             MMWorkEstimate(input_patches=input_patches)
@@ -221,6 +223,91 @@ def _submit_concurrently(
 
 
 class MMSchedulerTest(TestCase):
+    def test_late_result_collection_does_not_inflate_scheduler_latency(self):
+        sched = MMScheduler(_FakeMMPart(), batch_wait_ms=0, max_batch_size=1)
+        try:
+            with mock.patch(
+                "rtp_llm.multimodal.mm_scheduler.current_time_ms", return_value=100
+            ) as clock, mock.patch(
+                "rtp_llm.multimodal.mm_scheduler.kmonitor.report"
+            ) as report:
+                request = sched.submit([_FakeWorkItem()])
+                request.future.result(timeout=2)
+                clock.return_value = 9100
+                sched.wait(request)
+                values = [
+                    call.args[1]
+                    for call in report.call_args_list
+                    if call.args[0] == GaugeMetrics.VIT_EMBEDDING_RT_METRIC
+                ]
+                self.assertEqual(values, [0])
+        finally:
+            sched.close()
+
+    def test_idle_maintenance_runs_after_completion_in_both_modes(self):
+        for prefetch in (0, 1):
+            with self.subTest(prefetch=prefetch):
+                fake = _FakeMMPart()
+                entered, release, delivered = (threading.Event() for _ in range(3))
+                item = _FakeWorkItem()
+
+                def maintain():
+                    if item.embedding_result is not None:
+                        entered.set()
+                        self.assertTrue(release.wait(5))
+
+                fake.run_embedding_idle_work = maintain
+                fake.prepare_embedding_batch = lambda *args: None
+                sched = MMScheduler(
+                    fake,
+                    batch_wait_ms=0,
+                    max_batch_size=1,
+                    prefetch_batches=prefetch,
+                    allow_idle_work=True,
+                )
+
+                def submit():
+                    sched.submit_and_wait([item])
+                    delivered.set()
+
+                caller = threading.Thread(target=submit)
+                try:
+                    caller.start()
+                    self.assertTrue(entered.wait(5))
+                    self.assertTrue(
+                        delivered.wait(1), "first request waited for capture"
+                    )
+                finally:
+                    release.set()
+                    caller.join(5)
+                    self.assertTrue(sched.close())
+
+    def test_integrated_owner_does_not_run_idle_gpu_maintenance(self):
+        fake = _FakeMMPart()
+        fake.run_embedding_idle_work = mock.Mock()
+        sched = MMScheduler(fake, batch_wait_ms=0, max_batch_size=1)
+        try:
+            sched.submit_and_wait([_FakeWorkItem()])
+            sched._run_idle_work()
+            fake.run_embedding_idle_work.assert_not_called()
+        finally:
+            sched.close()
+
+    def test_strict_work_budget_rejects_oversized_indivisible_item(self):
+        fake = _FakeMMPart(work_budget=MMWorkEstimate(input_patches=10))
+        fake.strict_work_budget = True
+        sched = MMScheduler(fake, batch_wait_ms=0)
+        try:
+            with self.assertRaisesRegex(ValueError, "exceeds model resource budget"):
+                sched.submit_and_wait([_FakeWorkItem(input_patches=11)])
+            with self.assertRaisesRegex(ValueError, "exceeds model resource budget"):
+                sched.submit_and_wait(
+                    [_FakeWorkItem(input_patches=1), _FakeWorkItem(input_patches=11)]
+                )
+            self.assertEqual(fake.calls, [])
+        finally:
+            sched.close()
+
     def test_queue_metrics_report_depth_and_wait(self):
         """Queue gauges expose backlog depth and time before a forward starts."""
         release_forward = threading.Event()
@@ -333,7 +420,7 @@ class MMSchedulerTest(TestCase):
             self.assertEqual(sum(fake.calls), 5)
 
             # A single request above the whole budget is rejected up front.
-            with self.assertRaisesRegex(ValueError, "exceeds gpu_max_batch_images"):
+            with self.assertRaisesRegex(ValueError, "exceeds batch media limit"):
                 sched.submit_and_wait([_FakeWorkItem(images=20)])
         finally:
             sched.close()
@@ -402,7 +489,7 @@ class MMSchedulerTest(TestCase):
         sched = MMScheduler(fake, max_batch_images=5)
         try:
             # 3 + 3 = 6 images > 5 -> rejected, even though no single item exceeds.
-            with self.assertRaisesRegex(ValueError, "exceeds gpu_max_batch_images"):
+            with self.assertRaisesRegex(ValueError, "exceeds batch media limit"):
                 sched.submit_and_wait(
                     [_FakeWorkItem(images=3), _FakeWorkItem(images=3)]
                 )
@@ -899,8 +986,8 @@ class MMSchedulerTest(TestCase):
         release = threading.Event()
         orig_collect = MMScheduler._collect_batch
 
-        def slow_collect(scheduler):
-            batch = orig_collect(scheduler)
+        def slow_collect(scheduler, **kwargs):
+            batch = orig_collect(scheduler, **kwargs)
             if batch is not None:
                 # Park AFTER collecting, BEFORE the loop's stopped-check, so the
                 # test can force close() into exactly that window.
@@ -1092,12 +1179,14 @@ class VitEmbeddingSchedulerArgsTest(TestCase):
         cfg = VitConfig()
         cfg.gpu_max_batch_size = 8
         cfg.gpu_batch_wait_ms = 20
-        cfg.gpu_max_batch_images = 200
+        cfg.vit_concurrency = 16
+        cfg.vit_max_queue_size = 7
 
         args = cfg.embedding_scheduler_args()
         self.assertEqual(args["max_batch_size"], 8)
         self.assertEqual(args["batch_wait_ms"], 20)
-        self.assertEqual(args["max_batch_images"], 200)
+        self.assertEqual(args["max_batch_images"], 8)
+        self.assertEqual(args["max_queue_size"], 23)
 
     def test_invalid_policy_values_rejected(self):
         cfg = VitConfig()

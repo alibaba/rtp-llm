@@ -1,7 +1,7 @@
+import concurrent.futures
 import logging
 import threading
 import time
-from concurrent import futures
 
 import grpc
 
@@ -41,18 +41,53 @@ from rtp_llm.multimodal.multimodal_util import (
     trans_mm_input,
 )
 from rtp_llm.multimodal.transport import create_mm_output_transport
+from rtp_llm.multimodal.transport.base import (
+    RDMA_CLAIM_HEADER,
+    serialize_embedding_response,
+)
 from rtp_llm.server.mm_cache_metadata import (
     MM_CACHE_SNAPSHOT_MAX_BYTES,
     get_mm_cache_keys,
     get_mm_cache_metadata,
     metadata_to_proto,
 )
-from rtp_llm.server.request_headers import extract_request_headers
+from rtp_llm.server.request_headers import (
+    extract_correlation_request_id,
+    extract_request_headers,
+)
 from rtp_llm.server.vit_rpc_constants import VIT_ERROR_REPORTED_METADATA_KEY
+from rtp_llm.server.vit_rpc_control import create_vit_rpc_server
 
 
 def _now_us() -> int:
     return time.monotonic_ns() // 1000
+
+
+def _multimodal_inputs_region(multimodal_inputs):
+    """Read the request-level download region carried by the inputs message.
+
+    One value per request: the preprocess engine fans it out to every
+    multimodal input of this request. None when absent (older peer or the
+    gateway injected no workspace region); a cache-only hash probe may pass
+    no inputs at all.
+    """
+    if multimodal_inputs is None:
+        return None
+    return getattr(multimodal_inputs, "region", "") or None
+
+
+def _multimodal_inputs_input_inspection_enabled(multimodal_inputs):
+    """Read the request-level input-inspection override from the inputs message.
+
+    Unset means "follow configuration"; a present value forces the
+    request-scoped decision (false disables inspection, true still requires
+    the provider to be enabled).
+    """
+    if multimodal_inputs is None:
+        return None
+    if not multimodal_inputs.HasField("input_inspection_enabled"):
+        return None
+    return multimodal_inputs.input_inspection_enabled.value
 
 
 _EXCEPTION_CATEGORY_TO_GRPC_STATUS = {
@@ -130,6 +165,14 @@ def _abort_ft_runtime(context, error: FtRuntimeException) -> None:
     context.abort(status, format_mm_rpc_error(error))
 
 
+def _abort_unexpected(context, error: Exception) -> None:
+    logging.exception("Unexpected ViT RPC error")
+    message = f"{type(error).__name__}: {error}" if str(error) else type(error).__name__
+    _abort_ft_runtime(
+        context, FtRuntimeException(ExceptionType.MM_PROCESS_ERROR, message)
+    )
+
+
 class MultimodalRpcServer(MultimodalRpcServiceServicer):
     def __init__(
         self,
@@ -151,6 +194,11 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
     def GetMultimodalHashes(self, request: MultimodalHashRequestPB, context):
         try:
             inputs = request.inputs if request.HasField("inputs") else None
+            if inputs is not None and inputs.HasField("v41_inputs"):
+                raise FtRuntimeException(
+                    ExceptionType.INVALID_PARAMS,
+                    "Hash lookup requires original image URLs or data",
+                )
             cancellation = (
                 self._register_rpc_completion(context) if inputs is not None else None
             )
@@ -169,8 +217,18 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                     timeout_ms,
                     user_id=headers.get("x-dashscope-uid", ""),
                     service_name=headers.get("x-dashscope-service", ""),
+                    external_request_id=extract_correlation_request_id(headers),
                     cancellation_event=cancellation,
                     binary_hashes=True,
+                    defer_inspection=request.defer_inspection,
+                    inspection_lifetime_ms=request.timeout_ms,
+                    inspection_request_id=request.request_id,
+                    region=_multimodal_inputs_region(inputs),
+                    input_inspection_enabled=(
+                        _multimodal_inputs_input_inspection_enabled(
+                            inputs if inputs is not None else request
+                        )
+                    ),
                 )
             )
         except NotImplementedError as error:
@@ -178,7 +236,14 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         except OverflowError as error:
             context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, str(error))
         except ValueError as error:
-            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+            # Preserve the client-error classification across the RPC boundary.
+            # A bare INVALID_ARGUMENT abort carries no error details, so the
+            # client falls back to UNKNOWN_ERROR and DashSc reports 500 instead
+            # of 400 for invalid media.
+            _abort_ft_runtime(
+                context,
+                FtRuntimeException(ExceptionType.MM_WRONG_FORMAT_ERROR, str(error)),
+            )
         except TimeoutError as error:
             if inputs is not None:
                 self.engine.cancel_queued_request(inputs.request_id)
@@ -196,23 +261,28 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             _abort_ft_runtime(context, error)
         except Exception as error:
             self.engine.report_vit_error(error)
-            _abort_ft_runtime(
-                context, FtRuntimeException(ExceptionType.MM_PROCESS_ERROR, str(error))
-            )
+            _abort_unexpected(context, error)
         return MultimodalHashResponsePB()
 
     def AsyncSubmitEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
         try:
+            if multimodal_inputs.HasField("v41_inputs"):
+                raise FtRuntimeException(
+                    ExceptionType.INVALID_PARAMS,
+                    "This operation requires original image URLs or data",
+                )
             converted_inputs = trans_mm_input(multimodal_inputs)
+            headers = extract_request_headers(dict(context.invocation_metadata() or ()))
             self.engine.async_submit(
                 converted_inputs,
                 multimodal_inputs.request_id,
-                user_id=extract_request_headers(
-                    dict(context.invocation_metadata() or ())
-                ).get("x-dashscope-uid", ""),
-                service_name=extract_request_headers(
-                    dict(context.invocation_metadata() or ())
-                ).get("x-dashscope-service", ""),
+                user_id=headers.get("x-dashscope-uid", ""),
+                service_name=headers.get("x-dashscope-service", ""),
+                external_request_id=extract_correlation_request_id(headers),
+                region=_multimodal_inputs_region(multimodal_inputs),
+                input_inspection_enabled=(
+                    _multimodal_inputs_input_inspection_enabled(multimodal_inputs)
+                ),
             )
             return EmptyPB()
         except FtRuntimeException as error:
@@ -220,30 +290,64 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             _abort_ft_runtime(context, error)
         except Exception as error:
             self.engine.report_vit_error(error)
-            _mark_vit_error_reported(context)
-            logging.exception("AsyncSubmitEmbedding failed")
-            context.abort(
-                grpc.StatusCode.INTERNAL,
-                f"[MM_PROCESS_ERROR] {type(error).__name__}: {error}",
+            _abort_unexpected(context, error)
+
+    def GetGreenNetVerdict(self, request, context):
+        """Wait for work registered by hash routing and prefill on this worker."""
+        try:
+            timeout_ms = _rpc_timeout_ms(context, VitConfig.DEFAULT_MM_TIMEOUT_MS)
+            verdict = self.engine._inspection.tickets.wait(
+                request.inspection_ticket,
+                time.monotonic() + timeout_ms / 1000,
+                self._register_rpc_completion(context),
+                request_id=request.request_id,
             )
+            if not verdict.passed:
+                raise FtRuntimeException(
+                    (
+                        ExceptionType.UNSAFE_INPUT_CONTENT
+                        if verdict.code == 2
+                        else ExceptionType.MM_PROCESS_ERROR
+                    ),
+                    verdict.message or "data inspection failed",
+                )
+        except Exception as error:
+            if not isinstance(error, FtRuntimeException):
+                if isinstance(error, concurrent.futures.CancelledError):
+                    code = ExceptionType.CANCELLED_ERROR
+                elif isinstance(error, (TimeoutError, concurrent.futures.TimeoutError)):
+                    code = ExceptionType.GENERATE_TIMEOUT
+                else:
+                    code = ExceptionType.MM_PROCESS_ERROR
+                error = FtRuntimeException(code, str(error))
+            self.engine.report_vit_error(error)
+            _abort_ft_runtime(context, error)
+        return EmptyPB()
 
     def WaitGreenNetVerdict(self, multimodal_inputs: MultimodalInputsPB, context):
         """Start missing work and block until GreenNet decides for all inputs."""
         verdict = None
         try:
+            if multimodal_inputs.HasField("v41_inputs"):
+                raise FtRuntimeException(
+                    ExceptionType.INVALID_PARAMS,
+                    "This operation requires original image URLs or data",
+                )
             converted_inputs = trans_mm_input(multimodal_inputs)
+            headers = extract_request_headers(dict(context.invocation_metadata() or ()))
             cancellation_event = self._register_rpc_completion(context)
             verdict = self.engine.wait_greennet_verdict(
                 converted_inputs,
                 timeout_ms=_rpc_timeout_ms(context, VitConfig.DEFAULT_MM_TIMEOUT_MS),
                 request_id=multimodal_inputs.request_id,
                 cancellation_event=cancellation_event,
-                user_id=extract_request_headers(
-                    dict(context.invocation_metadata() or ())
-                ).get("x-dashscope-uid", ""),
-                service_name=extract_request_headers(
-                    dict(context.invocation_metadata() or ())
-                ).get("x-dashscope-service", ""),
+                user_id=headers.get("x-dashscope-uid", ""),
+                service_name=headers.get("x-dashscope-service", ""),
+                external_request_id=extract_correlation_request_id(headers),
+                region=_multimodal_inputs_region(multimodal_inputs),
+                input_inspection_enabled=(
+                    _multimodal_inputs_input_inspection_enabled(multimodal_inputs)
+                ),
             )
             if verdict is None:
                 raise RuntimeError("ViT GreenNet returned no verdict")
@@ -260,12 +364,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             return EmptyPB()
         except Exception as error:
             self.engine.report_vit_error(error)
-            _mark_vit_error_reported(context)
-            logging.exception("WaitGreenNetVerdict failed")
-            context.abort(
-                grpc.StatusCode.INTERNAL,
-                f"[MM_PROCESS_ERROR] {type(error).__name__}: {error}",
-            )
+            _abort_unexpected(context, error)
             return EmptyPB()
 
         try:
@@ -288,12 +387,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             # A malformed verdict or response-metadata failure is also an
             # exceptional result and must be visible in the error QPS.
             self.engine.report_vit_error(error)
-            _mark_vit_error_reported(context)
-            logging.exception("Failed to serialize ViT GreenNet verdict")
-            context.abort(
-                grpc.StatusCode.INTERNAL,
-                f"[MM_PROCESS_ERROR] {type(error).__name__}: {error}",
-            )
+            _abort_unexpected(context, error)
             return EmptyPB()
         return EmptyPB()
 
@@ -334,34 +428,55 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             )
             headers = extract_request_headers(dict(context.invocation_metadata() or ()))
             if multimodal_inputs.HasField("v41_inputs"):
-                multimodal_inputs.timeout_ms = _rpc_timeout_ms(
-                    context, multimodal_inputs.timeout_ms or 120000
-                )
-                res = self.engine.mm_embedding_rpc(
+                res = self.engine.get_prepared_v41_result(
                     multimodal_inputs,
-                    user_id=headers.get("x-dashscope-uid", ""),
-                    service_name=headers.get("x-dashscope-service", ""),
+                    _rpc_timeout_ms(
+                        context,
+                        multimodal_inputs.timeout_ms or VitConfig.DEFAULT_MM_TIMEOUT_MS,
+                    ),
+                    _multimodal_inputs_input_inspection_enabled(multimodal_inputs),
                 )
             else:
                 converted_inputs = trans_mm_input(multimodal_inputs)
                 cancellation_event = self._register_rpc_completion(context)
                 results = self.engine.get_embedding_result(
                     converted_inputs,
+                    **(
+                        {"inspection_ticket": multimodal_inputs.inspection_ticket}
+                        if multimodal_inputs.inspection_ticket
+                        else {}
+                    ),
                     timeout_ms=_rpc_timeout_ms(context, 120000),
                     request_id=multimodal_inputs.request_id,
                     cancellation_event=cancellation_event,
                     user_id=headers.get("x-dashscope-uid", ""),
                     service_name=headers.get("x-dashscope-service", ""),
+                    external_request_id=extract_correlation_request_id(headers),
+                    region=_multimodal_inputs_region(multimodal_inputs),
+                    input_inspection_enabled=(
+                        _multimodal_inputs_input_inspection_enabled(multimodal_inputs)
+                    ),
                 )
                 res = merge_embedding_results(results)
             output_pb = self._transport.transfer(multimodal_inputs, res)
-            add_multimodal_feature_hashes(output_pb, res.embeddings, res.feature_hashes)
-            kmonitor.report(
-                GaugeMetrics.VIT_RPC_SERVER_HANDLER_RT_US_METRIC,
-                _now_us() - start_us,
-                tags,
-            )
-            return output_pb
+            try:
+                add_multimodal_feature_hashes(
+                    output_pb, res.embeddings, res.feature_hashes
+                )
+                kmonitor.report(
+                    GaugeMetrics.VIT_RPC_SERVER_HANDLER_RT_US_METRIC,
+                    _now_us() - start_us,
+                    tags,
+                )
+                if (
+                    dict(context.invocation_metadata() or ()).get(RDMA_CLAIM_HEADER)
+                    == "1"
+                ):
+                    self._transport.offer(output_pb)
+                return output_pb
+            except Exception:
+                self._transport.rollback(output_pb)
+                raise
         except MMSchedulerOverloadError as e:
             # Backpressure, not a server fault: map to a defined, ret/backoff-able
             # status instead of a generic error. abort() raises to end the call.
@@ -373,11 +488,10 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 1,
                 {"source": "vit_server", "reason": "overload"},
             )
-            context.abort(
-                grpc.StatusCode.RESOURCE_EXHAUSTED,
-                format_mm_rpc_error(
-                    FtRuntimeException(ExceptionType.MM_PROCESS_ERROR, str(e))
-                ),
+            self.engine.report_vit_error(e)
+            _abort_ft_runtime(
+                context,
+                FtRuntimeException(ExceptionType.CONCURRENCY_LIMIT_ERROR, str(e)),
             )
         except MMSchedulerTimeoutError as e:
             # Scheduler wait exceeded its embedding timeout.
@@ -386,11 +500,10 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 1,
                 {"source": "vit_server", "reason": "timeout"},
             )
-            context.abort(
-                grpc.StatusCode.DEADLINE_EXCEEDED,
-                format_mm_rpc_error(
-                    FtRuntimeException(ExceptionType.MM_PROCESS_ERROR, str(e))
-                ),
+            self.engine.report_vit_error(e)
+            _abort_ft_runtime(
+                context,
+                FtRuntimeException(ExceptionType.GENERATE_TIMEOUT, str(e)),
             )
         except MMSchedulerRequestTooLargeError as e:
             # Client asked for more than a single request may carry -> a caller
@@ -400,11 +513,10 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 1,
                 {"source": "vit_server", "reason": "request_too_large"},
             )
-            context.abort(
-                grpc.StatusCode.INVALID_ARGUMENT,
-                format_mm_rpc_error(
-                    FtRuntimeException(ExceptionType.MM_WRONG_FORMAT_ERROR, str(e))
-                ),
+            self.engine.report_vit_error(e)
+            _abort_ft_runtime(
+                context,
+                FtRuntimeException(ExceptionType.MM_WRONG_FORMAT_ERROR, str(e)),
             )
         except FtRuntimeException as e:
             grpc_status = _grpc_status_for_runtime_exception(e)
@@ -416,21 +528,29 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             self.engine.report_vit_error(e)
             _abort_ft_runtime(context, e)
         except TimeoutError as error:
+            self.engine.report_vit_error(error)
             timeout_error = FtRuntimeException(
                 ExceptionType.GENERATE_TIMEOUT, str(error)
             )
-            self.engine.report_vit_error(timeout_error)
             _abort_ft_runtime(context, timeout_error)
-        except Exception:
+        except Exception as error:
             kmonitor.report(
                 AccMetrics.VIT_RPC_SERVER_ERROR_QPS_METRIC,
                 1,
                 {"source": "vit_server", "reason": "exception"},
             )
-            raise
+            self.engine.report_vit_error(error)
+            _abort_unexpected(context, error)
         finally:
             if not callback_added:
                 _report_lifecycle()
+
+    def ClaimRdmaLease(self, request: ReleaseLeasePB, context):
+        if not self._transport.claim(request):
+            context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION, "RDMA offer expired or unknown"
+            )
+        return EmptyPB()
 
     def ReleaseRdmaLease(self, request: ReleaseLeasePB, context):
         self._transport.release(request)
@@ -441,6 +561,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         worker_status.role = "VIT"
         worker_status.status_version = 1
         worker_status.alive = True
+        worker_status.mm_inflight_inputs.value = self.engine.get_inflight_input_count()
         return worker_status
 
     def GetCacheStatus(self, request: CacheVersionPB, context):
@@ -465,14 +586,4 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
 
 
 def create_rpc_server():
-    server = grpc.server(
-        futures.ThreadPoolExecutor(max_workers=200),
-        options=[
-            ("grpc.max_send_message_length", 1024 * 1024 * 1024),
-            ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
-            ("grpc.max_concurrent_streams", -1),
-            ("grpc.http2.min_ping_interval_without_data_ms", 1000),
-            ("grpc.http2.max_ping_strikes", 1000),
-        ],
-    )
-    return server
+    return create_vit_rpc_server(embedding_serializer=serialize_embedding_response)

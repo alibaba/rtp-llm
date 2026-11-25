@@ -169,6 +169,7 @@ class ExceptionType(IntEnum):
     MM_REMOTE_RPC_FAILED = 907
     UNSAFE_INPUT_CONTENT = 908, ExceptionCategory.BAD_REQUEST
     UNSAFE_OUTPUT_CONTENT = 909, ExceptionCategory.INVALID_OUTPUT
+    MM_IMAGE_PIXEL_LIMIT_EXCEEDED = 910, ExceptionCategory.BAD_REQUEST
 
     @classmethod
     def from_value(cls, value):

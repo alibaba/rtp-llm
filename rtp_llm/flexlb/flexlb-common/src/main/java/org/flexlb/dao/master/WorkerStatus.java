@@ -41,6 +41,11 @@ public class WorkerStatus {
     private final AtomicLong cacheLastUpdateTime = new AtomicLong(-1L);
     private final AtomicReference<PollLease> statusPollLease = new AtomicReference<>();
     private final AtomicReference<PollLease> cachePollLease = new AtomicReference<>();
+    // Cumulative for this worker generation. The next poll supersedes estimates
+    // for routes assigned before it began, while the reported load stays intact.
+    private final AtomicLong vitRoutedInputs = new AtomicLong();
+
+    private volatile VitLoad vitLoad;
 
     private WorkerStatus(TopologySnapshot initialTopology, EngineObservation initialStatus) {
         topology = new AtomicReference<>(initialTopology);
@@ -55,6 +60,35 @@ public class WorkerStatus {
                                 initialStatus, new AppliedStatusCursor(-1L, -1L)));
         long discoveredAtUs = System.nanoTime() / 1000;
         pollHealth = new AtomicReference<>(new PollHealth(discoveredAtUs, 0L, 0L, false));
+    }
+
+    public long vitRoutedInputs() {
+        return vitRoutedInputs.get();
+    }
+
+    public boolean tryAddVitRoutedInputs(long observed, int mediaCount) {
+        return vitRoutedInputs.compareAndSet(observed, observed + mediaCount);
+    }
+
+    @JsonIgnore
+    public VitLoad vitLoad() {
+        return vitLoad;
+    }
+
+    public void recordVitLoad(PollLease lease, Long inflightInputs) {
+        lock.lock();
+        try {
+            if (lease == null || statusPollLease.get() != lease || retiring) {
+                return;
+            }
+            vitLoad =
+                    inflightInputs == null || inflightInputs < 0
+                            ? null
+                            : new VitLoad(
+                                    inflightInputs, System.nanoTime(), lease.vitRoutedAtStart);
+        } finally {
+            lock.unlock();
+        }
     }
 
     /** Create one fully initialized service-discovery generation. */
@@ -581,6 +615,16 @@ public class WorkerStatus {
     }
 
     /**
+     * Pairs the worker's reported inflight inputs with the local dispatch count at poll start.
+     * Routing adds subsequent dispatches to this sample until the next poll or sample expiry.
+     */
+    public record VitLoad(long inflightInputs, long receivedNanos, long routedAtPollStart) {
+        public VitLoad(long inflightInputs, long receivedNanos) {
+            this(inflightInputs, receivedNanos, 0L);
+        }
+    }
+
+    /**
      * Freezes a worker generation's discovery labels separately from its engine observations.
      */
     public record TopologySnapshot(
@@ -951,10 +995,13 @@ public class WorkerStatus {
         private final PollKind kind;
         private final AtomicReference<PollLease> slot;
 
+        private final long vitRoutedAtStart;
+
         private PollLease(WorkerStatus owner, PollKind kind, AtomicReference<PollLease> slot) {
             this.owner = owner;
             this.kind = kind;
             this.slot = slot;
+            this.vitRoutedAtStart = owner.vitRoutedInputs();
         }
 
         @Override

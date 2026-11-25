@@ -365,7 +365,7 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
                                                 const BatchGenerateInputPB* request,
                                                 BatchGenerateOutputsPB*     response) {
     c10::InferenceMode inference_guard(true);
-    AtomicGuard request_guard(onflight_requests_);
+    AtomicGuard        request_guard(onflight_requests_);
     if (!request || !response)
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "batch request and response are required");
     response->Clear();
@@ -379,10 +379,10 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
     if (address.empty())
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "batch requires a Prefill address");
     std::unordered_set<int64_t> request_ids;
-    bool                        all_pd            = true;
-    bool                        master_admitted   = false;
+    bool                        all_pd                      = true;
+    bool                        master_admitted             = false;
     bool                        batch_has_unbounded_request = false;
-    int64_t                     batch_deadline_ms = entry_ms;
+    int64_t                     batch_deadline_ms           = entry_ms;
     BatchGenerateInputPB        effective;
     for (const auto& item : request->inputs()) {
         const bool multimodal =
@@ -502,14 +502,14 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
         auto* slot = prefill_request.add_dp_slots();
         slot->set_dp_rank(0);
         // The batch validated that all items target this exact Prefill endpoint.
-        std::optional<PrefillPeerInfo> peer;
-        std::unordered_map<int64_t, int> response_indices;
+        std::optional<PrefillPeerInfo>                        peer;
+        std::unordered_map<int64_t, int>                      response_indices;
         std::unordered_map<int64_t, PDCancelRegistry::Handle> handles_by_id;
-        std::vector<GenerateStreamPtr> output_streams(request->inputs_size());
-        std::vector<GenerateContext*> output_contexts(request->inputs_size(), nullptr);
+        std::vector<GenerateStreamPtr>                        output_streams(request->inputs_size());
+        std::vector<GenerateContext*>                         output_contexts(request->inputs_size(), nullptr);
         const auto fail_item = [&](int64_t request_id, const ErrorInfo& error) {
-            const auto index = response_indices.at(request_id);
-            auto* item_error = response->mutable_results(index)->mutable_error_info();
+            const auto index      = response_indices.at(request_id);
+            auto*      item_error = response->mutable_results(index)->mutable_error_info();
             item_error->set_error_code(transErrorCodeToRPC(error.code()));
             item_error->set_error_message(error.ToString());
             if (auto* context = output_contexts[index])
@@ -572,7 +572,7 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
             }
             input->request_deadline_is_handoff_only = configured_timeout == 0;
             input->generate_config->timeout_ms      = configured_timeout;
-            auto stream = engine_->makeStream(input);
+            auto stream                             = engine_->makeStream(input);
             stream->streamCacheResource().setPDDecodeLinearTailOnly(
                 maga_init_params_.pd_sep_config.decode_linear_tail_only);
             stream->setPrefillTpSize(peer->tp_size);
@@ -595,13 +595,15 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
             return guard.status = grpcStatusFromErrorInfo({ErrorCode::CANCELLED, "batch cancelled"});
         auto* prefill_items = slot->mutable_requests();
         for (int i = prefill_items->size() - 1; i >= 0; --i) {
-            auto* item = prefill_items->Mutable(i)->mutable_input();
-            const auto request_id = item->request_id();
-            const auto remaining = entry_ms + item->generate_config().timeout_ms() - currentTimeMs();
-            const auto& handle = handles_by_id.at(request_id);
+            auto*       item       = prefill_items->Mutable(i)->mutable_input();
+            const auto  request_id = item->request_id();
+            const auto  remaining  = entry_ms + item->generate_config().timeout_ms() - currentTimeMs();
+            const auto& handle     = handles_by_id.at(request_id);
             if (handle->canceled.load() || remaining <= 0) {
-                fail_item(request_id, handle->canceled.load() ? handle->cancel_reason :
-                    ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "batch item expired before Prefill admission"));
+                fail_item(request_id,
+                          handle->canceled.load() ?
+                              handle->cancel_reason :
+                              ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "batch item expired before Prefill admission"));
                 prefill_items->DeleteSubrange(i, 1);
             } else {
                 item->mutable_generate_config()->set_timeout_ms(clampRpcTimeoutMsToInt32(remaining));
@@ -696,9 +698,9 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
             }
         }
         for (auto& stream : guard.streams) {
-            const auto request_id = stream->generateInput()->request_id;
-            const auto index = response_indices.at(request_id);
-            const auto& handle = handles_by_id.at(request_id);
+            const auto  request_id = stream->generateInput()->request_id;
+            const auto  index      = response_indices.at(request_id);
+            const auto& handle     = handles_by_id.at(request_id);
             if (handle->canceled.load() && !response->results(index).has_error_info())
                 fail_item(request_id, handle->cancel_reason);
             if (response->results(index).has_error_info()) {
@@ -709,7 +711,7 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
             }
             ++guard.enqueued_stream_count;
         }
-        guard.status = pollBatchStreamOutput(context, output_streams, response, fail_item);
+        guard.status    = pollBatchStreamOutput(context, output_streams, response, fail_item);
         guard.completed = guard.status.ok() && !client_cancelled();
         return guard.status;
     } catch (const std::exception& e) {
@@ -733,8 +735,8 @@ grpc::Status DecodeRpcServer::preparePDRequest(const GenerateInputPB&          r
     }
     // Preserve the configured duration on the wire; D keeps its own deadline.
     input->generate_config->timeout_ms = request.generate_config().timeout_ms();
-    auto status = preprocessForPD(
-        input, mm_processor_.get(), engine_->isMTPEagle(), RoleType::DECODE, server_context, {});
+    auto status =
+        preprocessForPD(input, mm_processor_.get(), engine_->isMTPEagle(), RoleType::DECODE, server_context, {});
     if (!status.ok())
         return serializeErrorMsg(std::to_string(request.request_id()), status);
     prefill_request.CopyFrom(request);
@@ -743,8 +745,8 @@ grpc::Status DecodeRpcServer::preparePDRequest(const GenerateInputPB&          r
         && input->multimodal_features && input->mm_locs) {
         // Local ViT has already expanded the tokens used to register Decode's KV.
         // Prefill validates the same spans against its fetched embeddings.
-        const auto* token_ids = input->input_ids.data_ptr<int32_t>();
-        auto* wire_tokens = prefill_request.mutable_token_ids();
+        const auto* token_ids   = input->input_ids.data_ptr<int32_t>();
+        auto*       wire_tokens = prefill_request.mutable_token_ids();
         wire_tokens->Clear();
         wire_tokens->Reserve(input->input_ids.numel());
         for (int64_t i = 0; i < input->input_ids.numel(); ++i) {
@@ -755,6 +757,12 @@ grpc::Status DecodeRpcServer::preparePDRequest(const GenerateInputPB&          r
             auto* span = layout->add_spans();
             span->set_offset(input->mm_locs->data_ptr<int32_t>()[i]);
             span->set_length(input->multimodal_features->at(i).size(0));
+            if (input->multimodal_cache_spans) {
+                const auto& hashes = input->multimodal_cache_spans->at(i).row_hashes;
+                span->mutable_row_hashes()->Reserve(hashes.size());
+                for (int32_t hash : hashes)
+                    span->add_row_hashes(hash);
+            }
         }
     }
     const auto remaining = deadline_ms - currentTimeMs();
@@ -809,10 +817,10 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
         }
     };
 
-    const int64_t request_entry_ms          = currentTimeMs();
-    const auto    configured_timeout_ms     = clampRpcTimeoutMsToInt32(configuredRpcTimeoutMs(
+    const int64_t request_entry_ms      = currentTimeMs();
+    const auto    configured_timeout_ms = clampRpcTimeoutMsToInt32(configuredRpcTimeoutMs(
         request->generate_config().timeout_ms(), maga_init_params_.pd_sep_config.max_rpc_timeout_ms));
-    const auto    handoff_timeout_ms        = configured_timeout_ms > 0 ? configured_timeout_ms : kDefaultRpcTimeoutMs;
+    const auto    handoff_timeout_ms    = configured_timeout_ms > 0 ? configured_timeout_ms : kDefaultRpcTimeoutMs;
 
     // Always isolate decode-entrance P2P handoff from any caller-provided business unique_key.
     // The external unique_key remains on the original request object, while the internal handoff
@@ -845,22 +853,20 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
             return grpc::Status(grpc::StatusCode::UNAVAILABLE, "Decode is not initialized");
         }
         PDCancelRegistry::Handle handle;
-        const auto admission = cancel_registry_->admit(*request,
-                                                       "",
-                                                       prefillAddress(*request),
-                                                       request_entry_ms + handoff_timeout_ms,
-                                                       handle);
+        const auto               admission = cancel_registry_->admit(
+            *request, "", prefillAddress(*request), request_entry_ms + handoff_timeout_ms, handle);
         if (!admission.ok()) {
             return serializeErrorMsg(std::to_string(request->request_id()),
                                      QueryConverter::transRequestInfo(request->request_info()),
                                      admission);
         }
         PDCancelRegistry::CallGuard call_guard(*cancel_registry_, handle);
-        GenerateInputPB prefill_forward_request;
+        GenerateInputPB             prefill_forward_request;
         prefill_forward_request.CopyFrom(*effective_request);
         prefill_forward_request.mutable_generate_config()->set_timeout_ms(configured_timeout_ms);
         prefill_forward_request.mutable_generate_config()->set_can_use_pd_separation(false);
-        const auto status = prefill_server_caller_->callPrefill(server_context, &prefill_forward_request, response_writer);
+        const auto status =
+            prefill_server_caller_->callPrefill(server_context, &prefill_forward_request, response_writer);
         if (!handle->canceled.load()) {
             cancel_registry_->finishDownstream(handle);
         }
@@ -868,10 +874,10 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
     }
 
     const auto log_pd_error = [&](const char* stage, const grpc::Status& status) {
-        const auto error = errorInfoFromGrpcStatus(status);
-        const auto& trace_id = request->request_info().trace_id().empty()
-                                   ? request->generate_config().trace_id().value()
-                                   : request->request_info().trace_id();
+        const auto  error    = errorInfoFromGrpcStatus(status);
+        const auto& trace_id = request->request_info().trace_id().empty() ?
+                                   request->generate_config().trace_id().value() :
+                                   request->request_info().trace_id();
         if (status.error_code() == grpc::StatusCode::CANCELLED && error.code() == ErrorCode::CANCELLED) {
             RTP_LLM_LOG_INFO("P2P Decode request cancelled, stage=%s request_id=%ld unique_key=%s trace_id=%s error=%s",
                              stage,
@@ -894,14 +900,14 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
                             error.ToString().c_str());
     };
 
-    auto        request_id = request->request_id();
+    auto request_id = request->request_id();
     RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
-    PDCancelRegistry::Handle cancel_handle;
+    PDCancelRegistry::Handle                   cancel_handle;
     std::optional<PDCancelRegistry::CallGuard> cancel_guard;
     auto                                       generate_context =
         GenerateContext(request_id, configured_timeout_ms, server_context, metrics_reporter_, meta_);
     generate_context.onflight_requests = &onflight_requests_;
-    generate_context.request_info = QueryConverter::transRequestInfo(request->request_info());
+    generate_context.request_info      = QueryConverter::transRequestInfo(request->request_info());
     if (generate_context.request_info.trace_id.empty()) {
         generate_context.request_info.trace_id = request->generate_config().trace_id().value();
     }
@@ -919,8 +925,8 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
     telemetry::PhaseSpanSynthesisScope phase_span_scope([&generate_context](bool exception_unwinding) {
         generate_context.synthesizeTracePhases(telemetry::PhaseRole::Decode, exception_unwinding);
     });
-    const int uncaught_exceptions = std::uncaught_exceptions();
-    autil::ScopeGuard rpc_completion_guard([&generate_context, uncaught_exceptions] {
+    const int                          uncaught_exceptions = std::uncaught_exceptions();
+    autil::ScopeGuard                  rpc_completion_guard([&generate_context, uncaught_exceptions] {
         if (std::uncaught_exceptions() == uncaught_exceptions) {
             generate_context.markRpcHandlingCompleted();
         }
@@ -932,7 +938,8 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
                                                    cancel_handle);
     if (!admission.ok()) {
         generate_context.error_info = admission;
-        generate_context.error_status = serializeErrorMsg(generate_context.request_key, generate_context.request_info, admission);
+        generate_context.error_status =
+            serializeErrorMsg(generate_context.request_key, generate_context.request_info, admission);
         return generate_context.error_status;
     }
     cancel_guard.emplace(*cancel_registry_, cancel_handle);
@@ -977,7 +984,7 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
             generate_context.reportMetrics(collector);
         }
         if (!prepare_status.ok()) {
-            generate_context.error_info = errorInfoFromGrpcStatus(prepare_status);
+            generate_context.error_info   = errorInfoFromGrpcStatus(prepare_status);
             generate_context.error_status = serializeErrorMsg(
                 generate_context.request_key, generate_context.request_info, generate_context.error_info);
             log_pd_error("prepare", generate_context.error_status);
@@ -985,18 +992,19 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
         }
         if (cancel_handle->canceled.load()) {
             generate_context.error_info   = cancel_handle->cancel_reason;
-            generate_context.error_status = serializeErrorMsg(std::to_string(request_id), generate_context.request_info, generate_context.error_info);
+            generate_context.error_status = serializeErrorMsg(
+                std::to_string(request_id), generate_context.request_info, generate_context.error_info);
             return generate_context.error_status;
         }
         input->request_deadline_is_handoff_only = configured_timeout_ms == 0;
         input->generate_config->timeout_ms      = configured_timeout_ms;
-        auto stream = engine_->makeStream(input);
+        auto stream                             = engine_->makeStream(input);
         stream->streamCacheResource().setPDDecodeLinearTailOnly(
             maga_init_params_.pd_sep_config.decode_linear_tail_only);
         // Until enqueue succeeds, no scheduler owns this stream's terminal transition.
         struct UnenqueuedStreamGuard {
             GenerateStreamPtr stream;
-            bool submitted = false;
+            bool              submitted = false;
             ~UnenqueuedStreamGuard() {
                 if (!submitted) {
                     stream->finishWithoutGenerate();
@@ -1015,9 +1023,10 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
             if (cancel_handle->canceled.load()) {
                 // NormalEngine settles rejected canceled streams without scheduler ownership.
                 engine_->enqueue(stream);
-                unenqueued_guard.submitted = true;
+                unenqueued_guard.submitted    = true;
                 generate_context.error_info   = cancel_handle->cancel_reason;
-                generate_context.error_status = serializeErrorMsg(std::to_string(request_id), generate_context.request_info, generate_context.error_info);
+                generate_context.error_status = serializeErrorMsg(
+                    std::to_string(request_id), generate_context.request_info, generate_context.error_info);
                 return generate_context.error_status;
             }
             const auto& unique_key          = input->generate_config->unique_key;
@@ -1027,7 +1036,7 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
             uint32_t    target_port  = 0;
             auto        parse_status = parsePrefillDpAddr(prefillAddress(prefill_request), &target_ip, &target_port);
             if (!parse_status.ok()) {
-                generate_context.error_info = errorInfoFromGrpcStatus(parse_status);
+                generate_context.error_info   = errorInfoFromGrpcStatus(parse_status);
                 generate_context.error_status = serializeErrorMsg(
                     generate_context.request_key, generate_context.request_info, generate_context.error_info);
                 log_pd_error("prefill_address", generate_context.error_status);
@@ -1035,9 +1044,13 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
             }
             const auto prefill_call_start_us = currentTimeUs();
             auto       started               = prefill_server_caller_->callPrefill(
-                &prefill_request, target_ip, target_port, unique_key, request_deadline_ms,
+                &prefill_request,
+                target_ip,
+                target_port,
+                unique_key,
+                request_deadline_ms,
                 generate_context.trace_span_guard ? generate_context.trace_span_guard->sharedSpan() :
-                    opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{});
+                                                                        opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{});
             {
                 RpcMetricsCollector collector;
                 collector.min_response_done_time_us = 0;
@@ -1045,9 +1058,9 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
                 generate_context.reportMetrics(collector);
             }
             if (!started.ok()) {
-                generate_context.error_info = started.status();
-                generate_context.error_status =
-                    serializeErrorMsg(generate_context.request_key, generate_context.request_info, generate_context.error_info);
+                generate_context.error_info   = started.status();
+                generate_context.error_status = serializeErrorMsg(
+                    generate_context.request_key, generate_context.request_info, generate_context.error_info);
                 log_pd_error("call_prefill", generate_context.error_status);
                 return generate_context.error_status;
             }
@@ -1065,18 +1078,20 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
                 return FirstError::Snapshot{};
             }
             const auto remote = prefill_caller_ctx->firstError();
-            const auto first = FirstError::earlier(stream->firstError(), remote);
+            const auto first  = FirstError::earlier(stream->firstError(), remote);
             if (remote.error.hasError() && first.order == remote.order) {
                 generate_context.dependency_failure = remote;
             }
             return remote;
         };
-        generate_context.error_status = pollStreamOutput(
-            server_context, generate_context.request_key, response_writer, generate_context.getStream(), check_progress);
-        prefill_cancel_guard.completed = generate_context.error_status.ok() && !server_context->IsCancelled()
-                                         && !stream->hasError()
-                                         && (stream->getStatus() == StreamState::FINISHED
-                                             || stream->hasEvent(StreamEvents::GenerateDone));
+        generate_context.error_status = pollStreamOutput(server_context,
+                                                         generate_context.request_key,
+                                                         response_writer,
+                                                         generate_context.getStream(),
+                                                         check_progress);
+        prefill_cancel_guard.completed =
+            generate_context.error_status.ok() && !server_context->IsCancelled() && !stream->hasError()
+            && (stream->getStatus() == StreamState::FINISHED || stream->hasEvent(StreamEvents::GenerateDone));
         if (prefill_cancel_guard.completed)
             cancel_registry_->finishDownstream(cancel_handle);
         else
@@ -1102,13 +1117,19 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
     }
 } catch (const std::invalid_argument& error) {
     const auto key = request ? std::to_string(request->request_id()) : "unknown";
-    return serializeErrorMsg(key, request ? QueryConverter::transRequestInfo(request->request_info()) : RequestInfo(), ErrorInfo(ErrorCode::INVALID_PARAMS, error.what()));
+    return serializeErrorMsg(key,
+                             request ? QueryConverter::transRequestInfo(request->request_info()) : RequestInfo(),
+                             ErrorInfo(ErrorCode::INVALID_PARAMS, error.what()));
 } catch (const std::exception& error) {
     const auto key = request ? std::to_string(request->request_id()) : "unknown";
-    return serializeErrorMsg(key, request ? QueryConverter::transRequestInfo(request->request_info()) : RequestInfo(), ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
+    return serializeErrorMsg(key,
+                             request ? QueryConverter::transRequestInfo(request->request_info()) : RequestInfo(),
+                             ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
 } catch (...) {
     const auto key = request ? std::to_string(request->request_id()) : "unknown";
-    return serializeErrorMsg(key, request ? QueryConverter::transRequestInfo(request->request_info()) : RequestInfo(), ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown decode RPC exception"));
+    return serializeErrorMsg(key,
+                             request ? QueryConverter::transRequestInfo(request->request_info()) : RequestInfo(),
+                             ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown decode RPC exception"));
 }
 
 void DecodeRpcServer::updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_ptr<GenerateStream>& stream) {

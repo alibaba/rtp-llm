@@ -9,6 +9,7 @@ Defaults for ``SamplingParams`` align with ``rtp_llm.config.generate_config.Gene
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import struct
@@ -21,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Iterator, NamedTuple
 
 import torch
 
+from rtp_llm.config.dsv41_config import v41_image_detail_size
 from rtp_llm.config.response_format import parse_response_format
 from rtp_llm.config.thinking_mode import INT32_MAX
 from rtp_llm.dash_sc.proto import predict_v2_pb2
@@ -30,11 +32,18 @@ from rtp_llm.dash_sc.structural_tag import (
     structural_tag_from_response_format,
     validate_structural_tag_shape,
 )
-from rtp_llm.utils.base_model_datatypes import GenerateOutput, GenerateOutputs
+from rtp_llm.server.request_headers import (
+    extract_request_headers,
+    extract_workspace_region,
+)
+from rtp_llm.utils.base_model_datatypes import (
+    GenerateOutput,
+    GenerateOutputs,
+    MMUrlType,
+)
 
 if TYPE_CHECKING:
     from rtp_llm.config.generate_config import GenerateConfig
-    from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 _INT32_MIN = -2_147_483_648
 _DEFAULT_MAX_NEW_TOKENS = 32000
@@ -99,13 +108,13 @@ DASH_ERROR_BAD_REQUEST = DashErrorSpec(
 )
 DASH_ERROR_TOO_LONG = DashErrorSpec(
     error_no=LLMFinishReason.STOP_ENGINE_PARAM,
-    finish_reason=LLMFinishReason.STOP_ENGINE_PARAM,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
     status_code=413,
     status_name="InvalidParameter",
 )
 DASH_ERROR_UNSUPPORTED = DashErrorSpec(
     error_no=LLMFinishReason.STOP_ENGINE_PARAM,
-    finish_reason=LLMFinishReason.STOP_ENGINE_PARAM,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
     status_code=422,
     status_name="InvalidParameter",
 )
@@ -360,7 +369,14 @@ def parse_ds_header_attributes(
         return {}
     if not isinstance(attrs, dict):
         return {}
-    return {str(k).lower(): v for k, v in attrs.items()}
+    normalized = {str(k).lower(): v for k, v in attrs.items()}
+    # Case folding can overwrite an explicitly lowercase estimated-usage key.
+    for name in _ESTIMATED_USAGE_HEADERS:
+        if name in attrs:
+            normalized[name] = attrs[name]
+    # Empty aliases from upstream must not erase a real request identity.
+    normalized.update(extract_request_headers(attrs))
+    return normalized
 
 
 def _dict_get_case_insensitive(value: Any, key: str) -> Any:
@@ -727,6 +743,8 @@ class DashScRequestControls:
     reasoning_effort: str | int | None = None
     request_headers: dict[str, str] = field(default_factory=dict)
     log_input_output: bool = True
+    enable_estimated_usage: bool | None = None
+    support_frontend_estimated_usage: bool = False
 
 
 @dataclass(frozen=True)
@@ -1010,6 +1028,38 @@ def parse_sampling_params(
     )
 
 
+# Per-request switch for the early first packet (estimated usage frame).
+_ESTIMATED_USAGE_HEADER = "x-dashscope-inner-enableestimatedusage"
+# Gateway capability gate for the early first packet. Missing is false.
+_SUPPORT_FRONTEND_ESTIMATED_USAGE_HEADER = (
+    "x-dashscope-inner-support-frontend-estimatedusage"
+)
+_ESTIMATED_USAGE_HEADERS = (
+    _ESTIMATED_USAGE_HEADER,
+    _SUPPORT_FRONTEND_ESTIMATED_USAGE_HEADER,
+)
+
+
+def _request_header_value(
+    ds_attrs: dict[str, Any] | None,
+    invocation_metadata: Iterable[tuple[object, object]],
+    name: str,
+) -> Any:
+    value = _dict_get_case_insensitive(ds_attrs, name)
+    if value is not None:
+        return value
+    lower = name.lower()
+    if lower in _ESTIMATED_USAGE_HEADERS:
+        invocation_metadata = tuple(invocation_metadata)
+        for key, value in invocation_metadata:
+            if key == lower:
+                return value
+    for key, value in invocation_metadata:
+        if str(key).lower() == lower:
+            return value
+    return None
+
+
 def parse_request_controls(
     request: predict_v2_pb2.ModelInferRequest,
     ds_attrs: dict[str, Any] | None = None,
@@ -1044,6 +1094,22 @@ def parse_request_controls(
         _parse_optional_parameter_bool(request, "force_sp_accept") or False
     )
     ds_attrs = ds_attrs if ds_attrs is not None else parse_ds_header_attributes(request)
+    raw_estimated_usage = _request_header_value(
+        ds_attrs, invocation_metadata, _ESTIMATED_USAGE_HEADER
+    )
+    if raw_estimated_usage is None:
+        raw_estimated_usage = _lookup_ds_request_control(
+            ds_attrs, _ESTIMATED_USAGE_HEADER
+        )
+    enable_estimated_usage = _parse_optional_bool(raw_estimated_usage)
+    raw_support = _request_header_value(
+        ds_attrs, invocation_metadata, _SUPPORT_FRONTEND_ESTIMATED_USAGE_HEADER
+    )
+    if raw_support is None:
+        raw_support = _lookup_ds_request_control(
+            ds_attrs, _SUPPORT_FRONTEND_ESTIMATED_USAGE_HEADER
+        )
+    support_frontend_estimated_usage = _parse_optional_bool(raw_support) is True
     enable_thinking = _parse_optional_parameter_bool(request, "enable_thinking")
     if enable_thinking is None:
         enable_thinking = _parse_optional_bool(
@@ -1117,10 +1183,38 @@ def parse_request_controls(
         if value is not None:
             request_headers[header_name] = value
 
+    # Request-level download region parsed from the gateway workspace metadata.
+    region = extract_workspace_region(ds_attrs)
+    if region is not None:
+        request_headers["region"] = region
+
+    # Request-scoped content-inspection override, forwarded verbatim so the
+    # ViT RPC can parse it; an empty value means "follow configuration".
+    inspection = _jsonable_to_string(
+        _lookup_ds_request_control(ds_attrs, "x-dashscope-datainspection")
+    )
+    if inspection is not None:
+        request_headers["x-dashscope-datainspection"] = inspection
+
+    # Keep the full upstream ID for inspection; tracing may truncate its copy.
+    for header_name in ("x-dashscope-request-id", "x-dashscope-requestid"):
+        value = _normalize_non_empty_str(
+            _lookup_ds_request_control(ds_attrs, header_name)
+        )
+        if value is not None:
+            request_headers["x-dashscope-request-id"] = value
+            break
+    if "x-dashscope-request-id" not in request_headers:
+        value = _normalize_non_empty_str(request.id)
+        if value is not None:
+            request_headers["x-dashscope-request-id"] = value
+
     return DashScRequestControls(
         return_input_ids=return_input_ids,
         force_sp_accept=force_sp_accept,
         enable_thinking=enable_thinking,
+        enable_estimated_usage=enable_estimated_usage,
+        support_frontend_estimated_usage=support_frontend_estimated_usage,
         max_new_think_tokens=max_new_think_tokens,
         timeout_ms=timeout_ms,
         traffic_reject_priority=traffic_reject_priority,
@@ -1168,8 +1262,6 @@ def parse_dash_sc_grpc_request(
 def _multimodal_type_maps() -> (
     tuple[dict[str, tuple[str, MMUrlType]], dict[str, MMUrlType]]
 ):
-    from rtp_llm.utils.base_model_datatypes import MMUrlType
-
     return (
         {
             "image_url": ("image_url", MMUrlType.IMAGE),
@@ -1207,6 +1299,8 @@ class MultimodalPart:
     fps: int = -1
     max_frames: int = -1
     min_frames: int = -1
+    width: int = -1
+    height: int = -1
 
 
 def _extract_openai_url(part: dict[str, Any], inner_field: str) -> str | None:
@@ -1217,7 +1311,9 @@ def _extract_openai_url(part: dict[str, Any], inner_field: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _extract_per_part_config(part: dict[str, Any]) -> dict[str, int]:
+def _extract_per_part_config(
+    part: dict[str, Any], mm_type: MMUrlType, model_type: str | None
+) -> dict[str, int]:
     """Read nested preprocess_config first, then apply inline overrides."""
     out: dict[str, int] = {}
     nested = part.get("preprocess_config")
@@ -1238,10 +1334,21 @@ def _extract_per_part_config(part: dict[str, Any]) -> dict[str, int]:
             and value > 0
         ):
             out[key] = int(value)
+    if model_type == "deepseek_v41" and mm_type == MMUrlType.IMAGE:
+        source = part.get("image_url")
+        detail = part.get("detail")
+        if isinstance(source, dict):
+            detail = source.get("detail", detail)
+        try:
+            out["width"], out["height"] = v41_image_detail_size(detail)
+        except ValueError as error:
+            raise DashScParameterError(str(error)) from error
     return out
 
 
-def _parts_from_openai_content(part: dict[str, Any]) -> Iterator[MultimodalPart]:
+def _parts_from_openai_content(
+    part: dict[str, Any], model_type: str | None
+) -> Iterator[MultimodalPart]:
     openai_part_types, _ = _multimodal_type_maps()
     mapping = openai_part_types.get(part.get("type"))
     if mapping is None:
@@ -1255,12 +1362,13 @@ def _parts_from_openai_content(part: dict[str, Any]) -> Iterator[MultimodalPart]
     yield MultimodalPart(
         url=url,
         mm_type=mm_type,
-        **_extract_per_part_config(part),
+        **_extract_per_part_config(part, mm_type, model_type),
     )
 
 
-def _parts_from_dashscope_native(part: dict[str, Any]) -> Iterator[MultimodalPart]:
-    config = _extract_per_part_config(part)
+def _parts_from_dashscope_native(
+    part: dict[str, Any], model_type: str | None
+) -> Iterator[MultimodalPart]:
     _, native_part_types = _multimodal_type_maps()
     for key, mm_type in native_part_types.items():
         if key not in part:
@@ -1272,7 +1380,11 @@ def _parts_from_dashscope_native(part: dict[str, Any]) -> Iterator[MultimodalPar
             )
         if not isinstance(value, str) or not value:
             raise DashScParameterError(f"{key} requires a non-empty URL string")
-        yield MultimodalPart(url=value, mm_type=mm_type, **config)
+        yield MultimodalPart(
+            url=value,
+            mm_type=mm_type,
+            **_extract_per_part_config(part, mm_type, model_type),
+        )
 
 
 def _iter_messages_from_payload(obj: Any) -> Iterator[Any]:
@@ -1319,6 +1431,7 @@ def _load_multimodal_payload(
 
 def parse_multimodal_parts_from_request(
     request: predict_v2_pb2.ModelInferRequest,
+    model_type: str | None = None,
 ) -> list[MultimodalPart]:
     """Extract image, video, and audio parts without changing text-only requests."""
     payload = _load_multimodal_payload(request)
@@ -1337,9 +1450,9 @@ def parse_multimodal_parts_from_request(
             if not isinstance(part, dict):
                 continue
             if part.get("type") in openai_part_types:
-                result.extend(_parts_from_openai_content(part))
+                result.extend(_parts_from_openai_content(part, model_type))
             else:
-                result.extend(_parts_from_dashscope_native(part))
+                result.extend(_parts_from_dashscope_native(part, model_type))
     return result
 
 
@@ -1366,6 +1479,42 @@ def _first_int(value: int | list[int] | tuple[int, ...] | None) -> int | None:
     if isinstance(value, tuple):
         return int(value[0]) if value else None
     return int(value)
+
+
+def _mm_key_for_hashes(hashes: Iterable[int]) -> str:
+    """Stable 32-hex identifier for one media item's feature-hash segment."""
+    values = [int(value) for value in hashes]
+    payload = struct.pack("<%di" % len(values), *values) if values else b""
+    return hashlib.sha256(payload).hexdigest()[:32]
+
+
+def _build_multimodal_metadata(
+    split_sizes: Iterable[int], feature_hashes: Iterable[int]
+) -> dict[str, Any]:
+    sizes = [int(size) for size in split_sizes]
+    hashes = [int(value) for value in feature_hashes]
+    if not sizes:
+        if hashes:
+            raise ValueError("multimodal metadata size/hash mismatch")
+        return {"version": 1, "items": []}
+    if sum(sizes) != len(hashes):
+        raise ValueError("multimodal metadata size/hash mismatch")
+    items = []
+    offset = 0
+    for index, size in enumerate(sizes):
+        if size <= 0:
+            raise ValueError("multimodal metadata segment length must be positive")
+        segment = hashes[offset : offset + size]
+        offset += size
+        items.append(
+            {
+                "item_id": f"m{index}",
+                "modality": "image",
+                "mm_key": _mm_key_for_hashes(segment),
+                "llm_sequence_length": size,
+            }
+        )
+    return {"version": 1, "items": items}
 
 
 def _append_prompt_token_ids_output(
@@ -1649,6 +1798,7 @@ class StreamResponseBuilder:
         "_dash_sc_request_id",
         "_model_name",
         "_image_tokens",
+        "_image_tokens_from_backend",
         "_prompt_token_fallback",
         "_request_log_tag",
         "_request_input_ids",
@@ -1685,11 +1835,17 @@ class StreamResponseBuilder:
         max_token_id: int | None = None,
         log_input_output: bool = True,
         image_tokens: int | None = None,
+        image_tokens_from_backend: bool = False,
         prompt_token_fallback: int | None = None,
     ) -> None:
         self._dash_sc_request_id = dash_sc_request_id
         self._model_name = model_name
         self._image_tokens = image_tokens
+        # Generic multimodal requests obtain the actual media lengths from the
+        # backend after ViT expansion; text-only requests provide an explicit 0.
+        self._image_tokens_from_backend = (
+            image_tokens_from_backend and image_tokens is None
+        )
         self._prompt_token_fallback = (
             len(request_input_ids or [])
             if prompt_token_fallback is None
@@ -1715,6 +1871,51 @@ class StreamResponseBuilder:
         self._template_cached_tokens: int | None = None
         self._template_think_token_num: int | None = None
 
+    def build_fake_first_packet(
+        self,
+        *,
+        prompt_token_num: int,
+        split_sizes: Iterable[int] = (),
+        feature_hashes: Iterable[int] = (),
+    ) -> predict_v2_pb2.ModelStreamInferResponse:
+        """Build a standalone prefill-time frame without touching the template.
+
+        The frame carries estimated prompt/media accounting and per-image hash
+        metadata, but no generated tokens. It must be emitted before the first
+        real ``build()`` call so the cached template still initializes from a
+        genuine backend output.
+        """
+        response = predict_v2_pb2.ModelStreamInferResponse()
+        infer = response.infer_response
+        infer.id = self._dash_sc_request_id
+        infer.model_name = self._model_name
+        if self._return_input_ids and self._request_input_ids is not None:
+            _append_prompt_token_ids_output(infer, self._request_input_ids)
+        _append_generated_ids_output(infer, [])
+        _append_finish_reason_output(infer, False, int(LLMFinishReason.STREAMING))
+        _append_finished_output(infer, False)
+        _append_int32_scalar_output(infer, "prompt_token_num", prompt_token_num)
+        _append_int32_scalar_output(infer, "prompt_cached_token_num", 0)
+        infer.parameters["estimated_usage"].bool_param = True
+        infer.parameters["prompt_token_num"].int64_param = int(prompt_token_num)
+        infer.parameters["image_tokens"].int64_param = sum(
+            int(size) for size in split_sizes
+        )
+        infer.parameters["incremental_output"].int64_param = (
+            1 if self._is_streaming else 0
+        )
+        infer.parameters["multimodal_metadata"].string_param = json.dumps(
+            _build_multimodal_metadata(split_sizes, feature_hashes),
+            separators=(",", ":"),
+        )
+        _append_dashllm_limit_parameters(
+            infer,
+            generate_config=self._generate_config,
+            eos_token_id=self._eos_token_id,
+            max_token_id=self._max_token_id,
+        )
+        return response
+
     def build(
         self,
         go: GenerateOutputs,
@@ -1739,6 +1940,14 @@ class StreamResponseBuilder:
             else LLMFinishReason.STOP if finished else LLMFinishReason.STREAMING
         )
         aux_info = getattr(out_py, "aux_info", None)
+        if self._image_tokens_from_backend:
+            lengths = getattr(aux_info, "multimodal_lengths", None)
+            if isinstance(lengths, dict):
+                count = lengths.get(int(MMUrlType.IMAGE))
+                if type(count) is int and count >= 0:
+                    self._image_tokens = count
+            # No metadata means unknown, not zero. A later sparse frame can
+            # retain the last value actually reported for this request.
         prompt_tokens = (
             int(aux_info.input_len)
             if aux_info is not None
@@ -1806,6 +2015,10 @@ class StreamResponseBuilder:
         response = predict_v2_pb2.ModelStreamInferResponse()
         response.CopyFrom(self._template)
         infer = response.infer_response
+        if self._image_tokens is not None:
+            # A first frame may precede media accounting. Patch the cloned
+            # response too, without mutating previously emitted frames.
+            infer.parameters["image_tokens"].int64_param = self._image_tokens
 
         generated_raw = (
             struct.pack("<%di" % len(generated_ids), *generated_ids)

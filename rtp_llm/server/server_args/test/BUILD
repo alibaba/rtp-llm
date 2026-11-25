@@ -1,4 +1,16 @@
 py_test(
+    name = "vit_resource_config_test",
+    srcs = ["vit_resource_config_test.py"],
+    data = ["//:th_transformer_config"],
+    env = {"GPU_COUNT": "0"},
+    deps = [
+        "//rtp_llm:config_ops",
+        "//rtp_llm:testlib",
+        "//rtp_llm/server",
+    ],
+)
+
+py_test(
     name = "server_args_test",
     srcs = ["server_args_test.py"],
     data = [

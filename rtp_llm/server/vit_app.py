@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import logging
 import socket
 import threading
@@ -19,7 +20,7 @@ from uvicorn.loops.auto import auto_loop_setup
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.config.py_config_modules import PyEnvConfigs
-from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
+from rtp_llm.config.uvicorn_config import configure_uvicorn_logging
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     add_MultimodalRpcServiceServicer_to_server,
@@ -34,7 +35,10 @@ from rtp_llm.server.mm_cache_metadata import (
     get_mm_cache_keys,
     get_mm_cache_metadata,
 )
-from rtp_llm.server.request_headers import extract_request_headers
+from rtp_llm.server.request_headers import (
+    extract_correlation_request_id,
+    extract_request_headers,
+)
 from rtp_llm.server.vit_rpc_server import MultimodalRpcServer, create_rpc_server
 
 
@@ -73,6 +77,7 @@ def register_mm_cache_routes(app: FastAPI, engine: MMProcessEngine) -> None:
                 request.timeout_ms,
                 user_id=headers.get("x-dashscope-uid", ""),
                 service_name=headers.get("x-dashscope-service", ""),
+                external_request_id=extract_correlation_request_id(headers),
             )
         except NotImplementedError as error:
             raise HTTPException(status_code=501, detail=str(error)) from error
@@ -129,6 +134,11 @@ class VitEndpointApp:
             grpc_port: gRPC 端口号（从外部传入）
             http_port: HTTP 端口号（从外部传入，如果为 None 且最终计算后仍为 None，表示工作进程模式（不启动 HTTP 服务器）
         """
+        # Exclude long-lived model and engine objects from request-time GC.
+        # Keep the runtime thresholds so transient cycles are collected regularly.
+        gc.collect()
+        gc.freeze()
+
         # 启动 gRPC 服务器
         self._start_grpc(grpc_port)
 
@@ -158,11 +168,12 @@ class VitEndpointApp:
         timeout_keep_alive = self.py_env_configs.server_config.timeout_keep_alive
 
         # 创建 uvicorn 配置
+        configure_uvicorn_logging()
         config = Config(
             app,
             fd=fd,
             loop=loop,
-            log_config=get_uvicorn_logging_config(),
+            log_config=None,
             timeout_keep_alive=timeout_keep_alive,
             h11_max_incomplete_event_size=1024 * 1024,
         )
@@ -305,6 +316,9 @@ class VitEndpointServer:
         if self.mm_process_engine is None:
             return
 
+        from rtp_llm.telemetry import init_telemetry
+
+        init_telemetry(role="vit")
         address = f"0.0.0.0:{grpc_port}"
         if self.rpc_server.add_insecure_port(address) == 0:
             raise RuntimeError(f"Failed to bind VIT worker gRPC server: {address}")
@@ -315,9 +329,17 @@ class VitEndpointServer:
     def stop(self):
         kmonitor.set_serving(False)
         if self.rpc_server is not None:
-            self.rpc_server.stop(grace=None)
+            self.rpc_server.stop(grace=None).wait(timeout=2.0)
         if self.mm_rpc_server is not None:
             self.mm_rpc_server.stop()
+        from rtp_llm.telemetry import shutdown_telemetry
+
+        shutdown_telemetry()
 
     def worker_status(self):
-        return {}
+        if self.mm_process_engine is None:
+            return {}
+        return {
+            "alive": True,
+            "mm_inflight_inputs": self.mm_process_engine.get_inflight_input_count(),
+        }

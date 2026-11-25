@@ -1,4 +1,8 @@
 #include <torch/library.h>
+#include "rtp_llm/cpp/pybind/EmbRegisteredArena.h"
+#include "rtp_llm/cpp/pybind/EmbRegisteredWrite.h"
+#include "rtp_llm/cpp/pybind/EmbTensorCodec.h"
+#include "rtp_llm/cpp/pybind/EmbTensorObjectPlan.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -13,9 +17,23 @@
 
 namespace rtp_llm {
 void registerExecCtxOps(pybind11::module& m);
+#if USING_CUDA
+void registerEmbTensorObjectDecode(pybind11::module& m);
+void registerEmbRegisteredRead(pybind11::module& m);
+void registerEmbLocalCache(pybind11::module& m);
+#endif
 using namespace torch_ext;
 
 PYBIND11_MODULE(librtp_compute_ops, m) {
+    registerEmbTensorCodec(m);
+#if USING_CUDA
+    registerEmbTensorObjectDecode(m);
+    registerEmbRegisteredWrite(m);
+    registerEmbRegisteredRead(m);
+    registerEmbLocalCache(m);
+#endif
+    registerEmbTensorObjectPlan(m);
+    registerEmbRegisteredArena(m);
 #if USING_CUDA || USING_ROCM
     registerExecCtxOps(m);
 #endif

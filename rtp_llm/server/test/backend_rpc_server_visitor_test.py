@@ -412,7 +412,9 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
         visitor.host_service = _FakeHostService()
         visitor.backend_role_list = [RoleType.PREFILL]
         domain_route_called = False
-        domain_role = RoleAddr(role=RoleType.PREFILL, ip="domain", http_port=1, grpc_port=2)
+        domain_role = RoleAddr(
+            role=RoleType.PREFILL, ip="domain", http_port=1, grpc_port=2
+        )
 
         async def get_master_route_addrs(_input):
             return FlexlbResponse.connection_failed_response()
@@ -856,6 +858,38 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
         visitor.check_sp_supported = lambda _input: None
         visitor._report_frontend_cache_key_metrics = lambda _input: None
         return visitor
+
+    async def test_deferred_inspection_gates_dashscope_usage_packet(self):
+        for passed in (True, False):
+            with self.subTest(passed=passed):
+                started, release = asyncio.Event(), asyncio.Event()
+
+                class GatedClient:
+                    async def enqueue(self, inp):
+                        started.set()
+                        await release.wait()
+                        if not passed:
+                            raise FtRuntimeException(
+                                ExceptionType.UNSAFE_INPUT_CONTENT, "blocked"
+                            )
+                        yield "output"
+
+                visitor = self._visitor(GatedClient())
+                request = _FakeInput(is_streaming=True)
+                request.deferred_inspection = ("vit", 1, "ticket")
+                request.on_mm_routed = lambda _: "usage"
+                stream = await visitor.enqueue(request)
+                first = asyncio.create_task(stream.__anext__())
+                await asyncio.wait_for(started.wait(), 2)
+                self.assertFalse(first.done())
+                release.set()
+                if passed:
+                    self.assertEqual(await first, "usage")
+                    self.assertEqual(await stream.__anext__(), "output")
+                else:
+                    with self.assertRaises(FtRuntimeException):
+                        await first
+                await stream.aclose()
 
     async def test_native_batch_reuses_route_hashes_and_observes_each_item_once(self):
         from rtp_llm.utils.base_model_datatypes import GenerateInput
@@ -1620,14 +1654,20 @@ class MixedFrontendBatchTest(unittest.IsolatedAsyncioTestCase):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor._local_prefill_addresses = []
         visitor.pd_sep_config = SimpleNamespace(role_type=RoleType.FRONTEND)
-        visitor.backend_role_list = [RoleType.PREFILL, RoleType.DECODE, RoleType.PDFUSION]
+        visitor.backend_role_list = [
+            RoleType.PREFILL,
+            RoleType.DECODE,
+            RoleType.PDFUSION,
+        ]
         visitor.fill_request_info = Mock()
         visitor._validate_input = Mock()
         visitor.check_sp_supported = Mock()
         visitor.check_prefill_cp_supported = Mock()
         visitor.route_ips = AsyncMock()
         visitor.host_service = Mock()
-        visitor.model_rpc_client = SimpleNamespace(batch_enqueue=AsyncMock(return_value=["result"]))
+        visitor.model_rpc_client = SimpleNamespace(
+            batch_enqueue=AsyncMock(return_value=["result"])
+        )
         return visitor
 
     async def test_frontend_batch_uses_normal_per_item_routing(self):
@@ -1644,8 +1684,10 @@ class MixedFrontendBatchTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_master_admitted_batch_keeps_its_existing_pair(self):
         visitor = self.make_visitor()
-        pair = [RoleAddr(role=RoleType.PREFILL, ip="prefill", http_port=1, grpc_port=2),
-                RoleAddr(role=RoleType.DECODE, ip="decode", http_port=3, grpc_port=4)]
+        pair = [
+            RoleAddr(role=RoleType.PREFILL, ip="prefill", http_port=1, grpc_port=2),
+            RoleAddr(role=RoleType.DECODE, ip="decode", http_port=3, grpc_port=4),
+        ]
         item = _FakeRouteInput()
         item.generate_config.role_addrs = list(pair)
         item.enqueued_by_master = True
@@ -1654,7 +1696,9 @@ class MixedFrontendBatchTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(item.enqueued_by_master)
         visitor.host_service.get_backend_role_addrs.assert_not_called()
 
-    async def test_prefill_entry_batches_each_pd_pair_and_preserves_response_order(self):
+    async def test_prefill_entry_batches_each_pd_pair_and_preserves_response_order(
+        self,
+    ):
         visitor = self.make_visitor()
         visitor.pd_sep_config.role_type = RoleType.PREFILL
         visitor.host_service.service_available = True

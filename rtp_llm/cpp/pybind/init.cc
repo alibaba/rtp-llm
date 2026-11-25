@@ -43,6 +43,7 @@ PYBIND11_MODULE(libth_transformer, m) {
     registerRtpEmbeddingOp(m);
     registerEmbeddingOutput(m);
     m.def("get_multimodal_feature_hash", &getMultimodalFeatureHash, py::call_guard<py::gil_scoped_release>());
+    m.def("get_multimodal_feature_hashes", &getMultimodalFeatureHashes, py::call_guard<py::gil_scoped_release>());
 }
 
 }  // namespace rtp_llm

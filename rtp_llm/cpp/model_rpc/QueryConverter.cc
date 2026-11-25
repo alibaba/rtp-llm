@@ -319,7 +319,12 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     if (input->multimodal_inputs_size() > 0) {
         std::vector<MultimodalInput> mm_inputs;
         for (int i = 0; i < input->multimodal_inputs_size(); i++) {
-            auto               mm_input             = &input->multimodal_inputs(i);
+            auto mm_input = &input->multimodal_inputs(i);
+            if (input->has_multimodal_request()) {
+                // The protobuf envelope owns the media. Keep only its type for scheduler accounting.
+                mm_inputs.emplace_back("", mm_input->multimodal_type(), torch::Tensor{});
+                continue;
+            }
             auto               mm_preprocess_config = &mm_input->mm_preprocess_config();
             std::vector<float> crop_positions;
             for (const auto& crop_position : mm_preprocess_config->crop_positions()) {
@@ -340,12 +345,31 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
                 mm_preprocess_config->mm_timeout_ms(),
                 mm_preprocess_config->max_long_side_pixel() > 0 ? mm_preprocess_config->max_long_side_pixel() : -1);
         }
+        if (input->has_multimodal_request()) {
+            auto request = std::make_shared<MultimodalInputsPB>(input->multimodal_request());
+            if (request->multimodal_inputs_size() != 0)
+                throw std::invalid_argument("GenerateInput multimodal_request must contain metadata only");
+            request->mutable_multimodal_inputs()->CopyFrom(input->multimodal_inputs());
+            request->set_request_id(input->request_id());
+            generate_input->multimodal_request = std::move(request);
+        }
         generate_input->multimodal_inputs = std::move(mm_inputs);
     }
     if (input->has_multimodal_token_layout()) {
         MultimodalTokenLayout layout;
+        auto                  cache_spans = std::make_shared<MultimodalCacheSpans>();
         for (const auto& span : input->multimodal_token_layout().spans()) {
             layout.spans.emplace_back(span.offset(), span.length());
+            if (!span.row_hashes().empty()) {
+                if (span.row_hashes_size() != span.length())
+                    throw std::invalid_argument("multimodal row hash count must match span length");
+                cache_spans->push_back({span.offset(), {span.row_hashes().begin(), span.row_hashes().end()}});
+            }
+        }
+        if (!cache_spans->empty()) {
+            if (cache_spans->size() != layout.spans.size())
+                throw std::invalid_argument("incomplete multimodal row hash sidecar");
+            generate_input->multimodal_cache_spans = std::move(cache_spans);
         }
         generate_input->multimodal_token_layout = std::move(layout);
     }

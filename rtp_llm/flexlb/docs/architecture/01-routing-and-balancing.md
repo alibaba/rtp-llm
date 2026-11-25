@@ -10,7 +10,7 @@ worker 选择契约，两者组合完成多角色多阶段路由。
 当前 `Schedule` 可传 `schedule_roles`（Encoder、Prefill、Decode、PDFusion）只选择指定角色；
 未传时选择模型配置的全部角色。显式角色去重后按 `ModelMetaConfig.requiredRoles()` 的顺序决策；
 未配置角色以及非法枚举值返回 `INVALID_REQUEST`。现有 VIT 不属于该新增请求枚举，
-其选点仍使用 `RandomStrategy`。
+其首次 ViT 路由和整请求中的 ViT 选点均使用 `VitCacheSelector`。
 EPD 部署当前按客户端分别请求 Encoder 与 Generation 阶段；混合角色请求不在已验证链路内。
 
 Encoder 使用独立的 `EncoderStrategy`：候选必须是已发布且存活的 Encoder endpoint。
@@ -34,7 +34,7 @@ Encoder 选择器组成，按请求有效角色顺序逐个选择，并在失败
 2. **角色列表**：`ModelMetaConfig.requiredRoles()` 给出配置顺序；请求带
    `schedule_roles` 时取其交集，未传时使用全部配置角色。
 3. **逐角色选择**：Prefill/PDFusion 调用 `CostBasedPrefillStrategy`，Decode 调用
-   `DecodeSelector`，VIT 调用 `RandomStrategy`，Encoder 调用 `EncoderStrategy`。
+   `DecodeSelector`，VIT 调用 `VitCacheSelector`，Encoder 调用 `EncoderStrategy`。
    `group` 初始为 null；每个角色选中后 `group = serverStatus.getGroup()`——**首个成功角色的
    worker group 约束后续所有角色的候选集**（group 亲和链，如 DECODE 选中的 group 决定
    PREFILL 只能在同 group 中选）。任一角色失败立即关闭之前的选择并返回错误。
@@ -46,6 +46,12 @@ Encoder 选择器组成，按请求有效角色顺序逐个选择，并在失败
 (8403)、PDFUSION→`NO_PDFUSION_WORKER`(8404)、VIT→`NO_VIT_WORKER`(8405)、
 ENCODER→`NO_ENCODER_WORKER`(8408)，均可重试。
 
+ViT 首次路由按输入图片数为选中 worker 记账，同一负载快照上的后续路由可以看到这次派发。
+默认选择有效负载最低的候选，快照缺失或过期时优先选择有新鲜快照的候选。开启
+`router.roles.vit.cacheAffinityEnabled` 后，缓存命中最多的候选可比最低负载多承担
+`maxExtraInflightInputs` 个输入（默认 32）。尚未出现在快照中的图片 key 暂记在选中 worker 上。
+后续校验检查原 worker 及其 generation，成功时沿用首次选择。
+
 ### 角色与策略 / 资源指标映射
 
 映射不在 `RoleType` 上，而在 `FlexlbConfig`（`flexlb-common/.../config/FlexlbConfig.java`）：
@@ -54,7 +60,7 @@ ENCODER→`NO_ENCODER_WORKER`(8408)，均可重试。
 | ------------------ | --------------------------- | ------------------------------------------ | ------------------------------------------------------------ |
 | PDFUSION / PREFILL | `loadBalanceStrategy`       | `SHORTEST_TTFT`                            | `WAIT_TIME`                                                  |
 | DECODE             | `decodeLoadBalanceStrategy` | `WEIGHTED_CACHE`                           | `REMAINING_KV_CACHE`                                         |
-| VIT                | `vitLoadBalanceStrategy`    | `RANDOM`                                   | `WAIT_TIME`                                                  |
+| VIT                | `router.roles.vit`          | 在途媒体数最少                             | `mm_inflight_inputs` 加上轮询发起后本地派发的媒体数          |
 | ENCODER            | 独立 `EncoderStrategy`      | 提供命中长度时最少编码工作量，否则最少并发 | 在途预测／实际输入长度、`running + waiting + 本地待观察请求` |
 
 ### gRPC Schedule 响应

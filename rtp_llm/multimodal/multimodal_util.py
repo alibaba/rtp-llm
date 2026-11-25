@@ -16,16 +16,26 @@ from typing import Any, List, Optional
 
 import requests
 import torch
+from urllib3.exceptions import ReadTimeoutError
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.mm_download_domains import check_download_urls, domain_checked_get
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MMPreprocessConfigPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
 )
-from rtp_llm.multimodal.mm_error_messages import MMErr, raise_mm
+from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
+from rtp_llm.multimodal.mm_error_messages import MMErr, media_error_detail, raise_mm
+from rtp_llm.multimodal.url_cache import URLDataCache
+from rtp_llm.multimodal.vit_metrics import (
+    VIT_PHASE_METRICS,
+    record_vit_preprocess_value,
+    vit_http_phase_timer,
+)
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
+from rtp_llm.telemetry import vit_media
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
@@ -77,9 +87,7 @@ CONNECT_TIMEOUT_RETRIES = 2
 
 
 def _default_request_get(url, headers, timeout=10):
-    import requests
-
-    return requests.get(url, stream=True, headers=headers, timeout=timeout)
+    return domain_checked_get(url, stream=True, headers=headers, timeout=timeout)
 
 
 def _check_download(deadline, cancellation_event):
@@ -93,9 +101,11 @@ def request_get(url, headers, timeout=None, *, deadline=None, cancellation_event
     global REQUEST_GET
     if REQUEST_GET is None:
         try:
-            from internal_source.rtp_llm.utils.ssrf_check import safe_request_get
+            from internal_source.rtp_llm.utils.download_proxy import (
+                safe_proxy_request_get,
+            )
 
-            REQUEST_GET = safe_request_get
+            REQUEST_GET = safe_proxy_request_get
         except ImportError:
             REQUEST_GET = _default_request_get
 
@@ -105,17 +115,24 @@ def request_get(url, headers, timeout=None, *, deadline=None, cancellation_event
         _check_download(deadline, cancellation_event)
         try:
             if deadline is not None:
-                return REQUEST_GET(
-                    url,
-                    headers,
-                    timeout=max(0.001, min(10, deadline - time.monotonic())),
-                )
+                # Recompute before every connect retry, not just the initial GET.
+                remaining = max(0.001, deadline - time.monotonic())
+                if isinstance(timeout, tuple):
+                    connect, read = timeout
+                    attempt_timeout = (min(connect, remaining), min(read, remaining))
+                else:
+                    attempt_timeout = min(10 if timeout is None else timeout, remaining)
+                return REQUEST_GET(url, headers, timeout=attempt_timeout)
             if timeout is not None:
                 return REQUEST_GET(url, headers, timeout=timeout)
             return REQUEST_GET(url, headers)
         except requests.exceptions.ConnectTimeout:
             if retry_count == CONNECT_TIMEOUT_RETRIES:
                 raise
+            if VIT_PHASE_METRICS:
+                record_vit_preprocess_value(
+                    AccMetrics.VIT_HTTP_CONNECT_RETRY_QPS_METRIC, 1
+                )
             logger.warning(
                 "multimodal download connect timeout; retrying request (%d/%d)",
                 retry_count + 1,
@@ -143,6 +160,15 @@ def get_base64_prefix(s):
     if not match:
         return 0
     return match.end()
+
+
+def _decode_base64_url(url: str) -> bytes:
+    try:
+        return base64.b64decode(url[get_base64_prefix(url) :])
+    except ValueError as error:
+        raise FtRuntimeException(
+            ExceptionType.MM_DOWNLOAD_FAILED, f"Invalid Base64 data: {error}"
+        ) from error
 
 
 FRAMES_PACK_URL_PREFIX = "frames-pack:base64,"
@@ -258,6 +284,7 @@ def retry_on_assertion_error(retries: int = 3):
     return decorator
 
 
+@vit_media.download
 def get_json_result_from_url(url: str, download_headers: str = ""):
     """Get JSON result from URL.
 
@@ -269,23 +296,29 @@ def get_json_result_from_url(url: str, download_headers: str = ""):
     load_start = time.monotonic()
     try:
         if url.startswith("http") or url.startswith("https"):
-            import requests
-
-            response = requests.get(url, stream=True, headers=headers, timeout=10)
+            response = domain_checked_get(url, stream=True, headers=headers, timeout=10)
             if response.status_code == 200:
                 res = response.content.decode("utf-8")
             else:
-                raise Exception(f"download failed, error code: {response.status_code}")
+                raise_mm(
+                    f"{MMErr.DL_FAILED}: HTTP {response.status_code}",
+                    ExceptionType.MM_DOWNLOAD_FAILED,
+                )
         elif get_base64_prefix(url) > 0:
-            bytes_data = base64.b64decode(url[get_base64_prefix(url) :])
+            bytes_data = _decode_base64_url(url)
             res = bytes_data.decode("utf-8")
         else:
             # treat url as local path
             with open(url, "r", encoding="utf-8") as fh:
                 buf = fh.read()
             res = buf
+    except FtRuntimeException:
+        raise
     except Exception as e:
-        raise Exception(f"download and load {url} error, exception {e}")
+        raise FtRuntimeException(
+            ExceptionType.MM_DOWNLOAD_FAILED,
+            f"{MMErr.DL_FAILED}: {media_error_detail(e)}",
+        ) from e
     finally:
         _record_download_time(load_start)
     return res
@@ -311,14 +344,21 @@ def _download_http_content(
 
     response = None
     try:
-        if deadline is None and cancellation_event is None:
-            response = request_get(url, headers)
-        else:
-            response = request_get(
-                url, headers, deadline=deadline, cancellation_event=cancellation_event
-            )
+        with vit_http_phase_timer("headers"):
+            if deadline is None and cancellation_event is None:
+                response = request_get(url, headers)
+            else:
+                response = request_get(
+                    url,
+                    headers,
+                    deadline=deadline,
+                    cancellation_event=cancellation_event,
+                )
         if response.status_code != 200:
-            raise_mm(MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED)
+            raise_mm(
+                f"{MMErr.DL_FAILED}: HTTP {response.status_code}",
+                ExceptionType.MM_DOWNLOAD_FAILED,
+            )
 
         if max_file_size_kb is not None and max_file_size_kb > 0:
             content_length = response.headers.get("Content-Length")
@@ -332,37 +372,57 @@ def _download_http_content(
 
         content = BytesIO()
         downloaded_bytes = 0
-        for chunk in response.iter_content(chunk_size=1024 * 1024):
+        with vit_http_phase_timer("body"):
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                _check_download(deadline, cancellation_event)
+                if not chunk:
+                    continue
+                downloaded_bytes += len(chunk)
+                _validate_file_size(downloaded_bytes, max_file_size_kb)
+                content.write(chunk)
             _check_download(deadline, cancellation_event)
-            if not chunk:
-                continue
-            downloaded_bytes += len(chunk)
-            _validate_file_size(downloaded_bytes, max_file_size_kb)
-            content.write(chunk)
-        _check_download(deadline, cancellation_event)
+        if VIT_PHASE_METRICS:
+            record_vit_preprocess_value(
+                GaugeMetrics.VIT_HTTP_BODY_BYTES_METRIC, downloaded_bytes
+            )
         content.seek(0)
         return content
     except FtRuntimeException:
         raise
     except concurrent.futures.CancelledError:
         raise
-    except (requests.exceptions.Timeout, TimeoutError):
-        raise_mm(MMErr.DL_TIMEOUT, ExceptionType.MM_DOWNLOAD_FAILED)
+    except (requests.exceptions.Timeout, TimeoutError) as error:
+        raise_mm(
+            f"{MMErr.DL_TIMEOUT}: {media_error_detail(error)}",
+            ExceptionType.MM_DOWNLOAD_FAILED,
+        )
     except requests.exceptions.ConnectionError as error:
-        # Response.iter_content wraps urllib3's read timeout in ConnectionError.
+        # Response.iter_content wraps urllib3 read timeout in ConnectionError.
         if error.args and isinstance(error.args[0], ReadTimeoutError):
-            raise_mm(MMErr.DL_TIMEOUT, ExceptionType.MM_DOWNLOAD_FAILED)
-        raise_mm(MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED)
+            raise_mm(
+                f"{MMErr.DL_TIMEOUT}: {media_error_detail(error)}",
+                ExceptionType.MM_DOWNLOAD_FAILED,
+            )
+        raise_mm(
+            f"{MMErr.DL_FAILED}: {media_error_detail(error)}",
+            ExceptionType.MM_DOWNLOAD_FAILED,
+        )
     except (
         requests.exceptions.InvalidURL,
         requests.exceptions.MissingSchema,
         requests.exceptions.InvalidSchema,
         requests.exceptions.URLRequired,
-    ):
-        raise_mm(MMErr.URL_INVALID, ExceptionType.MM_WRONG_FORMAT_ERROR)
-    except Exception:
+    ) as error:
+        raise_mm(
+            f"{MMErr.URL_INVALID} ({media_error_detail(error)})",
+            ExceptionType.MM_WRONG_FORMAT_ERROR,
+        )
+    except Exception as error:
         logger.exception("failed to download multimodal content")
-        raise_mm(MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED)
+        raise_mm(
+            f"{MMErr.DL_FAILED}: {media_error_detail(error)}",
+            ExceptionType.MM_DOWNLOAD_FAILED,
+        )
     finally:
         if response is not None:
             response.close()
@@ -385,9 +445,41 @@ def get_bytes_io_from_url(
             available, and the limit is also enforced while streaming the body.
     """
 
+    from rtp_llm.multimodal.media_network import prepared_url_bytes
+
+    supplied = prepared_url_bytes.get()
+    if supplied is not None and url in supplied:
+        _check_download(deadline, cancellation_event)
+        check_download_urls((url,))
+        data = supplied[url]
+        _validate_file_size(len(data), max_file_size_kb)
+        return BytesIO(data)
+    return _load_url_source(
+        url, download_headers, max_file_size_kb, deadline, cancellation_event
+    )
+
+
+@vit_media.download
+def _load_url_source(
+    url, download_headers, max_file_size_kb, deadline, cancellation_event
+):
+    from rtp_llm.multimodal.media_network import current_network, read_native_source
+
     _check_download(deadline, cancellation_event)
-    cached_res = url_data_cache_.check_cache(url)
-    if cached_res is None:
+    check_download_urls((url,))
+    network = current_network.get()
+    if network is not None and url.startswith(("http://", "https://")):
+        return read_native_source(
+            network,
+            url,
+            download_headers,
+            max(0, max_file_size_kb or 0) * 1024,
+            deadline,
+            cancellation_event,
+            v41=False,
+        )
+
+    def load():
         headers = _get_http_heads(download_headers)
         load_start = time.monotonic()
         try:
@@ -407,7 +499,7 @@ def get_bytes_io_from_url(
 
                 res = get_bytes_io_from_oss_path(url)
             elif get_base64_prefix(url) > 0:
-                res = BytesIO(base64.b64decode(url[get_base64_prefix(url) :]))
+                res = BytesIO(_decode_base64_url(url))
             else:
                 # treat url as local path
                 with open(url, "rb") as fh:
@@ -417,19 +509,33 @@ def get_bytes_io_from_url(
             _validate_file_size(res.getbuffer().nbytes, max_file_size_kb)
         except (FtRuntimeException, concurrent.futures.CancelledError, TimeoutError):
             raise
-        except Exception:
+        except Exception as error:
             logger.exception("failed to load multimodal content")
-            raise_mm(MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED)
+            raise_mm(
+                f"{MMErr.DL_FAILED}: {media_error_detail(error)}",
+                ExceptionType.MM_DOWNLOAD_FAILED,
+            )
         finally:
             _record_download_time(load_start)
-        url_data_cache_.insert_cache(url, res)
         return res
-    else:
-        # Each caller needs an independent cursor because cache hits may be read
-        # concurrently by different preprocessing workers.
-        cached_bytes = cached_res.getvalue()
-        _validate_file_size(len(cached_bytes), max_file_size_kb)
-        return BytesIO(cached_bytes)
+
+    source, hit = url_data_cache_.get_or_load(
+        url,
+        download_headers,
+        load,
+        deadline,
+    )
+    if hit:
+        _check_download(deadline, cancellation_event)
+        _validate_file_size(source.getbuffer().nbytes, max_file_size_kb)
+        vit_media.download_cache_hit()
+    if VIT_PHASE_METRICS:
+        record_vit_preprocess_value(
+            AccMetrics.VIT_URL_SOURCE_QPS_METRIC,
+            1,
+            {"source": "cache" if hit else "load"},
+        )
+    return source
 
 
 class MMDataCache(object):
@@ -467,7 +573,7 @@ class MMDataCache(object):
 
 # Global cache instance for VIT embeddings
 vit_emb_cache_ = MMDataCache(cache_size=10)
-url_data_cache_ = MMDataCache(cache_size=10)
+url_data_cache_ = URLDataCache(cache_size=10)
 
 
 def trans_config(mm_process_config_pb: MMPreprocessConfigPB):

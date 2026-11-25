@@ -55,15 +55,15 @@ from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.response_format_compiler import ReasoningFormat
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
     ModelRpcClient,
-    _grpc_status_details,
     StreamState,
-    _selected_pd_separation,
-    _split_host_port,
     _engine_reported_finished,
+    _grpc_status_details,
     _record_client_span_latency,
     _record_client_span_usage,
     _request_completed_normally,
+    _selected_pd_separation,
     _settle_client_span_after_rpc,
+    _split_host_port,
     _trans_rpc_error_code,
     trans_input,
     trans_output,
@@ -444,12 +444,15 @@ class BatchedTerminalOutputTest(TestCase):
             call = Call(self.pb)
             stub = MagicMock()
             stub.GenerateStreamCall.return_value = call
-            with patch(
-                "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
-                return_value=stub,
-            ), patch(
-                "rtp_llm.cpp.model_rpc.model_rpc_client.RPC_SETTLE_TIMEOUT_SECONDS",
-                0.01,
+            with (
+                patch(
+                    "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                    return_value=stub,
+                ),
+                patch(
+                    "rtp_llm.cpp.model_rpc.model_rpc_client.RPC_SETTLE_TIMEOUT_SECONDS",
+                    0.01,
+                ),
             ):
                 stream = client.enqueue(self.input)
                 result = await stream.__anext__()
@@ -546,7 +549,9 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(len(actual.images), 1)
         self.assertEqual(actual.images[0].content_sha256, image.content_sha256)
         self.assertEqual(actual.images[0].patches.shape, [1, 2])
-        self.assertEqual(actual.images[0].patches.fp32_data, image.patches.numpy().tobytes())
+        self.assertEqual(
+            actual.images[0].patches.fp32_data, image.patches.numpy().tobytes()
+        )
 
     def test_trans_input_serializes_typed_request_info(self):
         input_py = GenerateInput(
@@ -795,7 +800,9 @@ class ModelRpcClientTest(TestCase):
             ErrorCodePB.GET_ALL_NODE_STATUS_FAILED,
         ):
             with self.subTest(code=code):
-                self.assertEqual(_trans_rpc_error_code(code), ExceptionType.GET_HOST_FAILED)
+                self.assertEqual(
+                    _trans_rpc_error_code(code), ExceptionType.GET_HOST_FAILED
+                )
         self.assertEqual(
             _trans_rpc_error_code(ErrorCodePB.CANCELLED),
             ExceptionType.CANCELLED_ERROR,
@@ -958,7 +965,9 @@ class ModelRpcClientTest(TestCase):
             asyncio.run(client.batch_generate(inputs))
 
         self.assertEqual(context.exception.exception_type, ExceptionType.INVALID_PARAMS)
-        self.assertIn("batch item 1 failed: invalid batch item", context.exception.message)
+        self.assertIn(
+            "batch item 1 failed: invalid batch item", context.exception.message
+        )
 
     def test_batch_enqueue_is_compatibility_alias_for_batch_generate(self):
         client = self._make_batch_client()
@@ -1728,7 +1737,9 @@ class ModelRpcClientTest(TestCase):
                     role_type=RoleType.DECODE,
                 )
                 client._channel_pool = _FakeChannelPool()
-                stub = _RoutingStub(generate_responses=[_make_response(finished=finished)])
+                stub = _RoutingStub(
+                    generate_responses=[_make_response(finished=finished)]
+                )
                 input_py = GenerateInput(
                     token_ids=torch.tensor([1, 2, 3]),
                     generate_config=GenerateConfig(
@@ -1751,7 +1762,9 @@ class ModelRpcClientTest(TestCase):
                     ) as start_span,
                 ):
                     if finished:
-                        self.assertEqual(len(asyncio.run(self._run(client, input_py))), 1)
+                        self.assertEqual(
+                            len(asyncio.run(self._run(client, input_py))), 1
+                        )
                     else:
                         asyncio.run(read_first_and_close(client, input_py))
 
@@ -1810,8 +1823,14 @@ class ModelRpcClientTest(TestCase):
         stub = _RoutingStub(generate_responses=[response])
         input_py = self._make_generate_input(GenerateConfig(timeout_ms=1000))
         with (
-            patch("rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub", return_value=stub),
-            patch("rtp_llm.cpp.model_rpc.model_rpc_client.start_client_span", return_value=(None, [])),
+            patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                return_value=stub,
+            ),
+            patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.start_client_span",
+                return_value=(None, []),
+            ),
             patch("rtp_llm.cpp.model_rpc.model_rpc_client.trans_output") as convert,
             self.assertLogs(level="ERROR") as logs,
             self.assertRaises(FtRuntimeException) as caught,
@@ -1821,7 +1840,9 @@ class ModelRpcClientTest(TestCase):
         self.assertIn("invalid request from backend frame", caught.exception.message)
         self.assertTrue(stub.generate_iterator.cancelled)
         convert.assert_not_called()
-        self.assertTrue(any("backend error: code=" in message for message in logs.output))
+        self.assertTrue(
+            any("backend error: code=" in message for message in logs.output)
+        )
         self.assertFalse(any("unknown error:" in message for message in logs.output))
 
     def test_prefill_only_fails_fast_when_backend_reports_generated_tokens(self):
@@ -2037,7 +2058,9 @@ class ModelRpcClientTest(TestCase):
                     trans_input(input).SerializeToString()
                 )
                 config = request.generate_config
-                self.assertEqual(config.HasField("logits_index"), logits_index is not None)
+                self.assertEqual(
+                    config.HasField("logits_index"), logits_index is not None
+                )
                 if logits_index is not None:
                     self.assertEqual(config.logits_index.value, logits_index)
 
@@ -2074,6 +2097,7 @@ class ModelRpcClientTest(TestCase):
             request_id=328,
             mm_inputs=[],
         )
+
         async def consume():
             async for _ in client.enqueue(request):
                 self.fail("incomplete routing must not produce an output")
@@ -2090,8 +2114,8 @@ class ModelRpcClientTest(TestCase):
             request_id=327,
             mm_inputs=[],
         )
-        addresses, target, response_roles = client._select_address_and_response_role_addrs(
-            input_py
+        addresses, target, response_roles = (
+            client._select_address_and_response_role_addrs(input_py)
         )
         self.assertEqual(addresses, ["fusion:9000"])
         self.assertEqual(target, "fusion:9000")
@@ -2202,8 +2226,13 @@ class ModelRpcClientTest(TestCase):
             request_id=2,
             mm_inputs=[],
         )
-        with patch("rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub", return_value=FakeBatchStub()):
-            self.assertEqual(len(asyncio.run(client.batch_enqueue([input_py, second_input]))), 2)
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=FakeBatchStub(),
+        ):
+            self.assertEqual(
+                len(asyncio.run(client.batch_enqueue([input_py, second_input]))), 2
+            )
         self.assertEqual(client._channel_pool.targets, ["decode:9002"])
 
     def test_batch_without_explicit_route_uses_local_pdfusion(self):
@@ -2243,15 +2272,20 @@ class ModelRpcClientTest(TestCase):
             mm_inputs=[],
             enqueued_by_master=True,
         )
+
         async def channel(_):
             return object()
+
         class CaptureStub(FakeBatchStub):
             async def BatchGenerateCall(self, request, timeout=None):
                 self.request = request
                 return await super().BatchGenerateCall(request, timeout)
+
         client._channel_pool.get = channel
         stub = CaptureStub()
-        with patch("rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub", return_value=stub):
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub", return_value=stub
+        ):
             self.assertEqual(len(asyncio.run(client.batch_enqueue([input_obj]))), 1)
         self.assertTrue(stub.request.inputs[0].enqueued_by_master)
 
@@ -2289,7 +2323,10 @@ class ModelRpcClientTest(TestCase):
             error_message="original backend failure",
         )
         for role_type in (RoleType.PDFUSION, RoleType.VIT):
-            for metadata in (None, (("grpc-status-details-bin", details.SerializeToString()),)):
+            for metadata in (
+                None,
+                (("grpc-status-details-bin", details.SerializeToString()),),
+            ):
                 with self.subTest(role_type=role_type, structured=bool(metadata)):
                     client = ModelRpcClient([target], {}, 5000, role_type)
 
@@ -2317,26 +2354,42 @@ class ModelRpcClientTest(TestCase):
                         request_id=1,
                         mm_inputs=[],
                     )
-                    with patch(
-                        "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
-                        return_value=FailedBatchStub(),
-                    ), self.assertRaises(FtRuntimeException) as caught:
+                    with (
+                        patch(
+                            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                            return_value=FailedBatchStub(),
+                        ),
+                        self.assertRaises(FtRuntimeException) as caught,
+                    ):
                         asyncio.run(client.batch_enqueue([input_obj]))
                     self.assertNotIn(target, caught.exception.message)
                     self.assertIn("batch_size=1", caught.exception.message)
                     self.assertEqual(
                         caught.exception.exception_type,
-                        ExceptionType.MM_PROCESS_ERROR if metadata else ExceptionType.GENERATE_TIMEOUT,
+                        (
+                            ExceptionType.MM_PROCESS_ERROR
+                            if metadata
+                            else ExceptionType.GENERATE_TIMEOUT
+                        ),
                     )
                     if metadata:
                         self.assertIn(details.error_message, caught.exception.message)
 
     def test_grpc_address_errors_include_the_original_address(self):
-        for address in ("host:", "host:abc", "[::1]:", "[::1]:abc", "host:0", "host:65536"):
+        for address in (
+            "host:",
+            "host:abc",
+            "[::1]:",
+            "[::1]:abc",
+            "host:0",
+            "host:65536",
+        ):
             with self.subTest(address=address):
                 with self.assertRaises(ValueError) as caught:
                     _split_host_port(address)
-                self.assertEqual(str(caught.exception), f"invalid grpc address: {address}")
+                self.assertEqual(
+                    str(caught.exception), f"invalid grpc address: {address}"
+                )
         self.assertEqual(_split_host_port("host:9000"), ("host", 9000))
         self.assertEqual(_split_host_port("[::1]:9000"), ("::1", 9000))
 
@@ -2483,12 +2536,15 @@ class ModelRpcClientTest(TestCase):
                 return output
             return None
 
-        with patch(
-            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
-            return_value=fake_stub,
-        ), patch(
-            "rtp_llm.cpp.model_rpc.model_rpc_client.RoleAddr",
-            side_effect=lambda **kwargs: SimpleNamespace(**kwargs),
+        with (
+            patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                return_value=fake_stub,
+            ),
+            patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.RoleAddr",
+                side_effect=lambda **kwargs: SimpleNamespace(**kwargs),
+            ),
         ):
             result = asyncio.run(_collect_output())
 
@@ -2726,9 +2782,13 @@ class BatchTraceRpcTest(TestCase):
                     elif mode in ("business_error", "business_code_only"):
                         outputs = await task
                         self.assertEqual(len(outputs), 3)
-                        self.assertEqual(outputs[0].generate_outputs[0].output_ids.item(), 801)
+                        self.assertEqual(
+                            outputs[0].generate_outputs[0].output_ids.item(), 801
+                        )
                         self.assertIsInstance(outputs[1], FtRuntimeException)
-                        self.assertEqual(outputs[2].generate_outputs[0].output_ids.item(), 803)
+                        self.assertEqual(
+                            outputs[2].generate_outputs[0].output_ids.item(), 803
+                        )
                         self.observed_error = (type(outputs[1]), str(outputs[1]))
                     elif mode != "ok":
                         expected = (
@@ -3267,7 +3327,9 @@ class ModelRpcClientGrpcMetadataTest(TestCase):
 
         asyncio.run(run())
 
-    def test_master_enqueued_traceparent_name_usage_and_status_cross_real_grpc_boundary(self):
+    def test_master_enqueued_traceparent_name_usage_and_status_cross_real_grpc_boundary(
+        self,
+    ):
         self.addCleanup(tracing.reset_telemetry_for_test)
 
         async def run():
@@ -3313,13 +3375,16 @@ class ModelRpcClientGrpcMetadataTest(TestCase):
                 spans = {span.name: span for span in exporter.get_finished_spans()}
                 decode_span = spans["rtp_llm.generate_stream_call"]
                 self.assertEqual(
-                    decode_span.parent.span_id, spans["master-enqueued-root"].context.span_id
+                    decode_span.parent.span_id,
+                    spans["master-enqueued-root"].context.span_id,
                 )
                 self.assertEqual(
                     decode_span.attributes["rpc.response.status_code"], "OK"
                 )
                 self.assertEqual(decode_span.attributes["gen_ai.usage.input_tokens"], 3)
-                self.assertEqual(decode_span.attributes["gen_ai.usage.output_tokens"], 1)
+                self.assertEqual(
+                    decode_span.attributes["gen_ai.usage.output_tokens"], 1
+                )
             finally:
                 await channel.close()
                 await server.stop(None)
@@ -3871,6 +3936,63 @@ class ClientSpanSettlementTest(TestCase):
                 self.assertEqual(span.status, "ERROR")
                 self.assertEqual(span.end_count, 1)
 
+    def test_deferred_gate_holds_first_frame_and_cancels_on_rejection(self):
+        for admitted in (False, True):
+            for passed in (False, True):
+                with self.subTest(admitted=admitted, passed=passed):
+                    client = self._build_client(_FakeClientSpan(), total=2)
+                    inp = self._make_input()
+                    inp.enqueued_by_master = admitted
+                    inp.generate_config.role_addrs = [
+                        RoleAddr(
+                            role=RoleType.DECODE,
+                            ip="127.0.0.1",
+                            grpc_port=1234,
+                            http_port=1,
+                        )
+                    ]
+                    inp.deferred_inspection = ("vit", 2, "ticket")
+                    pb = GenerateInputPB(request_id=inp.request_id)
+                    pb.multimodal_request.inspection_ticket = "ticket"
+                    pb.multimodal_inputs.add(multimodal_url="img")
+
+                    async def run():
+                        gate_started, release = asyncio.Event(), asyncio.Event()
+
+                        async def gate(*args, **kwargs):
+                            self.assertIsNotNone(client._test_stub.iterator)
+                            gate_started.set()
+                            await release.wait()
+                            if not passed:
+                                raise FtRuntimeException(
+                                    ExceptionType.UNSAFE_INPUT_CONTENT, "blocked"
+                                )
+
+                        with (
+                            patch(
+                                "rtp_llm.cpp.model_rpc.model_rpc_client.trans_input",
+                                return_value=pb,
+                            ),
+                            patch.object(
+                                client, "_wait_greennet_verdict", side_effect=gate
+                            ) as wait,
+                        ):
+                            stream = client.enqueue(inp)
+                            first = asyncio.create_task(stream.__anext__())
+                            await asyncio.wait_for(gate_started.wait(), 2)
+                            self.assertFalse(first.done())
+                            release.set()
+                            if passed:
+                                self.assertTrue((await first).generate_outputs)
+                            else:
+                                with self.assertRaises(FtRuntimeException):
+                                    await first
+                                self.assertTrue(client._test_stub.iterator.cancelled)
+                            wait.assert_awaited_once()
+                            await stream.aclose()
+
+                    asyncio.run(run())
+
     def test_greennet_transport_failure_is_not_content_rejection(self):
         # String patch lookup can resolve through rtp_llm.__getattr__ to the
         # mocked ops module before the real greennet_hook has been imported.
@@ -4241,13 +4363,13 @@ class ClientSpanSettlementTest(TestCase):
         for key in self.USAGE_KEYS:
             self.assertIn(key, span.attributes)
 
-    def test_master_enqueued_cancellation_records_observed_latency_before_single_end(self):
+    def test_master_enqueued_cancellation_records_observed_latency_before_single_end(
+        self,
+    ):
         async def run(span, client, exception_type, output_len, sequences):
             input_py = self._make_input()
             input_py.enqueued_by_master = True
-            input_py.generate_config.role_addrs = [
-                _decode_role_addr("127.0.0.1", 1234)
-            ]
+            input_py.generate_config.role_addrs = [_decode_role_addr("127.0.0.1", 1234)]
             outputs = GenerateOutputs(
                 generate_outputs=[
                     _FakeOut(False, output_len=output_len) for _ in range(sequences)
@@ -4283,16 +4405,16 @@ class ClientSpanSettlementTest(TestCase):
                         run(span, client, exception_type, output_len, sequences)
                     )
 
-    def test_master_enqueued_cleanup_recancellation_records_latency_before_single_end(self):
+    def test_master_enqueued_cleanup_recancellation_records_latency_before_single_end(
+        self,
+    ):
         span = _FakeClientSpan()
         client = self._build_client(span, total=3, finish_last=False)
 
         async def run():
             input_py = self._make_input()
             input_py.enqueued_by_master = True
-            input_py.generate_config.role_addrs = [
-                _decode_role_addr("127.0.0.1", 1234)
-            ]
+            input_py.generate_config.role_addrs = [_decode_role_addr("127.0.0.1", 1234)]
             gen = client.enqueue(input_py)
             for _ in range(3):
                 await gen.__anext__()
@@ -4325,9 +4447,7 @@ class ClientSpanSettlementTest(TestCase):
         async def run():
             input_py = self._make_input()
             input_py.enqueued_by_master = True
-            input_py.generate_config.role_addrs = [
-                _decode_role_addr("127.0.0.1", 1234)
-            ]
+            input_py.generate_config.role_addrs = [_decode_role_addr("127.0.0.1", 1234)]
 
             async def consume():
                 async for _ in client.enqueue(input_py):
@@ -4472,7 +4592,10 @@ class ClientSpanSettlementTest(TestCase):
             client._handle_grpc_error(error, "request: [7]", "worker:9000")
 
         self.assertEqual(raised.exception.exception_type, ExceptionType.UNKNOWN_ERROR)
-        self.assertEqual(raised.exception.message, "backend_error_code=999999: request: [7]: future error")
+        self.assertEqual(
+            raised.exception.message,
+            "backend_error_code=999999: request: [7]: future error",
+        )
 
 
 class FakeBatchStub:
@@ -4485,7 +4608,9 @@ class FakeBatchStub:
     async def BatchGenerateCall(self, input, timeout=None):
         self.last_timeout = timeout
         self.last_batch_size = len(input.inputs)
-        self.last_item_timeouts = [item.generate_config.timeout_ms for item in input.inputs]
+        self.last_item_timeouts = [
+            item.generate_config.timeout_ms for item in input.inputs
+        ]
         response = BatchGenerateOutputsPB()
         for _ in input.inputs:
             result = response.results.add()
@@ -4498,6 +4623,7 @@ class FakeBatchStub:
             aux_info.output_len = 1
             output_pb.finished.extend([True])
         return response
+
 
 class FirstCauseRpcErrorTest(TestCase):
     def rpc_error(self, metadata, code=grpc.StatusCode.UNAVAILABLE):
@@ -4516,9 +4642,10 @@ class FirstCauseRpcErrorTest(TestCase):
     def test_transport_cancellation_preserves_legacy_code(self):
         client = ModelRpcClient.__new__(ModelRpcClient)
         for metadata in (None, (), (("grpc-status-details-bin", b"\xff"),)):
-            with self.subTest(metadata=metadata), self.assertRaises(
-                FtRuntimeException
-            ) as caught:
+            with (
+                self.subTest(metadata=metadata),
+                self.assertRaises(FtRuntimeException) as caught,
+            ):
                 client._handle_grpc_error(
                     self.rpc_error(metadata, grpc.StatusCode.CANCELLED), "request=1"
                 )
@@ -4542,12 +4669,18 @@ class FirstCauseRpcErrorTest(TestCase):
         self.assertIn(details.error_message, caught.exception.message)
 
     def test_aio_metadata_preserves_backend_error(self):
-        details = ErrorDetailsPB(error_code=903, error_message="original backend failure")
-        metadata = grpc.aio.Metadata(("grpc-status-details-bin", details.SerializeToString()))
+        details = ErrorDetailsPB(
+            error_code=903, error_message="original backend failure"
+        )
+        metadata = grpc.aio.Metadata(
+            ("grpc-status-details-bin", details.SerializeToString())
+        )
         client = ModelRpcClient.__new__(ModelRpcClient)
         with self.assertRaises(FtRuntimeException) as caught:
             client._handle_grpc_error(self.rpc_error(metadata), "relay")
-        self.assertEqual(caught.exception.exception_type, ExceptionType.MM_PROCESS_ERROR)
+        self.assertEqual(
+            caught.exception.exception_type, ExceptionType.MM_PROCESS_ERROR
+        )
         self.assertEqual(caught.exception.message, f"relay: {details.error_message}")
 
     def test_aio_rpc_error_preserves_p2p_handoff_failure(self):
@@ -4589,22 +4722,32 @@ class FirstCauseRpcErrorTest(TestCase):
         self.assertNotIn("2001:db8", caught.exception.message)
 
     def test_structured_cause_survives_generic_grpc_status(self):
-        details = ErrorDetailsPB(error_code=903, error_message="Prefill VIT request=42 failed")
+        details = ErrorDetailsPB(
+            error_code=903, error_message="Prefill VIT request=42 failed"
+        )
         client = ModelRpcClient.__new__(ModelRpcClient)
         with self.assertRaises(FtRuntimeException) as caught:
             client._handle_grpc_error(
-                self.rpc_error((("grpc-status-details-bin", details.SerializeToString()),)),
+                self.rpc_error(
+                    (("grpc-status-details-bin", details.SerializeToString()),)
+                ),
                 "relay",
             )
-        self.assertEqual(caught.exception.exception_type, ExceptionType.MM_PROCESS_ERROR)
+        self.assertEqual(
+            caught.exception.exception_type, ExceptionType.MM_PROCESS_ERROR
+        )
         self.assertEqual(caught.exception.message, f"relay: {details.error_message}")
 
     def test_unknown_application_code_keeps_numeric_code_and_original_reason(self):
-        details = ErrorDetailsPB(error_code=99999, error_message="original backend failure")
+        details = ErrorDetailsPB(
+            error_code=99999, error_message="original backend failure"
+        )
         client = ModelRpcClient.__new__(ModelRpcClient)
         with self.assertRaises(FtRuntimeException) as caught:
             client._handle_grpc_error(
-                self.rpc_error((("grpc-status-details-bin", details.SerializeToString()),)),
+                self.rpc_error(
+                    (("grpc-status-details-bin", details.SerializeToString()),)
+                ),
                 "relay",
             )
         self.assertEqual(caught.exception.exception_type, ExceptionType.UNKNOWN_ERROR)
@@ -4614,46 +4757,81 @@ class FirstCauseRpcErrorTest(TestCase):
     def test_missing_or_malformed_metadata_does_not_mask_transport_cause(self):
         client = ModelRpcClient.__new__(ModelRpcClient)
         for metadata in (None, (), (("grpc-status-details-bin", b"\xff"),)):
-            with self.subTest(metadata=metadata), self.assertRaises(
-                FtRuntimeException
-            ) as caught:
-                client._handle_grpc_error(self.rpc_error(metadata), "Decode", "worker:9000")
-            self.assertEqual(caught.exception.exception_type, ExceptionType.CONNECTION_RESET_BY_PEER)
+            with (
+                self.subTest(metadata=metadata),
+                self.assertRaises(FtRuntimeException) as caught,
+            ):
+                client._handle_grpc_error(
+                    self.rpc_error(metadata), "Decode", "worker:9000"
+                )
+            self.assertEqual(
+                caught.exception.exception_type, ExceptionType.CONNECTION_RESET_BY_PEER
+            )
             self.assertIn("connection reset by peer", caught.exception.message)
             self.assertNotIn("worker:9000", caught.exception.message)
 
     def test_worker_status_codes_do_not_alias_frontend_master_capacity(self):
         client = ModelRpcClient.__new__(ModelRpcClient)
-        for code in (ErrorCodePB.GET_PART_NODE_STATUS_FAILED, ErrorCodePB.GET_ALL_NODE_STATUS_FAILED):
+        for code in (
+            ErrorCodePB.GET_PART_NODE_STATUS_FAILED,
+            ErrorCodePB.GET_ALL_NODE_STATUS_FAILED,
+        ):
             for source in ("frame", "trailer"):
-                with self.subTest(code=code, source=source), self.assertLogs(level="ERROR") as logs:
+                with (
+                    self.subTest(code=code, source=source),
+                    self.assertLogs(level="ERROR") as logs,
+                ):
                     with self.assertRaises(FtRuntimeException) as caught:
                         if source == "frame":
                             client._raise_pb_error(
-                                SimpleNamespace(error_code=code, error_message="worker lookup failed"), "request=42"
+                                SimpleNamespace(
+                                    error_code=code,
+                                    error_message="worker lookup failed",
+                                ),
+                                "request=42",
                             )
                         else:
-                            details = ErrorDetailsPB(error_code=code, error_message="worker lookup failed")
-                            client._handle_grpc_error(
-                                self.rpc_error((("grpc-status-details-bin", details.SerializeToString()),)), "request=42"
+                            details = ErrorDetailsPB(
+                                error_code=code, error_message="worker lookup failed"
                             )
-                self.assertEqual(caught.exception.exception_type, ExceptionType.GET_HOST_FAILED)
-                self.assertEqual(caught.exception.message, "request=42: worker lookup failed")
-                self.assertTrue(any(
-                    f"backend_error_code={code} frontend_error_code={ExceptionType.GET_HOST_FAILED.value}" in message
-                    for message in logs.output
-                ))
+                            client._handle_grpc_error(
+                                self.rpc_error(
+                                    (
+                                        (
+                                            "grpc-status-details-bin",
+                                            details.SerializeToString(),
+                                        ),
+                                    )
+                                ),
+                                "request=42",
+                            )
+                self.assertEqual(
+                    caught.exception.exception_type, ExceptionType.GET_HOST_FAILED
+                )
+                self.assertEqual(
+                    caught.exception.message, "request=42: worker lookup failed"
+                )
+                self.assertTrue(
+                    any(
+                        f"backend_error_code={code} frontend_error_code={ExceptionType.GET_HOST_FAILED.value}"
+                        in message
+                        for message in logs.output
+                    )
+                )
 
     def test_existing_proto_error_ids_map_to_internal_frontend_codes(self):
         for wire_code, expected in (
             (26, ExceptionType.INVALID_PARAMS),
             (27, ExceptionType.EXECUTION_EXCEPTION),
         ):
-            with self.subTest(wire_code=wire_code), self.assertRaises(
-                FtRuntimeException
-            ) as caught:
+            with (
+                self.subTest(wire_code=wire_code),
+                self.assertRaises(FtRuntimeException) as caught,
+            ):
                 ModelRpcClient._raise_pb_error(
-                    SimpleNamespace(error_code=wire_code, error_message="original cause"),
+                    SimpleNamespace(
+                        error_code=wire_code, error_message="original cause"
+                    ),
                     "request=42",
                 )
             self.assertEqual(caught.exception.exception_type, expected)
@@ -4669,7 +4847,10 @@ class FirstCauseRpcErrorTest(TestCase):
                 ExceptionType.P2P_CONNECTOR_WORKER_READ_CANCELLED,
             ),
         ):
-            with self.subTest(code=code), self.assertRaises(FtRuntimeException) as caught:
+            with (
+                self.subTest(code=code),
+                self.assertRaises(FtRuntimeException) as caught,
+            ):
                 ModelRpcClient._raise_pb_error(
                     SimpleNamespace(error_code=code, error_message="first cause"),
                     "batch item 1",
@@ -4687,12 +4868,19 @@ class FirstCauseRpcErrorTest(TestCase):
                 details = ErrorDetailsPB(
                     error_code=error_type.value, error_message="original transfer cause"
                 )
-                with self.subTest(code=error_type, request=request_id, channel="trailer"):
+                with self.subTest(
+                    code=error_type, request=request_id, channel="trailer"
+                ):
                     with self.assertLogs(level="ERROR") as logs:
                         with self.assertRaises(FtRuntimeException) as caught:
                             client._handle_grpc_error(
                                 self.rpc_error(
-                                    (("grpc-status-details-bin", details.SerializeToString()),),
+                                    (
+                                        (
+                                            "grpc-status-details-bin",
+                                            details.SerializeToString(),
+                                        ),
+                                    ),
                                     grpc.StatusCode.INTERNAL,
                                 ),
                                 request_desc,
@@ -4704,7 +4892,9 @@ class FirstCauseRpcErrorTest(TestCase):
                         f"{request_desc}: original transfer cause",
                     )
                     self.assertTrue(any(request_desc in line for line in logs.output))
-                    self.assertTrue(any(error_type.name in line for line in logs.output))
+                    self.assertTrue(
+                        any(error_type.name in line for line in logs.output)
+                    )
                 with self.subTest(code=error_type, request=request_id, channel="body"):
                     with self.assertRaises(FtRuntimeException) as caught:
                         client._raise_pb_error(
@@ -4723,57 +4913,87 @@ class FirstCauseRpcErrorTest(TestCase):
     def test_batch_pb_error_without_message_is_still_failure(self):
         with self.assertRaises(FtRuntimeException) as caught:
             ModelRpcClient._raise_pb_error(
-                SimpleNamespace(error_code=ErrorCodePB.GENERATE_TIMEOUT, error_message=""),
+                SimpleNamespace(
+                    error_code=ErrorCodePB.GENERATE_TIMEOUT, error_message=""
+                ),
                 "item 0",
             )
-        self.assertEqual(caught.exception.exception_type, ExceptionType.GENERATE_TIMEOUT)
+        self.assertEqual(
+            caught.exception.exception_type, ExceptionType.GENERATE_TIMEOUT
+        )
 
 
 class MixedPdfusionBatchTest(unittest.IsolatedAsyncioTestCase):
     def make_input(self, request_id, roles):
-        return GenerateInput(token_ids=torch.tensor([1, 2]),
-                             generate_config=GenerateConfig(role_addrs=roles),
-                             request_id=request_id, mm_inputs=[])
+        return GenerateInput(
+            token_ids=torch.tensor([1, 2]),
+            generate_config=GenerateConfig(role_addrs=roles),
+            request_id=request_id,
+            mm_inputs=[],
+        )
 
     async def test_frontend_pdfusion_batch_allows_unselected_decode_role(self):
-        fusion = RoleAddr(role=RoleType.PDFUSION, ip="fusion", http_port=9000, grpc_port=9001)
+        fusion = RoleAddr(
+            role=RoleType.PDFUSION, ip="fusion", http_port=9000, grpc_port=9001
+        )
         decode = _decode_role_addr("decode", 9002)
         client = ModelRpcClient(["unused:9000"], {}, 5000, RoleType.FRONTEND)
         targets = []
+
         async def channel(target):
             targets.append(target)
             return object()
+
         client._channel_pool.get = channel
         stub = FakeBatchStub()
-        with patch("rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub", return_value=stub):
-            outputs = await client.batch_enqueue([self.make_input(1, [fusion, decode]),
-                                                  self.make_input(2, [fusion])])
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub", return_value=stub
+        ):
+            outputs = await client.batch_enqueue(
+                [self.make_input(1, [fusion, decode]), self.make_input(2, [fusion])]
+            )
         self.assertEqual(len(outputs), 2)
         self.assertEqual(targets, ["fusion:9001"])
         self.assertEqual(stub.last_batch_size, 2)
 
     async def test_batch_rejects_conflicting_pdfusion_targets_before_rpc(self):
         client = ModelRpcClient(["unused:9000"], {}, 5000, RoleType.FRONTEND)
-        inputs = [self.make_input(i, [RoleAddr(role=RoleType.PDFUSION, ip=ip,
-                                             http_port=9000, grpc_port=9001)])
-                  for i, ip in [(1, "fusion1"), (2, "fusion2")]]
+        inputs = [
+            self.make_input(
+                i,
+                [
+                    RoleAddr(
+                        role=RoleType.PDFUSION, ip=ip, http_port=9000, grpc_port=9001
+                    )
+                ],
+            )
+            for i, ip in [(1, "fusion1"), (2, "fusion2")]
+        ]
         with self.assertRaises(FtRuntimeException):
             await client.batch_enqueue(inputs)
 
     async def test_pd_batch_preserves_per_item_timeouts_without_mutating_inputs(self):
         client = ModelRpcClient(["unused:9000"], {}, 5000, RoleType.FRONTEND)
-        inputs = [self.make_input(i, [_decode_role_addr("decode", 9002)]) for i in (1, 2)]
+        inputs = [
+            self.make_input(i, [_decode_role_addr("decode", 9002)]) for i in (1, 2)
+        ]
         inputs[0].generate_config.timeout_ms = 200
         inputs[1].generate_config.timeout_ms = 1200
+
         async def channel(_):
             return object()
+
         client._channel_pool.get = channel
         stub = FakeBatchStub()
-        with patch("rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub", return_value=stub):
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub", return_value=stub
+        ):
             self.assertEqual(len(await client.batch_enqueue(inputs)), 2)
         self.assertEqual(stub.last_timeout, 1.2)
         self.assertEqual(stub.last_item_timeouts, [200, 1200])
-        self.assertEqual([item.generate_config.timeout_ms for item in inputs], [200, 1200])
+        self.assertEqual(
+            [item.generate_config.timeout_ms for item in inputs], [200, 1200]
+        )
 
 
 class PdTraceDecisionTest(unittest.TestCase):

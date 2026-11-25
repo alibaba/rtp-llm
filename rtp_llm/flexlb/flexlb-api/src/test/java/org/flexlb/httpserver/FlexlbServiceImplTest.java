@@ -2338,6 +2338,52 @@ class FlexlbServiceImplTest {
         assertFalse(captor.getValue().getFound());
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void scheduleSpanRecordsSelectedGrpcEndpointOnlyForVitOnly(boolean vitOnly) {
+        var vit = new org.flexlb.dao.loadbalance.ServerStatus();
+        vit.setRole(org.flexlb.dao.route.RoleType.VIT);
+        vit.setServerIp("10.0.0.30");
+        vit.setHttpPort(8000);
+        vit.setGrpcPort(30461);
+        var response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        response.setServerStatus(java.util.List.of(vit));
+        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(response));
+
+        RecordingExporter exporter = new RecordingExporter();
+        try (var provider =
+                io.opentelemetry.sdk.trace.SdkTracerProvider.builder()
+                        .addSpanProcessor(
+                                io.opentelemetry.sdk.trace.export.SimpleSpanProcessor.create(
+                                        exporter))
+                        .build()) {
+            var span =
+                    provider.get("test")
+                            .spanBuilder("rtp_llm.flexlb.schedule")
+                            .setSpanKind(io.opentelemetry.api.trace.SpanKind.SERVER)
+                            .startSpan();
+            var request =
+                    FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                            .setRequestId(991L)
+                            .setVitRouteOnly(vitOnly)
+                            .build();
+            Context.current()
+                    .withValue(
+                            org.flexlb.interceptor.GrpcTraceInterceptor.OTEL_CONTEXT_KEY,
+                            io.opentelemetry.context.Context.root().with(span))
+                    .run(() -> service.schedule(request, mock(StreamObserver.class)));
+            span.end();
+            assertEquals(
+                    vitOnly ? "10.0.0.30:30461" : null,
+                    exporter.spans
+                            .getFirst()
+                            .getAttributes()
+                            .get(org.flexlb.telemetry.FlexlbTrace.VIT_ADDRESS));
+        }
+    }
+
     private static FlexlbConfig routingConfig() {
         FlexlbConfig config = org.flexlb.mock.TestFlexlbConfigs.create();
         config.setDispatcher(DispatcherConfig.nonBatch());

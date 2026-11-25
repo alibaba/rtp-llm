@@ -22,8 +22,9 @@ CompleteTokenIds::CompleteTokenIds(const CompleteTokenIds& other, bool share, in
     start_check_seq_length_(other.start_check_seq_length_),
     first_token_time_us_(other.first_token_time_us_),
     first_token_latency_us_(other.first_token_latency_us_) {
-    v41_inputs_       = other.v41_inputs_;
-    canonical_offset_ = other.canonical_offset_ + shift_token_num;
+    multimodal_cache_spans_ = other.multimodal_cache_spans_;
+    v41_inputs_             = other.v41_inputs_;
+    canonical_offset_       = other.canonical_offset_ + shift_token_num;
     if (share) {
         if (shift_token_num == 0) {
             complete_token_ids_ = other.complete_token_ids_;
@@ -47,9 +48,10 @@ CompleteTokenIds::CompleteTokenIds(const CompleteTokenIds& other, bool share, in
 void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input, size_t extra_reserve_token_num) {
     RTP_LLM_CHECK(generate_input != nullptr);
 
-    v41_inputs_       = generate_input->v41_inputs;
-    canonical_offset_ = 0;
-    seq_length_       = generate_input->inputLength();
+    multimodal_cache_spans_ = generate_input->multimodal_cache_spans;
+    v41_inputs_             = generate_input->v41_inputs;
+    canonical_offset_       = 0;
+    seq_length_             = generate_input->inputLength();
     RTP_LLM_CHECK_WITH_INFO(
         (seq_length_ <= max_seq_len_), "seq_length[%d] must be less than max_seq_len[%d]", seq_length_, max_seq_len_);
 
@@ -90,6 +92,40 @@ std::vector<int32_t> CompleteTokenIds::imageCacheIdentity(int begin, int count) 
                 result.push_back(byte);
             }
         }
+    }
+    return result;
+}
+
+std::vector<int32_t> CompleteTokenIds::multimodalCacheIdentity(int begin, int count) const {
+    std::vector<int32_t> result;
+    if (!multimodal_cache_spans_)
+        return imageCacheIdentity(begin, count);
+    if (count <= 0) {
+        return result;
+    }
+    const int64_t block_begin = int64_t(begin) + canonical_offset_;
+    const int64_t block_end   = block_begin + count;
+    for (const auto& span : *multimodal_cache_spans_) {
+        const int64_t span_begin    = span.offset;
+        const int64_t span_end      = span_begin + span.row_hashes.size();
+        const int64_t overlap_begin = std::max(block_begin, span_begin);
+        const int64_t overlap_end   = std::min(block_end, span_end);
+        if (overlap_begin >= overlap_end) {
+            continue;
+        }
+        // Domain-separate cache-only row identity from ordinary model tokens.
+        // Keep coordinates relative to this cache block/span. This makes the
+        // identity stable when a system prefix shifts both the span and query,
+        // while still preventing different span boundaries from aliasing.
+        result.insert(result.end(),
+                      {-42,
+                       static_cast<int32_t>(overlap_begin - block_begin),
+                       static_cast<int32_t>(span.row_hashes.size()),
+                       static_cast<int32_t>(overlap_begin - span_begin),
+                       static_cast<int32_t>(overlap_end - overlap_begin)});
+        result.insert(result.end(),
+                      span.row_hashes.begin() + (overlap_begin - span_begin),
+                      span.row_hashes.begin() + (overlap_end - span_begin));
     }
     return result;
 }

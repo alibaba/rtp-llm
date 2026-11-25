@@ -25,7 +25,7 @@ void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
             const int pos       = index * seq_size_per_block;
             const int block_len = std::min(seq_size_per_block, seq_len - pos);
             rolling_hash        = rtp_llm::hashInt64Array(rolling_hash, token_ids + pos, token_ids + pos + block_len);
-            const auto identity = complete_token_ids->imageCacheIdentity(pos, block_len);
+            const auto identity = complete_token_ids->multimodalCacheIdentity(pos, block_len);
             if (!identity.empty()) {
                 rolling_hash = hashInt64Array(rolling_hash, identity.data(), identity.data() + identity.size());
             }
@@ -64,7 +64,7 @@ void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
         for (int index = start_idx; index < total_blocks; ++index) {
             const int pos = index * seq_size_per_block;
             hash          = rtp_llm::hashInt64Array(hash, token_ids + pos, token_ids + pos + (int)seq_size_per_block);
-            const auto identity = complete_token_ids->imageCacheIdentity(pos, seq_size_per_block);
+            const auto identity = complete_token_ids->multimodalCacheIdentity(pos, seq_size_per_block);
             if (!identity.empty()) {
                 hash = hashInt64Array(hash, identity.data(), identity.data() + identity.size());
             }

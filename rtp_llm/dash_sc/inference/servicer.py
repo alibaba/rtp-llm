@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
 import time
 from dataclasses import dataclass, replace
 from typing import (
@@ -104,12 +105,13 @@ from rtp_llm.dash_sc.repetition_monitor import RequestRepetitionMonitorConfig
 from rtp_llm.frontend.frontend_request_metrics import FrontendRequestMetrics
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, kmonitor
+from rtp_llm.server.mm_cache_metadata import MMRoutingSnapshot
 from rtp_llm.server.request_headers import (
     extract_correlation_request_id,
     extract_request_headers,
     extract_trace_id,
 )
-from rtp_llm.telemetry import CURRENT_TRACE_STATE, start_server_span
+from rtp_llm.telemetry import CURRENT_TRACE_STATE, start_server_span, traced_stage
 from rtp_llm.telemetry.tracing import (
     metadata_to_headers,
     select_valid_server_trace_carrier,
@@ -153,11 +155,13 @@ _DASH_SERVER_ATTRIBUTES = {
 }
 
 
+@traced_stage("dash_sc.multimodal_parse")
 def _build_mm_inputs_from_request(
     request: predict_v2_pb2.ModelInferRequest,
+    model_type: str | None = None,
 ) -> list:
     """Convert DashSc message parts to the engine's generic multimodal inputs."""
-    parts = parse_multimodal_parts_from_request(request)
+    parts = parse_multimodal_parts_from_request(request, model_type)
     if not parts:
         return []
 
@@ -169,6 +173,8 @@ def _build_mm_inputs_from_request(
             part.mm_type,
             torch.empty(0),
             MMPreprocessConfig(
+                width=part.width,
+                height=part.height,
                 min_pixels=part.min_pixels,
                 max_pixels=part.max_pixels,
                 fps=part.fps,
@@ -714,6 +720,41 @@ def _image_download_chunks(response, deadline):
         yield from response.iter_content(chunk_size=1)
 
 
+def _validate_v41_standard_input_ids(input_ids, mm_inputs, image_token_id: int):
+    from rtp_llm.utils.base_model_datatypes import MMUrlType
+
+    if any(media.mm_type != MMUrlType.IMAGE for media in mm_inputs):
+        raise FtRuntimeException(
+            ExceptionType.INVALID_PARAMS, "V4.1 supports IMAGE inputs only"
+        )
+    if sum(token == image_token_id for token in input_ids) != len(mm_inputs):
+        raise FtRuntimeException(
+            ExceptionType.INVALID_PARAMS,
+            "image placeholder count does not match the supplied image records",
+        )
+
+
+def _early_first_packet_snapshot(
+    input: GenerateInput,
+) -> Optional[MMRoutingSnapshot]:
+    """Snapshot for the pre-prefill frame.
+
+    Multimodal requests only emit it when the frontend route has complete ViT
+    hashes; text-only requests always have a known prompt length and no media.
+    """
+    if getattr(input, "mm_inputs", None):
+        return getattr(input, "mm_routing_snapshot", None)
+    token_ids = input.token_ids
+    prompt_token_num = (
+        int(token_ids.numel()) if hasattr(token_ids, "numel") else len(token_ids)
+    )
+    return MMRoutingSnapshot(
+        prompt_token_num=prompt_token_num,
+        split_sizes=(),
+        feature_hashes=(),
+    )
+
+
 def _prepare_v41_image_request(request, input_ids, processor_config, images=None):
     from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
         prepare_vl_inputs_from_token_ids,
@@ -839,7 +880,11 @@ def _make_generate_input(
     frontend_metric_observer: Optional[Callable[[Any, int], None]] = None,
 ) -> GenerateInput:
     headers = dict(request_headers or {})
-    headers.update(_headers_from_invocation_metadata(invocation_metadata))
+    metadata_headers = _headers_from_invocation_metadata(invocation_metadata)
+    headers.update(metadata_headers)
+    external_request_id = extract_correlation_request_id(metadata_headers)
+    if external_request_id:
+        headers["x-dashscope-request-id"] = external_request_id
     trace_id = str(generate_config.trace_id or extract_trace_id(headers) or "")
     # ``input_ids_tensor`` is the zero-copy INT32 view the codec built straight off the
     # request payload (see ``ParsedInputIds``). Long-context dash requests otherwise pay
@@ -1046,6 +1091,8 @@ async def iter_real_model_stream_infer(
     input_ids_tensor: Optional[torch.Tensor] = None,
     v41_inputs=None,
     v41_processor_config=None,
+    v41_image_token_id: Optional[int] = None,
+    enable_fake_first_packet: bool = False,
     max_seq_len: Optional[int] = None,
     frontend_metric_tags: Optional[dict[str, str]] = None,
 ) -> AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]:
@@ -1088,6 +1135,11 @@ async def iter_real_model_stream_infer(
         len(input_ids_list),
         sampling,
     )
+    enable_fake_first_packet = bool(
+        enable_fake_first_packet
+        and request_controls.enable_estimated_usage
+        and request_controls.support_frontend_estimated_usage
+    )
     matched_echo_ids = _matched_echo_prefix_ids(input_ids_list, echo_prefix_ids)
     should_echo = bool(matched_echo_ids)
     echoed = False
@@ -1105,7 +1157,11 @@ async def iter_real_model_stream_infer(
                 input_ids_list,
                 v41_processor_config,
             )
-        image_tokens = None
+        if v41_image_token_id is not None:
+            _validate_v41_standard_input_ids(
+                input_ids_list, mm_inputs or [], v41_image_token_id
+            )
+        image_tokens = 0 if v41_image_token_id is not None and not mm_inputs else None
         prompt_length = len(input_ids_list)
         if v41_inputs is not None:
             prompt_length = len(v41_inputs.token_ids)
@@ -1228,6 +1284,8 @@ async def iter_real_model_stream_infer(
                 access_agg,
             ),
         )
+        if enable_fake_first_packet:
+            generate_input.on_mm_routed = _early_first_packet_snapshot
         is_streaming = bool(generate_config.is_streaming)
         logging.debug(
             "[DashScGrpc] [%s] generate_input: %s",
@@ -1250,6 +1308,7 @@ async def iter_real_model_stream_infer(
             max_token_id=max_id,
             prompt_token_fallback=prompt_length,
             image_tokens=image_tokens,
+            image_tokens_from_backend=v41_image_token_id is not None,
         )
         chunk_idx = 0
         phase2_needed = False
@@ -1263,6 +1322,36 @@ async def iter_real_model_stream_infer(
         phase2_triggered = False
         stream = await backend_visitor.enqueue(generate_input)
         async for go in stream:
+            if isinstance(go, MMRoutingSnapshot):
+                if not enable_fake_first_packet:
+                    continue
+                # Emitted by the backend visitor after ViT expansion and before
+                # prefill. It carries no generated tokens, so it must not touch
+                # the chunk counters or any real-frame state. Best-effort: a
+                # malformed snapshot must not fail an otherwise valid request.
+                try:
+                    fake = response_builder.build_fake_first_packet(
+                        prompt_token_num=go.prompt_token_num,
+                        split_sizes=go.split_sizes,
+                        feature_hashes=go.feature_hashes,
+                    )
+                except Exception:
+                    logging.warning(
+                        "[DashScGrpc] [%s] fake first packet build failed",
+                        tag,
+                        exc_info=True,
+                    )
+                    continue
+                fake_stats = (
+                    0,
+                    False,
+                    LLMFinishReason.STREAMING,
+                    go.prompt_token_num,
+                    0,
+                    (),
+                )
+                yield (fake, fake_stats) if yield_access_stats else fake
+                continue
             chunk_idx += 1
             logging.debug("[DashScGrpc] [%s] real infer chunk %s", tag, chunk_idx)
             if not go.generate_outputs:
@@ -1518,6 +1607,22 @@ async def iter_real_model_stream_infer(
             phase2_input_ids = _build_empty_think_phase2_input_ids(
                 input_ids_list, matched_think_bos_ids, list(runtime.empty_tokens)
             )
+            if v41_image_token_id is not None:
+                # Keep raw single-image markers and the original ordered media
+                # across phase 2. Never trim a marker with a thinking suffix or
+                # create one from generated/empty-thinking text.
+                prefix_length = len(phase2_input_ids) - len(runtime.empty_tokens)
+                if (
+                    v41_image_token_id in input_ids_list[prefix_length:]
+                    or v41_image_token_id in runtime.empty_tokens
+                ):
+                    raise FtRuntimeException(
+                        ExceptionType.INVALID_PARAMS,
+                        "phase-2 thinking tokens overlap an image placeholder",
+                    )
+                _validate_v41_standard_input_ids(
+                    phase2_input_ids, mm_inputs or [], v41_image_token_id
+                )
             phase2_v41_inputs = None
             if v41_inputs is not None:
                 from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
@@ -1588,6 +1693,7 @@ async def iter_real_model_stream_infer(
                 eos_token_id=eos_id,
                 max_token_id=max_id,
                 image_tokens=image_tokens,
+                image_tokens_from_backend=v41_image_token_id is not None,
             )
             phase2_cumulative_sent_ids: list[int] = []
 
@@ -1749,6 +1855,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         repetition_monitor_config: Optional[RequestRepetitionMonitorConfig] = None,
         grammar_validator: Optional[GrammarValidator] = None,
         v41_processor_config=None,
+        v41_image_token_id: Optional[int] = None,
         max_seq_len: Optional[int] = None,
         monitor_interval_s: Optional[float] = None,
         request_metrics: Optional[FrontendRequestMetrics] = None,
@@ -1794,6 +1901,10 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         # (invalid grammars surface as an engine-side error mid-stream).
         self._grammar_validator = grammar_validator
         self._v41_processor_config = v41_processor_config
+        self._v41_image_token_id = v41_image_token_id
+        self._enable_fake_first_packet = os.environ.get(
+            "DASHSC_ENABLE_FAKE_FIRST_PACKET", ""
+        ).strip().lower() in ("1", "true", "yes", "on")
         self._max_seq_len = max_seq_len
         self._request_metrics = request_metrics or FrontendRequestMetrics(
             concurrency_report_interval_s=monitor_interval_s
@@ -2070,6 +2181,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                             model_type=(
                                 "deepseek_v41"
                                 if self._v41_processor_config is not None
+                                or self._v41_image_token_id is not None
                                 else None
                             ),
                         )
@@ -2083,7 +2195,14 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     mm_inputs = (
                         []
                         if self._v41_processor_config is not None
-                        else _build_mm_inputs_from_request(request)
+                        else _build_mm_inputs_from_request(
+                            request,
+                            (
+                                "deepseek_v41"
+                                if self._v41_image_token_id is not None
+                                else None
+                            ),
+                        )
                     )
                     traceparent_new = _lookup_ds_request_control(
                         parse_ds_header_attributes(request), "traceparent_new"
@@ -2233,6 +2352,8 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     access_agg=record,
                     input_ids_tensor=parsed_input_ids.tensor,
                     v41_processor_config=self._v41_processor_config,
+                    v41_image_token_id=self._v41_image_token_id,
+                    enable_fake_first_packet=self._enable_fake_first_packet,
                     max_seq_len=self._max_seq_len,
                     yield_access_stats=True,
                     mm_inputs=mm_inputs,

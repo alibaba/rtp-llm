@@ -29,15 +29,16 @@ enum class ErrorCode {
     GRAMMAR_VERIFY_EXCEPTION          = 613,
 
     // multimodal error
-    MM_LONG_PROMPT_ERROR   = 901,
-    MM_WRONG_FORMAT_ERROR  = 902,
-    MM_PROCESS_ERROR       = 903,
-    MM_EMPTY_ENGINE_ERROR  = 904,
-    MM_NOT_SUPPORTED_ERROR = 905,
-    MM_DOWNLOAD_FAILED     = 906,
-    MM_REMOTE_RPC_FAILED   = 907,
-    UNSAFE_INPUT_CONTENT   = 908,
-    UNSAFE_OUTPUT_CONTENT  = 909,
+    MM_LONG_PROMPT_ERROR          = 901,
+    MM_WRONG_FORMAT_ERROR         = 902,
+    MM_PROCESS_ERROR              = 903,
+    MM_EMPTY_ENGINE_ERROR         = 904,
+    MM_NOT_SUPPORTED_ERROR        = 905,
+    MM_DOWNLOAD_FAILED            = 906,
+    MM_REMOTE_RPC_FAILED          = 907,
+    UNSAFE_INPUT_CONTENT          = 908,
+    UNSAFE_OUTPUT_CONTENT         = 909,
+    MM_IMAGE_PIXEL_LIMIT_EXCEEDED = 910,
 
     // Codes starting from 8000 are historically retry-oriented. Individual
     // domains may explicitly classify lower codes through their retry policy.
@@ -99,13 +100,13 @@ enum class ErrorCode {
     P2P_CONNECTOR_WORKER_READ_TIMEOUT                 = 8324,
     P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE       = 8325,
 
-    P2P_CONNECTOR_TRANSFER_BUILD_REQUEST_FAILED       = 8326,
-    P2P_CONNECTOR_TRANSFER_CONNECTION_FAILED          = 8327,
-    P2P_CONNECTOR_TRANSFER_RPC_FAILED                 = 8328,
-    P2P_CONNECTOR_TRANSFER_NOT_INITIALIZED            = 8329,
-    P2P_CONNECTOR_TRANSFER_QUEUE_REJECTED             = 8330,
-    P2P_CONNECTOR_TRANSFER_COPY_FAILED                = 8331,
-    P2P_CONNECTOR_TRANSFER_CONTEXT_DESTROYED          = 8332,
+    P2P_CONNECTOR_TRANSFER_BUILD_REQUEST_FAILED = 8326,
+    P2P_CONNECTOR_TRANSFER_CONNECTION_FAILED    = 8327,
+    P2P_CONNECTOR_TRANSFER_RPC_FAILED           = 8328,
+    P2P_CONNECTOR_TRANSFER_NOT_INITIALIZED      = 8329,
+    P2P_CONNECTOR_TRANSFER_QUEUE_REJECTED       = 8330,
+    P2P_CONNECTOR_TRANSFER_COPY_FAILED          = 8331,
+    P2P_CONNECTOR_TRANSFER_CONTEXT_DESTROYED    = 8332,
 
     // load balance error
     GET_PART_NODE_STATUS_FAILED = 8400,
@@ -264,6 +265,8 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "UNSAFE_INPUT_CONTENT";
         case ErrorCode::UNSAFE_OUTPUT_CONTENT:
             return "UNSAFE_OUTPUT_CONTENT";
+        case ErrorCode::MM_IMAGE_PIXEL_LIMIT_EXCEEDED:
+            return "MM_IMAGE_PIXEL_LIMIT_EXCEEDED";
         case ErrorCode::MM_REMOTE_RPC_FAILED:
             return "MM_REMOTE_RPC_FAILED";
         case ErrorCode::P2P_CONNECTOR_TRANSFER_BUILD_REQUEST_FAILED:

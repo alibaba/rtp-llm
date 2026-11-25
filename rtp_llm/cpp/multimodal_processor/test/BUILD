@@ -18,6 +18,19 @@ test_copts = [
 ] + copts()
 
 cc_test(
+    name = "mm_grpc_error_test",
+    srcs = ["MMGrpcErrorTest.cc"],
+    copts = test_copts,
+    env = {"GPU_COUNT": "0"},
+    deps = [
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/multimodal_processor/transport/grpc:mm_grpc_error",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "multimodal_processor_test",
     srcs = glob([
         "MultimodalProcessorTest.cc",
@@ -37,6 +50,50 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "canonical_multimodal_processor_test",
+    srcs = ["CanonicalMultimodalProcessorTest.cc"],
+    copts = test_copts,
+    deps = torch_deps() + [
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/multimodal_processor",
+        "//rtp_llm/cpp/testing:device_test_utils",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+# Real GPU dependency gate against the public MM preprocessing entry point.
+# The host watchdog releases the gate without calling any CUDA API, bounding a
+# pre-fix failure even when a synchronous copy is holding a driver lock.
+cc_test(
+    name = "multimodal_cuda_stream_test",
+    srcs = ["MultimodalCudaStreamTest.cc"],
+    copts = copts(),
+    deps = torch_deps() + cuda13_torch_link_deps + [
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/multimodal_processor",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + select({
+        "@//:using_cuda": [
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cuda_driver",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "//conditions:default": [],
+    }),
+    timeout = "short",
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
@@ -71,6 +128,9 @@ cc_test(
         "@com_google_googletest//:gtest_main",
         "//rtp_llm/cpp/multimodal_processor/transport:mm_remote_output_transport_core",
         "//rtp_llm/cpp/multimodal_processor/transport/grpc:mm_grpc_transport",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/telemetry:telemetry",
+        "@io_opentelemetry_cpp//exporters/memory:in_memory_span_exporter",
         "//rtp_llm/cpp/multimodal_processor/transport/rdma:mm_rdma_reader",
         "//rtp_llm/cpp/rdma_transport",
         # Building inline receipts for the real terminal. Lean target, no engine behind it.
@@ -103,6 +163,24 @@ cc_test(
     ],
     # Assertions are CPU-only, but linking torch pulls in libtorch_cuda, which needs
     # libcuda.so.1 just to load the process -- so this still has to land on a GPU node.
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+# CPU tensors and controlled provider gates validate pool ownership and deadlines.
+cc_test(
+    name = "mm_rdma_provider_pool_test",
+    srcs = ["MMRdmaProviderPoolTest.cc"],
+    copts = test_copts,
+    env = {"GPU_COUNT": "0"},
+    deps = torch_deps() + cuda13_torch_link_deps + [
+        "//rtp_llm/cpp/multimodal_processor/transport/rdma:mm_rdma_reader",
+        "//rtp_llm/cpp/rdma_transport",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    timeout = "short",
+    # The CUDA torch shared libraries still need the driver to load.
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )

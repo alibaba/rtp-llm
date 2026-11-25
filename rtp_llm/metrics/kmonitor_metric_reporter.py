@@ -3,7 +3,15 @@ import os
 import threading
 import time
 from enum import Enum
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Iterable, Optional, Union
+
+from .emb_interval_metrics import (
+    EmbCacheTokensMetric,
+    EmbInflightMetric,
+    EmbLatencyMetric,
+    EmbOutcomeMetric,
+    EmbSampleMetric,
+)
 
 # Auto-TPM QoS priority header conveyed by the DashScope gateway; the same
 # value the engine forwards to FlexLB as ``Schedule.priority``.
@@ -75,7 +83,17 @@ class AccMetrics(Enum):
 
     VIT_QPS_METRIC = "py_rtp_vit_qps"
     VIT_ERROR_QPS_METRIC = "py_rtp_vit_error_qps"
+    # Count rejected async submissions, not the number of media items in them.
+    VIT_QUEUE_REJECT_QPS_METRIC = "py_rtp_vit_queue_reject_qps"
     VIT_SUCCESS_QPS_METRIC = "py_rtp_vit_success_qps"
+    # Accumulated embedding rows; AccMetric normalizes by the flush interval,
+    # so the reported value is visual tokens/s.
+    VIT_EMBEDDING_TPS_METRIC = "py_rtp_vit_embedding_tps"
+    VIT_PACKED_FORWARD_WORK_QPS_METRIC = "py_rtp_vit_packed_forward_work_qps"
+    VIT_BATCH_SEAL_QPS_METRIC = "py_rtp_vit_batch_seal_qps"
+    VIT_URL_SOURCE_QPS_METRIC = "py_rtp_vit_url_source_qps"
+    VIT_HTTP_CONNECT_RETRY_QPS_METRIC = "py_rtp_vit_http_connect_retry_qps"
+    VIT_HTTP_SOURCE_RETRY_QPS_METRIC = "py_rtp_vit_http_source_retry_qps"
     # Incremented when a submission is rejected because the scheduler's waiting
     # queue is full (overload / stalled forward backpressure).
     VIT_EMBEDDING_OVERLOAD_QPS_METRIC = "py_rtp_vit_embedding_overload_qps"
@@ -83,6 +101,9 @@ class AccMetrics(Enum):
     VIT_RPC_CLIENT_ERROR_QPS_METRIC = "rtp_llm_vit_rpc_client_error_qps"
     VIT_RPC_SERVER_ERROR_QPS_METRIC = "rtp_llm_vit_rpc_server_error_qps"
     VIT_RPC_PROXY_ERROR_QPS_METRIC = "rtp_llm_vit_rpc_proxy_error_qps"
+
+    GREENNET_SUCCESS_QPS_METRIC = "py_rtp_greennet_success_qps"
+    GREENNET_ERROR_QPS_METRIC = "py_rtp_greennet_error_qps"
 
     # dash_sc DSV4 phase-2: incremented once per request that enters phase-2
     # via the terminate-token-id (token 1) abort path in the think phase.
@@ -101,9 +122,110 @@ class AccMetrics(Enum):
     VIT_EMBEDDING_CACHE_INFLIGHT_QPS_METRIC = "py_rtp_vit_embedding_cache_inflight_qps"
     VIT_EMBEDDING_CACHE_EVICTION_QPS_METRIC = "py_rtp_vit_embedding_cache_eviction_qps"
 
+    # Multimodal download proxy: download attempts routed through the region
+    # egress proxy, and connect-failure fallbacks to direct. Both carry the
+    # request region tag.
+    MM_DOWNLOAD_PROXY_QPS_METRIC = "py_rtp_mm_download_proxy_qps"
+    MM_DOWNLOAD_PROXY_FALLBACK_QPS_METRIC = "py_rtp_mm_download_proxy_fallback_qps"
+
+    # DashScope TPM recheck after the early first packet.
+    DASH_SC_TPM_RECHECK_QPS_METRIC = "py_rtp_dash_sc_tpm_recheck_qps"
+    DASH_SC_TPM_RECHECK_LIMIT_QPS_METRIC = "py_rtp_dash_sc_tpm_recheck_limit_qps"
+    DASH_SC_TPM_RECHECK_ERROR_QPS_METRIC = "py_rtp_dash_sc_tpm_recheck_error_qps"
+
+    # Remote tier only. Read status: hit/miss/admission_skip/timeout/error.
+    # Misses and admission skips are not failures. Error QPS includes timeouts.
+    VIT_REMOTE_EMB_READ_QPS_METRIC = "py_rtp_vit_remote_embedding_cache_read_qps"
+    VIT_REMOTE_EMB_READ_ERROR_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_read_error_qps"
+    )
+    VIT_REMOTE_EMB_WRITE_QPS_METRIC = "py_rtp_vit_remote_embedding_cache_write_qps"
+    VIT_REMOTE_EMB_WRITE_ERROR_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_write_error_qps"
+    )
+    # Per operation/stage: total = success + error + skipped. Miss is success.
+    VIT_REMOTE_EMB_OPERATION_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_operation_qps"
+    )
+    VIT_REMOTE_EMB_SKIP_QPS_METRIC = "py_rtp_vit_remote_embedding_cache_skip_qps"
+    VIT_REMOTE_EMB_GDR_ACQUIRE_FAILURE_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_gdr_acquire_failure_qps"
+    )
+    VIT_REMOTE_EMB_WRITE_IN_PROGRESS_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_write_in_progress_qps"
+    )
+
+    VIT_REMOTE_EMB_BUFFER_HOLD_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_buffer_hold_qps"
+    )
+    VIT_REMOTE_EMB_BUFFER_GC_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_buffer_gc_qps"
+    )
+    VIT_REMOTE_EMB_BUFFER_GC_SUCCESS_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_buffer_gc_success_qps"
+    )
+    VIT_REMOTE_EMB_BUFFER_GC_ERROR_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_buffer_gc_error_qps"
+    )
+
+    # Creation is distinct from per-operation acquisition of a shared client.
+    VIT_REMOTE_EMB_CLIENT_CREATE_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_client_create_qps"
+    )
+    VIT_REMOTE_EMB_CLIENT_CREATE_ERROR_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_client_create_error_qps"
+    )
+    VIT_REMOTE_EMB_METADATA_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_metadata_qps"
+    )
+    # One inspection-approved ViT result, not one LLM response or remote read.
+    VIT_REMOTE_EMB_RESULT_ACCEPTED_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_result_accepted_qps"
+    )
+
+    # Bounded operation/stage/status tags; no object IDs or exception text.
+    VIT_REMOTE_EMB_STAGE_QPS_METRIC = "py_rtp_vit_remote_embedding_cache_stage_qps"
+    VIT_REMOTE_EMB_STAGE_ERROR_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_stage_error_qps"
+    )
+    VIT_REMOTE_EMB_HEADER_OBSERVATION_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_header_observation_qps"
+    )
+    VIT_REMOTE_EMB_HEADER_D2H_BYTES_PER_SECOND_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_header_d2h_bytes_per_second"
+    )
+    # Accumulated bytes are exported as B/s, not as an average object size.
+    VIT_REMOTE_EMB_SDK_OBJECT_BYTES_PER_SECOND_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_sdk_object_bytes_per_second"
+    )
+    VIT_REMOTE_EMB_PAYLOAD_BYTES_PER_SECOND_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_payload_bytes_per_second"
+    )
+
 
 class GaugeMetrics(Enum):
     SERVICE_STATUS_METRIC = SERVICE_STATUS_METRIC
+    VIT_REMOTE_EMB_INFLIGHT_TASKS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_inflight_tasks"
+    )
+    VIT_REMOTE_EMB_INFLIGHT_BYTES_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_inflight_bytes"
+    )
+    VIT_REMOTE_EMB_GDR_ARENA_BYTES_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_gdr_arena_bytes"
+    )
+    VIT_REMOTE_EMB_BUFFER_HOLD_BYTES_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_buffer_hold_bytes"
+    )
+    VIT_REMOTE_EMB_BUFFER_RETAINED_BYTES_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_buffer_retained_bytes"
+    )
+    VIT_REMOTE_EMB_BUFFER_HOLD_AGE_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_buffer_hold_age_seconds"
+    )
+    VIT_REMOTE_EMB_BUFFER_HOLD_COUNT_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_buffer_hold_count"
+    )
     RESPONSE_FIRST_TOKEN_RT_METRIC = "py_rtp_response_first_token_rt"
     RESPONSE_ITER_RT_METRIC = "py_rtp_response_iterate_rt"
     RESPONSE_ITERATE_COUNT = "py_rtp_response_iterate_count"
@@ -139,6 +261,43 @@ class GaugeMetrics(Enum):
 
     # vit preprocess
     VIT_PREPROCESS_RT_METRIC = "py_rtp_vit_preprocess_rt"
+    # Milliseconds from a blocking engine request's entry to return/error,
+    # including CPU/GPU work, queue/cache and GreenNet waits, but not RPC output
+    # serialization. source distinguishes mm_embedding_cpp/get_embedding_result;
+    # status is success/error. Async submission ACKs are deliberately excluded.
+    VIT_REQUEST_RT_METRIC = "py_rtp_vit_request_rt"
+    # Full observed cache latency in milliseconds. A read hit includes metadata,
+    # queueing, SDK read, validation, and the direct GDR restore fence. A successful
+    # write includes planning, admission, snapshots, queueing, packing, and SDK save.
+    VIT_REMOTE_EMB_READ_RT_METRIC = "py_rtp_vit_remote_embedding_cache_read_rt"
+    VIT_REMOTE_EMB_WRITE_RT_METRIC = "py_rtp_vit_remote_embedding_cache_write_rt"
+
+    VIT_REMOTE_EMB_STAGE_RT_METRIC = "py_rtp_vit_remote_embedding_cache_stage_rt_ms"
+    VIT_REMOTE_EMB_GDR_LOCK_HOLD_RT_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_gdr_lock_hold_ms"
+    )
+    # Enqueue to worker start; canceled-before-start work has no observation.
+    VIT_REMOTE_EMB_QUEUE_WAIT_METRIC = "py_rtp_vit_remote_embedding_cache_queue_wait_ms"
+    # Logical object bytes for completed SDK calls and bytes / SDK wall time.
+    # An existing-key save may succeed without IO; reads may use local replicas.
+    # These are API volume, not transferred/network bytes. PACE reports actual IO.
+    VIT_REMOTE_EMB_SDK_OBJECT_BYTES_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_sdk_object_bytes"
+    )
+    VIT_REMOTE_EMB_SDK_EFFECTIVE_SPEED_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_sdk_effective_mib_per_second"
+    )
+    # Only caller-accepted reads / completed writes. A late SDK read after a
+    # caller timeout contributes to transfer metrics, never to payload metrics.
+    VIT_REMOTE_EMB_PAYLOAD_BYTES_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_payload_bytes"
+    )
+    VIT_REMOTE_EMB_EFFECTIVE_SPEED_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_effective_mib_per_second"
+    )
+    # Milliseconds per non-empty inspection group, including OSS/HTTP work,
+    # excluding input preparation, source handoff wait and GPU embedding.
+    GREENNET_RT_METRIC = "py_rtp_greennet_rt"
     # Per-request embedding latency = wait + forward, sampled once per request in
     # submit_and_wait. Preserves the historical meaning (pre-scheduler this timed
     # the forward under the embedding lock, i.e. lock-wait + forward per request)
@@ -160,6 +319,11 @@ class GaugeMetrics(Enum):
     VIT_OUTPUT_TOKEN_COUNT_METRIC = "rtp_llm_vit_output_token_count"
     VIT_INPUT_IMAGE_COUNT_METRIC = "rtp_llm_vit_input_image_count"
     VIT_IMAGE_FETCH_RT_US_METRIC = "rtp_llm_vit_image_fetch_rt_us"
+    VIT_HTTP_PHASE_RT_US_METRIC = "rtp_llm_vit_http_phase_rt_us"
+    VIT_HTTP_BODY_BYTES_METRIC = "rtp_llm_vit_http_body_bytes"
+    VIT_PREPROCESS_RESULT_BYTES_METRIC = "rtp_llm_vit_preprocess_result_bytes"
+    VIT_RGB_UPLOAD_PHASE_US_METRIC = "rtp_llm_vit_rgb_upload_phase_us"
+    VIT_RGB_UPLOAD_BYTES_METRIC = "rtp_llm_vit_rgb_upload_bytes"
     VIT_IMAGE_DECODE_RT_US_METRIC = "rtp_llm_vit_image_decode_rt_us"
     VIT_IMAGE_RESIZE_RT_US_METRIC = "rtp_llm_vit_image_resize_rt_us"
     VIT_IMAGE_PROCESSOR_RT_US_METRIC = "rtp_llm_vit_image_processor_rt_us"
@@ -187,12 +351,27 @@ class GaugeMetrics(Enum):
     VIT_DOWNLOAD_RT_METRIC = "py_rtp_vit_download_rt"
     VIT_PREPROCESS_OTHER_RT_METRIC = "py_rtp_vit_preprocess_other_rt"
     VIT_PREPROCESS_QUEUE_SIZE_METRIC = "py_rtp_vit_preprocess_queue_size"
+    VIT_PREPROCESS_DISPATCH_RT_METRIC = "py_rtp_vit_preprocess_dispatch_rt"
+    VIT_PREPROCESS_RETURN_RT_METRIC = "py_rtp_vit_preprocess_return_rt"
     VIT_EMBEDDING_LENGTH_METRIC = "py_rtp_vit_embedding_length"
     VIT_IMAGE_COUNT_METRIC = "py_rtp_vit_image_count"
     VIT_EMBEDDING_QUEUE_SIZE_METRIC = "py_rtp_vit_embedding_queue_size"
     VIT_EMBEDDING_QUEUE_WAIT_RT_METRIC = "py_rtp_vit_embedding_queue_wait_rt"
+    VIT_EMBEDDING_CACHE_HIT_RT_METRIC = "py_rtp_vit_embedding_cache_hit_rt_ms"
     VIT_EMBEDDING_CACHE_TOKENS_METRIC = "py_rtp_vit_embedding_cache_tokens"
     VIT_EMBEDDING_CACHE_BYTES_METRIC = "py_rtp_vit_embedding_cache_bytes"
+    VIT_EMBEDDING_CACHE_RESIDENT_BYTES_METRIC = (
+        "py_rtp_vit_embedding_cache_resident_bytes"
+    )
+    VIT_EMBEDDING_CACHE_RESIDENT_ENTRIES_METRIC = (
+        "py_rtp_vit_embedding_cache_resident_entries"
+    )
+    # Configured GPU + CPU capacity / successful new admission bytes per second.
+    # All shards share one activity-driven window of at least 60s. Idle periods
+    # emit no samples. This is an estimated turnover time, not a per-entry TTL.
+    VIT_EMBEDDING_CACHE_ESTIMATED_LIFETIME_SECONDS_METRIC = (
+        "py_rtp_vit_embedding_cache_estimated_lifetime_seconds"
+    )
 
     # Request-lifecycle metrics emitted by the Python frontend after rendering.
     FRONTEND_INPUT_LENGTH_METRIC = "py_rtp_frontend_input_length"
@@ -235,8 +414,12 @@ class MetricReporter(object):
         self._kmon = kmonitor
         self._matic_map: Dict[str, Any] = {}
         self._inited = False
+        self.embedding_cache_tokens = EmbCacheTokensMetric(
+            GaugeMetrics.VIT_EMBEDDING_CACHE_TOKENS_METRIC.value, {}
+        )
         self._state_lock = threading.RLock()
         self._state = ServiceState.STARTING
+        self._startup_client_counts = {}
         self._gate_file = ""
         self._reporting_start_time: Optional[float] = None
         self._service_draining = None
@@ -253,6 +436,18 @@ class MetricReporter(object):
     ):
         with self._state_lock:
             if self._state not in (ServiceState.SERVING, ServiceState.DRAINING):
+                # GDR clients can be constructed before ViT starts serving.
+                if self._state in (
+                    ServiceState.STARTING,
+                    ServiceState.WAITING_FOR_WARMUP,
+                ) and metric in (
+                    AccMetrics.VIT_REMOTE_EMB_CLIENT_CREATE_QPS_METRIC,
+                    AccMetrics.VIT_REMOTE_EMB_CLIENT_CREATE_ERROR_QPS_METRIC,
+                ):
+                    key = (metric, tuple(sorted((tags or {}).items())))
+                    self._startup_client_counts[key] = (
+                        self._startup_client_counts.get(key, 0) + value
+                    )
                 return
             kmon_metric = self._matic_map.get(metric.value)
             if kmon_metric is None:
@@ -267,18 +462,75 @@ class MetricReporter(object):
             # Monitoring transport failures must not abort startup or draining.
             logging.exception("kmonitor flush failed")
 
-    def init(self):
+    def init(
+        self,
+        *,
+        acc_metrics: Optional[Iterable[AccMetrics]] = None,
+        gauge_metrics: Optional[Iterable[GaugeMetrics]] = None,
+        tags: Optional[Dict[str, str]] = None,
+    ):
         with self._state_lock:
             if self._inited:
                 return
-            for metric in AccMetrics:
-                self._matic_map[metric.value] = self._kmon.register_acc_metric(
-                    metric.value
-                )
-            for metric in GaugeMetrics:
-                self._matic_map[metric.value] = self._kmon.register_gauge_metric(
-                    metric.value
-                )
+            for metric in AccMetrics if acc_metrics is None else acc_metrics:
+                if metric is AccMetrics.VIT_REMOTE_EMB_OPERATION_QPS_METRIC:
+                    backend = self._kmon.register_custom_metric(
+                        EmbOutcomeMetric(metric.value, tags or {})
+                    )
+                elif metric in (
+                    AccMetrics.VIT_REMOTE_EMB_STAGE_QPS_METRIC,
+                    AccMetrics.VIT_REMOTE_EMB_STAGE_ERROR_QPS_METRIC,
+                ):
+                    # Emitted from the same stage samples as latency.
+                    continue
+                else:
+                    backend = self._kmon.register_acc_metric(metric.value, tags or {})
+                self._matic_map[metric.value] = backend
+
+            for metric in GaugeMetrics if gauge_metrics is None else gauge_metrics:
+                if metric is GaugeMetrics.VIT_EMBEDDING_CACHE_TOKENS_METRIC:
+                    self.embedding_cache_tokens.tags = dict(tags or {})
+                    backend = self._kmon.register_custom_metric(
+                        self.embedding_cache_tokens
+                    )
+                elif metric in (
+                    GaugeMetrics.VIT_REMOTE_EMB_INFLIGHT_TASKS_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_INFLIGHT_BYTES_METRIC,
+                ):
+                    backend = self._kmon.register_custom_metric(
+                        EmbInflightMetric(metric.value, tags or {})
+                    )
+                elif metric in (
+                    GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC,
+                    GaugeMetrics.VIT_EMBEDDING_CACHE_HIT_RT_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_GDR_LOCK_HOLD_RT_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_QUEUE_WAIT_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_READ_RT_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_WRITE_RT_METRIC,
+                ):
+                    backend = self._kmon.register_custom_metric(
+                        EmbLatencyMetric(metric.value, tags or {})
+                    )
+                elif metric in (
+                    GaugeMetrics.VIT_REMOTE_EMB_GDR_ARENA_BYTES_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_SDK_OBJECT_BYTES_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_SDK_EFFECTIVE_SPEED_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_PAYLOAD_BYTES_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_EFFECTIVE_SPEED_METRIC,
+                ):
+                    backend = self._kmon.register_custom_metric(
+                        EmbSampleMetric(
+                            metric.value,
+                            tags or {},
+                            arena=(
+                                metric
+                                is GaugeMetrics.VIT_REMOTE_EMB_GDR_ARENA_BYTES_METRIC
+                            ),
+                        )
+                    )
+                else:
+                    backend = self._kmon.register_gauge_metric(metric.value, tags or {})
+                self._matic_map[metric.value] = backend
             self._inited = True
 
     def start_serving_when_ready(self) -> None:
@@ -328,9 +580,13 @@ class MetricReporter(object):
                 self._kmon.report_worker.get_report_events()
                 self._reporting_start_time = time.monotonic()
                 self._state = ServiceState.SERVING
+                for (metric, tags), value in self._startup_client_counts.items():
+                    self.report(metric, value, dict(tags))
+                self._startup_client_counts.clear()
             if self._state not in (ServiceState.SERVING, ServiceState.DRAINING):
                 return None
-            self.report(GaugeMetrics.SERVICE_STATUS_METRIC, float(self.is_serving))
+            if GaugeMetrics.SERVICE_STATUS_METRIC.value in self._matic_map:
+                self.report(GaugeMetrics.SERVICE_STATUS_METRIC, float(self.is_serving))
             return {SERVICE_STATUS_TAG: str(self.is_serving).lower()}
 
     @property

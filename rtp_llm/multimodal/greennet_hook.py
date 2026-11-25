@@ -22,7 +22,16 @@ Lifetime contract:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
+
+
+@dataclass(frozen=True)
+class GreenNetWorkerFactory:
+    create: Callable
+    max_concurrency: int
+
+    def __call__(self):
+        return self.create()
 
 
 @dataclass
@@ -58,6 +67,20 @@ class GreenNetHandle:
 
 
 class GreenNetProvider:
+    def share_verdict_cache(self) -> Optional[str]:
+        """Return a cache handle for ViT child processes when supported."""
+        return None
+
+    def attach_verdict_cache(self, handle: str) -> None:
+        """Use the parent ViT service's verdict cache when supported."""
+
+    def worker_factory(self):
+        """Optional picklable CPU-only factory; never pass a live HTTP client.
+
+        Providers without this capability keep the parent-loop source path.
+        """
+        return None
+
     def is_enabled(self) -> bool:
         """Effective enablement: internal source present AND the runtime flag
         on. When False, callers MUST skip greennet entirely (no preprocess,
@@ -69,6 +92,21 @@ class GreenNetProvider:
         self, request: Any, mm_inputs: List[Any]
     ) -> GreenNetHandle:
         raise NotImplementedError
+
+    async def reinspect_cached(self, request, mm_inputs) -> GreenNetHandle:
+        """Only the verdict is consumed; providers may reuse a cached decision."""
+        return await self.preprocess_and_submit(request, mm_inputs)
+
+    async def submit_sources(self, request, mm_inputs, sources: List[bytes]):
+        """Inspect encoded bytes returned by CPU preprocessing, without URLs.
+
+        This internal path must never re-download or rewrite inference input.
+        An unsupported provider fails closed instead of silently skipping audit.
+        """
+        raise NotImplementedError("GreenNet provider cannot inspect CPU sources")
+
+    async def close(self):
+        """Release connections owned by the current inspection event loop."""
 
 
 class NoopGreenNetHandle(GreenNetHandle):

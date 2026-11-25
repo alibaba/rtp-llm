@@ -1,27 +1,261 @@
-"""DeepSeek-V4.1 image preprocessing and canonical image-span metadata.
+"""DeepSeek-V4.1 image preprocessing owned by the ViT backend.
 
-The formulas and four token types follow HF revision
+The resize and grid formulas follow HF revision
 2bc89ac599031fa673cab993f1df02fc4a98c673, inference/image_processor.py.
 """
 
-import base64
-import hashlib
-import io
-import json
+import logging
 import math
-from dataclasses import asdict, dataclass, replace
-from typing import Any, Callable, Mapping, Sequence
+import time
+from dataclasses import dataclass
+from io import BytesIO
+from urllib.parse import urlsplit
 
 import numpy as np
+import requests
 import torch
-from PIL import Image, ImageOps
+from PIL import Image
 from pillow_heif import register_heif_opener
+from urllib3.exceptions import ProtocolError, ReadTimeoutError
+
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.mm_download_domains import check_download_urls
+from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.metrics import AccMetrics, GaugeMetrics
+from rtp_llm.models_py.modules.dsv41.vision_preprocess_tables import resize_geometry
+from rtp_llm.multimodal.mm_error_messages import MMErr, media_error_detail
+from rtp_llm.multimodal.vit_metrics import (
+    VIT_PHASE_METRICS,
+    record_vit_preprocess_value,
+    vit_http_phase_timer,
+    vit_preprocess_timer,
+)
+from rtp_llm.telemetry import vit_media
 
 register_heif_opener()
+_METRIC_TAGS = {"model": "deepseek_v41", "mm_type": "image"}
+_IMAGE_CONNECT_TIMEOUT_S = 3
+_IMAGE_READ_TIMEOUT_S = 20
+_IMAGE_DOWNLOAD_BUDGET_S = 30
 
-TEXT = -1
-IMAGE_START, IMAGE, IMAGE_NEW_LINE, IMAGE_END = range(4)
-IMAGE_PLACEHOLDER = "<\uff5cdeepseek_image\uff5c>"
+
+def image_download_deadline(deadline: float | None = None) -> float:
+    local_deadline = time.monotonic() + _IMAGE_DOWNLOAD_BUDGET_S
+    return local_deadline if deadline is None else min(deadline, local_deadline)
+
+
+def _image_download_chunks(response, deadline, cancellation_event):
+    from rtp_llm.multimodal.multimodal_util import _check_download
+
+    raw = getattr(response, "raw", None)
+    read1 = getattr(raw, "read1", None)
+    if callable(read1):
+        while True:
+            _check_download(deadline, cancellation_event)
+            connection = getattr(raw, "connection", None)
+            sock = getattr(connection, "sock", None)
+            if sock is not None:
+                sock.settimeout(
+                    min(_IMAGE_READ_TIMEOUT_S, max(0.001, deadline - time.monotonic()))
+                )
+            # Do not wait for a full chunk on a slow-drip response.
+            chunk = read1(64 * 1024, decode_content=True)
+            if not chunk:
+                break
+            yield chunk
+    else:
+        yield from response.iter_content(chunk_size=1)
+
+
+@vit_media.download
+def load_image_source(
+    url,
+    download_headers="",
+    max_file_size_kb=VitConfig.DEFAULT_MM_IMAGE_MAX_FILE_SIZE_KB,
+    *,
+    deadline=None,
+    cancellation_event=None,
+):
+    """Load original bytes in the backend, retaining the V4.1 HTTP contract.
+
+    HTTP inputs reuse cached source bytes by URL; on a miss, retries share
+    one deadline. Local/data inputs use the standard loader. No image conversion
+    occurs here; content inspection and ViT must consume the same source.
+    """
+    from rtp_llm.multimodal.multimodal_util import (
+        _check_download,
+        get_bytes_io_from_url,
+        url_data_cache_,
+    )
+
+    deadline = image_download_deadline(deadline)
+    if not url.startswith(("http://", "https://")):
+        return get_bytes_io_from_url(
+            url,
+            download_headers,
+            max_file_size_kb=max_file_size_kb,
+            deadline=deadline,
+            cancellation_event=cancellation_event,
+        )
+    check_download_urls((url,))
+
+    from rtp_llm.multimodal.media_network import current_network, read_native_source
+
+    max_bytes = max(0, max_file_size_kb or 0) * 1024
+    network = current_network.get()
+    if network is not None:
+        return read_native_source(
+            network,
+            url,
+            download_headers,
+            max_bytes,
+            deadline,
+            cancellation_event,
+            v41=True,
+        )
+
+    content, hit = url_data_cache_.get_or_load(
+        url,
+        download_headers,
+        lambda: _download_image_source(
+            url, download_headers, max_bytes, deadline, cancellation_event
+        ),
+        deadline,
+    )
+    if hit:
+        try:
+            _check_download(deadline, cancellation_event)
+        except TimeoutError as error:
+            raise FtRuntimeException(
+                ExceptionType.MM_DOWNLOAD_FAILED,
+                f"{MMErr.DL_TIMEOUT}: {media_error_detail(error)}",
+            ) from error
+        if max_bytes and content.getbuffer().nbytes > max_bytes:
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS, "Multimodal file size is too large"
+            )
+        vit_media.download_cache_hit()
+    if VIT_PHASE_METRICS:
+        record_vit_preprocess_value(
+            AccMetrics.VIT_URL_SOURCE_QPS_METRIC,
+            1,
+            {"source": "cache" if hit else "load"},
+        )
+    return content
+
+
+def _download_image_source(
+    url, download_headers, max_bytes, deadline, cancellation_event
+):
+    from rtp_llm.multimodal.multimodal_util import (
+        _check_download,
+        _get_http_heads,
+        _record_download_time,
+        request_get,
+    )
+
+    for attempt in range(3):
+        started = time.monotonic()
+        status = None
+        download_recorded = False
+        try:
+            _check_download(deadline, cancellation_event)
+            with vit_http_phase_timer("headers"):
+                reply = request_get(
+                    url,
+                    _get_http_heads(download_headers),
+                    timeout=(_IMAGE_CONNECT_TIMEOUT_S, _IMAGE_READ_TIMEOUT_S),
+                    deadline=deadline,
+                    cancellation_event=cancellation_event,
+                )
+            with reply as response:
+                status = response.status_code
+                if status in (408, 429, 500, 502, 503, 504):
+                    raise requests.ConnectionError("temporary image download failure")
+                if status != 200:
+                    raise ValueError("image download failed")
+                content = BytesIO()
+                with vit_http_phase_timer("body"):
+                    for chunk in _image_download_chunks(
+                        response, deadline, cancellation_event
+                    ):
+                        _check_download(deadline, cancellation_event)
+                        if max_bytes and content.tell() + len(chunk) > max_bytes:
+                            raise ValueError("Multimodal file size is too large")
+                        content.write(chunk)
+                    _check_download(deadline, cancellation_event)
+                if VIT_PHASE_METRICS:
+                    record_vit_preprocess_value(
+                        GaugeMetrics.VIT_HTTP_BODY_BYTES_METRIC, content.tell()
+                    )
+                content.seek(0)
+            return content
+        except (
+            requests.RequestException,
+            ReadTimeoutError,
+            ProtocolError,
+            TimeoutError,
+            ValueError,
+        ) as error:
+            # Network timing excludes retry backoff and is recorded exactly once.
+            _record_download_time(started)
+            download_recorded = True
+            # Never log a signed URL, response body, or exception text.
+            logging.warning(
+                "V4.1 image download host=%s attempt=%d status=%s error_type=%s elapsed_ms=%.1f",
+                urlsplit(url).hostname,
+                attempt + 1,
+                status,
+                type(error).__name__,
+                (time.monotonic() - started) * 1000,
+            )
+            transient = isinstance(
+                error,
+                (
+                    requests.Timeout,
+                    requests.ConnectionError,
+                    requests.exceptions.ChunkedEncodingError,
+                    ReadTimeoutError,
+                    ProtocolError,
+                    TimeoutError,
+                ),
+            )
+            detail = (
+                f"HTTP {status}"
+                if status is not None and status != 200
+                else media_error_detail(error)
+            )
+            if not transient:
+                message = (
+                    MMErr.FILE_TOO_LARGE
+                    if isinstance(error, ValueError)
+                    and str(error) == MMErr.FILE_TOO_LARGE
+                    else f"{MMErr.DL_FAILED}: {detail}"
+                )
+                raise FtRuntimeException(
+                    ExceptionType.INVALID_PARAMS, message
+                ) from error
+            remaining = deadline - time.monotonic()
+            if attempt == 2 or remaining <= 0:
+                raise FtRuntimeException(
+                    ExceptionType.MM_DOWNLOAD_FAILED,
+                    f"Temporary multimodal download failure: {detail}",
+                ) from error
+            delay = min(0.2 * 2**attempt, remaining)
+            if VIT_PHASE_METRICS:
+                record_vit_preprocess_value(
+                    AccMetrics.VIT_HTTP_SOURCE_RETRY_QPS_METRIC, 1
+                )
+            with vit_http_phase_timer("backoff"):
+                if cancellation_event is not None:
+                    cancellation_event.wait(delay)
+                else:
+                    time.sleep(delay)
+            # The next attempt checks cancellation/deadline inside the try, so
+            # backoff deadline expiry keeps the same download error contract.
+        finally:
+            if not download_recorded:
+                _record_download_time(started)
 
 
 @dataclass(frozen=True)
@@ -30,10 +264,6 @@ class V41ImageProcessorConfig:
     vision_downsample_ratio: int = 3
     vision_max_n_token: int = 1024
     vision_min_pixels: int = 295936
-    vision_max_wh_ratio: None = None
-    image_token_id: int = 129264
-    vocab_size: int = 129280
-    max_seq_len: int = 1048576
 
     @classmethod
     def from_model_config(cls, config):
@@ -43,57 +273,7 @@ class V41ImageProcessorConfig:
             vision_downsample_ratio=vision["downsample_ratio"],
             vision_max_n_token=vision["max_image_tokens"],
             vision_min_pixels=vision["min_pixels"],
-            vision_max_wh_ratio=vision.get("max_wh_ratio"),
-            image_token_id=config.image_token_id,
-            vocab_size=config.text["vocab_size"],
-            max_seq_len=config.text["max_position_embeddings"],
         )
-
-    @property
-    def identity(self) -> str:
-        return hashlib.sha256(
-            json.dumps(asdict(self), sort_keys=True).encode()
-        ).hexdigest()
-
-
-@dataclass(frozen=True)
-class V41ImageInput:
-    start: int
-    patches: torch.Tensor
-    n_vit_h: int
-    n_vit_w: int
-    types: torch.Tensor
-    content_sha256: str
-    processor_identity: str
-
-    @property
-    def length(self) -> int:
-        return self.types.numel()
-
-
-@dataclass(frozen=True)
-class V41PreparedInputs:
-    prompt: str
-    token_ids: tuple[int, ...]
-    token_types: tuple[int, ...]
-    images: tuple[V41ImageInput, ...]
-
-    def append_text(self, text, token_ids):
-        token_ids = tuple(token_ids)
-        return replace(
-            self,
-            prompt=self.prompt + text,
-            token_ids=self.token_ids + tuple(token_ids),
-            token_types=self.token_types + (TEXT,) * len(token_ids),
-        )
-
-    @property
-    def image_mask(self) -> torch.Tensor:
-        return torch.tensor(self.token_types, dtype=torch.int64, device="cpu") != TEXT
-
-    @property
-    def image_content_hashes(self) -> tuple[str, ...]:
-        return tuple(image.content_sha256 for image in self.images)
 
 
 def num_image_tokens(n_llm_h: int, n_llm_w: int) -> int:
@@ -151,120 +331,76 @@ def plan_image_grid(width: int, height: int, config: V41ImageProcessorConfig):
     return llm_h, llm_w, best_height, best_width
 
 
-def preprocess_image(image: Image.Image, config: V41ImageProcessorConfig):
-    image = image.convert("RGB")
-    llm_h, llm_w, best_height, best_width = plan_image_grid(
-        image.width, image.height, config
+def preprocess_image(
+    image: Image.Image,
+    config: V41ImageProcessorConfig,
+    *,
+    grid: tuple[int, int, int, int] | None = None,
+):
+    # Pillow decodes lazily; conversion must be inside the decode timer.
+    with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_DECODE_RT_US_METRIC, _METRIC_TAGS):
+        image = image.convert("RGB")
+    with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_RESIZE_RT_US_METRIC, _METRIC_TAGS):
+        llm_h, llm_w, best_height, best_width = grid or plan_image_grid(
+            *image.size, config
+        )
+        patch = config.vision_patch_size
+        vit_h, vit_w = best_height // patch, best_width // patch
+        resize_h, resize_w, top, left = resize_geometry(
+            image.height, image.width, best_height, best_width
+        )
+        image = image.resize((resize_w, resize_h), Image.Resampling.BICUBIC)
+        if image.size != (best_width, best_height):
+            canvas = Image.new("RGB", (best_width, best_height), (127, 127, 127))
+            canvas.paste(image, (left, top))
+            image = canvas
+    record_vit_preprocess_value(
+        GaugeMetrics.VIT_RESIZED_PIXEL_COUNT_METRIC,
+        best_height * best_width,
+        _METRIC_TAGS,
     )
-    patch = config.vision_patch_size
-    vit_h, vit_w = best_height // patch, best_width // patch
-    image = ImageOps.pad(image, (best_width, best_height), color=(127, 127, 127))
-    values = (
-        torch.from_numpy(np.asarray(image, dtype=np.float32)).permute(2, 0, 1) / 255
-    )
-    values = ((values - 0.5) / 0.5).to(torch.bfloat16)
-    patches = (
-        values.reshape(3, vit_h, patch, vit_w, patch)
-        .permute(1, 3, 0, 2, 4)
-        .reshape(vit_h * vit_w, 3, patch, patch)
-    )
+    with vit_preprocess_timer(
+        GaugeMetrics.VIT_IMAGE_PROCESSOR_RT_US_METRIC, _METRIC_TAGS
+    ):
+        values = (
+            torch.from_numpy(np.asarray(image, dtype=np.float32)).permute(2, 0, 1) / 255
+        )
+        values = ((values - 0.5) / 0.5).to(torch.bfloat16)
+        patches = (
+            values.reshape(3, vit_h, patch, vit_w, patch)
+            .permute(1, 3, 0, 2, 4)
+            .reshape(vit_h * vit_w, 3, patch, patch)
+        )
     return patches, vit_h, vit_w, llm_h, llm_w
 
 
-def image_token_types(n_llm_h: int, n_llm_w: int) -> torch.Tensor:
-    types = (
-        [IMAGE_START] + ([IMAGE] * n_llm_w + [IMAGE_NEW_LINE]) * n_llm_h + [IMAGE_END]
-    )
-    return torch.tensor(types, dtype=torch.int64, device="cpu")
-
-
-def load_image_bytes(
-    record: Mapping[str, Any], *, url_loader: Callable[[str], bytes] | None = None
-) -> bytes:
-    data = record.get("data")
-    if isinstance(data, bytes):
-        return data
-    if isinstance(data, str):
-        return base64.b64decode(data, validate=True)
-    source = record.get("source")
-    if isinstance(source, dict):
-        if source.get("data") is not None:
-            return base64.b64decode(source["data"], validate=True)
-        if source.get("url"):
-            return load_image_bytes({"url": source["url"]}, url_loader=url_loader)
-    url = record.get("url")
-    if not isinstance(url, str) or not url:
-        raise ValueError("image record has no supported data or URL source")
-    if url.startswith("data:"):
-        header, separator, payload = url.partition(",")
-        if not separator or ";base64" not in header:
-            raise ValueError("image data URLs require base64 encoding")
-        return base64.b64decode(payload, validate=True)
-    if url_loader is not None:
-        return url_loader(url)
-    from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
-
-    return get_bytes_io_from_url(url).getvalue()
-
-
-def prepare_vl_inputs(
-    prompt: str,
-    images: Sequence[Mapping[str, Any]],
-    tokenizer,
-    config: V41ImageProcessorConfig,
-    *,
-    url_loader=None,
-    output_budget: int = 0,
-) -> V41PreparedInputs:
-    # output_budget is retained for callers; the generation layer applies limits.
-    return prepare_vl_inputs_from_token_ids(
-        tokenizer.encode(prompt), images, config, prompt=prompt, url_loader=url_loader
-    )
-
-
-def prepare_vl_inputs_from_token_ids(
-    prompt_tokens: Sequence[int],
-    images: Sequence[Mapping[str, Any]],
-    config: V41ImageProcessorConfig,
-    *,
-    prompt: str = "",
-    url_loader=None,
-    max_image_bytes: int | None = None,
-) -> V41PreparedInputs:
-    """Expand upstream image markers without re-tokenizing any text or special IDs."""
-    if sum(token == config.image_token_id for token in prompt_tokens) != len(images):
-        raise ValueError(
-            "image placeholder count does not match the supplied image records"
+def _rgb_tensor(image: Image.Image) -> torch.Tensor:
+    """Decode/convert on CPU and own the RGB bytes before closing the image."""
+    with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_DECODE_RT_US_METRIC, _METRIC_TAGS):
+        return torch.from_numpy(
+            np.array(image.convert("RGB"), dtype=np.uint8, copy=True)
         )
-    tokens, token_types, image_inputs = [], [], []
-    records = iter(images)
-    for token in prompt_tokens:
-        if token != config.image_token_id:
-            tokens.append(token)
-            token_types.append(TEXT)
-            continue
-        data = load_image_bytes(next(records), url_loader=url_loader)
-        if max_image_bytes is not None and len(data) > max_image_bytes:
-            raise ValueError("Multimodal file size is too large")
-        try:
-            with Image.open(io.BytesIO(data)) as image:
-                patches, vit_h, vit_w, llm_h, llm_w = preprocess_image(image, config)
-        except (OSError, Image.DecompressionBombError) as error:
-            raise ValueError("invalid or damaged V4.1 image payload") from error
-        types = image_token_types(llm_h, llm_w)
-        image_inputs.append(
-            V41ImageInput(
-                len(tokens),
-                patches,
-                vit_h,
-                vit_w,
-                types,
-                hashlib.sha256(data).hexdigest(),
-                config.identity,
-            )
-        )
-        tokens.extend([config.image_token_id] * types.numel())
-        token_types.extend(types.tolist())
-    return V41PreparedInputs(
-        prompt, tuple(tokens), tuple(token_types), tuple(image_inputs)
+
+
+def _preprocess_rgb_on_device(rgb, target_hw, patch_size, device, *, tables=None):
+    """Only the GPU-owning caller may enter this boundary; no D2H round trip."""
+    from rtp_llm.models_py.modules.dsv41.vision_preprocess_triton import (
+        is_supported_shape,
+        preprocess_rgb_u8,
     )
+    from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
+
+    device = torch.device(device)
+    if device.type != "cuda":
+        raise ValueError("V4.1 GPU preprocessing requires an explicit CUDA device")
+    if not is_supported_shape(tuple(rgb.shape[:2]), target_hw, patch_size=patch_size):
+        raise ValueError("unsupported shape for V4.1 GPU preprocessing")
+    # Coordinate with any concurrent ViT graph capture. The low-level processor
+    # is eager and performs both uint8 resize passes before BF16 patch folding.
+    with torch.cuda.device(device), cuda_graph_gate.operation():
+        if torch.cuda.is_current_stream_capturing():
+            raise ValueError("V4.1 GPU preprocessing cannot run inside CUDA capture")
+        pixels = rgb.to(device=device)
+        return preprocess_rgb_u8(
+            pixels, target_hw, patch_size=patch_size, tables=tables
+        )

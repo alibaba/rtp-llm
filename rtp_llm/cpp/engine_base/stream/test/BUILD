@@ -20,6 +20,24 @@ cuda13_torch_link_deps = select({
     "//conditions:default": [],
 })
 
+# CPU token/history contracts; no GPU model or device is instantiated.
+cc_test(
+    name = "multimodal_cache_identity_test",
+    srcs = ["MultimodalCacheIdentityTest.cc"],
+    copts = copts(),
+    deps = [
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
+        "//rtp_llm/cpp/config:model_config",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    env = {
+        "GPU_COUNT": "0",
+        "CUDA_VISIBLE_DEVICES": "",
+    },
+    tags = ["local"],
+)
+
 test_deps = [
     "//rtp_llm/cpp/normal_engine:normal_engine",
     "//rtp_llm/cpp/engine_base:engine_base",

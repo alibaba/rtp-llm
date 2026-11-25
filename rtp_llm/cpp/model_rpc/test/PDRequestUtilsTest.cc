@@ -32,17 +32,20 @@ class TestMultimodalProcessor: public MultimodalProcessor {
 public:
     TestMultimodalProcessor(): MultimodalProcessor(py::object{}, MMModelConfig{true, {{1}}, false}, 100) {}
 
-    int  calls            = 0;
-    int  embedding_length = 3;
-    bool fail             = false;
+    int                      calls              = 0;
+    int                      embedding_length   = 3;
+    bool                     fail               = false;
     int                      failures_remaining = 0;
     ErrorCode                failure_code       = ErrorCode::MM_PROCESS_ERROR;
     std::function<void(int)> on_call;
-    grpc::ServerContext* seen_context = nullptr;
+    grpc::ServerContext*     seen_context = nullptr;
 
 private:
-    ErrorResult<MultimodalOutput>
-    MultimodalEmbedding(const std::vector<MultimodalInput>, std::string, int64_t, grpc::ServerContext* context) override {
+    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput>&,
+                                                      const std::string&,
+                                                      int64_t,
+                                                      grpc::ServerContext* context,
+                                                      std::optional<bool>) override {
         ++calls;
         seen_context = context;
         if (on_call)
@@ -72,25 +75,25 @@ TEST(PDRequestUtilsTest, PrefillMmTracePreservesRequestContextAndTypedFailure) {
     namespace memory = opentelemetry::exporter::memory;
     telemetry::TelemetryRuntime::shutdown(5000);
     std::shared_ptr<memory::InMemorySpanData> span_data;
-    auto exporter = memory::InMemorySpanExporterFactory::Create(span_data);
-    telemetry::TelemetryConfig config;
+    auto                                      exporter = memory::InMemorySpanExporterFactory::Create(span_data);
+    telemetry::TelemetryConfig                config;
     config.enabled = true;
-    config.role = "test";
+    config.role    = "test";
     ASSERT_TRUE(telemetry::TelemetryRuntime::initWithExporter(std::move(exporter), config));
-    grpc::ServerContext context;
-    auto request = makeMMRequest();
-    auto input = QueryConverter::transQuery(&request);
+    grpc::ServerContext     context;
+    auto                    request = makeMMRequest();
+    auto                    input   = QueryConverter::transQuery(&request);
     TestMultimodalProcessor processor;
-    processor.fail = true;
-    auto request_span = telemetry::startRpcServerSpan("pd-mm-request", &context, true);
+    processor.fail             = true;
+    auto       request_span    = telemetry::startRpcServerSpan("pd-mm-request", &context, true);
     const auto request_span_id = request_span->GetContext().span_id();
-    const auto result = preprocessForPD(input, &processor, false, RoleType::PREFILL, &context, request_span);
+    const auto result          = preprocessForPD(input, &processor, false, RoleType::PREFILL, &context, request_span);
     EXPECT_EQ(result.code(), ErrorCode::MM_PROCESS_ERROR);
     EXPECT_EQ(processor.calls, 1);
     EXPECT_EQ(processor.seen_context, &context);
     request_span->End();
     EXPECT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
-    auto spans = span_data->GetSpans();
+    auto   spans    = span_data->GetSpans();
     size_t mm_spans = 0;
     for (const auto& span : spans) {
         if (span->GetName() != "rtp_llm.vit") {
@@ -101,7 +104,7 @@ TEST(PDRequestUtilsTest, PrefillMmTracePreservesRequestContextAndTypedFailure) {
         EXPECT_EQ(span->GetParentSpanId(), request_span_id);
         EXPECT_EQ(span->GetStatus(), opentelemetry::trace::StatusCode::kError);
         const auto& attributes = span->GetAttributes();
-        const auto found = attributes.find(telemetry::kAttrRtpLlmErrorCode);
+        const auto  found      = attributes.find(telemetry::kAttrRtpLlmErrorCode);
         EXPECT_NE(found, attributes.end());
         if (found != attributes.end()) {
             EXPECT_EQ(opentelemetry::nostd::get<int64_t>(found->second),
@@ -203,7 +206,8 @@ TEST(PDRequestUtilsTest, DecodeAndPrefillLocalExpansionAgreeAcrossWireRoundTrip)
 TEST(PDRequestUtilsTest, MissingProcessorOrProcessingFailureAreRejected) {
     auto request = makeMMRequest();
     auto input   = QueryConverter::transQuery(&request);
-    EXPECT_EQ(preprocessForPD(input, nullptr, false, RoleType::PREFILL, nullptr, {}).code(), ErrorCode::MM_NOT_SUPPORTED_ERROR);
+    EXPECT_EQ(preprocessForPD(input, nullptr, false, RoleType::PREFILL, nullptr, {}).code(),
+              ErrorCode::MM_NOT_SUPPORTED_ERROR);
     TestMultimodalProcessor processor;
     processor.fail    = true;
     const auto result = preprocessForPD(input, &processor, false, RoleType::PREFILL, nullptr, {});
@@ -237,12 +241,14 @@ TEST(PDRequestUtilsTest, DecodeConsumesFrontendExpandedIdsWithoutProcessor) {
 TEST(PDRequestUtilsTest, DecodeRejectsRawOrMalformedMultimodalIds) {
     auto request = makeMMRequest();
     auto input   = QueryConverter::transQuery(&request);
-    EXPECT_EQ(preprocessForPD(input, nullptr, false, RoleType::DECODE, nullptr, {}).code(), ErrorCode::MM_WRONG_FORMAT_ERROR);
+    EXPECT_EQ(preprocessForPD(input, nullptr, false, RoleType::DECODE, nullptr, {}).code(),
+              ErrorCode::MM_WRONG_FORMAT_ERROR);
     auto* span = request.mutable_multimodal_token_layout()->add_spans();
     span->set_offset(2);
     span->set_length(2);
     input = QueryConverter::transQuery(&request);
-    EXPECT_EQ(preprocessForPD(input, nullptr, false, RoleType::DECODE, nullptr, {}).code(), ErrorCode::MM_WRONG_FORMAT_ERROR);
+    EXPECT_EQ(preprocessForPD(input, nullptr, false, RoleType::DECODE, nullptr, {}).code(),
+              ErrorCode::MM_WRONG_FORMAT_ERROR);
     EXPECT_FALSE(input->text_tokens_mask);
 }
 

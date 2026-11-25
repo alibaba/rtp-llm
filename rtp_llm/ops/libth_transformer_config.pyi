@@ -934,6 +934,7 @@ class LinearAttentionConfig:
     def to_string(self) -> str:
         ...
 class MMModelConfig:
+    semantic_mm_token_id: int
     include_sep_tokens: bool
     is_multimodal: bool
     mm_position_ids_style: int
@@ -1203,6 +1204,8 @@ class MultimodalInput:
     mm_type: int
     tensor: torch.Tensor
     url: str
+    def has_url(self) -> bool:
+        ...
     def __getstate__(self) -> tuple:
         ...
     def __init__(self, url: str, mm_type: int, tensor: torch.Tensor, mm_preprocess_config: ...) -> None:
@@ -1865,4 +1868,9 @@ PREFILL_CP: CPRotateMethod  # value = <CPRotateMethod.PREFILL_CP: 4>
 UNKNOWN: CPRotateMethod  # value = <CPRotateMethod.UNKNOWN: 5>
 
 def get_multimodal_token_spans(token_ids: list[int], separators: list[list[int]], include_separators: bool) -> list[tuple[int, int]]:
+    ...
+
+def map_preprocess_storage(arg0: int, arg1: int) -> torch.UntypedStorage:
+    ...
+def pack_preprocess_cpu_tensors(arg0: list[torch.Tensor]) -> list[torch.Tensor]:
     ...

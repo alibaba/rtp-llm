@@ -7,8 +7,10 @@ from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import setup_cuda_device_and_accl_env
 from rtp_llm.model_factory import ModelFactory
+from rtp_llm.multimodal.greennet_hook import get_greennet_provider
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.multimodal.multimodal_mixin_factory import MultimodalMixinFactory
+from rtp_llm.multimodal.multimodal_util import url_data_cache_
 from rtp_llm.ops import TaskType
 from rtp_llm.server.vit_app import VitEndpointApp
 
@@ -25,10 +27,19 @@ def vit_start_server(
     is_proxy_mode: bool = False,
     rdma_port: Optional[int] = None,
     service_draining=None,
+    *,
+    url_cache_handle=None,
+    verdict_cache_handle=None,
 ):
     from rtp_llm.metrics import kmonitor
 
     kmonitor.bind_service_draining(service_draining)
+    if verdict_cache_handle is not None:
+        get_greennet_provider().attach_verdict_cache(verdict_cache_handle)
+    if url_cache_handle is not None:
+        url_data_cache_.attach(
+            url_cache_handle, py_env_configs.vit_config.url_cache_item_num
+        )
     # Set server_id on the passed config
     py_env_configs.server_config.vit_server_id = server_id
     if rdma_port is not None:

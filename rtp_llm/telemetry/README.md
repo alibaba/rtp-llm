@@ -75,3 +75,41 @@ export POD_IP=10.0.0.12
 ## 验证
 
 发送一次受控请求，在 Unitrace 中按 trace ID 检查 Trace 是否出现。若没有 Trace，确认所有相关进程都注入了 JSON，并检查启动日志和接收端鉴权状态。
+
+## ViT 单媒体阶段
+
+ViT 复用上述配置、采样和 OTLP/HTTP exporter，不增加独立开关。媒体 span
+`rtp_llm.vit.media` 挂在处理该输入的 RPC 下，带有 `request_id`、
+`rtp_llm.vit.media.index`（从 0 开始）、`rtp_llm.vit.media.type` 和
+`rtp_llm.vit.media.url`。URL **原样上报**，保留 query、fragment 和 data URL，
+不脱敏、不生成 `url_hash`；URL 只作属性，不作 span 名或 metric 标签。
+
+每个阶段是独立的子 span，开始/结束时间表示实际进入/退出；阶段名称均以
+`rtp_llm.vit.` 为前缀：
+
+| 阶段 | 计时边界 |
+|---|---|
+| `compute.queue` | 异步计算任务提交到计算线程开始 |
+| `preprocess.queue` | CPU 任务提交到 worker 开始，包括 dispatch/IPC；本地执行通常接近零 |
+| `download` / `download.cache` | 已有媒体 loader 的调用；网络、文件、data URL 沿用原逻辑，下载缓存命中单独标记 |
+| `preprocess` | CPU 解码和预处理，下载期间暂停；一次输入可能有多个不重叠区间 |
+| `embedding.queue` | scheduler 入队到执行，包括凑批、等待和可选预取 |
+| `embedding` / `embedding.batch` | scheduler 的 host 调用，包括 batched embedding、结果校验和缓存回填；不是纯 GPU kernel 时间 |
+| `greennet.total` | 绿网分支开始到最终 verdict；仅启用时出现 |
+| `greennet.prepare` / `greennet` | 旧接口准备/提交与等待判定，或 source 接口提交到判定 |
+| `greennet.dispatch` / `greennet.queue` | CPU worker 绿网协程分发与检查容量排队 |
+| `cache_wait` | 等待已有/本次提交的缓存 entry 就绪；不代表重新计算 |
+
+同一请求的多图用原始序号区分；hash 查询筛选未命中的输入时仍保留原始序号。
+全量 hash 命中不会进入计算链路，因此不会虚构上述计算 span。相同 cache key 的
+实际生产任务共享一次计算，消费者通过 span link 关联生产者，并记录 `media.cache_state`。
+异步生产者的媒体 span 在任务实际完成/失败/取消时结束，不随提交 RPC 提前结束。
+
+跨请求合批只产生一个 batch span，link 到各媒体；每个媒体的 embedding span
+用 `rtp_llm.batch_id` 和 link 关联这次共同执行，不应把各媒体耗时相加当作 GPU 工作量。
+不可拆分的多输入处理标记 `rtp_llm.vit.shared_execution=true`，不伪造逐图独立耗时。
+
+CPU 子进程只通过已有结果通道回传时间戳，由 ViT 主进程创建并导出 span，
+不在 CPU worker 初始化 exporter。每个任务最多回传 256 条阶段记录，超出时
+记录 `rtp_llm.vit.timing_records_dropped`。进程崩溃/超时而未返回的阶段不会伪造完成时间。
+所有 span 使用现有 trace ID；埋点不增加 CUDA synchronize，也不改变调度/缓存/公共结果协议。

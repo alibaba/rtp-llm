@@ -1,3 +1,35 @@
+load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
+load("@arch_config//:arch_select.bzl", "telemetry_test_deps")
+
+py_test(
+    name = "shared_url_cache_test",
+    srcs = ["shared_url_cache_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "0", "CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "preprocess_ipc_test",
+    srcs = ["preprocess_ipc_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "0", "CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "mm_media_tracing_test",
+    srcs = ["mm_media_tracing_test.py"],
+    deps = ["//rtp_llm:testlib"] + telemetry_test_deps(),
+    env = {"GPU_COUNT": "0", "CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "deepseek_v41_preprocess_shape_test",
+    srcs = ["deepseek_v41_preprocess_shape_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    size = "small",
+    env = {"CUDA_VISIBLE_DEVICES": "", "GPU_COUNT": "0"},
+)
+
 filegroup(
     name = "testdata",
     srcs = glob([
@@ -16,12 +48,18 @@ py_test(
     name = "qwen4_multimodal_test",
     srcs = ["qwen4_multimodal_test.py"],
     deps = [
-        ":mm_cache_test_store",
+        ":remote_embedding_test_helpers",
         "//rtp_llm:testlib",
         "//rtp_llm/models_py/model_desc/test/qwen4_exp:qsa_fixtures",
     ],
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "source_download_executor_test",
+    srcs = ["source_download_executor_test.py"],
+    deps = ["//rtp_llm:multimodal"],
 )
 
 py_test(
@@ -34,6 +72,12 @@ py_test(
     ],
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "multiprocess_preprocess_executor_test",
+    srcs = ["multiprocess_preprocess_executor_test.py"],
+    deps = ["//rtp_llm:testlib"],
 )
 
 py_test(
@@ -117,6 +161,15 @@ py_test(
 )
 
 py_test(
+    name = "mm_feature_hash_batch_test",
+    srcs = ["mm_feature_hash_batch_test.py"],
+    data = ["//:rtp_compute_ops", "//:th_transformer"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1", "WORLD_SIZE": "1"},
+    tags = ["manual", "local", "L20_CU13"],
+)
+
+py_test(
     name = "mm_output_transport_test",
     srcs = [
         "mm_output_transport_test.py",
@@ -151,6 +204,31 @@ py_test(
     deps = ["//rtp_llm:testlib"],
 )
 
+py_test(
+    name = "mm_batch_pipeline_test",
+    srcs = ["mm_batch_pipeline_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["manual"],
+)
+
+py_test(
+    name = "deepseek_v41_packed_optimization_test",
+    srcs = ["deepseek_v41_packed_optimization_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    size = "enormous",
+    tags = ["manual", "local", "exclusive", "L20D_TEST"],
+    exec_properties = {"gpu": "L20D_TEST", "gpu_count": "1"},
+)
+
+py_test(
+    name = "deepseek_v41_pipeline_gpu_test",
+    srcs = ["deepseek_v41_pipeline_gpu_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    size = "enormous",
+    tags = ["manual", "local", "exclusive", "L20D_TEST"],
+    exec_properties = {"gpu": "L20D_TEST", "gpu_count": "1"},
+)
+
 py_library(
     name = "process_engine_test_helpers",
     testonly = True,
@@ -160,12 +238,16 @@ py_library(
 )
 
 py_test(
+    name = "mm_inspection_pipeline_test",
+    srcs = ["mm_inspection_pipeline_test.py"],
+    deps = [":remote_embedding_test_helpers", ":process_engine_test_helpers"],
+    data = [":testdata"],
+)
+
+py_test(
     name = "mm_remote_embedding_cache_test",
     srcs = ["mm_remote_embedding_cache_test.py"],
-    deps = [
-        ":mm_cache_test_store",
-        ":process_engine_test_helpers",
-    ],
+    deps = [":remote_embedding_test_helpers", ":process_engine_test_helpers"],
     exec_properties = {"gpu": "A10_CU13"},
     tags = ["A10_CU13"],
 )
@@ -217,6 +299,52 @@ py_test(
 )
 
 py_test(
+    name = "deepseek_v41_default_optimizations_test",
+    srcs = ["deepseek_v41_default_optimizations_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    size = "small",
+    env = {"CUDA_VISIBLE_DEVICES": "", "GPU_COUNT": "0"},
+)
+
+py_test(
+    name = "deepseek_v41_graph_cache_test",
+    srcs = ["deepseek_v41_graph_cache_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    size = "small",
+    env = {"CUDA_VISIBLE_DEVICES": "", "GPU_COUNT": "0"},
+)
+
+py_test(
+    name = "deepseek_v41_graph_cache_gpu_test",
+    srcs = ["deepseek_v41_graph_cache_gpu_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    size = "enormous",
+    tags = ["manual", "local", "exclusive", "L20D_TEST"],
+    exec_properties = {"gpu": "L20D_TEST", "gpu_count": "1"},
+)
+
+py_test(
+    name = "deepseek_v41_residual_rmsnorm_gpu_test",
+    srcs = ["deepseek_v41_residual_rmsnorm_gpu_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    size = "enormous",
+    env = {"GPU_COUNT": "1", "WORLD_SIZE": "1"},
+    tags = ["manual", "local", "exclusive", "SM100_ARM_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "deepseek_v41_backend_contract_test",
+    srcs = ["deepseek_v41_backend_contract_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    size = "small",
+    env = {
+        "CUDA_VISIBLE_DEVICES": "",
+        "GPU_COUNT": "0",
+    },
+)
+
+py_test(
     name = "deepseek_v41_vision_test",
     srcs = ["deepseek_v41_vision_test.py"],
     deps = ["//rtp_llm:testlib"],
@@ -225,9 +353,100 @@ py_test(
 )
 
 py_test(
+    name = "vision_downsample_cpu_test",
+    srcs = ["vision_downsample_test.py"],
+    main = "vision_downsample_test.py",
+    deps = ["//rtp_llm:testlib"],
+    size = "small",
+    env = {"CUDA_VISIBLE_DEVICES": "", "GPU_COUNT": "0"},
+)
+
+py_test(
+    name = "vision_downsample_gpu_test",
+    srcs = ["vision_downsample_test.py"],
+    main = "vision_downsample_test.py",
+    deps = ["//rtp_llm:testlib"],
+    size = "large",
+    tags = ["SM100_ARM_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "deepseek_v41_packed_vision_test",
+    srcs = ["deepseek_v41_packed_vision_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    size = "small",
+    env = {"CUDA_VISIBLE_DEVICES": "", "GPU_COUNT": "0"},
+)
+
+py_test(
+    name = "deepseek_v41_gpu_preprocess_test",
+    srcs = ["deepseek_v41_gpu_preprocess_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    size = "large",
+    tags = ["L20D_TEST"],
+    exec_properties = {"gpu": "L20D_TEST", "gpu_count": "1"},
+)
+
+py_test(
+    name = "deepseek_v41_span_test",
+    srcs = ["deepseek_v41_span_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "GPU_COUNT": "0"},
+)
+
+py_test(
     name = "deepseek_vision_test",
     srcs = ["deepseek_vision_test.py"],
     deps = ["//rtp_llm:testlib"],
     tags = ["SM100_ARM_CU13"],
     exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)
+
+cuda13_sm100_py_test(
+    name = "deepseek_v41_dynamic_batch_gpu_test",
+    srcs = ["deepseek_v41_dynamic_batch_gpu_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    size = "large",
+    env = {"GPU_COUNT": "1", "WORLD_SIZE": "1"},
+)
+
+py_test(
+    name = "mm_remote_embedding_engine_test",
+    srcs = ["mm_remote_embedding_engine_test.py"],
+    deps = [":remote_embedding_test_helpers", "//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "mm_kvcm_emb_client_integration_test",
+    timeout = "long",
+    srcs = [
+        "mm_kvcm_emb_client_integration_test.py",
+    ],
+    tags = ["manual"],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
+
+cuda13_sm100_py_test(
+    name = "registered_object_transport_test",
+    srcs = ["registered_object_transport_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1", "WORLD_SIZE": "1"},
+)
+
+py_library(
+    name = "remote_embedding_test_helpers",
+    testonly = True,
+    srcs = ["remote_embedding_test_helpers.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "registered_object_transport_failure_test",
+    srcs = ["registered_object_transport_test.py"],
+    main = "registered_object_transport_test.py",
+    deps = ["//rtp_llm:testlib"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "GPU_COUNT": "0"},
 )

@@ -4,14 +4,14 @@ import json
 import logging
 import math
 import time
+from collections.abc import Sequence
 from dataclasses import replace
 from typing import Any, AsyncGenerator, Dict, Optional, Union
 
 import grpc
 import torch
-from google.protobuf.wrappers_pb2 import StringValue
-from collections.abc import Sequence
 from google.protobuf.message import DecodeError
+from google.protobuf.wrappers_pb2 import StringValue
 from grpc import StatusCode
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -36,12 +36,14 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 from rtp_llm.server.request_headers import (
     dashscope_greennet_metadata,
     extract_correlation_request_id,
+    extract_input_inspection_enabled,
     extract_trace_id,
 )
 from rtp_llm.telemetry import CURRENT_TRACE_STATE
 from rtp_llm.telemetry import attributes as trace_attrs
 from rtp_llm.telemetry import (
     inject_context_to_metadata,
+    internal_span,
     start_batch_item_span,
     start_client_span,
 )
@@ -548,7 +550,11 @@ def _format_host_port(host: str, port: int) -> str:
 def _split_host_port(address: str) -> tuple[str, int]:
     if address.startswith("["):
         close_pos = address.find("]")
-        if close_pos == -1 or close_pos + 1 >= len(address) or address[close_pos + 1] != ":":
+        if (
+            close_pos == -1
+            or close_pos + 1 >= len(address)
+            or address[close_pos + 1] != ":"
+        ):
             raise ValueError(f"invalid grpc address: {address}")
         host = address[1:close_pos]
         port_text = address[close_pos + 2 :]
@@ -707,15 +713,18 @@ def _trans_jsonable_options(
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
-    input_pb.enqueued_by_master = bool(
-        getattr(input_py, "enqueued_by_master", False)
-    )
+    input_pb.enqueued_by_master = bool(getattr(input_py, "enqueued_by_master", False))
     expansion = input_py.mm_token_expansion
     if expansion is not None:
         input_pb.token_ids.extend(expansion.token_ids)
         input_pb.multimodal_token_layout.SetInParent()
+        cache_spans = dict(expansion.cache_spans)
         for offset, length in expansion.spans:
-            input_pb.multimodal_token_layout.spans.add(offset=offset, length=length)
+            span = input_pb.multimodal_token_layout.spans.add(
+                offset=offset, length=length
+            )
+            if offset in cache_spans:
+                span.row_hashes.extend(cache_spans[offset])
     else:
         input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
     prepared = getattr(input_py, "v41_inputs", None)
@@ -937,7 +946,9 @@ def trans_input(input_py: GenerateInput):
 
 
 def _make_multimodal_inputs_pb(input_pb: GenerateInputPB) -> MultimodalInputsPB:
-    mm_inputs_pb = MultimodalInputsPB(request_id=input_pb.request_id)
+    mm_inputs_pb = MultimodalInputsPB()
+    mm_inputs_pb.CopyFrom(input_pb.multimodal_request)
+    mm_inputs_pb.request_id = input_pb.request_id
     mm_inputs_pb.multimodal_inputs.extend(input_pb.multimodal_inputs)
     return mm_inputs_pb
 
@@ -954,7 +965,20 @@ def get_multimodal_preprocess_value(
 def trans_multimodal_input(
     input_py: GenerateInput, input_pb: GenerateInputPB, generate_config: GenerateConfig
 ):
+    if not input_py.mm_inputs:
+        return
+
+    multimodal = input_pb.multimodal_request
+    multimodal.request_id = input_pb.request_id
+    if input_py.deferred_inspection:
+        multimodal.inspection_ticket = input_py.deferred_inspection[2]
     input_pb.multimodal_inputs.extend(iter_multimodal_inputs(input_py, generate_config))
+    region = input_py.headers.get("region")
+    if region:
+        multimodal.region = region
+    inspection_enabled = extract_input_inspection_enabled(input_py.headers)
+    if inspection_enabled is not None:
+        multimodal.input_inspection_enabled.value = inspection_enabled
 
 
 def iter_multimodal_inputs(input_py: GenerateInput, generate_config: GenerateConfig):
@@ -1613,7 +1637,10 @@ class ModelRpcClient(object):
                 message = f"backend_error_code={code}: {message}"
         logging.error(
             "backend failure: backend_error_code=%d frontend_error_code=%d error_name=%s message=%s",
-            code, error_type.value, error_type.name, message,
+            code,
+            error_type.value,
+            error_type.name,
+            message,
         )
         raise FtRuntimeException(
             error_type, ModelRpcClient._client_backend_message(error_type, message)
@@ -1636,12 +1663,17 @@ class ModelRpcClient(object):
             ).value
         logging.error(
             "%s backend error frame: wire_code=%d backend_error_code=%d message=%s",
-            request_desc, error.error_code, code, error.error_message,
+            request_desc,
+            error.error_code,
+            code,
+            error.error_message,
         )
         message = error.error_message or _rpc_error_code_name(error.error_code)
         ModelRpcClient._raise_backend_error(code, f"{request_desc}: {message}")
 
-    def _handle_grpc_error(self, e: grpc.RpcError, request_desc: str, target_address: str = "") -> None:
+    def _handle_grpc_error(
+        self, e: grpc.RpcError, request_desc: str, target_address: str = ""
+    ) -> None:
         # request_desc reaches the client; keep backend addresses in the log-only argument.
         details = ErrorDetailsPB()
         try:
@@ -1654,19 +1686,35 @@ class ModelRpcClient(object):
         if details.error_code:
             logging.error(
                 "%s RPC to [%s] failed: grpc_code=%s backend_error_code=%d message=%s",
-                request_desc, target_address, e.code(), details.error_code,
+                request_desc,
+                target_address,
+                e.code(),
+                details.error_code,
                 details.error_message or e.details(),
             )
             self._raise_backend_error(
-                details.error_code, f"{request_desc}: {details.error_message or e.details()}"
+                details.error_code,
+                f"{request_desc}: {details.error_message or e.details()}",
             )
-        logging.error("%s RPC to [%s] failed: %s %s", request_desc, target_address, e.code(), e.details())
+        logging.error(
+            "%s RPC to [%s] failed: %s %s",
+            request_desc,
+            target_address,
+            e.code(),
+            e.details(),
+        )
         if e.code() == StatusCode.UNAVAILABLE:
             message = e.details() or ""
             lower = message.lower()
-            error_type = (ExceptionType.CONNECTION_RESET_BY_PEER if "socket closed" in lower or "connection reset" in lower
-                          else ExceptionType.CONNECT_TIMEOUT if "timed out" in lower or "timeout" in lower
-                          else ExceptionType.CONNECT_FAILED)
+            error_type = (
+                ExceptionType.CONNECTION_RESET_BY_PEER
+                if "socket closed" in lower or "connection reset" in lower
+                else (
+                    ExceptionType.CONNECT_TIMEOUT
+                    if "timed out" in lower or "timeout" in lower
+                    else ExceptionType.CONNECT_FAILED
+                )
+            )
             self._raise_backend_error(error_type.value, f"{request_desc}: {message}")
         codes = {
             StatusCode.DEADLINE_EXCEEDED: ExceptionType.GENERATE_TIMEOUT,
@@ -1750,12 +1798,14 @@ class ModelRpcClient(object):
         last_output = None
 
         try:
-            if input_pb.multimodal_inputs:
+            ticket = input_pb.multimodal_request.inspection_ticket
+            if input_pb.multimodal_inputs and not ticket:
                 # GreenNet content-safety gate: block before prefill until the VIT
                 # encoder's inspection verdict lands. A violation raises
                 # FtRuntimeException(UNSAFE_INPUT_CONTENT) here, short-circuiting the
                 # request before any LLM compute.
-                await self._wait_greennet_verdict(input_py, input_pb)
+                with internal_span("rtp_llm.frontend.wait_greennet_verdict"):
+                    await self._wait_greennet_verdict(input_py, input_pb)
             # Get channel from pool
             channel = await self._channel_pool.get(target_address)
             stub = RpcServiceStub(channel)
@@ -1786,8 +1836,21 @@ class ModelRpcClient(object):
                 if response is None:
                     break
                 if response.error_info.error_code or response.error_info.error_message:
-                    self._raise_pb_error(response.error_info, f"request={input_pb.request_id}")
-                output_py = trans_output(input_py, response, stream_state, response_role_addrs=response_role_addrs)
+                    self._raise_pb_error(
+                        response.error_info, f"request={input_pb.request_id}"
+                    )
+                if ticket:
+                    with internal_span("rtp_llm.frontend.wait_greennet_verdict"):
+                        await self._wait_greennet_verdict(
+                            input_py, input_pb, deadline=rpc_deadline
+                        )
+                    ticket = ""
+                output_py = trans_output(
+                    input_py,
+                    response,
+                    stream_state,
+                    response_role_addrs=response_role_addrs,
+                )
                 if not output_py.frontend_metric_only:
                     last_output = output_py
                 if _is_finished_response(response):
@@ -1997,7 +2060,9 @@ class ModelRpcClient(object):
         if not inputs:
             return []
         selected_targets = [self._get_explicit_target(inp) for inp in inputs]
-        selected_roles = [target.role if target is not None else None for target in selected_targets]
+        selected_roles = [
+            target.role if target is not None else None for target in selected_targets
+        ]
         if any(
             (role is None and self._requires_explicit_target(inp))
             or (role == RoleType.PDFUSION and getattr(inp, "enqueued_by_master", False))
@@ -2011,6 +2076,7 @@ class ModelRpcClient(object):
         # Keep validation/normalization inside trans_input off caller-owned configs.
         # Each item retains its own positive request timeout; non-positive values
         # use the same max_rpc_timeout_ms fallback as enqueue().
+        started = asyncio.get_running_loop().time()
         batch_inputs = []
         effective_timeouts_ms = []
         for inp in inputs:
@@ -2025,6 +2091,8 @@ class ModelRpcClient(object):
                 config.timeout_ms = int(effective_ms)
                 effective_timeouts_ms.append(int(effective_ms))
             batch_input = replace(inp, generate_config=config)
+            batch_input.deferred_inspection = inp.deferred_inspection
+            batch_input.mm_token_expansion = inp.mm_token_expansion
             batch_input.greennet_verified_vit = inp.greennet_verified_vit
             batch_inputs.append(batch_input)
 
@@ -2081,8 +2149,9 @@ class ModelRpcClient(object):
                 span, item_metadata = start_batch_item_span(inp.request_id, i)
                 item_spans.append(span)
                 input_pb = trans_input(inp)
-                if input_pb.multimodal_inputs:
-                    await self._wait_greennet_verdict(inp, input_pb)
+                if input_pb.multimodal_inputs and not inp.deferred_inspection:
+                    with internal_span("rtp_llm.frontend.wait_greennet_verdict"):
+                        await self._wait_greennet_verdict(inp, input_pb)
                 if selected_roles[i] == RoleType.PREFILL:
                     input_pb.generate_config.can_use_pd_separation = False
                 carrier = dict(item_metadata)
@@ -2145,10 +2214,16 @@ class ModelRpcClient(object):
                     )
                     if error.error_code or error.error_message:
                         exception_type = _trans_rpc_error_code(error.error_code)
-                        error_message = error.error_message or _rpc_error_code_name(error.error_code)
+                        error_message = error.error_message or _rpc_error_code_name(
+                            error.error_code
+                        )
                         logging.error(
                             "batch item %d request=%s wire_code=%d frontend_error_code=%d: %s",
-                            i, inputs[i].request_id, error.error_code, exception_type.value, error_message,
+                            i,
+                            inputs[i].request_id,
+                            error.error_code,
+                            exception_type.value,
+                            error_message,
                         )
                         item_error = FtRuntimeException(
                             exception_type,
@@ -2161,9 +2236,32 @@ class ModelRpcClient(object):
                     conversion_index = i
                     stream_state = StreamState()
                     output = trans_output(
-                        batch_inputs[i], result_pb.final_output, stream_state,
+                        batch_inputs[i],
+                        result_pb.final_output,
+                        stream_state,
                         response_role_addrs=response_role_addrs_list[i],
                     )
+                    if batch_inputs[i].deferred_inspection:
+                        timeout_ms = batch_inputs[i].generate_config.timeout_ms
+                        deadline = (
+                            started + timeout_ms / 1000
+                            if timeout_ms and timeout_ms > 0
+                            else None
+                        )
+                        try:
+                            with internal_span(
+                                "rtp_llm.frontend.wait_greennet_verdict"
+                            ):
+                                await self._wait_greennet_verdict(
+                                    batch_inputs[i],
+                                    batch_input_pb.inputs[i],
+                                    deadline=deadline,
+                                )
+                        except FtRuntimeException as error:
+                            if not allow_partial:
+                                raise
+                            results.append(error)
+                            continue
                     _validate_prefill_only_completed(batch_inputs[i], stream_state)
                     results.append(output)
                     conversion_index = None
@@ -2173,7 +2271,9 @@ class ModelRpcClient(object):
                 rpc_status = e.code()
                 transport_failure = e
                 self._handle_grpc_error(
-                    e, f"batch_size={len(inputs)} request_ids={[inp.request_id for inp in inputs]}", target_address,
+                    e,
+                    f"batch_size={len(inputs)} request_ids={[inp.request_id for inp in inputs]}",
+                    target_address,
                 )
             except FtRuntimeException:
                 raise
@@ -2215,7 +2315,7 @@ class ModelRpcClient(object):
                 )
 
     async def _wait_greennet_verdict(
-        self, input_py: GenerateInput, input_pb: GenerateInputPB
+        self, input_py: GenerateInput, input_pb: GenerateInputPB, *, deadline=None
     ) -> None:
         """Block until the VIT encoder's greennet inspection verdict lands.
 
@@ -2234,15 +2334,21 @@ class ModelRpcClient(object):
         off), this returns immediately WITHOUT any RPC — so the disabled path is
         byte-identical to the pre-greennet behavior (no extra round-trip).
         """
+        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import GreenNetQueryPB
         from rtp_llm.multimodal.greennet_hook import greennet_enabled
 
-        if not greennet_enabled():
+        receipt = input_py.deferred_inspection
+        if not receipt and (
+            extract_input_inspection_enabled(input_py.headers) is False
+            or not greennet_enabled()
+        ):
             return
         for role_addr in input_py.generate_config.role_addrs:
             if role_addr.role != RoleType.VIT:
                 continue
             if (
-                input_py.greennet_verified_vit is not None
+                not receipt
+                and input_py.greennet_verified_vit is not None
                 and input_py.greennet_verified_vit
                 == (
                     role_addr.ip,
@@ -2254,20 +2360,51 @@ class ModelRpcClient(object):
                 # approved hash). No separate ViT RPC is needed on this route.
                 continue
             vit_addr = f"{role_addr.ip}:{role_addr.grpc_port}"
-            mm_inputs_pb = _make_multimodal_inputs_pb(input_pb)
+            if receipt and receipt[:2] != (role_addr.ip, role_addr.grpc_port):
+                raise FtRuntimeException(
+                    ExceptionType.ROUTE_ERROR, "ViT inspection worker changed"
+                )
+            mm_inputs_pb = (
+                GreenNetQueryPB(
+                    inspection_ticket=receipt[2], request_id=input_py.request_id
+                )
+                if receipt
+                else _make_multimodal_inputs_pb(input_pb)
+            )
+            method = "GetGreenNetVerdict" if receipt else "WaitGreenNetVerdict"
             channel = await self._channel_pool.get(vit_addr)
             stub = MultimodalRpcServiceStub(channel)
             try:
-                await stub.WaitGreenNetVerdict(
+                from rtp_llm.telemetry.vit_rpc import vit_client_span
+
+                with vit_client_span(
+                    method,
+                    vit_addr,
                     mm_inputs_pb,
-                    timeout=VitConfig.DEFAULT_MM_TIMEOUT_MS / 1000.0,
-                    metadata=dashscope_greennet_metadata(input_py.headers),
-                )
+                    dashscope_greennet_metadata(input_py.headers),
+                ) as metadata:
+                    timeout = VitConfig.DEFAULT_MM_TIMEOUT_MS / 1000.0
+                    if deadline is not None:
+                        timeout = min(
+                            timeout, deadline - asyncio.get_running_loop().time()
+                        )
+                        if timeout <= 0:
+                            raise FtRuntimeException(
+                                ExceptionType.GENERATE_TIMEOUT,
+                                "Inspection deadline exceeded",
+                            )
+                    await getattr(stub, method)(
+                        mm_inputs_pb,
+                        timeout=timeout,
+                        metadata=metadata,
+                    )
             except grpc.RpcError as e:
                 error_details = ErrorDetailsPB()
                 try:
                     encoded = _grpc_status_details(e.trailing_metadata())
-                    has_details = bool(encoded) and bool(error_details.ParseFromString(encoded))
+                    has_details = bool(encoded) and bool(
+                        error_details.ParseFromString(encoded)
+                    )
                 except (DecodeError, TypeError, ValueError) as error:
                     logging.warning("Malformed greennet gRPC error details: %s", error)
                     has_details = False
@@ -2281,6 +2418,11 @@ class ModelRpcClient(object):
                         ExceptionType(error_details.error_code),
                         error_details.error_message,
                     )
+                if receipt and e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
+                    raise FtRuntimeException(
+                        ExceptionType.GENERATE_TIMEOUT,
+                        "ViT inspection deadline exceeded",
+                    ) from e
                 # No structured detail: greennet infra error (timeout / VIT down).
                 # Fail closed — never let an uninspected request through.
                 logging.error(
@@ -2291,7 +2433,11 @@ class ModelRpcClient(object):
                     ExceptionType.MM_PROCESS_ERROR,
                     f"greennet verdict unavailable: {e.code()}: {e.details()}",
                 )
-            break
+            return
+        if receipt:
+            raise FtRuntimeException(
+                ExceptionType.ROUTE_ERROR, "Missing ViT inspection worker"
+            )
 
     async def batch_enqueue(
         self, inputs: list[GenerateInput]

@@ -6,6 +6,9 @@ EMBEDDING_ARPC_IMPL = "@rtp_llm//rtp_llm/cpp/embedding_engine:embedding_engine_a
 # Arch branches that carry the impl keep the open service in open builds.
 SUBSCRIBE_IMPL = "@rtp_llm//rtp_llm/cpp/disaggregate/load_balancer/subscribe:subscribe_service_impl"
 
+def extension_wheel_requirements():
+    return []
+
 def extension_packages():
     return ["rtp_llm"]
 

@@ -54,7 +54,8 @@ public class WhitelistMetricsFilterConfig {
                     + "flexlb_app_flexlb_route_submit_time_ms,"
                     + "flexlb_app_routing_queue_wait_time_ms,"
                     + "flexlb_app_flexlb_dispatch_ack_time_ms,"
-                    + "flexlb_app_engine_balancing_master_dispatch_reason";
+                    + "flexlb_app_engine_balancing_master_dispatch_reason,"
+                    + "flexlb_app_vit_cache_affinity_images_total";
 
     private final PrefixAllowSet allowedMetrics;
 

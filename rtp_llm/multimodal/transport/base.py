@@ -13,6 +13,11 @@ from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
 
 METRIC_SOURCE = "vit_server"
+RDMA_CLAIM_HEADER = "x-rtp-rdma-claim"
+
+
+def receipt_handles(receipt: MultimodalOutputPB) -> List[str]:
+    return [slot.rdma_descriptor.lease_id for slot in receipt.output_rdma_slots]
 
 
 @dataclass
@@ -35,6 +40,12 @@ class MMTransportBackend(ABC):
     ) -> MMOutputResult:
         """Transfer the result or raise when the selected data plane fails."""
 
+    def offer(self, handles: List[str]) -> bool:
+        return False
+
+    def claim(self, handles: List[str]) -> bool:
+        return False
+
     def release(self, handles: List[str]) -> None:
         return None
 
@@ -48,9 +59,6 @@ class MMTerminalBackend(MMTransportBackend):
 
 def report_output_metrics(result: MMOutputResult) -> None:
     tags = {"source": METRIC_SOURCE, "transport": result.transport}
-    kmonitor.report(
-        GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC, result.receipt.ByteSize(), tags
-    )
     kmonitor.report(
         GaugeMetrics.VIT_RESPONSE_EMBEDDING_BYTES_METRIC,
         result.payload_embedding_bytes,
@@ -71,6 +79,21 @@ def report_output_metrics(result: MMOutputResult) -> None:
     )
 
 
+def serialize_embedding_response(response: MultimodalOutputPB) -> bytes:
+    # With the upb protobuf runtime, ByteSize() encodes and copies the
+    # message too. Measure the bytes gRPC is already going to send.
+    payload = response.SerializeToString()
+    kmonitor.report(
+        GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC,
+        len(payload),
+        {
+            "source": METRIC_SOURCE,
+            "transport": "rdma" if response.output_rdma_slots else "bytes",
+        },
+    )
+    return payload
+
+
 class MMOutputTransport:
     """Owns the explicitly selected data plane and its lifecycle."""
 
@@ -81,19 +104,31 @@ class MMOutputTransport:
         self, request: MultimodalInputsPB, res: MMEmbeddingRes
     ) -> MultimodalOutputPB:
         result = self._backend.transfer(request, res)
-        report_output_metrics(result)
+        try:
+            report_output_metrics(result)
+        except Exception:
+            self.rollback(result.receipt)
+            raise
         return result.receipt
+
+    def offer(self, receipt: MultimodalOutputPB) -> None:
+        handles = receipt_handles(receipt)
+        if handles:
+            receipt.rdma_claim_required = self._backend.offer(handles)
+
+    def claim(self, request: ReleaseLeasePB) -> bool:
+        return self._backend.claim(list(request.lease_id))
+
+    def rollback(self, receipt: MultimodalOutputPB) -> None:
+        handles = receipt_handles(receipt)
+        if handles:
+            self._backend.release(handles)
 
     def release(self, request: ReleaseLeasePB) -> None:
         handles = list(request.lease_id)
         if not handles:
             return
-        try:
-            self._backend.release(handles)
-        except Exception:  # noqa: BLE001 - remote slot GC is the backstop
-            logging.exception(
-                "[VIT] release failed on transport backend %s", self._backend.name
-            )
+        self._backend.release(handles)
 
     def close(self) -> None:
         try:

@@ -19,6 +19,36 @@ from rtp_llm.utils import backend_registry
 from rtp_llm.utils.backend_registry import register_backend_hook
 
 
+class MMRdmaProviderArgumentsTest(TestCase):
+    def parse_config(self, args, env):
+        from rtp_llm.config.py_config_modules import PyEnvConfigs
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+        from rtp_llm.server.server_args.vit_group_args import init_vit_group_args
+
+        configs = PyEnvConfigs()
+        parser = EnvArgumentParser()
+        parser.set_root_config(configs)
+        init_vit_group_args(parser, configs.vit_config)
+        with patch.dict(os.environ, env, clear=True):
+            parser.parse_args(args)
+        return configs.vit_config.output_transport.rdma
+
+    def test_default_environment_and_cli_provider_count(self):
+        self.assertEqual(self.parse_config([], {}).read_provider_count, 4)
+        env = {"MM_RDMA_READ_PROVIDER_COUNT": "2"}
+        self.assertEqual(self.parse_config([], env).read_provider_count, 2)
+        config = self.parse_config(["--mm_rdma_read_provider_count", "1"], env)
+        self.assertEqual(pickle.loads(pickle.dumps(config)).read_provider_count, 1)
+
+    def test_provider_count_must_be_positive(self):
+        for value in ("0", "-1", "invalid"):
+            with self.subTest(value=value):
+                with self.assertRaises(SystemExit):
+                    self.parse_config(["--mm_rdma_read_provider_count", value], {})
+                with self.assertRaises(SystemExit):
+                    self.parse_config([], {"MM_RDMA_READ_PROVIDER_COUNT": value})
+
+
 class Glm5EnvironmentArgumentsTest(TestCase):
     def test_registered_flags_cli_override_env_and_survive_pickle(self):
         from rtp_llm.server.server_args.server_args import setup_args
@@ -1038,6 +1068,27 @@ class ServerArgsPyEnvConfigsTest(TestCase):
             ):
                 with self.assertRaises(SystemExit):
                     server_args.setup_args([])
+
+    def test_vit_source_download_concurrency_from_env_and_cli(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                server_args.setup_args([]).vit_config.vit_source_download_concurrency, 0
+            )
+        with patch.dict(
+            os.environ, {"VIT_SOURCE_DOWNLOAD_CONCURRENCY": "32"}, clear=True
+        ):
+            self.assertEqual(
+                server_args.setup_args([]).vit_config.vit_source_download_concurrency,
+                32,
+            )
+            self.assertEqual(
+                server_args.setup_args(
+                    ["--vit_source_download_concurrency", "8"]
+                ).vit_config.vit_source_download_concurrency,
+                8,
+            )
 
     def test_dsv4_mega_moe_public_choices(self):
         from rtp_llm.server.server_args import server_args

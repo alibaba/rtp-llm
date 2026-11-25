@@ -1,3 +1,4 @@
+import json
 from typing import Any, Dict, Mapping, Optional
 
 REQUEST_HEADER_NAMES = (
@@ -6,6 +7,7 @@ REQUEST_HEADER_NAMES = (
     "x-dashscope-service",
     "x-dashscope-apikeyid",
     "x-dashscope-request-id",
+    "x-dashscope-requestid",
     "x-request-id",
     "dashscope-request-id",
     "trace-id",
@@ -15,9 +17,11 @@ REQUEST_HEADER_NAMES = (
     "eagleeye-traceid",
     "x-b3-traceid",
     "x-dashscope-inner-qos-level",
+    "x-dashscope-datainspection",
 )
 CORRELATION_HEADER_NAMES = (
     "x-dashscope-request-id",
+    "x-dashscope-requestid",
     "x-request-id",
     "dashscope-request-id",
 )
@@ -45,16 +49,17 @@ def extract_request_headers(
         return {}
 
     try:
-        lookup = {str(key).lower(): value for key, value in headers.items()}
+        lookup: Dict[str, str] = {}
+        for key, value in headers.items():
+            name = str(key).lower()
+            if name in REQUEST_HEADER_NAMES:
+                normalized = _normalize_header_value(value)
+                if normalized is not None:
+                    lookup[name] = normalized
     except Exception:
         return {}
 
-    result: Dict[str, str] = {}
-    for header_name in REQUEST_HEADER_NAMES:
-        value = _normalize_header_value(lookup.get(header_name))
-        if value is not None:
-            result[header_name] = value
-    return result
+    return {name: lookup[name] for name in REQUEST_HEADER_NAMES if name in lookup}
 
 
 def normalize_request_headers(headers: Optional[Mapping[str, Any]]) -> Dict[str, str]:
@@ -85,10 +90,110 @@ def extract_trace_id(headers: Optional[Mapping[str, Any]]) -> str:
 
 
 def dashscope_greennet_metadata(headers: Optional[Mapping[str, Any]]) -> tuple:
-    """Carry request UID and service identity to downstream ViT / LLM RPCs."""
+    """Carry identity and the external request ID to downstream ViT / LLM RPCs."""
     normalized = extract_request_headers(headers)
-    return tuple(
+    metadata = tuple(
         (name, normalized[name])
         for name in ("x-dashscope-uid", "x-dashscope-service")
         if name in normalized
     )
+    request_id = extract_correlation_request_id(normalized)
+    if request_id:
+        metadata += (("x-dashscope-request-id", request_id),)
+    return metadata
+
+
+def extract_workspace_region(ds_attrs: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """Extract only region from workspace metadata in decoded ds_header_attributes.
+
+    Missing or malformed metadata and blank/non-string regions return None.
+    No alternate headers or nested request paths are consulted.
+    """
+    if not ds_attrs:
+        return None
+    raw = ds_attrs.get("x-dashscope-inner-workspace-meta")
+    if not raw:
+        return None
+    if isinstance(raw, str):
+        try:
+            meta = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+    elif isinstance(raw, dict):
+        meta = raw
+    else:
+        return None
+    if not isinstance(meta, dict):
+        return None
+    region = meta.get("region")
+    if isinstance(region, str) and region.strip():
+        return region.strip()
+    return None
+
+
+_DATA_INSPECTION_HEADER = "x-dashscope-datainspection"
+_INSPECTION_DISABLED_VALUES = frozenset(
+    {"disable", "disabled", "false", "0", "off", "no", "n"}
+)
+_INSPECTION_ENABLED_VALUES = frozenset(
+    {"enable", "enabled", "true", "1", "on", "yes", "y"}
+)
+
+
+def extract_input_inspection_enabled(
+    headers: Optional[Mapping[str, Any]],
+) -> Optional[bool]:
+    """Parse the request-scoped input-inspection override.
+
+    ``x-dashscope-datainspection`` carries a JSON object such as
+    ``{"input": "disable", "output": "disable"}``; only ``input`` is
+    consumed. An absent, empty, malformed, or key-less header follows the
+    process configuration (``None``). ``disable`` forces inspection off
+    regardless of configuration; ``enable`` still requires the provider to
+    be enabled.
+    """
+    if not headers:
+        return None
+    raw = None
+    try:
+        for key, value in headers.items():
+            if str(key).lower() == _DATA_INSPECTION_HEADER:
+                raw = value
+                break
+    except Exception:
+        return None
+    raw = _normalize_header_value(raw)
+    if raw is None:
+        return None
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    directive = payload.get("input")
+    if not isinstance(directive, str):
+        return None
+    directive = directive.strip().lower()
+    if directive in _INSPECTION_DISABLED_VALUES:
+        return False
+    if directive in _INSPECTION_ENABLED_VALUES:
+        return True
+    return None
+
+
+def extract_qos_priority(input: Any) -> int:
+    """Use the same QoS priority for scheduling and Worker RPCs."""
+    headers = getattr(input, "headers", None)
+    if headers:
+        value = headers.get("x-dashscope-inner-qos-level")
+        if value is not None:
+            try:
+                return int(str(value).strip())
+            except (TypeError, ValueError):
+                pass
+    config = getattr(input, "generate_config", None)
+    priority = getattr(config, "qos_priority", None)
+    if priority is not None and priority > 0:
+        return priority
+    return 50

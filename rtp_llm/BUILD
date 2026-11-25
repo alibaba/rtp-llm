@@ -91,11 +91,14 @@ arch_with_version_dep = select({
 })
 
 requirement([
+    "quack-kernels",
+    "flash-attn-4",
     "sentencepiece",
     "transformers",
     "pynvml",
     "tiktoken",
     "protobuf",
+    "grpcio",
     "grpcio-tools",
     "setuptools",
     "Pillow",
@@ -274,16 +277,26 @@ py_library(
 )
 
 py_library(
+    name = "vit_metrics",
+    srcs = ["multimodal/vit_metrics.py"],
+    deps = ["//rtp_llm/metrics:metrics"],
+)
+
+py_library(
     name = "multimodal",
+    data = ["//rtp_llm/cpp/media_network:_media_network.so"],
     srcs = glob([
         "multimodal/*.py",
         "multimodal/**/*.py",
     ]),
     deps = [
+        "//rtp_llm/access_logger:access_logger",
+        ":telemetry",
         ":utils",
         ":Pillow",
         ":pillow-heif",
         ":pillow-avif-plugin",
+        ":mm_download_domains",
         ":nest_asyncio",
         ":matplotlib",
         ":torchvision",
@@ -335,8 +348,8 @@ py_library(
     }) + select({
         # cuda13 tests use the matching cubins from the pip lock.
         # The jit-cache wheel is installed through Requires-Dist in runtime images.
-        "@//:using_cuda13_x86": flashinfer + ["flashinfer-cubin", "nvidia-cutlass-dsl", "flash-mla", "fast-hadamard-transform", "tilelang"],
-        "@//:using_cuda13_arm": flashinfer + ["flashinfer-cubin", "nvidia-cutlass-dsl", "flash-mla", "flash-mla-legacy", "tilelang"],
+        "@//:using_cuda13_x86": flashinfer + ["flashinfer-cubin", "nvidia-cutlass-dsl", "quack-kernels", "flash-attn-4", "flash-mla", "fast-hadamard-transform", "tilelang"],
+        "@//:using_cuda13_arm": flashinfer + ["flashinfer-cubin", "nvidia-cutlass-dsl", "quack-kernels", "flash-attn-4", "flash-mla", "flash-mla-legacy", "tilelang"],
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
         "@//:cuda_pre_12_9": flashinfer,
@@ -398,6 +411,23 @@ py_library(
     name = "collective_config",
     srcs = ["config/collective_config.py"],
     visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "mm_download_domains",
+    srcs = ["config/mm_download_domains.py"],
+    deps = [":config_exceptions", ":requests"],
+)
+
+py_library(
+    name = "oss_download_config",
+    srcs = ["config/oss_download.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "config_exceptions",
+    srcs = ["config/exceptions.py"],
 )
 
 py_library(
@@ -483,6 +513,7 @@ py_library(
         "telemetry/*.py",
     ]),
     visibility = ["//visibility:public"],
+    deps = [":grpcio"],
     # The tracing SDK is optional at runtime; tracing.py degrades to a no-op
     # when the import is unavailable, so telemetry never blocks inference.
 )

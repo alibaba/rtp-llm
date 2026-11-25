@@ -1,0 +1,380 @@
+"""Request-owned multimodal work, tensor results and cache publication."""
+
+from __future__ import annotations
+
+import threading
+import time
+from typing import Any, List, Optional, Tuple
+
+import torch
+
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.multimodal.mm_embedding_cache import (
+    MMEmbeddingCache,
+    MMEmbeddingCacheEntry,
+    MMHashKeyCache,
+    _current_cuda_streams,
+    is_current_cache_entry,
+)
+from rtp_llm.multimodal.multimodal_mixins.multimodal_common import MMWorkEstimate
+from rtp_llm.multimodal.multimodal_util import maybe_tensor_to_list
+from rtp_llm.ops import (
+    MultimodalInput,
+    get_multimodal_feature_hash,
+    get_multimodal_feature_hashes,
+)
+from rtp_llm.telemetry import vit_media
+from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
+
+
+def _input_has_url(mm_input: MultimodalInput) -> bool:
+    native_check = getattr(mm_input, "has_url", None)
+    if callable(native_check):
+        return bool(native_check())
+    # Keep compatibility with Python-only input fixtures/providers.
+    return mm_input.url != ""
+
+
+def _acquire_input_cache(
+    cache: MMEmbeddingCache, mm_input: MultimodalInput, *, require_key: bool = False
+):
+    if not require_key:
+        return cache.try_acquire_lazy(mm_input.cache_key)
+    key = mm_input.cache_key()
+    state, entry = cache.try_acquire(key)
+    return key, state, entry
+
+
+def _validate_embedding_result(result: Any) -> None:
+    """Reject tensors that cannot represent visual tokens before caching."""
+    embeddings = result[0]
+    if isinstance(embeddings, torch.Tensor):
+        # Check stacked tensors before splitting: a zero leading dimension
+        # would otherwise become an empty list and bypass per-tensor validation.
+        embeddings = [embeddings]
+    for index, embedding in enumerate(embeddings or []):
+        if isinstance(embedding, torch.Tensor) and embedding.ndim == 0:
+            raise ValueError(
+                f"ViT returned scalar embedding at index {index}; "
+                "expected a visual-token tensor"
+            )
+        if isinstance(embedding, torch.Tensor) and embedding.numel() == 0:
+            raise ValueError(
+                f"ViT returned empty embedding at index {index}: "
+                f"shape={tuple(embedding.shape)}; expected non-empty visual tokens"
+            )
+
+
+@cuda_graph_gate.operation()
+def _feature_hashes_from_result(result: Any) -> List[torch.Tensor]:
+    """Build one sidecar hash tensor for every validated embedding tensor."""
+    _validate_embedding_result(result)
+    embeddings = maybe_tensor_to_list(result[0], ndim_threshold=2)
+    hashes = [get_multimodal_feature_hash(embedding) for embedding in embeddings]
+    return _add_semantic_identity(result, embeddings, hashes)
+
+
+def _add_semantic_identity(result, embeddings, hashes):
+    extra = maybe_tensor_to_list(result[2], ndim_threshold=1) if len(result) > 2 else []
+    if (
+        extra
+        and len(extra) == len(embeddings)
+        and all(
+            isinstance(ids, torch.Tensor)
+            and ids.dtype == torch.int32
+            and ids.ndim == 1
+            and ids.numel() == embedding.shape[0]
+            for ids, embedding in zip(extra, embeddings)
+        )
+    ):
+        import hashlib
+
+        # Equal media embeddings with different vocabulary IDs or positions
+        # must not share language-model KV state (e.g. PLE and MRoPE).
+        identity = hashlib.sha256()
+        for tensor in [*extra, *maybe_tensor_to_list(result[1], ndim_threshold=2)]:
+            if tensor.device.type != "cpu":
+                raise ValueError(
+                    "semantic IDs and media coordinates must be produced on CPU"
+                )
+            identity.update(tensor.contiguous().numpy().tobytes())
+        salt = int.from_bytes(identity.digest()[:4], "little", signed=True)
+        hashes = [(value.to(torch.int64) ^ salt).to(torch.int32) for value in hashes]
+    return hashes
+
+
+@cuda_graph_gate.operation()
+def prepare_batch_feature_hashes(work_items, results) -> None:
+    """Coalesce eager CUDA hashes before publishing any work-item cache entry.
+
+    Deferred async hashes and already computed hashes retain their old path.
+    CPU results keep the single-result implementation. No embedding is copied
+    or concatenated, and cache/inspection publication still belongs to each item.
+    """
+    pending, embeddings = [], []
+    for item, result in zip(work_items, results):
+        if item.defer_feature_hashes or item.feature_hashes is not None:
+            continue
+        _validate_embedding_result(result)
+        values = maybe_tensor_to_list(result[0], ndim_threshold=2)
+        if not values or not all(value.is_cuda for value in values):
+            continue
+        pending.append((item, result, values))
+        embeddings.extend(values)
+    if len(embeddings) < 2:
+        return
+    hashes = get_multimodal_feature_hashes(embeddings)
+    if len(hashes) != len(embeddings):
+        raise RuntimeError("Batched feature hash output count mismatch")
+    offset = 0
+    for item, result, values in pending:
+        end = offset + len(values)
+        item.feature_hashes = _add_semantic_identity(result, values, hashes[offset:end])
+        offset = end
+
+
+class MMEmbeddingRes:
+    """Result container for multimodal embedding operations."""
+
+    def __init__(
+        self,
+        embeddings: List[torch.Tensor],
+        position_ids: Optional[List[torch.Tensor]] = None,
+        extra_input: Optional[List[torch.Tensor]] = None,
+        feature_hashes: Optional[List[torch.Tensor]] = None,
+    ):
+        self.embeddings = embeddings
+        self.position_ids = position_ids if position_ids is not None else []
+        # Model-specific extra input, one opaque flat 1-D tensor per image (e.g. deepstack).
+        self.extra_input = extra_input if extra_input is not None else []
+        self.feature_hashes = feature_hashes
+
+    def __str__(self) -> str:
+        return f"MMEmbeddingRes(length={len(self.embeddings)}, embeddings_shape={[e.shape for e in self.embeddings]}, position_ids_shape={[p.shape for p in self.position_ids] if self.position_ids is not None else []}, extra_input_shape={[d.shape for d in self.extra_input] if self.extra_input is not None else []})"
+
+
+class MMWorkItem:
+    """Represents a work item for processing multimodal inputs."""
+
+    def __init__(
+        self,
+        mm_inputs: List[MultimodalInput],
+        mm_timeout_ms: Optional[int] = VitConfig.DEFAULT_MM_TIMEOUT_MS,
+        embedding_cache: Optional[MMEmbeddingCache] = None,
+        cache_claim: Optional[Tuple[str, MMEmbeddingCacheEntry, str]] = None,
+        defer_cache_complete: bool = False,
+        hash_key_cache: Optional[MMHashKeyCache] = None,
+        defer_feature_hashes: bool = False,
+        deadline: Optional[float] = None,
+        require_cache_key: bool = False,
+        region: Optional[str] = None,
+        cache_input: Optional[MultimodalInput] = None,
+        preprocess_ready_event: Optional[threading.Event] = None,
+    ):
+        self.deadline = deadline
+        if not mm_inputs:
+            raise ValueError("No mm_input for work item")
+
+        self.mm_inputs = mm_inputs
+        # Resolve each input independently, then use the largest budget for the
+        # shared batch so the worker matches the proxy deadline calculation.
+        default_timeout_ms = (
+            mm_timeout_ms
+            if mm_timeout_ms is not None and mm_timeout_ms > 0
+            else VitConfig.DEFAULT_MM_TIMEOUT_MS
+        )
+        self.mm_timeout_ms = max(
+            (
+                input.mm_preprocess_config.mm_timeout_ms
+                if input.mm_preprocess_config.mm_timeout_ms > 0
+                else default_timeout_ms
+            )
+            for input in self.mm_inputs
+        )
+        self.mm_type = self.mm_inputs[0].mm_type
+        # Passthrough workspace region for proxy-routed media downloads.
+        self.region: Optional[str] = region
+
+        self.preprocess_result: Optional[Any] = None
+        self.media_traces = ()
+        self.capture_inspection_sources = False
+        self.source_identity = None
+        self.inspection_sources: Optional[List[bytes]] = None
+        self.inspection_request = None
+        self.inspection_future = None
+        self.source_download = None
+        self.prepared_sources = None
+        self.pending_inspection_handle = None
+        self.preprocess_ready = False
+        self.preprocess_submitted_at = 0.0
+        self.preprocess_received_at = 0.0
+        self.preprocess_ready_event = (
+            threading.Event()
+            if preprocess_ready_event is None
+            else preprocess_ready_event
+        )
+        self.embedding_result: Optional[Any] = None
+        self.feature_hashes: Optional[List[torch.Tensor]] = None
+        self.work_estimate: Optional[MMWorkEstimate] = None
+        cache_input = mm_inputs[0] if cache_input is None else cache_input
+        self.need_check_cache = len(mm_inputs) == 1 and _input_has_url(cache_input)
+        self.embedding_cache = embedding_cache
+        self.hash_key_cache = hash_key_cache
+        self.cache_key: Optional[str] = None
+        self.cache_entry: Optional[MMEmbeddingCacheEntry] = None
+        self.cache_state: Optional[str] = None
+        self.remote_cache = None
+        self.remote_cache_key = None
+        self.remote_trace_id = None
+        self._remote_write_attempted = False
+        self._remote_producer_streams = None
+        self._cache_failed = False
+        self.defer_cache_complete = defer_cache_complete
+        # Only cache-free async producers defer hashes to get_embedding_result.
+        # None distinguishes uncaptured producing streams from CPU-only output.
+        self.defer_feature_hashes = defer_feature_hashes
+        self.embedding_producer_streams: Optional[List[Any]] = None
+
+        if cache_claim is not None:
+            if not self.need_check_cache:
+                raise ValueError("cache_claim requires one non-empty multimodal input")
+            self.cache_key, self.cache_entry, self.cache_state = cache_claim
+            if self.cache_state == "complete":
+                self.embedding_result = self.cache_entry.wait()
+                if (
+                    self.hash_key_cache is not None
+                    and self.embedding_cache is not None
+                    and is_current_cache_entry(
+                        self.embedding_cache, self.cache_key, self.cache_entry
+                    )
+                ):
+                    self.feature_hashes = self.hash_key_cache.get(
+                        self.cache_key, self.cache_entry.generation
+                    )
+        elif self.need_check_cache and self.embedding_cache is not None:
+            self.cache_key, self.cache_state, self.cache_entry = _acquire_input_cache(
+                self.embedding_cache, cache_input, require_key=require_cache_key
+            )
+            if self.cache_state == "complete":
+                self.embedding_result = self.cache_entry.wait()
+                if self.hash_key_cache is not None and is_current_cache_entry(
+                    self.embedding_cache, self.cache_key, self.cache_entry
+                ):
+                    self.feature_hashes = self.hash_key_cache.get(
+                        self.cache_key, self.cache_entry.generation
+                    )
+
+        # future 可以是 ApplyResult (multiprocess) 或 _LocalResult (local)
+        self.future: Optional[Any] = None
+
+    def release_preprocess_sources(self):
+        if self.source_download is not None:
+            self.source_download.close()
+            self.source_download = None
+            self.prepared_sources = None
+            self.pending_inspection_handle = None
+
+    def remaining_timeout_s(self) -> float:
+        timeout_s = self.mm_timeout_ms / 1000.0
+        if self.deadline is not None:
+            timeout_s = min(timeout_s, self.deadline - time.monotonic())
+            if timeout_s <= 0:
+                raise FtRuntimeException(
+                    ExceptionType.GENERATE_TIMEOUT, "ViT request deadline exceeded"
+                )
+        return timeout_s
+
+    @property
+    def waiting_for_cache(self) -> bool:
+        return self.cache_state == "in_progress" and self.embedding_result is None
+
+    @property
+    def should_preprocess(self) -> bool:
+        if self.capture_inspection_sources and self.cache_state == "miss":
+            # An unchecked remote tensor skips ViT but still needs source bytes.
+            return True
+        return self.embedding_result is None and not self.waiting_for_cache
+
+    def complete_cache(self, result: Any, force: bool = False) -> None:
+        # Async cache-free producers defer hashing, but must fail empty output
+        # immediately rather than publish it for a later result consumer.
+        _validate_embedding_result(result)
+        if self.defer_feature_hashes:
+            if self.embedding_producer_streams is None:
+                # Capture on the scheduler thread without synchronizing it.
+                # Consumers using the same streams need no extra CUDA events.
+                self.embedding_producer_streams = _current_cuda_streams(result)
+        elif self.feature_hashes is None:
+            self.feature_hashes = _feature_hashes_from_result(result)
+        if self.remote_cache is not None and self._remote_producer_streams is None:
+            # Inspection may publish from another thread. Snapshot on the
+            # stream that owns the encoder output before that storage is reused.
+            self._remote_producer_streams = _current_cuda_streams(result)
+        if self.defer_cache_complete and not force:
+            if (
+                self.cache_entry is not None
+                and self.cache_entry.capture_compute_streams
+                and self.embedding_producer_streams is None
+            ):
+                self.embedding_producer_streams = _current_cuda_streams(result)
+            return
+        if (
+            not self._cache_failed
+            and not self._remote_write_attempted
+            and self.remote_cache is not None
+            and self.remote_cache_key is not None
+            and getattr(self, "cache_source", "encoder") == "encoder"
+            and not self.waiting_for_cache
+        ):
+            self._remote_write_attempted = True
+            self.remaining_timeout_s()
+            self.remote_cache.submit_result(
+                self.remote_cache_key,
+                result,
+                trace_id=self.remote_trace_id,
+                producer_streams=self._remote_producer_streams,
+                entry=self.cache_entry,
+            )
+        if (
+            self.embedding_cache is None
+            or self.cache_key is None
+            or self.cache_entry is None
+        ):
+            return
+        if self.embedding_producer_streams is not None:
+            self.cache_entry.producer_streams = self.embedding_producer_streams
+        try:
+            self.embedding_cache.complete(
+                self.cache_key,
+                self.cache_entry,
+                result,
+                before_publish=self._publish_cache_hashes,
+            )
+        except BaseException as error:
+            vit_media.failure("cache.publish", error, self.media_traces)
+            raise
+
+    def _publish_cache_hashes(self) -> None:
+        if self.feature_hashes is not None and self.hash_key_cache is not None:
+            try:
+                self.hash_key_cache.put_for_entry(
+                    self.cache_key,
+                    self.feature_hashes,
+                    self.cache_entry,
+                    self.embedding_cache,
+                )
+            except BaseException as error:
+                vit_media.failure("cache.publish", error, self.media_traces)
+                raise
+
+    def fail_cache(self, error: Exception) -> None:
+        self._cache_failed = True
+        if (
+            self.embedding_cache is None
+            or self.cache_key is None
+            or self.cache_entry is None
+            or self.cache_state != "miss"
+        ):
+            return
+        self.embedding_cache.fail(self.cache_key, self.cache_entry, error)

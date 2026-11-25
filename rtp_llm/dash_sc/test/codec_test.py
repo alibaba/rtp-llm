@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.dash_sc import codec
 from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc.codec import (
@@ -33,8 +34,9 @@ from rtp_llm.dash_sc.codec import (
     parse_sampling_params,
     prepend_to_generated_ids_tensor,
 )
-from rtp_llm.dash_sc.inference.servicer import stream_log_tag
+from rtp_llm.dash_sc.inference.servicer import _make_generate_input, stream_log_tag
 from rtp_llm.dash_sc.proto import predict_v2_pb2
+from rtp_llm.server.request_headers import dashscope_greennet_metadata
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateOutput,
@@ -948,6 +950,35 @@ class DashScGrpcRequestTest(TestCase):
         op = parse_request_controls(req)
         self.assertTrue(op.return_input_ids)
 
+    def test_external_request_id_aliases_and_body_fallback(self) -> None:
+        external_id = "dash-" + "x" * 200
+        for name in ("X-DashScope-RequestId", "x-dashscope-request-id"):
+            for attrs in ({name: external_id}, {"parameters": {name: external_id}}):
+                with self.subTest(attrs=attrs):
+                    req = predict_v2_pb2.ModelInferRequest(id="body-id")
+                    req.parameters["ds_header_attributes"].string_param = json.dumps(
+                        attrs
+                    )
+                    headers = parse_request_controls(req).request_headers
+                    self.assertEqual(
+                        dashscope_greennet_metadata(headers),
+                        (("x-dashscope-request-id", external_id),),
+                    )
+            self.assertEqual(
+                dashscope_greennet_metadata(
+                    {name: external_id, "authorization": "secret"}
+                ),
+                (("x-dashscope-request-id", external_id),),
+            )
+        req = predict_v2_pb2.ModelInferRequest(id="body-id")
+        self.assertEqual(
+            dashscope_greennet_metadata(parse_request_controls(req).request_headers),
+            (("x-dashscope-request-id", "body-id"),),
+        )
+        self.assertEqual(
+            dashscope_greennet_metadata({"X-DashScope-RequestId": " "}), ()
+        )
+
     def test_parse_request_controls_int32(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         _add_tensor(req, "return_input_ids", "INT32", [1], struct.pack("<i", 0))
@@ -977,6 +1008,161 @@ class DashScGrpcRequestTest(TestCase):
         self.assertEqual(
             op.request_headers, {"user_id": "u1", "x-dashscope-apikeyid": "ak1"}
         )
+
+    def test_parse_workspace_region_from_ds_header_attributes(self) -> None:
+        meta = json.dumps(
+            {
+                "model_logging_policy": "default",
+                "region": "cn-beijing",
+                "service_site": "asia-pacific-china",
+            }
+        )
+        req = self._tpm_request(
+            {
+                "x-dashscope-inner-workspace-meta": meta,
+                "x-dashscope-inner-gateway-region": "different-gateway",
+                "workspace_id": "ws-example",
+                "x-dashscope-workspace": "ws-example",
+            }
+        )
+        controls = parse_request_controls(req)
+        self.assertEqual(controls.request_headers, {"region": "cn-beijing"})
+        generate_input = _make_generate_input(
+            request_id=1,
+            input_ids_list=[1],
+            generate_config=GenerateConfig(),
+            invocation_metadata=(),
+            request_headers=controls.request_headers,
+        )
+        self.assertEqual(generate_input.headers, {"region": "cn-beijing"})
+        self.assertNotIn(
+            "region",
+            parse_request_controls(self._tpm_request({})).request_headers,
+        )
+
+    def test_parse_workspace_region_ignores_other_sources(self) -> None:
+        meta = json.dumps({"region": "cn-beijing"})
+        req = self._tpm_request(
+            {
+                "x_dashscope_inner_workspace_meta": meta,
+                "x-dashscope-inner-gateway-region": "cn-beijing",
+            }
+        )
+        req.parameters["header"].string_param = json.dumps(
+            {"attributes": {"x_dashscope_inner_workspace_meta": meta}}
+        )
+        controls = parse_request_controls(
+            req, invocation_metadata=(("x-dashscope-inner-workspace-meta", meta),)
+        )
+        self.assertNotIn("region", controls.request_headers)
+        self.assertEqual(controls.request_headers, {})
+
+    def test_parse_workspace_region_invalid_values(self) -> None:
+        for value in (
+            None,
+            "",
+            "not-json",
+            "null",
+            "[]",
+            "{}",
+            '{"region": 123}',
+            '{"region": " "}',
+        ):
+            with self.subTest(value=value):
+                controls = parse_request_controls(
+                    self._tpm_request({"x-dashscope-inner-workspace-meta": value})
+                )
+                self.assertNotIn("region", controls.request_headers)
+                self.assertEqual(controls.request_headers, {})
+
+    def test_parse_enable_estimated_usage(self) -> None:
+        for value, expected in (
+            ("true", True),
+            ("false", False),
+            ("1", True),
+            ("0", False),
+            (None, None),
+        ):
+            with self.subTest(value=value):
+                attrs = {}
+                if value is not None:
+                    attrs["x-dashscope-inner-enableestimatedusage"] = value
+                op = parse_request_controls(self._tpm_request(attrs))
+                self.assertEqual(op.enable_estimated_usage, expected)
+
+        op = parse_request_controls(
+            predict_v2_pb2.ModelInferRequest(),
+            invocation_metadata=(("x-dashscope-inner-enableestimatedusage", "true"),),
+        )
+        self.assertTrue(op.enable_estimated_usage)
+
+    def test_parse_support_frontend_estimated_usage(self) -> None:
+        for value, expected in (
+            ("true", True),
+            ("false", False),
+            ("1", True),
+            ("0", False),
+            (None, False),
+        ):
+            with self.subTest(value=value):
+                attrs = {}
+                if value is not None:
+                    attrs["x-dashscope-inner-support-frontend-estimatedusage"] = value
+                op = parse_request_controls(self._tpm_request(attrs))
+                self.assertEqual(op.support_frontend_estimated_usage, expected)
+
+    def _tpm_request(self, attrs):
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(attrs)
+        return req
+
+    def test_request_identity_survives_empty_case_aliases(self) -> None:
+        for empty in ("", None, " \t "):
+            with self.subTest(empty=empty):
+                attrs = {
+                    "x-dashscope-service": "recorded-service",
+                    "X-DashScope-Service": empty,
+                    "x-dashscope-uid": "recorded-uid",
+                    "X-DashScope-Uid": empty,
+                    "parameters": {"enable_thinking": True},
+                    "PARAMETERS": None,
+                }
+                request = predict_v2_pb2.ModelInferRequest()
+                request.parameters["ds_header_attributes"].string_param = json.dumps(
+                    attrs
+                )
+                controls = parse_request_controls(request)
+                expected = (
+                    ("x-dashscope-uid", "recorded-uid"),
+                    ("x-dashscope-service", "recorded-service"),
+                )
+                self.assertEqual(dict(expected), controls.request_headers)
+                self.assertEqual(
+                    dashscope_greennet_metadata(controls.request_headers), expected
+                )
+                self.assertEqual(dashscope_greennet_metadata(attrs), expected)
+                self.assertIsNone(
+                    codec.parse_ds_header_attributes(request)["parameters"]
+                )
+
+    def test_request_identity_keeps_last_nonempty_value_without_fallback(self) -> None:
+        for override in ("last-service", "", None):
+            with self.subTest(override=override):
+                attrs = {
+                    "x-dashscope-service": "first-service" if override else "",
+                    "X-DashScope-Service": override,
+                }
+                request = predict_v2_pb2.ModelInferRequest()
+                request.parameters["ds_header_attributes"].string_param = json.dumps(
+                    attrs
+                )
+                expected = (
+                    (("x-dashscope-service", "last-service"),) if override else ()
+                )
+                self.assertEqual(dashscope_greennet_metadata(attrs), expected)
+                self.assertEqual(
+                    parse_request_controls(request).request_headers, dict(expected)
+                )
 
     def test_parse_request_controls_enable_thinking_only_from_parameter(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
@@ -1433,6 +1619,166 @@ class DashScMultimodalRequestTest(TestCase):
 
 
 class BuildStreamResponseFromGenerateOutputsTest(TestCase):
+    def test_prompt_cache_usage_preserves_pd_prefill_and_zero(self) -> None:
+        # The PD bridge publishes the prompt-cache count in reuse_len. Decode
+        # KV acquired during handoff remains a separate diagnostic counter.
+        cases = (
+            AuxInfo(
+                input_len=347211,
+                pd_sep=True,
+                reuse_len=343040,
+                prefill_total_reuse_len=343040,
+                decode_total_reuse_len=347136,
+            ),
+            AuxInfo(
+                input_len=347211,
+                pd_sep=True,
+                reuse_len=0,
+                prefill_total_reuse_len=0,
+                decode_total_reuse_len=347136,
+            ),
+            AuxInfo(input_len=8192, reuse_len=4096),
+        )
+        for is_streaming in (True, False):
+            builder = StreamResponseBuilder(
+                dash_sc_request_id="cache-usage",
+                model_name="default",
+                request_log_tag="cache-usage",
+                is_streaming=is_streaming,
+            )
+            for aux in cases:
+                with self.subTest(is_streaming=is_streaming, aux=aux):
+                    go = GenerateOutputs(
+                        generate_outputs=[
+                            GenerateOutput(
+                                output_ids=torch.tensor([7], dtype=torch.int32),
+                                finished=True,
+                                aux_info=aux,
+                            )
+                        ]
+                    )
+                    # Reuse one builder to exercise template patching from a
+                    # nonzero cache count to zero, then back to nonzero.
+                    responses = (
+                        builder.build(go),
+                        codec.build_stream_response_from_generate_outputs(
+                            "cache-usage",
+                            "default",
+                            go,
+                            "cache-usage",
+                            is_streaming=is_streaming,
+                        ),
+                    )
+                    for response in responses:
+                        infer = response.infer_response
+                        by_name = {
+                            output.name: raw
+                            for output, raw in zip(
+                                infer.outputs, infer.raw_output_contents
+                            )
+                        }
+                        self.assertEqual(
+                            _unpack_int32_le(by_name["prompt_cached_token_num"]),
+                            [aux.reuse_len],
+                        )
+                        cached = infer.parameters["prompt_cached_token_num"]
+                        self.assertTrue(cached.HasField("int64_param"))
+                        self.assertEqual(cached.int64_param, aux.reuse_len)
+                        self.assertEqual(
+                            _unpack_int32_le(by_name["prompt_token_num"]),
+                            [aux.input_len],
+                        )
+                        self.assertEqual(
+                            infer.parameters["prompt_token_num"].int64_param,
+                            aux.input_len,
+                        )
+                        self.assertEqual(
+                            infer.parameters["incremental_output"].int64_param,
+                            int(is_streaming),
+                        )
+
+    def _image_accounting_builder(self, **options):
+        return StreamResponseBuilder(
+            dash_sc_request_id="v41-media",
+            model_name="v41",
+            request_log_tag="v41-media",
+            **options,
+        )
+
+    @staticmethod
+    def _image_accounting_output(lengths):
+        return GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([7]),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=20, multimodal_lengths=lengths),
+                )
+            ]
+        )
+
+    def test_v41_opt_in_reports_backend_image_tokens_on_first_response(self):
+        builder = self._image_accounting_builder(image_tokens_from_backend=True)
+        frame = builder.build(
+            self._image_accounting_output(
+                {int(MMUrlType.IMAGE): 17, int(MMUrlType.VIDEO): 90}
+            )
+        )
+        self.assertEqual(
+            frame.infer_response.parameters["image_tokens"].int64_param, 17
+        )
+
+    def test_v41_unknown_image_tokens_not_fabricated_and_later_metadata_is_used(self):
+        builder = self._image_accounting_builder(image_tokens_from_backend=True)
+        first = builder.build(self._image_accounting_output({}))
+        self.assertNotIn("image_tokens", first.infer_response.parameters)
+        second = builder.build(
+            self._image_accounting_output({int(MMUrlType.IMAGE): 17})
+        )
+        third = builder.build(self._image_accounting_output({}))
+        self.assertEqual(
+            second.infer_response.parameters["image_tokens"].int64_param, 17
+        )
+        self.assertEqual(
+            third.infer_response.parameters["image_tokens"].int64_param, 17
+        )
+        self.assertNotIn("image_tokens", first.infer_response.parameters)
+
+    def test_backend_image_accounting_does_not_change_other_models_or_typed_values(
+        self,
+    ):
+        for options, expected in (
+            ({}, None),
+            ({"image_tokens": 4}, 4),
+            ({"image_tokens": 4, "image_tokens_from_backend": True}, 4),
+        ):
+            with self.subTest(options=options):
+                builder = self._image_accounting_builder(**options)
+                for _ in range(2):
+                    frame = builder.build(
+                        self._image_accounting_output({int(MMUrlType.IMAGE): 17})
+                    )
+                    if expected is None:
+                        self.assertNotIn(
+                            "image_tokens", frame.infer_response.parameters
+                        )
+                    else:
+                        self.assertEqual(
+                            frame.infer_response.parameters["image_tokens"].int64_param,
+                            expected,
+                        )
+
+    def test_unknown_backend_image_key_or_invalid_length_does_not_emit_zero(self):
+        for lengths in (
+            {int(MMUrlType.VIDEO): 20},
+            {"1": 20},
+            {int(MMUrlType.IMAGE): -1},
+        ):
+            with self.subTest(lengths=lengths):
+                builder = self._image_accounting_builder(image_tokens_from_backend=True)
+                frame = builder.build(self._image_accounting_output(lengths))
+                self.assertNotIn("image_tokens", frame.infer_response.parameters)
+
     def test_empty_generate_outputs_raises(self) -> None:
         go = GenerateOutputs(generate_outputs=[])
         builder = StreamResponseBuilder(
@@ -1889,6 +2235,84 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             for i in range(len(infer.outputs))
         }
         self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [2])
+
+
+class FakeFirstPacketTest(TestCase):
+    def _builder(self, **overrides):
+        static = {
+            "dash_sc_request_id": "fake-1",
+            "model_name": "default",
+            "request_log_tag": "fake-1",
+        }
+        static.update(overrides)
+        return StreamResponseBuilder(**static)
+
+    def test_multimodal_metadata_and_accounting(self) -> None:
+        response = self._builder().build_fake_first_packet(
+            prompt_token_num=1200,
+            split_sizes=(600, 400),
+            feature_hashes=tuple(range(1000)),
+        )
+        infer = response.infer_response
+        self.assertEqual(infer.id, "fake-1")
+        self.assertEqual(infer.model_name, "default")
+        self.assertTrue(infer.parameters["estimated_usage"].bool_param)
+        self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 1200)
+        self.assertEqual(infer.parameters["image_tokens"].int64_param, 1000)
+        self.assertEqual(infer.parameters["incremental_output"].int64_param, 1)
+        metadata = json.loads(infer.parameters["multimodal_metadata"].string_param)
+        self.assertEqual(metadata["version"], 1)
+        self.assertEqual([item["item_id"] for item in metadata["items"]], ["m0", "m1"])
+        self.assertEqual(
+            [item["llm_sequence_length"] for item in metadata["items"]], [600, 400]
+        )
+        self.assertTrue(all(len(item["mm_key"]) == 32 for item in metadata["items"]))
+        self.assertNotEqual(
+            metadata["items"][0]["mm_key"], metadata["items"][1]["mm_key"]
+        )
+        by_name = {
+            output.name: raw
+            for output, raw in zip(infer.outputs, infer.raw_output_contents)
+        }
+        generated = next(out for out in infer.outputs if out.name == "generated_ids")
+        self.assertEqual(list(generated.shape), [1, 0])
+        self.assertEqual(_unpack_int32_le(by_name["prompt_token_num"]), [1200])
+        self.assertEqual(_unpack_int32_le(by_name["prompt_cached_token_num"]), [0])
+        self.assertEqual(
+            _unpack_int64_le(by_name["finish_reason"]),
+            [int(LLMFinishReason.STREAMING)],
+        )
+        self.assertEqual(by_name["finished"], b"\x00")
+
+    def test_text_only_metadata_is_empty(self) -> None:
+        response = self._builder(is_streaming=False).build_fake_first_packet(
+            prompt_token_num=7
+        )
+        infer = response.infer_response
+        self.assertEqual(infer.parameters["image_tokens"].int64_param, 0)
+        self.assertEqual(infer.parameters["incremental_output"].int64_param, 0)
+        metadata = json.loads(infer.parameters["multimodal_metadata"].string_param)
+        self.assertEqual(metadata, {"version": 1, "items": []})
+
+    def test_fake_packet_does_not_initialize_template(self) -> None:
+        builder = self._builder()
+        builder.build_fake_first_packet(
+            prompt_token_num=3, split_sizes=(2,), feature_hashes=(1, 2)
+        )
+        self.assertIsNone(builder._template)
+        go = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([9]),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=3, reuse_len=0),
+                )
+            ]
+        )
+        response = builder.build(go)
+        self.assertEqual(
+            response.infer_response.parameters["prompt_token_num"].int64_param, 3
+        )
 
 
 class PrependToGeneratedIdsTensorTest(TestCase):

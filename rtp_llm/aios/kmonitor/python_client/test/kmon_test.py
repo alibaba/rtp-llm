@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 from rtp_llm.aios.kmonitor.python_client.kmonitor.kmonitor import KMonitor, MetricTypes
 from rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.metric_factory import (
@@ -21,12 +22,33 @@ class KmonTest(unittest.TestCase):
         metric.report(1, {"key": "v1"})
         metric.report(2, {"key": "v2"})
         points = metric.fetch_reported_data()
-        self.assertEqual(len(points), 3)
-        self.assertDictEqual(points[0].tags, {})
-        self.assertDictEqual(points[1].tags, {"key": "v1"})
-        self.assertDictEqual(points[2].tags, {"key": "v2"})
-        self.assertAlmostEqual(points[1].value * 1.5, points[2].value)
+        self.assertEqual(len(points), 2)
+        self.assertDictEqual(points[0].tags, {"key": "v1"})
+        self.assertDictEqual(points[1].tags, {"key": "v2"})
+        self.assertAlmostEqual(points[0].value * 1.5, points[1].value)
         report_worker.stop()
+
+    def test_unused_workers_do_not_emit_competing_zeros(self) -> None:
+        with mock.patch(
+            "rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.acc_metric.time"
+        ) as clock:
+            clock.time.return_value = 100.0
+            metrics = [
+                MetricFactory.create_metric(
+                    MetricTypes.ACC_METRIC, "vit_success", {"container_ip": "test"}
+                )
+                for _ in range(33)
+            ]
+            metrics[0].report(9)
+            clock.time.return_value = 101.0
+            points = [p for m in metrics for p in m.fetch_reported_data()]
+            self.assertEqual([p.value for p in points], [9.0])
+            clock.time.return_value = 102.0
+            points = [p for m in metrics for p in m.fetch_reported_data()]
+            self.assertEqual([p.value for p in points], [0.0])
+            metrics[0].report(2)
+            clock.time.return_value = 103.0
+            self.assertEqual(metrics[0].fetch_reported_data()[0].value, 2.0)
 
     def test_report(self) -> None:
         kmon = KMonitor({"tag_a": "aa"})
