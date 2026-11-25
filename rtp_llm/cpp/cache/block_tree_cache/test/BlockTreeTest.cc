@@ -383,6 +383,10 @@ TEST(BlockTreeTest, RemovePendingNodesReleasesAggregatedNonOwnerReferences) {
     EXPECT_TRUE(blocked.inserted_nodes.empty());
     ASSERT_TRUE(blocked.hard_stop);
 
+    const auto writeback = tree.insertNode({90, 100}, makeEmpty2DResources(2), false, false, /*is_writeback=*/true);
+    EXPECT_TRUE(writeback.hard_stop);
+    EXPECT_TRUE(tree.findNode({90}).empty());
+
     tree.removePendingNodes({{node, 1}});
     EXPECT_EQ(tree.insertNode({100}, makeEmpty2DResources(1), false, false).inserted_nodes.size(), 1u);
 }

@@ -27,17 +27,18 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
                                               size_t                                            remote_reuse_end) {
     resident_prefix_length = 0;
     RTP_LLM_CHECK_WITH_INFO(target_tier == Tier::DEVICE, "unsupported store target tier: %s", tierName(target_tier));
-    publishDeviceLocked(cache_keys, resources, is_resident, resident_prefix_length);
+    resident_prefix_length = publishDeviceLocked(cache_keys, resources, is_resident);
     return storage_backend_ ? storage_backend_->prepareWrite(makeStorageRequest(
                                   cache_keys, resources, request_id, remote_reuse_begin, remote_reuse_end)) :
                               StorageWriteTask{};
 }
 
-void BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                              cache_keys,
-                                          const std::vector<std::vector<GroupSetResource>>& resources,
-                                          bool                                              is_resident,
-                                          size_t&                                           resident_prefix_length) {
-    const BlockTreeInsertResult insert_result = tree_->insertNode(cache_keys, resources, false, is_resident);
+size_t BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                              cache_keys,
+                                            const std::vector<std::vector<GroupSetResource>>& resources,
+                                            bool                                              is_resident,
+                                            bool                                              is_writeback) {
+    const BlockTreeInsertResult insert_result =
+        tree_->insertNode(cache_keys, resources, false, is_resident, is_writeback);
     if (insert_result.hard_stop) {
         metrics_reporter_.reportInsertHardStop();
     }
@@ -48,7 +49,7 @@ void BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                  
     if (resources_inserted) {
         settled_(true);
     }
-    resident_prefix_length = insert_result.resident_prefix_length;
+    return insert_result.resident_prefix_length;
 }
 
 StorageRequest BlockTreeStorer::makeStorageRequest(const CacheKeysType&                              cache_keys,
@@ -69,19 +70,38 @@ StorageRequest BlockTreeStorer::makeStorageRequest(const CacheKeysType&         
         if (key_index >= remote_reuse_begin && key_index < remote_reuse_end) {
             continue;
         }
-        auto& key_handles = request.handles[output++];
-        for (size_t group_set = 0; group_set < tree_->groupSets().size(); ++group_set) {
-            const auto& resource = resources[key_index][group_set];
-            if (!resource.hasCompleteDeviceValue()) {
-                continue;
-            }
-            const auto& group = *tree_->groupSets()[group_set];
-            for (size_t member = 0; member < group.groupTags().size(); ++member) {
-                key_handles.push_back({group.groupTags()[member], resource.device_blocks[member]});
-            }
-        }
+        request.handles[output++] = deviceHandles(resources[key_index]);
     }
     return request;
+}
+
+StorageWriteTask BlockTreeStorer::preparePublishedWriteLocked(const CacheKeysType&          keys,
+                                                              const std::vector<TreeNode*>& path) const {
+    if (!storage_backend_) {
+        return {};
+    }
+    StorageRequest request;
+    request.keys = std::make_shared<CacheKeysType>(keys);
+    request.handles.reserve(path.size());
+    for (const auto* node : path) {
+        request.handles.push_back(deviceHandles(node->group_set_resources));
+    }
+    return storage_backend_->prepareWrite(std::move(request));
+}
+
+std::vector<StorageBlockHandle> BlockTreeStorer::deviceHandles(const std::vector<GroupSetResource>& groups) const {
+    std::vector<StorageBlockHandle> handles;
+    for (size_t gid = 0; gid < tree_->groupSets().size(); ++gid) {
+        const auto& resource = groups[gid];
+        if (!resource.hasCompleteDeviceValue()) {
+            continue;
+        }
+        const auto& tags = tree_->groupSets()[gid]->groupTags();
+        for (size_t i = 0; i < tags.size(); ++i) {
+            handles.push_back({tags[i], resource.device_blocks[i]});
+        }
+    }
+    return handles;
 }
 
 }  // namespace rtp_llm

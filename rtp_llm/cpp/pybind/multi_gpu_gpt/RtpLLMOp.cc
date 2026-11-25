@@ -2,6 +2,9 @@
 #include <memory>
 #include <tuple>
 #include <vector>
+#include <chrono>
+#include <thread>
+#include <pybind11/functional.h>
 #include "autil/EnvUtil.h"
 #include "autil/Log.h"
 #include "c10/util/intrusive_ptr.h"
@@ -28,6 +31,8 @@ namespace th = torch;
 namespace rtp_llm {
 
 namespace {
+
+using ShutdownClock = std::chrono::steady_clock;
 
 int64_t getGrpcStopTimeoutMs() {
     constexpr int64_t kDefaultStopTimeoutMs = 600 * 1000;
@@ -452,10 +457,16 @@ void RtpLLMOp::setServing(bool serving) {
     setKmonServiceServing(serving);
 }
 
-void RtpLLMOp::stop() {
+void RtpLLMOp::stop(const std::function<void(int64_t)>& before_rpc_shutdown) {
     setKmonServiceServing(false);
     const int64_t stop_timeout_ms = getGrpcStopTimeoutMs();
     if (!is_server_shutdown_) {
+        auto cache_manager = model_rpc_service_ ? model_rpc_service_->getCacheManager() : nullptr;
+        const bool writeback_enabled = cache_manager && cache_manager->hasP2PWriteback();
+        const auto now = ShutdownClock::now();
+        const auto max_timeout = std::chrono::duration_cast<std::chrono::milliseconds>(
+            ShutdownClock::time_point::max() - now);
+        const auto deadline = now + std::min(std::chrono::milliseconds(stop_timeout_ms), max_timeout);
         if (model_rpc_service_) {
             model_rpc_service_->beginShutdown();
         }
@@ -472,9 +483,32 @@ void RtpLLMOp::stop() {
                     break;
                 }
             }
-            RTP_LLM_LOG_INFO("Server shutdowning");
-            grpc_server_->Shutdown();
-            pybind11::gil_scoped_acquire acquire;
+        }
+        if (writeback_enabled) {
+            pybind11::gil_scoped_release release;
+            cache_manager->stopWriteback(
+                std::chrono::duration_cast<std::chrono::milliseconds>(deadline.time_since_epoch()).count());
+        }
+        cache_manager.reset();
+        if (before_rpc_shutdown) {
+            const auto remaining_ms = std::max<int64_t>(
+                0, std::chrono::duration_cast<std::chrono::milliseconds>(deadline - ShutdownClock::now()).count());
+            try {
+                before_rpc_shutdown(remaining_ms);
+            } catch (const std::exception& e) {
+                if (writeback_enabled) {
+                    RTP_LLM_LOG_ERROR("writeback rank rendezvous failed; proceeding with shutdown: %s", e.what());
+                } else {
+                    throw;
+                }
+            }
+        }
+        if (grpc_server_) {
+            RTP_LLM_LOG_INFO("Shutting down gRPC server");
+            {
+                pybind11::gil_scoped_release release;
+                grpc_server_->Shutdown();
+            }
             grpc_server_.reset();
         }
         if (model_rpc_service_) {
@@ -511,7 +545,7 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("mm_process_engine"),
              py::arg("trace_config") = py::none())
         .def("set_serving", &RtpLLMOp::setServing)
-        .def("stop", &RtpLLMOp::stop);
+        .def("stop", &RtpLLMOp::stop, py::arg("before_rpc_shutdown") = py::none());
 }
 
 }  // namespace rtp_llm

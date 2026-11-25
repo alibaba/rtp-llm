@@ -138,6 +138,7 @@ grpc::Status PrefillResultStore::fillStartLoadResponsePayload(const SideChannelD
         payload->set_frontend_context_execute_time_with_cache_us(data.frontend_context_execute_time_with_cache_us);
         payload->set_prefill_use_independent_block_pools(data.prefill_use_independent_block_pools);
         payload->set_total_reuse_len(data.total_reuse_len);
+        payload->set_writeback_first_use_len(data.writeback_first_use_len);
         payload->set_local_reuse_len(data.local_reuse_len);
         payload->set_remote_reuse_len(data.remote_reuse_len);
         payload->set_memory_reuse_len(data.memory_reuse_len);

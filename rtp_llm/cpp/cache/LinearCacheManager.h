@@ -45,8 +45,11 @@ public:
                          std::vector<size_t>* backfilled_positions = nullptr,
                          const RequiredPositions& required_positions   = {}) override;
 
-    void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
-    void releaseRequestStateToDecodeTail(BlockIds& block_ids, int reserve_step) override;
+    void removeSkippedBlocks(BlockIds& block_ids,
+                             bool      enable_reuse_cache = false,
+                             int       reserve_step       = 0,
+                             int       extra_tail_blocks  = 0) override;
+    void releaseRequestStateToDecodeTail(BlockIds& block_ids, int reserve_step, int extra_tail_blocks = 0) override;
     size_t         historyReclaimEnd(int committed_tokens) const override;
     int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const override;
     int            estimatePeakNeedBlocks(int                     seq_len,
@@ -54,14 +57,16 @@ public:
                                           int                     remaining_tokens,
                                           int                     reserve_step,
                                           bool                    enable_reuse_cache,
-                                          bool                    reclaim_history = false) const override;
+                                          bool                    reclaim_history   = false,
+                                          int                     extra_tail_blocks = 0) const override;
     int            estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                       int  common_seq_len,
                                                       int  remaining_tokens,
                                                       int  reserve_step,
                                                       bool enable_reuse_cache,
                                                       int  target_batch_size,
-                                                      bool reclaim_history = false) const override;
+                                                      bool reclaim_history   = false,
+                                                      int  extra_tail_blocks = 0) const override;
     NeedBlocksInfo getNeedBlocks(int                      common_seq_len,
                                  int                      seq_len,
                                  int                      reserve_step,
@@ -83,7 +88,7 @@ private:
     void filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const;
     int  materializedTailBlockCount() const;
     int  retainedTailBlockCount() const;
-    int  retainedDecodeBlocks(int reserve_step) const;
+    int  retainedDecodeBlocks(int reserve_step, int extra_tail_blocks = 0) const;
     bool mallocImpl(BlockIds&                block_ids,
                     int                      seq_len,
                     int                      reserve_step,

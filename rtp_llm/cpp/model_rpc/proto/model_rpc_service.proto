@@ -171,6 +171,8 @@ message GenerateConfigPB {
     google.protobuf.Int32Value logits_index = 78;
     uint32 top_logprobs = 79;
     bool return_logprobs = 80;
+    // Missing on legacy clients: preserve the service-level writeback behavior.
+    google.protobuf.BoolValue enable_p2p_writeback = 81;
 }
 
 message MMPreprocessConfigPB {
@@ -357,6 +359,7 @@ message AuxInfoPB {
     int32 disk_reuse_len = 31;
     int32 prefill_disk_reuse_len = 32;
     int32 decode_disk_reuse_len = 33;
+    int32 writeback_first_use_len = 34;
 }
 
 message PromptLogitsOutputPB {
@@ -814,6 +817,11 @@ enum P2PConnectorBroadcastType {
     CANCEL_HANDLE_READ = 3;
     QUERY_LEASE_STATUS = 4;
     HANDLE_READ_NO_TRANSFER = 5;
+    WRITE = 6;
+    HANDLE_WRITE = 7;
+    CANCEL_WRITE = 8;
+    CANCEL_HANDLE_WRITE = 9;
+    HANDLE_WRITE_READY = 10;
 }
 
 // One transfer route as minted by KVCacheTransferPlanner, projected onto the side that
@@ -905,7 +913,7 @@ message P2PPipelineLayoutPB {
 // Exchanged within an engine at startup. Only the layout is used by peer RPCs.
 message P2PStageStartupPB {
     P2PPipelineLayoutPB.Stage layout = 1;
-    map<string, uint64> decode_block_bytes = 2;  // Physical bytes per block ID on one TP rank.
+    map<string, uint64> decode_block_bytes = 2;  // Per-rank physical bytes per block ID, also used by PP Prefill writeback.
 }
 
 message P2PConnectorBroadcastTpRequestPB {
@@ -942,6 +950,9 @@ message P2PConnectorBroadcastTpRequestPB {
     int64 cancel_retention_ms = 14;
     // Per-send transport budget. Zero uses the legacy worker deadline.
     int64 communication_timeout_ms = 15;
+    P2PConnectorBroadcastType lease_operation = 16;
+    int32 worker_rank = 17;
+    uint64 writeback_kv_step = 18;  // WRITE only: local Decode compute must reach this step.
 }
 
 // GetPeerInfo: Decode queries the selected Prefill for its TP/CP layout before recv registration.
@@ -964,7 +975,7 @@ message GetPeerInfoResponsePB {
 message P2PConnectorBroadcastTpResponsePB {
     ErrorCodePB error_code = 1;
     string error_message = 2;
-    // Populated when request type == QUERY_LEASE_STATUS
+    // Populated for lease queries and cancellation acknowledgements.
     LeaseStatusResponsePB lease_status = 3;
     // Worker wall-clock timestamp for successful READ with transfer tasks.
     int64 kv_complete_time_us = 4;
@@ -980,6 +991,38 @@ message LeaseStatusResponsePB {
 message PrefillRouteKeysPB {
     int32 route_id = 1;
     repeated int64 cache_keys = 2;
+}
+
+message P2PConnectorWriteSourcePB {
+    string worker_addr = 1;
+    repeated TransferRoutePB routes = 2;
+}
+
+message P2PConnectorStartWriteBackRequestPB {
+    int64 request_id = 1;
+    string unique_key = 2;
+    int64 timeout_ms = 3;
+    repeated int64 cache_keys = 4;
+    int32 decode_tp_size = 5;
+    repeated int32 token_ids = 6;
+    int32 input_length = 7;
+    int64 deadline_ms = 8;
+    repeated P2PConnectorWriteSourcePB decode_workers = 9;
+    uint64 plan_digest = 10;
+    bytes decode_pipeline_layout = 11;  // Serialized P2PPipelineLayoutPB from startup.
+    uint64 writeback_kv_step = 12;
+}
+
+message P2PConnectorStartWriteBackResponsePB {
+    int32 error_code = 1;
+    string error_message = 2;
+    int32 accepted_block_count = 3;
+    bool stopped = 4;
+}
+
+message P2PConnectorCancelWriteBackRequestPB {
+    string unique_key = 1;
+    int64 deadline_ms = 2;
 }
 
 message P2PConnectorStartLoadRequestPB {
@@ -1041,6 +1084,7 @@ message SideChannelPayloadPB {
     int64 frontend_context_execute_time_us = 17;
     int64 frontend_context_execute_time_with_cache_us = 18;
     int64 first_token_time_us = 19;
+    int32 writeback_first_use_len = 20;
 }
 
 message P2PConnectorStartLoadResponsePB {
@@ -1347,6 +1391,8 @@ service RpcService {
 
     rpc ExecuteFunction(FunctionRequestPB) returns (FunctionResponsePB);
     rpc StartLoad(P2PConnectorStartLoadRequestPB) returns (P2PConnectorStartLoadResponsePB);
+    rpc StartWriteBack(P2PConnectorStartWriteBackRequestPB) returns (P2PConnectorStartWriteBackResponsePB);
+    rpc CancelWriteBack(P2PConnectorCancelWriteBackRequestPB) returns (P2PConnectorStartWriteBackResponsePB);
     rpc GetPeerInfo(GetPeerInfoRequestPB) returns (GetPeerInfoResponsePB);
     rpc EnqueueBatch(EnqueueBatchRequestPB) returns (EnqueueBatchResponsePB);
     rpc EnqueueGroup(EnqueueGroupRequestPB) returns (EnqueueBatchResponsePB);

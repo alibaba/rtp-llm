@@ -1042,4 +1042,33 @@ PrefillRpcServer::Cancel(grpc::ServerContext*, const CancelRequestPB* request, C
     return grpc::Status::OK;
 }
 
+grpc::Status PrefillRpcServer::StartWriteBack(grpc::ServerContext*                       context,
+                                              const P2PConnectorStartWriteBackRequestPB* request,
+                                              P2PConnectorStartWriteBackResponsePB*      response) {
+    if (context->IsCancelled()) {
+        return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
+    }
+    if (!engine_ || !engine_->getCacheManager()) {
+        response->set_error_code(ErrorCodePB::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
+        response->set_error_message("cache manager is unavailable");
+        response->set_stopped(true);
+        return grpc::Status::OK;
+    }
+    engine_->getCacheManager()->handleWrite(*request, *response, [context]() { return context->IsCancelled(); });
+    return grpc::Status::OK;
+}
+
+grpc::Status PrefillRpcServer::CancelWriteBack(grpc::ServerContext*                        context,
+                                               const P2PConnectorCancelWriteBackRequestPB* request,
+                                               P2PConnectorStartWriteBackResponsePB*       response) {
+    if (context->IsCancelled()) {
+        return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
+    }
+    if (!engine_ || !engine_->getCacheManager()) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is unavailable");
+    }
+    engine_->getCacheManager()->cancelP2PWrite(*request, *response);
+    return grpc::Status::OK;
+}
+
 }  // namespace rtp_llm

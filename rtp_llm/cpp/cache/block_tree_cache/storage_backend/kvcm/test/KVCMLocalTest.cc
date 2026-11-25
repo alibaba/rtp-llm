@@ -10,12 +10,14 @@
 #include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
 #include "rtp_llm/cpp/cache/events/KVCacheEventPublisher.h"
 #include "rtp_llm/cpp/cache/events/KVCacheEventReporter.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
 #include "rtp_llm/cpp/utils/AsyncProfileTrace.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 
@@ -570,6 +572,66 @@ TEST(KVCMLocalTest, ExecuteFunctionPropagatesMetadataErrorsAndPreservesTransferS
                       ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT ? REMOTE_TRANSFER_STATUS_TIMEOUT :
                                                                                 REMOTE_TRANSFER_STATUS_FAILED);
         }
+    }
+}
+
+TEST(KVCMLocalTest, ExternalWritebackPersistsDevicePrefixMissingFromRemote) {
+    for (const bool hybrid : {false, true}) {
+        SCOPED_TRACE(hybrid);
+        auto env = hybrid ? makeHybridBackendEnvironment("external_hybrid") : makeBackendEnvironment("external_full");
+        auto client = std::make_shared<MockClientWrapper>();
+        EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+        EXPECT_CALL(*client, shutdown()).Times(1);
+        auto                                handle = makeBackend(env, singleRankConfig(), client);
+        std::shared_ptr<KVCMStorageBackend> backend(std::move(handle.backend));
+
+        ScopedReferencedBlocks          blocks(env, 2);
+        std::vector<GroupSetPtr>        groups;
+        std::vector<GroupSetResource>   prefix, suffix;
+        kv_cache_manager::WriteLocation location;
+        location.write_session_id = "external";
+        location.block_mask       = kv_cache_manager::BlockMaskOffset{0};
+        location.locations.resize(2);
+        for (const auto& tag : env.cache_config.groupTags()) {
+            const bool linear = env.cache_config.topology().group(tag).policy.group_type == CacheGroupType::LINEAR;
+            std::vector<DeviceBlockPoolPtr> pools{env.pools_by_tag.at(tag)};
+            GroupSetPtr                     group;
+            if (linear) {
+                group = std::make_shared<LinearGroupSet>(pools, nullptr, nullptr);
+            } else {
+                group = std::make_shared<FullGroupSet>(pools, nullptr, nullptr);
+            }
+            group->initialize(groups.size(), env.cache_config.topologyPtr(), {tag});
+            groups.push_back(group);
+            prefix.emplace_back().device_blocks = {blocks.get()[0]};
+            suffix.emplace_back().device_blocks = {blocks.get()[1]};
+            const auto                  spec    = (linear ? "tp0_L" : "tp0_F") + tag;
+            kv_cache_manager::UriStrVec uris{tag + "_prefix", tag + "_suffix"};
+            for (size_t i = 0; i < uris.size(); ++i) {
+                location.locations[i].push_back({spec, uris[i]});
+            }
+            EXPECT_CALL(*client, saveKvCachesForTag(tag, uris, _, _))
+                .WillOnce(Invoke([&, tag, uris](const auto&, const auto&, const auto& buffers, const auto&) {
+                    EXPECT_EQ(buffers.size(), 2u);
+                    for (size_t i = 0; i < std::min(buffers.size(), blocks.get().size()); ++i) {
+                        const auto layer = env.cache_config.layerIdsForGroup(tag).front();
+                        EXPECT_EQ(buffers[i].iovs.at(0).base,
+                                  environmentBuffers(env, layer, tag, blocks.get()[i]).at(0).addr);
+                    }
+                    return std::make_pair(true, uris);
+                }));
+        }
+        EXPECT_CALL(*client, getWriteLocation(_, _, CacheKeysType({101, 102}), _, _, _, 0))
+            .WillOnce(Return(std::make_pair(true, location)));
+        EXPECT_CALL(*client, finishWrite(_, _, "external", _, _)).WillOnce(Return(true));
+        BlockTreeCacheConfig config;
+        config.enable_device_cache = true;
+        config.enable_remote_cache = true;
+        auto cache                 = block_tree_cache_test::makeBlockTreeCacheForTest(groups, config, backend);
+        ASSERT_TRUE(block_tree_cache_test::insertGroupSetResources(*cache, {101}, {prefix}));
+        std::vector<GroupSetResource> empty_prefix(groups.size());
+        ASSERT_TRUE(cache->insertExternalBlocks({101, 102}, 1, {empty_prefix, suffix}, currentTimeMs() + 10000).ok());
+        ASSERT_TRUE(waitForBackendOperationsForTest(*backend));
     }
 }
 

@@ -1289,6 +1289,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("p2p_rdma_staging_total_bytes", &CacheStoreConfig::p2p_rdma_staging_total_bytes)
         .def_readwrite("p2p_prefill_sender_thread_count", &CacheStoreConfig::p2p_prefill_sender_thread_count)
         .def_readwrite("p2p_prefill_sender_queue_size", &CacheStoreConfig::p2p_prefill_sender_queue_size)
+        .def_readwrite("p2p_writeback_enable", &CacheStoreConfig::p2p_writeback_enable)
+        .def_readwrite("p2p_writeback_require_device_prefix", &CacheStoreConfig::p2p_writeback_require_device_prefix)
+        .def_readwrite("p2p_writeback_max_kv_ratio", &CacheStoreConfig::p2p_writeback_max_kv_ratio)
         .def("to_string", &CacheStoreConfig::to_string)
         .def(py::pickle(
             [](const CacheStoreConfig& self) {
@@ -1313,7 +1316,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.p2p_rdma_enable_h2d_copy,
                                       self.p2p_rdma_staging_total_bytes,
                                       self.p2p_prefill_sender_thread_count,
-                                      self.p2p_prefill_sender_queue_size);
+                                      self.p2p_prefill_sender_queue_size,
+                                      self.p2p_writeback_enable,
+                                      self.p2p_writeback_max_kv_ratio,
+                                      self.p2p_writeback_require_device_prefix);
             },
             [](py::tuple t) {
                 if (t.size() == 18) {
@@ -1338,7 +1344,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     return c;
                 }
                 // The 27-, 28-, and 29-field layouts append retired values.
-                if (t.size() != 22 && t.size() != 27 && t.size() != 28 && t.size() != 29) {
+                if (t.size() != 22 && t.size() != 25 && t.size() != 27 && t.size() != 28 && t.size() != 29) {
                     throw std::runtime_error("Invalid CacheStoreConfig state");
                 }
                 CacheStoreConfig c;
@@ -1364,6 +1370,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.p2p_rdma_staging_total_bytes = t[19].cast<int64_t>();
                 c.p2p_prefill_sender_thread_count = t[20].cast<int>();
                 c.p2p_prefill_sender_queue_size = t[21].cast<int>();
+                if (t.size() == 25) {
+                    c.p2p_writeback_enable                = t[22].cast<bool>();
+                    c.p2p_writeback_max_kv_ratio          = t[23].cast<double>();
+                    c.p2p_writeback_require_device_prefix = t[24].cast<bool>();
+                }
                 return c;
             }));
 

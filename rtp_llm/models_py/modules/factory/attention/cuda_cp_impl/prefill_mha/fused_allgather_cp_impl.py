@@ -217,6 +217,8 @@ class PCPFusedPagedAttnOp:
         attn_inputs: PyAttentionInputs,
         parallelism_config: ParallelismConfig,
     ) -> tuple[bool, str]:
+        if parallelism_config.prefill_cp_config.kv_cache_sharded:
+            return False, "fused CP requires a replicated KV cache"
         if attn_configs.kv_cache_dtype != KvCacheDataType.BASE:
             return False, f"KV cache dtype is {attn_configs.kv_cache_dtype}"
 

@@ -14,6 +14,12 @@
 
 namespace rtp_llm {
 
+class WritebackStepTracker;
+
+inline bool validWritebackMaxKvRatio(double max_ratio) {
+    return max_ratio >= 0.0 && max_ratio <= 1.0;
+}
+
 inline int64_t getP2PTransferListenPort(int64_t cache_store_listen_port) {
     // Reuse the reserved per-worker slot right after cache_store_listen_port.
     // Keep port 0 unchanged so tests can still request an ephemeral port.
@@ -28,6 +34,8 @@ struct P2PConnectorSchedulerConfig {
     int64_t                  p2p_lease_query_timeout_ms                   = 500;
     int64_t                  p2p_cancel_broadcast_timeout_ms              = 1000;
     int64_t                     p2p_cancelled_keys_ttl_ms    = 3600 * 1000;
+    bool                                 p2p_writeback_require_device_prefix           = true;
+    double                               p2p_writeback_max_kv_ratio                    = 0.3;
     std::shared_ptr<const CacheTopology> topology;
     bool                                 use_group_cache_transfer_policy = false;
     bool                                 use_mla                         = false;
@@ -35,6 +43,7 @@ struct P2PConnectorSchedulerConfig {
     int                                  decode_transfer_layer_end       = std::numeric_limits<int>::max();
     std::map<std::string, size_t>        physical_block_bytes_by_group;
     size_t                               cache_key_tokens_per_block = 1;
+    int64_t                              cache_key_hash_seed        = 0;
     int                                  cp_rank = 0;
     int                                  cp_size = 1;
 
@@ -56,6 +65,8 @@ struct P2PConnectorSchedulerConfig {
         config.p2p_lease_query_timeout_ms = cache_store_config.p2p_lease_query_timeout_ms;
         config.p2p_cancel_broadcast_timeout_ms = cache_store_config.p2p_cancel_broadcast_timeout_ms;
         config.p2p_cancelled_keys_ttl_ms       = cache_store_config.p2p_cancelled_keys_ttl_ms;
+        config.p2p_writeback_require_device_prefix    = cache_store_config.p2p_writeback_require_device_prefix;
+        config.p2p_writeback_max_kv_ratio             = cache_store_config.p2p_writeback_max_kv_ratio;
         return config;
     }
 };
@@ -127,11 +138,18 @@ struct P2PConnectorWorkerConfig {
 };
 
 struct P2PConnectorConfig {
+    bool     p2p_writeback_enable = false;
     RoleType role_type = RoleType::PDFUSION;
     int      tp_rank   = 0;
 
     P2PConnectorSchedulerConfig scheduler_config;
     P2PConnectorWorkerConfig    worker_config;
+    std::shared_ptr<WritebackStepTracker> writeback_step_tracker;
+
+    int writebackWorkerIndex() const {
+        const auto& pc = scheduler_config.parallelism_config;
+        return static_cast<int>(pc.pp_rank * pc.tp_size) + tp_rank;
+    }
 
     static P2PConnectorConfig create(const RuntimeConfig&     runtime_config,
                                      const CacheStoreConfig&  cache_store_config,
@@ -140,6 +158,7 @@ struct P2PConnectorConfig {
                                      uint32_t                 layer_all_num,
                                      size_t                   llm_kv_block_size_bytes) {
         P2PConnectorConfig config;
+        config.p2p_writeback_enable = cache_store_config.p2p_writeback_enable;
         config.role_type = pd_sep_config.role_type;
         config.tp_rank   = parallelism_config.tp_rank;
         config.scheduler_config =

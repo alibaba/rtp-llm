@@ -10,9 +10,9 @@
 
 namespace rtp_llm {
 
-inline bool accumulateDecodeStageBlockBytes(const P2PStageStartupPB&       stage,
-                                            size_t                         tp_size,
-                                            std::map<std::string, size_t>& instance_block_bytes) {
+inline bool accumulateStageBlockBytes(const P2PStageStartupPB&       stage,
+                                      size_t                         tp_size,
+                                      std::map<std::string, size_t>& instance_block_bytes) {
     if (tp_size == 0) {
         return false;
     }

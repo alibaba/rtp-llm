@@ -26,6 +26,7 @@ public:
         int64_t                              first_token_id   = 0;
         int64_t                              first_token_time_us = 0;
         int32_t                              total_reuse_len  = 0;
+        int32_t                              writeback_first_use_len              = 0;
         int32_t                              local_reuse_len  = 0;
         int32_t                              remote_reuse_len = 0;
         int32_t                              memory_reuse_len = 0;

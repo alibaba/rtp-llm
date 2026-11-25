@@ -2292,6 +2292,7 @@ TEST_F(PPBatchStreamProcessorTest, NormalDispatchPreservesProcessorStateAfterLoc
     EXPECT_EQ(head_processor->updates, 1);
     EXPECT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{1, 2, 9, 10}));
     EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+    EXPECT_EQ(stream->writebackKVReadyTokenCount(), 3);
     EXPECT_FALSE(stream->isPPInflight());
     auto output = stream->nextOutput(1);
     ASSERT_TRUE(output.ok());
@@ -2486,6 +2487,8 @@ TEST_F(PPBatchStreamProcessorTest, SpeculativeDispatchCommitsAcceptedPrefixesAnd
                   decode ? std::vector<int32_t>({1, 1, 0}) : std::vector<int32_t>{});
         EXPECT_EQ(first->completeTokenIdsVec(0), expected_first);
         EXPECT_EQ(second->completeTokenIdsVec(0), expected_second);
+        EXPECT_EQ(first->writebackKVReadyTokenCount(), decode ? 3 : 2);
+        EXPECT_EQ(second->writebackKVReadyTokenCount(), decode ? 5 : 2);
         EXPECT_EQ(first->getProposeToken(), (std::vector<int>{30, 31, 32, 33}));
         EXPECT_EQ(second->getProposeToken(), (std::vector<int>{decode ? 22 : 20, 23, 24, 25}));
         EXPECT_EQ(tensorToVector<int32_t>(result.new_token_lengths), (std::vector<int32_t>{1, decode ? 3 : 1}));

@@ -2,10 +2,12 @@ import gc
 import logging
 import threading
 import time
+from datetime import timedelta
 from typing import TYPE_CHECKING, Optional
 
 from rtp_llm.access_logger.access_logger import AccessLogger
 from rtp_llm.config.engine_config import EngineConfig, update_worker_addrs
+from rtp_llm.ops import RoleType
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.mega_moe import MEGA_MOE_STRATEGIES
 from rtp_llm.config.py_config_modules import PyEnvConfigs
@@ -268,7 +270,20 @@ class BackendManager(object):
 
             engine_stop_error = None
             try:
-                self.engine.stop()
+                from rtp_llm.async_decoder_engine.embedding.embedding_engine import (
+                    EmbeddingCppEngine,
+                )
+
+                if (
+                    self.py_env_configs.cache_store_config.p2p_writeback_enable
+                    and self.py_env_configs.parallelism_config.world_size > 1
+                    and self.py_env_configs.role_config.role_type
+                    in (RoleType.PREFILL, RoleType.DECODE)
+                    and not isinstance(self.engine, EmbeddingCppEngine)
+                ):
+                    self.engine.stop(self._wait_for_writeback_stop)
+                else:
+                    self.engine.stop()
             except Exception as e:
                 engine_stop_error = e
                 logging.exception("engine stop failed during backend shutdown")
@@ -282,6 +297,32 @@ class BackendManager(object):
                         raise
             if engine_stop_error is not None:
                 raise engine_stop_error
+
+    def _wait_for_writeback_stop(self, remaining_ms: int) -> None:
+        pc = self.py_env_configs.parallelism_config
+
+        # TCPStore is independent of the model collectives, which may still be exiting.
+        store = self._distributed_server.store
+        drained_keys = [
+            f"shutdown_writeback_drained_{rank}" for rank in range(pc.world_size)
+        ]
+        observed_keys = [
+            f"shutdown_writeback_observed_{rank}" for rank in range(pc.world_size)
+        ]
+        deadline = time.monotonic() + remaining_ms / 1000
+
+        def wait_for_ranks(keys: list[str]) -> None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("writeback rank rendezvous timed out")
+            store.wait(keys, timedelta(seconds=max(remaining, 0.001)))
+
+        store.set(drained_keys[pc.world_rank], "1")
+        wait_for_ranks(drained_keys)
+        store.set(observed_keys[pc.world_rank], "1")
+        # The TCPStore owner must stay alive until every peer has observed the drain.
+        if pc.world_rank == 0:
+            wait_for_ranks(observed_keys)
 
     def ready(self):
         if self.engine is not None:

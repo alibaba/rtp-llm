@@ -47,7 +47,8 @@ public:
                  int                    remaining_tokens,
                  int                    reserve_step,
                  bool                   enable_reuse_cache,
-                 LinearCachePolicy      linear_cache_policy),
+                 LinearCachePolicy      linear_cache_policy,
+                 int                    writeback_alignment_tokens),
                 (const, override));
     MOCK_METHOD(size_t, availableBlocksNum, (), (const, override));
     MOCK_METHOD(size_t, totalBlocksNum, (), (const, override));
@@ -66,7 +67,8 @@ protected:
                  int               reserve_step,
                  bool              enable_reuse_cache,
                  int               target_batch_size,
-                 LinearCachePolicy linear_cache_policy),
+                 LinearCachePolicy linear_cache_policy,
+                 int               writeback_alignment_tokens),
                 (const, override));
 };
 

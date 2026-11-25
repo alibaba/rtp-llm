@@ -144,6 +144,14 @@ public:
                                bool                               enable_storage_backend = true,
                                std::optional<int64_t>             request_id             = {},
                                bool                               skip_linear            = false);
+    ErrorInfo            matchForExternalInsert(const CacheKeysType&  cache_keys,
+                                                size_t                required_prefix_blocks,
+                                                BlockTreeMatchResult& match_result,
+                                                bool                  require_device_prefix = true);
+    ErrorInfo            insertExternalBlocks(const CacheKeysType&                              cache_keys,
+                                              size_t                                            start_block,
+                                              const std::vector<std::vector<GroupSetResource>>& resources,
+                                              int64_t                                           deadline_ms);
     void                 insert(const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& resources,
                                 Tier                                              target_tier);
@@ -211,7 +219,11 @@ public:
 private:
     struct CapacityCallbackState;
 
-    void checkWatermark();
+    ErrorInfo validateWritebackPrefixLocked(const CacheKeysType&          cache_keys,
+                                            const std::vector<TreeNode*>& path,
+                                            size_t                        required_prefix_blocks,
+                                            bool                          require_device_prefix = true) const;
+    void      checkWatermark();
     // Caller holds mutex_.
     void onWorkflowSettledLocked(bool check_watermark);
 

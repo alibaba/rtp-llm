@@ -1174,6 +1174,53 @@ TEST_F(P2PConnectorSchedulerTest, DecodeCompactStateProjectsUsingPrefillCpSize) 
     EXPECT_EQ(layer.block_ids(1), 12);
 }
 
+TEST(P2PDecodeRouteProjectionTest, CompactStateUsesGroupBlockSizeOnCp1Destination) {
+    P2PConnectorSchedulerConfig config;
+    config.cache_key_tokens_per_block = 1024;
+    config.topology                   = test::makeTestCacheTopology(1, 1, {{0}}, 2048, {CacheGroupType::SWA});
+    config.parallelism_config.tp_size = 1;
+    config.parallelism_config.prefill_cp_config.kv_cache_sharded = true;
+    P2PSchedulerDecodeRead scheduler(config, nullptr, nullptr);
+
+    KVCacheResource resource;
+    resource.initGroups(config.topology);
+    resource.cacheKeys() = {100, 101, 102};
+    resource.mutableBlockIds("group0").assign({10, 11, NULL_BLOCK_IDX});
+    TransferPlan plan;
+    for (int source_rank = 0; source_rank < 2; ++source_rank) {
+        TransferRoute route;
+        route.route_id  = source_rank;
+        route.src_rank  = source_rank;
+        route.cache_tag = "group0";
+        route.src_keys  = {2, 1, true, 2};
+        route.dst_slice = {CpBlockSliceMode::EQUAL_BYTES, 2, source_rank};
+        plan.routes.push_back(std::move(route));
+    }
+    std::vector<PrefillRouteKeysPB> filters;
+    for (int start_block : {0, 2}) {
+        const auto projected = scheduler.buildDecodeRankRoutes(plan, resource, {start_block, -1}, 1, filters);
+        ASSERT_TRUE(projected.ok()) << projected.status().ToString();
+        EXPECT_TRUE(filters.empty());
+        ASSERT_EQ(projected.value().size(), 1u);
+        ASSERT_EQ(projected.value()[0].size(), 2u);
+        for (const auto& route : projected.value()[0]) {
+            ASSERT_EQ(route.layer_blocks_size(), 1);
+            const auto& blocks         = route.layer_blocks(0);
+            const int   expected_count = start_block == 0 ? 2 : 1;
+            ASSERT_EQ(blocks.cache_keys_size(), expected_count);
+            ASSERT_EQ(blocks.block_ids_size(), expected_count);
+            if (start_block == 0) {
+                EXPECT_EQ(blocks.cache_keys(0), 101);
+                EXPECT_EQ(blocks.block_ids(0), 10);
+            }
+            EXPECT_EQ(blocks.cache_keys(expected_count - 1), 102);
+            EXPECT_EQ(blocks.block_ids(expected_count - 1), 11);
+        }
+    }
+    resource.mutableBlockIds("group0").assign({10, NULL_BLOCK_IDX, 12});
+    EXPECT_FALSE(scheduler.buildDecodeRankRoutes(plan, resource, {2, -1}, 1, filters).ok());
+}
+
 TEST_F(P2PConnectorSchedulerTest, AsyncReadCpAcceptsDifferentAdvertisedSourceCpSize) {
     rebuildSchedulerWithLayerAttnTypes({CacheGroupType::FULL}, /*cp_size=*/2);
 
@@ -1786,8 +1833,8 @@ TEST(P2PRetainedKvTest, CapacityIncludesAllDecodePipelineStages) {
     (*stage0.mutable_decode_block_bytes())["group1"] = 200;
     P2PStageStartupPB stage1;
     (*stage1.mutable_decode_block_bytes())["group1"] = 600;
-    ASSERT_TRUE(accumulateDecodeStageBlockBytes(stage0, 2, config.physical_block_bytes_by_group));
-    ASSERT_TRUE(accumulateDecodeStageBlockBytes(stage1, 2, config.physical_block_bytes_by_group));
+    ASSERT_TRUE(accumulateStageBlockBytes(stage0, 2, config.physical_block_bytes_by_group));
+    ASSERT_TRUE(accumulateStageBlockBytes(stage1, 2, config.physical_block_bytes_by_group));
 
     auto pool = std::make_shared<autil::LockFreeThreadPool>(1, 16, nullptr, "P2PPipelineCapacity");
     ASSERT_TRUE(pool->start());

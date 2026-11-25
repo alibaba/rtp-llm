@@ -18,6 +18,7 @@ struct TreeNode {
     TreeNode*                                   parent{nullptr};
     std::vector<GroupSetResource>               group_set_resources;
     size_t                                      non_owner_transfer_ref_count{0};
+    bool                                        is_accounted{true};
     bool                                        is_resident{false};  // Must never change from true to false.
 };
 

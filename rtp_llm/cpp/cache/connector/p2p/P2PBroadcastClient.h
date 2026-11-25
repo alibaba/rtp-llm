@@ -7,7 +7,6 @@
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include <functional>
 #include <memory>
-#include <optional>
 #include <atomic>
 #include <optional>
 #include <string>
@@ -25,7 +24,7 @@ public:
     explicit P2PBroadcastClient(const std::vector<std::string>&         worker_addrs,
                                 int64_t                                 cancel_broadcast_timeout_ms = 1000,
                                 std::function<void(const std::string&)> connect_failure_reporter    = {});
-    ~P2PBroadcastClient() = default;
+    virtual ~P2PBroadcastClient() = default;
 
 public:
     /// @brief 初始化 RPC 连接池和 BroadcastManager
@@ -54,6 +53,18 @@ public:
             }
             return completed;
         }
+        bool waitDone(int timeout_ms, bool fatal_on_error = false) const {
+            if (locally_completed_) {
+                return true;
+            }
+            const bool completed =
+                tp_broadcast_result_ && tp_broadcast_result_->waitDone(timeout_ms, fatal_on_error);
+            if (completed) {
+                int64_t expected = 0;
+                total_cost_time_us_.compare_exchange_strong(expected, currentTimeUs() - start_time_us_);
+            }
+            return completed;
+        }
         bool success() const;
         std::optional<int64_t> kvPhysicalCompletionTimeUs() const;
         void checkDone();
@@ -63,6 +74,21 @@ public:
             } else if (callback) {
                 callback();
             }
+        }
+
+        bool rpcSuccess() const {
+            if (locally_completed_) {
+                return true;
+            }
+            if (!tp_broadcast_result_ || !tp_broadcast_result_->done() || !tp_broadcast_result_->rpcSuccess()) {
+                return false;
+            }
+            for (const auto& response : tp_broadcast_result_->responses()) {
+                if (!response.has_p2p_response()) {
+                    return false;
+                }
+            }
+            return true;
         }
 
         int64_t totalCostTimeUs() const {
@@ -106,6 +132,8 @@ public:
         RankRoutes                                    routes;
         uint64_t                                      plan_digest{0};
         std::function<bool()>                         is_cancelled;
+        int                                           worker_rank{0};
+        uint64_t                                      writeback_kv_step{0};
     };
 
     std::shared_ptr<Result> broadcast(BroadcastParams params);
@@ -148,7 +176,26 @@ public:
     /// @param poll_timeout_ms 单次 broadcast 的 gRPC 超时（毫秒）
     LeaseStatusResult queryLeaseStatus(const std::string& unique_key, int64_t poll_timeout_ms);
 
+public:
+    std::shared_ptr<TpBroadcastResult> controlWriteAsync(const std::string&        unique_key,
+                                                         P2PConnectorBroadcastType type,
+                                                         int64_t                   transfer_deadline_ms,
+                                                         int64_t                   control_timeout_ms);
+    virtual std::shared_ptr<TpBroadcastResult>
+    queryLeaseStatusAsync(const std::string& unique_key, P2PConnectorBroadcastType operation, int64_t poll_timeout_ms);
+    static LeaseStatusResult leaseStatus(const std::shared_ptr<TpBroadcastResult>& result);
+
+    bool hasInflightRpcs() const {
+        return tp_broadcast_manager_ && tp_broadcast_manager_->hasInflightRpcs();
+    }
+
+    int64_t lastActivityMs() const {
+        return tp_broadcast_manager_ ? tp_broadcast_manager_->lastActivityMs() : 0;
+    }
+
 private:
+    std::shared_ptr<TpBroadcastResult> broadcastRpc(const std::vector<FunctionRequestPB>& requests, int64_t timeout_ms);
+
     std::shared_ptr<Result> broadcastRequests(std::vector<FunctionRequestPB> requests,
                                               const std::string&             unique_key,
                                               int64_t                        deadline_ms,

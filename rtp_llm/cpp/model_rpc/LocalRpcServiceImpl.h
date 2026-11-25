@@ -147,6 +147,10 @@ public:
         return local_server_->getEngineScheduleInfo(latest_finised_version);
     }
 
+    std::shared_ptr<KVCacheManager> getCacheManager() const {
+        return local_server_ ? local_server_->getCacheManager() : nullptr;
+    }
+
     virtual size_t onflightRequestNum() {
         return local_server_->onflightRequestNum();
     }

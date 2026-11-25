@@ -14,11 +14,13 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 namespace {
@@ -238,6 +240,37 @@ std::shared_ptr<LoadAsyncContext> takeLoadContext(BlockTreeMatchResult& result) 
     auto context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
     result.async_context.reset();
     return context;
+}
+
+TEST(BlockTreeStorerTest, PersistingWritebackKeepsFirstPrefillUseUnaccounted) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+    auto backend = std::make_shared<PendingWriteBackend>();
+    auto env     = makeStoreEnvironment("writeback_accounting", true, false, false, {2}, 4, backend);
+    backend->setCache(env.cache.get());
+    auto blocks = allocateDeviceBlocksForTest(*env.groups[0], 2);
+    ASSERT_EQ(blocks.size(), 2u);
+    const auto prefix = deviceSourceResources({blocks[0]});
+    ASSERT_TRUE(insertGroupSetResources(*env.cache, {100}, prefix));
+    const auto                                       suffix = deviceSourceResources({blocks[1]});
+    const std::vector<std::vector<GroupSetResource>> writeback{std::vector<GroupSetResource>(1), suffix.front()};
+
+    ASSERT_TRUE(env.cache->insertExternalBlocks({100, 101}, 1, writeback, currentTimeMs() + 10000).ok());
+    ASSERT_TRUE(backend->waitForPendingWrite());
+    const auto path = env.cache->tree()->findNode({100, 101});
+    ASSERT_EQ(path.size(), 2u);
+    EXPECT_TRUE(path[0]->is_accounted);
+    EXPECT_FALSE(path[1]->is_accounted);
+    backend->finishWrite();
+    EXPECT_EQ(backend->keys(), (CacheKeysType{100, 101}));
+    EXPECT_EQ(backend->blocks(), (std::vector<BlockIdxType>{blocks[0][0], blocks[1][0]}));
+    EXPECT_FALSE(path[1]->is_accounted);
+
+    env.cache->insert({100, 101}, {prefix.front(), suffix.front()}, Tier::DEVICE);
+    EXPECT_TRUE(path[1]->is_accounted);
+    backend->finishWrite();
+    releaseDeviceBlocks(*env.cache, env.device_pools[0], {blocks[0][0], blocks[1][0]});
 }
 
 class ResidentTieredCacheTest: public ::testing::TestWithParam<Tier> {
@@ -771,6 +804,66 @@ TEST(BlockTreeStorerTest, DeviceInsertWithoutBackendOnlyPublishesLocalCache) {
     EXPECT_EQ(env.cache->tree()->findNode({100}).size(), 1u);
     EXPECT_EQ(env.device_pools[0]->refCount(holder[0][0]), 2u) << "only request and tree references remain";
     releaseDeviceBlocks(*env.cache, env.device_pools[0], holder[0]);
+}
+
+TEST(BlockTreeStorerTest, WritebackRejectsDemotedLinearEndpointBeforePublishingAnyBlocks) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+    auto full_pool   = makeDevicePool({{1, 0}}, 4, "writeback_full");
+    auto linear_pool = makeDevicePool({{1, 0}}, 4, "writeback_linear");
+    auto host_pool   = makeHostPool(1, 4);
+    ASSERT_NE(full_pool, nullptr);
+    ASSERT_NE(linear_pool, nullptr);
+    ASSERT_NE(host_pool, nullptr);
+    auto full   = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{full_pool}, nullptr, nullptr);
+    auto linear = std::make_shared<LinearGroupSet>(std::vector<DeviceBlockPoolPtr>{linear_pool}, host_pool, nullptr);
+    BlockTreeCacheConfig config;
+    config.enable_device_cache = true;
+    config.enable_host_cache   = true;
+    config.enable_remote_cache = true;
+    auto backend               = std::make_shared<PendingWriteBackend>();
+    auto cache                 = makeBlockTreeCacheForTest({full, linear}, config, backend);
+    backend->setCache(cache.get());
+
+    std::vector<std::vector<GroupSetResource>> seed(2, std::vector<GroupSetResource>(2));
+    const auto old_state = linear->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    ASSERT_NE(old_state, NULL_BLOCK_IDX);
+    seed[1][1].host_block = old_state;
+    const CacheKeysType keys{100, 200};
+    const auto          inserted = cache->tree()->insertNode(keys, seed, false, false);
+    ASSERT_EQ(inserted.inserted_nodes.size(), keys.size());
+    releaseLowerTierSeedRefs(cache->groupSets(), seed);
+
+    const auto full_blocks   = allocateDeviceBlocksForTest(*full, 3);
+    const auto linear_blocks = allocateDeviceBlocksForTest(*linear, 1);
+    ASSERT_EQ(full_blocks.size(), 3u);
+    ASSERT_EQ(linear_blocks.size(), 1u);
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(2));
+    resources[0][0].device_blocks = full_blocks[0];
+    resources[1][0].device_blocks = full_blocks[1];
+    resources[1][1].device_blocks = linear_blocks[0];
+    const auto result             = cache->insertExternalBlocks(keys, 0, resources, currentTimeMs() + 10000);
+    EXPECT_EQ(result.code(), ErrorCode::CACHE_STORE_STORE_FAILED);
+    const auto path = cache->tree()->findNode(keys);
+    ASSERT_EQ(path.size(), keys.size());
+    for (const auto* node : path) {
+        EXPECT_FALSE(node->group_set_resources[0].hasTier(Tier::DEVICE));
+    }
+    EXPECT_EQ(path.back()->group_set_resources[1].host_block, old_state);
+    EXPECT_EQ(backend->submittedCount(), 0u);
+
+    // The older host state falls outside the LINEAR reuse window when the endpoint advances.
+    resources[1][1].device_blocks.clear();
+    resources.emplace_back(2);
+    resources[2][0].device_blocks = full_blocks[2];
+    resources[2][1].device_blocks = linear_blocks[0];
+    ASSERT_TRUE(cache->insertExternalBlocks({100, 200, 300}, 0, resources, currentTimeMs() + 10000).ok());
+    EXPECT_EQ(path.back()->group_set_resources[1].host_block, old_state);
+    EXPECT_EQ(backend->submittedCount(), 1u);
+    backend->finishWrite();
+    unreferenceDeviceBlocksForTest(*full, full_blocks);
+    unreferenceDeviceBlocksForTest(*linear, linear_blocks);
 }
 
 TEST(BlockTreeStorerTest, StorageHandlesUseTopologyGroupsAndResolveGpuBuffers) {

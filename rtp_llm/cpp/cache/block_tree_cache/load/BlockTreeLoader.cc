@@ -177,7 +177,8 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
         return result;
     }
     std::vector<bool>    candidate_valid;
-    if (!path.empty() && !validMatch(path, candidate_valid, valid_prefix, skip_linear) && !storage_backend_) {
+    if (!path.empty() && !validMatch(path, candidate_valid, valid_prefix, skip_linear)
+        && (!storage_backend_ || !enable_storage_backend)) {
         return result;
     }
     const int64_t  access_time_us = currentTimeUs();
@@ -192,6 +193,9 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
         load_begins.push_back(path.size() - std::min(group_set->computeReuseBlockCount(path.size()), path.size()));
     }
     for (size_t i = 0; i < path.size(); ++i) {
+        if (!path[i]->is_accounted) {
+            result.reuse_accounting.unaccounted_block_indices.push_back(i);
+        }
         const size_t candidate_count        = i + 1;
         bool         all_groups_device      = true;
         bool         all_groups_device_host = true;

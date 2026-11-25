@@ -270,6 +270,11 @@ absl::Status GenerateStream::incrKVBlock() {
     return stream_cache_resource_->incrKVBlock();
 }
 
+void GenerateStream::setKVCacheWriteProgress(uint64_t step, const std::shared_ptr<torch::Event>& event) {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    stream_cache_resource_->setKVCacheWriteProgress(step, event);
+}
+
 void GenerateStream::releaseResource() {
     RTP_LLM_PROFILE_FUNCTION();
     // Return KV blocks only after all workers that captured this stream finish.
@@ -705,8 +710,26 @@ void GenerateStream::setInitialReuseLength(int initial_reuse_length) {
     __atomic_store_n(&initial_reuse_length_, initial_reuse_length, __ATOMIC_RELAXED);
 }
 
-void GenerateStream::setPrefillReuseLength(
-    int64_t total, int64_t local, int64_t remote, int64_t memory, int64_t disk, bool independent_pools) {
+void GenerateStream::setWritebackFirstUseLength(int length) {
+    writeback_first_use_length_ = length;
+}
+
+int GenerateStream::writebackFirstUseLength() const {
+    return writeback_first_use_length_;
+}
+
+int GenerateStream::prefillWritebackFirstUseLength() const {
+    return prefill_writeback_first_use_length_;
+}
+
+void GenerateStream::setPrefillReuseLength(int64_t total,
+                                           int64_t local,
+                                           int64_t remote,
+                                           int64_t memory,
+                                           int64_t disk,
+                                           bool    independent_pools,
+                                           int     writeback_first_use_len) {
+    prefill_writeback_first_use_length_ = writeback_first_use_len;
     prefill_independent_block_pools_ = independent_pools;
     prefill_total_reuse_len_         = total;
     prefill_local_reuse_len_         = local;
@@ -1753,6 +1776,9 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info,
             timings[i].ttft_us = complete_token_ids_->firstTokenLatencyUs();
         }
     }
+    if (update_info.kv_ready_token_count >= 0) {
+        writeback_kv_ready_token_count_ = std::min(update_info.kv_ready_token_count, seqLength() - 1);
+    }
 }
 
 absl::StatusOr<GenerateStream::LinearReplayRound> GenerateStream::prepareLinearReplayRound() {
@@ -1876,6 +1902,9 @@ void GenerateStream::updateWithoutLock(const StreamUpdateInfo& update_info,
         }
     }
     updateOutput(update_info);
+    if (update_info.kv_ready_token_count >= 0) {
+        writeback_kv_ready_token_count_ = std::min(update_info.kv_ready_token_count, seqLength() - 1);
+    }
 
     // Freeze TTFT after output trimming while holding the stream lock.
     if (timings && seqLength() > inputLength()) {

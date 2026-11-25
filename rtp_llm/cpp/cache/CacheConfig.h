@@ -127,6 +127,8 @@ public:
         return cache_topology;
     }
 
+    std::shared_ptr<const CacheTopology> activeModelTopologyPtr() const;
+
     const GroupBase& group(const std::string& tag) const {
         return topology().group(tag);
     }

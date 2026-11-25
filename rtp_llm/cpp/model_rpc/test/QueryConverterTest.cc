@@ -338,6 +338,24 @@ TEST_F(QueryConverterTest, EnableDiskCacheIsPreservedWhenExplicitlyEnabled) {
     ASSERT_TRUE(generate_input->generate_config->enable_disk_cache);
 }
 
+TEST_F(QueryConverterTest, RequestLevelP2PWritebackPreservesPresenceAndLegacyDefault) {
+    EXPECT_FALSE(GenerateConfig().enable_p2p_writeback.has_value());
+
+    for (const int wire_value : {-1, 0, 1}) {
+        SCOPED_TRACE(wire_value);
+        GenerateConfigPB config;
+        if (wire_value >= 0) {
+            config.mutable_enable_p2p_writeback()->set_value(wire_value == 1);
+        }
+
+        const auto converted = QueryConverter::transGenerateConfig(&config);
+        EXPECT_EQ(converted->enable_p2p_writeback.has_value(), wire_value >= 0);
+        if (wire_value >= 0) {
+            EXPECT_EQ(converted->enable_p2p_writeback.value(), wire_value == 1);
+        }
+    }
+}
+
 TEST_F(QueryConverterTest, EnableMemoryCacheIsPreservedFromProto) {
     EXPECT_EQ(GenerateConfigPB::kEnableMemoryCacheFieldNumber, 51);
     EXPECT_TRUE(GenerateConfig().enable_memory_cache);
@@ -526,6 +544,8 @@ TEST_F(QueryConverterTest, testTransOutput) {
     outputs.frontend_speculative_verify_rounds          = 3;
     outputs.frontend_speculative_accepted_token_num     = 9;
     outputs.frontend_speculative_proposed_draft_tokens  = 12;
+    res.aux_info.reuse_len = 4;
+    res.aux_info.writeback_first_use_len = 2;
     for (int i = 0; i < 6; ++i) {
         hidden_states_data[i] = i;
     }
@@ -540,6 +560,8 @@ TEST_F(QueryConverterTest, testTransOutput) {
     EXPECT_EQ(aux_info_pb.cost_time_us(), 1000);
     EXPECT_EQ(aux_info_pb.iter_count(), 9);
     EXPECT_EQ(aux_info_pb.input_len(), 8);
+    EXPECT_EQ(aux_info_pb.total_reuse_len(), 4);
+    EXPECT_EQ(aux_info_pb.writeback_first_use_len(), 2);
     EXPECT_EQ(aux_info_pb.output_len(), 7);
     EXPECT_EQ(aux_info_pb.speculative_draft_rounds(), 4);
     EXPECT_EQ(aux_info_pb.speculative_accepted_tokens_per_pos_size(), 3);

@@ -1356,6 +1356,9 @@ void PPBatchStreamProcessor::dispatchSpeculativeSingleStream(const PPStreamExecu
         update_info.speculative_propose_step = stream->getSPOutputBuffer()->propose_step;
         update_info.accepted_draft_tokens    = num_new_tokens - 1;
     }
+    if (num_new_tokens > 0) {
+        update_info.kv_ready_token_count = stream->seqLength() + (execution.is_context ? 0 : num_new_tokens - 1);
+    }
     stream->specUpdate(update_info, false);
 }
 
@@ -1372,21 +1375,22 @@ void PPBatchStreamProcessor::dispatchNormalSingleStream(const GenerateStreamPtr&
         return;
     }
     const auto& output = result.request_outputs[stream_idx];
-    stream->update({result.new_token_ids.narrow(0, batch_idx, stream_batch_size),
-                    1,
-                    output.hidden_states,
-                    output.logits,
-                    output.softmax_probs,
-                    output.cum_log_probs,
-                    output.all_probs,
-                    output.loss,
-                    torch::Tensor(),
-                    output.all_hidden_states,
-                    true,
-                    false,
-                    output.prompt_logits,
-                    std::nullopt},
-                   false);
+    StreamUpdateInfo update_info{result.new_token_ids.narrow(0, batch_idx, stream_batch_size),
+                                 1,
+                                 output.hidden_states,
+                                 output.logits,
+                                 output.softmax_probs,
+                                 output.cum_log_probs,
+                                 output.all_probs,
+                                 output.loss,
+                                 torch::Tensor(),
+                                 output.all_hidden_states,
+                                 true,
+                                 false,
+                                 output.prompt_logits,
+                                 std::nullopt};
+    update_info.kv_ready_token_count = stream->seqLength();
+    stream->update(update_info, false);
 }
 
 }  // namespace rtp_llm

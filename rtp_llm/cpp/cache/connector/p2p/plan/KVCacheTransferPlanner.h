@@ -37,9 +37,10 @@ class KVCacheTransferPlanner {
 public:
     /// Match global layers across PP cuts, then reuse plan() for every stage
     /// intersection and its cache tags. No per-request block window is needed.
-    static PlanResult planStages(const PipelineTransferLayout& prefill,
-                                 const PipelineTransferLayout& decode,
-                                 const std::string&            unique_key);
+    static PlanResult planStages(const PipelineTransferLayout&   source,
+                                 const PipelineTransferLayout&   target,
+                                 const std::string&              unique_key,
+                                 const std::vector<std::string>& excluded_tags = {});
 
     /// @brief 布局级编排：产出与请求无关的 route 集。
     static PlanResult plan(const ShardLayout&              src,

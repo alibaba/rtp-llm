@@ -34,11 +34,14 @@ public:
                                  size_t                                            remote_reuse_begin = 0,
                                  size_t                                            remote_reuse_end   = 0);
 
+    size_t           publishDeviceLocked(const CacheKeysType&                              cache_keys,
+                                         const std::vector<std::vector<GroupSetResource>>& resources,
+                                         bool                                              is_resident,
+                                         bool                                              is_writeback = false);
+    StorageWriteTask preparePublishedWriteLocked(const CacheKeysType& keys, const std::vector<TreeNode*>& path) const;
+
 private:
-    void           publishDeviceLocked(const CacheKeysType&                              cache_keys,
-                                       const std::vector<std::vector<GroupSetResource>>& resources,
-                                       bool                                              is_resident,
-                                       size_t&                                           resident_prefix_length);
+    std::vector<StorageBlockHandle> deviceHandles(const std::vector<GroupSetResource>& groups) const;
     StorageRequest makeStorageRequest(const CacheKeysType&                              cache_keys,
                                       const std::vector<std::vector<GroupSetResource>>& resources,
                                       const std::optional<int64_t>&                     request_id,

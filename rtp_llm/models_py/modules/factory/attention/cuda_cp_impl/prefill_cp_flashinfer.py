@@ -46,6 +46,13 @@ def select_prefill_cp_impl(
 ):
     """Select a CP implementation, falling back when fused cannot run safely."""
     method = parallelism_config.prefill_cp_config.method
+    if (
+        parallelism_config.prefill_cp_config.kv_cache_sharded
+        and method != CPRotateMethod.ALL_GATHER
+    ):
+        raise ValueError(
+            f"Sharded KV cache for CP MHA only supports ALL_GATHER, got {method}"
+        )
     impl = impl_map[method]
     if (
         method == CPRotateMethod.ALL_GATHER

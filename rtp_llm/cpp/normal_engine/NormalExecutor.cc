@@ -368,6 +368,7 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
+    const uint64_t writeback_step = cache_manager_ ? cache_manager_->beginWritebackStep() : 0;
     if (profile_step_start_) {
         profile_step_start_();
     }
@@ -457,6 +458,9 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
     if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {
         // Make all model streams quiescent before releasing borrowed buffers.
         cudaSyncAndCheck();
+        if (writeback_step != 0) {
+            cache_manager_->publishWritebackStep(writeback_step);
+        }
         // Warmup does not launch dispatch workers; non-root streams are empty.
         finish_snapshot_gather();
         model_->releaseBuffers();
@@ -521,6 +525,11 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
         // cudaStreamWaitEvent before pinned D2H staging.
         auto sampler_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
         sampler_event->record(cuda_graph::graphGetCurrentStream());
+        if (writeback_step != 0) {
+            for (const auto& stream : streams) {
+                stream->setKVCacheWriteProgress(writeback_step, sampler_event);
+            }
+        }
 
         // Metrics and KV release stay on the main thread; dispatch_output_us
         // now measures launch cost, while worker time is in async_runner.thread.
@@ -544,6 +553,11 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
                                    std::move(recorded_batch));
     }
 
+    if (writeback_step != 0) {
+        for (const auto& stream : streams) {
+            stream->setKVCacheWriteProgress(writeback_step);
+        }
+    }
     {
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output");
         int64_t      start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();

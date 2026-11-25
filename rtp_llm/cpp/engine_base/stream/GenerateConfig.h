@@ -126,6 +126,7 @@ public:
     bool               enable_memory_cache = true;
     bool               enable_disk_cache   = true;
     bool               enable_remote_cache = true;
+    std::optional<bool> enable_p2p_writeback;
     std::string        trace_id;
     std::optional<int> group_timeout;
     std::string        unique_key;
@@ -264,6 +265,9 @@ public:
         auto summarize_optional_string = [](const std::optional<std::string>& field) {
             return field.has_value() ? "len=" + std::to_string(field->size()) : std::string("<unset>");
         };
+        auto summarize_optional_bool = [](const std::optional<bool>& field) -> const char* {
+            return field.has_value() ? (*field ? "true" : "false") : "<unset>";
+        };
         std::stringstream debug_string;
         debug_string << "GenerateConfig {"
                      << "max_new_tokens:" << max_new_tokens << ", min_new_tokens:" << min_new_tokens
@@ -293,6 +297,7 @@ public:
                      << ", reuse_cache: " << reuse_cache << ", enable_device_cache: " << enable_device_cache
                      << ", enable_memory_cache: " << enable_memory_cache << ", enable_disk_cache: " << enable_disk_cache
                      << ", enable_remote_cache: " << enable_remote_cache << ", unique_key: " << unique_key
+                     << ", enable_p2p_writeback: " << summarize_optional_bool(enable_p2p_writeback)
                      << ", combo_token_size: " << combo_token_size
                      << ", banned_combo_token_ids_size: " << banned_combo_token_ids.size()
                      << ", enable_cross_sequence_ban: " << enable_cross_sequence_ban
@@ -418,6 +423,7 @@ public:
         JSONIZE(enable_memory_cache);
         JSONIZE(enable_disk_cache);
         JSONIZE(enable_remote_cache);
+        JSONIZE_OPTIONAL(enable_p2p_writeback);
         JSONIZE(aux_info);
         JSONIZE_OPTIONAL(group_timeout);
         JSONIZE(unique_key);

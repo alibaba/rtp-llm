@@ -202,6 +202,9 @@ KVCacheTransferPlanner::validateTag(const ShardLayout& src, const ShardLayout& d
                          + "': src=" + KVCacheSpecTypeToString(sg.spec_type)
                          + " dst=" + KVCacheSpecTypeToString(dg.spec_type));
     }
+    if (sg.global_kv_heads != dg.global_kv_heads) {
+        return planError("global KV head count mismatch for tag '" + tag + "'");
+    }
 
     if (sg.spec_type == KVCacheSpecType::LinearAttention) {
         // Asymmetric routes use explicit per-history-row Q/K/V subspans.
@@ -270,10 +273,10 @@ KVCacheTransferPlanner::validateTag(const ShardLayout& src, const ShardLayout& d
 
     const int src_cp = src.routeCpSize(tag);
     const int dst_cp = dst.routeCpSize(tag);
-    if (dst_cp != 1 && dst_cp != src_cp && !supportsAsymmetricPageRR(src, dst, tag)) {
+    if (src_cp != 1 && dst_cp != 1 && dst_cp != src_cp && !supportsAsymmetricPageRR(src, dst, tag)) {
         std::ostringstream oss;
         oss << "unsupported CP topology for tag '" << tag << "': src cp_size=" << src_cp << " dst cp_size=" << dst_cp
-            << "; dst must be unsharded, match src, or use divisible local FULL PageRR widths";
+            << "; one side must be unsharded, both must match, or local FULL PageRR widths must be divisible";
         return planError(oss.str());
     }
 
@@ -428,7 +431,7 @@ ErrorInfo KVCacheTransferPlanner::buildCpPairs(const ShardLayout&   src,
     // Transport CP controls ranks/byte slices; state/SWA key spacing follows
     // the physical group's token coverage, including on a single-rank Decode.
     const int  modulus    = is_full_group ?
-                                src_cp_size :
+                                std::max(src_cp_size, dst_cp_size) :
                                 static_cast<int>(src.group(tag).seq_size_per_block / src.cache_key_tokens_per_block);
     const bool src_sliced = src.effectiveSlice(tag) != CpBlockSliceMode::NONE;
     const bool is_compact = !is_full_group && modulus > 1;
@@ -811,37 +814,38 @@ ErrorInfo validatePipeline(const PipelineTransferLayout& side, int& main_layers,
 
 }  // namespace
 
-PlanResult KVCacheTransferPlanner::planStages(const PipelineTransferLayout& prefill,
-                                              const PipelineTransferLayout& decode,
-                                              const std::string&            unique_key) {
+PlanResult KVCacheTransferPlanner::planStages(const PipelineTransferLayout&   source,
+                                              const PipelineTransferLayout&   target,
+                                              const std::string&              unique_key,
+                                              const std::vector<std::string>& excluded_tags) {
     PlanDigest layout_digest;
-    int        prefill_main = 0, decode_main = 0;
-    auto       error = validatePipeline(prefill, prefill_main, layout_digest);
+    int        source_main = 0, target_main = 0;
+    auto       error = validatePipeline(source, source_main, layout_digest);
     if (error.ok()) {
-        error = validatePipeline(decode, decode_main, layout_digest);
+        error = validatePipeline(target, target_main, layout_digest);
     }
     if (!error.ok()) {
         return {{}, std::move(error)};
     }
-    if (prefill_main != decode_main) {
-        return {{}, planError("Prefill and Decode cover different main-model layers")};
+    if (source_main != target_main) {
+        return {{}, planError("PP source and target cover different main-model layers")};
     }
     const auto draftCount = [](const auto& stage) {
         return static_cast<int>(stage.layer_tags.size()) - stage.main_layer_count;
     };
-    const int draft_layers         = draftCount(decode.stages.back());
-    const int prefill_draft_layers = draftCount(prefill.stages.back());
-    if (prefill_draft_layers < draft_layers) {
+    const int draft_layers        = draftCount(target.stages.back());
+    const int source_draft_layers = draftCount(source.stages.back());
+    if (source_draft_layers < draft_layers) {
         return {{},
-                planError("Prefill is missing draft layers required by Decode: Prefill="
-                          + std::to_string(prefill_draft_layers) + " Decode=" + std::to_string(draft_layers))};
+                planError("PP source is missing draft layers required by target: source="
+                          + std::to_string(source_draft_layers) + " target=" + std::to_string(draft_layers))};
     }
 
     TransferPlan result;
     result.layout_digest = layout_digest.hash;
-    for (size_t s = 0, d = 0; s < prefill.stages.size() && d < decode.stages.size();) {
-        const auto& src     = prefill.stages[s];
-        const auto& dst     = decode.stages[d];
+    for (size_t s = 0, d = 0; s < source.stages.size() && d < target.stages.size();) {
+        const auto& src     = source.stages[s];
+        const auto& dst     = target.stages[d];
         const int   src_end = src.main_layer_begin + src.main_layer_count;
         const int   dst_end = dst.main_layer_begin + dst.main_layer_count;
         const auto  append_routes =
@@ -851,8 +855,11 @@ PlanResult KVCacheTransferPlanner::planStages(const PipelineTransferLayout& pref
             for (int layer = begin; layer < end; ++layer) {
                 const auto& src_tags = src.layer_tags[layer - src.main_layer_begin];
                 for (const auto& tag : dst.layer_tags[layer - dst.main_layer_begin]) {
+                    if (std::find(excluded_tags.begin(), excluded_tags.end(), tag) != excluded_tags.end()) {
+                        continue;
+                    }
                     if (std::find(src_tags.begin(), src_tags.end(), tag) == src_tags.end()) {
-                        return planError("Prefill is missing global layer " + std::to_string(layer) + " tag=" + tag);
+                        return planError("PP source is missing global layer " + std::to_string(layer) + " tag=" + tag);
                     }
                     layers_by_tag[tag].push_back(layer);
                 }
@@ -883,9 +890,9 @@ PlanResult KVCacheTransferPlanner::planStages(const PipelineTransferLayout& pref
                     if (result.routes.size() >= static_cast<size_t>(std::numeric_limits<int>::max())) {
                         return planError("PP transfer has too many routes");
                     }
-                    route.route_id = static_cast<int>(result.routes.size());
-                    route.src_rank = src.worker_indices[route.src_rank];
-                    route.dst_rank = dst.worker_indices[route.dst_rank];
+                    route.route_id                = static_cast<int>(result.routes.size());
+                    route.src_rank                = src.worker_indices[route.src_rank];
+                    route.dst_rank                = dst.worker_indices[route.dst_rank];
                     route.src_slice_payload_bytes = src_shards.group(tag).k_block_payload_bytes;
                     route.dst_slice_payload_bytes = dst_shards.group(tag).k_block_payload_bytes;
                     for (int layer : layers) {
@@ -904,8 +911,8 @@ PlanResult KVCacheTransferPlanner::planStages(const PipelineTransferLayout& pref
                               std::min(src_end, dst_end),
                               src.main_shards,
                               dst.main_shards);
-        if (error.ok() && src_end == prefill_main && dst_end == decode_main && draft_layers > 0) {
-            error = append_routes(prefill_main, prefill_main + draft_layers, src.draft_shards, dst.draft_shards);
+        if (error.ok() && src_end == source_main && dst_end == target_main && draft_layers > 0) {
+            error = append_routes(source_main, source_main + draft_layers, src.draft_shards, dst.draft_shards);
         }
         if (!error.ok()) {
             return {{}, std::move(error)};

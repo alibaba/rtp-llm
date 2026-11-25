@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/model_rpc/LocalRpcServiceImpl.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServiceImpl.h"
 #include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
+#include <functional>
 
 namespace th = torch;
 
@@ -23,7 +24,7 @@ public:
               py::object propose_model,
               py::object mm_process_engine,
               py::object trace_config = py::none());
-    void stop();
+    void stop(const std::function<void(int64_t)>& before_rpc_shutdown = {});
     void setServing(bool serving);
 
 private:

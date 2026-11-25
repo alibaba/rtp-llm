@@ -431,6 +431,10 @@ struct VitConfig {
 };
 
 struct CacheStoreConfig {
+    bool    p2p_writeback_enable                = false;
+    bool    p2p_writeback_require_device_prefix = true;
+    double  p2p_writeback_max_kv_ratio          = 0.3;
+
     bool    cache_store_rdma_mode               = false;
     int     thread_count                        = 32;
     int     rdma_connect_timeout_ms             = 250;

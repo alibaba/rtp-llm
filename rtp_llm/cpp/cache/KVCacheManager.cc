@@ -1,5 +1,8 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWriteWorkerUtil.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/cache/events/KVCMPublisher.h"
 
@@ -1462,8 +1465,9 @@ bool KVCacheManager::initP2PConnector() {
         const auto& draft = *config_.mtp_sub_configs.front();
         append_layout(draft, draft.layer_num, local_stage.mutable_draft_shards());
     }
-    const bool decode = pd_sep_config_.role_type == RoleType::DECODE;
-    if (decode) {
+    const bool decode                = pd_sep_config_.role_type == RoleType::DECODE;
+    const bool report_physical_bytes = decode || cache_store_config_.p2p_writeback_enable;
+    if (report_physical_bytes) {
         for (const auto& group : config_.topology().groups()) {
             // Capacity includes all allocated KV and scales, including extra draft modules.
             const auto bytes = config_.blockSizeBytesForGroup(group.tag);
@@ -1479,7 +1483,7 @@ bool KVCacheManager::initP2PConnector() {
         for (const auto& payload : collectPPStagePayloads(startup.SerializeAsString(), pc.pp_size)) {
             P2PStageStartupPB stage;
             if (!stage.ParseFromString(payload) || !stage.has_layout()
-                || (decode && !accumulateDecodeStageBlockBytes(stage, pc.tp_size, instance_block_bytes))) {
+                || (report_physical_bytes && !accumulateStageBlockBytes(stage, pc.tp_size, instance_block_bytes))) {
                 RTP_LLM_LOG_ERROR("P2P connector init failed to read PP stage layout or KV capacity");
                 return false;
             }
@@ -1488,8 +1492,8 @@ bool KVCacheManager::initP2PConnector() {
     } else {
         *pipeline.add_stages() = std::move(local_stage);
         // Preserve the existing per-rank capacity for non-PP deployments.
-        if (decode && !accumulateDecodeStageBlockBytes(startup, 1, instance_block_bytes)) {
-            RTP_LLM_LOG_ERROR("P2P connector init failed to read Decode KV capacity");
+        if (report_physical_bytes && !accumulateStageBlockBytes(startup, 1, instance_block_bytes)) {
+            RTP_LLM_LOG_ERROR("P2P connector init failed to read per-rank KV capacity");
             return false;
         }
     }
@@ -1502,18 +1506,20 @@ bool KVCacheManager::initP2PConnector() {
                      cache_store_config_.cache_store_rdma_mode ? 1 : 0,
                      pd_sep_config_.cache_store_listen_port);
 
+    const auto topology =
+        cache_store_config_.p2p_writeback_enable ? config_.activeModelTopologyPtr() : config_.topologyPtr();
     auto p2p_config                                             = P2PConnectorConfig::create(runtime_config_,
                                                  cache_store_config_,
                                                  parallelism_config_,
                                                  pd_sep_config_,
-                                                 static_cast<uint32_t>(config_.layer_all_num()),
+                                                 static_cast<uint32_t>(topology->layers().size()),
                                                  config_.totalGroupBlockSizeBytes());
-    p2p_config.scheduler_config.topology                        = config_.topologyPtr();
+    p2p_config.scheduler_config.topology                        = topology;
     p2p_config.scheduler_config.pipeline_layout                 = p2p_pipeline_layout_;
     p2p_config.scheduler_config.use_group_cache_transfer_policy = config_.usesGroupCacheTransferPolicy();
     p2p_config.scheduler_config.use_mla                         = config_.use_mla;
     p2p_config.scheduler_config.local_full_page_rr              = config_.local_kv_cache_sharded;
-    p2p_config.worker_config.topology                           = config_.topologyPtr();
+    p2p_config.worker_config.topology                           = topology;
     p2p_config.worker_config.global_layer_begin                 = config_.global_layer_begin;
     auto& linear_specs                                          = p2p_config.worker_config.linear_specs_by_layer;
     linear_specs.resize(config_.topology().layers().size());
@@ -1532,9 +1538,10 @@ bool KVCacheManager::initP2PConnector() {
             p2p_config.scheduler_config.decode_transfer_layer_end =
                 config_.layer_num + config_.mtp_sub_configs.front()->layer_num;
         }
-        p2p_config.scheduler_config.physical_block_bytes_by_group = std::move(instance_block_bytes);
     }
-    p2p_config.scheduler_config.cache_key_tokens_per_block = config_.seq_size_per_block;
+    p2p_config.scheduler_config.physical_block_bytes_by_group = std::move(instance_block_bytes);
+    p2p_config.scheduler_config.cache_key_tokens_per_block    = config_.seq_size_per_block;
+    p2p_config.scheduler_config.cache_key_hash_seed        = config_.cache_key_hash_seed;
     p2p_config.worker_config.cache_key_tokens_per_block    = config_.seq_size_per_block;
     const int cp_size =
         parallelism_config_.prefill_cp_config.kv_cache_sharded ? static_cast<int>(parallelism_config_.tp_size) : 1;
@@ -1543,7 +1550,12 @@ bool KVCacheManager::initP2PConnector() {
     p2p_config.worker_config.cp_size    = cp_size;
 
     auto layer_block_converter = std::make_shared<LayerBlockConverterImpl>(coordinator_manager_);
-    auto p2p = std::make_shared<P2PConnector>(std::move(p2p_config), layer_block_converter, metrics_reporter_);
+    if (decode && p2p_config.p2p_writeback_enable && !isAllocatorOwner()) {
+        writeback_step_tracker_           = std::make_shared<WritebackStepTracker>();
+        p2p_config.writeback_step_tracker = writeback_step_tracker_;
+    }
+    auto p2p = std::make_shared<P2PConnector>(
+        std::move(p2p_config), layer_block_converter, metrics_reporter_, coordinator_manager_);
     if (!p2p->init()) {
         RTP_LLM_LOG_ERROR("KVCacheManager: P2PConnector init failed");
         return false;
@@ -1616,4 +1628,144 @@ void KVCacheManager::handleRead(const P2PConnectorStartLoadRequestPB& request,
     }
 }
 
+bool KVCacheManager::writebackEnabled() const {
+    return pd_sep_config_.role_type == RoleType::DECODE && hasP2PWriteback();
+}
+
+bool KVCacheManager::hasP2PWriteback() const {
+    return cache_store_config_.p2p_writeback_enable && p2p_connector_ && p2p_connector_->writebackEnabled();
+}
+
+uint64_t KVCacheManager::beginWritebackStep() {
+    if (!writebackEnabled() || warmup_ || (parallelism_config_.tp_size == 1 && parallelism_config_.pp_size == 1)) {
+        return 0;
+    }
+    return ++writeback_step_;
+}
+
+void KVCacheManager::publishWritebackStep(uint64_t step, const std::shared_ptr<torch::Event>& event) {
+    if (step != 0 && writeback_step_tracker_) {
+        writeback_step_tracker_->publish(step, event);
+    }
+}
+
+std::shared_ptr<AsyncContext> KVCacheManager::asyncWriteBack(const BatchKVCacheResourcePtr& resource,
+                                                             const CompleteTokenIdsPtr&     tokens,
+                                                             int                            input_length,
+                                                             int                            kv_ready_token_count,
+                                                             const Meta&                    meta) noexcept {
+    const auto start_us                  = currentTimeUs();
+    const auto report_submission_failure = [&]() noexcept {
+        try {
+            WritebackStageMetricsCollector metrics;
+            metrics.stage        = "submission";
+            metrics.cost_time_us = currentTimeUs() - start_us;
+            metrics.error =
+                ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "writeback submission exception");
+            reportWritebackMetrics(metrics_reporter_, metrics);
+        } catch (...) {}
+    };
+    try {
+        const auto skip =
+            [this, input_length, kv_ready_token_count](const char* reason) -> std::shared_ptr<AsyncContext> {
+            RTP_LLM_LOG_DEBUG("writeback skipped: reason=%s input_length=%d kv_ready_token_count=%d",
+                              reason,
+                              input_length,
+                              kv_ready_token_count);
+            if (metrics_reporter_) {
+                WriteSchedulerMetricsCollector metrics;
+                metrics.skip_reason = reason;
+                reportWritebackMetrics(metrics_reporter_, metrics);
+            }
+            return nullptr;
+        };
+        if (!writebackEnabled() || parallelism_config_.pp_rank != 0 || parallelism_config_.tp_rank != 0) {
+            return skip("disabled_or_unsupported");
+        }
+        const auto routing = meta.p2pRouting();
+        if (!routing || routing->unique_key.empty() || routing->prefill_addr.first.empty()
+            || routing->prefill_addr.second == 0 || routing->prefill_tp_size <= 0 || routing->prefill_cp_size <= 0) {
+            return skip("invalid_routing");
+        }
+        if (!resource || !tokens || resource->batchSize() != 1 || kv_ready_token_count < input_length
+            || input_length < 0 || kv_ready_token_count > tokens->seqLength()) {
+            return skip("invalid_snapshot");
+        }
+        const auto& source = resource->cacheResource(0);
+        if (!tokens->imageCacheIdentity(0, input_length).empty()) {
+            return skip("unsupported_image_cache_identity");
+        }
+        const size_t block_size    = config_.seq_size_per_block;
+        const size_t cp_size       = routing->prefill_cp_size;
+        const size_t ready_units   = kv_ready_token_count / block_size / cp_size;
+        const size_t prompt_units  = input_length / block_size / cp_size;
+        if (ready_units <= prompt_units) {
+            return skip("no_complete_suffix");
+        }
+        const size_t ready_tokens = ready_units * cp_size * block_size;
+        const auto   groups       = coordinator_manager_->cacheGroups();
+        KVCacheResource selected;
+        selected.initGroups(config_.topologyPtr());
+        for (const auto& group : groups) {
+            selected.mutableBlockIds(group->tag()).assign(source.blocks(group->tag()));
+        }
+        const auto selected_error = p2p_connector_->selectWriteSource(selected, input_length, ready_tokens, *routing);
+        if (selected_error.hasError()) {
+            RTP_LLM_LOG_WARNING("writeback source selection failed: %s", selected_error.ToString().c_str());
+            return skip("invalid_source_routes");
+        }
+        // Preserve logical positions, including sparse holes, while holding only physical blocks.
+        KVCacheResourcePtr hold(new KVCacheResource, [groups](KVCacheResource* resource) {
+            for (const auto& group : groups) {
+                group->unreference(resource->blocks(group->tag()));
+            }
+            delete resource;
+        });
+        hold->initGroups(config_.topologyPtr());
+        for (const auto& group : groups) {
+            group->reference(hold->mutableBlockIds(group->tag()), selected.blocks(group->tag()));
+        }
+        hold->setLastBlockAligned(true);
+        const auto*      token_data = tokens->data(0);
+        std::vector<int> token_ids(token_data, token_data + ready_tokens);
+        return p2p_connector_->asyncWrite(std::move(hold), std::move(token_ids), input_length, ready_tokens, *routing);
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_WARNING("writeback submission failed: %s", error.what());
+        report_submission_failure();
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("writeback submission failed");
+        report_submission_failure();
+    }
+    return nullptr;
+}
+
+void KVCacheManager::stopWriteback(int64_t steady_deadline_ms) {
+    if (p2p_connector_) {
+        p2p_connector_->stopWriteback(steady_deadline_ms);
+    }
+}
+
+void KVCacheManager::handleWrite(const P2PConnectorStartWriteBackRequestPB& request,
+                                 P2PConnectorStartWriteBackResponsePB&      response,
+                                 std::function<bool()>                      is_cancelled) {
+    if (p2p_connector_) {
+        p2p_connector_->handleWrite(request, response, std::move(is_cancelled));
+    } else {
+        response.Clear();
+        response.set_error_code(transErrorCodeToRPC(ErrorCode::INVALID_PARAMS));
+        response.set_error_message("P2P connector is not initialized");
+        response.set_stopped(true);
+    }
+}
+
+void KVCacheManager::cancelP2PWrite(const P2PConnectorCancelWriteBackRequestPB& request,
+                                    P2PConnectorStartWriteBackResponsePB&       response) {
+    if (p2p_connector_) {
+        p2p_connector_->handleCancelWrite(request, response);
+    } else {
+        response.set_error_code(ErrorCodePB::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
+        response.set_error_message("writeback is unavailable");
+        response.set_stopped(true);
+    }
+}
 }  // namespace rtp_llm

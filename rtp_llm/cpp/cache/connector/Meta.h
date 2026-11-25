@@ -38,6 +38,7 @@ public:
         int                              prefill_cp_size = 0;
         bool                             decode_needs_compute = true;
         std::string                      prefill_pipeline_layout;
+        uint64_t                         writeback_kv_step = 0;
     };
 
     virtual std::optional<P2PRoutingContext> p2pRouting() const {

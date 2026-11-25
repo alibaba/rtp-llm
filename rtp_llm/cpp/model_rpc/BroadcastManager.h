@@ -147,6 +147,13 @@ public:
         return failureSummaryNoLock();
     }
 
+    grpc::StatusCode rpcStatusCode(size_t rank) const {
+        std::lock_guard<std::mutex> lock(wait_done_mutex_);
+        return done() && rank < worker_contexts_.size() && worker_contexts_[rank] ?
+                   worker_contexts_[rank]->status.error_code() :
+                   grpc::StatusCode::UNKNOWN;
+    }
+
     void onDone(DoneCallback callback) {
         if (!callback) {
             return;
@@ -256,6 +263,12 @@ public:
     std::vector<int64_t> completionWallTimesUs() const {
         std::lock_guard<std::mutex> lock(wait_done_mutex_);
         return completion_wall_times_us_;
+    }
+
+    bool rpcSuccess() const {
+        std::lock_guard<std::mutex> lock(wait_done_mutex_);
+        return already_done_.load(std::memory_order_acquire)
+               && std::all_of(rpc_succeeded_.begin(), rpc_succeeded_.end(), [](bool ok) { return ok; });
     }
 
     void finishRank(size_t rank, bool cq_event_ok) {
@@ -379,6 +392,13 @@ private:
                         } else if (ctx->response.p2p_response().error_code() != ErrorCodePB::NONE_ERROR) {
                             error.setErrorCode(ErrorCode::UNKNOWN_ERROR);
                         }
+                    }
+                } else if constexpr (std::is_same_v<RequestPB, P2PConnectorStartWriteBackRequestPB>
+                                     && std::is_same_v<ResponsePB, P2PConnectorStartWriteBackResponsePB>) {
+                    if (ctx->response.error_code() != ErrorCodePB::NONE_ERROR) {
+                        error = ErrorInfo(transRPCErrorCode(static_cast<ErrorCodePB>(ctx->response.error_code())),
+                                          "StartWriteBack peer=" + ctx->server_addr + " key="
+                                              + ctx->request.unique_key() + ": " + ctx->response.error_message());
                     }
                 }
                 grpc_status_failure_seen_ = grpc_status_failure_seen_ || !error.ok();
@@ -741,12 +761,14 @@ private:
         for (size_t rank = 0; rank < worker_size; ++rank) {
             tags.push_back(std::make_unique<CompletionTag<ResultT>>(result, rank));
         }
+        last_activity_ms_.store(steadyNowMs(), std::memory_order_relaxed);
         for (int rank = 0; rank < worker_size; ++rank) {
             auto& ctx = result->worker_contexts_.at(rank);
             if (!ctx->stub) {
                 result->finishRank(static_cast<size_t>(rank), true);
                 continue;
             }
+            bool queued = false;
             try {
                 if (failure_policy == DispatchFailurePolicy::kStop && result->firstError().error.hasError()) {
                     result->finishDispatchFailure(rank, "earlier rank failed");
@@ -765,10 +787,16 @@ private:
                 if (!reader) {
                     throw std::runtime_error("broadcast rpc call returned null reader");
                 }
+                inflight_rpcs_.fetch_add(1, std::memory_order_acq_rel);
+                queued = true;
                 reader->Finish(&ctx->response, &ctx->status, tags[rank].get());
                 (void)tags[rank].release();
+                queued = false;
                 result->markSubmitted(rank);
             } catch (const std::exception& error) {
+                if (queued) {
+                    inflight_rpcs_.fetch_sub(1, std::memory_order_release);
+                }
                 if (fatal_on_error) {
                     RTP_LLM_FAIL(
                         "broadcast rpc dispatch failed, rank=%d err=%s %s", rank, error.what(), rpc_tag.c_str());
@@ -783,6 +811,9 @@ private:
                 }
                 break;
             } catch (...) {
+                if (queued) {
+                    inflight_rpcs_.fetch_sub(1, std::memory_order_release);
+                }
                 if (fatal_on_error) {
                     RTP_LLM_FAIL("broadcast rpc dispatch failed, rank=%d unknown error %s", rank, rpc_tag.c_str());
                 }
@@ -811,6 +842,14 @@ public:
         return worker_addrs_;
     }
 
+    bool hasInflightRpcs() const {
+        return inflight_rpcs_.load(std::memory_order_acquire) > 0;
+    }
+
+    int64_t lastActivityMs() const {
+        return last_activity_ms_.load(std::memory_order_acquire);
+    }
+
 private:
     struct CompletionTagBase {
         virtual ~CompletionTagBase()   = default;
@@ -829,18 +868,28 @@ private:
         size_t                   rank;
     };
 
+    static int64_t steadyNowMs() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    }
+
     void pollCompletions() {
         void* raw_tag = nullptr;
         bool  ok      = false;
         while (completion_queue_->Next(&raw_tag, &ok)) {
-            std::unique_ptr<CompletionTagBase> tag(static_cast<CompletionTagBase*>(raw_tag));
-            try {
-                tag->complete(ok);
-            } catch (const std::exception& error) {
-                RTP_LLM_LOG_ERROR("broadcast completion callback failed: %s", error.what());
-            } catch (...) {
-                RTP_LLM_LOG_ERROR("broadcast completion callback failed: unknown error");
+            {
+                std::unique_ptr<CompletionTagBase> tag(static_cast<CompletionTagBase*>(raw_tag));
+                try {
+                    tag->complete(ok);
+                } catch (const std::exception& error) {
+                    RTP_LLM_LOG_ERROR("broadcast completion callback failed: %s", error.what());
+                } catch (...) {
+                    RTP_LLM_LOG_ERROR("broadcast completion callback failed: unknown error");
+                }
             }
+            last_activity_ms_.store(steadyNowMs(), std::memory_order_relaxed);
+            inflight_rpcs_.fetch_sub(1, std::memory_order_release);
         }
     }
 
@@ -849,6 +898,8 @@ private:
     std::shared_ptr<RPCPool>                      rpc_pool_;
     std::unique_ptr<grpc::CompletionQueue>        completion_queue_;
     std::thread                                   completion_thread_;
+    mutable std::atomic<size_t>               inflight_rpcs_{0};
+    mutable std::atomic<int64_t>              last_activity_ms_{0};
 };
 
 }  // namespace rtp_llm

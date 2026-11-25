@@ -1513,6 +1513,8 @@ TEST_F(P2PGenerateStreamSmokeTest, BatchPartialPrefillAdmissionKeepsAcceptedItem
     EXPECT_FALSE(response.results(0).has_error_info());
     ASSERT_TRUE(response.results(1).has_error_info());
     EXPECT_EQ(response.results(1).error_info().error_code(), ErrorCodePB::INVALID_PARAMS);
+    EXPECT_NE(response.results(1).error_info().error_message().find("EnqueueBatch does not support beam search"),
+              std::string::npos);
     expectCancelDrained();
     EXPECT_EQ(decode_engine_->checked_requests.load(), 1);
     healthyAfterCancel(1903);

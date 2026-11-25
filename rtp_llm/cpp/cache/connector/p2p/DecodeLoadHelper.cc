@@ -7,94 +7,12 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include <grpc++/grpc++.h>
-#include <arpa/inet.h>
-#include <cerrno>
 #include <chrono>
-#include <cstdlib>
 #include <limits>
 #include <mutex>
 #include <utility>
 
 namespace rtp_llm {
-
-namespace {
-
-struct WorkerAddrParts {
-    std::string host;
-    int32_t     cache_store_port = 0;
-};
-
-bool parseWorkerAddrPort(const std::string& port_text, int32_t* port) {
-    if (!port || port_text.empty()) {
-        return false;
-    }
-    char* end   = nullptr;
-    errno       = 0;
-    auto value  = std::strtoll(port_text.c_str(), &end, 10);
-    const bool parsed_all = end == port_text.c_str() + port_text.size();
-    if (errno != 0 || !parsed_all || value < 1 || value > 65535) {
-        return false;
-    }
-    *port = static_cast<int32_t>(value);
-    return true;
-}
-
-bool parseWorkerAddr(const std::string& worker_addr, WorkerAddrParts* parts) {
-    if (!parts || worker_addr.empty()) {
-        return false;
-    }
-
-    std::string host;
-    std::string cache_store_port_text;
-    std::string grpc_port_text;
-    if (worker_addr.front() == '[') {
-        const auto close_pos = worker_addr.find(']');
-        if (close_pos == std::string::npos || close_pos + 1 >= worker_addr.size()
-            || worker_addr[close_pos + 1] != ':') {
-            return false;
-        }
-        const auto cache_port_begin = close_pos + 2;
-        const auto cache_port_end   = worker_addr.find(':', cache_port_begin);
-        if (cache_port_end == std::string::npos || cache_port_end + 1 >= worker_addr.size()) {
-            return false;
-        }
-        host                  = worker_addr.substr(1, close_pos - 1);
-        cache_store_port_text = worker_addr.substr(cache_port_begin, cache_port_end - cache_port_begin);
-        grpc_port_text        = worker_addr.substr(cache_port_end + 1);
-    } else {
-        const auto grpc_col = worker_addr.rfind(':');
-        const auto cache_col = (grpc_col == std::string::npos || grpc_col == 0)
-                                   ? std::string::npos
-                                   : worker_addr.rfind(':', grpc_col - 1);
-        if (cache_col == std::string::npos || cache_col == 0 || cache_col + 1 >= grpc_col
-            || grpc_col + 1 >= worker_addr.size()) {
-            return false;
-        }
-        host                  = worker_addr.substr(0, cache_col);
-        cache_store_port_text = worker_addr.substr(cache_col + 1, grpc_col - cache_col - 1);
-        grpc_port_text        = worker_addr.substr(grpc_col + 1);
-        if (host.find(':') != std::string::npos && host.find('.') != std::string::npos) {
-            // Dotted IPv4 tails are valid in IPv4-mapped IPv6 literals. Validate
-            // the literal instead of rejecting all mixed ':'/'.' host strings.
-            in6_addr ipv6_address{};
-            if (inet_pton(AF_INET6, host.c_str(), &ipv6_address) != 1) {
-                return false;
-            }
-        }
-    }
-
-    int32_t cache_store_port = 0;
-    int32_t grpc_port        = 0;
-    if (host.empty() || !parseWorkerAddrPort(cache_store_port_text, &cache_store_port)
-        || !parseWorkerAddrPort(grpc_port_text, &grpc_port)) {
-        return false;
-    }
-    parts->host             = std::move(host);
-    parts->cache_store_port = cache_store_port;
-    return true;
-}
-
-}  // namespace
 
 DecodeLoadHelper::DecodeLoadHelper(const std::vector<std::string>& worker_addrs, int decode_tp_size):
     worker_addrs_(worker_addrs), decode_tp_size_(decode_tp_size) {
@@ -337,6 +255,7 @@ void DecodeLoadHelper::Result::parseSideChannelPayload(P2PSideChannelPayload& si
         side_channel_payload.generation_prefill_cuda_graph_status = payload.generation_prefill_cuda_graph_status();
         side_channel_payload.prefill_use_independent_block_pools  = payload.prefill_use_independent_block_pools();
         side_channel_payload.total_reuse_len  = payload.total_reuse_len();
+        side_channel_payload.writeback_first_use_len              = payload.writeback_first_use_len();
         side_channel_payload.local_reuse_len  = payload.local_reuse_len();
         side_channel_payload.remote_reuse_len = payload.remote_reuse_len();
         side_channel_payload.memory_reuse_len = payload.memory_reuse_len();
