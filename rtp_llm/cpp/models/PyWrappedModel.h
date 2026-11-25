@@ -117,6 +117,9 @@ public:
 #if USE_PPU
     void                       startDSparkVerifyHostVote(int64_t local_proposal_rows);
     bool                       tryStagePrivateDraftCommit(const GptModelInputs& inputs);
+    bool                       directDraftKVCommit(const GptModelInputs& inputs,
+                                                   int verify_width,
+                                                   const torch::Tensor& accepted_rows = {});
     bool                       prepareSpeculativeForwardCompletionWithPrivateDraft(PyWrappedModel& draft,
                                                                                     const torch::Tensor& prefixes);
     bool                       tryFinishSpeculativeForwardWithPrivateDraft(PyWrappedModel& draft,

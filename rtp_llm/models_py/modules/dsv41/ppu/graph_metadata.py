@@ -66,11 +66,30 @@ def _decode_kernels():
         tl.store(valid_out + row, live)
         tl.store(count, tl.sum(live.to(tl.int32), 0).to(tl.int64))
 
-    return triton, metadata_kernel, counters_kernel, stage_private_draft_rows
+    @triton.jit
+    def direct_draft_commit_rows(
+        prefixes, lengths, layout, requests, positions, valid,
+        BATCH: tl.constexpr, WIDTH: tl.constexpr, LIMIT: tl.constexpr, BLOCK: tl.constexpr,
+    ):
+        row = tl.arange(0, BLOCK)
+        request = row // WIDTH
+        column = row % WIDTH
+        active = request < BATCH
+        prefix = tl.load(prefixes + request, active, other=0).to(tl.int64)
+        length = tl.load(lengths + request, active, other=0).to(tl.int64)
+        position = prefix + column
+        tl.store(layout + request, prefix, active & (column == 0))
+        tl.store(layout + BATCH + request, length, active & (column == 0))
+        tl.store(requests + row, request.to(tl.int64), active)
+        tl.store(positions + row, tl.minimum(tl.maximum(position, 0), LIMIT - 1), active)
+        live = (column < length) & (position >= 0) & (position < LIMIT)
+        tl.store(valid + row, live, active)
+
+    return triton, metadata_kernel, counters_kernel, stage_private_draft_rows, direct_draft_commit_rows
 
 
 def update_decode_metadata(source, metadata, live_count, *, last_position, plus_one):
-    triton, kernel, _, _ = _decode_kernels()
+    triton, kernel, _, _, _ = _decode_kernels()
     block = 32
     kernel[(triton.cdiv(metadata.batch_size, block),)](
         source, metadata.request_ids, live_count, metadata.positions, metadata.valid_mask,
@@ -80,7 +99,7 @@ def update_decode_metadata(source, metadata, live_count, *, last_position, plus_
 
 
 def increment_decode_counters(layers, moe, engram, engram_mask):
-    triton, _, kernel, _ = _decode_kernels()
+    triton, _, kernel, _, _ = _decode_kernels()
     block = 32
     kernel[(triton.cdiv(layers.numel(), block),)](
         layers, moe, engram, engram_mask, layers.numel(), block, num_warps=1,
@@ -109,7 +128,7 @@ def try_stage_private_draft_rows(requests, positions, ends, active, *, window, m
     ):
         return None
     try:
-        _, _, _, kernel = _decode_kernels()
+        _, _, _, kernel, _ = _decode_kernels()
     except ImportError:
         return None
     req, pos, raw = (torch.empty_like(positions, dtype=torch.int64) for _ in range(3))
@@ -118,6 +137,22 @@ def try_stage_private_draft_rows(requests, positions, ends, active, *, window, m
     kernel[(1,)](requests, positions, ends, active, req, pos, raw, valid, count,
                  batch, rows, window, max_seq_len, num_warps=1)
     return req, pos, raw, valid, count
+
+
+def prepare_direct_draft_commit_rows(prefixes, lengths, width, max_seq_len):
+    """Build the dense Draft side of the paired-publication receipt."""
+    batch = prefixes.numel()
+    rows = batch * width
+    layout = torch.empty((2, batch), dtype=torch.int64, device=prefixes.device)
+    requests = torch.empty((rows,), dtype=torch.int64, device=prefixes.device)
+    positions = torch.empty_like(requests)
+    valid = torch.empty_like(requests, dtype=torch.bool)
+    triton, _, _, _, kernel = _decode_kernels()
+    kernel[(1,)](
+        prefixes, lengths, layout, requests, positions, valid,
+        batch, width, max_seq_len, triton.next_power_of_2(rows), num_warps=1,
+    )
+    return layout, requests, positions, valid
 
 
 @lru_cache(maxsize=1)

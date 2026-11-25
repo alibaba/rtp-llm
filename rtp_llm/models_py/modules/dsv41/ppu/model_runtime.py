@@ -1008,6 +1008,10 @@ class SharedNativeRuntime:
                 (base + count - 1 for base, count in zip(bases, counts) if count), default=-1,
             )
             receipt = draft.private_draft_commit_receipt(tx.request_ids)
+            if getattr(receipt, "write_prepared", None) is not None:
+                # The legacy host pair copies a Draft journal payload. A direct
+                # receipt instead uses the validated device plan or its own writer.
+                return False
             published = False
             prepared_publication = prepared_early or tx.prepared_joint_publication
             if _matches_prepared_verify_pair(prepared_publication, receipt, prefixes):
@@ -1087,6 +1091,7 @@ class SharedNativeRuntime:
             counts, replay_check=verify, accepted_tokens=accepted_tokens, vocab_size=vocab_size,
             on_publication_enqueued=on_publication_enqueued, lookahead_eos=lookahead_eos,
             on_publication_validated=on_publication_validated,
+            write_draft=getattr(receipt, "write_prepared", None),
         ):
             return False
         # The publication status event follows both receipts and validates the

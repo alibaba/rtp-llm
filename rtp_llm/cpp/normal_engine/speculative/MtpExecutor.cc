@@ -107,6 +107,18 @@ bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* labe
     return on;
 }
 
+bool usePpuDirectDraftKVCommit() {
+#if USE_PPU
+    // Keep direct commit opt-in. TODO: Debug the PPU Decode hang observed with A40 FlashMLA when direct commit and
+    // RTP_V41_PPU_VERIFY_SHARED_MLA_SCHEDULE=1 are both enabled.
+    static const bool enabled = readEnvFlagOnce(
+        "RTP_V41_PPU_DSPARK_DIRECT_DRAFT_KV_COMMIT", "ppu-dspark-commit", "direct");
+    return enabled;
+#else
+    return false;
+#endif
+}
+
 bool debugTargetVerifyInputEnabled() {
     static const bool enabled = []() {
         const char* env = std::getenv("RTP_LLM_DEBUG_TARGET_VERIFY_INPUT");
@@ -1559,7 +1571,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                        !is_dspark_,
                                        false,
                                        is_dspark_ ? DSparkModelRole::COMMIT : DSparkModelRole::NONE,
-                                       draft_graph_allowed,
+                                       draft_graph_allowed
+                                           && !(is_dspark_ && role_type_ == RoleType::DECODE
+                                                && usePpuDirectDraftKVCommit()),
                                        dspark_prefill_commit_only_));
             }
         }
@@ -2326,6 +2340,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     bool                          spec_logits_processor_present           = false;
     const bool                    alignment_only                          = enable_ffn_disaggregate_ && streams.empty();
 #if USE_PPU
+    const bool direct_draft_commit =
+        is_dspark_ && role_type_ == RoleType::DECODE && usePpuDirectDraftKVCommit();
+    torch::Tensor direct_draft_accepted_rows;
     static const bool zero_overhead = readEnvFlagOnce(
         "RTP_V41_PPU_ZERO_OVERHEAD_SCHEDULER", "ppu-dspark-scheduler", "zero_overhead");
     int64_t lookahead_eos = -1;
@@ -2937,7 +2954,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                     cuda_graph::GraphStreamGuard guard(cuda_graph::toGraphStream(draft_stream));
                     input_ready.block(draft_stream);
                     try {
-                        private_draft_commit.staged = draft->tryStagePrivateDraftCommit(commit_input);
+                        private_draft_commit.staged = direct_draft_commit ?
+                            draft->directDraftKVCommit(commit_input, propose_step_ + 1) :
+                            draft->tryStagePrivateDraftCommit(commit_input);
                     } catch (...) {
                         stage_ready->record(draft_stream);
                         private_draft_commit.ready = stage_ready;
@@ -2955,7 +2974,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
         static const bool prepare_early = readEnvFlagOnce(
             "RTP_V41_PPU_DSPARK_EARLY_DRAFT_COMMIT_PREPARE", "ppu-dspark-commit", "early_prepare");
-        if (prepare_early && !private_draft_commit.staged && draft != nullptr) {
+        if (prepare_early && !direct_draft_commit && !private_draft_commit.staged && draft != nullptr) {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_dspark_draft_commit)");
             // Dense Commit shares this round's verified geometry. Bind
             // the Draft's own cache tables now and leave the replay and
@@ -3524,7 +3543,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                     draft.model = nullptr;
                 }
             };
-            if (simulated_count || defer_commit) {
+            if (direct_draft_commit && !private_draft_commit.staged && !model_input.is_fake_stream) {
+                direct_draft_accepted_rows = accepted;
+            }
+            if ((!direct_draft_commit && simulated_count) || defer_commit) {
                 RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(defer_verify_publication)");
                 auto draft = std::make_shared<PrivateDraftCommitGuard>();
                 draft->model = std::exchange(private_draft_commit.model, nullptr);
@@ -3629,7 +3651,23 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         // freshly committed ring.
         try {
 #if USE_PPU
-            if (!private_draft_commit.staged)
+            if (direct_draft_commit && !private_draft_commit.staged && !model_input.is_fake_stream) {
+                RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(direct_draft_kv_commit)");
+                const auto options = torch::TensorOptions().dtype(torch::kInt32).device(model_input.last_hidden_states.device());
+                if (isTpRank0()) {
+                    RTP_LLM_CHECK_WITH_INFO(direct_draft_accepted_rows.defined(),
+                                            "DSpARK direct Draft commit requires finalized acceptance");
+                    direct_draft_accepted_rows = direct_draft_accepted_rows.to(options).contiguous();
+                } else {
+                    direct_draft_accepted_rows = torch::empty({static_cast<int64_t>(batch_size)}, options);
+                }
+                if (parallelism_config_.tp_size > 1) {
+                    execBroadcast({{direct_draft_accepted_rows}, 0});
+                }
+                auto* draft = dynamic_cast<PyWrappedModel*>(sp_prefill_draft_model_.get());
+                RTP_LLM_CHECK(draft != nullptr);
+                draft->directDraftKVCommit(model_input, propose_step_ + 1, direct_draft_accepted_rows);
+            } else if (!private_draft_commit.staged)
 #endif
             {
                 draft_prefill_model_output = runDraftPrefillForward(model_input);

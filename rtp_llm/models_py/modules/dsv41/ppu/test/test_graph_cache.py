@@ -414,6 +414,51 @@ class VerifyTableGeometryDeviceTest(unittest.TestCase):
                 device_result = (target_pool.clone(), draft_pool.clone())
                 target_pool.zero_()
                 draft_pool.zero_()
+                draft_payload = draft[0]._storage[1].clone()
+                draft[0]._storage[1].zero_()
+                submissions = []
+
+                def write_direct(plans, status):
+                    submissions.append("draft")
+                    slots = torch.where(status == 0, plans[0, :rows], -1)
+                    graph_cache_kernels.write_packed_rows(
+                        draft_pool, slots, draft_payload, width=row_bytes, entries=span, planar=False,
+                    )
+
+                def submit_proposal(_status, publish):
+                    submissions.append("proposal")
+                    publish()
+
+                for eos, success in ((tokens[0], False), (-1, True)):
+                    target_pool.zero_()
+                    draft_pool.zero_()
+                    submissions.clear()
+                    self.assertEqual(prepared.publish(
+                        device_counts, replay_check=receipt, accepted_tokens=emitted, vocab_size=1024,
+                        lookahead_eos=eos, on_publication_validated=submit_proposal, write_draft=write_direct,
+                    ), success)
+                    self.assertEqual(submissions, ["draft", "proposal"])
+                    if success:
+                        self.assertTrue(torch.equal(target_pool, device_result[0]))
+                        self.assertTrue(torch.equal(draft_pool, device_result[1]))
+                    else:
+                        self.assertFalse(bool(target_pool.any() or draft_pool.any()))
+
+                def fail_after_draft_write(plans, status):
+                    write_direct(plans, status)
+                    raise RuntimeError("injected direct Draft write failure")
+
+                target_pool.zero_()
+                draft_pool.zero_()
+                with self.assertRaisesRegex(RuntimeError, "injected direct Draft write failure"):
+                    prepared.publish(
+                        device_counts, replay_check=receipt, accepted_tokens=emitted, vocab_size=1024,
+                        write_draft=fail_after_draft_write,
+                    )
+                self.assertFalse(bool(target_pool.any() or draft_pool.any()))
+                draft[0]._storage[1].copy_(draft_payload)
+                target_pool.zero_()
+                draft_pool.zero_()
                 self.assertTrue(prepared.publish(tuple(device_counts.tolist()), replay_check=receipt))
                 self.assertTrue(torch.equal(device_result[0], target_pool))
                 self.assertTrue(torch.equal(device_result[1], draft_pool))
@@ -444,6 +489,56 @@ class VerifyTableGeometryDeviceTest(unittest.TestCase):
                         self.assertTrue(torch.equal(draft_pool, device_result[1]))
                     else:
                         self.assertFalse(bool(target_pool.any() or draft_pool.any()))
+
+    @torch.inference_mode()
+    def test_direct_draft_commit_slots_accept_dense_and_packed_widths(self):
+        from rtp_llm.models_py.modules.dsv41.ppu.dspark_attention import _prepare_accepted_commit_slots
+        from rtp_llm.models_py.modules.dsv41.ppu.graph_metadata import prepare_direct_draft_commit_rows
+
+        device = torch.device("cuda", torch.cuda.current_device())
+        table = torch.arange(1, 13, dtype=torch.int32, device=device).view(3, 4)
+        pool = torch.empty((13, 4 * 528), dtype=torch.uint8, device=device)
+        cache = SimpleNamespace(
+            _table_tag=lambda *_: "swa_kv", entries={"swa_kv": 4}, spans={"swa_kv": 4},
+            pool=lambda *_: pool, tables={"swa_kv": table}, max_seq_len=16,
+        )
+        host_prefixes = [3, 5, 9]
+        host_accepted = [3, 0, 2]
+        prefixes = torch.tensor(host_prefixes, dtype=torch.int32, device=device)
+        accepted = torch.tensor(host_accepted, dtype=torch.int32, device=device)
+        for packed, host_lengths in ((False, [5, 5, 5]), (True, [4, 1, 2])):
+            with self.subTest(packed=packed):
+                lengths = torch.tensor(host_lengths, dtype=torch.int32, device=device)
+                ends = lengths.cumsum(0) if packed else lengths
+                positions, slots, errors = _prepare_accepted_commit_slots(
+                    cache, 0, lengths, prefixes, accepted, sum(host_lengths), 5, packed, ends,
+                )
+                expected_pos, expected_slots = [], []
+                for request, (prefix, count, length) in enumerate(zip(host_prefixes, host_accepted, host_lengths)):
+                    for column in range(length):
+                        pos = prefix + column
+                        expected_pos.append(pos if column < count else 0)
+                        block = request * 4 + pos // 4 + 1
+                        expected_slots.append(block * 4 + pos % 4 if column < count else -1)
+                self.assertEqual(positions.tolist(), expected_pos)
+                self.assertEqual(slots.tolist(), expected_slots)
+                self.assertFalse(bool(errors.any()))
+
+                table[0, 1] = 0
+                try:
+                    _, _, errors = _prepare_accepted_commit_slots(
+                        cache, 0, lengths, prefixes, accepted, sum(host_lengths), 5, packed, ends,
+                    )
+                    self.assertEqual(errors.tolist(), [True, False, False])
+                finally:
+                    table[0, 1] = 2
+
+        edge_prefixes = torch.tensor([-1, 5, 14], dtype=torch.int64, device=device)
+        layout, requests, positions, valid = prepare_direct_draft_commit_rows(edge_prefixes, lengths, 5, 16)
+        self.assertEqual(layout.tolist(), [[-1, 5, 14], [4, 1, 2]])
+        self.assertEqual(requests.tolist(), [0] * 5 + [1] * 5 + [2] * 5)
+        self.assertEqual(positions.tolist(), [0, 0, 1, 2, 3, 5, 6, 7, 8, 9, 14, 15, 15, 15, 15])
+        self.assertEqual(valid.nonzero().flatten().tolist(), [1, 2, 3, 5, 10, 11])
 
     @patch.dict(os.environ, {"RTP_V41_PPU_FUSED_DSPARK_COMMIT_METADATA": "1"})
     @torch.inference_mode()

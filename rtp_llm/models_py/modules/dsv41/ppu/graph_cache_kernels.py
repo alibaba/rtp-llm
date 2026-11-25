@@ -832,7 +832,7 @@ class BatchedVerifyPublication:
     """Static pool descriptors for a Verify journal and its native cache."""
 
     @classmethod
-    def try_create(cls, pools, rows, device):
+    def try_create(cls, pools, rows, device, *, async_descriptors=False):
         if rows <= 0 or rows & (rows - 1) or device.type != "cuda":
             return None
         plan, transfer, storage, ranges = [], [], [], []
@@ -875,11 +875,19 @@ class BatchedVerifyPublication:
         # another pool. Keep the ordered fallback for those layouts.
         if not plan or any(end > start for (_, end), (start, _) in zip(ranges, ranges[1:])):
             return None
-        return cls(plan, transfer, storage, ranges, rows, words_per_row, max_words, device)
+        return cls(
+            plan, transfer, storage, ranges, rows, words_per_row, max_words, device,
+            async_descriptors=async_descriptors,
+        )
 
-    def __init__(self, plan, transfer, storage, ranges, rows, words_per_row, max_words, device):
-        self.plan = torch.tensor(plan, dtype=torch.int64, device=device)
-        self.transfer = torch.tensor(transfer, dtype=torch.int64, device=device)
+    def __init__(self, plan, transfer, storage, ranges, rows, words_per_row, max_words, device, *, async_descriptors):
+        def descriptor(values):
+            if async_descriptors:
+                return torch.tensor(values, dtype=torch.int64).pin_memory().to(device, non_blocking=True)
+            return torch.tensor(values, dtype=torch.int64, device=device)
+
+        self.plan = descriptor(plan)
+        self.transfer = descriptor(transfer)
         # Integer descriptors borrow addresses. Keep the referenced tensors
         # alive for at least as long as the descriptors.
         self._storage = storage
@@ -1098,6 +1106,7 @@ class _PreparedVerifyPair:
     def publish(
         self, counts, expected_prefixes=None, *, replay_check=None, accepted_tokens=None,
         vocab_size=0, on_publication_enqueued=None, lookahead_eos=-1, on_publication_validated=None,
+        write_draft=None,
     ) -> bool:
         """Validate and publish both KV journals on the bound stream."""
         batch, width, rows = self.prefixes.numel(), _VERIFY_PAIR_WIDTH, self.target[0].rows
@@ -1215,7 +1224,11 @@ class _PreparedVerifyPair:
                     backup = workspace.get_backup()
                     _copy_verify_pair(kernels, target_pub, draft_pub, plans, backup, status)
                     try:
-                        _copy_verify_pair(kernels, target_pub, draft_pub, plans, backup, status, write=True)
+                        if write_draft is None:
+                            _copy_verify_pair(kernels, target_pub, draft_pub, plans, backup, status, write=True)
+                        else:
+                            target_pub._copy(target_plans, backup[:target_words], write=True, status=status)
+                            write_draft(draft_plans, status)
                     except Exception:
                         rollback_error = None
                         # A combined launch may have reached both journals. Restore
@@ -1231,7 +1244,9 @@ class _PreparedVerifyPair:
                         if rollback_error is not None:
                             raise RuntimeError("joint Verify KV publication rollback failed") from rollback_error
                         raise
-                if on_publication_validated is None:
+                # Submit the backup and direct KV writes before the next Proposal queues its EP vote.
+                # The Proposal's replay event then covers the writes already queued on this stream.
+                if on_publication_validated is None or write_draft is not None:
                     enqueue_writes()
                 if overlap_status:
                     # Arm the status copy before the submitter prepares and queues

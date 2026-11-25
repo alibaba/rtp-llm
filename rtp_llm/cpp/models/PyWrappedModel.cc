@@ -225,6 +225,30 @@ bool PyWrappedModel::tryStagePrivateDraftCommit(const GptModelInputs& inputs) {
     return py_model_.attr("finish_private_draft_stage")().cast<bool>();
 }
 
+bool PyWrappedModel::directDraftKVCommit(const GptModelInputs& inputs,
+                                        int                   verify_width,
+                                        const torch::Tensor&  accepted_rows) {
+    RTP_LLM_PROFILE_SCOPE("py_model.direct_draft_kv_commit");
+    RTP_LLM_CHECK(dspark_model_role_ == DSparkModelRole::COMMIT);
+    d2d_copies_.clear();
+    torch_ext::PyAttentionInputs attention_inputs;
+    auto tagged         = setupKVCacheForAttentionInputs(attention_inputs, inputs);
+    const auto lengths  = tensorHoldHostAndToCuda(inputs.input_lengths).contiguous();
+    const auto prefixes = tensorHoldHostAndToCuda(inputs.prefix_lengths).contiguous();
+    fusedCopy(d2d_copies_);
+    py::gil_scoped_acquire gil;
+    const auto tables = tagged.empty() ? py::cast(attention_inputs) : py::cast(tagged);
+    if (!accepted_rows.defined()) {
+        return py_model_.attr("stage_direct_draft_kv")(
+            tables, inputs.last_hidden_states, lengths, prefixes, inputs.request_id, verify_width).cast<bool>();
+    }
+    RTP_LLM_CHECK(accepted_rows.is_cuda());
+    py_model_.attr("commit_accepted_draft_kv")(
+        tables, inputs.last_hidden_states, lengths, prefixes, accepted_rows,
+        verify_width, inputs.is_packed_target_verify);
+    return true;
+}
+
 bool PyWrappedModel::prepareSpeculativeForwardCompletionWithPrivateDraft(PyWrappedModel& draft,
                                                                          const torch::Tensor& prefixes) {
     py::gil_scoped_acquire gil;

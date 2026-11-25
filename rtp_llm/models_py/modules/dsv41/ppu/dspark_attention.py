@@ -1,6 +1,7 @@
 """PPU projection/codec seams for the inherited DSpark layer and commit loops."""
 
 import os
+from functools import lru_cache
 
 import torch
 import torch.nn.functional as F
@@ -14,6 +15,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.prefill import _rope_tail
 from rtp_llm.models_py.modules.dsv41.ppu.block import SharedPPUBlock
 from rtp_llm.models_py.modules.dsv41.ppu.graph_metadata import try_stage_private_draft_rows
 from rtp_llm.models_py.modules.dsv41.ppu.layers import PPUSharedRMSNorm
+from rtp_llm.models_py.modules.dsv41.ppu.linear import prepare_shared_ptpc_input
 from rtp_llm.models_py.modules.dsv41.ppu.graph_swa_write import (
     dequantize_draft_swa,
     try_prepare_draft_swa,
@@ -63,12 +65,15 @@ class SharedPPUDSparkBlock(SharedPPUBlock):
             super().__init__(views, layer_id, ops, enpm_group=enpm_group)
 
 
-def _project_commit_kv(attn, main_x, quantized_input=None):
-    raw = (
+def project_commit_kv_raw(attn, main_x, quantized_input=None):
+    return (
         attn.wkv(main_x) if quantized_input is None
         else attn.wkv.forward_quantized(*quantized_input)
     )
-    return attn.kv_norm(raw)
+
+
+def _project_commit_kv(attn, main_x, quantized_input=None):
+    return attn.kv_norm(project_commit_kv_raw(attn, main_x, quantized_input))
 
 
 def project_commit(attn, main_x, positions, freqs, *, quantized_input=None):
@@ -81,6 +86,137 @@ def project_commit(attn, main_x, positions, freqs, *, quantized_input=None):
 def _swa_geometry(cache, layer_id):
     domain = cache._table_tag(layer_id, "swa_kv")
     return domain, cache.entries[domain], cache.spans[domain], cache.pool(layer_id, "swa_kv").shape[0]
+
+
+@lru_cache(maxsize=1)
+def _accepted_commit_slots_kernel():
+    import triton
+    import triton.language as tl
+
+    @triton.jit
+    def accepted_commit_slots(
+        lengths, prefixes, counts, ends, table, positions, slots, errors,
+        ROWS: tl.constexpr, WIDTH: tl.constexpr, PACKED: tl.constexpr,
+        TABLE_COLS: tl.constexpr, TABLE_ROW_STRIDE: tl.constexpr,
+        TABLE_COL_STRIDE: tl.constexpr, SPAN: tl.constexpr, ENTRIES: tl.constexpr,
+        POOL_BLOCKS: tl.constexpr, MAX_POS: tl.constexpr, BLOCK: tl.constexpr,
+    ):
+        request = tl.program_id(0)
+        col = tl.arange(0, BLOCK)
+        length = tl.load(lengths + request).to(tl.int64)
+        count = tl.load(counts + request).to(tl.int64)
+        prefix = tl.load(prefixes + request).to(tl.int64)
+        start = tl.load(ends + request) - length if PACKED else request * WIDTH
+        row = start + col
+        valid = (col < length) & (row >= 0) & (row < ROWS)
+        accepted = valid & (col < count)
+        position = prefix + col
+        page = position // SPAN
+        lookup = accepted & (position >= 0) & (position < MAX_POS) & (page < TABLE_COLS)
+        block = tl.load(
+            table + request * TABLE_ROW_STRIDE + page * TABLE_COL_STRIDE, lookup, other=0,
+        ).to(tl.int64)
+        writable = lookup & (block > 0) & (block < POOL_BLOCKS)
+        offset = position % ENTRIES
+        tl.store(positions + row, tl.where(writable, position, 0), valid)
+        tl.store(slots + row, tl.where(writable, block * ENTRIES + offset, -1), valid)
+        bad = (length <= 0) | (length > WIDTH) | (count < 0) | (count > length)
+        bad |= (start < 0) | (start + length > ROWS)
+        if not PACKED:
+            bad |= length != WIDTH
+        bad |= tl.sum((accepted & ~writable).to(tl.int32), 0) != 0
+        tl.store(errors + request, bad)
+
+    return triton, accepted_commit_slots
+
+
+def _prepare_accepted_commit_slots(cache, layer_id, lengths, prefixes, accepted, rows, width, packed, ends):
+    domain, entries, span, pool_blocks = _swa_geometry(cache, layer_id)
+    table = cache.tables[domain]
+    if table.shape[0] < lengths.numel():
+        raise ValueError("DSpARK Draft SWA table does not cover the Verify requests")
+    positions = torch.zeros((rows,), dtype=torch.int64, device=lengths.device)
+    slots = torch.full_like(positions, -1)
+    errors = torch.empty_like(lengths, dtype=torch.bool)
+    triton, kernel = _accepted_commit_slots_kernel()
+    kernel[(lengths.numel(),)](
+        lengths, prefixes, accepted, ends, table, positions, slots, errors,
+        rows, width, packed, table.shape[1], *table.stride(), span, entries,
+        pool_blocks, cache.max_seq_len, triton.next_power_of_2(width), num_warps=1,
+    )
+    return positions, unique_commit_swa_slots(slots), errors
+
+
+def project_draft_swa(model, features):
+    """Share one activation quantization across the Draft WKV layers."""
+    layers = model.v4.layers
+    main_x = model.combine_hidden_states(features)
+    quantized = prepare_shared_ptpc_input(main_x, tuple(layer.attn.wkv for layer in layers))
+    return tuple(project_commit_kv_raw(layer.attn, main_x, quantized) for layer in layers)
+
+
+def store_projected_draft_swa(model, cache, projected, layer_metadata, *, status=None):
+    """Normalize and store the selected native KV rows."""
+    from rtp_llm.models_py.modules.dsv41.ppu.norm_store import try_norm_rope_store_swa
+
+    rope = {}
+    status_ok = None
+    for index, (layer, raw, (positions, slots)) in enumerate(zip(model.v4.layers, projected, layer_metadata)):
+        attn = layer.attn
+        table = model.shared_runtime.freqs_for(index)
+        if status is not None:
+            if try_norm_rope_store_swa(
+                raw, attn.kv_norm.weight, attn.kv_norm.variance_epsilon, table, cache, index, slots,
+                positions=positions, status=status,
+            ):
+                continue
+            if status_ok is None:
+                status_ok = status == 0
+            slots = torch.where(status_ok, slots, -1)
+        key = (id(table), id(positions))
+        if key not in rope:
+            rope[key] = table[positions]
+        frequencies = rope[key]
+        if not try_norm_rope_store_swa(
+            raw, attn.kv_norm.weight, attn.kv_norm.variance_epsilon, frequencies, cache, index, slots,
+        ):
+            normed = attn.kv_norm(raw)
+            if not try_write_rotary_swa(normed, frequencies, cache, index, slots):
+                payload = model._shared_ops.encode_kv(_rope_tail(normed, frequencies), pool_tag="swa_kv")
+                cache.write_rows(index, "swa_kv", slots, payload)
+
+
+def commit_accepted_draft_swa(model, cache, features, lengths, prefixes, accepted, *, width, packed, projected=None):
+    """Write only accepted Verify rows using the Draft's own native page tables."""
+    rows = features.shape[0]
+    batch = lengths.numel()
+    if (
+        features.ndim != 2 or not features.is_cuda or width <= 0 or batch == 0
+        or not 0 < rows <= batch * width or (not packed and rows != batch * width)
+        or any(t.shape != (batch,) or t.device != features.device
+               or t.dtype not in (torch.int32, torch.int64) or not t.is_contiguous()
+               for t in (lengths, prefixes, accepted))
+    ):
+        raise ValueError("invalid DSpARK accepted Draft KV geometry")
+    ends = lengths.cumsum(0, dtype=torch.int64) if packed else lengths
+    metadata = {}
+    layer_metadata = []
+    for index in range(len(model.v4.layers)):
+        geometry = _swa_geometry(cache, index)
+        if geometry not in metadata:
+            metadata[geometry] = _prepare_accepted_commit_slots(
+                cache, index, lengths, prefixes, accepted, rows, width, packed, ends,
+            )
+        layer_metadata.append(metadata[geometry][:2])
+    for _, _, errors in metadata.values():
+        if bool(errors.any()):
+            raise ValueError("DSpARK accepted Draft KV row has no valid native slot")
+    if packed and int(ends[-1]) != rows:
+        raise ValueError("DSpARK packed Draft KV lengths do not cover the Verify output")
+
+    if projected is None:
+        projected = project_draft_swa(model, features)
+    store_projected_draft_swa(model, cache, projected, layer_metadata)
 
 
 def graph_commit_layer(

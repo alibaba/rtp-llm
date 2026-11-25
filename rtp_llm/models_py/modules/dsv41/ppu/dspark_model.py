@@ -300,6 +300,57 @@ class DeepSeekV41PPUDSparkModel(DeepSeekV41DSparkModel):
         self._private_draft_armed_ids = None
         self._private_draft_pending = None
 
+    @torch.inference_mode()
+    def stage_direct_draft_kv(self, attention_inputs, features, lengths, prefixes, request_ids, width):
+        """Prepare publication metadata and project features on the Draft stream."""
+        from rtp_llm.models_py.modules.dsv41.ppu.dspark_graph import DirectDraftCommitReceipt
+        from rtp_llm.models_py.modules.dsv41.ppu.graph_cache import NativeGraphCache
+        from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import supports_verify_pair_layout
+
+        ids = _private_draft_request_ids(request_ids)
+        if (
+            ids is None or not supports_verify_pair_layout(len(ids), width)
+            or lengths.shape != (len(ids),) or prefixes.shape != (len(ids),)
+            or features.ndim != 2 or features.shape[0] != len(ids) * width
+        ):
+            return False
+        if self._private_draft_armed_ids is not None or self._private_draft_pending is not None:
+            raise RuntimeError("DSpARK Draft KV commit overlaps another publication")
+        runtime = self.shared_runtime
+        config = dict(self.shared_weight_views.config, max_position_embeddings=int(self._v4_args.max_seq_len))
+        native = NativeGraphCache(config, self.kv_cache, attention_inputs, device=runtime.device)
+        live = SharedNativeCache(
+            config, native.geometry, self.kv_cache, attention_inputs, (),
+            device=runtime.device, defer_producer_slots=True,
+        )
+        receipt = DirectDraftCommitReceipt(self, native, live, features, lengths, prefixes, width)
+        if receipt.journal._batched_publication is None:
+            return False
+        receipt.stage_projections()
+        self._private_draft_pending = (ids, receipt)
+        return True
+
+    @torch.inference_mode()
+    def commit_accepted_draft_kv(
+        self, attention_inputs, features, lengths, prefixes, accepted_rows, width, packed,
+    ):
+        """Commit accepted Decode features without the generic forward output."""
+        from rtp_llm.models_py.modules.dsv41.ppu.dspark_attention import commit_accepted_draft_swa
+        from rtp_llm.models_py.modules.dsv41.ppu.graph_cache import NativeGraphCache
+
+        runtime = self.shared_runtime
+        if runtime is None or runtime.current is not None:
+            raise RuntimeError("unavailable DSpARK Draft KV resources")
+        if self._private_draft_armed_ids is not None or self._private_draft_pending is not None:
+            raise RuntimeError("DSpARK Draft KV commit overlaps a private replay")
+        cache = NativeGraphCache(
+            dict(self.shared_weight_views.config, max_position_embeddings=int(self._v4_args.max_seq_len)),
+            self.kv_cache, attention_inputs, device=runtime.device,
+        )
+        commit_accepted_draft_swa(
+            self, cache, features, lengths, prefixes, accepted_rows, width=width, packed=packed,
+        )
+
     def commit_feature_rows(
         self, main_x, context_req_ids, context_positions, committed_ends,
         inputs, commit_ctx=None,

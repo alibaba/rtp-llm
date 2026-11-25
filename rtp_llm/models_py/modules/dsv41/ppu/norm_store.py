@@ -36,7 +36,7 @@ def _raw(value):
     )
 
 
-def _inputs_supported(raw, weight, eps, freqs, dim):
+def _inputs_supported(raw, weight, eps, freqs, dim, *, indexed_freqs=False):
     if not (
         _raw(raw)
         and raw.is_cuda
@@ -48,7 +48,9 @@ def _inputs_supported(raw, weight, eps, freqs, dim):
         and _raw(freqs)
         and freqs.device == raw.device
         and freqs.dtype == torch.complex64
-        and freqs.shape == (raw.shape[0], 32)
+        and freqs.ndim == 2
+        and freqs.shape[1] == 32
+        and (freqs.shape[0] > 0 if indexed_freqs else freqs.shape[0] == raw.shape[0])
         and freqs.is_contiguous()
         and isinstance(eps, (int, float))
         and math.isfinite(eps)
@@ -96,18 +98,21 @@ def _kernel():
 
     complex_multiply = _complex_multiply()
 
-    @triton.jit(do_not_specialize=["row_stride", "block_stride", "pool_blocks", "eps"])
+    @triton.jit(do_not_specialize=["row_stride", "block_stride", "pool_blocks", "freq_rows", "eps"])
     def norm_rope_store(
         raw,
         weight,
         eps,
         frequencies,
+        positions,
+        status,
         slots,
         pool,
         generations,
         row_stride,
         block_stride,
         pool_blocks,
+        freq_rows,
         ENTRIES: tl.constexpr,
         INDEXER: tl.constexpr,
         ROW_PACK: tl.constexpr,
@@ -128,6 +133,10 @@ def _kernel():
             offset = slot % ENTRIES
             base = pool + block * block_stride
             writable = (slot >= 0) & (block > 0) & (block < pool_blocks)
+        freq_row = row
+        if positions is not None:
+            freq_row = tl.load(positions + row)
+            writable = writable & (freq_row >= 0) & (freq_row < freq_rows) & (tl.load(status) == 0)
         if writable:
             columns = tl.arange(0, dim)
             values = tl.load(raw + row * row_stride + columns).to(tl.float32)
@@ -140,8 +149,8 @@ def _kernel():
             pair = tl.arange(0, 32)
             real = tl.gather(values, dim - 64 + 2 * pair, 0).to(tl.float32)
             imag = tl.gather(values, dim - 63 + 2 * pair, 0).to(tl.float32)
-            cosine = tl.load(frequencies + row * 64 + 2 * pair)
-            sine = tl.load(frequencies + row * 64 + 2 * pair + 1)
+            cosine = tl.load(frequencies + freq_row * 64 + 2 * pair)
+            sine = tl.load(frequencies + freq_row * 64 + 2 * pair + 1)
             real, imag = complex_multiply(real, imag, cosine, sine)
             tail = tl.interleave(real, imag).to(tl.bfloat16)
             values = tl.where(
@@ -195,19 +204,24 @@ def _kernel():
     return norm_rope_store
 
 
-def _launch(raw, weight, eps, freqs, slots, pool, generations, entries, indexer, row_pack):
+def _launch(
+    raw, weight, eps, freqs, slots, pool, generations, entries, indexer, row_pack, *, positions=None, status=None,
+):
     if raw.shape[0]:
         _kernel()[(raw.shape[0],)](
             raw,
             weight,
             float(eps),
             torch.view_as_real(freqs),
+            positions,
+            status,
             slots,
             pool,
             generations,
             raw.stride(0),
             pool.stride(0),
             pool.shape[0],
+            freqs.shape[0],
             entries,
             indexer,
             row_pack,
@@ -241,15 +255,21 @@ def try_norm_rope_pack_indexer(raw_index, norm_weight, eps, freqs):
     return _try_pack(raw_index, norm_weight, eps, freqs, indexer=True)
 
 
-def _try_store(raw, weight, eps, freqs, cache, layer_id, slots, *, indexer, journal):
+def _try_store(raw, weight, eps, freqs, cache, layer_id, slots, *, indexer, journal, positions=None, status=None):
     dim = INDEXER_HEAD_DIM if indexer else KV_DIM
     width = INDEXER_K_ENTRY_BYTES if indexer else SWA_KV_ENTRY_BYTES
     tag = "indexer_kv" if indexer else "swa_kv"
     if not (
         type(journal) is bool
         and type(layer_id) is int
-        and _inputs_supported(raw, weight, eps, freqs, dim)
+        and _inputs_supported(raw, weight, eps, freqs, dim, indexed_freqs=positions is not None)
         and _slots_supported(slots, raw)
+    ):
+        return False
+    if positions is not None and not (
+        _slots_supported(positions, raw)
+        and _raw(status) and status.device == raw.device and status.dtype == torch.int32
+        and status.shape in ((), (1,)) and status.is_contiguous()
     ):
         return False
     from rtp_llm.models_py.modules.dsv41.ppu.graph_cache import NativeGraphCache
@@ -281,6 +301,8 @@ def _try_store(raw, weight, eps, freqs, cache, layer_id, slots, *, indexer, jour
         # callers use the pack API above and retain their normal write path.
         if not isinstance(cache, NativeGraphCache):
             return False
+        if positions is not None and freqs.shape[0] < cache.max_seq_len:
+            return False
         if (layer_id, tag) not in cache._pools:
             return False
         target = _native_pool(cache, layer_id, tag, raw.device, width)
@@ -289,23 +311,32 @@ def _try_store(raw, weight, eps, freqs, cache, layer_id, slots, *, indexer, jour
         pool, entries = target
         generations = None
     outputs = (pool,) if generations is None else (pool, generations)
-    if not _disjoint_writes(outputs, (raw, weight, freqs, slots)):
+    if not _disjoint_writes(outputs, (raw, weight, freqs, slots, positions, status)):
         return False
-    _launch(raw, weight, eps, freqs, slots, pool, generations, entries, indexer, journal)
+    _launch(
+        raw, weight, eps, freqs, slots, pool, generations, entries, indexer, journal,
+        positions=positions, status=status,
+    )
     return True
 
 
 def try_norm_rope_store_swa(
-    raw_kv, norm_weight, eps, freqs, cache, layer_id, slots, *, journal=False
+    raw_kv, norm_weight, eps, freqs, cache, layer_id, slots, *, journal=False, positions=None, status=None,
 ):
     """Fuse raw main K norm/RoPE/FP8 encoding and native or journal storage.
+
+    Native writes can use ``positions`` to index the RoPE table and ``status``
+    to suppress publication when the device receipt is nonzero. Out-of-range
+    positions also suppress writes.
 
     Returns False before dispatch if unsupported. Once dispatched, JIT and
     provider errors propagate; the caller must not retry another writer.
     """
+    if (positions is None) != (status is None) or (journal is True and positions is not None):
+        return False
     return _try_store(
         raw_kv, norm_weight, eps, freqs, cache, layer_id, slots,
-        indexer=False, journal=journal,
+        indexer=False, journal=journal, positions=positions, status=status,
     )
 
 

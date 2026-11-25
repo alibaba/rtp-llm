@@ -22,6 +22,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import (
 )
 from rtp_llm.models_py.modules.dsv41.ppu.graph_metadata import (
     device_rows,
+    prepare_direct_draft_commit_rows,
     require_device_tables,
 )
 from rtp_llm.models_py.modules.dsv41.ppu.graph_packed_attention import (
@@ -295,12 +296,13 @@ class SharedDSparkGraphImpl:
 class VerifyGraphJournal:
     """Fixed raw-position payloads; only the existing accept hook publishes."""
 
-    def __init__(self, native, rows):
+    def __init__(self, native, rows, *, raw_positions=None):
         self.native_cache = native
         self.native, self.max_seq_len = native.native, native.max_seq_len
         self.rows = rows
         self.generations = {
-            key: torch.empty(rows, dtype=torch.long, device=native.device)
+            key: (raw_positions if raw_positions is not None
+                  else torch.empty(rows, dtype=torch.long, device=native.device))
             for key in native.geometry.pool_keys()
         }
         self.payloads = {
@@ -311,9 +313,9 @@ class VerifyGraphJournal:
         self.consumed_tables = {tag: torch.empty_like(table) for tag, table in native.tables.items()}
         self._batched_publication = None
         if enabled(_VERIFY_BATCHED_PUBLICATION_ENV, default=True):
-            self._batched_publication = self._build_publication_batch()
+            self._batched_publication = self._build_publication_batch(async_descriptors=raw_positions is not None)
 
-    def _build_publication_batch(self):
+    def _build_publication_batch(self, *, async_descriptors=False):
         cache = self.native_cache
         pools = []
         for (owner, tag), raw in self.generations.items():
@@ -325,7 +327,9 @@ class VerifyGraphJournal:
                 cache.entries[table_tag], cache.geometry.ratio(owner) if full else 1,
                 full, tag == "csa_state", tag == "indexer_kv",
             ))
-        return BatchedVerifyPublication.try_create(pools, self.rows, cache.device)
+        return BatchedVerifyPublication.try_create(
+            pools, self.rows, cache.device, async_descriptors=async_descriptors,
+        )
 
     def bind(self, requests, starts, prefixes, valid):
         self.requests, self.valid = requests.clamp_min(0), valid
@@ -559,10 +563,12 @@ class _PrivateDraftCommitJournal(VerifyGraphJournal):
 
     is_private_draft_commit = True
 
-    def __init__(self, native, rows, prefixes, lengths):
-        super().__init__(native, rows)
+    def __init__(self, native, rows, prefixes, lengths, *, raw_positions=None, layout=None):
+        super().__init__(native, rows, raw_positions=raw_positions)
         self.source_prefixes, self.source_lengths = prefixes, lengths
-        self.layout = torch.empty((2, prefixes.numel()), dtype=torch.int64, device=prefixes.device)
+        self.layout = layout if layout is not None else torch.empty(
+            (2, prefixes.numel()), dtype=torch.int64, device=prefixes.device,
+        )
 
     def bind_commit(self, requests, valid, live):
         self.layout[0].copy_(self.source_prefixes)
@@ -680,4 +686,63 @@ class _PrivateDraftCommitReceipt:
             bindings.validate()
         if not any(counts):
             return 0
+        return self._publish_rows(layout, counts)
+
+    def _publish_rows(self, layout, counts):
         return self.journal.publish(layout, counts)
+
+
+class DirectDraftCommitReceipt(_PrivateDraftCommitReceipt):
+    """Use the paired Verify validator without a captured Draft forward or KV payload."""
+
+    def __init__(self, model, native, live, features, lengths, prefixes, width):
+        batch, rows = lengths.numel(), features.shape[0]
+        layout, requests, positions, valid = prepare_direct_draft_commit_rows(
+            prefixes, lengths, width, native.max_seq_len,
+        )
+        journal = _PrivateDraftCommitJournal(
+            native, rows, prefixes, lengths, raw_positions=positions, layout=layout,
+        )
+        journal.requests, journal.prefixes, journal.valid = requests, layout[0], valid
+        for tag, table in native.tables.items():
+            journal.consumed_tables[tag].copy_(table)
+        impl = SimpleNamespace(
+            batch_size=batch, width=width, device=native.device, _private_draft_replay=0,
+        )
+        super().__init__(impl, journal, live)
+        self.model, self.features = model, features
+        self.positions = positions
+        self.projected = None
+
+    def stage_projections(self):
+        from rtp_llm.models_py.modules.dsv41.ppu.dspark_attention import project_draft_swa
+
+        self.features.record_stream(torch.cuda.current_stream(self.features.device))
+        self.projected = project_draft_swa(self.model, self.features)
+
+    def _projected_for_publication(self):
+        if self.projected is None:
+            raise RuntimeError("direct Draft KV publication requires staged projections")
+        stream = torch.cuda.current_stream(self.features.device)
+        for tensor in self.projected:
+            tensor.record_stream(stream)
+        return self.projected
+
+    def write_prepared(self, plans, status):
+        from rtp_llm.models_py.modules.dsv41.ppu.dspark_attention import store_projected_draft_swa
+
+        slots = plans[:, :self.journal.rows].unbind(0)
+        store_projected_draft_swa(
+            self.model, self.journal.native_cache, self._projected_for_publication(),
+            [(self.positions, row) for row in slots], status=status,
+        )
+
+    def _publish_rows(self, layout, counts):
+        from rtp_llm.models_py.modules.dsv41.ppu.dspark_attention import commit_accepted_draft_swa
+
+        accepted = torch.tensor(counts, dtype=torch.int32, device=self.features.device)
+        commit_accepted_draft_swa(
+            self.model, self.journal.native_cache, self.features,
+            self.journal.source_lengths, self.journal.source_prefixes, accepted,
+            width=self.impl.width, packed=False, projected=self._projected_for_publication(),
+        )
