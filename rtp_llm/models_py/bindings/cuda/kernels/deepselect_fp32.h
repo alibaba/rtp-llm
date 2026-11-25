@@ -11,6 +11,4 @@ deferred_compact_topk_topp(const torch::Tensor& logits,
                            float                top_p,
                            float                temperature    = 1.0f,
                            torch::Tensor*       log_normalizer = nullptr);
-// Returns false without modifying logits when this fast path is unsupported.
-bool deferred_topk_topp_filter(const torch::Tensor& logits, float top_p);
 }  // namespace torch_ext

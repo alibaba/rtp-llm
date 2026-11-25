@@ -336,9 +336,8 @@ struct GreedyParams {
     std::optional<torch::Tensor> do_sample;
 
     std::vector<at::Generator> generator;
-    GreedySamplingBuffers*     sampling_buffers              = nullptr;
-    bool                       defer_token_sampling          = false;
-    bool                       allow_compact_deferred_output = false;
+    GreedySamplingBuffers*     sampling_buffers     = nullptr;
+    bool                       defer_token_sampling = false;
     std::vector<at::Generator> deferred_rejection_generators;
     int64_t                    deferred_rejection_rows = 0;
     TensorHolder*              buffer_holder           = nullptr;

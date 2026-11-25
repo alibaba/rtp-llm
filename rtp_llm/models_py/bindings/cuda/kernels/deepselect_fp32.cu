@@ -24,89 +24,6 @@
 namespace torch_ext {
 #if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
 namespace {
-// Sorting only the candidates makes the nucleus boundary inexpensive. The
-// full-row count accounts for boundary ties that exactly-K selection omits.
-__global__ void
-deferredTopKTopPThreshold(const float* logits, const float* selected, float* thresholds, int vocab, float top_p) {
-    constexpr int threads = 256;
-    constexpr int items   = 4;
-    using Sort            = cub::BlockRadixSort<float, threads, items>;
-    using Reduce          = cub::BlockReduce<float, threads>;
-    using Scan            = cub::BlockScan<float, threads>;
-    __shared__ union {
-        Sort::TempStorage   sort;
-        Reduce::TempStorage reduce;
-        Scan::TempStorage   scan;
-    } temporary;
-    __shared__ float maximum, boundary, denominator;
-    const int        row = blockIdx.x;
-    float            values[items];
-#pragma unroll
-    for (int i = 0; i < items; ++i)
-        values[i] = selected[row * 1024 + threadIdx.x * items + i];
-    Sort(temporary.sort).SortDescending(values);
-    __syncthreads();
-    if (threadIdx.x == 0)
-        maximum = values[0];
-    if (threadIdx.x == threads - 1)
-        boundary = values[items - 1];
-    __syncthreads();
-    if (!isfinite(maximum)) {
-        if (threadIdx.x == 0)
-            thresholds[row] = nanf("");
-        return;
-    }
-    float missing_ties = 0;
-    for (int token = threadIdx.x; token < vocab; token += threads) {
-        const float value = logits[static_cast<int64_t>(row) * vocab + token];
-        missing_ties += isnan(value) ? nanf("") : static_cast<float>(value == boundary);
-    }
-    float probabilities[items];
-    float local_sum = 0;
-#pragma unroll
-    for (int i = 0; i < items; ++i) {
-        missing_ties -= values[i] == boundary;
-        probabilities[i] = expf(values[i] - maximum);
-        local_sum += probabilities[i];
-    }
-    const float boundary_mass = expf(boundary - maximum);
-    local_sum += missing_ties * boundary_mass;
-    const float total = Reduce(temporary.reduce).Sum(local_sum);
-    if (threadIdx.x == 0)
-        denominator = total;
-    __syncthreads();
-    if (isnan(denominator)) {
-        if (threadIdx.x == 0)
-            thresholds[row] = denominator;
-        return;
-    }
-    if (top_p >= 1.0f) {
-        if (threadIdx.x == 0)
-            thresholds[row] = boundary;
-        return;
-    }
-    float prefix[items];
-    Scan(temporary.scan).InclusiveSum(probabilities, prefix);
-    __syncthreads();
-    float first = 1024.0f;
-#pragma unroll
-    for (int i = 0; i < items; ++i) {
-        if (prefix[i] >= top_p * denominator)
-            first = fminf(first, static_cast<float>(threadIdx.x * items + i));
-    }
-    const float first_global = Reduce(temporary.reduce).Reduce(first, cuda::minimum<float>());
-    if (threadIdx.x == 0)
-        denominator = first_global;
-    __syncthreads();
-    const int cutoff_index = static_cast<int>(denominator);
-    if (cutoff_index == 1024) {
-        if (threadIdx.x == 0)
-            thresholds[row] = boundary;
-    } else if (threadIdx.x == cutoff_index / items) {
-        thresholds[row] = values[cutoff_index % items];
-    }
-}
-
 // Match the standalone temperature kernel's round-to-nearest and FTZ flags,
 // independently of DeepSelect's fast-math/ftz=false compilation settings.
 __device__ __forceinline__ float compactTemperatureScale(float temperature) {
@@ -224,17 +141,6 @@ __global__ void compactTopKTopP(float*   dense,
     }
 }
 
-__global__ void deferredMaskLogits(float* logits, const float* thresholds, int vocab) {
-    const int row   = blockIdx.y;
-    const int token = blockIdx.x * blockDim.x + threadIdx.x;
-    if (token < vocab) {
-        const auto  offset    = static_cast<int64_t>(row) * vocab + token;
-        const float threshold = thresholds[row];
-        const float value     = logits[offset];
-        logits[offset]        = isnan(threshold) ? threshold : (value >= threshold ? value : -INFINITY);
-    }
-}
-
 bool supportsDeferredTopK1024(const torch::Tensor& logits, float top_p) {
     if (!logits.is_cuda() || logits.scalar_type() != torch::kFloat32 || logits.dim() != 2 || !logits.is_contiguous()
         || logits.size(0) > 65535 || logits.size(1) <= 1024 || logits.size(1) >= MAX_VOCAB_SIZE
@@ -312,30 +218,6 @@ deferred_compact_topk_topp(const torch::Tensor& logits,
     return {candidates, ids, fallback};
 #else
     return {};
-#endif
-}
-
-bool deferred_topk_topp_filter(const torch::Tensor& logits, float top_p) {
-#if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
-    if (!supportsDeferredTopK1024(logits, top_p))
-        return false;
-    const c10::cuda::CUDAGuard guard(logits.device());
-    const auto                 stream     = at::cuda::getCurrentCUDAStream(logits.get_device());
-    auto                       selected   = selectTopK1024(logits, stream);
-    auto                       thresholds = torch::empty({logits.size(0)}, logits.options());
-    if (logits.size(0)) {
-        deferredTopKTopPThreshold<<<logits.size(0), 256, 0, stream>>>(logits.data_ptr<float>(),
-                                                                      std::get<0>(selected).data_ptr<float>(),
-                                                                      thresholds.data_ptr<float>(),
-                                                                      logits.size(1),
-                                                                      top_p);
-        deferredMaskLogits<<<dim3((logits.size(1) + 255) / 256, logits.size(0)), 256, 0, stream>>>(
-            logits.data_ptr<float>(), thresholds.data_ptr<float>(), logits.size(1));
-        C10_CUDA_KERNEL_LAUNCH_CHECK();
-    }
-    return true;
-#else
-    return false;
 #endif
 }
 }  // namespace torch_ext

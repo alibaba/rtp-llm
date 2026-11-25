@@ -1038,13 +1038,11 @@ TEST_F(CudaSamplerTest, testDeferredCompactFilterHonorsRequestTopKAndTopP) {
     kept = torch::isfinite(std::get<0>(selected));
     EXPECT_EQ(toHostInt(std::get<1>(selected).masked_select(kept)), (std::vector<int32_t>{0}));
 
-    // The compact output has exactly K slots. The dense mask keeps all boundary ties.
+    // The compact output has exactly K slots even when all logits tie.
     auto tied = torch::zeros({1, 4096}, options);
     selected  = torch_ext::deferred_compact_topk_topp(tied, 1024, 0.35f);
     ASSERT_TRUE(std::get<0>(selected).defined());
     EXPECT_EQ(torch::isfinite(std::get<0>(selected)).sum().item<int>(), 1024);
-    ASSERT_TRUE(torch_ext::deferred_topk_topp_filter(tied, 0.35f));
-    EXPECT_EQ(torch::isfinite(tied).sum().item<int>(), 4096);
 
     selected = torch_ext::deferred_compact_topk_topp(logits, 1025, 1.0f);
     EXPECT_FALSE(std::get<0>(selected).defined());

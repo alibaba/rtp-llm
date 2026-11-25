@@ -134,7 +134,6 @@ SamplerOutput Sampler::prepareDeferredVerification(const SamplerInputs& inputs) 
         params.no_repeat_ngram_size = inputs.no_repeat_ngram_size;
     }
     params.defer_token_sampling          = true;
-    params.allow_compact_deferred_output = true;
     params.deferred_rejection_generators = inputs.rejection_generators;
     params.deferred_rejection_rows       = inputs.rejection_generators.empty() ? 0 : inputs.rejection_rows;
     params.buffer_holder                 = &deferred_buffers_;

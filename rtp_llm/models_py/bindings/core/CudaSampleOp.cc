@@ -870,7 +870,7 @@ static GreedyOutput tryCompactDeferredSampling(const GreedyParams& params, float
     const auto* requested_k = params.top_k.data_ptr<int32_t>();
     const auto* requested_p = params.top_p.data_ptr<float>();
     const float compact_p = normalizeDeferredTopP(requested_p[0]);
-    if (params.allow_compact_deferred_output && requested_k[0] >= 2 && requested_k[0] <= 1024
+    if (requested_k[0] >= 2 && requested_k[0] <= 1024
         && std::all_of(
             requested_k, requested_k + batch_size, [requested_k](int32_t value) { return value == requested_k[0]; })
         && std::all_of(requested_p, requested_p + batch_size, [compact_p](float value) {
@@ -930,17 +930,8 @@ static GreedyOutput prepareDeferredTarget(const GreedyParams& params) {
     if (unfiltered) {
         return GreedyOutput{torch::Tensor(), true};
     }
-    const float compact_p = normalizeDeferredTopP(requested_p[0]);
-    auto        prepared  = tryCompactDeferredSampling(params);
-    if (prepared.deferred_token_sampling)
+    if (auto prepared = tryCompactDeferredSampling(params); prepared.deferred_token_sampling) {
         return prepared;
-    if (requested_k[0] == 1024
-        && std::all_of(requested_k, requested_k + batch_size, [](int32_t value) { return value == 1024; })
-        && std::all_of(requested_p,
-                       requested_p + batch_size,
-                       [compact_p](float value) { return normalizeDeferredTopP(value) == compact_p; })
-        && torch_ext::deferred_topk_topp_filter(params.logits, compact_p)) {
-        return GreedyOutput{torch::Tensor(), true};
     }
     auto top_k = params.top_k.clone();
     auto top_p = params.top_p.clone();
@@ -1136,8 +1127,8 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
                                                   params.do_sample.value().data_ptr<bool>() + batch_size,
                                                   [&](auto t) { return t; });
     const bool deferred = params.defer_token_sampling && Py_IsInitialized();
-    if (deferred && batch_size > 0 && params.allow_compact_deferred_output
-        && params.top_k.data_ptr<int32_t>()[0] == 1024 && need_do_sample && !has_not_do_sample) {
+    if (deferred && batch_size > 0 && params.top_k.data_ptr<int32_t>()[0] == 1024 && need_do_sample
+        && !has_not_do_sample) {
         const auto* temperatures = params.temperature.data_ptr<float>();
         const float temperature  = temperatures[0];
         // Mixed temperatures retain the batch-wide epsilon scaling in processLogits.
