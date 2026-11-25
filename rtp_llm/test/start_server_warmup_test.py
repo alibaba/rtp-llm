@@ -1,7 +1,8 @@
+import asyncio
 import unittest
 from contextlib import ExitStack
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from rtp_llm import start_server
 from rtp_llm.config.py_config_modules import PyEnvConfigs
@@ -153,6 +154,22 @@ class StartupRealWarmupTest(unittest.TestCase):
             ),
             1048568,
         )
+
+    def test_glm_warmup_uses_each_workers_resolved_limits(self):
+        config = PyEnvConfigs()
+        config.model_args.model_type = "glm_5"
+        self.assertIsNone(config.model_args.max_seq_len)
+        for model_limit, kv_capacity in ((2048, 4096), (4096, 1024)):
+            with self.subTest(model_limit=model_limit, kv_capacity=kv_capacity):
+                worker = AsyncMock()
+                worker.get_worker_status.return_value = SimpleNamespace(
+                    max_seq_len=model_limit, total_kv_cache=kv_capacity
+                )
+                limit = asyncio.run(
+                    start_server._get_startup_real_warmup_max_len(config, worker, "dp0", 60.0)
+                )
+                self.assertEqual(limit, min(model_limit, kv_capacity))
+                worker.get_worker_status.assert_awaited_once_with("dp0", 60.0)
 
     def test_glm_startup_warmup_gate(self):
         config = PyEnvConfigs()
