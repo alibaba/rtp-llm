@@ -22,7 +22,6 @@ What this class does NOT do — by design:
 from __future__ import annotations
 
 from contextlib import suppress
-from functools import lru_cache
 from typing import Any, Callable, Dict, NamedTuple, Optional
 
 import torch
@@ -60,6 +59,10 @@ from rtp_llm.models_py.modules.dsv41.fp8.compressor import (
 from rtp_llm.models_py.modules.dsv41.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.dsv41.qlinear import QuantizedLinear
 from rtp_llm.models_py.modules.dsv4 import native_ops as rtp_llm_ops
+from rtp_llm.models_py.modules.dsv4.native_ops import (
+    has_fast_prefill_topk as _has_fast_prefill_topk,
+    has_topk_v3 as _has_topk_v3,
+)
 
 
 def _as_bf16_contig(t: torch.Tensor) -> torch.Tensor:
@@ -72,16 +75,6 @@ def _as_bf16_contig(t: torch.Tensor) -> torch.Tensor:
 
 def _flat_1d(t: torch.Tensor) -> torch.Tensor:
     return t.reshape(-1).contiguous()
-
-
-@lru_cache(maxsize=1)
-def _has_topk_v3() -> bool:
-    return hasattr(rtp_llm_ops, "topk_v3")
-
-
-@lru_cache(maxsize=1)
-def _has_fast_prefill_topk() -> bool:
-    return hasattr(rtp_llm_ops, "fast_topk_v2_variable")
 
 
 _TOPK_V3_WORKSPACE_SIZE = 1024 * 1024
