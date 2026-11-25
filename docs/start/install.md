@@ -232,8 +232,8 @@ process exit while captured Graph addresses may still reference them.
 
 Run `//rtp_llm/models_py/modules/qwen4_exp/test:reduce_gate_integration_test`
 on CUDA 13. It reserves two SM120 GPUs and is included in `qwen4_moe`.
-It injects one-rank allocation/capability failures and shared-weight packing
-failures, verifies delayed arrival, and compares M1–32 across H8–8192 in
+It injects one-rank allocation/capability failures, verifies delayed arrival,
+and compares M1–32 across H8–8192 in
 repeated eager/Graph calls. Cross-implementation CUDA-versus-NCCL/Triton
 comparisons use the existing BF16 gating tolerance (`atol=rtol=1e-2`) and
 record unequal-element counts and maximum absolute error. Eager-versus-Graph
@@ -273,23 +273,31 @@ test with 64 waiting CTAs. The recorded cross-implementation comparisons had
 zero unequal elements in this run; their portable acceptance contract remains
 the BF16 tolerance above. Same-implementation eager/Graph checks were bitwise.
 
-On the admitted BF16 Decode path, the shared projections and gate run on
-an auxiliary CUDA stream and join the routed result before the LSA epilogue.
-For a static Qwen4 checkpoint, set `"decode_shared_gemm_nk": true` in the
-ModelOpt FP4 quantization config to also pack contiguous BF16 shared
-projection weights. The measured shapes use packed weights for up at
-physical M1–16 and down at M2–32. A 48-layer Qwen3.8-Flash-Next worker
-uses an additional 450 MiB per rank. This option defaults to false.
-Both ranks preflight the layout and memory, then build private copies and
-agree again before replacing modules or marking source weights immutable.
-If either fails, both release private copies, retain the original projections
-and keep their original update policy. Updating successfully packed weights
-requires restarting the model and rebuilding the CUDA Graphs.
+On SM120, Qwen4's BF16 shared projections use the standard Linear operator
+with contiguous `[N,K]` weights. Model initialization keeps the loader's
+`[K,N]` view and reuses the same storage owner for weight updates. The same
+Linear path applies to all token counts and does not require a separate
+quantization option or a persistent second copy.
+
+BF16 shared experts are TP-sharded independently of routed-expert EP.
+For TP2, shared width 640 and hidden size 2560, each rank's up projection
+is `[640,2560]` and down projection is `[2560,320]`. Gate/up channels
+are split together so each rank applies SiLU to its matching up channels.
+Older replicated rank bundles are normalized before Linear modules are built.
+
+During CUDA Graph warmup and capture, the BF16 shared branch runs on the
+current stream while routing and local experts run on an auxiliary stream.
+After joining, a fused gate-projection/sigmoid/mul/add kernel combines the
+local outputs before a single TP AllReduce. This follows SGLang's Qwen2MoE
+path at `297e54fd105e974cdf401e5b4d20253a22c16f90`. The Linear backend
+chooses TN and Split-K from the actual shard shape and CUDA libraries.
+The `shared_expert_sglang_test` two-rank regression checks M1, M2, M4,
+M8, M16, M32, M33 and M64, Graph replay, fused gate/add and the M8
+TN/Split-K launches on SM120.
 
 FP8 Dense keeps its existing shared-expert overlap qualification for both
-CUTLASS and Hybrid routed executors. BF16 Dense uses the separate model-owned
-LSA qualification above. Unsupported model layouts retain their original
-collective and shared computation path.
+CUTLASS and Hybrid routed executors. LSA has its own model-level qualification.
+Unsupported shared-expert layouts retain their original computation path.
 
 ## Method 3: Using docker
 More Docker versions can be obtained from [RTP-LLM Release](../release/index.rst)

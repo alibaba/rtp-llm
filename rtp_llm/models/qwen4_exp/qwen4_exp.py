@@ -136,7 +136,6 @@ class Qwen4Exp(Qwen35Moe):
                     "decode_lsa_enabled",
                     "decode_lsa_startup_timeout_s",
                     "decode_lsa_timeout_ms",
-                    "decode_shared_gemm_nk",
                 }
                 if (
                     not isinstance(requested, dict)

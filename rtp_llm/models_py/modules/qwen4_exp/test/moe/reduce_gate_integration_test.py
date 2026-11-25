@@ -1,6 +1,5 @@
 """Run with torchrun --standalone --nproc_per_node=2 with the CUDA 13 native extension."""
 
-import gc
 import json
 import os
 import signal
@@ -10,7 +9,6 @@ import sys
 import tempfile
 import time
 import unittest
-import weakref
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 from unittest.mock import patch
@@ -471,118 +469,6 @@ def check_startup_fallback(model, config, parallelism, rank, device):
             print(f"LSA_STARTUP_SYMMETRIC_FALLBACK {stage}", flush=True)
 
 
-def check_shared_packing(rank, device):
-    from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import (
-        CudaF16Linear,
-    )
-    from rtp_llm.models_py.modules.qwen4_exp.moe import shared_gemm
-    from rtp_llm.utils.model_weight import W
-    from rtp_llm.model_loader.model_weight_info import ModelWeights
-
-    for fail_rank in (0, 1):
-        for failure in ("memory", "layout", "mid_pack", None):
-            torch.manual_seed(816)
-            sources = [
-                {
-                    W.ffn_w13: torch.randn(
-                        2560, 1280, device=device, dtype=torch.bfloat16
-                    ),
-                    W.ffn_w2: torch.randn(
-                        640, 2560, device=device, dtype=torch.bfloat16
-                    ),
-                }
-                for _ in range(2)
-            ]
-            layers = [
-                SimpleNamespace(
-                    mlp=SimpleNamespace(
-                        shared_expert=SimpleNamespace(
-                            up_proj=CudaF16Linear(source[W.ffn_w13]),
-                            down_proj=CudaF16Linear(source[W.ffn_w2]),
-                        )
-                    )
-                )
-                for source in sources
-            ]
-            original = [
-                (layer.mlp.shared_expert.up_proj, layer.mlp.shared_expert.down_proj)
-                for layer in layers
-            ]
-            if rank == fail_rank and failure == "layout":
-                sources[0][W.ffn_w13] = sources[0][W.ffn_w13].clone()
-            pack = shared_gemm._PackedSharedLinear
-            count = 0
-            packed_refs = []
-
-            def allocate(*args):
-                nonlocal count
-                count += 1
-                if rank == fail_rank and failure == "mid_pack" and count == 3:
-                    raise torch.OutOfMemoryError("injected shared packing OOM")
-                result = pack(*args)
-                packed_refs.append(weakref.ref(result.packed_weight))
-                return result
-
-            memory = torch.cuda.mem_get_info(device)
-            with (
-                patch.object(shared_gemm, "_PackedSharedLinear", side_effect=allocate),
-                patch(
-                    "torch.cuda.mem_get_info",
-                    return_value=(
-                        (0, memory[1])
-                        if rank == fail_rank and failure == "memory"
-                        else memory
-                    ),
-                ),
-            ):
-                # Qualification still needs the real projection type.
-                success = shared_gemm.prepare_shared_gemm(
-                    layers, sources, group=dist.group.WORLD
-                )
-            assert success == (failure is None), (rank, fail_rank, failure)
-            if not success:
-                gc.collect()
-                assert all(
-                    ref() is None for ref in packed_refs
-                ), "Failed packing retained a private copy"
-            for layer, source, before in zip(layers, sources, original):
-                shared = layer.mlp.shared_expert
-                for index, key in enumerate((W.ffn_w13, W.ffn_w2)):
-                    assert (
-                        bool(
-                            getattr(
-                                source[key], "_rtp_requires_restart_for_update", False
-                            )
-                        )
-                        == success
-                    )
-                    projection = (shared.up_proj, shared.down_proj)[index]
-                    if not success:
-                        assert projection is before[index]
-                value = torch.ones(4, 2560, device=device, dtype=torch.bfloat16)
-                output = shared.up_proj(value)
-                other = output.clone()
-                dist.broadcast(other, src=0)
-                assert torch.equal(other, output), (rank, fail_rank, failure)
-            manager = ModelWeights(2, str(device), torch.bfloat16)
-            manager.weights = sources
-            for index, source in enumerate(sources):
-                before = source[W.ffn_w13].clone()
-                replacement = torch.zeros_like(before)
-                if success:
-                    with unittest.TestCase().assertRaises(PermissionError):
-                        manager.update_layer_weight(index, W.ffn_w13, replacement)
-                    assert torch.equal(source[W.ffn_w13], before)
-                else:
-                    manager.update_layer_weight(index, W.ffn_w13, replacement)
-                    assert torch.equal(source[W.ffn_w13], replacement)
-            dist.barrier()
-            if rank == 0:
-                print(
-                    "SHARED_PACKING_AGREEMENT", fail_rank, failure, success, flush=True
-                )
-
-
 def run_hidden_size(device, rank, hidden_size):
     from rtp_llm.models_py.distributed import collective_torch
     from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
@@ -657,11 +543,8 @@ def run_hidden_size(device, rank, hidden_size):
         if hidden_size == 2560:
             config.quant_config = SimpleNamespace(decode_lsa_timeout_ms=1000 * rank)
             assert prepare_model_reduce(model, config, parallelism) is None
-            config.quant_config = SimpleNamespace(decode_shared_gemm_nk=bool(rank))
-            assert prepare_model_reduce(model, config, parallelism) is None
             config.quant_config = SimpleNamespace(decode_lsa_timeout_ms=2000)
             check_startup_fallback(model, config, parallelism, rank, device)
-            check_shared_packing(rank, device)
         if hidden_size == 2560:
             owner = prepare_with_delayed_peer(model, config, parallelism, rank, None)
         elif hidden_size == 4096:
@@ -704,8 +587,11 @@ def run_hidden_size(device, rank, hidden_size):
         layer.shared_expert = Shared()
         layer.shared_expert_gate = Gate()
         layer._reduce_shared_gate = owner
-        layer.parallelism_config = parallelism
-        layer.prepare_reduce_gate_overlap()
+        layer.hidden_dim = hidden_size
+        layer._bf16_shared_stream = torch.cuda.Stream(device=device)
+        layer._shared_input_ready = torch.cuda.Event()
+        layer._shared_output_ready = torch.cuda.Event()
+        attention_inputs = SimpleNamespace(is_target_verify=True)
 
         def routed(self, value, *, skip_tp_allreduce=False):
             assert skip_tp_allreduce
@@ -731,7 +617,7 @@ def run_hidden_size(device, rank, hidden_size):
             return sigmoid_gate_scale_add_triton(gate, reference_shared, output)
 
         def fused():
-            return layer(hidden)
+            return layer(hidden, attention_inputs=attention_inputs, is_cuda_graph=True)
 
         if rows in (2, 4):
             aligned_partial, aligned_shared, aligned_hidden = partial, shared, hidden

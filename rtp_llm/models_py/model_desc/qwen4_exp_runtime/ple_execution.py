@@ -279,7 +279,9 @@ class PLEExecution:
         )
         pair_kwargs = {"trusted_host_table": True} if trusted_host_tables else {}
         # Eager fallback must never reuse rows prepared for a captured graph.
-        with ple.ple_embedding.lookup_context(graph_capture):
+        with ple.ple_embedding.lookup_context(
+            graph_capture, target_verify=is_target_verify
+        ):
             local_rows = (
                 [
                     (

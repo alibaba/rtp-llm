@@ -734,7 +734,14 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             hidden_states, hyper_states, inject_weights = self.mlp_hyper_connection(
                 hyper_states
             )
-        hidden_states = self.mlp(hidden_states)
+        if isinstance(self.mlp, Qwen4MoeLayer):
+            hidden_states = self.mlp(
+                hidden_states,
+                attention_inputs=attention_inputs,
+                is_cuda_graph=attn_meta.is_cuda_graph,
+            )
+        else:
+            hidden_states = self.mlp(hidden_states)
         return hyper_states, hidden_states, inject_weights
 
 
@@ -772,6 +779,12 @@ class Qwen4ExpModel(Qwen35Model):
         py_hw_kernel_config=None,
     ):
         config = model_config
+        if config.n_shared_experts > 0 and torch.version.hip is None:
+            from rtp_llm.models_py.modules.qwen4_exp.moe.shared_gemm import (
+                prepare_bf16_shared_weights,
+            )
+
+            prepare_bf16_shared_weights(weights.weights, config, parallelism_config)
         compute_weights = (
             prepare_compute_weights(weights)
             if getattr(config, "_qwen4_full_fp8_nvfp4", False)
@@ -834,21 +847,6 @@ class Qwen4ExpModel(Qwen35Model):
         )
 
         self._moe_reduce_gate = prepare_model_reduce(self, config, parallelism_config)
-        if self._moe_reduce_gate is not None:
-            for layer in self.layers:
-                layer.mlp.prepare_reduce_gate_overlap()
-            if getattr(config.quant_config, "decode_shared_gemm_nk", False):
-                from rtp_llm.models_py.modules.qwen4_exp.moe.shared_gemm import (
-                    prepare_shared_gemm,
-                )
-
-                from rtp_llm.models_py.distributed import collective_torch
-
-                prepare_shared_gemm(
-                    self.layers,
-                    weights.weights,
-                    group=collective_torch._get_group(collective_torch.Group.TP),
-                )
 
     def _ple_coordinator(self) -> PLETransactionCoordinator:
         coordinator = self.__dict__.get("_ple_transaction_coordinator")

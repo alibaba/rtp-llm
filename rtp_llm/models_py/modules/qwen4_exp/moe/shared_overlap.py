@@ -1,15 +1,17 @@
-"""Overlap the local shared branch with routing and experts on SM120.
+"""Overlap shared experts with routed experts on SM120.
 
-The two-event scheduling follows vLLM's SharedExperts runner (Apache-2.0).
-The routed TP reduction stays on the original stream. The unsharded shared
-branch retains its BF16 output and original fused sigmoid-scale-add boundary.
+The BF16 TP-sharded path follows SGLang's Qwen2MoE dual-stream schedule and
+combines the local shared and routed contributions before their TP reduction.
+The FP8 path retains its local shared-expert schedule.
 """
 
+from copy import deepcopy
 from functools import lru_cache
 
 import torch
 
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
+from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.qwen4_exp.dense_mlp import Qwen4DenseMLP
 
 
@@ -24,7 +26,27 @@ class Qwen4MoeLayer(GenericMoeLayer):
 
     _shared_stream = None
     _reused_shared_stream = None
-    _reduce_gate_shared_stream = None
+    _bf16_shared_stream = None
+    _bf16_shared_tp = False
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if (
+            getattr(self.config, "_qwen4_dense_storage", None) != "source_bf16"
+            or self.shared_expert is None
+        ):
+            return
+        pc = deepcopy(self.parallelism_config)
+        pc.ffn_tp_size = pc.get_attn_tp_size()
+        pc.ffn_tp_rank = pc.tp_rank
+        self.shared_expert.parallelism_config = pc
+        router = self.fused_moe.router
+        self._bf16_shared_tp = (
+            router.supports_skip_tp_allreduce
+            and router.tp_collective_size == pc.ffn_tp_size
+        )
+        self.use_unified_tp_allreduce = self._bf16_shared_tp
+        self.use_ep_shared_allreduce = not self._bf16_shared_tp and pc.ffn_tp_size > 1
 
     def prepare_shared_expert_overlap(self) -> None:
         """Allocate streams only for the explicitly qualified Qwen4 layout."""
@@ -45,66 +67,93 @@ class Qwen4MoeLayer(GenericMoeLayer):
 
         pc = self.parallelism_config
         role = str(getattr(pc, "role_type", "PDFUSION")).rsplit(".", 1)[-1]
+        fp8_decode = role == "DECODE" and getattr(
+            self.config, "_qwen4_full_fp8_nvfp4", False
+        )
+        bf16_target = (
+            getattr(self.config, "_qwen4_dense_storage", None) == "source_bf16"
+        )
+        if not (fp8_decode or bf16_target):
+            return
         shared = self.shared_expert
+        if bf16_target:
+            from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import (
+                CudaF16Linear,
+            )
+
+            if (
+                self._bf16_shared_tp
+                and torch.version.hip is None
+                and shared.up_proj.weight.is_cuda
+                and all(
+                    isinstance(projection, CudaF16Linear)
+                    and projection.weight.dtype == torch.bfloat16
+                    and projection.weight.device == shared.up_proj.weight.device
+                    for projection in (
+                        shared.up_proj,
+                        shared.down_proj,
+                        self.shared_expert_gate,
+                    )
+                )
+            ):
+                self._bf16_shared_stream = _shared_stream_for_device(
+                    shared.up_proj.weight.device.index
+                )
+                self._shared_input_ready = torch.cuda.Event()
+                self._shared_output_ready = torch.cuda.Event()
+            return
         if not (
-            role == "DECODE"
-            and getattr(self.config, "_qwen4_full_fp8_nvfp4", False)
-            and pc.tp_size == 2
+            pc.tp_size == 2
             and pc.ep_size == 2
             and pc.dp_size == 1
             and self.ffn_tp_size == 1
             and not self.use_ep_shared_allreduce
-            and not self.use_unified_tp_allreduce
+            and (not self.use_unified_tp_allreduce or self._bf16_shared_tp)
             and not self.config.eplb_config.enable_eplb()
             and type(shared) is DenseMLP
             and type(self.fused_moe) is FusedMoe
             and type(self.fused_moe.router) is PureTpRouterNvfp4Cutlass
             and type(self.fused_moe.fused_experts)
             in (CutlassNvfp4Executor, Nvfp4HybridExecutor)
-            and type(shared.up_proj) is Fp8Linear
-            and type(shared.down_proj) is Fp8Linear
-            and type(self.shared_expert_gate) is Fp8Linear
-            and tuple(shared.up_proj.weight.shape) == (1280, 2560)
-            and tuple(shared.down_proj.weight.shape) == (2560, 640)
-            and tuple(self.shared_expert_gate.weight.shape) == (1, 2560)
             and shared.up_proj.weight.is_cuda
             and torch.version.hip is None
             and torch.cuda.get_device_capability(shared.up_proj.weight.device)
             == (12, 0)
         ):
             return
-        self._shared_stream = torch.cuda.Stream(device=shared.up_proj.weight.device)
-        self._reused_shared_stream = _shared_stream_for_device(
-            shared.up_proj.weight.device.index
-        )
-        self._shared_input_ready = torch.cuda.Event()
-        self._shared_output_ready = torch.cuda.Event()
 
-    def prepare_reduce_gate_overlap(self) -> None:
-        role = str(getattr(self.parallelism_config, "role_type", "")).rsplit(".", 1)[-1]
-        if role != "DECODE":
+        device = shared.up_proj.weight.device
+        if (
+            fp8_decode
+            and type(shared.up_proj) is Fp8Linear
+            and type(shared.down_proj) is Fp8Linear
+            and type(self.shared_expert_gate) is Fp8Linear
+            and tuple(shared.up_proj.weight.shape) == (1280, 2560)
+            and tuple(shared.down_proj.weight.shape) == (2560, 640)
+            and tuple(self.shared_expert_gate.weight.shape) == (1, 2560)
+        ):
+            self._shared_stream = torch.cuda.Stream(device=device)
+            self._reused_shared_stream = _shared_stream_for_device(device.index)
+        else:
             return
-        # The reduce-gate owner is attached only after both ranks agree
-        # on a local shared expert and no shared-branch collective.
-        device = self.shared_expert_gate.weight.device
-        self._reduce_gate_shared_stream = _shared_stream_for_device(device.index)
         self._shared_input_ready = torch.cuda.Event()
         self._shared_output_ready = torch.cuda.Event()
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, hidden_states: torch.Tensor, *, attention_inputs=None, is_cuda_graph=False
+    ) -> torch.Tensor:
+        if self._bf16_shared_tp:
+            return self._forward_bf16_shared_tp(
+                hidden_states, is_cuda_graph=is_cuda_graph
+            )
         reduce_shared = getattr(self, "_reduce_shared_gate", None)
         if reduce_shared is not None and reduce_shared.supports(hidden_states):
             output = reduce_shared.prepare_output(hidden_states)
-            stream = self._reduce_gate_shared_stream
-            if stream is None:
-                experts = self._forward_routed(hidden_states, skip_tp_allreduce=True)
-                shared = self.shared_expert(hidden_states, skip_allreduce=True)
-                gate = self.shared_expert_gate(hidden_states)
-            else:
-                experts, shared, gate = self._overlap_shared_branch(
-                    hidden_states, stream, skip_tp_allreduce=True
-                )
+            experts = self._forward_routed(hidden_states, skip_tp_allreduce=True)
+            shared = self.shared_expert(hidden_states, skip_allreduce=True)
+            gate = self.shared_expert_gate(hidden_states)
             return reduce_shared(experts, shared, gate, output)
+
         stream = self._shared_stream
         # Larger shapes did not improve in the complete TP2 consumer. Keep
         # their established schedule and each layer's distinct event pair.
@@ -130,8 +179,56 @@ class Qwen4MoeLayer(GenericMoeLayer):
         self.sigmoid_gate_scale_add(gate, shared, experts)
         return experts
 
+    def _forward_bf16_shared_tp(self, hidden_states, *, is_cuda_graph):
+        from rtp_llm.models_py.modules.qwen4_exp.moe.shared_gate import (
+            fused_gate_sigmoid_mul_add,
+        )
+
+        main = torch.cuda.current_stream(hidden_states.device)
+        stream = self._bf16_shared_stream
+        capturing = torch.cuda.is_current_stream_capturing()
+        overlap = (
+            hidden_states.shape[0] > 0
+            and stream is not None
+            and is_cuda_graph
+            and not torch.compiler.is_compiling()
+        )
+        shared = None
+        if hidden_states.shape[0] > 0:
+            if overlap:
+                self._shared_input_ready.record(main)
+            shared = self.shared_expert(
+                hidden_states.clone() if overlap else hidden_states, skip_allreduce=True
+            )
+        if overlap:
+            try:
+                with torch.cuda.stream(stream):
+                    self._shared_input_ready.wait(stream)
+                    try:
+                        experts = self._forward_routed(
+                            hidden_states, skip_tp_allreduce=True
+                        )
+                    finally:
+                        self._shared_output_ready.record(stream)
+            finally:
+                self._shared_output_ready.wait(main)
+            if not capturing:
+                experts.record_stream(main)
+                hidden_states.record_stream(stream)
+        else:
+            experts = self._forward_routed(hidden_states, skip_tp_allreduce=True)
+        if shared is not None:
+            fused_gate_sigmoid_mul_add(
+                hidden_states, self.shared_expert_gate.weight, shared, experts
+            )
+        return getattr(self, "tp_all_reduce", all_reduce)(experts, group=Group.TP)
+
     def _overlap_shared_branch(
-        self, hidden_states: torch.Tensor, stream, *, skip_tp_allreduce: bool = False
+        self,
+        hidden_states: torch.Tensor,
+        stream,
+        *,
+        skip_tp_allreduce: bool = False,
     ):
         main = torch.cuda.current_stream(hidden_states.device)
         capturing = torch.cuda.is_current_stream_capturing()

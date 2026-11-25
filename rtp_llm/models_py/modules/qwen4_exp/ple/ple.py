@@ -160,6 +160,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         self._triton_shard_signature: Optional[tuple[int, ...]] = None
         self._closed = False
         self._graph_gather_required = False
+        self._target_verify_graph = False
         self._prefetcher = None
         if self._cpu_uva_enabled:
             from rtp_llm.models_py.modules.qwen4_exp.ple.ple_prefetch import (
@@ -176,14 +177,17 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             )
 
     @contextmanager
-    def lookup_context(self, graph_required: bool):
+    def lookup_context(self, graph_required: bool, *, target_verify: bool = False):
         """Scope the lookup mode to one call, including exception unwinding."""
         previous = self._graph_gather_required
+        previous_verify = self._target_verify_graph
         self._graph_gather_required = graph_required
+        self._target_verify_graph = graph_required and target_verify
         try:
             yield
         finally:
             self._graph_gather_required = previous
+            self._target_verify_graph = previous_verify
 
     def resource_usage(self) -> dict[str, int]:
         storages = {
@@ -392,6 +396,21 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             # loading the distributed runtime; production TP reaches this path.
             from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 
+            decode_reduce = getattr(self, "tp_all_reduce", None)
+            if decode_reduce is not None:
+                shape = out.shape
+                out = decode_reduce(out.reshape(-1, shape[-2] * shape[-1]), Group.TP)
+                return out.reshape(shape).flatten(-2)
+            if self._target_verify_graph and out.ndim == 4 and out.is_contiguous():
+                from rtp_llm.models_py.distributed.all_reduce import get_all_reduce
+
+                # The shard layout gives us [B, query, heads, head_dim].
+                # IPC accepts token rows, and the gather buffer must remain
+                # readable by the peer while writing the reduced output.
+                rows = out.flatten(0, 1).flatten(-2)
+                ipc = get_all_reduce()
+                if ipc is not None and ipc.should_use_registered_graph_input(rows):
+                    return ipc.all_reduce(rows).view(*out.shape[:2], rows.shape[-1])
             out = all_reduce(out, group=Group.TP)
         return out.flatten(-2)
 

@@ -891,9 +891,6 @@ class ModelOptFp4Config(QuantizationConfig):
             raise ValueError(
                 "decode_lsa_timeout_ms must be an integer from 0 through 2147483647"
             )
-        self.decode_shared_gemm_nk = kwargs.get("decode_shared_gemm_nk", False)
-        if type(self.decode_shared_gemm_nk) is not bool:
-            raise ValueError("decode_shared_gemm_nk must be a boolean")
         self.prefill_library = kwargs.get("prefill_library", None)
         self.prefill_library_sha256 = kwargs.get("prefill_library_sha256", None)
         self.source_fp8_block_size = kwargs.get(

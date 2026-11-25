@@ -132,7 +132,6 @@ class Qwen4Nvfp4Test(unittest.TestCase):
             decode_lsa_enabled=False,
             decode_lsa_startup_timeout_s=480,
             decode_lsa_timeout_ms=2000,
-            decode_shared_gemm_nk=True,
         )
         with tempfile.TemporaryDirectory() as root:
             Path(root, "config.json").write_text(json.dumps(_config()))
@@ -146,7 +145,6 @@ class Qwen4Nvfp4Test(unittest.TestCase):
             self.assertFalse(quant.decode_lsa_enabled)
             self.assertEqual(quant.decode_lsa_startup_timeout_s, 480)
             self.assertEqual(quant.decode_lsa_timeout_ms, 2000)
-            self.assertTrue(quant.decode_shared_gemm_nk)
             for invalid in (
                 dict(request, is_quanted=False),
                 dict(request, group_size=32),

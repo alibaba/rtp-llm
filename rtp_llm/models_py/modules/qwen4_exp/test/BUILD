@@ -541,6 +541,17 @@ _SM120_LSA_CUDA13_ONLY = select({
 })
 
 py_test(
+    name = "shared_expert_sglang_test",
+    srcs = ["moe/shared_expert_sglang_test.py"],
+    main = "moe/shared_expert_sglang_test.py",
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "2"},
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "2"},
+    target_compatible_with = _SM120_LSA_CUDA13_ONLY,
+)
+
+py_test(
     name = "reduce_gate_integration_test",
     srcs = ["moe/reduce_gate_integration_test.py"],
     main = "moe/reduce_gate_integration_test.py",
@@ -628,6 +639,7 @@ test_suite(
         ":moe_topk_triton_test",
         "//rtp_llm/models_py/triton_kernels/moe/test:qwen4_topk_test",
         ":shared_expert_overlap_test",
+        ":shared_expert_sglang_test",
         ":reduce_gate_integration_test",
         ":reduce_gate_default_abort_test",
         ":reduce_gate_peer_exit_test",

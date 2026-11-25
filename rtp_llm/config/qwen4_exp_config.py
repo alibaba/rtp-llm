@@ -273,7 +273,6 @@ def build_qwen4_quant_config(quantization, source_fp8):
             decode_cutlass_profile_ids=getattr(
                 requested, "decode_cutlass_profile_ids", None
             ),
-            decode_shared_gemm_nk=getattr(requested, "decode_shared_gemm_nk", False),
             decode_lsa_enabled=getattr(requested, "decode_lsa_enabled", True),
             decode_lsa_startup_timeout_s=getattr(
                 requested, "decode_lsa_startup_timeout_s", None

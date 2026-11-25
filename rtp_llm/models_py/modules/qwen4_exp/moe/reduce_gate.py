@@ -133,9 +133,6 @@ def prepare_model_reduce(model, config, parallelism):
     state = {
         "timeout_ms": timeout_ms,
         "startup_timeout_s": startup_timeout_s,
-        "shared_gemm_nk": getattr(
-            getattr(config, "quant_config", None), "decode_shared_gemm_nk", False
-        ),
         "error": None,
         "host": socket.gethostname(),
         "layers": len(model.layers),
@@ -207,7 +204,6 @@ def prepare_model_reduce(model, config, parallelism):
         or len({peer["hidden"] for peer in peers}) != 1
         or len({peer["timeout_ms"] for peer in peers}) != 1
         or len({peer["startup_timeout_s"] for peer in peers}) != 1
-        or len({peer["shared_gemm_nk"] for peer in peers}) != 1
         or len({peer["bus_id"] for peer in peers}) != 2
     ):
         logger.info("MoE LSA unavailable for this TP group: %s", peers)

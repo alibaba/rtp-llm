@@ -101,12 +101,13 @@ class SharedExpertOverlapTest(unittest.TestCase):
             layer.sigmoid_gate_scale_add(gate, expected, routed)
             self.assertTrue(torch.equal(layer(x), routed))
 
-    def test_bf16_shared_gemm_layout_dispatch_and_source_ownership(self):
+    def test_bf16_shared_linear_layout_keeps_live_weight_owner(self):
+        from rtp_llm.model_loader.model_weight_info import ModelWeights
         from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import (
             CudaF16Linear,
         )
         from rtp_llm.models_py.modules.qwen4_exp.moe.shared_gemm import (
-            prepare_shared_gemm,
+            prepare_bf16_shared_weights,
         )
         from rtp_llm.utils.model_weight import W
 
@@ -115,29 +116,34 @@ class SharedExpertOverlapTest(unittest.TestCase):
             W.ffn_w13: torch.randn(2560, 1280, dtype=torch.bfloat16, device=device),
             W.ffn_w2: torch.randn(640, 2560, dtype=torch.bfloat16, device=device),
         }
-        original_up = CudaF16Linear(source[W.ffn_w13])
-        original_down = CudaF16Linear(source[W.ffn_w2])
-        shared = SimpleNamespace(up_proj=original_up, down_proj=original_down)
-        layer = SimpleNamespace(mlp=SimpleNamespace(shared_expert=shared))
-        prepare_shared_gemm([layer], [source])
-        self.assertTrue(
-            all(w._rtp_requires_restart_for_update for w in source.values())
-        )
-        for original, current, k, low, high in (
-            (original_up, shared.up_proj, 2560, 1, 16),
-            (original_down, shared.down_proj, 640, 2, 32),
-        ):
-            self.assertTrue(current.packed_weight.is_contiguous())
-            self.assertTrue(torch.equal(original.weight, current.packed_weight))
+        expected = {name: weight.clone() for name, weight in source.items()}
+        owners = dict(source)
+        prepare_bf16_shared_weights([source])
+        manager = ModelWeights(1, str(device), torch.bfloat16)
+        manager.weights = [source]
+        for name, weight in source.items():
+            self.assertIs(weight, owners[name])
+            self.assertEqual(weight.stride(), (1, weight.shape[0]))
+            self.assertTrue(torch.equal(weight, expected[name]))
+            linear = CudaF16Linear(weight)
+            self.assertTrue(linear.weight.is_contiguous())
+            self.assertEqual(linear.weight.data_ptr(), weight.data_ptr())
             for rows in (1, 2, 8, 16, 32, 33):
-                x = torch.randn(rows, k, dtype=torch.bfloat16, device=device)
-                reference = original(x)
-                actual = current(x)
-                if low <= rows <= high:
-                    delta = (actual.float() - reference.float()).norm()
-                    self.assertLess((delta / reference.float().norm()).item(), 0.006)
-                else:
-                    self.assertTrue(torch.equal(actual, reference))
+                x = torch.randn(
+                    rows, weight.shape[0], dtype=torch.bfloat16, device=device
+                )
+                torch.testing.assert_close(
+                    linear(x),
+                    torch.nn.functional.linear(x, expected[name].t().contiguous()),
+                    rtol=0,
+                    atol=0,
+                )
+
+            weight_ptr = weight.data_ptr()
+            prepare_bf16_shared_weights([source])
+            manager.update_layer_weight(0, name, torch.zeros_like(expected[name]))
+            self.assertEqual(weight.data_ptr(), weight_ptr)
+            self.assertEqual(torch.count_nonzero(linear(x)).item(), 0)
 
     def test_shared_dense_mlp_fuses_activation_and_quant_before_down_gemm(self):
         import flashinfer
