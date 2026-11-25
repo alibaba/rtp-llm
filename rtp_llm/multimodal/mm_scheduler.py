@@ -88,6 +88,8 @@ def _run_embedding(
     Does the batched forward, guards the output count, writes embedding_result
     onto each work item, and caches cacheable results. Errors propagate.
     """
+    from rtp_llm.multimodal.mm_process_engine import _prepare_batch_feature_hashes
+
     data_list = [wi.preprocess_result for wi in items]
     type_list = [wi.mm_type for wi in items]
 
@@ -106,6 +108,7 @@ def _run_embedding(
             f"for {len(items)} work items"
         )
 
+    _prepare_batch_feature_hashes(items, batch_outputs)
     for wi, result in zip(items, batch_outputs):
         wi.embedding_result = result
         wi.complete_cache(result)

@@ -1,13 +1,24 @@
 import asyncio
+import os
+import threading
+import time
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.multimodal.glm54_mock_vit_input import GLM54_MOCK_IMAGE_TOKEN
+from rtp_llm.multimodal.media_network import (
+    MediaNetwork,
+    UnsupportedMediaNetworkPolicy,
+    read_media_source,
+)
+from rtp_llm.multimodal.mm_error_messages import MMErr
 from rtp_llm.multimodal.multimodal_mixins.glm5_3_flash.glm54_mock_vit import (
     Glm54MockImageEmbedding,
     Glm54MockVitMixin,
@@ -15,6 +26,11 @@ from rtp_llm.multimodal.multimodal_mixins.glm5_3_flash.glm54_mock_vit import (
 from rtp_llm.multimodal.multimodal_mixins.glm5_3_flash.glm5_3_flash_mixin import (
     Glm53FlashVisionModel,
     glm5_smart_resize,
+)
+from rtp_llm.multimodal.multimodal_util import (
+    _default_request_get,
+    collect_download_timing,
+    get_bytes_io_from_url,
 )
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.renderers.custom_renderer import ThinkStatus
@@ -67,6 +83,174 @@ class Glm54MockVitTest(unittest.TestCase):
         )
         self.renderer.tokenizer = Mock()
         self.renderer.tokenizer.encode.return_value = [8, 9]
+
+    def test_native_http_loader_bounds_and_partitions_cached_responses(self):
+        requests = []
+        paths = []
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                source = self.headers.get("X-Test-Source", "unknown")
+                requests.append(source)
+                paths.append(self.path)
+                payload = source.encode() * 600
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.addCleanup(server.server_close)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+        config = VitConfig()
+        config.mm_preprocess_max_workers = 2
+        config.url_cache_item_num = 8
+        # Loopback stands in for a public image origin in this hermetic test.
+        with patch.object(MediaNetwork, "_configure_internal_policy", return_value=None):
+            network = MediaNetwork(config)
+        self.addCleanup(network.close)
+        url = f"http://127.0.0.1:{server.server_port}/image with space.jpg"
+        red = '{"X-Test-Source":"red"}'
+        blue = '{"X-Test-Source":"blue"}'
+
+        with (
+            network.use(time.monotonic() + 5),
+            patch("rtp_llm.multimodal.media_network.getproxies", return_value={}),
+        ):
+            self.assertEqual(read_media_source(url, red, 8).read(), b"red" * 600)
+            with collect_download_timing() as timing:
+                self.assertEqual(read_media_source(url, red, 8).read(), b"red" * 600)
+            self.assertEqual(timing.elapsed_ms, 0)
+            self.assertEqual(read_media_source(url, blue, 8).read(), b"blue" * 600)
+            with self.assertRaisesRegex(FtRuntimeException, MMErr.FILE_TOO_LARGE):
+                read_media_source(url, red, 1)
+        self.assertEqual(requests, ["red", "blue"])
+        self.assertEqual(paths, ["/image%20with%20space.jpg"] * 2)
+
+        with (
+            network.use(time.monotonic() - 1),
+            patch("rtp_llm.multimodal.media_network.getproxies", return_value={}),
+        ):
+            with self.assertRaisesRegex(FtRuntimeException, MMErr.DL_TIMEOUT):
+                read_media_source(url, red, 8)
+
+        with (
+            network.use(time.monotonic() + 5),
+            patch(
+                "rtp_llm.multimodal.media_network.getproxies",
+                return_value={"https": "http://proxy.example.test"},
+            ),
+            patch(
+                "rtp_llm.multimodal.media_network.get_bytes_io_from_url",
+                return_value=BytesIO(b"proxied"),
+            ) as legacy,
+        ):
+            self.assertEqual(read_media_source(url, red, 8).read(), b"proxied")
+        legacy.assert_called_once()
+        self.assertEqual(requests, ["red", "blue"])
+
+    def test_legacy_http_loader_checks_denylist_on_redirects(self):
+        paths = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                paths.append(self.path)
+                if self.path == "/redirect":
+                    self.send_response(302)
+                    self.send_header(
+                        "Location", f"http://localhost:{self.server.server_port}/blocked"
+                    )
+                    self.send_header("Content-Length", "0")
+                else:
+                    self.send_response(200)
+                    self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.addCleanup(server.server_close)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        backend_url = f"http://127.0.0.1:{server.server_port}"
+        legacy_url = f"http://media.example.test:{server.server_port}"
+        ssrf_check = SimpleNamespace(
+            safe_request_get=Mock(),
+            rewrite_oss_url=Mock(
+                side_effect=lambda url: url.replace(legacy_url, backend_url)
+            ),
+            check_ssrf=Mock(return_value=True),
+        )
+        with patch.dict(os.environ, {"MM_DOWNLOAD_DOMAIN_DENYLIST": '["localhost"]'}):
+            with patch(
+                "rtp_llm.multimodal.multimodal_util.REQUEST_GET", _default_request_get
+            ):
+                with self.assertRaisesRegex(
+                    FtRuntimeException, "download domain is blocked"
+                ):
+                    get_bytes_io_from_url(f"{backend_url}/redirect")
+            with (
+                patch("rtp_llm.multimodal.multimodal_util.REQUEST_GET", None),
+                patch(
+                    "rtp_llm.multimodal.multimodal_util.import_module",
+                    return_value=ssrf_check,
+                ),
+            ):
+                self.assertEqual(
+                    get_bytes_io_from_url(f"{legacy_url}/allowed").read(), b""
+                )
+                with self.assertRaisesRegex(
+                    FtRuntimeException, "download domain is blocked"
+                ):
+                    get_bytes_io_from_url(f"{legacy_url}/redirect")
+        self.assertEqual(paths, ["/redirect", "/allowed", "/redirect"])
+        ssrf_check.safe_request_get.assert_not_called()
+        self.assertEqual(
+            [call.args[0] for call in ssrf_check.check_ssrf.call_args_list],
+            [f"{backend_url}/allowed", f"{backend_url}/redirect"],
+        )
+
+    def test_native_http_loader_declines_legacy_private_policy(self):
+        policy = Mock()
+        with patch(
+            "rtp_llm.multimodal.media_network.import_module",
+            return_value=SimpleNamespace(),
+        ):
+            with self.assertRaises(UnsupportedMediaNetworkPolicy):
+                MediaNetwork._configure_internal_policy(policy)
+        policy.set_networks.assert_not_called()
+
+    def test_mock_preprocess_passes_image_size_limit_to_transport(self):
+        config = VitConfig()
+        config.mm_image_max_file_size_kb = 3
+        url = "https://example.test/image.jpg"
+        image = MultimodalInput(url, MMUrlType.IMAGE, torch.empty(0), MMPreprocessConfig())
+        processor_config = {
+            "image_processor": {
+                "patch_size": 14,
+                "temporal_patch_size": 2,
+                "merge_size": 2,
+                "min_image_tokens": 1,
+                "max_image_tokens": 100,
+            }
+        }
+        with patch(
+            "rtp_llm.multimodal.multimodal_mixins.glm5_3_flash.glm5_3_flash_mixin.read_media_source",
+            side_effect=ValueError("download finished"),
+        ) as download:
+            with self.assertRaisesRegex(ValueError, "download finished"):
+                Glm54MockImageEmbedding.preprocess_input(
+                    [image], config, None, None, processor_config
+                )
+        download.assert_called_once_with(url, config.download_headers, 3)
 
     def test_renderer_preserves_image_order_and_preprocess_options(self):
         first_url = "https://example.test/first.png"

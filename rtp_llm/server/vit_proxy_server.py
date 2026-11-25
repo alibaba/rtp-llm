@@ -503,6 +503,8 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         so both real and test contexts carry the exact code/details."""
         code = error.code()
         details = error.details()
+        if context is not None:
+            _forward_worker_error_metadata(context, error)
         abort = getattr(context, "abort", None) if context is not None else None
         if abort is not None:
             abort(code, details)

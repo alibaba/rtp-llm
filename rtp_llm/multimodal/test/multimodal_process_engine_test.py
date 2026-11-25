@@ -41,14 +41,17 @@ from rtp_llm.multimodal.greennet_hook import (
     GreenNetProvider,
     GreenNetVerdict,
 )
+from rtp_llm.multimodal.media_network import MediaNetwork
 from rtp_llm.multimodal.mm_error_messages import MMErr
 from rtp_llm.multimodal.mm_process_engine import (
+    LocalPreprocessExecutor,
     MMEmbeddingAsyncCache,
     MMEmbeddingCacheEntry,
     MMHashKeyCache,
     MMProcessEngine,
     MMWorkItem,
     _feature_hashes_from_result,
+    _prepare_batch_feature_hashes,
 )
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MultiModalEmbeddingInterface,
@@ -744,6 +747,76 @@ class MMProcessEngineGpuBatchTest(TestCase):
         self.assertEqual(engine._hash_key_cache.keys(), [])
         self.assertTrue(torch.equal(first.feature_hashes[0], cached.feature_hashes[0]))
 
+    def test_sync_cache_hit_refills_hash_for_live_generation(self):
+        engine, part = self._make_engine(
+            mm_cache_cpu_max_bytes=4096, mm_hash_key_cache_max_bytes=4096
+        )
+        first = self._embed(engine, ["fake://1"])
+        key = engine._hash_key_cache.keys()[0]
+        entry = engine._embedding_cache.peek(key)
+        engine._hash_key_cache.clear()
+
+        cached = self._embed(engine, ["fake://1"])
+        self.assertEqual(part.embedding_calls, 1)
+        torch.testing.assert_close(cached.feature_hashes[0], first.feature_hashes[0])
+        torch.testing.assert_close(
+            engine._hash_key_cache.get(key, entry.generation)[0],
+            first.feature_hashes[0],
+        )
+
+    def test_sync_hash_publication_failure_leaves_image_retryable(self):
+        engine, part = self._make_engine(
+            mm_cache_cpu_max_bytes=4096, mm_hash_key_cache_max_bytes=4096
+        )
+        with patch.object(
+            engine._hash_key_cache,
+            "put_for_entry",
+            side_effect=RuntimeError("hash publication failed"),
+        ):
+            with self.assertRaisesRegex(Exception, "hash publication failed"):
+                self._embed(engine, ["fake://1"])
+
+        self.assertEqual(engine._hash_key_cache.keys(), [])
+        retry = self._embed(engine, ["fake://1"])
+        self.assertEqual(retry.embeddings[0].item(), 1)
+        self.assertEqual(part.embedding_calls, 2)
+        self.assertEqual(len(engine._hash_key_cache.keys()), 1)
+
+    def test_eager_cuda_hashes_preserve_item_order_and_semantic_identity(self):
+        first = MagicMock(spec=torch.Tensor, is_cuda=True, ndim=2, shape=(1, 2))
+        second = MagicMock(spec=torch.Tensor, is_cuda=True, ndim=2, shape=(2, 2))
+        deferred = MagicMock(spec=torch.Tensor, is_cuda=True, ndim=2, shape=(1, 2))
+        first.numel.return_value = 2
+        second.numel.return_value = 4
+        deferred.numel.return_value = 2
+        items = [SimpleNamespace(feature_hashes=None) for _ in range(4)]
+        items[1].defer_feature_hashes = True
+        results = [
+            ([first], None, [torch.tensor([6], dtype=torch.int32)]),
+            ([deferred], None),
+            ([torch.ones(1, 2)], None),
+            ([second], None),
+        ]
+        first_hash = torch.tensor([8], dtype=torch.int32)
+        second_hash = torch.tensor([9, 10], dtype=torch.int32)
+        module = "rtp_llm.multimodal.mm_process_engine"
+        with patch(f"{module}.get_multimodal_feature_hash", return_value=first_hash):
+            expected = _feature_hashes_from_result(results[0])
+        with patch(
+            f"{module}.get_multimodal_feature_hashes",
+            return_value=[first_hash, second_hash],
+        ) as batched_hash:
+            _prepare_batch_feature_hashes(items, results)
+
+        self.assertEqual(batched_hash.call_count, 1)
+        inputs = batched_hash.call_args.args[0]
+        self.assertIs(inputs[0], first)
+        self.assertIs(inputs[1], second)
+        torch.testing.assert_close(items[0].feature_hashes[0], expected[0])
+        self.assertIsNone(items[1].feature_hashes)
+        self.assertIsNone(items[2].feature_hashes)
+        self.assertIs(items[3].feature_hashes[0], second_hash)
+
     def test_gpu_batch_cache_hit(self):
         """A repeated url is served from cache without a second embedding call."""
         engine, part = self._make_engine(mm_cache_cpu_max_bytes=4096)
@@ -847,14 +920,15 @@ class PreprocessMetricTest(TestCase):
 
             def apply_async(self, *args, **kwargs):
                 self.callbacks.append((kwargs["callback"], kwargs["error_callback"]))
-                return object()
+                return MagicMock(get=MagicMock(return_value=(None, 0, 0, [])))
 
-        executor = object.__new__(MultiprocessPreprocessExecutor)
-        executor.pool = FakePool()
-        executor._pool_lock = threading.Lock()
-        executor._preprocess_queue_lock = threading.Lock()
-        executor._pending_preprocess_tasks = set()
-        executor._next_preprocess_task_id = 0
+        with patch(
+            "rtp_llm.multimodal.mm_process_engine._PreprocessPool",
+            return_value=FakePool(),
+        ):
+            executor = MultiprocessPreprocessExecutor(
+                None, VitConfig(), {}, lambda *_: None
+            )
 
         config = MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
         work_items = [
@@ -882,8 +956,11 @@ class PreprocessMetricTest(TestCase):
         ]
         self.assertEqual(depth_values[-1], 2)
 
+        calls_before_completion = report.call_count
         executor.pool.callbacks[0][0](None)
         executor.pool.callbacks[1][1](RuntimeError("preprocess failed"))
+        self.assertEqual(report.call_count, calls_before_completion)
+        executor.get_result(work_items[0])
         depth_values = [
             call.args[1]
             for call in report.call_args_list
@@ -1171,6 +1248,133 @@ class EmptyEmbeddingResultTest(TestCase):
 
 
 class AsyncSubmitGetEmbeddingTest(TestCase):
+    def test_shared_oversized_async_embedding_keeps_approved_hash_sidecar(self):
+        engine = self._make_engine()
+        self.addCleanup(engine.stop)
+        engine._embedding_cache.resize(0, 1)
+        image = self._make_input("fake://oversized-shared")
+        hashing, resume = threading.Event(), threading.Event()
+        waiting = threading.Barrier(3)
+        verdict = concurrent.futures.Future()
+        verdict.set_result(GreenNetVerdict(passed=True))
+
+        def compute_hashes(_result):
+            hashing.set()
+            if not resume.wait(5):
+                raise TimeoutError("Hash computation was not released")
+            return [torch.tensor([7], dtype=torch.int32)]
+
+        with (
+            patch.object(engine, "_greennet_enabled", return_value=True),
+            patch.object(
+                engine, "_begin_greennet", return_value=([image], verdict, None)
+            ),
+            patch(
+                "rtp_llm.multimodal.mm_process_engine._feature_hashes_from_result",
+                side_effect=compute_hashes,
+            ) as hash_op,
+            concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool,
+        ):
+            try:
+                engine.async_submit([image])
+                self.assertTrue(hashing.wait(5))
+                entry = engine._embedding_cache.peek(image.cache_key())
+                wait_ready = entry.wait_ready
+
+                def wait(*args, **kwargs):
+                    waiting.wait(timeout=5)
+                    return wait_ready(*args, **kwargs)
+
+                with patch.object(entry, "wait_ready", side_effect=wait):
+                    readers = [
+                        pool.submit(
+                            engine.get_embedding_result, [image], hashes_only=True
+                        )
+                        for _ in range(2)
+                    ]
+                    waiting.wait(timeout=5)
+                    resume.set()
+                    for reader in readers:
+                        result = reader.result(timeout=5)
+                        self.assertEqual(result[0].feature_hashes[0].tolist(), [7])
+            finally:
+                resume.set()
+            hash_op.assert_called_once()
+
+        key = image.cache_key()
+        self.assertIsNone(engine._embedding_cache.peek(key))
+        self.assertEqual(
+            engine._hash_key_cache.get(key, entry.generation)[0].tolist(), [7]
+        )
+        self.assertTrue(engine._hash_key_cache.greennet_passed(key))
+
+    def test_async_hash_lookup_still_populates_hash_only_cache(self):
+        engine = self._make_engine()
+        self.addCleanup(engine.stop)
+        engine._embedding_cache.resize(0, 0)
+        image = self._make_input("fake://hash-only")
+
+        result = engine.get_embedding_result([image], hashes_only=True)
+
+        self.assertIsNone(engine._embedding_cache.peek(image.cache_key()))
+        torch.testing.assert_close(
+            engine._hash_key_cache.get(image.cache_key())[0], result[0].feature_hashes[0]
+        )
+
+    def test_waiters_cannot_observe_ready_before_hash_publication(self):
+        engine = self._make_engine()
+        self.addCleanup(engine.stop)
+        image = self._make_input("fake://publication-race")
+        publishing, resume = threading.Event(), threading.Event()
+        waiting = threading.Barrier(5)
+        put = engine._hash_key_cache.put_for_entry
+
+        def publish(*args, **kwargs):
+            publishing.set()
+            if not resume.wait(5):
+                raise TimeoutError("Hash publisher was not released")
+            return put(*args, **kwargs)
+
+        with (
+            patch.object(engine._hash_key_cache, "put_for_entry", side_effect=publish),
+            patch(
+                "rtp_llm.multimodal.mm_process_engine._feature_hashes_from_result",
+                return_value=[torch.tensor([7], dtype=torch.int32)],
+            ) as hash_op,
+            concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool,
+        ):
+            try:
+                engine.async_submit([image])
+                self.assertTrue(publishing.wait(5))
+                entry = engine._embedding_cache.peek(image.cache_key())
+                self.assertFalse(entry.is_done)
+                wait_ready = entry.wait_ready
+
+                def wait(*args, **kwargs):
+                    waiting.wait(timeout=5)
+                    return wait_ready(*args, **kwargs)
+
+                with patch.object(entry, "wait_ready", side_effect=wait):
+                    readers = [
+                        pool.submit(
+                            engine.get_embedding_result, [image], hashes_only=True
+                        )
+                        for _ in range(4)
+                    ]
+                    waiting.wait(timeout=5)
+                    self.assertTrue(all(not reader.done() for reader in readers))
+                    resume.set()
+                    self.assertEqual(
+                        [
+                            reader.result(timeout=5)[0].feature_hashes[0].tolist()
+                            for reader in readers
+                        ],
+                        [[7]] * len(readers),
+                    )
+            finally:
+                resume.set()
+            hash_op.assert_called_once()
+
     def test_empty_embedding_fails_without_publishing_cache_or_hashes(self):
         for cache_enabled in (False, True):
             for async_mode in (False, True):
@@ -1987,6 +2191,155 @@ class MMProcessEngineGreenNetTest(TestCase):
             close_preprocess.assert_called_once()
             close_scheduler.assert_called_once()
             self.assertIsNone(engine._embedding_cache.peek(inp.cache_key()))
+
+    def test_stop_closes_dependencies_and_retries_preprocessing_after_timeout(self):
+        engine = self._make_engine()
+        engine._remote_embedding_cache = remote_cache = MagicMock()
+        self.addCleanup(engine.stop)
+        initial_timeout = TimeoutError("preprocessing worker did not exit")
+        retry_timeout = TimeoutError("preprocessing handler did not exit")
+        with (
+            patch.object(
+                engine.preprocess_executor,
+                "shutdown",
+                side_effect=[initial_timeout, retry_timeout, None],
+            ) as close_preprocess,
+            patch.object(
+                engine._async_compute_executor,
+                "shutdown",
+                wraps=engine._async_compute_executor.shutdown,
+            ) as close_compute,
+            patch.object(
+                engine._scheduler, "close", wraps=engine._scheduler.close
+            ) as close_scheduler,
+            patch.object(
+                engine, "_shutdown_greennet_loop", wraps=engine._shutdown_greennet_loop
+            ) as close_inspection,
+            patch.object(
+                engine._embedding_cache, "clear", wraps=engine._embedding_cache.clear
+            ) as clear_embeddings,
+            patch.object(
+                engine._hash_key_cache, "clear", wraps=engine._hash_key_cache.clear
+            ) as clear_hashes,
+        ):
+            with self.assertRaises(TimeoutError) as raised:
+                engine.stop()
+            self.assertIs(raised.exception, initial_timeout)
+            close_scheduler.assert_called_once()
+            close_inspection.assert_called_once()
+            clear_embeddings.assert_called_once()
+            clear_hashes.assert_called_once()
+            remote_cache.close.assert_called_once()
+
+            with self.assertRaises(TimeoutError) as raised:
+                engine.stop()
+            self.assertIs(raised.exception, retry_timeout)
+            engine.stop()
+            engine.stop()
+            self.assertEqual(close_preprocess.call_count, 3)
+            close_compute.assert_called_once_with(wait=True, cancel_futures=True)
+            close_scheduler.assert_called_once()
+            close_inspection.assert_called_once()
+            clear_embeddings.assert_called_once()
+            clear_hashes.assert_called_once()
+            remote_cache.close.assert_called_once()
+
+    def test_constructor_preserves_scheduler_error_if_preprocess_cleanup_times_out(
+        self,
+    ):
+        model = FakeModel(FakeMultiModalEmbeddingInterface())
+        vit_config = VitConfig()
+        vit_config.use_local_preprocess = True
+        vit_config.mm_remote_cache_enable = True
+        scheduler_error = ValueError("scheduler init failed")
+        with (
+            patch(
+                "rtp_llm.multimodal.mm_process_engine.MMScheduler",
+                side_effect=scheduler_error,
+            ),
+            patch(
+                "rtp_llm.multimodal.mm_process_engine.concurrent.futures.ThreadPoolExecutor",
+            ) as compute,
+            patch(
+                "rtp_llm.multimodal.mm_process_engine.LocalPreprocessExecutor",
+            ) as preprocess,
+            patch("rtp_llm.multimodal.kvcm.RtpKvMetaObjectClient.from_env"),
+            patch(
+                "rtp_llm.multimodal.mm_remote_embedding_cache.MMRemoteEmbeddingCache"
+            ) as remote_cache,
+        ):
+            preprocess.return_value.shutdown.side_effect = TimeoutError(
+                "preprocessing worker did not exit"
+            )
+            with self.assertRaises(ValueError) as raised:
+                MMProcessEngine(
+                    model.mm_part,
+                    model.model_config,
+                    vit_config,
+                    ProfilingDebugLoggingConfig(),
+                )
+            self.assertIs(raised.exception, scheduler_error)
+            compute.return_value.shutdown.assert_called_once_with(
+                wait=True, cancel_futures=True
+            )
+            preprocess.return_value.shutdown.assert_called_once()
+            remote_cache.return_value.close.assert_called_once()
+
+    def test_local_preprocess_shuts_down_native_network_once(self):
+        network = self._media_network()
+        executor = LocalPreprocessExecutor(lambda *_: None, VitConfig(), {}, network)
+        executor.shutdown()
+        executor.shutdown()
+        network._pool.close.assert_called_once()
+        network._results_thread.join.assert_called_once()
+
+    @staticmethod
+    def _media_network():
+        # Exercise the real close/use state machine without starting a native worker.
+        network = object.__new__(MediaNetwork)
+        network._lock = threading.Lock()
+        network._closed = False
+        network._pool = MagicMock()
+        network._results_thread = MagicMock()
+        return network
+
+    def test_local_preprocess_cancelled_when_network_closes_during_deadline_check(self):
+        network = self._media_network()
+        preprocess = MagicMock()
+        executor = LocalPreprocessExecutor(preprocess, VitConfig(), {}, network)
+        checking_deadline, release = threading.Event(), threading.Event()
+
+        def remaining_timeout():
+            checking_deadline.set()
+            if not release.wait(timeout=5):
+                raise RuntimeError("test did not release the deadline check")
+            return 5
+
+        work = SimpleNamespace(
+            should_preprocess=True,
+            deadline=None,
+            mm_inputs=[],
+            remaining_timeout_s=remaining_timeout,
+            future=None,
+        )
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            submit = pool.submit(executor.submit, work)
+            try:
+                self.assertTrue(checking_deadline.wait(timeout=2))
+                executor.shutdown()
+            finally:
+                release.set()
+            with self.assertRaisesRegex(
+                concurrent.futures.CancelledError, "ViT media transport is closed"
+            ):
+                submit.result(timeout=2)
+
+        with self.assertRaisesRegex(
+            concurrent.futures.CancelledError, "ViT media transport is closed"
+        ):
+            executor.submit(work)
+        preprocess.assert_not_called()
+        self.assertIsNone(work.future)
 
     def test_stop_cancels_pending_greennet_and_closes_loop(self):
         engine = self._make_engine()

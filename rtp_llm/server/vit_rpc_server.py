@@ -41,6 +41,7 @@ from rtp_llm.multimodal.multimodal_util import (
     trans_mm_input,
 )
 from rtp_llm.multimodal.transport import create_mm_output_transport
+from rtp_llm.multimodal.transport.base import serialize_embedding_response
 from rtp_llm.server.mm_cache_metadata import (
     MM_CACHE_SNAPSHOT_MAX_BYTES,
     get_mm_cache_keys,
@@ -178,7 +179,11 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         except OverflowError as error:
             context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, str(error))
         except ValueError as error:
-            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+            self.engine.report_vit_error(error)
+            _abort_ft_runtime(
+                context,
+                FtRuntimeException(ExceptionType.MM_WRONG_FORMAT_ERROR, str(error)),
+            )
         except TimeoutError as error:
             if inputs is not None:
                 self.engine.cancel_queued_request(inputs.request_id)
@@ -373,11 +378,10 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 1,
                 {"source": "vit_server", "reason": "overload"},
             )
-            context.abort(
-                grpc.StatusCode.RESOURCE_EXHAUSTED,
-                format_mm_rpc_error(
-                    FtRuntimeException(ExceptionType.MM_PROCESS_ERROR, str(e))
-                ),
+            self.engine.report_vit_error(e)
+            _abort_ft_runtime(
+                context,
+                FtRuntimeException(ExceptionType.CONCURRENCY_LIMIT_ERROR, str(e)),
             )
         except MMSchedulerTimeoutError as e:
             # Scheduler wait exceeded its embedding timeout.
@@ -386,11 +390,10 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 1,
                 {"source": "vit_server", "reason": "timeout"},
             )
-            context.abort(
-                grpc.StatusCode.DEADLINE_EXCEEDED,
-                format_mm_rpc_error(
-                    FtRuntimeException(ExceptionType.MM_PROCESS_ERROR, str(e))
-                ),
+            self.engine.report_vit_error(e)
+            _abort_ft_runtime(
+                context,
+                FtRuntimeException(ExceptionType.GENERATE_TIMEOUT, str(e)),
             )
         except MMSchedulerRequestTooLargeError as e:
             # Client asked for more than a single request may carry -> a caller
@@ -400,11 +403,10 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 1,
                 {"source": "vit_server", "reason": "request_too_large"},
             )
-            context.abort(
-                grpc.StatusCode.INVALID_ARGUMENT,
-                format_mm_rpc_error(
-                    FtRuntimeException(ExceptionType.MM_WRONG_FORMAT_ERROR, str(e))
-                ),
+            self.engine.report_vit_error(e)
+            _abort_ft_runtime(
+                context,
+                FtRuntimeException(ExceptionType.MM_WRONG_FORMAT_ERROR, str(e)),
             )
         except FtRuntimeException as e:
             grpc_status = _grpc_status_for_runtime_exception(e)
@@ -416,11 +418,11 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             self.engine.report_vit_error(e)
             _abort_ft_runtime(context, e)
         except TimeoutError as error:
-            timeout_error = FtRuntimeException(
-                ExceptionType.GENERATE_TIMEOUT, str(error)
+            self.engine.report_vit_error(error)
+            _abort_ft_runtime(
+                context,
+                FtRuntimeException(ExceptionType.GENERATE_TIMEOUT, str(error)),
             )
-            self.engine.report_vit_error(timeout_error)
-            _abort_ft_runtime(context, timeout_error)
         except Exception:
             kmonitor.report(
                 AccMetrics.VIT_RPC_SERVER_ERROR_QPS_METRIC,
@@ -464,15 +466,80 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             self._transport.close()
 
 
-def create_rpc_server():
-    server = grpc.server(
-        futures.ThreadPoolExecutor(max_workers=200),
-        options=[
-            ("grpc.max_send_message_length", 1024 * 1024 * 1024),
-            ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
-            ("grpc.max_concurrent_streams", -1),
-            ("grpc.http2.min_ping_interval_without_data_ms", 1000),
-            ("grpc.http2.max_ping_strikes", 1000),
-        ],
+class _VitRpcInterceptor(grpc.ServerInterceptor):
+    def __init__(self, status_executor):
+        self._status_executor = status_executor
+
+    def intercept_service(self, continuation, details):
+        handler = continuation(details)
+        if handler is None or handler.unary_unary is None:
+            return handler
+        if details.method == "/MultimodalRpcService/RemoteMultimodalEmbedding":
+            return grpc.unary_unary_rpc_method_handler(
+                handler.unary_unary,
+                request_deserializer=handler.request_deserializer,
+                response_serializer=serialize_embedding_response,
+            )
+        if details.method != "/MultimodalRpcService/GetWorkerStatus":
+            return handler
+
+        def dispatch(request, context):
+            return handler.unary_unary(request, context)
+
+        # The per-handler pool keeps health polls independent of inference.
+        dispatch.experimental_thread_pool = self._status_executor
+        return grpc.unary_unary_rpc_method_handler(
+            dispatch,
+            request_deserializer=handler.request_deserializer,
+            response_serializer=handler.response_serializer,
+        )
+
+
+def create_rpc_server(max_workers=200):
+    data_executor = futures.ThreadPoolExecutor(
+        max_workers=max_workers, thread_name_prefix="vit-rpc"
     )
+    status_executor = futures.ThreadPoolExecutor(
+        max_workers=4, thread_name_prefix="vit-status"
+    )
+    try:
+        server = grpc.server(
+            data_executor,
+            interceptors=[_VitRpcInterceptor(status_executor)],
+            options=[
+                ("grpc.max_send_message_length", 1024 * 1024 * 1024),
+                ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
+                ("grpc.max_concurrent_streams", -1),
+                ("grpc.http2.min_ping_interval_without_data_ms", 1000),
+                ("grpc.http2.max_ping_strikes", 1000),
+            ],
+        )
+    except BaseException:
+        data_executor.shutdown(wait=False, cancel_futures=True)
+        status_executor.shutdown(wait=False, cancel_futures=True)
+        raise
+
+    original_stop = server.stop
+    stop_lock = threading.Lock()
+    cleanup_started = False
+
+    def stop(grace):
+        nonlocal cleanup_started
+        stopped = original_stop(grace)
+
+        def close_executors():
+            # Keep accepted handlers running during a graceful stop.
+            stopped.wait()
+            data_executor.shutdown(wait=False)
+            status_executor.shutdown(wait=False)
+
+        with stop_lock:
+            if not cleanup_started:
+                threading.Thread(
+                    target=close_executors, name="vit-rpc-shutdown", daemon=True
+                ).start()
+                cleanup_started = True
+        return stopped
+
+    server.stop = stop
     return server

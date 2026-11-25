@@ -7,11 +7,13 @@ from unittest import TestCase, main
 from unittest.mock import MagicMock, patch
 
 import grpc
+import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     CacheStatusPB,
     CacheVersionPB,
+    ErrorDetailsPB,
     MMRdmaSlotPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
@@ -24,6 +26,8 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     MultimodalRpcServiceStub,
     add_MultimodalRpcServiceServicer_to_server,
 )
+from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
+from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
 from rtp_llm.multimodal.mm_scheduler import (
     MMSchedulerOverloadError,
     MMSchedulerRequestTooLargeError,
@@ -43,7 +47,12 @@ from rtp_llm.server.vit_proxy_server import (
     resolve_default_rpc_timeout_seconds,
     resolve_min_healthy_workers,
 )
-from rtp_llm.server.vit_rpc_server import MultimodalRpcServer
+from rtp_llm.server.vit_rpc_constants import VIT_ERROR_REPORTED_METADATA_KEY
+from rtp_llm.server.vit_rpc_server import (
+    MultimodalRpcServer,
+    create_rpc_server,
+    trans_output,
+)
 
 
 class FakeContext:
@@ -160,6 +169,10 @@ class RpcBoundaryFakeContext:
     def __init__(self):
         self.code = None
         self.details = None
+        self.trailing_metadata = ()
+
+    def set_trailing_metadata(self, metadata):
+        self.trailing_metadata = metadata
 
     def add_callback(self, callback):
         return False
@@ -1442,8 +1455,17 @@ class VitProxyRpcServerForwardingTest(TestCase):
         as RESOURCE_EXHAUSTED through the real gRPC framework — not downgraded to
         UNKNOWN — and must NOT retry another worker or mark the worker unhealthy."""
         overloaded_stub = MagicMock()
+        worker_error = RpcResourceExhausted()
+        worker_details = ErrorDetailsPB(
+            error_code=int(ExceptionType.CONCURRENCY_LIMIT_ERROR),
+            error_message=worker_error.details(),
+        ).SerializeToString()
+        worker_error.trailing_metadata = lambda: (
+            ("grpc-status-details-bin", worker_details),
+            (VIT_ERROR_REPORTED_METADATA_KEY, "1"),
+        )
         overloaded_stub.RemoteMultimodalEmbedding.future.return_value = FakeGrpcFuture(
-            error=RpcResourceExhausted()
+            error=worker_error
         )
         load_balancer = LoadBalancer(["overloaded"])
         connection_pool = MagicMock()
@@ -1465,10 +1487,72 @@ class VitProxyRpcServerForwardingTest(TestCase):
             grpc_server.stop(0)
 
         self.assertEqual(error.exception.code(), grpc.StatusCode.RESOURCE_EXHAUSTED)
+        metadata = dict(error.exception.trailing_metadata())
+        self.assertEqual(metadata["grpc-status-details-bin"], worker_details)
+        self.assertNotIn(VIT_ERROR_REPORTED_METADATA_KEY, metadata)
         overloaded_stub.RemoteMultimodalEmbedding.future.assert_called_once()
         self.assertEqual(
             server.load_balancer.get_alive_worker_addresses(), ["overloaded"]
         )
+
+
+class VitRpcControlTest(TestCase):
+    @patch("rtp_llm.multimodal.transport.base.kmonitor.report")
+    def test_saturated_embedding_pool_keeps_status_responsive(self, report):
+        started = threading.Event()
+        release = threading.Event()
+        features = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+        hashes = torch.tensor([21, 34], dtype=torch.int32)
+
+        def run_embedding(*args, **kwargs):
+            started.set()
+            if not release.wait(10):
+                raise TimeoutError("test did not unblock the embedding")
+            return [MMEmbeddingRes([features], feature_hashes=[hashes])]
+
+        engine = MagicMock()
+        engine.get_embedding_result.side_effect = run_embedding
+        worker = MultimodalRpcServer(engine)
+        server = create_rpc_server(max_workers=1)
+        add_MultimodalRpcServiceServicer_to_server(worker, server)
+        port = server.add_insecure_port("127.0.0.1:0")
+        server.start()
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            rpc = channel.unary_unary(
+                "/MultimodalRpcService/RemoteMultimodalEmbedding",
+                request_serializer=MultimodalInputsPB.SerializeToString,
+            )
+            try:
+                pending = rpc.future(MultimodalInputsPB(), timeout=20)
+                self.assertTrue(started.wait(5))
+                stub = MultimodalRpcServiceStub(channel)
+                status = stub.GetWorkerStatus(StatusVersionPB(), timeout=3)
+                self.assertTrue(status.alive)
+                self.assertFalse(pending.done())
+                release.set()
+                payload = pending.result(timeout=5)
+                expected = trans_output(
+                    MMEmbeddingRes([features], feature_hashes=[hashes])
+                )
+                self.assertEqual(payload, expected.SerializeToString())
+                wire_size_calls = [
+                    call.args
+                    for call in report.call_args_list
+                    if call.args[0] == GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC
+                ]
+                self.assertEqual(
+                    wire_size_calls,
+                    [
+                        (
+                            GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC,
+                            len(payload),
+                            {"source": "vit_server", "transport": "bytes"},
+                        )
+                    ],
+                )
+            finally:
+                release.set()
+                server.stop(0).wait(timeout=5)
 
 
 class RuntimeExceptionStatusTest(TestCase):
@@ -1506,12 +1590,12 @@ class RuntimeExceptionStatusTest(TestCase):
             (
                 MMSchedulerOverloadError("overloaded"),
                 grpc.StatusCode.RESOURCE_EXHAUSTED,
-                ExceptionType.MM_PROCESS_ERROR,
+                ExceptionType.CONCURRENCY_LIMIT_ERROR,
             ),
             (
                 MMSchedulerTimeoutError("timed out"),
                 grpc.StatusCode.DEADLINE_EXCEEDED,
-                ExceptionType.MM_PROCESS_ERROR,
+                ExceptionType.GENERATE_TIMEOUT,
             ),
             (
                 MMSchedulerRequestTooLargeError("too large"),
@@ -1530,6 +1614,10 @@ class RuntimeExceptionStatusTest(TestCase):
 
                 self.assertEqual(context.code, expected_status)
                 self.assertTrue(context.details.startswith(f"[{expected_type.name}]"))
+                metadata = dict(context.trailing_metadata)
+                details = ErrorDetailsPB.FromString(metadata["grpc-status-details-bin"])
+                self.assertEqual(details.error_code, int(expected_type))
+                self.assertEqual(details.error_message, str(error))
 
 
 def _rdma_slot(lease_id: str) -> MMRdmaSlotPB:

@@ -75,6 +75,8 @@ cc_test(
         "//rtp_llm/cpp/rdma_transport",
         # Building inline receipts for the real terminal. Lean target, no engine behind it.
         "//rtp_llm/cpp/model_rpc:tensor_pb_convert",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "@grpc//:grpc++",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
     ],

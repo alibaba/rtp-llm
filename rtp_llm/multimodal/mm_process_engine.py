@@ -3,6 +3,7 @@ import concurrent.futures
 import gc
 import logging
 import multiprocessing.pool
+import multiprocessing.queues
 import os
 import signal
 import threading
@@ -22,6 +23,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.greennet_hook import GreenNetVerdict, get_greennet_provider
+from rtp_llm.multimodal.media_network import MediaNetwork, UnsupportedMediaNetworkPolicy
 from rtp_llm.multimodal.mm_embedding_cache import (
     MMEmbeddingAsyncCache,
     MMEmbeddingCache,
@@ -46,11 +48,17 @@ from rtp_llm.multimodal.multimodal_util import (
     url_data_cache_,
     vit_emb_cache_,
 )
+from rtp_llm.multimodal.preprocess_ipc import register_preprocess_storage_reducer
 from rtp_llm.multimodal.vit_metrics import (
     VitMetricSample,
     collect_vit_preprocess_metrics,
 )
-from rtp_llm.ops import MMPreprocessConfig, MultimodalInput, get_multimodal_feature_hash
+from rtp_llm.ops import (
+    MMPreprocessConfig,
+    MultimodalInput,
+    get_multimodal_feature_hash,
+    get_multimodal_feature_hashes,
+)
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 from rtp_llm.utils.time_util import Timer, timer_wrapper
@@ -132,6 +140,10 @@ def _feature_hashes_from_result(result: Any) -> List[torch.Tensor]:
     _validate_embedding_result(result)
     embeddings = maybe_tensor_to_list(result[0], ndim_threshold=2)
     hashes = [get_multimodal_feature_hash(embedding) for embedding in embeddings]
+    return _add_semantic_hash_identity(result, embeddings, hashes)
+
+
+def _add_semantic_hash_identity(result, embeddings, hashes) -> List[torch.Tensor]:
     extra = maybe_tensor_to_list(result[2], ndim_threshold=1) if len(result) > 2 else []
     if (
         extra
@@ -160,6 +172,38 @@ def _feature_hashes_from_result(result: Any) -> List[torch.Tensor]:
     return hashes
 
 
+@cuda_graph_gate.operation()
+def _prepare_batch_feature_hashes(work_items, results) -> None:
+    """Collect eager CUDA hashes with one transfer before publishing results."""
+    pending = []
+    embeddings = []
+    for item, result in zip(work_items, results):
+        if (
+            getattr(item, "defer_feature_hashes", False)
+            or getattr(item, "feature_hashes", None) is not None
+        ):
+            continue
+        values = maybe_tensor_to_list(result[0], ndim_threshold=2)
+        if values and all(
+            isinstance(value, torch.Tensor) and value.is_cuda for value in values
+        ):
+            _validate_embedding_result(result)
+            pending.append((item, result, values))
+            embeddings.extend(values)
+    if len(embeddings) < 2:
+        return
+    hashes = get_multimodal_feature_hashes(embeddings)
+    if len(hashes) != len(embeddings):
+        raise RuntimeError("Batched feature hash output count mismatch")
+    offset = 0
+    for item, result, values in pending:
+        end = offset + len(values)
+        item.feature_hashes = _add_semantic_hash_identity(
+            result, values, hashes[offset:end]
+        )
+        offset = end
+
+
 def _worker_initializer(
     vit_config: VitConfig,
     preprocess_params: dict,
@@ -172,6 +216,7 @@ def _worker_initializer(
     global _worker_vit_config, _worker_preprocess_params, _worker_preprocess_func
     # 让工作进程忽略 SIGINT 信号，这样主进程的 Ctrl+C 不会杀死它们
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    register_preprocess_storage_reducer()
     _worker_vit_config = vit_config
     _worker_preprocess_params = preprocess_params
     _worker_preprocess_func = preprocess_func
@@ -180,12 +225,14 @@ def _worker_initializer(
 
 def _worker_process_task(
     mm_inputs: List[MultimodalInput],
+    deadline: Optional[float] = None,
 ) -> Tuple[Any, float, float, List[VitMetricSample]]:
     """
     只接收变化的 `mm_inputs` 参数。
     """
     if _worker_preprocess_func is None:
         raise RuntimeError("Worker process has not been initialized correctly.")
+    _check_preprocess_deadline(deadline)
 
     try:
         return _run_preprocess_task(
@@ -198,6 +245,14 @@ def _worker_process_task(
         # Invalid images and task I/O errors must not tear down healthy workers
         # or discard unrelated requests that are queued in the same pool.
         raise _PreprocessTaskError(error) from error
+
+
+def _check_preprocess_deadline(deadline: Optional[float]) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise FtRuntimeException(
+            ExceptionType.GENERATE_TIMEOUT,
+            "ViT request expired before CPU preprocessing",
+        )
 
 
 def _unpack_preprocess_result(payload: Any) -> Tuple[Any, float, float]:
@@ -276,23 +331,21 @@ class LocalPreprocessExecutor(PreprocessExecutor):
         preprocess_func: Callable,
         vit_config: VitConfig,
         preprocess_params: dict,
+        media_network: Optional[MediaNetwork] = None,
     ):
         self.preprocess_func = preprocess_func
         self.vit_config = vit_config
         self.preprocess_params = preprocess_params
+        self.media_network = media_network
         _report_preprocess_queue_size(0)
 
     def submit(self, work_item: "MMWorkItem") -> None:
         if not work_item.should_preprocess:
             return
 
+        _check_preprocess_deadline(work_item.deadline)
         try:
-            result, preprocess_time, download_time, samples = _run_preprocess_task(
-                self.preprocess_func,
-                work_item.mm_inputs,
-                self.vit_config,
-                self.preprocess_params,
-            )
+            result, preprocess_time, download_time, samples = self._preprocess(work_item)
             work_item.preprocess_result = result
             # 使用简单的对象模拟 future 行为
             work_item.future = _LocalResult(
@@ -301,6 +354,20 @@ class LocalPreprocessExecutor(PreprocessExecutor):
         except Exception as e:
             logging.error(f"Error in local preprocessing: {e}", exc_info=True)
             raise
+
+    def _preprocess(self, work_item: "MMWorkItem"):
+        network = self.media_network
+        args = (
+            self.preprocess_func,
+            work_item.mm_inputs,
+            self.vit_config,
+            self.preprocess_params,
+        )
+        if network is None:
+            return _run_preprocess_task(*args)
+        deadline = time.monotonic() + work_item.remaining_timeout_s()
+        with network.use(deadline):
+            return _run_preprocess_task(*args)
 
     def get_result(self, work_item: "MMWorkItem") -> None:
         if work_item.future is None:
@@ -317,6 +384,117 @@ class LocalPreprocessExecutor(PreprocessExecutor):
             logging.error(f"Error getting local preprocess result: {e}", exc_info=True)
             raise
 
+    def shutdown(self) -> None:
+        if self.media_network is not None:
+            self.media_network.close()
+
+
+class _PreprocessResultQueue(multiprocessing.queues.SimpleQueue):
+    def put(self, result):
+        if result is not None or self._wlock is None:
+            return super().put(result)
+        # Only the parent task handler sends this sentinel. A dead worker
+        # may own the write lock, so allow the parent to close the writer.
+        while not self._writer.closed:
+            if self._wlock.acquire(timeout=0.1):
+                try:
+                    self._writer.send(None)
+                finally:
+                    self._wlock.release()
+                return
+
+
+class _PreprocessPool(multiprocessing.pool.Pool):
+    def _setup_queues(self):
+        self._inqueue = self._ctx.SimpleQueue()
+        self._outqueue = _PreprocessResultQueue(ctx=self._ctx)
+        self._quick_put = self._inqueue._writer.send
+        self._quick_get = self._outqueue._reader.recv
+
+    def drain(self, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+
+        def join(target):
+            target.join(timeout=max(0, deadline - time.monotonic()))
+            return not target.is_alive()
+
+        # The worker handler can replace processes until it exits. Keep both
+        # graceful and forced joins in the caller so each worker has one waiter.
+        if not join(self._worker_handler):
+            return False
+        return all(
+            join(target)
+            for target in (self._task_handler, self._result_handler, *self._pool)
+        )
+
+    def terminate(self, timeout: float = 10) -> None:
+        self._state = multiprocessing.pool.TERMINATE
+        # Keep the finalizer registered if stopping times out so later retries
+        # and interpreter shutdown can still reach the old workers.
+        self._terminate_pool(
+            self._taskqueue,
+            self._inqueue,
+            self._outqueue,
+            self._pool,
+            self._change_notifier,
+            self._worker_handler,
+            self._task_handler,
+            self._result_handler,
+            self._cache,
+            timeout=timeout,
+        )
+        self._terminate.cancel()
+
+    @staticmethod
+    def _terminate_pool(
+        _taskqueue,
+        inqueue,
+        outqueue,
+        pool,
+        change_notifier,
+        worker_handler,
+        task_handler,
+        result_handler,
+        cache,
+        timeout=10,
+    ):
+        deadline = time.monotonic() + timeout
+
+        def join(target, description):
+            target.join(timeout=max(0, deadline - time.monotonic()))
+            if target.is_alive():
+                raise TimeoutError(f"Preprocessing {description} did not exit")
+
+        worker_handler._state = task_handler._state = result_handler._state = (
+            multiprocessing.pool.TERMINATE
+        )
+        if worker_handler.is_alive() and change_notifier.empty():
+            change_notifier.put(None)
+        # Prevent replacements before taking ownership of the worker list.
+        join(worker_handler, "worker handler")
+        for worker in pool:
+            if worker.exitcode is None:
+                try:
+                    worker.kill()
+                except ProcessLookupError:
+                    pass
+        for worker in pool:
+            join(worker, f"worker PID {worker.pid}")
+
+        # With all workers reaped, no other process holds these pipe peers.
+        # Closing them wakes a writer stuck on a full pipe and a result reader
+        # waiting on an incomplete frame without taking orphanable locks.
+        inqueue._reader.close()
+        outqueue._writer.close()
+        join(result_handler, "result handler")
+        outqueue._reader.close()
+        join(task_handler, "task handler")
+        inqueue._writer.close()
+        for result in list(cache.values()):
+            result._set(0, (False, BrokenPipeError("Preprocessing pool stopped")))
+        change_notifier.close()
+        pool.clear()
+
 
 class MultiprocessPreprocessExecutor(PreprocessExecutor):
     """多进程预处理执行器
@@ -325,9 +503,11 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
     is automatically torn down and recreated via ``_rebuild_pool()``.  This is
     triggered in two paths:
       1. submit() — catches BrokenPipeError/OSError/EOFError, rebuilds, retries once.
-      2. get_result() — catches the same errors or consecutive timeouts exceeding
-         ``_max_consecutive_timeouts``, then rebuilds for subsequent requests.
+      2. get_result() — catches the same errors or consecutive timeouts without
+         worker completions, then rebuilds for subsequent requests.
     """
+
+    _POOL_EXIT_TIMEOUT_S = 10
 
     def __init__(
         self,
@@ -340,9 +520,14 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         self.vit_config = vit_config
         self.preprocess_params = preprocess_params
         self.preprocess_func = preprocess_func
-        self.pool: Optional[multiprocessing.pool.Pool] = None
+        self.pool: Optional[_PreprocessPool] = None
+        self._retiring_pool: Optional[_PreprocessPool] = None
+        self._closed = False
+        self._pool_generation = 0
         self._consecutive_timeouts = 0
         self._max_consecutive_timeouts = vit_config.mm_preprocess_max_workers
+        self._completed_tasks = 0
+        self._last_timeout_completed = 0
         # Track accepted work items independently of multiprocessing.Pool's
         # private task queue. The gauge includes both running and waiting tasks.
         self._preprocess_queue_lock = threading.Lock()
@@ -355,10 +540,12 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
 
     def _create_pool(self) -> None:
         """创建进程池"""
+        self._reap_retiring_pool()
         logging.info(
             f"Creating multiprocessing pool for preprocessing with {self.vit_config.mm_preprocess_max_workers} workers"
         )
-        self.pool = self.mp_context.Pool(
+        self.pool = _PreprocessPool(
+            context=self.mp_context,
             processes=self.vit_config.mm_preprocess_max_workers,
             initializer=_worker_initializer,
             initargs=(
@@ -367,35 +554,56 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
                 self.preprocess_func,
             ),
         )
+        self._pool_generation += 1
+
+    def _record_timeout_locked(self) -> None:
+        with self._preprocess_queue_lock:
+            completed = self._completed_tasks
+        if completed != self._last_timeout_completed:
+            self._consecutive_timeouts = 0
+            self._last_timeout_completed = completed
+            return
+        self._consecutive_timeouts += 1
+        if self._consecutive_timeouts >= self._max_consecutive_timeouts:
+            logging.warning(
+                "Hit %d preprocessing timeouts without worker completions, rebuilding pool",
+                self._consecutive_timeouts,
+            )
+            self._rebuild_pool()
 
     def _track_preprocess_task(self) -> int:
         with self._preprocess_queue_lock:
             self._next_preprocess_task_id += 1
             task_id = self._next_preprocess_task_id
             self._pending_preprocess_tasks.add(task_id)
-            queue_size = len(self._pending_preprocess_tasks)
-        _report_preprocess_queue_size(queue_size)
         return task_id
 
-    def _finish_preprocess_task(self, task_id: int) -> None:
+    def _finish_preprocess_task(self, task_id: int, *, completed: bool = True) -> None:
         with self._preprocess_queue_lock:
             if task_id not in self._pending_preprocess_tasks:
                 return
             self._pending_preprocess_tasks.remove(task_id)
+            if completed:
+                self._completed_tasks += 1
+        # Pool callbacks run before get() wakes on a single shared thread.
+        # Leave metric reporting to the submitting/consuming thread.
+
+    def _report_queue_depth(self) -> None:
+        with self._preprocess_queue_lock:
             queue_size = len(self._pending_preprocess_tasks)
         _report_preprocess_queue_size(queue_size)
 
     def _clear_preprocess_tasks(self) -> None:
         with self._preprocess_queue_lock:
-            if not self._pending_preprocess_tasks:
-                return
             self._pending_preprocess_tasks.clear()
+            self._last_timeout_completed = self._completed_tasks
+        self._consecutive_timeouts = 0
         _report_preprocess_queue_size(0)
 
     def _apply_async(self, work_item: "MMWorkItem", task_id: int) -> Any:
         return self.pool.apply_async(
             _worker_process_task,
-            args=(work_item.mm_inputs,),
+            args=(work_item.mm_inputs, work_item.deadline),
             callback=lambda _result: self._finish_preprocess_task(task_id),
             error_callback=lambda _error: self._finish_preprocess_task(task_id),
         )
@@ -406,16 +614,16 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         Called when a worker dies / the pool's manager pipes are broken — without this
         the pool stays in a permanently-unusable state and every subsequent submit fails.
         """
-        old = self.pool
-        self.pool = None
-        self._clear_preprocess_tasks()
-        try:
-            if old is not None:
-                old.terminate()
-                old.join()
-        except Exception as e:
-            logging.warning(f"terminate broken pool failed: {e}")
+        if self.pool is not None:
+            self._retiring_pool = self.pool
+            self.pool = None
+            self._clear_preprocess_tasks()
         self._create_pool()
+
+    def _reap_retiring_pool(self) -> None:
+        if self._retiring_pool is not None:
+            self._retiring_pool.terminate(timeout=self._POOL_EXIT_TIMEOUT_S)
+            self._retiring_pool = None
 
     def submit(self, work_item: "MMWorkItem") -> None:
         if not work_item.should_preprocess:
@@ -426,6 +634,8 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             # Serialize submission with pool rebuilds. This keeps a task from
             # being submitted to an old pool while its queue accounting resets.
             with self._pool_lock:
+                if self._closed:
+                    raise RuntimeError("Preprocessing pool is closed")
                 # A previous rebuild may have failed to create its replacement.
                 if self.pool is None:
                     self._create_pool()
@@ -440,20 +650,18 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
                     logging.error(
                         f"Pool broken on submit, rebuilding: {e}", exc_info=True
                     )
-                    self._finish_preprocess_task(task_id)
+                    self._finish_preprocess_task(task_id, completed=False)
                     self._rebuild_pool()
                     task_id = self._track_preprocess_task()
                     work_item.future = self._apply_async(work_item, task_id)
-            return
-        except (BrokenPipeError, OSError, EOFError) as e:
-            if task_id is not None:
-                self._finish_preprocess_task(task_id)
-            raise
+                work_item.preprocess_pool_generation = self._pool_generation
         except Exception as e:
             if task_id is not None:
-                self._finish_preprocess_task(task_id)
+                self._finish_preprocess_task(task_id, completed=False)
             logging.error(f"Unexpected error during submission: {e}", exc_info=True)
             raise
+        finally:
+            self._report_queue_depth()
 
     def get_result(self, work_item: "MMWorkItem") -> None:
         if work_item.future is None:
@@ -469,21 +677,24 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
                 download_time,
             ) = _unpack_preprocess_result(payload)
             with self._pool_lock:
-                self._consecutive_timeouts = 0
+                if work_item.preprocess_pool_generation == self._pool_generation:
+                    self._consecutive_timeouts = 0
             _report_preprocess_timing(preprocess_time, download_time)
         except _PreprocessTaskError as e:
             logging.error("Preprocessing task failed: %s", e.error, exc_info=True)
             raise e.error from e
         except multiprocessing.pool.TimeoutError:
             with self._pool_lock:
-                self._consecutive_timeouts += 1
-                if self._consecutive_timeouts >= self._max_consecutive_timeouts:
-                    logging.warning(
-                        f"Hit {self._consecutive_timeouts} consecutive timeouts, "
-                        f"rebuilding pool (workers may be stuck)"
-                    )
-                    self._rebuild_pool()
-                    self._consecutive_timeouts = 0
+                if (
+                    self.pool is not None
+                    and work_item.preprocess_pool_generation == self._pool_generation
+                ):
+                    try:
+                        self._record_timeout_locked()
+                    except Exception:
+                        logging.exception(
+                            "Failed to rebuild stalled preprocessing pool"
+                        )
             raise TimeoutError(
                 f"Preprocessing timeout after {work_item.mm_timeout_ms}ms"
             )
@@ -491,14 +702,20 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             # worker died mid-task → pool is broken; rebuild so subsequent submits work
             logging.error(f"Pool broken on get_result, rebuilding: {e}", exc_info=True)
             with self._pool_lock:
-                try:
-                    self._rebuild_pool()
-                except Exception as rb:
-                    logging.error(f"pool rebuild failed: {rb}", exc_info=True)
+                if (
+                    self.pool is not None
+                    and work_item.preprocess_pool_generation == self._pool_generation
+                ):
+                    try:
+                        self._rebuild_pool()
+                    except Exception:
+                        logging.exception("Failed to rebuild broken preprocessing pool")
             raise
         except Exception as e:
             logging.error(f"Error getting preprocess result: {e}", exc_info=True)
             raise
+        finally:
+            self._report_queue_depth()
 
     @staticmethod
     def _get_child_pids_from_pool(pool: multiprocessing.pool.Pool) -> List[int]:
@@ -508,22 +725,23 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             return []
 
     def shutdown(self) -> None:
-        if self.pool is None:
-            return
-        logging.info("Shutting down the preprocessing pool...")
-        pool = self.pool
-        pool.close()
-        # Bounded join: if any worker is stuck running a long task, fall back
-        # to terminate() so shutdown can't hang indefinitely.
-        join_thread = threading.Thread(target=pool.join, daemon=True)
-        join_thread.start()
-        join_thread.join(timeout=10)
-        if join_thread.is_alive():
-            logging.warning("Preprocessing pool join exceeded 10s, terminating workers")
-            pool.terminate()
-            pool.join()
-        self._clear_preprocess_tasks()
-        logging.info("Preprocessing pool shut down.")
+        with self._pool_lock:
+            pool = self.pool
+            self.pool = None
+            self._closed = True
+            if pool is not None:
+                self._retiring_pool = pool
+                try:
+                    pool.close()
+                    if not pool.drain(timeout=self._POOL_EXIT_TIMEOUT_S):
+                        logging.warning(
+                            "Preprocessing pool did not drain, terminating workers"
+                        )
+                finally:
+                    self._clear_preprocess_tasks()
+                    self._reap_retiring_pool()
+            else:
+                self._reap_retiring_pool()
 
 
 class _LocalResult:
@@ -655,6 +873,7 @@ class MMWorkItem:
 
         # future 可以是 ApplyResult (multiprocess) 或 _LocalResult (local)
         self.future: Optional[Any] = None
+        self.preprocess_pool_generation: Optional[int] = None
 
     def remaining_timeout_s(self) -> float:
         timeout_s = self.mm_timeout_ms / 1000.0
@@ -690,21 +909,25 @@ class MMWorkItem:
             or self.embedding_cache is None
             or self.cache_key is None
             or self.cache_entry is None
+            or self.cache_state != "miss"
         ):
             return
         if self.defer_feature_hashes:
             self.cache_entry.producer_streams = self.embedding_producer_streams or []
-        self.embedding_cache.complete(self.cache_key, self.cache_entry, result)
-        if (
-            self.feature_hashes is not None
-            and self.hash_key_cache is not None
-            and self.embedding_cache.peek(self.cache_key) is self.cache_entry
-        ):
-            self.hash_key_cache.put(
+        self.embedding_cache.complete(
+            self.cache_key,
+            self.cache_entry,
+            result,
+            before_publish=self._publish_cache_hashes,
+        )
+
+    def _publish_cache_hashes(self) -> None:
+        if self.feature_hashes is not None and self.hash_key_cache is not None:
+            self.hash_key_cache.put_for_entry(
                 self.cache_key,
-                self.feature_hashes or [],
-                self.cache_entry.generation,
-                greennet_passed=self.cache_entry.greennet_passed,
+                self.feature_hashes,
+                self.cache_entry,
+                self.embedding_cache,
             )
 
     def fail_cache(self, error: Exception) -> None:
@@ -817,8 +1040,16 @@ class MMProcessEngine:
         preprocess_func = self.mm_part.preprocess_input
 
         if vit_config.use_local_preprocess:
+            media_network = None
+            if os.getenv("MM_NATIVE_MEDIA_NETWORK") == "1" and getattr(
+                preprocess_func, "uses_url_loader", False
+            ):
+                try:
+                    media_network = MediaNetwork(vit_config)
+                except UnsupportedMediaNetworkPolicy as error:
+                    logging.warning("Keeping the existing ViT URL loader: %s", error)
             self.preprocess_executor: PreprocessExecutor = LocalPreprocessExecutor(
-                preprocess_func, vit_config, preprocess_params
+                preprocess_func, vit_config, preprocess_params, media_network
             )
             logging.info(
                 f"MMProcessEngine: Using LOCAL preprocessing mode (no subprocess pool)"
@@ -868,12 +1099,21 @@ class MMProcessEngine:
                 **scheduler_args,
             )
         except Exception:
-            self._async_compute_executor.shutdown(wait=True, cancel_futures=True)
-            self.preprocess_executor.shutdown()
+            cleanup = [
+                (
+                    "async executor",
+                    lambda: self._async_compute_executor.shutdown(
+                        wait=True, cancel_futures=True
+                    ),
+                ),
+                ("preprocessing", self.preprocess_executor.shutdown),
+            ]
             if self._remote_embedding_cache is not None:
-                self._remote_embedding_cache.close()
+                cleanup.append(("remote cache", self._remote_embedding_cache.close))
+            self._close_resources(cleanup)
             raise
         self._stopped = False
+        self._retry_preprocess_shutdown = False
         logging.info(
             f"MMProcessEngine: MMScheduler "
             f"(configured_max_batch_size={vit_config.gpu_max_batch_size}, "
@@ -1740,6 +1980,14 @@ class MMProcessEngine:
                 )
             if wi.feature_hashes is None and not wi.defer_feature_hashes:
                 wi.complete_cache(result)
+                # Readers may refill an evicted sidecar, but may not publish
+                # from a producer still waiting for its inspection verdict.
+                if (
+                    wi.cache_state in ("complete", "in_progress")
+                    and wi.cache_entry is not None
+                    and wi.cache_entry.is_done
+                ):
+                    wi._publish_cache_hashes()
             emb_res.extend(maybe_tensor_to_list(result[0], ndim_threshold=2))
             pos_res.extend(maybe_tensor_to_list(result[1], ndim_threshold=2))
             if len(result) > 2:
@@ -1860,11 +2108,12 @@ class MMProcessEngine:
                         if producer.device not in hashed_devices:
                             with cuda_graph_gate.operation():
                                 producer.synchronize()
-                    self._hash_key_cache.put(
+                    self._hash_key_cache.put_for_entry(
                         cache_key,
                         feature_hashes,
-                        entry.generation,
-                        greennet_passed=entry.greennet_passed,
+                        entry,
+                        self._embedding_cache,
+                        allow_uncached=True,
                     )
                 if hashes_only:
                     results.append(MMEmbeddingRes([], feature_hashes=feature_hashes))
@@ -2332,17 +2581,57 @@ class MMProcessEngine:
         finally:
             self._cancel_greennet(handle)
 
+    @staticmethod
+    def _close_resources(
+        cleanup: List[Tuple[str, Callable[[], None]]],
+    ) -> Optional[Exception]:
+        first_error = None
+        for resource, close in cleanup:
+            try:
+                close()
+            except Exception as error:
+                logging.exception("Failed to close multimodal %s", resource)
+                if first_error is None:
+                    first_error = error
+        return first_error
+
     def stop(self) -> None:
         """Shutdown asynchronous work, the scheduler and preprocessing workers."""
         with self._async_task_lock:
-            if self._stopped:
+            first_stop = not self._stopped
+            if not first_stop and not self._retry_preprocess_shutdown:
                 return
             self._stopped = True
-        self._async_compute_executor.shutdown(wait=True, cancel_futures=True)
-        self.preprocess_executor.shutdown()
-        self._scheduler.close()
-        self._shutdown_greennet_loop()
-        self._embedding_cache.clear(RuntimeError("MMProcessEngine stopped"))
-        self._hash_key_cache.clear()
-        if self._remote_embedding_cache is not None:
-            self._remote_embedding_cache.close()
+            self._retry_preprocess_shutdown = False
+        if first_stop:
+            # Active compute and its callbacks still need the resources below.
+            self._async_compute_executor.shutdown(wait=True, cancel_futures=True)
+
+        preprocess_error = self._close_resources(
+            [("preprocessing", self.preprocess_executor.shutdown)]
+        )
+        shutdown_error = None
+        if first_stop:
+            cleanup = [
+                ("scheduler", self._scheduler.close),
+                ("inspection loop", self._shutdown_greennet_loop),
+                (
+                    "embedding cache",
+                    lambda: self._embedding_cache.clear(
+                        RuntimeError("MMProcessEngine stopped")
+                    ),
+                ),
+                ("hash cache", self._hash_key_cache.clear),
+            ]
+            if self._remote_embedding_cache is not None:
+                cleanup.append(("remote cache", self._remote_embedding_cache.close))
+            shutdown_error = self._close_resources(cleanup)
+        if isinstance(preprocess_error, TimeoutError):
+            # Only the retired pool remains. Publish the retry after all other
+            # cleanup so concurrent stop calls cannot repeat or race that work.
+            with self._async_task_lock:
+                self._retry_preprocess_shutdown = True
+        if preprocess_error is not None:
+            raise preprocess_error
+        if shutdown_error is not None:
+            raise shutdown_error

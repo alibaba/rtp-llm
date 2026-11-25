@@ -18,10 +18,49 @@
 #include "pybind11/stl.h"
 #include <limits>
 
+#if defined(__linux__)
+#include <ATen/MapAllocator.h>
+#include <c10/util/ScopeExit.h>
+#include <torch/csrc/utils/pybind.h>
+#include <cerrno>
+#include <cstdint>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <system_error>
+#include <unistd.h>
+#endif
+
 namespace py = pybind11;
 using namespace rtp_llm;
 
+#if defined(__linux__)
+static at::Storage mapPreprocessStorage(int borrowed_fd, size_t nbytes) {
+    TORCH_CHECK(nbytes > 0 && nbytes <= static_cast<size_t>(std::numeric_limits<ptrdiff_t>::max()),
+                "invalid preprocess storage size");
+    const int fd = fcntl(borrowed_fd, F_DUPFD_CLOEXEC, 0);
+    if (fd < 0) {
+        throw std::system_error(errno, std::generic_category(), "dup preprocess storage fd");
+    }
+    auto close_fd = c10::make_scope_exit([fd] { close(fd); });
+    // Torch shares fixed-size files. Keep MapAllocator off its file-growth path.
+    struct stat file_info {};
+    if (fstat(fd, &file_info) != 0) {
+        throw std::system_error(errno, std::generic_category(), "stat preprocess storage fd");
+    }
+    TORCH_CHECK(file_info.st_size >= 0 && nbytes <= static_cast<std::uintmax_t>(file_info.st_size),
+                "preprocess storage exceeds shared file size");
+    constexpr int flags = at::ALLOCATOR_MAPPED_SHAREDMEM | at::ALLOCATOR_MAPPED_NOCREATE | at::ALLOCATOR_MAPPED_KEEPFD
+                          | at::ALLOCATOR_MAPPED_FROMFD;
+    auto data = at::MapAllocator::makeDataPtr(at::WITH_FD, "", fd, flags, nbytes, nullptr);
+    close_fd.release();
+    return at::Storage(at::Storage::use_byte_size_t(), nbytes, std::move(data));
+}
+#endif
+
 void registerMultimodal(py::module& m) {
+#if defined(__linux__)
+    m.def("map_preprocess_storage", &mapPreprocessStorage, py::call_guard<py::gil_scoped_release>());
+#endif
     m.def("get_multimodal_token_spans",
           &getMultimodalTokenSpans,
           py::arg("token_ids"),

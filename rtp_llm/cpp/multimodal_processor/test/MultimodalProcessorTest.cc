@@ -3,16 +3,45 @@
 #include <memory>
 #include <utility>
 #include "gtest/gtest.h"
+#include "rtp_llm/cpp/multimodal_processor/CudaPinnedCopy.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalError.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputUtils.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/multimodal_processor/test/FakeMultimodalProcessor.h"
+#if USING_CUDA
+#include <c10/cuda/CUDAGuard.h>
+#endif
 
 using namespace std;
 
 namespace rtp_llm {
 
 class MultimodalProcessorTest: public DeviceTestBase {};
+
+#if USING_CUDA
+TEST_F(MultimodalProcessorTest, PinnedCopyWaitsForExplicitProducerAndReturnsCpuReady) {
+    const auto    device   = c10::cuda::current_device();
+    const auto    producer = c10::cuda::getStreamFromPool(false, device);
+    const auto    options  = torch::TensorOptions().device(torch::Device(torch::kCUDA, device)).dtype(torch::kFloat32);
+    const auto    expected = torch::arange(40, torch::kFloat32).view({5, 8}).transpose(0, 1);
+    torch::Tensor source;
+    {
+        const c10::cuda::CUDAStreamGuard guard(producer);
+        source = torch::arange(40, options).view({5, 8}).transpose(0, 1);
+    }
+
+    ASSERT_NE(c10::cuda::getCurrentCUDAStream(device), producer);
+    const auto dense = copyCudaTensorToPinnedHost(source, producer);
+    EXPECT_TRUE(dense.device().is_cpu());
+    EXPECT_TRUE(dense.is_pinned());
+    EXPECT_EQ(dense.strides(), source.strides());
+    EXPECT_TRUE(torch::equal(dense, expected));
+
+    const auto sliced = copyCudaTensorToPinnedHost(source.slice(0, 0, 8, 2), producer);
+    EXPECT_TRUE(sliced.is_pinned());
+    EXPECT_TRUE(torch::equal(sliced, expected.slice(0, 0, 8, 2)));
+}
+#endif
 
 TEST_F(MultimodalProcessorTest, SemanticIdsFollowFeatureSlicesAndValidateBounds) {
     auto features = torch::zeros({5, 4});

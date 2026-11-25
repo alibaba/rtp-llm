@@ -15,6 +15,7 @@ except ModuleNotFoundError:
     cpu = None
 
 from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.multimodal.media_network import read_media_source, uses_url_loader
 from rtp_llm.multimodal.mm_error_messages import MMErr, raise_mm
 from rtp_llm.multimodal.multimodal_mixin_register import register_multimodal_mixin
 from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
@@ -25,7 +26,6 @@ from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MMWorkEstimate,
     MultiModalEmbeddingInterface,
-    get_bytes_io_from_url,
 )
 from rtp_llm.multimodal.multimodal_mixins.qwen2_vl.image_processing_qwen2_vl import (
     Qwen2VLImageProcessor,
@@ -504,6 +504,7 @@ class Glm53FlashImageEmbedding(MultiModalEmbeddingInterface):
         return self.visual.patch_embed.proj.weight.device
 
     @staticmethod
+    @uses_url_loader
     def preprocess_input(
         mm_inputs: List[MultimodalInput],
         vit_config: VitConfig,
@@ -550,7 +551,14 @@ class Glm53FlashImageEmbedding(MultiModalEmbeddingInterface):
             if max_pixels < temporal_patch_size * factor**2:
                 raise_mm(MMErr.IMG_TOO_SMALL)
 
-        data = get_bytes_io_from_url(mm_input.url, vit_config.download_headers)
+        max_file_size_kb = (
+            vit_config.mm_video_max_file_size_kb
+            if mm_input.mm_type == MMUrlType.VIDEO
+            else vit_config.mm_image_max_file_size_kb
+        )
+        data = read_media_source(
+            mm_input.url, vit_config.download_headers, max_file_size_kb
+        )
         if mm_input.mm_type == MMUrlType.VIDEO:
             if VideoReader is None:
                 raise ImportError(

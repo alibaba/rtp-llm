@@ -10,6 +10,7 @@ from rtp_llm.multimodal.glm54_mock_vit_input import (
     validate_image_url,
     validate_pixel_bounds,
 )
+from rtp_llm.multimodal.media_network import uses_url_loader
 from rtp_llm.multimodal.mm_error_messages import raise_mm
 from rtp_llm.multimodal.multimodal_mixin_register import register_multimodal_mixin
 from rtp_llm.ops import MultimodalInput
@@ -80,6 +81,7 @@ class Glm54MockImageEmbedding(Glm53FlashImageEmbedding):
             self._validate_image_input(item)
 
     @staticmethod
+    @uses_url_loader
     def preprocess_input(
         mm_inputs, vit_config, processor, video_processor, processor_config
     ):

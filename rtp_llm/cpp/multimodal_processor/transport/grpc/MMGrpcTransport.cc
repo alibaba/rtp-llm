@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <deque>
 #include <iterator>
+#include <limits>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -13,6 +14,7 @@
 
 #include "rtp_llm/cpp/model_rpc/MultimodalPbConverter.h"
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
+#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalError.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -72,7 +74,7 @@ public:
     ErrorResult<MultimodalOutputPB>
     request(const std::string& endpoint, MultimodalInputsPB& request_pb, DeadlineBudget& budget) override {
         if (budget.exhausted()) {
-            return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, "vit rpc budget exhausted before the call");
+            return ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "vit rpc budget exhausted before the call");
         }
         auto connection_status = pool_.getConnection(endpoint);
         if (!connection_status.ok()) {
@@ -111,6 +113,13 @@ public:
         if (!status.ok()) {
             metrics_->reportRpcClientError(
                 endpoint, kReasonGrpcError, std::to_string(static_cast<int>(status.error_code())));
+            ErrorDetailsPB details;
+            if (!status.error_details().empty() && details.ParseFromString(status.error_details())
+                && details.error_code() > 0 && details.error_code() <= std::numeric_limits<int>::max()) {
+                const int code = static_cast<int>(details.error_code());
+                return ErrorInfo(parseMultimodalErrorCode(code).value_or(static_cast<ErrorCode>(code)),
+                                 details.error_message().empty() ? status.error_message() : details.error_message());
+            }
             if (auto error_info = parseMultimodalErrorMessage(status.error_message())) {
                 return *error_info;
             }

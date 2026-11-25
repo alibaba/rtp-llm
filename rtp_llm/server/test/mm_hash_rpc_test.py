@@ -18,6 +18,7 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import (
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     CacheVersionPB,
+    ErrorDetailsPB,
     MultimodalHashRequestPB,
     MultimodalHashResponsePB,
     MultimodalInputsPB,
@@ -369,6 +370,12 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(grpc.aio.AioRpcError) as raised:
                 await self.stub.GetMultimodalHashes(request)
             self.assertEqual(raised.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
+            details = ErrorDetailsPB.FromString(
+                raised.exception.trailing_metadata()["grpc-status-details-bin"]
+            )
+            self.assertEqual(
+                details.error_code, int(ExceptionType.MM_WRONG_FORMAT_ERROR)
+            )
         self.engine.get_embedding_result.assert_not_called()
 
     async def test_rpc_deadline_cancels_queued_work(self):

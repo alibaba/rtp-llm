@@ -10,11 +10,13 @@
 #include <thread>
 #include <vector>
 
+#include "grpcpp/grpcpp.h"
 #include "gtest/gtest.h"
 #include "kmonitor/client/core/MetricsCollector.h"
 #include "rtp_llm/cpp/metrics/ServiceStatus.h"
 
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
+#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/multimodal_processor/transport/MMRemoteOutputTransport.h"
 #include "rtp_llm/cpp/multimodal_processor/transport/grpc/MMGrpcTransport.h"
 #include "rtp_llm/cpp/multimodal_processor/transport/rdma/MMRdmaReader.h"
@@ -514,6 +516,71 @@ TEST(MMRemoteOutputTransportTest, strictRdmaRejectsInlineAndReleasesMalformedMix
     EXPECT_EQ(strict_client.transport->reads, 0u);
     ASSERT_EQ(strict_client.control->released.size(), 1u);
     EXPECT_EQ(strict_client.control->released.front(), std::vector<std::string>({"unread-slot"}));
+}
+
+TEST(MMRemoteOutputTransportTest, grpcControlPreservesWorkerErrorsAndTransportFallbacks) {
+    auto app_error = [](int64_t code, const std::string& message) {
+        ErrorDetailsPB details;
+        details.set_error_code(code);
+        details.set_error_message(message);
+        return details.SerializeAsString();
+    };
+    const auto future_code = static_cast<ErrorCode>(98765);
+    struct ErrorCase {
+        grpc::Status status;
+        ErrorCode code;
+        std::string message;
+    };
+    const std::vector<ErrorCase> cases = {
+        {{grpc::StatusCode::RESOURCE_EXHAUSTED, "[MM_PROCESS_ERROR] busy", app_error(static_cast<int>(ErrorCode::CONCURRENCY_LIMIT_ERROR), "queue full")},
+         ErrorCode::CONCURRENCY_LIMIT_ERROR, "queue full"},
+        {{grpc::StatusCode::DEADLINE_EXCEEDED, "scheduler timeout", app_error(static_cast<int>(ErrorCode::GENERATE_TIMEOUT), "expired")},
+         ErrorCode::GENERATE_TIMEOUT, "expired"},
+        {{grpc::StatusCode::CANCELLED, "legacy cancelled", app_error(499, "caller cancelled")},
+         ErrorCode::CANCELLED, "caller cancelled"},
+        {{grpc::StatusCode::INTERNAL, "fallback", app_error(98765, "")}, future_code, "fallback"},
+        {{grpc::StatusCode::INVALID_ARGUMENT, "[MM_WRONG_FORMAT_ERROR] bad input", "malformed"},
+         ErrorCode::MM_WRONG_FORMAT_ERROR, "bad input"},
+        {{grpc::StatusCode::RESOURCE_EXHAUSTED, "busy"}, ErrorCode::CONCURRENCY_LIMIT_ERROR, "busy"},
+        {{grpc::StatusCode::UNAVAILABLE, "offline"}, ErrorCode::MM_REMOTE_RPC_FAILED, "offline"},
+        {{grpc::StatusCode::DEADLINE_EXCEEDED, "connection wait"}, ErrorCode::MM_REMOTE_RPC_FAILED, "connection wait"},
+    };
+
+    class ErrorWorker : public MultimodalRpcService::Service {
+    public:
+        explicit ErrorWorker(const std::vector<ErrorCase>& cases): cases_(cases) {}
+
+        grpc::Status RemoteMultimodalEmbedding(grpc::ServerContext*,
+                                              const MultimodalInputsPB* request,
+                                              MultimodalOutputPB*) override {
+            return cases_.at(request->request_id()).status;
+        }
+
+    private:
+        const std::vector<ErrorCase>& cases_;
+    };
+    ErrorWorker worker(cases);
+    grpc::ServerBuilder server_builder;
+    int port = 0;
+    server_builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+    server_builder.RegisterService(&worker);
+    auto server = server_builder.BuildAndStart();
+    ASSERT_NE(server, nullptr);
+    const std::string endpoint = "127.0.0.1:" + std::to_string(port);
+    auto control = createGrpcMMControlClient(std::make_shared<MMTransportMetrics>(nullptr), 5000);
+
+    MultimodalInputsPB request;
+    for (size_t i = 0; i < cases.size(); ++i) {
+        SCOPED_TRACE(i);
+        request.set_request_id(i);
+        DeadlineBudget budget(5000);
+        auto result = control->request(endpoint, request, budget);
+        ASSERT_FALSE(result.ok());
+        EXPECT_EQ(result.status().code(), cases[i].code);
+        EXPECT_EQ(result.status().ToString(), cases[i].message);
+    }
+    DeadlineBudget expired(0);
+    EXPECT_EQ(control->request(endpoint, request, expired).status().code(), ErrorCode::GENERATE_TIMEOUT);
 }
 
 TEST(MMRemoteOutputTransportTest, typedRequestBudgetDoesNotExtendConfiguredRpcBudget) {

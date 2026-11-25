@@ -11,6 +11,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import IntEnum
+from importlib import import_module
 from io import BytesIO
 from typing import Any, List, Optional
 
@@ -18,6 +19,11 @@ import requests
 import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.mm_download_domains import (
+    blocked_download_domains,
+    check_download_urls,
+    domain_checked_get,
+)
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MMPreprocessConfigPB,
@@ -77,9 +83,7 @@ CONNECT_TIMEOUT_RETRIES = 2
 
 
 def _default_request_get(url, headers, timeout=10):
-    import requests
-
-    return requests.get(url, stream=True, headers=headers, timeout=timeout)
+    return domain_checked_get(url, stream=True, headers=headers, timeout=timeout)
 
 
 def _check_download(deadline, cancellation_event):
@@ -89,17 +93,52 @@ def _check_download(deadline, cancellation_event):
         raise TimeoutError("Media download deadline expired")
 
 
+def _load_request_get():
+    ssrf_module = "internal_source.rtp_llm.utils.ssrf_check"
+    try:
+        ssrf_check = import_module(ssrf_module)
+    except ModuleNotFoundError as error:
+        if not error.name or not (
+            error.name == ssrf_module or ssrf_module.startswith(error.name + ".")
+        ):
+            raise
+        return _default_request_get
+
+    def internal_request_get(url, headers, timeout=10):
+        if not blocked_download_domains():
+            return ssrf_check.safe_request_get(url, headers, timeout=timeout)
+
+        # The legacy loader rewrites the first URL and validates it before
+        # calling Requests. Keep those steps and check each redirect in send().
+        # Newer internal policy also owns proxy routing and needs its own API.
+        rewrite_url = getattr(ssrf_check, "rewrite_oss_url", None)
+        validate_url = getattr(ssrf_check, "check_ssrf", None)
+        if (
+            hasattr(ssrf_check, "INTRANET_CIDRS")
+            or not callable(rewrite_url)
+            or not callable(validate_url)
+        ):
+            raise_mm(
+                "The internal downloader cannot enforce MM_DOWNLOAD_DOMAIN_DENYLIST on redirects",
+                ExceptionType.MM_WRONG_FORMAT_ERROR,
+            )
+
+        check_download_urls((url,))
+        return domain_checked_get(
+            rewrite_url(url),
+            validate_url=validate_url,
+            stream=True,
+            headers=headers,
+            timeout=timeout,
+        )
+
+    return internal_request_get
+
+
 def request_get(url, headers, timeout=None, *, deadline=None, cancellation_event=None):
     global REQUEST_GET
     if REQUEST_GET is None:
-        try:
-            from internal_source.rtp_llm.utils.ssrf_check import safe_request_get
-
-            REQUEST_GET = safe_request_get
-        except ImportError:
-            REQUEST_GET = _default_request_get
-
-    import requests
+        REQUEST_GET = _load_request_get()
 
     for retry_count in range(CONNECT_TIMEOUT_RETRIES + 1):
         _check_download(deadline, cancellation_event)
@@ -386,6 +425,8 @@ def get_bytes_io_from_url(
     """
 
     _check_download(deadline, cancellation_event)
+    if url.startswith(("http://", "https://")):
+        check_download_urls((url,))
     cached_res = url_data_cache_.check_cache(url)
     if cached_res is None:
         headers = _get_http_heads(download_headers)

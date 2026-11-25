@@ -7,6 +7,7 @@
 #include <vector>
 #include <torch/python.h>
 #include "absl/status/statusor.h"
+#include "rtp_llm/cpp/multimodal_processor/CudaPinnedCopy.h"
 #include "rtp_llm/cpp/multimodal_processor/FeatureHashOp.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTokenUtils.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
@@ -26,10 +27,10 @@ ErrorInfo pinMultimodalTensors(std::vector<torch::Tensor>& tensors, const char* 
                 continue;
             }
             if (tensor.is_cuda()) {
-                auto options =
-                    torch::TensorOptions().dtype(tensor.scalar_type()).device(torch::kCPU).pinned_memory(true);
-                // Downstream TP serialization can read the host tensor immediately.
-                tensor = tensor.to(options, /*non_blocking=*/false);
+                // Keep the existing producer/consumer ordering. Only the D2H
+                // itself moves to a dedicated stream after that dependency.
+                const auto producer = c10::cuda::getCurrentCUDAStream(tensor.get_device());
+                tensor = copyCudaTensorToPinnedHost(tensor, producer);
             } else {
                 tensor = tensor.pin_memory();
             }

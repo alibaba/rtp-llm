@@ -43,6 +43,15 @@ py_test(
 )
 
 py_test(
+    name = "mm_feature_hash_batch_test",
+    srcs = ["mm_feature_hash_batch_test.py"],
+    data = ["//:th_transformer"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
     name = "multimodal_process_engine_test",
     srcs = [
         "multimodal_process_engine_test.py",
@@ -63,6 +72,12 @@ py_test(
 py_test(
     name = "multiprocess_preprocess_executor_test",
     srcs = ["multiprocess_preprocess_executor_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "preprocess_ipc_test",
+    srcs = ["preprocess_ipc_test.py"],
     deps = ["//rtp_llm:testlib"],
 )
 

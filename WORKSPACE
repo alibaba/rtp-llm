@@ -72,6 +72,10 @@ load("//3rdparty/xgrammar:repositories.bzl", "xgrammar_deps")
 
 xgrammar_deps()
 
+load("//3rdparty/media_network:repositories.bzl", "media_network_deps")
+
+media_network_deps()
+
 load("@io_opentelemetry_cpp//bazel:repository.bzl", "opentelemetry_cpp_deps")
 
 opentelemetry_cpp_deps()

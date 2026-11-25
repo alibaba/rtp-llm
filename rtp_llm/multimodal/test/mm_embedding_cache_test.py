@@ -563,6 +563,161 @@ class EmbeddingGpuCpuTest(unittest.TestCase):
 
 
 class HashCapacityTest(unittest.TestCase):
+    def test_disabling_cache_retires_pending_generation_from_future_claims(self):
+        hashes = MMHashKeyCache(max_bytes=8192)
+        embeddings = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=64)
+        _, older = embeddings.try_acquire("image")
+        embeddings.resize(0, 0)
+        _, newer = embeddings.try_acquire("image")
+        newer.complete(torch.ones(1))
+        self.assertIsNone(embeddings.peek("image"))
+
+        hashes.put_for_entry(
+            "image", [torch.tensor([9])], newer, embeddings, allow_uncached=True
+        )
+        generation = newer.generation
+        del newer
+        embeddings.resize(0, 64)
+        older.complete(torch.tensor([7]))
+        hashes.put_for_entry("image", [torch.tensor([7])], older, embeddings)
+        self.assertEqual(hashes.get("image", generation)[0].tolist(), [9])
+        self.assertEqual(older.wait(timeout=1).tolist(), [7])
+        state, fresh = embeddings.try_acquire("image")
+        self.assertEqual(state, "miss")
+        self.assertIsNot(fresh, older)
+        fresh.complete(torch.ones(1))
+
+        embeddings.remove("image")
+        hashes.clear()
+        self.assertIsNone(embeddings.peek("image"))
+        hashes.put_for_entry("image", [torch.tensor([11])], fresh, embeddings)
+        self.assertEqual(hashes.keys(), [])
+
+    def test_capacity_eviction_is_linearized_with_generation_validation(self):
+        hashes = MMHashKeyCache(max_bytes=8192)
+        embeddings = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=1)
+        for key in ("ref-a", "ref-b"):
+            hashes.put(key, [torch.tensor([1])], "x" * 32)
+        hashes.resize(hashes.stats()["resident_bytes"])
+        _, older = embeddings.try_acquire("image")
+        older.complete(torch.ones(1))
+        checked, resume = threading.Event(), threading.Event()
+        keys_at_check = []
+        validation = embeddings._with_current_entry
+
+        def check(key, entry, action, **kwargs):
+            current = validation(key, entry, action, **kwargs)
+            if current and not checked.is_set():
+                # `put_for_entry` owns the hash lock in this worker, so its
+                # guarded mutation has finished and no other writer can race.
+                keys_at_check.extend(hashes._entries)
+                checked.set()
+                if not resume.wait(5):
+                    raise TimeoutError("Generation check was not released")
+            return current
+
+        with (
+            patch.object(embeddings, "_with_current_entry", side_effect=check),
+            concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool,
+        ):
+            write = pool.submit(
+                hashes.put_for_entry, "image", [torch.tensor([7])], older, embeddings
+            )
+            try:
+                self.assertTrue(checked.wait(5))
+                _, newer = embeddings.try_acquire("image")
+                newer.complete(torch.ones(1))
+            finally:
+                resume.set()
+            write.result(timeout=5)
+
+        self.assertEqual(keys_at_check, ["ref-b"])
+        self.assertEqual(hashes.keys(), keys_at_check)
+        self.assertIsNone(hashes.get("image", older.generation))
+
+    def test_only_latest_capacity_bypass_can_publish_hashes(self):
+        hashes = MMHashKeyCache(max_bytes=8192)
+        embeddings = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=1)
+        _, older = embeddings.try_acquire("image")
+        older.complete(torch.ones(1))
+        self.assertIsNone(embeddings.peek("image"))
+        hashes.put_for_entry("image", [torch.tensor([7])], older, embeddings)
+        self.assertEqual(hashes.get("image", older.generation)[0].tolist(), [7])
+
+        _, newer = embeddings.try_acquire("image")
+        newer.complete(torch.ones(1))
+        self.assertIsNone(embeddings.peek("image"))
+        hashes.put_for_entry("image", [torch.tensor([9])], newer, embeddings)
+        generation = newer.generation
+        del newer
+        hashes.put_for_entry("image", [torch.tensor([11])], older, embeddings)
+        self.assertEqual(hashes.get("image", generation)[0].tolist(), [9])
+
+        _, removed = embeddings.try_acquire("image")
+        removed.complete(torch.ones(1))
+        embeddings.remove("image")
+        hashes.put_for_entry("image", [torch.tensor([13])], removed, embeddings)
+        self.assertEqual(hashes.get("image", generation)[0].tolist(), [9])
+
+    def test_stale_generation_cannot_replace_hashes_after_a_copy(self):
+        cache = MMHashKeyCache(max_bytes=8192)
+        embeddings = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=64)
+        _, stale = embeddings.try_acquire("image")
+        stale.complete(torch.ones(1))
+        copying, resume = threading.Event(), threading.Event()
+        stale_hash = torch.tensor([7], dtype=torch.int32)
+        original_detach = torch.Tensor.detach
+
+        def detach(tensor):
+            if tensor is stale_hash:
+                copying.set()
+                if not resume.wait(5):
+                    raise TimeoutError("Stale hash copy was not released")
+            return original_detach(tensor)
+
+        with (
+            patch.object(torch.Tensor, "detach", detach),
+            concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool,
+        ):
+            stale_write = pool.submit(
+                cache.put_for_entry, "image", [stale_hash], stale, embeddings
+            )
+            try:
+                self.assertTrue(copying.wait(5))
+                embeddings.remove("image")
+                _, current = embeddings.try_acquire("image")
+                current.complete(torch.ones(1))
+                cache.put_for_entry("image", [torch.tensor([9])], current, embeddings)
+            finally:
+                resume.set()
+            stale_write.result(timeout=5)
+
+        self.assertEqual(cache.get("image", current.generation)[0].tolist(), [9])
+        self.assertIsNone(cache.get("image", stale.generation))
+        cache.put_for_entry("image", [torch.ones(4096)], stale, embeddings)
+        self.assertEqual(cache.get("image", current.generation)[0].tolist(), [9])
+
+    def test_before_publish_error_rolls_back_and_wakes_waiters(self):
+        embeddings = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=64)
+        _, entry = embeddings.try_acquire("image")
+
+        def fail():
+            self.assertFalse(entry.is_done)
+            self.assertEqual(entry.tier, "cpu")
+            raise RuntimeError("hash publication failed")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            reader = pool.submit(entry.wait, 5)
+            with self.assertRaisesRegex(RuntimeError, "hash publication failed"):
+                embeddings.complete("image", entry, torch.ones(1), before_publish=fail)
+            with self.assertRaisesRegex(RuntimeError, "hash publication failed"):
+                reader.result(timeout=5)
+
+        self.assertIsNone(embeddings.peek("image"))
+        self.assertIsNone(entry.result)
+        self.assertEqual(embeddings.resident_tiers(["image"]), {})
+        self.assertEqual(embeddings.try_acquire("image")[0], "miss")
+
     def test_approval_follows_hash_lifetime_and_replacement(self):
         hashes = MMHashKeyCache(max_bytes=8192)
         embeddings = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=32)

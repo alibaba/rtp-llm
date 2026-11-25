@@ -10,10 +10,10 @@ public:
     using MultimodalProcessor::MultimodalProcessor;
 
 private:
-    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                                      std::string                                 ip_port    = "",
-                                                      int64_t                                     request_id = 0,
-                                                      grpc::ServerContext* server_context = nullptr) {
+    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput>& mm_inputs,
+                                                      std::string                        ip_port = "",
+                                                      int64_t                            request_id = 0,
+                                                      grpc::ServerContext*               server_context = nullptr) override {
         if (mm_inputs.size() == 0) {
             return MultimodalOutput();
         } else if (!mm_process_engine_.is_none()) {

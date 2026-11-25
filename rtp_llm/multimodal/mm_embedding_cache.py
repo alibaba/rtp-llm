@@ -9,6 +9,7 @@ from collections import OrderedDict
 from concurrent.futures import CancelledError
 from itertools import chain, islice
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from weakref import WeakValueDictionary
 
 import torch
 
@@ -500,6 +501,7 @@ class MMEmbeddingCacheEntry:
         self.result: Optional[Any] = None
         self.error: Optional[Exception] = None
         self.generation = uuid.uuid4().hex
+        self._completion_bypassed_cache = False
         # Error telemetry may be observed from several places (the producer
         # callback, a cache waiter, and an RPC handler). Keep one atomic claim
         # on the entry so a failed result contributes one error-QPS sample.
@@ -572,7 +574,9 @@ class MMEmbeddingCacheEntry:
         if self.error is not None:
             raise self.error
 
-    def complete(self, result: Any) -> bool:
+    def complete(
+        self, result: Any, *, before_publish: Optional[Callable[[], None]] = None
+    ) -> bool:
         with self._state_lock:
             if self._terminal:
                 return False
@@ -581,6 +585,8 @@ class MMEmbeddingCacheEntry:
         try:
             if self._on_complete is not None:
                 self._on_complete(self, result)
+            if before_publish is not None:
+                before_publish()
         except Exception as error:
             # fail() cannot take over this already-claimed transition. Roll it
             # back here so waiters never see a failed insertion as a cache hit.
@@ -683,8 +689,80 @@ class MMHashKeyCache:
         generation: Optional[str] = None,
         greennet_passed: bool = False,
     ) -> None:
+        self._put(cache_key, feature_hashes, generation, greennet_passed)
+
+    def put_for_entry(
+        self,
+        cache_key: str,
+        feature_hashes: List[torch.Tensor],
+        entry: MMEmbeddingCacheEntry,
+        embedding_cache: MMEmbeddingCache,
+        *,
+        allow_uncached: bool = False,
+    ) -> None:
+        """Publish hashes for the current embedding generation only."""
+        self._put(
+            cache_key,
+            feature_hashes,
+            entry.generation,
+            entry.greennet_passed,
+            entry=entry,
+            embedding_cache=embedding_cache,
+            allow_uncached=allow_uncached,
+        )
+
+    def _put(
+        self,
+        cache_key: str,
+        feature_hashes: List[torch.Tensor],
+        generation: Optional[str],
+        greennet_passed: bool,
+        *,
+        entry: Optional[MMEmbeddingCacheEntry] = None,
+        embedding_cache: Optional[MMEmbeddingCache] = None,
+        allow_uncached: bool = False,
+    ) -> None:
         if not cache_key or not self.enabled:
             return
+        generation = generation or ""
+
+        def can_replace() -> bool:
+            existing = self._entries.get(cache_key)
+            if existing is None or existing[1] != generation:
+                return True
+            if greennet_passed and not existing[4]:
+                self._entries[cache_key] = (*existing[:4], True)
+            return False
+
+        def with_current(action: Callable[[], bool]) -> bool:
+            # Hold the hash index lock across reservation and insertion. The
+            # embedding index lock is only taken for metadata, never for copies.
+            if entry is None:
+                return action()
+            return embedding_cache._with_current_entry(
+                cache_key, entry, action, allow_uncached=allow_uncached
+            )
+
+        def reserve_space_locked(charge_bytes: int) -> bool:
+            retired = []
+
+            def evict() -> bool:
+                if entry is not None and not can_replace():
+                    return False
+                retired.extend(self._take_locked(cache_key))
+                if charge_bytes > self._max_bytes:
+                    return False
+                while self._resident_bytes + charge_bytes > self._max_bytes:
+                    retired.extend(self._take_locked(next(iter(self._entries))))
+                return True
+
+            # Retire metadata while the generation is current, then release
+            # the pool reservations without holding the embedding index lock.
+            reserved = with_current(evict)
+            for owner in retired:
+                owner.release()
+            return reserved
+
         # Reject oversized values before making CPU copies. Replacing a key
         # must also discard its previous generation, even when the new value
         # cannot fit. Do not evict unrelated entries for such a value.
@@ -692,8 +770,9 @@ class MMHashKeyCache:
         pool_bytes = tensor_bytes
         if pool_bytes > self._max_bytes:
             with self._lock:
-                self._remove_locked(cache_key)
-            return
+                if pool_bytes > self._max_bytes:
+                    reserve_space_locked(pool_bytes)
+                    return
         # Hashes are small CPU int32 token-id tensors. Store an owned CPU copy
         # so the sidecar does not retain embedding storage or a GPU tensor.
         with cuda_graph_gate.operation():
@@ -701,7 +780,6 @@ class MMHashKeyCache:
                 hash_tensor.detach().to(device="cpu", dtype=torch.int32).clone()
                 for hash_tensor in feature_hashes
             ]
-        generation = generation or ""
         charge_bytes = (
             pool_bytes
             + sys.getsizeof(cache_key)
@@ -713,13 +791,8 @@ class MMHashKeyCache:
             + self._ENTRY_OVERHEAD
         )
         with self._lock:
-            self._remove_locked(cache_key)
-            if charge_bytes > self._max_bytes:
+            if not reserve_space_locked(charge_bytes):
                 return
-            # Evict before insertion so resident accounting never exceeds the
-            # budget, including when a key is replaced by a larger value.
-            while self._resident_bytes + charge_bytes > self._max_bytes:
-                self._remove_locked(next(iter(self._entries)))
             devices = _map_tensors(hashes, lambda _: torch.device("cpu"))
             try:
                 pooled, owners, _, _, _ = _pool_result(
@@ -730,21 +803,32 @@ class MMHashKeyCache:
                     "Hash-key cache CPU pool is full; bypassing key %s", cache_key
                 )
                 return
-            self._entries[cache_key] = (
-                pooled,
-                generation,
-                charge_bytes,
-                owners,
-                bool(greennet_passed),
-            )
-            self._resident_bytes += charge_bytes
+
+            def publish() -> bool:
+                self._entries[cache_key] = (
+                    pooled,
+                    generation,
+                    charge_bytes,
+                    owners,
+                    bool(greennet_passed),
+                )
+                self._resident_bytes += charge_bytes
+                return True
+
+            if not with_current(publish):
+                for owner in owners:
+                    owner.release()
 
     def _remove_locked(self, cache_key: str) -> None:
+        for owner in self._take_locked(cache_key):
+            owner.release()
+
+    def _take_locked(self, cache_key: str) -> List[_PoolReservation]:
         value = self._entries.pop(cache_key, None)
-        if value is not None:
-            self._resident_bytes -= value[2]
-            for owner in value[3]:
-                owner.release()
+        if value is None:
+            return []
+        self._resident_bytes -= value[2]
+        return value[3]
 
     def get(
         self, cache_key: str, generation: Optional[str] = None
@@ -897,6 +981,11 @@ class MMEmbeddingCache:
         # hold _lock, and only one cache transfer can allocate staging at a time.
         self._transfer_lock = threading.Lock()
         self._entries: "OrderedDict[str, MMEmbeddingCacheEntry]" = OrderedDict()
+        # Independent hashes may still be published for a capacity bypass.
+        # Keep its generation current only while a caller owns the entry.
+        self._latest_claims: WeakValueDictionary[str, MMEmbeddingCacheEntry] = (
+            WeakValueDictionary()
+        )
         self._gpu_lru: "OrderedDict[str, MMEmbeddingCacheEntry]" = OrderedDict()
         self._cpu_lru: "OrderedDict[str, MMEmbeddingCacheEntry]" = OrderedDict()
         self._gpu_max_bytes = gpu_max_bytes
@@ -948,6 +1037,7 @@ class MMEmbeddingCache:
             if not self.enabled:
                 self._stats["miss"] += 1
                 state, entry = "miss", MMEmbeddingCacheEntry()
+                self._latest_claims[cache_key] = entry
             elif cache_key in self._entries:
                 entry = self._entries[cache_key]
                 self._entries.move_to_end(cache_key)
@@ -964,6 +1054,7 @@ class MMEmbeddingCache:
             else:
                 entry = self._new_entry(cache_key)
                 self._entries[cache_key] = entry
+                self._latest_claims[cache_key] = entry
                 self._stats["miss"] += 1
                 state = "miss"
         self._report_access_metric(state)
@@ -1246,6 +1337,7 @@ class MMEmbeddingCache:
                     return
                 if not self.enabled:
                     self._remove_entry_locked(cache_key)
+                    entry._completion_bypassed_cache = True
                     return
             if gpu_bytes > self._gpu_max_bytes:
                 self._store_cpu(cache_key, entry, result, entry.ready_events)
@@ -1262,6 +1354,10 @@ class MMEmbeddingCache:
                     entry.original_devices,
                     False,
                     entry.ready_events,
+                )
+            with self._lock:
+                entry._completion_bypassed_cache = (
+                    self._entries.get(cache_key) is not entry
                 )
         self._report_current_residency()
 
@@ -1367,6 +1463,8 @@ class MMEmbeddingCache:
 
     def _remove_if_same(self, cache_key: str, expected: MMEmbeddingCacheEntry) -> bool:
         with self._transfer_lock, self._lock:
+            if self._latest_claims.get(cache_key) is expected:
+                self._latest_claims.pop(cache_key, None)
             if self._entries.get(cache_key) is not expected:
                 return False
             self._remove_entry_locked(cache_key)
@@ -1378,8 +1476,10 @@ class MMEmbeddingCache:
         cache_key: str,
         entry: MMEmbeddingCacheEntry,
         result: Any,
+        *,
+        before_publish: Optional[Callable[[], None]] = None,
     ) -> bool:
-        return entry.complete(result)
+        return entry.complete(result, before_publish=before_publish)
 
     def fail(
         self, cache_key: str, entry: MMEmbeddingCacheEntry, error: Exception
@@ -1387,14 +1487,40 @@ class MMEmbeddingCache:
         return entry.fail(error)
 
     def remove(self, cache_key: str) -> None:
-        with self._lock:
-            entry = self._entries.get(cache_key)
-        if entry is not None:
-            self._remove_if_same(cache_key, entry)
+        with self._transfer_lock, self._lock:
+            self._latest_claims.pop(cache_key, None)
+            if cache_key not in self._entries:
+                return
+            self._remove_entry_locked(cache_key)
+        self._report_current_residency()
 
     def peek(self, cache_key: str) -> Optional[MMEmbeddingCacheEntry]:
         with self._lock:
             return self._entries.get(cache_key)
+
+    def _with_current_entry(
+        self,
+        cache_key: str,
+        entry: MMEmbeddingCacheEntry,
+        action: Callable[[], bool],
+        *,
+        allow_uncached: bool,
+    ) -> bool:
+        # Callers already hold the hash lock; the callback only updates its
+        # index. No path may acquire the hash lock from this embedding lock.
+        with self._lock:
+            if (
+                entry.error is not None
+                or self._latest_claims.get(cache_key) is not entry
+            ):
+                return False
+            if (
+                self._entries.get(cache_key) is entry
+                or entry._completion_bypassed_cache
+                or (allow_uncached and not self.enabled and not entry.has_read_callback)
+            ):
+                return action()
+        return False
 
     def resident_tiers(
         self, keys: Optional[List[str]] = None, limit: Optional[int] = None
@@ -1445,6 +1571,14 @@ class MMEmbeddingCache:
             with self._lock:
                 self._gpu_max_bytes = gpu_max_bytes
                 self._cpu_max_bytes = cpu_max_bytes
+                if not self.enabled:
+                    for key, entry in list(self._entries.items()):
+                        if not entry.is_done:
+                            # Existing waiters retain entry references, but a
+                            # future re-enable must not admit this old result.
+                            if self._latest_claims.get(key) is entry:
+                                self._latest_claims.pop(key, None)
+                            self._remove_entry_locked(key, eviction=True)
             self._make_gpu_room(0)
             self._make_cpu_room(0)
             with self._lock:
@@ -1456,6 +1590,7 @@ class MMEmbeddingCache:
     def clear(self, error: Optional[Exception] = None) -> None:
         with self._transfer_lock, self._lock:
             entries = list(self._entries.values())
+            self._latest_claims.clear()
             for key in list(self._entries):
                 self._remove_entry_locked(key)
         if error is not None:

@@ -20,6 +20,7 @@ from rtp_llm.multimodal.transport.base import (
     MMOutputTransport,
     MMTransportBackend,
     report_output_metrics,
+    serialize_embedding_response,
 )
 from rtp_llm.multimodal.transport.factory import create_mm_output_transport
 from rtp_llm.multimodal.transport.grpc.backend import (
@@ -221,6 +222,10 @@ class MMOutputTransportTest(TestCase):
         )
 
         report_output_metrics(result)
+        self.assertEqual(
+            serialize_embedding_response(result.receipt),
+            result.receipt.SerializeToString(),
+        )
 
         samples = {call.args[0]: call.args[1] for call in report.call_args_list}
         self.assertEqual(samples[GaugeMetrics.VIT_RESPONSE_EMBEDDING_BYTES_METRIC], 32)
@@ -240,6 +245,10 @@ class MMOutputTransportTest(TestCase):
             result = backend.transfer(_rdma_request(), MMEmbeddingRes([_rows(2)]))
 
         report_output_metrics(result)
+        self.assertEqual(
+            serialize_embedding_response(result.receipt),
+            result.receipt.SerializeToString(),
+        )
 
         samples = {call.args[0]: call.args[1] for call in report.call_args_list}
         self.assertEqual(samples[GaugeMetrics.VIT_RESPONSE_EMBEDDING_BYTES_METRIC], 24)

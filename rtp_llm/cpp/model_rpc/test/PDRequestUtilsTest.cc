@@ -42,7 +42,7 @@ public:
 
 private:
     ErrorResult<MultimodalOutput>
-    MultimodalEmbedding(const std::vector<MultimodalInput>, std::string, int64_t, grpc::ServerContext* context) override {
+    MultimodalEmbedding(const std::vector<MultimodalInput>&, std::string, int64_t, grpc::ServerContext* context) override {
         ++calls;
         seen_context = context;
         if (on_call)

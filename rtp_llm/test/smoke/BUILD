@@ -16,7 +16,47 @@ smoke_test(
     ),
     envs = ["PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"],
     env_inherit = ["GLM54_MOCK_CHECKPOINT"],
-    data = ["data/model/llava/1.jpg"],
+    data = ["data/model/llava/1.jpg", "data/model/llava/2.jpg"],
+    gpu_type = ["SM103_CU13"],
+)
+
+# Exercise the static Decode-entry route with separate ViT, Prefill and
+# Decode. TP=1 keeps all 64 sparse MLA query heads on each DP rank.
+_GLM54_MOCK_PDV_LLM_ARGS = (
+    "--act_type BF16 --use_local 1 --vit_separation 2 " +
+    "--tp_size 1 --world_size 2 --dp_size 2 --ep_size 2 " +
+    "--max_seq_len 4096 --seq_size_per_block 64 --kernel_seq_size_per_block 64 " +
+    "--fp8_kv_cache 1 --kv_cache_mem_mb 4096 --warm_up 0 " +
+    "--concurrency_limit 1 --max_context_batch_size 1 --reuse_cache 0 " +
+    "--enable_cuda_graph 0 --load_method fastsafetensors " +
+    "--quantization FP8_PER_BLOCK --moe_strategy mega_moe " +
+    "--use_all_gather 0 --use_deepep_moe 0 --use_deepep_low_latency 0 " +
+    "--cache_store_rdma_mode 0 --load_cache_timeout_ms 120000"
+)
+
+smoke_test(
+    name = "glm54_mock_pdv_cu13",
+    task_info = "data/model/glm5/glm54_mock_pdv_cu13.json",
+    smoke_args = {
+        "frontend": "--act_type BF16 --role_type FRONTEND --max_seq_len 4096 --use_local 1 --warm_up 0",
+        "prefill": _GLM54_MOCK_PDV_LLM_ARGS + " --role_type PREFILL",
+        "decode": _GLM54_MOCK_PDV_LLM_ARGS + " --role_type DECODE",
+        "vit": (
+            "--act_type BF16 --tp_size 1 --world_size 1 --use_local 1 " +
+            "--use_local_preprocess 0 --mm_preprocess_max_workers 2 --warm_up 0"
+        ),
+    },
+    envs = {
+        "frontend": [],
+        "prefill": ["PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"],
+        "decode": [
+            "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True",
+            "LOG_LEVEL=DEBUG",
+        ],
+        "vit": [],
+    },
+    env_inherit = ["GLM54_MOCK_CHECKPOINT"],
+    data = ["data/model/llava/1.jpg", "data/model/llava/2.jpg"],
     gpu_type = ["SM103_CU13"],
 )
 

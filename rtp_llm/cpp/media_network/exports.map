@@ -1,0 +1,4 @@
+{
+    global: PyInit__media_network;
+    local: *;
+};

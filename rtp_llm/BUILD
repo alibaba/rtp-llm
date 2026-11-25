@@ -644,7 +644,8 @@ py_library(
                 "//conditions:default": [],
             }),
     data = [
-        "//rtp_llm/libs:libs"
+        "//rtp_llm/libs:libs",
+        "//rtp_llm/cpp/media_network:_media_network.so",
     ]
 )
 

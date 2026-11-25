@@ -9,10 +9,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from uvicorn import Config
+
 from rtp_llm.access_logger import access_logger
 from rtp_llm.access_logger.access_logger import AccessLogger, MMAccessLogger
+from rtp_llm.access_logger.async_log_handler import AsyncRotatingFileHandler
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.uvicorn_config import configure_uvicorn_logging
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.multimodal.mm_scheduler import MMSchedulerRequestTooLargeError
@@ -24,6 +28,44 @@ from rtp_llm.structure.request_constants import request_id_field_name
 
 
 class AccessLoggerTest(unittest.TestCase):
+    def test_uvicorn_startup_preserves_application_access_logging(self):
+        uvicorn_logger = logging.getLogger("uvicorn.access")
+        with tempfile.TemporaryDirectory() as directory, patch.multiple(
+            uvicorn_logger,
+            handlers=[],
+            level=uvicorn_logger.level,
+            propagate=uvicorn_logger.propagate,
+            disabled=uvicorn_logger.disabled,
+        ):
+            path = Path(directory) / "application.log"
+            handler = AsyncRotatingFileHandler(str(path))
+            application_logger = logging.Logger("test_application_access", logging.INFO)
+            application_logger.addHandler(handler)
+            try:
+                configure_uvicorn_logging(directory)
+                Config("unused:app", log_config=None)
+
+                application_logger.info("application request after Uvicorn setup")
+                handler.flush()
+                self.assertIn(
+                    "application request after Uvicorn setup", path.read_text()
+                )
+
+                uvicorn_logger.info(
+                    '%s - "%s %s HTTP/%s" %d',
+                    "127.0.0.1",
+                    "GET",
+                    "/health",
+                    "1.1",
+                    200,
+                )
+                uvicorn_log = Path(directory) / "uvicorn_access.log"
+                self.assertIn('"GET /health HTTP/1.1" 200', uvicorn_log.read_text())
+            finally:
+                handler.close()
+                for uvicorn_handler in uvicorn_logger.handlers:
+                    uvicorn_handler.close()
+
     def test_disable_access_log(self):
         for logger_type in (AccessLogger, MMAccessLogger):
             for value, disabled in [

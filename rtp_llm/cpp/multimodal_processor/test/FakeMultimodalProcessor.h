@@ -21,9 +21,9 @@ public:
     float feature_value = 0.0f;
 
 private:
-    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                                      std::string                                 ip_port    = "",
-                                                      int64_t                                     request_id = 0,
+    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput>& mm_inputs,
+                                                      std::string                        ip_port = "",
+                                                      int64_t                            request_id = 0,
                                                       grpc::ServerContext* = nullptr) override {
         MultimodalOutput output;
         for (const auto& input : mm_inputs) {
