@@ -11,6 +11,12 @@ repos:
     # Formatters
   - repo: local
     hooks:
+      - id: mock-master-config-format
+        name: Check Mock Master config format
+        entry: python rtp_llm/flexlb/tools/check_mock_master_config.py
+        language: python
+        additional_dependencies: [PyYAML==6.0.3]
+        files: (?:^|/)configs/master\.yaml$
       - id: flexlb-java-checker-tests
         name: Test FlexLB Java checkers
         entry: python -m unittest discover -s rtp_llm/flexlb/tools -p test_*.py
