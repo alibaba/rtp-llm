@@ -1,6 +1,5 @@
 """Batch-shape-stable execution for row-independent linear layers."""
 
-import os
 from typing import Callable
 
 import torch
@@ -10,6 +9,8 @@ def fixed_m_linear(
     linear: Callable[[torch.Tensor], torch.Tensor],
     input: torch.Tensor,
     chunk_rows: int,
+    *,
+    fuse_pad: bool = True,
 ) -> torch.Tensor:
     """Run ``linear`` with one fixed GEMM M dimension.
 
@@ -34,7 +35,7 @@ def fixed_m_linear(
         valid_rows = end - begin
         if valid_rows != chunk_rows:
             padded = None
-            if os.environ.get("RTP_LLM_FUSED_ROUTER_PAD", "1") == "1" and chunk.is_cuda:
+            if fuse_pad and chunk.is_cuda:
                 from rtp_llm.models_py.modules.factory.linear.fixed_m_pad_triton import (
                     try_pad_rows,
                 )

@@ -24,9 +24,12 @@ Operators used without a server config use the same default.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from rtp_llm.ops import HWKernelConfig
 
 
-def fuse_kernels_enabled(hw_kernel_config: Optional[Any] = None) -> bool:
+def fuse_kernels_enabled(hw_kernel_config: Optional[HWKernelConfig] = None) -> bool:
     """Read the resolved fusion policy, defaulting to enabled."""
-    return bool(getattr(hw_kernel_config, "enable_fuse_kernels", True))
+    return hw_kernel_config is None or hw_kernel_config.enable_fuse_kernels

@@ -33,6 +33,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer imp
     synchronized_moe_chunk_plan,
 )
 from rtp_llm.models_py.modules.factory.linear.fixed_m_linear import fixed_m_linear
+from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
 from rtp_llm.models_py.modules.hybrid.glm5_cmp import (
     Glm5Cmp,
     resolve_glm5_cmp_enabled,
@@ -76,6 +77,7 @@ class Glm5MoeLayer(GenericMoeLayer):
             parallelism_config.role_type != RoleType.DECODE
             and parallelism_config.prefill_cp_config.is_enabled()
         )
+        self.fuse_router_pad = fuse_kernels_enabled(hw_kernel_config)
         self.gate_chunk_rows = (
             8192 if config.model_type == "glm_5" and cp_prefill_enabled else 0
         )
@@ -135,7 +137,7 @@ class Glm5MoeLayer(GenericMoeLayer):
             and not moe_decode_forward()
         ):
             return fixed_m_linear(
-                self.gate, hidden_states, self.gate_chunk_rows
+                self.gate, hidden_states, self.gate_chunk_rows, fuse_pad=self.fuse_router_pad
             ).float()
         return self.gate(hidden_states).float()
 
@@ -150,6 +152,7 @@ class Glm5MoeLayer(GenericMoeLayer):
         clone.ffn_dim = self.ffn_dim
         clone.num_experts = self.num_experts
         clone.top_k = self.top_k
+        clone.fuse_router_pad = self.fuse_router_pad
         clone.gate_chunk_rows = self.gate_chunk_rows
         clone.gate = self.gate
         clone.select_topk = self.select_topk
@@ -317,7 +320,6 @@ class Glm5MoeDecoderLayer(nn.Module):
         # AND emit a bf16 normed output so downstream consumers (e.g. Indexer)
         # still see the normed feature vector. Single-output variant cannot be
         # used here because Indexer reads hidden_states directly.
-        from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
 
         _fuse_on = fuse_kernels_enabled(hw_kernel_config)
         self._fuse_input_norm_quant = False
