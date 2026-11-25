@@ -237,15 +237,143 @@ py_test(
     ]
 ]
 
-# Reproduces the all-rank Qwen4 single-launch Indexer captures. See QWEN4_M11_TIMELINE.md.
+_QWEN4_M11_MTP_TIMELINE_ENGINE_ARGS = [
+    "--model_type", "qwen4_exp",
+    "--role_type", "PDFUSION",
+    "--frontend_server_count", "1",
+    "--tp_size", "1",
+    "--dp_size", "8",
+    "--ep_size", "8",
+    "--world_size", "8",
+    "--local_world_size", "8",
+    "--world_rank", "0",
+    "--pp_size", "1",
+    "--load_method", "scratch",
+    "--act_type", "BF16",
+    "--moe_strategy", "mega_moe",
+    "--use_deepep_moe", "0",
+    "--vit_separation", "2",
+    "--fake_balance_expert", "0",
+    "--prefill_chunk_size", "0",
+    "--seq_size_per_block", "128",
+    "--kernel_seq_size_per_block", "128",
+    "--enable_cuda_graph", "1",
+    "--decode_capture_config", "1",
+    "--warm_up", "0",
+    "--startup_health_check_timeout", "3000",
+    "--frontend_pre_stop_drain_seconds", "0",
+    "--dash_sc_grpc_pre_stop_drain_seconds", "0",
+    "--max_context_batch_size", "1",
+    # Match the draft capacity for MegaMoE buffer sharing.
+    "--max_seq_len", "16464",
+    "--max_batch_tokens_size", "16464",
+    "--kv_cache_mem_mb", "4352",
+    "--linear_pool_blocks", "8",
+    "--sp_type", "mtp",
+    "--sp_model_type", "qwen4_exp_mtp",
+    "--sp_act_type", "BF16",
+    "--gen_num_per_cycle", "3",
+    "--reuse_cache", "1",
+    "--reuse_cache_tail_blocks", "4",
+]
+
+_QWEN4_M11_MTP_TIMELINE_ENV = {
+    "GPU_COUNT": "8",
+    "RTP_TEST_WATCHDOG_SECONDS": "10800",
+    "FT_SERVER_TEST": "1",
+    "GEN_TIMELINE_SYNC": "1",
+    "RTP_BATCH_INVARIANT": "0",
+    "RTP_LLM_STREAM_ASYNC": "1",
+    "RTP_LLM_DEVICE_INPUT": "1",
+    "RTP_LLM_DROP_BROAD_SYNC": "1",
+    "OMP_NUM_THREADS": "4",
+    "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+    "QUANTIZATION": "",
+    "SP_QUANTIZATION": "",
+    "QWEN4_GDN_BACKEND": "flashinfer",
+    "QWEN4_QSA_FUSED_INDEXER_PREP": "1",
+    "QWEN4_QSA_INDEXER_BACKEND": "flashinfer",
+    "QWEN4_QSA_INDEXER_CHUNK_SIZE": "4096",
+}
+
+# TP1/DP8/EP8 MTP grid profiles using the same runner as the DSV4 targets.
+# Pass --checkpoint_path, --tokenizer_path and --sp_checkpoint_path through --test_arg.
+[
+    py_test(
+        name = "qwen4_m11_mxfp4_sm10x_mtp_" + phase + "_timeline",
+        main = "batch_decode_test.py",
+        srcs = ["batch_decode_test.py"],
+        timeout = "eternal",
+        deps = [
+            "//rtp_llm:pyodps",
+            "//rtp_llm:testlib",
+            ":perf_test_lib",
+        ],
+        data = ["//rtp_llm:sdk"],
+        args = [
+            "--partial", partial,
+            "--batch_size", "1",
+            "--input_len", "16381",
+            "--decode_test_length", "1" if phase == "prefill" else "64",
+            "--warmup_runs", "0",
+            "--num_measures", "1",
+            "--generate_config", "'" + json.encode({"reuse_cache": False}) + "'",
+            "--use_batch_decode_scheduler", "1",
+        ] + _QWEN4_M11_MTP_TIMELINE_ENGINE_ARGS,
+        env = dict(
+            _QWEN4_M11_MTP_TIMELINE_ENV,
+            GEN_TIMELINE_TRACE_NAME = "qwen4_m11_mtp_" + phase,
+            GEN_TIMELINE_NUM_STEPS = num_steps,
+            PERF_PREARM_PROFILE = "1",
+            PERF_PROFILE_ARM_SLEEP = "0",
+            PERF_PROFILE_NUM_STEPS = num_steps,
+            PERF_PROFILE_FLUSH_SLEEP = "120",
+        ),
+        exec_properties = {"gpu": "SM103_CU13", "gpu_count": "8"},
+        tags = ["manual"],
+    )
+    for phase, partial, num_steps in [
+        ("prefill", "2", "1"),
+        ("decode", "1", "6"),
+    ]
+]
+
+# One cohort of real requests per launch, first prefill then six decode steps.
+_QWEN4_M11_MTP_PD_CHECKPOINT = "/mnt/fuse/qwen4-m11-zhongwei"
+
 py_test(
     name = "qwen4_m11_mxfp4_sm10x_timeline",
-    main = "qwen4_m11_timeline.py",
-    srcs = ["qwen4_m11_timeline.py"],
+    main = "offline_bench_test.py",
+    srcs = ["offline_bench_test.py"],
     timeout = "eternal",
-    deps = [":perf_test_lib"],
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        ":perf_test_lib",
+    ],
     data = ["//rtp_llm:sdk"],
-    env = {"GPU_COUNT": "8", "RTP_TEST_WATCHDOG_SECONDS": "10800"},
+    args = [
+        "--checkpoint_path", _QWEN4_M11_MTP_PD_CHECKPOINT,
+        "--tokenizer_path", _QWEN4_M11_MTP_PD_CHECKPOINT,
+        "--sp_checkpoint_path", _QWEN4_M11_MTP_PD_CHECKPOINT,
+        "--total_requests", "8",
+        "--concurrency_limit", "8",
+        "--input_len_min", "16381",
+        "--input_len_max", "16381",
+        "--output_len_min", "64",
+        "--output_len_max", "64",
+        "--drain_timeout", "180",
+        "--server_start_timeout", "3000",
+        "--use_batch_decode_scheduler", "0",
+    ] + _QWEN4_M11_MTP_TIMELINE_ENGINE_ARGS,
+    env = dict(
+        _QWEN4_M11_MTP_TIMELINE_ENV,
+        ENABLE_FP32_LM_HEAD = "0",
+        GEN_TIMELINE_TRACE_NAME = "qwen4_m11_mtp_pd",
+        GEN_TIMELINE_START_STEP = "0",
+        GEN_TIMELINE_NUM_STEPS = "7",
+        RTP_LLM_TEST_MTP_DECODE_ONLY = "1",
+    ),
     exec_properties = {"gpu": "SM103_CU13", "gpu_count": "8"},
     tags = ["manual"],
 )
