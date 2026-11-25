@@ -56,6 +56,17 @@ class _StatsOnlyBalancer:
     eplb_stats_only = True
 
 
+def stage_supports_weight_install(model, experts):
+    """The native controller may promote this stage from STATS without reloading."""
+    if getattr(model, "eplb_attention_only", False) or getattr(model, "_ft_eplb_stats_only", False):
+        return False
+    return all(
+        isinstance(module, BaseMoEExperts)
+        and module.quant_method.supports_eplb_weight_install
+        for module in experts
+    )
+
+
 def create_stage_expert_balancer(loader, model, model_config):
     """Only actual routed-expert owners participate on this PP stage."""
     if not model_config.eplb_config.enable_eplb():
@@ -94,11 +105,7 @@ def create_stage_expert_balancer(loader, model, model_config):
         )
     if not expected and not attention_only:
         return None  # Valid dense-only PP stage.
-    if attention_only or any(
-        not isinstance(module, BaseMoEExperts)
-        or not module.quant_method.supports_eplb_weight_install
-        for module in experts.values()
-    ):
+    if not stage_supports_weight_install(model, experts.values()):
         mode = model_config.eplb_config.eplb_mode
         if getattr(mode, "name", mode) != "STATS":
             raise ValueError(

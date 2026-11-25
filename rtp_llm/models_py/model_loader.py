@@ -692,6 +692,8 @@ class NewModelLoader:
         ep_size: int,
     ) -> Dict[str, torch.Tensor]:
         """Reload one physical MoE layer for a dynamic EPLB placement."""
+        if getattr(model, "_ft_eplb_stats_only", False):
+            raise ValueError("FT checkpoint does not declare an expert reload layout")
         if (ep_rank, ep_size) != (self.load_config.ep_rank, self.load_config.ep_size):
             raise ValueError(
                 "C++ EPLB EP partition does not match NewLoader: "
@@ -1982,10 +1984,10 @@ class NewModelLoader:
         try:
             torch.distributed.all_gather_object(reasons, local_reason, group=group)
         except (RuntimeError, TypeError, ValueError) as exc:
-            return (
-                "cannot synchronize checkpoint load status across ranks: "
-                f"{exc}"
-            )
+            # No shared decision exists. Only a completed vote may select scratch.
+            raise RuntimeError(
+                "cannot synchronize checkpoint load status across ranks"
+            ) from exc
         failures = [
             f"rank {rank}: {reason}"
             for rank, reason in enumerate(reasons)
@@ -2495,20 +2497,30 @@ class NewModelLoader:
                 finish_meta_lora = prepare_startup_lora_merge(model, self, *startup_lora)
             ft_rebalance = False
             if isinstance(ft_checkpoint, FTCheckpoint):
-                cfg = getattr(self.model_config, "eplb_config", None)
-                mode = getattr(cfg, "eplb_mode", None)
-                if getattr(mode, "name", mode) != "STATS":
-                    for leaf in model.modules():
-                        if not (
-                            getattr(leaf, "_supports_newloader_eplb", False)
-                            and getattr(leaf, "_dynamic_eplb_enabled", False)
-                        ):
-                            continue
+                routed = [
+                    leaf for leaf in model.modules()
+                    if callable(getattr(leaf, "bind_eplb_stats", None))
+                ]
+                if any(getattr(leaf, "_dynamic_eplb_enabled", False) for leaf in routed):
+                    from rtp_llm.models_py.eplb_controller import (
+                        stage_supports_weight_install,
+                    )
+
+                    ft_rebalance = stage_supports_weight_install(model, routed)
+                if ft_rebalance:
+                    for leaf in routed:
                         if getattr(leaf, "_ft_expert_binding_layout", None) is None:
+                            cfg = getattr(self.model_config, "eplb_config", None)
+                            mode = getattr(cfg, "eplb_mode", None)
+                            if getattr(mode, "name", mode) == "STATS":
+                                # This FT importer can serve and count tokens, but
+                                # cannot reconstruct another EP rank's source rows.
+                                model._ft_eplb_stats_only = True
+                                ft_rebalance = False
+                                break
                             raise ValueError(
                                 f"FT dynamic EPLB lacks a reload layout for {leaf.prefix}"
                             )
-                        ft_rebalance = True
             self._validate_loaded_weights(model)
             if meta_checkpoint is not None:
                 # Raw Meta tensors, unlike FT snapshots, still need the same
@@ -2530,7 +2542,7 @@ class NewModelLoader:
             model.eval()
             if ft_rebalance:
                 # Keep the stage's immutable catalog, not a second model.
-                # No FT reader/overlay survives for ordinary or STATS serving.
+                # Keep it even in STATS: an install-capable stage can switch modes.
                 self._eplb_ft_checkpoint = ft_checkpoint
             self._selected_load_method = (
                 NewLoaderLoadMethod.FASTSAFETENSORS
@@ -2657,14 +2669,20 @@ class NewModelLoader:
             if independent:
                 logger.info("NewLoader FST: %d collective files; %d use independent native CPU range reads",
                             len(shared),len(independent))
-            weights = chain(
-                self._fastsafetensors_weights_iterator(
-                    shared, self.load_config.device, base_filter, base_expander, base_resolver
-                ) if shared else (),
-                iter_fst_range_tensors(independent, catalog=self._checkpoint_catalog(), name_filter=base_filter,
-                    slice_expander=base_expander, read_spec_resolver=base_resolver)
-                if independent else (),
-            )
+            def iter_planned_weights():
+                # yield from forwards close() to the active native reader on
+                # dispatch failure. Unstarted readers never acquire resources.
+                if shared:
+                    yield from self._fastsafetensors_weights_iterator(
+                        shared, self.load_config.device, base_filter, base_expander, base_resolver
+                    )
+                if independent:
+                    yield from iter_fst_range_tensors(
+                        independent, catalog=self._checkpoint_catalog(), name_filter=base_filter,
+                        slice_expander=base_expander, read_spec_resolver=base_resolver,
+                    )
+
+            weights = iter_planned_weights()
         elif method == NewLoaderLoadMethod.FASTSAFETENSORS:
             from rtp_llm.models_py.fst_range_reader import iter_fst_range_tensors
 

@@ -130,6 +130,13 @@ def _rank_decision(rank, root, init):
                 RuntimeError, "rank 1: checkpoint shard selection is empty"
             ):
                 _select(loader, Method.FASTSAFETENSORS, paths)
+            # A failed vote is not a negative vote: neither AUTO nor forced FST
+            # can safely continue after losing contact with a participant.
+            with patch.object(dist, "all_gather_object", side_effect=RuntimeError("lost peer")):
+                for requested in (Method.AUTO, Method.FASTSAFETENSORS):
+                    with case.assertRaisesRegex(RuntimeError, "cannot synchronize") as failed:
+                        _select(loader, requested, paths)
+                    case.assertEqual(str(failed.exception.__cause__), "lost peer")
     finally:
         dist.destroy_process_group()
 
@@ -144,6 +151,15 @@ class _CheckpointCase(unittest.TestCase):
 
 
 class DefaultFstRouteTest(_CheckpointCase):
+    def test_legacy_ptuning_bin_overrides_base_checkpoint(self):
+        overlay = self.root / "overlay"
+        overlay.mkdir()
+        torch.save({"state_dict": {"weight": self.expected + 10}},
+                   overlay / "pytorch_model.bin", _use_new_zipfile_serialization=False)
+        loader = _loader(self.root, device="cpu", load_method=Method.SCRATCH)
+        loader.model_config["ptuning_path"] = str(overlay)
+        torch.testing.assert_close(loader.load().weight, self.expected + 10)
+
     def test_load_method_environment_only_supplies_an_omitted_option(self):
         for env in (None, "", "auto", "scratch", "fastsafetensors", "invalid"):
             with self.subTest(env=env), patch.dict(os.environ):
@@ -244,6 +260,44 @@ class DefaultFstRouteTest(_CheckpointCase):
 
 
 class DefaultFstNativeReaderTest(_CheckpointCase):
+    def test_consumer_failure_closes_active_native_reader_before_unwind(self):
+        from rtp_llm.models_py import fst_file_plan, fst_range_reader
+
+        for independent in (False, True):
+            loader = _loader(self.root, device="cpu", load_method=Method.FASTSAFETENSORS)
+            files = loader._checkpoint_files()
+            observed = []
+
+            def monitor(iterator):
+                try:
+                    yield from iterator
+                finally:
+                    observed.append("closed")
+
+            def reject(owner, weights):
+                name, _ = next(weights)
+                self.assertEqual(name, "weight")
+                raise ValueError("consumer rejected weight")
+
+            owner, method = ((fst_range_reader, "iter_fst_range_tensors") if independent
+                             else (loader, "_fastsafetensors_weights_iterator"))
+            read = getattr(owner, method)
+            with self.subTest(independent=independent), patch.object(
+                fst_file_plan, "plan_fst_files",
+                return_value=([], files) if independent else (files, []),
+            ), patch.object(owner, method, side_effect=lambda *a, **k: monitor(read(*a, **k))), patch.object(
+                _Owner, "load_weights", reject
+            ):
+                try:
+                    loader.load()
+                except ValueError as exc:
+                    self.assertEqual(str(exc), "consumer rejected weight")
+                    # Inspect inside the handler: traceback still owns the iterator.
+                    self.assertEqual(observed, ["closed"])
+                else:
+                    self.fail("consumer failure did not propagate")
+                self.assertIsNone(loader.loaded_method)
+
     def test_multifile_readspec_uses_native_batch_order_and_close(self):
         from fastsafetensors import ParallelLoader, SingleGroup
         from fastsafetensors.parallel_loader import TimingContext

@@ -11,7 +11,10 @@ import re
 import torch
 
 from rtp_llm.models_py.read_spec import ReadSpec
-from rtp_llm.models_py.weight_mapper import _unwrap_pytorch_state_dict
+from rtp_llm.models_py.weight_mapper import (
+    _can_map_cpu_archive,
+    _unwrap_pytorch_state_dict,
+)
 
 _PREFIX_ENCODER = re.compile(r"(?:^|\.)prefix_encoder(?:\.|$)")
 
@@ -20,7 +23,9 @@ class FinetuneCheckpointOverlay:
     def __init__(self, path: str):
         self.path = path
         metadata = _unwrap_pytorch_state_dict(
-            torch.load(path, map_location="meta", weights_only=True, mmap=True)
+            torch.load(
+                path, map_location="meta", weights_only=True, mmap=_can_map_cpu_archive(path)
+            )
         )
         self.names = frozenset(
             name
@@ -83,7 +88,7 @@ class FinetuneCheckpointOverlay:
         # mmap keeps an expert overlay from eagerly copying all expert payloads
         # into host memory. The same model-owned ReadSpecs select local pieces.
         payload = torch.load(
-            self.path, map_location="cpu", weights_only=True, mmap=True
+            self.path, map_location="cpu", weights_only=True, mmap=_can_map_cpu_archive(self.path)
         )
         state = _unwrap_pytorch_state_dict(payload)
         for name in state:

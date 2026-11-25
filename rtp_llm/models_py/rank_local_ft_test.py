@@ -139,6 +139,46 @@ class RankLocalFTTest(unittest.TestCase):
         )
 
     def test_ft_eplb_reload_reads_peer_rows_with_selected_backend(self):
+        self._check_ft_eplb_reload("EPLB")
+
+    def test_ft_stats_startup_can_promote_to_eplb_and_install_peer_rows(self):
+        self._check_ft_eplb_reload("STATS")
+
+    def test_ft_without_reload_layout_preserves_stats_only_serving(self):
+        from rtp_llm.models_py.eplb_controller import create_stage_expert_balancer
+
+        original = _ExpertModel.load_ft_checkpoint
+
+        def import_without_reload_layout(model, checkpoint):
+            original(model, checkpoint)
+            del model.experts._ft_expert_binding_layout
+
+        with tempfile.TemporaryDirectory() as root, patch.object(
+            _ExpertModel, "load_ft_checkpoint", import_without_reload_layout
+        ):
+            records = [
+                (7, "partial_moe_weights.intermediate_weight.kernel", torch.zeros(4, 64, 16)),
+                (7, "partial_moe_weights.intermediate_weight2.kernel", torch.zeros(4, 16, 32)),
+            ]
+            write_ft_shards(records, root)
+            generate_ft_index(root, {"TP_SIZE": 1, "DP_SIZE": 1, "EP_SIZE": 1})
+            loader = self._eplb_loader(root, "scratch")
+            cfg = loader.model_config
+            cfg.is_mtp = False
+            cfg.moe_layer_index = [0]
+            cfg.eplb_config = SimpleNamespace(enable_eplb=lambda: True, eplb_mode="STATS")
+            model = loader.load()
+            self.assertTrue(create_stage_expert_balancer(loader, model, cfg).eplb_stats_only)
+            self.assertIsNone(loader._eplb_ft_checkpoint)
+            with self.assertRaisesRegex(ValueError, "reload layout"):
+                loader.load_moe_layer_weights(
+                    model, layer_id=0, physical_to_logical=[3, 1, 0, 2], ep_rank=0, ep_size=1
+                )
+            cfg.eplb_config.eplb_mode = "EPLB"
+            with self.assertRaisesRegex(ValueError, "lacks a reload layout"):
+                loader.load()
+
+    def _check_ft_eplb_reload(self, startup_mode):
         from contextlib import nullcontext
         from rtp_llm.models_py import fst_range_reader
         from rtp_llm.utils.model_weight import W
@@ -161,7 +201,12 @@ class RankLocalFTTest(unittest.TestCase):
                 for rank in range(2):
                     with self.subTest(method=method, rank=rank):
                         loader = self._eplb_loader(root, method, rank=rank, size=2)
+                        loader.model_config.eplb_config.eplb_mode = startup_mode
                         model = loader.load()
+                        # CPU startup is checkpoint staging: explicitly prepare the
+                        # live tensor view without constructing a GPU MoE executor.
+                        model.experts.prepare_eplb_reload_weights()
+                        loader.model_config.eplb_config.eplb_mode = "EPLB"
                         rows = [3, 1, 0, 2]
                         selected = rows[rank*2:rank*2+2]
                         ctx = patch.object(
@@ -178,6 +223,14 @@ class RankLocalFTTest(unittest.TestCase):
                         for key, expected in ((W.moe_w1, w13), (W.moe_w2, w2)):
                             torch.testing.assert_close(staged[key], expected[selected])
                         torch.testing.assert_close(model.experts.w2, w2[rank*2:rank*2+2])
+                        placement = ExpertPlacement(4, 2, rank, tuple(rows))
+                        counts, inverse = model.experts._routing_tensors(placement)
+                        model.experts.apply_eplb_plan(
+                            torch.tensor(rows, dtype=torch.int32), counts, inverse, staged
+                        )
+                        torch.testing.assert_close(model.experts.w13, w13[selected])
+                        torch.testing.assert_close(model.experts.w2, w2[selected])
+                        self.assertEqual(model.experts._expert_placement, placement)
 
     def test_pytorch_ep1_eplb_reload_stacked_and_per_expert(self):
         from rtp_llm.utils.model_weight import W
