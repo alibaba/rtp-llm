@@ -152,34 +152,43 @@ protected:
                 [real_allocator](const BatchKVCacheResourcePtr& resource, int seq_len, int reserve_step) {
                     return real_allocator->singleBatchNeedBlocks(resource, seq_len, reserve_step);
                 }));
-        ON_CALL(*allocator,
-                estimatePeakNeedBlocks(testing::_, testing::_, testing::_, testing::_, testing::_, testing::_))
+        ON_CALL(
+            *allocator,
+            estimatePeakNeedBlocks(testing::_, testing::_, testing::_, testing::_, testing::_, testing::_, testing::_))
             .WillByDefault(testing::Invoke([real_allocator](const KVCacheResource& resource,
                                                             int                    seq_len,
                                                             int                    remaining_tokens,
                                                             int                    reserve_step,
                                                             bool                   reuse_cache,
-                                                            LinearCachePolicy      linear_cache_policy) {
-                return real_allocator->estimatePeakNeedBlocks(
-                    resource, seq_len, remaining_tokens, reserve_step, reuse_cache, linear_cache_policy);
+                                                            LinearCachePolicy      linear_cache_policy,
+                                                            int                    writeback_alignment_tokens) {
+                return real_allocator->estimatePeakNeedBlocks(resource,
+                                                              seq_len,
+                                                              remaining_tokens,
+                                                              reserve_step,
+                                                              reuse_cache,
+                                                              linear_cache_policy,
+                                                              writeback_alignment_tokens);
             }));
         ON_CALL(*allocator,
                 estimateInitialBatchPeakNeedBlocks(
-                    testing::_, testing::_, testing::_, testing::_, testing::_, testing::_, testing::_))
+                    testing::_, testing::_, testing::_, testing::_, testing::_, testing::_, testing::_, testing::_))
             .WillByDefault(testing::Invoke([real_allocator](int               seq_len,
                                                             int               common_seq_len,
                                                             int               remaining_tokens,
                                                             int               reserve_step,
                                                             bool              reuse_cache,
                                                             int               target_batch_size,
-                                                            LinearCachePolicy linear_cache_policy) {
+                                                            LinearCachePolicy linear_cache_policy,
+                                                            int               writeback_alignment_tokens) {
                 return real_allocator->estimateInitialBatchPeakNeedBlocks(seq_len,
                                                                           common_seq_len,
                                                                           remaining_tokens,
                                                                           reserve_step,
                                                                           reuse_cache,
                                                                           target_batch_size,
-                                                                          linear_cache_policy);
+                                                                          linear_cache_policy,
+                                                                          writeback_alignment_tokens);
             }));
         cache_manager->coordinator_manager_ = allocator;
         return context;
