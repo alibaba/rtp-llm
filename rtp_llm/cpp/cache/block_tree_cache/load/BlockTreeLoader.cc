@@ -193,8 +193,8 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
         load_begins.push_back(path.size() - std::min(group_set->computeReuseBlockCount(path.size()), path.size()));
     }
     for (size_t i = 0; i < path.size(); ++i) {
-        if (!path[i]->is_accounted) {
-            result.reuse_accounting.unaccounted_block_indices.push_back(i);
+        if (path[i]->unaccounted_writeback_version >= 0) {
+            result.reuse_accounting.unaccounted_blocks.push_back({i, path[i]->unaccounted_writeback_version});
         }
         const size_t candidate_count        = i + 1;
         bool         all_groups_device      = true;

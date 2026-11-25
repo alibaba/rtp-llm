@@ -384,6 +384,33 @@ void expireGroupTtl(Worker& worker, const std::string& key) {
     worker.active_groups_.insert(key);
 }
 
+TEST_F(P2PConnectorWriteWorkerTest, FullWorkerTablesRejectNewKeysAndPreserveReplayFencesUntilExpiry) {
+    config_.writeback_max_request_entries = 1;
+    P2PWorkerDecodeWrite  decode(config_, source_, sender_);
+    P2PWorkerPrefillWrite prefill(config_, target_, receiver_);
+    ASSERT_TRUE(decode.init());
+    ASSERT_TRUE(prefill.init());
+    const auto deadline = currentTimeMs() + 3000;
+    ASSERT_TRUE(decode.cancelWrite("first", deadline));
+    ASSERT_TRUE(prefill.cancelWrite("first", deadline));
+    EXPECT_FALSE(decode.cancelWrite("next", deadline));
+    EXPECT_FALSE(prefill.cancelWrite("next", deadline));
+    EXPECT_FALSE(decode.holdSourceResource("next", deadline, std::make_shared<KVCacheResource>()));
+    EXPECT_EQ(decode.write("next", deadline, workerPlan()).code(), ErrorCode::OUTPUT_QUEUE_FULL);
+    EXPECT_EQ(prefill.handleWrite("next", deadline, workerPlan()).code(), ErrorCode::OUTPUT_QUEUE_FULL);
+    EXPECT_TRUE(decode.write("first", deadline, workerPlan()).hasError());
+    EXPECT_TRUE(prefill.handleWrite("first", deadline, workerPlan()).hasError());
+
+    auto check_expiry = [&](auto& worker) {
+        EXPECT_TRUE(worker.cancelWrite("first", deadline));
+        expireGroupTtl(worker, "first");
+        worker.cleanup();
+        EXPECT_TRUE(worker.cancelWrite("next", deadline));
+    };
+    check_expiry(decode);
+    check_expiry(prefill);
+}
+
 TEST_F(P2PConnectorWriteWorkerTest, ReservedSourceIsUsedBySendTasksAndSurvivesCancellation) {
     sender_->retain_completed_callbacks     = true;
     const auto                     deadline = currentTimeMs() + 3000;

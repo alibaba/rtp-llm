@@ -88,16 +88,18 @@ Decode P2PConnectorAsyncWriteContext
 
 - **双边停止确认**：超时、取消或部分 rank 失败时，Decode 后台 `P2PConnectorAsyncWriteContextChecker` 会先向 Prefill 发送 `CancelWriteBack` 并轮询至 `stopped=true`，同时向本侧 Decode worker 广播 `CANCEL_WRITE` 并通过 `QUERY_LEASE_STATUS` 确认全部 rank 满足 `sealed && started_ops == finished_ops` 后，才释放源 KV 引用。
 - **Prefill 目标块排空**：Prefill 在发生取消、失败或部分注册失败时，同样通过 `CANCEL_HANDLE_WRITE` + `QUERY_LEASE_STATUS` 确认全部接收 rank 物理停止后才释放目标块。
+- Decode 从每个物理块池最多保留 30% 的块用于在途写回。按选中的源块预留，跳过空槽，并保守地按请求分别计入共享块。额度不足时跳过本次写回，记录 `source_kv_budget`。传输释放源块后归还额度。
 - **滞留 KV 观测（与正向 P2P Read 对齐）**：若因对端失联或传输卡死导致 KV 长时间无法释放，滞留块按 `(cache group, block ID)` 去重并按物理块字节数（含 KV scale，跨 PP stage 汇总）计入滞留占比，上报 `rtp_llm_p2p_writeback_retained_*` 指标；存在滞留时每 30 秒打印 `writeback retained KV` 告警日志，全部释放后打印恢复日志（不自动 `abort` 线上进程）。
-- **请求表容量上限**：Prefill 写回请求状态表最多保留 1,048,576 条活跃及终态记录（终态记录保留 1 小时防重放）；超限时返回 `OUTPUT_QUEUE_FULL`（不谎报 `stopped=true`）。
+- Prefill 调度器和两端的每个写回 worker 各自最多保存 1,048,576 个请求。表满时拒绝新 key；已有 key 仍可取消和查询。终态记录保留到请求截止时间加防重放 TTL（默认一小时）。
+- Prefill 的启动 RPC 在本地预算用尽或客户端取消后返回。尚未确认所有接收 worker 停止时返回 `stopped=false`；后台继续取消、查询并保留目标块，后续 `CancelWriteBack` 可查询最终状态。
 - **停机顺序**：服务退出时先调用 `stopP2PWriteback()` 停止新写回并等待在途 `handleWrite()` 与异步上下文排空，再释放 GIL 关闭 gRPC server，最后销毁推理引擎与缓存管理器。
 
 ---
 
 ## 首次复用计费（Billing）
 
-- Prefill 将写回块提交进 `BlockTreeCache` 时会把对应节点标记为未计费（`is_accounted = false`）；后续 Prefill 请求 `match()` 命中这些块时记录未计费索引，并在加载完成后累加计算 `writeback_first_use_len`。
-- 节点的 `is_accounted` 仅在**首个正常 Prefill 请求完成并执行 `insert()`（非写回插入）时**翻转为 `true`。因此串行多轮场景下同一块只计一次首次复用；在该次正常 `insert()` 完成前的并发窗口内，多个同时 `match()` 命中同一写回块的请求都会看到 `is_accounted == false` 并各自计入 `writeback_first_use_len`。
+- Decode 写回创建的节点带有发布版本。Prefill 匹配时记录节点的位置和版本，加载完成后只将实际复用前缀内的命中计入 `writeback_first_use_len`。
+- Prefill 成功提交时，仅清除本请求实际复用、成功发布且版本仍相同的节点标记。先匹配、后自行算出相同后缀的请求，以及匹配后节点被驱逐重建的请求，都保留新标记。多个请求在首次提交前并发命中时，各自保留匹配时的计费快照。
 - 该长度通过 `SideChannelPayloadPB.writeback_first_use_len` 回传给 Decode，最终暴露在响应 `AuxInfoPB.writeback_first_use_len` 以及监控指标 `rtp_llm_writeback_reuse_len` 中（同时从普通 `total_reuse_len` 中扣除）。
 - 若命中请求在加载阶段失败并清理重试，`clearCacheReuseState()` 会重置本请求的计费状态，避免本请求重复计费。
 

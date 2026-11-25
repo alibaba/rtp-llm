@@ -720,7 +720,7 @@ bool P2PConnectorPrefill::cancelProcessWritePerRank(const std::string& unique_ke
     }
     if (!write_worker_->cancelWrite(unique_key, currentTimeMs() + config_.worker_config.load_cache_timeout_ms)) {
         P2PConnector::setP2PResponse(
-            response, ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "invalid write key"));
+            response, ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "could not record write cancellation"));
         return false;
     }
     return queryLeaseStatusPerRank(unique_key, response);

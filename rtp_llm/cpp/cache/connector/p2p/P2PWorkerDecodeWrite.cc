@@ -74,9 +74,12 @@ ErrorInfo P2PWorkerDecodeWrite::write(const std::string&        unique_key,
     std::shared_ptr<WriteTaskGroup> group;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        auto [it, inserted] = groups_.try_emplace(unique_key, nullptr);
-        if (inserted) {
-            it->second = std::make_shared<WriteTaskGroup>(deadline_ms);
+        auto it = groups_.find(unique_key);
+        if (it == groups_.end()) {
+            if (groups_.size() >= config_.writeback_max_request_entries) {
+                return ErrorInfo(ErrorCode::OUTPUT_QUEUE_FULL, "writeback worker table full");
+            }
+            it = groups_.emplace(unique_key, std::make_shared<WriteTaskGroup>(deadline_ms)).first;
         }
         group = it->second;
         std::lock_guard<std::mutex> group_lock(group->mutex);
@@ -187,7 +190,7 @@ std::shared_ptr<p2p_internal::WriteTaskGroup> P2PWorkerDecodeWrite::holdSourceRe
     auto group = std::make_shared<p2p_internal::WriteTaskGroup>(deadline_ms, std::move(source_resource));
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!groups_.emplace(unique_key, group).second) {
+        if (groups_.size() >= config_.writeback_max_request_entries || !groups_.emplace(unique_key, group).second) {
             return nullptr;
         }
         active_groups_.insert(unique_key);
@@ -205,6 +208,9 @@ bool P2PWorkerDecodeWrite::cancelWrite(const std::string& unique_key, int64_t de
         std::lock_guard<std::mutex> lock(mutex_);
         auto                        it = groups_.find(unique_key);
         if (it == groups_.end()) {
+            if (groups_.size() >= config_.writeback_max_request_entries) {
+                return false;  // Acknowledge cancellation only after a late start is fenced.
+            }
             group = std::make_shared<p2p_internal::WriteTaskGroup>(deadline_ms);
             group->lease->seal();
             groups_.emplace(unique_key, group);

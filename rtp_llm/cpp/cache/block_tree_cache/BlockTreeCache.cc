@@ -397,7 +397,8 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
                               bool                                              is_resident,
                               std::optional<int64_t>                            request_id,
                               size_t                                            remote_reuse_begin,
-                              size_t                                            remote_reuse_end) {
+                              size_t                                            remote_reuse_end,
+                              const ReuseAccounting&                            accounting) {
     size_t           resident_prefix_length = 0;
     StorageWriteTask storage_write;
     {
@@ -409,7 +410,8 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
                                             resident_prefix_length,
                                             request_id,
                                             remote_reuse_begin,
-                                            remote_reuse_end);
+                                            remote_reuse_end,
+                                            accounting);
     }
     if (storage_write) {
         storage_backend_->write(std::move(storage_write));

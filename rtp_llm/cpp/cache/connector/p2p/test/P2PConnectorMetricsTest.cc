@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillWrite.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "kmonitor/client/common/MinMaxCalculator.h"
 #include "kmonitor/client/core/MetricsCollector.h"
 
@@ -21,10 +22,13 @@ struct MetricSample {
     std::string reason;
     std::string stage;
     std::string success;
+    std::string serving;
 };
 
 class P2PWritebackMetricsTest: public ::testing::Test {
 protected:
+    block_tree_cache_test::ScopedServingMetrics serving_;
+
     void SetUp() override {
         monitor_ = std::make_shared<kmonitor::KMonitor>("p2p_writeback_metrics_test");
         monitor_->SetServiceName("");
@@ -43,7 +47,8 @@ protected:
                                                     tags->FindTag("side"),
                                                     tags->FindTag("reason"),
                                                     tags->FindTag("stage"),
-                                                    tags->FindTag("success")});
+                                                    tags->FindTag("success"),
+                                                    tags->FindTag(KMON_SERVICE_STATUS_TAG)});
             }
         }
     }
@@ -251,12 +256,17 @@ TEST_F(P2PWritebackMetricsTest, CacheReuseReportsOnlyWritebackBenefitIncludingZe
     RtpLLMCacheReuseMetricsCollector metrics;
     metrics.report_reuse_lengths = true;
     metrics.writeback_reuse_len  = 4;
+    {
+        ScopedKmonMetricsSuppression warmup;
+        reporter_->report<RtpLLMCacheReuseMetrics>(nullptr, &metrics);
+    }
     reporter_->report<RtpLLMCacheReuseMetrics>(nullptr, &metrics);
     metrics.writeback_reuse_len = 0;
     reporter_->report<RtpLLMCacheReuseMetrics>(nullptr, &metrics);
     snapshot();
     expectGauge("rtp_llm_writeback_reuse_len", {4, 0});
     EXPECT_EQ(samples_.at("rtp_llm_writeback_reuse_len").front().side, "prefill");
+    EXPECT_EQ(samples_.at("rtp_llm_writeback_reuse_len").front().serving, "true");
     EXPECT_EQ(samples_.count("rtp_llm_actual_reuse_len"), 0);
     EXPECT_EQ(samples_.count("rtp_llm_reuse_len"), 0);
     EXPECT_EQ(samples_.count("rtp_llm_writeback_first_use_len"), 0);

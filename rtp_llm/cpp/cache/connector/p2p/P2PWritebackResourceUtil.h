@@ -14,6 +14,30 @@ struct P2PConnectorSchedulerConfig;
 // Direct connector users get a finite drain budget as well.
 int64_t writebackShutdownDeadline(int64_t steady_deadline_ms);
 
+// The Decode limit applies independently to each physical pool, including pools shared by cache groups.
+class WritebackSourceBudget : public std::enable_shared_from_this<WritebackSourceBudget> {
+public:
+    class Reservation {
+    public:
+        Reservation() = default;
+        Reservation(const Reservation&) = delete;
+        Reservation& operator=(const Reservation&) = delete;
+        ~Reservation();
+
+    private:
+        friend class WritebackSourceBudget;
+        std::shared_ptr<WritebackSourceBudget> budget_;
+        std::map<DeviceBlockPool*, size_t>     blocks_;
+    };
+
+    std::shared_ptr<Reservation> tryReserve(const std::vector<SingleTypeCacheManagerPtr>& groups,
+                                            const KVCacheResource&                       selected);
+
+private:
+    std::mutex                         mutex_;
+    std::map<DeviceBlockPool*, size_t> held_blocks_;
+};
+
 class WritebackRetainedKv {
 public:
     bool init(const P2PConnectorSchedulerConfig& config,

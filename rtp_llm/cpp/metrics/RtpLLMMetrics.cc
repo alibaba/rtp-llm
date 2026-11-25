@@ -1044,7 +1044,7 @@ void RtpLLMCacheReuseMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCa
     if (collector->report_reuse_lengths && collector->writeback_reuse_len >= 0) {
         kmonitor::MetricsTags reuse_tags = tags ? *tags : kmonitor::MetricsTags{};
         reuse_tags.AddTag("side", "prefill");
-        writeback_reuse_len_metric->Report(&reuse_tags, collector->writeback_reuse_len);
+        reportKmonMetric(writeback_reuse_len_metric, &reuse_tags, collector->writeback_reuse_len);
     }
     if (collector->report_reuse_metrics) {
         RTP_REPORT_MUTABLE_METRIC(device_input_length_metric, collector->device_input_length);

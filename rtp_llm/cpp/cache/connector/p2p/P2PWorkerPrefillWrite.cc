@@ -54,6 +54,9 @@ ErrorInfo P2PWorkerPrefillWrite::handleWrite(const std::string&         unique_k
     auto group = std::make_shared<WriteTaskGroup>(deadline_ms);
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (groups_.size() >= config_.writeback_max_request_entries && !groups_.count(unique_key)) {
+            return ErrorInfo(ErrorCode::OUTPUT_QUEUE_FULL, "writeback worker table full");
+        }
         if (!groups_.emplace(unique_key, group).second) {
             return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "duplicate write task");
         }
@@ -131,6 +134,9 @@ bool P2PWorkerPrefillWrite::cancelWrite(const std::string& unique_key, int64_t d
         std::lock_guard<std::mutex> lock(mutex_);
         auto                        it = groups_.find(unique_key);
         if (it == groups_.end()) {
+            if (groups_.size() >= config_.writeback_max_request_entries) {
+                return false;
+            }
             auto group = std::make_shared<p2p_internal::WriteTaskGroup>(deadline_ms);
             group->lease->seal();
             it = groups_.emplace(unique_key, std::move(group)).first;

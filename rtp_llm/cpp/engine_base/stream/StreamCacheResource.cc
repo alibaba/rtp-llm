@@ -452,6 +452,9 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                 InsertInfo insert_info{
                     batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier, stream_->streamId()};
                 insert_info.pd_decode_linear_tail_only = pd_decode_linear_tail_only_;
+                if (reuse_accounting_done_) {
+                    insert_info.reuse_accounting = std::move(reuse_accounting_);
+                }
                 size_t resident_prefix_length = 0;
                 resource_context_.cache_manager->insertIntoCache(insert_info, resident_prefix_length);
             }
@@ -598,7 +601,9 @@ absl::Status StreamCacheResource::initKVBlock() {
     // HOST/DISK reuse is published after the asynchronous load completes.
     publishReuseLengths(result.reuse_len, 0, 0, 0);
     allocator_load_context_ = std::move(result.async_context);
-    reuse_accounting_       = std::move(result.reuse_accounting);
+    if (!reuse_accounting_done_ && resource_context_.role_type != RoleType::DECODE) {
+        reuse_accounting_ = std::move(result.reuse_accounting);
+    }
     if (allocator_load_context_) {
         return absl::OkStatus();
     }
@@ -610,17 +615,18 @@ absl::Status StreamCacheResource::initKVBlock() {
 }
 
 void StreamCacheResource::finalizeReuseAccounting() {
-    if (!reuse_accounting_done_ && resource_context_.role_type != RoleType::DECODE) {
-        const int    tokens           = reuseBlockTokens();
-        const size_t first_use_blocks = reuse_accounting_.unaccountedBlocks(stream_->initialReuseLength() / tokens);
-        stream_->setWritebackFirstUseLength(static_cast<int>(first_use_blocks) * tokens);
-        reuse_accounting_done_ = true;
+    if (reuse_accounting_done_ || resource_context_.role_type == RoleType::DECODE) {
+        return;
     }
-    reuse_accounting_.unaccounted_block_indices.clear();
+    const int    tokens           = reuseBlockTokens();
+    const size_t first_use_blocks = reuse_accounting_.unaccountedBlocks(stream_->initialReuseLength() / tokens);
+    stream_->setWritebackFirstUseLength(static_cast<int>(first_use_blocks) * tokens);
+    reuse_accounting_.unaccounted_blocks.resize(first_use_blocks);
+    reuse_accounting_done_ = true;
 }
 
 void StreamCacheResource::clearCacheReuseState() {
-    reuse_accounting_.unaccounted_block_indices.clear();
+    reuse_accounting_.unaccounted_blocks.clear();
     reuse_accounting_done_ = false;
     stream_->setWritebackFirstUseLength(0);
     stream_->setReuseLength(0);

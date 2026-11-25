@@ -260,15 +260,17 @@ TEST(BlockTreeStorerTest, PersistingWritebackKeepsFirstPrefillUseUnaccounted) {
     ASSERT_TRUE(backend->waitForPendingWrite());
     const auto path = env.cache->tree()->findNode({100, 101});
     ASSERT_EQ(path.size(), 2u);
-    EXPECT_TRUE(path[0]->is_accounted);
-    EXPECT_FALSE(path[1]->is_accounted);
+    EXPECT_EQ(path[0]->unaccounted_writeback_version, -1);
+    EXPECT_GE(path[1]->unaccounted_writeback_version, 0);
     backend->finishWrite();
     EXPECT_EQ(backend->keys(), (CacheKeysType{100, 101}));
     EXPECT_EQ(backend->blocks(), (std::vector<BlockIdxType>{blocks[0][0], blocks[1][0]}));
-    EXPECT_FALSE(path[1]->is_accounted);
+    EXPECT_GE(path[1]->unaccounted_writeback_version, 0);
 
-    env.cache->insert({100, 101}, {prefix.front(), suffix.front()}, Tier::DEVICE);
-    EXPECT_TRUE(path[1]->is_accounted);
+    auto match = env.cache->match({100, 101});
+    env.cache->insert({100, 101}, {prefix.front(), suffix.front()}, Tier::DEVICE, false, {}, 0, 0, match.reuse_accounting);
+    releaseRequestRefsForTest(*env.cache, match.matched_device_resources);
+    EXPECT_EQ(path[1]->unaccounted_writeback_version, -1);
     backend->finishWrite();
     releaseDeviceBlocks(*env.cache, env.device_pools[0], {blocks[0][0], blocks[1][0]});
 }

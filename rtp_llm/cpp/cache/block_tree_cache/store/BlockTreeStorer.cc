@@ -24,10 +24,11 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
                                               size_t&                                           resident_prefix_length,
                                               std::optional<int64_t>                            request_id,
                                               size_t                                            remote_reuse_begin,
-                                              size_t                                            remote_reuse_end) {
+                                              size_t                                            remote_reuse_end,
+                                              const ReuseAccounting&                            accounting) {
     resident_prefix_length = 0;
     RTP_LLM_CHECK_WITH_INFO(target_tier == Tier::DEVICE, "unsupported store target tier: %s", tierName(target_tier));
-    resident_prefix_length = publishDeviceLocked(cache_keys, resources, is_resident);
+    resident_prefix_length = publishDeviceLocked(cache_keys, resources, is_resident, false, accounting);
     return storage_backend_ ? storage_backend_->prepareWrite(makeStorageRequest(
                                   cache_keys, resources, request_id, remote_reuse_begin, remote_reuse_end)) :
                               StorageWriteTask{};
@@ -36,9 +37,20 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
 size_t BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                              cache_keys,
                                             const std::vector<std::vector<GroupSetResource>>& resources,
                                             bool                                              is_resident,
-                                            bool                                              is_writeback) {
-    const BlockTreeInsertResult insert_result =
-        tree_->insertNode(cache_keys, resources, false, is_resident, is_writeback);
+                                            bool                                              is_writeback,
+                                            const ReuseAccounting&                            accounting) {
+    const auto insert_result =
+        tree_->insertNode(cache_keys, resources, !accounting.unaccounted_blocks.empty(), is_resident, is_writeback);
+    // A concurrent writeback can publish or recreate a node after this request's prefix match.
+    for (const auto& match : accounting.unaccounted_blocks) {
+        if (match.index >= insert_result.path.size()) {
+            break;
+        }
+        auto& version = insert_result.path[match.index]->unaccounted_writeback_version;
+        if (version == match.publication_version) {
+            version = -1;
+        }
+    }
     if (insert_result.hard_stop) {
         metrics_reporter_.reportInsertHardStop();
     }

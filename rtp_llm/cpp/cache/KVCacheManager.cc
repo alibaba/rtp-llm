@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWriteWorkerUtil.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWritebackResourceUtil.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/cache/events/KVCMPublisher.h"
@@ -244,6 +245,10 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     warmup_(warmup),
     block_tree_layout_(std::move(block_tree_layout)),
     allocation_wait_state_(std::make_shared<KVCacheAllocationWaitState>()) {
+    if (cache_store_config_.p2p_writeback_enable && pd_sep_config_.role_type == RoleType::DECODE
+        && parallelism_config_.tp_rank == 0 && parallelism_config_.pp_rank == 0) {
+        writeback_source_budget_ = std::make_shared<WritebackSourceBudget>();
+    }
     for (const auto& group : config_.topology().groups()) {
         RTP_LLM_CHECK_WITH_INFO(group.block_num > 0, "cache manager requires capacity-complete cache groups");
     }
@@ -1714,13 +1719,19 @@ std::shared_ptr<AsyncContext> KVCacheManager::asyncWriteBack(const BatchKVCacheR
             RTP_LLM_LOG_WARNING("writeback source selection failed: %s", selected_error.ToString().c_str());
             return skip("invalid_source_routes");
         }
-        // Preserve logical positions, including sparse holes, while holding only physical blocks.
-        KVCacheResourcePtr hold(new KVCacheResource, [groups](KVCacheResource* resource) {
+        auto reservation = writeback_source_budget_->tryReserve(groups, selected);
+        if (!reservation) {
+            return skip("source_kv_budget");
+        }
+        // Keep the reservation until the physical references have been returned.
+        auto release = [groups, reservation = std::move(reservation)](KVCacheResource* resource) mutable {
             for (const auto& group : groups) {
                 group->unreference(resource->blocks(group->tag()));
             }
             delete resource;
-        });
+            reservation.reset();
+        };
+        KVCacheResourcePtr hold(new KVCacheResource, std::move(release));
         hold->initGroups(config_.topologyPtr());
         for (const auto& group : groups) {
             group->reference(hold->mutableBlockIds(group->tag()), selected.blocks(group->tag()));

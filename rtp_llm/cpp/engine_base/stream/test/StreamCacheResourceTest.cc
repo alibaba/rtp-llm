@@ -2907,7 +2907,7 @@ TEST_F(StreamCacheResourceTest, WritebackAccountingWaitsForSuccessfulAllocationA
     prepareResource(true, RoleType::PREFILL);
     auto&        resource = stream_->streamCacheResource();
     MallocResult matched{true, 4};
-    matched.reuse_accounting.unaccounted_block_indices = {1};
+    matched.reuse_accounting.unaccounted_blocks = {{1, 1}};
     auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
     cache_manager_->coordinator_manager_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_)).WillRepeatedly(testing::Return(matched));
@@ -2932,14 +2932,14 @@ TEST_F(StreamCacheResourceTest, WritebackAccountingIsRecomputedAfterClearingAnAt
     prepareResource(true, RoleType::PREFILL);
     auto& resource = stream_->streamCacheResource();
     stream_->setInitialReuseLength(4);
-    resource.reuse_accounting_.unaccounted_block_indices = {0, 1};
+    resource.reuse_accounting_.unaccounted_blocks = {{0, 0}, {1, 1}};
     resource.finalizeReuseAccounting();
     ASSERT_EQ(stream_->writebackFirstUseLength(), 4);
 
     resource.clearCacheReuseState();
     EXPECT_EQ(stream_->writebackFirstUseLength(), 0);
     stream_->setInitialReuseLength(4);
-    resource.reuse_accounting_.unaccounted_block_indices = {1};
+    resource.reuse_accounting_.unaccounted_blocks = {{1, 1}};
     resource.finalizeReuseAccounting();
     EXPECT_EQ(stream_->writebackFirstUseLength(), 2);
 }
@@ -2950,7 +2950,7 @@ TEST_F(StreamCacheResourceTest, WritebackAccountingUsesCanonicalCpBlocks) {
     cache_manager_->cp_slot_mapper_ = std::make_shared<CPSlotMapper>(0, 2, 2);
     ASSERT_EQ(resource.reuseBlockTokens(), 4);
     stream_->setInitialReuseLength(4);
-    resource.reuse_accounting_.unaccounted_block_indices = {0};
+    resource.reuse_accounting_.unaccounted_blocks = {{0, 0}};
     resource.finalizeReuseAccounting();
     EXPECT_EQ(stream_->writebackFirstUseLength(), 4);
     EXPECT_EQ(stream_->initialReuseLength(), 4);
@@ -2981,7 +2981,7 @@ TEST_F(StreamCacheResourceTest, WritebackAccountingLoadFailureOnlyCountsSurvivin
     prepareResource(true, RoleType::PREFILL);
     auto& resource = stream_->streamCacheResource();
     stream_->setInitialReuseLength(2);
-    resource.reuse_accounting_.unaccounted_block_indices = {0, 1};
+    resource.reuse_accounting_.unaccounted_blocks = {{0, 0}, {1, 1}};
     auto context                                         = makeAllocatorLoadContext(2, {Tier::DEVICE, Tier::HOST});
     resource.allocator_load_context_                     = context;
     EXPECT_FALSE(resource.loadCacheDone());
@@ -2989,7 +2989,7 @@ TEST_F(StreamCacheResourceTest, WritebackAccountingLoadFailureOnlyCountsSurvivin
     ASSERT_TRUE(context->completeTransfers(1, false));
     ASSERT_TRUE(resource.loadCacheDone());
     EXPECT_EQ(stream_->writebackFirstUseLength(), 2);
-    EXPECT_TRUE(resource.reuse_accounting_.unaccounted_block_indices.empty());
+    EXPECT_EQ(resource.reuse_accounting_.unaccounted_blocks.size(), 1u);
 }
 
 TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessCommitsCompleteReuse) {
@@ -3001,7 +3001,7 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessCommitsCompleteReuse) {
     auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
     cache_manager_->coordinator_manager_ = allocator;
     MallocResult matched{true, 2, 0, load_context};
-    matched.reuse_accounting.unaccounted_block_indices = {1, 2};
+    matched.reuse_accounting.unaccounted_blocks = {{1, 1}, {2, 2}};
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_)).WillOnce(testing::Return(matched));
     EXPECT_CALL(*allocator, incrMalloc(testing::_)).WillOnce(testing::Return(MallocResult{true, 0}));
 
@@ -3022,7 +3022,7 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessCommitsCompleteReuse) {
     EXPECT_EQ(stream_->diskReuseLength(), 2);
     EXPECT_EQ(stream_->deviceReuseLength(), 2);
     EXPECT_EQ(stream_->writebackFirstUseLength(), 4);
-    EXPECT_TRUE(resource.reuse_accounting_.unaccounted_block_indices.empty());
+    EXPECT_EQ(resource.reuse_accounting_.unaccounted_blocks.size(), 2u);
 }
 
 TEST_F(StreamCacheResourceTest, testInitRejectsSuccessfulNonLoadAllocatorContext) {

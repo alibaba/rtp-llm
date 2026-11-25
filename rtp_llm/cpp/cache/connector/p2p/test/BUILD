@@ -169,7 +169,8 @@ cc_test(
         "@havenask//aios/autil:zlib",
     ] + device_impl_target(),
     copts = test_copts,
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(

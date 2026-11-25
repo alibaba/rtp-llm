@@ -94,6 +94,9 @@ class BackendManagerStopTest(unittest.TestCase):
     @staticmethod
     def make_manager(event=None):
         manager = BackendManager.__new__(BackendManager)
+        manager.py_env_configs = SimpleNamespace(
+            cache_store_config=SimpleNamespace(p2p_writeback_enable=False)
+        )
         manager.engine = None
         manager._shutdown_requested = threading.Event()
         manager._service_draining = event

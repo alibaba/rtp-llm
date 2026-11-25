@@ -16,8 +16,6 @@
 
 namespace rtp_llm {
 namespace {
-constexpr int64_t kControlInitialIntervalMs = 10;
-constexpr size_t  kMaxRequestEntries        = 1024 * 1024;
 constexpr int64_t kControlMaxIntervalMs     = 100;
 constexpr int64_t kLeaseQueryTimeoutMs      = 500;
 
@@ -70,25 +68,25 @@ void P2PSchedulerPrefillWrite::stop(int64_t steady_deadline_ms) {
         state->cancel(ErrorInfo(ErrorCode::CANCELLED, "writeback receiver stopping"));
     {
         std::unique_lock<std::mutex> lock(requests_mutex_);
-        if (!requests_cv_.wait_until(lock, deadline, [this] { return active_write_handlers_ == 0; })) {
+        const auto drained = [this] { return active_write_handlers_ == 0 && pending_drains_.empty(); };
+        if (!requests_cv_.wait_until(lock, deadline, drained)) {
             RTP_LLM_LOG_ERROR(
-                "writeback shutdown timed out on Prefill with %zu active handler(s); aborting drain and waiting for "
-                "handlers to unwind",
-                active_write_handlers_);
+                "writeback shutdown timed out on Prefill with %zu active handler(s) and %zu pending drain(s)",
+                active_write_handlers_, pending_drains_.size());
             drain_aborted_.store(true, std::memory_order_release);
             for (const auto& [key, state] : requests_) {
                 state->notifyProgress();
             }
-            requests_cv_.wait(lock, [this] { return active_write_handlers_ == 0; });
+            requests_cv_.notify_all();
+            requests_cv_.wait(lock, drained);
         }
         stopped_ = true;
     }
+    requests_cv_.notify_all();
+    if (drain_thread_.joinable())
+        drain_thread_.join();
     if (control_pool_)
         control_pool_->stop(autil::ThreadPoolBase::STOP_AFTER_QUEUE_EMPTY);
-    if (metrics_thread_) {
-        metrics_thread_->stop();
-        metrics_thread_.reset();
-    }
     if (initialized_) {
         checkRetainedResources();
     }
@@ -114,9 +112,8 @@ bool P2PSchedulerPrefillWrite::init() {
     }
     control_pool_ = std::make_shared<autil::ThreadPool>(4, 1024, nullptr, "P2PWriteControl");
     initialized_  = control_pool_->start();
-    if (initialized_ && metrics_reporter_) {
-        metrics_thread_ =
-            autil::LoopThread::createLoopThread([this] { checkRetainedResources(); }, 1000000, "WritebackMetrics");
+    if (initialized_) {
+        drain_thread_ = std::thread(&P2PSchedulerPrefillWrite::runDrainLoop, this);
     }
     return initialized_;
 }
@@ -286,7 +283,7 @@ void P2PSchedulerPrefillWrite::cancelWrite(const P2PConnectorCancelWriteBackRequ
         pruneRequestsLocked(P2PNotification::nowMs());
         state = findRequestLocked(request.unique_key());
         if (!state && !stopping_) {
-            if (requests_.size() + completed_requests_.size() >= kMaxRequestEntries) {
+            if (requests_.size() + completed_requests_.size() >= kMaxWritebackRequestEntries) {
                 response.set_stopped(false);
                 response.set_error_code(transErrorCodeToRPC(ErrorCode::OUTPUT_QUEUE_FULL));
                 response.set_error_message("writeback request table full");
@@ -432,97 +429,104 @@ void P2PSchedulerPrefillWrite::WriteTransfer::observe(PrefillWriteRequest& reque
     }
 }
 
-void P2PSchedulerPrefillWrite::drainWrite(const std::string&          unique_key,
-                                         int64_t                     deadline_ms,
-                                         PrefillWriteRequest&        request,
-                                         WriteTransfer&              transfer,
-                                         const std::function<void()>& notify) {
-    // Keep targets through physical stop, including any committed local load.
-    std::future<std::shared_ptr<P2PBroadcastClient::TpBroadcastResult>> control_submission;
-    std::shared_ptr<P2PBroadcastClient::TpBroadcastResult>              control_result;
-    bool                                                                cancel_confirmed = false;
-    int64_t                                                             next_control_ms  = 0;
-    int64_t                                                             interval_ms      = kControlInitialIntervalMs;
-    if (transfer.resource && !transfer.targetStopped()) {
-        bool became_non_empty = false;
-        {
-            std::lock_guard<std::mutex> lock(requests_mutex_);
-            const bool was_empty = retained_resources_.empty();
-            retained_resources_.emplace(unique_key, transfer.resource);
-            became_non_empty = was_empty && !retained_resources_.empty();
+void P2PSchedulerPrefillWrite::runDrainLoop() {
+    std::unique_lock<std::mutex> lock(requests_mutex_);
+    while (!stopped_) {
+        if (pending_drains_.empty()) {
+            requests_cv_.wait_for(lock, std::chrono::seconds(1), [this] { return stopped_ || !pending_drains_.empty(); });
+        } else {
+            requests_cv_.wait_for(lock, std::chrono::milliseconds(kControlInitialIntervalMs),
+                                  [this] { return stopped_ || drain_aborted_.load(); });
         }
-        checkRetainedResources(/*force=*/became_non_empty);
+        if (stopped_)
+            break;
+        std::vector<std::shared_ptr<WriteDrain>> drains;
+        for (const auto& [key, drain] : pending_drains_)
+            drains.push_back(drain);
+        lock.unlock();
+        for (const auto& drain : drains) {
+            if (!drain_aborted_.load())
+                advanceDrain(*drain);
+            if (drain->transfer.targetStopped() || drain_aborted_.load())
+                finishWrite(*drain);
+        }
+        if (metrics_reporter_ || !drains.empty())
+            checkRetainedResources(false);
+        drains.clear();
+        lock.lock();
     }
-    while (!transfer.targetStopped() && !drain_aborted_.load(std::memory_order_acquire)) {
-        const auto seq = request.progressSeq();
-        try {
-            transfer.observe(request, notify);
-            if (transfer.load_context)
-                transfer.load_context->abortPending();
-            if (control_submission.valid()
-                && control_submission.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
-                std::string failure;
-                control_result = p2p_internal::callForResult([&] { return control_submission.get(); }, failure);
-                if (control_result)
-                    control_result->setProgressCallback(notify);
-                else {
-                    cancel_confirmed = false;
-                    RTP_LLM_LOG_WARNING("writeback receive stop control failed, unique_key=%s: %s",
-                                        unique_key.c_str(),
-                                        failure.c_str());
-                    next_control_ms = P2PNotification::nowMs() + interval_ms;
-                    interval_ms     = std::min(interval_ms * 2, kControlMaxIntervalMs);
-                }
+}
+
+void P2PSchedulerPrefillWrite::advanceDrain(WriteDrain& drain) {
+    auto& transfer = drain.transfer;
+    const auto notify = [weak = std::weak_ptr<PrefillWriteRequest>(drain.state)] {
+        if (const auto state = weak.lock())
+            state->notifyProgress();
+    };
+    try {
+        transfer.observe(*drain.state, notify);
+        if (transfer.load_context)
+            transfer.load_context->abortPending();
+        if (drain.control_submission.valid()
+            && drain.control_submission.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+            std::string failure;
+            drain.control_result = p2p_internal::callForResult([&] { return drain.control_submission.get(); }, failure);
+            if (drain.control_result)
+                drain.control_result->setProgressCallback(notify);
+            else {
+                drain.cancel_confirmed = false;
+                RTP_LLM_LOG_WARNING("writeback receive stop control failed, unique_key=%s: %s",
+                                    drain.unique_key.c_str(),
+                                    failure.c_str());
+                drain.next_control_ms = P2PNotification::nowMs() + drain.interval_ms;
+                drain.interval_ms     = std::min(drain.interval_ms * 2, kControlMaxIntervalMs);
             }
-            if (control_result && control_result->done()) {
-                const auto status = P2PBroadcastClient::leaseStatus(control_result);
-                cancel_confirmed  = status.success;
-                if (status.success) {
-                    transfer.receive_stopped = transfer.receive_stopped || status.allStopped();
-                }
-                control_result.reset();
-                next_control_ms = P2PNotification::nowMs() + interval_ms;
-                interval_ms     = std::min(interval_ms * 2, kControlMaxIntervalMs);
-            }
-            if (transfer.targetStopped() || drain_aborted_.load(std::memory_order_acquire))
-                break;
-            if (transfer.receive_started && !transfer.receive_stopped && !control_submission.valid() && !control_result
-                && P2PNotification::nowMs() >= next_control_ms) {
-                const auto timeout_limit =
-                    std::min(config_.p2p_lease_query_timeout_ms,
-                             cancel_confirmed ? kLeaseQueryTimeoutMs : config_.p2p_cancel_broadcast_timeout_ms);
-                control_submission = submitWriteRpc(
-                    control_pool_,
-                    [client = client_, key = unique_key, deadline_ms, timeout_limit, cancel_confirmed] {
-                        return cancel_confirmed ?
-                                   client->queryLeaseStatusAsync(key, HANDLE_WRITE, timeout_limit) :
-                                   client->controlWriteAsync(key, CANCEL_HANDLE_WRITE, deadline_ms, timeout_limit);
-                    },
-                    notify);
-                if (!control_submission.valid()) {
-                    cancel_confirmed = false;
-                    next_control_ms  = P2PNotification::nowMs() + interval_ms;
-                    interval_ms      = std::min(interval_ms * 2, kControlMaxIntervalMs);
-                }
-            }
-            checkRetainedResources(/*force=*/false);
-            request.waitForProgress(seq);
-        } catch (const std::exception& e) {
-            cancel_confirmed = false;
-            RTP_LLM_LOG_ERROR("writeback receive cleanup iteration failed, retaining target KV, unique_key=%s: %s",
-                              unique_key.c_str(),
-                              e.what());
-            next_control_ms = P2PNotification::nowMs() + interval_ms;
-            interval_ms     = std::min(interval_ms * 2, kControlMaxIntervalMs);
-            std::this_thread::sleep_for(std::chrono::milliseconds(kControlInitialIntervalMs));
-        } catch (...) {
-            cancel_confirmed = false;
-            RTP_LLM_LOG_ERROR("writeback receive cleanup iteration failed, retaining target KV, unique_key=%s",
-                              unique_key.c_str());
-            next_control_ms = P2PNotification::nowMs() + interval_ms;
-            interval_ms     = std::min(interval_ms * 2, kControlMaxIntervalMs);
-            std::this_thread::sleep_for(std::chrono::milliseconds(kControlInitialIntervalMs));
         }
+        if (drain.control_result && drain.control_result->done()) {
+            const auto status = P2PBroadcastClient::leaseStatus(drain.control_result);
+            drain.cancel_confirmed  = status.success;
+            if (status.success) {
+                transfer.receive_stopped = transfer.receive_stopped || status.allStopped();
+            }
+            drain.control_result.reset();
+            drain.next_control_ms = P2PNotification::nowMs() + drain.interval_ms;
+            drain.interval_ms     = std::min(drain.interval_ms * 2, kControlMaxIntervalMs);
+        }
+        if (transfer.targetStopped() || drain_aborted_.load(std::memory_order_acquire))
+            return;
+        if (transfer.receive_started && !transfer.receive_stopped && !drain.control_submission.valid() && !drain.control_result
+            && P2PNotification::nowMs() >= drain.next_control_ms) {
+            const auto timeout_limit =
+                std::min(config_.p2p_lease_query_timeout_ms,
+                         drain.cancel_confirmed ? kLeaseQueryTimeoutMs : config_.p2p_cancel_broadcast_timeout_ms);
+            drain.control_submission = submitWriteRpc(
+                control_pool_,
+                [client = client_, key = drain.unique_key, deadline_ms = drain.deadline_ms, timeout_limit,
+                 cancel_confirmed = drain.cancel_confirmed] {
+                    return cancel_confirmed ?
+                               client->queryLeaseStatusAsync(key, HANDLE_WRITE, timeout_limit) :
+                               client->controlWriteAsync(key, CANCEL_HANDLE_WRITE, deadline_ms, timeout_limit);
+                },
+                notify);
+            if (!drain.control_submission.valid()) {
+                drain.cancel_confirmed = false;
+                drain.next_control_ms  = P2PNotification::nowMs() + drain.interval_ms;
+                drain.interval_ms      = std::min(drain.interval_ms * 2, kControlMaxIntervalMs);
+            }
+        }
+    } catch (const std::exception& e) {
+        drain.cancel_confirmed = false;
+        RTP_LLM_LOG_ERROR("writeback receive cleanup iteration failed, retaining target KV, unique_key=%s: %s",
+                          drain.unique_key.c_str(),
+                          e.what());
+        drain.next_control_ms = P2PNotification::nowMs() + drain.interval_ms;
+        drain.interval_ms     = std::min(drain.interval_ms * 2, kControlMaxIntervalMs);
+    } catch (...) {
+        drain.cancel_confirmed = false;
+        RTP_LLM_LOG_ERROR("writeback receive cleanup iteration failed, retaining target KV, unique_key=%s",
+                          drain.unique_key.c_str());
+        drain.next_control_ms = P2PNotification::nowMs() + drain.interval_ms;
+        drain.interval_ms     = std::min(drain.interval_ms * 2, kControlMaxIntervalMs);
     }
 }
 
@@ -669,7 +673,7 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
         std::lock_guard<std::mutex> lock(requests_mutex_);
         pruneRequestsLocked(P2PNotification::nowMs());
         if (!stopping_ && !findRequestLocked(unique_key)) {
-            if (requests_.size() + completed_requests_.size() >= kMaxRequestEntries) {
+            if (requests_.size() + completed_requests_.size() >= kMaxWritebackRequestEntries) {
                 table_full = true;
             } else {
                 const auto expiry = request_expirations_.emplace(holdUntilMs(state->stop_at_ms), unique_key);
@@ -863,10 +867,45 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
         state->fail(ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "writeback receive failed"));
     }
     finish_transfer(state->errorInfo());
-    const auto drain_start_us = currentTimeUs();
+    WriteDrain drain{unique_key, state, std::move(transfer), std::move(metrics),
+                     deadline_ms, start_us, hold_start_us, currentTimeUs()};
+    if (!drain.transfer.targetStopped()) {
+        // A local load that never submitted can be aborted and released before replying.
+        advanceDrain(drain);
+    }
+    if (drain.transfer.targetStopped()) {
+        finishWrite(drain);
+    } else {
+        // Cleanup outlives the RPC. CancelWriteBack can continue to query this request until all receivers stop.
+        auto pending = std::make_shared<WriteDrain>(std::move(drain));
+        {
+            std::lock_guard<std::mutex> lock(requests_mutex_);
+            if (pending->transfer.resource)
+                retained_resources_.emplace(unique_key, pending->transfer.resource);
+            pending_drains_.emplace(unique_key, std::move(pending));
+        }
+        requests_cv_.notify_all();
+        checkRetainedResources(false);
+        for (;;) {
+            const auto seq = state->progressSeq();
+            if (state->isStopped() || drain_aborted_.load() || P2PNotification::nowMs() >= stop_at_ms
+                || (is_cancelled && is_cancelled())) {
+                break;
+            }
+            state->waitForProgress(seq);
+        }
+    }
+    const auto error = state->errorInfo();
+    response.set_accepted_block_count(error.ok() ? count : 0);
+    response.set_stopped(state->isStopped());
+    response.set_error_code(transErrorCodeToRPC(error.code()));
+    response.set_error_message(error.ok() ? "" : error.ToString());
+}
 
-    // step 6: drain target workers until physical stop, release target KV, and finalize state/metrics
-    drainWrite(unique_key, deadline_ms, *state, transfer, notify);
+void P2PSchedulerPrefillWrite::finishWrite(WriteDrain& drain) {
+    auto&       transfer   = drain.transfer;
+    const auto& unique_key = drain.unique_key;
+    const auto& state      = drain.state;
     const bool target_stopped = transfer.targetStopped();
     bool       became_empty   = false;
     if (target_stopped) {
@@ -896,6 +935,7 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
     {
         std::lock_guard<std::mutex> requests_lock(requests_mutex_);
         std::lock_guard<std::mutex> lock(state->mutex);
+        pending_drains_.erase(unique_key);
         state->stopped = target_stopped;
         error          = state->error;
         if (target_stopped) {
@@ -908,15 +948,14 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
         state->cv.notify_all();
     }
     checkRetainedResources(/*force=*/became_empty);
-    response.set_accepted_block_count(error.ok() ? count : 0);
-    response.set_stopped(target_stopped);
-    response.set_error_code(transErrorCodeToRPC(error.code()));
-    response.set_error_message(error.ok() ? "" : error.ToString());
+    requests_cv_.notify_all();
+    auto& metrics = drain.metrics;
     metrics.no_transfer        = !transfer.receive_started && error.ok();
     metrics.error              = error;
-    metrics.hold_time_us       = hold_start_us > 0 ? released_us - hold_start_us : 0;
-    metrics.drain_time_us      = released_us - drain_start_us;
-    report();
+    metrics.hold_time_us       = drain.hold_start_us > 0 ? released_us - drain.hold_start_us : 0;
+    metrics.drain_time_us      = released_us - drain.drain_start_us;
+    metrics.total_cost_time_us = released_us - drain.start_us;
+    reportWritebackMetrics(metrics_reporter_, metrics);
 }
 
 }  // namespace rtp_llm

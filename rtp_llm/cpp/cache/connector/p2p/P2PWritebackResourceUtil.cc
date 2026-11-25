@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PNotification.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include <algorithm>
 #include <map>
 #include <set>
 
@@ -10,6 +11,44 @@ namespace rtp_llm {
 int64_t writebackShutdownDeadline(int64_t steady_deadline_ms) {
     constexpr int64_t kDefaultWritebackShutdownTimeoutMs = 600 * 1000;
     return steady_deadline_ms > 0 ? steady_deadline_ms : P2PNotification::nowMs() + kDefaultWritebackShutdownTimeoutMs;
+}
+
+WritebackSourceBudget::Reservation::~Reservation() {
+    if (budget_) {
+        std::lock_guard<std::mutex> lock(budget_->mutex_);
+        for (const auto& [pool, count] : blocks_) {
+            budget_->held_blocks_.at(pool) -= count;
+        }
+    }
+}
+
+std::shared_ptr<WritebackSourceBudget::Reservation>
+WritebackSourceBudget::tryReserve(const std::vector<SingleTypeCacheManagerPtr>& groups,
+                                  const KVCacheResource&                       selected) {
+    auto reservation = std::make_shared<Reservation>();
+    for (const auto& group : groups) {
+        const auto& blocks = selected.blocks(group->tag());
+        const auto count = std::count_if(blocks.begin(), blocks.end(), [](auto block) { return !isNullBlockIdx(block); });
+        if (count > 0) {
+            reservation->blocks_[group->blockPool().get()] += count;
+        }
+    }
+    auto self = shared_from_this();
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& [pool, count] : reservation->blocks_) {
+        // Count each request's references conservatively, even when two requests share a block.
+        constexpr double kMaxSourcePoolFraction = 0.30;
+        const size_t limit = static_cast<size_t>(pool->totalBlocksNum() * kMaxSourcePoolFraction);
+        const size_t held = held_blocks_[pool];
+        if (count > limit || held > limit - count) {
+            return nullptr;
+        }
+    }
+    for (const auto& [pool, count] : reservation->blocks_) {
+        held_blocks_.at(pool) += count;
+    }
+    reservation->budget_ = std::move(self);
+    return reservation;
 }
 
 bool WritebackRetainedKv::init(const P2PConnectorSchedulerConfig& config,

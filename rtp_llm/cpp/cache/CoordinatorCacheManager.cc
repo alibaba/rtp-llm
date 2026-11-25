@@ -1713,7 +1713,7 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
         }
         resident_prefix_length += block_tree_cache_->insert(
             insert_keys, resources, insert_info.target_tier, insert_info.is_resident, insert_info.request_id,
-            remote_reuse_begin, remote_reuse_end);
+            remote_reuse_begin, remote_reuse_end, insert_info.reuse_accounting);
     }
 }
 

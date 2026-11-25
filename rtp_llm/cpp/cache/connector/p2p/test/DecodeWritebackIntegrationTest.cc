@@ -25,6 +25,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayoutFactory.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverterImpl.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWritebackResourceUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorDecode.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorPrefill.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerDecodeWrite.h"
@@ -796,6 +797,7 @@ TEST_F(DecodeWritebackCpIntegrationTest, TcpScatterPublishesCanonicalPrefixAndRe
         }
     }
     InsertInfo insert_info{reused, ids, false, Tier::DEVICE};
+    insert_info.reuse_accounting = result.reuse_accounting;
     size_t     resident_prefix_length = 0;
     prefill_->insertIntoCache(insert_info, resident_prefix_length);
     const auto cache        = target_->blockTreeCacheOwner();
@@ -1543,6 +1545,38 @@ INSTANTIATE_TEST_SUITE_P(NoSubmitCases,
                                            "failed_finished_no_reuse",
                                            "fake_no_reuse",
                                            "beam_no_reuse"));
+
+TEST_F(DecodeWritebackIntegrationTest, SourceBudgetSkipsWritebackUntilPhysicalReferencesAreReleased) {
+    prepare();
+    const auto groups = source_->cacheGroups();
+    ASSERT_EQ(groups.size(), 1u);
+    ASSERT_EQ(groups.front()->blockPool()->totalBlocksNum(), 15u);
+    ASSERT_GE(source_blocks_.size(), 4u);
+    KVCacheResource selection;
+    selection.initGroups(config_.topologyPtr());
+    selection.mutableBlockIds(groups.front()->tag()).assign(
+        {source_blocks_[0], NULL_BLOCK_IDX, source_blocks_[2], source_blocks_[3]});
+
+    // Only one of these three-block requests fits in the four-block budget.
+    auto reserve = [&] { return decode_->writeback_source_budget_->tryReserve(groups, selection); };
+    auto competing = std::async(std::launch::async, reserve);
+    auto first = reserve();
+    auto second = competing.get();
+    ASSERT_NE(static_cast<bool>(first), static_cast<bool>(second));
+    stream_->releaseResource();
+    EXPECT_EQ(context(), nullptr);
+    EXPECT_EQ(prefill_service_.handshakes, 0);
+
+    first.reset();
+    second.reset();
+    prepare();
+    stream_->releaseResource();
+    auto write = awaitWriteStart();
+    ASSERT_NE(write, nullptr);
+    EXPECT_FALSE(reserve());  // The sender still holds two suffix blocks.
+    releaseAndExpectSuccess(write);
+    EXPECT_TRUE(reserve());
+}
 
 TEST_F(DecodeWritebackIntegrationTest, DecodeZeroKvRatioStillSubmitsWriteback) {
     auto reserved            = makeManager(RoleType::DECODE, source_, true, /*max_kv_ratio=*/0.0);

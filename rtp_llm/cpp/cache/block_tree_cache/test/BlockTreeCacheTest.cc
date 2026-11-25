@@ -262,44 +262,48 @@ protected:
     std::unique_ptr<BlockTreeCache> cache_;
 };
 
-TEST_F(BlockTreeCacheTest, WritebackInsertPreservesAccountingUntilNormalInsert) {
+TEST_F(BlockTreeCacheTest, OnlyPrefillThatReusedWritebackBlocksConfirmsFirstUse) {
     const CacheKeysType                        keys{100, 200, 300};
     std::vector<std::vector<GroupSetResource>> resources(3, std::vector<GroupSetResource>(1));
     for (size_t index = 0; index < resources.size(); ++index) {
         resources[index][0].device_blocks = {static_cast<BlockIdxType>(42 + index)};
     }
     cache_->insert({100}, {resources[0]}, Tier::DEVICE);
+    auto early = cache_->match(keys);
+    releaseRequestRefsForTest(*cache_, early.matched_device_resources);
     ASSERT_FALSE(cache_->insertExternalBlocks(keys, 1, resources, currentTimeMs() + 10000).hasError());
     const auto path = cache_->tree()->findNode(keys);
     ASSERT_EQ(path.size(), 3u);
-    EXPECT_TRUE(path[0]->is_accounted);
-    EXPECT_FALSE(path[1]->is_accounted);
-    EXPECT_FALSE(path[2]->is_accounted);
+    EXPECT_EQ(path[0]->unaccounted_writeback_version, -1);
+    EXPECT_GE(path[1]->unaccounted_writeback_version, 0);
+    EXPECT_GE(path[2]->unaccounted_writeback_version, 0);
 
+    // This request computed the suffix itself, before the writeback published it.
+    cache_->insert(keys, resources, Tier::DEVICE, false, {}, 0, 0, early.reuse_accounting);
     BlockTreeMatchResult probe;
     ASSERT_FALSE(cache_->matchForExternalInsert(keys, 1, probe).hasError());
     releaseRequestRefsForTest(*cache_, probe.matched_device_resources);
-    EXPECT_FALSE(path[1]->is_accounted);
-    EXPECT_FALSE(path[2]->is_accounted);
+    EXPECT_GE(path[1]->unaccounted_writeback_version, 0);
+    EXPECT_GE(path[2]->unaccounted_writeback_version, 0);
 
     auto first = cache_->match(keys);
     EXPECT_EQ(first.reuse_accounting.unaccountedBlocks(2), 1u);
     EXPECT_EQ(first.reuse_accounting.unaccountedBlocks(3), 2u);
-    EXPECT_FALSE(path[1]->is_accounted);
-    EXPECT_FALSE(path[2]->is_accounted);
+    EXPECT_GE(path[1]->unaccounted_writeback_version, 0);
+    EXPECT_GE(path[2]->unaccounted_writeback_version, 0);
     releaseRequestRefsForTest(*cache_, first.matched_device_resources);
 
     ASSERT_FALSE(cache_->insertExternalBlocks(keys, 1, resources, currentTimeMs() + 10000).hasError());
-    EXPECT_TRUE(path[0]->is_accounted);
-    EXPECT_FALSE(path[1]->is_accounted);
-    EXPECT_FALSE(path[2]->is_accounted);
-    cache_->insert({100, 200}, {resources[0], resources[1]}, Tier::DEVICE);
-    EXPECT_TRUE(path[1]->is_accounted);
-    EXPECT_FALSE(path[2]->is_accounted);
+    EXPECT_EQ(path[0]->unaccounted_writeback_version, -1);
+    EXPECT_GE(path[1]->unaccounted_writeback_version, 0);
+    EXPECT_GE(path[2]->unaccounted_writeback_version, 0);
+    cache_->insert({100, 200}, {resources[0], resources[1]}, Tier::DEVICE, false, {}, 0, 0, first.reuse_accounting);
+    EXPECT_EQ(path[1]->unaccounted_writeback_version, -1);
+    EXPECT_GE(path[2]->unaccounted_writeback_version, 0);
     auto second = cache_->match(keys);
     EXPECT_EQ(second.reuse_accounting.unaccountedBlocks(second.matched_device_blocks), 1u);
     releaseRequestRefsForTest(*cache_, second.matched_device_resources);
-    cache_->insert(keys, resources, Tier::DEVICE);
+    cache_->insert(keys, resources, Tier::DEVICE, false, {}, 0, 0, second.reuse_accounting);
     ASSERT_FALSE(cache_->insertExternalBlocks(keys, 1, resources, currentTimeMs() + 10000).hasError());
     auto third = cache_->match(keys);
     EXPECT_EQ(third.reuse_accounting.unaccountedBlocks(third.matched_device_blocks), 0u);
@@ -331,7 +335,9 @@ TEST_F(BlockTreeCacheTest, ConcurrentMatchesBeforePrefillCommitAllKeepTheirAccou
     while (matched_requests.load() != requests.size()) {
         std::this_thread::yield();
     }
-    cache_->insert({100, 200}, resources, Tier::DEVICE);
+    auto winner = cache_->match({100, 200});
+    cache_->insert({100, 200}, resources, Tier::DEVICE, false, {}, 0, 0, winner.reuse_accounting);
+    releaseRequestRefsForTest(*cache_, winner.matched_device_resources);
     committed.store(true);
     for (auto& request : requests) {
         request.join();
@@ -353,10 +359,12 @@ TEST_F(BlockTreeCacheTest, WritebackAccountingSnapshotSurvivesNodeRecreation) {
     resources[0][0].device_blocks = {43};
     ASSERT_FALSE(cache_->insertExternalBlocks({100}, 0, resources, currentTimeMs() + 10000).hasError());
     auto current = cache_->match({100});
-    cache_->insert({100}, resources, Tier::DEVICE);
+    cache_->insert({100}, resources, Tier::DEVICE, false, {}, 0, 0, previous.reuse_accounting);
+    EXPECT_GE(cache_->tree()->findNode({100}).front()->unaccounted_writeback_version, 0);
+    cache_->insert({100}, resources, Tier::DEVICE, false, {}, 0, 0, current.reuse_accounting);
     EXPECT_EQ(previous.reuse_accounting.unaccountedBlocks(1), 1u);
     EXPECT_EQ(current.reuse_accounting.unaccountedBlocks(1), 1u);
-    EXPECT_TRUE(cache_->tree()->findNode({100}).front()->is_accounted);
+    EXPECT_EQ(cache_->tree()->findNode({100}).front()->unaccounted_writeback_version, -1);
     releaseRequestRefsForTest(*cache_, current.matched_device_resources);
 }
 
@@ -369,15 +377,17 @@ TEST_F(BlockTreeCacheTest, ResidentPrefillAccountsOnlyThePublishedPrefix) {
     ASSERT_FALSE(cache_->insertExternalBlocks(keys, 0, resources, currentTimeMs() + 10000).hasError());
     const auto path = cache_->tree()->findNode(keys);
     ASSERT_EQ(path.size(), 3u);
+    auto matched = cache_->match(keys);
+    releaseRequestRefsForTest(*cache_, matched.matched_device_resources);
     path[1]->group_set_resources[0].transfer_state = GroupSetTransferState::EVICTING;
-    cache_->insert(keys, resources, Tier::DEVICE, /*is_resident=*/true);
-    EXPECT_TRUE(path[0]->is_accounted);
-    EXPECT_FALSE(path[1]->is_accounted);
-    EXPECT_FALSE(path[2]->is_accounted);
+    cache_->insert(keys, resources, Tier::DEVICE, /*is_resident=*/true, {}, 0, 0, matched.reuse_accounting);
+    EXPECT_EQ(path[0]->unaccounted_writeback_version, -1);
+    EXPECT_GE(path[1]->unaccounted_writeback_version, 0);
+    EXPECT_GE(path[2]->unaccounted_writeback_version, 0);
     path[1]->group_set_resources[0].transfer_state = GroupSetTransferState::IDLE;
-    cache_->insert(keys, resources, Tier::DEVICE, /*is_resident=*/true);
-    EXPECT_TRUE(path[1]->is_accounted);
-    EXPECT_TRUE(path[2]->is_accounted);
+    cache_->insert(keys, resources, Tier::DEVICE, /*is_resident=*/true, {}, 0, 0, matched.reuse_accounting);
+    EXPECT_EQ(path[1]->unaccounted_writeback_version, -1);
+    EXPECT_EQ(path[2]->unaccounted_writeback_version, -1);
 }
 
 TEST_F(BlockTreeCacheTest, IncompleteResidentInsertKeepsPrefixProtectedAndRetrySucceeds) {

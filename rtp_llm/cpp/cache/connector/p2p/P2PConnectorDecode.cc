@@ -429,7 +429,7 @@ bool P2PConnectorDecode::cancelWritePerRank(const std::string& unique_key, Funct
     P2PConnector::setP2PResponse(
         response,
         ret ? ErrorInfo::OkStatus() :
-              ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "invalid write key"));
+              ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "could not record write cancellation"));
     return ret;
 }
 

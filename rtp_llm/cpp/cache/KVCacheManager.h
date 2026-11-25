@@ -34,6 +34,7 @@ using BlockTreeCacheLayoutConstPtr = std::shared_ptr<const BlockTreeCacheLayout>
 class PrefillCacheHitMetricsReporter;
 class KVCacheAllocationWaitState;
 class P2PConnector;
+class WritebackSourceBudget;
 class WritebackStepTracker;
 class Meta;
 class KVCacheEventReporter;
@@ -288,6 +289,7 @@ private:
     mutable std::mutex                 cache_status_snapshot_mutex_;
     std::shared_ptr<const KVCacheInfo> cache_status_snapshot_;
     std::shared_ptr<P2PConnector>      p2p_connector_;
+    std::shared_ptr<WritebackSourceBudget> writeback_source_budget_;
     std::string                        p2p_pipeline_layout_;
 
     mutable std::mutex          cache_store_mutex_;

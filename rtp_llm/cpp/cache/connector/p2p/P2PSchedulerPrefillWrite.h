@@ -4,7 +4,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/DecodeLoadHelper.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
 #include "autil/ThreadPool.h"
-#include "autil/LoopThread.h"
+#include <thread>
 #include <atomic>
 #include <condition_variable>
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWritebackPlanner.h"
@@ -96,11 +96,28 @@ private:
         void observe(PrefillWriteRequest& request, const std::function<void()>& notify);
     };
 
-    void drainWrite(const std::string&         unique_key,
-                    int64_t                    deadline_ms,
-                    PrefillWriteRequest&       request,
-                    WriteTransfer&             transfer,
-                    const std::function<void()>& notify);
+    static constexpr int64_t kControlInitialIntervalMs = 10;
+
+    struct WriteDrain {
+        std::string                          unique_key;
+        std::shared_ptr<PrefillWriteRequest> state;
+        WriteTransfer                        transfer;
+        WriteSchedulerMetricsCollector       metrics;
+        int64_t                              deadline_ms;
+        int64_t                              start_us;
+        int64_t                              hold_start_us;
+        int64_t                              drain_start_us;
+
+        std::future<std::shared_ptr<P2PBroadcastClient::TpBroadcastResult>> control_submission{};
+        std::shared_ptr<P2PBroadcastClient::TpBroadcastResult>              control_result{};
+        bool    cancel_confirmed{false};
+        int64_t next_control_ms{0};
+        int64_t interval_ms{kControlInitialIntervalMs};
+    };
+
+    void runDrainLoop();
+    void advanceDrain(WriteDrain& drain);
+    void finishWrite(WriteDrain& drain);
 
     std::shared_ptr<PrefillWriteRequest> findRequest(const std::string& unique_key) const;
     std::shared_ptr<PrefillWriteRequest> findRequestLocked(const std::string& unique_key) const;
@@ -145,7 +162,8 @@ private:
     bool                                                                        initialized_{false};
     WritebackRetainedKv                                                         retained_kv_;
     std::atomic<int64_t>                                                        last_retained_check_ms_{0};
-    autil::LoopThreadPtr                                                        metrics_thread_;
+    std::thread                                                                 drain_thread_;
+    std::map<std::string, std::shared_ptr<WriteDrain>>                          pending_drains_;
 };
 
 }  // namespace rtp_llm

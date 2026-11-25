@@ -124,11 +124,16 @@ enum class MallocStatus : uint8_t {
 };
 
 struct ReuseAccounting {
-    std::vector<size_t> unaccounted_block_indices;
+    struct Match {
+        size_t  index;
+        int64_t publication_version;
+    };
+    std::vector<Match> unaccounted_blocks;
 
     size_t unaccountedBlocks(size_t reused_blocks) const {
-        return std::lower_bound(unaccounted_block_indices.begin(), unaccounted_block_indices.end(), reused_blocks)
-               - unaccounted_block_indices.begin();
+        auto end = std::lower_bound(unaccounted_blocks.begin(), unaccounted_blocks.end(), reused_blocks,
+                                    [](const Match& match, size_t limit) { return match.index < limit; });
+        return end - unaccounted_blocks.begin();
     }
 };
 
@@ -185,6 +190,7 @@ struct InsertInfo {
     // Keep FULL insertion while excluding LINEAR blocks for a PD decode
     // handoff whose linear state is supplied by the prefill side.
     bool pd_decode_linear_tail_only = false;
+    ReuseAccounting reuse_accounting{};
 };
 
 }  // namespace rtp_llm

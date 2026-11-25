@@ -16,6 +16,8 @@ namespace rtp_llm {
 
 class WritebackStepTracker;
 
+inline constexpr size_t kMaxWritebackRequestEntries = 1024 * 1024;
+
 inline bool validWritebackMaxKvRatio(double max_ratio) {
     return max_ratio >= 0.0 && max_ratio <= 1.0;
 }
@@ -88,6 +90,8 @@ struct P2PConnectorWorkerConfig {
     std::shared_ptr<const CacheTopology> topology;
     size_t                               cache_key_tokens_per_block = 1;
     int                                  cp_size = 1;
+
+    size_t writeback_max_request_entries = kMaxWritebackRequestEntries;
 
     // Only LINEAR_QKV needs the physical spec to build byte ranges. A tag may
     // be shared by the main model and a draft with different local geometry.

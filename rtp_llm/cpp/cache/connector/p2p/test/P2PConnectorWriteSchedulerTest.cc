@@ -2646,17 +2646,19 @@ TEST_F(P2PConnectorWriteSchedulerTest, MissingWorkerLeaseStatusRetainsTargetsUnt
     P2PConnectorStartWriteBackResponsePB response;
     auto call = std::async(std::launch::async, [&] { prefill_->handleWrite(input, response); });
     EXPECT_TRUE(await([&] { return prefill_workers_[0].starts && prefill_workers_[1].starts; }));
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
-    EXPECT_EQ(call.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+    auto cleanup = makeGuard([&] { completeAll(true); });
+    ASSERT_EQ(call.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    call.get();
+    EXPECT_FALSE(response.stopped());
+    EXPECT_EQ(response.accepted_block_count(), 0);
+    EXPECT_FALSE(sendCancel(input.unique_key()).stopped());
     EXPECT_EQ(prefill_->inflightContextCount(), 1u);
     EXPECT_EQ(allocator_->freeBlocksNum(), free_before - 2);
     for (auto& worker : prefill_workers_) {
         worker.omit_status = false;
     }
     completeAll();
-    call.get();
-    EXPECT_TRUE(response.stopped());
-    EXPECT_EQ(response.accepted_block_count(), 0);
+    ASSERT_TRUE(await([&] { return sendCancel(input.unique_key()).stopped(); }));
     EXPECT_EQ(prefill_->inflightContextCount(), 0u);
     EXPECT_EQ(allocator_->freeBlocksNum(), free_before);
 }
@@ -3486,6 +3488,31 @@ TEST_F(P2PConnectorWriteSchedulerTest, WritebackPlannerSpreadsReplicatedSourceRa
         }
         EXPECT_EQ(selected_src_ranks.size(), 2u);
     }
+}
+
+TEST_F(P2PConnectorWriteSchedulerTest, ClientCancellationReturnsBeforeDeadlineWhileWorkerDrainKeepsTargetPinned) {
+    prefill_config_.load_cache_timeout_ms = 10000;
+    createPrefill();
+    for (auto& worker : prefill_workers_)
+        worker.fail_start = true;
+    auto input = request();
+    input.set_timeout_ms(10000);
+    std::atomic<bool> cancelled{false};
+    const auto free_before = allocator_->freeBlocksNum();
+    P2PConnectorStartWriteBackResponsePB response;
+    auto handling = std::async(std::launch::async, [&] { prefill_->handleWrite(input, response, [&] { return cancelled.load(); }); });
+    auto cleanup = makeGuard([&] { completeAll(true); });
+
+    ASSERT_TRUE(await([&] { return prefill_workers_[0].cancels > 0; }));
+    cancelled.store(true);
+    ASSERT_EQ(handling.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    handling.get();
+    EXPECT_FALSE(response.stopped());
+    EXPECT_FALSE(sendCancel(input.unique_key()).stopped());
+    EXPECT_EQ(allocator_->freeBlocksNum(), free_before - 2);
+    completeAll();
+    ASSERT_TRUE(await([&] { return sendCancel(input.unique_key()).stopped(); }));
+    EXPECT_EQ(allocator_->freeBlocksNum(), free_before);
 }
 
 TEST_F(P2PConnectorWriteSchedulerTest, PrefillShutdownTimeoutUnwindsHandlerWhileRetainingTargetKv) {

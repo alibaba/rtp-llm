@@ -6,6 +6,7 @@
 #include <optional>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
@@ -32,12 +33,14 @@ public:
                                  size_t&                                           resident_prefix_length,
                                  std::optional<int64_t>                            request_id         = {},
                                  size_t                                            remote_reuse_begin = 0,
-                                 size_t                                            remote_reuse_end   = 0);
+                                 size_t                                            remote_reuse_end   = 0,
+                                 const ReuseAccounting&                            accounting = {});
 
     size_t           publishDeviceLocked(const CacheKeysType&                              cache_keys,
                                          const std::vector<std::vector<GroupSetResource>>& resources,
                                          bool                                              is_resident,
-                                         bool                                              is_writeback = false);
+                                         bool                                              is_writeback = false,
+                                         const ReuseAccounting&                            accounting = {});
     StorageWriteTask preparePublishedWriteLocked(const CacheKeysType& keys, const std::vector<TreeNode*>& path) const;
 
 private:
