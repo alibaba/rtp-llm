@@ -71,9 +71,10 @@ class SparsePagedTrustedSelectionTest(unittest.TestCase):
         selected[0, 1, :6] = torch.tensor([1, 8, 11, 12, 16, -1], device=_DEVICE)
         selected[0, 2, :4] = torch.tensor([3, 6, 9, 1000], device=_DEVICE)
 
-        with patch.dict(os.environ, _PRODUCTION_ENV), patch.object(
-            torch, "_assert_async"
-        ) as trap:
+        with (
+            patch.dict(os.environ, _PRODUCTION_ENV),
+            patch.object(torch, "_assert_async") as trap,
+        ):
             got = sparse_paged_gqa_attn(
                 q,
                 cache,
@@ -135,9 +136,10 @@ class SparsePagedTrustedSelectionTest(unittest.TestCase):
         # clamps the count and masks the two extra -1 slots.
         selected[..., width] = 5
 
-        with patch.dict(os.environ, _PRODUCTION_ENV), patch.object(
-            torch, "_assert_async"
-        ) as trap:
+        with (
+            patch.dict(os.environ, _PRODUCTION_ENV),
+            patch.object(torch, "_assert_async") as trap,
+        ):
             got = sparse_paged_gqa_attn(
                 q,
                 cache,
@@ -173,14 +175,15 @@ class SparsePagedTrustedSelectionTest(unittest.TestCase):
                     validate_selected=False,
                 )
 
-    def test_untrusted_selection_keeps_the_enqueue_only_verdict(self):
+    def test_untrusted_selection_rejects_invalid_indices_before_reading(self):
         q, cache, block_table, kv_lens = _fixture(_CLEAN_TABLE)
         selected = torch.full((1, 3, 8), -1, dtype=torch.int32, device=_DEVICE)
         selected[0, 0, 0] = 9  # == kv_lens[0, 0]: outside the row's kv_len
 
-        with patch.dict(os.environ, _PRODUCTION_ENV), patch.object(
-            torch, "_assert_async"
-        ) as trap:
+        with (
+            patch.dict(os.environ, _PRODUCTION_ENV),
+            self.assertRaisesRegex(ValueError, "outside its row's kv_len"),
+        ):
             sparse_paged_gqa_attn(
                 q,
                 cache,
@@ -190,11 +193,6 @@ class SparsePagedTrustedSelectionTest(unittest.TestCase):
                 page_size=4,
                 kv_head_num=2,
             )
-        trap.assert_called_once()
-        self.assertIn(
-            "selection, kv_lens or block table is invalid",
-            trap.call_args.args[1],
-        )
 
 
 if __name__ == "__main__":

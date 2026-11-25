@@ -140,15 +140,23 @@ class QsaPackedCountTest(unittest.TestCase):
         packed = compact_qsa_selection(selected)
         for multiplier in (0.01, 1.0, 16.0, 1000000.0):
             sf = scale * multiplier
-            with patch.object(
-                generic_backend._sparse_paged_online_split_kernel,
-                "run",
-                wraps=generic_backend._sparse_paged_online_split_kernel.run,
-            ) as generic_launch, patch.object(
-                grouped_backend,
-                "grouped_sparse_paged_split",
-                wraps=grouped_backend.grouped_sparse_paged_split,
-            ) as grouped_launch:
+            with (
+                patch.object(
+                    generic_backend._sparse_paged_online_split_kernel,
+                    "run",
+                    wraps=generic_backend._sparse_paged_online_split_kernel.run,
+                ) as generic_launch,
+                patch.object(
+                    grouped_backend,
+                    "grouped_sparse_paged_split",
+                    wraps=grouped_backend.grouped_sparse_paged_split,
+                ) as grouped_launch,
+                patch.object(
+                    generic_backend._sparse_paged_grouped_split_kernel,
+                    "run",
+                    wraps=generic_backend._sparse_paged_grouped_split_kernel.run,
+                ) as sm90_launch,
+            ):
                 actual = sparse_paged_gqa_attn(
                     q,
                     cache,
@@ -160,12 +168,20 @@ class QsaPackedCountTest(unittest.TestCase):
                     selected_has_count=True,
                     fp16_pv=True,
                 )
-            # This fixture is in the SM120 grouped domain; other devices use
-            # the generic path. Assert the real route before choosing its oracle.
-            expected_grouped = torch.cuda.get_device_capability(q.device) == (12, 0)
+            # SM120 and Hopper use different grouped implementations. Assert
+            # the real route before choosing its independent numerical oracle.
+            capability = torch.cuda.get_device_capability(q.device)
             self.assertEqual(
-                (generic_launch.call_count, grouped_launch.call_count),
-                (0, 1) if expected_grouped else (1, 0),
+                (
+                    generic_launch.call_count,
+                    grouped_launch.call_count,
+                    sm90_launch.call_count,
+                ),
+                (
+                    int(capability not in ((9, 0), (12, 0))),
+                    int(capability == (12, 0)),
+                    int(capability == (9, 0)),
+                ),
             )
             uses_grouped = grouped_launch.call_count == 1
             if uses_grouped:
