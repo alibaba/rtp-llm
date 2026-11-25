@@ -62,6 +62,9 @@ class FixedRoleTest(unittest.TestCase):
             self.assertEqual(env["DSV41_SM90_DECODE_GRAPH"], "0")
             self.assertNotIn("RTP_LLM_DROP_BROAD_SYNC", env)
             self.assertNotIn("RTP_LLM_STREAM_ASYNC", env)
+            self.assertNotIn("RTP_LLM_SCHEDULER_POLL_INTERVAL_MS", env)
+            self.assertEqual(options["fp8_kv_cache"], 1)
+            self.assertEqual(env["DSV41_SM90_MULTIQUERY_INDEXER"], "1")
             self.assertEqual((batches, output, LENGTHS), ((1,), 1, (32768, 65536)))
 
     def test_decode_dp8_capacity_matches_fixed_batches(self):
@@ -75,6 +78,12 @@ class FixedRoleTest(unittest.TestCase):
             self.assertEqual(env["DSV41_SM90_DECODE_GRAPH"], "1")
             self.assertEqual(env["RTP_LLM_STREAM_ASYNC"], "1")
             self.assertEqual(env["RTP_LLM_DROP_BROAD_SYNC"], "1")
+            self.assertEqual(env["RTP_LLM_SCHEDULER_POLL_INTERVAL_MS"], "1")
+            self.assertEqual(options["fp8_kv_cache"], 1)
+            self.assertEqual(env["DSV41_SM90_MULTIQUERY_INDEXER"], "1")
+            self.assertEqual(env["DSV41_ENGRAM_PREFETCH"], "1")
+            self.assertEqual(env["DSV41_CED"], "1")
+            self.assertEqual(env["DSV41_SWA_BOUNDED_REPLAY"], "1")
             self.assertEqual(env["ROLE_TYPE"], "DECODE")
             self.assertEqual(
                 (batches, output),

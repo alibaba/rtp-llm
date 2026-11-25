@@ -160,12 +160,14 @@ def recipe(args):
         env["DSV41_SM90_DECODE_GRAPH"] = "0"
     else:
         # Decode already runs stream-async bookkeeping; skipping the front-loaded
-        # broad sync removes the step-boundary bubble (D1). Non-linear V4.1
-        # keeps its device-state overlap.
+        # broad sync removes the step-boundary bubble (D1), and a 1 ms idle poll
+        # prevents DP8 low-BS fake-stream ranks from draining the GPU queue
+        # before Draft/Target L0 MegaMoE barriers (D5).
         env.update(
             DSV41_SM90_DECODE_GRAPH="1",
             DSV41_SM90_DECODE_GRAPH_MAX_ROWS=str(graph_rows),
             RTP_LLM_DROP_BROAD_SYNC="1",
+            RTP_LLM_SCHEDULER_POLL_INTERVAL_MS="1",
         )
         if args.gamma:
             env.update(SP_DSPARK_CONFIDENCE_MODE="bounded", SP_DSPARK_VERIFY_MODE="packed",

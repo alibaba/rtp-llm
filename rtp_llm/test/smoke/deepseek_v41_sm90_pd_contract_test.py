@@ -25,10 +25,12 @@ class DeepSeekV41Sm90PDContractTest(pd_contract.DeepSeekV41PDContractTest):
     # Hopper contract uses the native DeepGEMM fused MegaMoE backend.
     moe_strategy = os.environ.get("SM90_SMOKE_MOE_STRATEGY", "mega_sm90")
     # Decode runs stream-async bookkeeping; skip the front-loaded broad sync
-    # (D1) while prefill keeps its synchronous ownership boundary.
+    # (D1) and keep idle-rank poll at 1 ms to avoid DP low-BS barrier skew (D5)
+    # while prefill keeps its synchronous ownership boundary.
     decode_env = {
         "RTP_LLM_STREAM_ASYNC": "1",
         "RTP_LLM_DROP_BROAD_SYNC": "1",
+        "RTP_LLM_SCHEDULER_POLL_INTERVAL_MS": "1",
     }
     extra_server_env = {
         "MOE_STRATEGY": "auto",
@@ -43,6 +45,10 @@ class DeepSeekV41Sm90PDContractTest(pd_contract.DeepSeekV41PDContractTest):
     def test_decode_env_enables_drop_broad_sync(self):
         self.assertEqual(self.decode_env["RTP_LLM_STREAM_ASYNC"], "1")
         self.assertEqual(self.decode_env["RTP_LLM_DROP_BROAD_SYNC"], "1")
+        self.assertEqual(self.decode_env["RTP_LLM_SCHEDULER_POLL_INTERVAL_MS"], "1")
+        self.assertEqual(self.extra_server_env["DSV41_SM90_MOE_COMM"], "v2")
+        self.assertEqual(self.extra_server_env["DSV41_SM90_MULTIQUERY_INDEXER"], "1")
+        self.assertEqual(self.extra_server_env["DSV41_SM90_DECODE_GRAPH"], "1")
 
     def start_servers(self):
         import torch

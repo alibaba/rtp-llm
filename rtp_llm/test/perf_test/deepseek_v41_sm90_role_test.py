@@ -124,11 +124,12 @@ def recipe(role, mode, checkpoint, tokenizer):
         raise ValueError("DSV41_ENGRAM_PREFETCH must be 0 or 1")
     if decode:
         # Match the SM100 decode recipe: stream-async bookkeeping plus the
-        # front-loaded broad-sync skip (D1). Prefill keeps its synchronous
-        # ownership boundary.
+        # front-loaded broad-sync skip (D1) and 1 ms idle poll (D5). Prefill
+        # keeps its synchronous ownership boundary.
         env.update(
             RTP_LLM_STREAM_ASYNC="1",
             RTP_LLM_DROP_BROAD_SYNC="1",
+            RTP_LLM_SCHEDULER_POLL_INTERVAL_MS="1",
         )
     return options, env, local_batches, output_len
 
