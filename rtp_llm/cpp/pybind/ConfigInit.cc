@@ -879,6 +879,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_property_readonly_static("generation_prefill_cuda_graph_max_requests_limit",
                                       [](py::object) { return HWKernelConfig::kGenerationPrefillCudaGraphMaxRequests; })
         .def_readwrite("use_swizzleA", &HWKernelConfig::use_swizzleA)
+        .def_readwrite("batch_invariant", &HWKernelConfig::batch_invariant)
         .def_readwrite("enable_cuda_graph", &HWKernelConfig::enable_cuda_graph)
         .def_readwrite("enable_cuda_graph_debug_mode", &HWKernelConfig::enable_cuda_graph_debug_mode)
         .def_readwrite("generation_prefill_cuda_graph_max_requests",
@@ -893,17 +894,21 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def("to_string", &HWKernelConfig::to_string)
         .def(py::pickle(
             [](const HWKernelConfig& self) {
-                return py::make_tuple(self.use_swizzleA,
-                                      self.enable_cuda_graph,
-                                      self.enable_cuda_graph_debug_mode,
-                                      self.prefill_capture_seq_lens,
-                                      self.decode_capture_batch_sizes,
-                                      self.generation_prefill_cuda_graph_max_requests,
-                                      self.generation_prefill_capture_token_buckets,
-                                      self.enable_decode_cascade_attention);
+                auto state = py::make_tuple(self.use_swizzleA,
+                                            self.enable_cuda_graph,
+                                            self.enable_cuda_graph_debug_mode,
+                                            self.prefill_capture_seq_lens,
+                                            self.decode_capture_batch_sizes,
+                                            self.generation_prefill_cuda_graph_max_requests,
+                                            self.generation_prefill_capture_token_buckets,
+                                            self.enable_decode_cascade_attention);
+                // The Qwen4 11-field layout reserves the retired capacity and repeats the cascade flag.
+                return self.batch_invariant ?
+                           py::tuple(state + py::make_tuple(py::none(), self.enable_decode_cascade_attention, true)) :
+                           state;
             },
             [](py::tuple t) {
-                if (t.size() != 5 && t.size() != 7 && t.size() != 8 && t.size() != 9 && t.size() != 10)
+                if (t.size() != 5 && t.size() != 7 && t.size() != 8 && t.size() != 9 && t.size() != 10 && t.size() != 11)
                     throw std::runtime_error("Invalid state!");
                 HWKernelConfig c;
                 try {
@@ -924,6 +929,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     // 10-tuple additionally re-states the cascade flag at t[9].
                     if (t.size() >= 10) {
                         c.enable_decode_cascade_attention = t[9].cast<bool>();
+                    }
+                    if (t.size() == 11) {
+                        c.batch_invariant = t[10].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("HWKernelConfig unpickle error: ") + e.what());

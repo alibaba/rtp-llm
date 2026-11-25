@@ -8,6 +8,7 @@ from typing import Optional
 class CollectiveConfig:
     all_reduce_backend: str = "auto"
     large_prefill: Optional[bool] = None
+    batch_invariant: bool = False
 
     def __post_init__(self):
         if self.all_reduce_backend not in ("auto", "nccl", "sm120_ipc", "sm120_p2p"):
@@ -20,6 +21,13 @@ class CollectiveConfig:
             raise ValueError("large-prefill requires auto or sm120_ipc")
 
     def validate_topology(self, parallelism):
+        if self.batch_invariant and (
+            self.all_reduce_backend not in ("auto", "nccl") or self.large_prefill
+        ):
+            raise ValueError(
+                "RTP_BATCH_INVARIANT=1 requires all_reduce_backend=auto or nccl "
+                "and all_reduce_large_prefill disabled for tensor parallelism"
+            )
         if self.all_reduce_backend in ("auto", "nccl"):
             return
         size = 2 if self.all_reduce_backend == "sm120_ipc" else 8
@@ -38,7 +46,10 @@ class CollectiveConfig:
             )
 
     def to_string(self) -> str:
-        return (
+        result = (
             f"all_reduce_backend: {self.all_reduce_backend}\n"
             f"large_prefill: {self.large_prefill}"
         )
+        if self.batch_invariant:
+            result += "\nbatch_invariant: True"
+        return result

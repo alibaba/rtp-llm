@@ -188,6 +188,8 @@ class EngineConfig:
         collective_config = CollectiveConfig(
             all_reduce_backend=py_env_configs.all_reduce_backend,
             large_prefill=py_env_configs.all_reduce_large_prefill,
+            batch_invariant=hw_kernel_config.batch_invariant
+            and parallelism_config.tp_size > 1,
         )
         # Also validate single-rank servers, which do not initialize Torch groups.
         collective_config.validate_topology(parallelism_config)

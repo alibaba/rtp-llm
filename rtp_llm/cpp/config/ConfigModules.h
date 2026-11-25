@@ -308,8 +308,9 @@ struct HWKernelConfig {
     // Comma-separated list of batch sizes, e.g., "1,2,4,8,16,32"
     std::vector<int> decode_capture_batch_sizes;
     bool             enable_decode_cascade_attention = false;
-    bool             disable_dpc_random               = false;
-    bool             rocm_disable_custom_ag           = true;
+    bool             disable_dpc_random              = false;
+    bool             rocm_disable_custom_ag          = true;
+    bool             batch_invariant                 = false;
     std::string      to_string() const;
 };
 

@@ -11,6 +11,7 @@ import torch
 import torch.distributed
 
 from rtp_llm.config.collective_config import CollectiveConfig
+from rtp_llm.models_py.distributed.all_reduce import get_batch_invariant_sum
 from rtp_llm.models_py.distributed.rank_layout import Coord, Group, RankLayout
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
@@ -976,6 +977,9 @@ def all_reduce(
             return rocm_rccl.capture_all_reduce(target, _get_group(group))
 
     if group == Group.TP:
+        reduce_sum = get_batch_invariant_sum(tensor)
+        if reduce_sum is not None:
+            return reduce_sum(tensor, _get_group(group), inplace=inplace)
         if _canonical_p2p is not None and _canonical_p2p.should_use(tensor):
             return _canonical_p2p.all_reduce(tensor, inplace=inplace)
 

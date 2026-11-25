@@ -1,4 +1,4 @@
-"""Capability-selected SM120 IPC/P2P behind the generic collective API."""
+"""Select the reduction policy shared by all tensor-parallel ranks."""
 
 import logging
 import socket
@@ -152,6 +152,7 @@ class IpcAllReduce:
 
 _communicator: Optional[IpcAllReduce] = None
 _canonical_p2p = None
+_batch_invariant_sum = None
 _group = None
 _options = None
 _capture_active = False
@@ -199,13 +200,27 @@ def _capability_error(device, options):
 
 def init_all_reduce(group, device, parallelism, options: CollectiveConfig):
     """Negotiate one backend before entering optional GPU setup on any rank."""
-    global _communicator, _canonical_p2p, _group, _options
+    global _communicator, _canonical_p2p, _batch_invariant_sum, _group, _options
     error = None
+    batch_invariant_sum = None
     try:
         options.validate_topology(parallelism)
-    except ValueError as exception:
+        if options.batch_invariant and _group is None:
+            from rtp_llm.models_py.determinism.batch_invariant import (
+                all_reduce_batch_invariant as batch_invariant_sum,
+            )
+    except Exception as exception:
+        # A rank missing the selected backend must still join policy agreement.
         error = str(exception)
-    state = [options.all_reduce_backend, options.large_prefill, error, _group is group]
+    same_policy = _group is group and _options == options
+    state = [
+        options.all_reduce_backend,
+        options.large_prefill,
+        error,
+        _group is not None,
+        same_policy,
+        options.batch_invariant,
+    ]
     peers = exchange_group_state(group, state, "policy")
     if any(peer[2] is not None for peer in peers):
         raise ValueError(f"Invalid AllReduce configuration: {peers}")
@@ -214,11 +229,17 @@ def init_all_reduce(group, device, parallelism, options: CollectiveConfig):
             "AllReduce policy or initialization state differs across TP ranks"
         )
     if _group is not None:
-        if _group is not group or _options != options:
+        if not same_policy:
             raise RuntimeError(
                 "Destroy the distributed environment before changing policy"
             )
         return _communicator
+
+    if batch_invariant_sum is not None:
+        _batch_invariant_sum = batch_invariant_sum
+        _group, _options = group, options
+        logging.info("AllReduce policy: TP BF16 SUM uses batch-invariant reduction")
+        return None
 
     candidate = options
     if options.all_reduce_backend == "auto":
@@ -324,8 +345,14 @@ def get_canonical_p2p():
     return _canonical_p2p
 
 
+def get_batch_invariant_sum(tensor):
+    if _batch_invariant_sum is not None and tensor.dtype == torch.bfloat16:
+        return _batch_invariant_sum
+    return None
+
+
 def destroy_all_reduce():
-    global _communicator, _canonical_p2p, _group, _options
+    global _communicator, _canonical_p2p, _batch_invariant_sum, _group, _options
     try:
         if _communicator is not None:
             _communicator.destroy()
@@ -333,4 +360,4 @@ def destroy_all_reduce():
             _canonical_p2p.close()
     finally:
         abort_graph_capture()
-        _communicator = _canonical_p2p = _group = _options = None
+        _communicator = _canonical_p2p = _batch_invariant_sum = _group = _options = None

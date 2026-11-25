@@ -535,6 +535,10 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
 
     # 解析参数（会自动应用所有配置绑定）
     parsed_args = parser.parse_args(args)
+    batch_invariant = os.environ.get("RTP_BATCH_INVARIANT", "0")
+    if batch_invariant not in ("0", "1"):
+        raise ValueError("RTP_BATCH_INVARIANT must be 0 or 1")
+    py_env_configs.py_hw_kernel_config.batch_invariant = batch_invariant == "1"
     py_env_configs.server_config.validate_allocator_dump_config()
 
     # Normalize the two switches before model construction and process spawn.

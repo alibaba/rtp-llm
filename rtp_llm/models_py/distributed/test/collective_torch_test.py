@@ -13,6 +13,7 @@ logging.basicConfig(level=logging.INFO)
 
 import torch
 
+from rtp_llm.config.collective_config import CollectiveConfig
 from rtp_llm.models_py.distributed.collective_torch import (
     Group,
     _get_group,
@@ -514,6 +515,67 @@ def _test_pp_singleton_groups_worker(
         destroy_distributed_environment()
 
 
+def _test_batch_invariant_tp_worker(rank, world_size, tp_size, dp_size, nccl_port):
+    config = ParallelismConfig()
+    config.world_rank = config.local_rank = rank
+    config.world_size = config.local_world_size = world_size
+    config.tp_size = config.ffn_tp_size = tp_size
+    config.dp_size = dp_size
+    config.ep_size = config.pp_size = 1
+    torch.cuda.set_device(rank)
+    init_distributed_environment(
+        config,
+        nccl_comm_config=NcclCommConfig(nccl_ip="127.0.0.1"),
+        nccl_init_port=nccl_port,
+        collective_config=CollectiveConfig(batch_invariant=True),
+    )
+    try:
+        # At TP4 the small term between the two large terms is lost in FP32.
+        # Summing rank pairs first would instead return zero.
+        factors = (1, 4) if tp_size == 2 else (2**26, 1, -(2**26), 1)
+        expected_factor = 5 if tp_size == 2 else 1
+        feature = torch.arange(4096, dtype=torch.int32, device=f"cuda:{rank}")
+        target = (feature % 8 + 1).to(torch.bfloat16)
+        solo = all_reduce(target * factors[rank], Group.TP)
+        assert torch.equal(solo, target * expected_factor)
+
+        partials = torch.randn(
+            tp_size, 257, generator=torch.Generator().manual_seed(123)
+        ).bfloat16()
+        expected = torch.zeros(257)
+        for partial in partials:
+            expected += partial.float()
+        actual = all_reduce(partials[rank].to(feature.device), Group.TP)
+        assert torch.equal(
+            actual.cpu().view(torch.int16), expected.bfloat16().view(torch.int16)
+        )
+
+        # The long prefill exceeds the gather workspace at both TP degrees.
+        for rows, target_row, inplace in ((3, 0, False), (701, 700, True)):
+            row = torch.arange(rows, device=feature.device)[:, None]
+            pattern = ((row + feature) % 8 + 1).to(torch.bfloat16)
+            pattern[target_row].copy_(target)
+            contribution = pattern * factors[rank]
+            # Exercise a strided view and check both storage contracts.
+            storage = torch.empty(
+                (rows, 4096, 2), device=feature.device, dtype=torch.bfloat16
+            )
+            tensor = storage[:, :, 0]
+            tensor.copy_(contribution)
+            result = all_reduce(tensor, Group.TP, inplace=inplace)
+            assert torch.equal(result[target_row], solo)
+            assert torch.equal(result, pattern * expected_factor)
+            if inplace:
+                assert result is tensor
+            else:
+                assert result.data_ptr() != tensor.data_ptr()
+                assert torch.equal(tensor, contribution)
+        empty = target[:0]
+        assert all_reduce(empty, Group.TP) is empty
+    finally:
+        destroy_distributed_environment()
+
+
 class TestCollectiveOperations(unittest.TestCase):
     """Test collective operations with real multiprocessing"""
 
@@ -590,6 +652,19 @@ class TestCollectiveOperations(unittest.TestCase):
             dp_size=1,
             test_name="all_collectives_tp4_dp1",
         )
+
+    def test_batch_invariant_tp_sum(self):
+        for tp_size in (2, 4):
+            with self.subTest(tp_size=tp_size):
+                if torch.cuda.device_count() < tp_size:
+                    self.skipTest(f"requires {tp_size} visible GPUs")
+                self._run_test(
+                    _test_batch_invariant_tp_worker,
+                    world_size=tp_size,
+                    tp_size=tp_size,
+                    dp_size=1,
+                    test_name="batch_invariant_tp_sum",
+                )
 
     # Test configurations: world_size=4, tp_size=1, dp_size=4
     def test_all_collectives_tp1_dp4(self):

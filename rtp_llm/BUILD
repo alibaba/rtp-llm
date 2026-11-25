@@ -515,6 +515,7 @@ py_library(
         'model_factory_register.py',
     ],
     deps = [
+        "//rtp_llm/models_py:batch_invariant_config",
         "//rtp_llm/server:server",
         "//rtp_llm/distribute:distribute",
         "//rtp_llm/models_py/distributed:rank_layout",

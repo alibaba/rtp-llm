@@ -12,6 +12,18 @@ from rtp_llm.ops import (
 
 
 class DecodeGraphConfigPickleTest(unittest.TestCase):
+    def test_batch_invariant_opt_in_round_trip(self):
+        config = HWKernelConfig()
+        config.enable_decode_cascade_attention = True
+        state = config.__getstate__()
+        self.assertEqual(len(state), 8)
+        self.assertFalse(pickle.loads(pickle.dumps(config)).batch_invariant)
+        config.batch_invariant = True
+        self.assertEqual(config.__getstate__(), state + (None, True, True))
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertTrue(restored.batch_invariant)
+        self.assertTrue(restored.enable_decode_cascade_attention)
+
     def test_capture_config_and_explicit_prefill_capacity_round_trip(self):
         config = HWKernelConfig()
         config.decode_capture_batch_sizes = [128, 2048, 256]
@@ -24,18 +36,20 @@ class DecodeGraphConfigPickleTest(unittest.TestCase):
 
     def test_previous_layouts_keep_defaults(self):
         state = HWKernelConfig().__getstate__()
-        for legacy in (state[:16], state[:14]):
+        for legacy in (state[:5], state[:7], state[:8], state + (4096,)):
             result = HWKernelConfig.__new__(HWKernelConfig)
             result.__setstate__(legacy)
             self.assertFalse(result.enable_decode_cascade_attention)
+            self.assertFalse(result.batch_invariant)
             self.assertEqual(result.decode_capture_batch_sizes, [])
             self.assertEqual(result.generation_prefill_cuda_graph_max_requests, 1)
         # The retired independent decode capacity is ignored when reading an
         # older in-flight bootstrap; the Cascade flag still round-trips.
-        previous = state[:16] + (4096, True)
+        previous = state + (4096, True)
         result = HWKernelConfig.__new__(HWKernelConfig)
         result.__setstate__(previous)
         self.assertTrue(result.enable_decode_cascade_attention)
+        self.assertFalse(result.batch_invariant)
         self.assertEqual(result.decode_capture_batch_sizes, [])
 
 
@@ -231,6 +245,29 @@ class GrammarConfigPickleTest(unittest.TestCase):
 
 
 class HWKernelConfigPickleTest(unittest.TestCase):
+    def test_default_keeps_pre_batch_invariant_config_string(self):
+        config = HWKernelConfig()
+        previous = (
+            "use_swizzleA: 0\n"
+            "enable_cuda_graph: 0\n"
+            "enable_cuda_graph_debug_mode: 0\n"
+            "generation_prefill_cuda_graph_max_requests: 1\n"
+            "generation_prefill_capture_token_buckets size: 0\n"
+            "prefill_capture_seq_lens size: 0\n"
+            "decode_capture_batch_sizes size: 0\n"
+            "enable_decode_cascade_attention: 0\n"
+            "disable_dpc_random: 0\n"
+            "rocm_disable_custom_ag: 1"
+        )
+        self.assertEqual(config.to_string(), previous)
+        config.batch_invariant = True
+        self.assertEqual(
+            config.to_string(),
+            previous.replace(
+                "use_swizzleA: 0\n", "use_swizzleA: 0\nbatch_invariant: 1\n"
+            ),
+        )
+
     def test_current_format_round_trip(self):
         config = HWKernelConfig()
         config.use_swizzleA = True
@@ -266,7 +303,7 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         )
 
     def test_unsupported_tuple_sizes_are_rejected(self):
-        for size in (6, 11, 15, 19, 20):
+        for size in (6, 12, 15, 19, 20):
             with self.subTest(size=size), self.assertRaisesRegex(
                 RuntimeError, "Invalid state"
             ):
