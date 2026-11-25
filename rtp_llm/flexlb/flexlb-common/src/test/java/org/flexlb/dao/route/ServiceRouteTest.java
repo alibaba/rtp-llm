@@ -94,12 +94,17 @@ class ServiceRouteTest {
     void resolvesRoleEndpointsAcrossGroupsWithoutAModelIdentifier() {
         ServiceRoute route = ModelServiceConfigParser.parse("""
                 {"role_endpoints":[
-                  {"group":"g1","prefill_endpoint":{"address":"p1"},"decode_endpoint":{"address":"d1"}},
+                  {"group":"g1","frontend_endpoint":{"address":"fe1"},"prefill_endpoint":{"address":"p1"},"decode_endpoint":{"address":"d1"}},
                   {"group":"g2","prefill_endpoint":{"address":"p2"}}
                 ]}
                 """);
         ModelMetaConfig config = new ModelMetaConfig(route);
 
+        var frontend = config.endpointsWithGroup(RoleType.FRONTEND).getFirst().getRight();
+        assertEquals("fe1", frontend.getAddress());
+        assertEquals("g1", frontend.getGroup());
+        assertFalse(route.getAllEndpoints().contains(frontend));
+        assertFalse(route.getAllRoleTypes().contains(RoleType.FRONTEND));
         var prefill = config.endpointsWithGroup(RoleType.PREFILL);
         assertEquals(List.of("g1", "g2"), prefill.stream().map(pair -> pair.getLeft()).toList());
         assertEquals(List.of("p1", "p2"), prefill.stream().map(pair -> pair.getRight().getAddress()).toList());

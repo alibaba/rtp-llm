@@ -13,6 +13,10 @@ public class GroupRoleEndPoint {
     @JsonProperty("group")
     private String group;
 
+    /** DashServing ingress used for observability, outside the engine routing topology. */
+    @JsonProperty("frontend_endpoint")
+    private Endpoint frontendEndpoint;
+
     @JsonProperty("prefill_endpoint")
     private Endpoint prefillEndpoint;
 
@@ -30,6 +34,9 @@ public class GroupRoleEndPoint {
 
     void applyGroupToEndpoints() {
         String endpointGroup = group == null ? "" : group;
+        if (frontendEndpoint != null) {
+            frontendEndpoint.setGroup(endpointGroup);
+        }
         for (Endpoint endpoint : getAllEndpoints()) {
             endpoint.setGroup(endpointGroup);
         }
@@ -76,7 +83,9 @@ public class GroupRoleEndPoint {
     }
 
     public Endpoint getRoleEndpoint(RoleType roleType) {
-        if (roleType == RoleType.PREFILL) {
+        if (roleType == RoleType.FRONTEND) {
+            return frontendEndpoint;
+        } else if (roleType == RoleType.PREFILL) {
             return prefillEndpoint;
         } else if (roleType == RoleType.DECODE) {
             return decodeEndpoint;

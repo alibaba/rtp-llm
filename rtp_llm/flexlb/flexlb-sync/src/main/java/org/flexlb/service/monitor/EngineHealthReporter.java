@@ -78,10 +78,13 @@ import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_SUCCESS_PER
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_VISITOR_RT;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_INFO_STEP_LATENCY_VAR;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_ENGINE_ADD_TO_FIRST_TOKEN_US;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_ENGINE_OBSERVED_RECEIVED_TO_WAITING_MS;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_ENGINE_OBSERVED_WAITING_TO_RUNNING_MS;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_HBM_LOCAL_MATCH_TOKENS;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_HYBRID_KV_ALLOC_WAIT_US;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_INPUT_QUEUE_WAIT_MS;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_PREFILL_INFLIGHT_WALL_US;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MAX;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MIN;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_PREFILL_STEP_COUNT;
@@ -89,7 +92,10 @@ import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_REMOTE_KV_
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_REMOTE_KV_WAIT_MS;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_RUNNING_TO_FIRST_TOKEN_MS;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_SCHEDULER_TO_RUNNING_MS;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_SCHEDULER_WAIT_FOR_PLE_READY_US;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_SCHEDULER_WAIT_MS;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_SCHEDULER_WAIT_STEPS;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_SCHEDULER_WAIT_US;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STEP_BUDGET_FILL_RATIO;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STEP_PREFILL_REQUEST_COUNT;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STEP_PREFILL_TOKENS;
@@ -201,6 +207,17 @@ public class EngineHealthReporter {
                 FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
         this.monitor.register(ENGINE_WORKER_STATUS_REMOTE_KV_WAIT_MS,
                 FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        this.monitor.register(ENGINE_WORKER_STATUS_SCHEDULER_WAIT_US, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        this.monitor.register(ENGINE_WORKER_STATUS_SCHEDULER_WAIT_STEPS, FlexMetricType.GAUGE,
+                FlexStatisticsType.SUMMARY);
+        this.monitor.register(ENGINE_WORKER_STATUS_HYBRID_KV_ALLOC_WAIT_US, FlexMetricType.GAUGE,
+                FlexStatisticsType.SUMMARY);
+        this.monitor.register(ENGINE_WORKER_STATUS_PREFILL_INFLIGHT_WALL_US, FlexMetricType.GAUGE,
+                FlexStatisticsType.SUMMARY);
+        this.monitor.register(ENGINE_WORKER_STATUS_ENGINE_ADD_TO_FIRST_TOKEN_US, FlexMetricType.GAUGE,
+                FlexStatisticsType.SUMMARY);
+        this.monitor.register(ENGINE_WORKER_STATUS_SCHEDULER_WAIT_FOR_PLE_READY_US, FlexMetricType.GAUGE,
+                FlexStatisticsType.SUMMARY);
         this.monitor.register(ENGINE_WORKER_STATUS_RUNNING_TO_FIRST_TOKEN_MS,
                 FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
         this.monitor.register(ENGINE_WORKER_STATUS_HBM_LOCAL_MATCH_TOKENS,
@@ -384,9 +401,10 @@ public class EngineHealthReporter {
         }
     }
 
-    public void reportPrefillWorkerStatusTask(
-            String engineIp, String role, String group,
-            WorkerStatus.TaskTelemetry task) {
+    public void reportPrefillWorkerStatusTask(String engineIp,
+                                              String role,
+                                              String group,
+                                              WorkerStatus.TaskTelemetry task) {
         FlexMetricTags tags = lifecycleTags(engineIp, role, group);
         monitor.report(ENGINE_WORKER_STATUS_HBM_LOCAL_MATCH_TOKENS,
                 tags, task.hbmLocalMatchTokens());
@@ -405,6 +423,13 @@ public class EngineHealthReporter {
                 task.inputQueueDrainTimeMs(), task.inputQueueEnqueueTimeMs());
         monitor.report(ENGINE_WORKER_STATUS_REMOTE_KV_WAIT_MS,
                 tags, task.remoteKvWaitMs());
+        reportOptionalTiming(ENGINE_WORKER_STATUS_SCHEDULER_WAIT_US, tags, task.schedulerWaitUs());
+        reportOptionalTiming(ENGINE_WORKER_STATUS_SCHEDULER_WAIT_STEPS, tags, task.schedulerWaitSteps());
+        reportOptionalTiming(ENGINE_WORKER_STATUS_HYBRID_KV_ALLOC_WAIT_US, tags, task.hybridKvAllocWaitUs());
+        reportOptionalTiming(ENGINE_WORKER_STATUS_PREFILL_INFLIGHT_WALL_US, tags, task.prefillInflightWallUs());
+        reportOptionalTiming(ENGINE_WORKER_STATUS_ENGINE_ADD_TO_FIRST_TOKEN_US, tags, task.engineAddToFirstTokenUs());
+        reportOptionalTiming(ENGINE_WORKER_STATUS_SCHEDULER_WAIT_FOR_PLE_READY_US, tags,
+                task.schedulerWaitForPleReadyUs());
         long schedulerToRunningMs = reportDuration(
                 ENGINE_WORKER_STATUS_SCHEDULER_TO_RUNNING_MS, tags,
                 task.runningEnteredTimeMs(), task.waitingEnteredTimeMs());
@@ -435,6 +460,13 @@ public class EngineHealthReporter {
         long durationMs = Math.max(0L, endTimeMs - startTimeMs);
         monitor.report(metric, tags, durationMs);
         return durationMs;
+    }
+
+    private void reportOptionalTiming(String metric, FlexMetricTags tags, Long value) {
+        if (value == null || value < 0L) {
+            return;
+        }
+        monitor.report(metric, tags, value.doubleValue());
     }
 
     public void reportWorkerStepMetrics(

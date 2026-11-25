@@ -10,6 +10,7 @@ import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.service.monitor.RequestTimingPoller;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -28,12 +29,85 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class GrpcWorkerStatusRunnerTest {
+
+    @ParameterizedTest
+    @CsvSource({"PREFILL,100,true", "PDFUSION,100,true", "DECODE,100,false", "PREFILL,0,false"})
+    void reportsPrefillTimingsOnceWhenWorkerFiltersFinishedTasksByCursor(RoleType role,
+                                                                         long firstTokenTime,
+                                                                         boolean shouldReport) {
+        WorkerStatus status = RunnerTestSupport.discovered(role, "group-a", "127.0.0.1", 8080, 8081, "test-site");
+        WorkerEndpoint endpoint = mock(WorkerEndpoint.class);
+        EndpointRegistry registry = mock(EndpointRegistry.class);
+        WorkerDirectory directory = directory(registry, status);
+        when(registry.publishPreparedEndpoint(anyString(), any(), any())).thenAnswer(invocation -> {
+            status.publishPreparedStatus(invocation.getArgument(2));
+            return new EndpointRegistry.EndpointPublication(endpoint, () -> {});
+        });
+        when(registry.get(role, status.getLogicalIpPort(), status)).thenReturn(endpoint);
+        when(endpoint.applyPreparedStatus(any(), any())).thenAnswer(invocation -> {
+            status.publishPreparedStatus(invocation.getArgument(1));
+            return (Runnable) () -> {};
+        });
+        when(endpoint.observeStatusHeartbeat(any(), any())).thenReturn(() -> {});
+        var task = EngineRpcService.TaskInfoPB.newBuilder()
+                .setRequestIdStr("finished")
+                .setFirstTokenTimeMs(firstTokenTime)
+                .setEngineAddToFirstTokenUs(1234567)
+                .setSchedulerWaitUs(0)
+                .setRemoteKvWaitMs(17);
+        var response = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole(role.getCode())
+                .setRoleType(EngineRpcService.RoleTypePB.valueOf("ROLE_TYPE_" + role.name()))
+                .setStatusVersion(1)
+                .setLatestFinishedVersion(1)
+                .setAlive(true)
+                .addFinishedTaskList(task)
+                .addRunningTaskInfo(task.clone().setRequestIdStr("still-running"))
+                .build();
+        EngineGrpcService grpc = mock(EngineGrpcService.class);
+        when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any())).thenAnswer(invocation -> {
+            long finishedCursor = invocation.getArgument(2);
+            return CompletableFuture.completedFuture(
+                    finishedCursor < 1L ? response : response.toBuilder().clearFinishedTaskList().build());
+                });
+        EngineHealthReporter reporter = mock(EngineHealthReporter.class);
+        RequestTimingPoller timing = mock(RequestTimingPoller.class);
+
+        for (int poll = 0; poll < 2; poll++) {
+            new GrpcWorkerStatusRunner(status.getLogicalIpPort(), status.getGrpcPort(), "test-site", role, "group-a", status,
+                    status.tryBeginStatusPoll(), directory, reporter, grpc, 5000L, mock(CacheAwareService.class),
+                    Runnable::run, timing).run();
+        }
+
+        var observations = ArgumentCaptor.forClass(WorkerStatus.StatusObservation.class);
+        verify(timing, times(2)).addWorkerStatus(eq(status), observations.capture());
+        assertEquals(firstTokenTime, observations.getAllValues().get(0).finishedTasks().get("finished")
+                .telemetry().firstTokenTimeMs());
+        assertTrue(observations.getAllValues().get(1).finishedTasks().isEmpty());
+
+        verify(grpc).getWorkerStatusAsync(anyString(), anyInt(), eq(-1L), anyLong(), eq(role));
+        verify(grpc).getWorkerStatusAsync(anyString(), anyInt(), eq(1L), anyLong(), eq(role));
+
+        if (shouldReport) {
+            var telemetry = ArgumentCaptor.forClass(WorkerStatus.TaskTelemetry.class);
+            verify(reporter).reportPrefillWorkerStatusTask(eq(status.getMetricIpPort()), eq(role.name()), eq("group-a"),
+                    telemetry.capture());
+            assertEquals(1234567L, telemetry.getValue().engineAddToFirstTokenUs());
+            assertEquals(0L, telemetry.getValue().schedulerWaitUs());
+            assertEquals(17L, telemetry.getValue().remoteKvWaitMs());
+        } else {
+            verify(reporter, never()).reportPrefillWorkerStatusTask(anyString(), anyString(), anyString(), any());
+        }
+    }
 
     @ParameterizedTest
     @CsvSource({"DECODE,false,false", "PREFILL,true,false", "PDFUSION,true,false", "PREFILL,true,true"})

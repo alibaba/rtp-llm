@@ -330,6 +330,7 @@ public final class FlexlbConfigValidator {
     }
 
     private static void validateObservability(ObservabilityConfig observability) {
+        validateTtftStages(observability.getTtftStages());
         require(observability.getLogging() != null,
                 "observability.logging", "is required");
         require(observability.getLogging().getLevel() != null,
@@ -352,6 +353,21 @@ public final class FlexlbConfigValidator {
                             && !cacheHit.getTheoryLog().getPath().isBlank(),
                     "observability.cacheHit.theoryLog.path", "must not be blank");
         }
+    }
+
+    private static void validateTtftStages(TtftStagesConfig config) {
+        String path = "observability.ttftStages";
+        require(config != null, path, "is required");
+        require(config.getRpcTimeoutMs() > 0 && config.getRpcTimeoutMs() <= 1000, path + ".rpcTimeoutMs",
+                "must be between 1 and 1000");
+        require(config.getMaxRecords() > 0 && config.getMaxRecords() <= 4096, path + ".maxRecords",
+                "must be between 1 and 4096");
+        require(config.getMaximumEntries() >= 3 && config.getMaximumEntries() <= 1_000_000, path + ".maximumEntries",
+                "must be between 3 and 1000000");
+        require(config.getRetentionMs() > 0 && config.getRetentionMs() <= 600_000, path + ".retentionMs",
+                "must be between 1 and 600000");
+        require(config.getGraceMs() >= 1000 && config.getGraceMs() < config.getRetentionMs(), path + ".graceMs",
+                "must be at least 1000 and less than retentionMs");
     }
 
     private static void validateServiceDiscovery(

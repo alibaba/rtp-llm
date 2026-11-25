@@ -286,4 +286,51 @@ class EngineStatusConverterTest {
     private static EngineRpcService.WorkerStatusPB.Builder statusBuilder() {
         return EngineRpcService.WorkerStatusPB.newBuilder().setRole("RoleType.PREFILL");
     }
+
+    @Test
+    void preservesTimingWireTagsAndExplicitZerosForActiveAndFinishedTasks() throws Exception {
+        for (long value : List.of(0L, 1234567L)) {
+            var bytes = new ByteArrayOutputStream();
+            var wire = CodedOutputStream.newInstance(bytes);
+            wire.writeString(34, "timed-request");
+            for (int tag = 35; tag <= 40; tag++) {
+                wire.writeInt64(tag, value == 0L ? 0L : value + tag - 35);
+            }
+            wire.flush();
+            var task = EngineRpcService.TaskInfoPB.parseFrom(bytes.toByteArray());
+            assertTrue(task.hasSchedulerWaitUs());
+            assertTrue(task.hasSchedulerWaitSteps());
+            assertTrue(task.hasHybridKvAllocWaitUs());
+            assertTrue(task.hasPrefillInflightWallUs());
+            assertTrue(task.hasEngineAddToFirstTokenUs());
+            assertTrue(task.hasSchedulerWaitForPleReadyUs());
+            var observation = EngineStatusConverter.convertToStatusObservation(owner,
+                    statusBuilder().addRunningTaskInfo(task).addFinishedTaskList(task).build());
+
+            for (var telemetry : List.of(observation.activeTasks().get("timed-request").telemetry(),
+                    observation.finishedTasks().get("timed-request").telemetry())) {
+                assertEquals(value, telemetry.schedulerWaitUs());
+                assertEquals(value == 0L ? 0L : value + 1, telemetry.schedulerWaitSteps());
+                assertEquals(value == 0L ? 0L : value + 2, telemetry.hybridKvAllocWaitUs());
+                assertEquals(value == 0L ? 0L : value + 3, telemetry.prefillInflightWallUs());
+                assertEquals(value == 0L ? 0L : value + 4, telemetry.engineAddToFirstTokenUs());
+                assertEquals(value == 0L ? 0L : value + 5, telemetry.schedulerWaitForPleReadyUs());
+            }
+        }
+    }
+
+    @Test
+    void leavesUnavailableTimingFieldsNullForOlderWorkers() {
+        var task = EngineRpcService.TaskInfoPB.newBuilder().setRequestIdStr("old-worker").build();
+        var observation = EngineStatusConverter.convertToStatusObservation(owner,
+                statusBuilder().addFinishedTaskList(task).build());
+        var telemetry = observation.finishedTasks().get("old-worker").telemetry();
+
+        assertNull(telemetry.schedulerWaitUs());
+        assertNull(telemetry.schedulerWaitSteps());
+        assertNull(telemetry.hybridKvAllocWaitUs());
+        assertNull(telemetry.prefillInflightWallUs());
+        assertNull(telemetry.engineAddToFirstTokenUs());
+        assertNull(telemetry.schedulerWaitForPleReadyUs());
+    }
 }

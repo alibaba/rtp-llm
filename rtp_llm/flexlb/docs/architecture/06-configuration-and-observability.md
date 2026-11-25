@@ -39,6 +39,106 @@ native allocation 的实际占用仍取决于负载。
 
 ## FlexlbConfig 加载与动态更新
 
+### DashClient 单次分发的 P TTFT 分段采集
+
+`observability.ttftStages.enabled` 默认开启，设为 `false` 可关闭采集。独立运行模式由本机拉取 DashServing
+`RequestTimingService/PullRequestTimings`。启用 ZooKeeper 选主时，仅当选节点采集并上报，
+备节点直接跳过采集。切主时丢弃旧任期未完成的样本，新主任期从新的观察窗口开始采集。
+采集器从 `MODEL_SERVICE_CONFIG.role_endpoints[]` 的 `frontend_endpoint`、
+`prefill_endpoint` 和适用的 `pd_fusion_endpoint` 发现实例。各服务入口按既有
+`address`、`protocol`、`discovery` 配置指向 DashServing 推理服务。一个 group 可以
+只配置部分角色。Frontend 入口用于摘要发现，引擎调度沿用原角色集合。
+同一物理 daemon 上的多个逻辑引擎共用一个摘要游标，原 WorkerStatus 继续在各自的
+`worker_status_port` 轮询。配置过草案字段 `observability.ttftStages.endpoints` 的环境，
+升级前需将其移除。已有 Frontend 和 P 服务入口的部署自动开始采集。
+缺少 Frontend 入口时，在对应的 `role_endpoints[]` 分组加上下列字段，将地址替换为
+该部署的发现服务名，并沿用对应服务的协议和 provider。模型拓扑在 FlexLB 启动时读取。
+采集器每两秒在后台刷新服务实例列表，每秒拉取已发现实例的增量摘要。
+
+```json
+{
+  "frontend_endpoint": {
+    "address": "<Frontend 服务名>",
+    "protocol": "grpc",
+    "discovery": {"type": "vipserver"}
+  }
+}
+```
+
+以下字段合入现有 schema v3 的 `FLEXLB_CONFIG` JSON；环境变量只在启动读取，UniConfig/Nacos
+动态来源使用相同 JSON，经原有严格解析和递归合并更新，采集器下一轮采用新配置。
+它不是独立 Spring YAML/properties 配置项。原配置中的 ZooKeeper、请求超时和其他行为字段保留。
+
+```json
+{
+  "schemaVersion": 3,
+  "observability": {
+    "ttftStages": {
+      "rpcTimeoutMs": 800,
+      "maxRecords": 4096,
+      "maximumEntries": 65536,
+      "retentionMs": 120000,
+      "graceMs": 3000,
+      "remoteKvBeforeScheduler": false
+    }
+  }
+}
+```
+
+每个实例每轮最多拉取 8 页，每页最多 `maxRecords` 条（1–4096）。每个实例至多有一个
+在途 RPC，超时上限为 1000 ms。RPC 失败或整页序号不连续时，该实例保留原游标。
+页内单条业务记录的 ID、角色或计时字段无效时，只跳过这条记录，其余记录照常采集并推进游标。
+服务发现更新时仅增加新实例、移除已下线实例，其余实例保留原有进度。发现查询报错时
+沿用该服务最近一次成功的结果。VIPServer 可能将一次查询失败表示为空列表，因此等待连续两轮
+空结果再移除最后一批实例。每个地址应对应一个独立 daemon，以保证游标属于同一进程。
+
+聚合器每秒按完整执行 ID 检查。DashClient 分发起点、外层 P 接收和带 P 首 token 时间的 WorkerStatus 配齐并经过
+`graceMs` 等待后上报；缺记录的请求在 `retentionMs` 内可补齐，到期丢弃。
+已知来源重启、游标断档或 WorkerStatus 批次丢失时，跳过能够关联到受影响记录的请求。
+已上报请求继续去重。主备切换或修改采集窗口参数时会重新建立采集状态。新主节点从接管时刻开始统计。
+`remoteKvBeforeScheduler=true` 仅在确认该组 P 部署使用调度器之前完成远端 KV 的 Hybrid
+路径时启用；默认不将旧 `remote_kv_wait_ms` 与调度等待叠加，避免普通异步模式重叠。
+
+DashServing 的 Frontend 和 Prefill 默认提供请求时间摘要，可通过 `DS_REQUEST_TIMING_ENABLED=0` 关闭。
+角色取自既有 zone_type 或 `DS_REQUEST_TIMING_ROLE=frontend|prefill`，部署身份取自部署标签。
+服务复用 daemon 的推理 gRPC 端口，没有新增监听端口；生产端关闭/身份缺失时返回
+`FAILED_PRECONDITION`，采集器保留游标并等待后续重试。
+
+匹配后的计数器前缀是 `app.frontend.ttft.stages.`。`deployment_name` 取自 Frontend 摘要，
+FlexLB 自身部署使用全局标签 `SPECTRUM_DEPLOYMENT_NAME`。自定义 `kmonitorTags` 时应保留
+`BIZ_NAME` 并将 `deployment_name` 留给请求指标。Prometheus 导出时同名全局标签会覆盖它。
+
+| 后缀 | 累计值 |
+|---|---|
+| `total.us` | 每次 DashClient 分发开始到 P 引擎生成首 token |
+| `before.prefill.us` | 该次分发开始到 P 侧 DashServing 接收 |
+| `kv.alloc.us` | 关联执行的 Hybrid KV 分配等待 |
+| `remote.kv.us` | 显式启用前置 KV 口径时的远端 KV 等待 |
+| `scheduler.wait.us` | 关联执行的调度等待 |
+| `prefill.inflight.us` | 关联执行的 prefill 在途时间 |
+| `other.us` | 本次执行 TTFT 扣除以上五项后剩余的未归因时间 |
+| `requests` | 同批完整分段样本数 |
+| `failed.us` / `failed.requests` | 首 token 前失败或取消的执行累计耗时与次数，终点取 DashClient 判定失败的时间 |
+| `ple.wait.us` / `ple.requests` | 独立 PLE 等待累计与样本数，不叠加至分段 |
+
+上表是单调 COUNTER，可用同一窗口内的耗时增量除以对应次数增量计算均值，微秒除以
+1000 转为毫秒。六个分段共用 `requests`，PLE 使用 `ple.requests`。大盘四张 TTFT 图直接读取下述 20 秒 GAUGE。未采集的
+可选子项归入 `other`，全部新阶段 telemetry 缺失的旧引擎不产生阶段样本。
+每次 DashClient 分发使用独立的执行 ID。起点在选址前记录，每次执行在有效输出、正常结束、失败或取消时发出一条携带该起点的摘要。P 代理内部调用的传输后缀用于还原这次分发。
+各次重试独立配对、去重和上报。阶段拆分以 Frontend 的部署名归属，即使选中的 P 来自另一部署。
+如果 DashClient 收到错误时 P 已经生成首 token，使用 P 首 token 计算一次 TTFT。
+如果首 token 缺失或晚于失败时刻，且已收到与外层执行 ID 完全一致的 WorkerStatus，采集器在配对等待期后计一次失败。
+如果缺少 WorkerStatus，或只收到代理内部执行的记录，则等到保留期结束再判定失败。失败时长为 `failed_at_us - dispatch_start_us`。退避发生在两次分发之间，不计入两次执行的阶段。
+
+匹配缓存最多保留 `maximumEntries` 次执行，容量用尽时仍可补全已缓存的执行。
+已发布的执行单独保留 ID 去重。来源断档和已知丢弃的 WorkerStatus 只影响相关执行。
+主节点按执行完成配对的时刻以 20 秒为窗口计算均值与 P50、P95、P99。
+按单次 P TTFT 排序，分位取第 `ceil(q × N)` 次执行的总耗时和六段耗时，同耗时时按完整执行 ID 排序。
+
+结窗后一次性上报 `app.frontend.ttft.stages.window20s.*` GAUGE。七个耗时后缀沿用上表，单位为微秒，标签为 `deployment_name`、`slot` 和 `statistic=mean|p50|p95|p99`。相邻窗口使用不同的 `slot`，隔离底层采集周期。同部署、同 slot 的 `samples` 是配对数，`window.end.ms` 是横轴使用的窗口结束 Unix 毫秒。PLE 沿用独立累计值。
+
+每窗最多保留 `min(maximumEntries, 65536)` 条排序样本。达到上限后，受影响的已接纳部署继续计算均值，该窗分位留空。空窗、启动或切主时未完整覆盖的窗口不产生快照。
+
 `ConfigService` 是统一读取入口。`ConfigSourceSelection` 在启动时根据 FlexLB 进程的
 环境变量选择唯一的行为配置字符串来源，先判断 UniConfig，再判断 Nacos：
 
@@ -538,6 +638,37 @@ phase 时间戳的 0 表示未知，缺少时间戳时不报告相减得到的�
 Engine received→waiting 和 waiting→running 使用 WorkerStatus 中 Engine 自己记录的
 阶段时间戳计算。轮询间隔影响 Master 收到样本的时间，不用探测到状态的时间估算阶段耗时；
 完成任务的时间戳完整时，无需在轮询中逐个观察到这些阶段。
+
+### 请求级首 Token 阶段指标
+
+配套 vLLM develop 的请求计时经 DashLLM WorkerStatus RPC 进入 `TaskTelemetry`，
+与 `remote_kv_wait_ms` 一样，在 `GrpcWorkerStatusRunner` 消费 PREFILL/PDFUSION
+完成任务且该任务已有首 token 时，由 `EngineHealthReporter` 上报。只扩展现有
+完成任务入口，不增加监控轮询或另一条 DashLLM 直报链路；上报时间可能晚于首 token。
+
+以下指标均以 `app.engine.worker.status.` 为逻辑前缀，使用 GAUGE + SUMMARY：
+
+| 后缀 | 单位 | 定义 |
+| --- | --- | --- |
+| `scheduler.wait.us` | 微秒 | 原生 Scheduler 接纳到首次为请求分配正 token 预算 |
+| `scheduler.wait.steps` | 次 | 上述等待期间的非空调度轮数，不含首次分配预算轮 |
+| `hybrid.kv.alloc.wait.us` | 微秒 | Hybrid 入队准备到本地 KV 槽位分配成功 |
+| `prefill.inflight.wall.us` | 微秒 | 首 token 前有效 Prefill chunk 的在途墙钟区间并集，不是纯 GPU 计算时间 |
+| `engine.add.to.first.token.us` | 微秒 | EngineCore 接纳到 scheduler 处理首个非空输出 token |
+| `scheduler.wait.for.ple.ready.us` | 微秒 | scheduler 观察到 PLE 未就绪后的累计等待 |
+
+每个字段仅在值存在且非负时上报，明确的 0 是有效样本；旧引擎缺字段不产生零样本。
+标签复用阶段指标的 `role/group` 和 Master 公共身份，不增加 engineIp 或 request_id。
+KMonitor 命名空间沿用当前部署配置；微秒面板除以 1000 显示毫秒，轮数不转换。
+Micrometer provider 仅暴露最近值；GAUGE + SUMMARY 不意味着存在 Prometheus Histogram
+bucket，分位数和跨实例聚合必须以实际接收端支持的统计为准。
+
+引擎内总耗时直接取 `engine.add.to.first.token.us`，不含 EngineCore 输入队列等待
+和向客户端交付首 token 的时间。首次调度前 PLE 等待已经计入 `scheduler.wait.us`；
+原生 connector 的外部 KV 等待也可能与其重叠，因此不能将所有阶段堆叠相加。
+旧 `scheduler.wait.ms` 仍为 waiting→running 扣除 remote KV wait 的口径，不由新增
+`scheduler.wait.us` 覆盖。不同字段的有效样本集合可能不同，不能直接用聚合曲线相减
+推算未覆盖阶段。完成窗口仍有界，不承诺进程故障或长轮询停顿下无损上传。
 
 gRPC 服务端执行器与批次发送执行器初始化后立即通过 `FlexMonitor` 上报一次状态，之后每 2 秒上报忙碌线程数、总线程数和
 排队任务数；gRPC 服务端另报最大线程数、累计拒绝任务数。它们与其它线程池使用相同的

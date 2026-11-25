@@ -115,6 +115,13 @@ public class LBStatusConsistencyService implements MasterElectService {
         }
     }
 
+    /**
+     * Identifies one local leadership term so late telemetry callbacks can be discarded.
+     */
+    public long getLeadershipGeneration() {
+        return isNeedConsistency() ? zookeeperMasterElectService.getLeadershipGeneration() : 0L;
+    }
+
     public String getMasterHostIpPort() {
         if (!isNeedConsistency()) {
             return null;

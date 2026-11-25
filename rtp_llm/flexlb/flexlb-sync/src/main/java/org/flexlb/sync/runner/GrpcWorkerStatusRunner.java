@@ -9,6 +9,7 @@ import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.service.monitor.RequestTimingPoller;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
@@ -41,6 +42,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private static final int MAX_CONSECUTIVE_FAILURES = 3;
     private final CacheAwareService cacheAwareService;
     private final Executor callbackExecutor;
+    private final RequestTimingPoller requestTimingPoller;
 
     public GrpcWorkerStatusRunner(String ipPort,
                                   int workerStatusPort,
@@ -55,6 +57,25 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                   long syncRequestTimeoutMs,
                                   CacheAwareService cacheAwareService,
                                   Executor callbackExecutor) {
+        this(ipPort, workerStatusPort, site, roleType, ignoredGroup, workerStatus, pollLease,
+                workerDirectory, engineHealthReporter, engineGrpcService, syncRequestTimeoutMs,
+                cacheAwareService, callbackExecutor, null);
+    }
+
+    public GrpcWorkerStatusRunner(String ipPort,
+                                  int workerStatusPort,
+                                  String site,
+                                  RoleType roleType,
+                                  String ignoredGroup,
+                                  WorkerStatus workerStatus,
+                                  WorkerStatus.PollLease pollLease,
+                                  WorkerDirectory workerDirectory,
+                                  EngineHealthReporter engineHealthReporter,
+                                  EngineGrpcService engineGrpcService,
+                                  long syncRequestTimeoutMs,
+                                  CacheAwareService cacheAwareService,
+                                  Executor callbackExecutor,
+                                  RequestTimingPoller requestTimingPoller) {
         this.ipPort = ipPort;
         this.ip = workerStatus.getIp();
         this.workerStatusPort = workerStatusPort;
@@ -69,6 +90,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
         this.cacheAwareService = cacheAwareService;
         this.callbackExecutor = callbackExecutor;
+        this.requestTimingPoller = requestTimingPoller;
     }
 
     public GrpcWorkerStatusRunner(String ipPort,
@@ -399,6 +421,13 @@ public class GrpcWorkerStatusRunner implements Runnable {
             long startTime,
             WorkerEndpoint endpoint,
             WorkerStatus.StepMetrics previousStep) {
+        try {
+            if (requestTimingPoller != null) {
+                requestTimingPoller.addWorkerStatus(workerStatus, observation);
+            }
+        } catch (RuntimeException timingFailure) {
+            logger.warn("Request timing collection failed after worker status commit at {}", ipPort, timingFailure);
+        }
         try {
             engineHealthReporter.reportStatusCheckRemoteInfo(
                     workerStatus, startTime);

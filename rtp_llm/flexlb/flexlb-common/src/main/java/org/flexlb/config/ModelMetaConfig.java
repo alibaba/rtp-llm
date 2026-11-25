@@ -51,7 +51,7 @@ public class ModelMetaConfig {
      * Return a fresh structural list for the configured role across groups.
      */
     public List<Pair<String, Endpoint>> endpointsWithGroup(RoleType role) {
-        if (role == null || !serviceRoute.getAllRoleTypes().contains(role)) {
+        if (role == null || serviceRoute.getRoleEndpoints(role).isEmpty()) {
             return List.of();
         }
         return serviceRoute.getAllEndpointsWithGroup(role);

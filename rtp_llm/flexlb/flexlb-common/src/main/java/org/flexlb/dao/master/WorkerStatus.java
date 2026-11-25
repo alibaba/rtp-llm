@@ -92,45 +92,29 @@ public class WorkerStatus {
         }
 
         private static TaskObservation copyOf(TaskInfo task) {
-            return new TaskObservation(
-                    task.getRequestId(),
-                    task.getPrefixLength(),
-                    task.getPrefillTime(),
-                    task.getInputLength(),
-                    task.getWaitingTime(),
-                    task.getIterateCount(),
-                    task.getEndTimeMs(),
-                    task.getDpRank(),
-                    task.getErrorCode(),
-                    task.getErrorMessage(),
-                    task.getBatchId(),
-                    task.getPhase(),
-                    task.getExecutionTimeMs(),
-                    task.getPriorityPreemptionProgress(),
-                    new TaskTelemetry(task.isPrefixLengthValid(),
-                            task.getRequestReceivedTimeMs(),
-                            task.getInputQueueEnqueueTimeMs(),
-                            task.getInputQueueDrainTimeMs(),
-                            task.getWaitingEnteredTimeMs(),
-                            task.getRunningEnteredTimeMs(),
-                            task.getRemoteKvWaitMs(),
-                            task.getFirstTokenTimeMs(),
-                            task.getHbmLocalMatchTokens(),
-                            task.getRemoteKvAddedMatchTokens(),
-                            task.getFirstPrefillStepId(),
-                            task.getLastPrefillStepId(),
-                            task.getPrefillStepCount(),
-                            task.getPrefillNonfinalChunkTokensMin(),
-                            task.getPrefillNonfinalChunkTokensMax(),
+            return new TaskObservation(task.getRequestId(), task.getPrefixLength(), task.getPrefillTime(),
+                    task.getInputLength(), task.getWaitingTime(), task.getIterateCount(), task.getEndTimeMs(),
+                    task.getDpRank(), task.getErrorCode(), task.getErrorMessage(), task.getBatchId(), task.getPhase(),
+                    task.getExecutionTimeMs(), task.getPriorityPreemptionProgress(),
+                    new TaskTelemetry(task.isPrefixLengthValid(), task.getRequestReceivedTimeMs(),
+                            task.getInputQueueEnqueueTimeMs(), task.getInputQueueDrainTimeMs(),
+                            task.getWaitingEnteredTimeMs(), task.getRunningEnteredTimeMs(), task.getRemoteKvWaitMs(),
+                            task.getFirstTokenTimeMs(), task.getHbmLocalMatchTokens(),
+                            task.getRemoteKvAddedMatchTokens(), task.getFirstPrefillStepId(),
+                            task.getLastPrefillStepId(), task.getPrefillStepCount(),
+                            task.getPrefillNonfinalChunkTokensMin(), task.getPrefillNonfinalChunkTokensMax(),
                             task.getCompletedPrefillTokens(),
                             task.getRemainingPrefillTokens() < 0 ? null : task.getRemainingPrefillTokens(),
-                            task.getLastCompletedPrefillStepId()));
+                            task.getLastCompletedPrefillStepId(), task.getSchedulerWaitUs(),
+                            task.getSchedulerWaitSteps(), task.getHybridKvAllocWaitUs(),
+                            task.getPrefillInflightWallUs(), task.getEngineAddToFirstTokenUs(),
+                            task.getSchedulerWaitForPleReadyUs()));
         }
     }
 
     /**
      * Immutable request telemetry retained from the Engine status RPC.
-     * Nullable prefill progress values preserve omitted protobuf fields.
+     * Nullable progress and timing values preserve omitted protobuf fields.
      */
     public record TaskTelemetry(boolean prefixLengthValid,
                                 long requestReceivedTimeMs,
@@ -149,7 +133,13 @@ public class WorkerStatus {
                                 long prefillNonfinalChunkTokensMax,
                                 Long completedPrefillTokens,
                                 Long remainingPrefillTokens,
-                                Long lastCompletedPrefillStepId) {
+                                Long lastCompletedPrefillStepId,
+                                Long schedulerWaitUs,
+                                Long schedulerWaitSteps,
+                                Long hybridKvAllocWaitUs,
+                                Long prefillInflightWallUs,
+                                Long engineAddToFirstTokenUs,
+                                Long schedulerWaitForPleReadyUs) {
 
         public TaskTelemetry(boolean prefixLengthValid,
                              long requestReceivedTimeMs,
@@ -167,9 +157,9 @@ public class WorkerStatus {
                              long prefillNonfinalChunkTokensMin,
                              long prefillNonfinalChunkTokensMax) {
             this(prefixLengthValid, requestReceivedTimeMs, inputQueueEnqueueTimeMs, inputQueueDrainTimeMs,
-                    waitingEnteredTimeMs, runningEnteredTimeMs, remoteKvWaitMs, firstTokenTimeMs,
-                    hbmLocalMatchTokens, remoteKvAddedMatchTokens, firstPrefillStepId, lastPrefillStepId,
-                    prefillStepCount, prefillNonfinalChunkTokensMin, prefillNonfinalChunkTokensMax,
+                    waitingEnteredTimeMs, runningEnteredTimeMs, remoteKvWaitMs, firstTokenTimeMs, hbmLocalMatchTokens,
+                    remoteKvAddedMatchTokens, firstPrefillStepId, lastPrefillStepId, prefillStepCount,
+                    prefillNonfinalChunkTokensMin, prefillNonfinalChunkTokensMax, null, null, null, null, null, null,
                     null, null, null);
         }
     }

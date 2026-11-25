@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package dashserving.timing;
+option java_package = "org.flexlb.timing.grpc";
+option java_multiple_files = true;
+
+// Served on the daemon's existing inference gRPC port for supported roles.
+service RequestTimingService {
+  rpc PullRequestTimings(PullRequestTimingsRequest) returns (PullRequestTimingsResponse);
+}
+
+message PullRequestTimingsRequest {
+  string epoch = 1;
+  uint64 after_sequence = 2;
+  uint32 max_records = 3; // 0 = 512; capped at 4096 and a 3 MiB record payload.
+}
+
+message RequestTimingRecord {
+  uint64 sequence = 1;
+  string request_id = 2; // DashClient execution ID, or P wire ID (falls back to x-request-id when empty).
+  string role = 3; // frontend or prefill; deployment identity, not request role.
+  string deployment_name = 4;
+  int64 received_time_us = 5; // P business receipt, Unix microseconds.
+  reserved 6; // Removed daemon frontend TTFT: it is a different measurement.
+  RequestTimingEventKind event_kind = 7;
+  int64 dispatch_start_us = 8; // Native Master execution ID fixed, before selection.
+  int64 failed_at_us = 9; // Client failure/cancel before backoff; 0 for completion/receipt.
+}
+
+enum RequestTimingEventKind {
+  REQUEST_TIMING_EVENT_UNSPECIFIED = 0;
+  PREFILL_RECEIVED = 1;
+  DISPATCH_COMPLETED = 2; // Effective output or normal completion, including zero-token completion. P token time comes from WorkerStatus.
+  DISPATCH_FAILED = 3;
+}
+
+message PullRequestTimingsResponse {
+  string epoch = 1; // Changes on process restart or enabled role/deployment change.
+  uint64 next_sequence = 2; // Last returned sequence, or current valid cursor if empty.
+  bool gap = 3; // Epoch mismatch, evicted cursor, or cursor ahead of this producer.
+  bool has_more = 4;
+  repeated RequestTimingRecord records = 5;
+}

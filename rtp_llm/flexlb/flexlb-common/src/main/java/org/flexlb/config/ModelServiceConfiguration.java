@@ -6,6 +6,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.KvcmConfig;
 import org.flexlb.dao.route.OptimizerConfig;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.discovery.RoutingServiceDiscovery;
 import org.springframework.context.annotation.Bean;
@@ -46,6 +47,10 @@ public class ModelServiceConfiguration {
         for (Endpoint endpoint : endpoints) {
             validateEngineEndpointConfiguration(endpoint);
             serviceDiscovery.validate(endpoint);
+        }
+
+        for (Endpoint frontend : serviceRoute.getRoleEndpoints(RoleType.FRONTEND)) {
+            serviceDiscovery.validate(frontend);
         }
 
         validateKvcm(serviceRoute.getKvcm(), serviceDiscovery);

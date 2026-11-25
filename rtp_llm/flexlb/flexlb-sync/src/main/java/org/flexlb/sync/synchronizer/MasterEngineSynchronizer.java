@@ -10,10 +10,12 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.service.monitor.RequestTimingPoller;
 import org.flexlb.sync.runner.EngineSyncRunner;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
@@ -37,6 +39,7 @@ public final class MasterEngineSynchronizer {
     private final List<RoleType> requiredRoles;
     private final WorkerAddressService workerAddressService;
     private final WorkerDirectory workerDirectory;
+    private final RequestTimingPoller requestTimingPoller;
     private final EngineHealthReporter engineHealthReporter;
     private final FlexlbConfig flexlbConfig;
     private final EngineGrpcService engineGrpcService;
@@ -59,7 +62,23 @@ public final class MasterEngineSynchronizer {
                                     DynamicCacheIntervalService cacheIntervalService,
                                     ConfigService configService) {
 
+        this(workerAddressService, engineHealthReporter, workerDirectory, engineGrpcService,
+                modelMetaConfig, cacheAwareService, cacheIntervalService, configService, null);
+    }
+
+    @Autowired
+    public MasterEngineSynchronizer(WorkerAddressService workerAddressService,
+                                    EngineHealthReporter engineHealthReporter,
+                                    WorkerDirectory workerDirectory,
+                                    EngineGrpcService engineGrpcService,
+                                    ModelMetaConfig modelMetaConfig,
+                                    CacheAwareService cacheAwareService,
+                                    DynamicCacheIntervalService cacheIntervalService,
+                                    ConfigService configService,
+                                    RequestTimingPoller requestTimingPoller) {
+
         this.workerAddressService = workerAddressService;
+        this.requestTimingPoller = requestTimingPoller;
         this.engineHealthReporter = engineHealthReporter;
         this.workerDirectory = workerDirectory;
         this.flexlbConfig = configService.loadBalanceConfig();
@@ -122,7 +141,7 @@ public final class MasterEngineSynchronizer {
                         cacheIntervalService, syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
                         flexlbConfig.isKvcmAndStandbyEnabled(),
                         flexlbConfig.getWorkerRegistry().getCacheStatus().isFullSnapshotDebugMode(),
-                        statusStaleAfterUs));
+                        statusStaleAfterUs, requestTimingPoller));
             }
         } catch (Exception e) {
             logger.error("sync engine prefill status error", e);
