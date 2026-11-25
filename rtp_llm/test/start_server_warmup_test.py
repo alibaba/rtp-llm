@@ -2,7 +2,7 @@ import asyncio
 import unittest
 from contextlib import ExitStack
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from rtp_llm import start_server
 from rtp_llm.config.py_config_modules import PyEnvConfigs
@@ -155,21 +155,53 @@ class StartupRealWarmupTest(unittest.TestCase):
             1048568,
         )
 
-    def test_glm_warmup_uses_each_workers_resolved_limits(self):
+    def test_glm_warmup_uses_each_workers_admitted_input_lengths(self):
         config = PyEnvConfigs()
         config.model_args.model_type = "glm_5"
         self.assertIsNone(config.model_args.max_seq_len)
-        for model_limit, kv_capacity in ((2048, 4096), (4096, 1024)):
-            with self.subTest(model_limit=model_limit, kv_capacity=kv_capacity):
-                worker = AsyncMock()
-                worker.get_worker_status.return_value = SimpleNamespace(
-                    max_seq_len=model_limit, total_kv_cache=kv_capacity
-                )
-                limit = asyncio.run(
-                    start_server._get_startup_real_warmup_max_len(config, worker, "dp0", 60.0)
-                )
-                self.assertEqual(limit, min(model_limit, kv_capacity))
-                worker.get_worker_status.assert_awaited_once_with("dp0", 60.0)
+        config.sp_config.type = SpeculativeType.MTP
+        config.sp_config.gen_num_per_cycle = 5
+        limits = {"dp0": 11, "dp1": 1}
+
+        async def get_worker_status(address, timeout_s, *, include_warmup_input_limit=False):
+            return SimpleNamespace(
+                max_seq_len=128,
+                total_kv_cache=64,
+                max_warmup_input_tokens=limits[address] if include_warmup_input_limit else 0,
+            )
+
+        with patch.object(
+            start_server, "_get_startup_real_warmup_grpc_addresses", return_value=list(limits)
+        ), patch("rtp_llm.cpp.model_rpc.model_rpc_client.ModelRpcClient") as clients:
+            workers = [MagicMock(), MagicMock()]
+            clients.side_effect = workers
+            for worker in workers:
+                worker.get_worker_status = get_worker_status
+                worker.close = AsyncMock()
+            asyncio.run(start_server._run_startup_real_warmup_grpc(config))
+            lengths = [
+                [call.args[0].token_ids.numel() for call in worker.enqueue.call_args_list]
+                for worker in workers
+            ]
+        self.assertEqual(lengths, [[2, 4, 8, 11], [1]])
+
+    def test_glm_warmup_rejects_worker_with_no_admissible_prompt(self):
+        config = PyEnvConfigs()
+        config.model_args.model_type = "glm_5"
+        worker = AsyncMock()
+        worker.get_worker_status.return_value = SimpleNamespace(max_warmup_input_tokens=0)
+        with self.assertRaisesRegex(ValueError, "dp1"):
+            asyncio.run(start_server._get_startup_real_warmup_input_lens(config, worker, "dp1", 60.0))
+
+    def test_deepseek_warmup_keeps_model_length_and_speculative_reserve(self):
+        config = self._configs(SpeculativeType.DSPARK, 3)
+        config.model_args = SimpleNamespace(model_type="deepseek_v4", max_seq_len=32)
+        worker = AsyncMock()
+        lengths = asyncio.run(
+            start_server._get_startup_real_warmup_input_lens(config, worker, "dp0", 60.0)
+        )
+        self.assertEqual(lengths, [2, 4, 8, 16, 23])
+        worker.get_worker_status.assert_not_awaited()
 
     def test_glm_startup_warmup_gate(self):
         config = PyEnvConfigs()

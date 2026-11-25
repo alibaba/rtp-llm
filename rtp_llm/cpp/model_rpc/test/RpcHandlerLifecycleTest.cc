@@ -365,6 +365,29 @@ protected:
     }
 };
 
+TEST_F(RpcHandlerLifecycleTest, WarmupStatusUsesWorkerCacheAndPipelineReserve) {
+    LocalRpcServer server;
+    server.engine_ = std::make_shared<SteppedEngine>(OutputAction::WAIT);
+    server.meta_   = std::make_shared<RpcServerRuntimeMeta>();
+    auto& params   = server.maga_init_params_;
+    params.model_config_.max_seq_len   = 128;
+    params.sp_config.type              = SP_TYPE_MTP;
+    params.sp_config.gen_num_per_cycle = 3;
+    params.parallelism_config.pp_size  = 2;
+    auto limit = [&](bool request_limit) {
+        grpc::ServerContext context;
+        StatusVersionPB     request;
+        WorkerStatusPB      response;
+        request.set_include_warmup_input_limit(request_limit);
+        EXPECT_TRUE(server.GetWorkerStatus(&context, &request, &response).ok());
+        return response.max_warmup_input_tokens();
+    };
+    EXPECT_EQ(limit(false), 0);
+    EXPECT_EQ(limit(true), 49);  // Seven usable 8-token pages, with seven tokens reserved by PP MTP.
+    params.model_config_.max_seq_len = 16;
+    EXPECT_EQ(limit(true), 9);
+}
+
 TEST_F(RpcHandlerLifecycleTest, LocalSuccessReturnsBeforeSchedulerWithoutCanceling) {
     runSynchronousHandler(Handler::LOCAL, OutputAction::COMPLETE);
 }

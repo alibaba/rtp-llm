@@ -1054,23 +1054,30 @@ def _get_startup_real_warmup_pow2_lens(max_len: int):
     return lens
 
 
-async def _get_startup_real_warmup_max_len(
+async def _get_startup_real_warmup_input_lens(
     py_env_configs: PyEnvConfigs, client, address: str, timeout_s: float
-) -> int:
+) -> list[int]:
     if py_env_configs.model_args.model_type == "glm_5":
-        # Each DP worker reports the resolved model length and the scheduler's KV capacity in tokens.
-        status = await client.get_worker_status(address, timeout_s)
-        if status.max_seq_len <= 0 or status.total_kv_cache <= 0:
+        status = await client.get_worker_status(
+            address, timeout_s, include_warmup_input_limit=True
+        )
+        # The worker has already reserved space for generation and speculation.
+        limit = status.max_warmup_input_tokens
+        if limit <= 0:
             raise ValueError(
-                f"GLM5 warmup worker {address} reported max_seq_len={status.max_seq_len}, "
-                f"total_kv_cache={status.total_kv_cache}"
+                f"GLM5 warmup worker {address} reported no positive input limit "
+                f"(max_warmup_input_tokens={limit})"
             )
-        return min(status.max_seq_len, status.total_kv_cache)
+        return [1] if limit == 1 else _get_startup_real_warmup_pow2_lens(limit)
 
     model_max_len = int(getattr(py_env_configs.model_args, "max_seq_len", None) or 0)
     if model_max_len <= 0:
         raise ValueError(f"model_args.max_seq_len should be positive, got {model_max_len}")
-    return model_max_len
+    reserve_step = _get_startup_real_warmup_speculative_reserve_step(py_env_configs)
+    return [
+        _get_startup_real_warmup_request_token_len(length, model_max_len, reserve_step)
+        for length in _get_startup_real_warmup_pow2_lens(model_max_len)
+    ]
 
 
 def _get_startup_real_warmup_grpc_addresses(py_env_configs: PyEnvConfigs):
@@ -1183,7 +1190,6 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
     from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
     from rtp_llm.utils.base_model_datatypes import GenerateInput
 
-    reserve_step = _get_startup_real_warmup_speculative_reserve_step(py_env_configs)
     addresses = _get_startup_real_warmup_grpc_addresses(py_env_configs)
     timeout_s = _get_startup_real_warmup_timeout_s()
     timeout_ms = int(timeout_s * 1000)
@@ -1194,12 +1200,11 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
         else {}
     )
     logging.info(
-        "running DSV4 startup real warmup via backend grpc, addrs=%s, "
-        "token_id=%d, max_new_tokens=%d, reserve_step=%d, timeout=%.1fs",
+        "running startup real warmup via backend grpc, addrs=%s, "
+        "token_id=%d, max_new_tokens=%d, timeout=%.1fs",
         addresses,
         STARTUP_REAL_WARMUP_TOKEN_ID,
         STARTUP_REAL_WARMUP_MAX_NEW_TOKENS,
-        reserve_step,
         timeout_s,
     )
 
@@ -1212,17 +1217,13 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
             max_rpc_timeout_ms=timeout_ms,
         )
         try:
-            max_len = await _get_startup_real_warmup_max_len(
+            input_lens = await _get_startup_real_warmup_input_lens(
                 py_env_configs, client, addr, timeout_s
             )
-            token_lens = _get_startup_real_warmup_pow2_lens(max_len)
-            logging.info("Startup real warmup on %s uses token lengths %s", addr, token_lens)
-            for token_len in token_lens:
+            logging.info("Startup real warmup on %s uses input lengths %s", addr, input_lens)
+            for request_token_len in input_lens:
                 request_id = _new_startup_real_warmup_request_id(total_requests)
                 total_requests += 1
-                request_token_len = _get_startup_real_warmup_request_token_len(
-                    token_len, max_len, reserve_step
-                )
                 max_new_tokens = _get_startup_real_warmup_max_new_tokens()
                 generate_config = GenerateConfig(
                     max_new_tokens=max_new_tokens,
@@ -1254,15 +1255,12 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
                 last_aux = None
                 chunk_count = 0
                 logging.info(
-                    "DSV4 startup grpc warmup request begin, "
-                    "addr=%s, request_id=%d, target_token_len=%d, "
-                    "request_token_len=%d, max_new_tokens=%d, reserve_step=%d",
+                    "startup grpc warmup request begin, "
+                    "addr=%s, request_id=%d, request_token_len=%d, max_new_tokens=%d",
                     addr,
                     request_id,
-                    token_len,
                     request_token_len,
                     max_new_tokens,
-                    reserve_step,
                 )
                 async for outputs in client.enqueue(generate_input):
                     chunk_count += 1
@@ -1270,13 +1268,12 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
                         last_aux = outputs.generate_outputs[0].aux_info
                 if last_aux is not None:
                     logging.info(
-                        "DSV4 startup grpc warmup request finished, addr=%s, request_id=%d, "
-                        "target_token_len=%d, request_token_len=%d, max_new_tokens=%d, "
+                        "startup grpc warmup request finished, addr=%s, request_id=%d, "
+                        "request_token_len=%d, max_new_tokens=%d, "
                         "chunks=%d, input_len=%s, "
                         "reuse_len=%s, output_len=%s, cost=%.2fs",
                         addr,
                         request_id,
-                        token_len,
                         request_token_len,
                         max_new_tokens,
                         chunk_count,
@@ -1287,12 +1284,11 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
                     )
                 else:
                     logging.info(
-                        "DSV4 startup grpc warmup request finished, addr=%s, request_id=%d, "
-                        "target_token_len=%d, request_token_len=%d, max_new_tokens=%d, "
+                        "startup grpc warmup request finished, addr=%s, request_id=%d, "
+                        "request_token_len=%d, max_new_tokens=%d, "
                         "chunks=%d, aux_info=None, cost=%.2fs",
                         addr,
                         request_id,
-                        token_len,
                         request_token_len,
                         max_new_tokens,
                         chunk_count,
@@ -1303,13 +1299,13 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
                 await client.close()
             except Exception:
                 logging.warning(
-                    "failed to close DSV4 startup grpc warmup client, addr=%s, trace=%s",
+                    "failed to close startup grpc warmup client, addr=%s, trace=%s",
                     addr,
                     traceback.format_exc(),
                 )
 
     logging.info(
-        "DSV4 startup grpc warmup finished, requests=%d, addrs=%d, cost=%.2fs",
+        "startup grpc warmup finished, requests=%d, addrs=%d, cost=%.2fs",
         total_requests,
         len(addresses),
         time.time() - begin_all,

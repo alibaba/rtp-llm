@@ -2301,6 +2301,34 @@ size_t CoordinatorCacheManager::maxAvailableTokensNum() const {
     return minTokenCapacity(/*use_available_blocks=*/false, /*full_groups_only=*/true);
 }
 
+int CoordinatorCacheManager::maxWarmupInputTokens(int max_input_tokens, int reserve_step) const {
+    if (max_input_tokens <= 0 || reserve_step < 0) {
+        return 0;
+    }
+    int limit = static_cast<int>(std::min(static_cast<size_t>(max_input_tokens), maxAvailableTokensNum()));
+    for (size_t id = 0; id < kv_cache_groups_.size(); ++id) {
+        const auto& group = kv_cache_groups_[id];
+        // A resident system prompt can have only CACHE references and still be ineligible for eviction.
+        const auto free   = group_block_pools_[id]->freeBlocksNum();
+        const auto usable = free - std::min(free, reserveBlocksForPool(id));
+        int        low    = 0;
+        int        high   = limit;
+        while (low < high) {
+            const int prompt = high - (high - low) / 2;
+            // Initial allocation maps the whole prompt to local pages before adding the speculative reserve.
+            const int local_len = cpEffectiveSeqLenForReserve(cp_slot_mapper_, config_, group->tag(), prompt);
+            // GLM5 has FULL groups. Counting all logical slots also bounds sparse groups' chunk writes.
+            if (static_cast<size_t>(group->needBlocksNum(local_len, 0, reserve_step)) <= usable) {
+                low = prompt;
+            } else {
+                high = prompt - 1;
+            }
+        }
+        limit = low;
+    }
+    return limit;
+}
+
 KVCacheTokenCapacity CoordinatorCacheManager::tokenCapacity(size_t default_seq_size_per_block) const {
     (void)default_seq_size_per_block;
     // Tail-sparse groups (LINEAR/SWA) do not retain one block per sequence

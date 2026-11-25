@@ -1454,10 +1454,13 @@ class ModelRpcClient(object):
     async def close(self) -> None:
         await self._channel_pool.close()
 
-    async def get_worker_status(self, address: str, timeout_s: float) -> WorkerStatusPB:
+    async def get_worker_status(
+        self, address: str, timeout_s: float, *, include_warmup_input_limit: bool = False
+    ) -> WorkerStatusPB:
         channel = await self._channel_pool.get(address)
         return await RpcServiceStub(channel).GetWorkerStatus(
-            StatusVersionPB(), timeout=timeout_s
+            StatusVersionPB(include_warmup_input_limit=include_warmup_input_limit),
+            timeout=timeout_s,
         )
 
     def _get_explicit_target(self, input_py: GenerateInput) -> RoleAddr | None:

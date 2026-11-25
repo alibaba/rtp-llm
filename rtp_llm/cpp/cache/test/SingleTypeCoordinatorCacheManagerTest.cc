@@ -428,6 +428,45 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, MallocSingleBatch) {
     EXPECT_FALSE(result2.success);
 }
 
+TEST_F(SingleTypeCoordinatorCacheManagerTest, WarmupInputLimitMatchesUncachedInitialAllocation) {
+    constexpr int block_size = 8;
+    auto          config     = createSingleTypeTestConfig(/*layer_num=*/1, /*block_num=*/10, block_size);
+    allocator_               = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
+    ASSERT_TRUE(allocator_->init());
+    ASSERT_EQ(allocator_->freeBlocksNum(), 9u);
+    allocator_->setReserveBlocksNum(2);
+
+    for (const int cp_size : {1, 2}) {
+        allocator_->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, cp_size, block_size));
+        for (const int reserve_step : {0, 6}) {
+            SCOPED_TRACE(::testing::Message() << "cp_size=" << cp_size << ", reserve_step=" << reserve_step);
+            const int limit = allocator_->maxWarmupInputTokens(512, reserve_step);
+            // Seven usable pages. CP rounds the prompt to local pages before reserving MTP tokens.
+            const int expected = cp_size == 1 ? 7 * block_size - reserve_step :
+                                                (reserve_step == 0 ? 7 : 6) * block_size * cp_size;
+            ASSERT_EQ(limit, expected);
+            EXPECT_EQ(allocator_->maxWarmupInputTokens(11, reserve_step), 11);
+            for (const int length : {limit, limit + 1}) {
+                auto resource = createBatchKVCacheResource(1, config);
+                auto tokens   = createCompleteTokenIds(1, length, block_size);
+                tokens->setReserveStep(reserve_step);
+                MallocInfo info{resource, tokens};
+                info.enable_cache_lookup = false;
+                info.reuse_cache         = false;
+                const auto result        = allocator_->malloc(info);
+                if (length == limit) {
+                    ASSERT_TRUE(result.success);
+                    allocator_->free(FreeInfo{resource, tokens});
+                } else {
+                    EXPECT_EQ(result.status, MallocStatus::PERMANENT_RESOURCE_EXHAUSTED);
+                }
+            }
+        }
+    }
+    allocator_->setReserveBlocksNum(9);
+    EXPECT_EQ(allocator_->maxWarmupInputTokens(512, 0), 0);
+}
+
 TEST_F(SingleTypeCoordinatorCacheManagerTest, ReserveBlocksOnlyAppliedToInitMalloc) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/1);
     allocator_  = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
@@ -762,6 +801,8 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ResidentPrefixRemainsMatchableUnde
     EXPECT_TRUE(path.front()->is_resident);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 0u);
     EXPECT_EQ(cache->groupSets().front()->devicePools().front()->refCount(seed_block), 1u);
+    // The resident CACHE-only block remains unavailable to an uncached warmup.
+    EXPECT_EQ(allocator_->maxWarmupInputTokens(12, 0), 8);
 
     const BatchKVCacheResourcePtr pressure = createBatchKVCacheResource(1, config);
     pressure->setBatchCacheKeys(0, CacheKeysType{200, 201, 202});
