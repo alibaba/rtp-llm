@@ -5,7 +5,7 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 /** Timing of a SINGLE route in its worker queue. Capacity notifications and waits share the queue lock. */
 public final class RouteDispatchTiming {
     public enum Stage {
-        QUEUE_OR_RESELECTION, DISPATCH_ATTEMPT, PREFILL_RUNNING, PREFILL_INFLIGHT,
+        QUEUE_OR_RESELECTION, DISPATCH_ATTEMPT, PREFILL_WAITING_AND_IN_TRANSIT, PREFILL_INFLIGHT,
         PREFILL_ENGINE_WAITING, PREFILL_OTHER, PREFILL_KV, DECODE_CAPACITY, REOPEN_TO_RESUME
     }
 

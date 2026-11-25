@@ -237,6 +237,7 @@ public final class PrefillState {
     public final class BatchReservation extends Reservation {
         private final long headRequestId;
         private final long batchId;
+        private int reservedRequests = 1;
 
         private BatchReservation(RequestEntry originalOwner,
                                  long headRequestId,
@@ -254,6 +255,21 @@ public final class PrefillState {
 
         public long batchId() {
             return batchId;
+        }
+
+        /** The head already holds a slot. Every additional member competes for the same waiting budget. */
+        public boolean tryReserveAdditionalWaitingSlot() {
+            if (maxWaitingSizePrefillWorker == -1) { return true; }
+            lock.lock();
+            try {
+                if (state != LeaseState.OPEN || !waitingCapacityAvailable) { return false; }
+                reservedRequests++;
+                unobservedDispatches++;
+                publishWaitingCapacityUnderLock();
+                return true;
+            } finally {
+                lock.unlock();
+            }
         }
 
         /** Atomically commit this exact batch lease. */
@@ -430,6 +446,7 @@ public final class PrefillState {
         private Reservation reservation;
         /** Outstanding uncached tokens accepted for this entry; released once at removal. */
         private long tokenWork;
+        private boolean awaitingEngineObservation;
         /** Last real per-request Engine phase, including members of a partially running batch. */
         private WorkerStatus.TaskObservation lastObservedTask;
         private RequestEntry(ScheduledRequest item) {
@@ -611,8 +628,11 @@ public final class PrefillState {
     /** Derived immutable work; ACTIVE queue mutations leave committed work unchanged. */
     private WorkCapture committedWorkCapture;
     private long unknownEngineRequestCount;
-    private final int maxRunningSizePrefillWorker;
-    private volatile ActiveObservations latestActivity;
+    private final int maxWaitingSizePrefillWorker;
+    /** OPEN request permits and committed requests not yet acknowledged by this Engine. */
+    private long unobservedDispatches;
+    private volatile boolean waitingCapacityAvailable;
+    private ActiveObservations latestActivity;
     private int batchLeasesInUse;
     private long routeLeasesInUse;
     private volatile long occupiedRouteSlots;
@@ -738,6 +758,7 @@ public final class PrefillState {
 
     private void publishRequestCountUnderLock() {
         requireLock();
+        publishWaitingCapacityUnderLock();
         occupiedRouteSlots = saturatedAdd(routeLeasesInUse, unknownEngineRequestCount);
         long count = saturatedAdd(requests.size(), unknownEngineRequestCount);
         if (outstandingRequestCount != count) {
@@ -757,8 +778,9 @@ public final class PrefillState {
     }
 
     public PrefillState(ReentrantLock lock, PrefillActiveIndex activeIndex,
-                        LongSupplier clock, Runnable capacityAvailable, int maxRunningSizePrefillWorker) {
-        this.maxRunningSizePrefillWorker = maxRunningSizePrefillWorker;
+                        LongSupplier clock, Runnable capacityAvailable, int maxWaitingSizePrefillWorker) {
+        this.maxWaitingSizePrefillWorker = maxWaitingSizePrefillWorker;
+        this.waitingCapacityAvailable = maxWaitingSizePrefillWorker == -1;
         this.lock = Objects.requireNonNull(lock, "lock");
         this.activeIndex = Objects.requireNonNull(activeIndex, "activeIndex");
         this.clock = Objects.requireNonNull(clock, "clock");
@@ -776,6 +798,7 @@ public final class PrefillState {
         if (!requests.remove(requestId, entry)) {
             return false;
         }
+        acknowledgeDispatchUnderLock(entry);
         releaseTokenWorkUnderLock(entry);
         if (entry.queueMembership == QueueMembership.UNINDEXED) {
             committedWorkCapture = null;
@@ -947,6 +970,7 @@ public final class PrefillState {
                     entry, item.requestId(), predictedMs);
             entry.reservation = lease;
             routeLeasesInUse++;
+            if (maxWaitingSizePrefillWorker > 0) { unobservedDispatches++; }
             recordMutationUnderLock();
             return new ReservationResult<>(CapacityStatus.ACQUIRED, lease);
         } finally {
@@ -976,7 +1000,7 @@ public final class PrefillState {
                 return new ReservationResult<>(
                         CapacityStatus.BATCH_ID_ALREADY_RESERVED, null);
             }
-            if (batchLeasesInUse >= maximum || !runningCapacityAvailable(latestActivity)) {
+            if (batchLeasesInUse >= maximum || !waitingCapacityAvailable) {
                 return new ReservationResult<>(
                         CapacityStatus.CAPACITY_FULL, null);
             }
@@ -984,6 +1008,7 @@ public final class PrefillState {
                     entry, head.requestId(), batchId, generationHandoff);
             entry.reservation = lease;
             batchLeasesInUse++;
+            if (maxWaitingSizePrefillWorker > 0) { unobservedDispatches++; }
             recordMutationUnderLock();
             return new ReservationResult<>(CapacityStatus.ACQUIRED, lease);
         } finally {
@@ -999,7 +1024,7 @@ public final class PrefillState {
     private boolean batchCapacityAvailable(int maximum) {
         lock.lock();
         try {
-            return batchLeasesInUse < maximum && runningCapacityAvailable(latestActivity)
+            return batchLeasesInUse < maximum && waitingCapacityAvailable
                     && engineQueueAdmissionAvailableUnderLock();
         } finally {
             lock.unlock();
@@ -1028,7 +1053,7 @@ public final class PrefillState {
         boolean dispatchAllowed = admission == null
                 || admission.state() != EngineQueueAdmission.State.CONGESTED
                 && !admission.dispatchBlocked();
-        return dispatchAllowed && runningCapacityAvailable(latestActivity)
+        return dispatchAllowed && waitingCapacityAvailable
                 && (maximum == 0L || occupiedRouteSlots < maximum);
     }
 
@@ -1040,7 +1065,7 @@ public final class PrefillState {
     /** First closed hard gate in reservation order. Null means the route has capacity. */
     public Stage routeCapacityBlockUnderLock(long maximum) {
         requireLock();
-        if (!runningCapacityAvailable(latestActivity)) { return Stage.PREFILL_RUNNING; }
+        if (!waitingCapacityAvailable) { return Stage.PREFILL_WAITING_AND_IN_TRANSIT; }
         if (maximum == 0L) { return null; }
         if (routeLeasesInUse >= maximum || unknownEngineRequestCount >= maximum - routeLeasesInUse) {
             return Stage.PREFILL_INFLIGHT;
@@ -1048,9 +1073,18 @@ public final class PrefillState {
         return engineQueueAdmissionAvailableUnderLock() ? null : Stage.PREFILL_ENGINE_WAITING;
     }
 
-    private boolean runningCapacityAvailable(ActiveObservations activity) {
-        return maxRunningSizePrefillWorker == -1 || activity != null
-                && activity.reportedRunning >= 0L && activity.reportedRunning < maxRunningSizePrefillWorker;
+    private void publishWaitingCapacityUnderLock() {
+        ActiveObservations activity = latestActivity;
+        waitingCapacityAvailable = maxWaitingSizePrefillWorker == -1 || activity != null
+                && activity.reportedWaiting >= 0L
+                && activity.reportedWaiting < maxWaitingSizePrefillWorker - unobservedDispatches;
+    }
+
+    private void acknowledgeDispatchUnderLock(RequestEntry entry) {
+        if (entry.awaitingEngineObservation) {
+            entry.awaitingEngineObservation = false;
+            unobservedDispatches--;
+        }
     }
 
     /** Caller holds {@link #lock}; unknown Engine feedback keeps the legacy capacity verdict. */
@@ -1200,6 +1234,7 @@ public final class PrefillState {
             lease.state = LeaseState.OWNED;
             RequestEntry entry = requests.get(members.get(index).requestId());
             entry.commitIndividual(lease, nowMs);
+            entry.awaitingEngineObservation = maxWaitingSizePrefillWorker > 0;
         }
         committedWorkCapture = null;
         recordMutationUnderLock();
@@ -1236,6 +1271,8 @@ public final class PrefillState {
             }
         }
         long nowMs = clock.getAsLong();
+        requireState(maxWaitingSizePrefillWorker == -1 || members.size() == lease.reservedRequests,
+                "batch commit requires one waiting slot per request");
         BatchWork work = new BatchWork(
                 lease,
                 predictedMs,
@@ -1251,7 +1288,9 @@ public final class PrefillState {
         }
         moveGenerationHandoffToOwnedUnderLock(lease, committedHandoff);
         for (ScheduledRequest item : members) {
-            requests.get(item.requestId()).commitBatch(work);
+            RequestEntry entry = requests.get(item.requestId());
+            entry.commitBatch(work);
+            entry.awaitingEngineObservation = maxWaitingSizePrefillWorker > 0;
         }
         committedWorkCapture = null;
         recordMutationUnderLock();
@@ -1303,6 +1342,7 @@ public final class PrefillState {
             acceptTokenWorkUnderLock(entry, item);
             putRequestUnderLock(item.requestId(), entry);
             routeLeasesInUse++;
+            if (maxWaitingSizePrefillWorker > 0) { unobservedDispatches++; }
             committedWorkCapture = null;
             recordMutationUnderLock();
             return result;
@@ -1528,13 +1568,18 @@ public final class PrefillState {
                                       Map<Long, WorkerStatus.TaskObservation> foreign) {
     }
 
-    /** Return whether the latest running count reopens delivery, including on same-version heartbeats. */
+    /** Publish the waiting count and matching acknowledgements together, including on heartbeats. */
     private boolean publishActivityUnderLock(ActiveObservations activity) {
         requireLock();
-        activity.owned.forEach((id, task) -> requests.get(id).lastObservedTask = task);
-        boolean reopened = !runningCapacityAvailable(latestActivity) && runningCapacityAvailable(activity);
+        boolean wasAvailable = waitingCapacityAvailable;
+        activity.owned.forEach((id, task) -> {
+            RequestEntry entry = requests.get(id);
+            entry.lastObservedTask = task;
+            acknowledgeDispatchUnderLock(entry);
+        });
         latestActivity = activity;
-        return reopened;
+        publishWaitingCapacityUnderLock();
+        return !wasAvailable && waitingCapacityAvailable;
     }
 
     private ActiveObservations prepareActiveObservationsUnderLock(
@@ -1872,6 +1917,7 @@ public final class PrefillState {
             activeIndex.clear();
             batchLeasesInUse = 0;
             routeLeasesInUse = 0L;
+            unobservedDispatches = 0L;
             unknownEngineRequestCount = 0L;
             latestActivity = null;
             committedWorkCapture = null;
@@ -2366,6 +2412,9 @@ public final class PrefillState {
                         "Prefill batch rollback lost its generation handoff");
             }
             batch.generationHandoff = null;
+        }
+        if (maxWaitingSizePrefillWorker > 0) {
+            unobservedDispatches -= lease instanceof BatchReservation batch ? batch.reservedRequests : 1;
         }
         lease.state = LeaseState.CLOSED;
         releaseDeliverySlotUnderLock(lease);

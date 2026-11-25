@@ -241,6 +241,7 @@ public final class DeliveryStrategyTestSupport {
         private PrefillState.ReservationResult<PrefillState.BatchReservation>
                 reserveBatch() {
             batchReservation = Mockito.mock(PrefillState.BatchReservation.class);
+            Mockito.when(batchReservation.tryReserveAdditionalWaitingSlot()).thenReturn(true);
             Mockito.when(batchReservation.commit(
                             Mockito.anyList(), Mockito.anyLong()))
                     .thenAnswer(invocation -> committedHandoffs(1).getFirst());

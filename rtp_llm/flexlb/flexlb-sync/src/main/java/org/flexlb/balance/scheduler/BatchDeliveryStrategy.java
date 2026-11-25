@@ -487,6 +487,12 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                         memberAttempt = prepareMember(exact);
                 CapacityBoundary.Attempt<ScheduledRequest> result;
                 if (memberAttempt.accepted()) {
+                    if (!first && !reservation.tryReserveAdditionalWaitingSlot()) {
+                        Throwable cleanup = PrefillAdmissionResources.rollbackMember(memberAttempt.value(), null);
+                        if (cleanup != null) { return failed(cleanup); }
+                        return rejected(CapacityBoundary.deliveryUnavailable(
+                                prefill.batchAdmissionAvailability(exact.maxInflightBatchesPerPrefillWorker())));
+                    }
                     members.add(memberAttempt.value());
                     result = acceptedItem;
                 } else {

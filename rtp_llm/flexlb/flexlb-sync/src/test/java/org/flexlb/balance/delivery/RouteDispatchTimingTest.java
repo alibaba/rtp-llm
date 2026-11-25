@@ -27,7 +27,7 @@ class RouteDispatchTimingTest {
         verify(reporter).reportRouteDispatchStage("worker", 50, "PREFILL_INFLIGHT", 3);
         verify(reporter).reportRouteDispatchStage("worker", 50, "REOPEN_TO_RESUME", 2);
         for (var unused : new RouteDispatchTiming.Stage[]{PREFILL_KV, PREFILL_ENGINE_WAITING,
-                PREFILL_RUNNING, PREFILL_OTHER, DECODE_CAPACITY}) {
+                PREFILL_WAITING_AND_IN_TRANSIT, PREFILL_OTHER, DECODE_CAPACITY}) {
             verify(reporter).reportRouteDispatchStage("worker", 50, unused.name(), 0);
         }
         verifyNoMoreInteractions(reporter);

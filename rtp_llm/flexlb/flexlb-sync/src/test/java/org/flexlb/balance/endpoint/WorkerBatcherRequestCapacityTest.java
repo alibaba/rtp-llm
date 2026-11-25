@@ -14,6 +14,8 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.enums.TaskPhase;
+import org.flexlb.testfixture.TaskInfo;
 import org.flexlb.testfixture.WorkerStatusResponse;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -22,6 +24,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -44,11 +47,11 @@ class WorkerBatcherRequestCapacityTest {
     @ParameterizedTest
     @CsvSource({"false", "true"})
     @Timeout(10)
-    void runningAndInflightIndependentlyParkAndResumeDelivery(boolean sameVersion) throws Exception {
+    void waitingAndInflightIndependentlyParkAndResumeDelivery(boolean sameVersion) throws Exception {
         FlexlbConfig config = productionConfig();
         config.setDispatcher(DispatcherConfig.nonBatch());
         config.getDispatcher().setMaxInflightPerPrefillWorker(3);
-        config.getDispatcher().setMaxRunningSizePrefillWorker(2);
+        config.getDispatcher().setMaxWaitingSizePrefillWorker(2);
         config.getScheduler().setDecision(DecisionPolicyConfig.single());
         Semaphore delivered = new Semaphore(0);
         var runtime = new EndpointTestSupport.TestRequestRuntime() {
@@ -69,17 +72,17 @@ class WorkerBatcherRequestCapacityTest {
                 return transaction;
             }).when(fixture.delivery).prepare(anyList(), any(), any());
             WorkerStatusResponse report = new WorkerStatusResponse();
-            report.setRunningQueryLen(2);
+            report.setWaitingQueryLen(2);
             EndpointTestSupport.applyStatus(endpoint, report).run();
             ScheduledRequest first = item(config, endpoint, 1);
             assertTrue(EndpointTestSupport.offer(endpoint, first));
             assertTrue(EndpointTestSupport.offer(endpoint, item(config, endpoint, 2)));
             assertTrue(parked.await(2, TimeUnit.SECONDS));
             assertFalse(endpoint.routeAdmissionAvailability().isAvailable());
-            assertEquals(2, endpoint.queuedRequestCount(), "the running limit still allows placement");
+            assertEquals(2, endpoint.queuedRequestCount(), "the waiting limit still allows placement");
             assertEquals(0, delivered.availablePermits());
 
-            // Two Engine-only streams still occupy inflight slots. Only running changes the verdict.
+            // Two Engine-only streams still occupy inflight slots. One has started running, reopening one waiting slot.
             report.setRunningQueryLen(1);
             report.setWaitingQueryLen(1);
             if (sameVersion) {
@@ -93,6 +96,67 @@ class WorkerBatcherRequestCapacityTest {
             assertTrue(endpoint.releaseCommittedItem(first.execution()));
             assertTrue(delivered.tryAcquire(2, TimeUnit.SECONDS), "inflight release must wake the remaining request");
             assertEquals(0, endpoint.queuedRequestCount());
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false", "true"})
+    @Timeout(10)
+    void workerAcknowledgementsReopenOnlyTheAvailableWaitingSlots(boolean sameVersion) throws Exception {
+        FlexlbConfig config = productionConfig();
+        config.setDispatcher(DispatcherConfig.nonBatch());
+        config.getDispatcher().setMaxInflightPerPrefillWorker(128);
+        config.getDispatcher().setMaxWaitingSizePrefillWorker(2);
+        config.getScheduler().setDecision(DecisionPolicyConfig.single());
+        Semaphore delivered = new Semaphore(0);
+        var runtime = new EndpointTestSupport.TestRequestRuntime() {
+            @Override
+            void onCompleted(DeliveryClaim claim, DeliveryResult result) {
+                delivered.release();
+            }
+        };
+        try (Fixture fixture = fixture(config, runtime)) {
+            PrefillEndpoint endpoint = fixture.endpoint;
+            DeliveryStrategy live = EndpointTestSupport.liveRouteStrategy(runtime);
+            doAnswer(call -> live.prepare(call.getArgument(0), call.getArgument(1), call.getArgument(2)))
+                    .when(fixture.delivery).prepare(anyList(), any(), any());
+            WorkerStatusResponse report = new WorkerStatusResponse();
+            report.setRunningQueryLen(80);
+            EndpointTestSupport.applyStatus(endpoint, report).run();
+            for (int id = 1; id <= 5; id++) {
+                assertTrue(EndpointTestSupport.offer(endpoint, item(config, endpoint, id)));
+            }
+            assertTrue(delivered.tryAcquire(2, 2, TimeUnit.SECONDS));
+            assertFalse(endpoint.routeAdmissionAvailability().isAvailable());
+            assertEquals(3, endpoint.queuedRequestCount());
+
+            TaskInfo first = new TaskInfo();
+            first.setRequestId(1L);
+            first.setPhase(TaskPhase.RECEIVED);
+            report.setWaitingQueryLen(1);
+            report.setRunningTaskInfo(Map.of("1", first));
+            EndpointTestSupport.applyStatus(endpoint, report).run();
+            EndpointTestSupport.applyHeartbeat(endpoint, report);
+            assertFalse(endpoint.routeAdmissionAvailability().isAvailable(), "one waiting plus one unobserved");
+            TaskInfo second = new TaskInfo();
+            second.setRequestId(2L);
+            second.setPhase(TaskPhase.RUNNING);
+            report.setRunningTaskInfo(Map.of("1", first, "2", second));
+            EndpointTestSupport.applyHeartbeat(endpoint, report);
+            assertTrue(delivered.tryAcquire(2, TimeUnit.SECONDS), "a waiting request already reported by ID counts only once");
+            assertEquals(2, endpoint.queuedRequestCount());
+            first.setPhase(TaskPhase.RUNNING);
+            report.setWaitingQueryLen(0);
+            report.setRunningQueryLen(81);
+            if (sameVersion) {
+                EndpointTestSupport.applyHeartbeat(endpoint, report);
+            } else {
+                EndpointTestSupport.applyStatus(endpoint, report).run();
+            }
+            assertTrue(delivered.tryAcquire(2, TimeUnit.SECONDS), "the running transition wakes delivery");
+            assertEquals(1, endpoint.queuedRequestCount());
+            EndpointTestSupport.applyHeartbeat(endpoint, report);
+            assertFalse(endpoint.routeAdmissionAvailability().isAvailable(), "duplicate observation grants no extra slot");
         }
     }
 
@@ -271,24 +335,30 @@ class WorkerBatcherRequestCapacityTest {
     }
 
     @Test
-    void batchReservationChecksReportedRunningBeforeTakingAnInflightSlot() {
+    void batchReservationCountsEachMemberAgainstWaitingHeadroom() {
         FlexlbConfig config = productionConfig();
-        config.getDispatcher().setMaxRunningSizePrefillWorker(2);
+        config.getDispatcher().setMaxWaitingSizePrefillWorker(2);
         try (Fixture fixture = fixture(config)) {
             PrefillEndpoint endpoint = fixture.endpoint;
             WorkerStatusResponse report = new WorkerStatusResponse();
-            report.setRunningQueryLen(3);
+            report.setWaitingQueryLen(3);
             EndpointTestSupport.applyStatus(endpoint, report).run();
             ScheduledRequest request = item(config, endpoint, 1);
             assertTrue(EndpointTestSupport.offer(endpoint, request));
             assertFalse(endpoint.batchAdmissionAvailability(2).isAvailable());
             assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, endpoint.reserveBatch(request, 1, 2).status());
-            report.setRunningQueryLen(1);
+            report.setWaitingQueryLen(0);
+            report.setRunningQueryLen(30);
             EndpointTestSupport.applyHeartbeat(endpoint, report);
             assertTrue(endpoint.batchAdmissionAvailability(2).isAvailable());
             var result = endpoint.reserveBatch(request, 1, 2);
             assertEquals(PrefillState.CapacityStatus.ACQUIRED, result.status());
-            result.reservation().close();
+            try (var batch = result.reservation()) {
+                assertTrue(batch.tryReserveAdditionalWaitingSlot());
+                assertFalse(batch.tryReserveAdditionalWaitingSlot());
+                assertFalse(endpoint.batchAdmissionAvailability(2).isAvailable());
+            }
+            assertTrue(endpoint.batchAdmissionAvailability(2).isAvailable());
         }
     }
 

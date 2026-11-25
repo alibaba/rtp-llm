@@ -235,17 +235,21 @@ class FlexlbConfigSchedulingModeTest {
     }
 
     @Test
-    void runningLimitIsOptionalAndIndependentOfInflightLimit() {
-        assertEquals(-1, parse("QUEUE", "NON_BATCH", "").getDispatcher().getMaxRunningSizePrefillWorker());
+    void waitingLimitIsOptionalAndIndependentOfInflightLimit() {
+        assertEquals(-1, parse("QUEUE", "NON_BATCH", "").getDispatcher().getMaxWaitingSizePrefillWorker());
         var dispatcher = parse("QUEUE", "NON_BATCH",
-                ",\"maxInflightPerPrefillWorker\":128,\"maxRunningSizePrefillWorker\":16").getDispatcher();
+                ",\"maxInflightPerPrefillWorker\":128,\"maxWaitingSizePrefillWorker\":16").getDispatcher();
         assertEquals(128, dispatcher.getMaxInflightPerPrefillWorker());
-        assertEquals(16, dispatcher.getMaxRunningSizePrefillWorker());
+        assertEquals(16, dispatcher.getMaxWaitingSizePrefillWorker());
+        assertEquals(80, parse("QUEUE", "NON_BATCH", ",\"maxRunningSizePrefillWorker\":80")
+                .getDispatcher().getMaxWaitingSizePrefillWorker());
+        assertThrows(ConfigValidationException.class, () -> parse("QUEUE", "NON_BATCH",
+                ",\"maxRunningSizePrefillWorker\":80,\"maxWaitingSizePrefillWorker\":10"));
         assertEquals(-1, parse("QUEUE", "NON_BATCH",
-                ",\"maxRunningSizePrefillWorker\":-1").getDispatcher().getMaxRunningSizePrefillWorker());
+                ",\"maxWaitingSizePrefillWorker\":-1").getDispatcher().getMaxWaitingSizePrefillWorker());
         for (String value : new String[]{"0", "-2", "1.5", "\"2\"", "null", "2147483648"}) {
             assertThrows(ConfigValidationException.class,
-                    () -> parse("QUEUE", "NON_BATCH", ",\"maxRunningSizePrefillWorker\":" + value), value);
+                    () -> parse("QUEUE", "NON_BATCH", ",\"maxWaitingSizePrefillWorker\":" + value), value);
         }
     }
 

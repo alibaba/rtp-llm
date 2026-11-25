@@ -333,7 +333,7 @@ public final class WorkerBatcher {
                         this::signalQueuedDecodeCapacityAvailable)
                 : PrefillActiveIndex.disabled();
         this.prefillState = new PrefillState(queueLock, activeIndex, System::currentTimeMillis,
-                capacityAvailableSignal, config.getDispatcher().getMaxRunningSizePrefillWorker());
+                capacityAvailableSignal, config.getDispatcher().getMaxWaitingSizePrefillWorker());
         this.normalStopFailure = new CancellationException(
                 "FlexLB worker scheduling queue stopped: " + key);
         this.stopAcknowledgementFailure = new IllegalStateException(

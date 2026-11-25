@@ -28,7 +28,9 @@ final class FlexlbConfigValidator {
         JsonNode dispatcher = document.path("dispatcher");
         if (dispatcher.isObject()) {
             rejectFieldsExcept(dispatcher, "dispatcher", "type", "maxInflightPerPrefillWorker",
-                    "maxRunningSizePrefillWorker", "fetchAttachTimeoutMs", "prefillCostOrder");
+                    "maxWaitingSizePrefillWorker", "maxRunningSizePrefillWorker", "fetchAttachTimeoutMs", "prefillCostOrder");
+            require(!dispatcher.has("maxWaitingSizePrefillWorker") || !dispatcher.has("maxRunningSizePrefillWorker"),
+                    "dispatcher.maxWaitingSizePrefillWorker", "specify only one name for the waiting limit");
         }
 
         JsonNode decodeCostEstimator = document.path("router").path("roles")

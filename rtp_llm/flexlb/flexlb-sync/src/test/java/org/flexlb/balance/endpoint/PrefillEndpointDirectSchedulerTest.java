@@ -29,7 +29,7 @@ class PrefillEndpointDirectSchedulerTest {
         config.setScheduler(SchedulerConfig.direct());
         config.setDispatcher(DispatcherConfig.nonBatch());
         config.getDispatcher().setMaxInflightPerPrefillWorker(4);
-        config.getDispatcher().setMaxRunningSizePrefillWorker(2);
+        config.getDispatcher().setMaxWaitingSizePrefillWorker(2);
         var runtime = EndpointTestSupport.requestRuntime();
         PrefillEndpoint endpoint = new PrefillEndpoint(
                 EndpointTestSupport.workerStatus(role, "127.0.0.82", 8082, 9082),
@@ -38,13 +38,13 @@ class PrefillEndpointDirectSchedulerTest {
         endpoint.startGeneration();
         try (var executor = Executors.newFixedThreadPool(8)) {
             WorkerStatusResponse report = new WorkerStatusResponse();
-            report.setRunningQueryLen(2);
+            report.setWaitingQueryLen(2);
             EndpointTestSupport.applyStatus(endpoint, report).run();
             try (var pin = endpoint.tryPinGeneration()) {
                 assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL,
                         endpoint.reserveUnqueuedRoute(pin, item(100L), 10L).status());
             }
-            report.setRunningQueryLen(0);
+            report.setWaitingQueryLen(0);
             EndpointTestSupport.applyHeartbeat(endpoint, report);
             List<Future<PrefillState.ReservationResult<PrefillState.RouteReservation>>> futures =
                     new ArrayList<>();
@@ -65,12 +65,12 @@ class PrefillEndpointDirectSchedulerTest {
                     assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, result.status());
                 }
             }
-            assertEquals(4, owned.size());
-            assertEquals(4, endpoint.observedRequestCount());
+            assertEquals(2, owned.size());
+            assertEquals(2, endpoint.observedRequestCount());
             try (var pin = endpoint.tryPinGeneration()) {
                 var full = endpoint.reserveUnqueuedRoute(pin, item(100L), 10L);
                 assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, full.status(),
-                        "four exact owners already consume the four-request limit");
+                        "two unobserved dispatches consume the waiting headroom");
             }
             owned.forEach(PrefillState.RouteReservation::close);
             assertEquals(0, endpoint.observedRequestCount());

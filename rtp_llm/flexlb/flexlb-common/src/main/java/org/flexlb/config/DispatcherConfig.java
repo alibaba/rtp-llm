@@ -1,5 +1,6 @@
 package org.flexlb.config;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -20,8 +21,9 @@ public final class DispatcherConfig {
     /** Order requests waiting on the same Prefill by compute cost within business priority. */
     private boolean prefillCostOrder;
     private int maxInflightPerPrefillWorker = DEFAULT_MAX_INFLIGHT_PER_PREFILL_WORKER;
-    /** Pause delivery while the worker reports at least this many running streams. */
-    private int maxRunningSizePrefillWorker = -1;
+    /** Engine waiting requests plus local dispatches awaiting Engine acknowledgement. */
+    @JsonAlias("maxRunningSizePrefillWorker")
+    private int maxWaitingSizePrefillWorker = -1;
     /** BATCH only: engine wait for FetchResponse attachment, not generation duration. */
     private int fetchAttachTimeoutMs = DEFAULT_FETCH_ATTACH_TIMEOUT_MS;
 
@@ -50,8 +52,8 @@ public final class DispatcherConfig {
             throw new ConfigValidationException("dispatcher.maxInflightPerPrefillWorker",
                     "must be greater than zero");
         }
-        if (maxRunningSizePrefillWorker != -1 && maxRunningSizePrefillWorker <= 0) {
-            throw new ConfigValidationException("dispatcher.maxRunningSizePrefillWorker",
+        if (maxWaitingSizePrefillWorker != -1 && maxWaitingSizePrefillWorker <= 0) {
+            throw new ConfigValidationException("dispatcher.maxWaitingSizePrefillWorker",
                     "must be -1 (disabled) or greater than zero");
         }
         if (fetchAttachTimeoutMs <= 0) {
