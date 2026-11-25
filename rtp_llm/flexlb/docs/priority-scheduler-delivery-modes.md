@@ -164,7 +164,9 @@ compute tokens (the panel 10928 estimate), falling back to outstanding compute
 when the queue estimate is unavailable. Outstanding requests and then endpoint
 address break ties. A cooled or removed source stops contributing redirects.
 New sources wait until the next window. All current hotspots remain ineligible
-as receivers. The default `sourceTopK=0` allows all sustained hotspots.
+as receivers. At selection time, the receiver's observed plus planned requests and
+outstanding plus planned tokens must each be within the pool's corresponding
+hotspot limit, including between pool samples. The default is `sourceTopK=5`. Set `sourceTopK=0` to allow all sustained hotspots.
 
 With `targetPolicy=MIN_PENDING_COMPUTE`, Master ranks eligible receivers by
 outstanding and planned compute tokens, breaking ties by cache hit. The shared

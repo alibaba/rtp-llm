@@ -134,6 +134,28 @@ class PrefillHotspotsTest {
     }
 
     @Test
+    void receiverMustStayBelowBothHotspotLimitsBetweenPoolSamples() {
+        var requestHot = entry("request-hot", 60, 100);
+        var computeHot = entry("compute-hot", 1, 6000);
+        var target = entry("target", 1, 100);
+        var pool = List.of(requestHot, computeHot, target, entry("d", 1, 100), entry("e", 1, 100));
+        var snapshot = sample(pool, null, 0);
+        assertTrue(mayRedirect(snapshot, requestHot, target));
+        assertTrue(mayRedirect(snapshot, computeHot, target));
+
+        // The floors set the limits to 10 requests and 1000 tokens. Equal is still eligible.
+        var atComputeLimit = new PrefillTokenWorkload.Snapshot(100, 900, 1, 0, 1);
+        var aboveComputeLimit = new PrefillTokenWorkload.Snapshot(100, 901, 1, 0, 1);
+        assertTrue(snapshot.mayRedirect(requestHot.endpoint(), target.endpoint(), atComputeLimit));
+        assertFalse(snapshot.mayRedirect(requestHot.endpoint(), target.endpoint(), aboveComputeLimit));
+
+        var atRequestLimit = new PrefillTokenWorkload.Snapshot(100, 0, 9, 0, 1);
+        var aboveRequestLimit = new PrefillTokenWorkload.Snapshot(100, 0, 10, 0, 1);
+        assertTrue(snapshot.mayRedirect(computeHot.endpoint(), target.endpoint(), atRequestLimit));
+        assertFalse(snapshot.mayRedirect(computeHot.endpoint(), target.endpoint(), aboveRequestLimit));
+    }
+
+    @Test
     void windowRanksQueuedComputeAndKeepsOnlyItsTopTwoSources() {
         config.setSourceTopK(2);
         var first = entry("a", 60, 5000);

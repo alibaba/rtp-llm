@@ -10,7 +10,6 @@ import org.flexlb.dao.route.RoleType;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -73,32 +72,32 @@ final class PrefillHotspots {
         }
     }
 
+    private enum HotspotRole { HOT, REDIRECT_SOURCE }
+
     /** Read-only view shared by every decision within one pool sampling interval. */
     static final class Snapshot {
         private static final Signal NONE = new Signal(Long.MAX_VALUE, 0L);
-        static final Snapshot EMPTY = new Snapshot(Map.of(), Set.of(), Set.of(), NONE, NONE);
+        static final Snapshot EMPTY = new Snapshot(Map.of(), Map.of(), NONE, NONE);
 
         private final Map<PrefillEndpoint, Load> loads;
-        private final Set<PrefillEndpoint> hotspots;
-        private final Set<PrefillEndpoint> sources;
+        private final Map<PrefillEndpoint, HotspotRole> hotspots;
         private final Signal requests;
         private final Signal compute;
 
-        private Snapshot(Map<PrefillEndpoint, Load> loads, Set<PrefillEndpoint> hotspots,
-                         Set<PrefillEndpoint> sources, Signal requests, Signal compute) {
+        private Snapshot(Map<PrefillEndpoint, Load> loads, Map<PrefillEndpoint, HotspotRole> hotspots,
+                         Signal requests, Signal compute) {
             this.loads = Map.copyOf(loads);
-            this.hotspots = Set.copyOf(hotspots);
-            this.sources = sources == hotspots ? this.hotspots : sources;
+            this.hotspots = Map.copyOf(hotspots);
             this.requests = requests;
             this.compute = compute;
         }
 
         boolean isHot(PrefillEndpoint endpoint) {
-            return hotspots.contains(endpoint);
+            return hotspots.containsKey(endpoint);
         }
 
         boolean isRedirectSource(PrefillEndpoint endpoint) {
-            return isHot(endpoint) && sources.contains(endpoint);
+            return hotspots.get(endpoint) == HotspotRole.REDIRECT_SOURCE;
         }
 
         boolean mayRedirect(PrefillEndpoint source, PrefillEndpoint target, PrefillTokenWorkload.Snapshot current) {
@@ -111,6 +110,9 @@ final class PrefillHotspots {
                     current.observedRequests(), current.plannedRequests());
             long targetCompute = saturatedAdd(
                     current.pendingTokens(), current.plannedTokens());
+            if (targetRequests > requests.outlierLimit() || targetCompute > compute.outlierLimit()) {
+                return false;
+            }
             return requests.allows(from.requests(), targetRequests) || compute.allows(from.compute(), targetCompute);
         }
     }
@@ -150,7 +152,9 @@ final class PrefillHotspots {
             long duration = TimeUnit.MILLISECONDS.toNanos(config.getSustainedPressureMs());
             boolean fresh = last != null && now - last.at() < STALE_NANOS;
             Map<PrefillEndpoint, Long> continuing = new HashMap<>();
-            Set<PrefillEndpoint> hotspots = new HashSet<>();
+            int topK = config.getSourceTopK();
+            HotspotRole defaultRole = topK == 0 ? HotspotRole.REDIRECT_SOURCE : HotspotRole.HOT;
+            Map<PrefillEndpoint, HotspotRole> hotspots = new HashMap<>();
             for (var entry : loads.entrySet()) {
                 Load load = entry.getValue();
                 if (load.requests() <= requestSignal.outlierLimit() && load.compute() <= computeSignal.outlierLimit()) {
@@ -160,24 +164,27 @@ final class PrefillHotspots {
                 long since = fresh ? aboveSince.getOrDefault(endpoint, now) : now;
                 continuing.put(endpoint, since);
                 if (now - since >= duration) {
-                    hotspots.add(endpoint);
+                    hotspots.put(endpoint, defaultRole);
                 }
             }
             aboveSince = continuing;
-            var sources = sourceWorkers(entries, loads, hotspots, config.getSourceTopK(), now);
+            if (topK > 0) {
+                selectWindowSources(entries, loads, hotspots.keySet(), topK, now);
+                for (PrefillEndpoint source : windowSources) {
+                    hotspots.replace(source, HotspotRole.REDIRECT_SOURCE);
+                }
+            }
             Snapshot snapshot = hotspots.isEmpty() ? Snapshot.EMPTY
-                    : new Snapshot(loads, hotspots, sources, requestSignal, computeSignal);
+                    : new Snapshot(loads, hotspots, requestSignal, computeSignal);
             last = new Sample(now, snapshot);
             return snapshot;
         }
 
         private record Source(PrefillEndpoint endpoint, String address, long tokens, long requests) { }
 
-        // Only called by refresh under the pool lock; the published cohort is immutable.
-        private Set<PrefillEndpoint> sourceWorkers(List<PrefillRoutingEntry> entries, Map<PrefillEndpoint, Load> loads,
-                                                  Set<PrefillEndpoint> hotspots, int topK, long now) {
-            if (topK == 0) { return hotspots; }
-            if (!windowSources.isEmpty() && now - windowStart < SOURCE_WINDOW_NANOS) { return windowSources; }
+        private void selectWindowSources(List<PrefillRoutingEntry> entries, Map<PrefillEndpoint, Load> loads,
+                                         Set<PrefillEndpoint> hotspots, int topK, long now) {
+            if (!windowSources.isEmpty() && now - windowStart < SOURCE_WINDOW_NANOS) { return; }
             windowStart = now;
             if (hotspots.size() <= topK) {
                 windowSources = Set.copyOf(hotspots);
@@ -193,7 +200,6 @@ final class PrefillHotspots {
                                 .thenComparing(Source::address))
                         .limit(topK).map(Source::endpoint).collect(Collectors.toUnmodifiableSet());
             }
-            return windowSources;
         }
     }
 }
