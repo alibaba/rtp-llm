@@ -447,6 +447,9 @@ class GrpcWorkerStatusRunnerTest {
                 assertTrue(status.pollHealth().lastSuccessfulPollUs() > firstReceipt);
                 assertFalse(status.tryClaimHealthRetirement(System.nanoTime() / 1000, 10_000_000L));
                 assertFalse(busyApplicationQueued.get());
+                assertEquals(
+                        WorkerStatus.PollOutcome.APPLICATION_BUSY,
+                        status.latestStatusPollDiagnostics().outcome());
                 try (var captured =
                         directory.captureEndpoint(RoleType.VIT, status.getLogicalIpPort())) {
                     assertNull(captured);
@@ -460,6 +463,9 @@ class GrpcWorkerStatusRunnerTest {
 
             assertNotNull(pendingApplication.get());
             pendingApplication.get().run();
+            assertEquals(
+                    WorkerStatus.PollOutcome.APPLICATION_BUSY,
+                    status.latestStatusPollDiagnostics().outcome());
             try (var captured =
                     directory.captureEndpoint(RoleType.VIT, status.getLogicalIpPort())) {
                 assertNotNull(captured);

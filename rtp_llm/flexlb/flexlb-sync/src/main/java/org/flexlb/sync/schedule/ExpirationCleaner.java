@@ -121,11 +121,16 @@ public class ExpirationCleaner {
                     retirement.endpointToRetire(),
                     cacheAwareService,
                     logger);
-            logger.warn(
-                    "Retiring expired worker: {}, role: {}, generation={}",
-                    retirement.ipPort(),
-                    retirement.role(),
-                    retirement.workerStatus().getGenerationId());
+            if (logger.isWarnEnabled()) {
+                WorkerStatus worker = retirement.workerStatus();
+                logger.warn(
+                        "Retiring expired worker: {}, role: {}, generation={}, lastStatus={}, lastCache={}",
+                        retirement.ipPort(),
+                        retirement.role(),
+                        worker.getGenerationId(),
+                        worker.latestStatusPollDiagnostics(),
+                        worker.latestCachePollDiagnostics());
+            }
         }
     }
 

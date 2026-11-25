@@ -42,6 +42,39 @@ class WorkerStatusPollLeaseTest {
     }
 
     @Test
+    void lateStatusCompletionLeavesLatestStatusAndCacheRecordsIndependent() {
+        WorkerStatus status = workerStatus();
+        assertNull(status.latestStatusPollDiagnostics());
+        assertNull(status.latestCachePollDiagnostics());
+
+        try (var firstStatus = status.tryBeginStatusPoll();
+                var cache = status.tryBeginCachePoll()) {
+            firstStatus.close();
+            try (var nextStatus = status.tryBeginStatusPoll()) {
+                long rpcStartedUs = System.nanoTime() / 1000;
+                nextStatus.recordRpcStarted(rpcStartedUs);
+                firstStatus.completeDiagnostics(WorkerStatus.PollOutcome.APPLIED);
+                assertEquals(rpcStartedUs, status.latestStatusPollDiagnostics().rpcStartedUs());
+                assertNull(status.latestStatusPollDiagnostics().outcome());
+
+                cache.completeDiagnostics(WorkerStatus.PollOutcome.FULL_SNAPSHOT_NEEDED);
+                assertEquals(
+                        WorkerStatus.PollOutcome.FULL_SNAPSHOT_NEEDED,
+                        status.latestCachePollDiagnostics().outcome());
+                assertNull(status.latestStatusPollDiagnostics().outcome());
+
+                nextStatus.completeDiagnostics(WorkerStatus.PollOutcome.APPLICATION_BUSY);
+                assertEquals(
+                        WorkerStatus.PollOutcome.APPLICATION_BUSY,
+                        status.latestStatusPollDiagnostics().outcome());
+                assertEquals(
+                        WorkerStatus.PollOutcome.FULL_SNAPSHOT_NEEDED,
+                        status.latestCachePollDiagnostics().outcome());
+            }
+        }
+    }
+
+    @Test
     void cacheSuccessTransitionReturnsThePreviousSuccessPeriod() {
         WorkerStatus status = workerStatus();
 
