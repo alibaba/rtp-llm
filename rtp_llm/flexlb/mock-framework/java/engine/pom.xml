@@ -102,6 +102,16 @@
           <version>1.0.0-SNAPSHOT</version>
         </dependency>
       </dependencies>
+      <build>
+        <resources>
+          <resource>
+            <directory>src/main/resources</directory>
+          </resource>
+          <resource>
+            <directory>src/internal/resources</directory>
+          </resource>
+        </resources>
+      </build>
     </profile>
   </profiles>
   <build>
