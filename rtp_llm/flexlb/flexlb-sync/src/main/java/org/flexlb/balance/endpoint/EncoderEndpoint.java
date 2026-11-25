@@ -1,6 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.dao.master.WorkerStatus;
 
 import java.util.ArrayList;
@@ -28,7 +29,14 @@ public final class EncoderEndpoint extends WorkerEndpoint {
      * Bind an Encoder worker generation to its request lifecycle projector.
      */
     public EncoderEndpoint(WorkerStatus status, EndpointEventProjector endpointEvents) {
-        super(status);
+        this(status, endpointEvents, null);
+    }
+
+    EncoderEndpoint(
+            WorkerStatus status,
+            EndpointEventProjector endpointEvents,
+            PlacementAvailability placementAvailability) {
+        super(status, placementAvailability);
         this.endpointEvents = endpointEvents;
     }
 
