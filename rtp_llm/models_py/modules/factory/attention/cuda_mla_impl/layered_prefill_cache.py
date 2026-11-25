@@ -47,14 +47,15 @@ def _plan_pages(table, lengths, slots, page_size, capacity, logical_pages):
         raise ValueError("prefill cache is missing a live kernel page")
     table = table.to(torch.int64).masked_fill(~live, -1)
     pages = torch.unique(table[table >= 0], sorted=True)
-    if pages.numel() > capacity:
+    # Sparse MLA reserves page zero for an invalid page-table entry.
+    if pages.numel() >= capacity:
         raise ValueError(
             f"prefill batch needs {pages.numel()} kernel pages; "
-            f"staging capacity is {capacity}"
+            f"staging capacity is {capacity - 1} usable pages"
         )
     if pages.numel() and int(pages[-1]) >= logical_pages:
         raise ValueError("prefill block table exceeds logical cache capacity")
-    mapping = {page: slot for slot, page in enumerate(pages.tolist())}
+    mapping = {page: slot for slot, page in enumerate(pages.tolist(), start=1)}
 
     slots = slots.to(torch.int64)
     valid_slots = torch.unique(slots[slots >= 0])
@@ -65,10 +66,10 @@ def _plan_pages(table, lengths, slots, page_size, capacity, logical_pages):
     if any(page not in mapping for page in dirty):
         raise ValueError("KV write slots must belong to live prefill cache pages")
     full = set(dirty_pages[write_counts == page_size].tolist())
-    compact_table = torch.searchsorted(pages, table.clamp_min(0))
+    compact_table = torch.searchsorted(pages, table.clamp_min(0)) + 1
     compact_table.masked_fill_(table < 0, -1)
-    compact_slots = torch.searchsorted(
-        pages, slots.clamp_min(0) // page_size
+    compact_slots = (
+        torch.searchsorted(pages, slots.clamp_min(0) // page_size) + 1
     ) * page_size + slots.remainder(page_size)
     compact_slots.masked_fill_(slots < 0, -1)
     return _PagePlan(

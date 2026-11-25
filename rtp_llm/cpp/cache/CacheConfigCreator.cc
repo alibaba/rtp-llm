@@ -693,14 +693,17 @@ MlaHostCachePlan CacheConfigCreator::planMlaHostCache(const CacheConfig&        
         }
         const size_t context_blocks = context_tokens / page_tokens + (context_tokens % page_tokens != 0);
         if (context_blocks > 0) {
-            const auto reserve_context_layer = [&](size_t layer_block_bytes) {
+            const auto reserve_context_layer = [&](const GroupBase& group) {
+                auto layer_block_bytes = group.kvBlockStrideBytes();
+                // Page zero stays reserved, including in the compact CUDA staging tensor.
+                addBudgetBytes(input.context_workspace_bytes, layer_block_bytes / group.kernelBlocksPerKvBlock());
                 // Remapped page table and dirty host-slot tensor.
                 addBudgetBytes(layer_block_bytes, 2 * sizeof(int32_t), page_tokens);
                 addBudgetBytes(input.context_workspace_bytes, layer_block_bytes, context_blocks);
             };
-            reserve_context_layer(mla->kvBlockStrideBytes());
+            reserve_context_layer(*mla);
             for (const auto& draft : config.mtp_sub_configs) {
-                reserve_context_layer(draft->group("default").kvBlockStrideBytes());
+                reserve_context_layer(draft->group("default"));
             }
         }
         input.max_logical_blocks    = logical_limit;
@@ -859,7 +862,7 @@ CacheConfigCreator::sizingSignature(const CacheConfig& config, uint32_t baseline
             value >>= 8;
         }
     };
-    number(3);  // Sizing protocol version, including the two candidate capacities.
+    number(4);  // Sizing protocol includes the stage-wide prefill staging depth.
     number(config.mla_host_cache.layeredPrefill());
     number(config.mla_host_cache.pinnedDecode());
     // Main #1574's tail-retention knob replaces the old linear_step sizing
@@ -933,22 +936,33 @@ uint32_t CacheConfigCreator::synchronizeBlockNum(uint32_t                 candid
     // Main retired the DP_AND_TP collective scope: the sizing agreement runs
     // over the same stage-scoped lane as the block-num confirmation below
     // (all TP/DP ranks of the current PP stage).
-    const auto layout         = RankLayout::fromParallelismConfig(parallelism_config);
-    const auto group_size     = static_cast<size_t>(layout.laneStride());
-    const auto layered_blocks = automatic_prefill.logical_blocks;
-    RTP_LLM_CHECK_WITH_INFO(candidate_block_num <= static_cast<uint32_t>(std::numeric_limits<int32_t>::max())
-                                && layered_blocks <= static_cast<uint32_t>(std::numeric_limits<int32_t>::max()),
-                            "candidate cache block count exceeds collective int32 range");
-    const std::array<int32_t, 2> local_candidates{static_cast<int32_t>(candidate_block_num),
-                                                  static_cast<int32_t>(layered_blocks)};
-    const auto                   select = [&](const int32_t* candidates, size_t rank_count) {
-        const auto capacities = minimumMlaPrefillCapacities(candidates, rank_count);
-        if (capacities.useLayered()) {
+    const auto     layout         = RankLayout::fromParallelismConfig(parallelism_config);
+    const auto     group_size     = static_cast<size_t>(layout.laneStride());
+    const auto     layered_blocks = automatic_prefill.logical_blocks;
+    const auto     staging_layers = automatic_prefill.layeredPrefill() ? automatic_prefill.prefill_staging_layers :
+                                                                         config.mla_host_cache.prefill_staging_layers;
+    constexpr auto max_candidate  = static_cast<uint32_t>(std::numeric_limits<int32_t>::max());
+    RTP_LLM_CHECK_WITH_INFO(candidate_block_num <= max_candidate && layered_blocks <= max_candidate
+                                && staging_layers <= max_candidate,
+                            "candidate cache capacity exceeds collective int32 range");
+    const std::array<int32_t, MlaPrefillCapacities::candidate_width> local_candidates{
+        static_cast<int32_t>(candidate_block_num),
+        static_cast<int32_t>(layered_blocks),
+        static_cast<int32_t>(staging_layers)};
+    const auto select = [&](const int32_t* candidates, size_t rank_count) {
+        const auto capacities            = minimumMlaPrefillCapacities(candidates, rank_count);
+        const bool use_automatic_prefill = capacities.useLayered();
+        if (use_automatic_prefill) {
             config.mla_host_cache = automatic_prefill;
-            return static_cast<uint32_t>(capacities.layered_blocks);
         }
-        RTP_LLM_CHECK_WITH_INFO(capacities.ordinary_blocks > 0, "cross-rank cache block count must be positive");
-        return static_cast<uint32_t>(capacities.ordinary_blocks);
+        const auto confirmed = use_automatic_prefill ? capacities.layered_blocks : capacities.ordinary_blocks;
+        RTP_LLM_CHECK_WITH_INFO(confirmed > 0, "cross-rank cache block count must be positive");
+        if (config.mla_host_cache.layeredPrefill()) {
+            // CP ranks must use the same depth to issue the same KV collectives.
+            RTP_LLM_CHECK_WITH_INFO(capacities.staging_layers > 0, "cross-rank MLA staging depth must be positive");
+            config.mla_host_cache.prefill_staging_layers = static_cast<uint32_t>(capacities.staging_layers);
+        }
+        return static_cast<uint32_t>(confirmed);
     };
     if (group_size <= 1) {
         return select(local_candidates.data(), 1);
@@ -970,8 +984,8 @@ uint32_t CacheConfigCreator::synchronizeBlockNum(uint32_t                 candid
         validateSizingSignatures(data, group_size);
     };
     agree(0);
-    // Reduce both alternatives across the same stage before picking a placement,
-    // so a rank with a smaller HBM budget cannot select a different mode.
+    // Reduce capacities and staging depth across the stage before choosing
+    // a placement so different memory budgets cannot split the CP ranks.
     auto candidates =
         torch::empty({static_cast<int64_t>(group_size * local_candidates.size())}, torch::kInt32).pin_memory();
     auto* data = candidates.data_ptr<int32_t>();

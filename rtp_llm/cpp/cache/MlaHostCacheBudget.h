@@ -107,10 +107,13 @@ inline MlaHostCachePlan planLayeredMlaPrefill(const LayeredMlaPrefillBudget& inp
 }
 
 // A zero layered candidate means the rank cannot use the alternate placement.
-// Each rank contributes its original capacity and the optional layered capacity.
+// Staging depth applies to either an automatic or an explicitly layered plan.
 struct MlaPrefillCapacities {
+    static constexpr size_t candidate_width = 3;
+
     int32_t ordinary_blocks;
     int32_t layered_blocks;
+    int32_t staging_layers;
 
     bool useLayered() const {
         return layered_blocks > ordinary_blocks;
@@ -118,10 +121,12 @@ struct MlaPrefillCapacities {
 };
 
 inline MlaPrefillCapacities minimumMlaPrefillCapacities(const int32_t* candidates, size_t rank_count) {
-    MlaPrefillCapacities capacities{candidates[0], candidates[1]};
+    MlaPrefillCapacities capacities{candidates[0], candidates[1], candidates[2]};
     for (size_t rank = 1; rank < rank_count; ++rank) {
-        capacities.ordinary_blocks = std::min(capacities.ordinary_blocks, candidates[2 * rank]);
-        capacities.layered_blocks  = std::min(capacities.layered_blocks, candidates[2 * rank + 1]);
+        const auto* candidate      = candidates + MlaPrefillCapacities::candidate_width * rank;
+        capacities.ordinary_blocks = std::min(capacities.ordinary_blocks, candidate[0]);
+        capacities.layered_blocks  = std::min(capacities.layered_blocks, candidate[1]);
+        capacities.staging_layers  = std::min(capacities.staging_layers, candidate[2]);
     }
     return capacities;
 }

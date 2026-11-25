@@ -20,13 +20,13 @@ class PagePlanTest(unittest.TestCase):
             torch.tensor([7, 1]),
             torch.tensor([20, 21, 22, 23, 40, 40, 42, 68, -1]),
             page_size=4,
-            capacity=3,
+            capacity=4,
             logical_pages=64,
         )
-        self.assertEqual(plan.table.tolist(), [[0, 1, -1], [2, -1, -1]])
-        self.assertEqual(plan.slots.tolist(), [0, 1, 2, 3, 4, 4, 6, 8, -1])
-        self.assertEqual(plan.fetch, [(10, 1, 1), (17, 2, 1)])
-        self.assertEqual(plan.write, [(0, 5, 1), (1, 10, 1), (2, 17, 1)])
+        self.assertEqual(plan.table.tolist(), [[1, 2, -1], [3, -1, -1]])
+        self.assertEqual(plan.slots.tolist(), [4, 5, 6, 7, 8, 8, 10, 12, -1])
+        self.assertEqual(plan.fetch, [(10, 2, 1), (17, 3, 1)])
+        self.assertEqual(plan.write, [(1, 5, 1), (2, 10, 1), (3, 17, 1)])
         self.assertEqual(table.tolist(), [[5, 10, 55], [17, 60, 61]])
 
     def test_empty_cp_owner_and_multi_page_physical_blocks(self):
@@ -51,11 +51,11 @@ class PagePlanTest(unittest.TestCase):
         table = torch.tensor([[4, 5]])
         lengths = torch.tensor([8])
         with self.assertRaisesRegex(ValueError, "staging capacity"):
-            _plan_pages(table, lengths, torch.tensor([16]), 4, 1, 6)
+            _plan_pages(table, lengths, torch.tensor([16]), 4, 2, 6)
         with self.assertRaisesRegex(ValueError, "logical cache capacity"):
-            _plan_pages(table, lengths, torch.tensor([16]), 4, 2, 5)
+            _plan_pages(table, lengths, torch.tensor([16]), 4, 3, 5)
         with self.assertRaisesRegex(ValueError, "live prefill cache pages"):
-            _plan_pages(table, lengths, torch.tensor([12]), 4, 2, 6)
+            _plan_pages(table, lengths, torch.tensor([12]), 4, 3, 6)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -71,7 +71,7 @@ class LayeredPrefillCacheTest(unittest.TestCase):
             )
             for layer in range(3)
         ]
-        cache = ContiguousPrefillCache(backing, 1, 1, device)
+        cache = ContiguousPrefillCache(backing, 2, 1, device)
         table = torch.tensor([[4, 6]], dtype=torch.int32)
         inputs = SimpleNamespace(
             is_prefill=True, kv_cache_kernel_block_id=table, kv_cache_block_id=table
@@ -126,14 +126,14 @@ class LayeredPrefillCacheTest(unittest.TestCase):
                             self.assertEqual(staged.tag, "default")
                             self.assertEqual(staged.seq_size_per_block, 8)
                             self.assertIsNone(writer_owner.write_cache_store_impl)
-                            self.assertEqual(op.block_table.cpu().tolist(), [[0, -1]])
+                            self.assertEqual(op.block_table.cpu().tolist(), [[1, -1]])
                             slots = (
                                 op.sharded_slot_mapping
                                 if sharded
                                 else fmha.rope_params.slot_mapping
                             )
-                            self.assertEqual(slots.cpu().tolist(), [1, 2])
-                            staged.kv_cache_base[0, 1:3].fill_(10 + layer)
+                            self.assertEqual(slots.cpu().tolist(), [5, 6])
+                            staged.kv_cache_base[1, 1:3].fill_(10 + layer)
 
                 torch.cuda.current_stream().synchronize()
                 self.assertIs(op.block_table, original_table)
@@ -168,7 +168,7 @@ class LayeredPrefillCacheTest(unittest.TestCase):
                     with cache.attention(layer, fmha, canonical) as staged:
                         if layer > 0:
                             self.assertEqual(
-                                staged.kv_cache_base[0, 0, 0].item(), expected
+                                staged.kv_cache_base[1, 0, 0].item(), expected
                             )
             torch.cuda.current_stream().synchronize()
 
@@ -194,6 +194,9 @@ class LayeredPrefillCacheTest(unittest.TestCase):
         self.assertEqual(fmha.fmha_impl.block_table.tolist(), [[4, 6]])
 
     def test_local_eager_decode_crosses_kernel_page_boundary(self):
+        from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
+            triton_convert_req_index_to_global_index,
+        )
         from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, rtp_llm_ops
 
         device = torch.device("cuda", torch.cuda.current_device())
@@ -207,7 +210,7 @@ class LayeredPrefillCacheTest(unittest.TestCase):
             for layer in range(2)
         ]
         backing[1][4, :3].fill_(5)
-        cache = ContiguousPrefillCache(backing, 2, 1, device)
+        cache = ContiguousPrefillCache(backing, 3, 1, device)
         # Device-only kernel table and a deliberately different physical table:
         # a physical KV block can cover more than one kernel page.
         table = torch.tensor([[4, 5, 2, 3]], dtype=torch.int32, device=device)
@@ -240,16 +243,31 @@ class LayeredPrefillCacheTest(unittest.TestCase):
             )
             with cache.forward(fmha):
                 with cache.attention(1, fmha, LayerKVCache(backing[1], 8, 1)) as staged:
-                    staging_page = 0 if position < 4 else 1
+                    staging_page = 1 if position < 4 else 2
                     self.assertEqual(
                         params.slot_mapping.tolist(),
                         [staging_page * 4 + expected_offset],
                     )
                     self.assertEqual(
                         op.block_table.tolist(),
-                        [[0, -1, -1, -1]] if position < 4 else [[0, 1, -1, -1]],
+                        [[1, -1, -1, -1]] if position < 4 else [[1, 2, -1, -1]],
                     )
-                    self.assertEqual(staged.kv_cache_base[0, :3, 0].tolist(), [5, 5, 5])
+                    selected = triton_convert_req_index_to_global_index(
+                        torch.zeros(1, dtype=torch.int32, device=device),
+                        op.block_table,
+                        torch.tensor(
+                            [[0, position, -1, -1]], dtype=torch.int32, device=device
+                        ),
+                        4,
+                        4,
+                        NUM_TOPK_TOKENS=4,
+                        BLOCK_N=4,
+                    )
+                    self.assertEqual(
+                        selected.tolist(),
+                        [[4, staging_page * 4 + expected_offset, -1, -1]],
+                    )
+                    self.assertEqual(staged.kv_cache_base[1, :3, 0].tolist(), [5, 5, 5])
                     staged.kv_cache_base[staging_page, expected_offset].fill_(
                         position + 10
                     )

@@ -102,7 +102,10 @@ class PinnedMlaCapacityTest(unittest.TestCase):
 
 
 class PinnedMlaCacheTest(unittest.TestCase):
-    def test_context_stages_live_pages_and_writes_back_only_new_rows(self):
+    def test_context_stages_live_pages_and_writes_back_only_dirty_pages(self):
+        from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
+            triton_convert_req_index_to_global_index,
+        )
         from rtp_llm.ops.compute_ops import PyAttentionInputs, rtp_llm_ops
 
         page_size, device_pages = 4, 4
@@ -131,11 +134,24 @@ class PinnedMlaCacheTest(unittest.TestCase):
         attention.is_prefill = True
         staging = PinnedMlaContextCache.from_attention(attention, working)
         self.assertEqual(
-            staging.inputs.kv_cache_kernel_block_id.tolist(), [[0, 2, 1], [3, 4, 0]]
+            staging.inputs.kv_cache_kernel_block_id.tolist(), [[1, 3, 2], [4, 5, 0]]
         )
         self.assertEqual(
             attention.kv_cache_kernel_block_id.tolist(), [[1, 5, 3], [6, 7, 99]]
         )
+
+        selected = triton_convert_req_index_to_global_index(
+            torch.tensor([0, 1], dtype=torch.int32, device=device.device),
+            staging.inputs.kv_cache_kernel_block_id_device,
+            torch.tensor(
+                [[0, 4, -1, -1], [0, 4, 8, -1]], dtype=torch.int32, device=device.device
+            ),
+            page_size,
+            page_size,
+            NUM_TOPK_TOKENS=4,
+            BLOCK_N=4,
+        )
+        self.assertEqual(selected.tolist(), [[4, 12, -1, -1], [16, 20, -1, -1]])
 
         # Run the main native dense MLA planner against the staged input.
         # Request positions are unchanged and all writes target compact rows.
@@ -150,7 +166,7 @@ class PinnedMlaCacheTest(unittest.TestCase):
         )
         self.assertEqual(native.positions_d[:9].tolist(), [4, 5, 6, 7, 8, 9, 10, 11, 4])
         self.assertEqual(
-            native.slot_mapping[:9].tolist(), [8, 9, 10, 11, 4, 5, 6, 7, 16]
+            native.slot_mapping[:9].tolist(), [12, 13, 14, 15, 8, 9, 10, 11, 20]
         )
 
         original = SimpleNamespace(
@@ -162,8 +178,8 @@ class PinnedMlaCacheTest(unittest.TestCase):
         )
         with staging.attention(original, (working, 0)) as cache:
             pages = cache.kv_cache_base
-            self.assertEqual(pages[:, 0, 0].tolist(), [7, 7, 12, 12, 12])
-            pages[[1, 2, 4]] = 33
+            self.assertEqual(pages[1:, 0, 0].tolist(), [7, 7, 12, 12, 12])
+            pages[[2, 3, 5]] = 33
         torch.cuda.current_stream().synchronize()
         self.assertEqual(device[:, 0, 0].tolist(), [7, 7, 7, 33, 12])
         self.assertEqual(host[:, 0, 0].tolist(), [12, 33, 12, 33])

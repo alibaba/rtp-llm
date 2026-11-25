@@ -108,7 +108,8 @@ class PinnedMlaContextCache:
         pages = torch.unique(table[live], sorted=True)
         if int(pages[0]) < 0 or int(pages[-1]) >= device_pages + first.shape[0]:
             raise ValueError("context page table exceeds the logical MLA cache")
-        compact = torch.searchsorted(pages, table).to(table.dtype)
+        # Keep page zero invalid for paged sparse attention and dense padding.
+        compact = torch.searchsorted(pages, table).to(table.dtype) + 1
         compact.masked_fill_(~live, 0)
         dirty = (
             live & (columns >= prefix[:, None] // page_size) & (lengths[:, None] > 0)
@@ -127,33 +128,36 @@ class PinnedMlaContextCache:
         self.inputs = copy(attention)
         self.inputs.kv_cache_kernel_block_id = table
         self.inputs.kv_cache_kernel_block_id_device = table.to(working.device)
+        staged_pages = list(enumerate(pages, start=1))
         self.device_fetch = contiguous_runs(
-            [(page, index) for index, page in enumerate(pages) if page < device_pages]
+            [(page, index) for index, page in staged_pages if page < device_pages]
         )
         self.host_fetch = contiguous_runs(
             [
                 (page - device_pages, index)
-                for index, page in enumerate(pages)
+                for index, page in staged_pages
                 if page >= device_pages
             ]
         )
         self.device_write = contiguous_runs(
             [
                 (index, page)
-                for index, page in enumerate(pages)
+                for index, page in staged_pages
                 if page < device_pages and page in dirty_pages
             ]
         )
         self.host_write = contiguous_runs(
             [
                 (index, page - device_pages)
-                for index, page in enumerate(pages)
+                for index, page in staged_pages
                 if page >= device_pages and page in dirty_pages
             ]
         )
         first = working.backing[0]
         self.staging = torch.empty(
-            (len(pages), *first.shape[1:]), dtype=first.dtype, device=working.device
+            (len(staged_pages) + 1, *first.shape[1:]),
+            dtype=first.dtype,
+            device=working.device,
         )
         # Discard working-set entries for rewritten host pages. Each group is
         # invalidated once, before its first staged layer writes back.

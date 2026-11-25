@@ -42,38 +42,49 @@ void copyPagedKvCacheAsync(const torch::Tensor&                       source,
     if (runs.empty()) {
         return;
     }
-    // Submit all fragments together, leaving the CPU free to enqueue the
-    // owner layer while the copy engine fills the next layer's staging slot.
 #if CUDART_VERSION >= 12080 && !defined(USE_PPU)
-    cudaMemcpyAttributes attributes{};
-    attributes.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
-    size_t attribute_index    = 0;
+    // CUDA minor-version compatibility also permits drivers predating this API.
+    static const bool batch_supported = [] {
+        int            driver_version  = 0;
+        int            runtime_version = 0;
+        constexpr bool cuda13_abi      = CUDART_VERSION >= 13000;
+        constexpr int  min_driver      = cuda13_abi ? 13000 : 12080;
+        return cudaDriverGetVersion(&driver_version) == cudaSuccess && driver_version >= min_driver
+               && cudaRuntimeGetVersion(&runtime_version) == cudaSuccess && runtime_version >= 12080
+               && (runtime_version >= 13000) == cuda13_abi;
+    }();
+    if (batch_supported) {
+        // Queue all fragments together on the current stream.
+        cudaMemcpyAttributes attributes{};
+        attributes.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
+        size_t attribute_index    = 0;
 #if CUDART_VERSION >= 13000
-    C10_CUDA_CHECK(cudaMemcpyBatchAsync(
-        destinations.data(), sources.data(), sizes.data(), sizes.size(), &attributes, &attribute_index, 1, stream));
+        C10_CUDA_CHECK(cudaMemcpyBatchAsync(
+            destinations.data(), sources.data(), sizes.data(), sizes.size(), &attributes, &attribute_index, 1, stream));
 #else
-    std::vector<void*> mutable_sources;
-    mutable_sources.reserve(sources.size());
-    for (const auto* source_pointer : sources) {
-        mutable_sources.push_back(const_cast<void*>(source_pointer));
-    }
-    size_t failure_index = 0;
-    C10_CUDA_CHECK(cudaMemcpyBatchAsync(destinations.data(),
-                                        mutable_sources.data(),
-                                        sizes.data(),
-                                        sizes.size(),
-                                        &attributes,
-                                        &attribute_index,
-                                        1,
-                                        &failure_index,
-                                        stream));
+        std::vector<void*> mutable_sources;
+        mutable_sources.reserve(sources.size());
+        for (const auto* source_pointer : sources) {
+            mutable_sources.push_back(const_cast<void*>(source_pointer));
+        }
+        size_t failure_index = 0;
+        C10_CUDA_CHECK(cudaMemcpyBatchAsync(destinations.data(),
+                                            mutable_sources.data(),
+                                            sizes.data(),
+                                            sizes.size(),
+                                            &attributes,
+                                            &attribute_index,
+                                            1,
+                                            &failure_index,
+                                            stream));
 #endif
-#else
+        return;
+    }
+#endif
     const auto direction = source.is_cuda() ? cudaMemcpyDeviceToHost : cudaMemcpyHostToDevice;
     for (size_t i = 0; i < sizes.size(); ++i) {
         C10_CUDA_CHECK(cudaMemcpyAsync(destinations[i], sources[i], sizes[i], direction, stream));
     }
-#endif
 }
 
 }  // namespace rtp_llm

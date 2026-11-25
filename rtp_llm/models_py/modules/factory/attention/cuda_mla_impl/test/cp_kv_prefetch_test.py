@@ -1,6 +1,7 @@
 import socket
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
@@ -106,6 +107,8 @@ def _check_same_layer(rank, group, device, stream):
 
 
 def _worker(rank, port):
+    from rtp_llm.models_py.distributed import collective_torch
+
     device = torch.device("cuda", rank)
     torch.cuda.set_device(device)
     dist.init_process_group(
@@ -115,7 +118,17 @@ def _worker(rank, port):
         group = dist.group.WORLD
         stream = pynccl_cp.warmup_kv_overlap(group, device)
         compute = torch.cuda.current_stream(device)
-        _check_same_layer(rank, group, device, stream)
+        # Both ranks belong to TP in this fixture. Resolve the model's symbolic
+        # TP group to the real NCCL group initialized above.
+        original_get_group = collective_torch._get_group
+
+        def get_test_group(group_type, cpu_backend=False):
+            if group_type == collective_torch.Group.TP and not cpu_backend:
+                return group
+            return original_get_group(group_type, cpu_backend=cpu_backend)
+
+        with patch.object(collective_torch, "_get_group", get_test_group):
+            _check_same_layer(rank, group, device, stream)
         cases = [
             ([5, 2, 0], [3, 4, 2]),
             ([2], [2]),  # Rank one has neither history nor current owned rows.
