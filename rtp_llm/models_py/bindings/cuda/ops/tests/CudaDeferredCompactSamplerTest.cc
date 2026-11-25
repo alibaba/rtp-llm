@@ -29,14 +29,14 @@ finally:
 import torch
 )",
              scope);
-    constexpr int batch = 8, rows = 4, vocab = 4096;
+    constexpr int batch = 5, rows = 4, vocab = 4096;
     initializeSamplingRuntime(vocab);
     ASSERT_TRUE(supportsDeferredRejectionSampling());
 
     auto cuda = torch::TensorOptions().device(torch::kCUDA);
     auto ints = torch::TensorOptions().dtype(torch::kInt32);
-    // The first four requests have exact matches through the bonus row. The
-    // last four propose an absent token immediately and need a correction.
+    // Use fewer requests than the smallest plan bucket. The first two reach
+    // the bonus row and the remaining three need an immediate correction.
     auto target = torch::full({batch, rows, vocab}, -50.0f);
     auto drafts = torch::zeros({batch, rows - 1}, ints);
     for (int req = 0; req < batch; ++req) {
@@ -96,6 +96,8 @@ import torch
     mixed.defer_token_sampling = true;
     auto filtered              = sampler.forward(mixed);
     ASSERT_TRUE(filtered.verify_candidate_ids.defined());
+    EXPECT_TRUE(torch::isfinite(filtered.verify_logits).sum(-1).eq(7).all().item<bool>());
+    EXPECT_TRUE(torch::allclose(filtered.verify_log_normalizer, filtered.verify_logits.logsumexp(-1)));
     EXPECT_TRUE(torch::equal(filtered.verify_do_sample.cpu(), torch::tensor({false, true}, torch::kBool)));
     auto best = filtered.verify_candidate_ids.gather(1, filtered.verify_logits.argmax(-1, true)).view({2, rows}).cpu();
     EXPECT_TRUE(best[0].eq(token_a).all().item<bool>());
@@ -137,9 +139,9 @@ compile_plan.assert_called_once()
 materialize.assert_called_once()
 torch.testing.assert_close(native_ids, eager_ids, rtol=0, atol=0)
 torch.testing.assert_close(native_counts, eager_counts, rtol=0, atol=0)
-assert native_counts.tolist() == [4] * 4 + [1] * 4
+assert native_counts.tolist() == [4, 4, 1, 1, 1]
 for req, row in enumerate(native_ids.tolist()):
-    kept = 3 if req < 4 else 0
+    kept = 3 if req < 2 else 0
     assert row[:kept] == [1900 + 61 * req + 7 * pos for pos in range(kept)]
     first = 1900 + 61 * req + 7 * kept
     assert row[kept] in (first, first + 1250)

@@ -816,12 +816,8 @@ def rejection_sample(
     target_local_sumexp = target_logits.new_empty(
         num_logits, vocab_num_blocks, dtype=torch.float32
     )
-    draft_local_max = target_logits.new_empty(
-        num_logits, vocab_num_blocks, dtype=torch.float32
-    )
-    draft_local_sumexp = target_logits.new_empty(
-        num_logits, vocab_num_blocks, dtype=torch.float32
-    )
+    draft_local_max = torch.empty_like(target_local_max) if has_draft_logits else None
+    draft_local_sumexp = torch.empty_like(target_local_sumexp) if has_draft_logits else None
     # Separate target and draft CTAs keep probability conversion off the target path.
     stats_grid = (
         num_logits,
@@ -836,9 +832,9 @@ def rejection_sample(
         target_local_sumexp,
         target_local_sumexp.stride(0),
         draft_local_max,
-        draft_local_max.stride(0),
+        vocab_num_blocks,
         draft_local_sumexp,
-        draft_local_sumexp.stride(0),
+        vocab_num_blocks,
         target_logits,
         target_logits.stride(0),
         draft_logits,
@@ -896,9 +892,9 @@ def rejection_sample(
         draft_logits_stride_1,
         draft_logits_row_mapping,
         draft_local_max,
-        draft_local_max.stride(0),
+        vocab_num_blocks,
         draft_local_sumexp,
-        draft_local_sumexp.stride(0),
+        vocab_num_blocks,
         cu_num_logits,
         idx_mapping,
         temperature,

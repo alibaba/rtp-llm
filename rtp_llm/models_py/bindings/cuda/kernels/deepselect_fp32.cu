@@ -143,7 +143,7 @@ __global__ void compactTopKTopP(float*   dense,
         Reduce::TempStorage reduce;
         Scan::TempStorage   scan;
     } temporary;
-    __shared__ float maximum, boundary, total, cutoff;
+    __shared__ float maximum, total, cutoff;
     __shared__ int   overflow;
     const int        row = blockIdx.x;
     float            values[items];
@@ -160,7 +160,7 @@ __global__ void compactTopKTopP(float*   dense,
     if (threadIdx.x == 0)
         maximum = values[0];
     if (threadIdx.x == (request_top_k - 1) / items)
-        boundary = values[(request_top_k - 1) % items];
+        cutoff = values[(request_top_k - 1) % items];
     __syncthreads();
     if (threadIdx.x == 0) {
         // Strict TopK: candidate slots beyond the request limit stay excluded, even on ties.
@@ -168,35 +168,40 @@ __global__ void compactTopKTopP(float*   dense,
         fallback[row] = overflow;
     }
     __syncthreads();
-    float probabilities[items], prefix[items];
-    float subtotal = 0;
+    float probabilities[items];
+    if (top_p < 1.0f || log_normalizer) {
 #pragma unroll
-    for (int i = 0; i < items; ++i) {
-        const int slot   = threadIdx.x * items + i;
-        probabilities[i] = slot < request_top_k ? expf(values[i] - maximum) : 0.0f;
-        subtotal += probabilities[i];
+        for (int i = 0; i < items; ++i) {
+            const int slot   = threadIdx.x * items + i;
+            probabilities[i] = slot < request_top_k ? expf(values[i] - maximum) : 0.0f;
+        }
     }
-    const float sum = Reduce(temporary.reduce).Sum(subtotal);
-    if (threadIdx.x == 0)
-        total = sum;
-    __syncthreads();
-    Scan(temporary.scan).InclusiveSum(probabilities, prefix);
-    __syncthreads();
-    float first = 1024;
+    if (top_p < 1.0f) {
+        float subtotal = 0;
 #pragma unroll
-    for (int i = 0; i < items; ++i)
-        if (threadIdx.x * items + i < request_top_k && prefix[i] >= top_p * total)
-            first = fminf(first, static_cast<float>(threadIdx.x * items + i));
-    const float first_global = Reduce(temporary.reduce).Reduce(first, cuda::minimum<float>());
-    if (threadIdx.x == 0) {
-        total  = first_global;
-        cutoff = boundary;
+        for (int i = 0; i < items; ++i)
+            subtotal += probabilities[i];
+        const float sum = Reduce(temporary.reduce).Sum(subtotal);
+        if (threadIdx.x == 0)
+            total = sum;
+        __syncthreads();
+        float prefix[items];
+        Scan(temporary.scan).InclusiveSum(probabilities, prefix);
+        __syncthreads();
+        float first = 1024;
+#pragma unroll
+        for (int i = 0; i < items; ++i)
+            if (threadIdx.x * items + i < request_top_k && prefix[i] >= top_p * total)
+                first = fminf(first, static_cast<float>(threadIdx.x * items + i));
+        const float first_global = Reduce(temporary.reduce).Reduce(first, cuda::minimum<float>());
+        if (threadIdx.x == 0)
+            total = first_global;
+        __syncthreads();
+        const int index = static_cast<int>(total);
+        if (index < 1024 && threadIdx.x == index / items)
+            cutoff = values[index % items];
+        __syncthreads();
     }
-    __syncthreads();
-    const int index = static_cast<int>(total);
-    if (top_p < 1.0f && index < 1024 && threadIdx.x == index / items)
-        cutoff = values[index % items];
-    __syncthreads();
 #pragma unroll
     for (int i = 0; i < items; ++i) {
         const int slot = threadIdx.x * items + i;

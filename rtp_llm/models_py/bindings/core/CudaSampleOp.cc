@@ -333,9 +333,10 @@ bool supportsDeferredPlan(const RejectionSamplingParams& params) {
         || logits.scalar_type() != torch::kFloat32 || !logits.is_contiguous()) {
         return false;
     }
-    const auto batch = logits.size(0);
-    const auto rows  = logits.size(1);
-    if (batch < 8 || batch > 128 || rows < 2 || rows > 9) {
+    const auto batch     = logits.size(0);
+    const auto rows      = logits.size(1);
+    const auto min_batch = params.target_candidate_ids_d.defined() ? 1 : 8;
+    if (batch < min_batch || batch > 128 || rows < 2 || rows > 9) {
         return false;
     }
     const auto& forced = params.force_accept;
