@@ -183,3 +183,20 @@ def init_server_group_args(parser, server_config, distribute_config):
         "就认为这一行已经丢失：所有机器以 1 退出，不再原地重启。调小能更快停掉对端整机"
         "故障后卡住的行，但 start_server 偶尔停顿也更容易被误判",
     )
+
+    server_group.add_argument(
+        "--gumbel_rejection_graph",
+        env_name="RTP_LLM_GUMBEL_REJECTION_GRAPH",
+        bind_to=(server_config, "gumbel_rejection_graph"),
+        type=str2bool,
+        default=True,
+        help="Replay eligible rejection sampling with CUDA graphs.",
+    )
+    server_group.add_argument(
+        "--fuse_draft_probs_log",
+        env_name="RTP_LLM_FUSE_DRAFT_PROBS_LOG",
+        bind_to=(server_config, "fuse_draft_probs_log"),
+        type=str2bool,
+        default=True,
+        help="Read draft probabilities directly in rejection sampling.",
+    )

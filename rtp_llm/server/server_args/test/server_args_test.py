@@ -117,6 +117,51 @@ class Glm5EnvironmentArgumentsTest(TestCase):
             self.assertEqual(os.environ["FASTSAFETENSORS_CONFIG"], "new.json")
 
 
+class Glm5SamplingArgumentsTest(TestCase):
+    def test_glm5_verification_and_auto_topk_can_be_disabled_independently(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        def settings(args):
+            sp = pickle.loads(pickle.dumps(setup_args(args).sp_config))
+            return sp.use_vllm_rejection_sampling, sp.glm5_auto_topk1024
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(settings([]), (True, True))
+        with patch.dict(
+            os.environ,
+            {
+                "RTP_LLM_USE_VLLM_REJECTION_SAMPLING": "0",
+                "RTP_LLM_GLM5_AUTO_TOPK1024": "0",
+            },
+            clear=True,
+        ):
+            self.assertEqual(settings([]), (False, False))
+            self.assertEqual(
+                settings(["--use_vllm_rejection_sampling", "1"]), (True, False)
+            )
+            self.assertEqual(settings(["--glm5_auto_topk1024", "1"]), (False, True))
+
+    def test_graph_and_draft_probability_log_can_be_disabled_independently(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            config = setup_args([]).server_config
+            self.assertTrue(config.gumbel_rejection_graph)
+            self.assertTrue(config.fuse_draft_probs_log)
+
+        env = {
+            "RTP_LLM_GUMBEL_REJECTION_GRAPH": "0",
+            "RTP_LLM_FUSE_DRAFT_PROBS_LOG": "0",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            config = setup_args(["--gumbel_rejection_graph", "1"]).server_config
+            self.assertTrue(config.gumbel_rejection_graph)
+            self.assertFalse(config.fuse_draft_probs_log)
+            config = setup_args(["--fuse_draft_probs_log", "1"]).server_config
+            self.assertFalse(config.gumbel_rejection_graph)
+            self.assertTrue(config.fuse_draft_probs_log)
+
+
 class AllReduceArgumentsTest(TestCase):
     def test_default_auto_and_retired_environment(self):
         from rtp_llm.server.server_args import server_args

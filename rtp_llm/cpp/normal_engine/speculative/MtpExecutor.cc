@@ -998,7 +998,14 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     }
     speculative_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, propose_step_));
     if (!is_block_draft_) {
-        fast_topk_sampler_.reset(new speculative::FastTopKSampler(d2t_map_));
+        bool compact_point_mass = false;
+#if USING_CUDA
+        if (params.model_config_.model_type == "glm_5" && params.sp_config.use_vllm_rejection_sampling) {
+            initializeSamplingRuntime(vocab_size_);
+            compact_point_mass = supportsDeferredRejectionSampling();
+        }
+#endif
+        fast_topk_sampler_.reset(new speculative::FastTopKSampler(d2t_map_, compact_point_mass));
     }
 
     RTP_LLM_LOG_INFO("[speculative decoding] d2t_map size: %ld", d2t_map_.defined() ? d2t_map_.numel() : 0);
@@ -1405,7 +1412,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             // Seeding is commit-only: there is no proposal to sample. The
             // decode worker produces the first proposal at its round head.
         } else {
-            fast_topk_sampler_output       = fast_topk_sampler_->forward(draft_model_output.logits);
+            // PD peers can roll independently; legacy decode workers still require a dense first proposal.
+            fast_topk_sampler_output = model_input.pd_separation && fast_topk_sampler_->compactPointMassEnabled() ?
+                                           speculative::FastTopKSampler(d2t_map_).forward(draft_model_output.logits) :
+                                           fast_topk_sampler_->forward(draft_model_output.logits);
             draft_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
             draft_sampler_output.token_ids = fast_topk_sampler_output.token_ids;
         }
@@ -1819,10 +1829,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         // trick: update draft sampler output after spec decode to avoid kernel launch overhead
         if (isTpRank0()) {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(update_draft_sampler_output)");
-            if (!model_input.is_fake_stream) {
-                if (is_block_draft_) {
-                    // Round-head propose already populated draft_sampler_output, post process is not needed.
-                } else if (propose_step_ == 1) {
+            // Block drafts already supplied the sampled tokens and their actual q at round head.
+            if (!model_input.is_fake_stream && !is_block_draft_) {
+                draft_sampler_output.token_ids_are_point_mass = fast_topk_sampler_->compactPointMassEnabled();
+                if (propose_step_ == 1) {
                     batch_stream_processor_->updateOneStepDraftSamplerOutput(
                         stream_groups, draft_sampler_output, draft_token_probs_d_t, buffer_holder_);
                 } else {
@@ -1898,18 +1908,40 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
                 // target model sample
                 auto sampler_input_status = batch_stream_processor_->gatherSpecSamplerInput(
-                    stream_groups, model_output, *spec_logits_result, draft_sampler_output.token_ids);
+                    stream_groups,
+                    model_output,
+                    *spec_logits_result,
+                    draft_sampler_output.token_ids,
+                    !is_block_draft_ && fast_topk_sampler_->compactPointMassEnabled());
                 if (!sampler_input_status.ok()) {
                     return sampler_input_status.status();
                 }
                 auto& sampler_input = sampler_input_status.value();
                 holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
-                sampler_output           = std::move(sampler_->forward(sampler_input));
-                sampler_output.all_probs = sampler_output.all_probs.reshape(
-                    {(int64_t)batch_size, (int64_t)(propose_step_ + 1), (int64_t)vocab_size_});
-
-                // rejection sampling
                 auto params = gatherSpeculativeSamplingParams(streams);
+                if (sampler_input.defer_token_sampling) {
+                    sampler_input.rejection_rows = propose_step_ + 1;
+                    if (draft_sampler_output.token_ids_are_point_mass) {
+                        sampler_input.rejection_generators = params.generators;
+                    }
+                }
+                sampler_output          = sampler_->forward(sampler_input);
+                const auto verify_shape = [&](const torch::Tensor& tensor) {
+                    return tensor.reshape(
+                        {static_cast<int64_t>(batch_size), static_cast<int64_t>(propose_step_ + 1), tensor.size(-1)});
+                };
+                if (sampler_output.deferred_token_sampling) {
+                    sampler_output.verify_logits = verify_shape(sampler_output.verify_logits);
+                    if (sampler_output.verify_candidate_ids.defined()) {
+                        sampler_output.verify_candidate_ids =
+                            sampler_output.verify_candidate_ids.reshape_as(sampler_output.verify_logits);
+                    }
+                    if (sampler_output.verify_dense_fallback.defined()) {
+                        sampler_output.verify_dense_fallback = verify_shape(sampler_output.verify_dense_fallback);
+                    }
+                } else {
+                    sampler_output.all_probs = verify_shape(sampler_output.all_probs);
+                }
                 mtp::runRejectionSampling(*speculative_sampler_,
                                           params,
                                           draft_sampler_output,
@@ -3334,7 +3366,6 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         // sample
         auto fast_topk_sampler_output = fast_topk_sampler_->forward(draft_decode_model_output.logits, 1);
         auto draft_probs              = fast_topk_sampler_output.all_probs;
-        auto draft_probs_reshape      = draft_probs.reshape({(int)batch_size, 1, -1});
         auto draft_token_ids          = fast_topk_sampler_output.token_ids;
 
         if (model_input.is_fake_stream) {
@@ -3344,7 +3375,9 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 
         draft_token_ids = to_cuda_i32_flat(draft_token_ids);
         draft_token_columns.push_back(draft_token_ids);
-        draft_probs_list.push_back(draft_probs_reshape);
+        if (draft_probs.defined()) {
+            draft_probs_list.push_back(draft_probs.reshape({(int)batch_size, 1, -1}));
+        }
 
         // update model input
         if (i + 1 < decode_steps) {

@@ -397,6 +397,8 @@ struct SpeculativeExecutionConfig {
     // True: gamma query rows, including the anchor prediction. False:
     // one conditioning anchor followed by gamma prediction rows.
     bool        sp_dspark_sample_from_anchor = true;
+    bool        use_vllm_rejection_sampling  = true;
+    bool        glm5_auto_topk1024           = true;
     std::string to_string() const;
     size_t      speculativeReserveStep() const;
 

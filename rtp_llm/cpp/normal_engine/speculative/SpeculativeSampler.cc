@@ -15,15 +15,18 @@ FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int 
 
     if (top_k == 1) {
         output.token_ids = torch::argmax(logits, -1, true);
-        output.all_probs = torch::zeros_like(logits).scatter_(-1, output.token_ids, 1.0);
+        if (!compact_point_mass_) {
+            output.all_probs = torch::zeros_like(logits).scatter_(-1, output.token_ids, 1.0);
+        }
     } else {
         auto draft_probs = torch::softmax(logits, -1);
         output.token_ids = std::get<1>(torch::topk(draft_probs, top_k, -1));
         output.all_probs = std::move(draft_probs);
     }
 
-    int batch_size = output.token_ids.size(0);
-    execMappingDraft2Target({output.token_ids, d2t_map_, batch_size, 0, 1});
+    const int batch_size = output.token_ids.size(0);
+    const int stride     = output.token_ids.size(1);
+    execMappingDraft2Target({output.token_ids, d2t_map_, batch_size, 0, stride});
 
     return output;
 }
@@ -234,32 +237,35 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&        sample_out
 
     const int batch_size = params.do_sample.size(0);
 
-    auto draft_token_ids  = draft_sampler_output.token_ids;
-    auto target_token_ids = target_sampler_output.token_ids;
+    auto       draft_token_ids = draft_sampler_output.token_ids;
+    const bool deferred        = target_sampler_output.deferred_token_sampling;
 
     auto       draft_token_probs      = draft_sampler_output.all_probs;
-    auto       target_token_probs     = target_sampler_output.all_probs;
+    auto       target_token_probs = deferred ? target_sampler_output.verify_logits : target_sampler_output.all_probs;
     const bool draft_probs_point_mass = draft_sampler_output.token_ids_are_point_mass;
 
     buffer_holder_.hold_host(draft_token_ids);
     auto draft_token_ids_d_t = draft_token_ids.to(target_device, true);
 
     auto target_token_ids_d_t = target_sampler_output.token_ids;
-    if (!target_token_ids_d_t.is_cuda()) {
+    if (!deferred && !target_token_ids_d_t.is_cuda()) {
         buffer_holder_.hold_host(target_token_ids_d_t);
         target_token_ids_d_t = target_token_ids_d_t.to(target_device, true);
     }
 
-    const auto& do_sample = params.do_sample;
-    buffer_holder_.hold_host(do_sample);
-    auto do_sample_d = do_sample.to(target_device, true);
+    auto do_sample_d = target_sampler_output.verify_do_sample;
+    if (!do_sample_d.defined()) {
+        buffer_holder_.hold_host(params.do_sample);
+        do_sample_d = params.do_sample.to(target_device, true);
+    }
 
     auto          rand_options      = torch::TensorOptions().device(target_device).dtype(torch::kFloat);
-    torch::Tensor uniform_samples_d = torch::rand({(long)batch_size, (long)propose_step_ + 1}, rand_options);
+    torch::Tensor uniform_samples_d;
 
     // Override per-stream uniform samples with seeded generator when random_seed is set,
     // ensuring deterministic acceptance for reproducible iter_count.
-    {
+    if (!deferred) {
+        uniform_samples_d = torch::rand({(long)batch_size, (long)propose_step_ + 1}, rand_options);
         int idx = 0;
         for (const auto& gen : params.generators) {
             if (gen.defined()) {
@@ -280,9 +286,13 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&        sample_out
     RTP_LLM_CHECK_WITH_INFO(draft_probs_point_mass
                                 || (draft_token_probs_d_t.defined() && draft_token_probs_d_t.dim() == 3),
                             "draft probabilities must be [B, steps, vocab] unless token ids define a point mass");
-    if (!draft_probs_point_mass && draft_token_probs_d_t.size(2) != target_token_probs_d_t.size(2)) {
-        const int64_t target_vocab_size = target_token_probs_d_t.size(2);
-        const int64_t num_spec          = draft_token_probs_d_t.size(1);
+    const int64_t target_vocab_size = target_sampler_output.verify_dense_fallback.defined() ?
+                                          target_sampler_output.verify_dense_fallback.size(-1) :
+                                          target_token_probs_d_t.size(-1);
+    const bool has_vocab_map = d2t_map_.defined() && d2t_map_.numel() != 0;
+    if (!draft_probs_point_mass
+        && (draft_token_probs_d_t.size(2) != target_vocab_size || (deferred && has_vocab_map))) {
+        const int64_t num_spec = draft_token_probs_d_t.size(1);
 
         // Reuse pre-allocated padding buffer to avoid per-forward GPU allocation.
         // Grow-only along batch / num_spec dims; vocab dim must match exactly.
@@ -304,7 +314,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&        sample_out
 
         auto draft_probs_padding = draft_probs_padding_buffer_.narrow(0, 0, (int64_t)batch_size).narrow(1, 0, num_spec);
         draft_probs_padding.zero_();
-        if (d2t_map_.defined()) {
+        if (has_vocab_map) {
             draft_probs_padding.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), d2t_map_},
                                            draft_token_probs_d_t);
         } else {
@@ -319,17 +329,40 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&        sample_out
 
     {
         RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample.execRejectionSampling");
-        execRejectionSampling({
+        RejectionSamplingParams rejection{
             draft_token_probs_d_t,
             draft_token_ids_d_t,
             uniform_samples_d,
-            target_token_probs_d_t,
+            deferred ? torch::Tensor() : target_token_probs_d_t,
             target_token_ids_d_t,
             output_token_ids_d,
             output_accepted_token_num_d,
             do_sample_d,
             draft_probs_point_mass,
-        });
+        };
+        if (deferred) {
+            rejection.deferred_token_sampling = true;
+            rejection.target_logits_d         = target_token_probs_d_t;
+            rejection.target_candidate_ids_d  = target_sampler_output.verify_candidate_ids;
+            rejection.target_dense_fallback_d = target_sampler_output.verify_dense_fallback;
+            rejection.target_fallback_rows_d  = target_sampler_output.verify_fallback_rows;
+            rejection.target_log_normalizer_d = target_sampler_output.verify_log_normalizer;
+            rejection.prepared_rejection_rng  = target_sampler_output.prepared_rejection_rng;
+            rejection.cum_log_probs           = target_sampler_output.cum_log_probs;
+            rejection.buffer_holder           = &buffer_holder_;
+            if (!rejection.prepared_rejection_rng.defined()) {
+                rejection.generator = params.generators;
+            }
+            const auto* forced = params.force_accept.data_ptr<bool>();
+            rejection.force_accept.assign(forced, forced + batch_size);
+        }
+        execRejectionSampling(rejection);
+        if (deferred) {
+            // The verifier draws the correction/bonus and zero-fills rejected slots in place.
+            sample_output.accept_tokens = std::move(output_token_ids_d);
+            sample_output.accept_len    = std::move(output_accepted_token_num_d);
+            return;
+        }
     }
 
     RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample.post_rejection_sampling");

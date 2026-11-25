@@ -385,8 +385,7 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-deepselect_bf16_cuda_copts = [
-    "-DRTP_DEEPSELECT_BF16_ENABLED",
+deepselect_cuda_copts = [
     "-O3",
     "-U__CUDA_NO_HALF_OPERATORS__",
     "-U__CUDA_NO_HALF_CONVERSIONS__",
@@ -408,9 +407,34 @@ cc_library(
         "deepselect/**/*.cuh",
     ]),
     copts = copts() + cuda_default_copts_without_arch() + select({
-        "@//:using_cuda13_x86": deepselect_bf16_cuda_copts,
-        "@//:using_cuda13_arm": deepselect_bf16_cuda_copts,
-        "@//:using_cuda12_9": deepselect_bf16_cuda_copts,
+        "@//:using_cuda13_x86": deepselect_cuda_copts + ["-DRTP_DEEPSELECT_BF16_ENABLED"],
+        "@//:using_cuda13_arm": deepselect_cuda_copts + ["-DRTP_DEEPSELECT_BF16_ENABLED"],
+        "@//:using_cuda12_9": deepselect_cuda_copts + ["-DRTP_DEEPSELECT_BF16_ENABLED"],
+        "//conditions:default": [],
+    }),
+    deps = torch_deps() + [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + select({
+        "@//:using_cuda13_x86": ["@cutlass4.0//:cutlass"],
+        "@//:using_cuda13_arm": ["@cutlass4.0//:cutlass"],
+        "@//:using_cuda12_9": ["@cutlass4.0//:cutlass"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "deepselect_fp32",
+    srcs = ["deepselect_fp32.cu"],
+    hdrs = ["deepselect_fp32.h"] + glob([
+        "deepselect/**/*.h",
+        "deepselect/**/*.cuh",
+    ]),
+    copts = copts() + cuda_default_copts_without_arch() + select({
+        "@//:using_cuda13_x86": deepselect_cuda_copts + ["-DRTP_DEEPSELECT_FP32_ENABLED"],
+        "@//:using_cuda13_arm": deepselect_cuda_copts + ["-DRTP_DEEPSELECT_FP32_ENABLED"],
+        "@//:using_cuda12_9": deepselect_cuda_copts + ["-DRTP_DEEPSELECT_FP32_ENABLED"],
         "//conditions:default": [],
     }),
     deps = torch_deps() + [

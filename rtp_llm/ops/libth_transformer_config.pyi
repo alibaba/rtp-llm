@@ -1667,9 +1667,11 @@ class SpecialTokens:
 class SpeculativeExecutionConfig:
     checkpoint_path: str
     gen_num_per_cycle: int
+    glm5_auto_topk1024: bool
     model_type: str
     quantization: str
     tree_decode_config: str
+    use_vllm_rejection_sampling: bool
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:

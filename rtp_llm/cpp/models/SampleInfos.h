@@ -69,6 +69,11 @@ public:
     std::vector<at::Generator> generator;
     torch::Tensor              raw_logprobs_logits;
     torch::Tensor              raw_logprobs_row_indices;
+
+    // Fixed-length MTP Target verification only. Each request owns rejection_rows target positions.
+    bool                       defer_token_sampling = false;
+    int64_t                    rejection_rows       = 0;
+    std::vector<at::Generator> rejection_generators;
 };
 
 struct SamplerOutput {
@@ -84,6 +89,15 @@ public:
     bool          token_ids_are_point_mass = false;
     torch::Tensor raw_logprobs_logits;
     torch::Tensor raw_logprobs_row_indices;
+
+    bool          deferred_token_sampling = false;
+    torch::Tensor verify_logits;
+    torch::Tensor verify_candidate_ids;
+    torch::Tensor verify_dense_fallback;
+    torch::Tensor verify_fallback_rows;
+    torch::Tensor prepared_rejection_rng;
+    torch::Tensor verify_do_sample;
+    torch::Tensor verify_log_normalizer;
 };
 
 struct MergedOutput {

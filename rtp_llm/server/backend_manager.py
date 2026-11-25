@@ -64,7 +64,13 @@ class BackendManager(object):
             nccl_comm_config=self._distributed_server.get_nccl_comm_config(),
         )
 
+        from rtp_llm.models_py import sampling
         from rtp_llm.models_py.distributed import pynccl_cp
+
+        server = self.py_env_configs.server_config
+        sampling.rejection_options = sampling.RejectionOptions(
+            graph=server.gumbel_rejection_graph, fuse_draft_probs_log=server.fuse_draft_probs_log
+        )
 
         # Each spawned worker must publish this before CP communicators are built.
         pynccl_cp.configure(self.py_env_configs.py_hw_kernel_config.glm5_cp_opt)

@@ -64,3 +64,19 @@ def init_speculative_decoding_group_args(parser, sp_config):
         default=1,
         help="每一轮 speculative execution（推测式生成）中，最多生成多少个 token。",
     )
+    speculative_decoding_group.add_argument(
+        "--use_vllm_rejection_sampling",
+        env_name="RTP_LLM_USE_VLLM_REJECTION_SAMPLING",
+        bind_to=(sp_config, "use_vllm_rejection_sampling"),
+        type=str2bool,
+        default=True,
+        help="GLM5 固定步数投机解码使用延迟拒绝采样。关闭后使用原有验证和采样路径。",
+    )
+    speculative_decoding_group.add_argument(
+        "--glm5_auto_topk1024",
+        env_name="RTP_LLM_GLM5_AUTO_TOPK1024",
+        bind_to=(sp_config, "glm5_auto_topk1024"),
+        type=str2bool,
+        default=True,
+        help="GLM5 延迟验证时，若请求未限制 Top-K，使用 1024 个候选。关闭后保留请求的原始范围。",
+    )

@@ -102,6 +102,8 @@ void fusedStridedCopy(const FusedStridedCopyParams& params);
 // Sample ops
 // ===================================================================
 
+bool             supportsDeferredRejectionSampling();
+void             initializeSamplingRuntime(int64_t vocab_size);
 GreedyOutput     execSampleGreedy(const GreedyParams& params);
 torch::Tensor    execSampleFromProbs(const torch::Tensor& probabilities);
 BeamSearchOutput execSampleBeamSearch(BeamSearchParams params);

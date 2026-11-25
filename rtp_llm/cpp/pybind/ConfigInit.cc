@@ -1227,6 +1227,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("checkpoint_path", &SpeculativeExecutionConfig::checkpoint_path)
         .def_readwrite("sp_dspark_mask_token_id", &SpeculativeExecutionConfig::sp_dspark_mask_token_id)
         .def_readwrite("sp_dspark_sample_from_anchor", &SpeculativeExecutionConfig::sp_dspark_sample_from_anchor)
+        .def_readwrite("use_vllm_rejection_sampling", &SpeculativeExecutionConfig::use_vllm_rejection_sampling)
+        .def_readwrite("glm5_auto_topk1024", &SpeculativeExecutionConfig::glm5_auto_topk1024)
         .def("to_string", [](const SpeculativeExecutionConfig& self) { return self.to_string(); })
         .def(py::pickle(
             [](const SpeculativeExecutionConfig& self) {
@@ -1237,10 +1239,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.quantization,
                                       self.checkpoint_path,
                                       self.sp_dspark_mask_token_id,
-                                      self.sp_dspark_sample_from_anchor);
+                                      self.sp_dspark_sample_from_anchor,
+                                      self.use_vllm_rejection_sampling,
+                                      self.glm5_auto_topk1024);
             },
             [](py::tuple t) {
-                if (t.size() != 6 && t.size() != 7 && t.size() != 8)
+                if (t.size() != 6 && t.size() != 7 && t.size() != 8 && t.size() != 10)
                     throw std::runtime_error("Invalid state!");
                 SpeculativeExecutionConfig c;
                 try {
@@ -1250,12 +1254,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.gen_num_per_cycle  = t[3].cast<int64_t>();
                     c.quantization       = t[4].cast<std::string>();
                     c.checkpoint_path    = t[5].cast<std::string>();
-                    if (t.size() == 7) {
+                    if (t.size() >= 7) {
                         c.sp_dspark_mask_token_id = t[6].cast<int64_t>();
                     }
-                    if (t.size() == 8) {
-                        c.sp_dspark_mask_token_id      = t[6].cast<int64_t>();
+                    if (t.size() >= 8) {
                         c.sp_dspark_sample_from_anchor = t[7].cast<bool>();
+                    }
+                    if (t.size() == 10) {
+                        c.use_vllm_rejection_sampling = t[8].cast<bool>();
+                        c.glm5_auto_topk1024          = t[9].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("SpeculativeExecutionConfig unpickle error: ") + e.what());
