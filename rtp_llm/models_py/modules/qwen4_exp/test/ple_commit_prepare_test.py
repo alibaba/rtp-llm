@@ -225,6 +225,66 @@ class PLECommitPrepareTest(unittest.TestCase):
             self.assertTrue(torch.equal(stage.ctx_pool, before[1]))
             owner.finish_speculative_target_commit(False)
 
+    def test_deferred_predicated_commit_matches_reference_and_settles(self):
+        owner, stage, accepted, sb, cb = self.transaction_fixture()
+        before = stage.state_pool.clone(), stage.ctx_pool.clone()
+        expected = PLETransactionCoordinator._prepare_ple_values_reference(
+            stage, accepted, sb, cb
+        )
+        owner.prepare_speculative_target_commit(accepted.int(), defer_verdict=True)
+        self.assertIsNotNone(owner.active_transaction.deferred_resolution)
+        self.assertTrue(torch.equal(stage.state_pool, before[0]))
+        self.assertTrue(torch.equal(stage.ctx_pool, before[1]))
+        owner.finish_speculative_target_commit(True)
+        owner.finalize_speculative_target_commit()
+        self.assertIsNone(owner.active_transaction)
+        self.assertTrue(owner.has_pending_speculative_target_verdict())
+        owner.settle_speculative_target_verdict()
+        self.assertFalse(owner.has_pending_speculative_target_verdict())
+        self.assertTrue(torch.equal(stage.state_pool[sb], expected[0]))
+        self.assertTrue(torch.equal(stage.ctx_pool[cb], expected[1]))
+
+    def test_deferred_predicated_invalid_verdict_writes_zero_dirty_bytes(self):
+        for failure in ("accept", "missing", "overflow", "duplicate", "context"):
+            owner, stage, accepted, _, _ = self.transaction_fixture()
+            before = stage.state_pool.clone(), stage.ctx_pool.clone()
+            if failure == "accept":
+                accepted[0] = 0
+            else:
+                inputs = (
+                    stage.ctx_inputs if failure == "context" else stage.state_inputs
+                )
+                table = inputs.kv_cache_block_id_device.clone()
+                table[0].fill_(0 if failure in ("missing", "context") else 999)
+                if failure == "duplicate":
+                    table[0].copy_(table[1])
+                inputs.kv_cache_block_id_device = table
+            owner.prepare_speculative_target_commit(accepted.int(), defer_verdict=True)
+            self.assertIsNotNone(owner.active_transaction.deferred_resolution)
+            owner.finish_speculative_target_commit(True)
+            owner.finalize_speculative_target_commit()
+            self.assertTrue(owner.has_pending_speculative_target_verdict())
+            with self.assertRaises(RuntimeError):
+                owner.settle_speculative_target_verdict()
+            self.assertFalse(owner.has_pending_speculative_target_verdict())
+            torch.cuda.synchronize()
+            self.assertTrue(torch.equal(stage.state_pool, before[0]))
+            self.assertTrue(torch.equal(stage.ctx_pool, before[1]))
+
+    def test_deferred_predicated_rollback_restores_valid_and_preserves_invalid(self):
+        for valid in (True, False):
+            owner, stage, accepted, _, _ = self.transaction_fixture()
+            before = stage.state_pool.clone(), stage.ctx_pool.clone()
+            if not valid:
+                accepted[0] = 99
+            owner.prepare_speculative_target_commit(accepted.int(), defer_verdict=True)
+            owner.finish_speculative_target_commit(True)
+            owner.finish_speculative_target_commit(False)
+            self.assertIsNone(owner.active_transaction)
+            self.assertFalse(owner.has_pending_speculative_target_verdict())
+            self.assertTrue(torch.equal(stage.state_pool, before[0]))
+            self.assertTrue(torch.equal(stage.ctx_pool, before[1]))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import torch
 
@@ -63,6 +63,7 @@ class _PLETargetTransaction:
     prepared_writes: Optional[list[_PLEPreparedWrite]] = None
     commit_started: bool = False
     tentative_committed: bool = False
+    deferred_resolution: Optional[Any] = None
     graph_key: Optional[int] = None
     live_batch_size: Optional[int] = None
 

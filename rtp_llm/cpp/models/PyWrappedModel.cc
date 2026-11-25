@@ -199,6 +199,10 @@ bool PyWrappedModel::supportsDeviceSpeculativeHandoff() const {
     return supports_device_speculative_handoff_;
 }
 
+bool PyWrappedModel::supportsAsyncSpeculativeTargetVerdict() const {
+    return supports_async_speculative_target_verdict_;
+}
+
 std::optional<bool> PyWrappedModel::reduceSpeculativeTargetPrepareStatus(bool local_ok) {
     if (!has_speculative_target_status_reducer_) {
         return std::nullopt;
@@ -209,13 +213,30 @@ std::optional<bool> PyWrappedModel::reduceSpeculativeTargetPrepareStatus(bool lo
     return py_model_.attr("reduce_speculative_target_prepare_status")(local_ok).cast<bool>();
 }
 
+std::optional<bool> PyWrappedModel::reduceSpeculativeTargetVerdictStatus(bool local_ok) {
+    if (!has_speculative_target_verdict_status_reducer_) {
+        return std::nullopt;
+    }
+    py::gil_scoped_acquire gil;
+    // Dedicated shm verdict channel; native waiting releases the GIL.
+    return py_model_.attr("reduce_speculative_target_verdict_status")(local_ok).cast<bool>();
+}
+
 std::string PyWrappedModel::prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) {
+    return prepareSpeculativeTargetCommit(accept_len, false);
+}
+
+std::string PyWrappedModel::prepareSpeculativeTargetCommit(const torch::Tensor& accept_len, bool defer_verdict) {
     if (!has_speculative_target_commit_hooks_) {
         return {};
     }
     try {
         py::gil_scoped_acquire gil;
-        py_model_.attr("prepare_speculative_target_commit")(accept_len);
+        if (defer_verdict && supports_async_speculative_target_verdict_) {
+            py_model_.attr("prepare_speculative_target_commit")(accept_len, py::arg("defer_verdict") = true);
+        } else {
+            py_model_.attr("prepare_speculative_target_commit")(accept_len);
+        }
         return {};
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python speculative target commit prepare failed: %s", e.what());
@@ -266,6 +287,26 @@ std::string PyWrappedModel::finalizeSpeculativeTargetCommit() {
     } catch (...) {
         RTP_LLM_LOG_ERROR("Speculative target commit finalize failed with an unknown exception");
         return "unknown speculative target commit finalize failure";
+    }
+}
+
+std::string PyWrappedModel::settleSpeculativeTargetVerdict() {
+    if (!supports_async_speculative_target_verdict_) {
+        return {};
+    }
+    try {
+        py::gil_scoped_acquire gil;
+        py_model_.attr("settle_speculative_target_verdict")();
+        return {};
+    } catch (const py::error_already_set& e) {
+        RTP_LLM_LOG_ERROR("Python speculative target verdict failed: %s", e.what());
+        return e.what();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("Speculative target verdict failed: %s", e.what());
+        return e.what();
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("Speculative target verdict failed with an unknown exception");
+        return "unknown speculative target verdict failure";
     }
 }
 

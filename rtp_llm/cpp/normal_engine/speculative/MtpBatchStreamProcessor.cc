@@ -965,6 +965,28 @@ absl::StatusOr<GptModelInputs> MtpBatchStreamProcessor::gatherDecodeModelInput(c
     return model_input;
 }
 
+absl::StatusOr<std::pair<torch::Tensor, torch::Tensor>>
+MtpBatchStreamProcessor::gatherCommittedHostKvCacheBlockTables(const StreamGroups&             stream_groups,
+                                                               const std::vector<std::string>& group_tags,
+                                                               TensorHolder&                   host_holder) const {
+    RTP_LLM_PROFILE_SCOPE("normal_engine.mtp_batch_stream_processor.gather_committed_host_kv_tables");
+    auto physical = model_input_gatherer_->gatherKvCacheBlockId(stream_groups,
+                                                                group_tags,
+                                                                host_holder,
+                                                                /*kernel=*/false,
+                                                                torch::kCUDA,
+                                                                /*ignore_mtp_cache_snapshot=*/true);
+    RETURN_IF_STATUS_OR_ERROR(physical);
+    auto kernel = model_input_gatherer_->gatherKvCacheBlockId(stream_groups,
+                                                              group_tags,
+                                                              host_holder,
+                                                              /*kernel=*/true,
+                                                              torch::kCUDA,
+                                                              /*ignore_mtp_cache_snapshot=*/true);
+    RETURN_IF_STATUS_OR_ERROR(kernel);
+    return std::make_pair(std::move(physical.value()), std::move(kernel.value()));
+}
+
 void MtpBatchStreamProcessor::overlayMtpCacheSnapshots(const StreamGroups& stream_groups,
                                                        GptModelInputs&     model_input,
                                                        TensorHolder&       host_holder) const {

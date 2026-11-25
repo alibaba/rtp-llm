@@ -58,7 +58,8 @@ public:
                                                        const std::vector<std::string>& group_tags,
                                                        TensorHolder&                   host_holder,
                                                        bool                            kernel,
-                                                       torch::DeviceType output_device = torch::kCUDA) const;
+                                                       torch::DeviceType               output_device = torch::kCUDA,
+                                                       bool ignore_mtp_cache_snapshot = false) const;
 
 private:
     GptModelInputs allocateModelInputBuffers(const StreamGroups& stream_groups) const;

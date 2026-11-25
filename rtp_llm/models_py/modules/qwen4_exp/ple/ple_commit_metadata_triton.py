@@ -81,7 +81,21 @@ class AcceptedPairResolution:
     speculative gather cannot read out of bounds before the verdict lands.
     """
 
-    __slots__ = ("payload", "batch", "stage", "tags", "query_len", "pinned", "event")
+    __slots__ = (
+        "payload",
+        "batch",
+        "stage",
+        "tags",
+        "query_len",
+        "pinned",
+        "event",
+        "_device",
+        "_state_pool_rows",
+        "_ctx_pool_rows",
+        "_state_pool_ptr",
+        "_ctx_pool_ptr",
+        "_released",
+    )
 
     def __init__(self, payload, batch, stage, tags, query_len, pinned, event):
         self.payload = payload
@@ -91,6 +105,16 @@ class AcceptedPairResolution:
         self.query_len = query_len
         self.pinned = pinned
         self.event = event
+        self._device = payload.device
+        self._state_pool_rows = int(stage.state_pool.shape[0])
+        self._ctx_pool_rows = int(stage.ctx_pool.shape[0])
+        self._state_pool_ptr = int(stage.state_pool.data_ptr())
+        self._ctx_pool_ptr = int(stage.ctx_pool.data_ptr())
+        self._released = False
+
+    @property
+    def verdict_flag(self):
+        return self.payload[:1]
 
     @property
     def accepted(self):
@@ -106,15 +130,45 @@ class AcceptedPairResolution:
             )
         ]
 
+    def detach_stage(self):
+        """Release strong reference to large staging tensors once commit is enqueued."""
+        self.stage = None
+
+    def record_commit_done(self):
+        """Advance completion event past stream-ordered predicated writes."""
+        if not self._released and self.event is not None:
+            self.event.record()
+
+    def _return_channel_after_sync(self):
+        if self._released:
+            return
+        self._released = True
+        pinned, event = self.pinned, self.event
+        self.pinned = None
+        self.event = None
+        if pinned is not None and event is not None:
+            _release_verdict_channel(self._device, (pinned, event))
+
+    def release(self):
+        """Idempotently drain and return the pooled pinned flag and event."""
+        if self._released:
+            return
+        if self.event is not None:
+            self.event.synchronize()
+        self._return_channel_after_sync()
+
     def verify(self):
+        if self._released:
+            return
         self.event.synchronize()
-        if int(self.pinned[0].item()):
+        flag = int(self.pinned[0].item())
+        self._return_channel_after_sync()
+        if flag:
             self._raise_verdict()
 
     def _raise_verdict(self):
         host = self.payload.tolist()
         batch = self.batch
-        stage = self.stage
         tags = self.tags
         state_host = host[10 : 10 + batch]
         ctx_host = host[10 + batch : 10 + 2 * batch]
@@ -124,18 +178,18 @@ class AcceptedPairResolution:
                 f"[1, {self.query_len}]"
             )
         PLECacheViews._check_commit_verdict(
-            tags[0], host[2:6], state_host, stage.state_pool.shape[0]
+            tags[0], host[2:6], state_host, self._state_pool_rows
         )
         PLECacheViews._check_commit_verdict(
-            tags[1], host[6:10], ctx_host, stage.ctx_pool.shape[0]
+            tags[1], host[6:10], ctx_host, self._ctx_pool_rows
         )
         destinations = set()
-        for pool, blocks, tag in (
-            (stage.state_pool, state_host, tags[0]),
-            (stage.ctx_pool, ctx_host, tags[1]),
+        for pool_ptr, blocks, tag in (
+            (self._state_pool_ptr, state_host, tags[0]),
+            (self._ctx_pool_ptr, ctx_host, tags[1]),
         ):
             for block in blocks:
-                row = (int(pool.data_ptr()), int(block))
+                row = (pool_ptr, int(block))
                 if row in destinations:
                     raise RuntimeError(
                         f"qwen4_exp PLE cache {tag!r} has a duplicate "
@@ -146,21 +200,28 @@ class AcceptedPairResolution:
 
 
 _VERDICT_CHANNEL_LOCK = threading.Lock()
-_VERDICT_CHANNEL = {}
+_VERDICT_CHANNEL_POOL = {}
+_VERDICT_CHANNEL_POOL_MAX = 16
 
 
 def _verdict_channel(device):
-    """Pinned flag and event owned by one commit stream across decode steps."""
-    key = (device, torch.cuda.current_stream(device).cuda_stream)
+    """Acquire an isolated (8B pinned flag, CUDA Event) slot from a per-device pool."""
     with _VERDICT_CHANNEL_LOCK:
-        channel = _VERDICT_CHANNEL.get(key)
-        if channel is None:
-            channel = (
-                torch.empty(1, dtype=torch.int64, pin_memory=True),
-                torch.cuda.Event(),
-            )
-            _VERDICT_CHANNEL[key] = channel
-        return channel
+        pool = _VERDICT_CHANNEL_POOL.get(device)
+        if pool:
+            return pool.pop()
+    return (
+        torch.empty(1, dtype=torch.int64, pin_memory=True),
+        torch.cuda.Event(),
+    )
+
+
+def _release_verdict_channel(device, channel):
+    """Return a synchronized (pinned flag, Event) slot to the per-device pool."""
+    with _VERDICT_CHANNEL_LOCK:
+        pool = _VERDICT_CHANNEL_POOL.setdefault(device, [])
+        if len(pool) < _VERDICT_CHANNEL_POOL_MAX:
+            pool.append(channel)
 
 
 def begin_accepted_pair_resolution(transaction, accept_len):

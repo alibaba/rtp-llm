@@ -380,9 +380,14 @@ class PLEExecution:
                     raise RuntimeError(
                         "PLE CPU graph requires uniform nonempty query rows"
                     )
-                prefixes = ctx_inputs.prefix_lengths.to(
-                    device=ids.device, dtype=torch.long
-                )
+                prefix_src = getattr(ctx_inputs, "prefix_lengths_device", None)
+                if not (
+                    isinstance(prefix_src, torch.Tensor)
+                    and prefix_src.is_cuda
+                    and prefix_src.numel() == batch
+                ):
+                    prefix_src = ctx_inputs.prefix_lengths
+                prefixes = prefix_src.to(device=ids.device, dtype=torch.long)
                 pages = torch.div(
                     prefixes - 1, cache.seq_size_per_block, rounding_mode="floor"
                 )

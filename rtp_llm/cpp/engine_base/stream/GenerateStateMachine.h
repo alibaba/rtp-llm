@@ -51,7 +51,7 @@ public:
         events_.clearLoadInitiated();
     }
 
-    StreamState moveToNext();
+    StreamState moveToNext(bool coalesce_mtp_lookahead = false);
 
     StreamState getStatus() const {
         return status.load(std::memory_order_acquire);
@@ -86,7 +86,7 @@ public:
 private:
     void handleWaiting();
     void handleLoading();
-    void handleRunning();
+    void handleRunning(bool coalesce_mtp_lookahead);
     void transitionToRunning();
     void releaseResource();
 

@@ -53,6 +53,14 @@ public:
     absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups,
                                                           TensorHolder&       host_holder) const;
 
+    // Gather committed host physical and kernel KV block tables directly onto
+    // CUDA (ignoring any prior-round MTP device snapshots). Callers must have
+    // already joined the prior round's async bookkeeping worker.
+    absl::StatusOr<std::pair<torch::Tensor, torch::Tensor>>
+    gatherCommittedHostKvCacheBlockTables(const StreamGroups&             stream_groups,
+                                          const std::vector<std::string>& group_tags,
+                                          TensorHolder&                   host_holder) const;
+
     // Reuse only the same ordered requests from one publication. Admission,
     // removal and reordering use the normal gather path. Cache-only invalidation
     // may retain the continuation while requiring fresh physical/kernel tables.

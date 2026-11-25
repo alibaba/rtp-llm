@@ -46,6 +46,7 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_state import (
 )
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_transaction import (
     PLETransactionCoordinator,
+    async_ple_commit_disabled,
 )
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
     qsa_strict_validation_enabled,
@@ -1127,11 +1128,30 @@ class Qwen4ExpModel(Qwen35Model):
         for layer in self.layers:
             if isinstance(layer, Qwen4ExpDecoderLayer):
                 layer._tp2_ar_hc = self._tp2_ar_hc
+        if getattr(parallelism_config, "tp_size", 1) > 1:
+            from rtp_llm.models_py.distributed import collective_torch
+            from rtp_llm.models_py.distributed.flashinfer_all_reduce import (
+                get_flashinfer_allreduce,
+            )
+
+            flashinfer_ar = get_flashinfer_allreduce()
+            if flashinfer_ar is not None and torch.cuda.is_available():
+                flashinfer_ar.warmup(
+                    int(getattr(config, "hidden_size", 2560)),
+                    torch.bfloat16,
+                )
+            collective_torch.log_comm_backend_summary(
+                tp2_ar_hc=self._tp2_ar_hc,
+                head_ipc=self._head_ipc_gather,
+            )
         from rtp_llm.models_py.modules.qwen4_exp.cpu_target_status import (
             prepare_cpu_target_status,
         )
 
         self._cpu_target_status = prepare_cpu_target_status(config, parallelism_config)
+        self._cpu_target_verdict_status = prepare_cpu_target_status(
+            config, parallelism_config
+        )
         offline_nvfp4 = bool(getattr(config, "_qwen4_nvfp4_source", False))
         inventory = annotate_compute_inventory(
             self.weight, source_format="NVFP4" if offline_nvfp4 else None
@@ -1231,6 +1251,9 @@ class Qwen4ExpModel(Qwen35Model):
         status = self.__dict__.get("_cpu_target_status")
         if status is not None:
             status.close()
+        verdict_status = self.__dict__.get("_cpu_target_verdict_status")
+        if verdict_status is not None:
+            verdict_status.close()
         self._closed = True
 
     def try_gather_fp8_lm_head_for_tp(self, local):
@@ -1535,10 +1558,16 @@ class Qwen4ExpModel(Qwen35Model):
     def has_speculative_target_status_reducer(self) -> bool:
         return self.__dict__.get("_cpu_target_status") is not None
 
+    def has_speculative_target_verdict_status_reducer(self) -> bool:
+        return self.__dict__.get("_cpu_target_verdict_status") is not None
+
     def supports_device_speculative_handoff(self) -> bool:
         # The draft reads verify outputs and owns separate cache pools. It
         # never reads the target PLE state written by the commit worker.
         return bool(self.ple_layers)
+
+    def supports_async_speculative_target_verdict(self) -> bool:
+        return bool(self.ple_layers) and not async_ple_commit_disabled()
 
     def reduce_speculative_target_prepare_status(self, local_ok: bool) -> bool:
         status = self.__dict__.get("_cpu_target_status")
@@ -1546,14 +1575,29 @@ class Qwen4ExpModel(Qwen35Model):
             raise RuntimeError("CPU target status was not initialized collectively")
         return status.reduce(local_ok)
 
-    def prepare_speculative_target_commit(self, accept_len: torch.Tensor) -> None:
-        return self._ple_coordinator().prepare_speculative_target_commit(accept_len)
+    def reduce_speculative_target_verdict_status(self, local_ok: bool) -> bool:
+        status = self.__dict__.get("_cpu_target_verdict_status")
+        if status is None:
+            raise RuntimeError(
+                "CPU target verdict status was not initialized collectively"
+            )
+        return status.reduce(local_ok)
+
+    def prepare_speculative_target_commit(
+        self, accept_len: torch.Tensor, defer_verdict: bool = False
+    ) -> None:
+        return self._ple_coordinator().prepare_speculative_target_commit(
+            accept_len, defer_verdict=defer_verdict
+        )
 
     def finish_speculative_target_commit(self, commit: bool) -> None:
         return self._ple_coordinator().finish_speculative_target_commit(commit)
 
     def finalize_speculative_target_commit(self) -> None:
         return self._ple_coordinator().finalize_speculative_target_commit()
+
+    def settle_speculative_target_verdict(self) -> None:
+        return self._ple_coordinator().settle_speculative_target_verdict()
 
     def _start_eager_ple_prefetch(self, inputs: PyModelInputs, attention_inputs):
         if not self.ple_layers:

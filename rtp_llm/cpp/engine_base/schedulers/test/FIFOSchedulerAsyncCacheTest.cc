@@ -886,4 +886,123 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionPendingAllocatorLoadsCountToward
     ASSERT_EQ(initial_malloc_calls_, 2);
 }
 
+TEST_F(FIFOSchedulerAsyncCacheTest, testCoalescedMtpKvGrowthGrowsStaggeredPeersOnSingleBoundaryJoin) {
+    cache_config_ = test::makeSimpleMhaCacheConfig(
+        /*layer_num=*/1, /*block_num=*/32, /*tokens_per_block=*/16, rtp_llm::DataType::TYPE_INT8);
+    cache_manager_ = std::make_shared<KVCacheManager>(cache_config_);
+    ASSERT_TRUE(cache_manager_->init());
+
+    auto scheduler = createScheduler();
+    auto boundary_stream =
+        createStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}, /*reuse_cache=*/false, false, 64);
+    auto peer_stream = createStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, /*reuse_cache=*/false, false, 64);
+
+    auto publish_snapshot = [](const GenerateStreamPtr& stream, int64_t row, const std::shared_ptr<MtpDecodeBatchState>& batch) {
+        const auto& cache    = stream->streamCacheResource().kvCache();
+        auto        physical = torch::full({cache.groupNums(), 1, cache.curBlocksNum()}, 1, torch::kInt32);
+        auto        kernel   = torch::full({cache.groupNums(), 1, cache.curBlocksNum()}, 1, torch::kInt32);
+        GenerateStream::MtpAsyncDeviceState state;
+        state.next_kv_cache_block_id_gpu        = physical.to(torch::kCUDA);
+        state.next_kv_cache_kernel_block_id_gpu = kernel.to(torch::kCUDA);
+        state.next_seq_len_upper_bound          = stream->seqLength();
+        state.batch                             = batch;
+        state.batch_row                         = row;
+        stream->setMtpAsyncDeviceState(state);
+    };
+
+    ASSERT_TRUE(scheduler->enqueue(boundary_stream).ok());
+    ASSERT_TRUE(scheduler->enqueue(peer_stream).ok());
+    auto admitted = scheduler->schedule();
+    ASSERT_TRUE(admitted.ok());
+    ASSERT_EQ(admitted.value().size(), 2u);
+
+    auto batch = std::make_shared<MtpDecodeBatchState>();
+    for (auto* s : {boundary_stream.get(), peer_stream.get()}) {
+        s->setIsContextStream(false);
+        s->setReserveStep(4);
+    }
+    ASSERT_EQ(boundary_stream->curBlocksNum(), 1u);
+    ASSERT_EQ(peer_stream->curBlocksNum(), 1u);
+    publish_snapshot(boundary_stream, 0, batch);
+    publish_snapshot(peer_stream, 1, batch);
+
+    boundary_stream->incPendingAsyncBookkeeping();
+    peer_stream->incPendingAsyncBookkeeping();
+    EXPECT_TRUE(boundary_stream->needsAsyncBookkeepingJoinForKvReservation());
+    EXPECT_FALSE(peer_stream->needsAsyncBookkeepingJoinForKvReservation());
+
+    std::thread releaser([boundary_stream, peer_stream]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        boundary_stream->decPendingAsyncBookkeepingAndMaybeRelease();
+        peer_stream->decPendingAsyncBookkeepingAndMaybeRelease();
+    });
+
+    scheduler->evaluateAndUpdateStreams(scheduler->running_streams_, nullptr);
+    releaser.join();
+
+    EXPECT_FALSE(boundary_stream->hasPendingAsyncBookkeeping());
+    EXPECT_FALSE(peer_stream->hasPendingAsyncBookkeeping());
+    EXPECT_EQ(boundary_stream->curBlocksNum(), 2u);
+    EXPECT_EQ(peer_stream->curBlocksNum(), 2u);
+    EXPECT_FALSE(boundary_stream->hasMtpCacheSnapshot());
+    EXPECT_FALSE(peer_stream->hasMtpCacheSnapshot());
+
+    // After coalesced growth, advancing peer_stream to the original block edge
+    // no longer triggers a second async-bookkeeping join.
+    peer_stream->setSeqLength(14);
+    publish_snapshot(peer_stream, 1, batch);
+    peer_stream->incPendingAsyncBookkeeping();
+    EXPECT_FALSE(peer_stream->needsAsyncBookkeepingJoinForKvReservation());
+    peer_stream->decPendingAsyncBookkeepingAndMaybeRelease();
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testCoalescedMtpKvGrowthRespectsDisableEnvVar) {
+    autil::EnvGuard disable_guard("RTP_LLM_DISABLE_COALESCED_MTP_KV_GROWTH", "1");
+    cache_config_ = test::makeSimpleMhaCacheConfig(
+        /*layer_num=*/1, /*block_num=*/32, /*tokens_per_block=*/16, rtp_llm::DataType::TYPE_INT8);
+    cache_manager_ = std::make_shared<KVCacheManager>(cache_config_);
+    ASSERT_TRUE(cache_manager_->init());
+
+    auto scheduler = createScheduler();
+    auto boundary_stream =
+        createStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}, /*reuse_cache=*/false, false, 64);
+    auto peer_stream = createStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, /*reuse_cache=*/false, false, 64);
+
+    ASSERT_TRUE(scheduler->enqueue(boundary_stream).ok());
+    ASSERT_TRUE(scheduler->enqueue(peer_stream).ok());
+    auto admitted = scheduler->schedule();
+    ASSERT_TRUE(admitted.ok());
+    ASSERT_EQ(admitted.value().size(), 2u);
+
+    auto batch = std::make_shared<MtpDecodeBatchState>();
+    for (int64_t row = 0; row < 2; ++row) {
+        auto stream = row == 0 ? boundary_stream : peer_stream;
+        stream->setIsContextStream(false);
+        stream->setReserveStep(4);
+        const auto& cache = stream->streamCacheResource().kvCache();
+        GenerateStream::MtpAsyncDeviceState state;
+        state.next_kv_cache_block_id_gpu =
+            torch::full({cache.groupNums(), 1, cache.curBlocksNum()}, 1, torch::kInt32).to(torch::kCUDA);
+        state.next_kv_cache_kernel_block_id_gpu =
+            torch::full({cache.groupNums(), 1, cache.curBlocksNum()}, 1, torch::kInt32).to(torch::kCUDA);
+        state.next_seq_len_upper_bound = stream->seqLength();
+        state.batch                    = batch;
+        state.batch_row                = row;
+        stream->setMtpAsyncDeviceState(state);
+    }
+
+    boundary_stream->incPendingAsyncBookkeeping();
+    std::thread releaser([boundary_stream]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        boundary_stream->decPendingAsyncBookkeepingAndMaybeRelease();
+    });
+
+    scheduler->evaluateAndUpdateStreams(scheduler->running_streams_, nullptr);
+    releaser.join();
+
+    EXPECT_EQ(boundary_stream->curBlocksNum(), 2u);
+    EXPECT_EQ(peer_stream->curBlocksNum(), 1u);
+    EXPECT_TRUE(peer_stream->hasMtpCacheSnapshot());
+}
+
 }  // namespace rtp_llm

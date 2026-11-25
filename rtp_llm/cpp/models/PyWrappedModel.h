@@ -101,10 +101,15 @@ public:
     std::optional<std::string> takeDeferredHiddenStateCaptureError() override;
     bool                       hasSpeculativeTargetCommitHooks() const override;
     bool                       supportsDeviceSpeculativeHandoff() const override;
+    bool                       supportsAsyncSpeculativeTargetVerdict() const override;
     std::string                prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) override;
+    std::string                prepareSpeculativeTargetCommit(const torch::Tensor& accept_len,
+                                                              bool                 defer_verdict) override;
     std::string                finishSpeculativeTargetCommit(bool commit) override;
     std::string                finalizeSpeculativeTargetCommit() override;
+    std::string                settleSpeculativeTargetVerdict() override;
     std::optional<bool>        reduceSpeculativeTargetPrepareStatus(bool local_ok) override;
+    std::optional<bool>        reduceSpeculativeTargetVerdictStatus(bool local_ok) override;
 
 private:
     torch::Tensor sampleDraftGraphTokens(const PyModelInputs& inputs, const PyModelOutputs& outputs);
@@ -190,7 +195,9 @@ private:
     bool supports_micro_batch_{false};
     bool has_speculative_target_commit_hooks_{false};
     bool has_speculative_target_status_reducer_{false};
+    bool has_speculative_target_verdict_status_reducer_{false};
     bool supports_device_speculative_handoff_{false};
+    bool supports_async_speculative_target_verdict_{false};
     bool requires_exact_cuda_graph_batch_{false};
     bool enable_device_perf_{false};
     bool check_nan_{false};
@@ -393,9 +400,24 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                     "Python target status reducer capability requires its reduce hook");
         }
         if (has_speculative_target_commit_hooks_
+            && py::hasattr(py_model_, "has_speculative_target_verdict_status_reducer")) {
+            has_speculative_target_verdict_status_reducer_ =
+                py_model_.attr("has_speculative_target_verdict_status_reducer")().cast<bool>();
+            RTP_LLM_CHECK_WITH_INFO(!has_speculative_target_verdict_status_reducer_
+                                        || py::hasattr(py_model_, "reduce_speculative_target_verdict_status"),
+                                    "Python target verdict status reducer capability requires its reduce hook");
+        }
+        if (has_speculative_target_commit_hooks_
             && (params.parallelism_config.tp_size == 1 || has_speculative_target_status_reducer_)
             && py::hasattr(py_model_, "supports_device_speculative_handoff")) {
             supports_device_speculative_handoff_ = py_model_.attr("supports_device_speculative_handoff")().cast<bool>();
+        }
+        if (supports_device_speculative_handoff_
+            && (params.parallelism_config.tp_size == 1 || has_speculative_target_verdict_status_reducer_)
+            && py::hasattr(py_model_, "supports_async_speculative_target_verdict")
+            && py::hasattr(py_model_, "settle_speculative_target_verdict")) {
+            supports_async_speculative_target_verdict_ =
+                py_model_.attr("supports_async_speculative_target_verdict")().cast<bool>();
         }
         if (!has_explicit_exact_batch_policy) {
             requires_exact_cuda_graph_batch_ |= has_speculative_target_commit_hooks_;
