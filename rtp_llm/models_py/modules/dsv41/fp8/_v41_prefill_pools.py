@@ -16,6 +16,8 @@ from rtp_llm.models_py.modules.dsv41.attn_type import INDEXER_KV
 _MAX_TEMP_BYTES = 256 * 1024 * 1024
 _BYTES_PER_ROW = 288 + 64 + 4 + 64 + 4 + 3 * 8
 _MAX_ROWS = _MAX_TEMP_BYTES // _BYTES_PER_ROW
+_SM90_BYTES_PER_ROW = 584 + 132 + 128 + 4 + 3 * 8
+_SM90_MAX_ROWS = _MAX_TEMP_BYTES // _SM90_BYTES_PER_ROW
 _KEY_ALIGNMENT = 256
 _MAX_REQUESTS = 1024
 _REQUESTS_PER_GROUP = 128
@@ -69,7 +71,7 @@ def _group_row_metadata(seq_ends, first, stop, rows, ratio):
     return output.unbind(0)
 
 
-def _request_groups(counts):
+def _request_groups(counts, *, max_rows: int = _MAX_ROWS):
     """Keep requests whole so returned key views preserve scorer geometry."""
     if any(count < 0 for count in counts):
         return None
@@ -77,17 +79,97 @@ def _request_groups(counts):
         (count + _KEY_ALIGNMENT - 1) // _KEY_ALIGNMENT * _KEY_ALIGNMENT
         for count in counts
     )
-    if any(count > _MAX_ROWS for count in padded):
+    if any(count > max_rows for count in padded):
         return None
     groups = []
     first, rows = 0, 0
     for index, count in enumerate(padded):
-        if rows + count > _MAX_ROWS or index - first == _REQUESTS_PER_GROUP:
+        if rows + count > max_rows or index - first == _REQUESTS_PER_GROUP:
             groups.append((first, index, rows))
             first, rows = index, 0
         rows += count
     groups.append((first, len(counts), rows))
     return groups
+
+
+def _try_gather_sm90_fp8_pools(attn, main_pool, index_pool, ends, seq_ends, counts):
+    """Bounded multi-request SM90 V4+FP8 pool gather with batched CP all-reduce."""
+    swa_codec = getattr(attn, "_swa_codec", None)
+    if (
+        getattr(attn, "_indexer_mode", None) != "fp8_dg"
+        or not getattr(attn, "_use_v4_kv_cache", False)
+        or swa_codec is None
+        or main_pool.dtype != torch.uint8
+        or index_pool.dtype != torch.uint8
+        or index_pool.device != main_pool.device
+        or main_pool.ndim != 3
+        or main_pool.shape[-1] != 584
+        or index_pool.ndim != 3
+        or index_pool.shape[2] != 132
+        or index_pool.shape[1] not in (64, 128)
+        or not index_pool.is_contiguous()
+        or not isinstance(seq_ends, torch.Tensor)
+        or seq_ends.device != main_pool.device
+        or seq_ends.dtype != torch.int64
+        or seq_ends.shape != (len(ends),)
+        or seq_ends.stride(0) <= 0
+    ):
+        return None
+    groups = _request_groups(counts, max_rows=_SM90_MAX_ROWS)
+    if groups is None:
+        return None
+    padded_counts = tuple(
+        (count + _KEY_ALIGNMENT - 1) // _KEY_ALIGNMENT * _KEY_ALIGNMENT
+        for count in counts
+    )
+
+    from rtp_llm.models_py.modules.dsv41.fp8._v41_sm90_fp8_indexer_cache import dg_pages
+    from rtp_llm.models_py.modules.dsv41.fp8._v41_sm90_fp8_prefill import (
+        PrefillFP8IndexerKeys,
+        gather_fp8_indexer,
+        gather_raw_fp8_indexer,
+        unpack_raw_fp8_indexer,
+    )
+
+    cp = attn._cp_ctx
+    sharded_cp = cp is not None and cp.cp_size > 1 and cp.kv_cache_sharded
+    pages = dg_pages(index_pool)
+    result = []
+    for first, stop, rows in groups:
+        positions, req_ids = _group_row_metadata(
+            seq_ends, first, stop, rows, attn.compress_ratio
+        )
+        index_slots = attn._slots(INDEXER_KV, positions, req_ids)
+        if sharded_cp:
+            raw_index = gather_raw_fp8_indexer(pages, index_slots)
+            attn._gather_shards(raw_index)
+            index_keys = unpack_raw_fp8_indexer(raw_index)
+            del raw_index
+        else:
+            index_keys = gather_fp8_indexer(pages, index_slots)
+        del index_slots
+        global_slots = attn._slots(attn._global_region(), positions, req_ids)
+        raw_global = swa_codec.gather_k_cache_bytes(main_pool, global_slots)
+        attn._gather_shards(raw_global)
+        global_keys = swa_codec.dequantize_k_cache_bytes(raw_global)
+        del raw_global, global_slots, positions, req_ids
+        group_counts = padded_counts[first:stop]
+        # Split into 256-aligned contiguous views sharing each group's slab so
+        # grouped SM90 FP8 scoring can alias adjacent requests without copies.
+        result.extend(
+            (
+                _trim_rows(keys, count),
+                PrefillFP8IndexerKeys(_trim_rows(payload, count), _trim_rows(sf, count)),
+            )
+            for count, keys, payload, sf in zip(
+                counts[first:stop],
+                global_keys.split(group_counts, dim=0),
+                index_keys.quant.split(group_counts, dim=0),
+                index_keys.scale.split(group_counts, dim=0),
+            )
+        )
+        del global_keys, index_keys
+    return result
 
 
 def try_gather_prefill_pools(
@@ -121,13 +203,17 @@ def try_gather_prefill_pools(
     groups = _request_groups(counts)
     if any(count < 0 for count in counts):
         return None
-    if (
-        main_pool.device.type != "cuda"
-        or torch.cuda.get_device_capability(main_pool.device)[0] != 10
-        or main_pool.shape[-1] != 288
-    ):
-        # This byte transport is explicitly FP4; 584B SM90 pools use the
-        # caller's format-aware codec path, never an FP4 reinterpretation.
+    if main_pool.device.type != "cuda":
+        return None
+    major = torch.cuda.get_device_capability(main_pool.device)[0]
+    if major == 9:
+        return _try_gather_sm90_fp8_pools(
+            attn, main_pool, index_pool, ends, seq_ends, counts
+        )
+    main_shape = getattr(main_pool, "shape", None)
+    if major != 10 or (main_shape is not None and main_shape[-1] != 288):
+        # This byte transport is explicitly FP4; unsupported pools fall back
+        # to the caller's format-aware codec path.
         return None
 
     from rtp_llm.models_py.modules.dsv41.fp8 import _v41_joint_pool

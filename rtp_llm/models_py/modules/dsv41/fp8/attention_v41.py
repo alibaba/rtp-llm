@@ -1966,7 +1966,16 @@ class AttentionV41FP8(AttentionFP8):
         fused_indexer = self._indexer_mode != "fp8_dg" and prefill and prefill_indexer.is_supported(
             x_full.device, getattr(self, "index_n_heads", 0), owner.index_wk.shape[0]
         )
-        if fused_indexer and main_pool is not None and index_pool is not None:
+        sm90_fp8_prefill = (
+            self._indexer_mode == "fp8_dg"
+            and prefill
+            and getattr(self, "_use_v4_kv_cache", False)
+        )
+        if (
+            (fused_indexer or sm90_fp8_prefill)
+            and main_pool is not None
+            and index_pool is not None
+        ):
             from rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_pools import (
                 try_gather_prefill_pools,
             )
@@ -2283,14 +2292,14 @@ class AttentionV41FP8(AttentionFP8):
             if pending is not None:
                 with record_function_range("dsv41.prefill.pool.wait"):
                     pending.wait()
-            if fused_indexer:
+            if fused_indexer or fp8_indexer:
                 from ._v41_batched_prefill_select import try_select_batched
 
                 if try_select_batched(
                     self,
-                    q_fp4,
-                    q_sf,
-                    weights,
+                    q_fp8 if fp8_indexer else q_fp4,
+                    None if fp8_indexer else q_sf,
+                    dense_weights if fp8_indexer else weights,
                     globals_by_req,
                     request_row_slices,
                     positions,

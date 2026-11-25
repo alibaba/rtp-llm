@@ -131,3 +131,24 @@ def score_fp8_prefill_chunk(
         w_fold.float().contiguous(), starts, ends,
         len(keys),
     )
+
+
+def score_fp8_prefill_grouped(
+    q_fp8: torch.Tensor,
+    w_fold: torch.Tensor,
+    k_quant: torch.Tensor,
+    k_scale: torch.Tensor,
+    starts: torch.Tensor,
+    ends: torch.Tensor,
+    max_seqlen_k: int,
+) -> torch.Tensor:
+    import deep_gemm
+
+    return deep_gemm.fp8_fp4_mqa_logits(
+        (q_fp8.contiguous(), None),
+        (k_quant, k_scale),
+        w_fold.float().contiguous(),
+        starts.contiguous(),
+        ends.contiguous(),
+        max_seqlen_k,
+    )

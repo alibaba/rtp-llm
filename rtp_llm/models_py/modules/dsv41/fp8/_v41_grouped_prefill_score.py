@@ -373,7 +373,7 @@ def _plan_group_layout(widths, rows, adjacent, make_group, *, cp_ctx=None, ratio
     return tuple(groups)
 
 
-def _group_layout(keys, rows, *, cp_ctx=None, ratio=1):
+def _group_layout(keys, rows, *, cp_ctx=None, ratio=1, fp8_mode: bool = False):
     """Group adjacent requests and chunk oversized Q ranges without K copies."""
     if (
         not 1 <= len(keys) <= _MAX_REQUESTS
@@ -385,15 +385,18 @@ def _group_layout(keys, rows, *, cp_ctx=None, ratio=1):
     widths = tuple(len(key) for key in keys)
     device = layer_keys[0][0].device
     request_count = len(keys)
+    expected_dim = 128 if fp8_mode else 64
+    expected_quant_dtype = torch.float8_e4m3fn if fp8_mode else torch.int8
+    expected_scale_dtype = torch.float32 if fp8_mode else torch.int32
     for (quant, scale), width in zip(layer_keys, widths):
         if width == 0:
             continue
         if (
             width * request_count >= 2**31
-            or quant.shape != (width, 64)
+            or quant.shape != (width, expected_dim)
             or scale.shape != (width,)
-            or quant.dtype != torch.int8
-            or scale.dtype != torch.int32
+            or quant.dtype != expected_quant_dtype
+            or scale.dtype != expected_scale_dtype
             or quant.device != device
             or scale.device != device
             or not quant.is_contiguous()
@@ -437,11 +440,14 @@ class _GroupedScores:
         layout,
         req_ids,
         key_counts,
+        *,
+        fp8_mode: bool = False,
     ):
         self.q, self.sf, self.weights = q, sf, weights
         self.positions, self.ratio, self.shared = positions, ratio, shared
         self.rows, self.layout = rows, layout
         self.req_ids, self.key_counts = req_ids, key_counts
+        self.fp8_mode = fp8_mode
 
     def split_rows(self, tensor):
         """Make views for this call only; never cache layer activations."""
@@ -645,6 +651,32 @@ class _GroupedScores:
         ):
             score_options["schedule_cache"] = self._schedule_cache()
         bounds_by_group = self._iter_bounds()
+        if self.fp8_mode:
+            from ._v41_sm90_fp8_prefill import score_fp8_prefill_grouped
+
+            for group, bounds, q, weights in zip(
+                self.layout,
+                bounds_by_group,
+                self.split_rows(self.q),
+                self.split_rows(self.weights),
+            ):
+                rows, starts, ends, zeros, visible = bounds
+                logits = score_fp8_prefill_grouped(
+                    q,
+                    weights,
+                    group.payload,
+                    group.scale,
+                    starts,
+                    ends,
+                    group.width,
+                )
+                if mask_tail:
+                    _mask_tail_kernel[(logits.shape[0],)](
+                        logits, visible, group.width, logits.stride(0), 256
+                    )
+                yield rows, logits, visible, (zeros, visible)
+                del logits
+            return
         for group, bounds, q, sf, weights in zip(
             self.layout,
             bounds_by_group,
@@ -714,26 +746,33 @@ def try_grouped_scores(
     scores after this boundary. Forward-local positions must remain immutable.
     """
     count = len(globals_by_req)
+    fp8_mode = q.dtype == torch.float8_e4m3fn and sf is None
     if (
         not 1 <= count <= _MAX_REQUESTS
         or slices is None
         or len(slices) != count
         or q.device.type != "cuda"
         or torch.version.hip is not None
-        or q.dtype != torch.int8
+        or (not fp8_mode and q.dtype != torch.int8)
         or q.ndim != 3
-        or q.shape[1:] != (32, 64)
+        or q.shape[1:] != ((32, 128) if fp8_mode else (32, 64))
         or not q.is_contiguous()
-        or sf.shape != q.shape[:2]
-        or sf.dtype != torch.int32
-        or not sf.is_contiguous()
+        or (
+            not fp8_mode
+            and (
+                sf is None
+                or sf.shape != q.shape[:2]
+                or sf.dtype != torch.int32
+                or not sf.is_contiguous()
+                or sf.device != q.device
+                or sf.data_ptr() % 16
+            )
+        )
         or weights.shape != q.shape[:2]
         or weights.dtype not in (torch.float32, torch.bfloat16)
         or not weights.is_contiguous()
-        or sf.device != q.device
         or weights.device != q.device
         or q.data_ptr() % 16
-        or sf.data_ptr() % 16
         or weights.data_ptr() % 16
         or positions.shape != (q.shape[0],)
         or positions.dtype not in (torch.int32, torch.int64)
@@ -757,12 +796,18 @@ def try_grouped_scores(
     if cursor != q.shape[0]:
         return None
     rows = tuple(rows)
-    from ._v41_prefill_indexer import PrefillIndexerKeys
-
     keys = [entry[1] for entry in globals_by_req]
-    if not all(isinstance(k, PrefillIndexerKeys) for k in keys):
-        return None
-    layout = _group_layout(keys, rows, cp_ctx=cp_ctx, ratio=ratio)
+    if fp8_mode:
+        from ._v41_sm90_fp8_prefill import PrefillFP8IndexerKeys
+
+        if not all(isinstance(k, PrefillFP8IndexerKeys) for k in keys):
+            return None
+    else:
+        from ._v41_prefill_indexer import PrefillIndexerKeys
+
+        if not all(isinstance(k, PrefillIndexerKeys) for k in keys):
+            return None
+    layout = _group_layout(keys, rows, cp_ctx=cp_ctx, ratio=ratio, fp8_mode=fp8_mode)
     if layout is None or keys[0].quant.device != q.device:
         return None
     # TopK/candidate IDs are initialized by Q preparation. An optional
@@ -786,11 +831,22 @@ def try_grouped_scores(
         return None
     from ._indexer_score import has_fp8_fp4_mqa_logits
 
+    expected_major = 9 if fp8_mode else 10
     if (
-        torch.cuda.get_device_capability(q.device)[0] != 10
+        torch.cuda.get_device_capability(q.device)[0] != expected_major
         or not has_fp8_fp4_mqa_logits()
     ):
         return None
     return _GroupedScores(
-        q, sf, weights, positions, ratio, shared, rows, layout, req_ids, key_counts
+        q,
+        sf,
+        weights,
+        positions,
+        ratio,
+        shared,
+        rows,
+        layout,
+        req_ids,
+        key_counts,
+        fp8_mode=fp8_mode,
     )

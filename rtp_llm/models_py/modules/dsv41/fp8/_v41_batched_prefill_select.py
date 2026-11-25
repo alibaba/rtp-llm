@@ -297,8 +297,10 @@ def try_select_batched(
         key_counts = key_counts.to(torch.int32)
         cache[counts_key] = (cp.prefix_lengths, cp.input_lengths_global, key_counts)
     candidates = shared.get("candidates")
+    fp8_mode = getattr(q_payload, "dtype", None) == torch.float8_e4m3fn and q_sf is None
     if (
-        candidates is not None
+        not fp8_mode
+        and candidates is not None
         and candidate_source >= 0
         and attn.layer_id > candidate_source
     ):
@@ -326,7 +328,7 @@ def try_select_batched(
     from ._v41_grouped_prefill_score import _mask_tail_kernel, try_grouped_scores
     from .attention_v41 import _apply_prefill_candidates
 
-    return_bf16 = topk.supports_bf16()
+    return_bf16 = False if fp8_mode else topk.supports_bf16()
     grouped = try_grouped_scores(
         q_payload,
         q_sf,
@@ -343,8 +345,16 @@ def try_select_batched(
     if grouped is None:
         return False
     publishing = candidates is not None and publish_candidates
+    filtering_candidates = (
+        fp8_mode
+        and candidates is not None
+        and not publishing
+        and candidate_source >= 0
+        and attn.layer_id > candidate_source
+    )
     schedule_builder = (
-        os.environ.get("DSV41_PREFILL_INDEXER_BALANCED_SCORE") == "1"
+        not fp8_mode
+        and os.environ.get("DSV41_PREFILL_INDEXER_BALANCED_SCORE") == "1"
         and return_bf16
         and (attn.layer_id, attn.compress_ratio) in ((2, 2), (8, 2), (14, 2), (20, 1))
         and torch.cuda.get_device_capability(q_payload.device) == (10, 3)
@@ -383,6 +393,17 @@ def try_select_batched(
             continue
         if count != target.shape[1]:
             target = target[:, :count]
+        if filtering_candidates:
+            _apply_prefill_candidates(
+                shared,
+                logits,
+                visible,
+                rows,
+                candidate_size,
+                candidate_blocks,
+                False,
+                mask_tail=True,
+            )
         publication_handled, selected = False, None
         if publishing:
             publication_handled, selected = _try_publish_with_tokens(
