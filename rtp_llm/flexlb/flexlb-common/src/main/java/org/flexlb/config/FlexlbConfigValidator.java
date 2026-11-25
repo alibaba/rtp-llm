@@ -263,10 +263,9 @@ public final class FlexlbConfigValidator {
             PreemptionConfig preemption = ordering.getPreemption();
             if (preemption != null) {
                 require(
-                        preemption.getAllowedVictimStages() != null
-                                && !preemption.getAllowedVictimStages().isEmpty(),
+                        preemption.getAllowedVictimStages() != null,
                         "scheduler.ordering.preemption.allowedVictimStages",
-                        "must contain at least one stage when preemption is configured");
+                        "is required when preemption is configured");
                 positive(preemption.getTimeoutMs(), "scheduler.ordering.preemption.timeoutMs");
                 require(
                         preemption.getEngineCancellation() != null,

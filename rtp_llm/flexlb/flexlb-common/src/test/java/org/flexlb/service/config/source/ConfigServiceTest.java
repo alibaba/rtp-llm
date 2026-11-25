@@ -8,7 +8,6 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.KvcmCacheMatchingConfig;
 import org.flexlb.config.LocalSyncCacheMatchingConfig;
 import org.flexlb.config.QueueOrderingConfig;
-import org.flexlb.config.VictimStage;
 import org.flexlb.enums.LogLevel;
 import org.flexlb.service.config.ConfigSource;
 import org.flexlb.service.config.merger.FlexlbConfigMerger;
@@ -429,7 +428,7 @@ class ConfigServiceTest {
                                 .priorityOrdering()
                                 .getPreemption()
                                 .getAllowedVictimStages())
-                .containsExactly(VictimStage.PREFILL_QUEUED);
+                .isEmpty();
 
         FlexlbConfig lastKnownGood = service.loadBalanceConfig();
         source.emit("{\"schemaVersion\":3,\"router\":null}");

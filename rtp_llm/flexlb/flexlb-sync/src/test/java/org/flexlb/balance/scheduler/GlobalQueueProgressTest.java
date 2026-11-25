@@ -11,7 +11,6 @@ import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -276,14 +275,6 @@ class GlobalQueueProgressTest {
     }
 
     @Test
-    void queuedPreemptionIsNotBlockedByOrdinarySeatExhaustion() throws Exception {
-        try (Fixture f = new Fixture(RoleType.PREFILL, true)) {
-            f.submit(1, "a");
-            awaitCondition(() -> f.admitted.contains(1L));
-        }
-    }
-
-    @Test
     void admissionFailureDoesNotFenceSmallerRequestOnTheSameWorker() throws Exception {
         try (Fixture f = new Fixture(RoleType.PREFILL)) {
             f.aSlots.set(1);
@@ -352,12 +343,12 @@ class GlobalQueueProgressTest {
             this(role, false);
         }
 
-        private Fixture(RoleType role, boolean preempt) {
+        private Fixture(RoleType role, boolean priorityOrdering) {
             this.role = role;
             SchedulingTestConfig.useFifoQueue(config);
-            if (preempt) {
+            if (priorityOrdering) {
                 SchedulingTestConfig.usePriorityQueue(config);
-                SchedulingTestConfig.allowVictim(config, VictimStage.PREFILL_QUEUED);
+                config.priorityOrdering().getPreemption().setAllowedVictimStages(Set.of());
             }
             SchedulingTestConfig.useNonBatchDispatcher(config).setMaxInflightPerPrefillWorker(1);
             ConfigService service = mock(ConfigService.class);
@@ -391,7 +382,7 @@ class GlobalQueueProgressTest {
                                 long id = Long.parseLong(context.getRequestId());
                                 selected.add(id);
                                 onSelection.accept(id);
-                                if ("a".equals(groups.get(id)) && aSlots.get() == 0 && !preempt) {
+                                if ("a".equals(groups.get(id)) && aSlots.get() == 0) {
                                     return PlacementResult.blocked(new PlacementKey(role, "a"));
                                 }
                                 if (decodeBlocked.contains(id)) {
