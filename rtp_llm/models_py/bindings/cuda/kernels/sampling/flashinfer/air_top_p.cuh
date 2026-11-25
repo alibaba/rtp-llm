@@ -520,22 +520,33 @@ __global__ void AirTopPRenormInitKernel(Counter<T>* counters,
     }
 }
 
-// ======================== Renorm apply kernel ========================
+// ======================== Renorm apply kernels ========================
+
+static constexpr int      APPLY_BLOCK_SIZE = 256;
+static constexpr uint32_t MAX_APPLY_BLOCKS = 128;
+static_assert(MAX_APPLY_BLOCKS <= NUM_BUCKETS, "partialSums reuses histograms workspace");
+static_assert(MAX_APPLY_BLOCKS <= APPLY_BLOCK_SIZE, "ScaleKernel reduces partials in one thread per block");
 
 template<typename T>
 __global__ void AirTopPRenormApplyKernel(T const* probs, T* renormedProbs, Counter<T>* counters, int vocabSize) {
-    int const batchId = blockIdx.x;
-    int const tid     = threadIdx.x;
+    int const    batchId     = blockIdx.x;
+    int const    tid         = threadIdx.x;
+    size_t const rowOffset   = static_cast<size_t>(batchId) * static_cast<size_t>(vocabSize);
+    T const*     rowProbs    = probs + rowOffset;
+    T*           rowRenormed = renormedProbs + rowOffset;
     if (counters[batchId].p == 1.0f) {
+        if (rowRenormed == rowProbs) {
+            return;
+        }
         for (int i = tid; i < vocabSize; i += blockDim.x) {
-            renormedProbs[batchId * vocabSize + i] = probs[batchId * vocabSize + i];
+            rowRenormed[i] = rowProbs[i];
         }
         return;
     }
     T const threshold = twiddleOut<T>(counters[batchId].kthValueBits, false);
     float   threadSum = 0.0f;
     for (int i = tid; i < vocabSize; i += blockDim.x) {
-        T val = probs[batchId * vocabSize + i];
+        T val = rowProbs[i];
         if (val >= threshold)
             threadSum += static_cast<float>(val);
     }
@@ -548,9 +559,151 @@ __global__ void AirTopPRenormApplyKernel(T const* probs, T* renormedProbs, Count
     __syncthreads();
     float norm = sharedNorm;
     for (int i = tid; i < vocabSize; i += blockDim.x) {
-        T val = probs[batchId * vocabSize + i];
-        renormedProbs[batchId * vocabSize + i] =
-            (val >= threshold) ? static_cast<T>(static_cast<float>(val) * norm) : static_cast<T>(0);
+        T val          = rowProbs[i];
+        rowRenormed[i] = (val >= threshold) ? static_cast<T>(static_cast<float>(val) * norm) : static_cast<T>(0);
+    }
+}
+
+template<typename T>
+__global__ void AirTopPRenormApplySumKernel(T const*    probs,
+                                            Counter<T>* counters,
+                                            float*      partialSums,
+                                            int         vocabSize) {
+    int const batchId = blockIdx.y;
+    if (counters[batchId].p == 1.0f) {
+        return;
+    }
+    int const    colBlock    = blockIdx.x;
+    int const    numColBlock = gridDim.x;
+    int const    tid         = threadIdx.x;
+    int const    globalTid   = colBlock * APPLY_BLOCK_SIZE + tid;
+    int const    stride      = numColBlock * APPLY_BLOCK_SIZE;
+    size_t const rowOffset   = static_cast<size_t>(batchId) * static_cast<size_t>(vocabSize);
+    T const*     rowProbs    = probs + rowOffset;
+    T const      threshold   = twiddleOut<T>(counters[batchId].kthValueBits, false);
+
+    float threadSum = 0.0f;
+    if constexpr (std::is_same_v<T, float>) {
+        if ((reinterpret_cast<uintptr_t>(rowProbs) & 15u) == 0u) {
+            int const     vecWidth = vocabSize >> 2;
+            float4 const* p4       = reinterpret_cast<float4 const*>(rowProbs);
+            for (int v = globalTid; v < vecWidth; v += stride) {
+                float4 const x = p4[v];
+                if (x.x >= threshold)
+                    threadSum += x.x;
+                if (x.y >= threshold)
+                    threadSum += x.y;
+                if (x.z >= threshold)
+                    threadSum += x.z;
+                if (x.w >= threshold)
+                    threadSum += x.w;
+            }
+            for (int i = (vecWidth << 2) + globalTid; i < vocabSize; i += stride) {
+                float const val = rowProbs[i];
+                if (val >= threshold)
+                    threadSum += val;
+            }
+        } else {
+            for (int i = globalTid; i < vocabSize; i += stride) {
+                float const val = rowProbs[i];
+                if (val >= threshold)
+                    threadSum += val;
+            }
+        }
+    } else {
+        for (int i = globalTid; i < vocabSize; i += stride) {
+            T const val = rowProbs[i];
+            if (val >= threshold)
+                threadSum += static_cast<float>(val);
+        }
+    }
+
+    typedef cub::BlockReduce<float, APPLY_BLOCK_SIZE> BlockReduce;
+    __shared__ typename BlockReduce::TempStorage      temp;
+    float const                                       blockSum = BlockReduce(temp).Sum(threadSum);
+    if (tid == 0) {
+        partialSums[static_cast<size_t>(batchId) * static_cast<size_t>(numColBlock) + colBlock] = blockSum;
+    }
+}
+
+template<typename T>
+__global__ void AirTopPRenormApplyScaleKernel(T const*     probs,
+                                              T*           renormedProbs,
+                                              Counter<T>*  counters,
+                                              float const* partialSums,
+                                              int          vocabSize) {
+    int const    batchId     = blockIdx.y;
+    int const    colBlock    = blockIdx.x;
+    int const    numColBlock = gridDim.x;
+    int const    tid         = threadIdx.x;
+    int const    globalTid   = colBlock * APPLY_BLOCK_SIZE + tid;
+    int const    stride      = numColBlock * APPLY_BLOCK_SIZE;
+    size_t const rowOffset   = static_cast<size_t>(batchId) * static_cast<size_t>(vocabSize);
+    T const*     rowProbs    = probs + rowOffset;
+    T*           rowRenormed = renormedProbs + rowOffset;
+
+    if (counters[batchId].p == 1.0f) {
+        if (rowRenormed == rowProbs) {
+            return;
+        }
+        if constexpr (std::is_same_v<T, float>) {
+            if (((reinterpret_cast<uintptr_t>(rowProbs) & 15u) == 0u)
+                && ((reinterpret_cast<uintptr_t>(rowRenormed) & 15u) == 0u)) {
+                int const     vecWidth = vocabSize >> 2;
+                float4 const* p4       = reinterpret_cast<float4 const*>(rowProbs);
+                float4*       o4       = reinterpret_cast<float4*>(rowRenormed);
+                for (int v = globalTid; v < vecWidth; v += stride) {
+                    o4[v] = p4[v];
+                }
+                for (int i = (vecWidth << 2) + globalTid; i < vocabSize; i += stride) {
+                    rowRenormed[i] = rowProbs[i];
+                }
+                return;
+            }
+        }
+        for (int i = globalTid; i < vocabSize; i += stride) {
+            rowRenormed[i] = rowProbs[i];
+        }
+        return;
+    }
+
+    float const* rowPartials = partialSums + static_cast<size_t>(batchId) * static_cast<size_t>(numColBlock);
+    float const  partial     = (tid < numColBlock) ? rowPartials[tid] : 0.0f;
+    typedef cub::BlockReduce<float, APPLY_BLOCK_SIZE> BlockReduce;
+    __shared__ typename BlockReduce::TempStorage      temp;
+    float const                                       totalSum = BlockReduce(temp).Sum(partial);
+    __shared__ float                                  sharedNorm;
+    if (tid == 0) {
+        sharedNorm = (totalSum > 1e-8f) ? (1.0f / totalSum) : 1.0f;
+    }
+    __syncthreads();
+
+    float const norm      = sharedNorm;
+    T const     threshold = twiddleOut<T>(counters[batchId].kthValueBits, false);
+    if constexpr (std::is_same_v<T, float>) {
+        if (((reinterpret_cast<uintptr_t>(rowProbs) & 15u) == 0u)
+            && ((reinterpret_cast<uintptr_t>(rowRenormed) & 15u) == 0u)) {
+            int const     vecWidth = vocabSize >> 2;
+            float4 const* p4       = reinterpret_cast<float4 const*>(rowProbs);
+            float4*       o4       = reinterpret_cast<float4*>(rowRenormed);
+            for (int v = globalTid; v < vecWidth; v += stride) {
+                float4 x = p4[v];
+                x.x      = (x.x >= threshold) ? (x.x * norm) : 0.0f;
+                x.y      = (x.y >= threshold) ? (x.y * norm) : 0.0f;
+                x.z      = (x.z >= threshold) ? (x.z * norm) : 0.0f;
+                x.w      = (x.w >= threshold) ? (x.w * norm) : 0.0f;
+                o4[v]    = x;
+            }
+            for (int i = (vecWidth << 2) + globalTid; i < vocabSize; i += stride) {
+                float const val = rowProbs[i];
+                rowRenormed[i]  = (val >= threshold) ? (val * norm) : 0.0f;
+            }
+            return;
+        }
+    }
+    for (int i = globalTid; i < vocabSize; i += stride) {
+        T const val    = rowProbs[i];
+        rowRenormed[i] = (val >= threshold) ? static_cast<T>(static_cast<float>(val) * norm) : static_cast<T>(0);
     }
 }
 
@@ -604,6 +757,9 @@ cudaError_t AirTopPRenormProb(DType*       probs,
                               uint32_t     d,
                               void*        workspace,
                               cudaStream_t stream = 0) {
+    if (batch_size == 0 || d == 0) {
+        return cudaSuccess;
+    }
     using HisT_ = HisT<IsDeterministic, DType>;
 
     int dev, smCnt;
@@ -635,7 +791,19 @@ cudaError_t AirTopPRenormProb(DType*       probs,
             <<<grid, BLOCK_SIZE, 0, stream>>>(counters, histograms, countHistograms, pass, buf1, buf2);
     }
 
-    AirTopPRenormApplyKernel<DType><<<batch_size, 1024, 0, stream>>>(probs, renormed_prob, counters, d);
+    uint32_t const maxBlocksByDim = std::max<uint32_t>(1, ceilDiv<uint32_t>(d, APPLY_BLOCK_SIZE * 4));
+    uint32_t const targetBlocks   = std::max<uint32_t>(1, static_cast<uint32_t>(std::max(smCnt, 1) * 2) / batch_size);
+    uint32_t const applyBlockNum  = std::min<uint32_t>(MAX_APPLY_BLOCKS, std::min<uint32_t>(maxBlocksByDim, targetBlocks));
+    if (applyBlockNum > 1) {
+        dim3   applyGrid(applyBlockNum, batch_size);
+        float* partialSums = reinterpret_cast<float*>(histograms);
+        AirTopPRenormApplySumKernel<DType>
+            <<<applyGrid, APPLY_BLOCK_SIZE, 0, stream>>>(probs, counters, partialSums, d);
+        AirTopPRenormApplyScaleKernel<DType>
+            <<<applyGrid, APPLY_BLOCK_SIZE, 0, stream>>>(probs, renormed_prob, counters, partialSums, d);
+    } else {
+        AirTopPRenormApplyKernel<DType><<<batch_size, 1024, 0, stream>>>(probs, renormed_prob, counters, d);
+    }
 
     return cudaSuccess;
 }

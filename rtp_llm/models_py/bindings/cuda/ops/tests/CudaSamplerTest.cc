@@ -1484,6 +1484,68 @@ TEST_F(CudaSamplerTest, testCompactTopPRenorm4096MatchesSortedReference) {
     }
 }
 
+TEST_F(CudaSamplerTest, testAirTopPRenormLargeVocabMultiBlockMatchesReference) {
+    // Covers both 16-byte-aligned float4 (128800) and unaligned tail (128803)
+    // shapes on the multi-block AirTopPRenormApplySum/Scale path, including
+    // mixed top_p=1.0, flat, and peaked rows, plus in-place and determinism.
+    auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    for (int64_t width : {int64_t{128800}, int64_t{128803}}) {
+        constexpr int64_t batch = 4;
+        torch::manual_seed(20261125 + width);
+        auto logits = torch::randn({batch, width}, options) * 2.5f;
+        auto probs  = torch::softmax(logits, -1).contiguous();
+        // Make row 3 exactly flat to also exercise uniform-row behavior.
+        probs.select(0, 3).fill_(1.0f / static_cast<float>(width));
+
+        auto top_p   = torch::tensor({1.0f, 0.55f, 0.95f, 0.90f}, options);
+        auto out_a   = torch::empty_like(probs);
+        auto out_b   = torch::empty_like(probs);
+        auto inplace = probs.clone();
+
+        top_p_renorm_probs(probs, out_a, top_p, 1.0);
+        top_p_renorm_probs(probs, out_b, top_p, 1.0);
+        top_p_renorm_probs(inplace, inplace, top_p, 1.0);
+        check_cuda_error();
+
+        EXPECT_TRUE(torch::equal(out_a, out_b)) << "width=" << width;
+        EXPECT_TRUE(torch::equal(out_a, inplace)) << "width=" << width;
+        EXPECT_TRUE(torch::equal(out_a.select(0, 0), probs.select(0, 0))) << "width=" << width;
+
+        auto        host_probs   = toHostFloat(probs);
+        auto        host_output  = toHostFloat(out_a);
+        const float thresholds[] = {1.0f, 0.55f, 0.95f, 0.90f};
+        for (int64_t row = 1; row < batch; ++row) {
+            std::vector<float> sorted(host_probs.begin() + row * width, host_probs.begin() + (row + 1) * width);
+            std::sort(sorted.begin(), sorted.end(), std::greater<float>());
+            float mass   = 0.0f;
+            float cutoff = 0.0f;
+            for (float value : sorted) {
+                mass += value;
+                cutoff = value;
+                if (mass >= thresholds[row])
+                    break;
+            }
+            double kept_mass = 0.0;
+            for (int64_t col = 0; col < width; ++col) {
+                float value = host_probs[row * width + col];
+                if (value >= cutoff)
+                    kept_mass += static_cast<double>(value);
+            }
+            float max_err = 0.0f;
+            for (int64_t col = 0; col < width; ++col) {
+                float value    = host_probs[row * width + col];
+                float expected = value >= cutoff ? static_cast<float>(value / kept_mass) : 0.0f;
+                float err      = std::abs(host_output[row * width + col] - expected);
+                if (err > max_err)
+                    max_err = err;
+            }
+            EXPECT_LT(max_err, 1e-5f) << "width=" << width << " row=" << row;
+            EXPECT_NEAR(out_a.select(0, row).sum().item<float>(), 1.0f, 1e-4f)
+                << "width=" << width << " row=" << row;
+        }
+    }
+}
+
 TEST_F(CudaSamplerTest, testCudaSamplingKernelFailed) {
     size_t batch_size = 4;
     auto   logits_t   = cudaTensor(
