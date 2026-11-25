@@ -2,6 +2,7 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -11,11 +12,17 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.sync.runner.GrpcWorkerStatusRunner;
+import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -26,12 +33,19 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.AdditionalAnswers.delegatesTo;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * The configured limit, real worker publication lock and canonical request ledger together.
@@ -105,7 +119,7 @@ class WorkerBatcherRequestCapacityTest {
             assertTrue(EndpointTestSupport.offer(endpoint, second));
             assertEquals(2, endpoint.captureQueueSnapshot().items().size());
 
-            try (var delivery = endpoint.tryBeginRouteCommitAdmission()) {
+            try (var delivery = endpoint.tryBeginRouteCommitAdmission().reservation()) {
                 var firstAdmission = delivery.reserve(first, 1L);
                 assertEquals(PrefillState.CapacityStatus.ACQUIRED, firstAdmission.status());
                 try (var reservation = firstAdmission.reservation()) {
@@ -116,6 +130,68 @@ class WorkerBatcherRequestCapacityTest {
                 var secondAdmission = delivery.reserve(second, 1L);
                 assertEquals(PrefillState.CapacityStatus.ACQUIRED, secondAdmission.status());
                 secondAdmission.reservation().close();
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    @Timeout(10)
+    void staleRouteDeliveryWaitsForStatusRecoveryOrEndpointRetirement(boolean retires)
+            throws InterruptedException {
+        FlexlbConfig config = productionConfig();
+        config.setDispatcher(DispatcherConfig.nonBatch());
+        config.getDispatcher().setMaxInflightPerPrefillWorker(1);
+        try (Fixture fixture = fixture(config)) {
+            var endpoint = fixture.endpoint;
+            WorkerStatus status = endpoint.getStatus();
+            long freshnessUs = TimeUnit.SECONDS.toMicros(60);
+            status.configureStatusFreshness(freshnessUs);
+            recordStatusApplied(status, System.nanoTime() / 1000);
+            ScheduledRequest queued = item(config, endpoint, 1L);
+            DeliveryStrategy live = EndpointTestSupport.liveRouteStrategy(fixture.runtime);
+            CountDownLatch preparing = new CountDownLatch(1);
+            CountDownLatch resume = new CountDownLatch(1);
+            doAnswer(
+                            invocation -> {
+                                preparing.countDown();
+                                assertTrue(resume.await(5, TimeUnit.SECONDS));
+                                return live.prepare(
+                                        invocation.getArgument(0),
+                                        invocation.getArgument(1),
+                                        invocation.getArgument(2));
+                            })
+                    .when(fixture.delivery)
+                    .prepare(anyList(), any(), any());
+            try {
+                assertTrue(EndpointTestSupport.offer(endpoint, queued));
+                assertTrue(preparing.await(5, TimeUnit.SECONDS));
+                recordStatusApplied(status, System.nanoTime() / 1000 - freshnessUs - 1L);
+                assertTrue(endpoint.canAcceptRequest(), "execution capacity alone is available");
+            } finally {
+                resume.countDown();
+            }
+
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (endpoint.captureRouteProjectionInputs().queue().admissionBlock() == null
+                    && System.nanoTime() < deadline) {
+                Thread.sleep(1);
+            }
+            assertFalse(endpoint.routeAdmissionAvailability().isAvailable());
+            assertNotNull(endpoint.captureRouteProjectionInputs().queue().admissionBlock());
+            assertEquals(List.of(queued), endpoint.captureQueueSnapshot().items());
+
+            if (retires) {
+                endpoint.close();
+                endpoint.awaitRetirement();
+                assertTrue(endpoint.captureQueueSnapshot().items().isEmpty());
+                assertEquals(List.of(queued), fixture.runtime.offerFailures());
+            } else {
+                pollCurrentStatus(endpoint);
+                assertTrue(endpoint.hasFreshSchedulingStatus());
+                verify(fixture.runtime.requests(), timeout(2000))
+                        .publishRoute(any(), any(), anyLong());
+                assertTrue(fixture.runtime.prefillRetirements().isEmpty());
             }
         }
     }
@@ -200,6 +276,15 @@ class WorkerBatcherRequestCapacityTest {
         }
     }
 
+    private static void recordStatusApplied(WorkerStatus status, long receivedUs) {
+        status.lock.lock();
+        try {
+            status.recordStatusApplied(receivedUs);
+        } finally {
+            status.lock.unlock();
+        }
+    }
+
     private static FlexlbConfig productionConfig() {
         FlexlbConfig config = new FlexlbConfig();
         config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);
@@ -232,6 +317,41 @@ class WorkerBatcherRequestCapacityTest {
                 System.currentTimeMillis());
     }
 
+    private static void pollCurrentStatus(PrefillEndpoint endpoint) {
+        WorkerStatus status = endpoint.getStatus();
+        String address = status.getLogicalIpPort();
+        RoleType role = status.getRole();
+        EndpointRegistry registry = mock(EndpointRegistry.class);
+        when(registry.get(role, address, status)).thenReturn(endpoint);
+        WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
+        directory.currentOrDiscover(role, address, () -> status);
+        var response =
+                EngineRpcService.WorkerStatusPB.newBuilder()
+                        .setRole(role.getCode())
+                        .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
+                        .setStatusVersion(status.appliedStatusCursor().statusVersion())
+                        .setAlive(true)
+                        .build();
+        EngineGrpcService grpc = mock(EngineGrpcService.class);
+        when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
+                .thenReturn(CompletableFuture.completedFuture(response));
+        new GrpcWorkerStatusRunner(
+                        "test-model",
+                        address,
+                        status.getSite(),
+                        role,
+                        null,
+                        status,
+                        status.tryBeginStatusPoll(),
+                        directory,
+                        mock(EngineHealthReporter.class),
+                        grpc,
+                        5_000L,
+                        mock(CacheAwareService.class),
+                        Runnable::run)
+                .run();
+    }
+
     private static Fixture fixture(FlexlbConfig config) {
         WorkerStatus status =
                 WorkerStatus.createDiscovered(
@@ -239,6 +359,7 @@ class WorkerBatcherRequestCapacityTest {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(RoleType.PREFILL);
         response.setAlive(true);
+        response.setStatusVersion(1L);
         EndpointTestSupport.publishStatus(status, response);
         var runtime = EndpointTestSupport.requestRuntime();
         DeliveryStrategy parked = EndpointTestSupport.routeStrategy(runtime);

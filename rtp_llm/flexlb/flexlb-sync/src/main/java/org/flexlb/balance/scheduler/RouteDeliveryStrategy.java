@@ -333,10 +333,15 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
 
             predictions.put(exact, predictedMs);
             if (routeAdmission == null) {
-                routeAdmission = prefill.tryBeginRouteCommitAdmission();
-                if (routeAdmission == null) {
-                    return failed(PrefillAdmissionResources.retired("Prefill", exact));
+                var admission = prefill.tryBeginRouteCommitAdmission();
+                if (admission.status() != PrefillState.CapacityStatus.ACQUIRED) {
+                    return rejectedPrefill(
+                            exact,
+                            admission.status(),
+                            CapacityBoundary.deliveryUnavailable(
+                                    prefill.routeAdmissionAvailability()));
                 }
+                routeAdmission = admission.reservation();
             }
             var reservationResult = routeAdmission.reserve(exact, predictedMs);
             if (reservationResult.status() != PrefillState.CapacityStatus.ACQUIRED) {

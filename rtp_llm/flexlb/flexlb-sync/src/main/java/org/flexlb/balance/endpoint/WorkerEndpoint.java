@@ -133,7 +133,12 @@ public class WorkerEndpoint {
         return permit == null ? null : new GenerationPin(this, status.getGenerationId(), permit);
     }
 
-    /** Wake placement attempts parked while this generation's applied state was stale. */
+    /** Wake scheduling work parked while this generation's applied state was stale. */
+    public void signalSchedulingStatusRecovered() {
+        signalPlacementCapacityChanged();
+    }
+
+    /** Wake placement attempts when this generation can accept more work. */
     public void signalPlacementCapacityChanged() {}
 
     /** Validate an exact, still-open pin before consuming its admission right. */

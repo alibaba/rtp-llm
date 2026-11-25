@@ -23,6 +23,7 @@ import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
 import java.util.function.ToLongFunction;
 
@@ -236,6 +237,12 @@ public final class PrefillState {
         return batchLeasesInUse;
     }
 
+    public CapacityBoundary.Availability routeAvailability(
+            long maximum, BooleanSupplier statusFresh) {
+        return new CapacityAvailability(
+                () -> statusFresh.getAsBoolean() && canDispatchRoute(maximum));
+    }
+
     public boolean canDispatchRoute(long maximum) {
         if (maximum == 0L) {
             return true;
@@ -248,13 +255,9 @@ public final class PrefillState {
         }
     }
 
-    public CapacityBoundary.Availability routeAvailability(long maximum) {
-        return new CapacityAvailability(maximum, true);
-    }
-
     public CapacityBoundary.Availability batchAvailability(int maximum) {
         requirePositiveBatchLimit(maximum);
-        return new CapacityAvailability(maximum, false);
+        return new CapacityAvailability(() -> batchCapacityAvailable(maximum));
     }
 
     /**
@@ -1625,6 +1628,7 @@ public final class PrefillState {
     public enum CapacityStatus {
         ACQUIRED,
         CAPACITY_FULL,
+        STATUS_STALE,
         REQUEST_NOT_ACTIVE,
         REQUEST_ALREADY_RESERVED,
         BATCH_ID_ALREADY_RESERVED,
@@ -2207,18 +2211,16 @@ public final class PrefillState {
      * Exact wake capability permanently paired with this worker runtime.
      */
     private final class CapacityAvailability implements CapacityBoundary.Availability {
-        private final long maximum;
-        private final boolean route;
+        private final BooleanSupplier available;
         private Runnable subscribed;
 
-        private CapacityAvailability(long maximum, boolean route) {
-            this.maximum = maximum;
-            this.route = route;
+        private CapacityAvailability(BooleanSupplier available) {
+            this.available = available;
         }
 
         @Override
         public boolean isAvailable() {
-            return route ? canDispatchRoute(maximum) : batchCapacityAvailable((int) maximum);
+            return available.getAsBoolean();
         }
 
         @Override

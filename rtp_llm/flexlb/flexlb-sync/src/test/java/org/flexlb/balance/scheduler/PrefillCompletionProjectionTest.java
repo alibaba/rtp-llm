@@ -126,7 +126,7 @@ class PrefillCompletionProjectionTest {
                                     return true;
                                 }));
             }
-            try (var routeCommit = prefill.tryBeginRouteCommitAdmission()) {
+            try (var routeCommit = prefill.tryBeginRouteCommitAdmission().reservation()) {
                 assertNotNull(routeCommit);
                 var claim =
                         RequestLifecycleTestSupport.claimRouteWithoutPrediction(

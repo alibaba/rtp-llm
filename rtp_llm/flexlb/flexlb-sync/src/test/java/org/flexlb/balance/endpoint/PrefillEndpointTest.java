@@ -1262,7 +1262,9 @@ class PrefillEndpointTest {
                     "retirement-owner reentry must return instead of waiting on itself");
             assertTrue(callbackFailure.get() == null, () -> String.valueOf(callbackFailure.get()));
 
-            assertNull(retirementEndpoint.tryBeginRouteCommitAdmission());
+            assertEquals(
+                    PrefillState.CapacityStatus.ENDPOINT_RETIRED,
+                    retirementEndpoint.tryBeginRouteCommitAdmission().status());
         } finally {
             retirementEndpoint.close();
             executor.shutdownNow();
