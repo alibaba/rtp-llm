@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -56,6 +57,7 @@ public:
     void                        failPrefillPublication(const ErrorInfo& error);
     bool                        asyncLoadCache();
     bool                        loadCacheDone();
+    bool                        onAllocatorLoadDone(std::function<void()> callback);
 
     // swap all linear groups rhs and lhs
     void swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs);

@@ -93,7 +93,7 @@ absl::Status FIFOSchedulerBase::stop() {
         cancelStreams(running_streams_);
         cancelExtraStreams();
     }
-    cond_.notify_all();
+    scheduler_sync_state_->notify();
     return absl::OkStatus();
 }
 
@@ -198,7 +198,7 @@ absl::Status FIFOSchedulerBase::enqueue(const GenerateStreamPtr& stream) {
         waiting_streams_.emplace_back(stream);
         schedule_trigger_ = true;
     }
-    cond_.notify_all();
+    scheduler_sync_state_->notify();
     return absl::OkStatus();
 }
 
@@ -234,7 +234,7 @@ FIFOSchedulerBase::enqueueGroup(const vector<GenerateStreamPtr>& streams) {
         waiting_streams_.insert(waiting_streams_.end(), valid_streams.begin(), valid_streams.end());
         schedule_trigger_ = true;
     }
-    cond_.notify_all();
+    scheduler_sync_state_->notify();
     return {std::move(enqueue_successes), streams};
 }
 
@@ -433,6 +433,7 @@ void FIFOSchedulerBase::addStreamToNewState(const GenerateStreamPtr& stream, Str
             waiting_streams_.push_back(stream);
             break;
         case StreamState::LOADING_CACHE:
+            onLoadingStream(stream);
             loading_cache_streams_.push_back(stream);
             break;
         case StreamState::RUNNING:
