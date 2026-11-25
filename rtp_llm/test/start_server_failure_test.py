@@ -2,7 +2,7 @@ import multiprocessing
 import os
 import socket
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.ops import RoleType
@@ -69,6 +69,44 @@ class _ReadyListenerProcess:
 
 
 class StartServerFailureTest(unittest.TestCase):
+    def test_prompt_generator_starts_as_separate_frontend_processes(self):
+        for role in (RoleType.PDFUSION, RoleType.FRONTEND):
+            with self.subTest(role=role):
+                config = PyEnvConfigs()
+                config.role_config.role_type = role
+                config.server_config.enable_prompt_generator = True
+                config.server_config.enable_prompt_generator_mps = False
+                backend, pg = MagicMock(), MagicMock()
+                with (
+                    patch("rtp_llm.start_server.normalize_prompt_generator_config"),
+                    patch("rtp_llm.start_server.ProcessManager") as manager_cls,
+                    patch(
+                        "rtp_llm.start_server.start_backend_server_impl",
+                        return_value=backend,
+                    ) as spawn_backend,
+                    patch(
+                        "rtp_llm.start_server.start_prompt_generator_impl",
+                        return_value=[pg],
+                    ) as spawn_pg,
+                    patch(
+                        "rtp_llm.start_server.start_frontend_server_impl"
+                    ) as spawn_frontend,
+                ):
+                    start_server(config)
+                manager = manager_cls.return_value
+                spawn_pg.assert_called_once()
+                self.assertIs(spawn_pg.call_args.args[1], config)
+                self.assertIs(spawn_pg.call_args.args[2], manager)
+                spawn_frontend.assert_not_called()
+                if role == RoleType.PDFUSION:
+                    spawn_backend.assert_called_once()
+                    self.assertIs(spawn_backend.call_args.args[1], config)
+                    self.assertIs(spawn_backend.call_args.args[2], manager)
+                    self.assertFalse(spawn_backend.call_args.args[3].is_set())
+                else:
+                    spawn_backend.assert_not_called()
+                manager.monitor_and_release_processes.assert_called_once()
+
     def test_health_check_failure_requests_failure_shutdown_and_exits_nonzero(self):
         py_env_configs = PyEnvConfigs()
         py_env_configs.role_config.role_type = RoleType.VIT

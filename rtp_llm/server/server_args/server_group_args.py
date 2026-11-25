@@ -1,3 +1,4 @@
+
 from rtp_llm.server.server_args.util import str2bool
 
 
@@ -182,4 +183,28 @@ def init_server_group_args(parser, server_config, distribute_config):
         help="开启原地重启的跨机行里，某台机器的心跳或行协调器超过这么多秒没有响应，"
         "就认为这一行已经丢失：所有机器以 1 退出，不再原地重启。调小能更快停掉对端整机"
         "故障后卡住的行，但 start_server 偶尔停顿也更容易被误判",
+    )
+    server_group.add_argument(
+        "--enable_prompt_generator",
+        env_name="ENABLE_PROMPT_GENERATOR",
+        bind_to=(server_config, "enable_prompt_generator"),
+        type=str2bool,
+        default=False,
+        help="启用 prompt generator 服务",
+    )
+    server_group.add_argument(
+        "--prompt_generator_server_count",
+        env_name="PROMPT_GENERATOR_SERVER_COUNT",
+        bind_to=(server_config, "prompt_generator_server_count"),
+        type=int,
+        default=1,
+        help="prompt generator 服务器启动进程数量",
+    )
+    server_group.add_argument(
+        "--enable_prompt_generator_mps",
+        env_name="ENABLE_PROMPT_GENERATOR_MPS",
+        bind_to=(server_config, "enable_prompt_generator_mps"),
+        type=str2bool,
+        default=False,
+        help="prompt generator 启用 MPS 服务",
     )
