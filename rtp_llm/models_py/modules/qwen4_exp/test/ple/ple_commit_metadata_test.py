@@ -164,10 +164,32 @@ class PLECommitMetadataTest(unittest.TestCase):
 
     def test_repeated_resolution_reuses_channel(self):
         transaction, _, _, _ = self.fixture()
+        ptrs = []
         for _ in range(3):
             resolution = self.begin(transaction, self.accept([1, 2, 3, 1]))
             self.assertIsNotNone(resolution)
+            ptrs.append(resolution.pinned.data_ptr())
             resolution.verify()
+        self.assertEqual(len(set(ptrs)), 1)
+
+    def test_multi_slot_verdict_pool_prevents_same_stream_overwrite(self):
+        transaction, _, _, _ = self.fixture()
+        first = self.begin(transaction, self.accept([1, 2, 3, 1]))
+        second = self.begin(transaction, self.accept([1, 99, 1, 1]))
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertNotEqual(first.pinned.data_ptr(), second.pinned.data_ptr())
+        self.assertIsNot(first.event, second.event)
+        first_ptr = first.pinned.data_ptr()
+        second_ptr = second.pinned.data_ptr()
+        first.detach_stage()
+        second.detach_stage()
+        first.verify()
+        with self.assertRaisesRegex(RuntimeError, "accept_len must be in"):
+            second.verify()
+        third = self.begin(transaction, self.accept([1, 1, 1, 1]))
+        self.assertIn(third.pinned.data_ptr(), (first_ptr, second_ptr))
+        third.verify()
 
 
 if __name__ == "__main__":

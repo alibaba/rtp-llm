@@ -282,7 +282,7 @@ public:
         }
         // An exception in draft preparation/forward must not let cache release
         // or executor teardown race a commit still using the target pools.
-        if (pending_runner_) {
+        if (pending_runner_ || pending_verdict_runner_) {
             try {
                 wait();
             } catch (...) {
@@ -316,13 +316,15 @@ public:
         armed_ = model_ != nullptr && model_->hasSpeculativeTargetCommitHooks();
     }
 
-    void deferTo(AsyncRunner& runner) {
-        armed_          = false;
-        pending_runner_ = &runner;
+    void deferTo(AsyncRunner& runner, AsyncRunner* verdict_runner = nullptr) {
+        armed_                  = false;
+        pending_runner_         = &runner;
+        pending_verdict_runner_ = verdict_runner;
     }
 
     void handoffCommit() {
-        pending_runner_ = nullptr;
+        pending_runner_         = nullptr;
+        pending_verdict_runner_ = nullptr;
     }
 
     void wait() {
@@ -330,12 +332,17 @@ public:
             auto* runner = std::exchange(pending_runner_, nullptr);
             runner->sync(cuda_graph::graphGetCurrentStream());
         }
+        if (pending_verdict_runner_) {
+            auto* verdict_runner = std::exchange(pending_verdict_runner_, nullptr);
+            verdict_runner->sync(cuda_graph::graphGetCurrentStream());
+        }
     }
 
 private:
-    ModelBase* model_ = nullptr;
-    bool       armed_ = false;
-    AsyncRunner* pending_runner_ = nullptr;
+    ModelBase*   model_                  = nullptr;
+    bool         armed_                  = false;
+    AsyncRunner* pending_runner_         = nullptr;
+    AsyncRunner* pending_verdict_runner_ = nullptr;
     AsyncRunner& target_prepare_;
     bool&        target_prepare_pending_;
     AsyncRunner& draft_prepare_;
@@ -870,9 +877,14 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     }
     if (!warm_up_ && !is_block_draft_ && !enable_ffn_disaggregate_ && role_type_ != RoleType::PREFILL && model_
         && model_->supportsDeviceSpeculativeHandoff()) {
-        target_commit_runner_.emplace(cuda_graph::graphGetStreamFromPool(false));
+        if (model_->supportsAsyncSpeculativeTargetVerdict()) {
+            target_verdict_runner_.emplace(cuda_graph::graphGetStreamFromPool(false));
+        }
+        target_commit_runner_.emplace(cuda_graph::graphGetStreamFromPool(true));
         RTP_LLM_LOG_INFO(
-            "device speculative handoff enabled: GPU round state, overlapped prepare/commit and async output");
+            "device speculative handoff enabled: GPU round state, overlapped prepare/commit and async output "
+            "(async_verdict=%d)",
+            static_cast<int>(target_verdict_runner_.has_value()));
     }
 
     // Reject the EPLB + speculative-target-hooks combination at startup
@@ -1224,7 +1236,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
-    RETURN_IF_STATUS_ERROR(waitPendingTargetCommit());
+    RETURN_IF_STATUS_ERROR(waitPendingTargetCommitAndVerdict());
     beginProfiledWork();
     metrics_collector.not_skip = true;
 
@@ -1658,7 +1670,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     const auto                    continuation_batch =
         MtpBatchStreamProcessor::publishedDecodeBatch(stream_groups, /*require_cache_snapshot=*/false);
     const bool refresh_reused_cache =
-        continuation_batch && !MtpBatchStreamProcessor::publishedDecodeBatch(stream_groups);
+        continuation_batch
+        && (!MtpBatchStreamProcessor::publishedDecodeBatch(stream_groups)
+            || continuation_batch->peer_cache_table_refresh_needed);
     if (isTpRank0() && (!previous_published_batch || continuation_batch != previous_published_batch)) {
         // Admission, completion and reordered requests take the full input
         // path. Cache-only changes refresh the tables of the same continuation.
@@ -1673,7 +1687,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         model_input.skip_run = shouldSkipEmptyDecode(streams.empty());
         if (model_input.skip_run) {
             tpSyncModelInputs(model_input, parallelism_config_);
-            return waitPendingTargetCommit();
+            return waitPendingTargetCommitAndVerdict();
         }
         executor_collector.tp_sync_input_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
@@ -1687,6 +1701,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     const auto target_execution_status =
         validateSpeculativeTargetExecutionPolicy(speculativeTargetTransactionsEnabled(), expert_balancer_ != nullptr);
     if (!target_execution_status.ok()) {
+        (void)waitPendingTargetCommitAndVerdict();
         return target_execution_status;
     }
 
@@ -1716,7 +1731,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             }
             tpSyncModelInputs(proposal_input, parallelism_config_);
             if (proposal_input.skip_run) {
-                return absl::OkStatus();
+                return waitPendingTargetCommitAndVerdict();
             }
             beginProfiledWork();
             ensureModelInputsOnCuda(proposal_input, "decode.dspark_proposal_after_tp_sync");
@@ -1771,7 +1786,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                 draft_model_->discardPreparedAttentionInputs();
             }
             if (model_input.skip_run) {
-                return waitPendingTargetCommit();
+                return waitPendingTargetCommitAndVerdict();
             }
             beginProfiledWork();
             ensureModelInputsOnCuda(model_input, "decode.after_tp_sync");
@@ -1865,6 +1880,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         auto global_spec_logits_launch_status =
             rendezvousSpeculativeTargetPhaseStatus(local_spec_logits_launch_status, "spec-logits launch");
         if (!global_spec_logits_launch_status.ok()) {
+            (void)waitPendingTargetVerdict();
             return global_spec_logits_launch_status;
         }
     } else {
@@ -1873,13 +1889,17 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         launch_spec_logits_phase();
     }
 
-    // Launch draft-prefill prepare BEFORE target verify forward so it overlaps
-    // with target verify GPU work instead of running serially after it. Sync
-    // on this prepare happens just before draft_model_forward below.
-    // DSpARK commit reuses the verify token/length geometry verbatim. Only its
-    // rank-local feature tensor is bound after target forward, so attention
-    // preparation can overlap target verification just like ordinary MTP.
-    launchDraftPrefillPrepareAsync(model_input);
+    // Record readiness of the verify geometry BEFORE target verify forward, then
+    // launch draft-prefill prepare right AFTER target verify submission. This
+    // avoids CUDA driver lock contention between the background prepare worker
+    // and target verify's cudaGraphLaunch while still overlapping draft-prefill
+    // preparation with target verify GPU execution (and without waiting for
+    // target verify kernels to finish).
+    std::shared_ptr<torch::Event> pre_target_draft_prepare_event;
+    if (useAsyncPrepare() || (target_commit_runner_ && (useStreamAsync() || useAsyncDeviceState()))) {
+        pre_target_draft_prepare_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+        pre_target_draft_prepare_event->record(cuda_graph::graphGetCurrentStream());
+    }
     target_commit_guard.arm();
 
     {
@@ -1906,6 +1926,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                                       tp_rank_);
                     std::terminate();
                 }
+                (void)waitPendingTargetVerdict();
                 return absl::InternalError(target_forward_error);
             }
         } else {
@@ -1933,6 +1954,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                 rendezvousSpeculativeTargetPhaseStatus(local_hidden_override_status, "post-target hidden override");
             if (!global_hidden_override_status.ok()) {
                 target_commit_guard.dismiss();
+                (void)waitPendingTargetVerdict();
                 return global_hidden_override_status;
             }
         } else {
@@ -1940,6 +1962,13 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
+
+    // Target verify kernels are now queued on GPU. Fork draft-prefill attention
+    // preparation immediately so it overlaps target verify GPU execution without
+    // contending on CUDA context locks during target verify cudaGraphLaunch.
+    // DSpARK commit reuses the verify token/length geometry verbatim, so it
+    // overlaps target verification just like ordinary MTP.
+    launchDraftPrefillPrepareAsync(model_input, /*post_rejection=*/false, std::move(pre_target_draft_prepare_event));
 
     SamplerOutput sampler_output;
     auto          run_sampling_and_cap = [&]() -> absl::Status {
@@ -2060,6 +2089,20 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         // while native exceptions still propagate to the executor boundary.
         local_sampling_status = run_sampling_and_cap();
     }
+    // Target Verify t is already queued on GPU. Settle the deferred verdict of
+    // round t-1 before entering round t's sampling consensus / commit so any
+    // previous-round verdict error symmetrically rolls back round t's staged
+    // (uncommitted) transaction without blocking Target Verify launch.
+    if (pending_target_verdict_.valid()) {
+        auto prev_verdict_status = waitPendingTargetVerdict();
+        if (!prev_verdict_status.ok()) {
+            if (speculativeTargetTransactionsEnabled()) {
+                rollbackSpeculativeTargetStateOrFailStop("previous target verdict");
+            }
+            target_commit_guard.dismiss();
+            return prev_verdict_status;
+        }
+    }
     auto global_sampling_status = rendezvousSpeculativeTargetSamplingStatus(local_sampling_status);
     if (!global_sampling_status.ok()) {
         target_commit_guard.dismiss();
@@ -2067,17 +2110,20 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     std::shared_future<absl::Status> pending_target_commit;
+    std::shared_future<absl::Status> pending_target_verdict;
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(commit_target_side_state)");
         auto status = prepareAndCommitSpeculativeTargetState(
-            speculative_sampler_output.accept_len, batch_size, model_input.is_fake_stream, &pending_target_commit);
+            speculative_sampler_output.accept_len, batch_size, model_input.is_fake_stream,
+            &pending_target_commit, &pending_target_verdict);
         if (!status.ok()) {
             // The helper has already issued the rank-symmetric abort.
             target_commit_guard.dismiss();
             return status;
         }
         if (pending_target_commit.valid()) {
-            target_commit_guard.deferTo(*target_commit_runner_);
+            target_commit_guard.deferTo(*target_commit_runner_,
+                                        target_verdict_runner_ ? &*target_verdict_runner_ : nullptr);
         } else {
             target_commit_guard.dismiss();
         }
@@ -2182,6 +2228,18 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             }
         }
     }
+    struct ProactiveKvSnapshotGuard {
+        const std::list<GenerateStreamPtr>& streams;
+        bool                                armed = false;
+        ~ProactiveKvSnapshotGuard() {
+            if (!armed) {
+                return;
+            }
+            for (const auto& stream : streams) {
+                stream->clearMtpCacheSnapshot(/*retain_batch=*/false);
+            }
+        }
+    } proactive_kv_snapshot_guard{streams};
     if (publish_output) {
         if (engram_anchor_windows.defined()) {
             next_history = MtpBatchStreamProcessor::advanceEngramTokenWindows(
@@ -2193,13 +2251,24 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             }
         }
         if (useStreamAsync()) {
+            torch::Tensor next_state_kv_block_id        = model_input.kv_cache_block_id;
+            torch::Tensor next_state_kv_kernel_block_id = model_input.kv_cache_kernel_block_id;
+            const bool    proactive_kv_grew =
+                proactivelyGrowMtpKvCacheForNextRound(stream_groups,
+                                                      model_input.kv_cache_group_tags,
+                                                      next_state_kv_block_id,
+                                                      next_state_kv_kernel_block_id);
+            if (proactive_kv_grew) {
+                proactive_kv_snapshot_guard.armed = true;
+            }
             next_device_states = prepareDecodeDeviceStates(stream_groups,
                                                            speculative_sampler_output,
                                                            model_input.combo_position_ids,
-                                                           model_input.kv_cache_block_id,
-                                                           model_input.kv_cache_kernel_block_id,
+                                                           next_state_kv_block_id,
+                                                           next_state_kv_kernel_block_id,
                                                            {draft_prefill_model_output, draft_prefill_sampler_output},
-                                                           draft_input_template ? &*draft_input_template : nullptr);
+                                                           draft_input_template ? &*draft_input_template : nullptr,
+                                                           proactive_kv_grew);
             // Include the selected continuation hidden rows in the worker's
             // readiness contract; they were produced after draft sampling.
             draft_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
@@ -2241,11 +2310,16 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(wait_target_commit)");
         target_commit_guard.wait();
         pending_target_commit_event_.reset();
-        RETURN_IF_STATUS_ERROR(pending_target_commit.get());
+        auto commit_status  = pending_target_commit.get();
+        auto verdict_status = pending_target_verdict.valid() ? pending_target_verdict.get() : absl::OkStatus();
+        RETURN_IF_STATUS_ERROR(commit_status);
+        RETURN_IF_STATUS_ERROR(verdict_status);
     }
     if (defer_target_commit) {
         RTP_LLM_CHECK_WITH_INFO(!pending_target_commit_.valid(), "previous target commit was not consumed");
-        pending_target_commit_ = pending_target_commit;
+        RTP_LLM_CHECK_WITH_INFO(!pending_target_verdict_.valid(), "previous target verdict was not consumed");
+        pending_target_commit_  = pending_target_commit;
+        pending_target_verdict_ = pending_target_verdict;
     } else {
         pending_target_commit_event_.reset();
     }
@@ -2320,7 +2394,12 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                              std::move(next_device_states),
                              std::move(batch_record),
                              std::move(target_logprobs),
-                             defer_target_commit ? pending_target_commit : std::shared_future<absl::Status>{});
+                             defer_target_commit ? (pending_target_verdict.valid() ? pending_target_verdict :
+                                                                                      pending_target_commit) :
+                                                   std::shared_future<absl::Status>{});
+    if (dispatch_result.ok()) {
+        proactive_kv_snapshot_guard.armed = false;
+    }
     if (dispatch_result.ok() && next_history.defined()) {
         int64_t row = 0;
         for (const auto& stream : stream_groups.allStreams()) {
@@ -2536,7 +2615,9 @@ std::optional<GptModelInputs> MtpExecutor::launchTargetVerifyPrepareAsync(const 
     return model_input_copy;
 }
 
-void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_input, bool post_rejection) {
+void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs&         model_input,
+                                                 bool                          post_rejection,
+                                                 std::shared_ptr<torch::Event> input_ready_event) {
     if (mtp_indexer_share_enabled_ || draft_prefill_prepare_forked_) {
         return;
     }
@@ -2566,8 +2647,10 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
     model_input_copy.is_draft_extend  = !is_block_draft_;
     mtp::applyCacheStrideToModelInput(model_input_copy, mtp_cache_cfg);
     ensureModelInputsOnCuda(model_input_copy, "decode.draft_prefill_prepare");
-    auto input_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
-    input_ready_event->record(cuda_graph::graphGetCurrentStream());
+    if (!input_ready_event) {
+        input_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+        input_ready_event->record(cuda_graph::graphGetCurrentStream());
+    }
     draft_prefill_prepare_runner_.launch(
         [this, draft_prefill_model, input_ready_event, model_input_copy = std::move(model_input_copy)]() mutable {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_draft_prefill_input)");
@@ -2662,6 +2745,25 @@ bool MtpExecutor::reduceSpeculativeTargetPrepareStatus(bool local_ok) {
     throw std::runtime_error("speculative target transactions require a CPU TP status reducer");
 }
 
+bool MtpExecutor::reduceSpeculativeTargetVerdictStatus(bool local_ok) {
+    if (speculative_target_verdict_status_reducer_for_test_) {
+        return speculative_target_verdict_status_reducer_for_test_(local_ok);
+    }
+    if (speculative_target_status_reducer_for_test_) {
+        return speculative_target_status_reducer_for_test_(local_ok);
+    }
+    if (parallelism_config_.tp_size <= 1) {
+        return local_ok;
+    }
+    if (model_) {
+        const auto host_status = model_->reduceSpeculativeTargetVerdictStatus(local_ok);
+        if (host_status.has_value()) {
+            return *host_status;
+        }
+    }
+    return reduceSpeculativeTargetPrepareStatus(local_ok);
+}
+
 void MtpExecutor::rollbackSpeculativeTargetStateOrFailStop(const char* phase) {
     std::string local_rollback_error;
     try {
@@ -2719,7 +2821,8 @@ absl::Status MtpExecutor::rendezvousSpeculativeTargetSamplingStatus(const absl::
 
 absl::Status MtpExecutor::prepareAndCommitSpeculativeTargetState(
     torch::Tensor& accept_len, size_t batch_size, bool is_fake_stream,
-    std::shared_future<absl::Status>* pending_commit) {
+    std::shared_future<absl::Status>* pending_commit,
+    std::shared_future<absl::Status>* pending_verdict) {
     if (model_ == nullptr || !model_->hasSpeculativeTargetCommitHooks()) {
         return absl::OkStatus();
     }
@@ -2785,18 +2888,45 @@ absl::Status MtpExecutor::prepareAndCommitSpeculativeTargetState(
         auto commit_done  = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
         accept_ready->record(cuda_graph::graphGetCurrentStream());
         pending_target_commit_event_ = commit_done;
-        auto task = std::make_shared<std::packaged_task<absl::Status()>>([this, accept_len, accept_ready, commit_done]() {
-            accept_ready->block(cuda_graph::graphGetCurrentStream());
-            auto status = commitSpeculativeTargetState(accept_len);
-            commit_done->record(cuda_graph::graphGetCurrentStream());
-            return status;
-        });
+        const bool use_async_verdict = (pending_verdict != nullptr) && target_verdict_runner_.has_value()
+                                       && model_->supportsAsyncSpeculativeTargetVerdict();
+        auto verdict_promise = use_async_verdict ? std::make_shared<std::promise<absl::Status>>() : nullptr;
+        if (use_async_verdict) {
+            *pending_verdict = verdict_promise->get_future().share();
+        }
+        auto task = std::make_shared<std::packaged_task<absl::Status()>>(
+            [this, accept_len, accept_ready, commit_done, use_async_verdict, verdict_promise]() {
+                accept_ready->block(cuda_graph::graphGetCurrentStream());
+                auto status = commitSpeculativeTargetState(accept_len, use_async_verdict);
+                commit_done->record(cuda_graph::graphGetCurrentStream());
+                if (use_async_verdict) {
+                    if (!status.ok()) {
+                        verdict_promise->set_value(status);
+                    } else {
+                        target_verdict_runner_->launch([this, verdict_promise]() mutable {
+                            try {
+                                verdict_promise->set_value(settleSpeculativeTargetVerdict());
+                            } catch (const std::exception& e) {
+                                verdict_promise->set_value(
+                                    absl::InternalError(std::string("speculative target verdict task threw: ") + e.what()));
+                            } catch (...) {
+                                verdict_promise->set_value(
+                                    absl::InternalError("speculative target verdict task threw unknown exception"));
+                            }
+                        });
+                    }
+                }
+                return status;
+            });
         *pending_commit = task->get_future().share();
+        if (!use_async_verdict && pending_verdict) {
+            *pending_verdict = *pending_commit;
+        }
         target_commit_runner_->launch([task]() { (*task)(); });
         return absl::OkStatus();
     }
     pending_target_commit_event_.reset();
-    return commitSpeculativeTargetState(accept_len);
+    return commitSpeculativeTargetState(accept_len, false);
 }
 
 absl::Status MtpExecutor::waitPendingTargetCommit() {
@@ -2808,17 +2938,63 @@ absl::Status MtpExecutor::waitPendingTargetCommit() {
     auto completion = std::exchange(pending_target_commit_, {});
     pending_target_commit_event_.reset();
     // Both consumers see the same exception/status; neither consumes the
-    // other thread's error. Commit completes its GPU writes before readiness.
+    // other thread's error. Commit completes its GPU writes (or stream-ordered
+    // predicated enqueue) before readiness.
     auto status = completion.get();
     target_commit_runner_->sync(cuda_graph::graphGetCurrentStream());
     return status;
 }
 
-absl::Status MtpExecutor::commitSpeculativeTargetState(const torch::Tensor& accept_len) {
+absl::Status MtpExecutor::waitPendingTargetVerdict() {
+    if (!pending_target_verdict_.valid()) {
+        return absl::OkStatus();
+    }
+    RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(wait_previous_target_verdict)");
+    auto completion = std::exchange(pending_target_verdict_, {});
+    auto status     = completion.get();
+    if (target_verdict_runner_) {
+        target_verdict_runner_->sync(cuda_graph::graphGetCurrentStream());
+    }
+    return status;
+}
+
+absl::Status MtpExecutor::waitPendingTargetCommitAndVerdict() {
+    auto commit_status  = waitPendingTargetCommit();
+    auto verdict_status = waitPendingTargetVerdict();
+    if (!commit_status.ok()) {
+        return commit_status;
+    }
+    return verdict_status;
+}
+
+absl::Status MtpExecutor::settleSpeculativeTargetVerdict() {
+    RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(settle_target_verdict)");
+    std::string local_error;
+    try {
+        local_error = model_->settleSpeculativeTargetVerdict();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("speculative target verdict threw on TP rank %d: %s", tp_rank_, e.what());
+        local_error = std::string("verdict threw: ") + e.what();
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("speculative target verdict threw on TP rank %d: unknown exception", tp_rank_);
+        local_error = "verdict threw an unknown exception";
+    }
+    const bool global_ok = reduceSpeculativeTargetVerdictStatus(local_error.empty());
+    if (!global_ok) {
+        std::string message = "speculative target side-state verdict failed on at least one TP rank";
+        if (!local_error.empty()) {
+            message += "; local error: " + local_error;
+        }
+        return absl::InternalError(message);
+    }
+    return absl::OkStatus();
+}
+
+absl::Status MtpExecutor::commitSpeculativeTargetState(const torch::Tensor& accept_len, bool defer_verdict) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(apply_target_side_state)");
     std::string local_error;
     try {
-        local_error = model_->prepareSpeculativeTargetCommit(accept_len);
+        local_error = model_->prepareSpeculativeTargetCommit(accept_len, defer_verdict);
     } catch (const std::exception& e) {
         RTP_LLM_LOG_ERROR("speculative target commit prepare threw on TP rank %d: %s", tp_rank_, e.what());
         local_error = std::string("prepare threw: ") + e.what();
@@ -4018,6 +4194,75 @@ MtpExecutor::prepareDecodeBatchState(const torch::Tensor&                       
     return batch;
 }
 
+bool MtpExecutor::proactivelyGrowMtpKvCacheForNextRound(const StreamGroups&             stream_groups,
+                                                        const std::vector<std::string>& group_tags,
+                                                        torch::Tensor&                  kv_cache_block_id,
+                                                        torch::Tensor&                  kv_cache_kernel_block_id) {
+    if (!is_linear_attention_model_ || !useDeviceInput() || is_dspark_ || group_tags.empty() || !batch_stream_processor_
+        || !kv_cache_block_id.defined() || !kv_cache_block_id.is_cuda() || !kv_cache_kernel_block_id.defined()
+        || !kv_cache_kernel_block_id.is_cuda()) {
+        return false;
+    }
+    const char* disable_env = std::getenv("RTP_LLM_DISABLE_PROACTIVE_MTP_KV_GROWTH");
+    if (disable_env != nullptr && std::strcmp(disable_env, "1") == 0) {
+        return false;
+    }
+
+    const auto all_streams = stream_groups.allStreams();
+    if (all_streams.empty()) {
+        return false;
+    }
+
+    bool any_needs_growth = false;
+    for (const auto& stream : all_streams) {
+        if (stream->hasPendingAsyncBookkeeping()) {
+            return false;
+        }
+        if (stream->needsProactiveMtpKvGrowth()) {
+            any_needs_growth = true;
+        }
+    }
+    if (!any_needs_growth) {
+        return false;
+    }
+
+    RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(proactive_kv_growth,stream_count=%zu)", all_streams.size());
+    bool grew_any = false;
+    for (const auto& stream : all_streams) {
+        if (stream->proactiveGrowMtpKvBlock(/*coalesce_one_page=*/true)) {
+            grew_any = true;
+        }
+    }
+    if (!grew_any) {
+        return false;
+    }
+
+    auto gathered = batch_stream_processor_->gatherCommittedHostKvCacheBlockTables(
+        stream_groups, group_tags, buffer_holder_);
+    if (!gathered.ok()) {
+        RTP_LLM_LOG_WARNING("proactive MTP KV table gather failed (%s); falling back to scheduler refresh",
+                            gathered.status().ToString().c_str());
+        for (const auto& stream : all_streams) {
+            stream->clearMtpCacheSnapshot(/*retain_batch=*/false);
+        }
+        kv_cache_block_id        = torch::Tensor();
+        kv_cache_kernel_block_id = torch::Tensor();
+        return false;
+    }
+    auto& [physical, kernel] = gathered.value();
+    if (!physical.defined() || !physical.is_cuda() || !kernel.defined() || !kernel.is_cuda()) {
+        for (const auto& stream : all_streams) {
+            stream->clearMtpCacheSnapshot(/*retain_batch=*/false);
+        }
+        kv_cache_block_id        = torch::Tensor();
+        kv_cache_kernel_block_id = torch::Tensor();
+        return false;
+    }
+    kv_cache_block_id        = std::move(physical);
+    kv_cache_kernel_block_id = std::move(kernel);
+    return true;
+}
+
 std::vector<GenerateStream::MtpAsyncDeviceState>
 MtpExecutor::prepareDecodeDeviceStates(const StreamGroups&                          stream_groups,
                                        const speculative::SpeculativeSamplerOutput& spec_decode_output,
@@ -4025,7 +4270,8 @@ MtpExecutor::prepareDecodeDeviceStates(const StreamGroups&                      
                                        const torch::Tensor&                         kv_cache_block_id,
                                        const torch::Tensor&                         kv_cache_kernel_block_id,
                                        const MergedOutput&                          draft_prefill_output,
-                                       const GptModelInputs*                        draft_input_template) {
+                                       const GptModelInputs*                        draft_input_template,
+                                       bool                                         peer_cache_table_refresh_needed) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_device_continuation)");
 
     const auto all_streams = stream_groups.allStreams();
@@ -4082,6 +4328,7 @@ MtpExecutor::prepareDecodeDeviceStates(const StreamGroups&                      
     const bool  reusable_batch = draft_input_template && next_kv_cache_block_id.defined() && last_hidden_all.defined()
                                 && propose_tokens_gpu_all.defined() && propose_tokens_gpu_all.numel() == batch_size;
     if (reusable_batch) {
+        next_batch->peer_cache_table_refresh_needed = peer_cache_table_refresh_needed;
         for (const auto& stream : all_streams) {
             next_batch->stream_ids.push_back(stream->streamId());
         }

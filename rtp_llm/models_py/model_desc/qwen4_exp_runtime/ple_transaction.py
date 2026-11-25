@@ -4,9 +4,12 @@ The C++ executor owns TP consensus. Captured stages retain their addresses in
 ``captured_transactions``; releasing an active commit only releases its undo record.
 """
 
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from types import SimpleNamespace
+import os
+import threading
 from typing import Optional
 
 import torch
@@ -27,18 +30,40 @@ from .ple_state import (
 )
 
 
+def async_ple_commit_disabled() -> bool:
+    """Emergency kill-switch to revert PLE target commit to synchronous verdict."""
+    return os.environ.get("RTP_QWEN4_DISABLE_ASYNC_PLE_COMMIT", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
 class PLETransactionCoordinator:
     def __init__(self, layers: Mapping, fault_hook: Callable[[str], None]):
         self.ple_layers = layers
         self.fault_hook = fault_hook
         self.active_transaction: Optional[_PLETargetTransaction] = None
         self.captured_transactions: dict[int, _PLETargetTransaction] = {}
+        self._pending_verdicts: deque = deque()
+        self._pending_verdicts_lock = threading.Lock()
 
     def close(self) -> None:
         if self.active_transaction is not None:
+            if self.active_transaction.deferred_resolution is not None:
+                self.active_transaction.deferred_resolution.release()
+                self.active_transaction.deferred_resolution = None
             self._synchronize_ple_transaction(self.active_transaction)
         for transaction in self.captured_transactions.values():
+            if transaction.deferred_resolution is not None:
+                transaction.deferred_resolution.release()
+                transaction.deferred_resolution = None
             self._synchronize_ple_transaction(transaction)
+        with self._pending_verdicts_lock:
+            pending = list(self._pending_verdicts)
+            self._pending_verdicts.clear()
+        for resolution in pending:
+            resolution.release()
         self.active_transaction = None
         self.captured_transactions.clear()
 
@@ -279,7 +304,7 @@ class PLETransactionCoordinator:
             return
         if transaction.graph_key is not None or transaction.prepared_writes is not None:
             raise RuntimeError("cannot discard an active PLE target commit")
-        self._drain_ple_transaction(transaction)
+        self._synchronize_ple_transaction(transaction)
         self.active_transaction = None
 
     def save_speculative_target_graph_capture(self, graph_key: int) -> None:
@@ -317,13 +342,18 @@ class PLETransactionCoordinator:
     def _release_ple_target_transaction(
         self, transaction: _PLETargetTransaction
     ) -> None:
+        if transaction.deferred_resolution is not None:
+            transaction.deferred_resolution.release()
+            transaction.deferred_resolution = None
         if transaction.graph_key is not None:
             transaction.prepared_writes = None
             transaction.commit_started = False
             transaction.tentative_committed = False
         self.active_transaction = None
 
-    def prepare_speculative_target_commit(self, accept_len: torch.Tensor) -> None:
+    def prepare_speculative_target_commit(
+        self, accept_len: torch.Tensor, defer_verdict: bool = False
+    ) -> None:
         """Select accepted PLE snapshots and prepare undo without writing pools."""
         transaction = self.active_transaction
         if transaction is None:
@@ -395,6 +425,9 @@ class PLETransactionCoordinator:
                         initial_context=stage.initial_context[:batch],
                         candidate_state_inputs=stage.candidate_state_inputs[:batch],
                         candidate_ids=stage.candidate_ids[:batch],
+                        live_rows=(
+                            stage.live_rows[:batch] if stage.live_rows is not None else None
+                        ),
                     )
                     for layer, stage in transaction.stages.items()
                 },
@@ -453,122 +486,168 @@ class PLETransactionCoordinator:
         from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_commit_metadata import (
             begin_accepted_pair_resolution,
         )
+        from rtp_llm.models_py.kernels.cuda.qwen4_ple.commit_prepare import (
+            can_apply_commit_values_predicated,
+        )
+        from .ple_commit_prepare import prepare_commit_values
 
         resolution = begin_accepted_pair_resolution(transaction, accept_len)
-        if resolution is not None:
-            # The verdict read is deferred: the gather launches below run while
-            # the device computes it, and verify() re-checks before publishing.
-            accepted = resolution.accepted
-            pending = resolution.pending
-        else:
-            if bool(
-                torch.any(
-                    (accept_len < 1) | (accept_len > transaction.query_len)
-                ).item()
-            ):
-                raise RuntimeError(
-                    "qwen4_exp PLE target accept_len must be in "
-                    f"[1, {transaction.query_len}]"
-                )
-
-            accepted = accept_len.to(torch.long)
-            pending = []
-            destination_rows: set[tuple[int, int]] = set()
-            for layer_idx in sorted(transaction.stages):
-                stage = transaction.stages[layer_idx]
-                destinations = PLECacheViews._commit_physical_block_pair(
-                    stage, accepted
-                )
-                if destinations is not None:
-                    state_blocks, state_host_blocks, ctx_blocks, ctx_host_blocks = (
-                        destinations
-                    )
-                else:
-                    final_positions = stage.prefixes + accepted - 1
-                    final_pages = torch.div(
-                        final_positions, stage.page_size, rounding_mode="floor"
-                    )
-                    state_blocks, state_host_blocks = self._commit_physical_blocks(
-                        stage.state_inputs,
-                        PLE_STATE_TAG,
-                        final_pages,
-                        int(stage.state_pool.shape[0]),
-                        stage.state_pool.device,
-                    )
-                    ctx_blocks, ctx_host_blocks = self._commit_physical_blocks(
-                        stage.ctx_inputs,
-                        PLE_NGRAM_CTX_TAG,
-                        final_pages,
-                        int(stage.ctx_pool.shape[0]),
-                        stage.ctx_pool.device,
-                    )
-                pending.append(
-                    (
-                        stage,
-                        state_blocks,
-                        ctx_blocks,
-                    )
-                )
-
-                for pool, destination_ids, tag in (
-                    (stage.state_pool, state_host_blocks, PLE_STATE_TAG),
-                    (stage.ctx_pool, ctx_host_blocks, PLE_NGRAM_CTX_TAG),
+        try:
+            if resolution is not None:
+                # The verdict read is deferred: the gather launches below run while
+                # the device computes it, and verify() re-checks before publishing
+                # (or asynchronously after predicated commit when defer_verdict=True).
+                accepted = resolution.accepted
+                pending = resolution.pending
+            else:
+                if bool(
+                    torch.any(
+                        (accept_len < 1) | (accept_len > transaction.query_len)
+                    ).item()
                 ):
-                    pool_ptr = int(pool.data_ptr())
-                    for block in destination_ids:
-                        row = (pool_ptr, int(block))
-                        if row in destination_rows:
-                            raise RuntimeError(
-                                f"qwen4_exp PLE cache {tag!r} has a duplicate target "
-                                "destination physical row"
-                            )
-                        destination_rows.add(row)
+                    raise RuntimeError(
+                        "qwen4_exp PLE target accept_len must be in "
+                        f"[1, {transaction.query_len}]"
+                    )
 
-        # Every layer and destination has been validated. Select values and
-        # allocate immutable undo only now, with no persistent-pool writes.
-        prepared_writes = []
-        for stage, state_blocks, ctx_blocks in pending:
-            from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_commit_prepare import (
-                prepare_commit_values,
-            )
+                accepted = accept_len.to(torch.long)
+                pending = []
+                destination_rows: set[tuple[int, int]] = set()
+                for layer_idx in sorted(transaction.stages):
+                    stage = transaction.stages[layer_idx]
+                    destinations = PLECacheViews._commit_physical_block_pair(
+                        stage, accepted
+                    )
+                    if destinations is not None:
+                        state_blocks, state_host_blocks, ctx_blocks, ctx_host_blocks = (
+                            destinations
+                        )
+                    else:
+                        final_positions = stage.prefixes + accepted - 1
+                        final_pages = torch.div(
+                            final_positions, stage.page_size, rounding_mode="floor"
+                        )
+                        state_blocks, state_host_blocks = self._commit_physical_blocks(
+                            stage.state_inputs,
+                            PLE_STATE_TAG,
+                            final_pages,
+                            int(stage.state_pool.shape[0]),
+                            stage.state_pool.device,
+                        )
+                        ctx_blocks, ctx_host_blocks = self._commit_physical_blocks(
+                            stage.ctx_inputs,
+                            PLE_NGRAM_CTX_TAG,
+                            final_pages,
+                            int(stage.ctx_pool.shape[0]),
+                            stage.ctx_pool.device,
+                        )
+                    pending.append(
+                        (
+                            stage,
+                            state_blocks,
+                            ctx_blocks,
+                        )
+                    )
 
-            selected = prepare_commit_values(stage, accepted, state_blocks, ctx_blocks)
-            if selected is None:
-                selected = self._prepare_ple_values_reference(
+                    for pool, destination_ids, tag in (
+                        (stage.state_pool, state_host_blocks, PLE_STATE_TAG),
+                        (stage.ctx_pool, ctx_host_blocks, PLE_NGRAM_CTX_TAG),
+                    ):
+                        pool_ptr = int(pool.data_ptr())
+                        for block in destination_ids:
+                            row = (pool_ptr, int(block))
+                            if row in destination_rows:
+                                raise RuntimeError(
+                                    f"qwen4_exp PLE cache {tag!r} has a duplicate target "
+                                    "destination physical row"
+                                )
+                            destination_rows.add(row)
+
+            # Every layer and destination has been validated (or guarded by the
+            # GPU verdict flag). Select values and allocate immutable undo only
+            # now, with no persistent-pool writes.
+            prepared_writes = []
+            for stage, state_blocks, ctx_blocks in pending:
+                selected = prepare_commit_values(
                     stage, accepted, state_blocks, ctx_blocks
                 )
-            state_values, context_values, original_state, original_context = selected
-            prepared_writes.append(
-                _PLEPreparedWrite(
-                    state_pool=stage.state_pool,
-                    state_blocks=state_blocks,
-                    state_values=state_values,
-                    original_state=original_state,
-                    ctx_pool=stage.ctx_pool,
-                    ctx_blocks=ctx_blocks,
-                    ctx_values=context_values,
-                    original_context=original_context,
-                    boundary_slots=self._prepare_boundary_slots(
-                        stage,
-                        accepted,
-                        state_blocks,
-                        ctx_blocks,
-                        int(transaction.query_len),
-                        graph_capture=transaction.graph_key is not None,
-                    ),
+                if selected is None:
+                    selected = self._prepare_ple_values_reference(
+                        stage, accepted, state_blocks, ctx_blocks
+                    )
+                state_values, context_values, original_state, original_context = (
+                    selected
+                )
+                prepared_writes.append(
+                    _PLEPreparedWrite(
+                        state_pool=stage.state_pool,
+                        state_blocks=state_blocks,
+                        state_values=state_values,
+                        original_state=original_state,
+                        ctx_pool=stage.ctx_pool,
+                        ctx_blocks=ctx_blocks,
+                        ctx_values=context_values,
+                        original_context=original_context,
+                        boundary_slots=self._prepare_boundary_slots(
+                            stage,
+                            accepted,
+                            state_blocks,
+                            ctx_blocks,
+                            int(transaction.query_len),
+                            graph_capture=transaction.graph_key is not None,
+                        ),
+                    )
+                )
+
+            can_defer = (
+                bool(defer_verdict)
+                and not async_ple_commit_disabled()
+                and resolution is not None
+                and all(
+                    can_apply_commit_values_predicated(
+                        write.state_pool,
+                        write.state_blocks,
+                        write.state_values,
+                        write.ctx_pool,
+                        write.ctx_blocks,
+                        write.ctx_values,
+                    )
+                    and all(
+                        can_apply_commit_values_predicated(
+                            write.state_pool,
+                            slot.state_blocks,
+                            slot.state_values,
+                            write.ctx_pool,
+                            slot.ctx_blocks,
+                            slot.ctx_values,
+                        )
+                        for slot in write.boundary_slots
+                    )
+                    for write in prepared_writes
                 )
             )
-        # Gather/clone launches above are part of prepare, not commit.  Complete
-        # them before publishing the plan so the C++ prepare consensus observes
-        # any asynchronous failure on this rank before persistent writes begin.
-        # The gathers run on the current stream, so a current-stream
-        # synchronize observes their failures without draining unrelated
-        # streams (async bookkeeping) the way a device-wide sync does.
-        if resolution is not None:
-            resolution.verify()
-        else:
-            self._synchronize_ple_transaction(transaction)
-        owner.prepared_writes = prepared_writes
+            if can_defer:
+                owner.deferred_resolution = resolution
+                owner.prepared_writes = prepared_writes
+                return
+
+            # Synchronous prepare path: complete gathers and verify verdict before
+            # publishing the plan so C++ prepare consensus observes any failure
+            # before persistent writes begin.
+            if resolution is not None:
+                resolution.record_commit_done()
+                resolution.verify()
+            else:
+                self._synchronize_ple_transaction(transaction)
+            owner.deferred_resolution = None
+            owner.prepared_writes = prepared_writes
+        except Exception:
+            if (
+                resolution is not None
+                and owner.deferred_resolution is not resolution
+            ):
+                resolution.release()
+            raise
 
     def _prepare_boundary_slots(
         self,
@@ -712,30 +791,65 @@ class PLETransactionCoordinator:
             return
         if commit:
             self._maybe_inject_speculative_fault("commit")
+        deferred = transaction.deferred_resolution
         if not commit:
             if transaction.commit_started:
                 if transaction.prepared_writes is None:
                     raise RuntimeError(
                         "qwen4_exp PLE rollback lost its prepared writes"
                     )
-                for write in transaction.prepared_writes:
-                    for slot in write.boundary_slots:
+                if deferred is not None:
+                    from rtp_llm.models_py.kernels.cuda.qwen4_ple.commit_prepare import (
+                        apply_commit_values_predicated,
+                    )
+
+                    verdict_flag = deferred.verdict_flag
+                    for write in transaction.prepared_writes:
+                        for slot in write.boundary_slots:
+                            if not apply_commit_values_predicated(
+                                verdict_flag,
+                                write.state_pool,
+                                slot.state_blocks,
+                                slot.original_state,
+                                write.ctx_pool,
+                                slot.ctx_blocks,
+                                slot.original_context,
+                            ):
+                                raise RuntimeError(
+                                    "qwen4_exp PLE predicated boundary rollback failed"
+                                )
+                        if not apply_commit_values_predicated(
+                            verdict_flag,
+                            write.state_pool,
+                            write.state_blocks,
+                            write.original_state,
+                            write.ctx_pool,
+                            write.ctx_blocks,
+                            write.original_context,
+                        ):
+                            raise RuntimeError("qwen4_exp PLE predicated rollback failed")
+                else:
+                    for write in transaction.prepared_writes:
+                        for slot in write.boundary_slots:
+                            write.state_pool.index_copy_(
+                                0, slot.state_blocks, slot.original_state
+                            )
+                            write.ctx_pool.index_copy_(
+                                0, slot.ctx_blocks, slot.original_context
+                            )
                         write.state_pool.index_copy_(
-                            0, slot.state_blocks, slot.original_state
+                            0, write.state_blocks, write.original_state
                         )
                         write.ctx_pool.index_copy_(
-                            0, slot.ctx_blocks, slot.original_context
+                            0, write.ctx_blocks, write.original_context
                         )
-                    write.state_pool.index_copy_(
-                        0, write.state_blocks, write.original_state
-                    )
-                    write.ctx_pool.index_copy_(
-                        0, write.ctx_blocks, write.original_context
-                    )
             # Also synchronize an uncommitted transaction: target staging and a
             # failed prepare may have queued work even though no pool write was
             # launched.  Do not clear its lifetime until that work is settled.
-            self._drain_ple_transaction(transaction)
+            self._synchronize_ple_transaction(transaction)
+            if deferred is not None:
+                deferred.release()
+                transaction.deferred_resolution = None
             self._release_ple_target_transaction(transaction)
             return
 
@@ -746,6 +860,45 @@ class PLETransactionCoordinator:
         # Mark before the first copy so finish(false) restores every destination
         # even if a later launch or synchronization reports an error.
         transaction.commit_started = True
+        if deferred is not None:
+            from rtp_llm.models_py.kernels.cuda.qwen4_ple.commit_prepare import (
+                apply_commit_values_predicated,
+            )
+
+            verdict_flag = deferred.verdict_flag
+            for write in transaction.prepared_writes:
+                # Boundary slots first: a slot parked on the final destination must
+                # not survive the final write below.
+                for slot in write.boundary_slots:
+                    if not apply_commit_values_predicated(
+                        verdict_flag,
+                        write.state_pool,
+                        slot.state_blocks,
+                        slot.state_values,
+                        write.ctx_pool,
+                        slot.ctx_blocks,
+                        slot.ctx_values,
+                    ):
+                        raise RuntimeError(
+                            "qwen4_exp PLE predicated boundary commit failed"
+                        )
+                if not apply_commit_values_predicated(
+                    verdict_flag,
+                    write.state_pool,
+                    write.state_blocks,
+                    write.state_values,
+                    write.ctx_pool,
+                    write.ctx_blocks,
+                    write.ctx_values,
+                ):
+                    raise RuntimeError("qwen4_exp PLE predicated commit failed")
+            # Advance the completion event past every predicated store so
+            # settle_speculative_target_verdict() proves both verdict arrival
+            # and full GPU commit completion without synchronizing here.
+            deferred.record_commit_done()
+            transaction.tentative_committed = True
+            return
+
         for write in transaction.prepared_writes:
             # Boundary slots first: a slot parked on the final destination must
             # not survive the final write below.
@@ -769,4 +922,24 @@ class PLETransactionCoordinator:
             raise RuntimeError(
                 "qwen4_exp PLE target transaction cannot finalize before commit"
             )
+        if transaction.deferred_resolution is not None:
+            resolution = transaction.deferred_resolution
+            transaction.deferred_resolution = None
+            resolution.detach_stage()
+            with self._pending_verdicts_lock:
+                self._pending_verdicts.append(resolution)
         self._release_ple_target_transaction(transaction)
+
+    def has_pending_speculative_target_verdict(self) -> bool:
+        with self._pending_verdicts_lock:
+            return bool(self._pending_verdicts)
+
+    def settle_speculative_target_verdict(self) -> None:
+        """Await and verify the oldest deferred PLE commit verdict off-path."""
+        with self._pending_verdicts_lock:
+            resolution = (
+                self._pending_verdicts.popleft() if self._pending_verdicts else None
+            )
+        if resolution is None:
+            return
+        resolution.verify()

@@ -178,3 +178,122 @@ def prepare_commit_values(
         num_warps=4,
     )
     return values, ctx_values, undo, ctx_undo
+
+
+@triton.jit
+def _predicated_apply_commit_kernel(
+    VERDICT,
+    STATE_POOL,
+    STATE_BLOCKS,
+    STATE_VALUES,
+    CTX_POOL,
+    CTX_BLOCKS,
+    CTX_VALUES,
+    LENGTH: tl.constexpr,
+    WIDTH: tl.constexpr,
+    CTX: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    if tl.load(VERDICT) != 0:
+        return
+    row, tile = tl.program_id(0), tl.program_id(1)
+    index = tile * BLOCK + tl.arange(0, BLOCK)
+    live = index < LENGTH * WIDTH
+    state_block = tl.load(STATE_BLOCKS + row).to(tl.int64)
+    value = tl.load(STATE_VALUES + row * LENGTH * WIDTH + index, live, other=0)
+    tl.store(STATE_POOL + state_block * LENGTH * WIDTH + index, value, live)
+    if tile == 0:
+        offset = tl.arange(0, BLOCK)
+        ctx_live = offset < CTX
+        ctx_block = tl.load(CTX_BLOCKS + row).to(tl.int64)
+        ctx_value = tl.load(CTX_VALUES + row * CTX + offset, ctx_live, other=0)
+        tl.store(CTX_POOL + ctx_block * CTX + offset, ctx_value, ctx_live)
+
+
+def can_apply_commit_values_predicated(
+    state_pool,
+    state_blocks,
+    state_values,
+    ctx_pool,
+    ctx_blocks,
+    ctx_values,
+) -> bool:
+    """Return True iff the predicated Triton commit kernel supports these tensors."""
+    tensors = (
+        state_pool,
+        state_blocks,
+        state_values,
+        ctx_pool,
+        ctx_blocks,
+        ctx_values,
+    )
+    device = state_pool.device
+    return bool(
+        torch.version.hip is None
+        and device.type == "cuda"
+        and all(t.is_cuda and t.device == device for t in tensors)
+        and state_pool.dtype == state_values.dtype == torch.bfloat16
+        and ctx_pool.dtype == ctx_values.dtype == torch.int64
+        and state_blocks.dtype == ctx_blocks.dtype == torch.int64
+        and state_blocks.ndim == ctx_blocks.ndim == 1
+        and state_pool.ndim == state_values.ndim == 3
+        and ctx_pool.ndim == ctx_values.ndim == 2
+        and 0 < state_blocks.numel() <= 128
+        and state_blocks.numel()
+        == ctx_blocks.numel()
+        == state_values.shape[0]
+        == ctx_values.shape[0]
+        and state_pool.shape[1:] == state_values.shape[1:]
+        and ctx_pool.shape[1] == ctx_values.shape[1]
+        and min(state_values.shape[1:]) > 0
+        and 0 < ctx_values.shape[1] <= 512
+        and all(t.is_contiguous() for t in tensors)
+    )
+
+
+def apply_commit_values_predicated(
+    verdict_flag,
+    state_pool,
+    state_blocks,
+    state_values,
+    ctx_pool,
+    ctx_blocks,
+    ctx_values,
+) -> bool:
+    """Write prepared state/ctx rows only when ``verdict_flag[0] == 0``.
+
+    Guarantees zero persistent pool writes whenever the GPU verdict tripped
+    (invalid accept_len, out-of-range/unallocated block, or duplicate target).
+    """
+    if not (
+        isinstance(verdict_flag, torch.Tensor)
+        and verdict_flag.is_cuda
+        and verdict_flag.device == state_pool.device
+        and verdict_flag.dtype == torch.int64
+        and verdict_flag.numel() >= 1
+        and can_apply_commit_values_predicated(
+            state_pool,
+            state_blocks,
+            state_values,
+            ctx_pool,
+            ctx_blocks,
+            ctx_values,
+        )
+    ):
+        return False
+    batch, length, width = state_values.shape
+    _predicated_apply_commit_kernel[(batch, triton.cdiv(length * width, 512))](
+        verdict_flag,
+        state_pool,
+        state_blocks,
+        state_values,
+        ctx_pool,
+        ctx_blocks,
+        ctx_values,
+        length,
+        width,
+        ctx_values.shape[1],
+        512,
+        num_warps=4,
+    )
+    return True

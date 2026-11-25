@@ -116,11 +116,14 @@ protected:
     };
 
     absl::Status waitPendingTargetCommit();
+    absl::Status waitPendingTargetVerdict();
+    absl::Status waitPendingTargetCommitAndVerdict();
     bool isTpRank0() const;
     bool finishDSparkPrefillCachePublication(const GptModelInputs&               model_input,
                                              const std::list<GenerateStreamPtr>& streams);
 
     bool                reduceSpeculativeTargetPrepareStatus(bool local_ok);
+    bool                reduceSpeculativeTargetVerdictStatus(bool local_ok);
     static bool         asyncPrepareAllowed(bool requested, bool target_commit_hooks);
     static absl::Status validateSpeculativeTargetExecutionPolicy(bool target_commit_hooks, bool eplb_enabled);
     bool                speculativeTargetTransactionsEnabled() const;
@@ -129,8 +132,10 @@ protected:
     absl::Status        prepareAndCommitSpeculativeTargetState(torch::Tensor&                    accept_len,
                                                                size_t                            batch_size,
                                                                bool                              is_fake_stream = false,
-                                                               std::shared_future<absl::Status>* pending_commit = nullptr);
-    absl::Status        commitSpeculativeTargetState(const torch::Tensor& accept_len);
+                                                               std::shared_future<absl::Status>* pending_commit = nullptr,
+                                                               std::shared_future<absl::Status>* pending_verdict = nullptr);
+    absl::Status        commitSpeculativeTargetState(const torch::Tensor& accept_len, bool defer_verdict = false);
+    absl::Status        settleSpeculativeTargetVerdict();
     void                rollbackSpeculativeTargetStateOrFailStop(const char* phase);
     void                rollbackSpeculativeTargetStateBestEffort(const char* phase) noexcept;
 
@@ -156,10 +161,15 @@ protected:
     // preserves the original PROFILE_SCOPE labels.
     void waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams);
     std::optional<GptModelInputs> launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
-    // post_rejection=true forks with the final post-commit input, which is
-    // safe under speculative target hooks; the default pre-rejection fork
-    // keeps its historical useAsyncPrepare() gate.
-    void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input, bool post_rejection = false);
+    // Device handoff prepares immutable dense geometry before rejection.
+    // The compact host path can only prepare after acceptance is known.
+    // An optional pre-recorded event lets callers launch the background thread
+    // after target verify submission (avoiding CUDA driver lock contention
+    // during target verify cudaGraphLaunch) without waiting for target verify
+    // GPU kernels to complete.
+    void launchDraftPrefillPrepareAsync(const GptModelInputs&         model_input,
+                                        bool                          post_rejection    = false,
+                                        std::shared_ptr<torch::Event> input_ready_event = nullptr);
     GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
                                                          const StreamGroups&   stream_groups) const;
@@ -258,7 +268,17 @@ protected:
                               const torch::Tensor&                         kv_cache_block_id,
                               const torch::Tensor&                         kv_cache_kernel_block_id,
                               const MergedOutput&                          draft_prefill_output,
-                              const GptModelInputs*                        draft_input_template);
+                              const GptModelInputs*                        draft_input_template,
+                              bool                                         peer_cache_table_refresh_needed = false);
+
+    // Proactively grow KV blocks for the next speculative round while the
+    // current round is executing on GPU and prior-round host bookkeeping has
+    // already joined. Returns true if host tables grew and replaced the
+    // physical/kernel CUDA tables used to build the next continuation state.
+    bool proactivelyGrowMtpKvCacheForNextRound(const StreamGroups&             stream_groups,
+                                               const std::vector<std::string>& group_tags,
+                                               torch::Tensor&                  kv_cache_block_id,
+                                               torch::Tensor&                  kv_cache_kernel_block_id);
 
     // Prepare immutable continuation tensors while the current GPU round runs.
     // Peers advance cache tables only after the next root capacity decision.
@@ -398,14 +418,21 @@ private:
 
     // Test seam for the host transaction control transport.
     std::function<bool(bool)> speculative_target_status_reducer_for_test_;
+    std::function<bool(bool)> speculative_target_verdict_status_reducer_for_test_;
     std::function<void()>     before_model_forward_;
     std::function<void()>     after_model_forward_;
-    // Destroy the worker before the model and transaction status transport.
+    // Destroy the workers before the model and transaction status transport.
+    // Declare target_verdict_runner_ BEFORE target_commit_runner_ so C++
+    // reverse-order destruction joins target_commit_runner_ first (preventing
+    // new launches onto a destroyed verdict worker) and then target_verdict_runner_.
+    std::optional<AsyncRunner> target_verdict_runner_;
     std::optional<AsyncRunner> target_commit_runner_;
     // GPU continuation can be queued before the host verdict. The next target
-    // phase and output worker both consume this immutable completion.
+    // phase consumes pending_target_commit_ (fast enqueue + stream event), while
+    // post-verify and output worker consume pending_target_verdict_.
     std::shared_future<absl::Status> pending_target_commit_;
     std::shared_ptr<torch::Event>    pending_target_commit_event_;
+    std::shared_future<absl::Status> pending_target_verdict_;
     // Consumed once at the next decode boundary. A peer's transition is lazy:
     // the root must first confirm its batch/cache snapshot is still reusable.
     std::function<void(GptModelInputs&, bool)> next_decode_inputs_;

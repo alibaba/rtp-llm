@@ -46,6 +46,10 @@ struct MtpDecodeBatchState {
     torch::Tensor        accept_lengths;
     torch::Tensor        accept_tokens;
     std::vector<int64_t> stream_ids;
+    // Set on TP rank 0 when proactive in-round KV growth expanded the device
+    // page tables of this continuation batch so TP peers refresh via async GPU
+    // broadcast on the next round instead of advancing their older tables.
+    bool                 peer_cache_table_refresh_needed = false;
 };
 
 // GenerateStream-owned buffers stay on host by default; KV cache is the device-side exception.
@@ -470,7 +474,20 @@ public:
     size_t reserveStep() const {
         return reserve_step_;
     }
-    StreamState moveToNext();
+    StreamState moveToNext(bool coalesce_mtp_lookahead = false);
+    // moveToNext() runs under mutex_, while the async MTP worker needs the
+    // same mutex to commit accepted tokens/cache swaps. Decide whether a
+    // capacity-boundary join is needed before taking mutex_.
+    bool needsAsyncBookkeepingJoinForKvReservation() const;
+    // Check whether the next speculative round (committed + reserve_step_) will
+    // cross a KV page boundary (before hitting maxTokenNum()). Requires prior
+    // round async bookkeeping to have already completed on host.
+    bool needsProactiveMtpKvGrowth() const;
+    // Proactively grow host KV blocks (up to one page lookahead, clamped by
+    // maxTokenNum() / maxSeqLen()) while the current GPU round is in flight and
+    // prior round host bookkeeping has already joined. Non-fatal on OOM: returns
+    // true only if host KV block allocation succeeded and mutated the table.
+    bool proactiveGrowMtpKvBlock(bool coalesce_one_page = true);
 
     /** Each submitted PP execution holds one inflight reference until result dispatch commits or discards it.
      * The release/acquire pair publishes that update before terminal cleanup can reclaim the stream. */
@@ -1039,10 +1056,6 @@ public:
     }
 
 protected:
-    // moveToNext() runs under mutex_, while the async MTP worker needs the
-    // same mutex to commit accepted tokens/cache swaps.  Decide whether a
-    // capacity-boundary join is needed before taking mutex_.
-    bool needsAsyncBookkeepingJoinForKvReservation() const;
 
     void                               notifyLocalCleanupProgress();
     std::mutex                         cleanup_observers_mutex_;

@@ -36,7 +36,7 @@ CacheBlockLayout cacheBlockLayout(const BatchKVCacheResource& cache) {
 // GenerateStateMachine method implementations
 // ============================================================================
 
-StreamState GenerateStateMachine::moveToNext() {
+StreamState GenerateStateMachine::moveToNext(bool coalesce_mtp_lookahead) {
     // Error 最高优先级，任何状态下直接终止
     if (events_.has(StreamEvents::Error)) {
         status.store(StreamState::FINISHED, std::memory_order_release);
@@ -52,7 +52,7 @@ StreamState GenerateStateMachine::moveToNext() {
             handleLoading();
             break;
         case StreamState::RUNNING:
-            handleRunning();
+            handleRunning(coalesce_mtp_lookahead);
             break;
         case StreamState::FINISHED:
             break;
@@ -164,7 +164,7 @@ void GenerateStateMachine::transitionToRunning() {
     status.store(StreamState::RUNNING, std::memory_order_release);
 }
 
-void GenerateStateMachine::handleRunning() {
+void GenerateStateMachine::handleRunning(bool coalesce_mtp_lookahead) {
     // in pd sep case，kvcache could be released after remote load done.
     if (events_.has(StreamEvents::GenerateDone)) {
         status.store(StreamState::FINISHED, std::memory_order_release);
@@ -184,12 +184,37 @@ void GenerateStateMachine::handleRunning() {
     std::optional<CacheBlockLayout> committed_cache_layout;
     if (stream != nullptr) {
         const bool  pending   = stream->hasPendingAsyncBookkeeping();
-        const auto mtp_state = stream->getMtpAsyncDeviceState();
+        const auto  mtp_state = stream->getMtpAsyncDeviceState();
         const int   reservation_seq_len = pending ? mtp_state.next_seq_len_upper_bound : stream->seqLength();
+        int64_t     coalesced_target_len = -1;
+        if (coalesce_mtp_lookahead && !pending && GenerateStream::hasMtpCacheSnapshot(mtp_state) && mtp_state.batch
+            && reserve_step_ > 1) {
+            const int64_t committed = stream->seqLength();
+            const int64_t block_sz  = static_cast<int64_t>(stream->seqSizePerBlock());
+            const int64_t reserve   = static_cast<int64_t>(reserve_step_);
+            int64_t       max_useful_seq = static_cast<int64_t>(stream->maxSeqLen());
+            if (stream->generateConfig() && stream->generateConfig()->max_new_tokens > 0) {
+                max_useful_seq = std::min<int64_t>(
+                    max_useful_seq,
+                    static_cast<int64_t>(stream->inputLength())
+                        + static_cast<int64_t>(stream->generateConfig()->max_new_tokens));
+            }
+            if (block_sz > reserve) {
+                const int64_t target = std::min<int64_t>(committed + block_sz, max_useful_seq) - reserve;
+                if (target > committed) {
+                    coalesced_target_len = target;
+                }
+            }
+        }
         if (GenerateStream::hasMtpCacheSnapshot(mtp_state) && reservation_seq_len > 0
             && stream_cache_resource_->singleBatchNeedBlocks(reservation_seq_len, static_cast<int>(reserve_step_))
                    == 0) {
-            return;
+            if (coalesced_target_len < 0
+                || stream_cache_resource_->singleBatchNeedBlocks(static_cast<int>(coalesced_target_len),
+                                                                 static_cast<int>(reserve_step_))
+                       == 0) {
+                return;
+            }
         }
 
         // Once bookkeeping catches up, the host table represents the same
@@ -206,8 +231,10 @@ void GenerateStateMachine::handleRunning() {
                 const int64_t committed  = stream->seqLength();
                 const int64_t next_round = std::max<int64_t>(committed, mtp_state.next_seq_len_upper_bound)
                                            + static_cast<int64_t>(reserve_step_);
+                const int64_t desired =
+                    coalesced_target_len > 0 ? std::max(next_round, coalesced_target_len) : next_round;
                 const int64_t lookahead = std::min<int64_t>(
-                    {next_round, committed + stream->seqSizePerBlock(), static_cast<int64_t>(stream->maxSeqLen())});
+                    {desired, committed + stream->seqSizePerBlock(), static_cast<int64_t>(stream->maxSeqLen())});
                 if (lookahead > committed) {
                     allocation_seq_len = static_cast<int>(lookahead);
                 }

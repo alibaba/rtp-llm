@@ -260,6 +260,15 @@ public:
         return false;
     }
 
+    // Stream-ordered predicated target commit with an independent off-path
+    // verdict settlement channel. When true, prepareSpeculativeTargetCommit(
+    // accept_len, /*defer_verdict=*/true) + finish(true) + finalize() enqueue
+    // all GPU work without blocking the CPU, and settleSpeculativeTargetVerdict()
+    // settles the deferred GPU verdict asynchronously.
+    virtual bool supportsAsyncSpeculativeTargetVerdict() const {
+        return false;
+    }
+
     // Optional host consensus, selected collectively at model startup. nullopt
     // means the original device collective. A transport/protocol exception is
     // fail-stop and must propagate; asymmetric fallback is forbidden.
@@ -267,8 +276,18 @@ public:
         return std::nullopt;
     }
 
+    // Dedicated host consensus channel for asynchronous target verdict
+    // settlement so it never interleaves with the main commit status channel.
+    virtual std::optional<bool> reduceSpeculativeTargetVerdictStatus(bool /*local_ok*/) {
+        return std::nullopt;
+    }
+
     virtual std::string prepareSpeculativeTargetCommit(const torch::Tensor& /*accept_len*/) {
         return {};
+    }
+
+    virtual std::string prepareSpeculativeTargetCommit(const torch::Tensor& accept_len, bool /*defer_verdict*/) {
+        return prepareSpeculativeTargetCommit(accept_len);
     }
 
     virtual std::string finishSpeculativeTargetCommit(bool /*commit*/) {
@@ -279,6 +298,11 @@ public:
     // the retained originals/undo log without changing the committed state.
     // A finalize error is fail-stop because rollback is no longer legal.
     virtual std::string finalizeSpeculativeTargetCommit() {
+        return {};
+    }
+
+    // Waits for and validates the oldest deferred speculative target verdict.
+    virtual std::string settleSpeculativeTargetVerdict() {
         return {};
     }
 

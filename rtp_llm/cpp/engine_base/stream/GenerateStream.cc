@@ -1173,7 +1173,7 @@ void GenerateStream::setReserveStep(size_t reserve_step) {
     complete_token_ids_->setReserveStep(static_cast<int>(reserve_step));
 }
 
-StreamState GenerateStream::moveToNext() {
+StreamState GenerateStream::moveToNext(bool coalesce_mtp_lookahead) {
     // Most MTP rounds can execute from the immutable device page-table
     // snapshot while the previous host commit is in flight.  A page-capacity
     // boundary is different: the allocator must append blocks to the mutable
@@ -1200,7 +1200,7 @@ StreamState GenerateStream::moveToNext() {
             && !generate_status_->checkFinished()) {
             return old_status;
         }
-        state                 = generate_status_->moveToNext();
+        state                 = generate_status_->moveToNext(coalesce_mtp_lookahead);
         const auto new_status = getStatus();
         if (old_status == StreamState::LOADING_CACHE && new_status != StreamState::LOADING_CACHE
             && cache_exposed_wait_start_us_ > 0) {
@@ -1319,6 +1319,78 @@ void GenerateStream::clearPPInflight() {
 
 bool GenerateStream::isPPInflight() const {
     return pp_inflight_.load(std::memory_order_acquire) != 0;
+}
+
+bool GenerateStream::needsProactiveMtpKvGrowth() const {
+    if (getStatus() != StreamState::RUNNING || hasPendingAsyncBookkeeping() || isContextStream()
+        || maxBatchSize() != 1 || hasNumBeams() || stream_cache_resource_ == nullptr || reserve_step_ <= 1) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (hasErrorWithoutLock() || generate_status_->checkFinished() || stream_cache_resource_->isResourceReleased()
+        || !stream_cache_resource_->getKVBlockUpdateMapping().empty()) {
+        return false;
+    }
+    const int64_t committed  = static_cast<int64_t>(seqLength());
+    const int64_t reserve    = static_cast<int64_t>(reserve_step_);
+    const int64_t next_round = committed + reserve;
+    const int64_t max_useful = static_cast<int64_t>(maxTokenNum());
+    if (next_round >= max_useful) {
+        return false;
+    }
+    return stream_cache_resource_->singleBatchNeedBlocks(static_cast<int>(next_round), static_cast<int>(reserve)) > 0;
+}
+
+bool GenerateStream::proactiveGrowMtpKvBlock(bool coalesce_one_page) {
+    if (getStatus() != StreamState::RUNNING || hasPendingAsyncBookkeeping() || isContextStream()
+        || maxBatchSize() != 1 || hasNumBeams() || stream_cache_resource_ == nullptr || reserve_step_ <= 1) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (getStatus() != StreamState::RUNNING || hasPendingAsyncBookkeeping() || hasErrorWithoutLock()
+        || generate_status_->checkFinished() || stream_cache_resource_->isResourceReleased()
+        || !stream_cache_resource_->getKVBlockUpdateMapping().empty()) {
+        return false;
+    }
+    const int64_t committed  = static_cast<int64_t>(seqLength());
+    const int64_t reserve    = static_cast<int64_t>(reserve_step_);
+    const int64_t block_sz   = static_cast<int64_t>(seqSizePerBlock());
+    const int64_t next_round = committed + reserve;
+    const int64_t max_useful = static_cast<int64_t>(maxTokenNum());
+    if (block_sz <= 0 || next_round >= max_useful) {
+        return false;
+    }
+    // Keep FULL and LINEAR groups growing together on one boundary, bounded by
+    // one page above committed length (so LINEAR tail retention remains intact)
+    // and clamped so we never allocate an extra page beyond maxTokenNum().
+    const int64_t sync_target = committed + 2 * reserve;
+    const int64_t upper_bound = max_useful > reserve ? (max_useful - reserve) : next_round;
+    const int64_t desired     = coalesce_one_page ?
+                                    std::max(next_round, std::min(committed + block_sz, upper_bound)) :
+                                    std::max(next_round, std::min(sync_target, upper_bound));
+    const int64_t target =
+        std::min<int64_t>({desired, committed + block_sz, static_cast<int64_t>(maxSeqLen())});
+    if (target <= committed) {
+        return false;
+    }
+    const bool need_target =
+        stream_cache_resource_->singleBatchNeedBlocks(static_cast<int>(target), static_cast<int>(reserve)) > 0;
+    if (!need_target) {
+        return false;
+    }
+    auto status = stream_cache_resource_->incrKVBlock(static_cast<int>(target));
+    if (status.ok()) {
+        return true;
+    }
+    // Under memory pressure, fall back to only the strictly required next-round
+    // capacity; if that also fails, leave the stream untouched (non-fatal) so
+    // the scheduler handles OOM/preemption on the next round.
+    if (next_round < target
+        && stream_cache_resource_->singleBatchNeedBlocks(static_cast<int>(next_round), static_cast<int>(reserve)) > 0) {
+        status = stream_cache_resource_->incrKVBlock(static_cast<int>(next_round));
+        return status.ok();
+    }
+    return false;
 }
 
 bool GenerateStream::hasError() const {

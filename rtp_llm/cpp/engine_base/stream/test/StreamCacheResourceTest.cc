@@ -716,6 +716,165 @@ TEST_F(StreamCacheResourceTest, MtpLookaheadDoesNotExtendPastModelContext) {
     EXPECT_EQ(resource.singleBatchNeedBlocks(stream_->maxSeqLen(), 4), 0);
 }
 
+TEST_F(StreamCacheResourceTest, CoalescedMtpLookaheadGrowsOneBlockAndRespectsMaxNewTokens) {
+    auto config = test::makeSimpleHybridMhaCacheConfig(
+        /*layer_num=*/4, /*block_num=*/32, /*tokens_per_block=*/16, DataType::TYPE_FP16);
+    config.linear_step                 = 1;
+    config.enable_linear_cache_reclaim = false;
+    prepareResourceWithCacheConfig(
+        config, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, /*reuse_cache=*/false, RoleType::PDFUSION, {}, 1, 64);
+    auto& resource = stream_->streamCacheResource();
+    stream_->setReserveStep(4);
+    stream_->setIsContextStream(false);
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+    ASSERT_EQ(resource.kvCache().blocks(0, "full1").size(), 1u);
+    ASSERT_EQ(resource.singleBatchNeedBlocks(stream_->seqLength(), 4), 0);
+
+    const auto state = publishMtpCacheSnapshot();
+    // Without coalescing, a mid-page stream keeps its snapshot and does not grow.
+    ASSERT_EQ(stream_->moveToNext(/*coalesce_mtp_lookahead=*/false), StreamState::RUNNING);
+    EXPECT_EQ(resource.kvCache().blocks(0, "full1").size(), 1u);
+    EXPECT_TRUE(stream_->getMtpAsyncDeviceState().next_kv_cache_block_id_gpu.is_same(state.next_kv_cache_block_id_gpu));
+
+    // With coalescing, the stream grows by exactly one lookahead block.
+    ASSERT_EQ(stream_->moveToNext(/*coalesce_mtp_lookahead=*/true), StreamState::RUNNING);
+    EXPECT_EQ(resource.kvCache().blocks(0, "full1").size(), 2u);
+    EXPECT_FALSE(stream_->hasMtpCacheSnapshot());
+    EXPECT_EQ(stream_->getMtpAsyncDeviceState().batch, state.batch);
+
+    // Once one lookahead block is already held, a subsequent coalesced round is a no-op.
+    const auto grown_state = publishMtpCacheSnapshot();
+    ASSERT_EQ(stream_->moveToNext(/*coalesce_mtp_lookahead=*/true), StreamState::RUNNING);
+    EXPECT_EQ(resource.kvCache().blocks(0, "full1").size(), 2u);
+    EXPECT_TRUE(stream_->getMtpAsyncDeviceState().next_kv_cache_block_id_gpu.is_same(
+        grown_state.next_kv_cache_block_id_gpu));
+
+    // When max_new_tokens already fits inside current capacity (10 + 6 == 16), do not allocate extra blocks.
+    prepareResourceWithCacheConfig(
+        config, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, /*reuse_cache=*/false, RoleType::PDFUSION, {}, 1, 6);
+    auto& clamped_resource = stream_->streamCacheResource();
+    stream_->setReserveStep(4);
+    stream_->setIsContextStream(false);
+    ASSERT_TRUE(clamped_resource.initKVBlock().ok());
+    ASSERT_TRUE(clamped_resource.incrKVBlock().ok());
+    ASSERT_EQ(clamped_resource.kvCache().blocks(0, "full1").size(), 1u);
+    const auto clamped_state = publishMtpCacheSnapshot();
+    ASSERT_EQ(stream_->moveToNext(/*coalesce_mtp_lookahead=*/true), StreamState::RUNNING);
+    EXPECT_EQ(clamped_resource.kvCache().blocks(0, "full1").size(), 1u);
+    EXPECT_TRUE(stream_->getMtpAsyncDeviceState().next_kv_cache_block_id_gpu.is_same(
+        clamped_state.next_kv_cache_block_id_gpu));
+}
+
+TEST_F(StreamCacheResourceTest, CoalescedMtpLookaheadShortfallFallsBackWithoutError) {
+    auto config = test::makeSimpleHybridMhaCacheConfig(
+        /*layer_num=*/4, /*block_num=*/32, /*tokens_per_block=*/16, DataType::TYPE_FP16);
+    config.linear_step                 = 1;
+    config.enable_linear_cache_reclaim = false;
+    prepareResourceWithCacheConfig(
+        config, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, /*reuse_cache=*/false, RoleType::PDFUSION, {}, 1, 64);
+    auto& resource = stream_->streamCacheResource();
+    stream_->setReserveStep(4);
+    stream_->setIsContextStream(false);
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+    const auto state = publishMtpCacheSnapshot();
+
+    const auto& tags  = cache_manager_->cacheConfig().groupTags();
+    const auto  index = std::distance(tags.begin(), std::find(tags.begin(), tags.end(), "full1"));
+    ASSERT_LT(index, tags.size());
+    auto pool = cache_manager_->coordinator_manager_->groupBlockPools()[index];
+    auto held = pool->malloc(pool->freeBlocksNum());
+    ASSERT_TRUE(held.has_value());
+    pool->incRef(*held);
+    auto release = std::shared_ptr<void>(nullptr, [pool, blocks = *held](void*) { pool->decRef(blocks); });
+
+    ASSERT_EQ(stream_->moveToNext(/*coalesce_mtp_lookahead=*/true), StreamState::RUNNING);
+    EXPECT_FALSE(stream_->hasError());
+    EXPECT_EQ(resource.kvCache().blocks(0, "full1").size(), 1u);
+    EXPECT_TRUE(stream_->getMtpAsyncDeviceState().next_kv_cache_block_id_gpu.is_same(state.next_kv_cache_block_id_gpu));
+}
+
+TEST_F(StreamCacheResourceTest, ProactiveMtpKvGrowthDetectsNextRoundBoundaryGrowsBothGroupsAndClampsMaxNewTokens) {
+    auto config = test::makeSimpleHybridMhaCacheConfig(
+        /*layer_num=*/4, /*block_num=*/32, /*tokens_per_block=*/16, DataType::TYPE_FP16);
+    config.linear_step                 = 1;
+    config.enable_linear_cache_reclaim = false;
+    prepareResourceWithCacheConfig(
+        config, {1, 2, 3, 4, 5, 6, 7, 8}, /*reuse_cache=*/false, RoleType::PDFUSION, {}, 1, 64);
+    auto& resource = stream_->streamCacheResource();
+    stream_->setReserveStep(4);
+    stream_->setIsContextStream(false);
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+    ASSERT_EQ(resource.kvCache().blocks(0, "full1").size(), 1u);
+    ASSERT_EQ(resource.kvCache().blocks(0, "linear").size(), 4u);
+
+    // Mid-page (seq=8, next_round=12, 12+4=16 <= 16): no proactive growth needed.
+    EXPECT_FALSE(stream_->needsProactiveMtpKvGrowth());
+
+    // Advance to seq=10 (next_round=14, 14+4=18 > 16): next round would cross page boundary.
+    stream_->setSeqLength(10);
+    EXPECT_TRUE(stream_->needsProactiveMtpKvGrowth());
+    EXPECT_TRUE(stream_->proactiveGrowMtpKvBlock(/*coalesce_one_page=*/true));
+    EXPECT_EQ(resource.kvCache().blocks(0, "full1").size(), 2u);
+    EXPECT_EQ(resource.kvCache().blocks(0, "linear").size(), 5u);
+    EXPECT_FALSE(stream_->needsProactiveMtpKvGrowth());
+    EXPECT_FALSE(stream_->hasError());
+
+    // With pending bookkeeping for round t (upper bound = 14), round t+1 scheduler
+    // check must require zero drain.
+    auto state                      = publishMtpCacheSnapshot();
+    state.next_seq_len_upper_bound  = 14;
+    stream_->setMtpAsyncDeviceState(state);
+    stream_->incPendingAsyncBookkeeping();
+    EXPECT_FALSE(stream_->needsAsyncBookkeepingJoinForKvReservation());
+    stream_->decPendingAsyncBookkeepingAndMaybeRelease();
+
+    // Clamping by max_new_tokens: input=10, max_new_tokens=4 => maxTokenNum=14,
+    // so next_round=14 >= max_useful=14 must NOT over-allocate a second page.
+    prepareResourceWithCacheConfig(
+        config, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, /*reuse_cache=*/false, RoleType::PDFUSION, {}, 1, 4);
+    auto& clamped_resource = stream_->streamCacheResource();
+    stream_->setReserveStep(4);
+    stream_->setIsContextStream(false);
+    ASSERT_TRUE(clamped_resource.initKVBlock().ok());
+    ASSERT_TRUE(clamped_resource.incrKVBlock().ok());
+    ASSERT_EQ(clamped_resource.kvCache().blocks(0, "full1").size(), 1u);
+    EXPECT_FALSE(stream_->needsProactiveMtpKvGrowth());
+    EXPECT_FALSE(stream_->proactiveGrowMtpKvBlock(/*coalesce_one_page=*/true));
+    EXPECT_EQ(clamped_resource.kvCache().blocks(0, "full1").size(), 1u);
+}
+
+TEST_F(StreamCacheResourceTest, ProactiveMtpKvGrowthOomIsNonFatalAndLeavesStreamHealthy) {
+    auto config = test::makeSimpleHybridMhaCacheConfig(
+        /*layer_num=*/4, /*block_num=*/32, /*tokens_per_block=*/16, DataType::TYPE_FP16);
+    config.linear_step                 = 1;
+    config.enable_linear_cache_reclaim = false;
+    prepareResourceWithCacheConfig(
+        config, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, /*reuse_cache=*/false, RoleType::PDFUSION, {}, 1, 64);
+    auto& resource = stream_->streamCacheResource();
+    stream_->setReserveStep(4);
+    stream_->setIsContextStream(false);
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+    ASSERT_TRUE(stream_->needsProactiveMtpKvGrowth());
+
+    const auto& tags  = cache_manager_->cacheConfig().groupTags();
+    const auto  index = std::distance(tags.begin(), std::find(tags.begin(), tags.end(), "full1"));
+    ASSERT_LT(index, tags.size());
+    auto pool = cache_manager_->coordinator_manager_->groupBlockPools()[index];
+    auto held = pool->malloc(pool->freeBlocksNum());
+    ASSERT_TRUE(held.has_value());
+    pool->incRef(*held);
+    auto release = std::shared_ptr<void>(nullptr, [pool, blocks = *held](void*) { pool->decRef(blocks); });
+
+    EXPECT_FALSE(stream_->proactiveGrowMtpKvBlock(/*coalesce_one_page=*/true));
+    EXPECT_FALSE(stream_->hasError());
+    EXPECT_EQ(stream_->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(resource.kvCache().blocks(0, "full1").size(), 1u);
+}
+
 TEST_F(StreamCacheResourceTest, CompletedMtpBookkeepingInvalidatesGrownPageTables) {
     prepareLinearHistoryResource(/*enable_reclaim=*/false);
     auto& resource = stream_->streamCacheResource();

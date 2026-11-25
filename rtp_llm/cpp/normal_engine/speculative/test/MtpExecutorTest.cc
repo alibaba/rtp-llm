@@ -485,16 +485,37 @@ public:
         return speculative_target_commit_enabled_;
     }
 
+    bool supportsAsyncSpeculativeTargetVerdict() const override {
+        return async_speculative_target_verdict_enabled_;
+    }
+
     std::string prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) override {
+        return prepareSpeculativeTargetCommit(accept_len, false);
+    }
+
+    std::string prepareSpeculativeTargetCommit(const torch::Tensor& accept_len, bool defer_verdict) override {
         if (!speculative_target_commit_enabled_) {
             return {};
         }
+        last_prepare_defer_verdict_ = defer_verdict;
         recordEvent("prepare_target_commit");
         prepared_accept_len_ = accept_len.cpu().contiguous();
         if (speculative_target_prepare_throws_) {
             throw std::runtime_error("injected prepare exception");
         }
         return speculative_target_prepare_error_;
+    }
+
+    std::string settleSpeculativeTargetVerdict() override {
+        if (!async_speculative_target_verdict_enabled_) {
+            return {};
+        }
+        recordEvent("settle_target_verdict");
+        ++speculative_target_verdict_count_;
+        if (speculative_target_verdict_hook_) {
+            return speculative_target_verdict_hook_();
+        }
+        return {};
     }
 
     std::string finishSpeculativeTargetCommit(bool commit) override {
@@ -531,6 +552,19 @@ public:
     void enableSpeculativeTargetCommit(std::string prepare_error = {}) {
         speculative_target_commit_enabled_ = true;
         speculative_target_prepare_error_  = std::move(prepare_error);
+    }
+
+    void enableAsyncSpeculativeTargetVerdict(std::function<std::string()> verdict_hook = {}) {
+        async_speculative_target_verdict_enabled_ = true;
+        speculative_target_verdict_hook_          = std::move(verdict_hook);
+    }
+
+    bool lastPrepareDeferVerdict() const {
+        return last_prepare_defer_verdict_;
+    }
+
+    size_t speculativeTargetVerdictCount() const {
+        return speculative_target_verdict_count_;
     }
 
     void setSpeculativeTargetPrepareThrows(bool enabled) {
@@ -762,6 +796,10 @@ private:
     size_t                                     forward_count_    = 0;
     std::optional<bool>                        expected_is_target_verify_;
     std::optional<std::string>                 deferred_hidden_state_capture_error_;
+    bool                                       async_speculative_target_verdict_enabled_ = false;
+    bool                                       last_prepare_defer_verdict_               = false;
+    size_t                                     speculative_target_verdict_count_         = 0;
+    std::function<std::string()>               speculative_target_verdict_hook_;
     std::string                                publication_error_;
     std::exception_ptr                         publication_exception_;
     std::function<void()>                      publication_observer_;
@@ -4828,7 +4866,7 @@ TEST_F(MtpExecutorTest, DeferredTargetCommitPropagatesFailureAfterRollingBack) {
     components.executor->target_commit_runner_.emplace(cuda_graph::graphGetStreamFromPool(false));
     auto accept_len = torch::full({1}, 2, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
     std::shared_future<absl::Status> completion;
-    ASSERT_TRUE(components.executor->prepareAndCommitSpeculativeTargetState(accept_len, 1, &completion).ok());
+    ASSERT_TRUE(components.executor->prepareAndCommitSpeculativeTargetState(accept_len, 1, false, &completion).ok());
     ASSERT_TRUE(completion.valid());
 
     components.executor->target_commit_runner_->sync(main_stream);
@@ -4841,6 +4879,54 @@ TEST_F(MtpExecutorTest, DeferredTargetCommitPropagatesFailureAfterRollingBack) {
     EXPECT_EQ(target->speculativeTargetAbortCount(), 1u);
     EXPECT_FALSE(target->speculativeTargetStateCommitted());
     EXPECT_FALSE(target->speculativeTargetUndoRetained());
+}
+
+TEST_F(MtpExecutorTest, AsyncTargetVerdictSeparatesEnqueueFromVerdictAndPropagatesFailure) {
+    for (bool verdict_ok : {true, false}) {
+        auto  components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+        auto* target     = components.fake_target_model.get();
+        target->enableSpeculativeTargetCommit();
+        std::promise<void> release_verdict;
+        auto               verdict_gate = release_verdict.get_future().share();
+        target->enableAsyncSpeculativeTargetVerdict([verdict_gate, verdict_ok]() -> std::string {
+            verdict_gate.wait();
+            return verdict_ok ? std::string{} : std::string("injected async verdict failure");
+        });
+        components.executor->setTargetModel(std::move(components.fake_target_model));
+        components.executor->target_verdict_runner_.emplace(cuda_graph::graphGetStreamFromPool(false));
+        components.executor->target_commit_runner_.emplace(cuda_graph::graphGetStreamFromPool(false));
+
+        auto accept_len = torch::full({1}, 2, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+        std::shared_future<absl::Status> pending_commit;
+        std::shared_future<absl::Status> pending_verdict;
+        ASSERT_TRUE(components.executor
+                        ->prepareAndCommitSpeculativeTargetState(accept_len, 1, false, &pending_commit, &pending_verdict)
+                        .ok());
+        ASSERT_TRUE(pending_commit.valid());
+        ASSERT_TRUE(pending_verdict.valid());
+
+        // Enqueue future completes immediately while the verdict worker is still
+        // blocked on verdict_gate, proving Target Verify launch is unblocked.
+        ASSERT_EQ(pending_commit.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        EXPECT_TRUE(pending_commit.get().ok());
+        EXPECT_TRUE(target->lastPrepareDeferVerdict());
+        EXPECT_EQ(pending_verdict.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+
+        components.executor->pending_target_commit_  = pending_commit;
+        components.executor->pending_target_verdict_ = pending_verdict;
+        EXPECT_TRUE(components.executor->waitPendingTargetCommit().ok());
+        EXPECT_FALSE(components.executor->pending_target_commit_.valid());
+        EXPECT_TRUE(components.executor->pending_target_verdict_.valid());
+
+        release_verdict.set_value();
+        auto verdict_status = components.executor->waitPendingTargetVerdict();
+        EXPECT_FALSE(components.executor->pending_target_verdict_.valid());
+        EXPECT_EQ(verdict_status.ok(), verdict_ok);
+        if (!verdict_ok) {
+            EXPECT_NE(verdict_status.ToString().find("injected async verdict failure"), std::string::npos);
+        }
+        EXPECT_EQ(target->speculativeTargetVerdictCount(), 1u);
+    }
 }
 
 TEST_F(MtpExecutorTest, OutputPublicationWaitsForTargetCommitVerdict) {
@@ -5264,5 +5350,100 @@ TEST_F(MtpExecutorTest, testErroredSpecLogitsStreamDoesNotAbortExecutor) {
     EXPECT_TRUE(status.ok());
     EXPECT_TRUE(stream->hasError());
 }
+
+#if USING_CUDA
+TEST_F(MtpExecutorTest, ProactiveMtpKvGrowthExpandsDeviceTablesIgnoringStaleSnapshots) {
+    auto cache_config = test::makeSimpleHybridMhaCacheConfig(
+        /*layer_num=*/4, /*block_num=*/128, /*tokens_per_block=*/16, DataType::TYPE_FP16);
+    cache_config.linear_step                 = 1;
+    cache_config.enable_linear_cache_reclaim = false;
+    auto draft_config = test::makeSingleLayerCacheConfig(
+        test::makeMhaSpec("full1", 16, DataType::TYPE_FP16, 1, 16), CacheGroupType::FULL, 128);
+    cache_config.mtp_sub_configs.push_back(cache_config.mergeMTPModule(draft_config, 0, cache_config.layer_num));
+    cache_config.finalizeBlockNums(128, RuntimeConfig{});
+
+    MtpExecutorTestConfig test_config;
+    test_config.max_seq_len       = 256;
+    test_config.gen_num_per_cycle = 3;
+    auto  components              = createMtpExecutorComponents(test_config, &cache_config);
+    auto* executor = components.executor.get();
+    components.model_config.max_seq_len                         = 256;
+    components.model_config.attn_config.tokens_per_block        = 16;
+    components.model_config.attn_config.kernel_tokens_per_block = 16;
+    components.resource_context.cache_manager                   = executor->cache_manager_;
+    executor->batch_stream_processor_->device_handoff_ = true;
+    executor->target_commit_runner_.emplace(cuda_graph::graphGetStreamFromPool(false));
+    ASSERT_TRUE(executor->is_linear_attention_model_);
+    ASSERT_TRUE(executor->useDeviceInput());
+
+    auto make_running_stream = [&](const std::vector<int>& tokens) {
+        auto query                             = std::make_shared<GenerateInput>();
+        query->input_ids                       = torch::tensor(tokens, torch::kInt32);
+        query->generate_config                 = std::make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 64;
+        auto stream                            = std::make_shared<NormalGenerateStream>(
+            query, components.model_config, components.runtime_config, components.resource_context, nullptr);
+        stream->setReserveStep(4);
+        stream->setIsContextStream(false);
+        stream->generate_status_->status = StreamState::RUNNING;
+        EXPECT_TRUE(stream->streamCacheResource().initKVBlock().ok());
+        EXPECT_TRUE(stream->streamCacheResource().incrKVBlock().ok());
+        return stream;
+    };
+
+    // s1 (seq=10) crosses page boundary next round (10+4+4 > 16); s2 (seq=6) is mid-page.
+    auto s1 = make_running_stream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10});
+    auto s2 = make_running_stream({1, 2, 3, 4, 5, 6});
+    ASSERT_EQ(s1->streamCacheResource().kvCache().blocks(0, "full1").size(), 1u);
+    ASSERT_EQ(s2->streamCacheResource().kvCache().blocks(0, "full1").size(), 1u);
+
+    // Attach stale prior-round MTP snapshots to verify proactive gather ignores them.
+    const auto cuda_i32   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const auto group_tags = cache_config.groupTags();
+    const auto g          = static_cast<int64_t>(group_tags.size());
+    for (auto& s : {s1, s2}) {
+        GenerateStream::MtpAsyncDeviceState stale;
+        stale.next_kv_cache_block_id_gpu        = torch::full({g, 1, 4}, 999, cuda_i32);
+        stale.next_kv_cache_kernel_block_id_gpu = torch::full({g, 1, 4}, 999, cuda_i32);
+        s->setMtpAsyncDeviceState(stale);
+    }
+
+    StreamGroups  groups({s1, s2});
+    torch::Tensor phys   = torch::zeros({g, 2, 4}, cuda_i32);
+    torch::Tensor kernel = torch::zeros({g, 2, 4}, cuda_i32);
+
+    // Kill-switch disables proactive growth.
+    {
+        setenv("RTP_LLM_DISABLE_PROACTIVE_MTP_KV_GROWTH", "1", 1);
+        auto unset_guard =
+            std::shared_ptr<void>(nullptr, [](void*) { unsetenv("RTP_LLM_DISABLE_PROACTIVE_MTP_KV_GROWTH"); });
+        EXPECT_FALSE(executor->proactivelyGrowMtpKvCacheForNextRound(groups, group_tags, phys, kernel));
+        EXPECT_EQ(s1->streamCacheResource().kvCache().blocks(0, "full1").size(), 1u);
+        EXPECT_EQ(s2->streamCacheResource().kvCache().blocks(0, "full1").size(), 1u);
+    }
+
+    // Enabled: grows BOTH streams coalesced and returns fresh CUDA tables matching host blocks.
+    ASSERT_TRUE(executor->proactivelyGrowMtpKvCacheForNextRound(groups, group_tags, phys, kernel));
+    EXPECT_EQ(s1->streamCacheResource().kvCache().blocks(0, "full1").size(), 2u);
+    EXPECT_EQ(s2->streamCacheResource().kvCache().blocks(0, "full1").size(), 2u);
+    EXPECT_EQ(s1->streamCacheResource().kvCache().blocks(0, "linear").size(), 5u);
+    EXPECT_EQ(s2->streamCacheResource().kvCache().blocks(0, "linear").size(), 5u);
+    ASSERT_TRUE(phys.is_cuda() && kernel.is_cuda());
+    EXPECT_EQ(phys.sizes(), (torch::IntArrayRef{g, 2, 5}));
+    EXPECT_EQ(kernel.sizes(), (torch::IntArrayRef{g, 2, 5}));
+
+    auto       phys_cpu = phys.cpu();
+    const auto full_row =
+        std::distance(group_tags.begin(), std::find(group_tags.begin(), group_tags.end(), "full1"));
+    ASSERT_LT(full_row, static_cast<int64_t>(group_tags.size()));
+    EXPECT_EQ(phys_cpu[full_row][0][0].item<int32_t>(), s1->streamCacheResource().kvCache().blocks(0, "full1")[0]);
+    EXPECT_EQ(phys_cpu[full_row][0][1].item<int32_t>(), s1->streamCacheResource().kvCache().blocks(0, "full1")[1]);
+    EXPECT_EQ(phys_cpu[full_row][1][0].item<int32_t>(), s2->streamCacheResource().kvCache().blocks(0, "full1")[0]);
+    EXPECT_EQ(phys_cpu[full_row][1][1].item<int32_t>(), s2->streamCacheResource().kvCache().blocks(0, "full1")[1]);
+
+    // A second call immediately after growth is a no-op.
+    EXPECT_FALSE(executor->proactivelyGrowMtpKvCacheForNextRound(groups, group_tags, phys, kernel));
+}
+#endif
 
 }  // namespace rtp_llm

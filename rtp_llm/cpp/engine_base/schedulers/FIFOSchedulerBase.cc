@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <unordered_set>
 #include <sstream>
@@ -310,6 +312,28 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
 size_t FIFOSchedulerBase::evaluateAndUpdateStreams(list<GenerateStreamPtr>&                   streams,
                                                    const std::unordered_set<GenerateStream*>* admitted_streams) {
     RTP_LLM_PROFILE_FUNCTION();
+    // When any running MTP stream hits a KV page-capacity boundary, we must
+    // join the shared async bookkeeping worker once anyway. Coalesce one
+    // lookahead block across the batch on that same join so staggered streams
+    // do not trigger back-to-back pipeline drains on consecutive rounds.
+    const char* disable_env = std::getenv("RTP_LLM_DISABLE_COALESCED_MTP_KV_GROWTH");
+    const bool  disable_coalesced_mtp_growth = disable_env != nullptr && std::strcmp(disable_env, "1") == 0;
+    bool coalesce_mtp_lookahead = false;
+    if (!admitted_streams && streams.size() > 1 && !disable_coalesced_mtp_growth) {
+        for (const auto& stream : streams) {
+            if (stream->needsAsyncBookkeepingJoinForKvReservation()) {
+                coalesce_mtp_lookahead = true;
+                break;
+            }
+        }
+        if (coalesce_mtp_lookahead) {
+            for (const auto& stream : streams) {
+                if (stream->getStatus() == StreamState::RUNNING && stream->hasPendingAsyncBookkeeping()) {
+                    stream->waitPendingAsyncBookkeeping();
+                }
+            }
+        }
+    }
     size_t moved_count = 0;
     for (auto it = streams.begin(); it != streams.end();) {
         // Persistent CanRun/LoadInitiated events do not imply admission in this round.
@@ -320,7 +344,7 @@ size_t FIFOSchedulerBase::evaluateAndUpdateStreams(list<GenerateStreamPtr>&     
             continue;
         }
         auto state     = (*it)->getStatus();
-        auto new_state = (*it)->moveToNext();
+        auto new_state = (*it)->moveToNext(coalesce_mtp_lookahead);
         if (new_state != state) {
             if (state == StreamState::LOADING_CACHE && new_state == StreamState::WAITING) {
                 (*it)->clearCanRun();

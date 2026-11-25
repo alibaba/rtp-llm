@@ -25,11 +25,14 @@ bool ordinaryStreamHasBlockTable(const GenerateStreamPtr& stream) {
     return stream->curBlocksNum() > 0;
 }
 
-size_t blockTableWidth(const StreamGroups& stream_groups, const std::vector<std::string>& tags, bool kernel) {
+size_t blockTableWidth(const StreamGroups&             stream_groups,
+                       const std::vector<std::string>& tags,
+                       bool                            kernel,
+                       bool                            ignore_mtp_cache_snapshot = false) {
     size_t width = 0;
     auto   visit = [&](const GenerateStreamPtr& stream, bool decode) {
         const auto state = stream->getMtpAsyncDeviceState();
-        if (decode && GenerateStream::hasMtpCacheSnapshot(state)) {
+        if (!ignore_mtp_cache_snapshot && decode && GenerateStream::hasMtpCacheSnapshot(state)) {
             RTP_LLM_CHECK_WITH_INFO(stream->maxBatchSize() == 1 && !stream->hasNumBeams(),
                                     "MTP cache snapshots require one non-beam sequence per stream");
             const auto& table = kernel ? state.next_kv_cache_kernel_block_id_gpu : state.next_kv_cache_block_id_gpu;
@@ -923,7 +926,8 @@ absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheBlockId(con
                                                                              const std::vector<std::string>& group_tags,
                                                                              TensorHolder&     host_holder,
                                                                              bool              kernel,
-                                                                             torch::DeviceType output_device) const {
+                                                                             torch::DeviceType output_device,
+                                                                             bool ignore_mtp_cache_snapshot) const {
     RTP_LLM_CHECK_WITH_INFO(output_device == torch::kCPU || output_device == torch::kCUDA,
                             "block gather supports CPU or CUDA output");
     RTP_LLM_CHECK_WITH_INFO(group_tags.size() == config_.kv_cache_group_nums
@@ -940,7 +944,7 @@ absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheBlockId(con
             requested_tags.erase(tag) == 1, "block gather tag set differs from configuration: tag=%s", tag.c_str());
     }
     const size_t total_batch_size = stream_groups.totalModelBatchSize();
-    const size_t table_width      = blockTableWidth(stream_groups, group_tags, kernel);
+    const size_t table_width      = blockTableWidth(stream_groups, group_tags, kernel, ignore_mtp_cache_snapshot);
     if (table_width == 0 || total_batch_size == 0) {
         return torch::Tensor{};
     }
@@ -953,11 +957,14 @@ absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheBlockId(con
     int32_t*     dst_base         = host_tensor.data_ptr<int32_t>();
 
     auto fill_one_stream = [&](const GenerateStreamPtr& stream, int& batch_idx, bool decode) {
-        if (output_device == torch::kCPU) {
+        if (ignore_mtp_cache_snapshot) {
+            RTP_LLM_CHECK_WITH_INFO(!stream->hasPendingAsyncBookkeeping(),
+                                    "host block gather ignoring snapshots requires committed host tables");
+        } else if (output_device == torch::kCPU) {
             RTP_LLM_CHECK_WITH_INFO(!stream->hasPendingAsyncBookkeeping() && !stream->hasMtpCacheSnapshot(),
                                     "CPU block gather requires committed host tables without device snapshots");
         }
-        if (decode && stream->hasMtpCacheSnapshot()) {
+        if (!ignore_mtp_cache_snapshot && decode && stream->hasMtpCacheSnapshot()) {
             ++batch_idx;
             return;
         }
@@ -1007,6 +1014,9 @@ absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheBlockId(con
         return host_tensor;
     }
     auto device_tensor = publishInt32ToCuda(host_tensor, host_holder);
+    if (ignore_mtp_cache_snapshot) {
+        return device_tensor;
+    }
     batch_idx          = 0;
     for (const auto& stream : stream_groups.decodeStreams()) {
         const auto state = stream->getMtpAsyncDeviceState();
