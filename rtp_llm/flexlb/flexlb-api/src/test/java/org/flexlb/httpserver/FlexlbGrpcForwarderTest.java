@@ -7,7 +7,9 @@ import com.google.protobuf.DescriptorProtos;
 import com.google.protobuf.Descriptors;
 import com.google.protobuf.DynamicMessage;
 import io.grpc.CallOptions;
+import io.grpc.ClientCall;
 import io.grpc.ManagedChannel;
+import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
@@ -21,18 +23,25 @@ import org.mockito.ArgumentCaptor;
 import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.Field;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -68,10 +77,11 @@ class FlexlbGrpcForwarderTest {
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
 
         FlexlbScheduleProtocol.GetRequestStateResponsePB result =
-                forwarder.forwardGetRequestStateToMaster(
-                        FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                                .setRequestIdStr(String.valueOf(2L))
-                                .build());
+                await(
+                        forwarder.forwardGetRequestStateToMaster(
+                                FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
+                                        .setRequestIdStr(String.valueOf(2L))
+                                        .build()));
 
         assertNull(result);
         verify(consistency).getMasterHostIpPort();
@@ -286,6 +296,95 @@ class FlexlbGrpcForwarderTest {
     }
 
     @Test
+    void stateQueryRejectsAtCapacityAndReusesPermitsAfterCompletionOrStartFailure()
+            throws Exception {
+        EngineHealthReporter reporter = mock(EngineHealthReporter.class);
+        ConfigService config = mock(ConfigService.class);
+        when(config.loadBalanceConfig()).thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
+        var forwarder =
+                new FlexlbGrpcForwarder(
+                        masterAt("10.0.0.2:7001"),
+                        config,
+                        reporter,
+                        mock(EventLoopGroup.class),
+                        Runnable::run);
+        ManagedChannel channel = mock(ManagedChannel.class);
+        channels(forwarder).put("10.0.0.2:7003", channel);
+        List<ClientCall.Listener<FlexlbScheduleProtocol.GetRequestStateResponsePB>> listeners =
+                new ArrayList<>();
+        List<CallOptions> options = new ArrayList<>();
+        var failNextStart = new AtomicBoolean();
+        when(channel.newCall(any(MethodDescriptor.class), any(CallOptions.class)))
+                .thenAnswer(
+                        invocation -> {
+                            if (failNextStart.getAndSet(false)) {
+                                throw Status.UNAVAILABLE.asRuntimeException();
+                            }
+                            options.add(invocation.getArgument(1));
+                            ClientCall<?, ?> call = mock(ClientCall.class);
+                            doAnswer(
+                                            start -> {
+                                                listeners.add(start.getArgument(0));
+                                                return null;
+                                            })
+                                    .when(call)
+                                    .start(any(), any(Metadata.class));
+                            return call;
+                        });
+        var request =
+                FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
+                        .setRequestId(88L)
+                        .build();
+        List<CompletableFuture<FlexlbScheduleProtocol.GetRequestStateResponsePB>> pending =
+                new ArrayList<>();
+        for (int i = 0; i < FlexlbGrpcForwarder.MAX_INFLIGHT_STATE_FORWARDS; i++) {
+            var outcome = forwarder.forwardGetRequestStateToMaster(request).toCompletableFuture();
+            assertFalse(outcome.isDone());
+            pending.add(outcome);
+        }
+
+        var rejected = forwarder.forwardGetRequestStateToMaster(request).toCompletableFuture();
+        assertTrue(rejected.isCompletedExceptionally());
+        assertEquals(
+                Status.Code.RESOURCE_EXHAUSTED,
+                Status.fromThrowable(assertThrows(CompletionException.class, rejected::join))
+                        .getCode());
+        assertEquals(pending.size(), listeners.size());
+        verify(reporter).reportForwardToMasterResult("10.0.0.2", "STATE_QUERY_RESOURCE_EXHAUSTED");
+
+        long timeoutMs = options.getLast().getDeadline().timeRemaining(TimeUnit.MILLISECONDS);
+        assertTrue(timeoutMs > 0 && timeoutMs <= 5_000);
+        listeners.getFirst().onClose(Status.DEADLINE_EXCEEDED, new Metadata());
+        var missing = pending.getFirst();
+        assertTrue(missing.isDone());
+        assertNull(missing.join());
+
+        failNextStart.set(true);
+        assertNull(forwarder.forwardGetRequestStateToMaster(request).toCompletableFuture().join());
+        var replacement = forwarder.forwardGetRequestStateToMaster(request).toCompletableFuture();
+        var found =
+                FlexlbScheduleProtocol.GetRequestStateResponsePB.newBuilder()
+                        .setFound(true)
+                        .build();
+        listeners.getLast().onMessage(found);
+        listeners.getLast().onClose(Status.OK, new Metadata());
+        assertEquals(found, replacement.join());
+
+        var afterSuccess = forwarder.forwardGetRequestStateToMaster(request).toCompletableFuture();
+        assertFalse(afterSuccess.isDone());
+        assertTrue(
+                forwarder
+                        .forwardGetRequestStateToMaster(request)
+                        .toCompletableFuture()
+                        .isCompletedExceptionally());
+        listeners.get(1).onClose(Status.CANCELLED, new Metadata());
+        assertTrue(pending.get(1).isDone());
+        assertNull(pending.get(1).join());
+        assertFalse(
+                forwarder.forwardGetRequestStateToMaster(request).toCompletableFuture().isDone());
+    }
+
+    @Test
     void forwardedStateQueryCannotBeForwardedAgain() throws Exception {
         LBStatusConsistencyService consistency = masterAt("10.0.0.2:7001");
         when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
@@ -293,11 +392,12 @@ class FlexlbGrpcForwarderTest {
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
 
         FlexlbScheduleProtocol.GetRequestStateResponsePB result =
-                forwarder.forwardGetRequestStateToMaster(
-                        FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                                .setRequestIdStr(String.valueOf(8L))
-                                .setForwardHop(1)
-                                .build());
+                await(
+                        forwarder.forwardGetRequestStateToMaster(
+                                FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
+                                        .setRequestIdStr(String.valueOf(8L))
+                                        .setForwardHop(1)
+                                        .build()));
 
         assertNull(result);
         assertTrue(channels(forwarder).isEmpty());
@@ -312,10 +412,11 @@ class FlexlbGrpcForwarderTest {
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
 
         FlexlbScheduleProtocol.GetRequestStateResponsePB result =
-                forwarder.forwardGetRequestStateToMaster(
-                        FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                                .setRequestIdStr(String.valueOf(9L))
-                                .build());
+                await(
+                        forwarder.forwardGetRequestStateToMaster(
+                                FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
+                                        .setRequestIdStr(String.valueOf(9L))
+                                        .build()));
 
         assertNull(result);
         assertTrue(channels(forwarder).isEmpty());
@@ -337,11 +438,12 @@ class FlexlbGrpcForwarderTest {
                                         .setForwardHop(1)
                                         .build()));
         FlexlbScheduleProtocol.GetRequestStateResponsePB stateResult =
-                forwarder.forwardGetRequestStateToMaster(
-                        FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                                .setRequestIdStr(String.valueOf(13L))
-                                .setForwardHop(1)
-                                .build());
+                await(
+                        forwarder.forwardGetRequestStateToMaster(
+                                FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
+                                        .setRequestIdStr(String.valueOf(13L))
+                                        .setForwardHop(1)
+                                        .build()));
 
         assertEquals("FORWARD_HOP_LIMIT", scheduleResult.failure());
         assertNull(stateResult);
@@ -628,8 +730,7 @@ class FlexlbGrpcForwarderTest {
                 .build();
     }
 
-    private static FlexlbGrpcForwarder.MasterForwardResult await(
-            CompletionStage<FlexlbGrpcForwarder.MasterForwardResult> result) {
+    private static <T> T await(CompletionStage<T> result) {
         return result.toCompletableFuture().join();
     }
 
