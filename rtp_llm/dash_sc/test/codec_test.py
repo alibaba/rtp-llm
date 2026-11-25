@@ -942,6 +942,20 @@ class DashScGrpcRequestTest(TestCase):
         op = parse_request_controls(req)
         self.assertEqual(op, DashScRequestControls(return_input_ids=False))
 
+    def test_request_can_disable_pd_separation(self) -> None:
+        req = build_model_infer_request(
+            request_id="local-prefill",
+            model_name="default",
+            input_ids=[100, 101],
+            sampling=SamplingParams(max_new_tokens=1),
+        )
+        req.parameters["can_use_pd_separation"].bool_param = False
+
+        _, sampling, other = parse_dash_sc_grpc_request(req)
+        self.assertIsNotNone(sampling)
+        self.assertIsNotNone(other)
+        self.assertFalse(sampling.to_generate_config(request_controls=other).can_use_pd_separation)
+
     def test_parse_request_controls_bool(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         _add_tensor(req, "return_input_ids", "BOOL", [1], b"\x01")
