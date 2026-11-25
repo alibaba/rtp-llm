@@ -35,6 +35,7 @@ import static org.flexlb.constant.MetricConstant.CACHE_USED_KV_CACHE_TOKENS;
 import static org.flexlb.constant.MetricConstant.ENGINE_FINISHED_TASK_LIST_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_RUNNING_TASK_INFO_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_FAIL;
+import static org.flexlb.constant.MetricConstant.PREFILL_HOTSPOT_DECISION;
 import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_ESTIMATED_TTFT_MS;
 import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_EXECUTION_TIME_MS;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -91,6 +92,18 @@ class EngineHealthReporterSelectionMetricTest {
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register(PREFILL_SELECTED_EXECUTION_TIME_MS,
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+    }
+
+    @Test
+    void registersAndReportsPrefillHotspotDecisionsForTheSourceWorker() {
+        reporter.init();
+        verify(monitor).register(PREFILL_HOTSPOT_DECISION, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+
+        reporter.reportPrefillHotspotDecision("10.0.0.1", "FAILED", "BUDGET_EXHAUSTED");
+
+        verify(monitor).report(PREFILL_HOTSPOT_DECISION, FlexMetricTags.of(
+                "engineIp", "10.0.0.1",
+                "status", "FAILED", "reason", "BUDGET_EXHAUSTED"), 1.0);
     }
 
     @Test

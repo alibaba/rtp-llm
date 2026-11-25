@@ -65,6 +65,7 @@ import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_INFO_STEP_LATENCY
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_NUMBER;
 import static org.flexlb.constant.MetricConstant.FORWARD_TO_MASTER_RESULT;
 import static org.flexlb.constant.MetricConstant.GRPC_SERVER_PROCESS_MS;
+import static org.flexlb.constant.MetricConstant.PREFILL_HOTSPOT_DECISION;
 import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_ESTIMATED_TTFT_MS;
 import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_EXECUTION_TIME_MS;
 import static org.flexlb.constant.MetricConstant.REQUEST_NETWORK_DELAY_MS;
@@ -139,6 +140,7 @@ public class EngineHealthReporter {
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(PREFILL_SELECTED_EXECUTION_TIME_MS,
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(PREFILL_HOTSPOT_DECISION, FlexMetricType.QPS, FlexPriorityType.PRECISE);
 
         this.monitor.register(ZK_MASTER_NODE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ZK_MASTER_EVENT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -451,6 +453,15 @@ public class EngineHealthReporter {
                 "delivery_mode", deliveryMode);
         monitor.report(PREFILL_SELECTED_ESTIMATED_TTFT_MS, tags, estimatedTtftMs);
         monitor.report(PREFILL_SELECTED_EXECUTION_TIME_MS, tags, executionTimeMs);
+    }
+
+    public void reportPrefillHotspotDecision(String sourceIp, String status, String reason) {
+        try {
+            monitor.report(PREFILL_HOTSPOT_DECISION, FlexMetricTags.ofEngine(sourceIp,
+                    "status", status, "reason", reason), 1.0);
+        } catch (RuntimeException failure) {
+            logger.debug("Hotspot decision metric failed for source {} and status {}", sourceIp, status, failure);
+        }
     }
 
     /** Delegate a cache-affinity routing decision to the cache metric reporter. */

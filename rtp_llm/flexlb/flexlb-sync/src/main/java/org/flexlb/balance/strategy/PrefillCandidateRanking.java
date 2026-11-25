@@ -3,6 +3,7 @@ package org.flexlb.balance.strategy;
 import org.flexlb.balance.AdmissionVersion;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.util.Logger;
@@ -11,6 +12,7 @@ import java.util.BitSet;
 import java.util.function.IntPredicate;
 
 import static com.google.common.math.LongMath.saturatedAdd;
+import static org.flexlb.config.RoutingConfig.HotspotTargetPolicy.MIN_PENDING_COMPUTE_WITHIN_ONE_BLOCK;
 
 /** Ranks Prefill workers and proposes a redirect for validation when the target is reserved. */
 final class PrefillCandidateRanking {
@@ -22,13 +24,17 @@ final class PrefillCandidateRanking {
         this.reporter = reporter;
     }
 
-    record Choice(int index, int fallback, boolean cacheFirst, String reason) {
+    record Choice(int index, int fallback, boolean cacheFirst, String reason, int hotspotSource, String noTargetReason) {
         static Choice ordinary(int index, boolean cacheFirst, String reason) {
-            return new Choice(index, index, cacheFirst, reason);
+            return new Choice(index, index, cacheFirst, reason, -1, null);
         }
 
-        Choice redirectTo(int target) {
-            return new Choice(target, index, cacheFirst, "HOTSPOT_RELEASE");
+        Choice redirectTo(int source, int target) {
+            return new Choice(target, index, cacheFirst, "HOTSPOT_RELEASE", source, null);
+        }
+
+        Choice noTarget(int source, String cause) {
+            return new Choice(index, index, cacheFirst, reason, source, cause);
         }
 
         Choice rateLimited() {
@@ -47,12 +53,11 @@ final class PrefillCandidateRanking {
             return Choice.ordinary(-1, false, null);
         }
         var prefill = request.getConfig().getRouter().getRoles().getPrefill();
-        long inputTokens = request.getRequest().getSeqLen();
         var release = prefill.getHotspotRelease();
         boolean direct = request.getConfig().isDirect();
         return prefill.getTokenBalance() == null
-                ? selectByTtft(candidates, role, group, inputTokens, prefill.getCacheAffinity(), release, direct)
-                : selectTokenBalancedCandidate(candidates, role, group, inputTokens, prefill.getTokenBalance(), release, direct);
+                ? selectByTtft(candidates, role, group, request.getRequest(), prefill.getCacheAffinity(), release, direct)
+                : selectTokenBalancedCandidate(candidates, role, group, request.getRequest(), prefill.getTokenBalance(), release, direct);
     }
 
     private static BitSet redirectTargets(PrefillCandidateSet candidates, int source, boolean direct) {
@@ -69,8 +74,9 @@ final class PrefillCandidateRanking {
 
     /** Cache leaders pin hot requests unless a detected hotspot can redirect under the shared limit. */
     private Choice selectTokenBalancedCandidate(PrefillCandidateSet survivors,
-            RoleType roleType, String group, long seqLen,
+            RoleType roleType, String group, Request request,
             RoutingConfig.TokenBalanceConfig tokenBalance, RoutingConfig.HotspotReleaseConfig release, boolean direct) {
+        long seqLen = request.getSeqLen();
         boolean hotspotRelease = release.isEnabled();
         boolean cacheFirst = PrefillTokenBalance.cacheFirst(
                 survivors.maximumCacheHit, seqLen, tokenBalance.getMinPrefixHitPercent());
@@ -94,13 +100,16 @@ final class PrefillCandidateRanking {
         if (!hotspotRelease || !survivors.isHotspot(source)) { return fallback; }
 
         BitSet targets = redirectTargets(survivors, source, direct);
-        if (targets.isEmpty()) { return fallback; }
+        if (targets.isEmpty()) { return fallback.noTarget(source, "NO_ELIGIBLE_TARGET"); }
+        if (release.getTargetPolicy() == MIN_PENDING_COMPUTE_WITHIN_ONE_BLOCK) {
+            return selectWithinOneBlock(survivors, roleType, group, request.getCacheKeyBlockSize(), targets, source, fallback);
+        }
 
         leaders.and(targets);
         int selected = leaders.isEmpty()
                 ? selectByTokenWork(survivors, roleType, group, seqLen, true, targets::get, redirectRotation)
                 : selectTokenLeader(survivors, leaders, roleType, group, redirectRotation);
-        return selected >= 0 ? fallback.redirectTo(selected) : fallback;
+        return selected >= 0 ? fallback.redirectTo(source, selected) : fallback.noTarget(source, "NO_ELIGIBLE_TARGET");
     }
 
     private static int selectTokenLeader(PrefillCandidateSet survivors, BitSet leaders, RoleType role,
@@ -135,10 +144,40 @@ final class PrefillCandidateRanking {
 
     private record TtftChoice(int index, String reason) { }
 
+    private Choice selectWithinOneBlock(PrefillCandidateSet candidates, RoleType role, String group,
+                                       long blockSize, BitSet targets, int source, Choice fallback) {
+        long minimumHit = candidates.maximumCacheHit - Math.max(0L, blockSize);
+        long bestHit = -1L;
+        long leastWork = 0L;
+        for (int i = targets.nextSetBit(0); i >= 0; i = targets.nextSetBit(i + 1)) {
+            long hit = candidates.cacheHit(i);
+            if (hit < minimumHit) { continue; }
+            long work = outstandingTokens(candidates.workload(i));
+            int workOrder = Long.compareUnsigned(work, leastWork);
+            if (bestHit < 0 || workOrder < 0 || workOrder == 0 && hit > bestHit) {
+                leastWork = work;
+                bestHit = hit;
+            }
+        }
+        if (bestHit < 0) { return fallback.noTarget(source, "CACHE_LOSS_LIMIT"); }
+        long hit = bestHit;
+        long work = leastWork;
+        int target = redirectRotation.next(role, group, candidates.size(),
+                i -> targets.get(i) && candidates.cacheHit(i) == hit && outstandingTokens(candidates.workload(i)) == work,
+                candidates::endpointAddress);
+        return fallback.redirectTo(source, target);
+    }
+
+    /** An unsigned long holds the exact sum of two nonnegative long token counts. */
+    private static long outstandingTokens(PrefillTokenWorkload.Snapshot workload) {
+        return workload.pendingTokens() + workload.plannedTokens();
+    }
+
     /** Apply the ordinary ranking first, then release its winner if that endpoint is hot. */
-    private Choice selectByTtft(PrefillCandidateSet survivors, RoleType role, String group, long seqLen,
+    private Choice selectByTtft(PrefillCandidateSet survivors, RoleType role, String group, Request request,
                              RoutingConfig.CacheAffinityConfig affinity, RoutingConfig.HotspotReleaseConfig release,
                              boolean direct) {
+        long seqLen = request.getSeqLen();
         BitSet eligible = new BitSet(survivors.size());
         eligible.set(0, survivors.size());
         TtftChoice choice = rankByTtft(survivors, eligible, role, group, seqLen, affinity,
@@ -147,11 +186,12 @@ final class PrefillCandidateRanking {
         Choice ordinary = Choice.ordinary(selected, "CACHE_LEADER".equals(choice.reason()), choice.reason());
         if (release.isEnabled() && survivors.isHotspot(selected)) {
             BitSet targets = redirectTargets(survivors, selected, direct);
-            if (!targets.isEmpty()) {
-                int alternate = rankByTtft(survivors, targets, role, group, seqLen, affinity,
-                        true, redirectRotation).index();
-                return ordinary.redirectTo(alternate);
+            if (targets.isEmpty()) { return ordinary.noTarget(selected, "NO_ELIGIBLE_TARGET"); }
+            if (release.getTargetPolicy() == MIN_PENDING_COMPUTE_WITHIN_ONE_BLOCK) {
+                return selectWithinOneBlock(survivors, role, group, request.getCacheKeyBlockSize(), targets, selected, ordinary);
             }
+            int alternate = rankByTtft(survivors, targets, role, group, seqLen, affinity, true, redirectRotation).index();
+            return ordinary.redirectTo(selected, alternate);
         }
         return ordinary;
     }

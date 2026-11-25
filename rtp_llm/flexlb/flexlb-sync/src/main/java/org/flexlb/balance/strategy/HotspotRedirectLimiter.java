@@ -33,7 +33,11 @@ public final class HotspotRedirectLimiter {
         baseline.add(now, Math.max(0L, request.getRequest().getSeqLen() - bestHitTokens));
     }
 
-    synchronized Ticket tryAcquire(long extraTokens, int permille) {
+    sealed interface Acquisition permits Ticket, Rejection {}
+
+    enum Rejection implements Acquisition { BUDGET_EXHAUSTED, PACING }
+
+    synchronized Acquisition tryAcquire(long extraTokens, int permille) {
         if (extraTokens == 0) {
             return Ticket.FREE;
         }
@@ -45,11 +49,11 @@ public final class HotspotRedirectLimiter {
         // Divide before multiplying to preserve the exact floor even at large token totals.
         long quota = baseline.total / 1000 * permille + baseline.total % 1000 * permille / 1000;
         if (extraTokens > quota - chargedTokens) {
-            return null;
+            return Rejection.BUDGET_EXHAUSTED;
         }
         if (!charges.isEmpty()) {
             Ticket latest = charges.getLast();
-            if (now - latest.at < latest.gap) { return null; }
+            if (now - latest.at < latest.gap) { return Rejection.PACING; }
         }
         long gap = (long) Math.ceil((double) extraTokens * WINDOW_NANOS / quota);
         Ticket ticket = new Ticket(this, now, extraTokens, gap);
@@ -59,7 +63,7 @@ public final class HotspotRedirectLimiter {
     }
 
     /** A charge counts from acquisition. Abandoning an uncommitted route restores its quota and pacing. */
-    public static final class Ticket implements AutoCloseable {
+    public static final class Ticket implements Acquisition, AutoCloseable {
         private static final Ticket FREE = new Ticket(null, 0L, 0L, 0L);
         private final HotspotRedirectLimiter limiter;
         private final long at;

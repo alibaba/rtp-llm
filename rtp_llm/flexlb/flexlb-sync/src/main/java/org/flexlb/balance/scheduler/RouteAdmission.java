@@ -10,7 +10,7 @@ import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
-import org.flexlb.balance.strategy.HotspotRedirectLimiter;
+import org.flexlb.balance.strategy.HotspotRedirect;
 import org.flexlb.balance.strategy.PrefillTokenWorkload;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.dao.BalanceContext;
@@ -65,7 +65,7 @@ public final class RouteAdmission implements AutoCloseable {
         ServerStatus decodeStatus = null;
         long decodePlacementVersion = 0L;
         PrefillTokenWorkload.Reservation prefillTokenReservation = null;
-        HotspotRedirectLimiter.Ticket redirectTicket = null;
+        HotspotRedirect hotspotRedirect = null;
 
         try {
             for (SelectedRole selected : selectedRoles) {
@@ -94,7 +94,7 @@ public final class RouteAdmission implements AutoCloseable {
                     prefillEndpoint = prefill;
                     prefillPin = pin;
                     prefillTokenReservation = tokenReservation;
-                    redirectTicket = selected.takeRedirectTicket();
+                    hotspotRedirect = selected.takeHotspotRedirect();
                     prefillStatus = status;
                     prefillPlacementVersion = placementVersion;
                     prefillWorkMs = selected.prefillWorkMs();
@@ -139,12 +139,12 @@ public final class RouteAdmission implements AutoCloseable {
                             decodePin,
                             decodePlacementVersion,
                             prefillTokenReservation,
-                            redirectTicket),
+                            hotspotRedirect),
                     decodeRequest.bind(decodeStatus, decodeEndpoint, null));
         } catch (RuntimeException | Error failure) {
             WorkerEndpoint.GenerationPin ownedPrefillPin = prefillPin;
             WorkerEndpoint.GenerationPin ownedDecodePin = decodePin;
-            try (ownedPrefillPin; ownedDecodePin; var tokens = prefillTokenReservation; var redirect = redirectTicket) {
+            try (ownedPrefillPin; ownedDecodePin; var tokens = prefillTokenReservation; var redirect = hotspotRedirect) {
                 throw failure;
             }
         }
@@ -184,19 +184,26 @@ public final class RouteAdmission implements AutoCloseable {
                 yield PlacementResult.success(item);
             }
             case BLOCKED -> {
+                noteHotspotAbandon("PREFILL_ADMISSION_BLOCKED");
                 blockedEndpoint = prefillEndpoint();
                 yield PlacementResult.blocked(PlacementKey.exact(prefillStatus().getRole(),
                         prefillStatus().getGroup(), prefillEndpoint().ipPort()));
             }
-            case CLOSED -> PlacementResult.closed();
+            case CLOSED -> {
+                noteHotspotAbandon("REQUEST_CLOSED");
+                yield PlacementResult.closed();
+            }
             case REJECTED, REPLAN -> throw new IllegalStateException("unexpected route commit result: " + result);
         };
     }
 
     public boolean commitQueuedRequest(RequestRegistry lifecycle, ScheduledRequest item) {
         requireProvisional();
-        if (lifecycle.commitRoute(item, () -> prefillEndpoint().offerPinned(prefillPin(), item))
-                != PlacementResult.Status.SUCCESS) { return false; }
+        var result = lifecycle.commitRoute(item, () -> prefillEndpoint().offerPinned(prefillPin(), item));
+        if (result != PlacementResult.Status.SUCCESS) {
+            noteHotspotAbandon(result == PlacementResult.Status.CLOSED ? "REQUEST_CLOSED" : "PREFILL_ADMISSION_BLOCKED");
+            return false;
+        }
         markCommitted();
         return true;
     }
@@ -219,7 +226,10 @@ public final class RouteAdmission implements AutoCloseable {
         var capacity = decodeBinding.mode() == ScheduledRequest.DecodeMode.IMMEDIATE ? null : decodeBinding.capacity();
         var reservation = decodeEndpoint().reserve(decodePin(), requestId, decodeBinding.hardKvTokens(),
                 decodeBinding.expectedKvTokens(), decodeBinding.priority(), capacity, decodePlacementVersion());
-        if (reservation == null) { return false; }
+        if (reservation == null) {
+            noteHotspotAbandon("DECODE_RESERVATION_FAILED");
+            return false;
+        }
         try {
             decodeBinding = decodeBinding.bind(decodeStatus(), decodeEndpoint(), reservation);
             return true;
@@ -273,7 +283,10 @@ public final class RouteAdmission implements AutoCloseable {
             BalanceContext context, RequestRegistry lifecycle) {
         requireProvisional();
         try (AdmissionHandle handle = lifecycle.claimAdmissionHandle(requestId, context.getFuture())) {
-            if (handle == null) { return PlacementResult.closed(); }
+            if (handle == null) {
+                noteHotspotAbandon("REQUEST_CLOSED");
+                return PlacementResult.closed();
+            }
             if (!reserveDecode()) {
                 if (decodePlacementVersion() != decodeEndpoint().placementVersion()) { return PlacementResult.replan(); }
                 return PlacementResult.blocked(decodePlacementKey());
@@ -282,6 +295,7 @@ public final class RouteAdmission implements AutoCloseable {
             CapacityBoundary.Attempt<PrefillAdmissionResources.Member> attempt =
                     PrefillAdmissionResources.prepareMember(item);
             if (!attempt.accepted()) {
+                noteHotspotAbandon("ADMISSION_PREPARATION_FAILED");
                 return switch (attempt.boundary().status()) {
                     case UNAVAILABLE -> PlacementResult.blocked(decodePlacementKey());
                     case OWNERSHIP_LOST -> PlacementResult.rejected(
@@ -305,18 +319,23 @@ public final class RouteAdmission implements AutoCloseable {
         var reservationAttempt = new PrefillReservationAttempt(item);
         try (PrefillEndpoint.RouteCommitAdmission routeCommit = prefillEndpoint().tryBeginRouteCommitAdmission()) {
             if (routeCommit == null) {
+                noteHotspotAbandon("PREFILL_COMMIT_UNAVAILABLE");
                 return PlacementResult.rejected(Response.error(StrategyErrorType.DISPATCH_FAILED));
             }
             try (var admission = PrefillAdmissionResources.createCommittedOwner(List.of(member))) {
                 PlacementResult.Status result = lifecycle.commitRoute(item, reservationAttempt);
                 if (result != PlacementResult.Status.SUCCESS) {
+                    noteHotspotAbandon(result == PlacementResult.Status.CLOSED ? "REQUEST_CLOSED" : "PREFILL_ADMISSION_BLOCKED");
                     return result == PlacementResult.Status.CLOSED ? PlacementResult.closed()
                             : PlacementResult.rejected(Response.error(reservationAttempt.failure()));
                 }
                 var handoff = routeCommit.commit(List.of(item), List.of(reservationAttempt.reservation()));
                 admission.bindPrefillHandoff(handoff);
                 var claim = lifecycle.claimRouteDelivery(item, admission);
-                if (claim == null) { return PlacementResult.closed(); }
+                if (claim == null) {
+                    noteHotspotAbandon("REQUEST_CLOSED");
+                    return PlacementResult.closed();
+                }
                 markCommitted();
                 return PlacementResult.success(new RouteDelivery(claim, handoff.precedingWork(), selection.prefillWorkMs()));
             }
@@ -361,10 +380,14 @@ public final class RouteAdmission implements AutoCloseable {
         }
     }
 
+    void noteHotspotAbandon(String reason) {
+        if (selection.hotspotRedirect() != null) { selection.hotspotRedirect().onAbandon(reason); }
+    }
+
     private void markCommitted() {
         requireProvisional();
         ownership = Ownership.COMMITTED;
-        if (selection.redirectTicket() != null) { selection.redirectTicket().commit(); }
+        if (selection.hotspotRedirect() != null) { selection.hotspotRedirect().commit(); }
         closePins();
     }
 
@@ -387,12 +410,12 @@ public final class RouteAdmission implements AutoCloseable {
 
     private void closePins() {
         try (var prefill = prefillPin(); var decode = decodePin();
-                var tokens = selection.prefillTokenReservation(); var redirect = selection.redirectTicket()) { }
+                var tokens = selection.prefillTokenReservation(); var redirect = selection.hotspotRedirect()) { }
     }
 
     private record Selection(PrefillEndpoint prefillEndpoint, WorkerEndpoint.GenerationPin prefillPin,
                              ServerStatus prefillStatus, long prefillPlacementVersion, long prefillWorkMs, long residentPrefixTokens,
                              WorkerEndpoint.GenerationPin decodePin, long decodePlacementVersion,
                              PrefillTokenWorkload.Reservation prefillTokenReservation,
-                             HotspotRedirectLimiter.Ticket redirectTicket) { }
+                             HotspotRedirect hotspotRedirect) { }
 }

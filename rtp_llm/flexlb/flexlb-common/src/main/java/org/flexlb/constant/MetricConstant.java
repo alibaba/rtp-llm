@@ -125,6 +125,9 @@ public class MetricConstant {
     public static final String PREFILL_SELECTED_EXECUTION_TIME_MS =
             "app.flexlb.prefill.selected.execution_time_ms";
 
+    /** Prefill hotspot decisions, grouped by source worker, status, and reason. */
+    public static final String PREFILL_HOTSPOT_DECISION = "app.prefill.hotspot.decision.qps";
+
     /**
      * Batch predicted execution time (formula estimate) in milliseconds
      */

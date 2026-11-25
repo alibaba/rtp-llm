@@ -337,6 +337,8 @@ final class FlexlbConfigValidator {
         }
         RoutingConfig.HotspotReleaseConfig hotspotRelease = prefill.getHotspotRelease();
         if (hotspotRelease != null) {
+            require(hotspotRelease.getTargetPolicy() != null,
+                    "router.roles.prefill.hotspotRelease.targetPolicy", "is required");
             require(hotspotRelease.getOutlierFactor() >= 1.0,
                     "router.roles.prefill.hotspotRelease.outlierFactor",
                     "must be at least 1.0");

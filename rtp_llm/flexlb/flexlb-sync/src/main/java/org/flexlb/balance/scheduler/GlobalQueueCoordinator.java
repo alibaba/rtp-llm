@@ -482,6 +482,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                 try {
                     if (!entry.removed && prefixes.awaitBetterPrefix(entry, admission.prefillStatus(),
                             admission.residentPrefixTokens(), System.currentTimeMillis())) {
+                        admission.noteHotspotAbandon("WAIT_FOR_BETTER_PREFIX");
                         return Outcome.DONE;
                     }
                 } finally {

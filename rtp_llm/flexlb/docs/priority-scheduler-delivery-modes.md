@@ -166,6 +166,13 @@ triggered the hotspot. If the selected peer can accept the request within
 the extra compute budget, Master redirects the new placement.
 Requests already in the endpoint's local queue keep their assignment.
 
+With `targetPolicy=MIN_PENDING_COMPUTE_WITHIN_ONE_BLOCK`, Master considers
+only eligible peers within one request cache block of the pool's best effective
+hit. An unknown request block size permits zero loss. Among those peers it
+prefers the least outstanding and provisionally planned compute tokens, then
+the stronger cache match. Omitting the setting keeps the ordinary redirect
+ranking.
+
 All Prefill groups on a Master share a trailing one-second extra compute budget.
 When a request first has ranked candidates, its baseline work is its input length
 minus the best effective cache hit among those candidates. Its baseline enters
@@ -177,9 +184,20 @@ the target's effective hit. The limit is
 The default is 10‰ and the accepted integer range is 0–1000. At 100,000 baseline
 tokens, 10‰ allows 1,000 additional tokens. A grant spending 600 of them spaces
 the next positive-cost grant by at least 600 ms. Equal-cost destinations can
-redirect immediately, including at 0‰. Each positive-cost redirect decision
-consumes budget, even if placement later fails. Replanning can consume a fresh
-grant and never replenishes baseline work.
+redirect immediately, including at 0‰. A provisional grant reserves budget
+and sets the minimum spacing. Abandoning that route releases its grant. A
+committed grant counts until its one-second window expires.
+
+When hotspot release is enabled, `app.prefill.hotspot.decision.qps` attributes
+each placement attempt to its original Prefill worker (`engineIp`).
+`NOT_NEEDED` and `NEEDED` count ranking decisions. Each `NEEDED` attempt
+subsequently reports either `SUCCESS` when Master commits the redirected route
+or `FAILED` with a reason. For example, `NO_ELIGIBLE_TARGET` means no peer
+passed the load and admission filters, `CACHE_LOSS_LIMIT` means every eligible
+peer exceeded the one-block allowance, `BUDGET_EXHAUSTED` means the extra compute exceeded
+the remaining budget, and `PACING` means the budget was sufficient but the
+previous grant's minimum spacing had not elapsed. Replanning starts another
+attempt. An Engine completion is a separate event.
 
 A ranked request waiting on Decode keeps its place on Prefill. When Decode
 capacity returns, Master checks whether a different eligible Prefill has

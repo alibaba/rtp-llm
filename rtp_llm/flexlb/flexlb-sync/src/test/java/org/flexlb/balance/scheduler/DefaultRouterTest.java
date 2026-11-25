@@ -11,7 +11,7 @@ import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
 import org.flexlb.balance.scheduler.ScheduledRequest.DecodeMode;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
-import org.flexlb.balance.strategy.HotspotRedirectLimiter;
+import org.flexlb.balance.strategy.HotspotRedirect;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.ConfigService;
@@ -120,8 +120,8 @@ class DefaultRouterTest {
         context.getConfig().setScheduler(org.flexlb.config.SchedulerConfig.direct());
         SchedulingTestConfig.useNonBatchDispatcher(context.getConfig());
         SelectionFixture prefill = selection(RoleType.PREFILL, 7L, "p", 8001, "g1");
-        var ticket = mock(HotspotRedirectLimiter.Ticket.class);
-        when(prefill.selection().takeRedirectTicket()).thenReturn(ticket);
+        var ticket = mock(HotspotRedirect.class);
+        when(prefill.selection().takeHotspotRedirect()).thenReturn(ticket);
         SelectionFixture decode = selection(RoleType.DECODE, 7L, "d", 8002, "g1");
         PrefillState.RouteReservation registration = mock(PrefillState.RouteReservation.class);
         DecodeEndpoint.ReservationHandle reservation = new DecodeEndpoint.ReservationHandle(1L, 7L, 2L);
@@ -159,8 +159,8 @@ class DefaultRouterTest {
         context.getConfig().setScheduler(org.flexlb.config.SchedulerConfig.direct());
         SchedulingTestConfig.useNonBatchDispatcher(context.getConfig());
         SelectionFixture prefill = selection(RoleType.PREFILL, 8L, "p", 8001, "g1");
-        var ticket = mock(HotspotRedirectLimiter.Ticket.class);
-        when(prefill.selection().takeRedirectTicket()).thenReturn(ticket);
+        var ticket = mock(HotspotRedirect.class);
+        when(prefill.selection().takeHotspotRedirect()).thenReturn(ticket);
         SelectionFixture decode = selection(RoleType.DECODE, 8L, "d", 8002, "g1");
         DecodeEndpoint.ReservationHandle reservation = new DecodeEndpoint.ReservationHandle(1L, 8L, 2L);
         when(prefillSelector.select(context, RoleType.PREFILL, null))
@@ -178,6 +178,7 @@ class DefaultRouterTest {
                 scheduler(router, context).submit(context).join().getCode());
         verify(prefillSelector).select(context, RoleType.PREFILL, null);
         verify(ticket, never()).commit();
+        verify(ticket).onAbandon("PREFILL_ADMISSION_BLOCKED");
         verify(ticket).close();
         verify((DecodeEndpoint) decode.endpoint).release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
         verify(prefill.pin).close();
@@ -301,8 +302,8 @@ class DefaultRouterTest {
         var context = RequestLifecycleTestSupport.context(config, 700L);
         var prefill = selection(RoleType.PREFILL, 700L, "10.0.0.1", 8080, "g1");
         when(prefill.endpoint().ipPort()).thenReturn("10.0.0.1:8080");
-        var ticket = mock(HotspotRedirectLimiter.Ticket.class);
-        when(prefill.selection().takeRedirectTicket()).thenReturn(ticket);
+        var ticket = mock(HotspotRedirect.class);
+        when(prefill.selection().takeHotspotRedirect()).thenReturn(ticket);
         when(((PrefillEndpoint) prefill.endpoint()).offerPinned(eq(prefill.pin()), any())).thenReturn(accepted);
 
         try (var route = RouteAdmission.prepare(context, List.of(prefill.selection()), new Response())) {

@@ -25,14 +25,14 @@ public final class SelectedRole implements AutoCloseable {
     private final long placementVersion;
     private final long residentPrefixTokens;
     private PrefillTokenWorkload.Reservation tokenReservation;
-    private HotspotRedirectLimiter.Ticket redirectTicket;
+    private HotspotRedirect hotspotRedirect;
 
     private SelectedRole(
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus,
             long prefillWorkMs,
             long placementVersion, long residentPrefixTokens,
-            PrefillTokenWorkload.Reservation tokenReservation, HotspotRedirectLimiter.Ticket redirectTicket) {
+            PrefillTokenWorkload.Reservation tokenReservation, HotspotRedirect hotspotRedirect) {
         this.generationPin = generationPin;
         this.serverStatus = serverStatus;
         if (!serverStatus.isSuccess()) {
@@ -70,7 +70,7 @@ public final class SelectedRole implements AutoCloseable {
         this.placementVersion = placementVersion;
         this.residentPrefixTokens = residentPrefixTokens;
         this.tokenReservation = tokenReservation;
-        this.redirectTicket = redirectTicket;
+        this.hotspotRedirect = hotspotRedirect;
     }
 
     public static SelectedRole prefill(
@@ -104,14 +104,14 @@ public final class SelectedRole implements AutoCloseable {
 
     static SelectedRole prefill(WorkerEndpoint.GenerationPin generationPin, ServerStatus serverStatus,
             long prefillWorkMs, long placementVersion, long residentPrefixTokens,
-            PrefillTokenWorkload.Reservation tokenReservation, HotspotRedirectLimiter.Ticket redirectTicket) {
+            PrefillTokenWorkload.Reservation tokenReservation, HotspotRedirect hotspotRedirect) {
         if (prefillWorkMs < 0L) {
-            try (generationPin; tokenReservation; redirectTicket) {
+            try (generationPin; tokenReservation; hotspotRedirect) {
                 throw new IllegalArgumentException("Prefill work must be non-negative");
             }
         }
         return createOwned(generationPin, serverStatus, prefillWorkMs,
-                placementVersion, residentPrefixTokens, tokenReservation, redirectTicket);
+                placementVersion, residentPrefixTokens, tokenReservation, hotspotRedirect);
     }
 
     public static SelectedRole decode(
@@ -147,13 +147,13 @@ public final class SelectedRole implements AutoCloseable {
             ServerStatus serverStatus,
             long prefillWorkMs,
             long placementVersion, long residentPrefixTokens,
-            PrefillTokenWorkload.Reservation tokenReservation, HotspotRedirectLimiter.Ticket redirectTicket) {
+            PrefillTokenWorkload.Reservation tokenReservation, HotspotRedirect hotspotRedirect) {
         try {
             return new SelectedRole(
                     generationPin, serverStatus, prefillWorkMs,
-                    placementVersion, residentPrefixTokens, tokenReservation, redirectTicket);
+                    placementVersion, residentPrefixTokens, tokenReservation, hotspotRedirect);
         } catch (RuntimeException | Error failure) {
-            try (generationPin; tokenReservation; redirectTicket) {
+            try (generationPin; tokenReservation; hotspotRedirect) {
                 throw failure;
             }
         }
@@ -208,9 +208,9 @@ public final class SelectedRole implements AutoCloseable {
     }
 
     /** Transfer the optional hotspot migration charge with the Prefill selection. */
-    public HotspotRedirectLimiter.Ticket takeRedirectTicket() {
-        var owned = redirectTicket;
-        redirectTicket = null;
+    public HotspotRedirect takeHotspotRedirect() {
+        var owned = hotspotRedirect;
+        hotspotRedirect = null;
         return owned;
     }
 
@@ -226,6 +226,6 @@ public final class SelectedRole implements AutoCloseable {
     public void close() {
         WorkerEndpoint.GenerationPin owned = generationPin;
         generationPin = null;
-        try (owned; var tokens = takeTokenReservation(); var redirect = takeRedirectTicket()) { }
+        try (owned; var tokens = takeTokenReservation(); var redirect = takeHotspotRedirect()) { }
     }
 }

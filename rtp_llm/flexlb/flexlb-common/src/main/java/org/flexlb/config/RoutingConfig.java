@@ -55,6 +55,8 @@ public final class RoutingConfig {
     public static final class HotspotReleaseConfig {
         /** Enable redirects from a congested cache leader. */
         private boolean enabled = true;
+        /** Ranking among eligible receivers after a hotspot has been detected. */
+        private HotspotTargetPolicy targetPolicy = HotspotTargetPolicy.ROUTING_STRATEGY;
         /** Fleet-median multiple above which a worker counts as congested; at least 1.0. */
         private double outlierFactor = 1.5;
         /** Time above the pool's congestion threshold before declaring a hotspot. */
@@ -65,6 +67,11 @@ public final class RoutingConfig {
         private long setpointFloor = 10L;
         /** Minimum compute-token threshold, in tokens, independent of the outstanding-request floor. */
         private long computeTokenFloor = 1000L;
+    }
+
+    public enum HotspotTargetPolicy {
+        ROUTING_STRATEGY,
+        MIN_PENDING_COMPUTE_WITHIN_ONE_BLOCK
     }
 
     /** Prefill selection by outstanding uncached tokens with hot/cold cache affinity. */

@@ -100,31 +100,33 @@ public class CostBasedPrefillStrategy {
                 candidates.setHotspots(hotspots.sample(roleType, group, discovery.candidates(), release));
             }
             var choice = ranking.select(candidates, roleType, group, balanceContext);
-            return registerChoice(balanceContext, roleType, group, candidates, choice, discovery.candidates().size());
+            HotspotRedirect redirect = release.isEnabled() ? HotspotRedirect.observe(engineHealthReporter, candidates, choice) : null;
+            return registerChoice(balanceContext, roleType, group, candidates, choice, discovery.candidates().size(), redirect);
         }, attempt -> attempt.status() == PlacementResult.Status.REPLAN);
     }
 
     private PlacementResult<SelectedRole, PlacementKey> registerChoice(
             BalanceContext context, RoleType role, String group, PrefillCandidateSet candidates,
-            PrefillCandidateRanking.Choice choice, int workers) {
+            PrefillCandidateRanking.Choice choice, int workers, HotspotRedirect redirect) {
         long seqLen = context.getRequest().getSeqLen();
         FlexlbConfig config = context.getConfig();
         while (choice.index() >= 0) {
             int index = choice.index();
-            PrefillEndpoint endpoint = candidates.endpoint(index);
-            String address = candidates.endpointAddress(index);
-            String block = candidates.admissionBlock(index);
-            boolean directCapacityFull = block == null && config.isDirect() && !endpoint.canAcceptRequest();
-            WorkerEndpoint.GenerationPin pin = workerDirectory.captureEndpoint(role, address);
-            if (pin == null || pin.endpoint() != endpoint) {
-                if (pin != null) { pin.close(); }
-                return PlacementResult.blocked(new PlacementKey(role, group));
-            }
+            WorkerEndpoint.GenerationPin pin = null;
             PrefillTokenWorkload.Reservation work = null;
-            HotspotRedirectLimiter.Ticket budget = null;
             boolean transferred = false;
             try {
+                PrefillEndpoint endpoint = candidates.endpoint(index);
+                String address = candidates.endpointAddress(index);
+                String block = candidates.admissionBlock(index);
+                boolean directCapacityFull = block == null && config.isDirect() && !endpoint.canAcceptRequest();
+                pin = workerDirectory.captureEndpoint(role, address);
+                if (pin == null || pin.endpoint() != endpoint) {
+                    if (redirect != null) { redirect.onAbandon("TARGET_GENERATION_CHANGED"); }
+                    return PlacementResult.blocked(new PlacementKey(role, group));
+                }
                 if (block != null || directCapacityFull) {
+                    if (redirect != null) { redirect.onAbandon("TARGET_ADMISSION_BLOCKED"); }
                     Response failure = block == null ? admissionFailure(endpoint, context.getPriority())
                             : Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
                     return PlacementResult.blocked(PlacementKey.exact(role,
@@ -139,21 +141,27 @@ public class CostBasedPrefillStrategy {
                 long duration = candidates.prefillMs(index);
                 work = endpoint.tryPlanTokenWork(choice.expectedVersion(candidates),
                         Math.max(0L, seqLen - hit), duration);
-                if (work == null) { return PlacementResult.replan(); }
+                if (work == null) {
+                    if (redirect != null) { redirect.onAbandon("TARGET_VERSION_CHANGED"); }
+                    return PlacementResult.replan();
+                }
                 if (choice.redirect()) {
                     var release = config.getRouter().getRoles().getPrefill().getHotspotRelease();
-                    budget = redirectLimiter.tryAcquire(candidates.maximumCacheHit - hit, release.getMaxExtraComputePermille());
-                    if (budget == null) {
+                    var acquisition = redirectLimiter.tryAcquire(candidates.maximumCacheHit - hit, release.getMaxExtraComputePermille());
+                    if (acquisition instanceof HotspotRedirectLimiter.Rejection denied) {
+                        redirect.onAbandon(denied.name());
                         choice = choice.rateLimited();
                         continue;
                     }
+                    redirect.attach((HotspotRedirectLimiter.Ticket) acquisition);
                 }
 
                 long ttft = candidates.projectedTtftMs(index);
                 var status = prefillStatus(endpoint, role, context.getRequestId(), ttft, hit);
-                transferred = true; // The factory consumes all three resources, including on failure.
-                SelectedRole selected = SelectedRole.prefill(pin, status, duration, candidates.ownershipVersion(index),
-                        candidates.routingCacheMatchTokens(index), work, budget);
+                long version = candidates.ownershipVersion(index);
+                long matchedTokens = candidates.routingCacheMatchTokens(index);
+                transferred = true; // The factory consumes the pin, work and redirect even on failure.
+                SelectedRole selected = SelectedRole.prefill(pin, status, duration, version, matchedTokens, work, redirect);
                 try {
                     ranking.report(candidates, role, group, index, choice.reason());
                     reportSelectedEstimates(role, endpoint, config, ttft, duration);
@@ -166,8 +174,8 @@ public class CostBasedPrefillStrategy {
                 }
             } finally {
                 if (!transferred) {
-                    try (var ownedPin = pin; var ownedWork = work; var ownedBudget = budget) {
-                        // Release this exact attempt before retrying or selecting the fallback.
+                    try (var ownedPin = pin; var ownedWork = work; var ownedRedirect = redirect) {
+                        redirect = null;
                     }
                 }
             }

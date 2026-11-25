@@ -63,6 +63,14 @@ class PrefillTokenBalanceConfigTest {
                 () -> hotspotParse("{\"setpointFloor\":-1}"));
     }
 
+    @Test void hotspotTargetPolicyDefaultsToExistingRoutingAndRejectsInvalidOptions() {
+        assertEquals(RoutingConfig.HotspotTargetPolicy.ROUTING_STRATEGY, hotspotParse("{}").getTargetPolicy());
+        assertEquals(RoutingConfig.HotspotTargetPolicy.MIN_PENDING_COMPUTE_WITHIN_ONE_BLOCK,
+                hotspotParse("{\"targetPolicy\":\"MIN_PENDING_COMPUTE_WITHIN_ONE_BLOCK\"}").getTargetPolicy());
+        assertThrows(ConfigValidationException.class, () -> hotspotParse("{\"targetPolicy\":null}"));
+        assertThrows(ConfigValidationException.class, () -> hotspotParse("{\"targetPolicy\":\"UNKNOWN\"}"));
+    }
+
     /** The pre-1.5-fleet-release boolean switch was replaced by the object form; keep it loud. */
     @Test void removedHotspotReleaseBooleanSwitchIsRejected() {
         assertThrows(ConfigValidationException.class,
