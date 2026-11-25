@@ -1,19 +1,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, List
+from typing import Any
 
-
-def _collect_stop_token_ids(model: Any) -> List[int]:
-    ids: set[int] = set()
-    special_tokens = model.model_config.special_tokens
-    eos_token_id = getattr(special_tokens, "eos_token_id", None)
-    if isinstance(eos_token_id, int):
-        ids.add(eos_token_id)
-    for seq in getattr(special_tokens, "stop_words_id_list", None) or []:
-        if isinstance(seq, (list, tuple)) and len(seq) == 1:
-            ids.add(int(seq[0]))
-    return sorted(ids)
+from rtp_llm.config.grammar_tokenizer_info import grammar_stop_token_ids
+from rtp_llm.config.stop_words import resolve_stop_word_ids
 
 
 def bootstrap_grammar_config(engine_config: Any, model: Any) -> None:
@@ -29,7 +20,18 @@ def bootstrap_grammar_config(engine_config: Any, model: Any) -> None:
             int(model.model_config.vocab_size),
             (max(vocab.values()) + 1) if vocab else 0,
         )
-        stop_token_ids = _collect_stop_token_ids(model)
+        stop_words = resolve_stop_word_ids(
+            model.tokenizer,
+            model.model_config,
+            engine_config.misc_config,
+            model.vit_config,
+        )
+        stop_token_ids = grammar_stop_token_ids(
+            model.tokenizer,
+            model.model_config,
+            stop_words,
+            grammar_config.override_stop_tokens,
+        )
 
         from rtp_llm.ops import build_xgrammar_tokenizer_info_json
 

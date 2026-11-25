@@ -2,6 +2,8 @@ import importlib.util
 import os
 from typing import Any, List, Sequence
 
+from rtp_llm.config.stop_words import checkpoint_eos_ids, primary_eos_id
+
 
 def _make_xgrammar_bindings_findable() -> None:
     # xgrammar loads libxgrammar_bindings.so through tvm_ffi, which locates the
@@ -41,36 +43,44 @@ def build_grammar_tokenizer_info_json(
     return tokenizer_info.serialize_json()
 
 
+def grammar_stop_token_ids(
+    tokenizer: Any,
+    model_config: Any,
+    stop_words: Sequence[Sequence[int]],
+    override_stop_tokens: Sequence[int],
+) -> List[int]:
+    """Use the same terminal tokens for vocabulary compilation and matching."""
+    if override_stop_tokens:
+        return sorted(set(override_stop_tokens))
+
+    hf = tokenizer.get_real_tokenizer()
+    special = set(getattr(hf, "all_special_ids", ()))
+    # Fast tokenizers can have special added tokens outside all_special_ids.
+    added_tokens = getattr(hf, "added_tokens_decoder", {})
+    special.update(i for i, token in added_tokens.items() if token.special)
+    special.update(checkpoint_eos_ids(tokenizer))
+    ids = {seq[0] for seq in stop_words if len(seq) == 1 and seq[0] in special}
+    eos = primary_eos_id(tokenizer, model_config)
+    if eos is not None and eos >= 0:
+        ids.add(eos)
+    return sorted(ids)
+
+
 def build_model_grammar_tokenizer_info_json(
     tokenizer: Any,
     model_config: Any,
+    stop_words: Sequence[Sequence[int]],
+    override_stop_tokens: Sequence[int],
 ) -> str:
-    """Build admission metadata from the tokenizer already loaded by Dash-SC."""
+    """Build admission metadata from the tokenizer already loaded by Dash SC."""
     real_tokenizer = tokenizer.get_real_tokenizer()
     if real_tokenizer is None:
         return ""
 
-    stop_token_ids: List[int] = []
-
-    def add_id(token_id: Any) -> None:
-        if isinstance(token_id, (list, tuple)):
-            token_id = token_id[0] if token_id else None
-        if token_id is None:
-            return
-        token_id = int(token_id)
-        if token_id >= 0 and token_id not in stop_token_ids:
-            stop_token_ids.append(token_id)
-
-    special_tokens = model_config.special_tokens
-    add_id(getattr(tokenizer, "eos_token_id", None))
-    if not stop_token_ids:
-        add_id(special_tokens.eos_token_id)
-    for token_ids in special_tokens.stop_words_id_list:
-        if len(token_ids) == 1:
-            add_id(token_ids[0])
-
     return build_grammar_tokenizer_info_json(
         real_tokenizer,
         model_vocab_size=int(model_config.vocab_size or 0),
-        stop_token_ids=sorted(stop_token_ids),
+        stop_token_ids=grammar_stop_token_ids(
+            tokenizer, model_config, stop_words, override_stop_tokens
+        ),
     )

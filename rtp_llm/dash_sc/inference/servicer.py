@@ -941,7 +941,7 @@ async def iter_real_model_stream_infer(
     ``extra_stop_word_ids`` is the per-startup snapshot of model-specific stop tokens
     (renderer-injected extras + env-supplied) the dash-sc path otherwise misses because
     upstream pre-tokenization bypasses the OpenAI endpoint. Contract: it MUST be
-    pre-deduped (``_derive_stop_word_ids_list`` does this at startup) and is treated
+    pre-deduped (``resolve_stop_word_ids`` does this at startup) and is treated
     as read-only — the hot path shares inner-list references rather than copying.
 
     ``think_runtime`` is the init-time-resolved think/dashllm snapshot

@@ -2894,7 +2894,7 @@ class IterRealModelStreamInferStopWordsTest(unittest.IsolatedAsyncioTestCase):
     async def test_dedup_against_request_stop_words(self) -> None:
         """When the request carries a stop_word that's also in extras, the
         merged list keeps a single entry. (Extras themselves are pre-deduped
-        at startup by ``_derive_stop_word_ids_list``, so the hot path only
+        at startup by ``resolve_stop_word_ids``, so the hot path only
         dedups extras-vs-request, not extras-vs-extras.)"""
         captured: list = []
 
