@@ -476,6 +476,7 @@ class _PinnedSharedTable:
         table_shape: Optional[tuple] = None,
         load_into: Optional[Callable[[mmap.mmap], None]] = None,
         require_existing: bool = False,
+        resident_manager=None,
     ):
         digest = hashlib.sha256(source_identity.encode()).hexdigest()[:24]
         data_path = Path("/dev/shm") / f"rtp_llm_engram_{os.getuid()}_{digest}"
@@ -577,8 +578,8 @@ class _PinnedSharedTable:
                 fcntl.flock(file, fcntl.LOCK_SH)
                 mapping = mmap.mmap(file.fileno(), total_bytes)
                 # mmap retains a duplicate of the locked file description.
-            from rtp_llm.resident_weights import retain_host_file
-            retain_host_file(str(data_path), str(lock_path))
+            if resident_manager is not None:
+                resident_manager.retain_host_file(str(data_path), str(lock_path))
             lease_path.touch(mode=0o600)
             try:
                 os.utime(data_path)  # refresh LRU for the TTL prune

@@ -232,6 +232,7 @@ py_library(
         "quant_methods/w8a8_load_source.py",
         "read_spec.py",
         "resident_checkpoint.py",
+        "modules/fp8_fp4_weight_source.py",
         "registry.py",
         "runtime_weight_update.py",
         "scratch_moe_tp.py",

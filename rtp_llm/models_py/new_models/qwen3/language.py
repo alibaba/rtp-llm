@@ -439,6 +439,33 @@ class Qwen3ForCausalLM(GptModelBase, RtpModule):
     _decoder_layer = Qwen3DecoderLayer
     _dense_config = staticmethod(_extract_config_values)
 
+    # Plain CUDA dense inference reads its final Parameters directly. Record after
+    # head normalization, logit scaling and (if requested) startup LoRA merge.
+    resident_after_post_load = True
+
+    def resident_constructor_state(self):
+        from rtp_llm.models_py.layers.linear import LinearBase
+        from rtp_llm.models_py.quant_methods.unquantized import UnquantizedLinearMethod
+
+        if type(self) is not Qwen3ForCausalLM or any(
+            not isinstance(m.quant_method, UnquantizedLinearMethod)
+            for m in self.modules() if isinstance(m, LinearBase)
+        ):
+            raise ValueError("This resident layout describes only unquantized Qwen3 language-model owners")
+        return {"handlers": self.handler_heads.resident_shapes(),
+                "head_explicit": bool(self.lm_head and self.lm_head._explicit_checkpoint_loaded),
+                "head_tied": bool(self.lm_head and self.lm_head._tied_checkpoint_loaded)}
+
+    def finish_resident_checkpoint_restore(self):
+        from rtp_llm.models_py.resident_checkpoint import restore_final_linears
+
+        self._lm_head_postprocessed = True
+        state = self._native_resident_state
+        if self.lm_head is not None:
+            self.lm_head._explicit_checkpoint_loaded = state["head_explicit"]
+            self.lm_head._tied_checkpoint_loaded = state["head_tied"]
+        restore_final_linears(self)
+
     def _decoder_kwargs(self, parallelism_config):
         return {}
 
@@ -610,8 +637,11 @@ class Qwen3ForCausalLM(GptModelBase, RtpModule):
             py_hw_kernel_config=py_hw_kernel_config,
         )
 
+        self._native_resident_state = getattr(load_config, "resident_construction", None)
         cfg = self._dense_config(model_config, load_config)
         self._init_handler_heads(load_config, cfg)
+        if self._native_resident_state is not None:
+            self.handler_heads.reserve_resident_parameters(self._native_resident_state["handlers"])
         _validate_supported_parallelism(parallelism_config)
         pp_size = int(getattr(parallelism_config, "pp_size", 1))
         is_draft = bool(

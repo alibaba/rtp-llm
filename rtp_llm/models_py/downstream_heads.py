@@ -202,6 +202,20 @@ class ReplicatedHandlerHeads(nn.Module):
         self.params = nn.ParameterDict()
         self.register_buffer("_anchor", torch.empty(0, dtype=dtype), persistent=False)
 
+    def resident_shapes(self):
+        self.validate()
+        return {name: list(self.params[key].shape) for name, (key, _) in self.sources.items()}
+
+    def reserve_resident_parameters(self, shapes):
+        """Register variable-sized handler destinations before resident views are bound."""
+        if set(shapes) != self.sources.keys():
+            raise ValueError("Resident handler roles differ from the model configuration")
+        for name, (key, _) in self.sources.items():
+            self.params[key] = nn.Parameter(
+                torch.empty(shapes[name], device=self._anchor.device, dtype=self.dtypes[name]),
+                requires_grad=False,
+            )
+
     def capture(self, name, value):
         """Return original tensor for optional dispatch into the language owner."""
         key, _ = self.sources[name]

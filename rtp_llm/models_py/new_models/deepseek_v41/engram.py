@@ -227,9 +227,6 @@ class OwnedEngram(Engram, RtpModule):
             return source
 
         group = f"native.engram.{layer_id}"
-        identity = resident_init_scalar(
-            resident_weights, group + ".host", lambda: checkpoint().cache_identity()
-        )
 
         def table_pair():
             return checkpoint().load("embed.weight"), checkpoint().load("embed.scale")
@@ -239,6 +236,9 @@ class OwnedEngram(Engram, RtpModule):
             # Main's flock winner alone reads/stages the host table on a miss.
             # Attaching ranks bind the resulting pages, never allocating or
             # reading their own ~94 GiB copy.
+            identity = resident_init_scalar(
+                resident_weights, group + ".host", lambda: checkpoint().cache_identity()
+            )
             model._pinned = _PinnedSharedTable(
                 None,
                 None,
@@ -252,6 +252,7 @@ class OwnedEngram(Engram, RtpModule):
                 ),
                 table_shape=model.embed.shape,
                 require_existing=resident_weights is not None and source is None,
+                resident_manager=getattr(resident_weights, "manager", None),
             )
             pair = model._pinned.weight, model._pinned.scales.view(torch.float8_e8m0fnu)
         else:

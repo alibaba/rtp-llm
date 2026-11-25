@@ -1,11 +1,64 @@
 """Resident T1 checkpoint for direct parameter owners. No checkpoint-name translation."""
 
 import json
+from pathlib import Path
+from types import SimpleNamespace
 from dataclasses import dataclass, field
 
 import torch
 
 from rtp_llm.resident_weights import GLOBAL_SCOPE, WeightDict
+
+
+class _HeaderEntries:
+    def __init__(self, facts, source):
+        self.facts = facts
+        self.source = source
+
+    def __contains__(self, name):
+        if self.source is not None:
+            self.facts[name] = name in self.source
+        return self.facts[name]
+
+    def __getitem__(self, name):
+        if name not in self:
+            raise KeyError(name)
+        # Opaque arguments for _shape; no paths or file handles cross processes.
+        return name, None
+
+
+class ResidentFTHeader:
+    """Replay only the format facts the model constructor actually consulted.
+
+    No tensor-reading API. File selection and real FT import still use FTCheckpoint.
+    """
+    def __init__(self, root, facts, source=None):
+        self.root = Path(root)
+        self.facts = facts
+        self.source = source
+        self.entries = _HeaderEntries(facts["entries"], None if source is None else source.entries)
+        self.index_metadata = facts["metadata"]
+        self.topology = SimpleNamespace(**facts["topology"])
+
+    @classmethod
+    def recording(cls, source):
+        return cls(source.root, {
+            "entries": {}, "shapes": {}, "peer_shapes": {},
+            "topology": vars(source.topology),
+            "metadata": {"ft_export_backend": source.index_metadata.get("ft_export_backend")},
+        }, source)
+
+    def _shape(self, name, unused):
+        shapes = self.facts["shapes"]
+        if self.source is not None:
+            shapes[name] = list(self.source._shape(*self.source.entries[name]))
+        return tuple(shapes[name])
+
+    def read_rank_slice(self, name, tp_rank):
+        shapes = self.facts["peer_shapes"].setdefault(str(tp_rank), {})
+        if self.source is not None:
+            shapes[name] = list(self.source.read_rank_slice(name, tp_rank))
+        return tuple(shapes[name])
 
 
 @dataclass
@@ -55,6 +108,17 @@ class _OwnerSlots(WeightDict):
         if self.destinations is not None:
             self.destinations[name].data = value
         super().__setitem__(name, value)
+
+
+def restore_final_linears(model):
+    """A final dense snapshot already includes post-processing and startup adapters."""
+    from rtp_llm.models_py.layers.linear import LinearBase
+
+    for leaf in model.modules():
+        if isinstance(leaf, LinearBase):
+            leaf._loaded_parameter_names = set(getattr(leaf, "_rtp_loaded_weight_names", ()))
+            leaf._main_weight_loaded = "weight" in leaf._loaded_parameter_names
+            leaf._post_load_done = True
 
 
 def _loaded_fields(model):

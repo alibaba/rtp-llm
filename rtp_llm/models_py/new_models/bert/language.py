@@ -123,6 +123,21 @@ class BertEncoderOwner(GptModelBase, RtpModule):
             raise ValueError("BERT FT embedding disagrees with explicit input_vocab_size")
         return cls(config, load, ft_input_rows=rows)
 
+    resident_after_post_load = True
+
+    def resident_constructor_state(self):
+        return {
+            "input_rows": self.checkpoint_input_vocab_size,
+            "input_major": self._checkpoint_input_major,
+            "has_pooler": self.pooler is not None and self.pooler.weight is not None,
+            "handlers": self.handler_heads.resident_shapes(),
+        }
+
+    def finish_resident_checkpoint_restore(self):
+        from rtp_llm.models_py.resident_checkpoint import restore_final_linears
+
+        restore_final_linears(self)
+
     def __init__(self, config, load, *, ft_input_rows=None):
         super().__init__(
             config,
@@ -152,7 +167,10 @@ class BertEncoderOwner(GptModelBase, RtpModule):
         self.first = 0 in owned
         self.last = config.num_layers - 1 in owned
         self.owned = frozenset(owned)
-        self.checkpoint_input_vocab_size = ft_input_rows or checkpoint_input_vocab_size(
+        resident = getattr(load, "resident_construction", None)
+        if resident is not None and ft_input_rows is not None and ft_input_rows != resident["input_rows"]:
+            raise ValueError("Resident BERT input vocabulary disagrees with FT header")
+        self.checkpoint_input_vocab_size = (resident["input_rows"] if resident is not None else ft_input_rows) or checkpoint_input_vocab_size(
             config, self.checkpoint_prefix, tp_rank=load.tp_rank, tp_size=load.tp_size
         )
         self.embeddings = (
@@ -170,7 +188,7 @@ class BertEncoderOwner(GptModelBase, RtpModule):
             else None
         )
         self.encoder = nn.Module()
-        input_major = (
+        input_major = resident["input_major"] if resident is not None else (
             static_int8
             and ft_input_rows is None
             and static_int8_input_major(
@@ -181,6 +199,7 @@ class BertEncoderOwner(GptModelBase, RtpModule):
                 tp_size=load.tp_size,
             )
         )
+        self._checkpoint_input_major = input_major
         self.encoder.layer = nn.ModuleDict(
             {str(i): BertLayer(config, load, i, input_major=input_major) for i in owned}
         )
@@ -217,6 +236,17 @@ class BertEncoderOwner(GptModelBase, RtpModule):
             if mappings
             else ReplicatedHandlerHeads(*args)
         )
+
+        if resident is not None:
+            self.handler_heads.reserve_resident_parameters(resident["handlers"])
+            if resident["has_pooler"]:
+                if self.pooler is None:
+                    raise ValueError("Resident pooler belongs to another PP stage")
+                width = self.pooler.width
+                for name, shape in (("weight", (width, width)), ("bias", (width,))):
+                    self.pooler.register_parameter(
+                        name, nn.Parameter(self.pooler._anchor.new_empty(shape), requires_grad=False)
+                    )
 
     def finalize_runtime_input_vocab(self, config, tokenizer):
         publish_input_vocab(config, tokenizer, self.checkpoint_input_vocab_size)
