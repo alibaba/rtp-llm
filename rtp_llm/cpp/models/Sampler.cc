@@ -84,6 +84,73 @@ void Sampler::markGreedySamplingBufferReady() {
         }
     }
 }
+SamplerOutput Sampler::prepareDeferredVerification(const SamplerInputs& inputs) {
+    RTP_LLM_PROFILE_SCOPE("sampler.prepare_deferred_verification");
+    const auto rows = static_cast<int64_t>(inputs.batch_size);
+    TORCH_CHECK(inputs.rejection_rows > 0 && rows > 0 && rows % inputs.rejection_rows == 0,
+                "fixed-length verification requires one complete block of target rows per request");
+    const int64_t batch = rows / inputs.rejection_rows;
+    TORCH_CHECK(inputs.rejection_generators.empty() || inputs.rejection_generators.size() == batch,
+                "expected one rejection generator per request");
+
+    // do_sample=false and explicit top_k=1 both mean greedy, including in mixed batches.
+    auto        mask        = torch::empty({batch}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
+    const auto* sample      = inputs.do_sample.defined() ? inputs.do_sample.data_ptr<bool>() : nullptr;
+    const auto* top_k       = inputs.top_k.data_ptr<int32_t>();
+    auto*       output_mask = mask.data_ptr<bool>();
+    for (int64_t b = 0; b < batch; ++b) {
+        const auto row = b * inputs.rejection_rows;
+        output_mask[b] = (!sample || sample[row]) && top_k[row] != 1;
+    }
+
+    SamplerOutput output;
+    output.verify_do_sample = mask.to(inputs.logits.device(), /*non_blocking=*/true);
+    output.success          = torch::ones({rows}, inputs.logits.options().dtype(torch::kBool));
+    output.token_ids        = inputs.token_ids;
+    output.cum_log_probs    = inputs.cum_log_probs;
+
+    GreedyParams params{};
+    params.logits           = inputs.logits;
+    params.input_lengths    = inputs.input_lengths;
+    params.sequence_lengths = inputs.sequence_lengths;
+    params.token_ids        = inputs.token_ids;
+    params.step             = inputs.step;
+    params.top_k            = inputs.top_k;
+    params.top_p            = inputs.top_p;
+    params.temperature      = inputs.temperature;
+    if (inputs.do_sample.defined()) {
+        params.do_sample = inputs.do_sample;
+    }
+    if (inputs.repetition_penalty.defined()) {
+        params.repetition_penalty = inputs.repetition_penalty;
+    }
+    if (inputs.presence_penalty.defined()) {
+        params.presence_penalty = inputs.presence_penalty;
+    }
+    if (inputs.frequency_penalty.defined()) {
+        params.frequency_penalty = inputs.frequency_penalty;
+    }
+    if (inputs.no_repeat_ngram_size.defined()) {
+        params.no_repeat_ngram_size = inputs.no_repeat_ngram_size;
+    }
+    params.defer_token_sampling          = true;
+    params.deferred_rejection_generators = inputs.rejection_generators;
+    params.deferred_rejection_rows       = inputs.rejection_generators.empty() ? 0 : inputs.rejection_rows;
+    params.buffer_holder                 = &deferred_buffers_;
+
+    auto filtered = execSampleGreedy(params);
+    TORCH_CHECK(filtered.deferred_token_sampling, "target preparation must return deferred verification inputs");
+    output.deferred_token_sampling = true;
+    output.verify_logits           = filtered.deferred_logits.defined() ? filtered.deferred_logits : inputs.logits;
+    output.verify_candidate_ids    = std::move(filtered.deferred_token_ids);
+    output.verify_dense_fallback   = std::move(filtered.deferred_dense_fallback);
+    output.verify_fallback_rows    = std::move(filtered.deferred_fallback_rows);
+    output.prepared_rejection_rng  = std::move(filtered.prepared_rejection_rng);
+    output.verify_log_normalizer   = std::move(filtered.deferred_log_normalizer);
+    deferred_buffers_.release();
+    return output;
+}
+
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_PROFILE_SCOPE("sampler.forward");
@@ -107,6 +174,13 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     };
 
     auto processor_errors = preprocessLogits(inputs);
+    if (inputs.defer_token_sampling) {
+        auto output                     = prepareDeferredVerification(inputs);
+        output.processor_errors         = std::move(processor_errors);
+        output.raw_logprobs_logits      = inputs.raw_logprobs_logits;
+        output.raw_logprobs_row_indices = inputs.raw_logprobs_row_indices;
+        return output;
+    }
 
     uint64_t max_seq_len   = inputs.token_ids.size(1);
     auto     num_beams_in  = inputs.num_beams_in.data_ptr<int64_t>();

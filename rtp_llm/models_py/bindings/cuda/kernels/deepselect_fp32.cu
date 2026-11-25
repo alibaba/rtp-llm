@@ -1,0 +1,223 @@
+#include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_fp32.h"
+#include <cstdint>
+#include <cmath>
+#include <limits>
+
+#if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
+#include <cub/block/block_radix_sort.cuh>
+#include <cub/block/block_reduce.cuh>
+#include <cub/block/block_scan.cuh>
+#include <cuda/functional>
+
+// CUTLASS 4.0 does not recognize SM103a's supported TMA instructions.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1030 && defined(__CUDA_ARCH_FEAT_SM103_ALL)
+#ifndef CUTE_ARCH_TMA_SM90_ENABLED
+#define CUTE_ARCH_TMA_SM90_ENABLED
+#endif
+#endif
+#include "rtp_llm/models_py/bindings/cuda/kernels/deepselect/cuda_kernels/v3_fp32/topk_select.cuh"
+#endif
+
+namespace torch_ext {
+#if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
+namespace {
+// Match the standalone temperature kernel's round-to-nearest and FTZ flags,
+// independently of DeepSelect's fast-math/ftz=false compilation settings.
+__device__ __forceinline__ float compactTemperatureScale(float temperature) {
+    float denominator, scale;
+    asm("add.rn.ftz.f32 %0, %1, %2;" : "=f"(denominator) : "f"(temperature), "f"(1e-6f));
+    asm("div.rn.ftz.f32 %0, %1, %2;" : "=f"(scale) : "f"(1.0f), "f"(denominator));
+    return scale;
+}
+
+__device__ __forceinline__ float compactApplyTemperature(float value, float scale) {
+    float result;
+    asm("mul.rn.ftz.f32 %0, %1, %2;" : "=f"(result) : "f"(value), "f"(scale));
+    return result;
+}
+
+__global__ void compactTopKTopP(float*   dense,
+                                float*   candidates,
+                                int32_t* ids,
+                                int32_t* fallback,
+                                float*   log_normalizer,
+                                int      vocab,
+                                int      request_top_k,
+                                float    top_p,
+                                float    temperature) {
+    const bool    scale_temperature = temperature != 1.0f;
+    const float   temperature_scale = scale_temperature ? compactTemperatureScale(temperature) : 1.0f;
+    constexpr int threads           = 256;
+    constexpr int items             = 4;
+    using Sort                      = cub::BlockRadixSort<float, threads, items, int32_t>;
+    using Reduce                    = cub::BlockReduce<float, threads>;
+    using Scan                      = cub::BlockScan<float, threads>;
+    __shared__ union {
+        Sort::TempStorage   sort;
+        Reduce::TempStorage reduce;
+        Scan::TempStorage   scan;
+    } temporary;
+    __shared__ float maximum, total, cutoff;
+    __shared__ int   overflow;
+    const int        row = blockIdx.x;
+    float            values[items];
+    int32_t          keys[items];
+#pragma unroll
+    for (int i = 0; i < items; ++i) {
+        const int   slot = threadIdx.x * items + i;
+        const float raw  = candidates[row * 1024 + slot];
+        values[i]        = scale_temperature ? compactApplyTemperature(raw, temperature_scale) : raw;
+        keys[i]          = ids[row * 1024 + slot];
+    }
+    Sort(temporary.sort).SortDescending(values, keys);
+    __syncthreads();
+    if (threadIdx.x == 0)
+        maximum = values[0];
+    if (threadIdx.x == (request_top_k - 1) / items)
+        cutoff = values[(request_top_k - 1) % items];
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        // Strict TopK: candidate slots beyond the request limit stay excluded, even on ties.
+        overflow      = !isfinite(maximum);
+        fallback[row] = overflow;
+    }
+    __syncthreads();
+    float probabilities[items];
+    if (top_p < 1.0f || log_normalizer) {
+#pragma unroll
+        for (int i = 0; i < items; ++i) {
+            const int slot   = threadIdx.x * items + i;
+            probabilities[i] = slot < request_top_k ? expf(values[i] - maximum) : 0.0f;
+        }
+    }
+    if (top_p < 1.0f) {
+        float subtotal = 0;
+#pragma unroll
+        for (int i = 0; i < items; ++i)
+            subtotal += probabilities[i];
+        const float sum = Reduce(temporary.reduce).Sum(subtotal);
+        if (threadIdx.x == 0)
+            total = sum;
+        __syncthreads();
+        float prefix[items];
+        Scan(temporary.scan).InclusiveSum(probabilities, prefix);
+        __syncthreads();
+        float first = 1024;
+#pragma unroll
+        for (int i = 0; i < items; ++i)
+            if (threadIdx.x * items + i < request_top_k && prefix[i] >= top_p * total)
+                first = fminf(first, static_cast<float>(threadIdx.x * items + i));
+        const float first_global = Reduce(temporary.reduce).Reduce(first, cuda::minimum<float>());
+        if (threadIdx.x == 0)
+            total = first_global;
+        __syncthreads();
+        const int index = static_cast<int>(total);
+        if (index < 1024 && threadIdx.x == index / items)
+            cutoff = values[index % items];
+        __syncthreads();
+    }
+#pragma unroll
+    for (int i = 0; i < items; ++i) {
+        const int slot = threadIdx.x * items + i;
+        candidates[row * 1024 + slot] = slot < request_top_k && values[i] >= cutoff ? values[i] : -INFINITY;
+        ids[row * 1024 + slot]        = keys[i];
+    }
+    if (log_normalizer) {
+        float retained = 0.0f;
+#pragma unroll
+        for (int i = 0; i < items; ++i)
+            retained += threadIdx.x * items + i < request_top_k && values[i] >= cutoff ? probabilities[i] : 0.0f;
+        const float mass = Reduce(temporary.reduce).Sum(retained);
+        if (threadIdx.x == 0)
+            log_normalizer[row] = overflow ? nanf("") : maximum + logf(mass);
+    }
+    if (overflow) {
+        for (int token = threadIdx.x; token < vocab; token += threads) {
+            dense[static_cast<int64_t>(row) * vocab + token] = nanf("");
+        }
+    }
+}
+
+bool supportsDeferredTopK1024(const torch::Tensor& logits, float top_p) {
+    if (!logits.is_cuda() || logits.scalar_type() != torch::kFloat32 || logits.dim() != 2 || !logits.is_contiguous()
+        || logits.size(0) > 65535 || logits.size(1) <= 1024 || logits.size(1) >= MAX_VOCAB_SIZE
+        || logits.stride(0) % 256 != 0 || reinterpret_cast<uintptr_t>(logits.data_ptr()) % 16 != 0
+        || !(top_p > 0.0f && top_p <= 1.0f))
+        return false;
+    const auto* properties = at::cuda::getDeviceProperties(logits.get_device());
+    return properties->major == 10 && (properties->minor == 0 || properties->minor == 3);
+}
+
+std::tuple<torch::Tensor, torch::Tensor> selectTopK1024(const torch::Tensor& logits, cudaStream_t stream) {
+    auto values  = torch::empty({logits.size(0), 1024}, logits.options());
+    auto indices = torch::empty({logits.size(0), 1024}, logits.options().dtype(torch::kInt32));
+    if (logits.size(0)) {
+        TopkSelectArgs args{};
+        args.batch_size                = static_cast<uint32_t>(logits.size(0));
+        args.vocab_size                = static_cast<uint32_t>(logits.size(1));
+        args.topk                      = 1024;
+        args.input                     = logits.data_ptr();
+        args.output_index              = indices.data_ptr();
+        args.output_value              = values.data_ptr();
+        args.return_value              = true;
+        args.stride_input_batch        = logits.stride(0);
+        args.stride_output_index_batch = indices.stride(0);
+        args.stride_output_value_batch = values.stride(0);
+        args.idx_oob_fill_value        = -1;
+        args.value_oob_fill_value      = -std::numeric_limits<float>::infinity();
+        args.shared_memory_size_per_sm = at::cuda::getDeviceProperties(logits.get_device())->sharedMemPerBlockOptin;
+        args.stream                    = stream;
+        using Config = TopkSelectConfig<float, int32_t, false, false, true, 1024, 512, 1, 8192, 4096, 3>;
+        topk_select_fp32::run_topk_select_kernel<Config>(args);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
+    return {values, indices};
+}
+}  // namespace
+#endif
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
+deferred_compact_topk_topp(const torch::Tensor& logits,
+                           int64_t              request_top_k,
+                           float                top_p,
+                           float                temperature,
+                           torch::Tensor*       log_normalizer) {
+#if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
+    if (request_top_k < 2 || request_top_k > 1024 || !std::isfinite(temperature) || temperature <= 0.0f
+        || !supportsDeferredTopK1024(logits, top_p))
+        return {};
+    const c10::cuda::CUDAGuard guard(logits.device());
+    const auto                 stream = at::cuda::getCurrentCUDAStream(logits.get_device());
+    if (temperature != 1.0f || request_top_k != 1024) {
+        // Captured scalars would freeze temperature or the request's Top-K on replay.
+        cudaStreamCaptureStatus capture_status;
+        C10_CUDA_CHECK(cudaStreamIsCapturing(stream.stream(), &capture_status));
+        if (capture_status != cudaStreamCaptureStatusNone)
+            return {};
+    }
+    auto [candidates, ids] = selectTopK1024(logits, stream);
+    auto fallback          = torch::empty({logits.size(0)}, logits.options().dtype(torch::kInt32));
+    if (log_normalizer)
+        *log_normalizer = torch::empty({logits.size(0)}, logits.options());
+    if (logits.size(0)) {
+        compactTopKTopP<<<logits.size(0), 256, 0, stream>>>(logits.data_ptr<float>(),
+                                                            candidates.data_ptr<float>(),
+                                                            ids.data_ptr<int32_t>(),
+                                                            fallback.data_ptr<int32_t>(),
+                                                            log_normalizer ? log_normalizer->data_ptr<float>() :
+                                                                             nullptr,
+                                                            logits.size(1),
+                                                            static_cast<int>(request_top_k),
+                                                            top_p,
+                                                            temperature);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
+    return {candidates, ids, fallback};
+#else
+    return {};
+#endif
+}
+}  // namespace torch_ext

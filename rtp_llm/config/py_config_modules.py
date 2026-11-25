@@ -72,6 +72,8 @@ class ServerConfig:
         self.pre_stop_drain_headroom_seconds: float = -1.0
         self.pre_stop_drain_signal: bool = True
         self.backend_post_frontend_drain_seconds: float = -1.0
+        self.gumbel_rejection_graph: bool = True
+        self.fuse_draft_probs_log: bool = True
         self.enable_torch_allocator_dump: bool = False
         self.torch_allocator_dump_auth_token: str = ""
         self.torch_allocator_dump_auth_header: str = "X-RTP-LLM-Allocator-Dump-Token"

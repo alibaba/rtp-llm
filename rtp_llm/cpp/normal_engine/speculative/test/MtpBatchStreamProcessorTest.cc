@@ -361,6 +361,59 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
     }
 }
 
+TEST_F(MtpBatchStreamProcessorTest, Glm5FixedVerifyPreservesRequestFiltersAndExplicitOutputFallback) {
+    ModelConfig model;
+    model.model_type  = "glm_5";
+    model.max_seq_len = 4096;
+    model.vocab_size  = 2048;
+    model.num_layers  = 1;
+    SpeculativeExecutionConfig spec;
+    spec.gen_num_per_cycle = 2;
+    ResourceContext context;
+    auto            first  = createContextStream(model, {}, context, {4, 5}, 1);
+    auto            second = createContextStream(model, {}, context, {6, 7, 8}, 2);
+    for (const auto& stream : {first, second}) {
+        stream->setScoreLen(3);
+        stream->setReturnAllProbs(ReturnAllProbsMode::DEFAULT);  // Internal MTP request.
+        stream->generateConfig()->do_sample = true;
+    }
+    first->generateConfig()->top_k  = 0;
+    second->generateConfig()->top_k = 13;
+    second->generateConfig()->top_p = 0.7f;
+    StreamGroups    groups({first, second});
+    GptModelOutputs model_output;
+    model_output.logits               = torch::zeros({6, 2048}, torch::TensorOptions().device(torch::kCUDA));
+    auto                    proposals = torch::tensor({{1, 2}, {3, 4}}, torch::kInt32);
+    MtpBatchStreamProcessor processor(model, {}, {}, makeProcessorCacheConfig(), spec, false);
+
+    const auto inputs = processor.gatherSpecSamplerInput(groups, model_output, {}, proposals, true).value();
+    ASSERT_TRUE(inputs.defer_token_sampling);
+    EXPECT_TRUE(torch::equal(inputs.top_k, torch::tensor({1024, 1024, 1024, 13, 13, 13}, torch::kInt32)));
+    EXPECT_FLOAT_EQ(inputs.top_p[3].item<float>(), 0.7f);
+    EXPECT_FALSE(inputs.all_probs.defined());
+    EXPECT_EQ(inputs.token_ids.sizes().vec(), (std::vector<int64_t>{6, 1}));
+    EXPECT_EQ(inputs.logits.data_ptr(), model_output.logits.data_ptr());
+
+    spec.glm5_auto_topk1024 = false;
+    MtpBatchStreamProcessor unrestricted(model, {}, {}, makeProcessorCacheConfig(), spec, false);
+    auto no_cap = unrestricted.gatherSpecSamplerInput(groups, model_output, {}, proposals, true).value();
+    EXPECT_EQ(no_cap.top_k[0].item<int32_t>(), 0);
+    second->generateConfig()->repetition_penalty = 1.2f;
+    auto history = processor.gatherSpecSamplerInput(groups, model_output, {}, proposals, true).value();
+    EXPECT_TRUE(history.defer_token_sampling);
+    EXPECT_EQ(history.token_ids[5][3].item<int32_t>(), 3);
+    EXPECT_EQ(history.token_ids[5][4].item<int32_t>(), 4);
+
+    for (const bool allow : {false, true}) {
+        first->generateConfig()->return_logprobs = allow;
+        auto fallback = processor.gatherSpecSamplerInput(groups, model_output, {}, proposals, allow).value();
+        EXPECT_FALSE(fallback.defer_token_sampling);
+        EXPECT_EQ(fallback.all_probs.sizes().vec(), (std::vector<int64_t>{6, 2048}));
+        EXPECT_EQ(fallback.top_k[0].item<int32_t>(), 0);
+        EXPECT_NE(fallback.logits.data_ptr(), model_output.logits.data_ptr());
+    }
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;

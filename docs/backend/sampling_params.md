@@ -36,6 +36,14 @@ The raw protocol specifies sampling parameters through **generate_config**. Exam
 }
 ```
 
+### GLM5 fixed-length MTP Decode
+
+On eligible CUDA requests, the Target verifier applies Top-K to the logits and then applies Top-P within the retained candidates. It samples a correction at the first rejected Draft token, or one bonus token when every proposal is accepted.
+
+By default, this path uses 1024 candidates when the request leaves `top_k` unrestricted. This changes the sampling distribution for those requests. A positive `top_k` keeps its requested value, and `do_sample=false` selects greedily. Set `RTP_LLM_GLM5_AUTO_TOPK1024=0` to preserve unrestricted Top-K while keeping deferred verification. Set `RTP_LLM_USE_VLLM_REJECTION_SAMPLING=0` to use the previous Target sampler and rejection verifier.
+
+The compact kernel supports batches with a common Top-K and Top-P, with K between 2 and 1024, on supported GPUs. Other shapes use a dense fallback. Requests that need grammar processing or explicit probability outputs use the existing sampler.
+
 ## Basic Control Parameters
 
 | Parameter Name     | Core Function                                                            |

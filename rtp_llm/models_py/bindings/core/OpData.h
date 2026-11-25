@@ -336,11 +336,22 @@ struct GreedyParams {
     std::optional<torch::Tensor> do_sample;
 
     std::vector<at::Generator> generator;
-    GreedySamplingBuffers*     sampling_buffers = nullptr;
+    GreedySamplingBuffers*     sampling_buffers     = nullptr;
+    bool                       defer_token_sampling = false;
+    std::vector<at::Generator> deferred_rejection_generators;
+    int64_t                    deferred_rejection_rows = 0;
+    TensorHolder*              buffer_holder           = nullptr;
 };
 
 struct GreedyOutput {
     torch::Tensor success;
+    bool          deferred_token_sampling = false;
+    torch::Tensor deferred_logits;
+    torch::Tensor deferred_token_ids;
+    torch::Tensor deferred_dense_fallback;
+    torch::Tensor deferred_fallback_rows;
+    torch::Tensor prepared_rejection_rng;
+    torch::Tensor deferred_log_normalizer;
 };
 
 struct BeamSearchParams {
@@ -410,7 +421,20 @@ struct RejectionSamplingParams {
      * Normal DSpARK proposals carry sampled tokens and dense q; keep this
      * false so verification uses the actual proposal distribution.
      */
-    bool draft_probs_point_mass = false;
+    bool                       draft_probs_point_mass  = false;
+    bool                       deferred_token_sampling = false;
+    std::vector<at::Generator> generator;
+    TensorHolder*              buffer_holder = nullptr;
+    torch::Tensor              target_logits_d;
+    torch::Tensor              acceptance_cap;
+    std::vector<bool>          force_accept;
+    torch::Tensor              cum_log_probs;
+    torch::Tensor              target_candidate_ids_d;
+    torch::Tensor              target_dense_fallback_d;
+    torch::Tensor              target_fallback_rows_d;
+    // Reserved once per verification. All execution paths consume the same request RNG offsets.
+    torch::Tensor prepared_rejection_rng;
+    torch::Tensor target_log_normalizer_d;
 };
 
 struct RejectionSamplingLaunchConfig {

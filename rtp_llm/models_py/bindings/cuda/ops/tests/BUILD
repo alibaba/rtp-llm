@@ -70,10 +70,23 @@ cc_test(
     data = [],
     copts = copts(),
     deps = test_deps + [
+        "//rtp_llm/models_py/bindings/cuda/kernels:deepselect_fp32",
         "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
     ],
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "cuda_deferred_compact_sampler_test",
+    srcs = ["CudaDeferredCompactSamplerTest.cc"],
+    data = ["//rtp_llm/models_py/sampling:sampling"],
+    copts = copts(),
+    deps = test_deps + [
+        "//rtp_llm/cpp/models:models",
+    ] + cuda13_torch_link_deps,
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
 )
 
 cc_test(

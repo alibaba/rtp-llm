@@ -310,6 +310,7 @@ cc_library(
         ],
         "@//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
+            "//rtp_llm/models_py/bindings/cuda/kernels:deepselect_fp32",
             "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
             "//rtp_llm/models_py/bindings/cuda/kernels:speculative_sampling_host",
             "//rtp_llm/models_py/bindings/cuda/kernels/sampling:softmax_host",
@@ -345,6 +346,7 @@ cc_library(
         "@//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
             "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
+            "//rtp_llm/models_py/bindings/cuda/kernels:deepselect_fp32",
             "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
             "//rtp_llm/models_py/bindings/cuda/kernels:speculative_sampling_host",
             "//rtp_llm/models_py/bindings/cuda/kernels/sampling:softmax_host",

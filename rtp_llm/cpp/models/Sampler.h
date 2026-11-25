@@ -24,6 +24,7 @@ public:
     virtual SamplerOutput forward(const SamplerInputs& inputs);
 
 private:
+    SamplerOutput                         prepareDeferredVerification(const SamplerInputs& inputs);
     std::vector<std::optional<ErrorInfo>> preprocessLogits(const SamplerInputs& inputs);
     void                                  ensureGreedySamplingBuffers(size_t batch_size);
     void                                  allocateGreedySamplingBuffers(size_t max_batch_size);
@@ -40,6 +41,7 @@ private:
     // copies have consumed the pinned host buffers before the CPU overwrites them.
     static constexpr size_t kGreedySamplingBufferSlots = 3;
 
+    TensorHolder                                                     deferred_buffers_;
     bool                                                             fixed_max_batch_size_         = false;
     size_t                                                           max_batch_size_               = 0;
     size_t                                                           greedy_sampling_buffer_index_ = 0;

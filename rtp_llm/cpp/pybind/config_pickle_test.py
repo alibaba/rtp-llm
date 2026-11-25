@@ -8,7 +8,23 @@ from rtp_llm.ops import (
     PDSepConfig,
     RoleType,
     RuntimeConfig,
+    SpeculativeExecutionConfig,
 )
+
+
+class SpeculativeConfigPickleTest(unittest.TestCase):
+    def test_legacy_layouts_default_glm5_sampling_and_preserve_dspark_state(self):
+        state = ("draft", "dspark", "", 3, "", "", 42, False)
+        for size in (6, 7, 8):
+            with self.subTest(size=size):
+                config = SpeculativeExecutionConfig.__new__(SpeculativeExecutionConfig)
+                config.__setstate__(state[:size])
+                self.assertTrue(config.use_vllm_rejection_sampling)
+                self.assertTrue(config.glm5_auto_topk1024)
+                self.assertEqual(
+                    config.sp_dspark_mask_token_id, 42 if size >= 7 else -1
+                )
+                self.assertEqual(config.sp_dspark_sample_from_anchor, size < 8)
 
 
 class DecodeGraphConfigPickleTest(unittest.TestCase):

@@ -670,7 +670,7 @@ private:
 
 class FakeFastTopKSampler: public spec::FastTopKSampler {
 public:
-    FakeFastTopKSampler(): spec::FastTopKSampler(torch::Tensor()) {}
+    explicit FakeFastTopKSampler(bool compact = false): spec::FastTopKSampler(torch::Tensor(), compact) {}
 
     spec::FastTopKSamplerOutput forward(const torch::Tensor& logits, int top_k = 1) override {
         ++forward_count_;
@@ -711,6 +711,13 @@ public:
                                            SamplerOutput&                         target_sampler_output) override {
         ++forward_count_;
         last_params = params;
+        if (target_sampler_output.deferred_token_sampling) {
+            EXPECT_TRUE(draft_sampler_output.token_ids_are_point_mass);
+            EXPECT_FALSE(draft_sampler_output.all_probs.defined());
+            EXPECT_EQ(target_sampler_output.verify_logits.size(0), params.do_sample.size(0));
+            EXPECT_EQ(target_sampler_output.verify_logits.size(1), draft_sampler_output.token_ids.size(1) + 1);
+            EXPECT_EQ(target_sampler_output.verify_candidate_ids.sizes(), target_sampler_output.verify_logits.sizes());
+        }
         return output_holder.get();
     }
 
@@ -765,6 +772,12 @@ public:
 
     void checkInputs(const SamplerInputs& inputs) {
         auto expected_inputs = input_holder.get();
+        EXPECT_EQ(expected_inputs.defer_token_sampling, inputs.defer_token_sampling);
+        if (inputs.defer_token_sampling) {
+            ASSERT_GT(inputs.rejection_rows, 0);
+            EXPECT_EQ(inputs.rejection_rows, expected_inputs.rejection_rows);
+            EXPECT_EQ(inputs.rejection_generators.size(), inputs.batch_size / inputs.rejection_rows);
+        }
         RTP_LLM_LOG_INFO("check sampler logits");
         checkTensorEqual(inputs.logits, expected_inputs.logits);
     }
@@ -968,9 +981,13 @@ public:
         auto tokens_h         = tokens.cpu().clone();
         EXPECT_EQ(expect_propose_tokens, toVec<int>(tokens_h));
 
-        auto all_probs   = sp_output_buffer->all_probs;
-        auto all_probs_h = all_probs.is_cuda() ? all_probs.cpu() : all_probs;
-        EXPECT_EQ(expect_all_probs, toVec<float>(all_probs_h));
+        auto all_probs = sp_output_buffer->all_probs;
+        if (expect_all_probs.empty()) {
+            EXPECT_FALSE(all_probs.defined());
+        } else {
+            ASSERT_TRUE(all_probs.defined());
+            EXPECT_EQ(expect_all_probs, toVec<float>(all_probs.cpu()));
+        }
 
         if (expect_last_hidden_states.size() > 0) {
             auto last_hidden_states   = sp_output_buffer->hidden_states;
@@ -1299,7 +1316,8 @@ public:
                                        MtpExecutorComponents*       out                    = nullptr);
     void runSingleBatchDecodeScenario(bool                         with_prefill_only,
                                       const MtpExecutorTestConfig* config_override   = nullptr,
-                                      int64_t*                     out_kv_len_before = nullptr);
+                                      int64_t*                     out_kv_len_before = nullptr,
+                                      bool                         compact_verify    = false);
     void runMultiBatchDecodeScenario(int seed_mode, bool use_mtp_hidden_buffer = false);
 
     GptModelOutputs createRandomGptModelOutputs(size_t token_num, size_t vocab_size, size_t hidden_size) {
@@ -2935,7 +2953,8 @@ TEST_F(MtpExecutorTest, testMultiBatchPrefill) {
 
 void MtpExecutorTest::runSingleBatchDecodeScenario(bool                         with_prefill_only,
                                                    const MtpExecutorTestConfig* config_override,
-                                                   int64_t*                     out_kv_len_before) {
+                                                   int64_t*                     out_kv_len_before,
+                                                   bool                         compact_verify) {
     // test single batch decode accept partial
     // input [0, 1, 2] + [3]
     // darft [3] + [2, 1, 3]
@@ -2953,6 +2972,9 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool                         
         test_config.record_decode_sample_rate = config_override->record_decode_sample_rate;
     }
     auto components = createMtpExecutorComponents(test_config);
+    if (compact_verify) {
+        components.fake_fast_topk_sampler = std::make_unique<FakeFastTopKSampler>(true);
+    }
 
     size_t batch_size = 1;
 
@@ -2960,8 +2982,11 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool                         
     auto stream1_hidden_states     = torch::tensor({{0.03f, 0.04f}});
     auto stream1_draft_token_probs = torch::tensor({{0.0f, 0.0f, 1.0f, 0.0f}});
 
-    StreamSpecUpdateInfo spec_update_info1{
-        stream1_new_tokens, 1, torch::tensor({3}, torch::kInt32), stream1_hidden_states, stream1_draft_token_probs};
+    StreamSpecUpdateInfo spec_update_info1{stream1_new_tokens,
+                                           1,
+                                           torch::tensor({3}, torch::kInt32),
+                                           stream1_hidden_states,
+                                           compact_verify ? torch::Tensor() : stream1_draft_token_probs};
 
     GenerateStreamPtr stream1 = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info1);
@@ -3044,6 +3069,9 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool                         
     target_output.logits = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 1.1f, 1.2f, 1.3f, 1.4f, 2.1f, 2.2f,
                                           2.3f, 2.4f, 3.1f, 3.2f, 3.3f, 3.4f, 4.1f, 4.2f, 4.3f, 4.4f})
                                .reshape({(int64_t)(batch_size * (propose_step + 1)), 4});
+    if (compact_verify) {
+        target_output.logits = target_output.logits.to(torch::kCUDA);
+    }
     target_output.all_hidden_states =
         torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f, 0.07f, 0.08f, 0.09f, 0.10f})
             .reshape({(int64_t)(propose_step + 1), 2});
@@ -3076,6 +3104,14 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool                         
         SamplerOutput{torch::tensor({3, 2, 0, 0, 0}, torch::kInt32).reshape({(int64_t)batch_size, 5})};
     sampler_output.all_probs = torch::tensor(target_sample_all_probs_data)
                                    .reshape({(int64_t)batch_size, (int64_t)(propose_step + 1), (int64_t)vocab_size});
+    if (compact_verify) {
+        sampler_input.defer_token_sampling     = true;
+        sampler_input.rejection_rows           = propose_step + 1;
+        sampler_output.deferred_token_sampling = true;
+        sampler_output.verify_logits           = target_output.logits.narrow(1, 0, 2).contiguous();
+        sampler_output.verify_candidate_ids    = torch::zeros_like(sampler_output.verify_logits, torch::kInt32);
+        sampler_output.all_probs               = torch::Tensor();
+    }
     components.fake_sampler->setInputs({sampler_input});
     components.fake_sampler->setOutputs({sampler_output});
 
@@ -3093,6 +3129,13 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool                         
     draft_sampler_output_3.all_probs    = torch::tensor({1.0f, 0.0f, 0.0f, 0.0f}).reshape({(int64_t)batch_size, 4});
     next_draft_sampler_output.token_ids = torch::tensor({1}, torch::kInt32).reshape({(int64_t)batch_size, 1});
     next_draft_sampler_output.all_probs = torch::tensor({0.0f, 1.0f, 0.0f, 0.0f}).reshape({(int64_t)batch_size, 4});
+
+    if (compact_verify) {
+        for (auto* proposal :
+             {&draft_sampler_output_1, &draft_sampler_output_2, &draft_sampler_output_3, &next_draft_sampler_output}) {
+            proposal->all_probs = torch::Tensor();
+        }
+    }
 
     components.fake_fast_topk_sampler->setInputs(
         {draft_output_1.logits, draft_output_2.logits, draft_output_3.logits, next_draft_output.logits});
@@ -3177,11 +3220,16 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool                         
     }
 
     // check stream result
-    checkOutput(stream1, {0, 1, 2, 3, 2, 0}, {0, 1}, {0.0, 1.0, 0.0, 0.0}, {0.3, 0.33});
+    const vector<float> expected_q = compact_verify ? vector<float>{} : vector<float>{0.f, 1.f, 0.f, 0.f};
+    checkOutput(stream1, {0, 1, 2, 3, 2, 0}, {0, 1}, expected_q, {0.3, 0.33});
 }
 
 TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     runSingleBatchDecodeScenario(/*with_prefill_only=*/false);
+}
+
+TEST_F(MtpExecutorTest, FixedDecodeCarriesCompactTargetAndPointMassDraftToVerifier) {
+    runSingleBatchDecodeScenario(false, nullptr, nullptr, /*compact_verify=*/true);
 }
 
 TEST_F(MtpExecutorTest, testPdfusionPrefillOnlyDoesNotSkipSingleBatchDecode) {

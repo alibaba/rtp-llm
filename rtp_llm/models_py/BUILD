@@ -206,6 +206,7 @@ py_library(
         "//rtp_llm:warmup",
         "//rtp_llm/models_py/kernel_tuning",
         "//rtp_llm/resident_weights",
+        "//rtp_llm/models_py/sampling:sampling",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
         "//rtp_llm/models_py/distributed:deepep_wrapper",
         "//rtp_llm/models_py/distributed:moriep_wrapper",

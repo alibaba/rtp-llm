@@ -22,6 +22,7 @@ public:
         NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
         propose_step_(sp_config.gen_num_per_cycle),
         vocab_size_(model_config.vocab_size),
+        glm5_auto_topk1024_(sp_config.glm5_auto_topk1024),
         is_block_draft_(isBlockDraftType(sp_config.type)),
         dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)),
         dspark_sample_from_anchor_(sp_config.sp_dspark_sample_from_anchor) {}
@@ -75,7 +76,8 @@ public:
     absl::StatusOr<SamplerInputs> gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
                                                          const GptModelOutputs&                      model_output,
                                                          const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result,
-                                                         const torch::Tensor& draft_token_ids) const;
+                                                         const torch::Tensor&                        draft_token_ids,
+                                                         bool allow_deferred = false) const;
 
     void prepareDecodeDraftModelInput(const StreamGroups& stream_groups,
                                       GptModelInputs&     model_input,
@@ -185,6 +187,7 @@ protected:
 
     int     propose_step_;
     size_t  vocab_size_                   = 0;
+    bool    glm5_auto_topk1024_;
     bool    is_block_draft_                = false;
     int32_t dspark_mask_token_id_         = -1;
     bool    dspark_sample_from_anchor_     = true;
