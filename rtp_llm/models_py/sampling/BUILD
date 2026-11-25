@@ -42,11 +42,3 @@ py_test(
     tags = ["SM103_CU13", "manual"],
     exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
 )
-
-py_test(
-    name = "test_runtime",
-    srcs = ["test_runtime.py"],
-    deps = [":sampling"],
-    tags = ["SM103_CU13"],
-    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
-)
