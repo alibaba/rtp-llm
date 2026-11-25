@@ -45,12 +45,11 @@ def package(master_archive: Path, mock_jar: Path, output: Path) -> None:
         vip_jars = [
             name
             for name in names
-            if name.startswith("FlexLB/BOOT-INF/lib/vipserver-")
-            and name.endswith(".jar")
+            if re.fullmatch(r"FlexLB/BOOT-INF/lib/vipserver-\d[^/]*\.jar", name)
         ]
         if len(vip_jars) != 1:
             raise ValueError(
-                "Input distribution must include one internal VIP provider JAR"
+                f"Expected one internal VIP provider JAR, found {vip_jars}"
             )
         with source.extractfile(vip_jars[0]) as payload:
             with zipfile.ZipFile(io.BytesIO(payload.read())) as vip:
