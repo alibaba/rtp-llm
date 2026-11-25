@@ -21,6 +21,33 @@ class ServerArgsSetTest(TestCase):
         os.environ.update(self._environ_backup)
         sys.argv = self._argv_backup
 
+    def test_json_whitespace_default_and_overrides(self):
+        from rtp_llm.ops import GrammarConfig
+        from rtp_llm.server.server_args.grammar_group_args import (
+            init_grammar_group_args,
+        )
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        self.assertFalse(GrammarConfig().constrained_json_disable_any_whitespace)
+        flag = "--constrained_json_disable_any_whitespace"
+        for env_value, args, expected in (
+            (None, [], False),
+            ("1", [], True),
+            ("1", [flag, "false"], False),
+        ):
+            with self.subTest(env_value=env_value, args=args):
+                os.environ.pop("CONSTRAINED_JSON_DISABLE_ANY_WHITESPACE", None)
+                if env_value is not None:
+                    os.environ["CONSTRAINED_JSON_DISABLE_ANY_WHITESPACE"] = env_value
+                config = GrammarConfig()
+                parser = EnvArgumentParser()
+                parser.set_root_config(SimpleNamespace())
+                init_grammar_group_args(parser, config, SimpleNamespace())
+                parser.parse_args(args)
+                self.assertEqual(
+                    config.constrained_json_disable_any_whitespace, expected
+                )
+
     def test_grammar_sandbox_memory_default_and_overrides(self):
         from rtp_llm.config.py_config_modules import GrammarAdmissionConfig
         from rtp_llm.server.server_args.grammar_group_args import (
