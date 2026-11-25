@@ -2,12 +2,12 @@
 
 Eliminates the intermediate ``[M, 10240]`` BF16 ``mix_logits`` HBM write/read
 and extra kernel launch between ``F.linear(mix, bf16_up)`` and
-``fused_mix_reduce`` across decode, MTP draft, and target-verify batch sizes
-``1 <= M <= 128`` while preserving exact BF16 gate/product rounding boundaries
-(larger prefill/verify shapes defer to Hopper TMA cuBLASLt ``nvjet``).
+``fused_mix_reduce`` while preserving exact BF16 gate/product rounding.
+On H20, callers may opt into the existing two-kernel path for small row counts.
 """
 
 import os
+from functools import lru_cache
 
 import torch
 import triton
@@ -76,7 +76,12 @@ def _sm90_bf16_up_mix_kernel(
     )
 
 
-def try_sm90_bf16_up_mix(x, bf16_up, normed, branches):
+@lru_cache(maxsize=None)
+def _is_h20(device: torch.device) -> bool:
+    return torch.cuda.get_device_properties(device).multi_processor_count == 78
+
+
+def try_sm90_bf16_up_mix(x, bf16_up, normed, branches, *, allow_unfused=False):
     if os.getenv("RTP_QWEN4_DISABLE_SM90_BF16_UP_MIX", "0") == "1":
         return None
     if not (
@@ -102,12 +107,18 @@ def try_sm90_bf16_up_mix(x, bf16_up, normed, branches):
 
     rows_2d = x.reshape(-1, 320)
     m = rows_2d.shape[0]
-    output = x.new_empty((m, 2560))
-    pdl = sm90_pdl_enabled(x.device)
-    if m <= 64:
+    is_h20 = _is_h20(x.device)
+    if is_h20 and (m == 8 or m > 96):
+        bm, bn, stages = (16 if m == 8 else 64), 16, 2
+    elif is_h20 and allow_unfused:
+        # F.linear followed by mix costs less for the other H20 batches.
+        return None
+    elif m <= 64:
         bm, bn, stages = 16, 32, 2
     else:
         bm, bn, stages = 64, 32, 3
+    output = x.new_empty((m, 2560))
+    pdl = sm90_pdl_enabled(x.device)
     _sm90_bf16_up_mix_kernel[(triton.cdiv(m, bm), 2560 // bn)](
         rows_2d,
         bf16_up,

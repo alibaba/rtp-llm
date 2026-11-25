@@ -1665,14 +1665,12 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         model_input = std::move(model_input_status.value());
         executor_collector.gather_model_input_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
-    const auto engram_anchor_windows = model_input.engram_token_windows;
+    const auto                    engram_anchor_windows = model_input.engram_token_windows;
     std::optional<GptModelInputs> draft_input_template;
-    const auto                    continuation_batch =
-        MtpBatchStreamProcessor::publishedDecodeBatch(stream_groups, /*require_cache_snapshot=*/false);
-    const bool refresh_reused_cache =
-        continuation_batch
-        && (!MtpBatchStreamProcessor::publishedDecodeBatch(stream_groups)
-            || continuation_batch->peer_cache_table_refresh_needed);
+    const auto                    continuation         = MtpBatchStreamProcessor::inspectPublishedDecodeBatch(stream_groups);
+    const auto&                   continuation_batch   = continuation.batch;
+    const bool                    refresh_reused_cache =
+        continuation_batch && (!continuation.has_cache_snapshot || continuation_batch->peer_cache_table_refresh_needed);
     if (isTpRank0() && (!previous_published_batch || continuation_batch != previous_published_batch)) {
         // Admission, completion and reordered requests take the full input
         // path. Cache-only changes refresh the tables of the same continuation.

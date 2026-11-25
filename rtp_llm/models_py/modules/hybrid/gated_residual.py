@@ -419,7 +419,7 @@ class GatedResidual(nn.Module):
             )
 
             mixed = try_sm90_bf16_up_mix(
-                mix, bf16_up, normed, self.hc_mult
+                mix, bf16_up, normed, self.hc_mult, allow_unfused=True
             )
         if (
             mixed is None

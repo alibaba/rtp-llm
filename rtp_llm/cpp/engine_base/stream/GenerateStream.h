@@ -881,7 +881,16 @@ public:
         return valid(physical) && valid(kernel) && physical.size(0) == kernel.size(0);
     }
     bool hasMtpCacheSnapshot() const {
-        return hasMtpCacheSnapshot(getMtpAsyncDeviceState());
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
+        return hasMtpCacheSnapshot(mtp_async_state_);
+    }
+    std::shared_ptr<const MtpDecodeBatchState> getMtpContinuationBatch(int64_t row, bool& has_cache_snapshot) const {
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
+        if (!mtp_async_state_.batch || mtp_async_state_.batch_row != row) {
+            return nullptr;
+        }
+        has_cache_snapshot = hasMtpCacheSnapshot(mtp_async_state_);
+        return mtp_async_state_.batch;
     }
     // Allocation changes only page mappings. The immutable token/hidden-state
     // continuation remains valid for the same ordered batch after a table refresh.
