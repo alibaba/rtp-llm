@@ -273,8 +273,6 @@ class SourceBatch:
                         if media.mm_type == MMUrlType.VIDEO
                         else net.config.mm_image_max_file_size_kb
                     )
-                    if v41:
-                        limit = min(10240, limit) if limit and limit > 0 else 10240
                     future = net.image(
                         media.url,
                         net.config.download_headers,

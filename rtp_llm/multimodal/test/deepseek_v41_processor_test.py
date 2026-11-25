@@ -311,6 +311,56 @@ class V41ImageDownloadTimingTest(unittest.TestCase):
         self.assertEqual(requests, 2)
         self.assertEqual(elapsed_ms, 250.0)
 
+    def test_configured_image_size_limit_on_python_and_native_downloads(self):
+        from functools import partial
+        from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+        from tempfile import TemporaryDirectory
+
+        from rtp_llm.config.py_config_modules import VitConfig
+        from rtp_llm.multimodal.media_network import MediaNetwork, SourceBatch
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
+            load_image_source,
+        )
+
+        size_kb = 11 * 1024
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        with (Path(directory.name) / "image.png").open("wb") as output:
+            output.write(image_data(3, 5))
+            output.truncate(size_kb * 1024)
+        handler = partial(SimpleHTTPRequestHandler, directory=directory.name)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self.addCleanup(server.server_close)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        url = f"http://127.0.0.1:{server.server_port}/image.png"
+        network = MediaNetwork(VitConfig())
+        self.addCleanup(network.close)
+
+        def native_load(url, limit_kb):
+            network.config.mm_image_max_file_size_kb = limit_kb
+            item = SimpleNamespace(
+                mm_inputs=[SimpleNamespace(url=url, mm_type=MMUrlType.IMAGE)],
+                remaining_timeout_s=lambda: 30,
+                region=None,
+                preprocess_ready_event=threading.Event(),
+            )
+            return SourceBatch(network, item).result()[0]
+
+        def python_load(url, limit_kb):
+            return load_image_source(url, max_file_size_kb=limit_kb).getvalue()
+
+        for load in (python_load, native_load):
+            with self.subTest(loader=load.__name__):
+                self.assertEqual(len(load(url, size_kb)), size_kb * 1024)
+                for source in (url, url + "?uncached"):
+                    with self.assertRaises(FtRuntimeException) as error:
+                        load(source, size_kb - 1)
+                    self.assertEqual(
+                        error.exception.exception_type, ExceptionType.INVALID_PARAMS
+                    )
+                self.assertEqual(len(load(url + "?unlimited", 0)), size_kb * 1024)
+
     def test_cached_bytes_respect_current_size_limit_deadline_and_cancellation(self):
         from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
             load_image_source,
