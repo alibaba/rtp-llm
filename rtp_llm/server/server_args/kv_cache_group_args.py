@@ -402,7 +402,8 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=int,
         default=kv_cache_config.disk_cache_evict_max_pending_bytes,
         help=(
-            "HOST->DISK 水位淘汰共享的未结算字节上限，按协调 rank 的落盘 stride 计费（不累加其他 rank）；"
+            "HOST->DISK 水位淘汰共享的未结算字节上限。PP=1 按本地落盘 stride 计费，"
+            "PP>1 按该组实际写盘的 stage 的平均落盘 stride 计费，向上取整到字节；"
             "必须大于 0，超大单块允许独占提交。"
         ),
     )

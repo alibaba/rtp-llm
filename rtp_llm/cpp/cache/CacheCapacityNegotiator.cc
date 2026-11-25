@@ -99,4 +99,47 @@ std::vector<size_t> computeHostUsableBlockCounts(size_t                         
     return result;
 }
 
+std::optional<BlockTreeCacheBlockNums> computeHostDiskBlockCounts(const std::vector<GroupSetPoolSizing>& group_sets,
+                                                                  const BlockTreeCacheSizing&            sizing) {
+    std::vector<CacheGroupType> types;
+    std::vector<size_t>         device_blocks;
+    std::vector<size_t>         strides;
+    for (const auto& group_set : group_sets) {
+        types.push_back(group_set.type);
+        device_blocks.push_back(group_set.device_blocks);
+        strides.push_back(group_set.pool_stride);
+    }
+
+    std::vector<size_t> host;
+    if (sizing.host_budget_bytes > 0) {
+        const bool split = sizing.host_swa_block_ratio != 1.0
+                           && std::find(types.begin(), types.end(), CacheGroupType::FULL) != types.end()
+                           && std::find(types.begin(), types.end(), CacheGroupType::SWA) != types.end();
+        if (split) {
+            host = computeHostUsableBlockCounts(sizing.host_budget_bytes, strides, types, sizing.host_swa_block_ratio);
+            for (auto& count : host) {
+                if (count == 0) {
+                    return std::nullopt;
+                }
+                ++count;  /** Include the reserved block zero in the physical count. */
+            }
+        } else {
+            host = computeTierBlockCounts(sizing.host_budget_bytes, device_blocks, strides);
+        }
+    }
+    const auto disk = sizing.disk_budget_bytes > 0 ?
+                          computeTierBlockCounts(sizing.disk_budget_bytes, device_blocks, strides) :
+                          std::vector<size_t>{};
+    BlockTreeCacheBlockNums result;
+    for (size_t i = 0; i < group_sets.size(); ++i) {
+        if (!host.empty()) {
+            result.host.emplace(group_sets[i].type, host[i]);
+        }
+        if (!disk.empty()) {
+            result.disk.emplace(group_sets[i].type, disk[i]);
+        }
+    }
+    return result;
+}
+
 }  // namespace rtp_llm

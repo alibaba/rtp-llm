@@ -9,14 +9,24 @@
 
 namespace rtp_llm {
 
+/** A PP stage may own none of the layers in a GroupSet. */
+inline int getLocalDeviceIndex(const GroupSet& group) {
+    for (const auto& pool : group.devicePools()) {
+        if (pool && pool->config().allocate_storage) {
+            return pool->deviceIndex();
+        }
+    }
+    return -1;
+}
+
 inline bool isPlainDeviceTransferGroup(const GroupSet& group) {
     const auto& pools = group.devicePools();
-    if (group.crcEnabled() || group.storageBytes() != group.payloadBytes() || pools.empty() || !pools.front()) {
+    if (group.crcEnabled() || group.storageBytes() != group.payloadBytes()) {
         return false;
     }
-    const int device = pools.front()->deviceIndex();
+    const int device = getLocalDeviceIndex(group);
     return device >= 0 && std::all_of(pools.begin(), pools.end(), [device](const auto& pool) {
-        return pool && pool->deviceIndex() == device;
+        return pool && (!pool->config().allocate_storage || pool->deviceIndex() == device);
     });
 }
 

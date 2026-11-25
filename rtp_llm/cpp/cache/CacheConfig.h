@@ -35,6 +35,7 @@ inline void checkGroupResidencyBudget(const CacheGroupPolicy& policy, const std:
 
 struct CacheConfig {
 private:
+    /** Group tags describe the model's logical topology. Layer bindings identify groups with local storage. */
     std::shared_ptr<const CacheTopology> cache_topology;
 
 public:
@@ -48,8 +49,7 @@ public:
     bool use_typed_cache_regions                  = false;
     bool use_opaque_kv_cache_store                = false;
     bool disable_decode_first_malloc_device_reuse = false;
-    /** PP stages can own a single tag from a multi-tag model. Preserve the full-model
-     * transfer format so P and D use the same keys and block policy after partitioning. */
+    /** Keep the target's group transfer policy in the MTP cache config. */
     bool model_has_multiple_cache_groups = false;
 
     rtp_llm::DataType dtype              = rtp_llm::DataType::TYPE_INVALID;

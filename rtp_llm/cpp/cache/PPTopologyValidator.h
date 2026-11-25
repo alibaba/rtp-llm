@@ -17,6 +17,7 @@ struct StageCacheGroupSnapshot {
     std::string    tag;
     CacheGroupType type                      = CacheGroupType::FULL;
     bool           block_tree_group_member   = false;
+    bool           has_local_backing         = true;
     size_t         seq_size_per_block        = 0;
     size_t         kernel_seq_size_per_block = 0;
     size_t         cache_key_token_stride    = 0;
@@ -31,6 +32,7 @@ struct StageCacheSnapshot {
     BlockTreeCacheSizing                 block_tree;
 
     static StageCacheSnapshot captureLocalStage(const CacheConfig&          config,
+                                                uint32_t                    local_block_num,
                                                 const BlockTreeCacheSizing& block_tree_sizing);
 
     std::string               serialize() const;
@@ -59,12 +61,9 @@ struct PPValidationResult {
 
 /**
  * Validates cache geometry across PP stages and builds the agreed group
- * table. Groups pair by tag;
- * every stage's groups must be a subset of stage 0's because the leading
- * stage issues all block ids. Same-tag owners must agree on policy and token
- * geometry; capacity is the owner-stage minimum. A reusable group set must
- * be fully present or absent on each stage; partial overlap is rejected until
- * per-rank request projection is implemented.
+ * table. All stages declare the same logical tags and agree on their policy and
+ * token geometry. The leading stage assigns IDs using the minimum capacity
+ * among stages with local backing for each tag.
  */
 PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& stages);
 

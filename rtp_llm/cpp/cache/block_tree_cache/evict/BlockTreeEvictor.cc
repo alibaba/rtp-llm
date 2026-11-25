@@ -850,13 +850,13 @@ BlockTreeEvictor::watermarkLogicalBatchLimit(const GroupSet& group_set, Tier sou
             continue;
         }
         has_pending        = true;
-        const size_t bytes = pending_group->diskPool()->strideBytes();
+        const size_t bytes = pending_group->diskPool()->evictionBlockBytes();
         if (count > available_bytes / bytes) {
             return 0;
         }
         available_bytes -= count * bytes;
     }
-    size_t count = available_bytes / group_set.diskPool()->strideBytes();
+    size_t count = available_bytes / group_set.diskPool()->evictionBlockBytes();
     if (count == 0 && !has_pending) {
         count = 1;
     }

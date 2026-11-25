@@ -39,6 +39,7 @@ struct BlockPoolConfigBase {
     BlockPoolType pool_type{BlockPoolType::DEVICE};
     std::string   pool_name;
     size_t        physical_block_count{0};
+    bool          allocate_storage{true};
 };
 
 // IBlockPool owns allocation and Tree-internal lifetime shared by Device, Host, and Disk.
