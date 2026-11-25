@@ -198,16 +198,21 @@ bool P2PConnectorAsyncReadContext::expireLeaseHoldIfNeeded(int64_t now_us) {
     if (!resourceHoldPending() || hold_start_us <= 0 || now_us - hold_start_us < kv_force_release_timeout_ms_ * 1000) {
         return false;
     }
-    RTP_LLM_LOG_WARNING("P2P forcibly releasing retained Decode KV without all-rank stop confirmation, "
-                        "unique_key=%s event_time_us=%ld hold_ms=%ld cancel_confirmed=%d lease_query_state=%d "
-                        "target_blocks=%s",
+    const auto released_blocks = resource_ ? resource_->debugString() : std::string{};
+    const auto request_id = tp_sync_result_ ? tp_sync_result_->requestId().value_or(request_id_) : request_id_;
+    const auto lease_query_state = lease_query_state_.load(std::memory_order_relaxed);
+    releaseLeaseHoldLocked(/*all_ranks_stopped=*/false, now_us);
+    RTP_LLM_LOG_WARNING("P2P KV event=forced_quarantine_release request_id=%ld "
+                        "unique_key=%s event_time_us=%ld hold_ms=%ld timeout_ms=%ld cancel_confirmed=%d "
+                        "lease_query_state=%d released_target_blocks=%s",
+                        request_id,
                         uniqueKey().c_str(),
                         currentTimeUs(),
                         (now_us - hold_start_us) / 1000,
+                        kv_force_release_timeout_ms_,
                         cancel_confirmed_.load(std::memory_order_acquire),
-                        static_cast<int>(lease_query_state_.load(std::memory_order_relaxed)),
-                        resource_ ? resource_->debugString().c_str() : "");
-    releaseLeaseHoldLocked(/*all_ranks_stopped=*/false, now_us);
+                        static_cast<int>(lease_query_state),
+                        released_blocks.c_str());
     return true;
 }
 

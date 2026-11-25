@@ -450,7 +450,8 @@ P2PSchedulerDecodeRead::AsyncReadResult P2PSchedulerDecodeRead::asyncRead(
                                                                         no_transfer,
                                                                         request_deadline_ms,
                                                                         transfer_deadline_ms,
-                                                                        config_.p2p_kv_force_release_timeout_ms);
+                                                                        config_.p2p_kv_force_release_timeout_ms,
+                                                                        request_id);
 
     const auto enqueue_time_us = currentTimeUs();
     auto       submit_result   = async_read_pool_->pushTask(
