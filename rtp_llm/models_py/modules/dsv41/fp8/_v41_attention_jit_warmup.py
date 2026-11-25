@@ -1191,7 +1191,10 @@ def _warm_indexer_layout(
             return_bf16=return_bf16,
         )
         if heads == 32 and torch.cuda.get_device_capability(device)[0] == 10:
-            from ._indexer_score import fp8_fp4_mqa_indexer_score
+            from ._indexer_score import (
+                balanced_mqa_schedule_builder,
+                fp8_fp4_mqa_indexer_score,
+            )
             from ._v41_grouped_prefill_score import (
                 _grouped_score_bounds_kernel,
                 _mask_tail_kernel,
@@ -1235,6 +1238,25 @@ def _warm_indexer_layout(
                 grouped_logits, bounds[1], width, grouped_logits.stride(0), 256
             )
             del grouped_logits
+            if (
+                return_bf16
+                and torch.cuda.get_device_capability(device) == (10, 3)
+                and os.environ.get("DSV41_PREFILL_INDEXER_BALANCED_SCORE", "1") == "1"
+                and balanced_mqa_schedule_builder()
+            ):
+                fp8_fp4_mqa_indexer_score(
+                    q_fp4,
+                    q_sf,
+                    keys.quant,
+                    keys.scale,
+                    sparse_weights,
+                    torch.zeros_like(visible),
+                    visible,
+                    clean_logits=False,
+                    max_seqlen_k=width,
+                    return_bf16=True,
+                    balance_kv_tiles=True,
+                )
         if attn.index_topk == 512:
             for dtype in (torch.int32, torch.int64):
                 typed_visible = _indexer_warmup_vector(
@@ -1470,6 +1492,37 @@ def _warm_index_plan(attn, device):
                 ),
                 "batched FlashMLA index plan",
             )
+            if (
+                dtype == torch.int64
+                and getattr(attn, "layer_id", None) == 20
+                and getattr(attn, "swa_bounded_replay", False)
+            ):
+                _require_launch(
+                    try_build_index_plan(
+                        selected,
+                        positions,
+                        0,
+                        1,
+                        0,
+                        attn.window_size,
+                        swa_replay=1,
+                    ),
+                    "scalar L20 replay index plan",
+                )
+                _require_launch(
+                    try_build_index_plan(
+                        selected,
+                        positions,
+                        *metadata.unbind(0),
+                        attn.window_size,
+                        swa_replay=(
+                            torch.zeros_like(positions),
+                            torch.ones(2, dtype=torch.int32, device=device),
+                            1,
+                        ),
+                    ),
+                    "batched L20 replay index plan",
+                )
 
 
 def _warm_flash_mla(attn, device):

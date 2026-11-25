@@ -279,6 +279,7 @@ def update_decoder_swa_metadata(meta, entries_per_block, *, batch_size=None):
                 SWA_KV: meta.paged_pool_tokens_per_block[region],
             },
             swa_global_slots=torch.full_like(meta.swa_global_slots, -1),
+            sched_meta_cache={},
         )
         meta.decoder_swa_metadata = child
     if batch_size is None:

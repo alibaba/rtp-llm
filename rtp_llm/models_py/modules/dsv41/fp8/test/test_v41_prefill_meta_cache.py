@@ -874,6 +874,27 @@ class V41SwaWriteReuseDispatchTest(unittest.TestCase):
                         **_inputs(),
                     )
                     self.assertEqual(calls, [(21, DECODER_SWA_KV)])
+                    retained = layers[21]._prefill_meta_shared
+                    layers[-1]._set_prefill_meta_shared(None)
+                    layers[-1].compress_ratio = 2
+                    calls.clear()
+                    build_and_propagate_prefill_meta_fp8(
+                        model,
+                        torch.zeros(8, 1),
+                        0,
+                        cache,
+                        tables,
+                        first_layer=21,
+                        host_swa_tables={
+                            region: host[ids.index(region)] for region in ids
+                        },
+                        workspace=None,
+                        fill_missing=True,
+                        **_inputs(),
+                    )
+                    self.assertEqual(calls, [(39, DECODER_SWA_KV)])
+                    self.assertIs(layers[21]._prefill_meta_shared, retained)
+                    self.assertIsNotNone(layers[-1]._prefill_meta_shared)
 
     def test_write_only_requires_compressed_bounded_consumer(self):
         for ratio in (0, 1, 2):

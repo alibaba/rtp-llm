@@ -254,6 +254,7 @@ def update_packed_decode_metadata(
                         SWA_KV: span,
                     },
                     swa_global_slots=torch.empty_like(meta.swa_global_slots),
+                    sched_meta_cache={},
                 )
                 meta.decoder_swa_metadata = child
             child.is_packed = True

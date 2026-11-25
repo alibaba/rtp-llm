@@ -895,14 +895,17 @@ class CEDPlan:
     def candidate_publication(self, shared):
         """Limit L20 publication only when this forward will compact its consumers."""
         rows = self.exchange.candidate_rows_host
-        if cp_swa_replay_starts(self.context) is None or rows is None:
+        replay_starts = cp_swa_replay_starts(self.context)
+        if replay_starts is None or rows is None:
             yield
             return
         shared["ced_candidate_rows"] = rows
+        shared["ced_l20_swa_replay_starts"] = replay_starts
         try:
             yield
         finally:
             shared.pop("ced_candidate_rows", None)
+            shared.pop("ced_l20_swa_replay_starts", None)
 
     def can_split_l20(self, v4):
         """Keep Stage0 publication/compaction if a split interface is absent."""

@@ -98,6 +98,9 @@ class AttentionV41CudaGraphTest(unittest.TestCase):
         meta = impl.metadata
         self.assertEqual(meta.slot_mapping_compressed, {})
         self.assertEqual(set(meta.pool_block_tables), set(specs))
+        self.assertIsNot(
+            meta.sched_meta_cache, meta.decoder_swa_metadata.sched_meta_cache
+        )
         impl.prepare_cuda_graph(inputs, valid_request_count=1)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):

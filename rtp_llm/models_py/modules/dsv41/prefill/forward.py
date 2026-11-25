@@ -732,6 +732,7 @@ def forward_layers(
                             workspace=ws,
                             first_layer=21,
                             reuse_write_by_region=prefill_write_by_region,
+                            fill_missing=True,
                             host_swa_tables=host_swa_tables,
                         )
                 if engram_prefetch is not None:

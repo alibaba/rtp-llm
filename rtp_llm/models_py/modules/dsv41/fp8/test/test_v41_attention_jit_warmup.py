@@ -38,6 +38,25 @@ def attention(layer, ratio=2, producer=False):
 
 
 class V41AttentionWarmupCPU(unittest.TestCase):
+    def test_bounded_l20_warms_replay_index_plan_for_both_metadata_layouts(self):
+        import torch
+
+        build = Mock(return_value=object())
+        module = "rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_index_plan"
+        attn = attention(20, ratio=1, producer=True)
+        attn.swa_bounded_replay = True
+        with patch.dict(
+            sys.modules, {module: SimpleNamespace(try_build_index_plan=build)}
+        ):
+            warmup._warm_index_plan(attn, "cpu")
+        replay = [call for call in build.call_args_list if call.kwargs]
+        self.assertTrue(replay)
+        self.assertEqual(
+            {type(call.kwargs["swa_replay"]) for call in replay},
+            {int, tuple},
+        )
+        self.assertTrue(all(call.args[1].dtype == torch.int64 for call in replay))
+
     def test_index_plan_warms_scalar_and_packed_ragged_metadata(self):
         import torch
 
@@ -1288,7 +1307,8 @@ class V41AttentionWarmupCPU(unittest.TestCase):
             package_name: package,
             package_name
             + "._indexer_score": SimpleNamespace(
-                fp8_fp4_mqa_indexer_score=grouped_score
+                fp8_fp4_mqa_indexer_score=grouped_score,
+                balanced_mqa_schedule_builder=lambda: object(),
             ),
             package_name
             + "._v41_grouped_prefill_score": SimpleNamespace(
@@ -1340,7 +1360,7 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                 self.assertEqual(call.args[4].dtype, torch.bfloat16)
             for call in sparse.score.call_args_list:
                 self.assertEqual(call.args[3].dtype, torch.bfloat16)
-            self.assertEqual(capability.call_count, 2)
+            self.assertEqual(capability.call_count, 3)
             self.assertEqual(grouped_bounds.launch.call_count, 2)
             self.assertEqual(
                 [c.kwargs["return_bf16"] for c in grouped_score.call_args_list],
@@ -1395,6 +1415,22 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                 self.assertEqual(counts.dtype, torch.int32)
                 self.assertEqual(counts.tolist(), [16392, 16392])
                 self.assertEqual(lookup.args[2], 16640 + 16392)
+            capability.return_value = (10, 3)
+            for flag, expected in (("1", [False, False, True]), ("0", [False, False])):
+                with patch.dict(
+                    warmup.os.environ, {"DSV41_PREFILL_INDEXER_BALANCED_SCORE": flag}
+                ):
+                    grouped_score.reset_mock()
+                    warmup._warm_indexer_layout(
+                        attn, 32768, "cpu", rows=1, vector_stride=1, vector_offset=0
+                    )
+                self.assertEqual(
+                    [
+                        call.kwargs.get("balance_kv_tiles", False)
+                        for call in grouped_score.call_args_list
+                    ],
+                    expected,
+                )
             package._v41_prefill_topk.supports_bf16 = lambda: False
             indexer.score_indexer_chunk.reset_mock()
             grouped_score.reset_mock()

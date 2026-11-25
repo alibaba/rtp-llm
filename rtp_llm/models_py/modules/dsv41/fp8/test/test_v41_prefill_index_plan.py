@@ -192,6 +192,37 @@ class IndexPlanCUDA(unittest.TestCase):
         torch.testing.assert_close(selected, before[0], rtol=0, atol=0)
         torch.testing.assert_close(positions, before[1], rtol=0, atol=0)
 
+    def test_full_l20_replay_matches_compact_retained_rows(self):
+        device = "cuda"
+        positions = torch.arange(1024, device=device)
+        selected = torch.full((1024, 1), -1, dtype=torch.int32, device=device)
+        full, lengths = fused.try_build_index_plan(
+            selected, positions, 0, 0, 0, swa_replay=895
+        )
+        compact, compact_lengths = fused.try_build_index_plan(
+            selected[895:], positions[895:], 895, 0, 895
+        )
+        torch.testing.assert_close(full[895:], compact, rtol=0, atol=0)
+        torch.testing.assert_close(lengths[895:], compact_lengths, rtol=0, atol=0)
+        self.assertEqual(lengths[894:897].tolist(), [128, 1, 2])
+        self.assertEqual(full[895, 0].item(), 895)
+
+        positions = torch.tensor([500, 501, 1406, 1407], device=device)
+        offsets = torch.tensor([[1], [1], [44], [44]], device=device)
+        starts = torch.tensor([[500], [500], [512], [512]], device=device)
+        requests = torch.tensor([0, 0, 1, 1], device=device)
+        fresh = torch.tensor([31, 1024], dtype=torch.int32, device=device)
+        indices, lengths = fused.try_build_index_plan(
+            selected[:4],
+            positions,
+            offsets,
+            offsets,
+            starts,
+            swa_replay=(requests, fresh, 129),
+        )
+        self.assertEqual(lengths.tolist(), [1, 2, 128, 1])
+        self.assertEqual(indices[:, 0].tolist(), [2, 2, 855, 983])
+
     def test_small_and_captured_rows_bitexact(self):
         for rows in (0, 1, 17, 32, 1664, 8192, 32768):
             with self.subTest(rows=rows):

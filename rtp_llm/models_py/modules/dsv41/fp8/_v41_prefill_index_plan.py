@@ -29,7 +29,16 @@ def _device_supported(device):
 
 if triton is not None:
 
-    @triton.jit(do_not_specialize=["OFFSET", "GLOBAL_COUNT", "SWA_START"])
+    @triton.jit(
+        do_not_specialize=[
+            "OFFSET",
+            "GLOBAL_COUNT",
+            "SWA_START",
+            "SWA_REPLAY_START",
+            "REPLAY_TOKENS",
+            "REPLAY_BATCH",
+        ]
+    )
     def _prefill_index_plan_kernel(
         selected,
         positions,
@@ -38,6 +47,11 @@ if triton is not None:
         OFFSET,
         GLOBAL_COUNT,
         SWA_START,
+        SWA_REPLAY_START,
+        REQUEST_IDS,
+        FRESH_LENGTHS,
+        REPLAY_TOKENS,
+        REPLAY_BATCH,
         SELECTED_STRIDE: tl.constexpr,
         POSITION_STRIDE: tl.constexpr,
         K: tl.constexpr,
@@ -49,6 +63,9 @@ if triton is not None:
         OFFSET_STRIDE: tl.constexpr = 0,
         COUNT_STRIDE: tl.constexpr = 0,
         START_STRIDE: tl.constexpr = 0,
+        REPLAY: tl.constexpr = False,
+        REQUEST_STRIDE: tl.constexpr = 0,
+        FRESH_LENGTH_STRIDE: tl.constexpr = 0,
     ):
         row = tl.program_id(0).to(tl.int64)
         column = tl.arange(0, BLOCK)
@@ -80,7 +97,21 @@ if triton is not None:
         swbase = (position - WINDOW + 1).to(position.dtype).to(tl.int64)
         swpos = swbase + (column - K).to(tl.int64)
         global_index = tl.where(picked >= 0, offset + picked, -1)
-        swa_index = tl.where(swpos >= start, offset + size + swpos - start, -1)
+        visible = swpos >= start
+        if REPLAY:
+            if TENSOR_META:
+                request = tl.load(REQUEST_IDS + row * REQUEST_STRIDE).to(tl.int64)
+                request = tl.where(request < 0, request + REPLAY_BATCH, request)
+                fresh = tl.load(
+                    FRESH_LENGTHS + request * FRESH_LENGTH_STRIDE,
+                    (request >= 0) & (request < REPLAY_BATCH),
+                    other=0,
+                ).to(tl.int64)
+                replay = start + tl.maximum(fresh - REPLAY_TOKENS, 0)
+            else:
+                replay = SWA_REPLAY_START.to(tl.int64)
+            visible &= (position < replay) | (swpos >= replay)
+        swa_index = tl.where(visible, offset + size + swpos - start, -1)
         # The eager path casts to int32 BEFORE sorting validity and summing.
         value = tl.where(column < K, global_index, swa_index).to(tl.int32)
         active = column < K + WINDOW
@@ -154,6 +185,7 @@ def try_build_index_plan(
     *,
     out=None,
     lengths_out=None,
+    swa_replay=None,
 ):
     """Return contiguous int32 (indices[M,pad64(K+window)], lengths[M]).
 
@@ -161,6 +193,9 @@ def try_build_index_plan(
     Global selected IDs are sorted; duplicates are retained. Negative selected
     entries are normalized to -1 before offsetting. SWA
     validity uses exactly the eager lower bound, with no extra upper clamp.
+    Replay accepts an absolute boundary for scalar metadata, or a tuple
+    (row request IDs, per-request fresh lengths, retained token count).
+    It restricts retained queries without shifting physical SWA offsets.
     Optional outputs avoid allocation during graph capture/replay. No tensor
     is cached, synchronized, or retained by the module.
     """
@@ -169,6 +204,31 @@ def try_build_index_plan(
     ):
         return None
     rows, k = selected.shape
+    replay_start, request_ids, fresh_lengths, replay_tokens = 0, None, None, 0
+    if swa_replay is not None:
+        if type(swa_start) is int:
+            if type(swa_replay) is not int:
+                return None
+            replay_start = swa_replay
+        else:
+            if not isinstance(swa_replay, tuple) or len(swa_replay) != 3:
+                return None
+            request_ids, fresh_lengths, replay_tokens = swa_replay
+            if not (
+                isinstance(request_ids, torch.Tensor)
+                and isinstance(fresh_lengths, torch.Tensor)
+                and request_ids.shape == (rows,)
+                and fresh_lengths.ndim == 1
+                and all(
+                    x.device == selected.device
+                    and x.dtype in (torch.int32, torch.int64)
+                    and x.stride(0) > 0
+                    for x in (request_ids, fresh_lengths)
+                )
+                and type(replay_tokens) is int
+                and replay_tokens > 0
+            ):
+                return None
     padded = ((k + window_size + 63) // 64) * 64
     for output, shape in ((out, (rows, padded)), (lengths_out, (rows,))):
         if output is not None and not (
@@ -184,7 +244,7 @@ def try_build_index_plan(
     sources = [x for x in (selected, positions) if x.numel()]
     sources.extend(
         x
-        for x in (offset, global_count, swa_start)
+        for x in (offset, global_count, swa_start, request_ids, fresh_lengths)
         if isinstance(x, torch.Tensor) and x.numel()
     )
     storage = {x.untyped_storage().data_ptr() for x in sources}
@@ -206,6 +266,11 @@ def try_build_index_plan(
             offset,
             global_count,
             swa_start,
+            replay_start,
+            request_ids,
+            fresh_lengths,
+            replay_tokens,
+            0 if fresh_lengths is None else fresh_lengths.numel(),
             selected.stride(0),
             positions.stride(0),
             k,
@@ -221,6 +286,15 @@ def try_build_index_plan(
                     "START_STRIDE": swa_start.stride(0),
                 }
                 if isinstance(offset, torch.Tensor)
+                else {}
+            ),
+            REPLAY=swa_replay is not None,
+            **(
+                {
+                    "REQUEST_STRIDE": request_ids.stride(0),
+                    "FRESH_LENGTH_STRIDE": fresh_lengths.stride(0),
+                }
+                if request_ids is not None
                 else {}
             ),
             num_warps=4,

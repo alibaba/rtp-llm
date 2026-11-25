@@ -288,6 +288,49 @@ class PrefillRequestRowsCPU(unittest.TestCase):
                     None,
                 )
 
+    def test_l20_eager_index_plan_preserves_physical_swa_origin(self):
+        positions = torch.tensor([510, 511, 1406, 1407])
+        request_ids = torch.tensor([0, 0, 1, 1])
+        starts = torch.tensor([[500], [500], [512], [512]])
+        offsets = torch.tensor([[1], [1], [44], [44]])
+        selected = torch.full((4, 1), -1, dtype=torch.int32)
+        owner = SimpleNamespace(
+            compress_ratio=1,
+            kv_source_layer_id=20,
+            window_size=128,
+            _shared_attention={
+                "global": {20: []},
+                "ced_l20_swa_replay_starts": (11, 895),
+            },
+            _select_indices=lambda *args, **kwargs: selected,
+            _prefill_chunk_meta=lambda *args, **kwargs: (offsets, offsets, starts),
+            _host_prefill_lengths=lambda common: (140, 1024),
+            _prefill_output_buffer=lambda *args: None,
+            _prefill_sparse_attention=lambda *args, **kwargs: (
+                kwargs["indices"],
+                kwargs["topk_length"],
+            ),
+        )
+        common = SimpleNamespace(
+            cp_on=False,
+            position_ids=positions,
+            req_id_per_token=request_ids,
+            input_lengths=torch.tensor([140, 1024]),
+        )
+        with patch.object(
+            attention.prefill_kv_workspace, "combine_kv", return_value=torch.empty(0)
+        ):
+            indices, lengths = attention.AttentionV41FP8._prefill_query(
+                owner,
+                torch.ones(4, 2),
+                common,
+                SimpleNamespace(qr=torch.ones(4, 2)),
+                None,
+                (500, 512),
+            )
+        self.assertEqual(lengths.tolist(), [11, 1, 128, 1])
+        self.assertEqual(indices[:, 0].tolist(), [2, 13, 855, 983])
+
     def test_builder_attaches_slices_without_changing_compression_ratio(self):
         common = PrefillMeta(
             seqlen=8,

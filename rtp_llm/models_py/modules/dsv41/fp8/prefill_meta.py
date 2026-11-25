@@ -141,6 +141,7 @@ def build_and_propagate_prefill_meta_fp8(
     reuse_write_by_region: Optional[Dict] = None,
     host_swa_tables: Optional[Dict[str, torch.Tensor]] = None,
     stop_layer: Optional[int] = None,
+    fill_missing: bool = False,
 ) -> Dict:
     """Build the layer-invariant prefill meta once per ``compress_ratio``
     bucket and broadcast each bucket's meta to its layers'
@@ -161,6 +162,7 @@ def build_and_propagate_prefill_meta_fp8(
     ``stop_layer`` excludes buckets represented only at or beyond that layer.
     Their metadata stays None until the CED compact point rebuilds it. Buckets
     spanning the boundary still share their pre-boundary representative.
+    Use ``fill_missing`` to resume the same query domain after declining CED.
     """
     sp_per_req = _flat_optional(sp_per_req)
     cu_seqlens = _flat_optional(cu_seqlens)
@@ -174,6 +176,8 @@ def build_and_propagate_prefill_meta_fp8(
     for index, layer in enumerate(v4.layers[first_layer:], start=first_layer):
         attn = getattr(layer, "attn", None)
         if attn is not None:
+            if fill_missing and attn._prefill_meta_shared is not None:
+                continue
             key = (
                 int(attn.compress_ratio),
                 cached_swa_region(v4, kv_cache, attn.layer_id),
@@ -181,6 +185,9 @@ def build_and_propagate_prefill_meta_fp8(
             if stop_layer is None or index < stop_layer:
                 representatives.setdefault(key, attn)
             layer_buckets.append((attn, key))
+
+    if fill_missing and not layer_buckets:
+        return {}
 
     # SWA-only owns the superset metadata (common + SWA Group-1 + Group-2),
     # so build it first whenever the model has one. Compressed-only models use

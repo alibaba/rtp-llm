@@ -2891,8 +2891,34 @@ class AttentionV41FP8(AttentionFP8):
         if plan is not None and plan[0] is selected:
             indices, lens = plan[1], plan[2]
         else:
+            replay = None
+            replay_starts = self._shared_attention.get("ced_l20_swa_replay_starts")
+            if replay_starts is not None:
+                # Keep the full workspace's physical origin. The fused plan
+                # derives each logical boundary from device-resident lengths.
+                if len(replay_starts) == 1:
+                    replay = swa_starts[0] + replay_starts[0]
+                else:
+                    lengths = (
+                        common.cp_ctx.input_lengths_global
+                        if common.cp_on
+                        else common.input_lengths
+                    )
+                    retained = max(
+                        n - start
+                        for n, start in zip(
+                            self._host_prefill_lengths(common), replay_starts
+                        )
+                    )
+                    replay = (req_ids, lengths, retained)
             fused_plan = prefill_index_plan.try_build_index_plan(
-                selected, positions, offsets, ns, swstart, self.window_size
+                selected,
+                positions,
+                offsets,
+                ns,
+                swstart,
+                self.window_size,
+                swa_replay=replay,
             )
             if fused_plan is not None:
                 indices, lens = fused_plan
@@ -2903,9 +2929,18 @@ class AttentionV41FP8(AttentionFP8):
                     + 1
                     + torch.arange(self.window_size, device=device)[None]
                 )
-                swidx = torch.where(
-                    swpos >= swstart, offsets + ns + swpos - swstart, -1
-                )
+                visible = swpos >= swstart
+                if replay is not None:
+                    replay_start = replay
+                    if isinstance(replay, tuple):
+                        requests, lengths, retained = replay
+                        replay_start = swstart + (
+                            lengths[requests, None] - retained
+                        ).clamp_min_(0)
+                    visible &= (positions[:, None] < replay_start) | (
+                        swpos >= replay_start
+                    )
+                swidx = torch.where(visible, offsets + ns + swpos - swstart, -1)
                 ordered = selected.sort(dim=-1).values
                 global_idx = torch.where(ordered >= 0, offsets + ordered, -1)
                 indices = torch.cat((global_idx, swidx), -1).int()
