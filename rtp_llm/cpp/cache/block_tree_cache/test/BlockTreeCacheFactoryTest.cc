@@ -8,6 +8,7 @@
 #include <future>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -707,6 +708,7 @@ TEST_F(BlockTreeCacheFactoryTest, FactoryConsumesNegotiatedBlockCounts) {
     ASSERT_EQ(layout->sizing.group_sets.size(), 1u);
     EXPECT_EQ(layout->sizing.group_sets[0].first_tag, config.groups().front().tag);
     EXPECT_EQ(layout->sizing.group_sets[0].pool_stride, layout->backing_layouts[0].pool_stride);
+    EXPECT_EQ(layout->disk_eviction_block_bytes.at(CacheGroupType::FULL), layout->backing_layouts[0].pool_stride);
     EXPECT_EQ(layout->sizing.host_budget_bytes, 1024u * 1024u);
     layout->block_nums.emplace();
     layout->block_nums->host[CacheGroupType::FULL] = 5;
@@ -721,6 +723,49 @@ TEST_F(BlockTreeCacheFactoryTest, FactoryConsumesNegotiatedBlockCounts) {
     EXPECT_EQ(cache->groupSets().front()->hostPool()->totalBlocksNum(), 4u);
     ASSERT_NE(cache->groupSets().front()->diskPool(), nullptr);
     EXPECT_EQ(cache->groupSets().front()->diskPool()->totalBlocksNum(), 6u);
+    const auto& disk_pool = cache->groupSets().front()->diskPool();
+    EXPECT_EQ(disk_pool->evictionBlockBytes(), disk_pool->strideBytes());
+}
+
+TEST_F(BlockTreeCacheFactoryTest, HostDiskWatermarkChargesPPGroupWithoutLocalStorage) {
+    auto config = makeTierRatioConfig();
+    config.layer_num = 1;
+    config.setTopology(config.groups(), {{0, {"group0"}}});
+    block_transfer_engine_test::TempDirGuard disk_dir("pp_watermark_charge");
+    KVCacheConfig options;
+    options.enable_memory_cache = true;
+    options.memory_cache_size_mb = 1;
+    options.enable_disk_cache = true;
+    options.disk_cache_size_mb = 1;
+    options.disk_cache_buffered_io = true;
+    options.disk_cache_paths = disk_dir.path;
+    options.enable_crc = false;
+    options.disk_cache_evict_max_pending_bytes = 512;
+    options.memory_cache_max_descriptors_per_transfer_batch = 8;
+    auto layout = planBlockTreeCacheLayout(config, options);
+    ASSERT_NE(layout, nullptr);
+    layout->block_nums.emplace();
+    layout->block_nums->host = {{CacheGroupType::FULL, 8}, {CacheGroupType::SWA, 8}};
+    layout->block_nums->disk = layout->block_nums->host;
+    layout->disk_eviction_block_bytes = {{CacheGroupType::FULL, 128}, {CacheGroupType::SWA, 256}};
+    ParallelismConfig pp;
+    pp.pp_size = 3;
+    pp.world_size = 3;
+    auto allocator = initAllocator<CoordinatorCacheManager>(config);
+    auto cache = createBlockTreeCache(config, options, allocator, pp, nullptr, nullptr, nullptr, layout);
+    ASSERT_NE(cache, nullptr);
+    ASSERT_EQ(cache->groupSets().size(), 2u);
+    const auto& full = *cache->groupSets()[0];
+    const auto& swa = *cache->groupSets()[1];
+    ASSERT_EQ(swa.diskPool()->strideBytes(), 0u);
+
+    std::lock_guard<std::mutex> lock(cache->mutex_);
+    auto& evictor = cache->evictor_;
+    EXPECT_EQ(evictor.watermarkLogicalBatchLimit(swa, Tier::HOST, Tier::DISK), 2u);
+    auto& pending = evictor.heaps_[swa.groupSetId()].watermark_rounds[static_cast<size_t>(Tier::HOST)].pending_count;
+    pending = 1;
+    EXPECT_EQ(evictor.watermarkLogicalBatchLimit(full, Tier::HOST, Tier::DISK), 2u);
+    pending = 0;
 }
 
 TEST_F(BlockTreeCacheFactoryTest, NegotiatedHybridCountsRemainAuthoritativeWithNonDefaultHostRatio) {
@@ -1467,6 +1512,53 @@ TEST_F(BlockTreeCacheFactoryTest, SparseMlaIndexerPoolsShareAtomicReuseAndPacked
 
     allocator->attachBlockTreeCache(cache);
     EXPECT_EQ(allocator->blockTreeCache(), cache);
+}
+
+TEST_F(BlockTreeCacheFactoryTest, PartialPPGroupTransfersOnlyItsLocalMember) {
+    auto config = makeTierRatioConfig();
+    config.layer_num = 1;
+    config.setTopology(config.groups(), {{0, {"group2"}}});
+    auto allocator = initAllocator<CoordinatorCacheManager>(config);
+    for (const bool crc : {false, true}) {
+        SCOPED_TRACE(crc);
+        KVCacheConfig options;
+        options.enable_memory_cache = true;
+        options.memory_cache_size_mb = 1;
+        options.enable_crc = crc;
+        auto layout = planBlockTreeCacheLayout(config, options);
+        ASSERT_NE(layout, nullptr);
+        ASSERT_EQ(layout->sizing.group_sets.size(), 1u);
+        layout->block_nums.emplace();
+        layout->block_nums->host = {{CacheGroupType::FULL, 5}, {CacheGroupType::SWA, 7}};
+        auto cache = createBlockTreeCache(config, options, allocator, {}, nullptr, nullptr, nullptr, layout);
+        ASSERT_NE(cache, nullptr);
+        ASSERT_EQ(cache->groupSets().size(), 2u);
+        const auto& full = cache->groupSets()[0];
+        const auto& swa  = cache->groupSets()[1];
+        ASSERT_EQ(full->groupTags(), (std::vector<std::string>{"group0", "group2"}));
+        EXPECT_EQ(full->payloadBytes(), config.blockSizeBytesForGroup("group2"));
+        EXPECT_EQ(full->crcEnabled(), crc && CrcCopyWorkspace::available());
+        EXPECT_EQ(swa->payloadBytes(), 0u);
+        EXPECT_FALSE(swa->crcEnabled());
+        EXPECT_FALSE(swa->hostPool()->config().allocate_storage);
+        EXPECT_EQ(swa->hostPool()->totalBlocksNum(), 6u);
+
+        auto blocks = block_tree_cache_test::allocateDeviceBlocksForTest(*full, 1);
+        ASSERT_EQ(blocks.size(), 1u);
+        ASSERT_EQ(blocks.front().size(), 2u);
+        const auto host = full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::EVICT);
+        ASSERT_NE(host, NULL_BLOCK_IDX);
+        auto* addr = full->devicePools()[1]->convertIndexToAddr(0, blocks.front()[1]).kv_addr;
+        writeDevicePattern(addr, full->payloadBytes(), 0x35);
+        ASSERT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
+            {TransferDescriptor::deviceToHost(full->groupSetId(), blocks.front(), host)})).ok());
+        writeDevicePattern(addr, full->payloadBytes(), 0);
+        ASSERT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
+            {TransferDescriptor::hostToDevice(full->groupSetId(), host, blocks.front())})).ok());
+        expectDevicePattern(addr, full->payloadBytes(), 0x35);
+        full->hostPool()->decTreeRef(host, BlockTreeRefType::EVICT);
+        block_tree_cache_test::unreferenceDeviceBlocksForTest(*full, blocks);
+    }
 }
 
 TEST_F(BlockTreeCacheFactoryTest, SameTypeGroupsWithDifferentPhysicalLayoutsAggregate) {

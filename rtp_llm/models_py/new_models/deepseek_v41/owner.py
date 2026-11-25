@@ -127,9 +127,17 @@ class OwnedV41Mixin:
         args.embedding_tp_size, args.embedding_tp_rank = args.tp_size, args.tp_rank
         args.n_shared_experts = int(model_config.n_shared_experts)
         args.moe_inter_dim = int(model_config.moe_inter_size)
-        args.vision_router_bias_layers = vision_router_layers(model_config.ckpt_path)
+        if getattr(load_config, "resident_construction", None) is None:
+            args.vision_router_bias_layers = vision_router_layers(model_config.ckpt_path)
+        else:
+            args.vision_router_bias_layers = {
+                key: tuple(load_config.resident_construction[key]) for key in ("layers", "mtp")
+            }
         self.v4 = self.create_backbone(args, load_config)
         self.WEIGHTS_MAPPER = _BackboneMapper(self.v4)
+
+    def resident_constructor_state(self):
+        return self._v4_args.vision_router_bias_layers
 
     def create_backbone(self, args, load_config):
         return runtime_backbone_class(target_block_device=load_config.device)(

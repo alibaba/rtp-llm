@@ -8,6 +8,7 @@ from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.base.common.embedding import Embedding
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
+from rtp_llm.resident_weights import resident_init_tensors
 
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
 _FP8_LINEAR_REGISTRY = weakref.WeakSet()
@@ -106,6 +107,44 @@ def merge_v41_qkv_tensors(qw, qs, kw, ks):
     original allocations. Packed scales have an exact N-major leading
     dimension, so each fallback linear still packs its own small scale tensor.
     """
+    merged = _merge_qkv(qw, qs, kw, ks)
+    if merged is None:
+        return None
+    merged_w, merged_s = merged
+    return (
+        V41MXFP8Linear(merged_w, merged_s),
+        merged_w.split((qw.shape[0], kw.shape[0])),
+        merged_s.split((qs.shape[0], ks.shape[0])),
+    )
+
+
+def merge_v41_qkv_weights(weights, q_weight, q_scale, kv_weight, kv_scale):
+    keys = (q_weight, q_scale, kv_weight, kv_scale)
+    # Read before the merge: on a restart these are the slices published below, whose row
+    # counts are exactly the ones the publishing run split by.
+    q_rows, q_scale_rows = weights[q_weight].shape[0], weights[q_scale].shape[0]
+    group = f"v41.merged_qkv:{q_weight}"
+    merged = resident_init_tensors(
+        weights,
+        transform_key=group,
+        output_names=(f"{group}.w", f"{group}.s"),
+        consumed_names=keys,
+        builder=lambda: _merge_qkv(*(weights[key] for key in keys)),
+    )
+    if merged is None:
+        return None
+    merged_w, merged_s = merged
+    linear = V41MXFP8Linear(merged_w, merged_s)
+    weights[q_weight], weights[kv_weight] = merged_w.split(
+        (q_rows, merged_w.shape[0] - q_rows)
+    )
+    weights[q_scale], weights[kv_scale] = merged_s.split(
+        (q_scale_rows, merged_s.shape[0] - q_scale_rows)
+    )
+    return linear
+
+
+def _merge_qkv(qw, qs, kw, ks):
     if not (
         qw.ndim == kw.ndim == 2
         and qw.dtype == kw.dtype == torch.float8_e4m3fn
@@ -119,24 +158,7 @@ def merge_v41_qkv_tensors(qw, qs, kw, ks):
         return None
     merged_w = torch.cat((qw.view(torch.uint8), kw.view(torch.uint8))).view(qw.dtype)
     merged_s = torch.cat((qs.view(torch.uint8), ks.view(torch.uint8))).view(qs.dtype)
-    linear = V41MXFP8Linear(merged_w, merged_s)
-    return (
-        linear,
-        merged_w.split((qw.shape[0], kw.shape[0])),
-        merged_s.split((qs.shape[0], ks.shape[0])),
-    )
-
-
-def merge_v41_qkv_weights(weights, q_weight, q_scale, kv_weight, kv_scale):
-    merged = merge_v41_qkv_tensors(
-        weights[q_weight], weights[q_scale], weights[kv_weight], weights[kv_scale]
-    )
-    if merged is None:
-        return None
-    linear, weight_views, scale_views = merged
-    weights[q_weight], weights[kv_weight] = weight_views
-    weights[q_scale], weights[kv_scale] = scale_views
-    return linear
+    return merged_w, merged_s
 
 
 def iter_fp8_linears() -> list:

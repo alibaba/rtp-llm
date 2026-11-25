@@ -410,7 +410,14 @@ def _prune_expired_engram_tables() -> None:
                 # replaced it after our expiry verdict on the old inode);
                 # never let the prune unlink a live generation.
                 continue
-            table.unlink(missing_ok=True)
+            with table.open("rb") as candidate:
+                try:
+                    fcntl.flock(candidate, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue  # a resident store or engine still holds the table
+                if os.fstat(candidate.fileno()).st_ino != table.stat().st_ino:
+                    continue
+                table.unlink(missing_ok=True)
             logger.info("Pruned expired Engram shared table %s", table)
         except FileNotFoundError:
             continue
@@ -468,6 +475,7 @@ class _PinnedSharedTable:
         loader: Optional[Callable[[], tuple]] = None,
         table_shape: Optional[tuple] = None,
         load_into: Optional[Callable[[mmap.mmap], None]] = None,
+        require_existing: bool = False,
     ):
         digest = hashlib.sha256(source_identity.encode()).hexdigest()[:24]
         data_path = Path("/dev/shm") / f"rtp_llm_engram_{os.getuid()}_{digest}"
@@ -506,6 +514,8 @@ class _PinnedSharedTable:
                     partial.unlink(missing_ok=True)
             _prune_expired_engram_tables()
             if not data_path.exists():
+                if require_existing:
+                    raise RuntimeError(f"Published resident Engram host table is missing: {data_path}")
                 free = shutil.disk_usage(data_path.parent).free
                 if free < total_bytes:
                     raise RuntimeError(
@@ -564,7 +574,11 @@ class _PinnedSharedTable:
                     f"Engram shared table has an invalid size: {data_path}"
                 )
             with open(data_path, "r+b") as file:
+                fcntl.flock(file, fcntl.LOCK_SH)
                 mapping = mmap.mmap(file.fileno(), total_bytes)
+                # mmap retains a duplicate of the locked file description.
+            from rtp_llm.resident_weights import retain_host_file
+            retain_host_file(str(data_path), str(lock_path))
             lease_path.touch(mode=0o600)
             try:
                 os.utime(data_path)  # refresh LRU for the TTL prune

@@ -65,6 +65,10 @@ struct OpaqueKVCacheSpec: public KVCacheSpec {
         return entry_count_;
     }
 
+    std::string fingerprint() const override {
+        return KVCacheSpec::fingerprint() + ";entries_per_block=" + std::to_string(entriesPerBlock());
+    }
+
     rtp_llm::DataType memoryLayoutDType() const override {
         return entry_dtype_;
     }

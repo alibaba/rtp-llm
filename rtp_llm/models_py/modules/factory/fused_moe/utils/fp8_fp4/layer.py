@@ -22,6 +22,8 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.shared_expert imp
 )
 from rtp_llm.models_py.modules.fp8_fp4_weight_source import OwnerWeightSource
 from rtp_llm.models_py.utils.profiler import record_function_range
+from rtp_llm.resident_weights import resident_init_scalar
+from rtp_llm.utils.model_weight import W
 
 
 class Fp8Fp4MoeRuntimeConfig:
@@ -136,6 +138,16 @@ class Fp8Fp4MoeRuntimeConfig:
         )
 
 
+def _shared_fp8_block_size(shared_w13, shared_s13) -> int:
+    return (
+        MXFP8_BLOCK
+        if shared_w13 is not None
+        and shared_s13 is not None
+        and is_mxfp8_scale(shared_w13, shared_s13)
+        else FP8_BLOCK
+    )
+
+
 class Fp8Fp4MoeLayer(nn.Module):
     """Route tokens and execute canonical FP8/FP4 MoE weights via the factory."""
 
@@ -186,22 +198,21 @@ class Fp8Fp4MoeLayer(nn.Module):
                 "FP8/FP4 layer requires a weight owner or descriptor weights"
             )
         if weight_owner is not None:
-            shared_w13 = getattr(weight_owner, "shared_w13", None)
-            shared_s13 = getattr(weight_owner, "shared_s13", None)
+            binding = getattr(weight_owner, "_resident_expert_inputs", None)
+            shared_fp8_block_size = resident_init_scalar(
+                binding[0].global_weights if binding else None,
+                (binding[1] if binding else "") + "fp8_fp4.shared_fp8_block_size",
+                lambda: _shared_fp8_block_size(
+                    getattr(weight_owner, "shared_w13", None), getattr(weight_owner, "shared_s13", None)
+                ),
+            )
         else:
-            from rtp_llm.utils.model_weight import W
-
-            shared_w13 = layer_weights.get(W.ffn_w13)
-            shared_s13 = layer_weights.get(W.ffn_s13)
-        shared_fp8_block_size = (
-            MXFP8_BLOCK
-            if shared_w13 is not None
-            and shared_s13 is not None
-            and is_mxfp8_scale(shared_w13, shared_s13)
-            else FP8_BLOCK
-        )
-        # Release shape-probe references before the executor consumes weights.
-        del shared_w13, shared_s13
+            shared_fp8_block_size = resident_init_scalar(
+                layer_weights, "fp8_fp4.shared_fp8_block_size",
+                lambda: _shared_fp8_block_size(
+                    layer_weights.get(W.ffn_w13), layer_weights.get(W.ffn_s13)
+                ),
+            )
         self.gate = Gate(
             layer_id,
             dim,

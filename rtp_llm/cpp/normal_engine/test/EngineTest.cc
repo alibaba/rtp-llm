@@ -908,6 +908,7 @@ TEST_F(NormalEngineTest, testPpChunkedPrefillWarmupUsesStageCacheAndChunkShapes)
          {{4, 0, 1}, {4, 4, 1}, {4, 8, 1}, {4, 12, 1}, {3, 16, 1}, {15, 14, 3}, {7, 0, 1}}},
         {std::numeric_limits<int>::max(), SP_TYPE_NONE, RoleType::PREFILL, {{19, 0, 1}, {57, 0, 3}, {7, 0, 1}}},
     };
+    const std::vector<std::string> expected_tags{"first", "last"};
     for (const auto& test_case : cases) {
         CustomConfig config;
         config.warm_up                  = true;
@@ -935,7 +936,6 @@ TEST_F(NormalEngineTest, testPpChunkedPrefillWarmupUsesStageCacheAndChunkShapes)
                                               << ", role=" << test_case.role << ", stage=" << stage);
             params.parallelism_config.pp_rank    = stage;
             params.parallelism_config.world_rank = stage;
-            const std::string tag                = stage == 0 ? "first" : "last";
             auto proposal = stage == 1 && test_case.type != SP_TYPE_NONE ? makeLocalProposalParams(params) : nullptr;
             PPWarmupFactoryGuard      factories;
             std::vector<ForwardShape> shapes;
@@ -946,8 +946,10 @@ TEST_F(NormalEngineTest, testPpChunkedPrefillWarmupUsesStageCacheAndChunkShapes)
                     const auto& cache = init.cache_manager->cacheConfig();
                     EXPECT_EQ(cache.layer_num, 1u);
                     EXPECT_EQ(cache.global_layer_begin, static_cast<uint32_t>(stage));
-                    EXPECT_EQ(cache.groupTags(), (std::vector<std::string>{tag}));
-                    EXPECT_EQ(cache.group(tag).block_num, 2u);
+                    EXPECT_EQ(cache.groupTags(), expected_tags);
+                    EXPECT_EQ(cache.layerIdsForGroup(expected_tags[stage]), std::vector<int>{0});
+                    EXPECT_TRUE(cache.layerIdsForGroup(expected_tags[1 - stage]).empty());
+                    EXPECT_EQ(cache.group(expected_tags[stage]).block_num, 2u);
                 }
                 // Stop on the final system-prompt shape, after the real chunk loop and row-heavy shape.
                 return std::make_unique<PPWarmupProbeModel>(
@@ -959,7 +961,7 @@ TEST_F(NormalEngineTest, testPpChunkedPrefillWarmupUsesStageCacheAndChunkShapes)
                         EXPECT_TRUE(input.warmup);
                         EXPECT_TRUE(input.is_fake_stream);
                         EXPECT_EQ(input.sequence_lengths.numel(), 0);
-                        EXPECT_EQ(input.kv_cache_group_tags, (std::vector<std::string>{tag}));
+                        EXPECT_EQ(input.kv_cache_group_tags, expected_tags);
                         EXPECT_TRUE(input.kv_cache_block_id.eq(0).all().item<bool>());
                         EXPECT_TRUE(input.kv_cache_kernel_block_id.eq(0).all().item<bool>());
                     },
@@ -994,14 +996,14 @@ TEST_F(NormalEngineTest, testPpDecodeWarmupUsesStageCacheAndSpeculativeHeadroom)
     params.sp_config.gen_num_per_cycle              = 3;
     params.sp_config.sp_dspark_mask_token_id        = 99;
 
+    const std::vector<std::string> expected_tags{"first", "last"};
     for (auto type : {SP_TYPE_NONE, SP_TYPE_MTP, SP_TYPE_EAGLE, SP_TYPE_DSPARK}) {
         for (int stage : {0, 1}) {
             SCOPED_TRACE(::testing::Message() << "type=" << type << ", stage=" << stage);
             params.sp_config.type                = type;
             params.parallelism_config.pp_rank    = stage;
             params.parallelism_config.world_rank = stage;
-            const std::string tag                = stage == 0 ? "first" : "last";
-            const int         warmup_length      = type == SP_TYPE_NONE ? 63 : type == SP_TYPE_DSPARK ? 55 : 57;
+            const int warmup_length              = type == SP_TYPE_NONE ? 63 : type == SP_TYPE_DSPARK ? 55 : 57;
             std::unique_ptr<ProposeModelEngineInitParams> proposal;
             if (stage == 1 && type != SP_TYPE_NONE) {
                 auto modules = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
@@ -1018,20 +1020,24 @@ TEST_F(NormalEngineTest, testPpDecodeWarmupUsesStageCacheAndSpeculativeHeadroom)
                     const auto& cache = init.cache_manager->cacheConfig();
                     EXPECT_EQ(cache.layer_num, 1u);
                     EXPECT_EQ(cache.global_layer_begin, static_cast<uint32_t>(stage));
-                    EXPECT_EQ(cache.groupTags(), (std::vector<std::string>{tag}));
-                    EXPECT_EQ(cache.group(tag).block_num, 2u);
+                    EXPECT_EQ(cache.groupTags(), expected_tags);
+                    EXPECT_EQ(cache.layerIdsForGroup(expected_tags[stage]), std::vector<int>{0});
+                    EXPECT_TRUE(cache.layerIdsForGroup(expected_tags[1 - stage]).empty());
+                    EXPECT_EQ(cache.group(expected_tags[stage]).block_num, 2u);
                 }
                 return std::make_unique<PPWarmupProbeModel>(stage, [&](const GptModelInputs& input) {
                     saw_warmup = true;
                     EXPECT_TRUE(input.warmup);
-                    EXPECT_EQ(input.kv_cache_group_tags, (std::vector<std::string>{tag}));
+                    EXPECT_EQ(input.kv_cache_group_tags, expected_tags);
                     ASSERT_GT(input.sequence_lengths.numel(), 0);
                     EXPECT_TRUE(input.input_lengths.eq(warmup_length).all().item<bool>());
                     EXPECT_TRUE(input.sequence_lengths.eq(warmup_length - 1).all().item<bool>());
                     ASSERT_TRUE(input.kv_cache_block_id.defined());
                     ASSERT_TRUE(input.kv_cache_kernel_block_id.defined());
                     EXPECT_EQ(input.kv_cache_block_id.sizes().vec(),
-                              (std::vector<int64_t>{1, input.input_lengths.numel(), 32}));
+                              (std::vector<int64_t>{static_cast<int64_t>(expected_tags.size()),
+                                                    input.input_lengths.numel(),
+                                                    32}));
                     EXPECT_EQ(input.kv_cache_kernel_block_id.sizes().vec(), input.kv_cache_block_id.sizes().vec());
                     EXPECT_TRUE(input.kv_cache_block_id.eq(0).all().item<bool>());
                     EXPECT_TRUE(input.kv_cache_kernel_block_id.eq(0).all().item<bool>());

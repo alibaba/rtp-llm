@@ -1,0 +1,69 @@
+{
+  "schema_version": 2,
+  "model": {
+    "label": "qwen4-exp-prefill-tp2ep2-batch-daily-RTX5000PRO",
+    "type": "qwen4_exp",
+    "checkpoint": "/mnt/fuse/smoke-test/hf/Qwen--Qwen3.8-Flash-Next-FP8--236dfdf285828023ca3bcd3f37366c58a3469b13",
+    "tokenizer": "/mnt/fuse/smoke-test/hf/Qwen--Qwen3.8-Flash-Next-FP8--236dfdf285828023ca3bcd3f37366c58a3469b13",
+    "topology": {"tp": 2, "dp": 1, "pp": 1, "ep": 2}
+  },
+  "engine": {
+    "max_seq_len": 46080,
+    "max_batch_tokens": 49152,
+    "concurrency_limit": 32,
+    "args": {
+      "reuse_cache": 1,
+      "fp8_kv_cache": 1,
+      "moe_strategy": "nvfp4_cutlass",
+      "all_reduce_backend": "sm120_ipc",
+      "seq_size_per_block": 128,
+      "kernel_seq_size_per_block": 128,
+      "reserver_runtime_mem_mb": 10240,
+      "enable_cuda_graph": 0,
+      "frontend_server_count": 1
+    },
+    "env": {
+      "TOKENIZERS_PARALLELISM": "false",
+      "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True,large_segment_size_mb:1024"
+    }
+  },
+  "workload": {
+    "kind": "cache_grid",
+    "transport": "dashsc_input_ids",
+    "cache_alignment": 256,
+    "commit_tail_tokens": 256,
+    "probe_block_size": 256,
+    "measure_runs": 2,
+    "workspace_tokens": 49152,
+    "seed": 2026,
+    "traffic_request_batches": {
+      "distribution_file": "req_distribution.json",
+      "num_cases": 1000,
+      "batch_sizes": [2, 4, 8],
+      "min_input_tokens": 2048,
+      "max_input_tokens": 16384,
+      "kv_budget_tokens": 22500
+    }
+  },
+  "execution": {
+    "backend": "aone",
+    "platform": "cuda13",
+    "test_timeout_seconds": 7000,
+    "local": {
+      "devices": [
+        0,
+        1
+      ]
+    },
+    "aone": {
+      "resource": "daily",
+      "gpu_type": "RTX_5000_PRO_CU13",
+      "shard_count": 3,
+      "max_parallel": 3,
+      "exec_properties": {}
+    }
+  },
+  "output": {"result_root": "perf_test_results"},
+  "regression": {},
+  "publish": {}
+}

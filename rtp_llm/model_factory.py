@@ -109,6 +109,7 @@ class ModelFactory:
             ),
             loader_recycle_handles=engine_config.load_config.loader_recycle_handles,
             moe_pure_tp_preshard=engine_config.load_config.moe_pure_tp_preshard,
+            resident_weights_config=engine_config.load_config.resident_weights_config,
         )
         return model
 
@@ -218,6 +219,7 @@ class ModelFactory:
                     "disable ROCm swizzleA for BF16 Qwen3 block-draft propose model"
                 )
 
+            resident_config = engine_config.load_config.resident_weights_config
             gpt_model = model_cls.from_config(
                 model_config=propose_model_config,
                 parallelism_config=engine_config.parallelism_config,
@@ -235,6 +237,7 @@ class ModelFactory:
                 ),
                 loader_recycle_handles=engine_config.load_config.loader_recycle_handles,
                 moe_pure_tp_preshard=engine_config.load_config.moe_pure_tp_preshard,
+                resident_weights_config=resident_config.with_role("draft"),
                 weight_alias_owner=target_model if alias_names else None,
                 weight_alias_names=alias_names,
             )

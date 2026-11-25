@@ -267,6 +267,11 @@ class OwnedFp8Fp4MoE(RtpModule):
                 copy_weight_(target, tensor, name)
             self._loaded.add(name)
 
+    def finish_resident_checkpoint_restore(self):
+        # All packed rank-local destination tensors were just shape/type checked.
+        # Only a fully validated cold load can publish these fused expert stacks.
+        self._loaded = self._expected.copy()
+
     def checkpoint_load_complete(self):
         return self._expected.issubset(self._loaded)
 

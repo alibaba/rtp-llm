@@ -189,7 +189,7 @@ class OwnedEngram(Engram, RtpModule):
         self._pinned = None
 
     @classmethod
-    def from_checkpoint(cls, config, layer_id, checkpoint_path, device, *, load_method):
+    def from_checkpoint(cls, config, layer_id, checkpoint_path, device, *, load_method, resident_weights=None):
         """Initialize only this local layer, after the backbone resolves its loader.
 
         The backbone excludes Engram keys from its general shard stream and
@@ -215,10 +215,24 @@ class OwnedEngram(Engram, RtpModule):
                 model.wkv.scale.dtype,
             ),
         }
-        source = EngramSource(checkpoint_path, layer_id, specs, load_method)
+        # Header validation and tensor reads belong to cold builders only. On a
+        # hit use the retained host table and the four small resident GPU views.
+        from rtp_llm.resident_weights import resident_init_scalar, resident_init_tensors
+        source = None
+
+        def checkpoint():
+            nonlocal source
+            if source is None:
+                source = EngramSource(checkpoint_path, layer_id, specs, load_method)
+            return source
+
+        group = f"native.engram.{layer_id}"
+        identity = resident_init_scalar(
+            resident_weights, group + ".host", lambda: checkpoint().cache_identity()
+        )
 
         def table_pair():
-            return source.load("embed.weight"), source.load("embed.scale")
+            return checkpoint().load("embed.weight"), checkpoint().load("embed.scale")
 
         model.to(device=device)
         if device.type == "cuda":
@@ -228,24 +242,36 @@ class OwnedEngram(Engram, RtpModule):
             model._pinned = _PinnedSharedTable(
                 None,
                 None,
-                source.cache_identity(),
+                identity,
                 device,
-                loader=table_pair if source.method == "scratch" else None,
+                loader=table_pair if load_method == "scratch" else None,
                 load_into=(
-                    source.fill_shared_table
-                    if source.method == "fastsafetensors"
+                    (lambda mapping: checkpoint().fill_shared_table(mapping))
+                    if load_method == "fastsafetensors"
                     else None
                 ),
                 table_shape=model.embed.shape,
+                require_existing=resident_weights is not None and source is None,
             )
             pair = model._pinned.weight, model._pinned.scales.view(torch.float8_e8m0fnu)
         else:
             pair = table_pair()
         model.embed.load_weights(zip(("weight", "scale"), pair))
-        model.load_weights(
-            (name, source.load(name))
-            for name in ("q_weight", "k_weight", "wkv.weight", "wkv.scale")
-        )
+        names = ("q_weight", "k_weight", "wkv.weight", "wkv.scale")
+        if resident_weights is None:
+            model.load_weights((name, checkpoint().load(name)) for name in names)
+        else:
+            values = resident_init_tensors(
+                resident_weights, group + ".small", tuple(group + "." + n for n in names), (),
+                lambda: tuple(checkpoint().load(n).to(device) for n in names)
+            )
+            for name, value in zip(names, values):
+                param = model.get_parameter(name)
+                if param.shape != value.shape or param.dtype != value.dtype or value.device != param.device:
+                    raise ValueError(f"Incompatible resident Engram tensor {name}")
+                param.data = value
+                prefix, _, key = name.rpartition(".")
+                model.get_submodule(prefix)._mark_weight_loaded(key)
         model.wkv.process_weights_after_loading()
         model.process_weights_after_loading()
         return model

@@ -1,8 +1,9 @@
+import math
 import os
 import sys
 import time
-from dataclasses import dataclass
-from typing import Dict, Optional
+from dataclasses import dataclass, replace
+from typing import Dict, Optional, Tuple
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
@@ -78,6 +79,105 @@ class LoraConfig:
         return f"lora_info: {self.lora_info}\n" f"merge_lora: {self.merge_lora}\n"
 
 
+def _resolve_resident_timer(
+    name: str, value: Optional[float], mode_default: float
+) -> float:
+    if value is None:
+        return mode_default
+    if value == -1:
+        return -1.0
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be > 0 or -1 (disabled), got {value}")
+    return float(value)
+
+
+def resolve_engine_restart_limit(py_env_configs: "PyEnvConfigs") -> int:
+    """Resolve ENGINE_RESTART_LIMIT: -1 defaults to 3 in prod mode and 0 otherwise."""
+    limit = py_env_configs.server_config.engine_restart_limit
+    if limit == -1:
+        return (
+            3
+            if py_env_configs.load_config.resident_weights_config.mode == "prod"
+            else 0
+        )
+    if limit < -1:
+        raise ValueError(
+            f"engine_restart_limit must be >= 0 or -1 (mode default), got {limit}"
+        )
+    return limit
+
+
+@dataclass(slots=True)
+class ResidentWeightsConfig:
+    """Whether the loaded and transformed weights stay resident in the local store process.
+
+    ``mode`` is ``none`` (off), ``dev`` (the store outlives every exit until the user stops
+    it) or ``prod`` (start_server owns an instance store and stops it on a clean exit).
+    One model role of one engine: the target and its draft each get their own record, so they
+    carry the same switches under a different ``role``.
+    """
+
+    mode: str = "none"
+    verify: bool = False
+    role: str = "target"
+    # Idle timers of the store this start launches, in seconds; None uses the mode's default
+    # (dev: move to host memory after 600 s, drop after 3600 s; prod: both -1), -1 disables.
+    offload_after_s: Optional[float] = None
+    idle_ttl_s: Optional[float] = None
+    # Minimum host memory kept available after an idle offload: max(total * ratio, min_gb GiB).
+    offload_host_reserve_ratio: float = 0.2
+    offload_host_reserve_min_gb: float = 0.0
+
+    @property
+    def enable(self) -> bool:
+        return self.mode != "none"
+
+    def store_timers(self) -> Tuple[float, float]:
+        """(offload_after_s, idle_ttl_s) with the mode defaults filled in (-1: disabled)."""
+        dev = self.mode == "dev"
+        offload = _resolve_resident_timer(
+            "resident_weights_offload_after_s",
+            self.offload_after_s,
+            600.0 if dev else -1.0,
+        )
+        ttl = _resolve_resident_timer(
+            "resident_weights_idle_ttl_s",
+            self.idle_ttl_s,
+            3600.0 if dev else -1.0,
+        )
+        return offload, ttl
+
+    def store_host_reserve(self) -> Tuple[float, float]:
+        """(ratio, min_gb) host memory reserve for idle offload."""
+        ratio = self.offload_host_reserve_ratio
+        min_gb = self.offload_host_reserve_min_gb
+        if not math.isfinite(ratio) or not (0.0 <= ratio < 1.0):
+            raise ValueError(
+                f"resident_weights_offload_host_reserve_ratio must be in [0, 1), got {ratio}"
+            )
+        if not math.isfinite(min_gb) or not (0.0 <= min_gb <= 1e9):
+            raise ValueError(
+                f"resident_weights_offload_host_reserve_min_gb must be in [0, 1e9], got {min_gb}"
+            )
+        return float(ratio), float(min_gb)
+
+    def with_role(self, role: str) -> "ResidentWeightsConfig":
+        return replace(self, role=role)
+
+    def to_string(self):
+        offload, ttl = self.store_timers()
+        ratio, min_gb = self.store_host_reserve()
+        return (
+            f"mode: {self.mode}\n"
+            f"verify: {self.verify}\n"
+            f"role: {self.role}\n"
+            f"offload_after_s: {offload:g}\n"
+            f"idle_ttl_s: {ttl:g}\n"
+            f"offload_host_reserve_ratio: {ratio:g}\n"
+            f"offload_host_reserve_min_gb: {min_gb:g}"
+        )
+
+
 class LoadConfig:
     def __init__(self):
         self.fastsafetensors_config_json: Optional[str] = None
@@ -88,6 +188,7 @@ class LoadConfig:
         self.moe_pure_tp_preshard: bool = False
         self.loader_drop_page_cache: bool = True
         self.loader_drop_page_cache_threshold_mb: int = 2048
+        self.resident_weights_config: ResidentWeightsConfig = ResidentWeightsConfig()
 
     def to_string(self):
         return (
@@ -97,7 +198,10 @@ class LoadConfig:
             f"moe_pure_tp_preshard: {self.moe_pure_tp_preshard}\n"
             f"loader_drop_page_cache: {self.loader_drop_page_cache}\n"
             f"loader_drop_page_cache_threshold_mb: "
-            f"{self.loader_drop_page_cache_threshold_mb}"
+            f"{self.loader_drop_page_cache_threshold_mb}\n"
+            f"resident_weights_mode: {self.resident_weights_config.mode}\n"
+            f"resident_weights_verify: {self.resident_weights_config.verify}\n"
+            f"resident_weights_role: {self.resident_weights_config.role}"
         )
 
 

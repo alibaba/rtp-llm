@@ -27,15 +27,6 @@ def _load_tokenizer(
     return AutoTokenizer.from_pretrained(local_path, trust_remote_code=True)
 
 
-def get_prompt(tokenizer: Any, prompt: str, seqlen: int):
-    while len(tokenizer.encode(prompt)) < seqlen:
-        prompt += prompt
-    for dec_step in [1024, 256, 64, 16, 2, 1]:
-        while len(tokenizer.encode(prompt[:-dec_step])) >= seqlen:
-            prompt = prompt[:-dec_step]
-    return prompt
-
-
 def _create_query_worker(args: Tuple[str, int]) -> Tuple[int, str]:
     """Top-level worker for ProcessPoolExecutor (must be picklable)."""
     tokenizer_path, input_len = args

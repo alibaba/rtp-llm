@@ -164,7 +164,11 @@ def load_owned_model(service, *, publish_runtime=True):
         aliases, prepared, admin_lock = _resolve_owner_loans(service, config, device, publish_runtime)
         return aliases, prepared
 
-    module = loader.load(startup_lora=merged_adapter, prepare_loans=prepare_loans)
+    def load(**resident_options):
+        return loader.load(startup_lora=merged_adapter, prepare_loans=prepare_loans, **resident_options)
+
+    residency = getattr(service, "resident_weights_config", None)
+    module = service._load_with_residency(device, load) if residency and residency.enable else load()
     actual = loader.loaded_method
     requested = load_config.load_method
     if actual is None or (
@@ -207,9 +211,11 @@ def load_owned_model(service, *, publish_runtime=True):
         loader,
         startup_adapters=(merged_adapter[0],) if merged_adapter else (),
         admin_lock=admin_lock,
+        resident_weights_enabled=bool(residency and residency.enable),
     )
     weight_manager = NewLoaderWeightManager(
-        module, loader, adapters=rank_local_lora, admin_lock=admin_lock
+        module, loader, adapters=rank_local_lora, admin_lock=admin_lock,
+        resident_weights_enabled=bool(residency and residency.enable),
     )
     service.device = device
     service.weight = view

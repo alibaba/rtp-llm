@@ -486,6 +486,9 @@ uint32_t CacheConfig::blockNumForGroup(const GroupBase& group, uint32_t baseline
 uint32_t CacheConfig::maxBaselineBlockNum() const {
     uint64_t maximum = std::numeric_limits<uint32_t>::max();
     for (const auto& group : groups()) {
+        if (layerIdsForGroup(group.tag).empty()) {
+            continue;
+        }
         if (group.policy.explicit_block_num > 0) {
             (void)blockNumForGroup(group, 1);
             continue;

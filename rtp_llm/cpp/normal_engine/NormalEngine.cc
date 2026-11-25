@@ -1073,6 +1073,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
             negotiator.negotiate(config, confirmed_block_num, block_tree_layout->sizing, runtime_config);
         config.finalizeBlockNums(capacity.paged_block_num, runtime_config, &capacity.block_num_overrides);
         block_tree_layout->block_nums = capacity.block_tree;
+        block_tree_layout->disk_eviction_block_bytes = capacity.disk_eviction_block_bytes;
     } else {
         config.finalizeBlockNums(confirmed_block_num, runtime_config);
     }

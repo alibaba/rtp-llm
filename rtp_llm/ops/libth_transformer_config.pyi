@@ -755,6 +755,8 @@ class KVCacheConfig:
     block_tree_disk_evict_high_watermark_ratio: float
     fp8_kv_cache: int
     kv_cache_mem_mb: int
+    target_initialize_gpu_growth_bytes: int
+    draft_initialize_gpu_growth_bytes: int
     reuse_cache_tail_blocks: int
     linear_pool_blocks: int
     swa_pool_blocks: int

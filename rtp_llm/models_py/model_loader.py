@@ -1,4 +1,5 @@
 import inspect
+import json
 import logging
 import os
 import platform
@@ -409,6 +410,7 @@ class NewLoaderConfig:
     force_cpu_load_weights: bool = False
     # Opaque owner-validated coupled tensor references (e.g. scaled vocabulary).
     prepared_runtime_loan: Any = field(default=None, repr=False, compare=False)
+    resident_construction: Any = field(default=None, repr=False, compare=False)
     reserve_runtime_mem_mb: int = 0
     moe_pure_tp_preshard: bool = False
 
@@ -2493,12 +2495,27 @@ class NewModelLoader:
                 raise ValueError(f"{self._model_type()} does not support load-time W8A8")
         return checkpoint_files, expert_filter, meta_checkpoint, ft_checkpoint
 
+    def _record_resident_owner(self, model, resident, method, startup_lora, *, format_route="hf"):
+        from rtp_llm.models_py import resident_checkpoint
+        from rtp_llm.resident_weights import GLOBAL_SCOPE
+
+        describe = getattr(model, "resident_constructor_state", None)
+        if describe is None or startup_lora is not None:
+            raise RuntimeError(f"No resident checkpoint schema for {type(model).__name__} with startup_lora={startup_lora is not None}")
+        if format_route == "ft" and callable(getattr(model, "from_ft_checkpoint_header", None)):
+            raise ValueError("Cannot restore a header-dependent FT constructor as an HF owner")
+        resident_checkpoint.record(model, resident, method)
+        resident.init_scalar(GLOBAL_SCOPE, "native.format", lambda: format_route)
+        resident.init_scalar(GLOBAL_SCOPE, "native.constructor", lambda: json.dumps(describe(), sort_keys=True))
+
     @torch.inference_mode()
-    def load(self, *, startup_lora: Optional[Tuple[str, str]] = None, prepare_loans=None) -> nn.Module:
+    def load(self, *, startup_lora: Optional[Tuple[str, str]] = None, prepare_loans=None, resident=None, restored=None) -> nn.Module:
         # Only a complete load publishes a backend, including on retry.
         self._selected_load_method = None
         self._eplb_ft_checkpoint = None
         self._w8a8_source = None
+        if self.load_config.resident_construction is not None:
+            self.load_config = replace(self.load_config, resident_construction=None)
         requested_method = self.load_config.load_method
         parallel = self.load_config.parallelism_config
         # Participation is an owner-class contract, independent of whether a
@@ -2525,9 +2542,39 @@ class NewModelLoader:
                 self.parameter_aliases = dict(aliases)
                 self.load_config = replace(self.load_config, borrowed_parameter_paths=tuple(aliases),
                                            prepared_runtime_loan=prepared)
-            checkpoint_files, expert_filter, meta_checkpoint, ft_checkpoint = (
-                self._prepare_checkpoint(requested_method, startup_lora)
-            )
+            if restored is None:
+                checkpoint_files, expert_filter, meta_checkpoint, ft_checkpoint = self._prepare_checkpoint(requested_method, startup_lora)
+        if resident is not None and restored is not None:
+            from rtp_llm.models_py import resident_checkpoint as rc
+            from rtp_llm.resident_weights import GLOBAL_SCOPE
+
+            with self._checkpoint_preflight(owner, requested_method, isolated=isolated):
+                self.load_config = replace(self.load_config, resident_construction=json.loads(
+                    resident.init_scalar(GLOBAL_SCOPE, "native.constructor", rc._replay_only)
+                ))
+                method = NewLoaderLoadMethod(resident.init_scalar(GLOBAL_SCOPE, "native.backend", rc._replay_only))
+                if requested_method not in (NewLoaderLoadMethod.AUTO, method):
+                    raise ValueError("Resident weight record belongs to a different checkpoint backend")
+                route = resident.init_scalar(GLOBAL_SCOPE, "native.format", rc._replay_only)
+                if route not in ("hf", "ft", "meta"):
+                    raise ValueError(f"Unknown resident checkpoint format {route!r}")
+                load = self.load_config
+                adapt = getattr(load.quant_config, "for_ft_snapshot", None)
+                if route == "ft" and callable(adapt):
+                    load = replace(load, quant_config=adapt())
+                with torch.device("cpu"):
+                    model = self._create_model(ft_load_config=load)
+                self._validate_runtime_backends(model, self.load_config.device)
+                self._notify_checkpoint_source(model, method)
+                bind_borrowed_parameters(model, self.parameter_aliases, self.load_config.device)
+                rc.restore(model, resident, restored, self.load_config.device)
+                model.to(self.load_config.device)
+                self._validate_loaded_weights(model)
+                self._run_post_load_hooks(model)
+                validate_borrowed_parameters(model)
+                model.eval()
+            self._selected_load_method = method
+            return model
         if distributed_load and not isolated:
             route = ("meta" if meta_checkpoint is not None else "ft" if ft_checkpoint is not None
                      else "w8a8" if self._w8a8_source is not None else "hf")
@@ -2629,6 +2676,10 @@ class NewModelLoader:
                     self._finalize_host_staged_modules(model)
                 model.to(self.load_config.device)
                 self._validate_loaded_weights(model)
+                if resident is not None:
+                    ft_method = NewLoaderLoadMethod(ft_checkpoint.read_backend)
+                    self._record_resident_owner(model, resident, ft_method, startup_lora,
+                                                format_route="meta" if meta_checkpoint else "ft")
                 self._run_post_load_hooks(model)
                 validate_borrowed_parameters(model, self.load_config.device)
                 if finish_meta_lora is not None:
@@ -2880,6 +2931,8 @@ class NewModelLoader:
             validate_borrowed_parameters(model, self.load_config.device)
             model.to(self.load_config.device)
             self._validate_loaded_weights(model)
+            if resident is not None:
+                self._record_resident_owner(model, resident, method, startup_lora)
             self._run_post_load_hooks(model)
             if finish_lora is not None:
                 finish_lora()

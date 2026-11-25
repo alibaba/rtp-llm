@@ -257,12 +257,25 @@ class OwnedV41Attention(RtpModule):
     def validate_runtime_device(self, device):
         self.wkv.validate_runtime_device(device)
 
+    def bind_resident_parameters(self, bank, prefix):
+        self._resident_qkv = bank, tuple(prefix + n for n in (
+            "wq_a.weight", "wq_a.scale", "wkv.weight", "wkv.scale"
+        ))
+
     @torch.no_grad()
     def _prepare_qkv(self, merge):
         # Keep the four checkpoint Parameters (and their identity). A native
         # prefill projection reads their shared allocation, not another copy.
         q, kv = self.wq_a, self.wkv
-        merged = merge(q.weight, q.scale, kv.weight, kv.scale)
+        resident = getattr(self, "_resident_qkv", None)
+        if resident is None:
+            merged = merge(q.weight, q.scale, kv.weight, kv.scale)
+        else:
+            from rtp_llm.models_py.modules.dsv41.utils import merge_v41_qkv_weights
+            bank, keys = resident
+            linear = merge_v41_qkv_weights(bank, *keys)
+            qw, qs, kw, ks = keys
+            merged = None if linear is None else (linear, (bank[qw], bank[kw]), (bank[qs], bank[ks]))
         if merged is None:
             object.__setattr__(self, "wq_a_wkv", None)
             return

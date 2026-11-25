@@ -53,6 +53,17 @@ class _Owner(RtpModule):
 
 
 class MainUpdateCompatTest(unittest.TestCase):
+    def test_resident_mode_rejects_updates_before_transport_or_write(self):
+        model, loader = self.load(0)
+        manager = NewLoaderWeightManager(model, loader, resident_weights_enabled=True)
+        before = model.embed_tokens.weight.clone()
+        with self.assertRaisesRegex(RuntimeError, "resident weights"):
+            manager.update({"method": "shm", "name": "model.embed_tokens.weight", "desc": "invalid"})
+        with self.assertRaisesRegex(RuntimeError, "resident weights"):
+            manager.update_tensors({"model.embed_tokens.weight": torch.ones_like(before)})
+        self.assertEqual(manager.version, 0)
+        torch.testing.assert_close(model.embed_tokens.weight, before)
+
     def test_retry_busy_rank_after_peer_already_accepted_update(self):
         # The public call updates a single rank. A busy peer cannot undo an
         # earlier successful response; keep inference paused until it catches up.

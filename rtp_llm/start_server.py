@@ -1,10 +1,11 @@
 import logging
+import math
 import multiprocessing
 import os
 import sys
 import time
 import traceback
-from typing import Iterator
+from typing import Iterator, Optional
 
 import requests
 import torch
@@ -16,7 +17,7 @@ CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
 from rtp_llm.config.log_config import setup_logging
-from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.py_config_modules import PyEnvConfigs, resolve_engine_restart_limit
 from rtp_llm.config.server_config_setup import (
     load_gpu_nic_affinity,
     setup_and_configure_server,
@@ -25,7 +26,9 @@ from rtp_llm.distribute.distributed_server import get_local_world_info
 from rtp_llm.models_py.distributed.rank_layout import RankLayout
 from rtp_llm.ops import RoleType, SpeculativeType, VitSeparation
 from rtp_llm.server.server_args.server_args import setup_args
+from rtp_llm.utils.backend_restart import ShutdownRequested
 from rtp_llm.utils.concurrency_controller import init_controller
+from rtp_llm.utils.drain_flag import DrainFlag
 from rtp_llm.utils.process_manager import (
     DEFER_FIRST_SIGTERM_ENV,
     DEFER_FIRST_SIGTERM_SECONDS_ENV,
@@ -110,21 +113,11 @@ def _sync_server_shutdown_timeout(py_env_configs: PyEnvConfigs):
     )
 
 
-@timer_wrapper(description="start backend server")
-def start_backend_server_impl(
-    global_controller,
-    py_env_configs: PyEnvConfigs,
-    process_manager: ProcessManager = None,
-    service_draining=None,
+def _spawn_backend_process(
+    global_controller, py_env_configs: PyEnvConfigs, service_draining=None
 ):
+    """Start the backend manager process; return it with its pipe-based readiness check."""
     from rtp_llm.start_backend_server import start_backend_server
-
-    # only for debug
-    if py_env_configs.profiling_debug_logging_config.debug_load_server:
-        start_backend_server(
-            global_controller, py_env_configs, None, service_draining=service_draining
-        )
-        os._exit(-1)
 
     # Create pipe for subprocess startup status communication
     pipe_reader, pipe_writer = torch.multiprocessing.Pipe(duplex=False)
@@ -161,10 +154,6 @@ def start_backend_server_impl(
             os.environ[DEFER_FIRST_SIGTERM_SECONDS_ENV] = old_defer_seconds
         # Close parent's write end on both paths; on spawn failure leaving it open masks EOF as a hang.
         pipe_writer.close()
-
-    if process_manager:
-        # Register right after start so later failures in start_server() still clean this process up.
-        process_manager.add_process(backend_process, shutdown_group="backend")
 
     # Create check_ready_fn for pipe-based health check
     startup_status = {"ready": False, "error": None}
@@ -206,6 +195,32 @@ def start_backend_server_impl(
                 raise Exception(error)
 
         return False
+
+    return backend_process, check_backend_ready
+
+
+@timer_wrapper(description="start backend server")
+def start_backend_server_impl(
+    global_controller,
+    py_env_configs: PyEnvConfigs,
+    process_manager: ProcessManager = None,
+    service_draining=None,
+):
+    from rtp_llm.start_backend_server import start_backend_server
+
+    # only for debug
+    if py_env_configs.profiling_debug_logging_config.debug_load_server:
+        start_backend_server(
+            global_controller, py_env_configs, None, service_draining=service_draining
+        )
+        os._exit(-1)
+
+    backend_process, check_backend_ready = _spawn_backend_process(
+        global_controller, py_env_configs, service_draining
+    )
+    if process_manager:
+        # Register right after start so later failures in start_server() still clean this process up.
+        process_manager.add_process(backend_process, shutdown_group="backend")
 
     # Register health check with ProcessManager using custom check_ready_fn
     if process_manager:
@@ -686,8 +701,9 @@ def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
     return getattr(py_env_configs.model_args, "model_type", "") == "deepseek_v4"
 
 
-def _setup_startup_warmup_health_gate(py_env_configs: PyEnvConfigs):
-    if not _should_run_startup_real_warmup(py_env_configs):
+def _setup_startup_warmup_health_gate(py_env_configs: PyEnvConfigs, force=False):
+    # Backend restarts reuse this gate: /health stays 503 until a generation is ready.
+    if not force and not _should_run_startup_real_warmup(py_env_configs):
         os.environ.pop(STARTUP_WARMUP_HEALTH_GATE_FILE_ENV, None)
         return None
 
@@ -719,6 +735,147 @@ def _mark_startup_warmup_health_gate_ready(gate_file):
             traceback.format_exc(),
         )
         raise
+
+
+RESIDENT_STORE_ENV = "RTP_LLM_RESIDENT_STORE"
+
+
+def _owns_instance_resident_store(py_env_configs: PyEnvConfigs) -> bool:
+    """prod mode: this start_server owns its resident store and stops it on a clean exit."""
+    return (
+        py_env_configs.load_config.resident_weights_config.mode == "prod"
+        and py_env_configs.role_config.role_type
+        not in (RoleType.FRONTEND, RoleType.VIT)
+    )
+
+
+def _claim_instance_resident_store(py_env_configs: PyEnvConfigs) -> str:
+    """Name the resident store this instance stops on a clean exit.
+
+    An operator-provided name is kept as is and must then be exclusive to this instance.
+    """
+    from rtp_llm.resident_weights.store import instance_store_name
+
+    name = os.environ.get(RESIDENT_STORE_ENV) or instance_store_name(
+        py_env_configs.server_config.start_port
+    )
+    os.environ[RESIDENT_STORE_ENV] = name
+    return name
+
+
+def _stop_instance_resident_store(store_name: str) -> None:
+    from rtp_llm.resident_weights import store
+
+    try:
+        store.stop_store(store_name)
+        logging.info("stopped resident weight store %s", store_name)
+    except (ConnectionRefusedError, FileNotFoundError):
+        logging.info("no resident weight store %s to stop", store_name)
+    except Exception:
+        logging.exception("failed to stop resident weight store %s", store_name)
+
+
+def _engine_restart_enabled(py_env_configs: PyEnvConfigs) -> bool:
+    if resolve_engine_restart_limit(py_env_configs) <= 0:
+        return False
+    if py_env_configs.profiling_debug_logging_config.debug_load_server:
+        return False
+    return py_env_configs.role_config.role_type not in (
+        RoleType.FRONTEND,
+        RoleType.VIT,
+    )
+
+
+def _startup_health_check_timeout(py_env_configs: PyEnvConfigs) -> Optional[int]:
+    """Seconds a backend generation may take to become ready; None means no bound.
+
+    Only -1 is the unbounded opt-out; other non-positive values fall back to 3600.
+    """
+    timeout = py_env_configs.server_config.startup_health_check_timeout
+    if timeout == -1:
+        return None
+    if timeout <= 0:
+        logging.warning("invalid startup_health_check_timeout=%s; using 3600", timeout)
+        return 3600
+    return timeout
+
+
+def _backend_service_draining(service_draining, process_manager, restart_enabled):
+    """The drain event to hand the next backend generation.
+
+    A backend sets its drain event when it fails, which also marks every process sharing it
+    as no longer serving. Without in-place restart a failure ends the instance, so the whole
+    instance shares one event. With it, each generation gets its own: the instance's event is
+    set only when the instance stops, and the process manager forwards that to the current
+    generation.
+    """
+    if not restart_enabled:
+        return service_draining
+    event = DrainFlag()
+    process_manager.backend_service_draining = event
+    if service_draining.is_set():
+        event.set()
+    return event
+
+
+def _create_backend_restarter(
+    global_controller,
+    py_env_configs: PyEnvConfigs,
+    process_manager,
+    gate_file,
+    service_draining,
+):
+    from rtp_llm.distribute.distributed_server import get_master
+    from rtp_llm.utils.backend_restart import (
+        DEFAULT_HEARTBEAT_INTERVAL_S,
+        ROW_COORDINATOR_PORT_OFFSET,
+        BackendRestarter,
+        RowCoordinator,
+    )
+
+    pc = py_env_configs.parallelism_config
+    num_nodes = max(1, (pc.world_size + pc.local_world_size - 1) // pc.local_world_size)
+    node_index = pc.world_rank // pc.local_world_size
+    host, port = "", 0
+    if num_nodes > 1:
+        host, master_port = get_master(py_env_configs.distribute_config, pc)
+        base_port = (
+            int(master_port) if master_port else py_env_configs.server_config.start_port
+        )
+        port = base_port - ROW_COORDINATOR_PORT_OFFSET
+    startup_timeout = _startup_health_check_timeout(py_env_configs)
+    heartbeat_timeout = py_env_configs.server_config.engine_restart_heartbeat_timeout_s
+    # nan or inf would never time out (no fail-closed); at or below the beat interval a
+    # healthy row could look lost between two beats.
+    if not math.isfinite(heartbeat_timeout) or heartbeat_timeout <= (
+        DEFAULT_HEARTBEAT_INTERVAL_S
+    ):
+        raise ValueError(
+            f"engine_restart_heartbeat_timeout_s must be a finite number of seconds above the "
+            f"{DEFAULT_HEARTBEAT_INTERVAL_S:g}s heartbeat interval, got {heartbeat_timeout}"
+        )
+    coordinator = RowCoordinator(
+        num_nodes,
+        node_index,
+        host,
+        port,
+        connect_timeout_s=3600 if startup_timeout is None else max(startup_timeout, 60),
+        heartbeat_timeout_s=heartbeat_timeout,
+    )
+    coordinator.start(should_abort=lambda: process_manager.shutdown_requested)
+    return BackendRestarter(
+        restart_limit=resolve_engine_restart_limit(py_env_configs),
+        spawn_backend=lambda: _spawn_backend_process(
+            global_controller,
+            py_env_configs,
+            _backend_service_draining(service_draining, process_manager, True),
+        ),
+        coordinator=coordinator,
+        is_shutdown_requested=lambda: process_manager.shutdown_requested,
+        gate_file=gate_file,
+        after_ready=lambda: _maybe_run_startup_real_warmup(py_env_configs),
+        ready_timeout_s=startup_timeout,
+    )
 
 
 def main():
@@ -755,7 +912,7 @@ def start_server(py_env_configs: PyEnvConfigs):
     )
     _sync_server_shutdown_timeout(py_env_configs)
 
-    service_draining = multiprocessing.Event()
+    service_draining = DrainFlag()
     # Create process manager with config values
     process_manager = ProcessManager(
         service_draining=service_draining,
@@ -790,10 +947,29 @@ def start_server(py_env_configs: PyEnvConfigs):
     dash_sc_enabled = py_env_configs.role_config.role_type != RoleType.VIT
     py_env_configs.server_config.validate_port_layout(dash_sc_enabled=dash_sc_enabled)
 
+    resident_store_name = (
+        _claim_instance_resident_store(py_env_configs)
+        if _owns_instance_resident_store(py_env_configs)
+        else None
+    )
+    restart_enabled = _engine_restart_enabled(py_env_configs)
     # Impls register spawned processes right after start, so later failures still reach them in the finally cleanup.
-    startup_warmup_gate_file = _setup_startup_warmup_health_gate(py_env_configs)
+    startup_warmup_gate_file = _setup_startup_warmup_health_gate(
+        py_env_configs, force=restart_enabled
+    )
+    backend_restarter = None
 
     try:
+        if restart_enabled:
+            backend_restarter = _create_backend_restarter(
+                global_controller,
+                py_env_configs,
+                process_manager,
+                startup_warmup_gate_file,
+                service_draining,
+            )
+            process_manager.backend_restarter = backend_restarter
+
         if py_env_configs.role_config.role_type == RoleType.VIT:
             logging.info("start vit server")
             start_vit_server_impl(py_env_configs, process_manager, service_draining)
@@ -805,7 +981,12 @@ def start_server(py_env_configs: PyEnvConfigs):
             # For backend server, vit_process_engine is None when vit is separated
             logging.info("start backend server")
             start_backend_server_impl(
-                global_controller, py_env_configs, process_manager, service_draining
+                global_controller,
+                py_env_configs,
+                process_manager,
+                _backend_service_draining(
+                    service_draining, process_manager, restart_enabled
+                ),
             )
 
         if py_env_configs.role_config.role_type != RoleType.VIT:
@@ -821,27 +1002,24 @@ def start_server(py_env_configs: PyEnvConfigs):
             )
 
         # Start parallel health checks and wait; the bound is total (shared deadline across checks).
-        # Only -1 is the unbounded opt-out; other non-positive values fall back to 3600.
-        startup_timeout = py_env_configs.server_config.startup_health_check_timeout
-        if startup_timeout == -1:
-            startup_timeout = None
-        elif startup_timeout <= 0:
-            logging.warning(
-                "invalid startup_health_check_timeout=%s; using 3600", startup_timeout
-            )
-            startup_timeout = 3600
+        startup_timeout = _startup_health_check_timeout(py_env_configs)
         if not process_manager.run_health_checks(timeout=startup_timeout):
             logging.error("[START_SERVER] Health checks failed")
             raise Exception("Health checks failed")
 
         _maybe_run_startup_real_warmup(py_env_configs)
         _mark_startup_warmup_health_gate_ready(startup_warmup_gate_file)
+        if backend_restarter is not None:
+            backend_restarter.arm()
 
         logging.info(
             f"Backend RPC service is listening on 0.0.0.0, IP/IP range can be customized as needed"
         )
         consume_s = time.time() - start_time
         logging.info(f"start server took {consume_s:.2f}s")
+    except ShutdownRequested:
+        # Stopped while waiting for the row's part0: no backend was started; take the normal stop.
+        logging.info("stop requested while connecting to the row coordinator")
     except Exception as e:
         logging.error(f"start failed, trace: {traceback.format_exc()}")
         # If a SIGTERM/SIGINT already triggered shutdown before this exception,
@@ -852,7 +1030,12 @@ def start_server(py_env_configs: PyEnvConfigs):
         if not process_manager.shutdown_requested:
             process_manager.request_failure_shutdown()
     finally:
+        # A failure exits the process with code 1 inside; only a clean stop returns.
         process_manager.monitor_and_release_processes()
+        if backend_restarter is not None:
+            backend_restarter.coordinator.close()
+    if resident_store_name:
+        _stop_instance_resident_store(resident_store_name)
 
 
 def _get_startup_real_warmup_pow2_lens(max_len: int):

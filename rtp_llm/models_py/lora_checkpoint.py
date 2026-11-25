@@ -133,7 +133,8 @@ class RankLocalCheckpointAdapters:
     the manager's local lock cannot provide that distributed guarantee.
     """
 
-    def __init__(self, model, loader, *, startup_adapters=(), admin_lock=None):
+    def __init__(self, model, loader, *, startup_adapters=(), admin_lock=None, resident_weights_enabled=False):
+        self._resident_weights_enabled = resident_weights_enabled
         self._model = model
         self._loader = loader
         self._startup = frozenset(startup_adapters)
@@ -191,6 +192,8 @@ class RankLocalCheckpointAdapters:
                 self._manager.load(name, updates, allow_empty_stage=True)
 
     def _transition(self, op, pause_engine, *args):
+        if self._resident_weights_enabled and op in ("merge", "unmerge"):
+            raise RuntimeError("Cannot modify LoRA weights while resident weights mode is enabled")
         if not callable(pause_engine):
             raise TypeError("A caller-provided engine quiescence context is required")
         # Enter engine quiescence before the manager lock on every transition.

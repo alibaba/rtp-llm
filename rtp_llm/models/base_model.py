@@ -1,7 +1,9 @@
+import hashlib
+import importlib.metadata
 import json
 import logging
 import os
-from typing import Any, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 import torch
 
@@ -10,7 +12,7 @@ from rtp_llm.config.grammar_tokenizer_info import build_grammar_tokenizer_info_j
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.output_vocab_config import load_output_vocab_ids
-from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.config.py_config_modules import ResidentWeightsConfig, VitConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
     BaseTokenizer,
     TokenizerFactory,
@@ -26,11 +28,23 @@ from rtp_llm.ops import (
     MoeConfig,
     ParallelismConfig,
 )
+from rtp_llm.resident_weights import ResidentWeights, checkpoint_digest, vmm
+from rtp_llm.resident_weights.store import StoreSettings
+from rtp_llm.resident_weights.weights import all_ranks_true
 from rtp_llm.utils.model_weight import sp_0_pad8_size
 from rtp_llm.utils.time_util import timer_wrapper
 
 
+def _package_version(name: str) -> str:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return "absent"
+
+
 class BaseModel(object):
+
+    resident_weights_env_vars = ("MOE_MEGA_SHARED_EXPERT", "RTP_LLM_FP4_GEMM_BACKEND")
 
     # Independent configuration objects
     model_config: ModelConfig
@@ -55,6 +69,7 @@ class BaseModel(object):
         force_cpu_load_weights: bool = False,
         loader_recycle_handles: bool = False,
         moe_pure_tp_preshard: bool = False,
+        resident_weights_config: Optional[ResidentWeightsConfig] = None,
     ) -> None:
         """Initialize BaseModel with independent configuration objects.
         Args:
@@ -81,6 +96,10 @@ class BaseModel(object):
         self.force_cpu_load_weights = force_cpu_load_weights
         self.loader_recycle_handles = loader_recycle_handles
         self.moe_pure_tp_preshard = moe_pure_tp_preshard
+        self.resident_weights_config = (
+            resident_weights_config or ResidentWeightsConfig()
+        )
+        self._resident_weights: Optional[ResidentWeights] = None
         self.weight = None
         self.weight_manager = None
         self.rank_local_lora = None
@@ -159,12 +178,168 @@ class BaseModel(object):
 
         self.custom_module = self._init_custom_module()
         load_owned_model(self, publish_runtime=not skip_python_model)
+        self._finish_resident_weights()
 
     def support_pp(self) -> bool:
         return False
 
     def support_cuda_graph(self) -> bool:
         return False
+
+    def _load_with_residency(self, device, load):
+        """Agree on the source before any loader enters a checkpoint collective."""
+        if not self.resident_weights_config.enable:
+            return load()
+        self._resident_weights = self._create_resident_weights()
+        # A draft exists only on the last PP stage;
+        # its ranks must never join a WORLD collective that other stages skip.
+        synchronize_ranks = (
+            self.resident_weights_config.role == "target"
+            or self.parallelism_config.pp_size == 1
+        )
+        if synchronize_ranks and not all_ranks_true(
+            self._resident_weights is not None, device
+        ):
+            if self._resident_weights is not None:
+                # Every rank now loads from the checkpoint. A record this rank published
+                # earlier would otherwise keep its memory alongside the new copy.
+                logging.warning(
+                    "resident weights %s: another rank cannot use resident weights; "
+                    "dropping this rank's record and loading from the checkpoint",
+                    self._resident_weights.slot_key,
+                )
+                self._resident_weights.discard_attach()
+            self._resident_weights = None
+        manager = self._resident_weights
+        restored = None if manager is None else manager.acquire_for_load(
+            device, synchronize_ranks=synchronize_ranks
+        )
+        owner = load() if manager is None else load(resident=manager, restored=restored)
+        if synchronize_ranks:
+            self._wait_for_loading_ranks()
+        return owner
+
+    def _wait_for_loading_ranks(self) -> None:
+        """Let every rank finish loading before any of them enters the C++ engine.
+
+        Resident weights make ``T1`` wildly uneven: one rank attaches a published record in
+        seconds while its neighbour misses and spends ten minutes reading the checkpoint. ``T1``
+        runs under the world group BackendManager.start() built with an infinite timeout, but
+        the C++ ``T2`` after it (RtpLLMOp::init, the cache store handshake) does not, so a fast
+        rank that goes on alone times out there and takes the whole group down.
+        """
+        if not torch.distributed.is_initialized():
+            return
+        if torch.distributed.get_world_size() <= 1:
+            return
+        torch.distributed.barrier()
+
+    @property
+    def resident_initialize_gpu_growth_bytes(self) -> int:
+        """GPU memory the attached record gained in its cold start's initialize(), else 0.
+
+        This start holds it before the engine sizes the KV cache; see
+        KVCacheConfig.target_initialize_gpu_growth_bytes.
+        """
+        manager = self._resident_weights
+        return 0 if manager is None else manager.initialize_gpu_growth_bytes
+
+    def _finish_resident_weights(self) -> None:
+        if self._resident_weights is not None:
+            self._resident_weights.finalize_after_initialize(self.py_model)
+
+    def _create_resident_weights(self) -> Optional[ResidentWeights]:
+        if not vmm.is_available(self.parallelism_config.local_rank):
+            logging.warning(
+                "resident weights disabled: CUDA VMM with POSIX FD export is unavailable"
+            )
+            return None
+        if self.model_config.eplb_config.enable_eplb():
+            # The expert balancer copies reloaded experts into the weight tensors in place,
+            # which read-only resident mappings would fault on.
+            logging.warning("resident weights disabled: not supported with EPLB")
+            return None
+        offload_after_s, idle_ttl_s = self.resident_weights_config.store_timers()
+        host_reserve_ratio, host_reserve_min_gb = (
+            self.resident_weights_config.store_host_reserve()
+        )
+        resident = ResidentWeights(
+            self.resident_weights_config.role,
+            self.parallelism_config.local_rank,
+            self._resident_fingerprint(),
+            self.resident_weights_config.verify,
+            StoreSettings(
+                offload_after_s=offload_after_s,
+                idle_ttl_s=idle_ttl_s,
+                host_reserve_ratio=host_reserve_ratio,
+                host_reserve_min_gb=host_reserve_min_gb,
+            ),
+        )
+        return resident if resident.ensure_store_running() else None
+
+    def _resident_fingerprint(self) -> Dict[str, str]:
+        """Registered configuration guards, computed before loading mutates any config.
+
+        This is not a content or transitive-code dependency identity. Users must drop records
+        after incompatible checkpoint, weight-processing code or dependency changes.
+        """
+        config = self.model_config
+        fingerprint = {
+            "model_type": config.model_type,
+            "owner_layout": "newloader/native-v1",
+            "load_method": str(self.load_method),
+            "force_cpu_load_weights": str(self.force_cpu_load_weights),
+            "fmha_config": self.fmha_config.to_string(),
+            "max_generate_batch_size": str(self.max_generate_batch_size),
+            "checkpoint_path": os.path.realpath(config.ckpt_path),
+            "checkpoint_files": checkpoint_digest(config.ckpt_path, follow_index=True),
+            "ptuning_path": str(config.ptuning_path),
+            # The loader ignores absent/non-directory optional ptuning paths.
+            "ptuning_files": (
+                checkpoint_digest(config.ptuning_path)
+                if config.ptuning_path and os.path.isdir(config.ptuning_path)
+                else ""
+            ),
+            "lora_infos": str(config.lora_infos),
+            "lora_files": (
+                repr(
+                    sorted(
+                        (name, checkpoint_digest(path))
+                        for name, path in config.lora_infos.items()
+                    )
+                )
+                if self.merge_lora and len(config.lora_infos) == 1
+                else ""
+            ),
+            "enable_fp32_lm_head": str(config.enable_fp32_lm_head),
+            "normalize_lm_head_weight": str(config.normalize_lm_head_weight),
+            "output_vocab_ids": hashlib.sha256(
+                json.dumps(list(config.output_vocab_ids)).encode()
+            ).hexdigest(),
+            "merge_lora": str(self.merge_lora),
+            "moe_pure_tp_preshard": str(self.moe_pure_tp_preshard),
+            # The requested recipe is Python-only, so to_string() below omits it, and models
+            # derive storage choices (e.g. Qwen4 dense_storage) the C++ quant_algo cannot show.
+            "quantization": str(config.quantization),
+            # Borrowed globals are left out of this record; a different set leaves a hit
+            # missing or overriding them.
+            "global_weight_aliases": repr(sorted(self._weight_alias_names)),
+            "model_config": config.to_string(),
+            "parallelism_config": self.parallelism_config.to_string(),
+            "hw_kernel_config": self.hw_kernel_config.to_string(),
+            "moe_config": self.moe_config.to_string(),
+            # Cheap environment guards, not a complete identity of all weight-producing code.
+            "libraries": " ".join(
+                f"{name}={_package_version(name)}" for name in ("torch", "deep_gemm")
+            ),
+        }
+        if config.phy2log_path:
+            # The expert placement table is a file the path alone does not pin down.
+            with open(config.phy2log_path, "rb") as table:
+                fingerprint["phy2log_file"] = hashlib.sha256(table.read()).hexdigest()
+        for name in self.resident_weights_env_vars:
+            fingerprint[f"env {name}"] = repr(os.environ.get(name))
+        return fingerprint
 
     @classmethod
     def create_config(cls, ckpt_path: str) -> ModelConfig:
@@ -228,6 +403,7 @@ class BaseModel(object):
         skip_python_model: bool = False,
         loader_recycle_handles: bool = False,
         moe_pure_tp_preshard: bool = False,
+        resident_weights_config: Optional[ResidentWeightsConfig] = None,
         weight_alias_owner: Optional["BaseModel"] = None,
         weight_alias_names: Sequence[str] = (),
         reserve_runtime_mem_mb: int = 0,
@@ -259,6 +435,7 @@ class BaseModel(object):
             force_cpu_load_weights=force_cpu_load_weights,
             loader_recycle_handles=loader_recycle_handles,
             moe_pure_tp_preshard=moe_pure_tp_preshard,
+            resident_weights_config=resident_weights_config,
         )
         if weight_alias_names and weight_alias_owner is None:
             raise ValueError(

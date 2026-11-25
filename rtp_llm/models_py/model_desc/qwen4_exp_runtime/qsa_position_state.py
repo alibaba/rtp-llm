@@ -5,7 +5,10 @@ from dataclasses import dataclass, field
 import torch
 
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import INDEXER_ROPE_POS_TAG
-from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import build_qsa_rope
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
+    build_qsa_rope,
+    is_qsa_rope_style,
+)
 from rtp_llm.models_py.modules.qwen4_exp.qsa.validation import DeviceChecks
 
 from .qsa_cache_views import _block_table, _typed_2d_pool
@@ -112,6 +115,39 @@ class QSAPositionState:
             if prefill
             else torch.arange(batch + 1, device=device, dtype=torch.long)
         )
+        if (
+            self.is_graph
+            and ratio == 4
+            and self.pool.is_cuda
+            and torch.version.hip is None
+            and torch.cuda.get_device_capability(device) == (12, 0)
+        ):
+            from rtp_llm.models_py.kernels.cuda.qsa.position_state import (
+                position_geometry,
+            )
+
+            packed = position_geometry(
+                positions, prefixes, cu, table, self.pool.shape[0], self.page_size
+            )
+            if packed is not None:
+                requests, logical, ends, valid, slots, undo, lookup = packed
+                self.geometry = _PositionGeometry(
+                    positions,
+                    table,
+                    requests,
+                    logical,
+                    ends,
+                    cu,
+                    prefixes,
+                    valid,
+                    slots,
+                    None,
+                    group_lookup=lookup,
+                    undo_slots=undo,
+                )
+                if metadata is not None:
+                    metadata[key] = self.geometry
+                return
         rows = torch.arange(count, device=device, dtype=torch.long)
         requests = torch.bucketize(rows, cu[1:], right=True).clamp_max(batch - 1)
         logical = prefixes[requests] + rows - cu[requests]
@@ -163,7 +199,7 @@ class QSAPositionState:
         geometry.checked_by = checks
         return True
 
-    def group_positions(self):
+    def _group_lookup(self):
         g = self.geometry
         if g.group_lookup is None:
             starts = g.logical - g.logical.remainder(self.ratio)
@@ -178,10 +214,67 @@ class QSAPositionState:
             ) * self.ring_size + starts.remainder(self.ring_size)
             current = g.positions[source.clamp(0, g.positions.shape[0] - 1)]
             g.group_lookup = slots, in_current, current
-        slots, in_current, current = g.group_lookup
+        return g.group_lookup
+
+    def group_positions(self):
+        slots, in_current, current = self._group_lookup()
         # Only the lookup is common. Historical coordinates remain layer-local.
         saved = self.pool.flatten(0, 1)[slots]
         return torch.where(in_current[:, None], current, saved)
+
+    def group_rope_inputs(self, config, dtype=torch.bfloat16, *, frequency=None):
+        g = self.geometry
+        if (
+            self.is_graph
+            and self.pool.is_cuda
+            and torch.version.hip is None
+            and torch.cuda.get_device_capability(self.pool.device) == (12, 0)
+            and dtype == torch.bfloat16
+            and g.positions.shape[0] > 0
+            and self.pool.is_contiguous()
+            and is_qsa_rope_style(config, "Mrope")
+            and config.dim == 64
+            and config.index_factor == 3
+            and config.mrope_interleaved
+            and getattr(config, "indexer_is_neox_style", True)
+            and float(getattr(config, "scale", 1.0)) == 1.0
+            and config.mrope_dim1 >= 0
+            and 0 <= config.mrope_dim2 <= 11
+            and 0 <= config.mrope_dim3 <= 10
+            and config.mrope_dim1 + config.mrope_dim2 + config.mrope_dim3 == 32
+        ):
+            # Reuse the exact FP32 frequencies within this forward. Each layer
+            # still reads its own historical position ring before any mutation.
+            if frequency is None:
+                frequency_key = ("group_rope_frequency", config.base)
+                frequency = g.rope_cache.get(frequency_key)
+                if frequency is None:
+                    pairs = torch.arange(
+                        32, dtype=torch.float32, device=self.pool.device
+                    )
+                    frequency = float(config.base) ** (-2.0 * pairs / 64)
+                    g.rope_cache[frequency_key] = frequency
+            return (
+                self.pool,
+                *self._group_lookup(),
+                frequency,
+                config.mrope_dim2,
+                config.mrope_dim3,
+            )
+        return None
+
+    def target_query_rope(self, config, frequency):
+        from rtp_llm.models_py.kernels.cuda.qsa.position_state import (
+            query_position_rope,
+        )
+
+        g = self.geometry
+        key = ("target_query_rope", config.base, config.mrope_dim2, config.mrope_dim3)
+        if key not in g.rope_cache:
+            g.rope_cache[key] = query_position_rope(
+                g.positions, frequency, config.mrope_dim2, config.mrope_dim3
+            )
+        return g.rope_cache[key]
 
     def rope(self, config, *, group=False, dtype=torch.bfloat16):
         g = self.geometry
@@ -199,6 +292,14 @@ class QSAPositionState:
         )
         if not group and key in g.rope_cache:
             return g.rope_cache[key]
+        if group:
+            inputs = self.group_rope_inputs(config, dtype)
+            if inputs is not None:
+                from rtp_llm.models_py.kernels.cuda.qsa.position_state import (
+                    group_position_rope,
+                )
+
+                return group_position_rope(*inputs)
         positions = self.group_positions() if group else g.positions
         result = build_qsa_rope(
             positions.reshape(-1),
@@ -211,9 +312,7 @@ class QSAPositionState:
             g.rope_cache[key] = result
         return result
 
-    def stage(self):
-        if self.staged:
-            return
+    def staging_slots(self):
         g = self.geometry
         if not self.is_graph and (g.checked_by is None or not g.checked_by.verified):
             raise RuntimeError("QSA coordinate state must pass pre-write checks")
@@ -226,10 +325,19 @@ class QSAPositionState:
             )
             write = g.valid & (g.logical + self.ring_size > page_ends)
             g.undo_slots = torch.where(write, g.slots, -1)
-        self.undo_slots = g.undo_slots
-        # Advanced indexing already returns independent storage for undo.
-        self.original = self.pool.flatten(0, 1)[g.slots]
-        self._store(g.positions)
+        return g.undo_slots
+
+    def record_stage(self, slots, original):
+        self.undo_slots = slots
+        self.original = original
+        self.staged = True
+
+    def stage(self):
+        if self.staged:
+            return
+        self.undo_slots = self.staging_slots()
+        self.original = self.pool.flatten(0, 1)[self.geometry.slots]
+        self._store(self.geometry.positions)
         self.staged = True
 
     def _store(self, values):

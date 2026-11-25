@@ -57,6 +57,7 @@ class DeepSeekV41ForCausalLM(OwnedV41Mixin, DeepSeekV41Model, RtpModule):
                 self._owned_checkpoint_path,
                 device,
                 load_method=self._owned_source_method,
+                resident_weights=getattr(getattr(self, "_resident_bank", None), "global_weights", None),
             )
         self._engram_layers = tuple(
             (layer_id, layout.layer_ids.index(layer_id)) for layer_id in loadable

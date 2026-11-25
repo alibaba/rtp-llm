@@ -3,8 +3,8 @@
 from contextlib import contextmanager
 from typing import List
 
-from rtp_llm.test.perf_test.batch_perf_impl import BatchPerfImpl
-from rtp_llm.test.perf_test.dataclass import ResponseInfo
+from rtp_llm.test.perf_test.glm5x_legacy.batch_perf_impl import BatchPerfImpl
+from rtp_llm.test.perf_test.glm5x_legacy.dataclass import ResponseInfo
 
 
 def normalize_model_paths(argv: List[str]) -> List[str]:

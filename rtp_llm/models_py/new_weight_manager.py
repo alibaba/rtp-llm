@@ -46,7 +46,8 @@ def _checkpoint_wire_name(name):
 class NewLoaderWeightManager:
     requires_paused_engine = True
 
-    def __init__(self, model, loader, *, adapters=None, admin_lock=None):
+    def __init__(self, model, loader, *, adapters=None, admin_lock=None, resident_weights_enabled=False):
+        self._resident_weights_enabled = resident_weights_enabled
         self._full_model_contract = bool(
             getattr(model, "supports_checkpoint_weight_updates", False)
         )
@@ -79,6 +80,12 @@ class NewLoaderWeightManager:
             name: (tensor, _signature(tensor))
             for name, tensor in model.runtime_weight_view().items()
         }
+
+    def _ensure_writable(self):
+        if self._resident_weights_enabled:
+            raise RuntimeError(
+                "weight updates are not supported while the resident weights mode is enabled"
+            )
 
     def _validate_contract(self):
         current = dict(self._model.named_parameters(remove_duplicate=False))
@@ -122,6 +129,7 @@ class NewLoaderWeightManager:
 
     @torch.inference_mode()
     def update_tensors(self, weights: dict[str, torch.Tensor]) -> None:
+        self._ensure_writable()
         if not isinstance(weights, dict) or not weights:
             raise ValueError("Online updates require a non-empty tensor mapping")
         guard = (
@@ -397,6 +405,7 @@ class NewLoaderWeightManager:
         return True
 
     def update(self, req: dict[str, str]) -> None:
+        self._ensure_writable()
         for field in ("name", "method", "desc"):
             if not isinstance(req.get(field), str) or not req[field]:
                 raise ValueError(f"Missing or invalid online update field {field!r}")

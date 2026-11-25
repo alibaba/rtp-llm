@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -31,6 +32,12 @@ struct BlockTreeCacheBlockNums {
     TierBlockNumOverrides disk;
 };
 
+struct GroupSetPoolSizing {
+    CacheGroupType type;
+    size_t         device_blocks;
+    size_t         pool_stride;
+};
+
 std::vector<size_t> computeTierBlockCounts(size_t                     capacity_bytes,
                                            const std::vector<size_t>& device_block_counts,
                                            const std::vector<size_t>& pool_strides);
@@ -42,6 +49,9 @@ std::vector<size_t> computeHostUsableBlockCounts(size_t                         
                                                  const std::vector<CacheGroupType>& types,
                                                  double                             swa_full_ratio);
 
+std::optional<BlockTreeCacheBlockNums> computeHostDiskBlockCounts(const std::vector<GroupSetPoolSizing>& group_sets,
+                                                                  const BlockTreeCacheSizing&            sizing);
+
 /**
  * Final physical block counts: DEVICE per tag, HOST/DISK per GroupSet type.
  */
@@ -49,6 +59,8 @@ struct NegotiatedCapacity {
     uint32_t                paged_block_num = 0;
     PPBlockNumOverrides     block_num_overrides;
     BlockTreeCacheBlockNums block_tree;
+    /** HOST-to-DISK eviction charge per block, averaged over stages that write this GroupSet. */
+    std::unordered_map<CacheGroupType, size_t> disk_eviction_block_bytes;
 };
 
 /**

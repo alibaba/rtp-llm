@@ -115,8 +115,8 @@ TransferWorkLoop::TransferWorkLoop(std::vector<GroupSetPtr>                     
         // A single supplied pool remains useful for standalone load owners.
         staging_.pools = {staging, swa_staging ? std::move(swa_staging) : std::move(staging)};
         for (const auto& group : groups_) {
-            if (!group->devicePools().empty())
-                crc_waiting_.try_emplace(group->devicePools().front()->deviceIndex());
+            if (group->crcEnabled())
+                crc_waiting_.try_emplace(getLocalDeviceIndex(*group));
         }
     });
 }
@@ -424,7 +424,7 @@ void TransferWorkLoop::tryStep(Entry& entry) {
 void TransferWorkLoop::submitCrc(Entry& entry) {
     startStepTimer(entry, entry.step == Step::CRC_LOAD ? "h2d" : "d2h");
     const auto& owner   = group(entry);
-    auto&       waiting = crc_waiting_.at(owner->devicePools().front()->deviceIndex());
+    auto&       waiting = crc_waiting_.at(getLocalDeviceIndex(*owner));
     // Settle the stable Entry and intrusive indexes. Optional observations use
     // the existing task span and preallocated profiling buffer.
     CrcCopyExecutor::DoneCallback done = [this, &entry](TransferResult result) noexcept {
@@ -498,7 +498,7 @@ void TransferWorkLoop::submitPlainDeviceCopy(Entry& entry) {
         return;
     }
 
-    const auto             device_index = owner.devicePools().front()->deviceIndex();
+    const auto             device_index = getLocalDeviceIndex(owner);
     const auto             device       = torch::Device(torch::kCUDA, static_cast<c10::DeviceIndex>(device_index));
     const c10::DeviceGuard device_guard(device);
     const auto             bytes_on_host   = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);

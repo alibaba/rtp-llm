@@ -90,7 +90,8 @@ def _prepare_paged_inputs(
         raise ValueError("qwen4_exp sparse GQA sequence lengths must be non-negative")
     cached = getattr(self, "_qsa_target_visible_lengths", None)
     self._qsa_target_visible_lengths = None
-    if graph_paged and self.is_target_verify and cached is not None:
+    use_cached_lengths = graph_paged and self.is_target_verify and cached is not None
+    if use_cached_lengths:
         owner_inputs, owner_tokens, kv_lens = cached
         if not (
             owner_inputs is self.attn_inputs
@@ -122,7 +123,7 @@ def _prepare_paged_inputs(
     page_size, cache_blocks = _validate_main_cache_layout(
         self, kv_cache.kv_cache_base, block_table, batch, qkv.device
     )
-    if self.attn_inputs.is_s_padded:
+    if self.attn_inputs.is_s_padded and not use_cached_lengths:
         kv_lens = torch.where(block_table.ne(0).any(dim=1, keepdim=True), kv_lens, 0)
 
     if graph_paged:

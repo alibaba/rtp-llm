@@ -218,6 +218,25 @@ py_test(
 )
 
 py_test(
+    name = "backend_restart_test",
+    srcs = ["backend_restart_test.py"],
+    deps = [
+        "//rtp_llm:utils",
+        "//rtp_llm/test/utils:test_util",
+    ],
+)
+
+py_test(
+    name = "backend_restart_process_test",
+    srcs = ["backend_restart_process_test.py"],
+    deps = [
+        "//rtp_llm:utils",
+        "//rtp_llm/test/utils:test_util",
+    ],
+    timeout = "moderate",
+)
+
+py_test(
     name = "process_lifecycle_test",
     srcs = ["process_lifecycle_test.py"],
     deps = ["//rtp_llm:utils"],
@@ -309,4 +328,10 @@ py_test(
     name = "dsa_indexing_test",
     srcs = ["dsa_indexing_test.py"],
     data = ["//rtp_llm:utils/dsa_indexing.py"],
+)
+
+py_test(
+    name = "drain_flag_test",
+    srcs = ["drain_flag_test.py"],
+    deps = ["//rtp_llm:utils"],
 )

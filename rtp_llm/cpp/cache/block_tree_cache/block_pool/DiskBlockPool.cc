@@ -24,6 +24,9 @@ std::shared_ptr<const DiskBlockPoolConfig>
 DiskBlockPool::normalizeConfig(const std::shared_ptr<const DiskBlockPoolConfig>& config) {
     RTP_LLM_CHECK(config != nullptr);
     RTP_LLM_CHECK(config->pool_type == BlockPoolType::DISK);
+    if (!config->allocate_storage) {
+        return config;
+    }
     RTP_LLM_CHECK_WITH_INFO(
         config->stride_bytes > 0, "disk block pool [%s] stride_bytes must be > 0", config->pool_name.c_str());
 
@@ -48,6 +51,9 @@ DiskBlockPool::normalizeConfig(const std::shared_ptr<const DiskBlockPoolConfig>&
 
     auto normalized                  = std::make_shared<DiskBlockPoolConfig>(*config);
     normalized->physical_block_count = computed_physical_block_count;
+    if (normalized->eviction_block_bytes == 0) {
+        normalized->eviction_block_bytes = normalized->stride_bytes;
+    }
     return normalized;
 }
 
@@ -81,6 +87,10 @@ BlockIOStatus DiskBlockPool::mapStatus(DiskBlockIOStatus status) {
 
 bool DiskBlockPool::init() {
     const auto& cfg = config();
+    if (!cfg.allocate_storage) {
+        markInitialized();
+        return true;
+    }
     RTP_LLM_CHECK_WITH_INFO(
         cfg.payload_bytes > 0, "disk block pool [%s] payload_bytes must be > 0", cfg.pool_name.c_str());
     RTP_LLM_CHECK_WITH_INFO(cfg.stride_bytes >= cfg.payload_bytes,
@@ -253,6 +263,10 @@ size_t DiskBlockPool::payloadBytes() const {
 
 size_t DiskBlockPool::strideBytes() const {
     return config().stride_bytes;
+}
+
+size_t DiskBlockPool::evictionBlockBytes() const {
+    return config().eviction_block_bytes;
 }
 
 size_t DiskBlockPool::blockSizeBytes() const {

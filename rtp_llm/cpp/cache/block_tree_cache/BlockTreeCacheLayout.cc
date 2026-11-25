@@ -72,6 +72,8 @@ BackingLayout computeBlockTreeBackingLayout(const CacheConfig&              conf
     BackingLayout layout;
     for (const auto& tag : members) {
         const auto bytes = config.blockSizeBytesForGroup(tag);
+        if (bytes == 0 && config.layerIdsForGroup(tag).empty())
+            continue;
         RTP_LLM_CHECK_WITH_INFO(bytes > 0 && bytes <= std::numeric_limits<size_t>::max() - layout.payload_bytes,
                                 "invalid group set payload for tag=%s",
                                 tag.c_str());
@@ -79,6 +81,8 @@ BackingLayout computeBlockTreeBackingLayout(const CacheConfig&              conf
         if (enable_crc && config.topology().group(tag).policy.memory_placement != CacheMemoryPlacement::DEVICE)
             throw std::invalid_argument("CRC transfer requires GPU-resident device pool: " + tag);
     }
+    if (layout.payload_bytes == 0)
+        return layout;
     layout.crc_enabled   = enable_crc;
     layout.storage_bytes = enable_crc ? CrcCopyWorkspace::encodedBytes(layout.payload_bytes) : layout.payload_bytes;
     RTP_LLM_CHECK_WITH_INFO(alignment > 0

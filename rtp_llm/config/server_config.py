@@ -29,6 +29,9 @@ class ServerConfig:
             3600  # startup readiness bound (seconds)
         )
         self.monitor_interval: int = 1  # Monitor interval in seconds
+        # -1 uses the resident mode default; 0 disables automatic restart.
+        self.engine_restart_limit: int = -1
+        self.engine_restart_heartbeat_timeout_s: float = 30.0
         self.frontend_pre_stop_drain_seconds: float = 120.0
         self.dash_sc_grpc_pre_stop_drain_seconds: float = 120.0
         self.pre_stop_drain_headroom_seconds: float = -1.0
@@ -117,6 +120,8 @@ class ServerConfig:
             f"worker_info_port_num: {self.worker_info_port_num}\n"
             f"shutdown_timeout: {self.shutdown_timeout}\n"
             f"monitor_interval: {self.monitor_interval}\n"
+            f"engine_restart_limit: {self.engine_restart_limit}\n"
+            f"engine_restart_heartbeat_timeout_s: {self.engine_restart_heartbeat_timeout_s}\n"
             f"frontend_pre_stop_drain_seconds: {self.frontend_pre_stop_drain_seconds}\n"
             f"dash_sc_grpc_pre_stop_drain_seconds: {self.dash_sc_grpc_pre_stop_drain_seconds}\n"
             f"pre_stop_drain_headroom_seconds: {self.pre_stop_drain_headroom_seconds}\n"

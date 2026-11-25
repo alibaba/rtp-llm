@@ -41,6 +41,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.expert import (
     Expert,
     require_silu_mul_split,
 )
+from rtp_llm.models_py.modules.fp8_fp4_weight_source import resident_init_tensors
 
 from .fp8_fp4_base import Fp8Fp4ExecutorBase, split_moe_w13_gate_up
 
@@ -131,8 +132,23 @@ class LocalLoopExecutor(Fp8Fp4ExecutorBase):
         from rtp_llm.models_py.modules.fp8_fp4_weight_source import take_weight
 
         cfg = self.cfg
-        w13 = take_weight(layer_weights, "routed_w13")
-        s13 = take_weight(layer_weights, "routed_s13")
+        consumes = ("routed_w13", "routed_s13", "routed_w2", "routed_s2")
+        # Everything below is views or recomputed from these, also on a resident restart.
+        group = "fp8_fp4.local_loop.routed"
+        w13, s13, w2, s2 = resident_init_tensors(
+            layer_weights,
+            transform_key=group,
+            output_names=(
+                f"{group}.w13",
+                f"{group}.s13",
+                f"{group}.w2",
+                f"{group}.s2",
+            ),
+            consumed_names=consumes,
+            builder=lambda: tuple(take_weight(layer_weights, n) for n in (
+                "routed_w13", "routed_s13", "routed_w2", "routed_s2"
+            )),
+        )
         inter = cfg.moe_inter_dim
         layout = cfg.moe_w1_layout
         gate_w, up_w = split_moe_w13_gate_up(w13, inter, layout)
@@ -140,8 +156,8 @@ class LocalLoopExecutor(Fp8Fp4ExecutorBase):
         stacked_routed = {
             "w1_w": gate_w,
             "w1_s": gate_s,
-            "w2_w": take_weight(layer_weights, "routed_w2"),
-            "w2_s": take_weight(layer_weights, "routed_s2"),
+            "w2_w": w2,
+            "w2_s": s2,
             "w3_w": up_w,
             "w3_s": up_s,
         }

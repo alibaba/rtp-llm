@@ -231,6 +231,7 @@ py_library(
         "module_base.py",
         "quant_methods/w8a8_load_source.py",
         "read_spec.py",
+        "resident_checkpoint.py",
         "registry.py",
         "runtime_weight_update.py",
         "scratch_moe_tp.py",
@@ -240,6 +241,7 @@ py_library(
     ],
     deps = [
         "//rtp_llm:checkpoint_file_utils",
+        "//rtp_llm/resident_weights",
         "//rtp_llm:device_detection",
         "//rtp_llm:safetensors_torch",
         "//rtp_llm:w8a8_int8_quant",
@@ -384,6 +386,14 @@ py_test(
     srcs = ["pytorch_archive_reader_test.py"],
     env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
     deps = [":new_loader_core"],
+)
+
+py_test(
+    name = "native_resident_restart_test",
+    srcs = ["native_resident_restart_test.py"],
+    deps = [":new_loader_core", "//rtp_llm/resident_weights"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -1212,6 +1222,7 @@ py_library(
         ":tile_kernels_mhc",
         "//rtp_llm:warmup",
         "//rtp_llm/models_py/kernel_tuning",
+        "//rtp_llm/resident_weights",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
         "//rtp_llm/models_py/distributed:deepep_wrapper",
         "//rtp_llm/models_py/distributed:moriep_wrapper",
@@ -1363,6 +1374,7 @@ py_library(
     deps = [
         ":scaled_rope",
         ":utils",
+        "//rtp_llm/resident_weights",
         "//rtp_llm:torch",
         "//rtp_llm/models_py/triton_kernels:common",
         "//rtp_llm/models_py/triton_kernels:fla",

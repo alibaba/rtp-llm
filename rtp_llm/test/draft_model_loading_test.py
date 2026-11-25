@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from rtp_llm.config.layer_partition import local_layer_range
 from rtp_llm.config.model_args import ModelArgs
+from rtp_llm.config.py_config_modules import ResidentWeightsConfig
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.ops import RoleType, SpeculativeType, TaskType
@@ -32,6 +33,7 @@ def make_engine_config(sp_type, pp_size, pp_rank):
             loader_recycle_handles=False,
             moe_pure_tp_preshard=False,
             force_cpu_load_weights=False,
+            resident_weights_config=ResidentWeightsConfig(),
         ),
         pd_sep_config=SimpleNamespace(role_type=RoleType.PDFUSION),
         hw_kernel_config=MagicMock(),
@@ -183,23 +185,32 @@ class DraftModelLoadingTest(unittest.TestCase):
             SpeculativeType.EAGLE,
             SpeculativeType.DSPARK,
         ):
-            for pp_size, pp_rank, load_method, expected_method in (
-                (1, 0, "auto", "auto"),
-                (1, 0, "scratch", "scratch"),
-                (1, 0, "fastsafetensors", "fastsafetensors"),
-                (3, 0, "fastsafetensors", None),
-                (3, 1, "fastsafetensors", None),
-                (3, 2, "auto", "auto"),
-                (3, 2, "fastsafetensors", "fastsafetensors"),
-                (3, 2, "scratch", "scratch"),
+            for pp_size, pp_rank, load_method, expected_method, verify in (
+                (1, 0, "auto", "auto", False),
+                (1, 0, "fastsafetensors", "fastsafetensors", False),
+                (1, 0, "scratch", "scratch", False),
+                (3, 0, "fastsafetensors", None, False),
+                (3, 1, "fastsafetensors", None, False),
+                (3, 2, "auto", "auto", False),
+                (3, 2, "fastsafetensors", "fastsafetensors", False),
+                (3, 2, "scratch", "scratch", False),
+                (1, 0, "auto", "auto", True),
+                (3, 1, "auto", None, True),
+                (3, 2, "auto", "auto", True),
             ):
                 with self.subTest(
                     sp_type=sp_type,
                     pp_size=pp_size,
                     pp_rank=pp_rank,
                     load_method=load_method,
+                    verify=verify,
                 ):
                     engine_config = make_engine_config(sp_type, pp_size, pp_rank)
+                    engine_config.load_config.resident_weights_config = (
+                        ResidentWeightsConfig(
+                            mode="dev" if verify else "none", verify=verify
+                        )
+                    )
                     engine_config.load_config.load_method = load_method
                     target_config = SimpleNamespace(
                         max_seq_len=128, gen_num_per_cycle=2
@@ -212,7 +223,9 @@ class DraftModelLoadingTest(unittest.TestCase):
                         ModelFactory, "get_model_cls", return_value=model_cls
                     ), patch("rtp_llm.model_factory.configure_warmup"):
                         propose = ModelFactory.get_sp_model(
-                            target_config, draft_config, engine_config
+                            target_config,
+                            draft_config,
+                            engine_config,
                         )
                     self.assertEqual(engine_config.sp_config.type, sp_type)
                     self.assertEqual(engine_config.sp_config.gen_num_per_cycle, 2)
@@ -226,6 +239,7 @@ class DraftModelLoadingTest(unittest.TestCase):
                     self.assertEqual(propose.sp_type, sp_type)
                     self.assertEqual(propose.gen_num_per_circle, 2)
                     args = model_cls.from_config.call_args.kwargs
+                    self.assertEqual(args["resident_weights_config"].verify, verify)
                     self.assertEqual(args["load_method"], expected_method)
                     self.assertIs(args["model_config"], draft_config)
                     self.assertEqual(
