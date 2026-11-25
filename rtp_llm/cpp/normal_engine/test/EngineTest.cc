@@ -1046,6 +1046,49 @@ TEST_F(NormalEngineTest, testPpDecodeWarmupUsesStageCacheAndSpeculativeHeadroom)
 }
 #endif
 
+TEST_F(NormalEngineTest, testSparseCpPrefillWarmupOnlyBindsPagedCacheForMla) {
+    for (bool use_mla : {false, true}) {
+        SCOPED_TRACE(use_mla);
+        CustomConfig config;
+        config.warm_up            = true;
+        config.prefill_cp_enabled = true;
+
+        ModelConfig   model_config;
+        RuntimeConfig runtime_config;
+        KVCacheConfig kv_cache_config;
+        auto          params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+        params.model_config_.attn_config.is_sparse = true;
+        params.model_config_.attn_config.use_mla   = use_mla;
+        bool saw_warmup                            = false;
+        NormalExecutor::test_model_factory         = [&](const GptModelInitParams& init_params) {
+            const bool cache_bound = init_params.cache_manager != nullptr;
+            return std::make_unique<MockModel>(model_config.vocab_size, [&, cache_bound](const GptModelInputs& inputs) {
+                if (inputs.warmup) {
+                    saw_warmup = true;
+                    EXPECT_EQ(cache_bound, use_mla);
+                    ASSERT_EQ(inputs.kv_cache_block_id.defined(), use_mla);
+                    if (use_mla) {
+                        EXPECT_GT(inputs.kv_cache_block_id.numel(), 0);
+                        EXPECT_TRUE(inputs.kv_cache_block_id.cpu().eq(0).all().item<bool>());
+                    } else {
+                        EXPECT_TRUE(inputs.kv_cache_group_tags.empty());
+                        EXPECT_FALSE(inputs.kv_cache_kernel_block_id.defined());
+                    }
+                }
+            });
+        };
+        struct FactoryResetGuard {
+            ~FactoryResetGuard() {
+                NormalExecutor::test_model_factory = nullptr;
+            }
+        } factory_reset_guard;
+
+        auto engine = std::make_shared<NormalEngine>(params, nullptr);
+        EXPECT_TRUE(saw_warmup);
+        ASSERT_NE(engine->resourceContext().cache_manager, nullptr);
+    }
+}
+
 TEST_F(NormalEngineTest, testFp8KVCache) {
     CustomConfig config;
     config.kv_cache_data_type = DataType::TYPE_FP8_E4M3;

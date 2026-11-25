@@ -643,7 +643,11 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
                                                    /*primary_graph_is_prefill=*/false,
                                                    params.parallelism_config.role_type,
                                                    params.sp_config.type);
-        if (!generation_prefill_cuda_graph_requested) {
+        // Sparse MLA CP eager warmup also plans and gathers paged KV.
+        const bool cp_sparse_warmup = params.parallelism_config.prefill_cp_config.is_enabled()
+                                      && params.model_config_.attn_config.is_sparse
+                                      && params.model_config_.attn_config.use_mla;
+        if (!generation_prefill_cuda_graph_requested && !cp_sparse_warmup) {
             if (parallelism_config.pp_size > 1) {
                 executor_.reset(new PPExecutor(params, nullptr, true));
             } else {

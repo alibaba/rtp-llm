@@ -2,7 +2,7 @@ import json
 import tempfile
 from pathlib import Path
 from unittest import TestCase, main
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models.deepseek_v2 import DeepSeekV2, DeepSeekV2Weight
@@ -33,6 +33,42 @@ class Glm5KVCacheTest(TestCase):
         self.assertIs(DeepSeekV2.get_weight_cls(), DeepSeekV2Weight)
         self.assertIs(Glm5.get_weight_cls(), Glm5Weight)
         self.assertIs(Glm5Mtp.get_weight_cls(), Glm5MtpWeight)
+
+    def test_mtp_shares_only_compatible_full_checkpoint_weights(self):
+        shared = (W.embedding, W.lm_head)
+        owner = Mock(merge_lora=True)
+        load_config = owner.model_weights_loader.get_load_config.return_value
+        for field, target_value, draft_value, merged_lora, expected in (
+            ("output_vocab_ids", [1, 3, 5], [1, 3, 5], False, shared),
+            ("output_vocab_ids", [1, 3, 5], [1, 3, 5], True, ()),
+            ("output_vocab_ids", [1, 3, 5], [1, 5, 3], False, ()),
+            ("model_type", "deepseek_v3", "glm_5_mtp", False, ()),
+            ("mtp_layer_offset", 0, 0, False, ()),
+            ("ckpt_path", "/tmp/glm5", "/tmp/other", False, ()),
+            ("vocab_size", 256, 257, False, ()),
+            ("hidden_size", 128, 129, False, ()),
+            ("data_type", "bf16", "fp16", False, ()),
+            ("tie_word_embeddings", False, True, False, ()),
+            ("enable_fp32_lm_head", True, False, False, ()),
+            ("enable_output_vocab_pruning", True, False, False, ()),
+            ("enable_output_vocab_pruning", False, True, False, ()),
+            ("normalize_lm_head_weight", True, False, False, ()),
+            ("normalize_lm_head_weight", True, True, False, ()),
+            ("logit_scale", 0.5, 1.0, False, ()),
+            ("logit_scale", 0.5, 0.5, False, ()),
+        ):
+            with self.subTest(field=field, draft=draft_value, merged_lora=merged_lora):
+                target = self.config()
+                draft = self.config("glm_5_mtp", is_mtp=True)
+                target.ckpt_path = draft.ckpt_path = "/tmp/glm5"
+                draft.mtp_layer_offset = 78
+                setattr(target, field, target_value)
+                setattr(draft, field, draft_value)
+                owner.model_config = target
+                load_config.merge_lora = merged_lora
+                self.assertEqual(
+                    Glm5Mtp.speculative_weight_alias_names(owner, draft), expected
+                )
 
     def test_checkpoint_architecture_controls_layer_sharing(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from rtp_llm import start_server
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.ops import RoleType, SpeculativeType
 from rtp_llm.utils.drain_flag import DrainFlag
 
@@ -152,6 +153,27 @@ class StartupRealWarmupTest(unittest.TestCase):
             ),
             1048568,
         )
+
+    def test_glm_startup_warmup_gate(self):
+        config = PyEnvConfigs()
+        config.model_args.model_type = "glm_5"
+        config.parallelism_config.tp_size = 8
+        config.parallelism_config.world_size = 8
+        for warm_up, model_warm_up, role, rank, expected in (
+            (True, True, RoleType.PREFILL, 0, True),
+            (False, True, RoleType.PREFILL, 0, False),
+            (True, False, RoleType.PREFILL, 0, False),
+            (True, True, RoleType.DECODE, 0, False),
+            (True, True, RoleType.PREFILL, 1, False),
+        ):
+            with self.subTest(case=(warm_up, model_warm_up, role, rank)):
+                config.runtime_config.warm_up = warm_up
+                config.runtime_config.model_warm_up = model_warm_up
+                config.role_config.role_type = role
+                config.parallelism_config.world_rank = rank
+                self.assertEqual(
+                    start_server._should_run_startup_real_warmup(config), expected
+                )
 
 
 if __name__ == "__main__":
