@@ -6,12 +6,16 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 
 namespace rtp_llm {
 namespace {
 
-constexpr int kStatsColumns = 6;
+constexpr int     kStatsColumns                  = 6;
+constexpr int     kDraftCommitThreads            = 256;
+constexpr int64_t kDraftCommitElementsPerBlock   = 1024;
+constexpr int64_t kDraftCommitMaxColBlocks       = 65535;
 
 struct DraftCommitParams {
     const int32_t* sampled;
@@ -26,14 +30,41 @@ struct DraftCommitParams {
     int64_t        sampled_stride, candidate_stride, probability_stride, map_stride, map_size;
     int64_t        token_stride, output_probability_stride, output_candidate_stride;
     int64_t        width, output_width, embedding_rows, embedding_width, embedding_row_stride, embedding_col_stride;
+    bool           zero_output_probabilities;
 };
+
+__global__ void dsparkZeroRowsKernel(float* output, int64_t row_stride, int64_t output_width) {
+    const int64_t row        = blockIdx.x;
+    const int64_t col_block  = blockIdx.y;
+    const int64_t col_stride = static_cast<int64_t>(gridDim.y) * blockDim.x;
+    float*        dst_row    = output + row * row_stride;
+    if ((reinterpret_cast<uintptr_t>(dst_row) & 15) == 0) {
+        const int64_t vec_width = output_width >> 2;
+        auto*         dst_vec   = reinterpret_cast<float4*>(dst_row);
+        const float4  zero4     = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        for (int64_t v = col_block * blockDim.x + threadIdx.x; v < vec_width; v += col_stride) {
+            dst_vec[v] = zero4;
+        }
+        const int64_t tail_start = vec_width << 2;
+        if (col_block == 0 && tail_start + threadIdx.x < output_width) {
+            dst_row[tail_start + threadIdx.x] = 0.0f;
+        }
+    } else {
+        for (int64_t col = col_block * blockDim.x + threadIdx.x; col < output_width; col += col_stride) {
+            dst_row[col] = 0.0f;
+        }
+    }
+}
 
 template<typename Bits, typename Candidate>
 __global__ void dsparkDraftStepCommitKernel(DraftCommitParams p) {
-    const int64_t      row = blockIdx.x;
+    const int64_t      row        = blockIdx.x;
+    const int64_t      col_block  = blockIdx.y;
+    const int64_t      col_stride = static_cast<int64_t>(gridDim.y) * blockDim.x;
     const auto*        candidates = static_cast<const Candidate*>(p.candidates);
+    const bool         need_emb   = p.next_embedding != nullptr && col_block * blockDim.x < p.embedding_width;
     __shared__ int32_t next_token;
-    if (threadIdx.x == 0) {
+    if ((col_block == 0 || need_emb) && threadIdx.x == 0) {
         int64_t token = p.sampled[row * p.sampled_stride];
         if (p.candidates) {
             CUDA_KERNEL_ASSERT(token >= 0 && token < p.width);
@@ -43,8 +74,10 @@ __global__ void dsparkDraftStepCommitKernel(DraftCommitParams p) {
             CUDA_KERNEL_ASSERT(token >= 0 && token < p.map_size);
             token = p.map[token * p.map_stride];
         }
-        next_token                         = static_cast<int32_t>(token);
-        p.tokens_out[row * p.token_stride] = next_token;
+        next_token = static_cast<int32_t>(token);
+        if (col_block == 0) {
+            p.tokens_out[row * p.token_stride] = next_token;
+        }
         if (p.next_embedding) {
             CUDA_KERNEL_ASSERT(next_token >= 0 && next_token < p.embedding_rows);
         }
@@ -53,31 +86,54 @@ __global__ void dsparkDraftStepCommitKernel(DraftCommitParams p) {
     // A mapped compact distribution retains its original draft vocabulary
     // coordinates, exactly like zero_().scatter_() in the existing path.
     const bool scatter_probabilities = p.probabilities_out && p.candidates && !p.candidates_out;
-    if (scatter_probabilities) {
+    if (scatter_probabilities && p.zero_output_probabilities) {
         for (int64_t column = threadIdx.x; column < p.output_width; column += blockDim.x) {
             p.probabilities_out[row * p.output_probability_stride + column] = 0.0f;
         }
     }
-    __syncthreads();
-    for (int64_t column = threadIdx.x; column < p.width; column += blockDim.x) {
-        if (p.probabilities_out) {
-            int64_t output_column = column;
-            if (scatter_probabilities) {
-                output_column = candidates[row * p.candidate_stride + column];
+    if (need_emb || (scatter_probabilities && p.zero_output_probabilities)) {
+        __syncthreads();
+    }
+
+    if (p.probabilities_out) {
+        const float* src_row = p.probabilities + row * p.probability_stride;
+        float*       dst_row = p.probabilities_out + row * p.output_probability_stride;
+        if (scatter_probabilities) {
+            for (int64_t column = col_block * blockDim.x + threadIdx.x; column < p.width; column += col_stride) {
+                const int64_t output_column = candidates[row * p.candidate_stride + column];
                 CUDA_KERNEL_ASSERT(output_column >= 0 && output_column < p.output_width);
+                dst_row[output_column] = src_row[column];
             }
-            p.probabilities_out[row * p.output_probability_stride + output_column] =
-                p.probabilities[row * p.probability_stride + column];
+        } else if ((reinterpret_cast<uintptr_t>(src_row) & 15) == 0
+                   && (reinterpret_cast<uintptr_t>(dst_row) & 15) == 0) {
+            const int64_t vec_width = p.width >> 2;
+            const auto*   src_vec   = reinterpret_cast<const float4*>(src_row);
+            auto*         dst_vec   = reinterpret_cast<float4*>(dst_row);
+            for (int64_t v = col_block * blockDim.x + threadIdx.x; v < vec_width; v += col_stride) {
+                dst_vec[v] = src_vec[v];
+            }
+            const int64_t tail_start = vec_width << 2;
+            if (col_block == 0 && tail_start + threadIdx.x < p.width) {
+                dst_row[tail_start + threadIdx.x] = src_row[tail_start + threadIdx.x];
+            }
+        } else {
+            for (int64_t column = col_block * blockDim.x + threadIdx.x; column < p.width; column += col_stride) {
+                dst_row[column] = src_row[column];
+            }
         }
-        if (p.candidates_out) {
+    }
+
+    if (p.candidates_out) {
+        for (int64_t column = col_block * blockDim.x + threadIdx.x; column < p.width; column += col_stride) {
             p.candidates_out[row * p.output_candidate_stride + column] =
                 static_cast<int32_t>(candidates[row * p.candidate_stride + column]);
         }
     }
-    if (p.next_embedding) {
+
+    if (need_emb) {
         const auto* weights = static_cast<const Bits*>(p.embeddings);
         auto*       output  = static_cast<Bits*>(p.next_embedding);
-        for (int64_t column = threadIdx.x; column < p.embedding_width; column += blockDim.x) {
+        for (int64_t column = col_block * blockDim.x + threadIdx.x; column < p.embedding_width; column += col_stride) {
             output[row * p.embedding_width + column] =
                 weights[static_cast<int64_t>(next_token) * p.embedding_row_stride + column * p.embedding_col_stride];
         }
@@ -312,7 +368,11 @@ bool tryDSparkDraftStepCommit(const torch::Tensor& sampled_tokens,
         return true;
     }
     const c10::cuda::CUDAGuard guard(device);
-    DraftCommitParams          params{
+    const bool scatter_probabilities =
+        output_probabilities.defined() && candidate_ids.defined() && !output_candidate_ids.defined();
+    const int64_t output_width     = output_probabilities.defined() ? output_probabilities.size(1) : 0;
+    const bool    separate_zero    = scatter_probabilities && output_width > kDraftCommitThreads;
+    DraftCommitParams params{
         sampled_tokens.data_ptr<int32_t>(),
         candidate_ids.defined() ? candidate_ids.data_ptr() : nullptr,
         probabilities.defined() ? probabilities.data_ptr<float>() : nullptr,
@@ -331,18 +391,38 @@ bool tryDSparkDraftStepCommit(const torch::Tensor& sampled_tokens,
         output_probabilities.defined() ? output_probabilities.stride(0) : 0,
         output_candidate_ids.defined() ? output_candidate_ids.stride(0) : 0,
         candidate_ids.defined() || output_probabilities.defined() || output_candidate_ids.defined() ? width : 0,
-        output_probabilities.defined() ? output_probabilities.size(1) : 0,
+        output_width,
         markov_w1.size(0),
         markov_w1.size(1),
         markov_w1.stride(0),
-        markov_w1.stride(1)};
+        markov_w1.stride(1),
+        !separate_zero};
     const auto stream = at::cuda::getCurrentCUDAStream();
-    const auto launch = [&](auto candidate_type) {
+    if (separate_zero) {
+        const int64_t zero_blocks = std::clamp(
+            (output_width + kDraftCommitElementsPerBlock - 1) / kDraftCommitElementsPerBlock,
+            int64_t{1},
+            kDraftCommitMaxColBlocks);
+        dsparkZeroRowsKernel<<<dim3(static_cast<unsigned int>(batch), static_cast<unsigned int>(zero_blocks)),
+                               kDraftCommitThreads,
+                               0,
+                               stream>>>(
+            params.probabilities_out, params.output_probability_stride, params.output_width);
+    }
+    const int64_t work_width = std::max(params.width, params.next_embedding ? params.embedding_width : int64_t{0});
+    const int64_t col_blocks = (!scatter_probabilities && work_width > kDraftCommitThreads) ?
+                                   std::clamp((work_width + kDraftCommitElementsPerBlock - 1)
+                                                  / kDraftCommitElementsPerBlock,
+                                              int64_t{1},
+                                              kDraftCommitMaxColBlocks) :
+                                   int64_t{1};
+    const dim3    grid(static_cast<unsigned int>(batch), static_cast<unsigned int>(col_blocks));
+    const auto    launch = [&](auto candidate_type) {
         using Candidate = decltype(candidate_type);
         if (markov_w1.element_size() == 4) {
-            dsparkDraftStepCommitKernel<uint32_t, Candidate><<<static_cast<int>(batch), 256, 0, stream>>>(params);
+            dsparkDraftStepCommitKernel<uint32_t, Candidate><<<grid, kDraftCommitThreads, 0, stream>>>(params);
         } else {
-            dsparkDraftStepCommitKernel<uint16_t, Candidate><<<static_cast<int>(batch), 256, 0, stream>>>(params);
+            dsparkDraftStepCommitKernel<uint16_t, Candidate><<<grid, kDraftCommitThreads, 0, stream>>>(params);
         }
     };
     if (candidate_ids.defined() && candidate_ids.scalar_type() == torch::kInt32) {

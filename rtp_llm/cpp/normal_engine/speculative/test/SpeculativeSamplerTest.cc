@@ -1645,6 +1645,61 @@ TEST(DSparkDraftCommitTest, CaptureReplayReadsChangedSlotsCandidatesAndEmbedding
         slots.to(torch::kInt64), candidates, probabilities, {}, weights, token_column, q_column, id_column, next));
 }
 
+TEST(DSparkDraftCommitTest, LargeVocabMultiBlockDenseAndScatterCommit) {
+    const c10::cuda::CUDAGuard guard(0);
+    const auto                 fp32 = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    constexpr int64_t          rank = 256;
+    for (int64_t vocab : {128800, 128803}) {
+        auto weights = torch::randn({vocab, rank}, fp32.dtype(torch::kBFloat16));
+        for (int64_t batch : {1, 4}) {
+            // 1) Full-vocab dense probability copy (both aligned and unaligned tail)
+            auto probs      = torch::rand({batch, vocab}, fp32);
+            auto tokens_in  = (torch::arange(batch, fp32.dtype(torch::kInt32)) * 137 + 19) % vocab;
+            auto tokens_out = torch::full({batch, 5}, -1, tokens_in.options());
+            auto q_out      = torch::full({batch, 5, vocab}, -1.0f, fp32);
+            auto next_emb   = torch::empty({batch, rank}, weights.options());
+            ASSERT_TRUE(tryDSparkDraftStepCommit(tokens_in,
+                                                 {},
+                                                 probs,
+                                                 {},
+                                                 weights,
+                                                 tokens_out.select(1, 2),
+                                                 q_out.select(1, 2),
+                                                 {},
+                                                 next_emb));
+            EXPECT_TRUE(torch::equal(tokens_out.select(1, 2), tokens_in));
+            EXPECT_TRUE(torch::equal(q_out.select(1, 2), probs));
+            EXPECT_TRUE(torch::equal(next_emb.view(torch::kInt16),
+                                     weights.index_select(0, tokens_in.to(torch::kInt64)).view(torch::kInt16)));
+
+            // 2) Large-vocab mapped compact scatter (triggers separate vectorized zero kernel)
+            constexpr int64_t width      = 16;
+            auto              map        = (torch::arange(vocab, fp32.dtype(torch::kInt64)) * 7) % vocab;
+            auto              candidates = (torch::arange(batch * width, fp32.dtype(torch::kInt64)) * 11) % vocab;
+            candidates                   = candidates.reshape({batch, width});
+            auto compact_probs           = torch::rand({batch, width}, fp32);
+            auto slots                   = torch::arange(batch, fp32.dtype(torch::kInt32)) % width;
+            auto q_scatter               = torch::full({batch, 5, vocab}, -2.0f, fp32);
+            auto expected_scatter        = q_scatter.clone();
+            expected_scatter.select(1, 1).zero_().scatter_(1, candidates, compact_probs);
+            ASSERT_TRUE(tryDSparkDraftStepCommit(slots,
+                                                 candidates,
+                                                 compact_probs,
+                                                 map,
+                                                 weights,
+                                                 tokens_out.select(1, 1),
+                                                 q_scatter.select(1, 1),
+                                                 {},
+                                                 next_emb));
+            auto selected = candidates.gather(1, slots.to(torch::kInt64).unsqueeze(1)).squeeze(1);
+            auto target   = map.index_select(0, selected);
+            EXPECT_TRUE(torch::equal(tokens_out.select(1, 1), target.to(torch::kInt32)));
+            EXPECT_TRUE(torch::equal(q_scatter.select(1, 1), expected_scatter.select(1, 1)));
+            EXPECT_TRUE(torch::equal(next_emb.view(torch::kInt16), weights.index_select(0, target).view(torch::kInt16)));
+        }
+    }
+}
+
 TEST(DSparkDraftCommitTest, FiveStepCompactConfidenceMatchesConditionalDistributionAndRng) {
     const c10::cuda::CUDAGuard guard(0);
     const auto                 fp32  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
