@@ -46,17 +46,21 @@ def _make_communicator(workspace=None):
 class FlashInferAllReduceUnitTest(unittest.TestCase):
     def tearDown(self):
         flashinfer_ar.destroy_flashinfer_allreduce()
+        flashinfer_ar._SHARED_TRTLLM_WORKSPACES.clear()
 
-    def test_existing_custom_ar_switch_is_opt_in(self):
+    def test_custom_ar_switch_is_enabled_by_default(self):
         with patch.dict(os.environ, {}, clear=True):
-            self.assertFalse(flashinfer_ar.enabled_by_env())
+            self.assertTrue(flashinfer_ar.enabled_by_env())
         for value in ("0", "false", "off", "no"):
             with self.subTest(value=value), patch.dict(
                 os.environ, {"FT_DISABLE_CUSTOM_AR": value}, clear=True
             ):
                 self.assertTrue(flashinfer_ar.enabled_by_env())
-        with patch.dict(os.environ, {"FT_DISABLE_CUSTOM_AR": "1"}, clear=True):
-            self.assertFalse(flashinfer_ar.enabled_by_env())
+        for value in ("1", "true", "on", "yes"):
+            with self.subTest(value=value), patch.dict(
+                os.environ, {"FT_DISABLE_CUSTOM_AR": value}, clear=True
+            ):
+                self.assertFalse(flashinfer_ar.enabled_by_env())
 
     def test_explicit_custom_ar_config_overrides_environment(self):
         with patch.dict(os.environ, {"FT_DISABLE_CUSTOM_AR": "0"}, clear=True):
@@ -266,12 +270,180 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
         fast_path.all_reduce_into.assert_called_once_with(tensor, tensor)
         fast_path.all_reduce.assert_not_called()
 
+    def test_high_vram_tp4_tp8_expands_workspace_capacity(self):
+        h200_mem = 140 * (1024 ** 3)
+        h20_mem = 95 * (1024 ** 3)
+        with patch.dict(os.environ, {}, clear=True):
+            with patch(
+                "torch.cuda.get_device_properties",
+                return_value=SimpleNamespace(
+                    multi_processor_count=132, total_memory=h200_mem
+                ),
+            ):
+                self.assertEqual(
+                    flashinfer_ar._max_workspace_bytes_for_device(4, torch.device("cuda", 0)),
+                    32 * 1024 * 1024,
+                )
+                self.assertEqual(
+                    flashinfer_ar._max_workspace_bytes_for_device(8, torch.device("cuda", 0)),
+                    16 * 1024 * 1024,
+                )
+            with patch(
+                "torch.cuda.get_device_properties",
+                return_value=SimpleNamespace(
+                    multi_processor_count=78, total_memory=h20_mem
+                ),
+            ):
+                self.assertEqual(
+                    flashinfer_ar._max_workspace_bytes_for_device(4, torch.device("cuda", 0)),
+                    2 * 1024 * 1024,
+                )
+                self.assertEqual(
+                    flashinfer_ar._max_workspace_bytes_for_device(8, torch.device("cuda", 0)),
+                    512 * 1024,
+                )
+
+    def test_warmup_initializes_workspace_before_capture(self):
+        communicator = _make_communicator(workspace=None)
+        probe = _FakeTensor()
+        with (
+            patch("torch.cuda.is_current_stream_capturing", return_value=False),
+            patch("torch.cuda.device") as dev_ctx,
+            patch("torch.zeros", return_value=probe),
+            patch.object(communicator, "should_use", return_value=True) as should_use,
+            patch.object(communicator, "all_reduce", return_value=probe) as all_reduce,
+        ):
+            dev_ctx.return_value.__enter__.return_value = None
+            dev_ctx.return_value.__exit__.return_value = False
+            self.assertTrue(communicator.warmup(2560, torch.bfloat16))
+        should_use.assert_called_once_with(probe)
+        all_reduce.assert_called_once_with(probe)
+
     def test_destroy_is_idempotent(self):
         workspace = MagicMock()
         communicator = _make_communicator(workspace)
         communicator.destroy()
         communicator.destroy()
         workspace.destroy.assert_called_once_with()
+
+    def test_shared_trtllm_workspace_reuses_and_refcounts(self):
+        shared_group = object()
+        workspace = MagicMock(spec=["is_buffer_size_sufficient", "destroy"])
+        workspace.is_buffer_size_sufficient.return_value = True
+
+        comm_1024 = _make_communicator()
+        comm_1024.group = shared_group
+        comm_1024.cpp_small_enabled = False
+        comm_1024._h20_max_num_tokens = 1024
+        comm_1024._flashinfer_comm.create_allreduce_fusion_workspace.return_value = (
+            workspace
+        )
+
+        comm_128 = _make_communicator()
+        comm_128.group = shared_group
+        comm_128.cpp_small_enabled = False
+        comm_128._h20_max_num_tokens = 128
+
+        tensor = _FakeTensor()
+        tensor.shape = (16, 2560)
+        backend = SimpleNamespace(TorchDistBackend=MagicMock())
+        with (
+            patch("torch.cuda.is_current_stream_capturing", return_value=False),
+            patch("torch.cuda.get_device_capability", return_value=(9, 0)),
+            patch(
+                "torch.cuda.get_device_properties",
+                return_value=SimpleNamespace(multi_processor_count=78),
+            ),
+            patch.object(torch.version, "hip", None),
+            patch("torch.tensor", return_value=SimpleNamespace(item=lambda: 1)),
+            patch.object(flashinfer_ar.dist, "all_reduce"),
+            patch.dict("sys.modules", {"flashinfer.comm.mnnvl": backend}),
+        ):
+            self.assertTrue(comm_1024._create_workspace(tensor))
+            self.assertTrue(comm_128._create_workspace(tensor))
+
+        self.assertIs(comm_128._workspace, workspace)
+        comm_1024._flashinfer_comm.create_allreduce_fusion_workspace.assert_called_once()
+        comm_128._flashinfer_comm.create_allreduce_fusion_workspace.assert_not_called()
+        self.assertEqual(comm_1024._max_num_tokens, 1024)
+        self.assertEqual(comm_128._max_num_tokens, 128)
+        self.assertIn("backend=trtllm", comm_128.status_summary())
+        self.assertIn("shared_refs=2", comm_128.status_summary())
+
+        comm_128.destroy()
+        workspace.destroy.assert_not_called()
+        comm_1024.destroy()
+        workspace.destroy.assert_called_once_with()
+        self.assertEqual(flashinfer_ar._SHARED_TRTLLM_WORKSPACES, {})
+
+    def test_high_vram_oversized_eager_prefill_chunks_in_flashinfer(self):
+        workspace = MagicMock(spec=["is_buffer_size_sufficient", "destroy"])
+        workspace.is_buffer_size_sufficient.return_value = True
+        communicator = _make_communicator(workspace)
+        communicator.cpp_small_enabled = False
+        communicator._hidden_dim = 4
+        communicator._max_num_tokens = 3
+        communicator._allow_eager_chunking = True
+        communicator._flashinfer_comm.AllReduceFusionPattern.kAllReduce = 17
+        communicator._flashinfer_comm.allreduce_fusion.side_effect = (
+            lambda *, input, **kwargs: input * 2
+        )
+
+        # Oversized 2D tensor (8 > 3) chunks cleanly into 3 + 3 + 2 on H200 eager.
+        tensor = torch.arange(32, dtype=torch.bfloat16).reshape(8, 4)
+        fake_meta = _FakeTensor()
+        fake_meta.shape = (8, 4)
+        with patch("torch.cuda.is_current_stream_capturing", return_value=False):
+            self.assertTrue(communicator.should_use(fake_meta))
+            workspace.is_buffer_size_sufficient.assert_called_with(
+                2, 3, 4, torch.bfloat16
+            )
+            out = communicator.all_reduce(tensor)
+            torch.testing.assert_close(out, tensor * 2)
+            self.assertEqual(
+                communicator._flashinfer_comm.allreduce_fusion.call_count, 3
+            )
+            dst = tensor.clone()
+            res = communicator.all_reduce_into(dst, dst)
+            self.assertIs(res, dst)
+            torch.testing.assert_close(dst, tensor * 2)
+
+        # CUDA graph capture never chunks; non-high-VRAM devices never chunk.
+        with patch("torch.cuda.is_current_stream_capturing", return_value=True):
+            self.assertFalse(communicator.should_use(fake_meta))
+        communicator._allow_eager_chunking = False
+        with patch("torch.cuda.is_current_stream_capturing", return_value=False):
+            self.assertFalse(communicator.should_use(fake_meta))
+
+    def test_contiguous_3d_tensor_routes_through_flashinfer(self):
+        workspace = MagicMock(spec=["is_buffer_size_sufficient", "destroy"])
+        workspace.is_buffer_size_sufficient.return_value = True
+        communicator = _make_communicator(workspace)
+        communicator._hidden_dim = 4
+        communicator._max_num_tokens = 16
+        communicator._flashinfer_comm.AllReduceFusionPattern.kAllReduce = 17
+        communicator._flashinfer_comm.allreduce_fusion.side_effect = (
+            lambda *, input, **kwargs: input + 1
+        )
+
+        class _Fake3D(_FakeTensor):
+            shape = (2, 3, 4)
+
+            def dim(self):
+                return 3
+
+        self.assertTrue(communicator.should_use(_Fake3D()))
+        workspace.is_buffer_size_sufficient.assert_called_once_with(
+            2, 6, 4, torch.bfloat16
+        )
+        tensor = torch.ones((2, 3, 4), dtype=torch.bfloat16)
+        out = communicator.all_reduce(tensor)
+        self.assertEqual(tuple(out.shape), (2, 3, 4))
+        torch.testing.assert_close(out, tensor + 1)
+        dst = tensor.clone()
+        res = communicator.all_reduce_into(dst, dst)
+        self.assertIs(res, dst)
+        torch.testing.assert_close(dst, tensor + 1)
 
 
 if __name__ == "__main__":
