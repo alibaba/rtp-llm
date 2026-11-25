@@ -223,6 +223,79 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
             RESOURCE_EXHAUSTED,
         )
 
+    async def test_schedule_overload_preserves_channel_and_does_not_retry_slave(self):
+        client = MasterClient(
+            host_service=_FakeHostServiceWithSlave(), master_config=_FakeMasterConfig()
+        )
+        schedule = AsyncMock(
+            side_effect=grpc.aio.AioRpcError(
+                grpc.StatusCode.RESOURCE_EXHAUSTED,
+                grpc.aio.Metadata(),
+                grpc.aio.Metadata(),
+                details="FlexLB gRPC executor saturated",
+            )
+        )
+        with patch(
+            "rtp_llm.server.master_client.FlexlbServiceStub",
+            return_value=SimpleNamespace(Schedule=schedule),
+        ), patch.object(client, "_get_channel") as channel, patch.object(
+            client, "_close_channel", new_callable=AsyncMock
+        ) as close_channel:
+            with self.assertRaises(FtRuntimeException) as raised:
+                await client.get_backend_role_addrs(
+                    block_cache_keys=[1],
+                    cache_key_block_size=128,
+                    input=_FakeInput(),
+                    request_id=99,
+                )
+
+        self.assertEqual(
+            raised.exception.exception_type, ExceptionType.RESOURCE_EXHAUSTED
+        )
+        self.assertEqual(
+            raised.exception.admission_reject_reason,
+            AdmissionRejectReason.RESOURCE_EXHAUSTED,
+        )
+        self.assertEqual(raised.exception.message, "FlexLB gRPC executor saturated")
+        channel.assert_called_once_with(client._get_grpc_target("master:1234"))
+        close_channel.assert_not_awaited()
+        schedule.assert_awaited_once()
+
+    async def test_schedule_connection_failure_still_tries_slave(self):
+        client = MasterClient(
+            host_service=_FakeHostServiceWithSlave(), master_config=_FakeMasterConfig()
+        )
+        schedule = AsyncMock(
+            side_effect=[
+                grpc.aio.AioRpcError(
+                    grpc.StatusCode.UNAVAILABLE,
+                    grpc.aio.Metadata(),
+                    grpc.aio.Metadata(),
+                ),
+                FlexlbScheduleResponsePB(success=True, code=200),
+            ]
+        )
+        with patch(
+            "rtp_llm.server.master_client.FlexlbServiceStub",
+            return_value=SimpleNamespace(Schedule=schedule),
+        ), patch.object(client, "_get_channel") as channel, patch.object(
+            client, "_close_channel", new_callable=AsyncMock
+        ) as close_channel:
+            response = await client.get_backend_role_addrs(
+                block_cache_keys=[1],
+                cache_key_block_size=128,
+                input=_FakeInput(),
+                request_id=99,
+            )
+
+        self.assertTrue(response.is_ok)
+        master_target = client._get_grpc_target("master:1234")
+        slave_target = client._get_grpc_target("slave:1234")
+        self.assertEqual(
+            channel.call_args_list, [call(master_target), call(slave_target)]
+        )
+        close_channel.assert_awaited_once_with(master_target)
+
     async def test_transport_failure_after_resend_does_not_try_slave(self):
         client = MasterClient(
             host_service=_FakeHostServiceWithSlave(), master_config=_FakeMasterConfig()
