@@ -109,6 +109,9 @@ public:
             lost_reply.set_value();
             return grpc::Status(grpc::StatusCode::UNAVAILABLE, "simulated lost seal response");
         }
+        if (lease->token() <= unavailable_through.load()) {
+            return grpc::Status(grpc::StatusCode::UNAVAILABLE, "simulated unreachable peer");
+        }
         bool stopped = false;
         if (!registry->seal(*lease, stopped))
             return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "foreign lease");
@@ -120,6 +123,7 @@ public:
     std::shared_ptr<PDWriteLeaseRegistry> registry = std::make_shared<PDWriteLeaseRegistry>();
     std::atomic<bool>                     supports_protected_positions{true};
     std::atomic<int>                      seal_calls{0};
+    std::atomic<uint64_t>                 unavailable_through{0};
     std::promise<void>                    lost_reply;
 };
 }  // namespace
@@ -170,6 +174,99 @@ TEST(PDWriteLeaseTest, RetriesLostStopReceiptAndWaitsForEveryWriter) {
     last_writer.reset();
     EXPECT_EQ(proof.wait_for(5s), std::future_status::ready);
     EXPECT_GE(service.seal_calls.load(), 3);
+}
+
+TEST(PDWriteLeaseTest, ShutdownKeepsClaimedWriterWhileRecoveryIsInProgress) {
+    using namespace std::chrono_literals;
+    auto registry = std::make_shared<PDWriteLeaseRegistry>();
+    PreparePDWriteLeaseRequestPB prepare;
+    prepare.set_request_key("shutdown-drain");
+    prepare.set_timeout_ms(10000);
+    BroadcastLoadRequestPB request;
+    request.set_request_key(prepare.request_key());
+    *request.mutable_write_lease() = registry->prepare(prepare);
+    auto writer = registry->claim(request);
+    ASSERT_TRUE(writer);
+    auto unclaimed_lease = registry->prepare(prepare);
+
+    std::promise<void> recovery_started;
+    std::promise<void> finish_recovery;
+    auto started = recovery_started.get_future();
+    auto finish = finish_recovery.get_future();
+    registry->registerRecovery(request.write_lease(), [&] {
+        recovery_started.set_value();
+        finish.wait();
+    });
+    auto seal = std::async(std::launch::async, [&] {
+        bool stopped = false;
+        return registry->seal(request.write_lease(), stopped) && !stopped;
+    });
+
+    EXPECT_EQ(started.wait_for(5s), std::future_status::ready);
+    registry->closeAdmission();
+    EXPECT_EQ(registry->activeWriters(), 1u);
+    EXPECT_EQ(registry->prepare(prepare).token(), 0u);
+    BroadcastLoadRequestPB late_request = request;
+    *late_request.mutable_write_lease() = unclaimed_lease;
+    EXPECT_FALSE(registry->claim(late_request));
+
+    finish_recovery.set_value();
+    EXPECT_TRUE(seal.get());
+    writer.reset();
+    EXPECT_EQ(registry->activeWriters(), 0u);
+    bool stopped = false;
+    EXPECT_TRUE(registry->seal(request.write_lease(), stopped));
+    EXPECT_TRUE(stopped);
+}
+
+TEST(PDWriteLeaseTest, RecoversReachableLeasesPastFirstBatchWhileRetainingUnavailablePins) {
+    using namespace std::chrono_literals;
+    constexpr size_t unavailable_count = 33;
+    constexpr size_t reachable_count = 7;
+
+    LeaseService service;
+    service.unavailable_through.store(unavailable_count);
+    grpc::ServerBuilder builder;
+    int port = 0;
+    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(&service);
+    auto server = builder.BuildAndStart();
+    ASSERT_TRUE(server);
+    std::shared_ptr<RpcService::Stub> stub = RpcService::NewStub(
+        grpc::CreateChannel("127.0.0.1:" + std::to_string(port), grpc::InsecureChannelCredentials()));
+
+    struct PinGroup {
+        explicit PinGroup(size_t count): remaining(count) {}
+        std::atomic<size_t> remaining;
+        std::promise<void> drained;
+    };
+    auto unavailable = std::make_shared<PinGroup>(unavailable_count);
+    auto reachable = std::make_shared<PinGroup>(reachable_count);
+    auto unavailable_proof = unavailable->drained.get_future();
+    auto reachable_proof = reachable->drained.get_future();
+    PreparePDWriteLeaseRequestPB prepare;
+    prepare.set_request_key("large-drain");
+    prepare.set_timeout_ms(10000);
+    std::list<PDWriteLeaseDrain> pending;
+    for (size_t i = 0; i < unavailable_count + reachable_count; ++i) {
+        auto lease = service.registry->prepare(prepare);
+        auto group = i < unavailable_count ? unavailable : reachable;
+        std::shared_ptr<void> pin(group.get(), [group](void*) {
+            if (group->remaining.fetch_sub(1) == 1) {
+                group->drained.set_value();
+            }
+        });
+        pending.push_back({{stub, std::move(lease)}, std::move(pin)});
+    }
+    PDWriteLeaseRecovery::instance().adopt(pending);
+
+    EXPECT_EQ(reachable_proof.wait_for(5s), std::future_status::ready);
+    EXPECT_EQ(reachable->remaining.load(), 0u);
+    EXPECT_EQ(unavailable_proof.wait_for(0s), std::future_status::timeout);
+    EXPECT_EQ(unavailable->remaining.load(), unavailable_count);
+    service.unavailable_through.store(0);
+    EXPECT_EQ(unavailable_proof.wait_for(5s), std::future_status::ready);
+    EXPECT_EQ(unavailable->remaining.load(), 0u);
 }
 
 }  // namespace rtp_llm
