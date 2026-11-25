@@ -56,6 +56,19 @@ bool tryMtpGatherPageSnapshots(const torch::Tensor&              physical_host,
                                torch::Tensor&                    kernel_output,
                                cudaStream_t                      stream);
 
+// Assemble both page tables directly from device snapshots without host backing
+// buffers, zero-filling ragged tails on device. Returns false without launching
+// when any snapshot is missing or has an unsupported layout/device.
+bool tryMtpGatherPageSnapshots(const std::vector<torch::Tensor>& physical_snapshots,
+                               const std::vector<torch::Tensor>& kernel_snapshots,
+                               int64_t                           physical_groups,
+                               int64_t                           physical_width,
+                               int64_t                           kernel_groups,
+                               int64_t                           kernel_width,
+                               torch::Tensor&                    physical_output,
+                               torch::Tensor&                    kernel_output,
+                               cudaStream_t                      stream);
+
 // Fuses flip/cat/index construction/gather for the four-token Engram history.
 // Returns undefined for layouts/dtypes that should use the Torch fallback.
 torch::Tensor

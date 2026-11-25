@@ -58,7 +58,8 @@ public:
                                                              TensorHolder&                   host_holder) const;
 
 private:
-    GptModelInputs allocateModelInputBuffers(const StreamGroups& stream_groups) const;
+    GptModelInputs allocateModelInputBuffers(const StreamGroups& stream_groups,
+                                             bool                skip_host_page_tables = false) const;
     void           initializeKvCacheMetadata(GptModelInputs& model_input) const;
     absl::Status   processDecodeStreams(GptModelInputs& model_input, const StreamGroups& stream_groups) const;
     absl::Status   processContextStreams(GptModelInputs&     model_input,

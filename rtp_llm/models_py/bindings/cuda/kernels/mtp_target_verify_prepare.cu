@@ -295,11 +295,14 @@ __global__ void mtpGatherPageSnapshotsKernel(PageSnapshotGather params) {
     const auto  row    = params.rows.rows[blockIdx.y];
     const auto  index  = params.offset + blockIdx.y;
     const auto* source = row.source[table];
-    const auto* host =
-        params.host[table] + group * params.host_group_stride[table] + index * params.host_row_stride[table];
-    auto* output = params.output[table] + (group * params.batch + index) * params.width[table];
+    const auto* host   = params.host[table] ?
+                             params.host[table] + group * params.host_group_stride[table]
+                                 + index * params.host_row_stride[table] :
+                             nullptr;
+    auto*       output = params.output[table] + (group * params.batch + index) * params.width[table];
     for (int64_t col = threadIdx.x; col < params.width[table]; col += blockDim.x) {
-        output[col] = source && col < row.width[table] ? source[group * row.stride[table] + col] : host[col];
+        output[col] =
+            source && col < row.width[table] ? source[group * row.stride[table] + col] : (host ? host[col] : 0);
     }
 }
 
@@ -767,6 +770,78 @@ bool tryMtpGatherPageSnapshots(const torch::Tensor&              physical_host,
                 at::cuda::CachingHostAllocator_recordEvent(
                     host.data_ptr(), host.storage().data_ptr().get_context(), at::cuda::getCurrentCUDAStream());
             }
+        }
+    }
+    physical_output = std::move(outputs[0]);
+    kernel_output   = std::move(outputs[1]);
+    return true;
+}
+
+bool tryMtpGatherPageSnapshots(const std::vector<torch::Tensor>& physical_snapshots,
+                               const std::vector<torch::Tensor>& kernel_snapshots,
+                               int64_t                           physical_groups,
+                               int64_t                           physical_width,
+                               int64_t                           kernel_groups,
+                               int64_t                           kernel_width,
+                               torch::Tensor&                    physical_output,
+                               torch::Tensor&                    kernel_output,
+                               cudaStream_t                      stream) {
+    if (physical_snapshots.size() != kernel_snapshots.size() || physical_groups < 0 || physical_width < 0
+        || kernel_groups < 0 || kernel_width < 0) {
+        return false;
+    }
+    const int64_t                     batch        = static_cast<int64_t>(physical_snapshots.size());
+    const int64_t                     table_groups[2] = {physical_groups, kernel_groups};
+    const int64_t                     table_widths[2] = {physical_width, kernel_width};
+    const std::vector<torch::Tensor>* snapshots[2] = {&physical_snapshots, &kernel_snapshots};
+    const auto                        device       = c10::cuda::current_device();
+    for (int table = 0; table < 2; ++table) {
+        for (const auto& snapshot : *snapshots[table]) {
+            if (!snapshot.defined() || !snapshot.is_cuda() || snapshot.get_device() != device
+                || snapshot.scalar_type() != torch::kInt32 || snapshot.dim() != 3
+                || snapshot.size(0) != table_groups[table] || snapshot.size(1) != 1
+                || snapshot.size(2) > table_widths[table] || snapshot.stride(2) != 1) {
+                return false;
+            }
+        }
+    }
+    const int64_t phys_numel = physical_groups * batch * physical_width;
+    const int64_t kern_numel = kernel_groups * batch * kernel_width;
+    const auto    cuda_i32   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto          storage    = torch::empty({phys_numel + kern_numel}, cuda_i32);
+    torch::Tensor outputs[2] = {
+        storage.narrow(0, 0, phys_numel).view({physical_groups, batch, physical_width}),
+        storage.narrow(0, phys_numel, kern_numel).view({kernel_groups, batch, kernel_width}),
+    };
+    PageSnapshotGather params{};
+    params.batch = batch;
+    for (int table = 0; table < 2; ++table) {
+        params.host[table]              = nullptr;
+        params.output[table]            = outputs[table].data_ptr<int32_t>();
+        params.groups[table]            = table_groups[table];
+        params.width[table]             = table_widths[table];
+        params.host_group_stride[table] = 0;
+        params.host_row_stride[table]   = 0;
+        for (const auto& snapshot : *snapshots[table]) {
+            c10::cuda::CUDACachingAllocator::recordStream(snapshot.storage().data_ptr(),
+                                                          at::cuda::getCurrentCUDAStream());
+        }
+    }
+    const auto groups = std::max(params.groups[0], params.groups[1]);
+    if (groups > 0 && (params.width[0] > 0 || params.width[1] > 0)) {
+        for (int64_t offset = 0; offset < params.batch; offset += kRowsPerLaunch) {
+            const auto count = std::min<int64_t>(kRowsPerLaunch, params.batch - offset);
+            params.offset    = offset;
+            for (int64_t row = 0; row < count; ++row) {
+                for (int table = 0; table < 2; ++table) {
+                    const auto& snapshot                = (*snapshots[table])[offset + row];
+                    params.rows.rows[row].source[table] = snapshot.data_ptr<int32_t>();
+                    params.rows.rows[row].width[table]  = snapshot.size(2);
+                    params.rows.rows[row].stride[table] = snapshot.stride(0);
+                }
+            }
+            mtpGatherPageSnapshotsKernel<<<dim3(groups, count, 2), kPrepareBlockSize, 0, stream>>>(params);
+            C10_CUDA_KERNEL_LAUNCH_CHECK();
         }
     }
     physical_output = std::move(outputs[0]);

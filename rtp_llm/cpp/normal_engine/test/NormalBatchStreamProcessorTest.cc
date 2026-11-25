@@ -1221,6 +1221,32 @@ TEST_F(NormalBatchStreamProcessorTest, testMixedGroupBlockWidthsGatherCompleteRo
                 EXPECT_EQ(toVec<int32_t>((*snapshot_kernel)[row][1]),
                           toVec<int32_t>(snapshot_inputs->kv_cache_kernel_block_id[1 - row][1]));
             }
+
+            // Deferred gather skips host pinned page-table allocation only when
+            // every stream in a decode-only batch carries a device snapshot.
+            auto mixed_deferred = gatherer.gather(snapshot_groups, holder, /*defer_page_tables=*/true);
+            ASSERT_TRUE(mixed_deferred.ok());
+            EXPECT_TRUE(mixed_deferred->kv_cache_block_id.defined());
+            EXPECT_TRUE(mixed_deferred->kv_cache_kernel_block_id.defined());
+
+            StreamGroups all_snapshot_groups({steady});
+            auto         eager_all_snapshot = gatherer.gather(all_snapshot_groups, holder, /*defer_page_tables=*/false);
+            ASSERT_TRUE(eager_all_snapshot.ok());
+            EXPECT_TRUE(eager_all_snapshot->kv_cache_block_id.defined());
+            EXPECT_TRUE(eager_all_snapshot->kv_cache_kernel_block_id.defined());
+
+            auto deferred_all_snapshot = gatherer.gather(all_snapshot_groups, holder, /*defer_page_tables=*/true);
+            ASSERT_TRUE(deferred_all_snapshot.ok());
+            EXPECT_FALSE(deferred_all_snapshot->kv_cache_block_id.defined());
+            EXPECT_FALSE(deferred_all_snapshot->kv_cache_kernel_block_id.defined());
+
+            auto all_snapshot_kernel = gatherer.gatherKvCacheKernelBlockId(all_snapshot_groups, reversed_tags, holder);
+            ASSERT_TRUE(all_snapshot_kernel.ok());
+            ASSERT_TRUE(all_snapshot_kernel->is_cuda());
+            EXPECT_EQ(toVec<int32_t>((*all_snapshot_kernel)[0][0]),
+                      toVec<int32_t>(state.next_kv_cache_kernel_block_id_gpu[1][0]));
+            EXPECT_EQ(toVec<int32_t>((*all_snapshot_kernel)[1][0]),
+                      toVec<int32_t>(state.next_kv_cache_kernel_block_id_gpu[0][0]));
         }
     }
 }

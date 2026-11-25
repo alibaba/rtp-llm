@@ -4163,6 +4163,72 @@ TEST_F(MtpBatchStreamProcessorTest, CacheSnapshotGatherHandlesChunkedMixedRagged
     }
 }
 
+TEST_F(MtpBatchStreamProcessorTest, AllSnapshotDecodeGatherSkipsHostTablesForUniformRaggedAndStridedBatches) {
+    ModelConfig model;
+    model.max_seq_len = 2048;
+    model.vocab_size  = 8;
+    model.num_layers  = 1;
+    RuntimeConfig              runtime;
+    ResourceContext            resources;
+    SpeculativeExecutionConfig speculative;
+    speculative.type                    = SP_TYPE_DSPARK;
+    speculative.gen_num_per_cycle       = 3;
+    speculative.sp_dspark_mask_token_id = 7;
+    TestableMtpBatchStreamProcessor processor(
+        model, PDSepConfig{}, ProfilingDebugLoggingConfig{}, makeProcessorCacheConfig(), speculative, false);
+    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+
+    // mode 0: uniform contiguous snapshots (fast single-storage kernel path)
+    // mode 1: ragged contiguous snapshots across chunk boundary (>64 rows)
+    // mode 2: ragged strided snapshots (CUDA zero-init + overlay fallback)
+    for (int mode : {0, 1, 2}) {
+        const int                    batch = mode == 1 ? 65 : 4;
+        const int                    max_p = mode == 0 ? 3 : 5;
+        const int                    max_k = mode == 0 ? 4 : 7;
+        auto                         expected_physical = torch::zeros({1, batch, max_p}, torch::kInt32);
+        auto                         expected_kernel   = torch::zeros({1, batch, max_k}, torch::kInt32);
+        std::list<GenerateStreamPtr> streams;
+        for (int row = 0; row < batch; ++row) {
+            auto stream = createContextStream(model, runtime, resources, {1}, row + 1);
+            stream->setIsContextStream(false);
+            const int pw = mode == 0 ? max_p : 3 + row % 3;
+            const int kw = mode == 0 ? max_k : 4 + row % 4;
+            auto      physical =
+                (torch::arange(pw, torch::kInt32) + 100 * (row + 1)).reshape({1, 1, pw});
+            auto kernel =
+                (torch::arange(kw, torch::kInt32) + 1000 * (row + 1)).reshape({1, 1, kw});
+            expected_physical.narrow(1, row, 1).narrow(2, 0, pw).copy_(physical);
+            expected_kernel.narrow(1, row, 1).narrow(2, 0, kw).copy_(kernel);
+            GenerateStream::MtpAsyncDeviceState state;
+            state.next_kv_cache_block_id_gpu        = physical.to(cuda_i32);
+            state.next_kv_cache_kernel_block_id_gpu = kernel.to(cuda_i32);
+            if (mode == 2 && row == 1) {
+                auto strided = torch::empty({1, 1, 2 * pw}, cuda_i32).slice(2, 0, 2 * pw, 2);
+                strided.copy_(state.next_kv_cache_block_id_gpu);
+                state.next_kv_cache_block_id_gpu = strided;
+            }
+            stream->setMtpAsyncDeviceState(std::move(state));
+            streams.push_back(stream);
+        }
+        TensorHolder holder;
+        auto         input = processor.gatherDecodeModelInput(StreamGroups(streams), holder);
+        ASSERT_TRUE(input.ok()) << "mode=" << mode;
+        ASSERT_TRUE(input->kv_cache_block_id.defined() && input->kv_cache_block_id.is_cuda()) << "mode=" << mode;
+        ASSERT_TRUE(input->kv_cache_kernel_block_id.defined() && input->kv_cache_kernel_block_id.is_cuda())
+            << "mode=" << mode;
+        EXPECT_TRUE(torch::equal(input->kv_cache_block_id.cpu(), expected_physical)) << "mode=" << mode;
+        EXPECT_TRUE(torch::equal(input->kv_cache_kernel_block_id.cpu(), expected_kernel)) << "mode=" << mode;
+        if (mode != 2) {
+            EXPECT_EQ(input->kv_cache_block_id.storage().data_ptr().get(),
+                      input->kv_cache_kernel_block_id.storage().data_ptr().get())
+                << "mode=" << mode;
+            EXPECT_EQ(input->kv_cache_block_id.data_ptr<int32_t>() + input->kv_cache_block_id.numel(),
+                      input->kv_cache_kernel_block_id.data_ptr<int32_t>())
+                << "mode=" << mode;
+        }
+    }
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testPrefillShiftsMultimodalMaskAndPackedLocations) {
     ModelConfig model_config;
     model_config.max_seq_len = 2048;

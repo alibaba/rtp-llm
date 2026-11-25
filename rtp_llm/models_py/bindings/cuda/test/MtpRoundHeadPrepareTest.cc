@@ -170,6 +170,54 @@ TEST_F(MtpRoundHeadPrepareTest, PageSnapshotsMixRaggedDeviceRowsAndPinnedHostSuf
     }
 }
 
+TEST_F(MtpRoundHeadPrepareTest, PageSnapshotsWithoutHostBuffersZeroFillRaggedDeviceRows) {
+    for (int64_t batch : {0, 1, 7, 64, 65, 129, 257}) {
+        for (int64_t width : {0, 3, 1537}) {
+            torch::Tensor              expected[2], output[2];
+            std::vector<torch::Tensor> snapshots[2];
+            int64_t                    groups[2]  = {2, 3};
+            int64_t                    columns[2] = {width, width ? width + 7 : 0};
+            for (int table = 0; table < 2; ++table) {
+                expected[table] = torch::zeros({groups[table], batch, columns[table]}, torch::kInt32);
+                snapshots[table].resize(batch);
+                for (int64_t row = 0; row < batch; ++row) {
+                    const int64_t live   = row % 3 == 0 ? columns[table] : columns[table] / (row % 3 + 1);
+                    auto          source = (torch::arange(groups[table] * 2 * (live + 2), torch::kInt32) + 200000 + row * 71)
+                                      .reshape({groups[table], 2, live + 2});
+                    snapshots[table][row] = source.to(torch::kCUDA).slice(1, 1, 2).slice(2, 1, live + 1);
+                    expected[table]
+                        .slice(1, row, row + 1)
+                        .slice(2, 0, live)
+                        .copy_(source.slice(1, 1, 2).slice(2, 1, live + 1));
+                }
+            }
+            ASSERT_TRUE(tryMtpGatherPageSnapshots(
+                snapshots[0], snapshots[1], groups[0], columns[0], groups[1], columns[1], output[0], output[1], stream_));
+            if (output[0].numel() && output[1].numel()) {
+                ASSERT_EQ(output[0].storage().data_ptr().get(), output[1].storage().data_ptr().get());
+                ASSERT_EQ(output[0].data_ptr<int32_t>() + output[0].numel(), output[1].data_ptr<int32_t>());
+            }
+            for (int table = 0; table < 2; ++table) {
+                ASSERT_TRUE(output[table].is_contiguous());
+                ASSERT_TRUE(torch::equal(output[table].cpu(), expected[table]));
+            }
+        }
+    }
+
+    std::vector<torch::Tensor> missing(1), valid(1);
+    valid[0] = torch::ones({2, 1, 4}, cudaInt32());
+    torch::Tensor physical, kernel;
+    EXPECT_FALSE(tryMtpGatherPageSnapshots(missing, valid, 2, 4, 2, 4, physical, kernel, stream_));
+    std::vector<torch::Tensor> strided = {torch::zeros({2, 1, 8}, cudaInt32()).slice(2, 0, 8, 2)};
+    EXPECT_FALSE(tryMtpGatherPageSnapshots(strided, valid, 2, 4, 2, 4, physical, kernel, stream_));
+    std::vector<torch::Tensor> too_wide = {torch::ones({2, 1, 5}, cudaInt32())};
+    EXPECT_FALSE(tryMtpGatherPageSnapshots(too_wide, valid, 2, 4, 2, 4, physical, kernel, stream_));
+    std::vector<torch::Tensor> on_cpu = {torch::ones({2, 1, 4}, torch::kInt32)};
+    EXPECT_FALSE(tryMtpGatherPageSnapshots(on_cpu, valid, 2, 4, 2, 4, physical, kernel, stream_));
+    EXPECT_FALSE(physical.defined());
+    EXPECT_FALSE(kernel.defined());
+}
+
 TEST_F(MtpRoundHeadPrepareTest, PageSnapshotsRejectUnsupportedInputsBeforeWriting) {
     const auto                 pinned = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
     auto                       host   = torch::zeros({2, 1, 7}, pinned);
