@@ -651,6 +651,26 @@ message TaskInfoPB {
         int64 last_completed_prefill_step_id = 33;
     }
     string request_id_str = 34;
+    // Request timing observations: omitted means unavailable; zero is valid.
+    // Each field has independent presence so all stages can be reported together.
+    oneof scheduler_wait_us_presence {
+        int64 scheduler_wait_us = 35;
+    }
+    oneof scheduler_wait_steps_presence {
+        int64 scheduler_wait_steps = 36;
+    }
+    oneof hybrid_kv_alloc_wait_us_presence {
+        int64 hybrid_kv_alloc_wait_us = 37;
+    }
+    oneof prefill_inflight_wall_us_presence {
+        int64 prefill_inflight_wall_us = 38;
+    }
+    oneof engine_add_to_first_token_us_presence {
+        int64 engine_add_to_first_token_us = 39;
+    }
+    oneof scheduler_wait_for_ple_ready_us_presence {
+        int64 scheduler_wait_for_ple_ready_us = 40;
+    }
 }
 
 message UpdateWeightsRequestPB {

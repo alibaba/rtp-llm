@@ -264,6 +264,8 @@ class ConfigServiceTest {
         assertEquals(50L, cache.getMinRefreshIntervalMs());
         assertEquals(3000L, cache.getMaxRefreshIntervalMs());
         assertFalse(cache.isFullSnapshotDebugMode());
+        assertTrue(config.getObservability().getTtftStages().isEnabled());
+        assertFalse(config.getObservability().getTtftStages().isRemoteKvBeforeScheduler());
         var observability = config.getObservability().getCacheHit();
         assertTrue(observability.getRecentKeyWindow().isWriteEnabled());
         assertEquals(1800000L, observability.getRecentKeyWindow().getDurationMs());
@@ -365,6 +367,15 @@ class ConfigServiceTest {
         assertEquals(1, config.getRouter().getGroupSelector().getRules().size());
         assertEquals("/home/admin/ai-whale/logs/master_theory_hit.log",
                 config.getObservability().getCacheHit().getTheoryLog().getPath());
+    }
+
+    @Test
+    void parsesTtftStageOptions() {
+        FlexlbConfig config = ConfigTestFixtures.parse("""
+                {"observability":{"ttftStages":{"enabled":false,"remoteKvBeforeScheduler":true}}}
+                """);
+        assertFalse(config.getObservability().getTtftStages().isEnabled());
+        assertTrue(config.getObservability().getTtftStages().isRemoteKvBeforeScheduler());
     }
 
     @Test

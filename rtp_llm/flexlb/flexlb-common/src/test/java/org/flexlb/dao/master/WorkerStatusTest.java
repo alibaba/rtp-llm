@@ -20,6 +20,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -42,6 +43,39 @@ class WorkerStatusTest {
     private static WorkerStatus discovered() {
         return WorkerStatus.createDiscovered(
                 RoleType.PREFILL, "group-a", "10.0.0.1", 8080, 9090, "site-a");
+    }
+
+    @Test
+    void legacyTaskCopyPreservesOptionalEngineTimings() {
+        TaskInfo timed = new TaskInfo();
+        timed.setRequestId("timed");
+        timed.setSchedulerWaitUs(0L);
+        timed.setSchedulerWaitSteps(3L);
+        timed.setHybridKvAllocWaitUs(1001L);
+        timed.setPrefillInflightWallUs(2002L);
+        timed.setEngineAddToFirstTokenUs(3003L);
+        timed.setSchedulerWaitForPleReadyUs(0L);
+        TaskInfo older = new TaskInfo();
+        older.setRequestId("older");
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setRole(RoleType.PREFILL);
+        response.setRunningTaskInfo(Map.of("timed", timed, "older", older));
+
+        var observation = discovered().freezeStatusResponse(response);
+        var actual = observation.activeTasks().get("timed").telemetry();
+        assertEquals(0L, actual.schedulerWaitUs());
+        assertEquals(3L, actual.schedulerWaitSteps());
+        assertEquals(1001L, actual.hybridKvAllocWaitUs());
+        assertEquals(2002L, actual.prefillInflightWallUs());
+        assertEquals(3003L, actual.engineAddToFirstTokenUs());
+        assertEquals(0L, actual.schedulerWaitForPleReadyUs());
+        var missing = observation.activeTasks().get("older").telemetry();
+        assertNull(missing.schedulerWaitUs());
+        assertNull(missing.schedulerWaitSteps());
+        assertNull(missing.hybridKvAllocWaitUs());
+        assertNull(missing.prefillInflightWallUs());
+        assertNull(missing.engineAddToFirstTokenUs());
+        assertNull(missing.schedulerWaitForPleReadyUs());
     }
 
     @Test

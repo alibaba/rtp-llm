@@ -155,7 +155,13 @@ public class EngineStatusConverter {
                             task.getPrefillNonfinalChunkTokensMax(),
                             task.hasCompletedPrefillTokens() ? task.getCompletedPrefillTokens() : null,
                             task.hasRemainingPrefillTokens() ? task.getRemainingPrefillTokens() : null,
-                            task.hasLastCompletedPrefillStepId() ? task.getLastCompletedPrefillStepId() : null));
+                            task.hasLastCompletedPrefillStepId() ? task.getLastCompletedPrefillStepId() : null,
+                            task.hasSchedulerWaitUs() ? task.getSchedulerWaitUs() : null,
+                            task.hasSchedulerWaitSteps() ? task.getSchedulerWaitSteps() : null,
+                            task.hasHybridKvAllocWaitUs() ? task.getHybridKvAllocWaitUs() : null,
+                            task.hasPrefillInflightWallUs() ? task.getPrefillInflightWallUs() : null,
+                            task.hasEngineAddToFirstTokenUs() ? task.getEngineAddToFirstTokenUs() : null,
+                            task.hasSchedulerWaitForPleReadyUs() ? task.getSchedulerWaitForPleReadyUs() : null));
             tasks.put(observation.requestId(), observation);
         }
         return Map.copyOf(tasks);

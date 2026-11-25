@@ -124,13 +124,20 @@ public class WorkerStatus {
                             task.getPrefillNonfinalChunkTokensMax(),
                             task.getCompletedPrefillTokens(),
                             task.getRemainingPrefillTokens() < 0 ? null : task.getRemainingPrefillTokens(),
-                            task.getLastCompletedPrefillStepId()));
+                            task.getLastCompletedPrefillStepId(),
+                            task.getSchedulerWaitUs(),
+                            task.getSchedulerWaitSteps(),
+                            task.getHybridKvAllocWaitUs(),
+                            task.getPrefillInflightWallUs(),
+                            task.getEngineAddToFirstTokenUs(),
+                            task.getSchedulerWaitForPleReadyUs()));
         }
     }
 
     /**
      * Immutable request telemetry retained from the Engine status RPC.
      * Nullable prefill progress values preserve omitted protobuf fields.
+     * The optional timing fields also distinguish an omitted value from zero.
      */
     public record TaskTelemetry(boolean prefixLengthValid,
                                 long requestReceivedTimeMs,
@@ -149,7 +156,13 @@ public class WorkerStatus {
                                 long prefillNonfinalChunkTokensMax,
                                 Long completedPrefillTokens,
                                 Long remainingPrefillTokens,
-                                Long lastCompletedPrefillStepId) {
+                                Long lastCompletedPrefillStepId,
+                                Long schedulerWaitUs,
+                                Long schedulerWaitSteps,
+                                Long hybridKvAllocWaitUs,
+                                Long prefillInflightWallUs,
+                                Long engineAddToFirstTokenUs,
+                                Long schedulerWaitForPleReadyUs) {
 
         public TaskTelemetry(boolean prefixLengthValid,
                              long requestReceivedTimeMs,
@@ -171,6 +184,32 @@ public class WorkerStatus {
                     hbmLocalMatchTokens, remoteKvAddedMatchTokens, firstPrefillStepId, lastPrefillStepId,
                     prefillStepCount, prefillNonfinalChunkTokensMin, prefillNonfinalChunkTokensMax,
                     null, null, null);
+        }
+
+        public TaskTelemetry(boolean prefixLengthValid,
+                             long requestReceivedTimeMs,
+                             long inputQueueEnqueueTimeMs,
+                             long inputQueueDrainTimeMs,
+                             long waitingEnteredTimeMs,
+                             long runningEnteredTimeMs,
+                             long remoteKvWaitMs,
+                             long firstTokenTimeMs,
+                             long hbmLocalMatchTokens,
+                             long remoteKvAddedMatchTokens,
+                             long firstPrefillStepId,
+                             long lastPrefillStepId,
+                             long prefillStepCount,
+                             long prefillNonfinalChunkTokensMin,
+                             long prefillNonfinalChunkTokensMax,
+                             Long completedPrefillTokens,
+                             Long remainingPrefillTokens,
+                             Long lastCompletedPrefillStepId) {
+            this(prefixLengthValid, requestReceivedTimeMs, inputQueueEnqueueTimeMs, inputQueueDrainTimeMs,
+                    waitingEnteredTimeMs, runningEnteredTimeMs, remoteKvWaitMs, firstTokenTimeMs,
+                    hbmLocalMatchTokens, remoteKvAddedMatchTokens, firstPrefillStepId, lastPrefillStepId,
+                    prefillStepCount, prefillNonfinalChunkTokensMin, prefillNonfinalChunkTokensMax,
+                    completedPrefillTokens, remainingPrefillTokens, lastCompletedPrefillStepId,
+                    null, null, null, null, null, null);
         }
     }
 

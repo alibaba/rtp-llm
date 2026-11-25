@@ -372,6 +372,41 @@ class EngineHealthReporterTest {
     }
 
     @Test
+    void reportsOptionalPrefillTimingsInMicrosecondsAndSteps() {
+        reporter.init();
+        var task = new WorkerStatus.TaskTelemetry(true, 0, 0, 0, 0, 0, 0, 1900,
+                0, 0, 0, 0, 0, 0, 0, null, null, null, 1234567L, 3L, 4001L, 5002L, 1243570L, 0L);
+        reporter.reportPrefillWorkerStatusTask("10.0.0.1:8080@0", "PREFILL", "test-group", task);
+        FlexMetricTags expectedTags = FlexMetricTags.of("role", "PREFILL", "group", "test-group");
+        Map<String, Double> expected = Map.of("app.engine.worker.status.scheduler.wait.us", 1234567.0,
+                "app.engine.worker.status.scheduler.wait.steps", 3.0,
+                "app.engine.worker.status.hybrid.kv.alloc.wait.us", 4001.0,
+                "app.engine.worker.status.prefill.inflight.wall.us", 5002.0,
+                "app.engine.worker.status.engine.add.to.first.token.us", 1243570.0,
+                "app.engine.worker.status.scheduler.wait.for.ple.ready.us", 0.0);
+        expected.forEach((name, value) -> {
+            verify(monitor).register(name, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+            verify(monitor).report(name, expectedTags, value);
+        });
+    }
+
+    @Test
+    void skipsUnavailableAndInvalidTimingsButReportsExplicitZero() {
+        WorkerStatus.TaskTelemetry task = new WorkerStatus.TaskTelemetry(true, 0, 0, 0, 0, 0, 0, 1900, 0, 0, 1, 1, 1, 0,
+                0, null, null, null, null, -1L, null, -1L, 0L, null);
+
+        reporter.reportPrefillWorkerStatusTask("10.0.0.1:8080", "PDFUSION", "test-group", task);
+
+        for (String suffix : List.of("scheduler.wait.us", "scheduler.wait.steps", "hybrid.kv.alloc.wait.us",
+                "prefill.inflight.wall.us", "scheduler.wait.for.ple.ready.us")) {
+            verify(monitor, never()).report(eq("app.engine.worker.status." + suffix), any(), anyDouble());
+        }
+        FlexMetricTags tags = FlexMetricTags.of("role", "PDFUSION", "group", "test-group");
+        verify(monitor).report("app.engine.worker.status.engine.add.to.first.token.us", tags, 0.0);
+        verify(monitor).report(MetricConstant.ENGINE_WORKER_STATUS_REMOTE_KV_WAIT_MS, tags, 0.0);
+    }
+
+    @Test
     void shouldExcludeRequestsWithoutNonfinalChunksFromChunkMetrics() {
         WorkerStatus.TaskTelemetry task = new WorkerStatus.TaskTelemetry(
                 true, 900, 1000, 1100, 1200, 1600, 0, 1900,

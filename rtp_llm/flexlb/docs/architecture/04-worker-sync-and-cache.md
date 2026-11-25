@@ -117,9 +117,15 @@ PAI-vLLM 端的 Encoder 状态上报不属于 FlexLB 实现范围。
 `runningQueryLen` 与 `waitingQueryLen` 则直接保留引擎上报的数量。
 `TaskTelemetry` 保留可选的 `completed_prefill_tokens`、`remaining_prefill_tokens` 和
 `last_completed_prefill_step_id`；未上报时为 `null`，与明确上报的 `0` 区分。
+`TaskInfoPB` 的编号 35–40 分别为 `scheduler_wait_us`、`scheduler_wait_steps`、
+`hybrid_kv_alloc_wait_us`、`prefill_inflight_wall_us`、`engine_add_to_first_token_us` 和
+`scheduler_wait_for_ple_ready_us`。每个字段使用独立 oneof 保留 presence；转换为
+`TaskTelemetry` 和 legacy `TaskInfo` 时使用可空 `Long`，不能将缺失默认成 0。
+配套 vLLM develop 通过 DashLLM WorkerStatus RPC 提供这些字段。它们只用于请求阶段
+观测，不参与容量和选路评分；详见[监控口径](06-configuration-and-observability.md#请求级首-token-阶段指标)。
 其余字段包括 `alive`、`available_concurrency`、`status_version`、`step_latency_ms`、
 `iterate_count`、dp/tp size、KV cache 容量、`block_size`、`block_hash_lookahead_tokens`、
-`cache_match_rollback_blocks`、`kv_cache_group_mode` 等。没有显式 TTFT 字段——负载估计由 `stepLatencyMs` 与本地
+`cache_match_rollback_blocks`、`kv_cache_group_mode` 等。负载估计由 `stepLatencyMs` 与本地
 `runningQueueTime` 组成。
 
 `dp_master_address` 保存 Engine 状态上报的 DP master 地址，随同一次状态事务写入
@@ -271,6 +277,11 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
 `CacheMatchResult` 携带**应答源自己的 blockSize**（KVCM/standby 的块大小可能与请求主
 hash 不同）和 `querySucceeded`。空匹配是成功结果，查询失败的结果不产生预测指标。
 路由侧统一用 `blockSize × 匹配块数` 折算 token，并以请求 token 数作为上限。
+
+## P 引擎 TTFT
+
+`GrpcWorkerStatusRunner` 在状态提交后将本次增量完成任务交给阶段统计器。每条 P 完成记录
+独立产生样本，重试沿用引擎的任务边界。时间口径见[监控配置](06-configuration-and-observability.md#p-引擎-ttft-分段采集)。
 
 ## 客户端 block cache keys
 

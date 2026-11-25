@@ -88,4 +88,17 @@ public class TaskInfo {
     @JsonProperty("last_completed_prefill_step_id")
     private long lastCompletedPrefillStepId;
 
+    @JsonProperty("scheduler_wait_us")
+    private Long schedulerWaitUs;
+    @JsonProperty("scheduler_wait_steps")
+    private Long schedulerWaitSteps;
+    @JsonProperty("hybrid_kv_alloc_wait_us")
+    private Long hybridKvAllocWaitUs;
+    @JsonProperty("prefill_inflight_wall_us")
+    private Long prefillInflightWallUs;
+    @JsonProperty("engine_add_to_first_token_us")
+    private Long engineAddToFirstTokenUs;
+    @JsonProperty("scheduler_wait_for_ple_ready_us")
+    private Long schedulerWaitForPleReadyUs;
+
 }

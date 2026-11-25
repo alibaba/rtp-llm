@@ -330,6 +330,7 @@ public final class FlexlbConfigValidator {
     }
 
     private static void validateObservability(ObservabilityConfig observability) {
+        require(observability.getTtftStages() != null, "observability.ttftStages", "is required");
         require(observability.getLogging() != null,
                 "observability.logging", "is required");
         require(observability.getLogging().getLevel() != null,

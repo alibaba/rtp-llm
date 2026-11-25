@@ -310,6 +310,17 @@ public class MetricConstant {
             "app.engine.worker.status.scheduler.wait.ms";
     public static final String ENGINE_WORKER_STATUS_REMOTE_KV_WAIT_MS =
             "app.engine.worker.status.remote.kv.wait.ms";
+    public static final String ENGINE_WORKER_STATUS_SCHEDULER_WAIT_US = "app.engine.worker.status.scheduler.wait.us";
+    public static final String ENGINE_WORKER_STATUS_SCHEDULER_WAIT_STEPS =
+            "app.engine.worker.status.scheduler.wait.steps";
+    public static final String ENGINE_WORKER_STATUS_HYBRID_KV_ALLOC_WAIT_US =
+            "app.engine.worker.status.hybrid.kv.alloc.wait.us";
+    public static final String ENGINE_WORKER_STATUS_PREFILL_INFLIGHT_WALL_US =
+            "app.engine.worker.status.prefill.inflight.wall.us";
+    public static final String ENGINE_WORKER_STATUS_ENGINE_ADD_TO_FIRST_TOKEN_US =
+            "app.engine.worker.status.engine.add.to.first.token.us";
+    public static final String ENGINE_WORKER_STATUS_SCHEDULER_WAIT_FOR_PLE_READY_US =
+            "app.engine.worker.status.scheduler.wait.for.ple.ready.us";
     public static final String ENGINE_WORKER_STATUS_RUNNING_TO_FIRST_TOKEN_MS =
             "app.engine.worker.status.running.to.first.token.ms";
     public static final String ENGINE_WORKER_STATUS_HBM_LOCAL_MATCH_TOKENS =
