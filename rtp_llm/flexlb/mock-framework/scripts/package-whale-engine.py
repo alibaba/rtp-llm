@@ -134,7 +134,7 @@ def package():
     )
     jar = FRAMEWORK / "java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar"
     with zipfile.ZipFile(jar) as archive:
-        provider = "META-INF/services/org.flexlb.discovery.ServiceDiscovery"
+        provider = "META-INF/services/org.flexlb.discovery.ServiceDiscoveryProvider"
         if internal_discovery:
             required = (
                 provider,

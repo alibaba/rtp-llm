@@ -59,6 +59,24 @@ P/D/V 的资源候选绑定同一个 CI 镜像，按实际节点架构选择资�
 3. 在 Whale 的部署页保存目标 zone 配置，检查启动命令、镜像、资源覆盖和 ENV 的差异。修改 zone 配置后提交当前部署。更换服务配置版本时，在发布页面选中对应版本和目标部署。
 4. 回读 Carbon 启动计划、镜像、健康探针和 VIP 注册端口。确认各角色就绪、`engine_started` 日志中的 `effective_config` 与预期一致，再从 Frontend 发一条真实请求。滚动更新后观察成功率、TTFT 和 Prefill 复用率回稳。
 
+### 单 Pod 运行多个 Mock DP
+
+Prefill 和 Decode 可在 TP1、PP1 下用 `DP_SIZE` 启动多个独立 JVM。所有 DP 都在同一个 Pod。每个 JVM 的 HTTP 端口是 `START_PORT + rank × 10`，gRPC 端口是 HTTP 加 1。若平台提供 `WORKER_INFO_PORT_NUM`，多 DP 模式要求它为 `10`。任一 JVM 退出时整组退出，由平台恢复 Pod。
+
+在 Mock Master 的 `MODEL_SERVICE_CONFIG.role_endpoints` 中，给对应的 `prefill_endpoint` 或 `decode_endpoint` 增加 `"mock_dp_per_pod": 8`，数值和该角色的 `DP_SIZE` 一致。省略或填 `1` 沿用原有发现。每个 VIP 的 Pod 必须采用同一端口布局。多 DP endpoint 使用 HTTP VIP 发现，保留 `multi_engine_num` 默认值和按地址推导的 worker status 端口。
+
+使用同一源码版本构建 Mock Master JAR 和带内部 VIP provider 的普通 Whale Master 分发包，再生成 Mock 分发包。以下命令从 `mock-framework` 目录执行：
+
+```bash
+scripts/build-mock-java-runtime.sh -pl java/master -am -DskipTests
+python3 scripts/package-whale-master.py \
+  ../flexlb-api/target/ai-whale.tgz \
+  java/master/target/mock-master-1.0.0-SNAPSHOT.jar \
+  target/mock-master-ai-whale.tgz
+```
+
+构建测试 Master 镜像时，用输出的归档作为原 Whale 镜像配方里的 `ai-whale.tgz`。归档将启动类切到 Mock Master 入口，沿用原镜像启动命令。VIP 仍按 Pod 基础端口维护成员，Mock Master 展开该 Pod 的 DP 地址并按端口获取状态。
+
 ## CP 与 block size
 
 使用支持显式 Prefill CP 的 Frontend。默认让 Frontend 和 Mock Prefill 的 `SEQ_SIZE_PER_BLOCK`（**CP 前的基础块大小**）及 `PREFILL_CP_SIZE` 分别对齐，Frontend 额外设 `PREFILL_CP_KV_CACHE_SHARDED=1`。两端按基础块滚动哈希，每组取最后一个 key，Master 的路由跨度为基础块大小 × CP。Mock P/D 的 `CACHE_KEY_HASH_SEED` 与 Frontend 生效值对齐。

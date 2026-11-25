@@ -12,6 +12,12 @@ import java.util.*;
 public final class MetricTags {
     private MetricTags() { }
 
+    public static Map<String, String> rtpEngineTags(Map<String, String> environment) {
+        var tags = new LinkedHashMap<>(fromEnvironment(environment));
+        tags.put("dp_rank", environment.getOrDefault("DP_RANK", "0"));
+        return tags;
+    }
+
     public static Map<String, String> fromEnvironment(Map<String, String> environment) {
         var tags = new LinkedHashMap<String, String>();
         if (!environment.getOrDefault("HIPPO_ROLE", "").isBlank()) {
