@@ -1,6 +1,3 @@
-import hashlib
-import json
-import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Collection, Dict, List, Optional, Union
@@ -15,6 +12,7 @@ from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.qwen3_next.qwen3_next_weight import Qwen35MoeWeight
 from rtp_llm.ops import HybridAttentionType
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, stack_, stack_moe_w1
+from rtp_llm.utils.qwen4_ple import resolve_shared_ple_table
 
 # Verified against Qwen/Qwen3.8-Flash-Next model.safetensors.index.json; the
 # bring-up status and revisit list live in
@@ -65,26 +63,11 @@ _PLE_NGRAM_SHARD_KEY = "ple_embedding.ngram_embedding.shard_{s}.weight"
 
 
 @lru_cache(maxsize=1)
-def _shared_ple_table(
-    manifest_path: str, checkpoint_path: str
-) -> tuple[torch.Tensor, dict]:
-    manifest = json.loads(Path(manifest_path).read_text())
-    root = Path(checkpoint_path)
-    for field, name in (
-        ("checkpoint_index_sha256", "model.safetensors.index.json"),
-        ("checkpoint_config_sha256", "config.json"),
-    ):
-        if (
-            manifest.get(field)
-            != hashlib.sha256((root / name).read_bytes()).hexdigest()
-        ):
-            raise ValueError("Qwen4 shared PLE manifest does not match checkpoint")
-    path = manifest["path"]
-    table = torch.from_file(
-        path, shared=True, size=os.stat(path).st_size, dtype=torch.uint8
-    )
+def _shared_ple_table(path: str, checkpoint_path: str) -> tuple[torch.Tensor, dict]:
+    size, entries = resolve_shared_ple_table(path, Path(checkpoint_path))
+    table = torch.from_file(path, shared=True, size=size, dtype=torch.uint8)
     table.untyped_storage()._qwen4_ple_shared = True
-    return table, manifest["entries"]
+    return table, entries
 
 
 class Qwen4ExpPleNgramWeight(AtomicWeight):
@@ -112,6 +95,7 @@ class Qwen4ExpPleNgramWeight(AtomicWeight):
         scale_weight: Optional[CkptWeightInfo] = None,
         preserve_fp8: bool = False,
         shared_ple_checkpoint: Optional[str] = None,
+        shared_ple_table_path: Optional[str] = None,
         **kwargs: Any,
     ) -> None:
         if "cpu_offload" in kwargs:
@@ -121,6 +105,7 @@ class Qwen4ExpPleNgramWeight(AtomicWeight):
         self.scale_weight = scale_weight
         self.preserve_fp8 = preserve_fp8
         self.shared_ple_checkpoint = shared_ple_checkpoint
+        self.shared_ple_table_path = shared_ple_table_path
         self.resident_output_devices = (
             {W.qwen4_ple_ngram_scale: "cpu"} if preserve_fp8 else {}
         )
@@ -193,8 +178,10 @@ class Qwen4ExpPleNgramWeight(AtomicWeight):
             result[W.qwen4_ple_ngram_scale] = scale.to(device="cpu")
         shared = None
         if self.shared_ple_checkpoint is not None:
+            if self.shared_ple_table_path is None:
+                raise ValueError("Qwen4 MXFP4 shared PLE table was not initialized")
             shared = _shared_ple_table(
-                os.environ["QWEN4_PLE_SHARED_TABLE"], self.shared_ple_checkpoint
+                self.shared_ple_table_path, self.shared_ple_checkpoint
             )
         for shard_index in self._local_shard_range(load_config):
             ckpt_weight = self.weights[shard_index]
@@ -477,6 +464,9 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
                         self.model_config.ckpt_path
                         if getattr(self.model_config, "_qwen4_mxfp4_source", False)
                         else None
+                    ),
+                    shared_ple_table_path=getattr(
+                        self.model_config, "_qwen4_ple_table_path", None
                     ),
                 )
             )

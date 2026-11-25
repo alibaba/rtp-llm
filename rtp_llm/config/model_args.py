@@ -29,6 +29,7 @@ class ModelArgs:
         "phy2log_path",
         "enable_fp32_lm_head",
         "enable_output_vocab_pruning",
+        "_qwen4_ple_table_path",
     ]
 
     def __init__(self):
@@ -37,6 +38,9 @@ class ModelArgs:
         self.ckpt_path: str = ""
         self.tokenizer_path: str = ""
         self.ptuning_path: str = ""
+
+        # Startup sets this for the local backend rank processes.
+        self._qwen4_ple_table_path: Optional[str] = None
 
         # Model type and task
         self.model_type: str = ""

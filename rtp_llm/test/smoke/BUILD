@@ -171,7 +171,7 @@ test_suite(
     ]
 ]
 
-# Manual DP8/EP8 text smoke. Set QWEN4_M11_CHECKPOINT and QWEN4_PLE_SHARED_TABLE.
+# Manual DP8/EP8 text smoke. Set QWEN4_M11_CHECKPOINT.
 [
     custom_smoke_test(
         name = name,

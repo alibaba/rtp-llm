@@ -1,5 +1,5 @@
-import hashlib
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,6 +24,10 @@ from rtp_llm.ops import MoeConfig as RuntimeMoeConfig
 from rtp_llm.ops import ParallelismConfig
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.model_weight import W
+from rtp_llm.utils.qwen4_ple import (
+    resolve_shared_ple_table,
+    stage_qwen4_ple_for_server,
+)
 
 
 class Qwen4Mxfp4Test(unittest.TestCase):
@@ -67,38 +71,55 @@ class Qwen4Mxfp4Test(unittest.TestCase):
         parallelism.world_size = parallelism.dp_size = parallelism.ep_size = 16
         parallelism.local_world_size = 4
         parallelism.local_rank = 3
-        with patch.dict("os.environ", {"QWEN4_PLE_SHARED_TABLE": "/ple.json"}):
-            resolved = resolve_qwen4_parallelism(runtime, parallelism)
+        resolved = resolve_qwen4_parallelism(runtime, parallelism)
         self.assertEqual(
             (resolved.dp_size, resolved.ep_size, resolved.local_rank), (16, 16, 3)
         )
         self.assertEqual((resolved.ffn_tp_size, resolved.ffn_tp_rank), (1, 0))
 
-    def test_shared_ple_manifest_matches_the_checkpoint(self):
-        config = b"config"
-        index = b"index"
-        (self.root / "config.json").write_bytes(config)
-        (self.root / "model.safetensors.index.json").write_bytes(index)
-        table_path = self.root / "table"
-        table_path.write_bytes(b"\x12")
-        manifest = self.root / "ple.json"
-        data = {
-            "path": str(table_path),
-            "entries": {},
-            "checkpoint_config_sha256": hashlib.sha256(config).hexdigest(),
-            "checkpoint_index_sha256": hashlib.sha256(index).hexdigest(),
-        }
+    @unittest.skipUnless(sys.platform == "linux", "requires Linux memfd")
+    def test_shared_ple_derives_shard_offsets_from_checkpoint(self):
+        config_path = self.root / "config.json"
+        config_path.write_text(json.dumps({"quantization_config": self.quant}))
+        weight_map = {}
+        for part in range(2):
+            tensors = {}
+            filename = f"ple-{part}.safetensors"
+            for shard in reversed(range(part * 64, (part + 1) * 64)):
+                name = (
+                    "model.language_model.layers.0.ple.ple_embedding.ngram_embedding."
+                    f"shard_{shard}.weight"
+                )
+                tensors[name] = torch.full((2, 2), shard, dtype=torch.uint8).view(
+                    torch.float8_e4m3fn
+                )
+                weight_map[name] = filename
+            save_file(tensors, self.root / filename)
+        (self.root / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": weight_map})
+        )
+        checkpoint_files = set(self.root.iterdir())
+        model_args = SimpleNamespace(model_type="qwen4_exp", ckpt_path=str(self.root))
         self.addCleanup(_shared_ple_table.cache_clear)
-        for key in ("checkpoint_config_sha256", "checkpoint_index_sha256"):
-            manifest.write_text(json.dumps({**data, key: "stale"}))
-            with self.assertRaisesRegex(
-                ValueError, "shared PLE manifest does not match"
-            ):
-                _shared_ple_table(str(manifest), str(self.root))
-
-        manifest.write_text(json.dumps(data))
-        table, _ = _shared_ple_table(str(manifest), str(self.root))
-        self.assertEqual(table.tolist(), [0x12])
+        with (
+            patch("rtp_llm.utils.qwen4_ple._check_staging_memory") as check_memory,
+            stage_qwen4_ple_for_server(
+                model_args, shutdown_requested=lambda: False
+            ) as path,
+        ):
+            check_memory.assert_called_once_with(128 * 4)
+            assert path is not None
+            table, entries = _shared_ple_table(path, str(self.root))
+            self.assertTrue(table.untyped_storage()._qwen4_ple_shared)
+            self.assertEqual(set(entries), set(weight_map))
+            for name, (offset, length, shape) in entries.items():
+                shard = int(name.rsplit("_", 1)[-1].split(".")[0])
+                self.assertEqual(shape, [2, 2])
+                self.assertEqual(table[offset : offset + length].tolist(), [shard] * 4)
+            self.assertEqual(set(self.root.iterdir()), checkpoint_files)
+            config_path.write_text("{}")
+            with self.assertRaisesRegex(ValueError, "table does not match checkpoint"):
+                resolve_shared_ple_table(path, self.root)
 
     def test_layer_loading_releases_safetensors_handle_and_keeps_tensor_view(self):
         expected = torch.arange(4, dtype=torch.bfloat16)

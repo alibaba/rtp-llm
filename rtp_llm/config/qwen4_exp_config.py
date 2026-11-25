@@ -5,7 +5,6 @@ known. Target and draft build independent snapshots; pickle preserves them.
 """
 
 import json
-import os
 from copy import deepcopy
 from dataclasses import dataclass
 
@@ -252,8 +251,6 @@ def resolve_qwen4_parallelism(config, parallelism):
                 "Qwen4 MXFP4 MegaMoE requires TP=EP or DP=EP, "
                 "evenly sharded heads and experts, and no PP/CP"
             )
-        if not os.environ.get("QWEN4_PLE_SHARED_TABLE"):
-            raise ValueError("Qwen4 MXFP4 requires QWEN4_PLE_SHARED_TABLE")
         resolved.ffn_tp_size = 1
         resolved.ffn_tp_rank = 0
         return resolved

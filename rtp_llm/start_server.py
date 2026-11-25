@@ -4,6 +4,7 @@ import os
 import sys
 import time
 import traceback
+from contextlib import ExitStack
 from typing import Iterator
 
 import requests
@@ -38,6 +39,7 @@ from rtp_llm.utils.process_manager import (
     DEFER_FIRST_SIGTERM_VALUE,
     ProcessManager,
 )
+from rtp_llm.utils.qwen4_ple import stage_qwen4_ple_for_server
 from rtp_llm.utils.warmup import configure_warmup
 
 setup_logging()
@@ -669,9 +671,11 @@ def start_server(py_env_configs: PyEnvConfigs):
     )
     _sync_server_shutdown_timeout(py_env_configs)
 
-    # Create process manager with config values
+    # Keep startup resources alive until managed processes have stopped.
+    resources = ExitStack()
     process_manager = ProcessManager(
         shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
+        pre_exit_cleanup=resources.close,
         monitor_interval=py_env_configs.server_config.monitor_interval,
         frontend_pre_stop_drain_seconds=(
             py_env_configs.server_config.frontend_pre_stop_drain_seconds
@@ -714,6 +718,14 @@ def start_server(py_env_configs: PyEnvConfigs):
             py_env_configs.role_config.role_type != RoleType.FRONTEND
             and py_env_configs.role_config.role_type != RoleType.VIT
         ):
+            py_env_configs.model_args._qwen4_ple_table_path = resources.enter_context(
+                stage_qwen4_ple_for_server(
+                    py_env_configs.model_args,
+                    shutdown_requested=lambda: process_manager.shutdown_requested,
+                )
+            )
+            if process_manager.shutdown_requested:
+                return
             # For backend server, vit_process_engine is None when vit is separated
             logging.info("start backend server")
             start_backend_server_impl(
@@ -764,7 +776,10 @@ def start_server(py_env_configs: PyEnvConfigs):
         if not process_manager.shutdown_requested:
             process_manager.request_failure_shutdown()
     finally:
-        process_manager.monitor_and_release_processes()
+        try:
+            process_manager.monitor_and_release_processes()
+        finally:
+            resources.close()
 
 
 def _get_startup_real_warmup_pow2_lens(max_len: int):

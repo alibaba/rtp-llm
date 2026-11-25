@@ -1,4 +1,5 @@
 import unittest
+from contextlib import contextmanager
 from unittest.mock import patch
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
@@ -8,6 +9,46 @@ from rtp_llm.utils.process_manager import ProcessManager
 
 
 class StartServerFailureTest(unittest.TestCase):
+    def test_ple_resources_survive_startup_and_clean_up_on_failure(self):
+        py_env_configs = PyEnvConfigs()
+        py_env_configs.role_config.role_type = RoleType.PDFUSION
+        events = []
+        table_path = "/proc/123/fd/4"
+
+        @contextmanager
+        def stage_ple(model_args, *, shutdown_requested):
+            self.assertIs(model_args, py_env_configs.model_args)
+            self.assertFalse(shutdown_requested())
+            events.append("stage")
+            try:
+                yield table_path
+            finally:
+                events.append("release")
+
+        def exit_parent(code):
+            self.assertEqual(events, ["stage", "backend", "release"])
+            raise SystemExit(code)
+
+        def start_backend(_, configs, __):
+            self.assertEqual(configs.model_args._qwen4_ple_table_path, table_path)
+            events.append("backend")
+
+        with (
+            patch("rtp_llm.start_server.stage_qwen4_ple_for_server", stage_ple),
+            patch(
+                "rtp_llm.start_server.start_backend_server_impl",
+                side_effect=start_backend,
+            ),
+            patch("rtp_llm.start_server.start_frontend_server_impl"),
+            patch("rtp_llm.start_server.start_dash_sc_server_impl"),
+            patch.object(ProcessManager, "run_health_checks", return_value=False),
+            patch("rtp_llm.utils.process_manager.os._exit", side_effect=exit_parent),
+        ):
+            with self.assertRaises(SystemExit) as exit_context:
+                start_server(py_env_configs)
+        self.assertEqual(exit_context.exception.code, 1)
+        self.assertEqual(events, ["stage", "backend", "release"])
+
     def test_health_check_failure_requests_failure_shutdown_and_exits_nonzero(self):
         py_env_configs = PyEnvConfigs()
         py_env_configs.role_config.role_type = RoleType.VIT

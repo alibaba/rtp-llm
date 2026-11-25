@@ -24,7 +24,6 @@ def main():
     if bi not in (0, 1):
         parser.error("RTP_BATCH_INVARIANT must be 0 or 1")
     checkpoint = Path(os.environ["QWEN4_M11_CHECKPOINT"]).resolve(strict=True)
-    ple = Path(os.environ["QWEN4_PLE_SHARED_TABLE"]).resolve(strict=True)
     output = Path(os.environ["RTP_M11_OUTPUT"]).resolve()
     output.mkdir(parents=True, exist_ok=True)
     ready = output / "service.json"
@@ -83,7 +82,6 @@ def main():
                 "prefill_chunk_size": args.chunk,
                 "argv": smoke_args,
                 "checkpoint": str(checkpoint),
-                "ple_manifest": str(ple),
                 "port": int(server.port),
                 "rpc_addresses": rank_rpc_addresses(server.port, 8),
                 "log_dir": str(output / "logs"),
