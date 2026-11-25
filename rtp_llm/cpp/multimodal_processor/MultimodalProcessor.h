@@ -26,6 +26,8 @@ class MultimodalInputsPB;
 
 namespace rtp_llm {
 
+class DeferredMMRpc;
+
 struct ExpandedOutput {
     torch::Tensor                               expanded_ids;
     torch::Tensor                               token_type_ids;
@@ -92,7 +94,8 @@ private:
     virtual ErrorResult<MultimodalOutput> MultimodalEmbeddingFromRpc(const MultimodalInputsPB& inputs,
                                                                      const std::string&        ip_port,
                                                                      int64_t                   request_id,
-                                                                     grpc::ServerContext*      context);
+                                                                     grpc::ServerContext*      context,
+                                                                     DeferredMMRpc*            deferred = nullptr);
 
     ErrorResult<ExpandedOutput> useExpandedTokenLayout(const GenerateInput&                             input,
                                                        const std::vector<torch::Tensor>&                features,
@@ -111,6 +114,11 @@ private:
     ErrorInfo checkExpandLength(const ExpandedOutput& expand_output);
 
 public:
+    virtual bool supportsDeferredPrefill() const {
+        return false;
+    }
+    ErrorInfo preparePrefillLayout(GenerateInput& input);
+
     ErrorInfo updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input,
                                        grpc::ServerContext*                     server_context = nullptr);
 
@@ -118,7 +126,8 @@ public:
 
     ErrorInfo updateMultimodalFeatures(GenerateInput&            input,
                                        const MultimodalInputsPB& mm_inputs,
-                                       grpc::ServerContext*      server_context);
+                                       grpc::ServerContext*      server_context,
+                                       DeferredMMRpc*            deferred = nullptr);
 
     ErrorInfo updateMultimodalFeatures(std::shared_ptr<rtp_llm::EmbeddingInput>&    input,
                                        const std::vector<rtp_llm::MultimodalInput>& mm_inputs,

@@ -22,18 +22,17 @@ PDSupportDecision checkPDSupport(const GenerateInputPB& request);
 ErrorInfo         validatePDHandoff(const GenerateInputPB& request);
 std::string       masterEnqueuedHandoffUniqueKey(int64_t request_id);
 
-ErrorInfo updateMultimodalFeaturesWithTrace(
-    MultimodalProcessor& processor,
-    std::shared_ptr<GenerateInput>& input,
-    const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& span,
-    grpc::ServerContext* server_context);
+ErrorInfo updateMultimodalFeaturesWithTrace(MultimodalProcessor&            processor,
+                                            std::shared_ptr<GenerateInput>& input,
+                                            const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& span,
+                                            grpc::ServerContext* server_context);
 
 // Decode consumes FE-expanded IDs; Prefill performs multimodal embedding preparation.
-ErrorInfo preprocessForPD(std::shared_ptr<GenerateInput>& input,
-                          MultimodalProcessor*            processor,
-                          bool                            is_mtp_eagle,
-                          RoleType                        role,
-                          grpc::ServerContext*            server_context,
+ErrorInfo preprocessForPD(std::shared_ptr<GenerateInput>&                                     input,
+                          MultimodalProcessor*                                                processor,
+                          bool                                                                is_mtp_eagle,
+                          RoleType                                                            role,
+                          grpc::ServerContext*                                                server_context,
                           const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& span);
 
 // Rebuild a failed Prefill MM attempt from immutable wire input, preserving the
@@ -46,5 +45,15 @@ ErrorInfo preprocessPrefillWithRetry(const GenerateInputPB&                     
                                      grpc::ServerContext*                                                server_context,
                                      const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& span,
                                      const std::function<ErrorInfo()>&                                   cancellation);
+
+ErrorInfo deferPrefillMedia(std::shared_ptr<GenerateInput>&                                     input,
+                            const std::shared_ptr<MultimodalProcessor>&                         processor,
+                            bool                                                                is_mtp_eagle,
+                            const PDSepConfig&                                                  config,
+                            grpc::ServerContext*                                                context,
+                            const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& span,
+                            const std::function<ErrorInfo()>&                                   cancellation,
+                            std::function<bool(std::function<void()>)>                          submit,
+                            bool inherit_rpc_deadline = true);
 
 }  // namespace rtp_llm

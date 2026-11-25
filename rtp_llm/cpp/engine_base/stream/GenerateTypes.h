@@ -1,6 +1,7 @@
 #pragma once
 #include "rtp_llm/cpp/multimodal_processor/V41Input.h"
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <limits>
 #include <stdexcept>
@@ -191,6 +192,9 @@ public:
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;
     std::optional<std::vector<torch::Tensor>>   mm_extra_input;
     std::optional<MultimodalTokenLayout>        multimodal_token_layout;
+
+    // Scheduler-owned barrier after KV lookup/load (including fallback). false means I/O is in flight.
+    std::function<ErrorResult<bool>(GenerateInput&, int)> prepare_prefill_media;
 
     int     prefix_length        = 0;
     int64_t begin_time_us        = 0;

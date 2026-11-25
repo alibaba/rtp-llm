@@ -289,6 +289,49 @@ ErrorResult<MultimodalOutput> MultimodalProcessor::V41MultimodalEmbedding(
     }
 }
 
+ErrorInfo MultimodalProcessor::preparePrefillLayout(GenerateInput& input) {
+    const auto& ids   = input.input_ids;
+    const auto& spans = input.multimodal_token_layout->spans;
+    if (input.generate_config->calculate_loss) {
+        return {ErrorCode::MM_NOT_SUPPORTED_ERROR, "cannot calculate loss in multimodal query"};
+    }
+    if (!ids.defined() || !ids.device().is_cpu() || ids.scalar_type() != torch::kInt32 || ids.dim() != 1
+        || !ids.is_contiguous() || spans.empty() || spans.size() != input.multimodal_inputs->size()
+        || spans.size() != static_cast<size_t>(input.multimodal_request->multimodal_inputs_size())) {
+        return {ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid deferred multimodal token layout"};
+    }
+    RETURN_IF_STATUS_ERROR(checkExpandLength(ExpandedOutput(ids)));
+    if (semantic_mm_token_id_ >= 0
+        && (!input.multimodal_cache_spans || input.multimodal_cache_spans->size() != spans.size())) {
+        return {ErrorCode::MM_WRONG_FORMAT_ERROR, "missing multimodal cache identity"};
+    }
+    auto               mask = torch::ones_like(ids);
+    std::map<int, int> lengths;
+    int64_t            previous_end = 0;
+    for (size_t i = 0; i < spans.size(); ++i) {
+        const auto [offset, length] = spans[i];
+        const auto end              = int64_t(offset) + length;
+        if (offset < previous_end || length <= 0 || end > ids.numel()) {
+            return {ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid frontend multimodal span"};
+        }
+        if (semantic_mm_token_id_ >= 0) {
+            const auto& sidecar = input.multimodal_cache_spans->at(i);
+            const auto* values  = ids.data_ptr<int32_t>() + offset;
+            if (sidecar.offset != offset || sidecar.row_hashes.size() != static_cast<size_t>(length)
+                || !std::all_of(values, values + length, [this](int32_t id) { return id == semantic_mm_token_id_; })) {
+                return {ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid semantic multimodal layout"};
+            }
+        }
+        std::fill_n(mask.data_ptr<int32_t>() + offset, length, 0);
+        lengths[input.multimodal_inputs->at(i).mm_type] += length;
+        previous_end = end;
+    }
+    input.text_tokens_mask           = std::move(mask);
+    input.mm_locs                    = torch::empty({0}, torch::kInt32);
+    input.handoff_multimodal_lengths = std::move(lengths);
+    return ErrorInfo::OkStatus();
+}
+
 ErrorResult<ExpandedOutput>
 MultimodalProcessor::useExpandedTokenLayout(const GenerateInput&                             input,
                                             const std::vector<torch::Tensor>&                features,
@@ -477,7 +520,8 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
 ErrorResult<MultimodalOutput> MultimodalProcessor::MultimodalEmbeddingFromRpc(const MultimodalInputsPB& inputs,
                                                                               const std::string&        ip_port,
                                                                               int64_t                   request_id,
-                                                                              grpc::ServerContext*      context) {
+                                                                              grpc::ServerContext*      context,
+                                                                              DeferredMMRpc*) {
     std::optional<bool> inspect;
     if (inputs.has_input_inspection_enabled()) {
         inspect = inputs.input_inspection_enabled().value();
@@ -504,7 +548,8 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(GenerateInput& input) {
 
 ErrorInfo MultimodalProcessor::updateMultimodalFeatures(GenerateInput&            input,
                                                         const MultimodalInputsPB& mm_inputs,
-                                                        grpc::ServerContext*      server_context) {
+                                                        grpc::ServerContext*      server_context,
+                                                        DeferredMMRpc*            deferred) {
     if (input.generate_config && input.generate_config->calculate_loss) {
         return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "cannot calculate loss in multimodal query");
     }
@@ -517,7 +562,7 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(GenerateInput&          
 #endif
     CHECK_AND_RETURN_REF(
         mm_embedding_res,
-        MultimodalEmbeddingFromRpc(mm_inputs, vitRoleAddress(input), input.request_id, server_context));
+        MultimodalEmbeddingFromRpc(mm_inputs, vitRoleAddress(input), input.request_id, server_context, deferred));
     return setGenerateMultimodalFeatures(input, mm_embedding_res);
 }
 

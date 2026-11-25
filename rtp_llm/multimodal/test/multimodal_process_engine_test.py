@@ -85,11 +85,11 @@ class MMRequestLatencyTest(TestCase):
         self.clock += seconds
         return result
 
-    def _samples(self):
+    def _samples(self, metric=GaugeMetrics.VIT_REQUEST_RT_METRIC):
         return [
             call.args[1:]
             for call in self.report.call_args_list
-            if call.args[0] == GaugeMetrics.VIT_REQUEST_RT_METRIC
+            if call.args[0] == metric
         ]
 
     def test_cpp_includes_result_preparation_and_reports_once(self):
@@ -150,9 +150,22 @@ class MMRequestLatencyTest(TestCase):
                 self.report.reset_mock()
                 results = self.engine.get_embedding_result([], hashes_only=hashes_only)
                 self.assertEqual(len(results), 2)
+                metric, source = (
+                    (GaugeMetrics.VIT_HASH_FILL_RT_METRIC, "hash_fill")
+                    if hashes_only
+                    else (
+                        GaugeMetrics.VIT_REMOTE_MULTIMODAL_EMBEDDING_RT_METRIC,
+                        "remote_multimodal_embedding",
+                    )
+                )
+                self.assertEqual(self._samples(), [])
                 self.assertEqual(
-                    self._samples(),
-                    [(2500.0, {"source": "get_embedding_result", "status": "success"})],
+                    self._samples(AccMetrics.VIT_PHASE_QPS_METRIC),
+                    [(1, {"source": source, "status": "success"})],
+                )
+                self.assertEqual(
+                    self._samples(metric),
+                    [(2500.0, {"source": source, "status": "success"})],
                 )
 
     def test_result_failure_and_cancellation_are_reported(self):
@@ -172,9 +185,55 @@ class MMRequestLatencyTest(TestCase):
                 with self.assertRaises((TimeoutError, FtRuntimeException)):
                     self.engine.get_embedding_result([])
                 self.assertEqual(
-                    self._samples(),
-                    [(750.0, {"source": "get_embedding_result", "status": "error"})],
+                    self._samples(
+                        GaugeMetrics.VIT_REMOTE_MULTIMODAL_EMBEDDING_RT_METRIC
+                    ),
+                    [
+                        (
+                            750.0,
+                            {
+                                "source": "remote_multimodal_embedding",
+                                "status": "error",
+                            },
+                        )
+                    ],
                 )
+
+    def test_frontend_and_prefill_cache_access_samples(self):
+        cache = MMEmbeddingAsyncCache(0, 1024, report_metrics=True)
+
+        def access(inputs, *, hashes_only, **kwargs):
+            state, entry = cache.try_acquire(inputs[0].url)
+            if state == "miss" and inputs[0].url == "ready":
+                cache.complete("ready", entry, (torch.zeros(1, 2), None))
+            return state
+
+        self.engine._get_embedding_result_impl = access
+
+        def lookup(key, hashes_only=False):
+            item = MultimodalInput(
+                key, MMUrlType.IMAGE, torch.empty(0), MMPreprocessConfig()
+            )
+            return self.engine.get_embedding_result([item], hashes_only=hashes_only)
+
+        try:
+            self.assertEqual(lookup("ready", True), "miss")
+            self.assertEqual(lookup("ready"), "complete")
+            self.assertEqual(lookup("ready", True), "complete")
+            self.assertEqual(lookup("pending", True), "miss")
+            self.assertEqual(lookup("pending", True), "in_progress")
+            self.assertEqual(lookup("pending"), "in_progress")
+            self.assertEqual(lookup("prefill_only"), "miss")
+            self.assertEqual(cache.try_acquire("outside")[0], "miss")
+        finally:
+            cache.close()
+        for metric, count in (
+            (AccMetrics.VIT_EMBEDDING_CACHE_MISS_QPS_METRIC, 2),
+            (AccMetrics.VIT_EMBEDDING_CACHE_HIT_QPS_METRIC, 1),
+            (AccMetrics.VIT_EMBEDDING_CACHE_INFLIGHT_QPS_METRIC, 1),
+            (AccMetrics.VIT_PREFILL_EMBEDDING_CACHE_MISS_QPS_METRIC, 1),
+        ):
+            self.assertEqual(len(self._samples(metric)), count)
 
     def test_async_ack_is_not_a_completed_request_sample(self):
         self.engine.mm_part = MagicMock()

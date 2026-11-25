@@ -351,6 +351,37 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(error.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
         self.engine.get_embedding_result.assert_not_called()
 
+    async def test_no_inspection_receipt_is_bound_to_the_selected_worker_and_inputs(
+        self,
+    ):
+        await self.client.get_vit_cache_metadata(self.address, self.keys, self.request)
+        self.assertTrue(
+            trans_input(
+                self.request, selected_vit=self.address
+            ).multimodal_request.frontend_inspection_verified
+        )
+        self.request.generate_config.role_addrs = [self.address]
+        self.assertTrue(
+            trans_input(self.request).multimodal_request.frontend_inspection_verified
+        )
+        # The same worker can serve a different request or a reroute can pick another worker.
+        self.request.greennet_verified_vit = (
+            self.address.ip,
+            self.address.grpc_port,
+            ("other-key",),
+        )
+        self.assertFalse(
+            trans_input(self.request).multimodal_request.frontend_inspection_verified
+        )
+        self.request.greennet_verified_vit = (
+            self.address.ip,
+            self.address.grpc_port + 1,
+            tuple(self.keys),
+        )
+        self.assertFalse(
+            trans_input(self.request).multimodal_request.frontend_inspection_verified
+        )
+
     async def test_missing_region_reaches_vit_as_none(self):
         await self.client.get_vit_cache_metadata(self.address, self.keys, self.request)
         self.assertIsNone(self.engine.get_embedding_result.call_args.kwargs["region"])
@@ -366,7 +397,12 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             set(response.DESCRIPTOR.fields_by_name),
-            {"worker_instance", "entries", "inspection_ticket"},
+            {
+                "worker_instance",
+                "entries",
+                "inspection_ticket",
+                "input_inspection_disabled",
+            },
         )
         self.assertFalse(self.engine._hash_key_cache.contains(self.keys[0]))
 

@@ -98,6 +98,57 @@ void addBatchError(EnqueueBatchResponsePB* response, int64_t request_id, ErrorCo
 
 }  // namespace
 
+ErrorInfo PrefillRpcServer::prepareMedia(const GenerateInputPB&                                              request,
+                                         std::shared_ptr<GenerateInput>&                                     input,
+                                         grpc::ServerContext*                                                context,
+                                         const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& span,
+                                         const PDCancelRegistry::Handle&                                     handle,
+                                         bool inherit_rpc_deadline) {
+    std::weak_ptr<PDCancelRegistry::Entry> weak      = handle;
+    auto                                   cancelled = [weak]() -> ErrorInfo {
+        auto owner = weak.lock();
+        if (!owner)
+            return {ErrorCode::CANCELLED, "Prefill request released"};
+        return owner->canceled.load() ? owner->cancel_reason : ErrorInfo::OkStatus();
+    };
+    if (media_pool_ && input->multimodal_token_layout && input->multimodal_inputs && input->multimodal_request
+        && !input->v41_inputs) {
+        const auto& media = *input->multimodal_request;
+        // Skipped images must already be covered by the frontend inspection flow.
+        const bool per_image =
+            input->multimodal_token_layout->spans.size() == size_t(media.multimodal_inputs_size())
+            && std::all_of(media.multimodal_inputs().begin(), media.multimodal_inputs().end(), [](const auto& item) {
+                   return item.multimodal_type() == 0 || item.multimodal_type() == 1;
+               });
+        if (per_image
+            && (media.frontend_inspection_verified() || !media.inspection_ticket().empty()
+                || (media.has_input_inspection_enabled() && !media.input_inspection_enabled().value()))) {
+            std::weak_ptr<autil::ThreadPool> pool = media_pool_;
+            return deferPrefillMedia(
+                input,
+                mm_processor_,
+                engine_->isMTPEagle(),
+                maga_init_params_.pd_sep_config,
+                context,
+                span,
+                cancelled,
+                [pool](std::function<void()> task) {
+                    auto io = pool.lock();
+                    return io && io->pushTask(std::move(task), false, false) == autil::ThreadPool::ERROR_NONE;
+                },
+                inherit_rpc_deadline);
+        }
+    }
+    return preprocessPrefillWithRetry(request,
+                                      input,
+                                      mm_processor_.get(),
+                                      engine_->isMTPEagle(),
+                                      maga_init_params_.pd_sep_config,
+                                      context,
+                                      span,
+                                      cancelled);
+}
+
 PrefillRpcServer::~PrefillRpcServer() {
     {
         std::lock_guard<std::mutex> lock(batch_event_owner_->mutex);
@@ -397,6 +448,14 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
     }
 
     cancel_registry_ = std::make_shared<PDCancelRegistry>(meta_);
+    if (mm_processor_ && mm_processor_->supportsDeferredPrefill()
+        && maga_init_params.model_config_.mm_model_config.mm_position_ids_style == 0) {
+        const auto capacity = std::max(1, maga_init_params.concurrency_config.concurrency_limit);
+        media_pool_         = std::make_shared<autil::ThreadPool>(std::min(capacity, 32), capacity);
+        if (!media_pool_->start("prefill_mm")) {
+            return grpc::Status(grpc::StatusCode::INTERNAL, "failed to start prefill media workers");
+        }
+    }
 
     // Start [HANG-DIAG] watchdog: every 30s, scan onflight_trackers_ and WARN
     // about any GenerateStreamCall that has been alive longer than the
@@ -507,19 +566,14 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
         int64_t mm_cost_us = 0, enqueue_cost_us = 0, poll_cost_us = 0;
         int64_t phase_start = currentTimeUs();
 
-        auto preprocess_status = preprocessPrefillWithRetry(
-            *request,
-            input,
-            mm_processor_.get(),
-            engine_->isMTPEagle(),
-            maga_init_params_.pd_sep_config,
-            server_context,
-            generate_context.trace_span_guard ? generate_context.trace_span_guard->sharedSpan() :
-                                                opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{},
-            [cancel_handle] {
-                return cancel_handle->canceled.load() ? cancel_handle->cancel_reason : ErrorInfo::OkStatus();
-            });
-        mm_cost_us = currentTimeUs() - phase_start;
+        auto preprocess_status = prepareMedia(*request,
+                                              input,
+                                              server_context,
+                                              generate_context.trace_span_guard ?
+                                                  generate_context.trace_span_guard->sharedSpan() :
+                                                  opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{},
+                                              cancel_handle);
+        mm_cost_us             = currentTimeUs() - phase_start;
         if (!preprocess_status.ok()) {
             generate_context.error_status =
                 serializeErrorMsg(generate_context.request_key, generate_context.request_info, preprocess_status);
@@ -832,18 +886,7 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
                 const auto item_span         = item_context->trace_span_guard ?
                                                    item_context->trace_span_guard->sharedSpan() :
                                                    opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{};
-                const auto preprocess_status = preprocessPrefillWithRetry(item,
-                                                                          input,
-                                                                          mm_processor_.get(),
-                                                                          engine_->isMTPEagle(),
-                                                                          maga_init_params_.pd_sep_config,
-                                                                          context,
-                                                                          item_span,
-                                                                          [cancel_handle] {
-                                                                              return cancel_handle->canceled.load() ?
-                                                                                         cancel_handle->cancel_reason :
-                                                                                         ErrorInfo::OkStatus();
-                                                                          });
+                const auto preprocess_status = prepareMedia(item, input, context, item_span, cancel_handle, false);
                 if (!preprocess_status.ok()) {
                     reject_item(preprocess_status.code(), preprocess_status.ToString());
                     continue;

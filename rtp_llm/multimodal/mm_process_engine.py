@@ -8,7 +8,6 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from functools import wraps
 from types import SimpleNamespace
 from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 
@@ -67,6 +66,11 @@ from rtp_llm.multimodal.multimodal_util import (
     maybe_tensor_to_list,
     url_data_cache_,
     vit_emb_cache_,
+)
+from rtp_llm.multimodal.vit_metrics import (
+    HASH_FILL,
+    REMOTE_EMBEDDING,
+    vit_request_source,
 )
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput, VitSeparation
 from rtp_llm.telemetry import vit_media
@@ -146,31 +150,22 @@ def _report_vit_metric(metric, value, tags=None) -> None:
         logging.exception("Failed to report ViT metric")
 
 
-def _measure_vit_request(method):
-    """Time one blocking engine request, not an async submission ACK.
-
-    Includes cache/queue waits, preprocessing, embedding, inspection and output
-    preparation performed by this call. Excludes RPC transport and time before
-    this invocation (e.g. work already started by async_submit). No extra CUDA
-    synchronization is introduced for telemetry.
-    """
-
-    @wraps(method)
-    def measured(*args, **kwargs):
-        started = time.perf_counter()
-        status = "error"
-        try:
-            result = method(*args, **kwargs)
-            status = "success"
-            return result
-        finally:
-            _report_vit_metric(
-                GaugeMetrics.VIT_REQUEST_RT_METRIC,
-                (time.perf_counter() - started) * 1000.0,
-                {"source": method.__name__, "status": status},
-            )
-
-    return measured
+@contextmanager
+def _measure_vit_request(metric, source):
+    """Time this engine call, including waits but excluding RPC transport."""
+    token = vit_request_source.set(source)
+    started = time.perf_counter()
+    status = "error"
+    try:
+        yield
+        status = "success"
+    finally:
+        vit_request_source.reset(token)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        tags = {"source": source, "status": status}
+        _report_vit_metric(metric, elapsed_ms, tags)
+        if source in (HASH_FILL, REMOTE_EMBEDDING):
+            _report_vit_metric(AccMetrics.VIT_PHASE_QPS_METRIC, 1, tags)
 
 
 def _count_images(mm_inputs: List[MultimodalInput]) -> int:
@@ -181,12 +176,13 @@ def _count_images(mm_inputs: List[MultimodalInput]) -> int:
     )
 
 
-def _report_image_count(mm_inputs: List[MultimodalInput]) -> None:
+def _report_image_count(mm_inputs: List[MultimodalInput], tags=None) -> None:
     """Report the image count once for the current logical request."""
     try:
         kmonitor.report(
             GaugeMetrics.VIT_IMAGE_COUNT_METRIC,
             _count_images(mm_inputs),
+            tags or {},
         )
     except Exception:
         # Telemetry must never change the multimodal request result.
@@ -1035,7 +1031,7 @@ class MMProcessEngine:
             self.report_vit_error(error, current_entry)
             raise error
 
-    @_measure_vit_request
+    @_measure_vit_request(GaugeMetrics.VIT_REQUEST_RT_METRIC, "mm_embedding_cpp")
     def mm_embedding_cpp(
         self,
         urls: List[str],
@@ -1564,6 +1560,9 @@ class MMProcessEngine:
             self.report_vit_error(error)
             raise
 
+    @_measure_vit_request(
+        GaugeMetrics.VIT_REMOTE_MULTIMODAL_EMBEDDING_RT_METRIC, REMOTE_EMBEDDING
+    )
     def get_prepared_v41_result(self, request, timeout_ms, input_inspection_enabled):
         """Serve schema-v1 preprocessed patches through the same bounded GPU queue."""
         typed = request.v41_inputs
@@ -1644,7 +1643,6 @@ class MMProcessEngine:
         finally:
             self.dec_query_num()
 
-    @_measure_vit_request
     @vit_media.request
     def get_embedding_result(
         self,
@@ -1668,7 +1666,18 @@ class MMProcessEngine:
         If complete, returns immediately. With hashes_only, return sidecar hashes
         without exporting embeddings or promoting a CPU entry with cached hashes.
         """
-        with _input_inspection_scope(input_inspection_enabled):
+        metric, source = (
+            (GaugeMetrics.VIT_HASH_FILL_RT_METRIC, HASH_FILL)
+            if hashes_only
+            else (
+                GaugeMetrics.VIT_REMOTE_MULTIMODAL_EMBEDDING_RT_METRIC,
+                REMOTE_EMBEDDING,
+            )
+        )
+        with (
+            _measure_vit_request(metric, source),
+            _input_inspection_scope(input_inspection_enabled),
+        ):
             return self._get_embedding_result_impl(
                 mm_inputs,
                 timeout_ms=timeout_ms,
@@ -1705,7 +1714,8 @@ class MMProcessEngine:
         try:
             self._normalize_remote_url_inputs(mm_inputs)
             self._validate_inputs(mm_inputs)
-            _report_image_count(mm_inputs)
+            tags = {"source": vit_request_source.get()}
+            _report_image_count(mm_inputs, tags)
             self._raise_if_async_request_cancelled(request_id, cancellation_event)
             if time.monotonic() >= deadline:
                 raise TimeoutError("ViT request deadline expired before submission")
@@ -1869,6 +1879,7 @@ class MMProcessEngine:
             _report_vit_metric(
                 GaugeMetrics.VIT_EMBEDDING_LENGTH_METRIC,
                 embedding_length,
+                tags,
             )
             # Count the ViT RPC's accepted results. With a ticket the frontend
             # still gates delivery on a subsequent inspection query.

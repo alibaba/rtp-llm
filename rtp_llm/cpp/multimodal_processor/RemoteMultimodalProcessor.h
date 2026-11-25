@@ -20,6 +20,10 @@ namespace rtp_llm {
 
 class RemoteMultimodalProcessor: public MultimodalProcessor {
 public:
+    bool supportsDeferredPrefill() const override {
+        return true;
+    }
+
     // Keep the legacy EmbeddingCppEngine path on its existing inline gRPC data plane.
     RemoteMultimodalProcessor(const MMModelConfig&         mm_model_config,
                               int64_t                      max_seq_len,
@@ -49,7 +53,8 @@ public:
     ErrorResult<MultimodalOutput> MultimodalEmbeddingFromRpc(const MultimodalInputsPB& inputs,
                                                              const std::string&        ip_port,
                                                              int64_t                   request_id,
-                                                             grpc::ServerContext*      server_context) override {
+                                                             grpc::ServerContext*      server_context,
+                                                             DeferredMMRpc*            deferred = nullptr) override {
         if (ip_port.empty()) {
             return ErrorInfo(ErrorCode::MM_EMPTY_ENGINE_ERROR, "ip:port is empty in remote multimodal processing");
         }
@@ -61,7 +66,7 @@ public:
         for (auto& item : *request.mutable_multimodal_inputs()) {
             item.clear_multimodal_tensor();
         }
-        return output_transport_->fetch(ip_port, request, server_context);
+        return output_transport_->fetch(ip_port, request, server_context, deferred);
     }
 
     ErrorResult<MultimodalOutput> V41MultimodalEmbedding(const V41RequestInputs& inputs,

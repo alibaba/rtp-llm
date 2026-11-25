@@ -21,6 +21,11 @@ from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
+from rtp_llm.multimodal.vit_metrics import (
+    HASH_FILL,
+    REMOTE_EMBEDDING,
+    vit_request_source,
+)
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
 _PROFILE_LOCAL_HITS = os.environ.get("MM_EMB_LOCAL_HIT_PROFILE") == "1"
@@ -619,6 +624,7 @@ class MMEmbeddingCacheEntry:
             )
             if (
                 _PROFILE_LOCAL_HITS
+                and vit_request_source.get() == HASH_FILL
                 and self._cache_hit_implementation
                 and self.tier
                 and random.getrandbits(4) == 0
@@ -2131,6 +2137,11 @@ class MMEmbeddingCache:
 
     def _report_access_metric(self, state: str) -> None:
         if not self._report_metrics_enabled:
+            return
+        source = vit_request_source.get()
+        if source == REMOTE_EMBEDDING and state == "miss":
+            kmonitor.report(AccMetrics.VIT_PREFILL_EMBEDDING_CACHE_MISS_QPS_METRIC, 1)
+        if source != HASH_FILL:
             return
         metric = {
             "miss": AccMetrics.VIT_EMBEDDING_CACHE_MISS_QPS_METRIC,

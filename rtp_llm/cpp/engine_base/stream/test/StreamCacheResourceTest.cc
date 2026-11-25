@@ -2153,6 +2153,11 @@ TEST_F(StreamCacheResourceTest, AsyncPrefillOverallDeadlineRetriesWithLocalCache
     auto  backend  = prepareStorageBackendResource(false, true, RoleType::PREFILL, false, std::chrono::seconds(1));
     auto& resource = stream_->streamCacheResource();
     initCacheKeys(resource.batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), 2);
+    std::vector<int> media_reuse_lengths;
+    stream_->generateInput()->prepare_prefill_media = [&](GenerateInput&, int reuse) -> ErrorResult<bool> {
+        media_reuse_lengths.push_back(reuse);
+        return true;
+    };
     backend->blockReads();
     block_tree_cache_detail::ScopeRollback release_read([&] { backend->releaseReads(); });
     stream_->generate_status_->status = StreamState::WAITING;
@@ -2191,6 +2196,7 @@ TEST_F(StreamCacheResourceTest, AsyncPrefillOverallDeadlineRetriesWithLocalCache
         retry_state = stream_->moveToNext();
     }
     ASSERT_EQ(retry_state, StreamState::RUNNING);
+    EXPECT_EQ(media_reuse_lengths, std::vector<int>{2});
     EXPECT_FALSE(stream_->hasError());
     EXPECT_EQ(backend->matchCalls(), 1u);
     EXPECT_EQ(stream_->localReuseLength(), 2);
@@ -3435,8 +3441,8 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
         for (bool eos : {false, true}) {
             SCOPED_TRACE(::testing::Message() << "requested=" << requested << ", hybrid=" << hybrid << ", eos=" << eos
                                               << ", prompt_scores=" << prompt_scores);
-            const bool compact = hybrid && !requested;
-            const std::string key = "first-token-outputs";
+            const bool        compact = hybrid && !requested;
+            const std::string key     = "first-token-outputs";
             ASSERT_NO_FATAL_FAILURE(prepareP2PRegistrationResource(true, key, hybrid));
             auto&      prefill_connector = *cache_manager_->p2p_connector_->prefill_;
             const auto deadline_ms       = stream_->generateInput()->request_deadline_ms;
@@ -3500,20 +3506,21 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
             const auto graph_status = eos ? GenerationPrefillCudaGraphStatus::REPLAYED :
                                             GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE;
             prefill->step();
-            prefill->update({.new_tokens        = torch::tensor({7}, torch::kInt32).reshape({1, 1}),
-                             .num_new_tokens    = 1,
-                             .hidden_states     = hidden,
-                             .logits            = logits,
-                             .softmax_probs     = torch::full({1, 1}, 0.75f),
-                             .cum_log_probs     = torch::full({1}, -0.5f),
-                             .all_probs         = probs,
-                             .loss              = requested ? loss : torch::Tensor{},
-                             .all_hidden_states = all_hidden,
-                             .prompt_logits     = prompt_scores ? std::make_optional(scores) : std::nullopt,
-                             .generation_prefill_cuda_graph_status = graph_status,
-                             .token_logprobs        = compact ? torch::full({1, 1}, -0.5f) : torch::Tensor{},
-                             .top_logprob_token_ids = compact ? torch::full({1, 1, 1}, 7, torch::kInt32) : torch::Tensor{},
-                             .top_logprobs          = compact ? torch::full({1, 1, 1}, -0.5f) : torch::Tensor{}});
+            prefill->update(
+                {.new_tokens                           = torch::tensor({7}, torch::kInt32).reshape({1, 1}),
+                 .num_new_tokens                       = 1,
+                 .hidden_states                        = hidden,
+                 .logits                               = logits,
+                 .softmax_probs                        = torch::full({1, 1}, 0.75f),
+                 .cum_log_probs                        = torch::full({1}, -0.5f),
+                 .all_probs                            = probs,
+                 .loss                                 = requested ? loss : torch::Tensor{},
+                 .all_hidden_states                    = all_hidden,
+                 .prompt_logits                        = prompt_scores ? std::make_optional(scores) : std::nullopt,
+                 .generation_prefill_cuda_graph_status = graph_status,
+                 .token_logprobs                       = compact ? torch::full({1, 1}, -0.5f) : torch::Tensor{},
+                 .top_logprob_token_ids = compact ? torch::full({1, 1, 1}, 7, torch::kInt32) : torch::Tensor{},
+                 .top_logprobs          = compact ? torch::full({1, 1, 1}, -0.5f) : torch::Tensor{}});
             ASSERT_FALSE(prefill->hasError());
             PrefillResultStore::SideChannelData published;
             ASSERT_TRUE(prefill_connector.stream_store_->takePrefillPayload(key, published));

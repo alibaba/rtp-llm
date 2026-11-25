@@ -212,6 +212,27 @@ class BackendRPCServerVisitorRouteCacheKeysTest(unittest.TestCase):
 
 
 class BackendRPCServerVisitorFrontendCacheMetricTest(unittest.TestCase):
+
+    def test_remote_vit_request_denominator_counts_prompts_in_a_mixed_batch(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        inputs = [
+            SimpleNamespace(mm_inputs=["a", "b"]),
+            SimpleNamespace(mm_inputs=[]),
+            SimpleNamespace(v41_inputs=SimpleNamespace(images=["c"])),
+            SimpleNamespace(v41_inputs=SimpleNamespace(images=[])),
+        ]
+        with patch(
+            "rtp_llm.server.backend_rpc_server_visitor.kmonitor.report"
+        ) as report:
+            visitor.remote_vit = False
+            visitor._report_vit_requests(inputs)
+            report.assert_not_called()
+            visitor.remote_vit = True
+            visitor._report_vit_requests(inputs)
+            report.assert_called_once_with(
+                AccMetrics.VIT_MULTIMODAL_REQUEST_QPS_METRIC, 2
+            )
+
     def test_frontend_cache_metrics_are_opt_in(self):
         self.assertFalse(
             BackendRPCServerVisitor._frontend_cache_metrics_enabled(

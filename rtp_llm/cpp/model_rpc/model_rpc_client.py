@@ -710,7 +710,7 @@ def _trans_jsonable_options(
     )
 
 
-def trans_input(input_py: GenerateInput):
+def trans_input(input_py: GenerateInput, *, selected_vit: Optional[RoleAddr] = None):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
     input_pb.enqueued_by_master = bool(getattr(input_py, "enqueued_by_master", False))
@@ -782,7 +782,7 @@ def trans_input(input_py: GenerateInput):
             if tracestate:
                 input_pb.request_info.trace_context.tracestate = tracestate
 
-    trans_multimodal_input(input_py, input_pb, input_py.generate_config)
+    trans_multimodal_input(input_py, input_pb, input_py.generate_config, selected_vit)
     # Preserve main's regular GenerateConfig validation at the RPC boundary,
     # then assert (without mutating) that the request entrypoint prepared grammar.
     input_py.generate_config.validate()
@@ -962,17 +962,39 @@ def get_multimodal_preprocess_value(
         return default
 
 
+def _verified_vit(input_py: GenerateInput, role_addr, resolved_inputs=None) -> bool:
+    verified = input_py.greennet_verified_vit
+    return (
+        verified is not None
+        and verified[:2] == (role_addr.ip, role_addr.grpc_port)
+        and verified[2]
+        == tuple(dict.fromkeys(multimodal_cache_keys(input_py, resolved_inputs)))
+    )
+
+
 def trans_multimodal_input(
-    input_py: GenerateInput, input_pb: GenerateInputPB, generate_config: GenerateConfig
+    input_py: GenerateInput,
+    input_pb: GenerateInputPB,
+    generate_config: GenerateConfig,
+    selected_vit: Optional[RoleAddr] = None,
 ):
     if not input_py.mm_inputs:
         return
 
     multimodal = input_pb.multimodal_request
     multimodal.request_id = input_pb.request_id
+    input_pb.multimodal_inputs.extend(iter_multimodal_inputs(input_py, generate_config))
+    if input_py.greennet_verified_vit:
+        # Master may enqueue this protobuf before the final role_addrs are populated.
+        # For a direct model RPC, the client sends to the first listed ViT.
+        vit = selected_vit or next(
+            (addr for addr in generate_config.role_addrs if addr.role == RoleType.VIT),
+            None,
+        )
+        if vit is not None and _verified_vit(input_py, vit, input_pb.multimodal_inputs):
+            multimodal.frontend_inspection_verified = True
     if input_py.deferred_inspection:
         multimodal.inspection_ticket = input_py.deferred_inspection[2]
-    input_pb.multimodal_inputs.extend(iter_multimodal_inputs(input_py, generate_config))
     region = input_py.headers.get("region")
     if region:
         multimodal.region = region
@@ -1035,14 +1057,14 @@ def iter_multimodal_inputs(input_py: GenerateInput, generate_config: GenerateCon
         yield mm_input_pb
 
 
-def multimodal_cache_keys(input_py: GenerateInput) -> list[str]:
+def multimodal_cache_keys(input_py: GenerateInput, resolved_inputs=None) -> list[str]:
     from rtp_llm.multimodal.multimodal_util import trans_config
     from rtp_llm.ops import MultimodalInput
 
     keys = []
-    for original, item in zip(
-        input_py.mm_inputs, iter_multimodal_inputs(input_py, input_py.generate_config)
-    ):
+    if resolved_inputs is None:
+        resolved_inputs = iter_multimodal_inputs(input_py, input_py.generate_config)
+    for original, item in zip(input_py.mm_inputs, resolved_inputs):
         if not item.multimodal_url or (
             original.tensor is not None and original.tensor.numel() > 0
         ):
@@ -2346,15 +2368,8 @@ class ModelRpcClient(object):
         for role_addr in input_py.generate_config.role_addrs:
             if role_addr.role != RoleType.VIT:
                 continue
-            if (
-                not receipt
-                and input_py.greennet_verified_vit is not None
-                and input_py.greennet_verified_vit
-                == (
-                    role_addr.ip,
-                    role_addr.grpc_port,
-                    tuple(dict.fromkeys(multimodal_cache_keys(input_py))),
-                )
+            if not receipt and _verified_vit(
+                input_py, role_addr, input_pb.multimodal_inputs
             ):
                 # Hash acquisition already waited for inspection (or reused an
                 # approved hash). No separate ViT RPC is needed on this route.

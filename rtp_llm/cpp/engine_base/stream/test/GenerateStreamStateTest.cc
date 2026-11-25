@@ -454,6 +454,34 @@ TEST_F(GenerateStreamStateTest, testLoadInitiatedSkipsAsyncLoadCache) {
     ASSERT_FALSE(resource.allocator_load_context_);
 }
 
+TEST_F(GenerateStreamStateTest, DeferredMediaWaitsForFinalKvReuseAndDoesNotStartComputeEarly) {
+    auto  stream   = createStream({1, 2, 3, 4}, false, RoleType::PREFILL);
+    auto& resource = stream->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream->reportEvent(StreamEvents::LoadInitiated);
+    stream->setReuseLength(3);
+    stream->generate_status_->status = StreamState::LOADING_CACHE;
+    std::vector<int> seen;
+    bool             ready                         = false;
+    stream->generateInput()->prepare_prefill_media = [&](GenerateInput&, int reuse) -> ErrorResult<bool> {
+        seen.push_back(reuse);
+        return bool(ready);
+    };
+    // Cache completion may shrink reuse after the original match.
+    stream->setReuseLength(1);
+    ASSERT_EQ(stream->moveToNext(), StreamState::WAITING);
+    EXPECT_TRUE(seen.empty());
+    stream->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream->moveToNext(), StreamState::LOADING_CACHE);
+    ASSERT_EQ(seen, std::vector<int>{1});
+    ASSERT_EQ(stream->moveToNext(), StreamState::LOADING_CACHE);
+    ready = true;
+    ASSERT_EQ(stream->moveToNext(), StreamState::WAITING);
+    stream->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+    EXPECT_EQ(seen, (std::vector<int>{1, 1, 1}));
+}
+
 TEST_F(GenerateStreamStateTest, testPrefillFallbackDecodeGrowsBlocksAfterContext) {
     auto stream = createStream({1, 2}, /*reuse_cache=*/false, RoleType::PREFILL);
 
@@ -606,19 +634,19 @@ TEST_F(GenerateStreamStateTest, testNormalPathTriggersAsyncLoadCache) {
     ASSERT_TRUE(new_state == StreamState::LOADING_CACHE || new_state == StreamState::WAITING);
 }
 
-
 TEST_F(GenerateStreamStateTest, AsyncRequestLifecycleEndsOnlyAtCommittedTerminal) {
     auto session = AsyncProfileSession::start(32);
-    auto stream = createStream();
+    auto stream  = createStream();
     stream->reportError(ErrorCode::CANCELLED, "trace cancellation");
     EXPECT_NE(stream->getStatus(), StreamState::FINISHED);
     EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
     stream->moveToNext();
     stream.reset();
     const auto events = session->finish();
-    size_t roots = 0, cancelled = 0, released = 0;
+    size_t     roots = 0, cancelled = 0, released = 0;
     for (const auto& e : events) {
-        if (e.record.path != "request") continue;
+        if (e.record.path != "request")
+            continue;
         roots += e.record.stage == "request_lifetime";
         cancelled += e.record.stage == "cancelled";
         released += e.record.stage == "released_without_terminal";

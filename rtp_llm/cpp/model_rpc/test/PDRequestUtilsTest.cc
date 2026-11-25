@@ -30,7 +30,8 @@ GenerateInputPB makeRequest() {
 
 class TestMultimodalProcessor: public MultimodalProcessor {
 public:
-    TestMultimodalProcessor(): MultimodalProcessor(py::object{}, MMModelConfig{true, {{1}}, false}, 100) {}
+    explicit TestMultimodalProcessor(const MMModelConfig& config = MMModelConfig{true, {{1}}, false}):
+        MultimodalProcessor(py::object{}, config, 100) {}
 
     int                      calls              = 0;
     int                      embedding_length   = 3;
@@ -69,7 +70,130 @@ GenerateInputPB makeMMRequest() {
     return request;
 }
 
+MMModelConfig imageModelConfig(bool semantic) {
+    MMModelConfig config{true, {{1}}, false};
+    config.semantic_mm_token_id = semantic ? 99 : -1;
+    return config;
+}
+
+class RecordingPrefillProcessor: public TestMultimodalProcessor {
+public:
+    explicit RecordingPrefillProcessor(bool semantic = false): TestMultimodalProcessor(imageModelConfig(semantic)) {}
+    std::vector<std::string> fetched;
+    bool                     change_hash = false;
+
+    ErrorResult<MultimodalOutput> MultimodalEmbeddingFromRpc(
+        const MultimodalInputsPB& request, const std::string&, int64_t, grpc::ServerContext*, DeferredMMRpc*) override {
+        EXPECT_EQ(request.inspection_ticket(), "receipt");
+        EXPECT_EQ(request.region(), "test-region");
+        EXPECT_EQ(request.timeout_ms(), 5000);
+        MultimodalOutput result;
+        result.mm_feature_hashes.emplace();
+        for (const auto& image : request.multimodal_inputs()) {
+            fetched.push_back(image.multimodal_url());
+            auto hash = (image.multimodal_url() == "a" ? 11 : 22) + int(change_hash);
+            result.mm_features.push_back(torch::full({2, 2}, hash, torch::kFloat));
+            result.mm_feature_hashes->push_back(torch::full({2}, hash, torch::kInt32));
+        }
+        return result;
+    }
+};
+
+std::shared_ptr<GenerateInput> twoImages(bool semantic = false) {
+    auto request = makeRequest();
+    request.clear_token_ids();
+    for (int id : {10, 11, 11, 10, 22, 22, 10})
+        request.add_token_ids(semantic && id != 10 ? 99 : id);
+    auto* header = request.mutable_multimodal_request();
+    header->set_inspection_ticket("receipt");
+    header->set_region("test-region");
+    header->set_timeout_ms(5000);
+    for (int offset : {1, 4}) {
+        auto* item = request.add_multimodal_inputs();
+        item->set_multimodal_type(1);
+        item->set_multimodal_url(offset == 1 ? "a" : "b");
+        auto* span = request.mutable_multimodal_token_layout()->add_spans();
+        span->set_offset(offset);
+        span->set_length(2);
+        if (semantic) {
+            span->add_row_hashes(offset == 1 ? 11 : 22);
+            span->add_row_hashes(offset == 1 ? 11 : 22);
+        }
+    }
+    auto input                 = QueryConverter::transQuery(&request);
+    input->request_deadline_ms = currentTimeMs() + 30000;
+    return input;
+}
+
 }  // namespace
+
+TEST(PDRequestUtilsTest, PrefillFetchesOnlyImagesBeyondActualReuse) {
+    for (int covered : {0, 2, 3, 5, 6}) {
+        SCOPED_TRACE(covered);
+        const bool            semantic  = covered >= 3;
+        auto                  input     = twoImages(semantic);
+        auto                  processor = std::make_shared<RecordingPrefillProcessor>(semantic);
+        std::function<void()> queued;
+        ASSERT_TRUE(deferPrefillMedia(input, processor, false, {}, nullptr, {}, {}, [&](auto work) {
+                        queued = std::move(work);
+                        return true;
+                    }).ok());
+        input->updatePrefix({91, 92});
+        auto ready = input->prepare_prefill_media(*input, covered + 2);
+        ASSERT_TRUE(ready.ok());
+        EXPECT_EQ(ready.value(), covered == 6);
+        EXPECT_TRUE(processor->fetched.empty());
+        EXPECT_EQ(input->multimodalLengths().at(1), 4);
+        if (semantic) {
+            ASSERT_EQ(input->multimodal_cache_spans->size(), 2u);
+            EXPECT_EQ(input->multimodal_cache_spans->front().offset, 3);
+            EXPECT_EQ(input->multimodal_cache_spans->back().offset, 6);
+        }
+        EXPECT_TRUE(torch::equal(*input->text_tokens_mask, torch::tensor({1, 1, 1, 0, 0, 1, 0, 0, 1}, torch::kInt32)));
+        if (covered == 6) {
+            EXPECT_FALSE(queued);
+            EXPECT_EQ(input->mm_locs->numel(), 0);
+            continue;
+        }
+        ASSERT_TRUE(queued);
+        queued();
+        ready = input->prepare_prefill_media(*input, covered + 2);
+        ASSERT_TRUE(ready.ok()) << ready.status().ToString();
+        ASSERT_TRUE(ready.value());
+        const bool both = covered < 3;
+        EXPECT_EQ(processor->fetched, (both ? std::vector<std::string>{"a", "b"} : std::vector<std::string>{"b"}));
+        EXPECT_TRUE(torch::equal(*input->mm_locs,
+                                 both ? torch::tensor({3, 6}, torch::kInt32) : torch::tensor({6}, torch::kInt32)));
+        ASSERT_EQ(input->multimodal_features->size(), processor->fetched.size());
+        EXPECT_EQ(input->multimodal_features->back()[0][0].item<float>(), 22);
+    }
+}
+
+TEST(PDRequestUtilsTest, DeferredPrefillRejectsMismatchedHandoffHashesAndCancellation) {
+    for (bool cancelled : {false, true}) {
+        auto input             = twoImages();
+        auto processor         = std::make_shared<RecordingPrefillProcessor>();
+        processor->change_hash = true;
+        ASSERT_TRUE(
+            deferPrefillMedia(
+                input,
+                processor,
+                false,
+                {},
+                nullptr,
+                {},
+                [&] { return cancelled ? ErrorInfo(ErrorCode::CANCELLED, "cancelled") : ErrorInfo::OkStatus(); },
+                [](auto work) {
+                    work();
+                    return true;
+                })
+                .ok());
+        auto ready = input->prepare_prefill_media(*input, 3);
+        ASSERT_FALSE(ready.ok());
+        EXPECT_EQ(ready.status().code(), cancelled ? ErrorCode::CANCELLED : ErrorCode::MM_PROCESS_ERROR);
+        EXPECT_EQ(processor->fetched.size(), cancelled ? 0u : 1u);
+    }
+}
 
 TEST(PDRequestUtilsTest, PrefillMmTracePreservesRequestContextAndTypedFailure) {
     namespace memory = opentelemetry::exporter::memory;

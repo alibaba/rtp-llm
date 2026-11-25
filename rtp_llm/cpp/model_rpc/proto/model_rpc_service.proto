@@ -212,6 +212,8 @@ message MultimodalInputsPB {
     google.protobuf.BoolValue input_inspection_enabled = 7;
     // Issued by the selected ViT during hash routing.
     string inspection_ticket = 8;
+    // The frontend obtained clearance for these exact keys on the routed ViT.
+    bool frontend_inspection_verified = 9;
 }
 
 enum TensorDataTypePB {
@@ -1401,6 +1403,8 @@ message MultimodalHashResponsePB {
     reserved 2;
     repeated MultimodalHashEntryPB entries = 3;
     string inspection_ticket = 4;
+    // The serving ViT determined that this request needs no input inspection.
+    bool input_inspection_disabled = 5;
 }
 
 service MultimodalRpcService {

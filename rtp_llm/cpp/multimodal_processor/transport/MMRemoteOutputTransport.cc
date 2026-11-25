@@ -23,6 +23,34 @@ resolveRpcTimeoutMs(const MultimodalInputsPB& request, int64_t default_rpc_timeo
     return max_timeout_ms > 0 ? max_timeout_ms : default_rpc_timeout_ms;
 }
 
+DeferredMMRpc::DeferredMMRpc(grpc::ServerContext* parent, bool inherit_deadline) {
+    if (!parent)
+        return;
+    if (inherit_deadline)
+        deadline = parent->deadline();
+    for (const auto* key : {"x-dashscope-uid", "x-dashscope-service", "x-dashscope-request-id"}) {
+        auto it = parent->client_metadata().find(key);
+        if (it != parent->client_metadata().end())
+            metadata_.emplace_back(key, std::string(it->second.data(), it->second.size()));
+    }
+}
+
+void DeferredMMRpc::attach(const std::shared_ptr<grpc::ClientContext>& client) {
+    for (const auto& [key, value] : metadata_)
+        client->AddMetadata(key, value);
+    std::lock_guard<std::mutex> guard(mutex_);
+    active_ = client;
+    if (cancelled_)
+        client->TryCancel();
+}
+
+void DeferredMMRpc::cancel() {
+    std::lock_guard<std::mutex> guard(mutex_);
+    cancelled_ = true;
+    if (auto client = active_.lock())
+        client->TryCancel();
+}
+
 // ---- MMTransportMetrics ----
 
 void MMTransportMetrics::reportRpcClientError(const std::string& endpoint,
@@ -60,9 +88,18 @@ void MMTransportMetrics::reportRpcMetrics(const std::string& endpoint,
 
 ErrorResult<MultimodalOutput> MMRemoteOutputTransport::fetch(const std::string&   endpoint,
                                                              MultimodalInputsPB&  request_pb,
-                                                             grpc::ServerContext* server_context) {
-    DeadlineBudget  budget(resolveRpcTimeoutMs(request_pb, default_rpc_timeout_ms_, rpc_timeout_margin_ms_),
-                          server_context);
+                                                             grpc::ServerContext* server_context,
+                                                             DeferredMMRpc*       deferred) {
+    auto timeout_ms = resolveRpcTimeoutMs(request_pb, default_rpc_timeout_ms_, rpc_timeout_margin_ms_);
+    if (deferred) {
+        const auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deferred->deadline - std::chrono::system_clock::now())
+                .count();
+        timeout_ms = std::min<int64_t>(timeout_ms, remaining);
+        if (timeout_ms <= 0)
+            return {ErrorCode::GENERATE_TIMEOUT, "Prefill media deadline expired"};
+    }
+    DeadlineBudget  budget(timeout_ms, server_context, deferred);
     DeliveryContext context{endpoint, budget, *control_, control_};
 
     std::vector<MMReceiptReader*> advertised;

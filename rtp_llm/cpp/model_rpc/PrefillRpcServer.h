@@ -2,6 +2,7 @@
 
 #include "grpc++/grpc++.h"
 #include "autil/LoopThread.h"
+#include "autil/ThreadPool.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PDCancelRegistry.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRequestLogger.h"
@@ -25,7 +26,7 @@ public:
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                       py::object                                             mm_process_engine) override;
 
-    void beginShutdown();
+    void   beginShutdown();
     size_t onflightRequestNum() override;
 
     grpc::Status Cancel(grpc::ServerContext* context, const CancelRequestPB* request, CancelResponsePB* response);
@@ -49,6 +50,13 @@ public:
     GetPeerInfo(::grpc::ServerContext* context, const GetPeerInfoRequestPB* request, GetPeerInfoResponsePB* response);
 
 private:
+    ErrorInfo                             prepareMedia(const GenerateInputPB&                                              request,
+                                                       std::shared_ptr<GenerateInput>&                                     input,
+                                                       grpc::ServerContext*                                                context,
+                                                       const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& span,
+                                                       const PDCancelRegistry::Handle&                                     handle,
+                                                       bool inherit_rpc_deadline = true);
+    std::shared_ptr<autil::ThreadPool>    media_pool_;
     std::unique_ptr<PrefillRequestLogger> request_logger_;
     std::shared_ptr<PDCancelRegistry>     cancel_registry_;
     // Per-onflight tracker for [HANG-DIAG] watchdog. Each GenerateStreamCall
@@ -100,19 +108,19 @@ private:
         std::mutex        mutex;
         PrefillRpcServer* server;
     };
-    static std::function<void()>                scheduleBatchEvent(std::weak_ptr<BatchEventOwner>         owner,
-                                                                   int64_t                                delay_ms,
-                                                                   std::function<void(PrefillRpcServer&)> callback);
-    void                                        registerBatchAttach(const std::string&       key,
-                                                                    const GenerateStreamPtr& stream,
-                                                                    int64_t                  timeout_ms,
-                                                                    int64_t                  request_deadline_ms,
-                                                                    int64_t                  now_ms);
-    bool                                        attachBatch(const std::string& key, int64_t now_ms);
-    void expireBatchAttachment(const std::string& key, uint64_t generation, int64_t now_ms);
-    void finishBatchStream(const std::string& key, uint64_t generation);
-    bool                                        batch_stopping_{false};
-    std::mutex                                  batch_mutex_;
+    static std::function<void()> scheduleBatchEvent(std::weak_ptr<BatchEventOwner>         owner,
+                                                    int64_t                                delay_ms,
+                                                    std::function<void(PrefillRpcServer&)> callback);
+    void                         registerBatchAttach(const std::string&       key,
+                                                     const GenerateStreamPtr& stream,
+                                                     int64_t                  timeout_ms,
+                                                     int64_t                  request_deadline_ms,
+                                                     int64_t                  now_ms);
+    bool                         attachBatch(const std::string& key, int64_t now_ms);
+    void                         expireBatchAttachment(const std::string& key, uint64_t generation, int64_t now_ms);
+    void                         finishBatchStream(const std::string& key, uint64_t generation);
+    bool                         batch_stopping_{false};
+    std::mutex                   batch_mutex_;
     std::unordered_map<std::string, BatchEntry> batch_entries_;
     uint64_t                                    batch_generation_{0};
     std::shared_ptr<BatchEventOwner>            batch_event_owner_{std::make_shared<BatchEventOwner>(this)};

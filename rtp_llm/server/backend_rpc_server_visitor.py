@@ -539,7 +539,7 @@ class BackendRPCServerVisitor:
                     cache_key_block_size=self._cache_key_block_size(),
                     input=input,
                     request_id=input.request_id,
-                    input_pb=trans_input(input),
+                    input_pb=trans_input(input, selected_vit=selected_vit),
                     **route_args,
                 )
             if (
@@ -663,7 +663,7 @@ class BackendRPCServerVisitor:
                         cache_key_block_size=self._cache_key_block_size(),
                         input=input,
                         request_id=input.request_id,
-                        input_pb=trans_input(input),
+                        input_pb=trans_input(input, selected_vit=selected_vit),
                         **route_args,
                     )
         except BaseException:
@@ -1230,6 +1230,22 @@ class BackendRPCServerVisitor:
                 f"request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}",
             )
 
+    def _report_vit_requests(self, inputs):
+        if not getattr(self, "remote_vit", False):
+            return
+        count = sum(
+            bool(
+                getattr(item, "mm_inputs", None)
+                or getattr(getattr(item, "v41_inputs", None), "images", None)
+            )
+            for item in inputs
+        )
+        if count:
+            try:
+                kmonitor.report(AccMetrics.VIT_MULTIMODAL_REQUEST_QPS_METRIC, count)
+            except Exception:
+                route_logger.exception("failed to count frontend multimodal requests")
+
     @torch.inference_mode()
     async def enqueue(
         self, input: GenerateInput
@@ -1264,6 +1280,8 @@ class BackendRPCServerVisitor:
         except BaseException as e:
             set_aux_info(e)
             raise
+
+        self._report_vit_requests((input,))
 
         # Count each submitted prompt once, independently of route retries.
         if self._frontend_cache_metrics_enabled(input):
@@ -1440,6 +1458,7 @@ class BackendRPCServerVisitor:
             self.check_sp_supported(input)
             self.check_prefill_cp_supported(input)
 
+        self._report_vit_requests(inputs)
         for input in inputs:
             input._frontend_batch_cache_probe = self._frontend_cache_metrics_enabled(
                 input
