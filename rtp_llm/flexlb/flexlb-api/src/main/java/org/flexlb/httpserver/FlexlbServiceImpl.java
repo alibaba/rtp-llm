@@ -47,6 +47,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -544,6 +545,37 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     private void routeAndComplete(
+            BalanceContext context,
+            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver,
+            AtomicBoolean completionClaimed,
+            ScheduleOrigin origin) {
+        var executor = GrpcOverloadInterceptor.directScheduleExecutor();
+        if (!context.getConfig().isDirect() || executor == null) {
+            startLocalRoute(context, responseObserver, completionClaimed, origin);
+            return;
+        }
+
+        Context callerContext = Context.current();
+        try {
+            executor.execute(
+                    callerContext.wrap(
+                            () -> {
+                                if (!callerContext.isCancelled()) {
+                                    startLocalRoute(
+                                            context, responseObserver, completionClaimed, origin);
+                                }
+                            }));
+        } catch (RejectedExecutionException saturated) {
+            if (!callerContext.isCancelled() && completionClaimed.compareAndSet(false, true)) {
+                responseObserver.onError(
+                        Status.RESOURCE_EXHAUSTED
+                                .withDescription(saturated.getMessage())
+                                .asRuntimeException());
+            }
+        }
+    }
+
+    private void startLocalRoute(
             BalanceContext context,
             StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver,
             AtomicBoolean completionClaimed,
