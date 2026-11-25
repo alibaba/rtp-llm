@@ -346,5 +346,150 @@ class MediaNetworkTest(unittest.TestCase):
             )
 
 
+class RangeDownloadTest(unittest.TestCase):
+    body = b"0123456789"
+
+    def setUp(self):
+        visits = self.visits = []
+        data = self.body
+        self.barrier = threading.Barrier(2)
+        barrier = self.barrier
+        occupied = self.occupied = threading.Event()
+        release = self.release = threading.Event()
+        self.addCleanup(release.set)
+
+        class Origin(Handler):
+            def do_HEAD(self):
+                visits.append(("HEAD", self.path, None))
+                self.send_response(405 if self.path == "/get-only" else 200)
+                if self.path != "/no-length":
+                    self.send_header("Content-Length", str(len(data)))
+                if self.path != "/no-etag":
+                    self.send_header("ETag", '"v1"')
+                if self.path == "/no-ranges":
+                    self.send_header("Accept-Ranges", "none")
+                self.end_headers()
+
+            def do_GET(self):
+                interval = self.headers.get("Range")
+                visits.append(("GET", self.path, interval))
+                if not interval or self.path == "/ignore":
+                    self.reply(200, data)
+                    return
+                start, end = map(int, interval.removeprefix("bytes=").split("-"))
+                if self.path == "/hold-ranges" and start < 8:
+                    barrier.wait(timeout=3)
+                    occupied.set()
+                    release.wait(5)
+                if self.path.endswith("/parallel") and start < 8:
+                    barrier.wait(timeout=3)
+                if self.headers.get("If-Match") != '"v1"':
+                    self.reply(412, b"")
+                    return
+                part = data[start : end + 1]
+                self.send_response(206)
+                self.send_header("Content-Length", str(len(part)))
+                reported_end = end + (self.path == "/bad-range")
+                self.send_header(
+                    "Content-Range", f"bytes {start}-{reported_end}/{len(data)}"
+                )
+                self.send_header("ETag", '"v2"' if self.path == "/changed" else '"v1"')
+                self.end_headers()
+                self.wfile.write(part)
+
+        self.origin = ThreadingHTTPServer(("127.0.0.1", 0), Origin)
+        self.base = f"http://127.0.0.1:{self.origin.server_port}"
+        self.addCleanup(self.origin.server_close)
+        threading.Thread(target=self.origin.serve_forever, daemon=True).start()
+        self.addCleanup(self.origin.shutdown)
+
+    def network(self, chunk_size):
+        policy = native.Policy()
+        policy.internal = True
+        policy.range_chunk_bytes = chunk_size
+        net = native.Network(2, 1, policy)
+        self.addCleanup(net.close)
+        return net
+
+    def fetch(self, net, path, proxy=False, **options):
+        req = native.Request()
+        req.url = self.base + path
+        if proxy:
+            req.proxy = self.base
+            req.url = "http://127.0.0.1:1" + path
+        for name, value in options.items():
+            setattr(req, name, value)
+        job = net.submit(req)
+        self.assertIs(net.next(), job)
+        return job.result()
+
+    def test_small_equal_and_disabled(self):
+        for size in (0, len(self.body), len(self.body) + 1):
+            with self.subTest(size=size):
+                self.visits.clear()
+                result = self.fetch(self.network(size), "/small")
+                self.assertEqual(result[:3], (200, "", self.body))
+                expected = [("HEAD", "/small", None)] if size else []
+                self.assertEqual(self.visits, expected + [("GET", "/small", None)])
+
+    def test_parallel_ranges_and_cache(self):
+        for proxy in (False, True):
+            with self.subTest(proxy=proxy):
+                self.visits.clear()
+                path = "/parallel"
+                target = "http://127.0.0.1:1" + path if proxy else path
+                net = self.network(4)
+                self.assertEqual(
+                    self.fetch(net, path, proxy, cache_key="image")[:4],
+                    (200, "", self.body, False),
+                )
+                self.assertTrue(self.fetch(net, path, proxy, cache_key="image")[3])
+                self.assertEqual(self.visits[0], ("HEAD", target, None))
+                self.assertCountEqual(
+                    self.visits[1:],
+                    [("GET", target, f"bytes={r}") for r in ("0-3", "4-7", "8-9")],
+                )
+
+    def test_unsupported_metadata_and_invalid_ranges_fall_back(self):
+        net = self.network(4)
+        for path in (
+            "/get-only",
+            "/no-length",
+            "/no-etag",
+            "/no-ranges",
+            "/ignore",
+            "/bad-range",
+            "/changed",
+        ):
+            with self.subTest(path=path):
+                self.visits.clear()
+                self.assertEqual(self.fetch(net, path)[:3], (200, "", self.body))
+                self.assertEqual(self.visits[0], ("HEAD", path, None))
+                self.assertEqual(self.visits.count(("GET", path, None)), 1)
+                if path in ("/get-only", "/no-length", "/no-etag", "/no-ranges"):
+                    self.assertEqual(len(self.visits), 2)
+                else:
+                    self.assertTrue(any(interval for _, _, interval in self.visits))
+
+    def test_queued_request_keeps_its_deadline(self):
+        net = self.network(4)
+        req = native.Request()
+        req.url = self.base + "/hold-ranges"
+        busy = net.submit(req)
+        try:
+            self.assertTrue(self.occupied.wait(3))
+            self.assertEqual(self.fetch(net, "/queued", budget_ms=100)[1], "timeout")
+            self.assertFalse(any(path == "/queued" for _, path, _ in self.visits))
+        finally:
+            self.release.set()
+        self.assertIs(net.next(), busy)
+        self.assertEqual(busy.result()[:3], (200, "", self.body))
+
+    def test_size_limit_before_body(self):
+        result = self.fetch(self.network(4), "/limit", limit=len(self.body) - 1)
+        self.assertEqual(result[1], "too_large")
+        self.assertEqual(self.visits, [("HEAD", "/limit", None)])
+
+
 if __name__ == "__main__":
     unittest.main()

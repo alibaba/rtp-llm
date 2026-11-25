@@ -333,6 +333,7 @@ class VitConfig:
     # shared by the --mm_timeout_ms / MM_TIMEOUT_MS server arg and the
     # MMScheduler fallback so the three never drift.
     DEFAULT_MM_TIMEOUT_MS: int = DEFAULT_MM_TIMEOUT_MS
+    DEFAULT_MM_DOWNLOAD_CHUNK_BYTES: int = 1024 * 1024
     DEFAULT_MM_IMAGE_MAX_FILE_SIZE_KB: int = 100 * 1024
     DEFAULT_MM_VIDEO_MAX_FILE_SIZE_KB: int = 2 * 1024 * 1024
     # Per-process byte budgets. Hashes live on CPU, independently of the
@@ -390,6 +391,10 @@ class VitConfig:
         self.vit_concurrency: int = 64
         self.vit_max_queue_size: int = 64
         self.vit_source_download_concurrency: int = 0
+        self.mm_download_range_config = {
+            "enable": False,
+            "chunk_size_bytes": self.DEFAULT_MM_DOWNLOAD_CHUNK_BYTES,
+        }
         self.biencoder_preprocess: bool = False
         self.extra_input_in_mm_embedding = ""
         self.mm_timeout_ms: int = VitConfig.DEFAULT_MM_TIMEOUT_MS
@@ -520,6 +525,7 @@ class VitConfig:
             f"vit_concurrency: {self.vit_concurrency}\n"
             f"vit_max_queue_size: {self.vit_max_queue_size}\n"
             f"vit_source_download_concurrency: {self.vit_source_download_concurrency}\n"
+            f"mm_download_range_config: {self.mm_download_range_config}\n"
             f"biencoder_preprocess: {self.biencoder_preprocess}\n"
             f"extra_input_in_mm_embedding: {self.extra_input_in_mm_embedding}\n"
             f"mm_timeout_ms: {self.mm_timeout_ms}\n"

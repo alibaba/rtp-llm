@@ -856,6 +856,26 @@ class CacheConfigArgumentsTest(TestCase):
 class ServerArgsPyEnvConfigsTest(TestCase):
     """Test that environment variables and command line arguments are correctly set to py_env_configs structure."""
 
+    def test_download_range_config(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            default = server_args.setup_args([]).vit_config.mm_download_range_config
+            self.assertEqual(default, {"enable": False, "chunk_size_bytes": 1048576})
+        with patch.dict(os.environ, {"MM_DOWNLOAD_RANGE_CONFIG": '{"enable":true}'}):
+            config = server_args.setup_args([]).vit_config.mm_download_range_config
+            self.assertEqual(config, {"enable": True, "chunk_size_bytes": 1048576})
+            config = server_args.setup_args(
+                [
+                    "--mm_download_range_config",
+                    '{"enable":true,"chunk_size_bytes":4096}',
+                ]
+            ).vit_config.mm_download_range_config
+            self.assertEqual(config, {"enable": True, "chunk_size_bytes": 4096})
+            for value in ('{"enable":"false"}', '{"chunk_size_bytes":0}', '["enable"]'):
+                with self.subTest(value=value), self.assertRaises(SystemExit):
+                    server_args.setup_args(["--mm_download_range_config", value])
+
     def test_vit_source_download_concurrency_from_env_and_cli(self):
         from rtp_llm.server.server_args import server_args
 

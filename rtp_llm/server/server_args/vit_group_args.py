@@ -133,6 +133,21 @@ _EMBEDDING_CACHE_FIELDS = {
 }
 
 
+def parse_download_range_config(value):
+    config = json.loads(value)
+    if not isinstance(config, dict) or config.keys() - {"enable", "chunk_size_bytes"}:
+        raise argparse.ArgumentTypeError(
+            "MM_DOWNLOAD_RANGE_CONFIG expects an object with enable and chunk_size_bytes"
+        )
+    enable = config.get("enable", False)
+    size = config.get("chunk_size_bytes", VitConfig.DEFAULT_MM_DOWNLOAD_CHUNK_BYTES)
+    if type(enable) is not bool or type(size) is not int or not 0 < size < 2**63:
+        raise argparse.ArgumentTypeError(
+            "enable must be a boolean and chunk_size_bytes a positive 64-bit integer"
+        )
+    return {"enable": enable, "chunk_size_bytes": size}
+
+
 def parse_embedding_cache_config(value):
     """Validate before binding; reject typos and bool-as-int silently disabling caches."""
 
@@ -595,6 +610,15 @@ def init_vit_group_args(parser, vit_config):
         type=int,
         default=vit_config.vit_max_queue_size,
         help="ViT 异步计算的额外等待任务数；GPU 就绪队列容量由 VIT_CONCURRENCY 加此值派生，满时拒绝新任务",
+    )
+
+    vit_group.add_argument(
+        "--mm_download_range_config",
+        env_name="MM_DOWNLOAD_RANGE_CONFIG",
+        bind_to=(vit_config, "mm_download_range_config"),
+        type=parse_download_range_config,
+        default=vit_config.mm_download_range_config,
+        help='Native HTTP media range downloads, e.g. {"enable":true,"chunk_size_bytes":1048576}.',
     )
 
     vit_group.add_argument(

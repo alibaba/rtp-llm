@@ -67,6 +67,7 @@ struct Policy {
     bool                            internal    = false;
     bool                            rewrite_oss = false;
     std::string                     ca;
+    size_t                          range_chunk_bytes = 0;
 };
 struct Endpoint {
     std::string origin, host;
@@ -152,6 +153,13 @@ struct Job {
     bool              hit     = false;
     int               retries = 0, connect_retries = 0, proxy_attempts = 0, fallbacks = 0;
 };
+struct RangeMetadata {
+    std::string url, etag;
+    curl_off_t  length         = -1;
+    bool        strip_headers  = false;
+    bool        accepts_ranges = true;
+};
+
 struct Transfer {
     Job&                                            job;
     std::string                                     body;
@@ -165,7 +173,14 @@ struct Transfer {
     size_t                                          content_length      = 0;
     std::unique_ptr<rtp_llm::media::ContentDecoder> decoder;
 
+    RangeMetadata*          probe       = nullptr;
+    const std::atomic_bool* stop_ranges = nullptr;
+    std::string             expected_range, content_range, etag;
+    size_t                  range_length = 0;
+
     void append(std::string_view bytes) {
+        if (range_length && bytes.size() > range_length - body.size())
+            throw Failure("invalid_range");
         if (job.req.limit && bytes.size() > job.req.limit - body.size()) {
             large = true;
             throw Failure("too_large");
@@ -173,8 +188,12 @@ struct Transfer {
         body.append(bytes);
     }
 
+    bool canceled() const {
+        return job.canceled.load() || (stop_ranges && stop_ranges->load());
+    }
+
     std::string failure() const {
-        if (job.canceled.load())
+        if (canceled())
             return "cancelled";
         auto now = Clock::now();
         if (now >= job.deadline || now - last_io >= std::chrono::milliseconds(job.req.idle_ms))
@@ -186,6 +205,8 @@ size_t write_body(char* data, size_t sz, size_t n, void* ptr) noexcept {
     auto&  t     = *static_cast<Transfer*>(ptr);
     size_t count = sz * n;
     t.last_io    = Clock::now();
+    if (t.range_length && (t.status != 206 || t.stop_ranges->load()))
+        return 0;
     if (t.job.req.media && t.status >= 300)
         return count;
     try {
@@ -217,6 +238,36 @@ size_t read_header(char* bytes, size_t size, size_t count, void* ptr) noexcept {
             transfer.headers_complete    = false;
             transfer.content_length      = 0;
             transfer.decoder.reset();
+            transfer.etag.clear();
+            transfer.content_range.clear();
+            if (transfer.probe)
+                transfer.probe->accepts_ranges = true;
+        } else if (transfer.probe && !transfer.headers_complete && line.size() >= 14
+                   && !strncasecmp(bytes, "Accept-Ranges:", 14)) {
+            const auto start = line.find_first_not_of(" \t", 14);
+            if (start != line.npos) {
+                const auto end                 = line.find_last_not_of(" \t");
+                transfer.probe->accepts_ranges = lower(std::string(line.substr(start, end - start + 1))) != "none";
+            }
+        } else if ((transfer.probe || transfer.range_length) && !transfer.headers_complete && line.size() >= 5
+                   && !strncasecmp(bytes, "ETag:", 5)) {
+            transfer.etag = line.substr(5);
+            transfer.etag.erase(0, transfer.etag.find_first_not_of(" \t"));
+            transfer.etag.erase(transfer.etag.find_last_not_of(" \t") + 1);
+        } else if (transfer.range_length && !transfer.headers_complete) {
+            if (line.empty() && transfer.status >= 200) {
+                transfer.headers_complete = true;
+                if (transfer.status != 206 || transfer.content_range != transfer.expected_range)
+                    return 0;
+            } else if (line.size() >= 14 && !strncasecmp(bytes, "Content-Range:", 14)) {
+                auto pos = line.find_first_not_of(" \t", 14);
+                if (pos != line.npos)
+                    transfer.content_range.append(line.substr(pos));
+            } else if (line.size() >= 17 && !strncasecmp(bytes, "Content-Encoding:", 17)) {
+                auto pos = line.find_first_not_of(" \t", 17);
+                if (pos != line.npos && lower(std::string(line.substr(pos))) != "identity")
+                    return 0;
+            }
         } else if (transfer.job.req.media && transfer.status == 200 && !transfer.headers_complete) {
             if (line.empty()) {
                 transfer.headers_complete = true;
@@ -256,7 +307,7 @@ size_t read_header(char* bytes, size_t size, size_t count, void* ptr) noexcept {
 }
 int progress(void* ptr, curl_off_t, curl_off_t, curl_off_t, curl_off_t) noexcept {
     auto& t = *static_cast<Transfer*>(ptr);
-    return t.job.canceled.load() || Clock::now() >= t.job.deadline
+    return t.canceled() || Clock::now() >= t.job.deadline
            || Clock::now() - t.last_io >= std::chrono::milliseconds(t.job.req.idle_ms);
 }
 struct HeaderList {
@@ -338,7 +389,7 @@ void validate_proxied_media_host(const Endpoint& dest, Job& job) {
 // easy handles for one transfer; the multi handle retains connections between transfers.
 class CurlConnectionPool {
 public:
-    explicit CurlConnectionPool(long capacity): multi_(curl_multi_init(), curl_multi_cleanup) {
+    explicit CurlConnectionPool(long capacity): capacity_(capacity), multi_(curl_multi_init(), curl_multi_cleanup) {
         if (!multi_ || curl_multi_setopt(multi_.get(), CURLMOPT_MAXCONNECTS, capacity) != CURLM_OK)
             throw Failure("curl connection pool initialization failed");
         io_ = std::thread([this] { drive(); });
@@ -347,16 +398,19 @@ public:
         stop();
     }
 
-    CURLcode perform(CURL* easy) {
-        std::future<CURLcode> result;
+    std::future<CURLcode> submit(CURL* easy, Transfer& transfer) {
+        std::promise<CURLcode> done;
+        auto                   result = done.get_future();
         {
             std::lock_guard<std::mutex> lock(mu_);
-            if (stopping_)
-                return CURLE_FAILED_INIT;
-            result = pending_.try_emplace(easy).first->second.get_future();
+            if (stopping_) {
+                done.set_value(CURLE_FAILED_INIT);
+                return result;
+            }
+            pending_.push_back({easy, transfer, std::move(done)});
         }
         curl_multi_wakeup(multi_.get());
-        return result.get();
+        return result;
     }
 
     void stop() {
@@ -371,35 +425,63 @@ public:
     }
 
 private:
+    struct Pending {
+        CURL*                  easy;
+        Transfer&              transfer;
+        std::promise<CURLcode> done;
+    };
     using Transfers = std::map<CURL*, std::promise<CURLcode>>;
     void drive() {
         Transfers active;
         for (;;) {
+            int poll_ms = 60000;
             {
                 std::lock_guard<std::mutex> lock(mu_);
                 if (stopping_)
                     break;
-                while (!pending_.empty()) {
-                    auto transfer = pending_.extract(pending_.begin());
-                    if (curl_multi_add_handle(multi_.get(), transfer.key()) == CURLM_OK)
-                        active.insert(std::move(transfer));
-                    else
-                        transfer.mapped().set_value(CURLE_FAILED_INIT);
+                const auto now = Clock::now();
+                for (auto it = pending_.begin(); it != pending_.end();) {
+                    auto& [easy, transfer, done] = *it;
+                    const auto remaining =
+                        std::chrono::ceil<std::chrono::milliseconds>(transfer.job.deadline - now).count();
+                    if (transfer.canceled()) {
+                        done.set_value(CURLE_ABORTED_BY_CALLBACK);
+                    } else if (remaining <= 0) {
+                        done.set_value(CURLE_OPERATION_TIMEDOUT);
+                    } else if (active.size() >= capacity_) {
+                        // A queued fragment still consumes its parent request's deadline.
+                        poll_ms = static_cast<int>(std::min<int64_t>(poll_ms, remaining));
+                        ++it;
+                        continue;
+                    } else {
+                        transfer.last_io = now;
+                        curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS, static_cast<long>(remaining));
+                        if (curl_multi_add_handle(multi_.get(), easy) == CURLM_OK)
+                            active.emplace(easy, std::move(done));
+                        else
+                            done.set_value(CURLE_FAILED_INIT);
+                    }
+                    it = pending_.erase(it);
                 }
             }
             int running = 0;
             if (curl_multi_perform(multi_.get(), &running) != CURLM_OK)
                 break;
-            int remaining = 0;
+            int  remaining = 0;
+            bool completed = false;
             while (auto* msg = curl_multi_info_read(multi_.get(), &remaining)) {
                 if (msg->msg == CURLMSG_DONE) {
+                    completed     = true;
                     auto transfer = active.extract(msg->easy_handle);
                     auto result   = msg->data.result;
                     curl_multi_remove_handle(multi_.get(), transfer.key());
                     transfer.mapped().set_value(result);
                 }
             }
-            if (curl_multi_poll(multi_.get(), nullptr, 0, active.empty() ? 60000 : 1000, nullptr) != CURLM_OK)
+            if (completed)
+                continue;
+            if (curl_multi_poll(multi_.get(), nullptr, 0, active.empty() ? poll_ms : std::min(poll_ms, 1000), nullptr)
+                != CURLM_OK)
                 break;
         }
 
@@ -410,18 +492,90 @@ private:
             result.set_value(CURLE_FAILED_INIT);
         }
         for (auto& pending : pending_)
-            pending.second.set_value(CURLE_FAILED_INIT);
+            pending.done.set_value(CURLE_FAILED_INIT);
         pending_.clear();
     }
 
+    size_t                                                capacity_;
     std::unique_ptr<CURLM, decltype(&curl_multi_cleanup)> multi_;
     std::mutex                                            mu_;
-    Transfers                                             pending_;
+    std::list<Pending>                                    pending_;
     bool                                                  stopping_ = false;
     std::thread                                           io_;
 };
 
-void exchange(CurlConnectionPool& connections, CURL* curl, Job& job, const Policy& policy, const std::string& proxy) {
+void configure_transfer(CURL*              curl,
+                        Transfer&          transfer,
+                        HeaderList&        headers,
+                        const Policy&      policy,
+                        const std::string& url,
+                        const std::string& proxy,
+                        bool               strip) {
+    auto&       job = transfer.job;
+    const auto& req = job.req;
+    auto        ms  = std::chrono::duration_cast<std::chrono::milliseconds>(job.deadline - Clock::now()).count();
+    if (job.canceled.load())
+        throw Failure("cancelled");
+    if (ms <= 0)
+        throw Failure("timeout");
+    curl_easy_reset(curl);
+    for (const auto& [name, value] : (proxy.empty() ? req.headers : req.proxy_headers)) {
+        if (name.empty() || name.find_first_of(" :\r\n\t") != std::string::npos || name.find('\0') != std::string::npos
+            || value.find_first_of("\r\n") != std::string::npos || value.find('\0') != std::string::npos)
+            throw Failure("invalid_header");
+        if ((transfer.probe || transfer.range_length) && lower(name) == "accept-encoding")
+            continue;
+        if (!strip || safe_on_redirect(name))
+            headers.append(name + ": " + value);
+    }
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    if (req.media) {
+        curl_easy_setopt(curl, CURLOPT_HAPPY_EYEBALLS_TIMEOUT_MS, 150L);
+        // Let curl finish a redirect at the headers. Authorize every next hop here.
+        if (curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 0L) != CURLE_OK
+            || curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L) != CURLE_OK)
+            throw Failure("transport");
+    }
+    curl_easy_setopt(curl, CURLOPT_PROXY, proxy.c_str());
+    if (!proxy.empty())
+        curl_easy_setopt(curl, CURLOPT_NOPROXY, "");
+    if (!policy.ca.empty())
+        curl_easy_setopt(curl, CURLOPT_CAINFO, policy.ca.c_str());
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, std::min<long>(ms, req.connect_ms));
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(ms));
+    if (transfer.probe || transfer.range_length) {
+        curl_easy_setopt(curl, CURLOPT_SUPPRESS_CONNECT_HEADERS, 1L);
+        curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "identity");
+    } else {
+        curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, req.media ? "gzip, deflate, br, zstd" : "");
+    }
+    if (req.media)
+        curl_easy_setopt(curl, CURLOPT_HTTP_CONTENT_DECODING, 0L);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers.head);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_body);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &transfer);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, read_header);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &transfer);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &transfer);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    if (transfer.probe) {
+        curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
+    } else if (req.method != "GET") {
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(req.body.size()));
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req.body.data());
+        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, req.method.c_str());
+    }
+}
+
+void exchange(CurlConnectionPool& connections,
+              CURL*               curl,
+              Job&                job,
+              const Policy&       policy,
+              const std::string&  proxy,
+              RangeMetadata*      probe = nullptr) {
     auto&       req   = job.req;
     std::string url   = req.media ? rewrite(req.url, policy) : req.url;
     const auto  first = endpoint(url, policy, req.media);
@@ -431,56 +585,11 @@ void exchange(CurlConnectionPool& connections, CURL* curl, Job& job, const Polic
         strip     = strip || dest.origin != first.origin;
         if (req.media && policy.internal && !proxy.empty())
             validate_proxied_media_host(dest, job);
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(job.deadline - Clock::now()).count();
-        if (job.canceled.load())
-            throw Failure("cancelled");
-        if (ms <= 0)
-            throw Failure("timeout");
-        curl_easy_reset(curl);
-        Transfer   transfer{job};
+        Transfer transfer{job};
+        transfer.probe = probe;
         HeaderList headers;
-        for (const auto& [name, value] : (proxy.empty() ? req.headers : req.proxy_headers)) {
-            if (name.empty() || name.find_first_of(" :\r\n\t") != std::string::npos
-                || name.find('\0') != std::string::npos || value.find_first_of("\r\n") != std::string::npos
-                || value.find('\0') != std::string::npos)
-                throw Failure("invalid_header");
-            if (!strip || safe_on_redirect(name))
-                headers.append(name + ": " + value);
-        }
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
-        curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-        if (req.media) {
-            curl_easy_setopt(curl, CURLOPT_HAPPY_EYEBALLS_TIMEOUT_MS, 150L);
-            // Let curl finish a redirect at the headers. Authorize every next hop here.
-            if (curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 0L) != CURLE_OK
-                || curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L) != CURLE_OK)
-                throw Failure("transport");
-        }
-        curl_easy_setopt(curl, CURLOPT_PROXY, proxy.c_str());
-        if (!proxy.empty())
-            curl_easy_setopt(curl, CURLOPT_NOPROXY, "");
-        if (!policy.ca.empty())
-            curl_easy_setopt(curl, CURLOPT_CAINFO, policy.ca.c_str());
-        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, std::min<long>(ms, req.connect_ms));
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(ms));
-        curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, req.media ? "gzip, deflate, br, zstd" : "");
-        if (req.media)
-            curl_easy_setopt(curl, CURLOPT_HTTP_CONTENT_DECODING, 0L);
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers.head);
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_body);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &transfer);
-        curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, read_header);
-        curl_easy_setopt(curl, CURLOPT_HEADERDATA, &transfer);
-        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress);
-        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &transfer);
-        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-        if (req.method != "GET") {
-            curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(req.body.size()));
-            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req.body.data());
-            curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, req.method.c_str());
-        }
-        auto rc = connections.perform(curl);
+        configure_transfer(curl, transfer, headers, policy, url, proxy, strip);
+        auto rc = connections.submit(curl, transfer).get();
         if (job.canceled.load())
             throw Failure("cancelled");
         if (transfer.large)
@@ -513,6 +622,14 @@ void exchange(CurlConnectionPool& connections, CURL* curl, Job& job, const Polic
                 continue;
             }
         }
+        if (probe) {
+            probe->url           = url;
+            probe->strip_headers = strip;
+            probe->etag          = std::move(transfer.etag);
+            if (!transfer.has_encoding_header || lower(transfer.content_encoding) == "identity")
+                curl_easy_getinfo(curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &probe->length);
+            return;
+        }
         if (transfer.decoder) {
             try {
                 transfer.decoder->finish();
@@ -524,6 +641,28 @@ void exchange(CurlConnectionPool& connections, CURL* curl, Job& job, const Polic
         return;
     }
     throw Failure("redirect_limit");
+}
+
+// The I/O loop owns each easy handle until its completion future is ready.
+struct RangePart {
+    explicit RangePart(Job& job): transfer{job} {
+        if (!curl)
+            throw Failure("curl initialization failed");
+    }
+    ~RangePart() {
+        if (done.valid())
+            done.wait();
+    }
+    std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl{curl_easy_init(), curl_easy_cleanup};
+    Transfer                                            transfer;
+    HeaderList                                          headers;
+    std::future<CURLcode>                               done;
+};
+
+bool strong_etag(const std::string& tag) {
+    return tag.size() >= 2 && tag.front() == '"' && tag.back() == '"'
+           && std::all_of(
+               tag.begin() + 1, tag.end() - 1, [](unsigned char c) { return c != '"' && c > 0x20 && c != 0x7f; });
 }
 
 class Network {
@@ -623,6 +762,81 @@ private:
             lru_.pop_back();
         }
     }
+    bool read_ranges(Job& job, const RangeMetadata& meta, const std::string& proxy) {
+        const size_t                           total  = static_cast<size_t>(meta.length);
+        const size_t                           window = std::min<size_t>(8, workers_.size());
+        std::atomic_bool                       stop{false};
+        std::deque<std::unique_ptr<RangePart>> pending;
+        std::string                            body;
+        size_t                                 next = 0;
+        try {
+            while (next < total || !pending.empty()) {
+                while (next < total && pending.size() < window) {
+                    auto&        part            = *pending.emplace_back(std::make_unique<RangePart>(job));
+                    const size_t length          = std::min(policy_.range_chunk_bytes, total - next);
+                    const auto   interval        = std::to_string(next) + "-" + std::to_string(next + length - 1);
+                    part.transfer.range_length   = length;
+                    part.transfer.expected_range = "bytes " + interval + "/" + std::to_string(total);
+                    part.transfer.stop_ranges    = &stop;
+                    part.headers.append("Range: bytes=" + interval);
+                    part.headers.append("If-Match: " + meta.etag);
+                    // HEAD already authorized this exact URL. A range redirect triggers
+                    // a normal GET, which validates every hop and filters its headers.
+                    configure_transfer(
+                        part.curl.get(), part.transfer, part.headers, policy_, meta.url, proxy, meta.strip_headers);
+                    part.done = connections_->submit(part.curl.get(), part.transfer);
+                    next += length;
+                }
+                auto& part     = *pending.front();
+                auto& response = part.transfer;
+                if (part.done.get() != CURLE_OK || response.status != 206 || !response.headers_complete
+                    || response.body.size() != response.range_length
+                    || (!response.etag.empty() && response.etag != meta.etag)) {
+                    stop = true;
+                    return false;
+                }
+                body.append(response.body);
+                pending.pop_front();
+            }
+        } catch (...) {
+            stop = true;
+            throw;
+        }
+        job.body   = std::make_shared<const std::string>(std::move(body));
+        job.status = 200;
+        return true;
+    }
+
+    void download(CURL* curl, Job& job, const std::string& proxy) {
+        if (job.req.media && policy_.range_chunk_bytes) {
+            const auto& headers     = proxy.empty() ? job.req.headers : job.req.proxy_headers;
+            const bool  conditional = std::any_of(headers.begin(), headers.end(), [](const auto& header) {
+                auto name = lower(header.first);
+                return name == "range" || name.rfind("if-", 0) == 0;
+            });
+            if (!conditional) {
+                RangeMetadata meta;
+                try {
+                    exchange(*connections_, curl, job, policy_, proxy, &meta);
+                } catch (const Failure& e) {
+                    const std::string reason = e.what();
+                    if (reason != "transport" && reason != "body_transport" && reason != "timeout"
+                        && reason != "connect_timeout")
+                        throw;
+                    // Some GET-only endpoints close a HEAD without a response.
+                }
+                if (job.status == 200 && meta.accepts_ranges && meta.length > 0
+                    && static_cast<uint64_t>(meta.length) > policy_.range_chunk_bytes && strong_etag(meta.etag)) {
+                    if (job.req.limit && static_cast<uint64_t>(meta.length) > job.req.limit)
+                        throw Failure("too_large");
+                    if (read_ranges(job, meta, proxy))
+                        return;
+                }
+            }
+        }
+        exchange(*connections_, curl, job, policy_, proxy);
+    }
+
     void perform(CURL* curl, Job& job) {
         const auto& req = job.req;
         for (int retry = 0;; ++retry) {
@@ -630,12 +844,12 @@ private:
                 if (!req.proxy.empty())
                     ++job.proxy_attempts;
                 try {
-                    exchange(*connections_, curl, job, policy_, req.proxy);
+                    download(curl, job, req.proxy);
                 } catch (const Failure& e) {
                     if (req.proxy.empty() || std::string(e.what()) != "transport")
                         throw;
                     ++job.fallbacks;
-                    exchange(*connections_, curl, job, policy_, "");
+                    download(curl, job, "");
                 }
                 return;
             } catch (const Failure& e) {
@@ -742,7 +956,8 @@ PYBIND11_MODULE(_media_network, m) {
         .def_readwrite("region_list", &Policy::region_list)
         .def_readwrite("internal", &Policy::internal)
         .def_readwrite("rewrite_oss", &Policy::rewrite_oss)
-        .def_readwrite("ca", &Policy::ca);
+        .def_readwrite("ca", &Policy::ca)
+        .def_readwrite("range_chunk_bytes", &Policy::range_chunk_bytes);
     py::class_<Request>(m, "Request")
         .def(py::init<>())
         .def_readwrite("url", &Request::url)
