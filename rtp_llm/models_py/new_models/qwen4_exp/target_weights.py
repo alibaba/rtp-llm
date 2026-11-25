@@ -24,6 +24,7 @@ from rtp_llm.models_py.new_models.qwen4_exp.dense_weights import Qwen4ShardedPro
 from rtp_llm.models_py.new_models.qwen4_exp.expert_factory import make_qwen4_experts
 from rtp_llm.models_py.new_models.qwen4_exp.ple_layer import Qwen4PLELayer
 from rtp_llm.models_py.new_models.qwen4_exp.qsa_indexer import Qwen4QSAIndexer
+from rtp_llm.models_py.new_models.qwen4_exp.resident_checkpoint import Qwen4ResidentOwner
 
 
 class Qwen4CheckpointPlan:
@@ -265,7 +266,7 @@ class Qwen4DecoderWeights(RtpModule):
                 prefetch_budget_mb=plan.ple_prefetch_mb)
 
 
-class Qwen4TargetWeights(DecoderHandlerOwner, RtpModule):
+class Qwen4TargetWeights(Qwen4ResidentOwner, DecoderHandlerOwner, RtpModule):
     @classmethod
     def from_ft_checkpoint_header(cls, model_config, load_config, checkpoint):
         from rtp_llm.models_py.new_models.qwen4_exp.rank_local_ft import rank_local_plan
@@ -278,7 +279,9 @@ class Qwen4TargetWeights(DecoderHandlerOwner, RtpModule):
     def __init__(self, model_config, load_config, *, checkpoint_plan=None):
         super().__init__()
         directory = model_config.get("ckpt_path") if isinstance(model_config,dict) else model_config.ckpt_path
-        self.checkpoint_plan = plan = checkpoint_plan or Qwen4CheckpointPlan(directory, model_config)
+        self.checkpoint_plan = plan = checkpoint_plan or self._resident_plan(
+            getattr(load_config, "resident_construction", None), directory, model_config
+        ) or Qwen4CheckpointPlan(directory, model_config)
         self.WEIGHTS_MAPPER = WeightsMapper(prefix_mapping={plan.prefix:""})
         self._init_decoder_handlers(load_config, plan.hidden_size)
         def option(name, default):

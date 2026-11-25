@@ -286,10 +286,10 @@ class BaseModel(object):
         config = self.model_config
         fingerprint = {
             "model_type": config.model_type,
-            "owner_layout": "newloader/native-v1",
+            "owner_layout": "newloader/native-v2",
             "load_method": str(self.load_method),
             "force_cpu_load_weights": str(self.force_cpu_load_weights),
-            "fmha_config": self.fmha_config.to_string(),
+            "fmha_config": self.fmha_config.to_string() if self.fmha_config is not None else "",
             "max_generate_batch_size": str(self.max_generate_batch_size),
             "checkpoint_path": os.path.realpath(config.ckpt_path),
             "checkpoint_files": checkpoint_digest(config.ckpt_path, follow_index=True),

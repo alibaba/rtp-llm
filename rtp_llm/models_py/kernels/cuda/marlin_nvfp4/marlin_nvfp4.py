@@ -313,6 +313,28 @@ class Nvfp4MarlinMoE:
         except (TypeError, ValueError):
             return False
 
+    @classmethod
+    def from_prepared(cls, w1, w2, s1, s2, g1, g2, *, ep_rank):
+        """Bind the six published tensors; allocate per-stream workspaces afresh."""
+        load_library()
+        experts, tiles, packed_n = w1.shape
+        n, k = packed_n // 4, tiles * 16
+        if (packed_n % 4 or n % 16 or w1.dtype != torch.int32 or w2.dtype != torch.int32
+                or w2.shape != (experts, n // 16, k * 2)
+                or s1.shape != (experts, tiles, n * 2)
+                or s2.shape != (experts, n // 16, k)
+                or s1.dtype != torch.float8_e4m3fn or s2.dtype != torch.float8_e4m3fn
+                or g1.numel() != experts or g2.numel() != experts
+                or any(x.device != w1.device for x in (w2, s1, s2, g1, g2))):
+            raise ValueError("Inconsistent prepared NVFP4 Marlin tensors")
+        moe = cls.__new__(cls)
+        moe.experts, moe.n, moe.k = experts, n, k
+        moe._one_row_sm120 = (k, n) == (2560, 640) and torch.cuda.get_device_capability(w1.device) == (12, 0)
+        moe.first = experts * ep_rank
+        moe.w1, moe.w2, moe.s1, moe.s2, moe.g1, moe.g2 = w1, w2, s1, s2, g1, g2
+        moe.workspaces = {}
+        return moe
+
     def __init__(self, q1, s1, g1, q2, s2, g2, ep_size, ep_rank=0):
         load_library()
         self.experts, both_n, packed_k = q1.shape

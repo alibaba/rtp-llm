@@ -2412,7 +2412,7 @@ class NewModelLoader:
             notify(method.value)
 
     @staticmethod
-    def _migrate_staged_modules(model: nn.Module, device: str) -> None:
+    def _migrate_staged_modules(model: nn.Module, device: str, *, defer_executor=False) -> None:
         """Move and compress online-quantized leaves one at a time.
 
         Migrating the entire model first would retain every BF16 staging weight on
@@ -2424,9 +2424,13 @@ class NewModelLoader:
         NewModelLoader._validate_staged_device_modules(model, staged_modules)
         for module in staged_modules:
             module.to(target_device)
-            module.process_weights_after_loading()
+            stage = getattr(module, "process_weights_during_staged_load", None)
+            if defer_executor and callable(stage):
+                stage()
+            else:
+                module.process_weights_after_loading()
 
-    def _finalize_host_staged_modules(self, model):
+    def _finalize_host_staged_modules(self, model, *, defer_executor=False):
         if self.load_config.force_cpu_load_weights:
             # Honor a requested host quantizer, not merely host checkpoint I/O.
             for module in self._staged_device_modules(model):
@@ -2435,7 +2439,7 @@ class NewModelLoader:
                 )
                 if callable(prepare):
                     prepare(module)
-        self._migrate_staged_modules(model, self.load_config.device)
+        self._migrate_staged_modules(model, self.load_config.device, defer_executor=defer_executor)
 
     def _prepare_checkpoint(self, requested_method, startup_lora):
         meta_checkpoint = None
@@ -2573,7 +2577,8 @@ class NewModelLoader:
                 self._validate_runtime_backends(model, self.load_config.device)
                 self._notify_checkpoint_source(model, method)
                 bind_borrowed_parameters(model, self.parameter_aliases, self.load_config.device)
-                rc.restore(model, resident, restored, self.load_config.device)
+                rc.restore(model, resident, restored, self.load_config.device,
+                           construction=self.load_config.resident_construction)
                 model.to(self.load_config.device)
                 self._validate_loaded_weights(model)
                 if not getattr(model, "resident_after_post_load", False):
@@ -2687,7 +2692,7 @@ class NewModelLoader:
                 if meta_checkpoint is not None:
                     # Raw Meta tensors, unlike FT snapshots, still need the same
                     # bounded layer-at-a-time conversion as a floating HF checkpoint.
-                    self._finalize_host_staged_modules(model)
+                    self._finalize_host_staged_modules(model, defer_executor=resident is not None)
                 model.to(self.load_config.device)
                 self._validate_loaded_weights(model)
                 after_hooks = resident is not None and getattr(model, "resident_after_post_load", False)
@@ -2945,7 +2950,7 @@ class NewModelLoader:
 
         with self._checkpoint_preflight(model, requested_method):
             if not accelerator_fst:
-                self._finalize_host_staged_modules(model)
+                self._finalize_host_staged_modules(model, defer_executor=resident is not None)
             validate_borrowed_parameters(model, self.load_config.device)
             model.to(self.load_config.device)
             self._validate_loaded_weights(model)

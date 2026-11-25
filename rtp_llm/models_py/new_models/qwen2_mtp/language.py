@@ -24,6 +24,25 @@ class Qwen2MTPForCausalLM(Qwen2ForCausalLM):
     decoder layers otherwise retain their checkpoint indices.
     """
 
+    resident_after_post_load = True
+
+    def resident_constructor_state(self):
+        state = super().resident_constructor_state()
+        state["draft_extras"] = sorted(self._extra_draft_seen)
+        return state
+
+    def prepare_resident_checkpoint_restore(self, state, values):
+        super().prepare_resident_checkpoint_restore(state, values)
+        self._extra_draft_seen = set(state["draft_extras"])
+        if self._extra_draft_seen != self._extra_draft_shapes.keys():
+            raise ValueError("Resident MTP layer coverage differs from this draft")
+        for name in ("d2t", "t2d"):
+            value = values.get(name)
+            if value is not None:
+                if value.dtype != torch.int64 or value.ndim != 1:
+                    raise ValueError(f"Invalid resident draft vocabulary map {name}")
+                self._buffers[name] = value
+
     WEIGHTS_MAPPER = Qwen2CheckpointMapper(
         exact_mapping={
             "model.layers.0.e_norm.weight": "mtp_block.e_norm.weight",

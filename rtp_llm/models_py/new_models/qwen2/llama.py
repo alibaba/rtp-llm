@@ -26,6 +26,7 @@ def _check_window(hf, max_seq_len):
 class LlamaForCausalLM(Qwen2ForCausalLM):
     # The HF Q/K rotary channel ordering, gated MLP and TP slicing are the
     # same as Qwen2. Do not create (or falsely require) a packed QKV bias.
+    resident_after_post_load = True
     QKV_BIAS = False
 
     def checkpoint_weight_name_filter(self):
@@ -61,7 +62,7 @@ class LlamaForCausalLM(Qwen2ForCausalLM):
             if (root / "config.json").is_file():
                 with (root / "config.json").open() as stream:
                     hf = json.load(stream)
-            elif not (root / "params.json").is_file():
+            elif not (root / "params.json").is_file() and getattr(load_config, "resident_construction", None) is None:
                 # FT exports may have only a rank index; architecture and
                 # topology come from the caller and the FT importer. Never
                 # mistake an ordinary HF shard index for an FT snapshot.

@@ -7,6 +7,7 @@ from torch import nn
 
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.new_models.qwen4_exp.hyper_connection import Qwen4HyperConnection
+from rtp_llm.models_py.new_models.qwen4_exp.resident_checkpoint import Qwen4ResidentOwner
 from rtp_llm.models_py.new_models.qwen4_exp.target_weights import (
     Qwen4CheckpointPlan,
     Qwen4DecoderWeights,
@@ -55,7 +56,7 @@ class _DraftPlan(Qwen4CheckpointPlan):
             )
 
 
-class Qwen4MTPDraftWeights(RtpModule):
+class Qwen4MTPDraftWeights(Qwen4ResidentOwner, RtpModule):
     """Load only mtp.* plus the source vocabulary when it isn't a target loan."""
 
     preserved_ft_parameter_loans = {
@@ -136,7 +137,9 @@ class Qwen4MTPDraftWeights(RtpModule):
         directory = (
             config["ckpt_path"] if isinstance(config, dict) else config.ckpt_path
         )
-        self.checkpoint_plan = plan = checkpoint_plan or _DraftPlan(directory, config)
+        self.checkpoint_plan = plan = checkpoint_plan or self._resident_plan(
+            getattr(load, "resident_construction", None), directory, config
+        ) or _DraftPlan(directory, config)
         if load.compute_dtype != torch.bfloat16:
             raise ValueError("Qwen4 draft requires BF16 compute")
         self._vocab_loan = loan = load.prepared_runtime_loan

@@ -174,6 +174,8 @@ class Qwen4Nvfp4Experts(RtpModule):
             for op in ("gptq_marlin_repack", "moe_wna16_marlin_gemm"):
                 getattr(torch.ops.rtp_qwen4_marlin, op)
 
+    resident_consumed_parameters = ("w13", "w2", "s13", "s2")
+
     def process_weights_after_loading(self):
         if not self.w13.is_cuda or self._marlin is not None:
             return
@@ -181,16 +183,34 @@ class Qwen4Nvfp4Experts(RtpModule):
             Nvfp4MarlinMoE,
         )
 
-        moe = Nvfp4MarlinMoE(
-            self.w13,
-            self.s13,
-            self.outer_scales[:, 0].contiguous(),
-            self.w2,
-            self.s2,
-            self.outer_scales[:, 2].contiguous(),
-            self.ep_size,
-            self.ep_rank,
-        )
+        def pack():
+            return Nvfp4MarlinMoE(
+                self.w13, self.s13, self.outer_scales[:, 0].contiguous(),
+                self.w2, self.s2, self.outer_scales[:, 2].contiguous(),
+                self.ep_size, self.ep_rank,
+            )
+
+        binding = getattr(self, "_resident_expert_inputs", None)
+        if binding is None:
+            moe = pack()
+        else:
+            from rtp_llm.resident_weights import resident_init_tensors
+
+            bank, prefix = binding
+            consumed = tuple(prefix + n for n in self.resident_consumed_parameters)
+            outputs = tuple(prefix + "marlin." + n for n in ("w1", "w2", "s1", "s2", "g1", "g2"))
+
+            def build():
+                packed = pack()
+                for key in consumed:
+                    bank.global_weights.pop(key)
+                return packed.w1, packed.w2, packed.s1, packed.s2, packed.g1, packed.g2
+
+            tensors = resident_init_tensors(
+                bank.global_weights, prefix + "marlin.v1", outputs, consumed, build
+            )
+            moe = Nvfp4MarlinMoE.from_prepared(*tensors, ep_rank=self.ep_rank)
+            bank.consumed.update(consumed)
         # Retain only one set of large matrices. Marlin owns the repacked
         # tensors and these Parameters expose the same storage to the model.
         for name, tensor in (

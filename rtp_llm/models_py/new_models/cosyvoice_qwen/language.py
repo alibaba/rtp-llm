@@ -6,6 +6,8 @@ from rtp_llm.models_py.new_models.qwen2.language import Qwen2ForCausalLM
 
 
 class CosyVoiceQwenForCausalLM(Qwen2ForCausalLM):
+    resident_after_post_load = True
+
     def load_ft_checkpoint(self, checkpoint):
         from rtp_llm.models_py.new_models.qwen2.ft_checkpoint import (
             load_gqa_ffn_ft_checkpoint,

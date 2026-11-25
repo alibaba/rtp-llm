@@ -33,6 +33,14 @@ class _Layer(RtpModule):
         self.norm = torch.nn.Parameter(torch.empty(128, dtype=torch.bfloat16))
 
 
+    def resident_constructor_state(self):
+        self.experts.validate_weights_loaded()
+        return {"inputs": sorted(self.experts._loaded)}
+
+    def prepare_resident_checkpoint_restore(self, state, values):
+        self.experts._loaded = set(state["inputs"])
+
+
 def _payload():
     payload = {"norm": torch.arange(128).bfloat16()}
     for e in range(4):
@@ -50,7 +58,7 @@ def _payload():
     return payload
 
 
-def _load(directory, size=1, rank=0, method="scratch", device="cpu"):
+def _load(directory, size=1, rank=0, method="scratch", device="cpu", **resident):
     model_config = SimpleNamespace(
         model_type="_qwen4_nvfp4_expert_cpu_test", num_experts=4, layer_num=1, moe_k=2
     )
@@ -64,7 +72,7 @@ def _load(directory, size=1, rank=0, method="scratch", device="cpu"):
         ep_rank=rank,
     )
     loader = NewModelLoader(model_config, load, model_path=directory)
-    model = loader.load()
+    model = loader.load(**resident)
     assert loader._selected_load_method.value == method
     return model
 
@@ -172,6 +180,50 @@ class Qwen4Nvfp4ExpertTest(unittest.TestCase):
             other = actual.get_parameter(name)
             self.assertEqual(param.dtype, other.dtype)
             torch.testing.assert_close(param.view(torch.uint8), other.view(torch.uint8))
+
+    @unittest.skipUnless(
+        os.environ.get("RUN_Q4_NEWLOADER_MARLIN") == "1",
+        "requires the H20 CUDA 13 Marlin test target",
+    )
+    def test_restart_maps_packed_marlin_weights_without_repacking(self):
+        from unittest.mock import patch
+        from uuid import uuid4
+
+        from rtp_llm.resident_weights import ResidentWeights, store
+
+        name = "rtp_llm_q4_marlin." + uuid4().hex
+        device = f"cuda:{torch.cuda.current_device()}"
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, RTP_LLM_RESIDENT_STORE=name):
+            self._save(directory, _payload())
+            store.ensure_running(name, owner_pid=os.getpid())
+            try:
+                x = torch.ones(1, 128, dtype=torch.bfloat16, device=device)
+                ids = torch.zeros((1, 1), dtype=torch.int32, device=device)
+                prob = torch.ones((1, 1), device=device)
+                for hot in (False, True):
+                    manager = ResidentWeights("target", 0, {"layout": "direct_marlin"}, False)
+                    record = manager.acquire_for_load(device, synchronize_ranks=False)
+                    self.assertEqual(record is not None, hot)
+                    if hot:
+                        with patch(
+                            "rtp_llm.models_py.kernels.cuda.marlin_nvfp4.marlin_nvfp4.prepare_weight",
+                            side_effect=AssertionError("hot reload repacked a resident weight"),
+                        ):
+                            model = _load(directory, device=device, resident=manager, restored=record)
+                    else:
+                        model = _load(directory, device=device, resident=manager)
+                        Path(directory, "model.safetensors").unlink()
+                    output = model.experts(x, ids, prob).cpu()
+                    self.assertIsNotNone(manager.allocation_of(model.experts._marlin.w1))
+                    if hot:
+                        torch.testing.assert_close(output, expected, rtol=0, atol=0)
+                    else:
+                        expected = output
+                    manager.finalize()
+                    model.close()
+                    del model, manager
+            finally:
+                store.stop_store(name)
 
     @unittest.skipUnless(
         os.environ.get("RUN_Q4_NEWLOADER_MARLIN") == "1",

@@ -447,7 +447,9 @@ class Qwen3ForCausalLM(GptModelBase, RtpModule):
         from rtp_llm.models_py.layers.linear import LinearBase
         from rtp_llm.models_py.quant_methods.unquantized import UnquantizedLinearMethod
 
-        if type(self) is not Qwen3ForCausalLM or any(
+        # A derived MoE or draft model can add non-parameter execution state.
+        # Only a concrete owner that declares this final-dense layout uses it.
+        if not type(self).__dict__.get("resident_after_post_load", False) or any(
             not isinstance(m.quant_method, UnquantizedLinearMethod)
             for m in self.modules() if isinstance(m, LinearBase)
         ):
@@ -455,6 +457,9 @@ class Qwen3ForCausalLM(GptModelBase, RtpModule):
         return {"handlers": self.handler_heads.resident_shapes(),
                 "head_explicit": bool(self.lm_head and self.lm_head._explicit_checkpoint_loaded),
                 "head_tied": bool(self.lm_head and self.lm_head._tied_checkpoint_loaded)}
+
+    def prepare_resident_checkpoint_restore(self, state, values):
+        self.handler_heads.bind_resident_parameters_from_record(state["handlers"], values)
 
     def finish_resident_checkpoint_restore(self):
         from rtp_llm.models_py.resident_checkpoint import restore_final_linears
@@ -640,8 +645,6 @@ class Qwen3ForCausalLM(GptModelBase, RtpModule):
         self._native_resident_state = getattr(load_config, "resident_construction", None)
         cfg = self._dense_config(model_config, load_config)
         self._init_handler_heads(load_config, cfg)
-        if self._native_resident_state is not None:
-            self.handler_heads.reserve_resident_parameters(self._native_resident_state["handlers"])
         _validate_supported_parallelism(parallelism_config)
         pp_size = int(getattr(parallelism_config, "pp_size", 1))
         is_draft = bool(

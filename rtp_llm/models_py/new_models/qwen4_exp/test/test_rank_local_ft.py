@@ -109,7 +109,7 @@ def write_rank_pair(root):
 
 
 class Qwen4FTTest(unittest.TestCase):
-    def check_rank1(self, backend, pruned=False):
+    def check_rank1(self, backend, pruned=False, restart=False):
         with tempfile.TemporaryDirectory() as directory:
             write_rank_pair(Path(directory))
             topology = CheckpointTopology(tp_size=2, tp_rank=1, ep_size=2, ep_rank=1)
@@ -175,10 +175,34 @@ class Qwen4FTTest(unittest.TestCase):
             torch.testing.assert_close(
                 table.shard_1, ft.read("layers.0.qwen4.ple.ngram_shards.1")
             )
+            if restart:
+                # This is a CPU construction/ownership test, not a VMM/device smoke.
+                from rtp_llm.models_py.resident_checkpoint import ResidentFTHeader
+
+                ref = ResidentFTHeader.recording(ft)
+                Qwen4TargetWeights.from_ft_checkpoint_header(config, load, ref)
+                state = json.loads(json.dumps(model.resident_constructor_state()))
+                values = dict(model.named_parameters())
+                for path in Path(directory).glob("*.safetensors"):
+                    path.unlink()
+                (Path(directory) / "model.safetensors.index.json").unlink()
+                replay = ResidentFTHeader(directory, json.loads(json.dumps(ref.facts)))
+                restored = Qwen4TargetWeights.from_ft_checkpoint_header(
+                    config, replace(load, resident_construction=state), replay
+                )
+                restored.prepare_resident_checkpoint_restore(state, values)
+                fresh = restored.layers[0].ple.ple_embedding.ngram_embedding
+                self.assertEqual(fresh.shard_1.data_ptr(), table.shard_1.data_ptr())
+                self.assertEqual(fresh.shard_rows, table.shard_rows)
+                restored.layers[0].mlp.experts.validate_weights_loaded()
+                restored.close()
             model.close()
 
     def test_rank1_attention_experts_and_global_parameters(self):
         self.check_rank1("scratch")
+
+    def test_ft_restart_rebuilds_constructor_and_host_ple_without_shards(self):
+        self.check_rank1("scratch", restart=True)
 
     def test_native_fst_rank1(self):
         self.check_rank1("fastsafetensors")

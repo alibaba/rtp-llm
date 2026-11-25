@@ -182,7 +182,10 @@ models_py_test(
     name = "qwen4_nvfp4_newloader_hopper_output_test",
     src = "new_models/qwen4_exp/nvfp4_experts_test.py",
     gpu = "H20_CU13",
-    args = ["Qwen4Nvfp4ExpertTest.test_gpu_marlin_output_against_dequantized_reference"],
+    args = [
+        "Qwen4Nvfp4ExpertTest.test_gpu_marlin_output_against_dequantized_reference",
+        "Qwen4Nvfp4ExpertTest.test_restart_maps_packed_marlin_weights_without_repacking",
+    ],
     env = {"RUN_Q4_NEWLOADER_MARLIN": "1"},
     deps = [":new_weight_loader"],
 )
@@ -392,7 +395,7 @@ py_test(
 py_test(
     name = "native_resident_restart_test",
     srcs = ["native_resident_restart_test.py"],
-    deps = [":new_loader_core", "//rtp_llm/resident_weights"],
+    deps = [":new_loader_core", "//rtp_llm:fastsafetensors", "//rtp_llm/resident_weights"],
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )

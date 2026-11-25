@@ -237,16 +237,17 @@ class BertEncoderOwner(GptModelBase, RtpModule):
             else ReplicatedHandlerHeads(*args)
         )
 
-        if resident is not None:
-            self.handler_heads.reserve_resident_parameters(resident["handlers"])
-            if resident["has_pooler"]:
-                if self.pooler is None:
-                    raise ValueError("Resident pooler belongs to another PP stage")
-                width = self.pooler.width
-                for name, shape in (("weight", (width, width)), ("bias", (width,))):
-                    self.pooler.register_parameter(
-                        name, nn.Parameter(self.pooler._anchor.new_empty(shape), requires_grad=False)
-                    )
+    def prepare_resident_checkpoint_restore(self, state, values):
+        self.handler_heads.bind_resident_parameters_from_record(state["handlers"], values)
+        if state["has_pooler"]:
+            if self.pooler is None:
+                raise ValueError("Resident pooler belongs to another PP stage")
+            width = self.pooler.width
+            for name, shape in (("weight", (width, width)), ("bias", (width,))):
+                value = values["pooler." + name]
+                if tuple(value.shape) != shape or value.dtype != self.pooler._anchor.dtype:
+                    raise ValueError(f"Invalid resident pooler layout: {name}")
+                self.pooler.register_parameter(name, nn.Parameter(value, requires_grad=False))
 
     def finalize_runtime_input_vocab(self, config, tokenizer):
         publish_input_vocab(config, tokenizer, self.checkpoint_input_vocab_size)
