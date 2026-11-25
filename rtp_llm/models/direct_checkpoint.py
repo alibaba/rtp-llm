@@ -49,27 +49,12 @@ def _runtime_view(module, config, device):
     )
 
 
-def load_owned_model(service, *, publish_runtime=True):
-    """Build locally first; never expose a half-loaded module to serving."""
-    config = service.model_config
-    if not is_model_registered(config.model_type):
-        raise ValueError(
-            f"Cannot serve model_type={config.model_type!r}: no direct checkpoint "
-            "owner is registered. Architecture detection alone does not provide "
-            "a loader. Check rtp_llm.models_py.registry.list_models()."
-        )
-    owner_cls = get_model_class(config.model_type)
+def _resolve_owner_loans(service, config, device, publish_runtime):
     aliases = {}
-    device = service._get_device_str()
-    if (
-        not publish_runtime
-        and torch.device(device).type == "cuda"
-        and not torch.cuda.is_available()
-    ):
-        device = "cpu"
     prepared_loan = None
     admin_lock = None
     if service._weight_alias_names:
+        owner_cls = get_model_class(config.model_type)
         source = service._weight_alias_owner
         if source is None or source.py_model is None or source.weight is None:
             raise RuntimeError("draft parameter loans require an already loaded target")
@@ -92,6 +77,26 @@ def load_owned_model(service, *, publish_runtime=True):
             aliases = aliases_from_runtime_exports(
                 source.py_model, exports, owner_cls.runtime_parameter_paths
             )
+    return aliases, prepared_loan, admin_lock
+
+
+def load_owned_model(service, *, publish_runtime=True):
+    """Build locally first; never expose a half-loaded module to serving."""
+    config = service.model_config
+    if not is_model_registered(config.model_type):
+        raise ValueError(
+            f"Cannot serve model_type={config.model_type!r}: no direct checkpoint "
+            "owner is registered. Architecture detection alone does not provide "
+            "a loader. Check rtp_llm.models_py.registry.list_models()."
+        )
+    device = service._get_device_str()
+    if (
+        not publish_runtime
+        and torch.device(device).type == "cuda"
+        and not torch.cuda.is_available()
+    ):
+        device = "cpu"
+    admin_lock = None
     source_quant = config.quant_config
     quant_type = "none"
     if source_quant is not None:
@@ -106,7 +111,7 @@ def load_owned_model(service, *, publish_runtime=True):
     load_config = NewLoaderConfig.from_runtime(
         service.parallelism_config,
         device=device,
-        prepared_runtime_loan=prepared_loan,
+
         compute_dtype=config.compute_dtype,
         load_method=method,
         quant_config=QuantizationConfig(
@@ -135,7 +140,7 @@ def load_owned_model(service, *, publish_runtime=True):
         ),
     )
     loader = NewModelLoader(
-        config, load_config, model_path=config.ckpt_path, parameter_aliases=aliases
+        config, load_config, model_path=config.ckpt_path
     )
     logging.info(
         "Using NewModelLoader for model_type=%s requested=%s", config.model_type, method
@@ -154,7 +159,12 @@ def load_owned_model(service, *, publish_runtime=True):
             len(adapters),
             service.merge_lora,
         )
-    module = loader.load(startup_lora=merged_adapter)
+    def prepare_loans():
+        nonlocal admin_lock
+        aliases, prepared, admin_lock = _resolve_owner_loans(service, config, device, publish_runtime)
+        return aliases, prepared
+
+    module = loader.load(startup_lora=merged_adapter, prepare_loans=prepare_loans)
     actual = loader.loaded_method
     requested = load_config.load_method
     if actual is None or (

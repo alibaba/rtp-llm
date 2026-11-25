@@ -163,11 +163,7 @@ class BaseMoEExperts(RtpModule):
         full_map = {**self._BASE_QUANT_MAP, **self._EXTRA_QUANT_MAP}
         self._quant_family = full_map.get(raw_qt, "none")
 
-        if num_experts % ep_size != 0:
-            raise ValueError(
-                f"num_experts ({num_experts}) must be divisible by ep_size ({ep_size}) "
-                "to avoid silently dropping experts during EP loading."
-            )
+        # The placement validates EP divisibility of physical slots, not logical ids.
         if top_k > num_experts:
             raise ValueError(
                 f"top_k ({top_k}) cannot exceed num_experts ({num_experts})"
@@ -244,7 +240,7 @@ class BaseMoEExperts(RtpModule):
         # Explicit phy2log files need not place a logical expert in its
         # canonical slot. Keep the legacy choice where valid; otherwise select
         # a slot that actually contains that expert from the loaded placement.
-        logical_per_rank = self.num_experts // self.ep_size
+        logical_per_rank = (self.num_experts + self.ep_size - 1) // self.ep_size
         initial_map = self._expert_placement.physical_to_logical
         first = {}
         for slot, logical in enumerate(initial_map):
@@ -255,7 +251,7 @@ class BaseMoEExperts(RtpModule):
                 logical // logical_per_rank
             ) * self.num_local_experts + logical % logical_per_rank
             routes.append(
-                canonical if initial_map[canonical] == logical else first[logical]
+                canonical if canonical < len(initial_map) and initial_map[canonical] == logical else first[logical]
             )
         self.register_buffer(
             "_initial_expert_route",
@@ -1460,7 +1456,7 @@ class BaseMoEExperts(RtpModule):
         if self._dynamic_eplb_enabled:
             extra_finalize_args = {
                 "eplb_logical_topk_ids": topk_ids,
-                "eplb_logical_experts_per_rank": self.num_experts // self.ep_size,
+                "eplb_logical_experts_per_rank": (self.num_experts + self.ep_size - 1) // self.ep_size,
             }
         return self.fused_moe(
             hidden_states=hidden_states,

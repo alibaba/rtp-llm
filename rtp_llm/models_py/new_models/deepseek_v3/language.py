@@ -540,10 +540,7 @@ def extract_config_values(
             raise ValueError(
                 f"num_experts_per_tok={top_k} must be in [1, {num_experts}]"
             )
-        if num_experts % ep_size:
-            raise ValueError(
-                f"num_experts={num_experts} must be divisible by ep_size={ep_size}"
-            )
+
     if is_sparse:
         if q_lora_rank == 0:
             raise ValueError("DeepSeek sparse indexer requires q_lora_rank > 0")

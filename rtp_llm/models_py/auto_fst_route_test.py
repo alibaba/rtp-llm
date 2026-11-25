@@ -38,6 +38,16 @@ def _loader(root, device="cuda:0", **kwargs):
     )
 
 
+@register_model("_test_overlay_local_stage")
+class _OverlayStage(_Owner):
+    def __init__(self, config, load):
+        super().__init__(config, load)
+        self.bias = torch.nn.Parameter(torch.empty_like(self.weight), requires_grad=False)
+
+    def checkpoint_weight_name_filter(self):
+        return lambda name: name in ("weight", "bias")
+
+
 @register_model("_test_draft_loan_preflight")
 class _DraftWithLoan(_Owner):
     def __init__(self, config, load):
@@ -166,10 +176,65 @@ def _rank_decision(rank, root, init):
             load_method=Method.AUTO,
             parallelism_config=SimpleNamespace(world_size=2, pp_size=1),
         )
+        from rtp_llm.models_py.fst_file_plan import plan_fst_files
+        from rtp_llm.models_py.read_spec import ReadSpec
+        local = Path(root) / f"plan-{rank}"
+        local.mkdir()
+        shard = str(local / "same.safetensors")
+        pg = dist.group.WORLD
+        case = unittest.TestCase()
+        for shape, dtype, key in [((rank + 1,), torch.float32, "w"), ((2,), torch.int32 if rank else torch.float32, "w"),
+                                  ((2,), torch.float32, f"w{rank}")]:
+            save_file({key: torch.ones(shape, dtype=dtype)}, shard)
+            case.assertEqual(plan_fst_files([shard], local, pg, None, None), ([], [shard]))
+        save_file({"w": torch.ones(2)}, shard)
+        case.assertEqual(plan_fst_files([shard], local, pg, None, None), ([shard], []))
+        def inconsistent_placement(name, shape):
+            return ReadSpec.full(name, shape).with_targets((rank,), True)
+        with case.assertRaisesRegex(ValueError, "Inconsistent expert placement"):
+            plan_fst_files([shard], local, pg, None, None, resolver=inconsistent_placement)
         paths = [] if rank == 1 else loader._checkpoint_files()
         # Exercise the real load() preflight, not just the backend vote.
         for method in (Method.AUTO, Method.FASTSAFETENSORS):
+            # Rank 1 fails even before there is a model instance or a reader.
+            empty = Path(root) / "rank1-empty"
+            if rank == 1:
+                empty.mkdir(exist_ok=True)
+            missing = _loader(empty if rank == 1 else root, "cpu", load_method=method)
+            with unittest.TestCase().assertRaisesRegex(
+                RuntimeError, "rank 1: FileNotFoundError: No supported checkpoint files"
+            ):
+                missing.load()
+            assert missing.loaded_method is None
             consumer = _loader(root, "cpu", load_method=method)
+            failed_import = patch("rtp_llm.models_py.model_loader.get_model_class",
+                                  side_effect=ImportError("missing owner backend")) if rank else ExitStack()
+            with failed_import, case.assertRaisesRegex(RuntimeError, "rank 1: ImportError: missing owner backend"):
+                consumer.load()
+            def allocate(*args, **kwargs):
+                if rank:
+                    raise RuntimeError("rank-local destination exhausted")
+            with patch.object(consumer, "_select_load_method", return_value=Method.FASTSAFETENSORS), patch.object(
+                consumer, "_prepare_model_for_fastsafetensors", side_effect=allocate
+            ), case.assertRaisesRegex(RuntimeError, "rank 1: RuntimeError: rank-local destination exhausted"):
+                consumer.load()
+            prepare = consumer._prepare_checkpoint
+            def different_formats(*args):
+                files, expert, meta, ft = prepare(*args)
+                return files, expert, meta, object() if rank else ft
+            with patch.object(consumer, "_prepare_checkpoint", side_effect=different_formats), case.assertRaisesRegex(
+                RuntimeError, "inconsistent checkpoint formats"
+            ):
+                consumer.load()
+            if rank == 1:
+                constructor = patch.object(consumer, "_create_checkpoint_model",
+                                           side_effect=ValueError("bad rank-local header"))
+            else:
+                constructor = ExitStack()
+            with constructor, unittest.TestCase().assertRaisesRegex(
+                RuntimeError, "rank 1: ValueError: bad rank-local header"
+            ):
+                consumer.load()
             with patch.object(consumer, "_model_checkpoint_name_filter",
                               return_value=lambda key: key == ("weight" if rank == 0 else "absent")):
                 with unittest.TestCase().assertRaisesRegex(
@@ -232,6 +297,28 @@ class DefaultFstRouteTest(_CheckpointCase):
         loader = _loader(self.root, device="cpu", load_method=Method.SCRATCH)
         loader.model_config["ptuning_path"] = str(overlay)
         torch.testing.assert_close(loader.load().weight, self.expected + 10)
+
+    def test_overlay_can_supply_entire_local_stage_but_not_hide_missing_weights(self):
+        overlay = self.root / "overlay"
+        overlay.mkdir()
+        save_file({"other_stage.weight": self.expected}, str(self.root / "model.safetensors"))
+        for keys in (("weight", "bias"), ("bias",), ("other_stage.bias",)):
+            torch.save({k: self.expected + 5 for k in keys}, overlay / "pytorch_model.bin")
+            for method in (Method.SCRATCH, Method.AUTO):
+                loader = _loader(self.root, device="cpu", load_method=method)
+                loader.model_config["model_type"] = "_test_overlay_local_stage"
+                loader.model_config["ptuning_path"] = str(overlay)
+                with self.subTest(keys=keys, method=method):
+                    if len(keys) == 2:
+                        loaded = loader.load()
+                        torch.testing.assert_close(loaded.weight, self.expected + 5)
+                        torch.testing.assert_close(loaded.bias, self.expected + 5)
+                    else:
+                        message = ("missing required checkpoint parameters" if keys == ("bias",)
+                                   else "filter did not match")
+                        with self.assertRaisesRegex((ValueError, RuntimeError), message):
+                            loader.load()
+                        self.assertIsNone(loader.loaded_method)
 
     def test_load_method_environment_only_supplies_an_omitted_option(self):
         for env in (None, "", "auto", "scratch", "fastsafetensors", "invalid"):
@@ -341,6 +428,53 @@ class DefaultFstRouteTest(_CheckpointCase):
 
 
 class DefaultFstNativeReaderTest(_CheckpointCase):
+    def test_explicit_fst_with_whole_stage_in_overlay(self):
+        save_file({"other_stage.weight": self.expected}, str(self.root / "model.safetensors"))
+        overlay = self.root / "overlay"
+        overlay.mkdir()
+        torch.save({"weight": self.expected, "bias": self.expected + 1}, overlay / "pytorch_model.bin")
+        loader = _loader(self.root, device="cpu", load_method=Method.FASTSAFETENSORS)
+        loader.model_config.update(model_type="_test_overlay_local_stage", ptuning_path=str(overlay))
+        model = loader.load()
+        self.assertEqual(loader.loaded_method, Method.FASTSAFETENSORS)
+        torch.testing.assert_close(model.weight, self.expected)
+        torch.testing.assert_close(model.bias, self.expected + 1)
+
+    def test_native_scatter_applies_residual_slices_and_matches_scratch(self):
+        from fastsafetensors import ParallelLoader, SingleGroup
+        from fastsafetensors.parallel_loader import TimingContext
+        from rtp_llm.models_py.fastsafetensors_read_spec import build_read_spec_parallel_loader
+        from rtp_llm.models_py.read_spec import ReadSpec
+        from rtp_llm.models_py.v4_fst_nogds import checked_nogds_loader
+
+        path = str(self.root / "model.safetensors")
+        value = torch.arange(24).reshape(8, 3)
+        save_file({"weight": value}, path)
+        cls = build_read_spec_parallel_loader(checked_nogds_loader(ParallelLoader), TimingContext)
+        for indices in ((slice(None), slice(None)), (slice(None, None, 2), -1),
+                        (slice(0, 0), slice(None)), (2, slice(1, None))):
+            def resolve(name, shape):
+                return ReadSpec(name, name, tuple(shape), slices=indices, shard_dim=0)
+            reader = cls(pg=SingleGroup(), hf_weights_files=[path], read_spec_resolver=resolve,
+                         device="cpu", nogds=True, use_tqdm_on_load=False, queue_size=0)
+            try:
+                with self.subTest(indices=indices):
+                    [(name, actual)] = [(n, v.tensor.clone()) for n, v in reader.iterate_weights()]
+                    [(key, expected)] = weight_mapper.get_all_weights([path], read_spec_resolver=resolve)
+                    self.assertEqual(name, key)
+                    torch.testing.assert_close(actual, expected.tensor)
+                    torch.testing.assert_close(actual, value[indices])
+            finally:
+                reader.close()
+        for rank in (0, 1):
+            spec = ReadSpec("w", "w", (8, 3), slices=(slice(rank*4, rank*4+4, 2), 1),
+                            shard_dim=0, shard_count=2, shard_rank=rank)
+            torch.testing.assert_close(spec.materialize_scattered(value.chunk(2)[rank]).tensor,
+                                       spec.materialize(value).tensor)
+            with self.assertRaisesRegex(ValueError, "cross the hinted shard"):
+                ReadSpec("w", "w", (8, 3), slices=(slice(None), 1),
+                         shard_dim=0, shard_count=2, shard_rank=rank)
+
     def test_consumer_failure_closes_active_native_reader_before_unwind(self):
         from rtp_llm.models_py import fst_file_plan, fst_range_reader
 

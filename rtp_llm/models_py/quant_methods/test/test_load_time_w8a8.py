@@ -26,6 +26,7 @@ from rtp_llm.utils.w8a8_int8_quant import (
 
 class _Fixture(RtpModule):
     supports_expert_parallel = True
+    supports_load_time_w8a8 = True
 
     def __init__(self, config, load):
         super().__init__()
@@ -137,6 +138,20 @@ class LoadTimeW8A8Test(unittest.TestCase):
                             torch.testing.assert_close(
                                 actual[name], expected[name], rtol=0, atol=0
                             )
+
+    def test_online_recipe_requires_owner_capability_not_model_name(self):
+        class NoOnlineRecipe(_Fixture):
+            supports_load_time_w8a8 = False
+
+        with tempfile.TemporaryDirectory() as root, patch.dict(
+            MODEL_REGISTRY, {"_another_w8a8_owner": _Fixture, "qwen35_moe": NoOnlineRecipe}
+        ):
+            save_file(self.values(), os.path.join(root, "model.safetensors"))
+            other = self.loader(root)
+            other.model_config.model_type = "_another_w8a8_owner"
+            self.assertTrue(any(t.dtype == torch.int8 for t in other.load().state_dict().values()))
+            with self.assertRaisesRegex(ValueError, "does not support load-time W8A8"):
+                self.loader(root).load()
 
     def test_incompatible_sources_fail_before_model_allocation(self):
         key = "layers.0.self_attn.q_proj.weight"

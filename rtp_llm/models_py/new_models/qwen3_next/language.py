@@ -857,6 +857,10 @@ class Qwen3NextForCausalLM(DecoderHandlerOwner, Qwen3NextModel, RtpModule):
     supports_pp_global_weight_aliases = True
     _expects_mtp = False
 
+    @property
+    def supports_scratch_moe_tp_preshard(self):
+        return bool(self.config.moe_layer_index)
+
     WEIGHTS_MAPPER = WeightsMapper(
         prefix_mapping={
             "model.language_model.": "",
@@ -1216,6 +1220,12 @@ class Qwen3NextForCausalLM(DecoderHandlerOwner, Qwen3NextModel, RtpModule):
         if multimodal_inputs is None:
             return hidden_states
         return self.multimodal_embedding_injector(hidden_states, features, locations)
+
+
+class Qwen35MoeForCausalLM(Qwen3NextForCausalLM):
+    """This owner accepts floating checkpoints for the online W8A8 recipe."""
+
+    supports_load_time_w8a8 = True
 
 
 class Qwen3NextMTPForCausalLM(Qwen3NextForCausalLM):

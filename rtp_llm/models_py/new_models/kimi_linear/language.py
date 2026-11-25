@@ -319,8 +319,7 @@ def _extract_config_values(
         raise ValueError("MLA head count must be divisible by attention TP")
     if kda_num_heads % attn_tp_size:
         raise ValueError("KDA head count must be divisible by attention TP")
-    if num_experts % ep_size:
-        raise ValueError("num_experts must be divisible by EP size")
+
     if tie_word_embeddings and (
         attn_tp_size != lm_head_tp_size or attn_tp_rank != lm_head_tp_rank
     ):

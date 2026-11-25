@@ -5,9 +5,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 import torch
 from pydantic import BaseModel
 
-from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
-from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
+
 from rtp_llm.models_py.downstream_heads import (
     handler_role_name,
     handler_weight_mappings,
@@ -15,6 +13,9 @@ from rtp_llm.models_py.downstream_heads import (
 )
 
 if TYPE_CHECKING:
+    from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
+    from rtp_llm.config.model_config import ModelConfig
+    from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
     from rtp_llm.ops import EmbeddingCppOutput
 
 """

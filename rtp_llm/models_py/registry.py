@@ -24,7 +24,17 @@ def _class_location(cls: Type[nn.Module]) -> str:
         return "<unknown>"
 
 
-def register_lazy_model(model_type: str, module_path: str, class_name: str) -> None:
+_ISOLATED_LAZY_OWNERS = set()
+
+
+def uses_isolated_checkpoint_load(model_type: str) -> bool:
+    # A failed lazy import must not decide whether this rank joins a collective.
+    return model_type in _ISOLATED_LAZY_OWNERS or bool(
+        getattr(MODEL_REGISTRY.get(model_type), "fastsafetensors_load_isolated", False)
+    )
+
+
+def register_lazy_model(model_type: str, module_path: str, class_name: str, *, isolated=False) -> None:
     model_type = _validate_model_type(model_type)
     if not module_path or not class_name:
         raise ValueError("module_path and class_name must be non-empty")
@@ -40,6 +50,8 @@ def register_lazy_model(model_type: str, module_path: str, class_name: str) -> N
             f"Model type {model_type!r} already maps to {existing[0]}.{existing[1]}"
         )
     _LAZY_MODEL_REGISTRY[model_type] = candidate
+    if isolated:
+        _ISOLATED_LAZY_OWNERS.add(model_type)
 
 
 def register_model(model_type: str):
@@ -222,6 +234,7 @@ register_lazy_model(
     "kimi_k25_vision",
     "rtp_llm.models_py.new_models.kimi_k25.vision",
     "KimiK25ForVisionEmbedding",
+    isolated=True,
 )
 
 # Use the service model_type, not the Hugging Face architecture string. Draft
@@ -229,7 +242,7 @@ register_lazy_model(
 for _model_type, _owner in (
     ("qwen3_next", "Qwen3NextForCausalLM"),
     ("qwen35_dense", "Qwen3NextForCausalLM"),
-    ("qwen35_moe", "Qwen3NextForCausalLM"),
+    ("qwen35_moe", "Qwen35MoeForCausalLM"),
     ("qwen3_next_mtp", "Qwen3NextMTPForCausalLM"),
     ("qwen35_dense_mtp", "Qwen35DenseMTPForCausalLM"),
     ("qwen35_moe_mtp", "Qwen35MoeMTPForCausalLM"),

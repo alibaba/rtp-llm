@@ -485,7 +485,7 @@ def iter_read_spec_tensors(
         )
         if can_scatter:
             tensor = file_buffer.get_sharded(key, read_spec.shard_dim)
-            yield read_spec.output_name, read_spec.wrap_sharded_tensor(tensor)
+            yield read_spec.output_name, read_spec.materialize_scattered(tensor)
             continue
 
         tensor = file_buffer.get_tensor(key)

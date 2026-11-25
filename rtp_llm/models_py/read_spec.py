@@ -15,6 +15,10 @@ class ReadSpec:
     (fastsafetensors ``get_sharded``), or as a compatibility fallback after a
     full tensor has been materialized.
 
+    Optional ``shard_dim/count/rank`` describe a uniform transport chunk.
+    Slices may further select within it. Omit the scatter hint for a slice
+    spanning multiple chunks.
+
     ``row_indices`` expresses sorted global checkpoint rows for output-vocab
     pruning (including the tied embedding/head union). Scratch reads just
     their contiguous spans; FST currently selects from its full tensor buffer.
@@ -139,6 +143,7 @@ class ReadSpec:
                 )
             if self.slices is None:
                 raise ValueError("ReadSpec with shard_dim must define slices")
+            self._scatter_axis_index()  # Reject impossible scatter hints on every backend.
         if self.target_ranks is not None:
             if not isinstance(self.target_ranks, tuple):
                 raise TypeError("ReadSpec.target_ranks must be a tuple or None")
@@ -229,6 +234,41 @@ class ReadSpec:
         if not self.is_local_shard:
             return tensor
         return LoadedCheckpointTensor(tensor.contiguous(), self)
+
+    def _scatter_axis_index(self):
+        """Translate the checkpoint index to an index inside this rank's uniform chunk."""
+        dim = self.shard_dim
+        size = self.source_shape[dim]
+        width, remainder = divmod(size, self.shard_count)
+        if remainder:
+            raise ValueError("ReadSpec uniform scatter requires a divisible dimension")
+        offset = width * self.shard_rank
+        index = self.slices[dim]
+        if isinstance(index, int):
+            row = index + size if index < 0 else index
+            if offset <= row < offset + width:
+                return row - offset
+        else:
+            rows = range(*index.indices(size))
+            if rows.step <= 0:
+                raise ValueError("ReadSpec scatter slices require a positive stride")
+            if not rows:
+                return slice(0, 0)
+            if offset <= rows[0] and rows[-1] < offset + width:
+                return slice(rows.start - offset, rows[-1] - offset + 1, rows.step)
+        raise ValueError(
+            "ReadSpec slices cross the hinted shard; omit shard_dim for a general slice"
+        )
+
+    def materialize_scattered(self, tensor: torch.Tensor):
+        """Scatter only applied the uniform chunk, not any remaining model slices."""
+        shape = list(self.source_shape)
+        shape[self.shard_dim] //= self.shard_count
+        if not isinstance(tensor, torch.Tensor) or tuple(tensor.shape) != tuple(shape):
+            raise ValueError(f"FST returned the wrong shard shape for {self.source_name!r}")
+        indices = list(self.slices)
+        indices[self.shard_dim] = self._scatter_axis_index()
+        return self.wrap_sharded_tensor(tensor[tuple(indices)])
 
     def wrap_sharded_tensor(self, tensor: torch.Tensor):
         if not isinstance(tensor, torch.Tensor):

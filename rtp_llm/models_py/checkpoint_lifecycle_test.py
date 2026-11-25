@@ -12,6 +12,35 @@ from rtp_llm.models_py.module_base import RtpModule
 
 
 class CheckpointLifecycleTest(unittest.TestCase):
+    def test_retry_rediscovers_checkpoint_after_empty_directory(self):
+        class Owner(RtpModule):
+            def __init__(self):
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.zeros(2), requires_grad=False)
+
+        with tempfile.TemporaryDirectory() as root:
+            loader = NewModelLoader({"model_type": "deepseek_v41"},
+                                    NewLoaderConfig(device="cpu", load_method="scratch"), model_path=root)
+            with patch.object(loader, "_create_model", side_effect=Owner):
+                with self.assertRaises(FileNotFoundError):
+                    loader.load()
+                save_file({"weight": torch.tensor([3., 7.])}, str(Path(root) / "model.safetensors"))
+                self.assertEqual(loader.load().weight.tolist(), [3., 7.])
+
+
+    def test_fallback_copy_cannot_convert_fp8_and_strided_targets_must_be_writable(self):
+        from rtp_llm.models_py.module_base import validate_checkpoint_storage
+
+        owner = RtpModule()
+        owner.register_buffer("weight", torch.ones(2, dtype=torch.bfloat16))
+        with self.assertRaisesRegex(TypeError, "Dtype mismatch"):
+            owner._assign_weight(owner, "weight", torch.zeros(2).to(torch.float8_e4m3fn))
+        self.assertEqual(owner.weight.tolist(), [1, 1])
+        view = torch.zeros(4)
+        with self.assertRaisesRegex(ValueError, "Internally overlapping"):
+            validate_checkpoint_storage([("weight", view.as_strided((2, 2), (1, 1)))])
+        validate_checkpoint_storage([("weight", view.reshape(2, 2).t())])
+
     def test_read_indices_do_not_treat_bool_as_int(self):
         from rtp_llm.models_py.read_spec import ReadSpec
 

@@ -60,6 +60,51 @@ def copy_weight_(target: torch.Tensor, source: torch.Tensor, label: str) -> None
         target.copy_(source)
 
 
+def checkpoint_byte_span(tensor):
+    start = tensor.data_ptr()
+    extent = 1 + sum((n - 1) * stride for n, stride in zip(tensor.shape, tensor.stride()))
+    return start, start + extent * tensor.element_size()
+
+
+def validate_checkpoint_storage(named_tensors, *, allow_tied=False):
+    """Validate destinations before the first write or device migration."""
+    seen, by_device = set(), {}
+    for name, tensor in named_tensors:
+        if tensor.is_meta or not tensor.numel() or (allow_tied and id(tensor) in seen):
+            continue
+        seen.add(id(tensor))
+        if not tensor.is_contiguous():
+            width = 1
+            for stride, n in sorted((s, n) for s, n in zip(tensor.stride(), tensor.shape) if n > 1):
+                if stride < width:
+                    raise ValueError(f"Internally overlapping checkpoint storage: {name}")
+                width += (n - 1) * stride
+        by_device.setdefault(tensor.device, []).append((*checkpoint_byte_span(tensor), name))
+    for spans in by_device.values():
+        spans.sort()
+        for (_, end, left), (start, _, right) in zip(spans, spans[1:]):
+            if start < end:
+                raise ValueError(
+                    f"tied parameter bindings or overlapping storage require an explicit adapter: {left}, {right}"
+                )
+
+
+def validate_hf_checkpoint_storage(model):
+    borrowed = getattr(model, "_rtp_borrowed_parameter_bindings", {})
+    loan_ids = {id(model.get_parameter(name)) for name in borrowed}
+    def destinations():
+        for path, leaf in model.named_modules(remove_duplicate=False):
+            for name, tensor in (*leaf._parameters.items(), *leaf._buffers.items()):
+                if tensor is None or name in leaf._non_persistent_buffers_set:
+                    continue
+                target = f"{path}.{name}" if path else name
+                if id(tensor) in loan_ids and target not in borrowed:
+                    raise PermissionError(f"Cannot write an alias of a borrowed parameter: {target}")
+                yield target, tensor
+
+    validate_checkpoint_storage(destinations(), allow_tied=True)
+
+
 def _mark_loaded(module: nn.Module, name: str) -> None:
     loaded = getattr(module, "_rtp_loaded_weight_names", None)
     if loaded is None:
@@ -328,20 +373,7 @@ class RtpModule(nn.Module):
         if not is_parameter and not is_buffer:
             return False
         target = parameter if is_parameter else buffer
-        if tuple(target.shape) != tuple(tensor.shape):
-            raise ValueError(
-                f"Shape mismatch for {module.__class__.__name__}.{name}: "
-                f"expected {tuple(target.shape)}, got {tuple(tensor.shape)}"
-            )
-        if target.dtype != tensor.dtype and not (
-            target.is_floating_point() and tensor.is_floating_point()
-        ):
-            raise TypeError(
-                f"Dtype mismatch for {module.__class__.__name__}.{name}: "
-                f"expected {target.dtype}, got {tensor.dtype}"
-            )
-        with torch.no_grad():
-            target.copy_(tensor)
+        copy_weight_(target, tensor, f"{module.__class__.__name__}.{name}")
         _mark_loaded(module, name)
         return True
 

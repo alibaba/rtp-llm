@@ -42,11 +42,7 @@ def _physical_to_logical_layers(
             f"redundant_expert={redundant_experts} must be in "
             f"[0, logical_expert_count={logical_expert_count}]"
         )
-    if logical_expert_count % ep_size:
-        raise ValueError(
-            f"logical_expert_count={logical_expert_count} must be divisible by "
-            f"ep_size={ep_size}"
-        )
+
     if physical_expert_count % ep_size:
         raise ValueError(
             f"physical_expert_count={physical_expert_count} must be divisible by "

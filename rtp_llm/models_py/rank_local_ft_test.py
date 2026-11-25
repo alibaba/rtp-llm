@@ -97,6 +97,16 @@ def _gloo_load(rank, folder, rendezvous):
         torch.testing.assert_close(
             torch.cat(physical), reference[[3, 0, 1, 2, 3, 0]], atol=0, rtol=0
         )
+        original = _Stage.load_ft_checkpoint
+        def import_weights(owner, checkpoint):
+            if rank:
+                owner.boundary = torch.nn.Parameter(torch.zeros(2, dtype=torch.int32), requires_grad=False)
+            original(owner, checkpoint)
+        with patch.object(_Stage, "load_ft_checkpoint", import_weights), unittest.TestCase().assertRaisesRegex(
+            RuntimeError, "rank 1:"
+        ):
+            loader.load()
+        assert loader.loaded_method is None
     finally:
         dist.destroy_process_group()
 
@@ -124,6 +134,34 @@ class _ExpertModel(RtpModule):
 
 
 class RankLocalFTTest(unittest.TestCase):
+    def test_real_hf_rejects_overlapping_storage_and_ambiguous_names(self):
+        from safetensors.torch import save_file
+        from rtp_llm.models_py.weight_mapper import WeightsMapper
+
+        class Owner(RtpModule):
+            WEIGHTS_MAPPER = WeightsMapper(prefix_mapping={"model.": ""})
+            def __init__(self, overlap):
+                super().__init__()
+                buf = torch.zeros(3)
+                self.a = torch.nn.Parameter(buf[:2], requires_grad=False)
+                if overlap:
+                    self.register_buffer("b", buf[1:])
+
+        with tempfile.TemporaryDirectory() as root:
+            for method in ("scratch", "fastsafetensors"):
+                for overlap in (False, True):
+                    owner = Owner(overlap)
+                    save_file({"a": torch.ones(2), "b" if overlap else "model.a": torch.zeros(2)},
+                              str(Path(root) / "model.safetensors"))
+                    loader = NewModelLoader({"model_type": "deepseek_v41"}, NewLoaderConfig(
+                        device="cpu", load_method=method, force_cpu_load_weights=True), model_path=root)
+                    with self.subTest(method=method, overlap=overlap), patch.object(loader, "_create_model", return_value=owner):
+                        with self.assertRaisesRegex(ValueError, "overlapping storage" if overlap else "Ambiguous checkpoint"):
+                            loader.load()
+                        self.assertIsNone(loader.loaded_method)
+                        if overlap:
+                            self.assertEqual(owner.a.tolist(), [0., 0.])
+
     def test_snapshot_blob_and_escaping_shards(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
@@ -145,6 +183,28 @@ class RankLocalFTTest(unittest.TestCase):
             blob.symlink_to(unrelated)
             with self.assertRaisesRegex(ValueError, "escapes checkpoint directory"):
                 FTCheckpoint.open(str(root), CheckpointTopology())
+
+    def test_local_parameter_and_buffer_views_validate_before_copy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            write_ft_shards([(None, n, torch.full((2,), v)) for n, v in
+                             (("a", 1.0), ("b", 9.0))], directory)
+            generate_ft_index(directory, {"TP_SIZE": 1, "DP_SIZE": 1, "EP_SIZE": 1})
+            ft = FTCheckpoint.open(directory, CheckpointTopology())
+            bindings = tuple(RuntimeTensorBinding((f"global.{n}",), n, lambda vs: vs[0])
+                             for n in ("a", "b"))
+            for offset in (0, 1, 2):
+                with self.subTest(offset=offset):
+                    owner = torch.nn.Module()
+                    storage = torch.zeros(4)
+                    owner.a = torch.nn.Parameter(storage[:2], requires_grad=False)
+                    owner.register_buffer("b", storage[offset:offset + 2])
+                    if offset < 2:
+                        with self.assertRaisesRegex(ValueError, "overlapping storage"):
+                            ft.load_parameters(owner, bindings)
+                        self.assertEqual(storage.tolist(), [0, 0, 0, 0])
+                    else:
+                        ft.load_parameters(owner, bindings)
+                        self.assertEqual(storage.tolist(), [1, 1, 9, 9])
 
     def test_ft_writes_do_not_overlap_borrowed_storage(self):
         from rtp_llm.models_py.borrowed_parameters import BorrowedParameter, bind_borrowed_parameters

@@ -35,9 +35,10 @@ from rtp_llm.models_py.module_base import (
     CheckpointLoadTarget,
     RtpModule,
     collect_loaded_tensor_ids,
+    validate_hf_checkpoint_storage,
 )
 from rtp_llm.models_py.read_spec import LoadedCheckpointTensor, ReadSpec
-from rtp_llm.models_py.registry import get_model_class, list_models
+from rtp_llm.models_py.registry import get_model_class, list_models, uses_isolated_checkpoint_load
 
 logger = logging.getLogger(__name__)
 _CUSTOM_WEIGHT_PREFIX = "__custom__."
@@ -97,7 +98,7 @@ class _ExpertRangeFilter:
                 raise TypeError(f"{name} must be an integer, got {value!r}")
         if ep_size <= 0 or not 0 <= ep_rank < ep_size:
             raise ValueError(f"Invalid EP partition: rank={ep_rank}, size={ep_size}")
-        if num_experts <= 0 or num_experts % ep_size != 0:
+        if num_experts <= 0 or (model_config is None and num_experts % ep_size != 0):
             raise ValueError(
                 f"num_experts={num_experts} must be positive and divisible by "
                 f"ep_size={ep_size}"
@@ -238,9 +239,9 @@ class _ExpertRangeFilter:
                     load=self.ep_rank in target_ranks,
                     slices=(expert_id,) + (slice(None),) * (len(shape) - 1),
                     partition="ep_stacked_expert",
-                    shard_dim=0,
-                    shard_count=self.ep_size,
-                    shard_rank=expert_id // experts_per_rank,
+                    shard_dim=0 if self.num_experts % self.ep_size == 0 else None,
+                    shard_count=self.ep_size if self.num_experts % self.ep_size == 0 else 1,
+                    shard_rank=expert_id // experts_per_rank if self.num_experts % self.ep_size == 0 else 0,
                     target_ranks=target_ranks,
                 )
             )
@@ -1051,6 +1052,8 @@ class NewModelLoader:
             # Other PP stages own different layer IDs and are not consumers.
             world_size = layout.lane_stride()
 
+        planned_sources = {}
+
         def resolve(name: str, shape: Tuple[int, ...]) -> ReadSpec:
             shape = tuple(shape)
             if model_filter is not None and not model_filter(name):
@@ -1066,6 +1069,9 @@ class NewModelLoader:
                     mapped_name, shape
                 )
                 if checkpoint_load_plan is not None and load_target is not None:
+                    previous = planned_sources.setdefault(mapped_name, name)
+                    if previous != name:
+                        raise ValueError(f"Ambiguous checkpoint sources {previous!r} and {name!r} map to {mapped_name!r}")
                     checkpoint_load_plan[mapped_name] = load_target
             if read_spec is None:
                 read_spec = ReadSpec.full(name, shape)
@@ -1788,8 +1794,9 @@ class NewModelLoader:
         *,
         automatic: bool,
         expert_filter: Optional[_ExpertRangeFilter] = None,
+        overlay_only: bool = False,
     ) -> Optional[str]:
-        if not checkpoint_files:
+        if not checkpoint_files and not overlay_only:
             return "checkpoint shard selection is empty"
         non_safetensors = [
             os.fspath(path)
@@ -1983,6 +1990,8 @@ class NewModelLoader:
     def _synchronize_load_failure(
         self,
         local_reason: Optional[str],
+        *,
+        format_route=None,
     ) -> Optional[str]:
         """Agree amongst the consumers actually taking part in this load."""
         if not torch.distributed.is_initialized():
@@ -2003,12 +2012,21 @@ class NewModelLoader:
             return local_reason
         reasons: List[Optional[str]] = [None] * participants
         try:
-            torch.distributed.all_gather_object(reasons, local_reason, group=group)
+            if format_route is None:
+                torch.distributed.all_gather_object(reasons, local_reason, group=group)
+            else:
+                torch.distributed.all_gather_object(reasons, format_route, group=group)
+                # Compared below so that a disagreement is not reported as
+                # a broken process group.
         except (RuntimeError, TypeError, ValueError) as exc:
             # No shared decision exists. Only a completed vote may select scratch.
             raise RuntimeError(
                 "cannot synchronize checkpoint load status across ranks"
             ) from exc
+        if format_route is not None:
+            if len(set(reasons)) > 1:
+                raise RuntimeError(f"inconsistent checkpoint formats across ranks: {reasons}")
+            return None
         failures = [
             f"rank {rank}: {reason}"
             for rank, reason in enumerate(reasons)
@@ -2025,10 +2043,11 @@ class NewModelLoader:
         return f"distributed prerequisite failure: {'; '.join(sample)}{suffix}"
 
     @contextmanager
-    def _checkpoint_preflight(self, model, requested):
+    def _checkpoint_preflight(self, model, requested, *, isolated=False):
         # Scratch and isolated owners do not participate in the FST vote.
         if (
             requested == NewLoaderLoadMethod.SCRATCH
+            or isolated
             or getattr(model, "fastsafetensors_load_isolated", False)
             or not torch.distributed.is_initialized()
         ):
@@ -2051,6 +2070,8 @@ class NewModelLoader:
         model: nn.Module,
         checkpoint_files: List[str],
         expert_filter: Optional[_ExpertRangeFilter] = None,
+        *,
+        overlay_only: bool = False,
     ) -> NewLoaderLoadMethod:
         if requested == NewLoaderLoadMethod.SCRATCH:
             return requested
@@ -2060,6 +2081,7 @@ class NewModelLoader:
             checkpoint_files,
             automatic=automatic,
             expert_filter=expert_filter,
+            overlay_only=overlay_only,
         )
         # Most distributed loads must make one consistent backend decision,
         # including replicated TP=1/DP ranks.  A small number of auxiliary
@@ -2413,14 +2435,7 @@ class NewModelLoader:
                     prepare(module)
         self._migrate_staged_modules(model, self.load_config.device)
 
-    @torch.inference_mode()
-    def load(self, *, startup_lora: Optional[Tuple[str, str]] = None) -> nn.Module:
-        # Backend selection alone does not publish a model. On retry, do not
-        # expose the previous attempt's backend as evidence for this attempt.
-        self._selected_load_method = None
-        self._eplb_ft_checkpoint = None
-        self._w8a8_source = None
-        requested_method = self.load_config.load_method
+    def _prepare_checkpoint(self, requested_method, startup_lora):
         meta_checkpoint = None
         if self._model_type() == "llama":
             from rtp_llm.models_py.meta_checkpoint import MetaLlamaCheckpoint
@@ -2460,8 +2475,6 @@ class NewModelLoader:
         ):
             from rtp_llm.models_py.quant_methods.w8a8_load_source import W8A8LoadSource
 
-            if self._model_type() != "qwen35_moe":
-                raise ValueError("load-time W8A8 is supported only for qwen35_moe")
             if ft_checkpoint is not None or weight_mapper.is_rank_local_checkpoint(checkpoint_files):
                 raise ValueError("load-time W8A8 requires a global floating HF checkpoint")
             if requested_method not in (NewLoaderLoadMethod.AUTO, NewLoaderLoadMethod.SCRATCH):
@@ -2476,112 +2489,158 @@ class NewModelLoader:
                 checkpoint_files, runtime_quant, self._checkpoint_catalog()
             )
             self._w8a8_source.validate_overlay(self._finetune_overlay(checkpoint_files))
-        with torch.device("cpu"):
+            if not getattr(get_model_class(self._model_type()), "supports_load_time_w8a8", False):
+                raise ValueError(f"{self._model_type()} does not support load-time W8A8")
+        return checkpoint_files, expert_filter, meta_checkpoint, ft_checkpoint
+
+    @torch.inference_mode()
+    def load(self, *, startup_lora: Optional[Tuple[str, str]] = None, prepare_loans=None) -> nn.Module:
+        # Only a complete load publishes a backend, including on retry.
+        self._selected_load_method = None
+        self._eplb_ft_checkpoint = None
+        self._w8a8_source = None
+        requested_method = self.load_config.load_method
+        parallel = self.load_config.parallelism_config
+        # Participation is an owner-class contract, independent of whether a
+        # rank can open its local mount or construct its parameter tree.
+        self._ckpt_files = None
+        self._checkpoint_catalog_cache = _CHECKPOINT_CATALOG_UNSET
+        distributed_load = requested_method != NewLoaderLoadMethod.SCRATCH and torch.distributed.is_initialized()
+        owner = lookup_error = None
+        isolated = False
+        if distributed_load:
+            model_type = self._model_type()
+            isolated = uses_isolated_checkpoint_load(model_type)
+            try:
+                owner = get_model_class(model_type)
+            except Exception as exc:
+                lookup_error = exc
+            else:
+                isolated = isolated or getattr(owner, "fastsafetensors_load_isolated", False)
+        with self._checkpoint_preflight(owner, requested_method, isolated=isolated):
+            if lookup_error is not None:
+                raise lookup_error
+            if prepare_loans is not None:
+                aliases, prepared = prepare_loans()
+                self.parameter_aliases = dict(aliases)
+                self.load_config = replace(self.load_config, borrowed_parameter_paths=tuple(aliases),
+                                           prepared_runtime_loan=prepared)
+            checkpoint_files, expert_filter, meta_checkpoint, ft_checkpoint = (
+                self._prepare_checkpoint(requested_method, startup_lora)
+            )
+        if distributed_load and not isolated:
+            route = ("meta" if meta_checkpoint is not None else "ft" if ft_checkpoint is not None
+                     else "w8a8" if self._w8a8_source is not None else "hf")
+            self._synchronize_load_failure(None, format_route=(
+                route, requested_method.value, self.load_config.force_cpu_load_weights
+            ))
+        with self._checkpoint_preflight(owner, requested_method), torch.device("cpu"):
             model = self._create_checkpoint_model(ft_checkpoint)
         if expert_filter is not None:
             expert_filter.checkpoint_to_runtime_layer = getattr(model, "checkpoint_to_runtime_expert_layer", None)
         if ft_checkpoint is not None:
-            # Format adapters own their import and return before the HF/FST
-            # borrowed-parameter filters. Do not let them mutate target loans.
-            bind_borrowed_parameters(model, self.parameter_aliases, self.load_config.device)
-            validate_format_parameter_ownership(model, ft=meta_checkpoint is None)
-            overlay = self._finetune_overlay(checkpoint_files)
-            if overlay is not None:
-                ft_checkpoint.apply_overlay(overlay)
-            if getattr(parallel, "pp_size", 1) != 1:
-                if meta_checkpoint is not None or not callable(
-                    getattr(model, "layer_ids", None)
+            with self._checkpoint_preflight(model, requested_method):
+                # Format adapters own their import and return before the HF/FST
+                # borrowed-parameter filters. Do not let them mutate target loans.
+                bind_borrowed_parameters(model, self.parameter_aliases, self.load_config.device)
+                validate_format_parameter_ownership(model, ft=meta_checkpoint is None)
+                overlay = self._finetune_overlay(checkpoint_files)
+                if overlay is not None:
+                    ft_checkpoint.apply_overlay(overlay)
+                if getattr(parallel, "pp_size", 1) != 1:
+                    if meta_checkpoint is not None or not callable(
+                        getattr(model, "layer_ids", None)
+                    ):
+                        raise ValueError(
+                            "This format adapter does not declare PP stage ownership"
+                        )
+                    # Main's FT writer exports all layers even when deployment
+                    # later uses PP. Use the constructed model's range, including
+                    # the full-range exception for speculative drafts.
+                    ft_checkpoint.select_stage(model.layer_ids(), model.config.num_layers)
+                if requested_method == NewLoaderLoadMethod.FASTSAFETENSORS:
+                    if meta_checkpoint is not None and any(
+                        not path.endswith(".safetensors") for path in checkpoint_files
+                    ):
+                        raise ValueError(
+                            "FST requires safetensors; Meta .pth archives require scratch"
+                        )
+                    ft_checkpoint.read_backend = "fastsafetensors"
+                importer = getattr(
+                    model,
+                    "load_meta_checkpoint" if meta_checkpoint else "load_ft_checkpoint",
+                    None,
+                )
+                if importer is None:
+                    raise ValueError(
+                        f"{type(model).__name__} has no checkpoint format adapter"
+                    )
+                if self.load_config.custom_weight_mappings and (
+                    meta_checkpoint is not None or not getattr(model, "supports_ft_handler_heads", False)
                 ):
                     raise ValueError(
-                        "This format adapter does not declare PP stage ownership"
+                        "Custom HF weight mappings cannot be applied to FT runtime tensors"
                     )
-                # Main's FT writer exports all layers even when deployment
-                # later uses PP. Use the constructed model's range, including
-                # the full-range exception for speculative drafts.
-                ft_checkpoint.select_stage(model.layer_ids(), model.config.num_layers)
-            if requested_method == NewLoaderLoadMethod.FASTSAFETENSORS:
-                if meta_checkpoint is not None and any(
-                    not path.endswith(".safetensors") for path in checkpoint_files
-                ):
-                    raise ValueError(
-                        "FST requires safetensors; Meta .pth archives require scratch"
+                self._validate_runtime_backends(model, self.load_config.device)
+                self._notify_checkpoint_source(
+                    model,
+                    (
+                        NewLoaderLoadMethod.FASTSAFETENSORS
+                        if ft_checkpoint.read_backend == "fastsafetensors"
+                        else NewLoaderLoadMethod.SCRATCH
+                    ),
+                )
+                importer(ft_checkpoint)
+                finish_meta_lora = None
+                if meta_checkpoint is not None and startup_lora is not None:
+                    from rtp_llm.models_py.lora_checkpoint import prepare_startup_lora_merge
+
+                    finish_meta_lora = prepare_startup_lora_merge(model, self, *startup_lora)
+                ft_rebalance = False
+                if isinstance(ft_checkpoint, FTCheckpoint):
+                    routed = [
+                        leaf for leaf in model.modules()
+                        if callable(getattr(leaf, "bind_eplb_stats", None))
+                    ]
+                    if any(getattr(leaf, "_dynamic_eplb_enabled", False) for leaf in routed):
+                        from rtp_llm.models_py.eplb_controller import (
+                            stage_supports_weight_install,
+                        )
+
+                        ft_rebalance = stage_supports_weight_install(model, routed)
+                    if ft_rebalance:
+                        for leaf in routed:
+                            if getattr(leaf, "_ft_expert_binding_layout", None) is None:
+                                cfg = getattr(self.model_config, "eplb_config", None)
+                                mode = getattr(cfg, "eplb_mode", None)
+                                if getattr(mode, "name", mode) == "STATS":
+                                    # This FT importer can serve and count tokens, but
+                                    # cannot reconstruct another EP rank's source rows.
+                                    model._ft_eplb_stats_only = True
+                                    ft_rebalance = False
+                                    break
+                                raise ValueError(
+                                    f"FT dynamic EPLB lacks a reload layout for {leaf.prefix}"
+                                )
+                self._validate_loaded_weights(model)
+                if meta_checkpoint is not None:
+                    # Raw Meta tensors, unlike FT snapshots, still need the same
+                    # bounded layer-at-a-time conversion as a floating HF checkpoint.
+                    self._finalize_host_staged_modules(model)
+                model.to(self.load_config.device)
+                self._validate_loaded_weights(model)
+                self._run_post_load_hooks(model)
+                validate_borrowed_parameters(model, self.load_config.device)
+                if finish_meta_lora is not None:
+                    finish_meta_lora()
+                elif startup_lora is not None:
+                    # Format adapters may import already packed runtime parameters.
+                    from rtp_llm.models_py.lora_checkpoint import (
+                        merge_startup_lora_checkpoint,
                     )
-                ft_checkpoint.read_backend = "fastsafetensors"
-            importer = getattr(
-                model,
-                "load_meta_checkpoint" if meta_checkpoint else "load_ft_checkpoint",
-                None,
-            )
-            if importer is None:
-                raise ValueError(
-                    f"{type(model).__name__} has no checkpoint format adapter"
-                )
-            if self.load_config.custom_weight_mappings and (
-                meta_checkpoint is not None or not getattr(model, "supports_ft_handler_heads", False)
-            ):
-                raise ValueError(
-                    "Custom HF weight mappings cannot be applied to FT runtime tensors"
-                )
-            self._validate_runtime_backends(model, self.load_config.device)
-            self._notify_checkpoint_source(
-                model,
-                (
-                    NewLoaderLoadMethod.FASTSAFETENSORS
-                    if ft_checkpoint.read_backend == "fastsafetensors"
-                    else NewLoaderLoadMethod.SCRATCH
-                ),
-            )
-            importer(ft_checkpoint)
-            finish_meta_lora = None
-            if meta_checkpoint is not None and startup_lora is not None:
-                from rtp_llm.models_py.lora_checkpoint import prepare_startup_lora_merge
 
-                finish_meta_lora = prepare_startup_lora_merge(model, self, *startup_lora)
-            ft_rebalance = False
-            if isinstance(ft_checkpoint, FTCheckpoint):
-                routed = [
-                    leaf for leaf in model.modules()
-                    if callable(getattr(leaf, "bind_eplb_stats", None))
-                ]
-                if any(getattr(leaf, "_dynamic_eplb_enabled", False) for leaf in routed):
-                    from rtp_llm.models_py.eplb_controller import (
-                        stage_supports_weight_install,
-                    )
-
-                    ft_rebalance = stage_supports_weight_install(model, routed)
-                if ft_rebalance:
-                    for leaf in routed:
-                        if getattr(leaf, "_ft_expert_binding_layout", None) is None:
-                            cfg = getattr(self.model_config, "eplb_config", None)
-                            mode = getattr(cfg, "eplb_mode", None)
-                            if getattr(mode, "name", mode) == "STATS":
-                                # This FT importer can serve and count tokens, but
-                                # cannot reconstruct another EP rank's source rows.
-                                model._ft_eplb_stats_only = True
-                                ft_rebalance = False
-                                break
-                            raise ValueError(
-                                f"FT dynamic EPLB lacks a reload layout for {leaf.prefix}"
-                            )
-            self._validate_loaded_weights(model)
-            if meta_checkpoint is not None:
-                # Raw Meta tensors, unlike FT snapshots, still need the same
-                # bounded layer-at-a-time conversion as a floating HF checkpoint.
-                self._finalize_host_staged_modules(model)
-            model.to(self.load_config.device)
-            self._validate_loaded_weights(model)
-            self._run_post_load_hooks(model)
-            validate_borrowed_parameters(model, self.load_config.device)
-            if finish_meta_lora is not None:
-                finish_meta_lora()
-            elif startup_lora is not None:
-                # Format adapters may import already packed runtime parameters.
-                from rtp_llm.models_py.lora_checkpoint import (
-                    merge_startup_lora_checkpoint,
-                )
-
-                merge_startup_lora_checkpoint(model, self, *startup_lora)
-            model.eval()
+                    merge_startup_lora_checkpoint(model, self, *startup_lora)
+                model.eval()
             if ft_rebalance:
                 # Keep the stage's immutable catalog, not a second model.
                 # Keep it even in STATS: an install-capable stage can switch modes.
@@ -2603,6 +2662,7 @@ class NewModelLoader:
             # A draft's owner can disagree on just one rank. Bind inside the
             # existing participant vote, before any peer selects an FST backend.
             bind_borrowed_parameters(model, self.parameter_aliases, self.load_config.device)
+            validate_hf_checkpoint_storage(model)
             finish_lora = None
             if startup_lora is not None:
                 from rtp_llm.models_py.lora_checkpoint import prepare_startup_lora_merge
@@ -2642,6 +2702,9 @@ class NewModelLoader:
                 checkpoint_files,
                 model_filter,
                 self._safetensor_catalog(),
+                allow_empty=overlay is not None and any(
+                    name_filter is None or name_filter(key) for key in overlay.names
+                ),
             )
         if len(selected_files) != len(checkpoint_files):
             logger.info(
@@ -2651,9 +2714,13 @@ class NewModelLoader:
             )
         method = (
             NewLoaderLoadMethod.SCRATCH if self._w8a8_source is not None
-            else self._select_load_method(requested_method, model, selected_files, expert_filter)
+            else self._select_load_method(
+                requested_method, model, selected_files, expert_filter,
+                overlay_only=not selected_files and overlay is not None,
+            )
         )
-        self._notify_checkpoint_source(model, method)
+        with self._checkpoint_preflight(model, requested_method):
+            self._notify_checkpoint_source(model, method)
         logger.info(
             "NewLoader load method: requested=%s, selected=%s",
             requested_method.value,
@@ -2673,39 +2740,40 @@ class NewModelLoader:
             with self._scratch_stage("destination allocation"):
                 self._prepare_streamed_scratch(model)
         if accelerator_fst:
-            staged_modules = self._staged_device_modules(model)
-            self._validate_staged_device_modules(
-                model, staged_modules, require_load_complete=True
-            )
-            self._prepare_model_for_fastsafetensors(
-                model,
-                self.load_config.device,
-                deferred_modules=staged_modules,
-            )
-            if staged_modules:
-                staged_coordinator = _StagedFSTLoadCoordinator(
-                    model, staged_modules, self.load_config.device
+            with self._checkpoint_preflight(model, requested_method):
+                staged_modules = self._staged_device_modules(model)
+                self._validate_staged_device_modules(
+                    model, staged_modules, require_load_complete=True
                 )
-                coordinator_modules = [
-                    module
-                    for module in model.modules()
-                    if isinstance(module, RtpModule)
-                ]
-                for module in coordinator_modules:
-                    module._rtp_staged_load_coordinator = staged_coordinator
+                self._prepare_model_for_fastsafetensors(
+                    model,
+                    self.load_config.device,
+                    deferred_modules=staged_modules,
+                )
+                if staged_modules:
+                    staged_coordinator = _StagedFSTLoadCoordinator(
+                        model, staged_modules, self.load_config.device
+                    )
+                    coordinator_modules = [
+                        module
+                        for module in model.modules()
+                        if isinstance(module, RtpModule)
+                    ]
+                    for module in coordinator_modules:
+                        module._rtp_staged_load_coordinator = staged_coordinator
         if accelerator_fst:
             from rtp_llm.models_py.fst_file_plan import plan_fst_files
             from rtp_llm.models_py.fst_range_reader import iter_fst_range_tensors
 
             _, single_group = self._fastsafetensors_api()
             process_group = self._fastsafetensors_process_group(
-                single_group, selected_files, base_expander
+                single_group, checkpoint_files, base_expander
             )
             shared, independent = plan_fst_files(
                 selected_files, self._resolved_model_path(), process_group,
                 overlay.base_filter(model_filter) if overlay is not None else model_filter,
                 self._fixed_host_key_filter(model),
-                catalog=self._checkpoint_catalog(),
+                catalog=self._checkpoint_catalog(), resolver=base_resolver, expander=base_expander,
             )
             if independent:
                 logger.info("NewLoader FST: %d collective files; %d use independent native CPU range reads",
@@ -2745,7 +2813,7 @@ class NewModelLoader:
                 and self.load_config.ep_size == 1
                 and getattr(self.load_config.parallelism_config, "dp_size", 1) == 1
                 and startup_lora is None
-                and self._model_type() in {"qwen3_next", "qwen3_next_mtp", "qwen35_moe", "qwen35_moe_mtp"}
+                and getattr(model, "supports_scratch_moe_tp_preshard", False)
             ):
                 from rtp_llm.models_py.scratch_moe_tp import make_reader
 
@@ -2774,9 +2842,18 @@ class NewModelLoader:
         dispatch_context = (
             self._scratch_stage("checkpoint dispatch") if streamed_scratch else nullcontext()
         )
-        with dispatch_context:
+        def checked_weights():
+            sources = {}
+            for name, tensor in weights:
+                mapped = self._mapped_checkpoint_name(model, name)
+                previous = sources.setdefault(mapped, name)
+                if previous != name:
+                    raise ValueError(f"Ambiguous checkpoint sources {previous!r} and {name!r} map to {mapped!r}")
+                yield name, tensor
+
+        with self._checkpoint_preflight(model, requested_method), dispatch_context:
             try:
-                model.load_weights(weights)
+                model.load_weights(checked_weights())
                 if staged_coordinator is not None:
                     staged_coordinator.finish()
             finally:
@@ -2797,15 +2874,16 @@ class NewModelLoader:
             time.time() - started,
         )
 
-        if not accelerator_fst:
-            self._finalize_host_staged_modules(model)
-        validate_borrowed_parameters(model, self.load_config.device)
-        model.to(self.load_config.device)
-        self._validate_loaded_weights(model)
-        self._run_post_load_hooks(model)
-        if finish_lora is not None:
-            finish_lora()
-        validate_borrowed_parameters(model)
-        model.eval()
+        with self._checkpoint_preflight(model, requested_method):
+            if not accelerator_fst:
+                self._finalize_host_staged_modules(model)
+            validate_borrowed_parameters(model, self.load_config.device)
+            model.to(self.load_config.device)
+            self._validate_loaded_weights(model)
+            self._run_post_load_hooks(model)
+            if finish_lora is not None:
+                finish_lora()
+            validate_borrowed_parameters(model)
+            model.eval()
         self._selected_load_method = method
         return model

@@ -505,24 +505,15 @@ class FTCheckpoint:
             for name, value in module._buffers.items():
                 if value is not None and name not in module._non_persistent_buffers_set:
                     targets[f"{path}.{name}" if path else name] = value
-        if loans:
-            # detach(), narrow() and Parameter(view) create new Tensor objects,
-            # but writes still change the owner's bytes. For strided views use
-            # their enclosing byte span; fail closed on interleaved layouts.
-            def byte_span(tensor):
-                start = tensor.data_ptr()
-                extent = 1 + sum(
-                    (size - 1) * stride
-                    for size, stride in zip(tensor.shape, tensor.stride())
-                )
-                return start, start + extent * tensor.element_size()
+        from rtp_llm.models_py.module_base import checkpoint_byte_span, validate_checkpoint_storage
 
-            spans = [(loan.device, *byte_span(loan)) for loan in loans if loan.numel()]
+        if loans:
+            spans = [(loan.device, *checkpoint_byte_span(loan)) for loan in loans if loan.numel()]
             loan_ids = {id(loan) for loan in loans}
             for name, value in targets.items():
                 overlaps = id(value) in loan_ids
                 if not overlaps and value.numel():
-                    start, end = byte_span(value)
+                    start, end = checkpoint_byte_span(value)
                     overlaps = any(
                         dev == value.device and start < hi and lo < end
                         for dev, lo, hi in spans
@@ -531,6 +522,8 @@ class FTCheckpoint:
                     raise PermissionError(
                         f"FT adapter cannot write an alias of a borrowed parameter: {name}"
                     )
+        # Include generated targets: their bytes must also survive the import.
+        validate_checkpoint_storage(targets.items())
         # Raw format adapters may build an online quantizer whose scale is
         # generated after import. Require the exact declared parameter; do not
         # silently exempt any other missing binding. Runtime FT snapshots

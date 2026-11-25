@@ -254,11 +254,7 @@ class DeepSeekV32MTPForCausalLM(DeepSeekV32ForCausalLM):
                 "DeepSeek MTP requires routed experts with "
                 f"top_k={cfg['top_k']} and num_experts={cfg['num_experts']}"
             )
-        if cfg["num_experts"] % cfg["ep_size"]:
-            raise ValueError(
-                f"num_experts={cfg['num_experts']} must be divisible by "
-                f"ep_size={cfg['ep_size']}"
-            )
+
 
         # The single draft layer always uses the routed/shared MoE path.
         cfg["moe_layer_index"] = [0]

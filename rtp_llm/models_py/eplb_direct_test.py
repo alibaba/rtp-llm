@@ -617,6 +617,25 @@ class DistributedEplbReloadTest(unittest.TestCase):
                 join=True,
             )
 
+    def test_three_logical_experts_on_four_physical_slots(self):
+        from rtp_llm.models_py.fst_file_plan import plan_fst_files
+
+        config = types.SimpleNamespace(num_layers=1, eplb_config=types.SimpleNamespace(redundant_expert=1))
+        key = PREFIX + "down_proj.weight"
+        rows = torch.arange(6).reshape(3, 2)
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "model.safetensors")
+            save_file({key: rows}, path)
+            for rank, expected in enumerate(((0, 1), (0, 2))):
+                f = _ExpertRangeFilter(3, 2, rank, config)
+                self.assertEqual(plan_fst_files([path], root, types.SimpleNamespace(size=lambda: 1),
+                                                None, None, expander=f), ([], [path]))
+                got = dict(iter_fst_range_tensors([path], slice_expander=f, catalog=None,
+                                                  name_filter=None, read_spec_resolver=None))
+                self.assertEqual(set(got), {PREFIX + f"{i}.down_proj.weight" for i in expected})
+                for i in expected:
+                    torch.testing.assert_close(got[PREFIX + f"{i}.down_proj.weight"], rows[i])
+
     def test_two_cpu_ranks_real_fst_checkpoint_commit_and_rollback(self):
         self._run(False)
 
