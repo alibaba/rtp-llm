@@ -294,6 +294,9 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         config.glm5_cp_opt = False
         config.enable_glm5_cmp = True
         config.indexer_fused_topk = True
+        config.glm5_eh_fusion = False
+        config.glm5_cmp_moe_dual_stream = False
+        config.fused_router_pad = False
 
         restored = pickle.loads(pickle.dumps(config))
 
@@ -310,10 +313,19 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         self.assertFalse(restored.glm5_cp_opt)
         self.assertTrue(restored.enable_glm5_cmp)
         self.assertTrue(restored.indexer_fused_topk)
+        self.assertFalse(restored.glm5_eh_fusion)
+        self.assertFalse(restored.glm5_cmp_moe_dual_stream)
+        self.assertFalse(restored.fused_router_pad)
         previous = _new_hw_kernel_config()
         previous.__setstate__(config.__getstate__()[:15])
         self.assertFalse(previous.indexer_fused_topk)
         self.assertTrue(previous.enable_glm5_cmp)
+        previous = _new_hw_kernel_config()
+        previous.__setstate__(config.__getstate__()[:16])
+        self.assertTrue(previous.indexer_fused_topk)
+        self.assertTrue(previous.glm5_eh_fusion)
+        self.assertTrue(previous.glm5_cmp_moe_dual_stream)
+        self.assertTrue(previous.fused_router_pad)
         self.assertTrue(restored.enable_dynamic_decode_backend)
         self.assertEqual(
             restored.dyn_decode_gate_thresholds, config.dyn_decode_gate_thresholds
@@ -386,7 +398,7 @@ class HWKernelConfigPickleTest(unittest.TestCase):
                 self.assertFalse(restored.enable_dynamic_decode_backend)
 
     def test_unsupported_tuple_sizes_are_rejected(self):
-        for size in (6, 14, 17, 19, 20):
+        for size in (6, 14, 17, 18, 20):
             with self.subTest(size=size), self.assertRaisesRegex(
                 RuntimeError, "Invalid state"
             ):
@@ -394,16 +406,8 @@ class HWKernelConfigPickleTest(unittest.TestCase):
                 config.__setstate__(tuple(range(size)))
 
     def test_current_layout_rejects_wrong_field_type(self):
-        malformed_state = (
-            True,
-            True,
-            True,
-            [64, 128],
-            [1, 8],
-            "not-an-integer",
-            [32, 64],
-            True,
-        )
+        state = HWKernelConfig().__getstate__()
+        malformed_state = state[:5] + ("not-an-integer",) + state[6:]
         with self.assertRaisesRegex(RuntimeError, "HWKernelConfig unpickle error"):
             config = _new_hw_kernel_config()
             config.__setstate__(malformed_state)

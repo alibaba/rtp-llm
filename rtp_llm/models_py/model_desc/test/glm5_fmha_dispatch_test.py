@@ -516,7 +516,7 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
             "rtp_llm.models_py.model_desc.glm5.fixed_m_linear", return_value=logits
         ) as linear:
             ids, weights = layer._route(hidden)
-        linear.assert_called_once_with(layer.gate, hidden, 8192)
+        linear.assert_called_once_with(layer.gate, hidden, 8192, fuse_pad=True)
         self.assertEqual(ids.dtype, torch.int64)
         self.assertEqual(weights.dtype, torch.float32)
         topk_args = layer.group_topk.call_args.kwargs
