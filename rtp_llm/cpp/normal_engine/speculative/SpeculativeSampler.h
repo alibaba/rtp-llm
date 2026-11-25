@@ -170,6 +170,14 @@ protected:
     // Reusable buffer for draft_probs vocab-padding when draft/target vocab sizes differ.
     // Grow-only; reused across batchSample calls to avoid per-forward GPU allocation in hot path.
     mutable torch::Tensor draft_probs_padding_buffer_;
+
+    // Zero-filled stand-in for uniform samples when no row needs a stochastic
+    // acceptance draw (all greedy and/or force-accepted). The rejection kernel
+    // reads this tensor unconditionally but only uses its values on the
+    // do_sample && !force path. Grow-only along batch; zeroed once, never
+    // written afterwards, so steady-state batches launch no RNG kernel and no
+    // DtoD copy.
+    mutable torch::Tensor uniform_samples_buffer_;
 };
 
 }  // namespace speculative

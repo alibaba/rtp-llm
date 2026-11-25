@@ -1085,19 +1085,70 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     const bool finalize_in_kernel = execRejectionSamplingSupportsFinalize();
 
     // An undefined force mask retains the ordinary rejection path.
-    auto          rand_options      = torch::TensorOptions().device(target_device).dtype(torch::kFloat);
-    torch::Tensor uniform_samples_d = torch::rand({(long)batch_size, (long)propose_step_ + 1}, rand_options);
+    auto          rand_options  = torch::TensorOptions().device(target_device).dtype(torch::kFloat);
+    const int64_t uniform_width = static_cast<int64_t>(propose_step_) + 1;
 
-    // Override per-stream uniform samples when random_seed is set, so acceptance
-    // is reproducible for a fixed seed.
-    //
-    // Bounded DSpARK verification keys those draws by (seed, absolute position)
-    // instead of a stateful generator: the budget decides per round how many
-    // draft positions are verified, so a generator draw would land on a
-    // different absolute position whenever the budget or the accepted prefix
-    // changed. Every other speculative path keeps the historical generator draw
-    // byte for byte.
+    // The rejection kernel reads uniform_samples unconditionally, but its value
+    // only participates in acceptance when do_sample && !force_accept. Greedy
+    // rows compare tokens exactly and force-accepted rows are overwritten by
+    // the folded finalize, so they need no entropy. Tracking that per row lets
+    // an all-greedy/all-forced batch reuse a zero-filled buffer: no RNG kernel,
+    // no per-row DtoD copy, and replayRejectionGraph/execRejectionSampling
+    // still receive a valid contiguous CUDA float tensor.
+    std::vector<bool> needs_uniform(static_cast<size_t>(batch_size), false);
+    bool              any_needs_uniform      = false;
+    bool              all_needed_rows_seeded = true;
     {
+        int idx = 0;
+        for (const auto& stream : streams) {
+            const bool need    = do_sample_ptr[idx] && !force_mask_ptr[idx];
+            needs_uniform[idx] = need;
+            any_needs_uniform |= need;
+            if (need) {
+                const auto seed = stream->generateConfig()->random_seed;
+                // A seeded bounded row is filled from (seed, absolute position)
+                // below; a seeded unbounded row needs a live generator. Any
+                // other needed row falls back to the default-generator draw.
+                all_needed_rows_seeded &=
+                    seed.has_value() && (valid_draft_lengths.defined() || stream->getGenerator().defined());
+            }
+            ++idx;
+        }
+    }
+
+    torch::Tensor uniform_samples_d;
+    if (!any_needs_uniform) {
+        // Grow-only zero-filled stand-in. It is never written, so it stays zero
+        // for every later all-greedy/all-forced batch. Compare against the
+        // resolved device index: Tensor::device() always carries one, while
+        // target_device is index-less.
+        const auto uniform_device =
+            torch::Device(target_device.type(), cuda_graph::graphGetCurrentStream().device_index());
+        if (!uniform_samples_buffer_.defined() || uniform_samples_buffer_.device() != uniform_device
+            || uniform_samples_buffer_.scalar_type() != torch::kFloat || uniform_samples_buffer_.dim() != 2
+            || uniform_samples_buffer_.size(0) < batch_size || uniform_samples_buffer_.size(1) != uniform_width) {
+            uniform_samples_buffer_ = torch::zeros({(long)batch_size, uniform_width}, rand_options);
+        }
+        uniform_samples_d = uniform_samples_buffer_.narrow(0, 0, (long)batch_size);
+    } else {
+        // Draw the default-generator fill only when at least one needed row is
+        // unseeded. Otherwise every needed row is overwritten below and the
+        // initial RNG kernel is pure overhead.
+        if (all_needed_rows_seeded) {
+            uniform_samples_d = torch::empty({(long)batch_size, uniform_width}, rand_options);
+        } else {
+            uniform_samples_d = torch::rand({(long)batch_size, uniform_width}, rand_options);
+        }
+
+        // Override per-stream uniform samples when random_seed is set, so acceptance
+        // is reproducible for a fixed seed.
+        //
+        // Bounded DSpARK verification keys those draws by (seed, absolute position)
+        // instead of a stateful generator: the budget decides per round how many
+        // draft positions are verified, so a generator draw would land on a
+        // different absolute position whenever the budget or the accepted prefix
+        // changed. Every other speculative path keeps the historical generator draw
+        // byte for byte.
         struct SeededRow {
             int64_t  row;
             uint64_t seed;
@@ -1106,6 +1157,12 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         std::vector<SeededRow> counter_rows;
         int                    idx = 0;
         for (const auto& stream : streams) {
+            if (!needs_uniform[idx]) {
+                // Greedy/forced rows consume no entropy: skipping them keeps
+                // their generator state untouched.
+                ++idx;
+                continue;
+            }
             const auto seed = stream->generateConfig()->random_seed;
             if (!seed.has_value()) {
                 ++idx;
@@ -1120,25 +1177,27 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
             } else {
                 auto gen = stream->getGenerator();
                 if (gen.defined()) {
-                    uniform_samples_d[idx] = torch::rand({(long)propose_step_ + 1}, gen, std::nullopt, rand_options);
+                    // torch::rand(size, gen) is exactly empty(size) + uniform_(0, 1, gen).
+                    // Filling the row view in place is bit-identical to the historical
+                    // draw while avoiding a temporary allocation and a per-row Memcpy DtoD.
+                    uniform_samples_d[idx].uniform_(0, 1, gen);
                 }
             }
             ++idx;
         }
         if (!counter_rows.empty()) {
-            const int64_t width     = static_cast<int64_t>(propose_step_) + 1;
-            auto          host      = torch::empty({static_cast<int64_t>(counter_rows.size()), width},
+            auto  host      = torch::empty({static_cast<int64_t>(counter_rows.size()), uniform_width},
                                      torch::TensorOptions().dtype(torch::kFloat).pinned_memory(true));
-            auto          rows      = torch::empty({static_cast<int64_t>(counter_rows.size())},
+            auto  rows      = torch::empty({static_cast<int64_t>(counter_rows.size())},
                                      torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true));
-            auto*         values    = host.data_ptr<float>();
-            auto*         row_index = rows.data_ptr<int64_t>();
+            auto* values    = host.data_ptr<float>();
+            auto* row_index = rows.data_ptr<int64_t>();
             for (size_t row = 0; row < counter_rows.size(); ++row) {
                 const auto& source = counter_rows[row];
                 row_index[row]     = source.row;
-                for (int64_t position = 0; position < width; ++position) {
-                    values[row * width + position] =
-                        dsparkRejectionUniformAt(source.seed, source.base_position, position, width - 1);
+                for (int64_t position = 0; position < uniform_width; ++position) {
+                    values[row * uniform_width + position] =
+                        dsparkRejectionUniformAt(source.seed, source.base_position, position, uniform_width - 1);
                 }
             }
             buffer_holder_.hold_host(host);
