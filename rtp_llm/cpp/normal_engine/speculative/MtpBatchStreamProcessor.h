@@ -64,6 +64,11 @@ public:
     // Reuse only the same ordered requests from one publication. Admission,
     // removal and reordering use the normal gather path. Cache-only invalidation
     // may retain the continuation while requiring fresh physical/kernel tables.
+    struct PublishedDecodeBatch {
+        std::shared_ptr<const MtpDecodeBatchState> batch;
+        bool                                       has_cache_snapshot = false;
+    };
+    static PublishedDecodeBatch                       inspectPublishedDecodeBatch(const StreamGroups& stream_groups);
     static std::shared_ptr<const MtpDecodeBatchState> publishedDecodeBatch(const StreamGroups& stream_groups,
                                                                            bool require_cache_snapshot = true);
 

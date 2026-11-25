@@ -19,6 +19,7 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 _MIB = 1024 * 1024
+_TRTLLM_ONE_SHOT_MAX_TOKENS = 128
 _H200_MIN_TOTAL_MEMORY_BYTES = 110 * (1024 ** 3)
 _MAX_WORKSPACE_BYTES = {
     2: 64 * _MIB,
@@ -78,6 +79,7 @@ def enabled_by_config(disable_custom_all_reduce: Optional[bool] = None) -> bool:
 class FlashInferAllReduce:
     _h20_max_num_tokens: int = 128
     _allow_eager_chunking: bool = False
+    _inplace_trtllm_tp2: bool = False
 
     def __init__(
         self,
@@ -139,9 +141,14 @@ class FlashInferAllReduce:
                 return
             self._flashinfer_comm = flashinfer_comm
             self.disabled = False
+            capability = (
+                torch.cuda.get_device_capability(device)
+                if self.world_size == 2
+                else None
+            )
+            self._inplace_trtllm_tp2 = capability == (9, 0)
             self.cpp_small_enabled = (
-                self.world_size == 2
-                and torch.cuda.get_device_capability(device) == (12, 0)
+                capability == (12, 0)
                 and torch.cuda.device_count() == 2
                 and torch.cuda.can_device_access_peer(0, 1)
                 and torch.cuda.can_device_access_peer(1, 0)
@@ -379,7 +386,9 @@ class FlashInferAllReduce:
             and self.should_use(tensor)
         )
 
-    def _all_reduce_trtllm_single(self, tensor: torch.Tensor) -> torch.Tensor:
+    def _all_reduce_trtllm_single(
+        self, tensor: torch.Tensor, *, output: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         return self._flashinfer_comm.allreduce_fusion(
             input=tensor,
             workspace=self._workspace,
@@ -388,6 +397,7 @@ class FlashInferAllReduce:
             # FlashInfer 0.6.9 can expose one-shot output too early when PDL is
             # chained. Completion-at-end is the graph replay safety contract.
             trigger_completion_at_end=True,
+            **({"output": output} if output is not None else {}),
         )
 
     def all_reduce(self, tensor: torch.Tensor) -> torch.Tensor:
@@ -448,6 +458,19 @@ class FlashInferAllReduce:
                 view_out[start:end].copy_(
                     self._all_reduce_trtllm_single(view_in[start:end])
                 )
+            return output
+
+        if (
+            self._inplace_trtllm_tp2
+            and output is tensor
+            and tensor.dim() == 2
+            and 0 < view_in.shape[0] <= _TRTLLM_ONE_SHOT_MAX_TOKENS
+            and view_in.data_ptr() % 16 == 0
+            # Bound the one-shot input even when workspace capacity is overridden.
+            and view_in.numel() * view_in.element_size() <= _MAX_WORKSPACE_BYTES[2]
+        ):
+            # One-shot threads stage their input before writing the same vector.
+            self._all_reduce_trtllm_single(view_in, output=view_out)
             return output
 
         view_out.copy_(self._all_reduce_trtllm_single(view_in))
