@@ -197,6 +197,19 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         response = client.post("/health_check")
         self.assertEqual(response.status_code, 400)
 
+    def test_embedding_worker_waits_for_its_own_channel_before_serving(self):
+        owner = FrontendApp.__new__(FrontendApp)
+        owner.frontend_server = FakeFrontendServer(is_embedding=True)
+        endpoint = SimpleNamespace(health_check=AsyncMock(side_effect=[False, True]))
+        owner.frontend_server._embedding_endpoint = endpoint
+        owner.grpc_client = FakeGrpcClient()
+        owner.server_config = SimpleNamespace(rank_id=0, frontend_server_id=1)
+        with patch("rtp_llm.frontend.frontend_app.asyncio.sleep", new_callable=AsyncMock) as retry:
+            asyncio.run(owner._wait_backend_health_ready_impl())
+        retry.assert_awaited_once_with(1)
+        self.assertEqual(endpoint.health_check.await_count, 2)
+        self.assertEqual(owner.grpc_client.calls, [])
+
     def test_draining_rejects_new_business_and_marks_health_unavailable(self):
         app_owner = FrontendApp.__new__(FrontendApp)
         app_owner.frontend_server = FakeFrontendServer()

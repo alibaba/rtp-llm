@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 #include <array>
+#include <cstring>
 #include <exception>
 #include <thread>
 
@@ -50,6 +51,33 @@ TEST(PpuNoBlockCopyTest, ValidatesBeforeSubmittingAndHandlesEmptyCopies) {
                  c10::Error);
     EXPECT_NO_THROW(execNoBlockCopy({}));
     EXPECT_NO_THROW(execNoBlockCopy({{dst.slice(0, 0, 0)}, {src.slice(0, 0, 0)}}));
+}
+
+TEST(PpuNoBlockCopyTest, HostKvRoundTripDoesNotUsePooledDmaOrConvertBytes) {
+    ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+    auto owner = acquireDeviceHostCopyStreams(0);
+    auto gpu = torch::zeros({15}, bytesOn(torch::Device(torch::kCUDA, 0)));
+    auto backing = torch::tensor({0, 513, 1027, 0}, torch::kInt32).pin_memory();
+    auto words = backing.narrow(0, 1, 2);
+    auto payload = words.view(torch::kUInt8);
+    auto output = torch::full({11}, 93, torch::kUInt8);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+    // Reject the known-bad submission path. Both actual transfers must still
+    // succeed, and a larger destination must retain its untouched suffix.
+    struct RestoreHook {
+        decltype(no_block_copy_detail::cuda_result_for_test) previous;
+        ~RestoreHook() { no_block_copy_detail::cuda_result_for_test = previous; }
+    } restore{no_block_copy_detail::cuda_result_for_test};
+    no_block_copy_detail::cuda_result_for_test = [](const char* phase, int result) {
+        return std::strcmp(phase, "generic_submit") == 0 ? static_cast<int>(cudaErrorInvalidValue) : result;
+    };
+    execNoBlockCopy({{gpu.narrow(0, 3, 10)}, {words}}, {owner, DeviceHostCopyDirection::H2D});
+    execNoBlockCopy({{output.narrow(0, 1, 9)}, {gpu.narrow(0, 3, 8)}}, {owner, DeviceHostCopyDirection::D2H});
+    EXPECT_TRUE(torch::equal(output.narrow(0, 1, 8), payload));
+    EXPECT_EQ(output[0].item<int>(), 93);
+    EXPECT_EQ(output[9].item<int>(), 93);
+    EXPECT_EQ(gpu[11].item<int>(), 0);
 }
 
 TEST(PpuNoBlockCopyTest, ConcurrentLayerStagingKeepsBytesAndOwnerLifetimes) {

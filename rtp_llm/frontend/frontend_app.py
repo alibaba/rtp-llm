@@ -445,14 +445,18 @@ class FrontendApp(object):
 
     async def _wait_backend_health_ready_impl(self) -> None:
         """Loop until backend gRPC health_check returns ok (used when PD 不分离)."""
-        if self.frontend_server.is_embedding:
-            return
         timeout_s = 3600
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             try:
-                response = await self.grpc_client.post_request("health_check", {})
-                if response.get("status") == "ok":
+                if self.frontend_server.is_embedding:
+                    # Each frontend has its own pooled channel. A successful
+                    # probe on a different worker doesn't make this one ready.
+                    ready = await self.frontend_server._embedding_endpoint.health_check()
+                else:
+                    response = await self.grpc_client.post_request("health_check", {})
+                    ready = response.get("status") == "ok"
+                if ready:
                     logging.info(
                         "Backend health_check ready, starting frontend rank_id=%s frontend_server_id=%s",
                         self.server_config.rank_id,

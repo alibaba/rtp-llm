@@ -79,16 +79,27 @@ void copyBlocks(const MultiCopyParams& params, const DeviceHostCopyExecutionCont
                 continue;
             }
             const int copy_device = getCopyDevice(dst, src);
+            if (src.is_cpu() || dst.is_cpu()) {
+                // Host KV slots can be interior, non-owning byte ranges. The
+                // PPU runtime rejects side-stream DMA for some of these ranges.
+                // As in the PPU TCP transport, complete on the device's current
+                // stream before publishing the slot. Preserve raw byte-copy
+                // semantics even if the two tensors have different dtypes.
+                drain("generic_completion");
+                device_guard.reset_device(torch::Device(torch::kCUDA, static_cast<c10::DeviceIndex>(copy_device)));
+                auto src_bytes = src.reshape({-1}).view(torch::kUInt8);
+                auto dst_bytes = dst.reshape({-1}).view(torch::kUInt8).narrow(0, 0, src_bytes.numel());
+                dst_bytes.copy_(src_bytes, /*non_blocking=*/false);
+                continue;
+            }
             if (!stream || copy_device != device_index) {
                 drain("generic_completion");
                 device_guard.reset_device(torch::Device(torch::kCUDA, static_cast<c10::DeviceIndex>(copy_device)));
                 device_index = copy_device;
                 stream       = getNoBlockCopyStream(device_index).stream();
             }
-            const auto kind = src.is_cuda() ? (dst.is_cuda() ? cudaMemcpyDeviceToDevice : cudaMemcpyDeviceToHost) :
-                                              cudaMemcpyHostToDevice;
-            check_cuda_value(
-                copyPpuResult("generic_submit", cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), bytes, kind, *stream)));
+            check_cuda_value(copyPpuResult(
+                "generic_submit", cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), bytes, cudaMemcpyDeviceToDevice, *stream)));
         }
         drain("generic_completion");
         if (device_index >= 0) {
