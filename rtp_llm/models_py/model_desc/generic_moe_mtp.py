@@ -278,6 +278,7 @@ class GenericMoeMTPModel(Glm5ModelBase):
             prev_topk_indices,
             force_reuse_topk_indices=reuse_topk_indices,
             residual=residual,
+            layer_progress=getattr(inputs, "prefill_layer_progress", None),
         )
 
         if (

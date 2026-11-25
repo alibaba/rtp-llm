@@ -168,6 +168,7 @@ cc_library(
     ], exclude = ["ModelInputsLogger.cc"]),
     deps = [
         ":model_inputs_logger",
+        "//rtp_llm/cpp/models/prefill_progress",
         ":sample_infos",
         ":logits_processor",
         ":dfa_utils",

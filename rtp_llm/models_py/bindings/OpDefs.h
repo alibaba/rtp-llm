@@ -385,6 +385,7 @@ struct PyModelInputs {
 
     // Internal homogeneous-batch signal; not part of the Generate RPC/config surface.
     bool capture_hidden_states = false;
+    void (*prefill_layer_progress)(int) = nullptr;
 
     /** PP boundary tensors received from the upstream stage; empty under pp_size=1. */
     PPIntermediates pp_intermediates;

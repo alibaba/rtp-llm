@@ -32,6 +32,8 @@ from rtp_llm.utils.concurrency_controller import (
 )
 from rtp_llm.utils.oom_diag import install_oom_dump
 from rtp_llm.utils.process_lifecycle import arm_parent_death_sigkill
+from rtp_llm.ops import RoleType
+from rtp_llm.utils.prefill_watchdog import SLOT_ENV as _PREFILL_PROGRESS_SLOT_ENV, PrefillWatchdog
 from rtp_llm.utils.process_manager import ProcessManager
 from rtp_llm.utils.util import copy_gemm_config
 
@@ -140,6 +142,8 @@ def local_rank_start(
         backend_manager.serve_forever()
 
     except BaseException as e:
+        if prefill_watchdog is not None:
+            prefill_watchdog.close()
         if service_draining is not None:
             service_draining.set()
         error_msg = f"start server error: {e}"
@@ -199,6 +203,7 @@ def _create_rank_processes(
     processes: List[BaseProcess],
     rank_pipe_readers: List[Connection],
     service_draining=None,
+    prefill_watchdog=None,
 ):
     """Create and start rank processes. Each proc is appended before start() so a
     mid-loop abort still leaves every spawned object in the caller's list; teardown
@@ -227,10 +232,32 @@ def _create_rank_processes(
             name=f"rank-{world_rank}",
         )
         processes.append(proc)
+        previous_slot = os.environ.pop(_PREFILL_PROGRESS_SLOT_ENV, None)
+        slot_path = None
         try:
+            if prefill_watchdog is not None:
+                try:
+                    slot_path = prefill_watchdog.create_slot(world_rank)
+                except OSError as error:
+                    logging.warning(
+                        "Cannot monitor Prefill rank %s: %s", world_rank, error
+                    )
+                if slot_path is not None:
+                    os.environ[_PREFILL_PROGRESS_SLOT_ENV] = os.fspath(slot_path)
             proc.start()
         finally:
-            writer.close()  # drop parent copy so reader EOFs when the rank dies
+            if previous_slot is None:
+                os.environ.pop(_PREFILL_PROGRESS_SLOT_ENV, None)
+            else:
+                os.environ[_PREFILL_PROGRESS_SLOT_ENV] = previous_slot
+            writer.close()
+        if prefill_watchdog is not None:
+            try:
+                prefill_watchdog.register_process(world_rank, proc.pid)
+            except OSError as error:
+                logging.warning(
+                    "Cannot identify Prefill rank %s: %s", world_rank, error
+                )
 
 
 def _close_readers(readers: List[Connection]) -> None:
@@ -334,6 +361,13 @@ def multi_rank_start(
     """Start multi-rank backend server with proper process management"""
     ctx = multiprocessing.get_context("spawn")
     processes, rank_pipe_readers = [], []
+    prefill_watchdog = None
+    if (
+        not py_env_configs.distribute_config.fake_gang_env
+        and py_env_configs.role_config.role_type == RoleType.PREFILL
+        and py_env_configs.model_args.model_type == "glm_5"
+    ):
+        prefill_watchdog = PrefillWatchdog.from_env()
     try:
         _create_rank_processes(
             global_controller,
@@ -342,6 +376,7 @@ def multi_rank_start(
             processes,
             rank_pipe_readers,
             service_draining,
+            prefill_watchdog,
         )
         local_world_size = len(processes)
 
@@ -359,6 +394,7 @@ def multi_rank_start(
             monitor_interval=py_env_configs.server_config.monitor_interval,
             allow_defer_first_sigterm=True,
             pre_exit_cleanup=cleanup,
+            prefill_watchdog=prefill_watchdog,
             service_draining=service_draining,
         )
         manager.set_processes(processes, shutdown_group="backend")

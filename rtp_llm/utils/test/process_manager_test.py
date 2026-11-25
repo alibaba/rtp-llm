@@ -360,6 +360,48 @@ class TestProcessManager(unittest.TestCase):
         proc.join(timeout=1)
         self.assertFalse(proc.is_alive())
 
+    def test_prefill_watchdog_polls_then_closes_before_shutdown(self):
+        watchdog = Mock()
+        self.manager._prefill_watchdog = watchdog
+        self.manager.add_process(Mock())
+
+        def poll():
+            self.manager.shutdown_requested = True
+
+        def terminate(*args, **kwargs):
+            watchdog.close.assert_called_once()
+
+        watchdog.poll.side_effect = poll
+        with patch.object(
+            self.manager, "_terminate_processes", side_effect=terminate
+        ) as stop, patch.object(self.manager, "_force_kill_processes"), patch(
+            "time.sleep"
+        ):
+            self.manager._monitor_processes_health()
+        watchdog.poll.assert_called_once()
+        stop.assert_called_once()
+        self.assertIsNone(self.manager._prefill_watchdog)
+
+    def test_prefill_watchdog_stops_during_parent_drain(self):
+        watchdog = Mock()
+        self.manager._prefill_watchdog = watchdog
+        self.manager.service_draining = Mock()
+        self.manager.service_draining.is_set.return_value = True
+        self.manager._poll_prefill_watchdog()
+        watchdog.poll.assert_not_called()
+        watchdog.close.assert_called_once()
+
+    def test_prefill_watchdog_failure_leaves_engine_monitor_running(self):
+        watchdog = Mock()
+        watchdog.poll.side_effect = RuntimeError("cannot read Prefill progress")
+        self.manager._prefill_watchdog = watchdog
+        with self.assertLogs(level="ERROR"):
+            self.manager._poll_prefill_watchdog()
+        watchdog.close.assert_called_once()
+        self.assertIsNone(self.manager._prefill_watchdog)
+        self.assertFalse(self.manager.shutdown_requested)
+        self.assertFalse(self.manager.failure_detected)
+
     def test_monitor_empty_processes(self):
         """Test monitoring with no processes"""
         with patch("logging.info") as mock_info:
