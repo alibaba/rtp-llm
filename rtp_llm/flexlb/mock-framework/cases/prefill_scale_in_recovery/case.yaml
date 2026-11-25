@@ -1,0 +1,158 @@
+id: prefill_scale_in_recovery
+name: Prefill 缩容后的自恢复
+describe: 单遍原速回放中将 Prefill 从 55 缩到 42，固定等待 20 分钟后检查末段恢复。
+# 定时回归使用 mock-case launch --scrape-interval 5s。
+environment:
+  master:
+    deployment:
+      replicas: 2
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 55
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 192
+    config: configs/decode.yaml
+  vit:
+    deployment:
+      replicas: 160
+    config: configs/vit.yaml
+  frontend:
+    deployment:
+      replicas: 4
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待发现。
+    timeout: 150s
+    steps:
+      - id: check_master_leader
+        describe: 双 Master 中恰有一个主节点。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+      - id: check_master_count
+        describe: 确认两台 Master 在线。
+        interface: master/list/addresses
+        expect:
+          count: 2
+      - id: list_prefill_before_playback
+        describe: 记录两台 Master 发现的 Prefill 地址。
+        interface: master/list/engines
+        args: { role: prefill }
+  - id: warmup
+    describe: 启动单遍回放并固定预热 510 秒。
+    timeout: 540s
+    steps:
+      - id: start_frontend
+        describe: 启动连续回放，前 120 秒用 0.25 倍速起跑，随后切到原速。
+        interface: frontend/start/playback
+        args:
+          # 在 .cache/ 下链接外部数据集。预热、缩容和排空共用一次单遍回放。
+          requests_file: .cache/deepseek-v4.1-40min.mckidx
+          reuse_cache: true
+          replay_speed: 1.0
+          initial_rate:
+            duration: 120s
+            rate_scale: 0.25
+          total_concurrency: 32000
+          queue_capacity: 48000
+          request_timeout: 120s
+          drain_timeout: 150s
+        within: 530s
+        wait_after: 510s
+  - id: baseline
+    describe: 记录 55 P 的缩容前基线并检查末段流量和命中率。
+    timeout: 45s
+    steps:
+      - id: measure_baseline_hit_rate_series
+        describe: 记录缩容前最后 60 秒的滚动命中率采样。
+        interface: engine/query/cache_hit_rate
+        args: { range: [-65s, -5s], mode: series }
+        within: 10s
+      - id: check_baseline_qps
+        describe: 检查缩容前 60 秒平均发请求量。
+        interface: frontend/query/qps
+        args: { range: [-65s, -5s] }
+        expect: { gte: 1080, lte: 1300 }
+        within: 10s
+      - id: check_baseline_hit_rate
+        describe: 缩容前最后 60 秒的 token 加权命中率须达到 93%。
+        interface: engine/query/cache_hit_rate
+        args: { range: [-65s, -5s] }
+        expect: { gte: 0.93 }
+        within: 10s
+      - id: measure_baseline_ttft
+        describe: 记录缩容前 TTFT P95，供末段对比。
+        interface: frontend/query/ttft
+        args: { range: [-65s, -5s], statistic: p95 }
+        within: 10s
+  - id: scale_in
+    describe: 原速回放期间按注册顺序摘除 13 个 Prefill。
+    timeout: 120s
+    steps:
+      - id: remove_prefill_workers
+        describe: 从 55 个 Prefill 缩到 42 个。
+        interface: engine/scale
+        args: { direction: in, role: prefill, count: 13 }
+        expect: { count: 13 }
+        within: 110s
+  - id: recovery
+    describe: 摘除完成后保持 42 P 和原速回放，固定等待 20 分钟。
+    timeout: 1215s
+    steps:
+      - id: wait_for_recovery
+        describe: 在 42 P 下继续回放 20 分钟。
+        interface: case/wait
+        args: { duration: 1200s }
+  - id: check_recovery
+    describe: 检查固定观察期末段的流量、成功率和命中率。
+    timeout: 60s
+    steps:
+      - id: check_recovery_hit_rate
+        describe: 缩容后末段命中率至少为 92.5%。
+        interface: engine/query/cache_hit_rate
+        args: { range: [-65s, -5s] }
+        expect: { gte: 0.925 }
+        within: 10s
+      - id: check_recovery_success_rate
+        describe: 缩容后末段终态成功率至少为 99.9%。
+        interface: frontend/query/success_rate
+        args: { range: [-65s, -5s] }
+        expect: { gte: 0.999 }
+        within: 10s
+      - id: check_recovery_qps
+        describe: 缩容后末段签发量维持在正常范围。
+        interface: frontend/query/qps
+        args: { range: [-65s, -5s] }
+        expect: { gte: 1080, lte: 1300 }
+        within: 10s
+      - id: measure_recovery_ttft
+        describe: 记录排空前的 TTFT P95。
+        interface: frontend/query/ttft
+        args: { range: [-65s, -5s], statistic: p95 }
+        within: 10s
+      - id: list_prefill_end_of_hold
+        describe: 记录缩容后两台 Master 各自发现的 Prefill 地址。
+        interface: master/list/engines
+        args: { role: prefill }
+        within: 10s
+  - id: drain
+    describe: 停止回放并排空已发请求。
+    timeout: 195s
+    steps:
+      - id: stop_frontend
+        describe: 停止签发，等待已发请求结束。
+        interface: frontend/stop/playback
+        within: 190s
