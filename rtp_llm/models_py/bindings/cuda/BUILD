@@ -226,14 +226,20 @@ cc_library(
     srcs = [
         "RegisterCudaOps.cc",
     ],
-    copts = copts() + ["-fno-strict-aliasing"],
+    copts = copts() + ["-fno-strict-aliasing"] + select({
+        "//:using_cuda13_x86": ["-DRTP_ENABLE_SM120_LSA"],
+        "//conditions:default": [],
+    }),
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         ":bf16_gemm_op",
         "//rtp_llm/models_py/bindings/common:common",
         ":cuda_bindings_base",
         ":cuda_attn_bindings_base",
-    ],
+    ] + select({
+        "//:using_cuda13_x86": ["//rtp_llm/models_py/kernels/cuda/qwen4_moe:reduce_gate"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
     alwayslink = 1,
 )

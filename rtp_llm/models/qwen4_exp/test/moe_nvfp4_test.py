@@ -123,6 +123,39 @@ class Qwen4Nvfp4Test(unittest.TestCase):
                     if not config.is_mtp:
                         self.assertGreater(config._extra_weight_bytes, 100e9)
 
+    def test_prepacked_decode_options_survive_precision_finalization(self):
+        request = dict(
+            method="modelopt_fp4",
+            bits=4,
+            group_size=16,
+            is_quanted=True,
+            decode_lsa_enabled=False,
+            decode_lsa_startup_timeout_s=480,
+            decode_lsa_timeout_ms=2000,
+        )
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "config.json").write_text(json.dumps(_config()))
+            config = Qwen4Exp.create_config(root)
+            config.quantization = json.dumps(request)
+            config.init_precision_config(None, "BF16")
+            Qwen4Exp._post_build_model_config(config)
+            quant = config.quant_config
+            self.assertTrue(quant.is_quanted())
+            self.assertEqual(config.dense_weight_dtype, "bf16")
+            self.assertFalse(quant.decode_lsa_enabled)
+            self.assertEqual(quant.decode_lsa_startup_timeout_s, 480)
+            self.assertEqual(quant.decode_lsa_timeout_ms, 2000)
+            for invalid in (
+                dict(request, is_quanted=False),
+                dict(request, group_size=32),
+                dict(request, online_cache_dir="/tmp/unused"),
+            ):
+                config.quantization = json.dumps(invalid)
+                with self.assertRaisesRegex(
+                    ValueError, "do not support requantization"
+                ):
+                    Qwen4Exp._post_build_model_config(config)
+
     def test_decode_all_nibbles_and_independent_group_scales(self):
         packed = torch.tensor(
             [[0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE] * 2], dtype=torch.uint8
