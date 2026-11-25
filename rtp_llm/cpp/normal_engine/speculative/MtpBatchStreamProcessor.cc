@@ -867,41 +867,48 @@ absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&        
     return absl::OkStatus();
 }
 
-std::shared_ptr<const MtpDecodeBatchState>
-MtpBatchStreamProcessor::publishedDecodeBatch(const StreamGroups& stream_groups, bool require_cache_snapshot) {
+MtpBatchStreamProcessor::PublishedDecodeBatch
+MtpBatchStreamProcessor::inspectPublishedDecodeBatch(const StreamGroups& stream_groups) {
     if (stream_groups.totalContextBatchSize() != 0 || stream_groups.totalBlockUpdateCopyNum() != 0
         || stream_groups.isFakeStream()) {
-        return nullptr;
+        return {};
     }
-    std::shared_ptr<const MtpDecodeBatchState> batch;
-    int64_t                                    row = 0;
+    PublishedDecodeBatch published;
+    published.has_cache_snapshot = true;
+    int64_t row                  = 0;
     for (const auto& stream : stream_groups.decodeStreams()) {
-        const auto state = stream->getMtpAsyncDeviceState();
-        if (!state.batch || state.batch_row != row
-            || (require_cache_snapshot && !GenerateStream::hasMtpCacheSnapshot(state)) || stream->hasError()
-            || stream->maxBatchSize() != 1 || stream->hasNumBeams()) {
-            return nullptr;
+        bool       has_cache_snapshot = false;
+        const auto batch              = stream->getMtpContinuationBatch(row, has_cache_snapshot);
+        if (!batch || stream->hasError() || stream->maxBatchSize() != 1 || stream->hasNumBeams()) {
+            return {};
         }
-        if (!batch) {
-            batch = state.batch;
+        if (!published.batch) {
             if (batch->stream_ids.size() != stream_groups.size()) {
-                return nullptr;
+                return {};
             }
+            published.batch = batch;
         }
-        if (state.batch != batch || batch->stream_ids[row] != stream->streamId()) {
-            return nullptr;
+        if (batch != published.batch || batch->stream_ids[row] != stream->streamId()) {
+            return {};
         }
+        published.has_cache_snapshot &= has_cache_snapshot;
         ++row;
     }
-    return batch;
+    return published;
+}
+
+std::shared_ptr<const MtpDecodeBatchState>
+MtpBatchStreamProcessor::publishedDecodeBatch(const StreamGroups& stream_groups, bool require_cache_snapshot) {
+    auto published = inspectPublishedDecodeBatch(stream_groups);
+    return require_cache_snapshot && !published.has_cache_snapshot ? nullptr : std::move(published.batch);
 }
 
 absl::StatusOr<GptModelInputs> MtpBatchStreamProcessor::gatherDecodeModelInput(const StreamGroups& stream_groups,
                                                                                TensorHolder&       host_holder) const {
-    if (const auto batch = publishedDecodeBatch(stream_groups, /*require_cache_snapshot=*/false)) {
+    if (const auto published = inspectPublishedDecodeBatch(stream_groups); published.batch) {
         RTP_LLM_PROFILE_SCOPE("normal_engine.mtp_batch_stream_processor.gather_published_batch");
-        auto input = batch->draft_inputs;
-        if (!publishedDecodeBatch(stream_groups)) {
+        auto input = published.batch->draft_inputs;
+        if (!published.has_cache_snapshot) {
             RTP_LLM_PROFILE_SCOPE("normal_engine.mtp_batch_stream_processor.refresh_cache_tables");
             // The executor joins any pending host bookkeeping before gathering
             // an invalidated table. Keep device token/position/hidden owners.
